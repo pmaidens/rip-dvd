@@ -1263,6 +1263,7 @@ export interface EncodeJobAccess {
   completeCancellation(claim: RunningEncodeJob): EncodeJob;
   completeCancellationWithReports(
     claim: RunningEncodeJob,
+    cleanup: EncodeJobPartialCleanup | null,
     reports: readonly EncodeJobFailureReportInput[],
   ): EncodeJob;
   beginPublicationMutation(
@@ -1281,6 +1282,10 @@ export interface EncodeJobAccess {
     cleanup: EncodeJobPartialCleanup,
     recoveryFailureReport?: EncodeJobFailureReportInput,
   ): EncodeJob;
+  recordExpiredPublicationRecoveryFailure(
+    cleanup: EncodeJobPartialCleanup,
+    report: EncodeJobFailureReportInput,
+  ): void;
   listExpiredCancellationClaims(): ClaimedEncodeJob[];
   completeExpiredCancellation(
     claim: ClaimedEncodeJob,

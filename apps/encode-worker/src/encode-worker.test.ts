@@ -1295,6 +1295,49 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it("persists command execution before HandBrake emits progress", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
+    const fixture = createQueuedJob();
+    const recoveryAccess = createLegacySidecarDataAccess({
+      databasePath: fixture.databasePath,
+    });
+
+    await pollEncodeWorker({
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: {
+        run: vi.fn(async () => {
+          expect(fixture.access.encodeJobs.list()).toEqual([
+            expect.objectContaining({
+              id: fixture.job.id,
+              progressPhase: "encoding",
+            }),
+          ]);
+          vi.setSystemTime(new Date("2026-09-01T12:01:00.001Z"));
+          expect(recoveryAccess.encodeJobs.recoverExpiredClaims()).toEqual([
+            expect.objectContaining({ id: fixture.job.id, status: "failed" }),
+          ]);
+        }),
+      },
+      signal: new AbortController().signal,
+    });
+
+    expect(recoveryAccess.encodeJobs.listFailureReports([fixture.job.id]))
+      .toEqual([
+        expect.objectContaining({
+          reasonCode: "lease_expired",
+          phase: "encoding",
+          evidence: { kind: "lease", scope: "job_claim" },
+        }),
+      ]);
+    recoveryAccess.close();
+    fixture.access.close();
+  });
+
   it("does not publish when output validation leaves an empty partial", async () => {
     const fixture = createQueuedJob();
     let partialPath = "";
@@ -5806,6 +5849,121 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it("attributes a detached pending-cleanup failure to its Encode Job", async () => {
+    const fixture = createQueuedJob();
+    const claim = fixture.access.encodeJobs.claimNext(
+      "detached-cleanup-recovery",
+    );
+    if (!claim) {
+      throw new Error("Expected detached cleanup recovery claim");
+    }
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    const canonicalFinalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const partialPath = claimPartialPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    writeFileSync(partialPath, "active cleanup output", { flag: "wx" });
+    fixture.access.encodeJobs.registerPartialCleanup(claim);
+    fixture.access.encodeJobs.fail(claim, "worker exited before cleanup");
+    let rejectInactive!: (error: Error) => void;
+    const inactive = new Promise<void>((_resolve, reject) => {
+      rejectInactive = reject;
+    });
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: {
+        isActive: (outputPath: string) => outputPath === partialPath,
+        whenInactive: async () => inactive,
+        run: vi.fn(),
+      },
+      signal: new AbortController().signal,
+    };
+
+    await pollEncodeWorker(options);
+    rejectInactive(new Error("process closure cleanup failed"));
+    await vi.waitFor(() =>
+      expect(
+        fixture.access.encodeJobs.listFailureReports([fixture.job.id]).some(
+          ({ reasonCode }) => reasonCode === "publication_recovery_failed",
+        ),
+      ).toBe(true)
+    );
+
+    expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id])[0])
+      .toMatchObject({
+        reasonCode: "publication_recovery_failed",
+        phase: "recovery",
+        evidence: { kind: "recovery", operation: "cleanup_recovery" },
+      });
+    expect(fixture.access.workerIncidents.list({
+      workerKind: "encode",
+      resolvedLimit: 20,
+    })).toEqual([]);
+    fixture.access.close();
+  });
+
+  it("attributes expired publication-mutation recovery failures to the job", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
+    const fixture = createQueuedJob();
+    const claim = fixture.access.encodeJobs.claimNext(
+      "expired-mutation-attribution",
+    );
+    if (!claim) {
+      throw new Error("Expected expired mutation attribution claim");
+    }
+    const publication = fixture.access.encodeJobs.registerPartialCleanup(
+      claim,
+      { publicationPending: true },
+    );
+    fixture.access.encodeJobs.beginPublicationMutation(claim, publication);
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+    const recoveryAccess: DataAccess = {
+      ...fixture.access,
+      encodeJobs: {
+        ...fixture.access.encodeJobs,
+        recoverExpiredPublicationMutation() {
+          throw new Error("expired mutation recovery failed");
+        },
+      },
+    };
+
+    await pollEncodeWorker({
+      access: recoveryAccess,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: { run: vi.fn() },
+      signal: new AbortController().signal,
+    });
+
+    expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id]))
+      .toEqual([
+        expect.objectContaining({
+          reasonCode: "publication_recovery_failed",
+          phase: "recovery",
+          evidence: {
+            kind: "recovery",
+            operation: "publication_recovery",
+          },
+        }),
+      ]);
+    expect(fixture.access.workerIncidents.list({
+      workerKind: "encode",
+      resolvedLimit: 20,
+    })).toEqual([]);
+    fixture.access.close();
+  });
+
   it("records an active recovery failure when its expired lease is recovered", async () => {
     vi.useFakeTimers();
     const fixture = createQueuedJob();
@@ -6865,6 +7023,86 @@ describe("encode worker polling", () => {
     expect(existsSync(fixture.outputPath)).toBe(false);
     expect(existsSync(partialPath)).toBe(false);
     expect(quarantinedContents(partialPath)).toContain("race loser output");
+    fixture.access.close();
+  });
+
+  it("cancels with a report when fenced publication rollback cleanup fails", async () => {
+    const fixture = createQueuedJob();
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    const canonicalFinalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const completePublishedClaim =
+      fixture.access.encodeJobs.completePublishedClaim.bind(
+        fixture.access.encodeJobs,
+      );
+    const racingAccess: DataAccess = {
+      ...fixture.access,
+      encodeJobs: {
+        ...fixture.access.encodeJobs,
+        completePublishedClaim(claim, cleanup, publicationMatches) {
+          fixture.access.encodeJobs.requestCancellation(claim.id);
+          return completePublishedClaim(claim, cleanup, publicationMatches);
+        },
+      },
+    };
+    staleCleanupRenameCrash.armed = true;
+    staleCleanupRenameCrash.finalPath = canonicalFinalPath;
+    const options = {
+      access: racingAccess,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: {
+        run: vi.fn(async ({ outputPath }: { outputPath: string }) => {
+          writeFileSync(outputPath, "cancelled fenced publication", {
+            flag: "wx",
+          });
+        }),
+      },
+      signal: new AbortController().signal,
+      workerId: "fenced-publication-cancellation-worker",
+    };
+
+    await pollEncodeWorker(options);
+
+    expect(staleCleanupRenameCrash.triggered).toBe(true);
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        status: "cancelled",
+        partialCleanupClaimToken: expect.any(String),
+        partialCleanupLeaseToken: null,
+        publicationPending: false,
+      }),
+    ]);
+    expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id]))
+      .toEqual([
+        expect.objectContaining({
+          reasonCode: "cleanup_failed",
+          phase: "cleanup",
+          evidence: { kind: "cleanup", operation: "published_output" },
+        }),
+      ]);
+
+    staleCleanupRenameCrash.armed = false;
+    await pollEncodeWorker({
+      ...options,
+      access: fixture.access,
+      runner: { run: vi.fn() },
+      workerId: "fenced-publication-cancellation-recovery",
+    });
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        status: "cancelled",
+        partialCleanupClaimToken: null,
+        partialCleanupOutputPath: null,
+      }),
+    ]);
+    expect(existsSync(canonicalFinalPath)).toBe(false);
     fixture.access.close();
   });
 

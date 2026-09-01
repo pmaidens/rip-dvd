@@ -1294,9 +1294,23 @@ export function createDataAccessInternal(
   function completeEncodeCancellation(
     claim: RunningEncodeJob,
     reports: readonly ValidatedEncodeJobFailureReportInput[] = [],
+    cleanup?: EncodeJobPartialCleanup,
   ): EncodeJob {
     const timestamp = now();
     const cleanupPending = reports.length > 0;
+    const expiredBefore = new Date(
+      timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+    );
+    if (
+      cleanup !== undefined &&
+      (cleanup.jobId !== claim.id ||
+        cleanup.claimToken !== claim.claimToken ||
+        cleanup.publicationPending)
+    ) {
+      throw new DomainInvariantError(
+        "Encode Job cancellation cleanup provenance is invalid",
+      );
+    }
     return database.transaction((transaction) => {
       const cancelled = transaction
         .update(encodeJobs)
@@ -1325,14 +1339,52 @@ export function createDataAccessInternal(
           eq(encodeJobs.id, claim.id),
           eq(encodeJobs.status, "cancellation_requested"),
           eq(encodeJobs.claimToken, claim.claimToken),
-          isNull(encodeJobs.partialCleanupLeaseToken),
           eq(encodeJobs.publicationPending, false),
           eq(encodeJobs.publicationCompletionPending, false),
           cleanupPending
-            ? undefined
+            ? and(
+                gt(encodeJobs.updatedAt, expiredBefore),
+                cleanup === undefined
+                  ? and(
+                      isNull(encodeJobs.partialCleanupLeaseToken),
+                      or(
+                        and(
+                          isNull(encodeJobs.partialCleanupOutputPath),
+                          isNull(encodeJobs.partialCleanupClaimToken),
+                        ),
+                        and(
+                          eq(
+                            encodeJobs.partialCleanupOutputPath,
+                            claim.outputPath,
+                          ),
+                          eq(
+                            encodeJobs.partialCleanupClaimToken,
+                            claim.claimToken,
+                          ),
+                        ),
+                      ),
+                    )
+                  : and(
+                      eq(
+                        encodeJobs.partialCleanupOutputPath,
+                        cleanup.outputPath,
+                      ),
+                      eq(
+                        encodeJobs.partialCleanupClaimToken,
+                        cleanup.claimToken,
+                      ),
+                      cleanup.leaseToken === null
+                        ? isNull(encodeJobs.partialCleanupLeaseToken)
+                        : eq(
+                            encodeJobs.partialCleanupLeaseToken,
+                            cleanup.leaseToken,
+                          ),
+                    ),
+              )
             : and(
                 isNull(encodeJobs.partialCleanupOutputPath),
                 isNull(encodeJobs.partialCleanupClaimToken),
+                isNull(encodeJobs.partialCleanupLeaseToken),
               ),
         ))
         .returning()
@@ -9708,7 +9760,7 @@ export function createDataAccessInternal(
       completeCancellation(claim) {
         return completeEncodeCancellation(claim);
       },
-      completeCancellationWithReports(claim, reportInputs) {
+      completeCancellationWithReports(claim, cleanup, reportInputs) {
         if (reportInputs.length === 0 || reportInputs.length > 10) {
           throw new DomainInvariantError(
             "Encode Job cancellation cleanup must include between one and ten reports",
@@ -9720,7 +9772,11 @@ export function createDataAccessInternal(
             "Encode Job cancellation cleanup report reason is invalid",
           );
         }
-        return completeEncodeCancellation(claim, reports);
+        return completeEncodeCancellation(
+          claim,
+          reports,
+          cleanup ?? undefined,
+        );
       },
       beginPublicationMutation(claim, cleanup, retainedOutputPath) {
         if (!cleanup.publicationPending || cleanup.leaseToken !== null) {
@@ -10023,7 +10079,7 @@ export function createDataAccessInternal(
         const report = validateEncodeJobFailureReport({
           schemaVersion: 1,
           reasonCode: "lease_expired",
-          phase: "publication",
+          phase: cleanup.publicationPending ? "publication" : "cleanup",
           retryability: "after_action",
           diagnostic: "Encode publication cleanup lease expired",
           evidence: { kind: "lease", scope: "publication_cleanup" },
@@ -10086,6 +10142,77 @@ export function createDataAccessInternal(
             timestamp,
           );
           return updated;
+        }, { behavior: "immediate" });
+      },
+      recordExpiredPublicationRecoveryFailure(cleanup, reportInput) {
+        if (cleanup.leaseToken === null) {
+          throw new DomainInvariantError(
+            "Encode Job expired publication recovery report requires fenced provenance",
+          );
+        }
+        const leaseToken = cleanup.leaseToken;
+        const report = validateEncodeJobFailureReport(reportInput);
+        if (
+          report.reasonCode !== "publication_recovery_failed" ||
+          report.evidence.kind !== "recovery" ||
+          report.evidence.operation !==
+            (cleanup.publicationPending
+              ? "publication_recovery"
+              : "cleanup_recovery")
+        ) {
+          throw new DomainInvariantError(
+            "Expired Encode publication recovery report reason is invalid",
+          );
+        }
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+        );
+        database.transaction((transaction) => {
+          const owned = transaction
+            .select({ id: encodeJobs.id })
+            .from(encodeJobs)
+            .where(and(
+              eq(encodeJobs.id, cleanup.jobId),
+              eq(encodeJobs.status, "running"),
+              eq(
+                encodeJobs.publicationPending,
+                cleanup.publicationPending,
+              ),
+              eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+              eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+              eq(
+                encodeJobs.partialCleanupLeaseToken,
+                leaseToken,
+              ),
+              lte(encodeJobs.updatedAt, expiredBefore),
+            ))
+            .get();
+          if (!owned) {
+            throw new StaleJobAttemptError(
+              "encode job publication mutation",
+              cleanup.jobId,
+            );
+          }
+          const latestReport = transaction
+            .select()
+            .from(encodeJobFailureReports)
+            .where(eq(encodeJobFailureReports.encodeJobId, owned.id))
+            .orderBy(desc(encodeJobFailureReports.sequence))
+            .limit(1)
+            .get();
+          if (
+            latestReport !== undefined &&
+            matchesLatestPublicationRecoveryFailure(latestReport, report)
+          ) {
+            return;
+          }
+          appendEncodeJobFailureReports(
+            transaction,
+            owned.id,
+            [report],
+            timestamp,
+          );
         }, { behavior: "immediate" });
       },
       listExpiredCancellationClaims() {
@@ -10273,6 +10400,9 @@ export function createDataAccessInternal(
           );
         }
         const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+        );
         const updated = database
           .update(encodeJobs)
           .set({ publicationPending: false, updatedAt: timestamp })
@@ -10284,6 +10414,7 @@ export function createDataAccessInternal(
                 "cancellation_requested",
               ]),
               eq(encodeJobs.claimToken, claim.claimToken),
+              gt(encodeJobs.updatedAt, expiredBefore),
               eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
               eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
               cleanup.leaseToken === null

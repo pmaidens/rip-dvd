@@ -221,6 +221,7 @@ describe("Encode Job Failure Reports", () => {
 
     const cancelled = access.encodeJobs.completeCancellationWithReports(
       claimed,
+      null,
       [cleanupFailure("cancellation quarantine failed")],
     );
     const cleanup = {
@@ -255,6 +256,64 @@ describe("Encode Job Failure Reports", () => {
       partialCleanupOutputPath: null,
       partialCleanupClaimToken: null,
     });
+  });
+
+  it("rejects cancellation reports from an expired claim", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
+    const { access, job } = createEncodeJobFixture();
+    const claimed = claim(access);
+    access.encodeJobs.requestCancellation(job.id);
+    vi.advanceTimersByTime(60_001);
+
+    expect(() =>
+      access.encodeJobs.completeCancellationWithReports(
+        claimed,
+        null,
+        [cleanupFailure("expired cancellation cleanup")],
+      )
+    ).toThrow(StaleJobAttemptError);
+    expect(access.encodeJobs.listFailureReports([job.id])).toEqual([]);
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: job.id,
+        status: "cancellation_requested",
+      }),
+    ]);
+  });
+
+  it("converts an owned publication lease into cancelled cleanup provenance", () => {
+    const { access, job } = createEncodeJobFixture();
+    const claimed = claim(access);
+    const publication = access.encodeJobs.registerPartialCleanup(claimed, {
+      publicationPending: true,
+    });
+    const mutation = access.encodeJobs.beginPublicationMutation(
+      claimed,
+      publication,
+    );
+    access.encodeJobs.requestCancellation(job.id);
+    const revoked = access.encodeJobs.revokePublication(claimed, mutation);
+
+    expect(
+      access.encodeJobs.completeCancellationWithReports(
+        claimed,
+        revoked,
+        [cleanupFailure("publication rollback failed")],
+      ),
+    ).toMatchObject({
+      status: "cancelled",
+      partialCleanupOutputPath: claimed.outputPath,
+      partialCleanupClaimToken: claimed.claimToken,
+      partialCleanupLeaseToken: null,
+      publicationPending: false,
+    });
+    expect(access.encodeJobs.listFailureReports([job.id])).toEqual([
+      expect.objectContaining({
+        reasonCode: "cleanup_failed",
+        diagnostic: "publication rollback failed",
+      }),
+    ]);
   });
 
   it("orders reports by insertion sequence without changing occurrence time", () => {
@@ -446,6 +505,55 @@ describe("Encode Job Failure Reports", () => {
           evidence: { kind: "lease", scope: "publication_cleanup" },
         }),
       ]);
+  });
+
+  it("classifies an expired revoked publication lease as cleanup", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
+    const { access, job } = createEncodeJobFixture();
+    const claimed = claim(access);
+    const publication = access.encodeJobs.registerPartialCleanup(claimed, {
+      publicationPending: true,
+    });
+    const mutation = access.encodeJobs.beginPublicationMutation(
+      claimed,
+      publication,
+    );
+    const revoked = access.encodeJobs.revokePublication(claimed, mutation);
+    vi.advanceTimersByTime(60_001);
+    const recoveryFailure = {
+      schemaVersion: 1,
+      reasonCode: "publication_recovery_failed",
+      phase: "recovery",
+      retryability: "after_action",
+      diagnostic: "expired cleanup recovery failed",
+      evidence: { kind: "recovery", operation: "cleanup_recovery" },
+    } as const;
+
+    access.encodeJobs.recordExpiredPublicationRecoveryFailure(
+      revoked,
+      recoveryFailure,
+    );
+    expect(access.encodeJobs.recoverExpiredPublicationMutation(revoked))
+      .toMatchObject({ status: "failed", publicationPending: false });
+    expect(access.encodeJobs.listFailureReports([job.id])).toEqual([
+      expect.objectContaining({
+        reasonCode: "lease_expired",
+        phase: "cleanup",
+        evidence: { kind: "lease", scope: "publication_cleanup" },
+      }),
+      expect.objectContaining({
+        reasonCode: "publication_recovery_failed",
+        phase: "recovery",
+        evidence: { kind: "recovery", operation: "cleanup_recovery" },
+      }),
+    ]);
+    expect(() =>
+      access.encodeJobs.recordExpiredPublicationRecoveryFailure(
+        revoked,
+        recoveryFailure,
+      )
+    ).toThrow(StaleJobAttemptError);
   });
 
   it("keeps newest-first history across requeue and completion", () => {

@@ -327,6 +327,50 @@ function recordCleanupFailure(
   }
 }
 
+function recordDetachedPublicationRecoveryFailure(
+  cleanup: EncodeJobPartialCleanup,
+  error: unknown,
+  options: EncodePublicationOptions,
+): void {
+  const attributed = recordCleanupFailure(
+    cleanup,
+    publicationRecoveryFailureReport(error, cleanup.publicationPending),
+    options,
+  );
+  options.log(
+    `Deferred Encode publication cleanup failed: ${
+      normalizeErrorMessage(error)
+    }`,
+  );
+  if (!attributed) {
+    recordEncodePublicationRecoveryIncident(
+      options,
+      "pending_partial_cleanup",
+    );
+  }
+}
+
+function recordExpiredPublicationRecoveryFailure(
+  cleanup: EncodeJobPartialCleanup,
+  error: unknown,
+  options: EncodePublicationOptions,
+): boolean {
+  try {
+    options.access.encodeJobs.recordExpiredPublicationRecoveryFailure(
+      cleanup,
+      publicationRecoveryFailureReport(error, cleanup.publicationPending),
+    );
+    return true;
+  } catch (reportError) {
+    options.log(
+      `Expired Encode publication recovery Failure Report could not be persisted: ${
+        normalizeErrorMessage(reportError)
+      }`,
+    );
+    return false;
+  }
+}
+
 function recordClaimFailure(
   claim: RunningEncodeJob,
   report: EncodeJobFailureReportInput,
@@ -1137,11 +1181,11 @@ async function quarantinePartial(
   log: (message: string) => void,
   onQuarantined?: () => unknown | Promise<unknown>,
   onFailure?: (error: unknown) => unknown | Promise<unknown>,
-): Promise<string | null> {
+): Promise<"completed" | "deferred"> {
   if (!(runner.isActive?.(partialPath) ?? false)) {
-    const failedPath = await moveAside(partialPath);
+    await moveAside(partialPath);
     await onQuarantined?.();
-    return failedPath;
+    return "completed";
   }
   const inactive = runner.whenInactive?.(partialPath);
   if (inactive) {
@@ -1167,7 +1211,7 @@ async function quarantinePartial(
         );
       });
   }
-  return null;
+  return "deferred";
 }
 
 async function reconcilePendingPublications(
@@ -1379,7 +1423,7 @@ async function reconcilePendingPublications(
           }
         }
         await cleanupReplacementLink(replacementPath, partialMetadata);
-        await quarantinePartial(
+        const quarantineResult = await quarantinePartial(
           partialPath,
           options.runner,
           options.log,
@@ -1387,7 +1431,16 @@ async function reconcilePendingPublications(
             options.access.encodeJobs.completePartialCleanup(
               authorizedCleanup,
             ),
+          (error) =>
+            recordDetachedPublicationRecoveryFailure(
+              authorizedCleanup,
+              error,
+              options,
+            ),
         );
+        if (quarantineResult === "deferred") {
+          recovery.markDeferred();
+        }
         continue;
       }
       if (replacementMetadata !== null) {
@@ -1440,12 +1493,21 @@ async function reconcilePendingPublications(
       if (reconciledFinalMetadata === null && priorFinalMetadata !== null) {
         await restoreMovedAsideOutput(priorFinalPath, finalPath);
       }
-      await quarantinePartial(
+      const quarantineResult = await quarantinePartial(
         partialPath,
         options.runner,
         options.log,
         () => options.access.encodeJobs.completePartialCleanup(cleanup),
+        (error) =>
+          recordDetachedPublicationRecoveryFailure(
+            cleanup,
+            error,
+            options,
+          ),
       );
+      if (quarantineResult === "deferred") {
+        recovery.markDeferred();
+      }
     } catch (error) {
       const attributed = recordCleanupFailure(
         reportingCleanup,
@@ -1511,9 +1573,15 @@ async function recoverAbandonedPublicationMutations(
         options.mutationLock.release(handle);
       }
     } catch (error) {
+      const attributed = recordExpiredPublicationRecoveryFailure(
+        mutation,
+        error,
+        options,
+      );
       recovery.recordFailure(
         "Encode publication mutation could not be recovered",
         error,
+        !attributed,
       );
     }
   }
@@ -1947,8 +2015,12 @@ export async function executeEncodeClaim(
       "--subtitle-burned=none",
     ];
     failurePhase = "encoding";
+    options.access.encodeJobs.updateProgress(claim, {
+      progressPercent: 0,
+      phase: "encoding",
+      etaSeconds: null,
+    });
     renewClaim();
-    failurePhase = "encoding";
     await options.runner.run({
       arguments_,
       onOutput: parseProgress,
@@ -2279,7 +2351,8 @@ export async function executeEncodeClaim(
       if (
         partialPath !== undefined &&
         pendingPartialCleanup !== undefined &&
-        !replacementCleanupFailed
+        !replacementCleanupFailed &&
+        cleanupFailures.length === 0
       ) {
         const cleanup = pendingPartialCleanup;
         try {
@@ -2297,6 +2370,7 @@ export async function executeEncodeClaim(
         try {
           options.access.encodeJobs.completeCancellationWithReports(
             claim,
+            pendingPartialCleanup ?? null,
             cleanupFailureReports,
           );
           options.log(

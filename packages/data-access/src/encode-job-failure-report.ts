@@ -405,7 +405,8 @@ export function validateEncodeJobFailureReport(
       input.evidence.kind !== "lease" ||
       !ENCODE_JOB_FAILURE_LEASE_SCOPES.includes(input.evidence.scope) ||
       (input.evidence.scope === "publication_cleanup" &&
-        input.phase !== "publication") ||
+        input.phase !== "publication" &&
+        input.phase !== "cleanup") ||
       (input.evidence.scope === "job_claim" &&
         (input.phase === "cleanup" || input.phase === "recovery"))
     ) {
