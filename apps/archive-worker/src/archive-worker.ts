@@ -21,6 +21,13 @@ import {
   defaultDvdRescueWorkspaceLock,
   type DvdRescueWorkspaceLock,
 } from "./dvd-rescue-workspace-lock.js";
+import {
+  type ArchiveWorkerRecoveryArea,
+  recordArchiveClaimRecoveryIncident,
+  recordArchivePollIncident,
+  resolveArchiveClaimRecoveryIncident,
+  resolveArchivePollIncident,
+} from "./worker-incidents.js";
 
 export type {
   BoundOpticalDrive,
@@ -62,6 +69,13 @@ interface DrivePollAdmission {
 }
 
 const MAX_ARCHIVE_DRIVE_POLL_INTERVAL_MS = 5_000;
+
+class ArchiveClaimRecoveryError extends Error {
+  constructor(error: unknown) {
+    super(error instanceof Error ? error.message : String(error));
+    this.name = "ArchiveClaimRecoveryError";
+  }
+}
 
 function requireArchiveWorkerConcurrency(value: number): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -138,12 +152,37 @@ async function pollArchiveWorkerWithDriveAdmission(
     workerId = "archive-worker",
   }: PollArchiveWorkerOptions,
   admission?: DrivePollAdmission,
-): Promise<void> {
+): Promise<"completed" | "completed_with_failures"> {
   signal.throwIfAborted();
   const concurrency = requireArchiveWorkerConcurrency(requestedConcurrency);
-  access.archiveJobs.recoverExpiredClaims();
+  const runClaimRecoveryStep = <Result>(
+    recoveryArea: ArchiveWorkerRecoveryArea,
+    failureMessage: string,
+    recover: () => Result,
+  ): Result => {
+    try {
+      const result = recover();
+      resolveArchiveClaimRecoveryIncident({ access, log }, recoveryArea);
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log(`${failureMessage}: ${message}`);
+      recordArchiveClaimRecoveryIncident({ access, log }, recoveryArea);
+      throw new ArchiveClaimRecoveryError(error);
+    }
+  };
+  runClaimRecoveryStep(
+    "expired_archive_job_claim",
+    "Expired Archive Job claims could not be recovered",
+    () => access.archiveJobs.recoverExpiredClaims(),
+  );
   if (copyRunner !== undefined && originalsLibraryPath !== undefined) {
-    for (const claim of access.archiveJobs.listExpiredCancellations()) {
+    const expiredCancellations = runClaimRecoveryStep(
+      "expired_cancellation",
+      "Expired Archive Job cancellations could not be listed for recovery",
+      () => access.archiveJobs.listExpiredCancellations(),
+    );
+    for (const claim of expiredCancellations) {
       try {
         const disc = access.catalog.listDetectedDiscs(undefined, {
           ids: [claim.detectedDiscId],
@@ -217,6 +256,7 @@ async function pollArchiveWorkerWithDriveAdmission(
     }
   }
   const prioritizedDrives = prioritizeDrivesWithPendingRequests(access, drives);
+  let pollHadUnownedFailure = false;
 
   const pollDrive = async (drive: (typeof drives)[number]): Promise<void> => {
     if (!drive.isPresent || !drive.isEnabled) {
@@ -280,6 +320,8 @@ async function pollArchiveWorkerWithDriveAdmission(
       }
       const message = error instanceof Error ? error.message : String(error);
       log(`DVD scan failed for ${drive.devicePath}: ${message}`);
+      pollHadUnownedFailure = true;
+      recordArchivePollIncident({ access, log });
     } finally {
       admission?.release(drive.devicePath);
     }
@@ -307,6 +349,7 @@ async function pollArchiveWorkerWithDriveAdmission(
   if (failedLane) {
     throw failedLane.reason;
   }
+  return pollHadUnownedFailure ? "completed_with_failures" : "completed";
 }
 
 export async function pollArchiveWorker(
@@ -362,10 +405,19 @@ export async function runArchiveWorker({
       pollOptions,
       admission,
     )
+      .then((result) => {
+        if (result === "completed") {
+          resolveArchivePollIncident(pollOptions);
+        }
+      })
       .catch((error: unknown) => {
-        if (!pollOptions.signal.aborted) {
+        if (
+          !pollOptions.signal.aborted &&
+          !(error instanceof ArchiveClaimRecoveryError)
+        ) {
           const message = error instanceof Error ? error.message : String(error);
           pollOptions.log(`Archive worker poll failed: ${message}`);
+          recordArchivePollIncident(pollOptions);
         }
       })
       .finally(() => {

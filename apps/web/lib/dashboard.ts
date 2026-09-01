@@ -35,6 +35,7 @@ import type {
 import {
   archiveBoundaryEvidenceFromRecord,
   isEncodeJobSafelyTerminal,
+  WORKER_KINDS,
 } from "@rip-dvd/data-access";
 import {
   decodeDvdTitleMap,
@@ -991,6 +992,7 @@ const WORKER_INCIDENT_RECOVERY_AREA_LABELS: Record<
   WorkerIncidentRecoveryArea,
   string
 > = {
+  expired_archive_job_claim: "Expired Archive Job claim",
   active_publication: "Active publication",
   expired_publication_mutation: "Expired publication mutation",
   expired_encode_job_claim: "Expired Encode Job claim",
@@ -998,40 +1000,60 @@ const WORKER_INCIDENT_RECOVERY_AREA_LABELS: Record<
   pending_partial_cleanup: "Pending partial cleanup",
 };
 
-const WORKER_INCIDENT_PRESENTATIONS: Record<
+const WORKER_INCIDENT_PHASE_LABELS: Record<
   WorkerIncidentReasonCode,
-  {
-    phaseLabel: string;
-    explanation: string;
-    activeAction: string;
-    recoveredAction: string;
-  }
+  string
 > = {
-  poll_failure: {
-    phaseLabel: "Polling",
-    explanation:
-      "The Encode Worker could not finish a polling pass for available work.",
-    activeAction:
-      "Check the Encode Worker stdout and database health. The worker will retry the polling pass automatically.",
-    recoveredAction:
-      "No action is needed. The Encode Worker completed a later polling pass.",
-  },
-  publication_recovery_failure: {
-    phaseLabel: "Publication recovery",
+  poll_failure: "Polling",
+  claim_recovery_failure: "Claim recovery",
+  publication_recovery_failure: "Publication recovery",
+};
+
+function workerIncidentPresentation(incident: WorkerIncident) {
+  const worker = incident.workerKind === "archive"
+    ? "Archive Worker"
+    : "Encode Worker";
+  if (incident.reasonCode === "poll_failure") {
+    return {
+      worker,
+      phaseLabel: WORKER_INCIDENT_PHASE_LABELS[incident.reasonCode],
+      explanation:
+        `${worker} could not finish a polling pass for available work.`,
+      activeAction:
+        `Check the ${worker} stdout and database health. The worker will retry the polling pass automatically.`,
+      recoveredAction:
+        `No action is needed. The ${worker} completed a later polling pass.`,
+    };
+  }
+  if (incident.reasonCode === "claim_recovery_failure") {
+    return {
+      worker,
+      phaseLabel: WORKER_INCIDENT_PHASE_LABELS[incident.reasonCode],
+      explanation:
+        "The Archive Worker could not finish part of Archive Job claim recovery.",
+      activeAction:
+        "Check the Archive Worker stdout and database health. The worker will retry claim recovery automatically.",
+      recoveredAction:
+        "No action is needed. The Archive Worker completed a later claim-recovery pass.",
+    };
+  }
+  return {
+    worker,
+    phaseLabel: WORKER_INCIDENT_PHASE_LABELS[incident.reasonCode],
     explanation:
       "The Encode Worker could not finish part of publication recovery.",
     activeAction:
       "Check the Encode Worker stdout and media-library availability. The worker will retry publication recovery automatically.",
     recoveredAction:
       "No action is needed. The Encode Worker completed a later recovery pass.",
-  },
-};
+  };
+}
 
 function workerIncidentInvestigation(
   incident: WorkerIncident,
 ): DashboardInvestigation {
   const recovered = incident.resolvedAt !== null;
-  const presentation = WORKER_INCIDENT_PRESENTATIONS[incident.reasonCode];
+  const presentation = workerIncidentPresentation(incident);
   const technicalEvidence: DashboardInvestigation["technicalEvidence"] = [
     { label: "Occurrence count", value: String(incident.occurrenceCount) },
     {
@@ -1060,7 +1082,7 @@ function workerIncidentInvestigation(
   ];
   return {
     incidentId: incident.id,
-    worker: "Encode Worker",
+    worker: presentation.worker,
     subjectType: "Worker Incident",
     subjectId: incident.id,
     attempt: null,
@@ -1069,8 +1091,8 @@ function workerIncidentInvestigation(
     occurredAt: incident.lastObservedAt.toISOString(),
     retryability: "not_appropriate",
     retryabilityDetail: recovered
-      ? "The Encode Worker recovered without an operator retry."
-      : "The Encode Worker retries this phase automatically; there is no operator retry action.",
+      ? `${presentation.worker} recovered without an operator retry.`
+      : `${presentation.worker} retries this phase automatically; there is no operator retry action.`,
     explanation: presentation.explanation,
     suggestedAction: recovered
       ? presentation.recoveredAction
@@ -1224,12 +1246,32 @@ function readDashboardSnapshotRecords(
           encodeJobSource.value.map((job) => job.id),
         )
   );
-  const workerIncidentSource = readSource(() =>
-    access.workerIncidents.list({
-      workerKind: "encode",
-      resolvedLimit: activityLimit ?? DASHBOARD_ACTIVITY_HISTORY_LIMIT,
-    }),
-  );
+  const workerIncidentSource = readSource(() => {
+    const resolvedLimit = activityLimit ?? DASHBOARD_ACTIVITY_HISTORY_LIMIT;
+    const incidents = WORKER_KINDS.flatMap((workerKind) =>
+      access.workerIncidents.list({ workerKind, resolvedLimit })
+    );
+    const descendingId = (left: WorkerIncident, right: WorkerIncident) =>
+      left.id < right.id ? 1 : left.id === right.id ? 0 : -1;
+    const active = incidents
+      .filter((incident) => incident.resolvedAt === null)
+      .sort((left, right) =>
+        right.lastObservedAt.getTime() - left.lastObservedAt.getTime() ||
+        descendingId(left, right)
+      );
+    const recovered = incidents
+      .filter(
+        (incident): incident is WorkerIncident & { resolvedAt: Date } =>
+          incident.resolvedAt !== null,
+      )
+      .sort((left, right) =>
+        right.resolvedAt.getTime() - left.resolvedAt.getTime() ||
+        right.lastObservedAt.getTime() - left.lastObservedAt.getTime() ||
+        descendingId(left, right)
+      )
+      .slice(0, resolvedLimit);
+    return [...active, ...recovered];
+  });
   const encodeJobLinkSource = readSource(() =>
     encodeJobSource.status === "error"
       ? []
@@ -1788,8 +1830,7 @@ function readDashboardSnapshotRecords(
     ? unavailable<DashboardWorkerIncident>()
     : loaded(
         workerIncidentSource.value.map((incident): DashboardWorkerIncident => {
-          const presentation =
-            WORKER_INCIDENT_PRESENTATIONS[incident.reasonCode];
+          const presentation = workerIncidentPresentation(incident);
           return {
             id: incident.id,
             activityRevision: [
@@ -1797,7 +1838,7 @@ function readDashboardSnapshotRecords(
               incident.occurrenceCount,
               incident.resolvedAt?.toISOString() ?? "active",
             ].join(":"),
-            worker: "Encode Worker",
+            worker: presentation.worker,
             status: incident.resolvedAt === null ? "active" : "recovered",
             reasonCode: `worker.${incident.reasonCode}`,
             phase: incident.phase,

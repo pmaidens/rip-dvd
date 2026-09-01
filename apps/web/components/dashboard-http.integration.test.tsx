@@ -1,7 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
-import type { OpticalDriveHardware } from "../../archive-worker/src/archive-worker.js";
+import {
+  type OpticalDriveHardware,
+  runArchiveWorker,
+} from "../../archive-worker/src/archive-worker.js";
 import { pollEncodeWorker } from "../../encode-worker/src/encode-worker.js";
 
 import type { DashboardSnapshot } from "../lib/dashboard";
@@ -112,6 +115,126 @@ describe("database-backed dashboard over HTTP", () => {
         : undefined,
     ).toMatchObject({
       id: incident!.id,
+      status: "recovered",
+      occurrenceCount: 2,
+      resolvedAt: expect.any(String),
+    });
+  });
+
+  it("carries a coalesced Archive Worker Incident through HTTP, investigation, copy, and recovery", async () => {
+    const { access, databasePath } = dataAccessFixture.createWithDatabasePath();
+    const diagnostic =
+      "/dev/private-optical-drive --probe ENV=private-value claim=private-token";
+    const discover = vi.fn<OpticalDriveHardware["discover"]>(async () => {
+      throw new Error(diagnostic);
+    });
+    const log = vi.fn();
+    const hardware: OpticalDriveHardware = {
+      discover,
+      bindOpticalDrive: vi.fn(),
+      confirmOpticalDrive: vi.fn(),
+      observeMedia: vi.fn(),
+      observeMediaGeneration: vi.fn(),
+      scanDvd: vi.fn(),
+    };
+    const workerOptions = {
+      access,
+      configuredDevicePath: "/dev/private-optical-drive",
+      hardware,
+      log,
+      pollIntervalMs: 1,
+    };
+    const runUntil = async (condition: () => void) => {
+      const controller = new AbortController();
+      await runArchiveWorker({
+        ...workerOptions,
+        signal: controller.signal,
+        waitForNextPoll: async () => {
+          await vi.waitFor(condition);
+          controller.abort();
+        },
+      });
+    };
+
+    for (const occurrenceCount of [1, 2]) {
+      await runUntil(() => {
+        expect(access.workerIncidents.list({
+          workerKind: "archive",
+          resolvedLimit: 20,
+        })[0]).toMatchObject({ occurrenceCount, resolvedAt: null });
+      });
+    }
+
+    const response = createDashboardResponse(access);
+    const dashboard = (await response.json()) as DashboardSnapshot;
+    const serialized = JSON.stringify(dashboard);
+    const incident = dashboard.workerIncidents.status === "loaded"
+      ? dashboard.workerIncidents.items[0]
+      : undefined;
+    expect(incident).toMatchObject({
+      worker: "Archive Worker",
+      status: "active",
+      reasonCode: "worker.poll_failure",
+      phase: "polling",
+      occurrenceCount: 2,
+      resolvedAt: null,
+      investigation: {
+        subjectType: "Worker Incident",
+        worker: "Archive Worker",
+        failedPhase: "Polling",
+        retryability: "not_appropriate",
+        technicalEvidence: expect.arrayContaining([
+          { label: "Occurrence count", value: "2" },
+        ]),
+      },
+    });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining(diagnostic));
+
+    const dashboardHtml = renderToStaticMarkup(
+      <DashboardView state={dashboard} section="encoding" />,
+    );
+    const investigation = incident!.investigation!;
+    const panelHtml = renderToStaticMarkup(
+      <InvestigationPanel
+        investigation={investigation}
+        returnFocusTo={null}
+        onClose={() => undefined}
+      />,
+    );
+    const copiedReport = investigationReport(investigation);
+    expect(dashboardHtml).toContain("Archive Worker");
+    expect(dashboardHtml).toContain("2 occurrences");
+    expect(panelHtml).toContain("Archive Worker");
+    expect(copiedReport).toContain("Worker: Archive Worker");
+    for (const secret of [
+      diagnostic,
+      "/dev/private-optical-drive",
+      databasePath,
+      "private-token",
+      "private-value",
+    ]) {
+      expect(serialized).not.toContain(secret);
+      expect(dashboardHtml).not.toContain(secret);
+      expect(panelHtml).not.toContain(secret);
+      expect(copiedReport).not.toContain(secret);
+    }
+
+    discover.mockResolvedValue([]);
+    await runUntil(() => {
+      expect(access.workerIncidents.list({
+        workerKind: "archive",
+        resolvedLimit: 20,
+      })[0]?.resolvedAt).toEqual(expect.any(Date));
+    });
+    const recoveredResponse = createDashboardResponse(access);
+    const recovered = (await recoveredResponse.json()) as DashboardSnapshot;
+    expect(
+      recovered.workerIncidents.status === "loaded"
+        ? recovered.workerIncidents.items[0]
+        : undefined,
+    ).toMatchObject({
+      id: incident!.id,
+      worker: "Archive Worker",
       status: "recovered",
       occurrenceCount: 2,
       resolvedAt: expect.any(String),
