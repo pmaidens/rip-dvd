@@ -35,6 +35,7 @@ import type {
   ENCODE_JOB_FAILURE_REPORT_SCHEMA_VERSIONS,
   ENCODE_JOB_FAILURE_RETRYABILITIES,
   ENCODE_JOB_FAILURE_SIGNALS,
+  ENCODE_JOB_FAILURE_VALIDATION_CHECKS,
 } from "./encode-job-failure-report.js";
 import type {
   DiscSelectionSourceIdentity,
@@ -872,10 +873,19 @@ export interface EncodeJobFailureOptions {
 
 export type EncodeJobFailureSignal =
   (typeof ENCODE_JOB_FAILURE_SIGNALS)[number];
+export type EncodeJobFailureValidationCheck =
+  (typeof ENCODE_JOB_FAILURE_VALIDATION_CHECKS)[number];
 export type EncodeJobFailureEvidence =
   | { kind: "exit_status"; exitStatus: number }
   | { kind: "signal"; signal: EncodeJobFailureSignal }
-  | { kind: "timeout"; timeoutSeconds: number };
+  | { kind: "timeout"; timeoutSeconds: number }
+  | {
+      kind: "duration";
+      expectedSeconds: number;
+      observedSeconds: number;
+    }
+  | { kind: "validation_check"; check: EncodeJobFailureValidationCheck }
+  | { kind: "none" };
 
 export interface EncodeJobFailureReportInput {
   schemaVersion: (typeof ENCODE_JOB_FAILURE_REPORT_SCHEMA_VERSIONS)[number];

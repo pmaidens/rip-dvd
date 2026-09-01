@@ -1,3 +1,10 @@
+export {
+  HANDBRAKE_PRESET_GROUPS,
+  HANDBRAKE_PRESETS,
+  isHandBrakePreset,
+  type HandBrakePresetGroup,
+} from "./handbrake-presets.js";
+
 export interface RuntimeConfig {
   databasePath: string;
   mediaLibraryPath: string;

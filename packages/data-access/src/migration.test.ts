@@ -397,3 +397,145 @@ it("preserves historical Encode Jobs without inventing Failure Reports", () => {
   });
   sqlite.close();
 });
+
+it("migrates command reports and accepts every new Encode failure category", () => {
+  const databasePath = createDatabasePath("rip-dvd-expanded-encode-report-");
+  const commandReportMigrations = createMigrationsThrough(
+    "20260901172324_glorious_cargill",
+  );
+  const previousAccess = createLegacySidecarDataAccess({
+    databasePath,
+    migrationsFolder: commandReportMigrations,
+  });
+  const drive = previousAccess.catalog.upsertOpticalDrive({
+    devicePath: "/dev/expanded-encode",
+    isPresent: true,
+  });
+  const disc = previousAccess.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint: "expanded-encode-disc",
+  });
+  previousAccess.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  previousAccess.catalog.updateDetectedDiscStatus(disc.id, "approved");
+  const archive = previousAccess.catalog.createOriginalDiscArchive({
+    detectedDiscId: disc.id,
+    discKind: "dvd",
+    archiveFormat: "iso",
+    archivePath: "/originals/expanded-encode.iso",
+    fingerprint: disc.fingerprint,
+  });
+  const item = previousAccess.catalog.createMediaItem({
+    kind: "movie",
+    title: "Expanded Encode Reports",
+  });
+  const selection = previousAccess.catalog.createDiscSelection({
+    originalDiscArchiveId: archive.id,
+    mediaItemId: item.id,
+    sourceIdentity: { kind: "main_feature" },
+  });
+  completeCatalogReview(previousAccess, archive.id);
+  const profile = previousAccess.encodingProfiles.create({
+    key: "expanded-encode",
+    displayName: "Expanded encode",
+    mediaDomain: "dvd_video",
+    settings: { preset: "Fast 480p30" },
+  });
+  const job = previousAccess.encodeJobs.enqueue({
+    discSelectionId: selection.id,
+    encodingProfileId: profile.id,
+    outputPath: "/media/expanded-encode.mkv",
+  });
+  const commandClaim = previousAccess.encodeJobs.claimNext("command-worker");
+  if (!commandClaim) throw new Error("Expected command report claim");
+  previousAccess.encodeJobs.fail(commandClaim, "HandBrake command failed");
+  previousAccess.close();
+  const historicalSqlite = new DatabaseSync(databasePath);
+  historicalSqlite.prepare(`
+    INSERT INTO encode_job_failure_reports (
+      id, encode_job_id, schema_version, worker_kind, reason_code, phase,
+      retryability, diagnostic, exit_status, signal, timeout_seconds,
+      occurred_at, created_at
+    ) VALUES (?, ?, 1, 'encode_worker', 'command_failed', 'encoding',
+      'appropriate', 'historical command failure', 17, NULL, NULL, 1, 1)
+  `).run("historical-command-report", job.id);
+  historicalSqlite.close();
+
+  const access = createDataAccess({ databasePath });
+  expect(access.encodeJobs.listFailureReports([job.id])).toEqual([
+    expect.objectContaining({
+      reasonCode: "command_failed",
+      evidence: { kind: "exit_status", exitStatus: 17 },
+    }),
+  ]);
+  const reports = [
+    {
+      reasonCode: "input_unavailable",
+      phase: "preparation",
+      evidence: { kind: "none" },
+    },
+    {
+      reasonCode: "invalid_configuration",
+      phase: "preparation",
+      evidence: { kind: "none" },
+    },
+    {
+      reasonCode: "output_conflict",
+      phase: "preparation",
+      evidence: { kind: "none" },
+    },
+    {
+      reasonCode: "unsafe_output_state",
+      phase: "preparation",
+      evidence: { kind: "none" },
+    },
+    {
+      reasonCode: "output_validation_failed",
+      phase: "validation",
+      evidence: {
+        kind: "duration",
+        expectedSeconds: 8_078,
+        observedSeconds: 97.205,
+      },
+    },
+    {
+      reasonCode: "unknown_failure",
+      phase: "publication",
+      evidence: { kind: "none" },
+    },
+  ] as const;
+  for (const [index, report] of reports.entries()) {
+    access.encodeJobs.requeue(job.id);
+    const claim = access.encodeJobs.claimNext(`expanded-worker-${index}`);
+    if (!claim) throw new Error("Expected expanded report claim");
+    access.encodeJobs.failWithReport(claim, {
+      schemaVersion: 1,
+      retryability: "after_action",
+      diagnostic: `expanded failure ${index}`,
+      ...report,
+    });
+  }
+  expect(
+    new Set(
+      access.encodeJobs.listFailureReports([job.id]).map(({ reasonCode }) =>
+        reasonCode
+      ),
+    ),
+  ).toEqual(new Set([
+    "command_failed",
+    "input_unavailable",
+    "invalid_configuration",
+    "output_conflict",
+    "unsafe_output_state",
+    "output_validation_failed",
+    "unknown_failure",
+  ]));
+  access.close();
+
+  const sqlite = new DatabaseSync(databasePath);
+  expect(sqlite.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  expect(sqlite.prepare("PRAGMA quick_check").get()).toEqual({
+    quick_check: "ok",
+  });
+  sqlite.close();
+});

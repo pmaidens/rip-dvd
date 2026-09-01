@@ -381,7 +381,16 @@ function asClaimedEncodeJob(job: EncodeJob): ClaimedEncodeJob {
 function toEncodeJobFailureReport(
   row: typeof encodeJobFailureReports.$inferSelect,
 ): EncodeJobFailureReport {
-  const { exitStatus, schemaVersion, signal, timeoutSeconds, ...report } = row;
+  const {
+    exitStatus,
+    expectedSeconds,
+    observedSeconds,
+    schemaVersion,
+    signal,
+    timeoutSeconds,
+    validationCheck,
+    ...report
+  } = row;
   if (schemaVersion !== 1) {
     throw new DomainInvariantError(
       "Encode Job Failure Report schema version is unsupported",
@@ -393,12 +402,15 @@ function toEncodeJobFailureReport(
       ? { kind: "signal" as const, signal }
       : timeoutSeconds !== null
         ? { kind: "timeout" as const, timeoutSeconds }
-        : null;
-  if (evidence === null) {
-    throw new DomainInvariantError(
-      "Encode Job Failure Report has no valid evidence",
-    );
-  }
+        : expectedSeconds !== null && observedSeconds !== null
+          ? {
+              kind: "duration" as const,
+              expectedSeconds,
+              observedSeconds,
+            }
+          : validationCheck !== null
+            ? { kind: "validation_check" as const, check: validationCheck }
+            : { kind: "none" as const };
   return { ...report, schemaVersion, evidence };
 }
 
@@ -425,6 +437,18 @@ function encodeJobFailureReportRecord(
     timeoutSeconds:
       report.evidence.kind === "timeout"
         ? report.evidence.timeoutSeconds
+        : null,
+    validationCheck:
+      report.evidence.kind === "validation_check"
+        ? report.evidence.check
+        : null,
+    expectedSeconds:
+      report.evidence.kind === "duration"
+        ? report.evidence.expectedSeconds
+        : null,
+    observedSeconds:
+      report.evidence.kind === "duration"
+        ? report.evidence.observedSeconds
         : null,
     occurredAt,
     createdAt: occurredAt,
@@ -10731,11 +10755,19 @@ export function createDataAccessInternal(
       fail: encodeJobQueue.fail,
       failWithReport(claim, reportInput, options) {
         const report = validateEncodeJobFailureReport(reportInput);
+        const failureMessages = {
+          input_unavailable: "Encode input is unavailable",
+          invalid_configuration: "Encode configuration is invalid",
+          output_conflict: "Encode output conflicts with existing state",
+          unsafe_output_state: "Encode output state is unsafe",
+          command_failed: "HandBrake command failed",
+          command_timeout: "HandBrake command timed out",
+          output_validation_failed: "Encode output validation failed",
+          unknown_failure: "Encode failed for an unknown reason",
+        } satisfies Record<typeof report.reasonCode, string>;
         return encodeJobQueue.fail(
           claim,
-          report.reasonCode === "command_timeout"
-            ? "HandBrake command timed out"
-            : "HandBrake command failed",
+          failureMessages[report.reasonCode],
           { ...options, failureReport: report },
         );
       },
