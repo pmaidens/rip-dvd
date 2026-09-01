@@ -1324,10 +1324,10 @@ export function DashboardView({
         <>
           <DashboardSection
             title="Worker Incidents"
-            eyebrow="Encode Worker health"
+            eyebrow="Worker health"
             className="wide-section"
             state={workerIncidentState}
-            emptyMessage="No Encode Worker Incidents are recorded."
+            emptyMessage="No Worker Incidents are recorded."
             renderItem={(incident) => (
               <article className="operation-item" key={incident.id}>
                 <div className="item-heading">
@@ -1350,7 +1350,7 @@ export function DashboardView({
                   </p>
                 ) : (
                   <p className="job-progress-detail" role="status">
-                    The Encode Worker is retrying automatically.
+                    The {incident.worker} is retrying automatically.
                   </p>
                 )}
                 {incident.investigation ? (
