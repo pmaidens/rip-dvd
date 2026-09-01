@@ -2187,7 +2187,13 @@ describe("encode worker polling", () => {
     expect(fixture.access.encodeJobs.listRetainedOutputs([replacement.id]))
       .toEqual([]);
     expect(fixture.access.encodeJobs.listFailureReports([replacement.id]))
-      .toEqual([]);
+      .toEqual([
+        expect.objectContaining({
+          reasonCode: "unknown_failure",
+          phase: "encoding",
+          evidence: { kind: "none" },
+        }),
+      ]);
     fixture.access.close();
   });
 
@@ -2257,7 +2263,7 @@ describe("encode worker polling", () => {
       expect.objectContaining({
         id: replacement.id,
         status: "failed",
-        errorMessage: "Encode failed for an unknown reason",
+        errorMessage: "Encode Worker was interrupted",
       }),
     );
     expect(fixture.access.encodeJobs.listRetainedOutputs([replacement.id]))
@@ -2303,7 +2309,13 @@ describe("encode worker polling", () => {
     expect(fixture.access.encodeJobs.listRetainedOutputs([replacement.id]))
       .toEqual([]);
     expect(fixture.access.encodeJobs.listFailureReports([replacement.id]))
-      .toEqual([]);
+      .toEqual([
+        expect.objectContaining({
+          reasonCode: "output_conflict",
+          phase: "publication",
+          evidence: { kind: "none" },
+        }),
+      ]);
     fixture.access.close();
   });
 
