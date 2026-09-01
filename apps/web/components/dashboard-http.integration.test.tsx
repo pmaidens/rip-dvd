@@ -204,6 +204,9 @@ describe("database-backed dashboard over HTTP", () => {
     const copiedReport = investigationReport(investigation);
     expect(dashboardHtml).toContain("Archive Worker");
     expect(dashboardHtml).toContain("2 occurrences");
+    expect(dashboardHtml).toContain(
+      "The Archive Worker is retrying automatically.",
+    );
     expect(panelHtml).toContain("Archive Worker");
     expect(copiedReport).toContain("Worker: Archive Worker");
     for (const secret of [
