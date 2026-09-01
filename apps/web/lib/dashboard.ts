@@ -28,6 +28,8 @@ import type {
   OriginalDiscArchiveId,
   UnreadableSectorRange,
   WorkerIncident,
+  WorkerIncidentPhase,
+  WorkerIncidentReasonCode,
   WorkerIncidentRecoveryArea,
 } from "@rip-dvd/data-access";
 import {
@@ -170,8 +172,9 @@ export interface DashboardWorkerIncident {
   activityRevision: string;
   worker: string;
   status: "active" | "recovered";
-  reasonCode: string;
-  phase: string;
+  reasonCode: `worker.${WorkerIncidentReasonCode}`;
+  phase: WorkerIncidentPhase;
+  phaseLabel: string;
   occurrenceCount: number;
   firstObservedAt: string;
   lastObservedAt: string;
@@ -792,10 +795,40 @@ const WORKER_INCIDENT_RECOVERY_AREA_LABELS: Record<
   pending_partial_cleanup: "Pending partial cleanup",
 };
 
+const WORKER_INCIDENT_PRESENTATIONS: Record<
+  WorkerIncidentReasonCode,
+  {
+    phaseLabel: string;
+    explanation: string;
+    activeAction: string;
+    recoveredAction: string;
+  }
+> = {
+  poll_failure: {
+    phaseLabel: "Polling",
+    explanation:
+      "The Encode Worker could not finish a polling pass for available work.",
+    activeAction:
+      "Check the Encode Worker stdout and database health. The worker will retry the polling pass automatically.",
+    recoveredAction:
+      "No action is needed. The Encode Worker completed a later polling pass.",
+  },
+  publication_recovery_failure: {
+    phaseLabel: "Publication recovery",
+    explanation:
+      "The Encode Worker could not finish part of publication recovery.",
+    activeAction:
+      "Check the Encode Worker stdout and media-library availability. The worker will retry publication recovery automatically.",
+    recoveredAction:
+      "No action is needed. The Encode Worker completed a later recovery pass.",
+  },
+};
+
 function workerIncidentInvestigation(
   incident: WorkerIncident,
 ): DashboardInvestigation {
   const recovered = incident.resolvedAt !== null;
+  const presentation = WORKER_INCIDENT_PRESENTATIONS[incident.reasonCode];
   const technicalEvidence: DashboardInvestigation["technicalEvidence"] = [
     { label: "Occurrence count", value: String(incident.occurrenceCount) },
     {
@@ -822,21 +855,6 @@ function workerIncidentInvestigation(
         }]
       : []),
   ];
-  const presentation = incident.reasonCode === "poll_failure"
-    ? {
-        explanation:
-          "The Encode Worker could not finish a polling pass for available work.",
-        suggestedAction: recovered
-          ? "No action is needed. The Encode Worker completed a later polling pass."
-          : "Check the Encode Worker stdout and database health. The worker will retry the polling pass automatically.",
-      }
-    : {
-        explanation:
-          "The Encode Worker could not finish part of publication recovery.",
-        suggestedAction: recovered
-          ? "No action is needed. The Encode Worker completed a later recovery pass."
-          : "Check the Encode Worker stdout and media-library availability. The worker will retry publication recovery automatically.",
-      };
   return {
     incidentId: incident.id,
     worker: "Encode Worker",
@@ -844,16 +862,16 @@ function workerIncidentInvestigation(
     subjectId: incident.id,
     attempt: null,
     reasonCode: `worker.${incident.reasonCode}`,
-    failedPhase: incident.phase === "polling"
-      ? "Polling"
-      : "Publication recovery",
+    failedPhase: presentation.phaseLabel,
     occurredAt: incident.lastObservedAt.toISOString(),
     retryability: "not_appropriate",
     retryabilityDetail: recovered
       ? "The Encode Worker recovered without an operator retry."
       : "The Encode Worker retries this phase automatically; there is no operator retry action.",
     explanation: presentation.explanation,
-    suggestedAction: presentation.suggestedAction,
+    suggestedAction: recovered
+      ? presentation.recoveredAction
+      : presentation.activeAction,
     technicalEvidence,
   };
 }
@@ -1566,25 +1584,30 @@ function readDashboardSnapshotRecords(
   const workerIncidents = workerIncidentSource.status === "error"
     ? unavailable<DashboardWorkerIncident>()
     : loaded(
-        workerIncidentSource.value.map((incident): DashboardWorkerIncident => ({
-          id: incident.id,
-          activityRevision: [
-            incident.lastObservedAt.toISOString(),
-            incident.occurrenceCount,
-            incident.resolvedAt?.toISOString() ?? "active",
-          ].join(":"),
-          worker: "Encode Worker",
-          status: incident.resolvedAt === null ? "active" : "recovered",
-          reasonCode: `worker.${incident.reasonCode}`,
-          phase: incident.phase,
-          occurrenceCount: incident.occurrenceCount,
-          firstObservedAt: incident.firstObservedAt.toISOString(),
-          lastObservedAt: incident.lastObservedAt.toISOString(),
-          resolvedAt: incident.resolvedAt?.toISOString() ?? null,
-          ...(includeInvestigations
-            ? { investigation: workerIncidentInvestigation(incident) }
-            : {}),
-        })),
+        workerIncidentSource.value.map((incident): DashboardWorkerIncident => {
+          const presentation =
+            WORKER_INCIDENT_PRESENTATIONS[incident.reasonCode];
+          return {
+            id: incident.id,
+            activityRevision: [
+              incident.lastObservedAt.toISOString(),
+              incident.occurrenceCount,
+              incident.resolvedAt?.toISOString() ?? "active",
+            ].join(":"),
+            worker: "Encode Worker",
+            status: incident.resolvedAt === null ? "active" : "recovered",
+            reasonCode: `worker.${incident.reasonCode}`,
+            phase: incident.phase,
+            phaseLabel: presentation.phaseLabel,
+            occurrenceCount: incident.occurrenceCount,
+            firstObservedAt: incident.firstObservedAt.toISOString(),
+            lastObservedAt: incident.lastObservedAt.toISOString(),
+            resolvedAt: incident.resolvedAt?.toISOString() ?? null,
+            ...(includeInvestigations
+              ? { investigation: workerIncidentInvestigation(incident) }
+              : {}),
+          };
+        }),
       );
 
   const catalogReview =

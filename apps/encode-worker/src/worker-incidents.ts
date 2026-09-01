@@ -1,5 +1,6 @@
 import type {
   DataAccess,
+  WorkerIncidentIdentity,
   WorkerIncidentRecoveryArea,
 } from "@rip-dvd/data-access";
 
@@ -38,54 +39,54 @@ function logPersistenceFailure(
   );
 }
 
-export function recordEncodePollIncident(
+function recordIncident(
   options: EncodeWorkerIncidentOptions,
+  identity: WorkerIncidentIdentity,
 ): void {
   try {
     options.access.workerIncidents.record({
+      ...identity,
       schemaVersion: 1,
       retryability: "automatic",
-      ...pollIncident,
     });
   } catch (error) {
     logPersistenceFailure(options, "persisted", error);
   }
 }
 
-export function resolveEncodePollIncident(
+function resolveIncident(
   options: EncodeWorkerIncidentOptions,
+  identity: WorkerIncidentIdentity,
 ): void {
   try {
-    options.access.workerIncidents.resolve(pollIncident);
+    options.access.workerIncidents.resolve(identity);
   } catch (error) {
     logPersistenceFailure(options, "resolved", error);
   }
+}
+
+export function recordEncodePollIncident(
+  options: EncodeWorkerIncidentOptions,
+): void {
+  recordIncident(options, pollIncident);
+}
+
+export function resolveEncodePollIncident(
+  options: EncodeWorkerIncidentOptions,
+): void {
+  resolveIncident(options, pollIncident);
 }
 
 export function recordEncodePublicationRecoveryIncident(
   options: EncodeWorkerIncidentOptions,
   recoveryArea: WorkerIncidentRecoveryArea,
 ): void {
-  try {
-    options.access.workerIncidents.record({
-      schemaVersion: 1,
-      retryability: "automatic",
-      ...publicationRecoveryIncident(recoveryArea),
-    });
-  } catch (error) {
-    logPersistenceFailure(options, "persisted", error);
-  }
+  recordIncident(options, publicationRecoveryIncident(recoveryArea));
 }
 
 export function resolveEncodePublicationRecoveryIncident(
   options: EncodeWorkerIncidentOptions,
   recoveryArea: WorkerIncidentRecoveryArea,
 ): void {
-  try {
-    options.access.workerIncidents.resolve(
-      publicationRecoveryIncident(recoveryArea),
-    );
-  } catch (error) {
-    logPersistenceFailure(options, "resolved", error);
-  }
+  resolveIncident(options, publicationRecoveryIncident(recoveryArea));
 }

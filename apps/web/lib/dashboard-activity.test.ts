@@ -427,6 +427,7 @@ describe("watchDashboardActivity", () => {
         status: "active",
         reasonCode: "worker.poll_failure",
         phase: "polling",
+        phaseLabel: "Polling",
         occurrenceCount: 1,
         firstObservedAt: "2026-09-01T12:00:01.000Z",
         lastObservedAt: "2026-09-01T12:00:01.000Z",

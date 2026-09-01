@@ -1333,11 +1333,7 @@ export function DashboardView({
                 <div className="item-heading">
                   <div>
                     <h3>{incident.worker}</h3>
-                    <p>
-                      {incident.phase === "polling"
-                        ? "Polling"
-                        : "Publication recovery"}
-                    </p>
+                    <p>{incident.phaseLabel}</p>
                   </div>
                   <StatusBadge value={incident.status} />
                 </div>
