@@ -163,6 +163,10 @@ type PublicationRecoveryStepResult =
   | "completed"
   | "completed_with_failures"
   | "deferred";
+type PublicationMutationFailureReports = Map<
+  NonNullable<EncodeJobPartialCleanup["leaseToken"]>,
+  EncodeJobFailureReportInput
+>;
 
 function createPublicationRecoveryStepTracker(
   options: EncodePublicationOptions,
@@ -221,6 +225,29 @@ function boundedDiagnostic(error: unknown): string {
   return normalizeErrorMessage(error).slice(0, 500);
 }
 
+type OperationalFailureClassification = Pick<
+  EncodeJobFailureReportInput,
+  "reasonCode" | "phase" | "evidence"
+> & {
+  reasonCode:
+    | "cleanup_failed"
+    | "publication_failed"
+    | "worker_interrupted"
+    | "publication_recovery_failed";
+};
+
+function operationalFailureReport(
+  error: unknown,
+  classification: OperationalFailureClassification,
+): EncodeJobFailureReportInput {
+  return {
+    schemaVersion: 1,
+    retryability: "after_action",
+    diagnostic: boundedDiagnostic(error),
+    ...classification,
+  };
+}
+
 function cleanupFailureReport(
   error: unknown,
   operation: Extract<
@@ -228,14 +255,11 @@ function cleanupFailureReport(
     { kind: "cleanup" }
   >["operation"],
 ): EncodeJobFailureReportInput {
-  return {
-    schemaVersion: 1,
+  return operationalFailureReport(error, {
     reasonCode: "cleanup_failed",
     phase: "cleanup",
-    retryability: "after_action",
-    diagnostic: boundedDiagnostic(error),
     evidence: { kind: "cleanup", operation },
-  };
+  });
 }
 
 function publicationFailureReport(
@@ -245,47 +269,38 @@ function publicationFailureReport(
     { kind: "publication" }
   >["operation"],
 ): EncodeJobFailureReportInput {
-  return {
-    schemaVersion: 1,
+  return operationalFailureReport(error, {
     reasonCode: "publication_failed",
     phase: "publication",
-    retryability: "after_action",
-    diagnostic: boundedDiagnostic(error),
     evidence: { kind: "publication", operation },
-  };
+  });
 }
 
 function interruptionFailureReport(
   error: unknown,
   phase: EncodeJobFailureReportInput["phase"],
 ): EncodeJobFailureReportInput {
-  return {
-    schemaVersion: 1,
+  return operationalFailureReport(error, {
     reasonCode: "worker_interrupted",
     phase,
-    retryability: "after_action",
-    diagnostic: boundedDiagnostic(error),
     evidence: { kind: "interruption", source: "worker_shutdown" },
-  };
+  });
 }
 
 function publicationRecoveryFailureReport(
   error: unknown,
   publicationPending: boolean,
 ): EncodeJobFailureReportInput {
-  return {
-    schemaVersion: 1,
+  return operationalFailureReport(error, {
     reasonCode: "publication_recovery_failed",
     phase: "recovery",
-    retryability: "after_action",
-    diagnostic: boundedDiagnostic(error),
     evidence: {
       kind: "recovery",
       operation: publicationPending
         ? "publication_recovery"
         : "cleanup_recovery",
     },
-  };
+  });
 }
 
 function recordCleanupFailure(
@@ -1430,6 +1445,7 @@ async function reconcilePendingPublications(
 
 async function recoverAbandonedPublicationMutations(
   options: EncodePublicationOptions,
+  failureReports: PublicationMutationFailureReports,
 ): Promise<PublicationRecoveryStepResult> {
   const mutations =
     options.access.encodeJobs.listExpiredPublicationMutations();
@@ -1458,6 +1474,9 @@ async function recoverAbandonedPublicationMutations(
       try {
         options.access.encodeJobs.recoverExpiredPublicationMutation(
           mutation,
+          mutation.leaseToken === null
+            ? undefined
+            : failureReports.get(mutation.leaseToken),
         );
       } finally {
         options.mutationLock.release(handle);
@@ -1522,6 +1541,7 @@ async function recoverAbandonedCancellations(
 
 async function reconcileActivePublicationMutations(
   options: EncodePublicationOptions,
+  failureReports: PublicationMutationFailureReports,
 ): Promise<PublicationRecoveryStepResult> {
   const mutations = options.access.encodeJobs.listPublicationMutations();
   if (mutations.length === 0) {
@@ -1578,14 +1598,18 @@ async function reconcileActivePublicationMutations(
       await syncPath(dirname(finalPath));
       options.access.encodeJobs.completePartialCleanup(mutation);
     } catch (error) {
+      const failureReport = publicationRecoveryFailureReport(
+        error,
+        mutation.publicationPending,
+      );
       recordCleanupFailure(
         mutation,
-        publicationRecoveryFailureReport(
-          error,
-          mutation.publicationPending,
-        ),
+        failureReport,
         options,
       );
+      if (mutation.leaseToken !== null) {
+        failureReports.set(mutation.leaseToken, failureReport);
+      }
       recovery.recordFailure(
         "Active Encode publication mutation could not be reconciled",
         error,
@@ -2348,6 +2372,8 @@ export async function executeEncodeClaim(
 export async function reconcileEncodePublications(
   options: EncodePublicationOptions,
 ): Promise<void> {
+  const publicationMutationFailureReports: PublicationMutationFailureReports =
+    new Map();
   const runPublicationRecoveryStep = async (
     recoveryArea: EncodeWorkerIncidentRecoveryArea,
     failureMessage: string,
@@ -2370,12 +2396,20 @@ export async function reconcileEncodePublications(
   await runPublicationRecoveryStep(
     "active_publication",
     "Active Encode publications could not be listed for reconciliation",
-    () => reconcileActivePublicationMutations(options),
+    () =>
+      reconcileActivePublicationMutations(
+        options,
+        publicationMutationFailureReports,
+      ),
   );
   await runPublicationRecoveryStep(
     "expired_publication_mutation",
     "Expired Encode publication mutations could not be listed for recovery",
-    () => recoverAbandonedPublicationMutations(options),
+    () =>
+      recoverAbandonedPublicationMutations(
+        options,
+        publicationMutationFailureReports,
+      ),
   );
   await runPublicationRecoveryStep(
     "expired_encode_job_claim",

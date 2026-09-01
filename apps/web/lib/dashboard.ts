@@ -1873,13 +1873,20 @@ function readDashboardSnapshotRecords(
               const canRequeue = terminalRequeueSelectionIds.has(
                 job.discSelectionId,
               );
-              const investigations = failureReports.length > 0
-                ? failureReports.map((report) =>
-                    encodeJobFailureReportInvestigation(job, report, canRequeue)
-                  )
-                : job.status === "failed" && includeInvestigations
+              const structuredInvestigations = failureReports.map((report) =>
+                encodeJobFailureReportInvestigation(job, report, canRequeue)
+              );
+              const primaryFailureIsUnclassified = job.status === "failed" &&
+                includeInvestigations &&
+                !failureReports.some(
+                  ({ reasonCode }) => reasonCode !== "cleanup_failed",
+                );
+              const investigations = [
+                ...(primaryFailureIsUnclassified
                   ? [legacyEncodeJobInvestigation(job, canRequeue)]
-                  : [];
+                  : []),
+                ...structuredInvestigations,
+              ];
               return {
                 id: job.id,
                 mediaTitle: mediaItem?.title ?? "Unknown Media Item",

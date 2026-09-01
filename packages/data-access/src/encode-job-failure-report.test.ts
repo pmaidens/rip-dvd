@@ -284,14 +284,39 @@ describe("Encode Job Failure Reports", () => {
     );
     vi.advanceTimersByTime(60_001);
 
+    expect(access.encodeJobs.listPublicationMutations()).toEqual([mutation]);
+    expect(access.encodeJobs.listExpiredPublicationMutations()).toEqual([
+      mutation,
+    ]);
     expect(
-      access.encodeJobs.recoverExpiredPublicationMutation(mutation),
+      access.encodeJobs.recoverExpiredPublicationMutation(mutation, {
+        schemaVersion: 1,
+        reasonCode: "publication_recovery_failed",
+        phase: "recovery",
+        retryability: "after_action",
+        diagnostic: "directory sync failed",
+        evidence: {
+          kind: "recovery",
+          operation: "publication_recovery",
+        },
+      }),
     ).toMatchObject({ id: job.id, status: "failed" });
-    expect(access.encodeJobs.listFailureReports([job.id])[0]).toMatchObject({
-      reasonCode: "lease_expired",
-      phase: "publication",
-      evidence: { kind: "lease", scope: "publication_cleanup" },
-    });
+    expect(access.encodeJobs.listFailureReports([job.id]).slice(0, 2))
+      .toEqual([
+        expect.objectContaining({
+          reasonCode: "publication_recovery_failed",
+          phase: "recovery",
+          evidence: {
+            kind: "recovery",
+            operation: "publication_recovery",
+          },
+        }),
+        expect.objectContaining({
+          reasonCode: "lease_expired",
+          phase: "publication",
+          evidence: { kind: "lease", scope: "publication_cleanup" },
+        }),
+      ]);
   });
 
   it("keeps newest-first history across requeue and completion", () => {
