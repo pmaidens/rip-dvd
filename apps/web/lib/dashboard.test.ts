@@ -194,7 +194,7 @@ describe("readDashboardSnapshot", () => {
       explanation:
         "The output path or file state did not pass the worker's safety checks.",
       suggestedAction:
-        "Remove symlinks or ambiguous files from the output location, then retry the Encode Job.",
+        "Check output permissions and free space, and remove symlinks or ambiguous files from the output location before retrying the Encode Job.",
     });
     expect(
       byReason.get("encode.output_validation_failed:Expected duration"),

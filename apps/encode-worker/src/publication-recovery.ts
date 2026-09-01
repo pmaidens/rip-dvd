@@ -25,9 +25,11 @@ import { createRequire } from "node:module";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isHandBrakePreset } from "@rip-dvd/config";
 import {
   decodeArchivedDvdTitles,
   decodeDvdTitleMap,
+  ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
   ENCODE_JOB_LEASE_DURATION_MS,
   type DataAccess,
   type DiscSelection,
@@ -117,7 +119,10 @@ function encodeFailureReport(
       reasonCode: "output_validation_failed",
       phase: "validation",
       retryability: "after_action",
-      diagnostic: error.message.slice(0, 500),
+      diagnostic: error.message.slice(
+        0,
+        ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
+      ),
       evidence: error.evidence,
     };
   }
@@ -127,7 +132,10 @@ function encodeFailureReport(
       reasonCode: error.reasonCode,
       phase: error.phase,
       retryability: "after_action",
-      diagnostic: error.message.slice(0, 500),
+      diagnostic: error.message.slice(
+        0,
+        ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
+      ),
       evidence: error.evidence,
     };
   }
@@ -136,7 +144,10 @@ function encodeFailureReport(
     reasonCode: "unknown_failure",
     phase,
     retryability: "after_action",
-    diagnostic: normalizeErrorMessage(error).slice(0, 500),
+    diagnostic: normalizeErrorMessage(error).slice(
+      0,
+      ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
+    ),
     evidence: { kind: "none" },
   };
 }
@@ -173,6 +184,21 @@ function createPublicationRecoveryStepTracker(
       return result;
     },
   };
+}
+
+async function runEncodePreparationStep<T>(
+  operation: () => Promise<T>,
+  reasonCode: "input_unavailable" | "unsafe_output_state",
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw new ClassifiedEncodeFailureError(
+      normalizeErrorMessage(error),
+      reasonCode,
+      "preparation",
+    );
+  }
 }
 
 export interface AtomicPathExchange {
@@ -1492,7 +1518,7 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
       !profile ||
       profile.mediaDomain !== "dvd_video" ||
       typeof preset !== "string" ||
-      preset.trim() === "" ||
+      !isHandBrakePreset(preset) ||
       (profile.settings.container !== undefined &&
         profile.settings.container !== "mkv")
     ) {
@@ -1606,57 +1632,37 @@ export async function executeEncodeClaim(
   let failurePhase: EncodeJobFailureReportInput["phase"] = "preparation";
   try {
     const input = resolveClaimInput(options.access, claim);
-    let originalsRoot: string;
-    try {
-      originalsRoot = await requireLibraryRoot(options.originalsLibraryPath, {
-        create: false,
-      });
-    } catch (error) {
-      throw new ClassifiedEncodeFailureError(
-        normalizeErrorMessage(error),
-        "input_unavailable",
-        "preparation",
-      );
-    }
-    let mediaRoot: string;
-    try {
-      mediaRoot = await requireLibraryRoot(options.mediaLibraryPath, {
-        create: true,
-      });
-    } catch (error) {
-      throw new ClassifiedEncodeFailureError(
-        normalizeErrorMessage(error),
-        "unsafe_output_state",
-        "preparation",
-      );
-    }
-    let sourcePath: string;
-    try {
-      sourcePath = await requireSourcePath(
-        originalsRoot,
-        input.archive.archivePath,
-      );
-    } catch (error) {
-      throw new ClassifiedEncodeFailureError(
-        normalizeErrorMessage(error),
-        "input_unavailable",
-        "preparation",
-      );
-    }
-    let paths: Awaited<ReturnType<typeof requireOutputPaths>>;
-    try {
-      paths = await requireOutputPaths(
-        mediaRoot,
-        claim.outputPath,
-        claim.claimToken,
-      );
-    } catch (error) {
-      throw new ClassifiedEncodeFailureError(
-        normalizeErrorMessage(error),
-        "unsafe_output_state",
-        "preparation",
-      );
-    }
+    const originalsRoot = await runEncodePreparationStep(
+      () =>
+        requireLibraryRoot(options.originalsLibraryPath, {
+          create: false,
+        }),
+      "input_unavailable",
+    );
+    const mediaRoot = await runEncodePreparationStep(
+      () =>
+        requireLibraryRoot(options.mediaLibraryPath, {
+          create: true,
+        }),
+      "unsafe_output_state",
+    );
+    const sourcePath = await runEncodePreparationStep(
+      () =>
+        requireSourcePath(
+          originalsRoot,
+          input.archive.archivePath,
+        ),
+      "input_unavailable",
+    );
+    const paths = await runEncodePreparationStep(
+      () =>
+        requireOutputPaths(
+          mediaRoot,
+          claim.outputPath,
+          claim.claimToken,
+        ),
+      "unsafe_output_state",
+    );
     finalPath = paths.finalPath;
     partialPath = paths.partialPath;
     replacementPath = paths.replacementPath;

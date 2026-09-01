@@ -1626,6 +1626,12 @@ describe("encode worker polling", () => {
       evidence: { kind: "none" },
     },
     {
+      category: "unsupported profile preset",
+      reasonCode: "invalid_configuration",
+      phase: "preparation",
+      evidence: { kind: "none" },
+    },
+    {
       category: "output conflict",
       reasonCode: "output_conflict",
       phase: "preparation",
@@ -1669,6 +1675,18 @@ describe("encode worker polling", () => {
         const sqlite = new DatabaseSync(fixture.databasePath);
         sqlite.prepare("UPDATE encoding_profiles SET settings = '{}' WHERE id = ?")
           .run(fixture.profile.id);
+        sqlite.close();
+      } else if (category === "unsupported profile preset") {
+        const sqlite = new DatabaseSync(fixture.databasePath);
+        sqlite.prepare(
+          "UPDATE encoding_profiles SET settings = ? WHERE id = ?",
+        ).run(
+          JSON.stringify({
+            preset: "Not a HandBrake preset",
+            container: "mkv",
+          }),
+          fixture.profile.id,
+        );
         sqlite.close();
       } else if (category === "output conflict") {
         mkdirSync(dirname(fixture.outputPath), { recursive: true });

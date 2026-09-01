@@ -814,7 +814,7 @@ const ENCODE_FAILURE_PRESENTATIONS = {
     explanation:
       "The output path or file state did not pass the worker's safety checks.",
     suggestedAction:
-      "Remove symlinks or ambiguous files from the output location, then retry the Encode Job.",
+      "Check output permissions and free space, and remove symlinks or ambiguous files from the output location before retrying the Encode Job.",
   },
   command_failed: {
     explanation: "HandBrake exited without completing the Encode Job.",
@@ -838,6 +838,83 @@ const ENCODE_FAILURE_PRESENTATIONS = {
   >,
   { explanation: string; suggestedAction: string }
 >;
+
+interface EncodeFailureEvidencePresentation {
+  technicalEvidence: DashboardInvestigation["technicalEvidence"];
+  explanation: string;
+  suggestedAction: string;
+}
+
+function encodeFailureEvidencePresentation(
+  report: EncodeJobFailureReport,
+): EncodeFailureEvidencePresentation {
+  switch (report.evidence.kind) {
+    case "exit_status":
+      return {
+        ...ENCODE_FAILURE_PRESENTATIONS.command_failed,
+        technicalEvidence: [{
+          label: "Exit status",
+          value: String(report.evidence.exitStatus),
+        }],
+      };
+    case "signal":
+      return {
+        ...ENCODE_FAILURE_PRESENTATIONS.command_failed,
+        explanation: "HandBrake stopped after receiving a process signal.",
+        technicalEvidence: [{
+          label: "Termination signal",
+          value: report.evidence.signal,
+        }],
+      };
+    case "timeout":
+      return {
+        ...ENCODE_FAILURE_PRESENTATIONS.command_timeout,
+        technicalEvidence: [{
+          label: "Timeout limit",
+          value: `${report.evidence.timeoutSeconds} seconds`,
+        }],
+      };
+    case "duration":
+      return {
+        technicalEvidence: [
+          {
+            label: "Expected duration",
+            value: `${report.evidence.expectedSeconds} seconds`,
+          },
+          {
+            label: "Observed duration",
+            value: `${report.evidence.observedSeconds} seconds`,
+          },
+        ],
+        explanation:
+          "The encoded file is materially shorter than the selected DVD title.",
+        suggestedAction:
+          "Verify the selected DVD title and source metadata, then retry the Encode Job.",
+      };
+    case "validation_check": {
+      const presentation =
+        ENCODE_VALIDATION_CHECK_PRESENTATIONS[report.evidence.check];
+      return {
+        technicalEvidence: [{
+          label: "Validation check",
+          value: presentation.evidence,
+        }],
+        explanation: presentation.explanation,
+        suggestedAction: presentation.suggestedAction,
+      };
+    }
+    case "none": {
+      const presentation = report.reasonCode === "output_validation_failed"
+        ? {
+            explanation: "The encoded file failed validation.",
+            suggestedAction:
+              "Review the Encode Job inputs, then retry the Encode Job.",
+          }
+        : ENCODE_FAILURE_PRESENTATIONS[report.reasonCode];
+      return { ...presentation, technicalEvidence: [] };
+    }
+  }
+}
 
 function encodeFailureRetryGuidance(
   job: EncodeJob,
@@ -890,55 +967,7 @@ function encodeJobFailureReportInvestigation(
     canRetry,
     report.retryability,
   );
-  const technicalEvidence = report.evidence.kind === "exit_status"
-    ? [{ label: "Exit status", value: String(report.evidence.exitStatus) }]
-    : report.evidence.kind === "signal"
-      ? [{ label: "Termination signal", value: report.evidence.signal }]
-      : report.evidence.kind === "timeout"
-        ? [{
-            label: "Timeout limit",
-            value: `${report.evidence.timeoutSeconds} seconds`,
-          }]
-        : report.evidence.kind === "duration"
-          ? [
-              {
-                label: "Expected duration",
-                value: `${report.evidence.expectedSeconds} seconds`,
-              },
-              {
-                label: "Observed duration",
-                value: `${report.evidence.observedSeconds} seconds`,
-              },
-            ]
-          : report.evidence.kind === "validation_check"
-            ? [{
-                label: "Validation check",
-                value:
-                  ENCODE_VALIDATION_CHECK_PRESENTATIONS[report.evidence.check]
-                    .evidence,
-              }]
-            : [];
-  const presentation = report.reasonCode === "output_validation_failed"
-    ? report.evidence.kind === "duration"
-      ? {
-          explanation:
-            "The encoded file is materially shorter than the selected DVD title.",
-          suggestedAction:
-            "Verify the selected DVD title and source metadata, then retry the Encode Job.",
-        }
-      : report.evidence.kind === "validation_check"
-        ? ENCODE_VALIDATION_CHECK_PRESENTATIONS[report.evidence.check]
-        : {
-            explanation: "The encoded file failed validation.",
-            suggestedAction:
-              "Review the Encode Job inputs, then retry the Encode Job.",
-          }
-    : report.reasonCode === "command_failed" && report.evidence.kind === "signal"
-      ? {
-          ...ENCODE_FAILURE_PRESENTATIONS.command_failed,
-          explanation: "HandBrake stopped after receiving a process signal.",
-        }
-      : ENCODE_FAILURE_PRESENTATIONS[report.reasonCode];
+  const presentation = encodeFailureEvidencePresentation(report);
   const actionApplies = job.status === "failed" && canRetry &&
     retry.retryability !== "not_appropriate";
   return {
@@ -956,7 +985,7 @@ function encodeJobFailureReportInvestigation(
     suggestedAction: actionApplies
       ? presentation.suggestedAction
       : "Review the current Encode Job state. No retry is needed for this historical report.",
-    technicalEvidence,
+    technicalEvidence: presentation.technicalEvidence,
   };
 }
 
