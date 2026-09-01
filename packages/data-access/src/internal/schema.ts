@@ -5,6 +5,7 @@ import {
   index,
   integer,
   primaryKey,
+  real,
   sqliteTable,
   text,
   uniqueIndex,
@@ -46,6 +47,7 @@ import {
   ENCODE_JOB_FAILURE_REPORT_SCHEMA_VERSIONS,
   ENCODE_JOB_FAILURE_RETRYABILITIES,
   ENCODE_JOB_FAILURE_SIGNALS,
+  ENCODE_JOB_FAILURE_VALIDATION_CHECKS,
 } from "../encode-job-failure-report.js";
 import type {
   ArchiveRequestId,
@@ -961,6 +963,11 @@ export const encodeJobFailureReports = sqliteTable(
     exitStatus: integer("exit_status"),
     signal: text("signal", { enum: ENCODE_JOB_FAILURE_SIGNALS }),
     timeoutSeconds: integer("timeout_seconds"),
+    validationCheck: text("validation_check", {
+      enum: ENCODE_JOB_FAILURE_VALIDATION_CHECKS,
+    }),
+    expectedSeconds: real("expected_seconds"),
+    observedSeconds: real("observed_seconds"),
     occurredAt: integer("occurred_at", { mode: "timestamp_ms" }).notNull(),
     createdAt: createdAt(),
   },
@@ -992,7 +999,7 @@ export const encodeJobFailureReports = sqliteTable(
     ),
     check(
       "encode_job_failure_reports_evidence_check",
-      sql`(${table.reasonCode} = 'command_failed' and ${table.timeoutSeconds} is null and ((typeof(${table.exitStatus}) = 'integer' and ${table.exitStatus} between 1 and 255 and ${table.signal} is null) or (${table.exitStatus} is null and ${table.signal} in (${sqliteStringLiterals(ENCODE_JOB_FAILURE_SIGNALS)})))) or (${table.reasonCode} = 'command_timeout' and ${table.exitStatus} is null and ${table.signal} is null and typeof(${table.timeoutSeconds}) = 'integer' and ${table.timeoutSeconds} between 1 and 604800)`,
+      sql`(${table.reasonCode} = 'command_failed' and ${table.timeoutSeconds} is null and ${table.validationCheck} is null and ${table.expectedSeconds} is null and ${table.observedSeconds} is null and ((typeof(${table.exitStatus}) = 'integer' and ${table.exitStatus} between 1 and 255 and ${table.signal} is null) or (${table.exitStatus} is null and ${table.signal} in (${sqliteStringLiterals(ENCODE_JOB_FAILURE_SIGNALS)})))) or (${table.reasonCode} = 'command_timeout' and ${table.exitStatus} is null and ${table.signal} is null and typeof(${table.timeoutSeconds}) = 'integer' and ${table.timeoutSeconds} between 1 and 604800 and ${table.validationCheck} is null and ${table.expectedSeconds} is null and ${table.observedSeconds} is null) or (${table.reasonCode} = 'output_validation_failed' and ${table.exitStatus} is null and ${table.signal} is null and ${table.timeoutSeconds} is null and ((${table.validationCheck} in (${sqliteStringLiterals(ENCODE_JOB_FAILURE_VALIDATION_CHECKS)}) and ${table.expectedSeconds} is null and ${table.observedSeconds} is null) or (${table.validationCheck} is null and typeof(${table.expectedSeconds}) in ('integer', 'real') and ${table.expectedSeconds} > 0 and ${table.expectedSeconds} <= 604800 and typeof(${table.observedSeconds}) in ('integer', 'real') and ${table.observedSeconds} >= 0 and ${table.observedSeconds} <= 604800))) or (${table.reasonCode} in ('input_unavailable', 'invalid_configuration', 'output_conflict', 'unsafe_output_state', 'unknown_failure') and ${table.exitStatus} is null and ${table.signal} is null and ${table.timeoutSeconds} is null and ${table.validationCheck} is null and ${table.expectedSeconds} is null and ${table.observedSeconds} is null)`,
     ),
     index("encode_job_failure_reports_job_occurred_idx").on(
       table.encodeJobId,

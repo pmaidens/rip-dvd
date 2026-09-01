@@ -42,7 +42,10 @@ import {
   pollEncodeWorker,
   type HandBrakeRunner,
 } from "./encode-worker.js";
-import type { EncodeOutputValidator } from "./encode-output-validator.js";
+import {
+  EncodeOutputValidationError,
+  type EncodeOutputValidator,
+} from "./encode-output-validator.js";
 import {
   encodeOutputFilesystemIdentity,
 } from "./encode-output-filesystem-identity.js";
@@ -1194,8 +1197,13 @@ describe("encode worker polling", () => {
         expect(outputPath).toBe(partialPath);
         expect(expectations).toEqual({ expectedDurationSeconds: 8_078 });
         expect(existsSync(fixture.outputPath)).toBe(false);
-        throw new Error(
-          "Encode output validation failed: output duration 97.205 seconds is materially shorter than the expected 8078 seconds",
+        throw new EncodeOutputValidationError(
+          "output duration 97.205 seconds is materially shorter than the expected 8078 seconds",
+          {
+            kind: "duration",
+            expectedSeconds: 8_078,
+            observedSeconds: 97.205,
+          },
         );
       }),
     };
@@ -1216,10 +1224,23 @@ describe("encode worker polling", () => {
     expect(quarantinedContents(partialPath)).toContain("corrupt encode");
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({
-        errorMessage:
-          "Encode output validation failed: output duration 97.205 seconds is materially shorter than the expected 8078 seconds",
+        errorMessage: "Encode output validation failed",
         id: fixture.job.id,
         status: "failed",
+      }),
+    ]);
+    expect(
+      fixture.access.encodeJobs.listFailureReports([fixture.job.id]),
+    ).toEqual([
+      expect.objectContaining({
+        reasonCode: "output_validation_failed",
+        phase: "validation",
+        retryability: "after_action",
+        evidence: {
+          kind: "duration",
+          expectedSeconds: 8_078,
+          observedSeconds: 97.205,
+        },
       }),
     ]);
     fixture.access.close();
@@ -1256,8 +1277,7 @@ describe("encode worker polling", () => {
     expect(existsSync(partialPath)).toBe(false);
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({
-        errorMessage:
-          "Encode output validation did not retain a regular output file",
+        errorMessage: "Encode output validation failed",
         id: fixture.job.id,
         status: "failed",
       }),
@@ -1390,7 +1410,7 @@ describe("encode worker polling", () => {
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({
         id: fixture.job.id,
-        errorMessage: "Encode Job output directory escaped the media library",
+        errorMessage: "Encode output state is unsafe",
         status: "failed",
       }),
     ]);
@@ -1429,7 +1449,7 @@ describe("encode worker polling", () => {
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({
         id: fixture.job.id,
-        errorMessage: "Encode Job output directory is ambiguous",
+        errorMessage: "Encode output state is unsafe",
         status: "failed",
       }),
     ]);
@@ -1482,7 +1502,7 @@ describe("encode worker polling", () => {
         progressPhase: "encoding",
         progressPercent: 18,
         progressEtaSeconds: null,
-        errorMessage: "HandBrake encoder failed",
+        errorMessage: "Encode failed for an unknown reason",
       }),
     ]);
 
@@ -1586,6 +1606,107 @@ describe("encode worker polling", () => {
           phase: "encoding",
           evidence,
           diagnostic: error.diagnostic,
+        }),
+      ]);
+      fixture.access.close();
+    },
+  );
+
+  it.each([
+    {
+      category: "unavailable input",
+      reasonCode: "input_unavailable",
+      phase: "preparation",
+      evidence: { kind: "none" },
+    },
+    {
+      category: "invalid profile configuration",
+      reasonCode: "invalid_configuration",
+      phase: "preparation",
+      evidence: { kind: "none" },
+    },
+    {
+      category: "output conflict",
+      reasonCode: "output_conflict",
+      phase: "preparation",
+      evidence: { kind: "none" },
+    },
+    {
+      category: "unsafe output state",
+      reasonCode: "unsafe_output_state",
+      phase: "preparation",
+      evidence: { kind: "none" },
+    },
+    {
+      category: "typed output validation",
+      reasonCode: "output_validation_failed",
+      phase: "validation",
+      evidence: { kind: "validation_check", check: "video_decode" },
+    },
+    {
+      category: "unknown failure",
+      reasonCode: "unknown_failure",
+      phase: "encoding",
+      evidence: { kind: "none" },
+    },
+  ] as const)(
+    "classifies $category without parsing diagnostic text",
+    async ({ category, reasonCode, phase, evidence }) => {
+      const fixture = createQueuedJob();
+      const runner: HandBrakeRunner = {
+        run: vi.fn(async ({ outputPath }) => {
+          if (category === "typed output validation") {
+            writeFileSync(outputPath, "invalid encode", { flag: "wx" });
+          } else if (category === "unknown failure") {
+            throw new Error("unrecognized /private/path --secret CLAIM-TOKEN");
+          }
+        }),
+      };
+      let outputValidator: EncodeOutputValidator | undefined;
+      if (category === "unavailable input") {
+        rmSync(fixture.sourcePath);
+      } else if (category === "invalid profile configuration") {
+        const sqlite = new DatabaseSync(fixture.databasePath);
+        sqlite.prepare("UPDATE encoding_profiles SET settings = '{}' WHERE id = ?")
+          .run(fixture.profile.id);
+        sqlite.close();
+      } else if (category === "output conflict") {
+        mkdirSync(dirname(fixture.outputPath), { recursive: true });
+        writeFileSync(fixture.outputPath, "existing output", { flag: "wx" });
+      } else if (category === "unsafe output state") {
+        mkdirSync(dirname(fixture.outputPath), { recursive: true });
+        symlinkSync(fixture.sourcePath, fixture.outputPath);
+      } else if (category === "typed output validation") {
+        outputValidator = {
+          prepareAndValidate: vi.fn(async () => {
+            throw new EncodeOutputValidationError(
+              "bounded decode did not complete",
+              evidence,
+            );
+          }),
+        };
+      }
+
+      await pollEncodeWorker({
+        access: fixture.access,
+        concurrency: 1,
+        log: vi.fn(),
+        mediaLibraryPath: fixture.mediaLibraryPath,
+        originalsLibraryPath: fixture.originalsLibraryPath,
+        ...(outputValidator === undefined ? {} : { outputValidator }),
+        runner,
+        signal: new AbortController().signal,
+      });
+
+      expect(
+        fixture.access.encodeJobs.listFailureReports([fixture.job.id]),
+      ).toEqual([
+        expect.objectContaining({
+          reasonCode,
+          phase,
+          retryability: "after_action",
+          evidence,
+          diagnostic: expect.any(String),
         }),
       ]);
       fixture.access.close();
@@ -1741,7 +1862,7 @@ describe("encode worker polling", () => {
       expect.objectContaining({
         id: fixture.job.id,
         status: "failed",
-        errorMessage: "Encode Job Disc Selection is unavailable",
+        errorMessage: "Encode input is unavailable",
       }),
     ]);
     fixture.access.close();
@@ -1827,7 +1948,7 @@ describe("encode worker polling", () => {
       expect.objectContaining({
         id: fixture.job.id,
         status: "failed",
-        errorMessage: expect.stringContaining("EEXIST"),
+        errorMessage: "Encode output conflicts with existing state",
       }),
     ]);
 
@@ -2114,7 +2235,7 @@ describe("encode worker polling", () => {
       expect.objectContaining({
         id: replacement.id,
         status: "failed",
-        errorMessage: "Encode interrupted",
+        errorMessage: "Encode failed for an unknown reason",
       }),
     );
     expect(fixture.access.encodeJobs.listRetainedOutputs([replacement.id]))
@@ -4917,7 +5038,7 @@ describe("encode worker polling", () => {
         partialCleanupClaimToken: expect.any(String),
         partialCleanupOutputPath: fixture.outputPath,
         status: "failed",
-        errorMessage: "HandBrake timed out",
+        errorMessage: "Encode failed for an unknown reason",
       }),
     ]);
     active = false;

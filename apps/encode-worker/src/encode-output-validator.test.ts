@@ -105,15 +105,22 @@ describe("encode output validation", () => {
       runMediaTool: createMediaToolRunner({ outputDurationSeconds: 97.205 }),
     });
 
-    await expect(
-      validator.prepareAndValidate(
-        "/media/truncated.mkv",
-        new AbortController().signal,
-        { expectedDurationSeconds: 8_078 },
-      ),
-    ).rejects.toThrow(
+    const failure = validator.prepareAndValidate(
+      "/media/truncated.mkv",
+      new AbortController().signal,
+      { expectedDurationSeconds: 8_078 },
+    );
+
+    await expect(failure).rejects.toThrow(
       "Encode output validation failed: output duration 97.205 seconds is materially shorter than the expected 8078 seconds",
     );
+    await expect(failure).rejects.toMatchObject({
+      evidence: {
+        kind: "duration",
+        expectedSeconds: 8_078,
+        observedSeconds: 97.205,
+      },
+    });
   });
 
   it("accepts a full-title output within the duration tolerance", async () => {
@@ -135,15 +142,17 @@ describe("encode output validation", () => {
       runMediaTool: createMediaToolRunner({ outputDurationSeconds: null }),
     });
 
-    await expect(
-      validator.prepareAndValidate(
-        "/media/unmeasured.mkv",
-        new AbortController().signal,
-        { expectedDurationSeconds: 8_078 },
-      ),
-    ).rejects.toThrow(
+    const failure = validator.prepareAndValidate(
+      "/media/unmeasured.mkv",
+      new AbortController().signal,
+      { expectedDurationSeconds: 8_078 },
+    );
+    await expect(failure).rejects.toThrow(
       "Encode output validation failed: output duration metadata is unavailable",
     );
+    await expect(failure).rejects.toMatchObject({
+      evidence: { kind: "validation_check", check: "duration_metadata" },
+    });
   });
 
   it("accepts an identified video stream that starts promptly and decodes frames", async () => {

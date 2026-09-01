@@ -212,4 +212,100 @@ describe("Encode Job Failure Reports", () => {
     expect(reports[0]).toMatchObject({ diagnostic: "attempt 21" });
     expect(reports.at(-1)).toMatchObject({ diagnostic: "attempt 2" });
   });
+
+  it.each([
+    {
+      reasonCode: "input_unavailable",
+      phase: "preparation",
+      retryability: "after_action",
+      evidence: { kind: "none" },
+    },
+    {
+      reasonCode: "invalid_configuration",
+      phase: "preparation",
+      retryability: "after_action",
+      evidence: { kind: "none" },
+    },
+    {
+      reasonCode: "output_conflict",
+      phase: "preparation",
+      retryability: "after_action",
+      evidence: { kind: "none" },
+    },
+    {
+      reasonCode: "unsafe_output_state",
+      phase: "preparation",
+      retryability: "after_action",
+      evidence: { kind: "none" },
+    },
+    {
+      reasonCode: "output_validation_failed",
+      phase: "validation",
+      retryability: "after_action",
+      evidence: {
+        kind: "duration",
+        expectedSeconds: 8_078,
+        observedSeconds: 97.205,
+      },
+    },
+    {
+      reasonCode: "output_validation_failed",
+      phase: "validation",
+      retryability: "after_action",
+      evidence: { kind: "validation_check", check: "video_decode" },
+    },
+    {
+      reasonCode: "unknown_failure",
+      phase: "publication",
+      retryability: "after_action",
+      evidence: { kind: "none" },
+    },
+  ])(
+    "persists allowlisted $reasonCode evidence without changing the report contract",
+    ({ reasonCode, phase, retryability, evidence }) => {
+      const { access, job } = createEncodeJobFixture();
+
+      access.encodeJobs.failWithReport(claim(access), {
+        schemaVersion: 1,
+        reasonCode,
+        phase,
+        retryability,
+        diagnostic: "/private/source.iso --preset SECRET claim-token",
+        evidence,
+      } as EncodeJobFailureReportInput);
+
+      expect(access.encodeJobs.listFailureReports([job.id])).toEqual([
+        expect.objectContaining({
+          reasonCode,
+          phase,
+          retryability,
+          evidence,
+        }),
+      ]);
+    },
+  );
+
+  it("rejects untyped or out-of-range validation evidence", () => {
+    const { access, job } = createEncodeJobFixture();
+    const claimed = claim(access);
+
+    expect(() =>
+      access.encodeJobs.failWithReport(claimed, {
+        schemaVersion: 1,
+        reasonCode: "output_validation_failed",
+        phase: "validation",
+        retryability: "after_action",
+        evidence: {
+          kind: "duration",
+          expectedSeconds: 8_078,
+          observedSeconds: Number.POSITIVE_INFINITY,
+          outputPath: "/private/output.mkv",
+        },
+      } as unknown as EncodeJobFailureReportInput)
+    ).toThrow(DomainInvariantError);
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: job.id, status: "running" }),
+    ]);
+    expect(access.encodeJobs.listFailureReports([job.id])).toEqual([]);
+  });
 });

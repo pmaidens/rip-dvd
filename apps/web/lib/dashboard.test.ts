@@ -96,6 +96,142 @@ function seedEncodeJob(
 }
 
 describe("readDashboardSnapshot", () => {
+  it("maps every structured Encode failure reason without exposing diagnostics", () => {
+    const access = dataAccessFixture.create();
+    const { job } = seedEncodeJob(access);
+    const reports = [
+      {
+        reasonCode: "input_unavailable",
+        phase: "preparation",
+        evidence: { kind: "none" },
+      },
+      {
+        reasonCode: "invalid_configuration",
+        phase: "preparation",
+        evidence: { kind: "none" },
+      },
+      {
+        reasonCode: "output_conflict",
+        phase: "preparation",
+        evidence: { kind: "none" },
+      },
+      {
+        reasonCode: "unsafe_output_state",
+        phase: "preparation",
+        evidence: { kind: "none" },
+      },
+      {
+        reasonCode: "output_validation_failed",
+        phase: "validation",
+        evidence: {
+          kind: "duration",
+          expectedSeconds: 8_078,
+          observedSeconds: 97.205,
+        },
+      },
+      {
+        reasonCode: "output_validation_failed",
+        phase: "validation",
+        evidence: { kind: "validation_check", check: "video_decode" },
+      },
+      {
+        reasonCode: "unknown_failure",
+        phase: "publication",
+        evidence: { kind: "none" },
+      },
+    ] as const;
+    for (const [index, report] of reports.entries()) {
+      const claim = access.encodeJobs.claimNext(`dashboard-report-${index}`);
+      if (!claim) throw new Error("Expected Encode Job claim");
+      access.encodeJobs.failWithReport(claim, {
+        schemaVersion: 1,
+        retryability: "after_action",
+        diagnostic:
+          "/private/source.iso /media/output.mkv --preset SECRET ENV=value claim-token",
+        ...report,
+      });
+      if (index < reports.length - 1) {
+        access.encodeJobs.requeue(job.id);
+      }
+    }
+
+    const snapshot = readDashboardSnapshot(access);
+    const encodeJobs = snapshot.encodeJobs.status === "loaded"
+      ? snapshot.encodeJobs.items
+      : [];
+    const investigations = encodeJobs[0]!.investigations!;
+    const byReason = new Map(
+      investigations.map((investigation) => [
+        `${investigation.reasonCode}:${investigation.technicalEvidence[0]?.label ?? "none"}`,
+        investigation,
+      ]),
+    );
+
+    expect(byReason.get("encode.input_unavailable:none")).toMatchObject({
+      failedPhase: "Preparation",
+      retryability: "after_action",
+      explanation:
+        "The Encode Worker could not read the selected Original Disc Archive or its catalog input.",
+      suggestedAction:
+        "Verify the Original Disc Archive and Catalog Review, then retry the Encode Job.",
+    });
+    expect(byReason.get("encode.invalid_configuration:none")).toMatchObject({
+      retryability: "after_action",
+      explanation:
+        "The Encoding Profile is missing or has settings the Encode Worker cannot use.",
+      suggestedAction:
+        "Correct or reactivate the Encoding Profile, then retry the Encode Job.",
+    });
+    expect(byReason.get("encode.output_conflict:none")).toMatchObject({
+      retryability: "after_action",
+      explanation:
+        "The requested output is already owned or changed while the Encode Job was running.",
+      suggestedAction:
+        "Resolve the competing output or choose a different output path, then retry the Encode Job.",
+    });
+    expect(byReason.get("encode.unsafe_output_state:none")).toMatchObject({
+      retryability: "after_action",
+      explanation:
+        "The output path or file state did not pass the worker's safety checks.",
+      suggestedAction:
+        "Remove symlinks or ambiguous files from the output location, then retry the Encode Job.",
+    });
+    expect(
+      byReason.get("encode.output_validation_failed:Expected duration"),
+    ).toMatchObject({
+      failedPhase: "Validation",
+      retryability: "after_action",
+      explanation:
+        "The encoded file is materially shorter than the selected DVD title.",
+      suggestedAction:
+        "Verify the selected DVD title and source metadata, then retry the Encode Job.",
+      technicalEvidence: [
+        { label: "Expected duration", value: "8078 seconds" },
+        { label: "Observed duration", value: "97.205 seconds" },
+      ],
+    });
+    expect(
+      byReason.get("encode.output_validation_failed:Validation check"),
+    ).toMatchObject({
+      explanation: "The encoded file failed the bounded video decode check.",
+      suggestedAction:
+        "Retry the Encode Job. If the bounded video decode fails again, copy this report when asking for support.",
+      technicalEvidence: [
+        { label: "Validation check", value: "Bounded video decode" },
+      ],
+    });
+    expect(byReason.get("encode.unknown_failure:none")).toMatchObject({
+      failedPhase: "Publication",
+      retryability: "after_action",
+      explanation: "The Encode Worker could not classify this failure.",
+      suggestedAction:
+        "Review the output location for an obvious conflict, then retry once. Copy this report if the failure repeats.",
+    });
+    expect(JSON.stringify(snapshot)).not.toMatch(
+      /private|output\.mkv|--preset|ENV=value|claim-token/,
+    );
+  });
+
   it("keeps a terminal Encode Job outcome beside its Disc Selection correction", () => {
     const access = dataAccessFixture.create();
     const { archive, job, selection } = seedEncodeJob(access);
