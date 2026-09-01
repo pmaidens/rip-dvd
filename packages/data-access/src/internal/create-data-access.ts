@@ -11109,6 +11109,18 @@ export function createDataAccessInternal(
             "Encode Job cleanup report reason is invalid",
           );
         }
+        if (
+          report.reasonCode === "publication_recovery_failed" &&
+          (report.evidence.kind !== "recovery" ||
+            report.evidence.operation !==
+              (cleanup.publicationPending
+                ? "publication_recovery"
+                : "cleanup_recovery"))
+        ) {
+          throw new DomainInvariantError(
+            "Encode Job cleanup recovery report provenance is invalid",
+          );
+        }
         const timestamp = now();
         const expiredBefore = new Date(
           timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,

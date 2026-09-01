@@ -436,6 +436,44 @@ describe("Encode Job Failure Reports", () => {
     ]);
   });
 
+  it.each([
+    {
+      publicationPending: false,
+      mismatchedOperation: "publication_recovery" as const,
+    },
+    {
+      publicationPending: true,
+      mismatchedOperation: "cleanup_recovery" as const,
+    },
+  ])(
+    "rejects $mismatchedOperation evidence when publicationPending is $publicationPending",
+    ({ publicationPending, mismatchedOperation }) => {
+      const { access, job } = createEncodeJobFixture();
+      const claimed = claim(access);
+      const cleanup = access.encodeJobs.registerPartialCleanup(claimed, {
+        publicationPending,
+      });
+      access.encodeJobs.failWithReport(claimed, commandFailure(33));
+
+      expect(() =>
+        access.encodeJobs.recordCleanupFailureReport(cleanup, {
+          schemaVersion: 1,
+          reasonCode: "publication_recovery_failed",
+          phase: "recovery",
+          retryability: "after_action",
+          diagnostic: "contradictory recovery evidence",
+          evidence: {
+            kind: "recovery",
+            operation: mismatchedOperation,
+          },
+        })
+      ).toThrow(DomainInvariantError);
+      expect(access.encodeJobs.listFailureReports([job.id])).toEqual([
+        expect.objectContaining({ reasonCode: "command_failed" }),
+      ]);
+    },
+  );
+
   it("atomically classifies expired job and publication leases", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));

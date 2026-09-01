@@ -4452,6 +4452,62 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it("attributes a failed publication revocation to the revocation error", async () => {
+    const fixture = createQueuedJob();
+    const primaryError = new Error("primary publication completion failed");
+    const revocationError = new Error("publication revocation fence failed");
+    const revocationFailureAccess: DataAccess = {
+      ...fixture.access,
+      encodeJobs: {
+        ...fixture.access.encodeJobs,
+        completePublishedClaim() {
+          throw primaryError;
+        },
+        revokePublication(claim) {
+          fixture.access.encodeJobs.fail(
+            claim,
+            "publication was terminalized concurrently",
+            { preserveReplacementAuthority: true },
+          );
+          throw revocationError;
+        },
+      },
+    };
+
+    await pollEncodeWorker({
+      access: revocationFailureAccess,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "published before revocation failed", {
+            flag: "wx",
+          });
+        }),
+      },
+      signal: new AbortController().signal,
+    });
+
+    expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id]))
+      .toEqual([
+        expect.objectContaining({
+          reasonCode: "publication_failed",
+          diagnostic: revocationError.message,
+          evidence: {
+            kind: "publication",
+            operation: "publication_completion",
+          },
+        }),
+      ]);
+    expect(
+      fixture.access.encodeJobs.listFailureReports([fixture.job.id])[0]
+        ?.diagnostic,
+    ).not.toBe(primaryError.message);
+    fixture.access.close();
+  });
+
   it("retains recovery provenance when the final changes during completion commit", async () => {
     const fixture = createQueuedJob();
     const options = {

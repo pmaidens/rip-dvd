@@ -2246,7 +2246,7 @@ export async function executeEncodeClaim(
         if (pendingPartialCleanup !== undefined) {
           recordCleanupFailure(
             pendingPartialCleanup,
-            publicationFailureReport(error, publicationOperation),
+            publicationFailureReport(authorityError, publicationOperation),
             options,
           );
         }
