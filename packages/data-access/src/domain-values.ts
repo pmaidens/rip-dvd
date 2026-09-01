@@ -180,11 +180,15 @@ export const WORKER_INCIDENT_PHASES = [
 
 export const WORKER_INCIDENT_RETRYABILITIES = ["automatic"] as const;
 
-export const WORKER_INCIDENT_RECOVERY_AREAS = [
-  "expired_archive_job_claim",
+export const ENCODE_WORKER_INCIDENT_RECOVERY_AREAS = [
   "active_publication",
   "expired_publication_mutation",
   "expired_encode_job_claim",
   "expired_cancellation",
   "pending_partial_cleanup",
+] as const;
+
+export const WORKER_INCIDENT_RECOVERY_AREAS = [
+  "expired_archive_job_claim",
+  ...ENCODE_WORKER_INCIDENT_RECOVERY_AREAS,
 ] as const;

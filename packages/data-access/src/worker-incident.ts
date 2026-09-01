@@ -1,4 +1,5 @@
 import {
+  ENCODE_WORKER_INCIDENT_RECOVERY_AREAS,
   WORKER_INCIDENT_PHASES,
   WORKER_INCIDENT_REASON_CODES,
   WORKER_INCIDENT_RECOVERY_AREAS,
@@ -69,7 +70,11 @@ export function normalizeWorkerIncidentIdentity(
     input.workerKind === "encode" &&
     input.reasonCode === "publication_recovery_failure" &&
     input.phase === "publication_recovery" &&
-    "recoveryArea" in evidence;
+    "recoveryArea" in evidence &&
+    included(
+      ENCODE_WORKER_INCIDENT_RECOVERY_AREAS,
+      evidence.recoveryArea,
+    );
   if (
     (!isPolling && !isArchiveClaimRecovery && !isPublicationRecovery) ||
     (isPolling && Object.keys(evidence).length !== 0)

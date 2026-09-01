@@ -35,9 +35,9 @@ import {
   type DiscSelection,
   type EncodeJobFailureReportInput,
   type EncodeJobPartialCleanup,
+  type EncodeWorkerIncidentRecoveryArea,
   type PublicationMutationRecoveryLock,
   type RunningEncodeJob,
-  type WorkerIncidentRecoveryArea,
 } from "@rip-dvd/data-access";
 
 import {
@@ -166,7 +166,7 @@ type PublicationRecoveryStepResult =
 
 function createPublicationRecoveryStepTracker(
   options: EncodePublicationOptions,
-  recoveryArea: WorkerIncidentRecoveryArea,
+  recoveryArea: EncodeWorkerIncidentRecoveryArea,
 ) {
   let result: PublicationRecoveryStepResult = "completed";
   return {
@@ -2145,7 +2145,7 @@ export async function reconcileEncodePublications(
   options: EncodePublicationOptions,
 ): Promise<void> {
   const runPublicationRecoveryStep = async (
-    recoveryArea: WorkerIncidentRecoveryArea,
+    recoveryArea: EncodeWorkerIncidentRecoveryArea,
     failureMessage: string,
     recover: () =>
       | PublicationRecoveryStepResult
