@@ -99,7 +99,9 @@ export function createNodeCommandRunner(
       );
       if (completion.exitCode === null) {
         if (completion.signal === null) {
-          throw new Error("device command ended without an exit status or signal");
+          throw new Error(
+            "Optical Drive command ended without an exit status or signal",
+          );
         }
         return {
           exitCode: null,
