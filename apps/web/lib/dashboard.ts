@@ -1016,6 +1016,31 @@ function encodeFailureEvidence(
   }
 }
 
+function encodeFailureSuggestedAction(
+  job: EncodeJob,
+  effectiveRetryability: DashboardInvestigation["retryability"],
+  classifiedAction: string,
+): string {
+  if (effectiveRetryability !== "not_appropriate") {
+    return classifiedAction;
+  }
+  if (job.partialCleanupOutputPath !== null) {
+    return "Keep the Encode Worker running and leave output files in place while cleanup or publication recovery finishes. No operator retry is needed while recovery is pending.";
+  }
+  switch (job.status) {
+    case "completed":
+      return "No operator action is needed for this completed Encode Job. Keep this report as historical context.";
+    case "cancelled":
+      return "No operator retry is needed for this cancelled Encode Job. Keep this report as historical context.";
+    case "queued":
+    case "running":
+    case "cancellation_requested":
+      return "Let the current Encode Job transition finish before deciding whether any further action is needed.";
+    case "failed":
+      return "Review the current Encode Job and Disc Selection state. This report does not recommend retrying unchanged.";
+  }
+}
+
 function encodeJobFailureReportInvestigation(
   job: EncodeJob,
   report: EncodeJobFailureReport,
@@ -1039,10 +1064,11 @@ function encodeJobFailureReportInvestigation(
     retryability: retry.retryability,
     retryabilityDetail: retry.detail,
     explanation: presentation.explanation,
-    suggestedAction: retry.retryability === "not_appropriate" &&
-        report.retryability === "appropriate"
-      ? "Review the current Encode Job state. No retry is needed for this historical report."
-      : presentation.suggestedAction,
+    suggestedAction: encodeFailureSuggestedAction(
+      job,
+      retry.retryability,
+      presentation.suggestedAction,
+    ),
     technicalEvidence: presentation.technicalEvidence,
   };
 }

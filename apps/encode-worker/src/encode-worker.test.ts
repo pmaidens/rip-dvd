@@ -5781,6 +5781,13 @@ describe("encode worker polling", () => {
       resolvedLimit: 20,
     })).toEqual([]);
 
+    await pollEncodeWorker(options);
+    expect(
+      fixture.access.encodeJobs.listFailureReports([fixture.job.id]).filter(
+        ({ reasonCode }) => reasonCode === "publication_recovery_failed",
+      ),
+    ).toHaveLength(1);
+
     recoveryDirectorySyncFailure.armed = false;
     await pollEncodeWorker(options);
 

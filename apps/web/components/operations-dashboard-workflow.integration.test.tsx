@@ -600,6 +600,32 @@ describe("end-to-end operations dashboard workflow", () => {
       expect(copied).not.toContain("claim-token");
       expect(copied).not.toContain("/tmp/private.lock");
     }
+
+    access.encodeJobs.requeue(job.id);
+    const recoveredClaim = access.encodeJobs.claimNext(
+      "completed-publication-investigation-worker",
+    );
+    if (!recoveredClaim) {
+      throw new Error("Expected completed publication investigation claim");
+    }
+    access.encodeJobs.complete(recoveredClaim);
+    const recoveredDashboard = await readDashboard(access);
+    const recoveredInvestigations = encodeJobById(
+      recoveredDashboard.snapshot,
+      job.id,
+    )!.investigations!.slice(0, 5);
+    for (const investigation of recoveredInvestigations) {
+      expect(investigation).toMatchObject({
+        retryability: "not_appropriate",
+        suggestedAction:
+          "No operator action is needed for this completed Encode Job. Keep this report as historical context.",
+      });
+      const copied = investigationReport(investigation);
+      expect(copied).toContain(
+        "Suggested action: No operator action is needed for this completed Encode Job. Keep this report as historical context.",
+      );
+      expect(copied).not.toContain("then retry the Encode Job");
+    }
   });
 
   it("carries every preparation and validation failure through the safe dashboard workflow", async () => {

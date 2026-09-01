@@ -1279,6 +1279,18 @@ export function createDataAccessInternal(
     }
   }
 
+  function matchesLatestPublicationRecoveryFailure(
+    row: typeof encodeJobFailureReports.$inferSelect,
+    report: ValidatedEncodeJobFailureReportInput,
+  ): boolean {
+    return report.reasonCode === "publication_recovery_failed" &&
+      row.reasonCode === report.reasonCode &&
+      row.phase === report.phase &&
+      row.retryability === report.retryability &&
+      row.diagnostic === report.diagnostic &&
+      row.context === encodeJobFailureEvidenceContext(report.evidence);
+  }
+
   function completeEncodeCancellation(
     claim: RunningEncodeJob,
     reports: readonly ValidatedEncodeJobFailureReportInput[] = [],
@@ -10986,7 +10998,13 @@ export function createDataAccessInternal(
               eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
               eq(encodeJobs.publicationPending, cleanup.publicationPending),
               cleanup.leaseToken === null
-                ? isNull(encodeJobs.partialCleanupLeaseToken)
+                ? and(
+                    isNull(encodeJobs.partialCleanupLeaseToken),
+                    or(
+                      ne(encodeJobs.status, "running"),
+                      gt(encodeJobs.updatedAt, expiredBefore),
+                    ),
+                  )
                 : and(
                     eq(
                       encodeJobs.partialCleanupLeaseToken,
@@ -11001,6 +11019,22 @@ export function createDataAccessInternal(
               "encode job cleanup",
               cleanup.jobId,
             );
+          }
+          const latestReport = report.reasonCode ===
+              "publication_recovery_failed"
+            ? transaction
+              .select()
+              .from(encodeJobFailureReports)
+              .where(eq(encodeJobFailureReports.encodeJobId, owned.id))
+              .orderBy(desc(encodeJobFailureReports.sequence))
+              .limit(1)
+              .get()
+            : undefined;
+          if (
+            latestReport !== undefined &&
+            matchesLatestPublicationRecoveryFailure(latestReport, report)
+          ) {
+            return;
           }
           appendEncodeJobFailureReports(
             transaction,
