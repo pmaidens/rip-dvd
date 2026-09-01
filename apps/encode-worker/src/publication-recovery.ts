@@ -31,6 +31,7 @@ import {
   ENCODE_JOB_LEASE_DURATION_MS,
   type DataAccess,
   type DiscSelection,
+  type EncodeJobFailureReportInput,
   type EncodeJobPartialCleanup,
   type PublicationMutationRecoveryLock,
   type RunningEncodeJob,
@@ -48,7 +49,11 @@ import type {
   EncodeOutputValidator,
   EncodeOutputVobSubExpectation,
 } from "./encode-output-validator.js";
-import type { HandBrakeRunner } from "./handbrake-runner.js";
+import {
+  HandBrakeCommandError,
+  type HandBrakeRunner,
+  HandBrakeTimeoutError,
+} from "./handbrake-runner.js";
 import { normalizeErrorMessage } from "./normalize-error-message.js";
 import { createProgressParser } from "./progress-parser.js";
 
@@ -59,6 +64,35 @@ const ATOMIC_EXCHANGE_PATH = fileURLToPath(
 
 class PendingPublicationRecoveryError extends Error {}
 class EncodeCancellationRequestedError extends Error {}
+
+function handBrakeFailureReport(
+  error: unknown,
+): EncodeJobFailureReportInput | null {
+  if (error instanceof HandBrakeCommandError) {
+    return {
+      schemaVersion: 1,
+      reasonCode: "command_failed",
+      phase: "encoding",
+      retryability: "appropriate",
+      diagnostic: error.diagnostic,
+      evidence: error.evidence,
+    };
+  }
+  if (error instanceof HandBrakeTimeoutError) {
+    return {
+      schemaVersion: 1,
+      reasonCode: "command_timeout",
+      phase: "encoding",
+      retryability: "appropriate",
+      diagnostic: error.diagnostic,
+      evidence: {
+        kind: "timeout",
+        timeoutSeconds: error.timeoutSeconds,
+      },
+    };
+  }
+  return null;
+}
 
 export interface AtomicPathExchange {
   exchange(firstPath: string, secondPath: string): void;
@@ -1839,9 +1873,16 @@ export async function executeEncodeClaim(
         : ""
     }`.slice(0, 500);
     try {
-      options.access.encodeJobs.fail(claim, message, {
-        preserveReplacementAuthority,
-      });
+      const report = signal.aborted ? null : handBrakeFailureReport(error);
+      if (report === null) {
+        options.access.encodeJobs.fail(claim, message, {
+          preserveReplacementAuthority,
+        });
+      } else {
+        options.access.encodeJobs.failWithReport(claim, report, {
+          preserveReplacementAuthority,
+        });
+      }
     } catch (failureError) {
       const failureMessage = normalizeErrorMessage(failureError);
       options.log(

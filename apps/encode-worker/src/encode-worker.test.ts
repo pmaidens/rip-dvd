@@ -35,6 +35,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createNodeHandBrakeRunner,
+  HandBrakeCommandError,
+  HandBrakeTimeoutError,
   nodeAtomicPathExchange,
   nodePublicationMutationLock,
   pollEncodeWorker,
@@ -1521,6 +1523,74 @@ describe("encode worker polling", () => {
     ).toEqual([]);
     fixture.access.close();
   });
+
+  it.each([
+    {
+      error: new HandBrakeCommandError(
+        { kind: "exit_status", exitStatus: 23 },
+        "private diagnostic /originals/secret.iso",
+      ),
+      errorMessage: "HandBrake command failed",
+      reasonCode: "command_failed",
+      evidence: { kind: "exit_status", exitStatus: 23 },
+    },
+    {
+      error: new HandBrakeCommandError(
+        { kind: "signal", signal: "SIGKILL" },
+        "signal diagnostic --preset SECRET",
+      ),
+      errorMessage: "HandBrake command failed",
+      reasonCode: "command_failed",
+      evidence: { kind: "signal", signal: "SIGKILL" },
+    },
+    {
+      error: new HandBrakeTimeoutError(
+        86_400_000,
+        "timeout diagnostic CLAIM-TOKEN",
+      ),
+      errorMessage: "HandBrake command timed out",
+      reasonCode: "command_timeout",
+      evidence: { kind: "timeout", timeoutSeconds: 86_400 },
+    },
+  ] as const)(
+    "persists structured HandBrake failure evidence for $reasonCode / $evidence.kind",
+    async ({ error, errorMessage, reasonCode, evidence }) => {
+      const fixture = createQueuedJob();
+
+      await pollEncodeWorker({
+        access: fixture.access,
+        concurrency: 1,
+        log: vi.fn(),
+        mediaLibraryPath: fixture.mediaLibraryPath,
+        originalsLibraryPath: fixture.originalsLibraryPath,
+        runner: {
+          run: vi.fn(async () => {
+            throw error;
+          }),
+        },
+        signal: new AbortController().signal,
+      });
+
+      expect(fixture.access.encodeJobs.list()).toEqual([
+        expect.objectContaining({
+          id: fixture.job.id,
+          errorMessage,
+          status: "failed",
+        }),
+      ]);
+      expect(
+        fixture.access.encodeJobs.listFailureReports([fixture.job.id]),
+      ).toEqual([
+        expect.objectContaining({
+          reasonCode,
+          phase: "encoding",
+          evidence,
+          diagnostic: error.diagnostic,
+        }),
+      ]);
+      fixture.access.close();
+    },
+  );
 
   it("does not run one claimed job in two competing workers", async () => {
     const fixture = createQueuedJob();
@@ -6621,6 +6691,51 @@ describe("node HandBrake runner", () => {
     expect(runner.isActive?.("/partial.mkv")).toBe(false);
   });
 
+  it.each([
+    {
+      code: 12,
+      signal: null,
+      evidence: { kind: "exit_status", exitStatus: 12 },
+    },
+    {
+      code: null,
+      signal: "SIGTERM" as const,
+      evidence: { kind: "signal", signal: "SIGTERM" },
+    },
+  ] as const)(
+    "returns typed command evidence for status/signal termination: $evidence.kind",
+    async ({ code, signal, evidence }) => {
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        kill: vi.fn(() => true),
+        unref: vi.fn(),
+      });
+      const runner = createNodeHandBrakeRunner({
+        spawnProcess: vi.fn(() => child),
+      });
+      const running = runner.run({
+        arguments_: ["-i", "/source.iso", "-o", "/partial.mkv"],
+        onOutput: vi.fn(),
+        outputPath: "/partial.mkv",
+        signal: new AbortController().signal,
+      });
+      child.stderr.emit(
+        "data",
+        Buffer.from("raw diagnostic /private/source.iso --preset SECRET"),
+      );
+
+      child.emit("close", code, signal);
+
+      const failure = await running.catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(HandBrakeCommandError);
+      expect(failure).toMatchObject({
+        evidence,
+        diagnostic: "raw diagnostic /private/source.iso --preset SECRET",
+      });
+    },
+  );
+
   it("retains the child and output ownership after timeout until close", async () => {
     vi.useFakeTimers();
     const child = Object.assign(new EventEmitter(), {
@@ -6639,10 +6754,13 @@ describe("node HandBrake runner", () => {
       outputPath: "/partial.mkv",
       signal: new AbortController().signal,
     });
-    const timedOut = expect(running).rejects.toThrow("HandBrake timed out");
+    const timedOut = running.catch((error: unknown) => error);
 
     await vi.advanceTimersByTimeAsync(10);
-    await timedOut;
+    await expect(timedOut).resolves.toMatchObject({
+      name: "HandBrakeTimeoutError",
+      timeoutSeconds: 1,
+    });
     expect(child.kill).toHaveBeenCalledWith("SIGKILL");
     expect(child.stdout.destroyed).toBe(true);
     expect(child.stderr.destroyed).toBe(true);

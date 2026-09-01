@@ -7,8 +7,10 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 
 import type { DataAccess, MediaItemId } from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
@@ -40,6 +42,8 @@ import {
   dvdRescueWorkspacePaths,
 } from "../../archive-worker/src/dvd-rescue-workspace.js";
 import {
+  createNodeHandBrakeRunner,
+  HandBrakeTimeoutError,
   pollEncodeWorker,
   type HandBrakeRunner,
 } from "../../encode-worker/src/encode-worker.js";
@@ -61,6 +65,7 @@ import type {
   DashboardEncodeJob,
   DashboardSnapshot,
 } from "../lib/dashboard";
+import { investigationReport } from "../lib/investigation";
 import {
   CatalogReviewView,
   type CatalogReviewDto,
@@ -71,6 +76,7 @@ import {
   type FilesystemVerificationInventoryState,
 } from "./filesystem-verification-inventory";
 import { DashboardView } from "./operations-dashboard";
+import { InvestigationPanel } from "./investigation-panel";
 
 const trustedOrigin = "http://localhost:3000";
 const temporaryDirectories: string[] = [];
@@ -261,6 +267,198 @@ function createGate(): {
 }
 
 describe("end-to-end operations dashboard workflow", () => {
+  it("retains path-free Encode command investigations across retry and completion", async () => {
+    const root = mkdtempSync(join(tmpdir(), "rip-dvd-encode-investigation-"));
+    temporaryDirectories.push(root);
+    const originalsLibraryPath = join(root, "originals");
+    const mediaLibraryPath = join(root, "media");
+    mkdirSync(originalsLibraryPath);
+    mkdirSync(mediaLibraryPath);
+    const sourcePath = join(originalsLibraryPath, "Investigation.iso");
+    writeFileSync(sourcePath, "investigation source");
+    const access = createLegacySidecarDataAccess({
+      databasePath: join(root, "rip-dvd.sqlite"),
+      mediaLibraryPath,
+      originalsLibraryPath,
+    });
+    openAccess.push(access);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/encode-investigation",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"9".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 3_600,
+          chapters: 12,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: sourcePath,
+      fingerprint: contentId,
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Encode Investigation",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    access.catalog.completeCatalogReview(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+    );
+    const profile = access.encodingProfiles.create({
+      key: "encode-investigation",
+      displayName: "Encode investigation",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    const job = access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath: join(mediaLibraryPath, "Encode Investigation.mkv"),
+    });
+    const sensitiveDiagnostic =
+      `${sourcePath} --preset SECRET claim-token=<unsafe>`;
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: vi.fn(() => true),
+    });
+    const runner = createNodeHandBrakeRunner({
+      spawnProcess: vi.fn(() => {
+        queueMicrotask(() => {
+          child.stderr.emit("data", Buffer.from(sensitiveDiagnostic));
+          child.emit("close", 17, null);
+        });
+        return child;
+      }),
+    });
+
+    await pollEncodeWorker({
+      access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath,
+      originalsLibraryPath,
+      runner,
+      signal: new AbortController().signal,
+    });
+
+    expect(access.encodeJobs.listFailureReports([job.id])).toEqual([
+      expect.objectContaining({
+        reasonCode: "command_failed",
+        phase: "encoding",
+        diagnostic: sensitiveDiagnostic,
+        evidence: { kind: "exit_status", exitStatus: 17 },
+      }),
+    ]);
+    const failedDashboard = await readDashboard(access);
+    const failedJob = encodeJobById(failedDashboard.snapshot, job.id)!;
+    const firstInvestigation = failedJob.investigations?.[0];
+    expect(firstInvestigation).toMatchObject({
+      reasonCode: "encode.command_failed",
+      failedPhase: "Encoding",
+      retryability: "appropriate",
+      explanation: "HandBrake exited without completing the Encode Job.",
+      technicalEvidence: [{ label: "Exit status", value: "17" }],
+    });
+    expect(failedDashboard.html).toContain("Investigate");
+    expect(JSON.stringify(failedDashboard.snapshot)).not.toContain(
+      sensitiveDiagnostic,
+    );
+    expect(JSON.stringify(failedDashboard.snapshot)).not.toContain(sourcePath);
+    const firstReport = investigationReport(firstInvestigation!);
+    expect(firstReport).toContain("Reason code: encode.command_failed");
+    expect(firstReport).toContain("- Exit status: 17");
+    expect(firstReport).not.toContain(sensitiveDiagnostic);
+
+    access.encodeJobs.requeue(job.id);
+    await pollEncodeWorker({
+      access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath,
+      originalsLibraryPath,
+      runner: {
+        run: vi.fn(async () => {
+          throw new HandBrakeTimeoutError(
+            86_400_000,
+            "timeout /private/second.iso ENV=secret",
+          );
+        }),
+      },
+      signal: new AbortController().signal,
+    });
+
+    const retriedDashboard = await readDashboard(access);
+    const investigations = encodeJobById(
+      retriedDashboard.snapshot,
+      job.id,
+    )!.investigations!;
+    expect(investigations).toHaveLength(2);
+    expect(investigations.map(({ reasonCode }) => reasonCode)).toEqual([
+      "encode.command_timeout",
+      "encode.command_failed",
+    ]);
+    const investigationHtml = renderToStaticMarkup(
+      <InvestigationPanel
+        investigation={investigations[0]!}
+        investigations={investigations}
+        returnFocusTo={null}
+        onClose={() => undefined}
+      />,
+    );
+    expect(investigationHtml).toContain("Failure report");
+    expect(investigationHtml).toContain("Latest");
+    expect(investigationHtml).toContain("Older 1");
+    expect(investigationHtml).toContain("encode.command_timeout");
+    expect(investigationHtml).not.toContain("/private/second.iso");
+
+    access.encodeJobs.requeue(job.id);
+    await pollEncodeWorker({
+      access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath,
+      originalsLibraryPath,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "completed retry", { flag: "wx" });
+        }),
+      },
+      signal: new AbortController().signal,
+    });
+    const completedDashboard = await readDashboard(access);
+    const completedJob = encodeJobById(completedDashboard.snapshot, job.id)!;
+    expect(completedJob.status).toBe("completed");
+    expect(completedJob.investigations).toHaveLength(2);
+    expect(completedDashboard.html).toContain("Investigate prior failures");
+    expect(JSON.stringify(completedDashboard.snapshot)).not.toContain(
+      sensitiveDiagnostic,
+    );
+  });
+
   it("presents bounded watchable-salvage evidence after unused-space validation", async () => {
     const root = mkdtempSync(join(tmpdir(), "rip-dvd-salvage-workflow-"));
     temporaryDirectories.push(root);

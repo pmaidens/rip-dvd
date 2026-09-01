@@ -35,6 +35,14 @@ import {
   RETAINED_ENCODE_OUTPUT_STATES,
   TMDB_MEDIA_TYPES,
 } from "../domain-values.js";
+import {
+  ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
+  ENCODE_JOB_FAILURE_PHASES,
+  ENCODE_JOB_FAILURE_REASON_CODES,
+  ENCODE_JOB_FAILURE_REPORT_SCHEMA_VERSIONS,
+  ENCODE_JOB_FAILURE_RETRYABILITIES,
+  ENCODE_JOB_FAILURE_SIGNALS,
+} from "../encode-job-failure-report.js";
 import type {
   ArchiveRequestId,
   ArchiveJobId,
@@ -49,6 +57,7 @@ import type {
   DvdTitleBadSectorCount,
   EncodeJobCleanupClaimToken,
   EncodeJobId,
+  EncodeJobFailureReportId,
   EncodeJobClaimToken,
   EncodeOutputFilesystemIdentity,
   EncodingProfileId,
@@ -918,6 +927,70 @@ export const encodeJobs = sqliteTable(
     check(
       "encode_jobs_verification_check",
       sql`(${table.verificationStatus} is null) = (${table.verificationMessage} is null) and (${table.verificationStatus} is null) = (${table.verifiedAt} is null) and (${table.verificationStatus} is null or ${table.verificationStatus} in (${sqliteStringLiterals(FILESYSTEM_VERIFICATION_STATUSES)}))`,
+    ),
+  ],
+);
+
+export const encodeJobFailureReports = sqliteTable(
+  "encode_job_failure_reports",
+  {
+    id: text("id").$type<EncodeJobFailureReportId>().notNull().primaryKey(),
+    encodeJobId: text("encode_job_id")
+      .$type<EncodeJobId>()
+      .notNull()
+      .references(() => encodeJobs.id, { onDelete: "restrict" }),
+    schemaVersion: integer("schema_version").notNull(),
+    workerKind: text("worker_kind", { enum: ["encode_worker"] })
+      .notNull()
+      .default("encode_worker"),
+    reasonCode: text("reason_code", {
+      enum: ENCODE_JOB_FAILURE_REASON_CODES,
+    }).notNull(),
+    phase: text("phase", { enum: ENCODE_JOB_FAILURE_PHASES }).notNull(),
+    retryability: text("retryability", {
+      enum: ENCODE_JOB_FAILURE_RETRYABILITIES,
+    }).notNull(),
+    diagnostic: text("diagnostic"),
+    exitStatus: integer("exit_status"),
+    signal: text("signal", { enum: ENCODE_JOB_FAILURE_SIGNALS }),
+    timeoutSeconds: integer("timeout_seconds"),
+    occurredAt: integer("occurred_at", { mode: "timestamp_ms" }).notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check("encode_job_failure_reports_id_not_null", sql`${table.id} is not null`),
+    check(
+      "encode_job_failure_reports_schema_version_check",
+      sql`${table.schemaVersion} in (${sql.raw(ENCODE_JOB_FAILURE_REPORT_SCHEMA_VERSIONS.join(", "))})`,
+    ),
+    check(
+      "encode_job_failure_reports_worker_kind_check",
+      sql`${table.workerKind} = 'encode_worker'`,
+    ),
+    check(
+      "encode_job_failure_reports_reason_code_check",
+      sql`${table.reasonCode} in (${sqliteStringLiterals(ENCODE_JOB_FAILURE_REASON_CODES)})`,
+    ),
+    check(
+      "encode_job_failure_reports_phase_check",
+      sql`${table.phase} in (${sqliteStringLiterals(ENCODE_JOB_FAILURE_PHASES)})`,
+    ),
+    check(
+      "encode_job_failure_reports_retryability_check",
+      sql`${table.retryability} in (${sqliteStringLiterals(ENCODE_JOB_FAILURE_RETRYABILITIES)})`,
+    ),
+    check(
+      "encode_job_failure_reports_diagnostic_check",
+      sql`${table.diagnostic} is null or (typeof(${table.diagnostic}) = 'text' and length(${table.diagnostic}) between 1 and ${sql.raw(String(ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH))})`,
+    ),
+    check(
+      "encode_job_failure_reports_evidence_check",
+      sql`(${table.reasonCode} = 'command_failed' and ${table.timeoutSeconds} is null and ((typeof(${table.exitStatus}) = 'integer' and ${table.exitStatus} between 1 and 255 and ${table.signal} is null) or (${table.exitStatus} is null and ${table.signal} in (${sqliteStringLiterals(ENCODE_JOB_FAILURE_SIGNALS)})))) or (${table.reasonCode} = 'command_timeout' and ${table.exitStatus} is null and ${table.signal} is null and typeof(${table.timeoutSeconds}) = 'integer' and ${table.timeoutSeconds} between 1 and 604800)`,
+    ),
+    index("encode_job_failure_reports_job_occurred_idx").on(
+      table.encodeJobId,
+      table.occurredAt,
+      table.id,
     ),
   ],
 );

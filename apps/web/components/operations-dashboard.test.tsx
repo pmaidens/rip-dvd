@@ -108,6 +108,28 @@ function discInspectionInvestigation(
   };
 }
 
+function encodeInvestigation(
+  overrides: Partial<DashboardInvestigation> = {},
+): DashboardInvestigation {
+  return {
+    incidentId: "encode-report-latest",
+    worker: "Encode Worker",
+    subjectType: "Encode Job",
+    subjectId: "failed-encode",
+    attempt: null,
+    reasonCode: "encode.command_timeout",
+    failedPhase: "Encoding",
+    occurredAt: "2026-09-01T13:00:00.000Z",
+    retryability: "appropriate",
+    retryabilityDetail:
+      "Retrying starts another attempt for this logical Encode Job and keeps this report.",
+    explanation: "HandBrake did not finish within the command time limit.",
+    suggestedAction: "Retry the Encode Job.",
+    technicalEvidence: [{ label: "Timeout limit", value: "86400 seconds" }],
+    ...overrides,
+  };
+}
+
 function failedDiscInspection(
   id = "failed-inspection",
   overrides: Partial<
@@ -1248,6 +1270,83 @@ describe("DashboardView", () => {
     });
     expect(container.querySelector('[role="dialog"]')).toBeNull();
     expect(document.activeElement).toBe(terminalTrigger);
+    await act(async () => root.unmount());
+  });
+
+  it("opens the latest Encode Job report and lets the operator select and copy an older report", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const latest = encodeInvestigation();
+    const older = encodeInvestigation({
+      incidentId: "encode-report-older",
+      reasonCode: "encode.command_failed",
+      occurredAt: "2026-09-01T12:00:00.000Z",
+      explanation: "HandBrake exited without completing the Encode Job.",
+      technicalEvidence: [{ label: "Exit status", value: "23" }],
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <DashboardView
+          section="encoding"
+          state={{
+            opticalDrives: { status: "loaded", items: [] },
+            detectedDiscs: { status: "loaded", items: [] },
+            archiveJobs: { status: "loaded", items: [] },
+            encodeJobs: {
+              status: "loaded",
+              items: [{
+                id: "failed-encode" as EncodeJobId,
+                mediaTitle: "Failed encode",
+                mediaYear: null,
+                encodingProfileName: "DVD · Version 1",
+                status: "failed",
+                progressPhase: "encoding",
+                progressPercent: 45,
+                progressEtaSeconds: null,
+                investigations: [latest, older],
+              }],
+            },
+            catalogReview: { status: "loaded", items: [] },
+          }}
+        />,
+      );
+    });
+
+    const trigger = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Investigate",
+    )!;
+    await act(async () => trigger.click());
+    const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!;
+    const selector = dialog.querySelector<HTMLSelectElement>("select")!;
+    expect(selector.value).toBe(latest.incidentId);
+    expect(dialog.textContent).toContain("encode.command_timeout");
+    expect(dialog.textContent).toContain("Timeout limit86400 seconds");
+
+    await act(async () => {
+      selector.value = older.incidentId;
+      selector.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(dialog.textContent).toContain("encode.command_failed");
+    expect(dialog.textContent).toContain("Exit status23");
+    expect(dialog.textContent).not.toContain("Timeout limit86400 seconds");
+
+    const copy = [...dialog.querySelectorAll("button")].find(
+      (button) => button.textContent === "Copy report",
+    )!;
+    await act(async () => copy.click());
+    expect(writeText).toHaveBeenCalledWith(
+      expect.stringContaining("Incident identifier: encode-report-older"),
+    );
+    expect(writeText).toHaveBeenCalledWith(
+      expect.stringContaining("- Exit status: 23"),
+    );
     await act(async () => root.unmount());
   });
 

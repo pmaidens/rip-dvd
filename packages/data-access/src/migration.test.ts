@@ -12,6 +12,8 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it } from "vitest";
 
 import { createDataAccess } from "./index.js";
+import { completeCatalogReview } from "./catalog.test-support.js";
+import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 import {
   boundedSettlingMigration,
   createPreBoundedDiscSettlingProductionFixture,
@@ -317,4 +319,81 @@ it("migrates historical Original Disc Archives with null boundary evidence", () 
     quick_check: "ok",
   });
   migratedSqlite.close();
+});
+
+it("preserves historical Encode Jobs without inventing Failure Reports", () => {
+  const databasePath = createDatabasePath("rip-dvd-encode-report-migration-");
+  const previousMigrations = createMigrationsThrough(
+    "20260828164042_married_lady_ursula",
+  );
+  const previousAccess = createLegacySidecarDataAccess({
+    databasePath,
+    migrationsFolder: previousMigrations,
+  });
+  const drive = previousAccess.catalog.upsertOpticalDrive({
+    devicePath: "/dev/historical-encode",
+    isPresent: true,
+  });
+  const disc = previousAccess.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint: "historical-encode-disc",
+  });
+  previousAccess.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  previousAccess.catalog.updateDetectedDiscStatus(disc.id, "approved");
+  const archive = previousAccess.catalog.createOriginalDiscArchive({
+    detectedDiscId: disc.id,
+    discKind: "dvd",
+    archiveFormat: "iso",
+    archivePath: "/originals/historical-encode.iso",
+    fingerprint: disc.fingerprint,
+  });
+  const item = previousAccess.catalog.createMediaItem({
+    kind: "movie",
+    title: "Historical Encode",
+  });
+  const selection = previousAccess.catalog.createDiscSelection({
+    originalDiscArchiveId: archive.id,
+    mediaItemId: item.id,
+    sourceIdentity: { kind: "main_feature" },
+  });
+  completeCatalogReview(previousAccess, archive.id);
+  const profile = previousAccess.encodingProfiles.create({
+    key: "historical-encode",
+    displayName: "Historical encode",
+    mediaDomain: "dvd_video",
+    settings: { preset: "Fast 480p30" },
+  });
+  const job = previousAccess.encodeJobs.enqueue({
+    discSelectionId: selection.id,
+    encodingProfileId: profile.id,
+    outputPath: "/media/historical-encode.mkv",
+  });
+  const claim = previousAccess.encodeJobs.claimNext("historical-worker");
+  if (claim === null) {
+    throw new Error("Expected historical Encode Job claim");
+  }
+  previousAccess.encodeJobs.fail(
+    claim,
+    "HandBrake failed with status 9 and /private/legacy-path",
+  );
+  previousAccess.close();
+
+  const migratedAccess = createDataAccess({ databasePath });
+  expect(migratedAccess.encodeJobs.list()).toEqual([
+    expect.objectContaining({
+      id: job.id,
+      status: "failed",
+      errorMessage: "HandBrake failed with status 9 and /private/legacy-path",
+    }),
+  ]);
+  expect(migratedAccess.encodeJobs.listFailureReports([job.id])).toEqual([]);
+  migratedAccess.close();
+
+  const sqlite = new DatabaseSync(databasePath);
+  expect(sqlite.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  expect(sqlite.prepare("PRAGMA quick_check").get()).toEqual({
+    quick_check: "ok",
+  });
+  sqlite.close();
 });

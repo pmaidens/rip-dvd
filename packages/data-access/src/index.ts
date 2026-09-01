@@ -38,6 +38,15 @@ export {
   ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH,
   validateEncodeQueueSearchQuery,
 } from "./encode-queue-search.js";
+export {
+  ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
+  ENCODE_JOB_FAILURE_PHASES,
+  ENCODE_JOB_FAILURE_REASON_CODES,
+  ENCODE_JOB_FAILURE_REPORT_HISTORY_LIMIT,
+  ENCODE_JOB_FAILURE_REPORT_SCHEMA_VERSIONS,
+  ENCODE_JOB_FAILURE_RETRYABILITIES,
+  ENCODE_JOB_FAILURE_SIGNALS,
+} from "./encode-job-failure-report.js";
 export type { EncodeQueueSearchQueryValidation } from "./encode-queue-search.js";
 export {
   isCorrectedEncodePredecessorReady,
