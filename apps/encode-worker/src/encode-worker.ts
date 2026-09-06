@@ -3,6 +3,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { DataAccess } from "@rip-dvd/data-access";
 
 import {
+  nodeDvdSubtitleScanner,
+  type DvdSubtitleScanner,
+} from "./dvd-subtitle-scanner.js";
+
+import {
   nodeHandBrakeRunner,
   type HandBrakeRunner,
 } from "./handbrake-runner.js";
@@ -63,6 +68,7 @@ export interface PollEncodeWorkerOptions {
   originalsLibraryPath: string;
   outputValidator?: EncodeOutputValidator;
   runner?: HandBrakeRunner;
+  subtitleScanner?: DvdSubtitleScanner;
   signal: AbortSignal;
   workerId?: string;
 }
@@ -89,6 +95,7 @@ export async function pollEncodeWorker(
     mutationLock: options.mutationLock ?? nodePublicationMutationLock,
     outputValidator: options.outputValidator ?? nodeEncodeOutputValidator,
     runner: options.runner ?? nodeHandBrakeRunner,
+    subtitleScanner: options.subtitleScanner ?? nodeDvdSubtitleScanner,
   };
   await reconcileEncodePublications(publicationOptions);
   const runSlot = async () => {

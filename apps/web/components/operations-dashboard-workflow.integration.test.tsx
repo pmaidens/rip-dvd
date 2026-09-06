@@ -34,6 +34,11 @@ vi.mock(
   },
 );
 
+vi.mock("../../encode-worker/src/dvd-subtitle-scanner.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../encode-worker/src/dvd-subtitle-scanner.js")>(),
+  nodeDvdSubtitleScanner: { scan: vi.fn(async () => []) },
+}));
+
 import type { OpticalDriveHardware } from "../../archive-worker/src/archive-worker.js";
 import type { DvdCopyRunner } from "../../archive-worker/src/dvd-archiver.js";
 import {
