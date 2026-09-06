@@ -100,6 +100,37 @@ function createMediaToolRunner({
 }
 
 describe("encode output validation", () => {
+  it.each([
+    { title: null, actualTitle: undefined, valid: true },
+    { title: "Commentary", actualTitle: "Commentary", valid: true },
+    { title: null, actualTitle: "Commentary", valid: false },
+    { title: "Commentary", actualTitle: undefined, valid: false },
+    { title: "Closed Caption", actualTitle: "Commentary", valid: false },
+  ])("validates HandBrake track name $title against $actualTitle", async ({
+    title, actualTitle, valid,
+  }) => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [{
+          codec_name: "dvd_subtitle",
+          disposition: { default: 0, forced: 0 },
+          index: 2,
+          tags: { language: "eng", title: actualTitle },
+        }],
+      }),
+    });
+    const validation = validator.prepareAndValidate(
+      "/media/subtitled.mkv",
+      new AbortController().signal,
+      { expectedVobSubStreams: [{ languageCode: "eng", title }] },
+    );
+    if (valid) {
+      await expect(validation).resolves.toBeUndefined();
+    } else {
+      await expect(validation).rejects.toThrow("source VobSub stream 1 has title");
+    }
+  });
+
   it("rejects a materially truncated full-title output", async () => {
     const validator = createNodeEncodeOutputValidator({
       runMediaTool: createMediaToolRunner({ outputDurationSeconds: 97.205 }),
@@ -278,9 +309,9 @@ describe("encode output validation", () => {
         new AbortController().signal,
         {
           expectedVobSubStreams: [
-            { contentLabel: "Normal", languageCode: "en" },
-            { contentLabel: "Director", languageCode: "en" },
-            { contentLabel: "Normal_CC", languageCode: "en" },
+            { languageCode: "en", title: null },
+            { languageCode: "en", title: "Commentary" },
+            { languageCode: "en", title: "Closed Caption" },
           ],
         },
       ),
@@ -310,12 +341,12 @@ describe("encode output validation", () => {
     await expect(
       validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal, {
         expectedVobSubStreams: [
-          { contentLabel: "Normal", languageCode: "en" },
-          { contentLabel: "Director", languageCode: "en" },
+          { languageCode: "en", title: null },
+          { languageCode: "en", title: "Commentary" },
         ],
       }),
     ).rejects.toThrow(
-      "Encode output validation failed: source VobSub stream 2 has title undefined, expected content Director",
+      "Encode output validation failed: source VobSub stream 2 has title undefined, expected title Commentary",
     );
   });
 
@@ -342,12 +373,12 @@ describe("encode output validation", () => {
     await expect(
       validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal, {
         expectedVobSubStreams: [
-          { contentLabel: "Director", languageCode: "en" },
-          { contentLabel: "Normal_CC", languageCode: "en" },
+          { languageCode: "en", title: "Commentary" },
+          { languageCode: "en", title: "Closed Caption" },
         ],
       }),
     ).rejects.toThrow(
-      "Encode output validation failed: source VobSub stream 1 has title Closed Caption, expected content Director",
+      "Encode output validation failed: source VobSub stream 1 has title Closed Caption, expected title Commentary",
     );
   });
 

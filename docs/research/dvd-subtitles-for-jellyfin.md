@@ -120,7 +120,27 @@ ffprobe -v error \
 
 `ffprobe` supports stream selection, restricted entry output, and JSON output as documented in the [official ffprobe manual](https://ffmpeg.org/ffprobe.html). If metadata must be corrected after HandBrake, use a stream-copy remux and set every subtitle disposition explicitly. FFmpeg copies dispositions by default and can also manufacture a default stream when none exists, so a partial metadata edit is risky ([FFmpeg disposition rules](https://www.ffmpeg.org/ffmpeg.html#Main-options)). Prefer making HandBrake produce the right metadata and proving it with the probe.
 
-The current archive scan already persists subtitle source ID, language code, language label, and content label per DVD title. That is enough evidence for title-specific expectations in explicit title and chapter-range jobs. A `main_feature` job also needs the title number HandBrake actually chose recorded or parsed before a strict source-to-output comparison can be made.
+The stored Disc Inspection persists subtitle declaration IDs, language codes,
+language labels, and content labels per DVD title. A declaration can refer to
+several physical display variants, so its count is insufficient for output
+validation. Explicit title and chapter-range jobs now obtain expectations
+from a bounded HandBrake JSON scan of that title in the Original Disc Archive.
+Each VobSub entry contributes one expected stream, including its language and
+optional name. The scan uses the same packaged binary and `--no-dvdnav` reader
+as encoding. See [the variant repair plan](../plans/dvd-subtitle-variants.md)
+for compatibility and retry instructions.
+
+HandBrake 1.9.2 expands and deduplicates display variants in its
+[DVD reader](https://github.com/HandBrake/HandBrake/blob/1.9.2/libhb/dvd.c#L586-L651),
+and exposes the resulting ordered subtitle list through its
+[JSON serializer](https://github.com/HandBrake/HandBrake/blob/1.9.2/libhb/hb_json.c#L463-L495).
+The CLI emits the JSON title set in scan-only mode; a normal encode prints a
+text title summary even with `--json`, as shown in its
+[scan completion handler](https://github.com/HandBrake/HandBrake/blob/1.9.2/test/test.c#L967-L984).
+The separate scan supplies subtitle expectations without changing encode
+progress parsing. A `main_feature` job still needs the title number HandBrake
+actually chose recorded before a strict source-to-output comparison can be
+made.
 
 ## Backfilling existing outputs
 
