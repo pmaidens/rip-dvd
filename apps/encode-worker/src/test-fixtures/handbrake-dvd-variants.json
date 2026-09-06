@@ -1,0 +1,28 @@
+{
+  "MainFeature": 4,
+  "TitleList": [
+    {
+      "Index": 4,
+      "SubtitleList": [
+        {
+          "TrackNumber": 1,
+          "Format": "bitmap",
+          "Source": 0,
+          "SourceName": "VOBSUB",
+          "Attributes": { "Wide": true, "Letterbox": false },
+          "Language": "English (Wide Screen) [VOBSUB]",
+          "LanguageCode": "eng"
+        },
+        {
+          "TrackNumber": 2,
+          "Format": "bitmap",
+          "Source": 0,
+          "SourceName": "VOBSUB",
+          "Attributes": { "Wide": false, "Letterbox": true },
+          "Language": "English (Letterbox) [VOBSUB]",
+          "LanguageCode": "eng"
+        }
+      ]
+    }
+  ]
+}
