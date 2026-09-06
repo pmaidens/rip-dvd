@@ -8,6 +8,8 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+OLD_COMMIT = "1" * 40
+TARGET_COMMIT = "2" * 40
 
 
 def compose_config(
@@ -64,6 +66,14 @@ def write_fake_docker(directory: pathlib.Path) -> None:
         "  esac\n"
         "fi\n"
         "case \"$*\" in\n"
+        "  'compose --profile maintenance run --rm --no-deps backup')\n"
+        "    if [ -z \"${DOCKER_SKIP_BACKUP_FILE:-}\" ]; then\n"
+        "      mkdir -p \"${RIP_DVD_BACKUP_HOST_PATH}\"\n"
+        "      printf 'backup fixture\\n' > "
+        "\"${RIP_DVD_BACKUP_HOST_PATH}/rip-dvd-test.sqlite\"\n"
+        "    fi\n"
+        "    printf 'SQLite backup written to /backups/rip-dvd-test.sqlite\\n'\n"
+        "    ;;\n"
         "  'compose ps --quiet web') printf 'web-container\\n' ;;\n"
         "  'inspect --format {{if .State.Health}}{{.State.Health.Status}}"
         "{{else}}{{.State.Status}}{{end}} web-container') "
@@ -108,6 +118,9 @@ def run_update_script(
         temporary = pathlib.Path(directory)
         calls = temporary / "calls"
         pull_marker = temporary / "pulled"
+        update_state = temporary / "state"
+        if (environment or {}).get("CREATE_CONTROLLER_LOCK") == "1":
+            (update_state / "run.lock").mkdir(parents=True)
 
         git = temporary / "git"
         git.write_text(
@@ -117,6 +130,8 @@ def run_update_script(
             "  'rev-parse --show-toplevel') printf '%s\\n' \"$UPDATE_ROOT\" ;;\n"
             "  'rev-parse --git-path rip-dvd-update.lock') "
             "printf '%s\\n' \"$UPDATE_LOCK_FILE\" ;;\n"
+            "  'rev-parse --git-path rip-dvd-deployment') "
+            "printf '%s\\n' \"$UPDATE_STATE_DIR\" ;;\n"
             "  'status --porcelain --untracked-files=normal') "
             "printf '%s' \"${GIT_STATUS_OUTPUT:-}\" ;;\n"
             "  'symbolic-ref --quiet --short HEAD') printf 'main\\n' ;;\n"
@@ -124,14 +139,16 @@ def run_update_script(
             "printf 'origin/main\\n' ;;\n"
             "  'rev-parse HEAD')\n"
             "    if [ -f \"$UPDATE_PULL_MARKER\" ]; then\n"
-            "      printf 'new-commit\\n'\n"
+            f"      printf '{TARGET_COMMIT}\\n'\n"
             "    else\n"
-            "      printf 'old-commit\\n'\n"
+            f"      printf '{OLD_COMMIT}\\n'\n"
             "    fi\n"
             "    ;;\n"
-            "  'pull --ff-only')\n"
-            "    [ -z \"${GIT_PULL_FAIL_STATUS:-}\" ] || "
-            "exit \"$GIT_PULL_FAIL_STATUS\"\n"
+            f"  'cat-file -e {TARGET_COMMIT}^{{commit}}') exit 0 ;;\n"
+            f"  'merge-base --is-ancestor {OLD_COMMIT} {TARGET_COMMIT}') exit 0 ;;\n"
+            f"  'merge --ff-only {TARGET_COMMIT}')\n"
+            "    [ -z \"${GIT_MERGE_FAIL_STATUS:-}\" ] || "
+            "exit \"$GIT_MERGE_FAIL_STATUS\"\n"
             "    : > \"$UPDATE_PULL_MARKER\"\n"
             "    ;;\n"
             "  *) exit 64 ;;\n"
@@ -145,8 +162,17 @@ def run_update_script(
         flock.write_text("#!/bin/sh\nexit \"${FLOCK_STATUS:-0}\"\n")
         flock.chmod(0o755)
 
+        stat = temporary / "stat"
+        stat.write_text("#!/bin/sh\nprintf '15\\n'\n")
+        stat.chmod(0o755)
+
         result = subprocess.run(
-            ["sh", str(ROOT / "scripts" / "update.sh")],
+            [
+                "sh",
+                str(ROOT / "scripts" / "update.sh"),
+                "--target",
+                TARGET_COMMIT,
+            ],
             capture_output=True,
             check=False,
             cwd=temporary,
@@ -159,6 +185,7 @@ def run_update_script(
                 "UPDATE_LOCK_FILE": str(temporary / "update.lock"),
                 "UPDATE_PULL_MARKER": str(pull_marker),
                 "UPDATE_ROOT": str(ROOT),
+                "UPDATE_STATE_DIR": str(update_state),
                 **(environment or {}),
             },
             text=True,
@@ -203,6 +230,524 @@ def run_worker_entrypoint(
             text=True,
         )
         return result, calls.read_text().splitlines() if calls.exists() else []
+
+
+def write_executable(path: pathlib.Path, body: str) -> None:
+    path.write_text(body)
+    path.chmod(0o755)
+
+
+class DeploymentControllerHarness:
+    def __init__(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temporary_directory.name)
+        self.commands = self.root / "commands"
+        self.commands.mkdir()
+        self.calls = self.root / "calls"
+        self.head = self.root / "head"
+        self.fetch_count = self.root / "fetch-count"
+        self.state = self.root / "state"
+        self.backups = self.root / "backups"
+        self.backups.mkdir()
+        self.config = self.root / "deployment.json"
+        self.dashboard = {
+            "opticalDrives": {
+                "items": [
+                    {"id": "drive-a", "displayName": "Drive A", "state": "ready"},
+                    {"id": "drive-b", "displayName": "Drive B", "state": "empty"},
+                ]
+            },
+            "detectedDiscs": {"items": []},
+            "archiveJobs": {"items": []},
+            "encodeJobs": {"items": []},
+        }
+        self.config.write_text(
+            json.dumps(
+                {
+                    "expectedHostname": "test-host",
+                    "expectedRepositoryRoot": str(ROOT),
+                    "expectedRemoteUrl": "https://github.com/pmaidens/rip-dvd.git",
+                    "branch": "main",
+                    "upstream": "origin/main",
+                    "remote": "origin",
+                    "targetRef": "origin/main",
+                    "healthUrl": "http://127.0.0.1:3000/api/health",
+                    "dashboardUrl": "http://127.0.0.1:3000/api/dashboard",
+                    "storagePaths": ["/", "/mnt/sandisk"],
+                    "expectedDrives": [
+                        {
+                            "serialNumber": "SERIAL-A",
+                            "applicationId": "drive-a",
+                        },
+                        {
+                            "serialNumber": "SERIAL-B",
+                            "applicationId": "drive-b",
+                        },
+                    ],
+                }
+            )
+        )
+        self.environment = {
+            "COMMAND_CALL_LOG": str(self.calls),
+            "DEPLOY_ROOT": str(ROOT),
+            "GIT_FETCH_COUNT": str(self.fetch_count),
+            "GIT_HEAD_FILE": str(self.head),
+            "RIP_DVD_BACKUP_HOST_PATH": str(self.backups),
+            "RIP_DVD_DEPLOY_HOSTNAME_OVERRIDE": "test-host",
+            "RIP_DVD_DEPLOY_STATE_DIR": str(self.state),
+            "DASHBOARD_JSON": json.dumps(self.dashboard),
+            "LSBLK_JSON": json.dumps(
+                {
+                    "blockdevices": [
+                        {
+                            "path": "/dev/sr1",
+                            "type": "rom",
+                            "model": "Drive A",
+                            "serial": "SERIAL-A",
+                        },
+                        {
+                            "path": "/dev/sr2",
+                            "type": "rom",
+                            "model": "Drive B",
+                            "serial": "SERIAL-B",
+                        },
+                    ]
+                }
+            ),
+            "GIT_CHANGE_KIND": "source",
+        }
+        self._write_commands()
+
+    def cleanup(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def _write_commands(self) -> None:
+        git = r"""#!/bin/sh
+printf 'git|%s\n' "$*" >> "$COMMAND_CALL_LOG"
+case "$*" in
+  'rev-parse --show-toplevel') printf '%s\n' "${GIT_REPOSITORY_ROOT:-$DEPLOY_ROOT}" ;;
+  'remote get-url origin') printf '%s\n' "${GIT_REMOTE_URL:-https://github.com/pmaidens/rip-dvd.git}" ;;
+  'branch --show-current') printf '%s\n' "${GIT_BRANCH:-main}" ;;
+  'rev-parse --abbrev-ref --symbolic-full-name @{upstream}') printf '%s\n' "${GIT_UPSTREAM:-origin/main}" ;;
+  'status --porcelain --untracked-files=normal') printf '%s' "${GIT_STATUS_OUTPUT:-}" ;;
+  'rev-parse HEAD')
+    if [ -f "$GIT_HEAD_FILE" ]; then
+      printf '%s\n' "${GIT_DEPLOYED_COMMIT:-__TARGET__}"
+    else
+      printf '%s\n' "__OLD__"
+    fi
+    ;;
+  'fetch --prune origin')
+    count=0
+    if [ -f "$GIT_FETCH_COUNT" ]; then count="$(sed -n '1p' "$GIT_FETCH_COUNT")"; fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$GIT_FETCH_COUNT"
+    ;;
+  'rev-parse --verify origin/main^{commit}')
+    count=0
+    if [ -f "$GIT_FETCH_COUNT" ]; then count="$(sed -n '1p' "$GIT_FETCH_COUNT")"; fi
+    if [ "${GIT_MOVE_TARGET:-0}" = 1 ] && [ "$count" -ge 2 ]; then
+      printf '%s\n' "__MOVED__"
+    else
+      printf '%s\n' "__TARGET__"
+    fi
+    ;;
+  'merge-base --is-ancestor __OLD__ __TARGET__')
+    [ "${GIT_ANCESTRY_FAIL:-0}" != 1 ]
+    ;;
+  'log --format=%H%x09%s --no-merges __OLD__..__TARGET__')
+    printf '__TARGET__\tFixture deployment commit\n'
+    ;;
+  'diff --name-status -z __OLD__..__TARGET__')
+    case "${GIT_CHANGE_KIND:-source}" in
+      source) printf 'M\000apps/web/app/page.tsx\000' ;;
+      risky) printf 'M\000scripts/update.sh\000' ;;
+      schema) printf 'M\000packages/data-access/src/schema.ts\000' ;;
+      compose) printf 'M\000compose.yaml\000' ;;
+    esac
+    ;;
+  diff\ --no-ext-diff*) printf '%s' "${GIT_REVIEW_DIFF:-}" ;;
+  'rev-parse --git-path rip-dvd-update.lock') printf '%s\n' "$RIP_DVD_DEPLOY_STATE_DIR/update.lock" ;;
+  'symbolic-ref --quiet --short HEAD') printf 'main\n' ;;
+  'cat-file -e __TARGET__^{commit}') exit 0 ;;
+  'merge --ff-only __TARGET__')
+    [ -z "${GIT_MERGE_FAIL_STATUS:-}" ] || exit "$GIT_MERGE_FAIL_STATUS"
+    : > "$GIT_HEAD_FILE"
+    ;;
+  *) printf 'unexpected fake git command: %s\n' "$*" >&2; exit 64 ;;
+esac
+"""
+        git = (
+            git.replace("__OLD__", OLD_COMMIT)
+            .replace("__TARGET__", TARGET_COMMIT)
+            .replace("__MOVED__", "3" * 40)
+        )
+        write_executable(self.commands / "git", git)
+
+        docker = """#!/bin/sh
+printf 'docker|%s\n' "$*" >> "$COMMAND_CALL_LOG"
+if [ -n "${DOCKER_FAIL_MATCH:-}" ]; then
+  case "$*" in
+    *"$DOCKER_FAIL_MATCH"*) exit "${DOCKER_FAIL_STATUS:-1}" ;;
+  esac
+fi
+case "$*" in
+  'compose config --quiet') exit 0 ;;
+  'compose config --environment')
+    printf 'RIP_DVD_BACKUP_HOST_PATH=%s\n' "$RIP_DVD_BACKUP_HOST_PATH"
+    ;;
+  'compose ps') printf 'web healthy\narchive-worker running\nencode-worker running\n' ;;
+  'system df') printf 'TYPE TOTAL ACTIVE SIZE RECLAIMABLE\nImages 5 5 1GB 0B\n' ;;
+  'compose --profile maintenance run --rm --no-deps backup')
+    if [ "${DOCKER_SKIP_BACKUP_FILE:-0}" != 1 ]; then
+      printf 'fixture\n' > "$RIP_DVD_BACKUP_HOST_PATH/rip-dvd-test.sqlite"
+    fi
+    printf 'SQLite backup written to /backups/rip-dvd-test.sqlite\n'
+    ;;
+  'compose --profile maintenance run --rm --no-deps migrate')
+    printf 'SQLite migrations are current\n'
+    ;;
+  'compose ps --quiet web') printf 'web-container\n' ;;
+  'inspect --format {{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}} web-container')
+    printf '%s\n' "${WEB_HEALTH_STATUS:-healthy}"
+    ;;
+  'compose ps --status running --services')
+    printf '%s\n' "${RUNNING_SERVICES:-web archive-worker encode-worker}" | tr ' ' '\n'
+    ;;
+  'compose exec -T archive-worker lsblk --json --output PATH,TYPE,MODEL,SERIAL')
+    printf '%s\n' "$LSBLK_JSON"
+    ;;
+  'compose logs --since 10m --no-color web archive-worker encode-worker'|'compose logs --tail 200 --timestamps web archive-worker encode-worker')
+    printf '%s\n' "${LOG_OUTPUT:-}"
+    ;;
+  'compose stop --timeout 30 archive-worker encode-worker web') exit 0 ;;
+  'compose up --detach --no-build web archive-worker encode-worker') exit 0 ;;
+  'compose --progress plain --profile maintenance build migrate'|'compose --progress plain --profile maintenance build backup'|'compose --progress plain --profile maintenance build web'|'compose --progress plain --profile maintenance build archive-worker'|'compose --progress plain --profile maintenance build encode-worker')
+    exit 0
+    ;;
+  *) printf 'unexpected fake docker command: %s\n' "$*" >&2; exit 64 ;;
+esac
+"""
+        write_executable(self.commands / "docker", docker)
+
+        write_executable(
+            self.commands / "curl",
+            """#!/bin/sh
+case "$*" in
+  *'/api/dashboard') printf '%s\n' "$DASHBOARD_JSON" ;;
+  *'/api/health') printf '{"status":"ok"}\n' ;;
+  *) exit 64 ;;
+esac
+""",
+        )
+        write_executable(
+            self.commands / "free",
+            """#!/bin/sh
+printf '              total used free shared buff/cache available\n'
+printf 'Mem: 4294967296 1 1 1 1 %s\n' "${MEMORY_AVAILABLE_BYTES:-2147483648}"
+""",
+        )
+        write_executable(
+            self.commands / "df",
+            """#!/bin/sh
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf '/dev/root 10000000 1 %s 1%% /\n' "${ROOT_AVAILABLE_KIB:-8000000}"
+printf '/dev/data 10000000 1 8000000 1%% /mnt/sandisk\n'
+""",
+        )
+        write_executable(
+            self.commands / "systemctl",
+            "#!/bin/sh\nprintf '%s' \"${SYSTEMD_FAILED:-}\"\n",
+        )
+        write_executable(self.commands / "flock", "#!/bin/sh\nexit 0\n")
+        write_executable(self.commands / "stat", "#!/bin/sh\nprintf '8\n'\n")
+        write_executable(
+            self.commands / "screen",
+            """#!/bin/sh
+printf 'screen|%s\n' "$*" >> "$COMMAND_CALL_LOG"
+case "$1" in
+  -ls) exit 1 ;;
+  -DmS) exit 0 ;;
+esac
+""",
+        )
+
+    def run(
+        self,
+        *arguments: str,
+        environment: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        node = shutil.which("node")
+        if node is None:
+            raise unittest.SkipTest("Node.js is unavailable")
+        return subprocess.run(
+            [node, str(ROOT / "scripts" / "deploy.mjs"), *arguments],
+            capture_output=True,
+            check=False,
+            cwd=ROOT,
+            env={
+                **self.environment,
+                "PATH": f"{self.commands}:/usr/bin:/bin",
+                **(environment or {}),
+            },
+            text=True,
+        )
+
+    @staticmethod
+    def result(completed: subprocess.CompletedProcess[str]) -> dict[str, object]:
+        line = next(
+            line
+            for line in reversed(completed.stdout.splitlines())
+            if line.startswith("RIP_DVD_RESULT_JSON=")
+        )
+        return json.loads(line.removeprefix("RIP_DVD_RESULT_JSON="))
+
+
+class DeploymentControllerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.harness = DeploymentControllerHarness()
+
+    def tearDown(self) -> None:
+        self.harness.cleanup()
+
+    def plan(self, environment: dict[str, str] | None = None):
+        return self.harness.run(
+            "plan",
+            "--config",
+            str(self.harness.config),
+            environment=environment,
+        )
+
+    def test_plan_refuses_dirty_host_and_repository_mismatches(self) -> None:
+        dirty = self.plan({"GIT_STATUS_OUTPUT": " M compose.yaml\n"})
+        self.assertEqual(
+            self.harness.result(dirty)["state"], "validation_failure"
+        )
+        self.assertIn("local changes", dirty.stdout)
+
+        mismatch = self.plan({"GIT_REMOTE_URL": "https://example.test/wrong.git"})
+        self.assertEqual(
+            self.harness.result(mismatch)["state"], "validation_failure"
+        )
+        self.assertIn("remote identity", mismatch.stdout)
+
+    def test_plan_blocks_active_disc_work_before_checkout_changes(self) -> None:
+        dashboard = {
+            **self.harness.dashboard,
+            "encodeJobs": {
+                "items": [{"id": "encode-7", "status": "running"}]
+            },
+        }
+        result = self.plan({"DASHBOARD_JSON": json.dumps(dashboard)})
+
+        self.assertEqual(result.returncode, 20)
+        payload = self.harness.result(result)
+        self.assertEqual(payload["state"], "active_work")
+        self.assertFalse(self.harness.head.exists())
+
+    def test_apply_requires_explicit_active_work_authorization(self) -> None:
+        dashboard = {
+            **self.harness.dashboard,
+            "archiveJobs": {
+                "items": [{"id": "archive-9", "status": "running"}]
+            },
+        }
+        active_environment = {"DASHBOARD_JSON": json.dumps(dashboard)}
+        self.plan(active_environment)
+
+        blocked = self.harness.run(
+            "apply",
+            "--target",
+            TARGET_COMMIT,
+            environment=active_environment,
+        )
+        self.assertEqual(self.harness.result(blocked)["state"], "active_work")
+        self.assertFalse(self.harness.head.exists())
+
+        authorized = self.harness.run(
+            "apply",
+            "--target",
+            TARGET_COMMIT,
+            "--allow-active-work",
+            environment=active_environment,
+        )
+        self.assertEqual(self.harness.result(authorized)["state"], "success")
+
+    def test_plan_rejects_ancestry_and_resource_failures(self) -> None:
+        ancestry = self.plan({"GIT_ANCESTRY_FAIL": "1"})
+        self.assertEqual(
+            self.harness.result(ancestry)["state"], "validation_failure"
+        )
+        shortage = self.plan({"ROOT_AVAILABLE_KIB": "100"})
+        self.assertEqual(
+            self.harness.result(shortage)["state"], "validation_failure"
+        )
+        self.assertIn("build space", shortage.stdout)
+
+    def test_risky_plan_requires_sha_bound_review_approval(self) -> None:
+        planned = self.plan({"GIT_CHANGE_KIND": "risky"})
+        self.assertEqual(planned.returncode, 21)
+        self.assertEqual(
+            self.harness.result(planned)["state"], "review_required"
+        )
+
+        blocked = self.harness.run("apply", "--target", TARGET_COMMIT)
+        self.assertEqual(blocked.returncode, 21)
+        self.assertFalse(self.harness.head.exists())
+
+        approved = self.harness.run(
+            "apply",
+            "--target",
+            TARGET_COMMIT,
+            "--approve-review",
+            TARGET_COMMIT,
+        )
+        self.assertEqual(self.harness.result(approved)["state"], "success")
+
+    def test_apply_rejects_target_movement_before_head_changes(self) -> None:
+        planned = self.plan()
+        self.assertEqual(self.harness.result(planned)["state"], "planned")
+        applied = self.harness.run(
+            "apply",
+            "--target",
+            TARGET_COMMIT,
+            environment={"GIT_MOVE_TARGET": "1"},
+        )
+
+        self.assertEqual(applied.returncode, 22)
+        self.assertEqual(self.harness.result(applied)["state"], "stale_plan")
+        self.assertFalse(self.harness.head.exists())
+
+    def test_apply_reports_pre_and_post_migration_failures(self) -> None:
+        self.plan()
+        build = self.harness.run(
+            "apply",
+            "--target",
+            TARGET_COMMIT,
+            environment={
+                "DOCKER_FAIL_MATCH": (
+                    "compose --progress plain --profile maintenance build web"
+                ),
+                "DOCKER_FAIL_STATUS": "72",
+            },
+        )
+        self.assertEqual(
+            self.harness.result(build)["state"], "pre_migration_failure"
+        )
+
+        self.harness.head.unlink(missing_ok=True)
+        migration = self.harness.run(
+            "apply",
+            "--target",
+            TARGET_COMMIT,
+            environment={
+                "DOCKER_FAIL_MATCH": (
+                    "compose --profile maintenance run --rm --no-deps migrate"
+                ),
+                "DOCKER_FAIL_STATUS": "73",
+            },
+        )
+        self.assertEqual(
+            self.harness.result(migration)["state"], "post_migration_failure"
+        )
+
+        self.harness.head.unlink(missing_ok=True)
+        startup = self.harness.run(
+            "apply",
+            "--target",
+            TARGET_COMMIT,
+            environment={
+                "DOCKER_FAIL_MATCH": (
+                    "compose up --detach --no-build web archive-worker "
+                    "encode-worker"
+                ),
+                "DOCKER_FAIL_STATUS": "74",
+            },
+        )
+        self.assertEqual(
+            self.harness.result(startup)["state"], "post_migration_failure"
+        )
+
+    def test_backup_verification_fails_before_head_changes(self) -> None:
+        self.plan()
+        applied = self.harness.run(
+            "apply",
+            "--target",
+            TARGET_COMMIT,
+            environment={"DOCKER_SKIP_BACKUP_FILE": "1"},
+        )
+
+        self.assertEqual(
+            self.harness.result(applied)["state"], "pre_migration_failure"
+        )
+        self.assertFalse(self.harness.head.exists())
+
+    def test_recent_error_logs_fail_verification_without_exposing_paths(self) -> None:
+        self.plan()
+        applied = self.harness.run(
+            "apply",
+            "--target",
+            TARGET_COMMIT,
+            environment={
+                "LOG_OUTPUT": (
+                    "fatal TOKEN=secret-value at "
+                    "/mnt/sandisk/private/movie.iso"
+                )
+            },
+        )
+
+        self.assertEqual(
+            self.harness.result(applied)["state"], "verification_failure"
+        )
+        self.assertNotIn("secret-value", applied.stdout)
+        self.assertNotIn("private/movie.iso", applied.stdout)
+
+    def test_exact_commit_enforcement_and_drive_mismatch_blocking(self) -> None:
+        self.plan()
+        wrong_commit = self.harness.run(
+            "apply",
+            "--target",
+            TARGET_COMMIT,
+            environment={"GIT_DEPLOYED_COMMIT": "4" * 40},
+        )
+        self.assertEqual(
+            self.harness.result(wrong_commit)["state"], "pre_migration_failure"
+        )
+
+        self.harness.head.unlink(missing_ok=True)
+        mismatched_lsblk = json.dumps(
+            {
+                "blockdevices": [
+                    {
+                        "path": "/dev/sr1",
+                        "type": "rom",
+                        "model": "Drive A",
+                        "serial": "WRONG",
+                    }
+                ]
+            }
+        )
+        mismatch = self.harness.run(
+            "apply",
+            "--target",
+            TARGET_COMMIT,
+            environment={"LSBLK_JSON": mismatched_lsblk},
+        )
+        self.assertEqual(
+            self.harness.result(mismatch)["state"], "validation_failure"
+        )
+        self.assertFalse(self.harness.head.exists())
+
+    def test_status_emits_a_bounded_stable_json_contract(self) -> None:
+        self.plan()
+        status = self.harness.run("status")
+        payload = self.harness.result(status)
+
+        self.assertEqual(payload["schemaVersion"], 1)
+        self.assertEqual(payload["command"], "status")
+        self.assertEqual(payload["state"], "planned")
+        self.assertEqual(payload["targetCommit"], TARGET_COMMIT)
+        self.assertLess(len(json.dumps(payload).encode()), 65_536)
 
 
 class ComposeDeploymentTests(unittest.TestCase):
@@ -287,14 +832,18 @@ class ComposeDeploymentTests(unittest.TestCase):
         )
         self.assertEqual(archive["group_add"], ["24"])
 
-    def test_build_script_builds_every_deployable_image_from_the_repo(self) -> None:
+    def test_build_script_builds_every_deployable_image_sequentially(self) -> None:
         result, calls = run_compose_script("compose-build.sh")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             calls,
             [
-                f"{ROOT}||compose --profile maintenance build migrate backup web archive-worker encode-worker"
+                f"{ROOT}||compose --progress plain --profile maintenance build migrate",
+                f"{ROOT}||compose --progress plain --profile maintenance build backup",
+                f"{ROOT}||compose --progress plain --profile maintenance build web",
+                f"{ROOT}||compose --progress plain --profile maintenance build archive-worker",
+                f"{ROOT}||compose --progress plain --profile maintenance build encode-worker",
             ],
         )
 
@@ -328,7 +877,9 @@ class ComposeDeploymentTests(unittest.TestCase):
             start_script.index('compose-migrate.sh'),
         )
 
-    def test_update_script_backs_up_pulls_builds_starts_and_verifies(self) -> None:
+    def test_update_script_backs_up_merges_exact_target_builds_starts_and_verifies(
+        self,
+    ) -> None:
         result, calls = run_update_script()
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -337,12 +888,12 @@ class ComposeDeploymentTests(unittest.TestCase):
             for index, call in enumerate(calls)
             if "compose --profile maintenance run --rm --no-deps backup" in call
         )
-        pull = calls.index("git|pull --ff-only")
-        build = next(
+        merge = calls.index(f"git|merge --ff-only {TARGET_COMMIT}")
+        builds = [
             index
             for index, call in enumerate(calls)
-            if "compose --profile maintenance build" in call
-        )
+            if "compose --progress plain --profile maintenance build" in call
+        ]
         first_stop = next(
             index
             for index, call in enumerate(calls)
@@ -364,13 +915,14 @@ class ComposeDeploymentTests(unittest.TestCase):
             if call.startswith("docker|inspect --format")
         )
 
-        self.assertLess(backup, pull)
-        self.assertLess(pull, build)
-        self.assertLess(build, first_stop)
+        self.assertLess(backup, merge)
+        self.assertEqual(len(builds), 5)
+        self.assertLess(merge, builds[0])
+        self.assertLess(builds[-1], first_stop)
         self.assertLess(first_stop, migrate)
         self.assertLess(migrate, start)
         self.assertLess(start, health)
-        self.assertIn("old-commit -> new-commit", result.stdout)
+        self.assertIn(f"{OLD_COMMIT} -> {TARGET_COMMIT}", result.stdout)
 
     def test_update_script_refuses_a_dirty_checkout_before_backup(self) -> None:
         result, calls = run_update_script(
@@ -379,19 +931,30 @@ class ComposeDeploymentTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("local changes", result.stderr)
-        self.assertNotIn("git|pull --ff-only", calls)
+        self.assertNotIn(f"git|merge --ff-only {TARGET_COMMIT}", calls)
+        self.assertFalse(any(call.startswith("docker|") for call in calls))
+
+    def test_update_script_refuses_a_concurrent_controller_run(self) -> None:
+        result, calls = run_update_script(
+            environment={"CREATE_CONTROLLER_LOCK": "1"}
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("deployment controller is running", result.stderr)
         self.assertFalse(any(call.startswith("docker|") for call in calls))
 
     def test_update_build_failure_leaves_existing_services_running(self) -> None:
         result, calls = run_update_script(
             environment={
-                "DOCKER_FAIL_MATCH": "compose --profile maintenance build",
+                "DOCKER_FAIL_MATCH": (
+                    "compose --progress plain --profile maintenance build web"
+                ),
                 "DOCKER_FAIL_STATUS": "72",
             }
         )
 
         self.assertEqual(result.returncode, 72, result.stderr)
-        self.assertIn("git|pull --ff-only", calls)
+        self.assertIn(f"git|merge --ff-only {TARGET_COMMIT}", calls)
         self.assertFalse(any("compose stop --timeout 30" in call for call in calls))
 
     def test_update_verification_failure_stops_partial_runtime(self) -> None:
@@ -799,6 +1362,7 @@ class ComposeDeploymentTests(unittest.TestCase):
 
         for script in (
             "scripts/update.sh",
+            "scripts/deploy.mjs",
             "scripts/compose-build.sh",
             "scripts/compose-migrate.sh",
             "scripts/compose-start.sh",
