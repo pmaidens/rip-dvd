@@ -28,7 +28,6 @@ import { fileURLToPath } from "node:url";
 import { isHandBrakePreset } from "@rip-dvd/config";
 import {
   decodeArchivedDvdTitles,
-  decodeDvdTitleMap,
   ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
   ENCODE_JOB_LEASE_DURATION_MS,
   type DataAccess,
@@ -52,6 +51,7 @@ import type {
   EncodeOutputValidator,
   EncodeOutputVobSubExpectation,
 } from "./encode-output-validator.js";
+import type { DvdSubtitleScanner } from "./dvd-subtitle-scanner.js";
 import { EncodeOutputValidationError } from "./encode-output-validator.js";
 import {
   HandBrakeCommandError,
@@ -488,6 +488,7 @@ export interface EncodePublicationOptions {
   originalsLibraryPath: string;
   outputValidator: EncodeOutputValidator;
   runner: HandBrakeRunner;
+  subtitleScanner: DvdSubtitleScanner;
   signal: AbortSignal;
 }
 
@@ -1726,20 +1727,61 @@ async function syncPath(path: string): Promise<void> {
   }
 }
 
-function buildSelectionArguments(selection: DiscSelection): string[] {
-  const sourceIdentity = selection.sourceIdentity;
+function resolveSelectionExecutionPlan(
+  sourceIdentity: DiscSelection["sourceIdentity"],
+  archivedTitles: ReturnType<typeof decodeArchivedDvdTitles>,
+) {
   if (sourceIdentity.kind === "main_feature") {
-    return ["--main-feature"];
+    const expectedDurationSeconds = archivedTitles?.reduce(
+      (longest, title) => Math.max(longest, title.durationSeconds),
+      0,
+    );
+    if (!expectedDurationSeconds) {
+      throw new ClassifiedEncodeFailureError(
+        "Encode Job DVD title metadata is unavailable",
+        "input_unavailable",
+        "preparation",
+      );
+    }
+    return {
+      expectedDurationSeconds,
+      selectionArguments: ["--main-feature"],
+    };
+  }
+  const selectedTitle = archivedTitles?.find(
+    (title) => title.number === sourceIdentity.titleNumber,
+  );
+  if (selectedTitle === undefined) {
+    throw new ClassifiedEncodeFailureError(
+      "Encode Job DVD title metadata is unavailable",
+      "input_unavailable",
+      "preparation",
+    );
   }
   if (sourceIdentity.kind === "dvd_title") {
-    return ["--title", String(sourceIdentity.titleNumber)];
+    if (!selectedTitle.durationSeconds) {
+      throw new ClassifiedEncodeFailureError(
+        "Encode Job DVD title duration is unavailable",
+        "input_unavailable",
+        "preparation",
+      );
+    }
+    return {
+      expectedDurationSeconds: selectedTitle.durationSeconds,
+      selectionArguments: ["--title", String(sourceIdentity.titleNumber)],
+      subtitleScanTitleNumber: sourceIdentity.titleNumber,
+    };
   }
-  return [
-    "--title",
-    String(sourceIdentity.titleNumber),
-    "--chapters",
-    `${sourceIdentity.chapterStart}-${sourceIdentity.chapterEnd}`,
-  ];
+  return {
+    expectedDurationSeconds: undefined,
+    selectionArguments: [
+      "--title",
+      String(sourceIdentity.titleNumber),
+      "--chapters",
+      `${sourceIdentity.chapterStart}-${sourceIdentity.chapterEnd}`,
+    ],
+    subtitleScanTitleNumber: sourceIdentity.titleNumber,
+  };
 }
 
 function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
@@ -1788,62 +1830,14 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
       ids: [archive.detectedDiscId],
     })[0];
     const archivedTitles = decodeArchivedDvdTitles(detectedDisc?.scanData);
-    let expectedDurationSeconds: number | undefined;
-    let expectedVobSubStreams:
-      | readonly EncodeOutputVobSubExpectation[]
-      | undefined;
-    if (sourceIdentity.kind === "main_feature") {
-      expectedDurationSeconds = archivedTitles?.reduce(
-        (longest, title) => Math.max(longest, title.durationSeconds),
-        0,
-      );
-      if (!expectedDurationSeconds) {
-        throw new ClassifiedEncodeFailureError(
-          "Encode Job DVD title metadata is unavailable",
-          "input_unavailable",
-          "preparation",
-        );
-      }
-    } else {
-      const selectedTitle = archivedTitles?.find(
-        (title) => title.number === sourceIdentity.titleNumber,
-      );
-      if (selectedTitle === undefined) {
-        throw new ClassifiedEncodeFailureError(
-          "Encode Job DVD title metadata is unavailable",
-          "input_unavailable",
-          "preparation",
-        );
-      }
-      if (sourceIdentity.kind === "dvd_title") {
-        expectedDurationSeconds = selectedTitle.durationSeconds;
-        if (!expectedDurationSeconds) {
-          throw new ClassifiedEncodeFailureError(
-            "Encode Job DVD title duration is unavailable",
-            "input_unavailable",
-            "preparation",
-          );
-        }
-      }
-      const selectedCurrentTitle = decodeDvdTitleMap(
-        detectedDisc?.scanData,
-      )?.titles.find((title) => title.number === sourceIdentity.titleNumber);
-      expectedVobSubStreams =
-        selectedCurrentTitle === undefined
-          ? selectedTitle.subtitles.map(() => ({}))
-          : selectedCurrentTitle.subtitles.map((subtitle) => ({
-              ...(subtitle.content === undefined
-                ? {}
-                : { contentLabel: subtitle.content }),
-              languageCode: subtitle.languageCode ?? "und",
-            }));
-    }
+    const selectionPlan = resolveSelectionExecutionPlan(
+      sourceIdentity,
+      archivedTitles,
+    );
     return {
       archive,
-      expectedDurationSeconds,
-      expectedVobSubStreams,
       preset: preset.trim(),
-      selection,
+      ...selectionPlan,
     };
   });
 }
@@ -1975,6 +1969,21 @@ export async function executeEncodeClaim(
       );
     }
     replaceableFinal = existingFinal ?? undefined;
+    let expectedVobSubStreams:
+      | readonly EncodeOutputVobSubExpectation[]
+      | undefined;
+    if (input.subtitleScanTitleNumber !== undefined) {
+      expectedVobSubStreams = await runEncodePreparationStep(
+        () => options.subtitleScanner.scan(
+          sourcePath,
+          input.subtitleScanTitleNumber,
+          signal,
+        ),
+        "input_unavailable",
+      );
+      signal.throwIfAborted();
+      renewClaim();
+    }
     try {
       await moveAside(paths.legacyPartialPath);
       await moveStalePartials(finalPath, options.runner);
@@ -2002,7 +2011,7 @@ export async function executeEncodeClaim(
     });
     const arguments_ = [
       "--no-dvdnav",
-      ...buildSelectionArguments(input.selection),
+      ...input.selectionArguments,
       "-i",
       sourcePath,
       "-o",
@@ -2044,9 +2053,9 @@ export async function executeEncodeClaim(
       ...(input.expectedDurationSeconds === undefined
         ? {}
         : { expectedDurationSeconds: input.expectedDurationSeconds }),
-      ...(input.expectedVobSubStreams === undefined
+      ...(expectedVobSubStreams === undefined
         ? {}
-        : { expectedVobSubStreams: input.expectedVobSubStreams }),
+        : { expectedVobSubStreams }),
     });
     signal.throwIfAborted();
     const validatedPartialMetadata = await requireRegularOutputForValidation(

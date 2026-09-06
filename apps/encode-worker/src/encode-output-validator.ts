@@ -47,8 +47,8 @@ export interface EncodeOutputValidationExpectations {
 }
 
 export interface EncodeOutputVobSubExpectation {
-  contentLabel?: string;
   languageCode?: string;
+  title?: string | null;
 }
 
 interface ProbePacket {
@@ -223,34 +223,6 @@ function expectedLanguageName(languageCode: string): string {
   return normalizedLanguageName(languageCode) ?? "und";
 }
 
-function expectedVobSubTitle(contentLabel: string): string | null {
-  switch (contentLabel.trim().toLowerCase()) {
-    case "undefined":
-    case "normal":
-    case "reserved":
-    case "forced":
-      return null;
-    case "large":
-      return "large type";
-    case "children":
-      return "children";
-    case "normal_cc":
-      return "closed caption";
-    case "large_cc":
-      return "closed caption, large type";
-    case "children_cc":
-      return "closed caption, children";
-    case "director":
-      return "commentary";
-    case "large_director":
-      return "commentary, large type";
-    case "children_director":
-      return "commentary, children";
-    default:
-      throw new Error("Encode output subtitle expectation is invalid");
-  }
-}
-
 function isProbeFlag(value: unknown): boolean {
   return value === 0 || value === 1;
 }
@@ -363,10 +335,10 @@ function validateExpectedVobSubStreams(
       typeof expectation !== "object" ||
       expectation === null ||
       Array.isArray(expectation) ||
-      (expectation.contentLabel !== undefined &&
-        !identifiedMetadata(expectation.contentLabel)) ||
       (expectation.languageCode !== undefined &&
-        !identifiedMetadata(expectation.languageCode))
+        !identifiedMetadata(expectation.languageCode)) ||
+      (expectation.title !== undefined && expectation.title !== null &&
+        !identifiedMetadata(expectation.title))
     ) {
       throw new Error("Encode output subtitle expectation is invalid");
     }
@@ -390,17 +362,17 @@ function validateExpectedVobSubStreams(
         );
       }
     }
-    if (expectation.contentLabel === undefined) {
+    if (expectation.title === undefined) {
       continue;
     }
-    const expectedTitle = expectedVobSubTitle(expectation.contentLabel);
+    const expectedTitle = expectation.title?.trim().toLowerCase() ?? null;
     const actualTitle = sourceStreams[position]!.tags.title;
     const normalizedActualTitle =
       typeof actualTitle === "string" ? actualTitle.trim().toLowerCase() : null;
     if (normalizedActualTitle !== expectedTitle) {
       throw validationError(
         "subtitle_streams",
-        `source VobSub stream ${position + 1} has title ${String(actualTitle)}, expected content ${expectation.contentLabel}`,
+        `source VobSub stream ${position + 1} has title ${String(actualTitle)}, expected title ${String(expectation.title)}`,
       );
     }
   }

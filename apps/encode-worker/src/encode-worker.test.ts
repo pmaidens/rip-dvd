@@ -43,12 +43,25 @@ import {
   type HandBrakeRunner,
 } from "./encode-worker.js";
 import {
+  createNodeEncodeOutputValidator,
   EncodeOutputValidationError,
   type EncodeOutputValidator,
 } from "./encode-output-validator.js";
 import {
   encodeOutputFilesystemIdentity,
 } from "./encode-output-filesystem-identity.js";
+import { createNodeDvdSubtitleScanner } from "./dvd-subtitle-scanner.js";
+import dvdVariants from "./test-fixtures/handbrake-dvd-variants.json" with { type: "json" };
+
+vi.mock("./dvd-subtitle-scanner.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./dvd-subtitle-scanner.js")>(),
+  nodeDvdSubtitleScanner: {
+    scan: vi.fn(async () => [
+      { languageCode: "en", title: null },
+      { languageCode: "fr", title: "Commentary" },
+    ]),
+  },
+}));
 
 vi.mock("./encode-output-validator.js", async (importOriginal) => {
   const actual = await importOriginal<
@@ -1098,6 +1111,136 @@ async function createCorrectedReplacementFixture() {
 }
 
 describe("encode worker polling", () => {
+  it.each<{
+    name: string;
+    legacy?: boolean;
+    chapters?: boolean;
+    outputCount?: number;
+    language?: string;
+    foreignAudioSearch?: boolean;
+    expectedFailure?: string;
+  }>([
+    { name: "current title metadata", legacy: false, chapters: false },
+    { name: "legacy count-only metadata", legacy: true, chapters: false },
+    { name: "a chapter range", legacy: false, chapters: true },
+    { name: "a foreign-audio-search result", foreignAudioSearch: true },
+    { name: "one missing variant", outputCount: 1, expectedFailure: "expected 2 source VobSub streams, found 1" },
+    { name: "an extra source track", outputCount: 3, expectedFailure: "expected 2 source VobSub streams, found 3" },
+    { name: "incorrect language metadata", language: "fra", expectedFailure: "has language fra, expected eng" },
+  ])("validates DVD display variants with $name and one stored declaration", async ({
+    legacy, chapters, outputCount = 2, language = "eng",
+    foreignAudioSearch = false, expectedFailure,
+  }) => {
+    const fixture = createQueuedJob(chapters
+      ? { kind: "dvd_chapters", titleNumber: 4, chapterStart: 3, chapterEnd: 5 }
+      : { kind: "dvd_title", titleNumber: 4 }, "Example.mkv", 1);
+    if (legacy) {
+      const database = new DatabaseSync(fixture.databasePath);
+      database.prepare("UPDATE detected_discs SET scan_data = ? WHERE id = ?").run(
+        JSON.stringify({ legacySchemaVersion: 1, titles: [{
+          number: 4, seconds: 3600, chapters: 12, audio_streams: 0, subtitles: 1,
+        }] }),
+        fixture.archive.detectedDiscId,
+      );
+      database.close();
+    }
+    const storedScan = fixture.access.catalog.listDetectedDiscs()[0]!.scanData;
+    const scanCommand = vi.fn(async () => ({ stdout: `JSON Title Set: ${JSON.stringify(dvdVariants)}\n` }));
+    const outputValidator = createNodeEncodeOutputValidator({
+      repairer: { removeEmptyVobSubStreams: vi.fn(async () => { throw new Error("Unexpected repair"); }) },
+      runMediaTool: async ({ executable, arguments_ }) => {
+        if (executable === "ffmpeg") {
+          return { stdout: "frame=120\nprogress=end\n", stderr: "" };
+        }
+        const selector = arguments_[arguments_.indexOf("-select_streams") + 1];
+        return {
+          stderr: "",
+          stdout: JSON.stringify(selector === "s" ? {
+            streams: [
+              ...Array.from({ length: outputCount }, (_, index) => ({
+                index: index + 3, codec_name: "dvd_subtitle", nb_read_packets: "10",
+                disposition: { default: 0, forced: 0 }, tags: { language },
+              })),
+              ...(foreignAudioSearch ? [{
+                index: 2, codec_name: "dvd_subtitle", nb_read_packets: "1",
+                disposition: { default: 1, forced: 1 }, tags: { language: "eng" },
+              }] : []),
+            ],
+          } : {
+            format: { duration: "3600" }, packets: [{ pts_time: "0.0" }],
+            streams: [{ codec_name: "h264", pix_fmt: "yuv420p", profile: "High" }],
+          }),
+        };
+      },
+    });
+    await pollEncodeWorker({
+      ...fixture, concurrency: 1, log: vi.fn(), outputValidator,
+      subtitleScanner: createNodeDvdSubtitleScanner({ runCommand: scanCommand }),
+      runner: { run: async ({ outputPath }) => { writeFileSync(outputPath, "two subtitle variants"); } },
+      signal: new AbortController().signal,
+    });
+    expect(fixture.access.encodeJobs.list(), JSON.stringify(fixture.access.encodeJobs.listFailureReports([fixture.job.id]))).toEqual([
+      expect.objectContaining({ id: fixture.job.id, status: expectedFailure ? "failed" : "completed" }),
+    ]);
+    if (expectedFailure) {
+      expect(existsSync(fixture.outputPath)).toBe(false);
+      expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id])).toEqual([
+        expect.objectContaining({
+          reasonCode: "output_validation_failed",
+          diagnostic: expect.stringContaining(expectedFailure),
+        }),
+      ]);
+    } else {
+      expect(readFileSync(fixture.outputPath, "utf8")).toBe("two subtitle variants");
+    }
+    expect(scanCommand).toHaveBeenCalledOnce();
+    expect(scanCommand.mock.calls[0]).toEqual([
+      "nice",
+      ["-n", "19", "ionice", "-c", "3", "rip-dvd-handbrake", "--no-dvdnav", "--scan", "--json", "--title", "4", "--min-duration", "0", "--previews", "1:0", "-i", realpathSync(fixture.sourcePath)],
+      expect.objectContaining({ signal: expect.any(AbortSignal), timeout: 120_000 }),
+    ]);
+    expect(fixture.access.catalog.listDetectedDiscs()[0]!.scanData).toEqual(storedScan);
+    expect(readFileSync(fixture.sourcePath, "utf8")).toBe("original dvd");
+    fixture.access.close();
+  });
+
+  it.each(["invalid metadata", "scan failure", "cancellation"])(
+    "prevents encoding and publication after subtitle %s",
+    async (failure) => {
+      const fixture = createQueuedJob({ kind: "dvd_title", titleNumber: 4 });
+      const controller = new AbortController();
+      const runner: HandBrakeRunner = { run: vi.fn() };
+      const subtitleScanner = createNodeDvdSubtitleScanner({
+        runCommand: async () => {
+          if (failure === "cancellation") {
+            controller.abort(new Error("shutdown"));
+          }
+          if (failure !== "invalid metadata") {
+            throw new Error("private raw command error");
+          }
+          return { stdout: "JSON Title Set: {}" };
+        },
+      });
+      const polling = pollEncodeWorker({
+        ...fixture, concurrency: 1, log: vi.fn(), runner, subtitleScanner,
+        signal: controller.signal,
+      });
+      if (failure === "cancellation") {
+        await expect(polling).rejects.toThrow("shutdown");
+      } else {
+        await polling;
+        expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id]))
+          .toEqual([expect.objectContaining({
+            reasonCode: "input_unavailable", phase: "preparation",
+          })]);
+      }
+      expect(runner.run).not.toHaveBeenCalled();
+      expect(existsSync(fixture.outputPath)).toBe(false);
+      expect(readFileSync(fixture.sourcePath, "utf8")).toBe("original dvd");
+      fixture.access.close();
+    },
+  );
+
   it("claims a main-feature job, persists HandBrake progress, and publishes only after success", async () => {
     const fixture = createQueuedJob(
       { kind: "main_feature" },
@@ -1385,8 +1528,8 @@ describe("encode worker polling", () => {
       validationExpectations: {
         expectedDurationSeconds: 3_600,
         expectedVobSubStreams: [
-          { contentLabel: "Normal", languageCode: "en" },
-          { contentLabel: "Director", languageCode: "fr" },
+          { languageCode: "en", title: null },
+          { languageCode: "fr", title: "Commentary" },
         ],
       },
     },
@@ -1407,8 +1550,8 @@ describe("encode worker polling", () => {
       ],
       validationExpectations: {
         expectedVobSubStreams: [
-          { contentLabel: "Normal", languageCode: "en" },
-          { contentLabel: "Director", languageCode: "fr" },
+          { languageCode: "en", title: null },
+          { languageCode: "fr", title: "Commentary" },
         ],
       },
     },
