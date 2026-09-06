@@ -36,6 +36,7 @@ repository_root=$2
 snapshot=$3
 target_commit=$4
 stage_file=${RIP_DVD_UPDATE_STAGE_FILE:-}
+result_file=${RIP_DVD_UPDATE_RESULT_FILE:-}
 owns_controller_lock=0
 controller_lock=""
 
@@ -138,7 +139,7 @@ backup_filename="$(
     sed -n 's|^SQLite backup written to /backups/\([^/[:space:]]*\.sqlite\)$|\1|p'
 )"
 case "$backup_filename" in
-  ''|*/*)
+  ''|*/*|*[!A-Za-z0-9._-]*)
     printf 'The backup command did not report one safe backup filename.\n' >&2
     exit 1
     ;;
@@ -156,8 +157,9 @@ if [ ! -s "$backup_host_path/$backup_filename" ]; then
   printf 'The reported backup file is missing or empty.\n' >&2
   exit 1
 fi
+backup_size="$(stat -c %s "$backup_host_path/$backup_filename")"
 printf 'Verified SQLite backup: %s (%s bytes)\n' \
-  "$backup_filename" "$(stat -c %s "$backup_host_path/$backup_filename")"
+  "$backup_filename" "$backup_size"
 
 set_stage checkout
 printf 'Fast-forwarding to the reviewed commit without fetching...\n'
@@ -223,4 +225,11 @@ if ! verify_updated_services; then
 fi
 
 set_stage complete
+if [ -n "$result_file" ]; then
+  result_temporary="$result_file.tmp.$$"
+  umask 077
+  printf '{"schemaVersion":1,"backup":{"filename":"%s","sizeBytes":%s},"migrationsCurrent":true}\n' \
+    "$backup_filename" "$backup_size" > "$result_temporary"
+  mv "$result_temporary" "$result_file"
+fi
 printf 'rip-dvd update complete: %s -> %s\n' "$previous_commit" "$current_commit"

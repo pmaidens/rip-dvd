@@ -1,30 +1,34 @@
 #!/usr/bin/env node
 
-import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   mkdirSync,
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
-import { basename, dirname, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { dirname, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
-const SCRIPT_PATH = fileURLToPath(import.meta.url);
-const REPOSITORY_ROOT = resolve(dirname(SCRIPT_PATH), "..");
+import {
+  MAX_LOG_BYTES,
+  REPOSITORY_ROOT,
+  runCheckedSync,
+  runStreaming,
+  sanitizeText,
+  tailBytes,
+} from "./deploy-support.mjs";
+import { buildReviewBundle, parseNameStatus } from "./deploy-review.mjs";
+
+export { sanitizeText } from "./deploy-support.mjs";
+export { classifyReview } from "./deploy-review.mjs";
+
+const SCRIPT_PATH = resolve(REPOSITORY_ROOT, "scripts/deploy.mjs");
 const RESULT_PREFIX = "RIP_DVD_RESULT_JSON=";
 const RESULT_SCHEMA_VERSION = 1;
-const MAX_COMMAND_BYTES = 1_048_576;
 const MAX_RESULT_BYTES = 65_536;
-const MAX_REVIEW_DIFF_BYTES = 65_536;
-const MAX_REVIEW_BUNDLE_BYTES = 48 * 1024;
-const MAX_LOG_BYTES = 1_048_576;
-const MAX_FILES = 300;
-const MAX_COMMITS = 100;
 const FULL_SHA = /^[0-9a-f]{40}$/u;
 const TERMINAL_STATES = new Set([
   "active_work",
@@ -49,6 +53,7 @@ const EXIT_CODES = {
   validation_failure: 10,
   verification_failure: 25,
 };
+const POST_MIGRATION_STAGES = new Set(["migration", "verification", "complete"]);
 
 class DeploymentError extends Error {
   constructor(state, message, details = {}) {
@@ -59,108 +64,11 @@ class DeploymentError extends Error {
   }
 }
 
-function tailBytes(value, maximum = MAX_COMMAND_BYTES) {
-  const buffer = Buffer.from(String(value ?? ""));
-  if (buffer.length <= maximum) return buffer.toString("utf8");
-  return `[earlier output omitted]\n${buffer.subarray(buffer.length - maximum).toString("utf8")}`;
-}
-
-export function sanitizeText(value, maximum = MAX_COMMAND_BYTES) {
-  const withoutPrivateKeys = tailBytes(value, maximum)
-    .replace(/-----BEGIN [^-]+ PRIVATE KEY-----[\s\S]*?-----END [^-]+ PRIVATE KEY-----/giu, "[REDACTED PRIVATE KEY]")
-    .split(/\r?\n/u)
-    .map((line) =>
-      /\/(?:media\/(?:movies|originals)|mnt\/sandisk)(?:\/|\b)/iu.test(line)
-        ? "[REDACTED_MEDIA_PATH]"
-        : line,
-    )
-    .join("\n");
-  return withoutPrivateKeys
-    .replace(/\b((?:API_)?(?:KEY|TOKEN|PASSWORD|SECRET|PRIVATE_KEY))\s*=\s*[^\s]+/giu, "$1=[REDACTED]")
-    .replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/giu, "$1[REDACTED]@")
-    .replace(/[\t ]+$/gmu, "");
-}
-
-function command(executable, arguments_, options = {}) {
-  const result = spawnSync(executable, arguments_, {
-    cwd: options.cwd ?? REPOSITORY_ROOT,
-    encoding: "utf8",
-    env: options.env ?? process.env,
-    input: options.input,
-    maxBuffer: MAX_COMMAND_BYTES * 2,
-    stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
-  });
-  const stdout = tailBytes(result.stdout);
-  const stderr = sanitizeText(result.stderr);
-  if (result.error || result.status !== 0) {
-    if (options.allowFailure) {
-      return { status: result.status ?? 1, stdout, stderr };
-    }
-    const reason = result.error?.message ?? stderr.trim() ?? `exit ${result.status}`;
-    throw new Error(`${executable} failed: ${reason}`);
-  }
-  return { status: 0, stdout, stderr };
-}
-
-function streamingCommand(executable, arguments_, options = {}) {
-  return new Promise((resolvePromise) => {
-    const child = spawn(executable, arguments_, {
-      cwd: options.cwd ?? REPOSITORY_ROOT,
-      env: options.env ?? process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const logPath = resolve(stateDirectory(), "run-output.log");
-    let stdout = "";
-    let stderr = "";
-    let log = "";
-    try {
-      log = readFileSync(logPath, "utf8");
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
-    let flushTimer;
-    const flush = () => {
-      if (flushTimer) clearTimeout(flushTimer);
-      flushTimer = undefined;
-      writeFileSync(logPath, tailBytes(log, MAX_LOG_BYTES), {
-        encoding: "utf8",
-        mode: 0o600,
-      });
-    };
-    const record = (channel, chunk) => {
-      const text = sanitizeText(chunk, 65_536);
-      if (channel === "stdout") {
-        stdout = tailBytes(`${stdout}${text}`);
-        process.stdout.write(text);
-      } else {
-        stderr = tailBytes(`${stderr}${text}`);
-        process.stderr.write(text);
-      }
-      log = tailBytes(`${log}${text}`, MAX_LOG_BYTES);
-      if (!flushTimer) flushTimer = setTimeout(flush, 250);
-    };
-    child.stdout.on("data", (chunk) => record("stdout", chunk));
-    child.stderr.on("data", (chunk) => record("stderr", chunk));
-    child.on("error", (error) => {
-      flush();
-      resolvePromise({
-        status: 1,
-        stdout,
-        stderr: `${stderr}${sanitizeText(error.message, 2000)}`,
-      });
-    });
-    child.on("close", (status) => {
-      flush();
-      resolvePromise({ status: status ?? 1, stdout, stderr });
-    });
-  });
-}
-
 function stateDirectory() {
   if (process.env.RIP_DVD_DEPLOY_STATE_DIR) {
     return resolve(process.env.RIP_DVD_DEPLOY_STATE_DIR);
   }
-  const path = command("git", ["rev-parse", "--git-path", "rip-dvd-deployment"]).stdout.trim();
+  const path = runCheckedSync("git", ["rev-parse", "--git-path", "rip-dvd-deployment"]).stdout.trim();
   return resolve(REPOSITORY_ROOT, path);
 }
 
@@ -324,22 +232,22 @@ function assertIdentity(config) {
       actual: actualHost,
     });
   }
-  const actualRoot = resolve(command("git", ["rev-parse", "--show-toplevel"]).stdout.trim());
+  const actualRoot = resolve(runCheckedSync("git", ["rev-parse", "--show-toplevel"]).stdout.trim());
   if (actualRoot !== config.expectedRepositoryRoot || actualRoot !== REPOSITORY_ROOT) {
     throw new DeploymentError("validation_failure", "Repository root identity does not match", {
       expected: config.expectedRepositoryRoot,
       actual: actualRoot,
     });
   }
-  const remote = command("git", ["remote", "get-url", config.remote]).stdout.trim();
+  const remote = runCheckedSync("git", ["remote", "get-url", config.remote]).stdout.trim();
   if (normalizedRemote(remote) !== normalizedRemote(config.expectedRemoteUrl)) {
     throw new DeploymentError("validation_failure", "Repository remote identity does not match", {
       expected: normalizedRemote(config.expectedRemoteUrl),
       actual: normalizedRemote(remote),
     });
   }
-  const branch = command("git", ["branch", "--show-current"]).stdout.trim();
-  const upstream = command("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).stdout.trim();
+  const branch = runCheckedSync("git", ["branch", "--show-current"]).stdout.trim();
+  const upstream = runCheckedSync("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).stdout.trim();
   if (branch !== config.branch || upstream !== config.upstream) {
     throw new DeploymentError("validation_failure", "Branch or upstream does not match", {
       expectedBranch: config.branch,
@@ -348,13 +256,13 @@ function assertIdentity(config) {
       actualUpstream: upstream,
     });
   }
-  const dirty = command("git", ["status", "--porcelain", "--untracked-files=normal"]).stdout;
+  const dirty = runCheckedSync("git", ["status", "--porcelain", "--untracked-files=normal"]).stdout;
   if (dirty.length > 0) {
     throw new DeploymentError("validation_failure", "Checkout has local changes", {
       paths: sanitizeText(dirty, 32_768).trim().split(/\r?\n/u),
     });
   }
-  command("docker", ["compose", "config", "--quiet"]);
+  runCheckedSync("docker", ["compose", "config", "--quiet"]);
 }
 
 function parseMemoryAvailable(output) {
@@ -379,8 +287,8 @@ function parseDiskRows(output) {
 }
 
 function checkResources(config) {
-  const memoryAvailableBytes = parseMemoryAvailable(command("free", ["--bytes"]).stdout);
-  const disks = parseDiskRows(command("df", ["-Pk", ...config.storagePaths]).stdout);
+  const memoryAvailableBytes = parseMemoryAvailable(runCheckedSync("free", ["--bytes"]).stdout);
+  const disks = parseDiskRows(runCheckedSync("df", ["-Pk", ...config.storagePaths]).stdout);
   const root = disks.find((disk) => disk.path === "/") ?? disks[0];
   if (!root || root.availableBytes < config.minimumRootFreeBytes) {
     throw new DeploymentError("validation_failure", "Root filesystem lacks deployment build space", {
@@ -449,10 +357,10 @@ function activeWork(dashboard) {
 }
 
 function runtimeSnapshot(config) {
-  const health = command("curl", ["--fail", "--silent", "--show-error", "--max-time", "10", config.healthUrl]);
-  const dashboard = parseDashboard(command("curl", ["--fail", "--silent", "--show-error", "--max-time", "10", config.dashboardUrl]).stdout);
+  const health = runCheckedSync("curl", ["--fail", "--silent", "--show-error", "--max-time", "10", config.healthUrl]);
+  const dashboard = parseDashboard(runCheckedSync("curl", ["--fail", "--silent", "--show-error", "--max-time", "10", config.dashboardUrl]).stdout);
   const driveChecks = verifyDrives(config, dashboard);
-  const failedUnits = command("systemctl", ["--failed", "--no-legend", "--plain"], { allowFailure: true }).stdout
+  const failedUnits = runCheckedSync("systemctl", ["--failed", "--no-legend", "--plain"], { allowFailure: true }).stdout
     .trim()
     .split(/\r?\n/u)
     .filter(Boolean)
@@ -462,102 +370,30 @@ function runtimeSnapshot(config) {
     dashboard,
     driveChecks,
     activeWork: activeWork(dashboard),
-    compose: sanitizeText(command("docker", ["compose", "ps"]).stdout, 16_384),
-    dockerDiskUsage: sanitizeText(command("docker", ["system", "df"]).stdout, 16_384),
+    compose: sanitizeText(runCheckedSync("docker", ["compose", "ps"]).stdout, 16_384),
+    dockerDiskUsage: sanitizeText(runCheckedSync("docker", ["system", "df"]).stdout, 16_384),
     failedUnits,
   };
 }
 
-function parseNameStatus(output) {
-  const parts = output.split("\0").filter((part) => part.length > 0);
-  const files = [];
-  for (let index = 0; index < parts.length && files.length < MAX_FILES; index += 1) {
-    const status = parts[index];
-    if (/^[RC]/u.test(status)) {
-      files.push({ status, oldPath: parts[index + 1], path: parts[index + 2] });
-      index += 2;
-    } else {
-      files.push({ status, path: parts[index + 1] });
-      index += 1;
-    }
-  }
-  return files;
-}
-
-export function classifyReview(files, diff) {
-  const paths = files.flatMap((file) => [file.path, file.oldPath].filter(Boolean));
-  const reasons = new Set();
-  const hasMigration = paths.some((path) => /(?:^|\/)(?:drizzle|migrations?)(?:\/|$)|\.sql$/u.test(path));
-  const hasSchema = paths.some((path) => /packages\/data-access\/(?:src\/)?(?:schema|tables)|schema\.ts$/u.test(path));
-  if (hasMigration) reasons.add("migration");
-  if (hasSchema && !hasMigration) reasons.add("schema_without_migration");
-  if (paths.some((path) => /(^|\/)compose(?:\.[^/]*)?\.ya?ml$/u.test(path))) {
-    reasons.add("compose_change");
-    if (/^[+-].*\b(?:volumes|devices)\s*:/gmu.test(diff)) reasons.add("compose_volumes_or_devices");
-  }
-  if (paths.some((path) => /(?:^|\/)Dockerfile(?:\.[^/]*)?$|\.Dockerfile$/u.test(path))) reasons.add("dockerfile");
-  if (paths.some((path) => /(?:^|\/)(?:pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb?)$/u.test(path))) reasons.add("dependency_lockfile");
-  if (paths.some((path) => /^(?:scripts\/(?:update|deploy|compose-|.*recover)|docker\/backup-sqlite|README\.md$)/u.test(path))) reasons.add("deployment_or_recovery");
-  if (paths.some((path) => /optical-drive|optical_drives|compose.*hardware/iu.test(path)) || /^[+-].*\bdevices\s*:/gmu.test(diff)) reasons.add("optical_drive_identity_policy");
-  if (paths.some((path) => path === ".env.example") || /^[+].*\$\{[A-Z0-9_]+(?::?\?)/gmu.test(diff)) reasons.add("required_environment");
-  if (paths.some((path) => /^(?:\.github\/|docker\/|scripts\/)/u.test(path)) && reasons.size === 0) reasons.add("unclassified_operational_change");
-  return [...reasons].sort();
-}
-
-function buildReviewBundle(oldCommit, targetCommit, commits, files, diff) {
-  const reasons = classifyReview(files, diff);
-  const bundle = {
-    schemaVersion: 1,
-    oldCommit,
-    targetCommit,
-    reviewRequired: reasons.length > 0,
-    reasons,
-    limits: {
-      commits: MAX_COMMITS,
-      files: MAX_FILES,
-      diffBytes: MAX_REVIEW_DIFF_BYTES,
-    },
-    caveat: "The classifier identifies risky change classes. It does not prove SQL, configuration, or recovery changes are semantically safe.",
-    commits: commits.slice(0, MAX_COMMITS),
-    files: files.slice(0, MAX_FILES),
-    relevantDiff: sanitizeText(diff, MAX_REVIEW_DIFF_BYTES),
-  };
-  while (Buffer.byteLength(JSON.stringify(bundle)) > MAX_REVIEW_BUNDLE_BYTES) {
-    if (Buffer.byteLength(bundle.relevantDiff) > 4096) {
-      bundle.relevantDiff = tailBytes(
-        bundle.relevantDiff,
-        Math.max(4096, Math.floor(Buffer.byteLength(bundle.relevantDiff) / 2)),
-      );
-    } else if (bundle.files.length > 50) {
-      bundle.files = bundle.files.slice(0, Math.ceil(bundle.files.length / 2));
-    } else if (bundle.commits.length > 20) {
-      bundle.commits = bundle.commits.slice(0, Math.ceil(bundle.commits.length / 2));
-    } else {
-      bundle.relevantDiff = "[diff omitted to preserve the bounded review contract]";
-      break;
-    }
-  }
-  return bundle;
-}
-
 function gitPlan(config) {
-  const oldCommit = command("git", ["rev-parse", "HEAD"]).stdout.trim();
-  command("git", ["fetch", "--prune", config.remote]);
-  const targetCommit = command("git", ["rev-parse", "--verify", `${config.targetRef}^{commit}`]).stdout.trim();
+  const oldCommit = runCheckedSync("git", ["rev-parse", "HEAD"]).stdout.trim();
+  runCheckedSync("git", ["fetch", "--prune", config.remote]);
+  const targetCommit = runCheckedSync("git", ["rev-parse", "--verify", `${config.targetRef}^{commit}`]).stdout.trim();
   if (!FULL_SHA.test(oldCommit) || !FULL_SHA.test(targetCommit)) {
     throw new DeploymentError("validation_failure", "Git did not return full commit SHAs", { oldCommit, targetCommit });
   }
-  const ancestry = command("git", ["merge-base", "--is-ancestor", oldCommit, targetCommit], { allowFailure: true });
+  const ancestry = runCheckedSync("git", ["merge-base", "--is-ancestor", oldCommit, targetCommit], { allowFailure: true });
   if (ancestry.status !== 0) {
     throw new DeploymentError("validation_failure", "Current commit is not an ancestor of the deployment target", { oldCommit, targetCommit });
   }
-  const commitOutput = command("git", ["log", "--format=%H%x09%s", "--no-merges", `${oldCommit}..${targetCommit}`]).stdout;
-  const commits = commitOutput.trim().split(/\r?\n/u).filter(Boolean).slice(0, MAX_COMMITS).map((line) => {
+  const commitOutput = runCheckedSync("git", ["log", "--format=%H%x09%s", "--no-merges", `${oldCommit}..${targetCommit}`]).stdout;
+  const commits = commitOutput.trim().split(/\r?\n/u).filter(Boolean).map((line) => {
     const [sha, ...subject] = line.split("\t");
     return { sha, subject: sanitizeText(subject.join("\t"), 1000) };
   });
-  const files = parseNameStatus(command("git", ["diff", "--name-status", "-z", `${oldCommit}..${targetCommit}`]).stdout);
-  const diff = command("git", [
+  const files = parseNameStatus(runCheckedSync("git", ["diff", "--name-status", "-z", `${oldCommit}..${targetCommit}`]).stdout);
+  const diff = runCheckedSync("git", [
     "diff",
     "--no-ext-diff",
     "--unified=40",
@@ -614,7 +450,9 @@ function createPlan(options) {
     runId: randomUUID(),
     startedAt: new Date().toISOString(),
   };
+  let release = () => {};
   try {
+    release = acquireLock(run.runId);
     run = progress(run, "preflight", "Checking deployment host, checkout, runtime, and resources.");
     assertIdentity(config);
     const resources = checkResources(config);
@@ -667,10 +505,20 @@ function createPlan(options) {
     return emitResult(makeResult("plan", "planned", plan, run.message, { reviewBundle: resolve(directory, "review-bundle.json") }, run));
   } catch (error) {
     const failure = error instanceof DeploymentError ? error : new DeploymentError("validation_failure", error.message);
+    if (failure.state === "concurrent_run") {
+      const result = emitResult(
+        makeResult("plan", failure.state, undefined, failure.message, failure.details, run),
+        { persist: false },
+      );
+      process.exitCode = EXIT_CODES.concurrent_run;
+      return result;
+    }
     run = progress(run, failure.state, failure.message, failure.details);
     const result = emitResult(makeResult("plan", failure.state, undefined, failure.message, failure.details, run));
     process.exitCode = EXIT_CODES[failure.state] ?? 1;
     return result;
+  } finally {
+    release();
   }
 }
 
@@ -716,19 +564,19 @@ function assertFreshPlan(plan, options) {
     });
   }
   assertIdentity(plan.config);
-  const head = command("git", ["rev-parse", "HEAD"]).stdout.trim();
+  const head = runCheckedSync("git", ["rev-parse", "HEAD"]).stdout.trim();
   if (head !== plan.oldCommit) {
     throw new DeploymentError("stale_plan", "Checkout HEAD changed after planning", { plannedHead: plan.oldCommit, actualHead: head });
   }
-  command("git", ["fetch", "--prune", plan.config.remote]);
-  const currentTarget = command("git", ["rev-parse", "--verify", `${plan.targetRef}^{commit}`]).stdout.trim();
+  runCheckedSync("git", ["fetch", "--prune", plan.config.remote]);
+  const currentTarget = runCheckedSync("git", ["rev-parse", "--verify", `${plan.targetRef}^{commit}`]).stdout.trim();
   if (currentTarget !== plan.targetCommit) {
     throw new DeploymentError("stale_plan", "Deployment target moved after review", {
       plannedTarget: plan.targetCommit,
       currentTarget,
     });
   }
-  const ancestry = command("git", ["merge-base", "--is-ancestor", plan.oldCommit, plan.targetCommit], { allowFailure: true });
+  const ancestry = runCheckedSync("git", ["merge-base", "--is-ancestor", plan.oldCommit, plan.targetCommit], { allowFailure: true });
   if (ancestry.status !== 0) {
     throw new DeploymentError("stale_plan", "Frozen target no longer has the planned commit as an ancestor");
   }
@@ -753,27 +601,28 @@ function assertFreshPlan(plan, options) {
   return runtime;
 }
 
-function parseBackupFilename(output) {
-  const matches = [...output.matchAll(/SQLite backup written to \/backups\/([^\s/]+\.sqlite)\b/gu)];
-  return matches.at(-1)?.[1] ?? null;
+function updateFailureState(stage) {
+  return POST_MIGRATION_STAGES.has(stage)
+    ? "post_migration_failure"
+    : "pre_migration_failure";
 }
 
-function verifyBackup(filename) {
-  if (!filename || basename(filename) !== filename) {
-    throw new Error("Updater did not report a safe backup filename");
+function readUpdateEvidence(path) {
+  const evidence = readJson(path, "Update evidence");
+  if (
+    evidence.schemaVersion !== 1
+    || evidence.migrationsCurrent !== true
+    || !/^[A-Za-z0-9._-]+\.sqlite$/u.test(evidence.backup?.filename ?? "")
+    || !Number.isSafeInteger(evidence.backup?.sizeBytes)
+    || evidence.backup.sizeBytes <= 0
+  ) {
+    throw new Error("Updater returned invalid deployment evidence");
   }
-  const environment = command("docker", ["compose", "config", "--environment"]).stdout;
-  const configured = environment.split(/\r?\n/u).find((line) => line.startsWith("RIP_DVD_BACKUP_HOST_PATH="))?.slice("RIP_DVD_BACKUP_HOST_PATH=".length);
-  const directory = configured ? resolve(REPOSITORY_ROOT, configured) : resolve(REPOSITORY_ROOT, "backups");
-  const path = resolve(directory, filename);
-  if (dirname(path) !== resolve(directory) || statSync(path).size <= 0) {
-    throw new Error("The reported backup file is missing or empty");
-  }
-  return { filename, sizeBytes: statSync(path).size };
+  return evidence;
 }
 
 function verifyDrives(config, dashboard) {
-  const output = command("docker", ["compose", "exec", "-T", "archive-worker", "lsblk", "--json", "--output", "PATH,TYPE,MODEL,SERIAL"]).stdout;
+  const output = runCheckedSync("docker", ["compose", "exec", "-T", "archive-worker", "lsblk", "--json", "--output", "PATH,TYPE,MODEL,SERIAL"]).stdout;
   let parsed;
   try {
     parsed = JSON.parse(output);
@@ -798,25 +647,25 @@ function verifyDrives(config, dashboard) {
 }
 
 function independentVerify(plan, expectedCommit) {
-  const head = command("git", ["rev-parse", "HEAD"]).stdout.trim();
-  const dirty = command("git", ["status", "--porcelain", "--untracked-files=normal"]).stdout;
+  const head = runCheckedSync("git", ["rev-parse", "HEAD"]).stdout.trim();
+  const dirty = runCheckedSync("git", ["status", "--porcelain", "--untracked-files=normal"]).stdout;
   if (head !== expectedCommit || dirty.length > 0) throw new Error("Checkout verification failed after deployment");
-  command("docker", ["compose", "config", "--quiet"]);
-  const web = command("docker", ["compose", "ps", "--quiet", "web"]).stdout.trim();
+  runCheckedSync("docker", ["compose", "config", "--quiet"]);
+  const web = runCheckedSync("docker", ["compose", "ps", "--quiet", "web"]).stdout.trim();
   if (!web) throw new Error("Web service container is unavailable");
-  const webStatus = command("docker", ["inspect", "--format", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}", web]).stdout.trim();
+  const webStatus = runCheckedSync("docker", ["inspect", "--format", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}", web]).stdout.trim();
   if (webStatus !== "healthy") throw new Error(`Web service is ${webStatus || "unknown"}`);
-  const services = new Set(command("docker", ["compose", "ps", "--status", "running", "--services"]).stdout.trim().split(/\r?\n/u));
+  const services = new Set(runCheckedSync("docker", ["compose", "ps", "--status", "running", "--services"]).stdout.trim().split(/\r?\n/u));
   for (const service of ["web", "archive-worker", "encode-worker"]) {
     if (!services.has(service)) throw new Error(`Runtime service is not running: ${service}`);
   }
-  command("curl", ["--fail", "--silent", "--show-error", "--max-time", "10", plan.config.healthUrl]);
-  const dashboard = parseDashboard(command("curl", ["--fail", "--silent", "--show-error", "--max-time", "10", plan.config.dashboardUrl]).stdout);
+  runCheckedSync("curl", ["--fail", "--silent", "--show-error", "--max-time", "10", plan.config.healthUrl]);
+  const dashboard = parseDashboard(runCheckedSync("curl", ["--fail", "--silent", "--show-error", "--max-time", "10", plan.config.dashboardUrl]).stdout);
   const drives = verifyDrives(plan.config, dashboard);
-  const failedUnitsAfter = command("systemctl", ["--failed", "--no-legend", "--plain"], { allowFailure: true }).stdout.trim().split(/\r?\n/u).filter(Boolean).map((line) => sanitizeText(line, 1000));
+  const failedUnitsAfter = runCheckedSync("systemctl", ["--failed", "--no-legend", "--plain"], { allowFailure: true }).stdout.trim().split(/\r?\n/u).filter(Boolean).map((line) => sanitizeText(line, 1000));
   const newFailedUnits = failedUnitsAfter.filter((line) => !plan.failedUnitsBefore.includes(line));
   if (newFailedUnits.length > 0) throw new Error(`New failed systemd units: ${newFailedUnits.join(", ")}`);
-  const logs = command("docker", ["compose", "logs", "--since", "10m", "--no-color", "web", "archive-worker", "encode-worker"], { allowFailure: true }).stdout
+  const logs = runCheckedSync("docker", ["compose", "logs", "--since", "10m", "--no-color", "web", "archive-worker", "encode-worker"], { allowFailure: true }).stdout
     .split(/\r?\n/u)
     .filter((line) => /error|fail|fatal|panic|unhandled|exception|unhealthy/iu.test(line))
     .map((line) => sanitizeText(line, 4000))
@@ -845,24 +694,26 @@ async function applyPlan(options) {
     release = acquireLock(run.runId);
     run = progress(run, "preflight", "Rechecking the frozen deployment plan before changing HEAD.");
     const stagePath = resolve(stateDirectory(), "update-stage");
+    const evidencePath = resolve(stateDirectory(), "update-evidence.json");
     try { rmSync(stagePath, { force: true }); } catch {}
+    try { rmSync(evidencePath, { force: true }); } catch {}
     assertFreshPlan(plan, options);
     run = progress(run, "apply", `Applying reviewed commit ${plan.targetCommit}.`);
-    const updater = await streamingCommand("sh", [resolve(REPOSITORY_ROOT, "scripts/update.sh"), "--target", plan.targetCommit], {
+    const updater = await runStreaming("sh", [resolve(REPOSITORY_ROOT, "scripts/update.sh"), "--target", plan.targetCommit], {
+      logPath: resolve(stateDirectory(), "run-output.log"),
       env: {
         ...process.env,
         RIP_DVD_CONTROLLER_LOCK_HELD: "1",
+        RIP_DVD_UPDATE_RESULT_FILE: evidencePath,
         RIP_DVD_UPDATE_STAGE_FILE: stagePath,
       },
     });
     appendBoundedLog(resolve(stateDirectory(), "deployment.log"), `${updater.stdout}\n${updater.stderr}`);
-    process.stdout.write(sanitizeText(updater.stdout, 65_536));
     if (updater.status !== 0) {
       let stage = "unknown";
       try { stage = readFileSync(stagePath, "utf8").trim(); } catch {}
-      const postMigration = ["migration", "verification"].includes(stage);
-      const state = postMigration ? "post_migration_failure" : "pre_migration_failure";
-      throw new DeploymentError(state, postMigration
+      const state = updateFailureState(stage);
+      throw new DeploymentError(state, state === "post_migration_failure"
         ? "Deployment failed after runtime services were stopped; keep them stopped and use recovery guidance."
         : "Deployment failed before migration; the old runtime should still be running.", {
         stage,
@@ -872,12 +723,9 @@ async function applyPlan(options) {
     }
     let backup;
     try {
-      if (!updater.stdout.includes("SQLite migrations are current")) {
-        throw new Error("Updater output did not confirm current SQLite migrations");
-      }
-      backup = verifyBackup(parseBackupFilename(updater.stdout));
+      backup = readUpdateEvidence(evidencePath).backup;
     } catch (error) {
-      command("sh", [resolve(REPOSITORY_ROOT, "scripts/compose-stop.sh")], { allowFailure: true });
+      runCheckedSync("sh", [resolve(REPOSITORY_ROOT, "scripts/compose-stop.sh")], { allowFailure: true });
       throw new DeploymentError("verification_failure", "Deployment evidence verification failed; runtime services were stopped", {
         error: sanitizeText(error.message, 4000),
       });
@@ -887,7 +735,7 @@ async function applyPlan(options) {
     try {
       verification = independentVerify(plan, plan.targetCommit);
     } catch (error) {
-      command("sh", [resolve(REPOSITORY_ROOT, "scripts/compose-stop.sh")], { allowFailure: true });
+      runCheckedSync("sh", [resolve(REPOSITORY_ROOT, "scripts/compose-stop.sh")], { allowFailure: true });
       throw new DeploymentError("verification_failure", "Independent deployment verification failed; runtime services were stopped", {
         error: sanitizeText(error.message, 4000),
         backup,
@@ -903,9 +751,7 @@ async function applyPlan(options) {
     const failure = error instanceof DeploymentError
       ? error
       : new DeploymentError(
-          ["migration", "verification", "complete"].includes(stage)
-            ? "post_migration_failure"
-            : "pre_migration_failure",
+          updateFailureState(stage),
           error.message,
           { stage },
         );
@@ -929,11 +775,11 @@ async function startRun(options) {
   const screenArguments = ["-DmS", "rip-dvd-update", process.execPath, SCRIPT_PATH, "apply", "--target", options.target];
   if (options.approve_review) screenArguments.push("--approve-review", options.approve_review);
   if (options.allow_active_work) screenArguments.push("--allow-active-work");
-  const existing = command("screen", ["-ls"], { allowFailure: true });
+  const existing = runCheckedSync("screen", ["-ls"], { allowFailure: true });
   if (existing.stdout.includes(".rip-dvd-update")) {
     return emitResult(makeResult("run", "running", plan, "The named deployment Screen session is already running. Use status to reconnect."));
   }
-  const started = command("screen", screenArguments, { allowFailure: true });
+  const started = runCheckedSync("screen", screenArguments, { allowFailure: true });
   if (started.status !== 0) {
     const result = emitResult(makeResult("run", "validation_failure", plan, "Could not start the deployment Screen session", { error: started.stderr }));
     process.exitCode = EXIT_CODES.validation_failure;
@@ -1008,8 +854,8 @@ function verifyCurrent() {
 
 function diagnostics() {
   const plan = loadPlan();
-  const logs = command("docker", ["compose", "logs", "--tail", "200", "--timestamps", "web", "archive-worker", "encode-worker"], { allowFailure: true });
-  const compose = command("docker", ["compose", "ps", "--all"], { allowFailure: true });
+  const logs = runCheckedSync("docker", ["compose", "logs", "--tail", "200", "--timestamps", "web", "archive-worker", "encode-worker"], { allowFailure: true });
+  const compose = runCheckedSync("docker", ["compose", "ps", "--all"], { allowFailure: true });
   const resources = (() => {
     try { return checkResources({ ...plan.config, minimumRootFreeBytes: 0, minimumMemoryAvailableBytes: 0 }); }
     catch (error) { return { error: sanitizeText(error.message, 2000) }; }

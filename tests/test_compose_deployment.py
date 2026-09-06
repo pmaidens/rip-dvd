@@ -1,4 +1,5 @@
 import json
+import os
 import pathlib
 import shutil
 import sqlite3
@@ -364,6 +365,15 @@ case "$*" in
       risky) printf 'M\000scripts/update.sh\000' ;;
       schema) printf 'M\000packages/data-access/src/schema.ts\000' ;;
       compose) printf 'M\000compose.yaml\000' ;;
+      config) printf 'M\000packages/config/src/index.ts\000' ;;
+      many)
+        index=1
+        while [ "$index" -le 300 ]; do
+          printf 'M\000apps/web/file-%s.ts\000' "$index"
+          index=$((index + 1))
+        done
+        printf 'M\000scripts/update.sh\000'
+        ;;
     esac
     ;;
   diff\ --no-ext-diff*) printf '%s' "${GIT_REVIEW_DIFF:-}" ;;
@@ -531,6 +541,46 @@ class DeploymentControllerTests(unittest.TestCase):
         )
         self.assertIn("remote identity", mismatch.stdout)
 
+        hostname = self.plan({"RIP_DVD_DEPLOY_HOSTNAME_OVERRIDE": "wrong-host"})
+        self.assertEqual(
+            self.harness.result(hostname)["state"], "validation_failure"
+        )
+        self.assertIn("host identity", hostname.stdout)
+
+        repository = self.plan({"GIT_REPOSITORY_ROOT": "/tmp/wrong-repository"})
+        self.assertEqual(
+            self.harness.result(repository)["state"], "validation_failure"
+        )
+        self.assertIn("root identity", repository.stdout)
+
+    def test_plan_refuses_to_overwrite_state_during_an_active_run(self) -> None:
+        self.harness.state.mkdir()
+        status = self.harness.state / "status.json"
+        status.write_text('{"phase":"apply","message":"still running"}\n')
+        lock = self.harness.state / "run.lock"
+        lock.mkdir()
+        (lock / "owner.json").write_text(
+            json.dumps({"pid": os.getpid(), "runId": "active-run"})
+        )
+
+        result = self.plan()
+
+        self.assertEqual(result.returncode, 26)
+        self.assertEqual(self.harness.result(result)["state"], "concurrent_run")
+        self.assertEqual(
+            status.read_text(),
+            '{"phase":"apply","message":"still running"}\n',
+        )
+
+    def test_review_classifier_fails_closed_beyond_bundle_file_limit(self) -> None:
+        planned = self.plan({"GIT_CHANGE_KIND": "many"})
+
+        self.assertEqual(planned.returncode, 21)
+        payload = self.harness.result(planned)
+        self.assertEqual(payload["state"], "review_required")
+        self.assertIn("deployment_or_recovery", payload["details"]["reasons"])
+        self.assertIn("review_bundle_limit_exceeded", payload["details"]["reasons"])
+
     def test_plan_blocks_active_disc_work_before_checkout_changes(self) -> None:
         dashboard = {
             **self.harness.dashboard,
@@ -571,7 +621,12 @@ class DeploymentControllerTests(unittest.TestCase):
             "--allow-active-work",
             environment=active_environment,
         )
-        self.assertEqual(self.harness.result(authorized)["state"], "success")
+        payload = self.harness.result(authorized)
+        self.assertEqual(payload["state"], "success")
+        self.assertEqual(
+            payload["details"]["backup"],
+            {"filename": "rip-dvd-test.sqlite", "sizeBytes": 8},
+        )
 
     def test_plan_rejects_ancestry_and_resource_failures(self) -> None:
         ancestry = self.plan({"GIT_ANCESTRY_FAIL": "1"})

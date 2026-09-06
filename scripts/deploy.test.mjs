@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { classifyReview, sanitizeText } from "./deploy.mjs";
+import { createStreamSanitizer } from "./deploy-support.mjs";
 
 describe("deployment review classifier", () => {
   it("requires review for migrations and schema changes without migrations", () => {
@@ -59,6 +60,16 @@ describe("deployment review classifier", () => {
       "optical_drive_identity_policy",
     ]);
   });
+
+  it("classifies runtime configuration loader changes", () => {
+    assert.deepEqual(
+      classifyReview(
+        [{ status: "M", path: "packages/config/src/index.ts" }],
+        '+const value = requiredValue(environment, "NEW_REQUIRED");',
+      ),
+      ["required_environment"],
+    );
+  });
 });
 
 describe("deployment output privacy", () => {
@@ -66,6 +77,9 @@ describe("deployment output privacy", () => {
     const sanitized = sanitizeText(
       [
         "TOKEN=plain-secret",
+        "PUBLIC_ORIGIN=https://private-host.example",
+        '{"token":"json-secret","password":"hunter2"}',
+        "Authorization: Bearer bearer-secret",
         "https://user:password@example.test/path",
         "/media/movies/Private Title/movie.mkv",
         "/mnt/sandisk/rip-dvd/originals/private.iso",
@@ -75,9 +89,21 @@ describe("deployment output privacy", () => {
       ].join("\n"),
     );
 
-    assert.doesNotMatch(sanitized, /plain-secret|password|Private Title|private\.iso|secret-body/u);
+    assert.doesNotMatch(sanitized, /plain-secret|private-host|json-secret|hunter2|bearer-secret|Private Title|private\.iso|secret-body/u);
     assert.match(sanitized, /TOKEN=\[REDACTED\]/u);
     assert.match(sanitized, /\[REDACTED_MEDIA_PATH\]/u);
     assert.match(sanitized, /\[REDACTED PRIVATE KEY\]/u);
+  });
+
+  it("redacts private keys split across streaming chunks", () => {
+    let output = "";
+    const sanitizer = createStreamSanitizer((text) => { output += text; });
+
+    sanitizer.write("safe before\n-----BEGIN OPENSSH PRI");
+    sanitizer.write("VATE KEY-----\nsecret-");
+    sanitizer.write("body\n-----END OPENSSH PRIVATE KEY-----\nsafe after\n");
+    sanitizer.flush();
+
+    assert.equal(output, "safe before\n[REDACTED PRIVATE KEY]\nsafe after\n");
   });
 });
