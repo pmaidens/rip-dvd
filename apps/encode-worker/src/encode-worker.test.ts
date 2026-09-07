@@ -1118,8 +1118,20 @@ describe("encode worker polling", () => {
     outputCount?: number;
     language?: string;
     foreignAudioSearch?: boolean;
+    emptyForeignAudioSearch?: boolean;
+    emptyCount?: number;
+    scanCount?: number;
     expectedFailure?: string;
   }>([
+    { name: "empty foreign-audio-search with populated sources", foreignAudioSearch: true, emptyForeignAudioSearch: true },
+    { name: "empty foreign-audio-search with empty sources", foreignAudioSearch: true, emptyForeignAudioSearch: true, emptyCount: 2 },
+    { name: "one empty trailer subtitle", scanCount: 1, outputCount: 1, emptyCount: 1 },
+    { name: "empty source with foreign-audio-search", emptyCount: 2, foreignAudioSearch: true },
+    { name: "empty extra track", outputCount: 3, emptyCount: 1, expectedFailure: "expected 2 source VobSub streams, found 3" },
+    { name: "empty missing variant", outputCount: 1, emptyCount: 1, expectedFailure: "expected 2 source VobSub streams, found 1" },
+    { name: "empty incorrect language", emptyCount: 2, language: "fra", expectedFailure: "has language fra, expected eng" },
+    { name: "all empty source variants", emptyCount: 2 },
+    { name: "mixed empty and populated source variants", emptyCount: 1 },
     { name: "current title metadata", legacy: false, chapters: false },
     { name: "legacy count-only metadata", legacy: true, chapters: false },
     { name: "a chapter range", legacy: false, chapters: true },
@@ -1129,7 +1141,7 @@ describe("encode worker polling", () => {
     { name: "incorrect language metadata", language: "fra", expectedFailure: "has language fra, expected eng" },
   ])("validates DVD display variants with $name and one stored declaration", async ({
     legacy, chapters, outputCount = 2, language = "eng",
-    foreignAudioSearch = false, expectedFailure,
+    foreignAudioSearch = false, emptyForeignAudioSearch = false, emptyCount = 0, scanCount = 2, expectedFailure,
   }) => {
     const fixture = createQueuedJob(chapters
       ? { kind: "dvd_chapters", titleNumber: 4, chapterStart: 3, chapterEnd: 5 }
@@ -1145,9 +1157,14 @@ describe("encode worker polling", () => {
       database.close();
     }
     const storedScan = fixture.access.catalog.listDetectedDiscs()[0]!.scanData;
-    const scanCommand = vi.fn(async () => ({ stdout: `JSON Title Set: ${JSON.stringify(dvdVariants)}\n` }));
+    const scan = structuredClone(dvdVariants);
+    scan.TitleList[0]!.SubtitleList = scan.TitleList[0]!.SubtitleList.slice(0, scanCount);
+    const scanCommand = vi.fn(async () => ({ stdout: `JSON Title Set: ${JSON.stringify(scan)}\n` }));
+    const removedIndexes = new Set<number>();
     const outputValidator = createNodeEncodeOutputValidator({
-      repairer: { removeEmptyVobSubStreams: vi.fn(async () => { throw new Error("Unexpected repair"); }) },
+      repairer: { removeEmptyVobSubStreams: vi.fn(async ({ emptyStreamIndexes }) => {
+        for (const index of emptyStreamIndexes) removedIndexes.add(index);
+      }) },
       runMediaTool: async ({ executable, arguments_ }) => {
         if (executable === "ffmpeg") {
           return { stdout: "frame=120\nprogress=end\n", stderr: "" };
@@ -1158,11 +1175,11 @@ describe("encode worker polling", () => {
           stdout: JSON.stringify(selector === "s" ? {
             streams: [
               ...Array.from({ length: outputCount }, (_, index) => ({
-                index: index + 3, codec_name: "dvd_subtitle", nb_read_packets: "10",
+                index: index + 3, codec_name: "dvd_subtitle", nb_read_packets: index < emptyCount ? undefined : "10",
                 disposition: { default: 0, forced: 0 }, tags: { language },
-              })),
-              ...(foreignAudioSearch ? [{
-                index: 2, codec_name: "dvd_subtitle", nb_read_packets: "1",
+              })).filter((stream) => !removedIndexes.has(stream.index)),
+              ...(foreignAudioSearch && !removedIndexes.has(2) ? [{
+                index: 2, codec_name: "dvd_subtitle", nb_read_packets: emptyForeignAudioSearch ? undefined : "1",
                 disposition: { default: 1, forced: 1 }, tags: { language: "eng" },
               }] : []),
             ],

@@ -480,6 +480,7 @@ async function validateSubtitleStreams({
   timeoutMs: number;
 }): Promise<void> {
   let removedEmptyStreams = false;
+  let expectedVobSubStreams = expectations.expectedVobSubStreams;
   while (true) {
     const subtitleProbe = parseProbeResult(
       (
@@ -509,16 +510,14 @@ async function validateSubtitleStreams({
       "subtitle_streams",
     );
     const subtitleStreams = validatedSubtitleStreams(subtitleProbe);
+    const sourceStreams = sourceVobSubStreams(subtitleStreams);
+    validateExpectedVobSubStreams(sourceStreams, expectedVobSubStreams);
     const vobSubIndexes = new Set(
       subtitleStreams
         .filter((stream) => stream.codec_name === "dvd_subtitle")
         .map((stream) => stream.index),
     );
     if (vobSubIndexes.size === 0) {
-      validateExpectedVobSubStreams(
-        sourceVobSubStreams(subtitleStreams),
-        expectations.expectedVobSubStreams,
-      );
       return;
     }
     const packetProbeRun = await runTool(
@@ -559,10 +558,6 @@ async function validateSubtitleStreams({
       vobSubIndexes,
     );
     if (emptyIndexes.size === 0) {
-      validateExpectedVobSubStreams(
-        sourceVobSubStreams(subtitleStreams),
-        expectations.expectedVobSubStreams,
-      );
       return;
     }
     if (removedEmptyStreams) {
@@ -571,6 +566,11 @@ async function validateSubtitleStreams({
         "subtitle cleanup left an empty VobSub stream",
       );
     }
+    // Match the complete declared source list before forgiving any empty tracks.
+    // Filter by source position, since remuxing can renumber stream indexes.
+    expectedVobSubStreams = expectedVobSubStreams?.filter(
+      (_, position) => !emptyIndexes.has(sourceStreams[position]!.index),
+    );
     try {
       await repairer.removeEmptyVobSubStreams({
         emptyStreamIndexes: [...emptyIndexes],
