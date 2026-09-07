@@ -119,9 +119,6 @@ def run_update_script(
         calls = temporary / "calls"
         pull_marker = temporary / "pulled"
         update_state = temporary / "state"
-        if (environment or {}).get("CREATE_CONTROLLER_LOCK") == "1":
-            (update_state / "run.lock").mkdir(parents=True)
-
         git = temporary / "git"
         git.write_text(
             "#!/bin/sh\n"
@@ -159,7 +156,13 @@ def run_update_script(
         write_fake_docker(temporary)
 
         flock = temporary / "flock"
-        flock.write_text("#!/bin/sh\nexit \"${FLOCK_STATUS:-0}\"\n")
+        flock.write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  '-n 8') [ \"${CREATE_CONTROLLER_LOCK:-0}\" != 1 ] ;;\n"
+            "  *) exit \"${FLOCK_STATUS:-0}\" ;;\n"
+            "esac\n"
+        )
         flock.chmod(0o755)
 
         stat = temporary / "stat"

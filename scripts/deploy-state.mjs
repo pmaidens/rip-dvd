@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import {
   mkdirSync,
-  linkSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -169,118 +169,106 @@ export function makeResult(commandName, state, plan, message, details = {}, run 
   };
 }
 
-function processAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+function readLockOwner(path) {
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === "EPERM";
-  }
-}
-
-function concurrentRun(owner = {}) {
-  return new DeploymentError(
-    "concurrent_run",
-    "Another deployment process is running",
-    owner,
-  );
-}
-
-function readLockOwner(lock) {
-  try {
-    try {
-      return JSON.parse(readFileSync(lock, "utf8"));
-    } catch (error) {
-      if (error?.code !== "EISDIR") throw error;
-      return JSON.parse(readFileSync(resolve(lock, "owner.json"), "utf8"));
-    }
+    return JSON.parse(readFileSync(path, "utf8"));
   } catch {
-    return null;
+    return {};
   }
 }
 
-function publishLock(candidate, lock) {
-  linkSync(candidate, lock);
-  try {
-    rmSync(candidate);
-  } catch (error) {
-    rmSync(lock);
-    throw error;
-  }
+function closeLock(child) {
+  return new Promise((resolvePromise) => {
+    if (child.exitCode !== null) {
+      resolvePromise();
+      return;
+    }
+    const timeout = setTimeout(() => child.kill("SIGKILL"), 5_000);
+    child.once("close", () => {
+      clearTimeout(timeout);
+      resolvePromise();
+    });
+    child.stdin.end();
+  });
 }
 
 export function acquireLock(runId) {
   const directory = stateDirectory();
   const lock = resolve(directory, "run.lock");
-  const recovery = resolve(directory, "run.lock.recovery");
-  const candidate = resolve(directory, `run.lock.candidate-${process.pid}-${randomUUID()}`);
+  const ownerPath = resolve(directory, "run.lock.owner.json");
   const owner = {
     pid: process.pid,
     runId,
     startedAt: new Date().toISOString(),
   };
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  writeFileSync(candidate, `${JSON.stringify(owner)}\n`, {
-    encoding: "utf8",
-    flag: "wx",
-    mode: 0o600,
-  });
-
-  let acquired = false;
-  try {
-    publishLock(candidate, lock);
-    acquired = true;
-  } catch (error) {
-    if (error?.code !== "EEXIST") {
-      rmSync(candidate, { force: true });
-      throw error;
-    }
-    const publishedOwner = readLockOwner(lock);
-    if (publishedOwner === null || processAlive(publishedOwner.pid)) {
-      rmSync(candidate);
-      throw concurrentRun(publishedOwner ?? {});
-    }
-    try {
-      mkdirSync(recovery, { mode: 0o700 });
-    } catch (recoveryError) {
-      rmSync(candidate);
-      if (recoveryError?.code === "EEXIST") throw concurrentRun();
-      throw recoveryError;
-    }
-    try {
-      const confirmedOwner = readLockOwner(lock);
-      if (
-        confirmedOwner === null
-        || confirmedOwner.runId !== publishedOwner.runId
-        || confirmedOwner.pid !== publishedOwner.pid
-        || processAlive(confirmedOwner.pid)
-      ) {
-        throw concurrentRun(confirmedOwner ?? {});
-      }
-      rmSync(lock, { recursive: true });
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(
+      "flock",
+      [
+        "--exclusive",
+        "--nonblock",
+        lock,
+        "sh",
+        "-c",
+        "printf 'RIP_DVD_LOCKED\\n'; cat >/dev/null",
+      ],
+      { stdio: ["pipe", "pipe", "ignore"] },
+    );
+    let settled = false;
+    let output = "";
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      child.stdin.end();
+      rejectPromise(error);
+    };
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      fail(new DeploymentError(
+        "validation_failure",
+        "Timed out while acquiring the deployment lock",
+      ));
+    }, 5_000);
+    child.once("error", (error) => fail(new DeploymentError(
+      "validation_failure",
+      "The operating-system deployment lock is unavailable",
+      { error: sanitizeText(error.message, 1000) },
+    )));
+    child.once("close", () => fail(new DeploymentError(
+      "concurrent_run",
+      "Another deployment process is running",
+      readLockOwner(ownerPath),
+    )));
+    child.stdout.on("data", (chunk) => {
+      output += String(chunk);
+      if (!output.includes("RIP_DVD_LOCKED\n") || settled) return;
+      settled = true;
+      clearTimeout(timeout);
       try {
-        publishLock(candidate, lock);
-        acquired = true;
-      } catch (replacementError) {
-        if (replacementError?.code === "EEXIST") {
-          throw concurrentRun(readLockOwner(lock) ?? {});
-        }
-        throw replacementError;
+        atomicWriteJson(ownerPath, owner);
+      } catch (error) {
+        child.stdin.end();
+        rejectPromise(error);
+        return;
       }
-    } finally {
-      if (!acquired) rmSync(candidate, { force: true });
-      rmSync(recovery, { recursive: true });
-    }
-  }
-  return () => {
-    const publishedOwner = readLockOwner(lock);
-    if (publishedOwner?.runId !== runId || publishedOwner?.pid !== process.pid) {
-      throw new DeploymentError(
-        "concurrent_run",
-        "Deployment lock ownership changed before release",
-      );
-    }
-    rmSync(lock, { recursive: true });
-  };
+      resolvePromise(async () => {
+        let ownershipError;
+        const publishedOwner = readLockOwner(ownerPath);
+        if (publishedOwner.runId !== runId || publishedOwner.pid !== process.pid) {
+          ownershipError = new DeploymentError(
+            "concurrent_run",
+            "Deployment lock ownership changed before release",
+          );
+        }
+        try {
+          if (!ownershipError) rmSync(ownerPath);
+        } finally {
+          await closeLock(child);
+        }
+        if (ownershipError) throw ownershipError;
+      });
+    });
+  });
 }

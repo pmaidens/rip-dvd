@@ -38,6 +38,9 @@ export function classifyReview(files, diff) {
   }
   if (paths.some((path) => /(?:^|\/)(?:Dockerfile(?:\.[^/]*)?|[^/]+\.Dockerfile)$/u.test(path))) reasons.add("dockerfile");
   if (paths.some((path) => /(?:^|\/)(?:pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb?)$/u.test(path))) reasons.add("dependency_lockfile");
+  if (paths.some((path) =>
+    /(?:^|\/)package\.json$|^pnpm-workspace\.yaml$|^\.node-version$|^tsconfig(?:\.[^/]*)?\.json$/u.test(path)
+  )) reasons.add("docker_build_input");
   if (paths.some((path) => /^(?:scripts\/(?:update|deploy|compose-|.*recover)|docker\/backup-sqlite|README\.md$)/u.test(path))) reasons.add("deployment_or_recovery");
   if (paths.some((path) => /optical-drive|optical_drives|compose.*hardware/iu.test(path)) || /^[+-].*\bdevices\s*:/gmu.test(diff)) reasons.add("optical_drive_identity_policy");
   if (

@@ -40,7 +40,12 @@ export { classifyReview } from "./deploy-review.mjs";
 
 const SCRIPT_PATH = resolve(REPOSITORY_ROOT, "scripts/deploy.mjs");
 const FULL_SHA = /^[0-9a-f]{40}$/u;
-const POST_QUIESCENCE_STAGES = new Set(["quiescing", "migration", "verification", "complete"]);
+const PRE_QUIESCENCE_STAGES = new Set([
+  "backup",
+  "checkout",
+  "build",
+  "startup_preflight",
+]);
 
 function parseArguments(arguments_) {
   const [subcommand = "help", ...rest] = arguments_;
@@ -110,7 +115,13 @@ function gitPlan(config) {
     "docker",
     "scripts",
     ".env.example",
+    ".node-version",
     "*lock*",
+    "package.json",
+    "apps/*/package.json",
+    "packages/*/package.json",
+    "pnpm-workspace.yaml",
+    "tsconfig*.json",
     "packages/config",
     "packages/data-access/drizzle",
     "packages/data-access/src",
@@ -132,7 +143,7 @@ function planId(oldCommit, targetCommit) {
   return createHash("sha256").update(`${oldCommit}\0${targetCommit}`).digest("hex").slice(0, 24);
 }
 
-function createPlan(options) {
+async function createPlan(options) {
   const config = loadConfig(options.config);
   const directory = stateDirectory();
   mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -147,7 +158,7 @@ function createPlan(options) {
   };
   let release = () => {};
   try {
-    release = acquireLock(run.runId);
+    release = await acquireLock(run.runId);
     run = progress(run, "preflight", "Checking deployment host, checkout, runtime, and resources.");
     assertIdentity(config);
     const resources = checkResources(config);
@@ -223,7 +234,7 @@ function createPlan(options) {
     process.exitCode = exitCodeFor(failure.state);
     return result;
   } finally {
-    release();
+    await release();
   }
 }
 
@@ -277,9 +288,17 @@ function assertFreshPlan(plan, options) {
 }
 
 function updateFailureState(stage) {
-  return POST_QUIESCENCE_STAGES.has(stage)
-    ? "post_migration_failure"
-    : "pre_migration_failure";
+  return PRE_QUIESCENCE_STAGES.has(stage)
+    ? "pre_migration_failure"
+    : "post_migration_failure";
+}
+
+function readUpdateStage(path) {
+  try {
+    return readFileSync(path, "utf8").trim();
+  } catch (error) {
+    return error?.code === "ENOENT" ? "startup_preflight" : "stage_unreadable";
+  }
 }
 
 function readUpdateEvidence(path) {
@@ -312,7 +331,7 @@ async function applyPlan(options) {
   };
   let release = () => {};
   try {
-    release = acquireLock(run.runId);
+    release = await acquireLock(run.runId);
     run = progress(run, "preflight", "Rechecking the frozen deployment plan before changing HEAD.");
     const stagePath = resolve(stateDirectory(), "update-stage");
     const evidencePath = resolve(stateDirectory(), "update-evidence.json");
@@ -336,8 +355,7 @@ async function applyPlan(options) {
       plan.config.storagePaths,
     );
     if (updater.status !== 0) {
-      let stage = "unknown";
-      try { stage = readFileSync(stagePath, "utf8").trim(); } catch {}
+      const stage = readUpdateStage(stagePath);
       const state = updateFailureState(stage);
       throw new DeploymentError(state, state === "post_migration_failure"
         ? "Deployment failed at or after runtime quiescence; controller containment is required."
@@ -368,10 +386,7 @@ async function applyPlan(options) {
     run = progress(run, "success", "Deployment reached the reviewed commit and passed independent verification.");
     return emitResult(makeResult("apply", "success", plan, run.message, { backup, verification }, run));
   } catch (error) {
-    let stage = "unknown";
-    try {
-      stage = readFileSync(resolve(stateDirectory(), "update-stage"), "utf8").trim();
-    } catch {}
+    const stage = readUpdateStage(resolve(stateDirectory(), "update-stage"));
     const failure = error instanceof DeploymentError
       ? error
       : new DeploymentError(
@@ -402,7 +417,7 @@ async function applyPlan(options) {
     process.exitCode = exitCodeFor(failure.state);
     return result;
   } finally {
-    release();
+    await release();
   }
 }
 

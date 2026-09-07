@@ -42,8 +42,7 @@ controller_lock=""
 
 cleanup() {
   if [ "$owns_controller_lock" -eq 1 ]; then
-    rm -f "$controller_lock/owner.json"
-    rmdir "$controller_lock" 2>/dev/null || true
+    rm -f "$controller_lock_owner"
   fi
   rm -f "$snapshot"
 }
@@ -91,12 +90,14 @@ if [ "${RIP_DVD_CONTROLLER_LOCK_HELD:-0}" != 1 ]; then
   esac
   mkdir -p "$controller_state"
   controller_lock="$controller_state/run.lock"
-  if ! mkdir "$controller_lock" 2>/dev/null; then
+  controller_lock_owner="$controller_state/run.lock.owner.json"
+  exec 8>"$controller_lock"
+  if ! flock -n 8; then
     printf 'Another rip-dvd deployment controller is running.\n' >&2
     exit 1
   fi
   owns_controller_lock=1
-  printf '{"pid":%s,"source":"scripts/update.sh"}\n' "$$" > "$controller_lock/owner.json"
+  printf '{"pid":%s,"source":"scripts/update.sh"}\n' "$$" > "$controller_lock_owner"
 fi
 
 if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then

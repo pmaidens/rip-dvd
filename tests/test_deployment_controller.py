@@ -190,7 +190,13 @@ esac
 printf 'docker|%s\n' "$*" >> "$COMMAND_CALL_LOG"
 if [ -n "${DOCKER_FAIL_MATCH:-}" ]; then
   case "$*" in
-    *"$DOCKER_FAIL_MATCH"*) exit "${DOCKER_FAIL_STATUS:-1}" ;;
+    *"$DOCKER_FAIL_MATCH"*)
+      if [ "${CORRUPT_STAGE_ON_FAILURE:-0}" = 1 ]; then
+        rm -f "$RIP_DVD_UPDATE_STAGE_FILE"
+        mkdir "$RIP_DVD_UPDATE_STAGE_FILE"
+      fi
+      exit "${DOCKER_FAIL_STATUS:-1}"
+      ;;
   esac
 fi
 case "$*" in
@@ -275,7 +281,13 @@ printf '/dev/data 10000000 1 8000000 1%% %s\n' "${DATA_MOUNT_PATH:-/mnt/sandisk}
             "  exit \"${SYSTEMD_STATUS:-88}\"\n"
             "fi\n",
         )
-        write_executable(self.commands / "flock", "#!/bin/sh\nexit 0\n")
+        write_executable(
+            self.commands / "flock",
+            "#!/bin/sh\n"
+            "if [ \"${FLOCK_CONTENDED:-0}\" = 1 ]; then exit 1; fi\n"
+            "printf 'RIP_DVD_LOCKED\\n'\n"
+            "cat >/dev/null\n",
+        )
         write_executable(self.commands / "stat", "#!/bin/sh\nprintf '8\n'\n")
         write_executable(
             self.commands / "screen",
@@ -363,13 +375,12 @@ class DeploymentControllerTests(unittest.TestCase):
         self.harness.state.mkdir()
         status = self.harness.state / "status.json"
         status.write_text('{"phase":"apply","message":"still running"}\n')
-        lock = self.harness.state / "run.lock"
-        lock.mkdir()
-        (lock / "owner.json").write_text(
+        owner = self.harness.state / "run.lock.owner.json"
+        owner.write_text(
             json.dumps({"pid": os.getpid(), "runId": "active-run"})
         )
 
-        result = self.plan()
+        result = self.plan({"FLOCK_CONTENDED": "1"})
 
         self.assertEqual(result.returncode, 26)
         self.assertEqual(self.harness.result(result)["state"], "concurrent_run")
@@ -378,16 +389,15 @@ class DeploymentControllerTests(unittest.TestCase):
             '{"phase":"apply","message":"still running"}\n',
         )
 
-    def test_plan_does_not_reclaim_an_ownerless_lock(self) -> None:
+    def test_plan_ignores_stale_owner_metadata_when_os_lock_is_free(self) -> None:
         self.harness.state.mkdir()
-        lock = self.harness.state / "run.lock"
-        lock.mkdir()
+        owner = self.harness.state / "run.lock.owner.json"
+        owner.write_text('{"pid":999999,"runId":"interrupted-recovery"}\n')
 
         result = self.plan()
 
-        self.assertEqual(result.returncode, 26)
-        self.assertEqual(self.harness.result(result)["state"], "concurrent_run")
-        self.assertTrue(lock.is_dir())
+        self.assertNotEqual(result.returncode, 26)
+        self.assertFalse(owner.exists())
 
     def test_review_classifier_fails_closed_beyond_bundle_file_limit(self) -> None:
         planned = self.plan({"GIT_CHANGE_KIND": "many"})
@@ -584,6 +594,7 @@ class DeploymentControllerTests(unittest.TestCase):
                     "compose --profile maintenance run --rm --no-deps migrate"
                 ),
                 "DOCKER_FAIL_STATUS": "73",
+                "CORRUPT_STAGE_ON_FAILURE": "1",
             },
         )
         self.assertEqual(
