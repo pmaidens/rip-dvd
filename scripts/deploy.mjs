@@ -394,6 +394,14 @@ async function applyPlan(options) {
           error.message,
           { stage },
         );
+    if (failure.state === "concurrent_run") {
+      const result = emitResult(
+        makeResult("apply", failure.state, plan, failure.message, failure.details, run),
+        { persist: false },
+      );
+      process.exitCode = exitCodeFor("concurrent_run");
+      return result;
+    }
     if (["post_migration_failure", "verification_failure"].includes(failure.state)) {
       try {
         failure.details = {

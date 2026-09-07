@@ -399,6 +399,25 @@ class DeploymentControllerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 26)
         self.assertFalse(owner.exists())
 
+    def test_apply_contention_does_not_overwrite_active_run_status(self) -> None:
+        self.plan()
+        status = self.harness.state / "status.json"
+        status.write_text('{"phase":"apply","message":"still running"}\n')
+
+        result = self.harness.run(
+            "apply",
+            "--target",
+            TARGET_COMMIT,
+            environment={"FLOCK_CONTENDED": "1"},
+        )
+
+        self.assertEqual(result.returncode, 26)
+        self.assertEqual(self.harness.result(result)["state"], "concurrent_run")
+        self.assertEqual(
+            status.read_text(),
+            '{"phase":"apply","message":"still running"}\n',
+        )
+
     def test_review_classifier_fails_closed_beyond_bundle_file_limit(self) -> None:
         planned = self.plan({"GIT_CHANGE_KIND": "many"})
 
