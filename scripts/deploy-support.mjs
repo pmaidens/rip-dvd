@@ -30,7 +30,9 @@ export function sanitizeText(value, maximum = MAX_COMMAND_BYTES, privatePaths = 
   const redacted = withoutConfiguredPaths
     .replace(/\b([A-Z][A-Z0-9_]*)\s*=\s*[^\s]+/giu, "$1=[REDACTED]")
     .replace(/(["'][^"']*(?:private[_-]?key|password|secret|token|api[_-]?key)[^"']*["']\s*:\s*)(["'])[^"'\r\n]*\2/giu, "$1$2[REDACTED]$2")
+    .replace(/(\bAuthorization\s*:\s*(?:Basic|Bearer)\s+)[^\s]+/giu, "$1[REDACTED]")
     .replace(/(\bBearer\s+)[A-Z0-9._~+/-]+=*/giu, "$1[REDACTED]")
+    .replace(/(\b(?:private[_-]?key|password|secret|token|api[_-]?key)\b\s*:\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/giu, "$1[REDACTED]")
     .replace(/(--?(?:private-key|password|secret|token|key)\s+)[^\s]+/giu, "$1[REDACTED]")
     .replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/giu, "$1[REDACTED]@")
     .replace(/[\t ]+$/gmu, "");

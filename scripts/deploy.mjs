@@ -316,8 +316,8 @@ async function applyPlan(options) {
     run = progress(run, "preflight", "Rechecking the frozen deployment plan before changing HEAD.");
     const stagePath = resolve(stateDirectory(), "update-stage");
     const evidencePath = resolve(stateDirectory(), "update-evidence.json");
-    try { rmSync(stagePath, { force: true }); } catch {}
-    try { rmSync(evidencePath, { force: true }); } catch {}
+    rmSync(stagePath, { force: true });
+    rmSync(evidencePath, { force: true });
     assertFreshPlan(plan, options);
     run = progress(run, "apply", `Applying reviewed commit ${plan.targetCommit}.`);
     const updater = await runStreaming("sh", [resolve(REPOSITORY_ROOT, "scripts/update.sh"), "--target", plan.targetCommit], {

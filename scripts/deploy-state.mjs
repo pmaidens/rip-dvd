@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
+  linkSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -101,7 +102,12 @@ function sanitizeStructured(value, privatePaths) {
   if (Array.isArray(value)) return value.map((entry) => sanitizeStructured(entry, privatePaths));
   if (value && typeof value === "object") {
     return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, sanitizeStructured(entry, privatePaths)]),
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        /^(?:authorization|key|.*(?:credential|password|secret|token)|.*(?:api|private)[_-]?key)$/iu.test(key)
+          ? "[REDACTED]"
+          : sanitizeStructured(entry, privatePaths),
+      ]),
     );
   }
   return value;
@@ -173,26 +179,108 @@ function processAlive(pid) {
   }
 }
 
-export function acquireLock(runId) {
-  const lock = resolve(stateDirectory(), "run.lock");
+function concurrentRun(owner = {}) {
+  return new DeploymentError(
+    "concurrent_run",
+    "Another deployment process is running",
+    owner,
+  );
+}
+
+function readLockOwner(lock) {
   try {
-    mkdirSync(lock, { mode: 0o700 });
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
-    let owner = {};
     try {
-      owner = JSON.parse(readFileSync(resolve(lock, "owner.json"), "utf8"));
-    } catch {}
-    if (processAlive(owner.pid)) {
-      throw new DeploymentError("concurrent_run", "Another deployment process is running", owner);
+      return JSON.parse(readFileSync(lock, "utf8"));
+    } catch (error) {
+      if (error?.code !== "EISDIR") throw error;
+      return JSON.parse(readFileSync(resolve(lock, "owner.json"), "utf8"));
     }
-    rmSync(lock, { recursive: true, force: true });
-    mkdirSync(lock, { mode: 0o700 });
+  } catch {
+    return null;
   }
-  atomicWriteJson(resolve(lock, "owner.json"), {
+}
+
+function publishLock(candidate, lock) {
+  linkSync(candidate, lock);
+  try {
+    rmSync(candidate);
+  } catch (error) {
+    rmSync(lock);
+    throw error;
+  }
+}
+
+export function acquireLock(runId) {
+  const directory = stateDirectory();
+  const lock = resolve(directory, "run.lock");
+  const recovery = resolve(directory, "run.lock.recovery");
+  const candidate = resolve(directory, `run.lock.candidate-${process.pid}-${randomUUID()}`);
+  const owner = {
     pid: process.pid,
     runId,
     startedAt: new Date().toISOString(),
+  };
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  writeFileSync(candidate, `${JSON.stringify(owner)}\n`, {
+    encoding: "utf8",
+    flag: "wx",
+    mode: 0o600,
   });
-  return () => rmSync(lock, { recursive: true, force: true });
+
+  let acquired = false;
+  try {
+    publishLock(candidate, lock);
+    acquired = true;
+  } catch (error) {
+    if (error?.code !== "EEXIST") {
+      rmSync(candidate, { force: true });
+      throw error;
+    }
+    const publishedOwner = readLockOwner(lock);
+    if (publishedOwner === null || processAlive(publishedOwner.pid)) {
+      rmSync(candidate);
+      throw concurrentRun(publishedOwner ?? {});
+    }
+    try {
+      mkdirSync(recovery, { mode: 0o700 });
+    } catch (recoveryError) {
+      rmSync(candidate);
+      if (recoveryError?.code === "EEXIST") throw concurrentRun();
+      throw recoveryError;
+    }
+    try {
+      const confirmedOwner = readLockOwner(lock);
+      if (
+        confirmedOwner === null
+        || confirmedOwner.runId !== publishedOwner.runId
+        || confirmedOwner.pid !== publishedOwner.pid
+        || processAlive(confirmedOwner.pid)
+      ) {
+        throw concurrentRun(confirmedOwner ?? {});
+      }
+      rmSync(lock, { recursive: true });
+      try {
+        publishLock(candidate, lock);
+        acquired = true;
+      } catch (replacementError) {
+        if (replacementError?.code === "EEXIST") {
+          throw concurrentRun(readLockOwner(lock) ?? {});
+        }
+        throw replacementError;
+      }
+    } finally {
+      if (!acquired) rmSync(candidate, { force: true });
+      rmSync(recovery, { recursive: true });
+    }
+  }
+  return () => {
+    const publishedOwner = readLockOwner(lock);
+    if (publishedOwner?.runId !== runId || publishedOwner?.pid !== process.pid) {
+      throw new DeploymentError(
+        "concurrent_run",
+        "Deployment lock ownership changed before release",
+      );
+    }
+    rmSync(lock, { recursive: true });
+  };
 }

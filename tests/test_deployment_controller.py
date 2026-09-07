@@ -32,16 +32,25 @@ class DeploymentControllerHarness:
         self.backups = self.root / "backups"
         self.backups.mkdir()
         self.config = self.root / "deployment.json"
-        self.dashboard = {
-            "opticalDrives": {
-                "items": [
-                    {"id": "drive-a", "displayName": "Drive A", "state": "ready"},
-                    {"id": "drive-b", "displayName": "Drive B", "state": "empty"},
-                ]
-            },
-            "detectedDiscs": {"items": []},
-            "archiveJobs": {"items": []},
-            "encodeJobs": {"items": []},
+        self.readiness = {
+            "schemaVersion": 1,
+            "activeWork": [],
+            "opticalDrives": [
+                {
+                    "id": "drive-a",
+                    "devicePath": "/dev/sr1",
+                    "serialNumber": "SERIAL-A",
+                    "isEnabled": True,
+                    "isPresent": True,
+                },
+                {
+                    "id": "drive-b",
+                    "devicePath": "/dev/sr2",
+                    "serialNumber": "SERIAL-B",
+                    "isEnabled": True,
+                    "isPresent": True,
+                },
+            ],
         }
         self.config.write_text(
             json.dumps(
@@ -54,7 +63,7 @@ class DeploymentControllerHarness:
                     "remote": "origin",
                     "targetRef": "origin/main",
                     "healthUrl": "http://127.0.0.1:3000/api/health",
-                    "dashboardUrl": "http://127.0.0.1:3000/api/dashboard",
+                    "readinessUrl": "http://127.0.0.1:3000/api/deployment-readiness",
                     "storagePaths": ["/", "/mnt/sandisk"],
                     "expectedDrives": [
                         {
@@ -79,7 +88,7 @@ class DeploymentControllerHarness:
             "RIP_DVD_BACKUP_HOST_PATH": str(self.backups),
             "RIP_DVD_DEPLOY_HOSTNAME_OVERRIDE": "test-host",
             "RIP_DVD_DEPLOY_STATE_DIR": str(self.state),
-            "DASHBOARD_JSON": json.dumps(self.dashboard),
+            "READINESS_JSON": json.dumps(self.readiness),
             "LSBLK_JSON": json.dumps(
                 {
                     "blockdevices": [
@@ -233,7 +242,7 @@ esac
             self.commands / "curl",
             """#!/bin/sh
 case "$*" in
-  *'/api/dashboard') printf '%s\n' "$DASHBOARD_JSON" ;;
+  *'/api/deployment-readiness') printf '%s\n' "$READINESS_JSON" ;;
   *'/api/health') printf '{"status":"ok"}\n' ;;
   *) exit 64 ;;
 esac
@@ -369,6 +378,17 @@ class DeploymentControllerTests(unittest.TestCase):
             '{"phase":"apply","message":"still running"}\n',
         )
 
+    def test_plan_does_not_reclaim_an_ownerless_lock(self) -> None:
+        self.harness.state.mkdir()
+        lock = self.harness.state / "run.lock"
+        lock.mkdir()
+
+        result = self.plan()
+
+        self.assertEqual(result.returncode, 26)
+        self.assertEqual(self.harness.result(result)["state"], "concurrent_run")
+        self.assertTrue(lock.is_dir())
+
     def test_review_classifier_fails_closed_beyond_bundle_file_limit(self) -> None:
         planned = self.plan({"GIT_CHANGE_KIND": "many"})
 
@@ -379,27 +399,36 @@ class DeploymentControllerTests(unittest.TestCase):
         self.assertIn("review_bundle_limit_exceeded", payload["details"]["reasons"])
 
     def test_plan_blocks_active_disc_work_before_checkout_changes(self) -> None:
-        dashboard = {
-            **self.harness.dashboard,
-            "encodeJobs": {
-                "items": [{"id": "encode-7", "status": "running"}]
-            },
+        readiness = {
+            **self.harness.readiness,
+            "activeWork": [
+                {"kind": "encode_job", "id": "encode-7", "status": "running"}
+            ],
         }
-        result = self.plan({"DASHBOARD_JSON": json.dumps(dashboard)})
+        result = self.plan({"READINESS_JSON": json.dumps(readiness)})
 
         self.assertEqual(result.returncode, 20)
         payload = self.harness.result(result)
         self.assertEqual(payload["state"], "active_work")
         self.assertFalse(self.harness.head.exists())
 
+    def test_plan_fails_closed_on_invalid_readiness_evidence(self) -> None:
+        result = self.plan({"READINESS_JSON": '{"status":"error"}'})
+
+        self.assertEqual(result.returncode, 10)
+        self.assertEqual(
+            self.harness.result(result)["state"], "validation_failure"
+        )
+        self.assertFalse(self.harness.head.exists())
+
     def test_apply_requires_explicit_active_work_authorization(self) -> None:
-        dashboard = {
-            **self.harness.dashboard,
-            "archiveJobs": {
-                "items": [{"id": "archive-9", "status": "running"}]
-            },
+        readiness = {
+            **self.harness.readiness,
+            "activeWork": [
+                {"kind": "archive_job", "id": "archive-9", "status": "running"}
+            ],
         }
-        active_environment = {"DASHBOARD_JSON": json.dumps(dashboard)}
+        active_environment = {"READINESS_JSON": json.dumps(readiness)}
         self.plan(active_environment)
 
         blocked = self.harness.run(
@@ -436,6 +465,30 @@ class DeploymentControllerTests(unittest.TestCase):
         )
         self.assertIn("build space", shortage.stdout)
 
+    def test_plan_rejects_invalid_resource_configuration_and_evidence(self) -> None:
+        config = json.loads(self.harness.config.read_text())
+        config["storagePaths"] = ["/mnt/sandisk"]
+        self.harness.config.write_text(json.dumps(config))
+        missing_root = self.plan()
+        self.assertEqual(
+            self.harness.result(missing_root)["state"], "validation_failure"
+        )
+
+        config["storagePaths"] = ["/", "/mnt/sandisk"]
+        config["minimumRootFreeBytes"] = -1
+        self.harness.config.write_text(json.dumps(config))
+        negative = self.plan()
+        self.assertEqual(
+            self.harness.result(negative)["state"], "validation_failure"
+        )
+
+        config["minimumRootFreeBytes"] = 1
+        self.harness.config.write_text(json.dumps(config))
+        malformed = self.plan({"ROOT_AVAILABLE_KIB": "not-a-number"})
+        self.assertEqual(
+            self.harness.result(malformed)["state"], "validation_failure"
+        )
+
     def test_plan_requires_unique_expected_drive_identities(self) -> None:
         config = json.loads(self.harness.config.read_text())
         config["expectedDrives"] = []
@@ -454,6 +507,21 @@ class DeploymentControllerTests(unittest.TestCase):
         self.assertEqual(
             self.harness.result(duplicate)["state"], "validation_failure"
         )
+
+    def test_plan_requires_authoritative_drive_id_and_serial_pairs(self) -> None:
+        config = json.loads(self.harness.config.read_text())
+        config["expectedDrives"] = [
+            {"serialNumber": "SERIAL-A", "applicationId": "drive-b"},
+            {"serialNumber": "SERIAL-B", "applicationId": "drive-a"},
+        ]
+        self.harness.config.write_text(json.dumps(config))
+
+        swapped = self.plan()
+
+        self.assertEqual(
+            self.harness.result(swapped)["state"], "validation_failure"
+        )
+        self.assertFalse(self.harness.head.exists())
 
     def test_risky_plan_requires_sha_bound_review_approval(self) -> None:
         planned = self.plan({"GIT_CHANGE_KIND": "risky"})
@@ -583,7 +651,7 @@ class DeploymentControllerTests(unittest.TestCase):
             TARGET_COMMIT,
             environment={
                 "LOG_OUTPUT": (
-                    "fatal TOKEN=secret-value at "
+                    "fatal password: colon-secret Authorization: Basic basic-secret at "
                     "/mnt/sandisk/private/movie.iso"
                 )
             },
@@ -592,7 +660,8 @@ class DeploymentControllerTests(unittest.TestCase):
         self.assertEqual(
             self.harness.result(applied)["state"], "verification_failure"
         )
-        self.assertNotIn("secret-value", applied.stdout)
+        self.assertNotIn("colon-secret", applied.stdout)
+        self.assertNotIn("basic-secret", applied.stdout)
         self.assertNotIn("private/movie.iso", applied.stdout)
 
     def test_verification_commands_fail_closed_and_stop_runtime(self) -> None:

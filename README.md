@@ -485,7 +485,7 @@ Pass a non-secret JSON configuration file to the planner:
   "upstream": "origin/main",
   "targetRef": "origin/main",
   "healthUrl": "http://127.0.0.1:3000/api/health",
-  "dashboardUrl": "http://127.0.0.1:3000/api/dashboard",
+  "readinessUrl": "http://127.0.0.1:3000/api/deployment-readiness",
   "storagePaths": ["/", "/mnt/storage"],
   "expectedDrives": [
     {
@@ -497,8 +497,10 @@ Pass a non-secret JSON configuration file to the planner:
 ```
 
 `expectedDrives` must contain at least one drive, with unique nonempty
-`serialNumber` and `applicationId` values. This keeps physical-drive identity
-verification from succeeding without checking hardware.
+`serialNumber` and `applicationId` values. The readiness endpoint ties those
+pairs to the application's stored device path and the physical drive reported
+inside the Archive Worker. `storagePaths` must include `/`; resource thresholds
+must be nonnegative integer byte counts.
 
 The normal command sequence is:
 

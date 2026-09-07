@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
 import { classifyReview, sanitizeText } from "./deploy.mjs";
 import { buildReviewBundle } from "./deploy-review.mjs";
+import { acquireLock, emitResult } from "./deploy-state.mjs";
 import { createStreamSanitizer, runCheckedSync } from "./deploy-support.mjs";
 
 describe("deployment review classifier", () => {
@@ -119,6 +123,10 @@ describe("deployment output privacy", () => {
         "PUBLIC_ORIGIN=https://private-host.example",
         '{"token":"json-secret","password":"hunter2"}',
         "Authorization: Bearer bearer-secret",
+        "Authorization: Basic basic-secret",
+        "password: colon-password",
+        "token: colon-token",
+        "api-key: colon-api-key",
         "https://user:password@example.test/path",
         "/media/movies/Private Title/movie.mkv",
         "/mnt/sandisk/rip-dvd/originals/private.iso",
@@ -128,7 +136,7 @@ describe("deployment output privacy", () => {
       ].join("\n"),
     );
 
-    assert.doesNotMatch(sanitized, /plain-secret|private-host|json-secret|hunter2|bearer-secret|Private Title|private\.iso|secret-body/u);
+    assert.doesNotMatch(sanitized, /plain-secret|private-host|json-secret|hunter2|bearer-secret|basic-secret|colon-password|colon-token|colon-api-key|Private Title|private\.iso|secret-body/u);
     assert.match(sanitized, /TOKEN=\[REDACTED\]/u);
     assert.match(sanitized, /\[REDACTED_MEDIA_PATH\]/u);
     assert.match(sanitized, /\[REDACTED PRIVATE KEY\]/u);
@@ -146,6 +154,44 @@ describe("deployment output privacy", () => {
     assert.equal(output, "safe before\n[REDACTED PRIVATE KEY]\nsafe after\n");
   });
 
+  it("redacts colon-delimited credentials split across streaming chunks", () => {
+    let output = "";
+    const sanitizer = createStreamSanitizer((text) => { output += text; });
+
+    sanitizer.write("password: stream-");
+    sanitizer.write("secret\nAuthorization: Basic basic-secret\n");
+    sanitizer.flush();
+
+    assert.doesNotMatch(output, /stream-secret|basic-secret/u);
+    assert.match(output, /password: \[REDACTED\]/u);
+  });
+
+  it("redacts sensitive structured-result fields", () => {
+    const directory = mkdtempSync(resolve(tmpdir(), "rip-dvd-deploy-result-"));
+    const previousDirectory = process.env.RIP_DVD_DEPLOY_STATE_DIR;
+    process.env.RIP_DVD_DEPLOY_STATE_DIR = directory;
+    try {
+      emitResult({
+        command: "test",
+        state: "validation_failure",
+        details: {
+          password: "structured-password",
+          nested: { apiToken: "structured-token" },
+        },
+      });
+      const persisted = readFileSync(resolve(directory, "last-result.json"), "utf8");
+      assert.doesNotMatch(persisted, /structured-password|structured-token/u);
+      assert.match(persisted, /\[REDACTED\]/u);
+    } finally {
+      if (previousDirectory === undefined) {
+        delete process.env.RIP_DVD_DEPLOY_STATE_DIR;
+      } else {
+        process.env.RIP_DVD_DEPLOY_STATE_DIR = previousDirectory;
+      }
+      rmSync(directory, { recursive: true });
+    }
+  });
+
   it("redacts private keys and configured paths before truncation", () => {
     const privateKey = [
       "-----BEGIN OPENSSH PRIVATE KEY-----",
@@ -157,5 +203,28 @@ describe("deployment output privacy", () => {
 
     assert.doesNotMatch(sanitized, /sensitive-body|\/srv\/private-library/u);
     assert.match(sanitized, /\[REDACTED_MEDIA_PATH\]/u);
+  });
+});
+
+describe("deployment locking", () => {
+  it("does not release a lock whose ownership changed", () => {
+    const directory = mkdtempSync(resolve(tmpdir(), "rip-dvd-deploy-lock-"));
+    const previousDirectory = process.env.RIP_DVD_DEPLOY_STATE_DIR;
+    process.env.RIP_DVD_DEPLOY_STATE_DIR = directory;
+    try {
+      const release = acquireLock("original-run");
+      const lock = resolve(directory, "run.lock");
+      writeFileSync(lock, '{"pid":999999,"runId":"replacement-run"}\n');
+
+      assert.throws(release, /ownership changed/u);
+      assert.equal(existsSync(lock), true);
+    } finally {
+      if (previousDirectory === undefined) {
+        delete process.env.RIP_DVD_DEPLOY_STATE_DIR;
+      } else {
+        process.env.RIP_DVD_DEPLOY_STATE_DIR = previousDirectory;
+      }
+      rmSync(directory, { recursive: true });
+    }
   });
 });
