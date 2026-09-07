@@ -249,6 +249,22 @@ function parseReadiness(output) {
   return readiness;
 }
 
+export function runtimeReadiness(config) {
+  return parseReadiness(
+    runCheckedSync(
+      "curl",
+      [
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--max-time",
+        "10",
+        config.readinessUrl,
+      ],
+    ).stdout,
+  );
+}
+
 function verifyDrives(config, readiness) {
   const output = runCheckedSync(
     "docker",
@@ -316,9 +332,7 @@ function failedSystemdUnits() {
 export function runtimeSnapshot(config) {
   const curlArguments = ["--fail", "--silent", "--show-error", "--max-time", "10"];
   const health = runCheckedSync("curl", [...curlArguments, config.healthUrl]);
-  const readiness = parseReadiness(
-    runCheckedSync("curl", [...curlArguments, config.readinessUrl]).stdout,
-  );
+  const readiness = runtimeReadiness(config);
   const driveChecks = verifyDrives(config, readiness);
   const failedUnits = failedSystemdUnits();
   return {
@@ -362,9 +376,7 @@ export function independentVerify(plan, expectedCommit) {
   }
   const curlArguments = ["--fail", "--silent", "--show-error", "--max-time", "10"];
   runCheckedSync("curl", [...curlArguments, plan.config.healthUrl]);
-  const readiness = parseReadiness(
-    runCheckedSync("curl", [...curlArguments, plan.config.readinessUrl]).stdout,
-  );
+  const readiness = runtimeReadiness(plan.config);
   const drives = verifyDrives(plan.config, readiness);
   const failedUnitsAfter = failedSystemdUnits();
   const newFailedUnits = failedUnitsAfter.filter((line) => !plan.failedUnitsBefore.includes(line));

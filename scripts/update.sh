@@ -176,6 +176,15 @@ printf 'Building deployment images sequentially while current services remain ru
 sh "$repository_root/scripts/compose-build.sh"
 
 set_stage startup_preflight
+if [ "${RIP_DVD_CONTROLLER_LOCK_HELD:-0}" = 1 ] &&
+  [ "${RIP_DVD_ALLOW_ACTIVE_WORK:-0}" != 1 ]; then
+  deploy_node=${RIP_DVD_DEPLOY_NODE:-node}
+  if ! command -v "$deploy_node" >/dev/null 2>&1; then
+    printf 'Node.js is required for the pre-quiescence active-work check.\n' >&2
+    exit 1
+  fi
+  "$deploy_node" "$repository_root/scripts/deploy-quiescence-check.mjs"
+fi
 printf 'Migrating and starting the updated services...\n'
 sh "$repository_root/scripts/compose-start.sh"
 

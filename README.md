@@ -520,7 +520,8 @@ last result, and rolling 1 MiB sanitized log under the Git path
 with `status` or `screen -r rip-dvd-update`.
 
 Active Disc Inspection, Archive Request, Archive Job, or Encode Job work blocks
-before `HEAD` changes. A human can override that block with
+before `HEAD` changes and is checked again after image builds, immediately
+before runtime quiescence. A human can override both checks with
 `--allow-active-work`. Risky changes produce `review_required`; after
 semantic review, authorize only the frozen SHA with
 `--approve-review REVIEWED_FULL_SHA`. The classifier flags migrations,

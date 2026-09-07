@@ -26,6 +26,7 @@ class DeploymentControllerHarness:
         self.calls = self.root / "calls"
         self.head = self.root / "head"
         self.fetch_count = self.root / "fetch-count"
+        self.readiness_count = self.root / "readiness-count"
         self.runtime_stopped = self.root / "runtime-stopped"
         self.systemctl_count = self.root / "systemctl-count"
         self.state = self.root / "state"
@@ -83,6 +84,7 @@ class DeploymentControllerHarness:
             "DEPLOY_ROOT": str(ROOT),
             "GIT_FETCH_COUNT": str(self.fetch_count),
             "GIT_HEAD_FILE": str(self.head),
+            "READINESS_COUNT": str(self.readiness_count),
             "RUNTIME_STOPPED_MARKER": str(self.runtime_stopped),
             "SYSTEMCTL_COUNT": str(self.systemctl_count),
             "RIP_DVD_BACKUP_HOST_PATH": str(self.backups),
@@ -191,6 +193,9 @@ printf 'docker|%s\n' "$*" >> "$COMMAND_CALL_LOG"
 if [ -n "${DOCKER_FAIL_MATCH:-}" ]; then
   case "$*" in
     *"$DOCKER_FAIL_MATCH"*)
+      if [ "${DELETE_STAGE_ON_FAILURE:-0}" = 1 ]; then
+        rm -f "$RIP_DVD_UPDATE_STAGE_FILE"
+      fi
       if [ "${CORRUPT_STAGE_ON_FAILURE:-0}" = 1 ]; then
         rm -f "$RIP_DVD_UPDATE_STAGE_FILE"
         mkdir "$RIP_DVD_UPDATE_STAGE_FILE"
@@ -248,7 +253,17 @@ esac
             self.commands / "curl",
             """#!/bin/sh
 case "$*" in
-  *'/api/deployment-readiness') printf '%s\n' "$READINESS_JSON" ;;
+  *'/api/deployment-readiness')
+    count=0
+    if [ -f "$READINESS_COUNT" ]; then count="$(sed -n '1p' "$READINESS_COUNT")"; fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$READINESS_COUNT"
+    if [ -n "${LATE_READINESS_AFTER:-}" ] && [ "$count" -ge "$LATE_READINESS_AFTER" ]; then
+      printf '%s\n' "$LATE_READINESS_JSON"
+    else
+      printf '%s\n' "$READINESS_JSON"
+    fi
+    ;;
   *'/api/health') printf '{"status":"ok"}\n' ;;
   *) exit 64 ;;
 esac
@@ -286,6 +301,7 @@ printf '/dev/data 10000000 1 8000000 1%% %s\n' "${DATA_MOUNT_PATH:-/mnt/sandisk}
             "#!/bin/sh\n"
             "if [ \"${FLOCK_CONTENDED:-0}\" = 1 ]; then exit 1; fi\n"
             "printf 'RIP_DVD_LOCKED\\n'\n"
+            "if [ \"${FLOCK_EXIT_AFTER_LOCK:-0}\" = 1 ]; then exit 0; fi\n"
             "cat >/dev/null\n",
         )
         write_executable(self.commands / "stat", "#!/bin/sh\nprintf '8\n'\n")
@@ -418,6 +434,15 @@ class DeploymentControllerTests(unittest.TestCase):
             '{"phase":"apply","message":"still running"}\n',
         )
 
+    def test_plan_fails_when_operating_system_lock_is_lost(self) -> None:
+        result = self.plan({"FLOCK_EXIT_AFTER_LOCK": "1"})
+
+        self.assertEqual(result.returncode, 10)
+        self.assertEqual(
+            self.harness.result(result)["state"], "validation_failure"
+        )
+        self.assertIn("lock was lost", result.stdout)
+
     def test_review_classifier_fails_closed_beyond_bundle_file_limit(self) -> None:
         planned = self.plan({"GIT_CHANGE_KIND": "many"})
 
@@ -482,6 +507,36 @@ class DeploymentControllerTests(unittest.TestCase):
             payload["details"]["backup"],
             {"filename": "rip-dvd-test.sqlite", "sizeBytes": 8},
         )
+
+    def test_apply_rechecks_active_work_before_quiescence(self) -> None:
+        self.plan()
+        late_readiness = {
+            **self.harness.readiness,
+            "activeWork": [
+                {
+                    "kind": "archive_request",
+                    "id": "late-request",
+                    "status": "pending",
+                }
+            ],
+        }
+
+        applied = self.harness.run(
+            "apply",
+            "--target",
+            TARGET_COMMIT,
+            environment={
+                "LATE_READINESS_AFTER": "3",
+                "LATE_READINESS_JSON": json.dumps(late_readiness),
+            },
+        )
+
+        self.assertEqual(
+            self.harness.result(applied)["state"], "pre_migration_failure"
+        )
+        self.assertIn("Active disc work began", applied.stdout)
+        self.assertTrue(self.harness.head.exists())
+        self.assertFalse(self.harness.runtime_stopped.exists())
 
     def test_plan_rejects_ancestry_and_resource_failures(self) -> None:
         ancestry = self.plan({"GIT_ANCESTRY_FAIL": "1"})
@@ -658,6 +713,25 @@ class DeploymentControllerTests(unittest.TestCase):
         payload = self.harness.result(applied)
         self.assertEqual(payload["state"], "post_migration_failure")
         self.assertFalse(payload["details"]["containment"]["verified"])
+
+    def test_missing_stage_after_quiescence_forces_containment(self) -> None:
+        self.plan()
+        applied = self.harness.run(
+            "apply",
+            "--target",
+            TARGET_COMMIT,
+            environment={
+                "DOCKER_FAIL_MATCH": (
+                    "compose --profile maintenance run --rm --no-deps migrate"
+                ),
+                "DOCKER_FAIL_STATUS": "76",
+                "DELETE_STAGE_ON_FAILURE": "1",
+            },
+        )
+
+        payload = self.harness.result(applied)
+        self.assertEqual(payload["state"], "post_migration_failure")
+        self.assertTrue(payload["details"]["containment"]["verified"])
 
     def test_backup_verification_fails_before_head_changes(self) -> None:
         self.plan()

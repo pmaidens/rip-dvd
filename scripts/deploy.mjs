@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -40,6 +40,12 @@ export { classifyReview } from "./deploy-review.mjs";
 
 const SCRIPT_PATH = resolve(REPOSITORY_ROOT, "scripts/deploy.mjs");
 const FULL_SHA = /^[0-9a-f]{40}$/u;
+const NEVER = new Promise(() => {});
+const NO_LOCK = Object.freeze({
+  lost: NEVER,
+  assertHeld: async () => {},
+  release: async () => {},
+});
 const PRE_QUIESCENCE_STAGES = new Set([
   "backup",
   "checkout",
@@ -116,11 +122,15 @@ function gitPlan(config) {
     "scripts",
     ".env.example",
     ".node-version",
+    ".npmrc",
+    ".pnpmfile.cjs",
+    ".yarnrc*",
     "*lock*",
     "package.json",
     "apps/*/package.json",
     "packages/*/package.json",
     "pnpm-workspace.yaml",
+    "pnpmfile.cjs",
     "tsconfig*.json",
     "packages/config",
     "packages/data-access/drizzle",
@@ -156,15 +166,17 @@ async function createPlan(options) {
     startedAt: new Date().toISOString(),
     _privatePaths: config.storagePaths,
   };
-  let release = () => {};
+  let lock = NO_LOCK;
   try {
-    release = await acquireLock(run.runId);
+    lock = await acquireLock(run.runId);
     run = progress(run, "preflight", "Checking deployment host, checkout, runtime, and resources.");
     assertIdentity(config);
     const resources = checkResources(config);
     const runtime = runtimeSnapshot(config);
+    await lock.assertHeld();
     run = progress(run, "fetch", "Fetching the deployment remote and freezing the reviewed target.");
     const git = gitPlan(config);
+    await lock.assertHeld();
     const review = buildReviewBundle(
       git.oldCommit,
       git.targetCommit,
@@ -195,6 +207,7 @@ async function createPlan(options) {
     };
     atomicWriteJson(resolve(directory, "plan.json"), plan);
     atomicWriteJson(resolve(directory, "review-bundle.json"), review);
+    await lock.assertHeld();
     run = {
       ...run,
       planId: plan.planId,
@@ -234,7 +247,7 @@ async function createPlan(options) {
     process.exitCode = exitCodeFor(failure.state);
     return result;
   } finally {
-    await release();
+    await lock.release();
   }
 }
 
@@ -297,7 +310,7 @@ function readUpdateStage(path) {
   try {
     return readFileSync(path, "utf8").trim();
   } catch (error) {
-    return error?.code === "ENOENT" ? "startup_preflight" : "stage_unreadable";
+    return error?.code === "ENOENT" ? "stage_missing" : "stage_unreadable";
   }
 }
 
@@ -329,26 +342,41 @@ async function applyPlan(options) {
     startedAt: new Date().toISOString(),
     _privatePaths: plan.config.storagePaths,
   };
-  let release = () => {};
+  let lock = NO_LOCK;
   try {
-    release = await acquireLock(run.runId);
+    lock = await acquireLock(run.runId);
     run = progress(run, "preflight", "Rechecking the frozen deployment plan before changing HEAD.");
     const stagePath = resolve(stateDirectory(), "update-stage");
     const evidencePath = resolve(stateDirectory(), "update-evidence.json");
-    rmSync(stagePath, { force: true });
+    rmSync(stagePath, { recursive: true, force: true });
+    writeFileSync(stagePath, "startup_preflight\n", { mode: 0o600 });
     rmSync(evidencePath, { force: true });
     assertFreshPlan(plan, options);
+    await lock.assertHeld();
     run = progress(run, "apply", `Applying reviewed commit ${plan.targetCommit}.`);
-    const updater = await runStreaming("sh", [resolve(REPOSITORY_ROOT, "scripts/update.sh"), "--target", plan.targetCommit], {
+    const updateAbort = new AbortController();
+    const updaterPromise = runStreaming("sh", [resolve(REPOSITORY_ROOT, "scripts/update.sh"), "--target", plan.targetCommit], {
       logPath: resolve(stateDirectory(), "run-output.log"),
       privatePaths: plan.config.storagePaths,
+      signal: updateAbort.signal,
       env: {
         ...process.env,
         RIP_DVD_CONTROLLER_LOCK_HELD: "1",
+        RIP_DVD_ALLOW_ACTIVE_WORK: options.allow_active_work ? "1" : "0",
+        RIP_DVD_DEPLOY_NODE: process.execPath,
+        RIP_DVD_DEPLOY_PLAN_FILE: resolve(stateDirectory(), "plan.json"),
         RIP_DVD_UPDATE_RESULT_FILE: evidencePath,
         RIP_DVD_UPDATE_STAGE_FILE: stagePath,
       },
     });
+    const updater = await Promise.race([
+      updaterPromise,
+      lock.lost.then((error) => {
+        updateAbort.abort();
+        throw error;
+      }),
+    ]);
+    await lock.assertHeld();
     appendBoundedLog(
       resolve(stateDirectory(), "deployment.log"),
       `${updater.stdout}\n${updater.stderr}`,
@@ -377,6 +405,7 @@ async function applyPlan(options) {
     let verification;
     try {
       verification = independentVerify(plan, plan.targetCommit);
+      await lock.assertHeld();
     } catch (error) {
       throw new DeploymentError("verification_failure", "Independent deployment verification failed", {
         error: sanitizeText(error.message, 4000),
@@ -425,7 +454,7 @@ async function applyPlan(options) {
     process.exitCode = exitCodeFor(failure.state);
     return result;
   } finally {
-    await release();
+    await lock.release();
   }
 }
 
@@ -466,9 +495,7 @@ function showStatus() {
   const state = isTerminalState(status.phase) ? status.phase : "running";
   let updateStage;
   if (status.phase === "apply") {
-    try {
-      updateStage = readFileSync(resolve(directory, "update-stage"), "utf8").trim();
-    } catch {}
+    updateStage = readUpdateStage(resolve(directory, "update-stage"));
   }
   return emitResult({
     command: "status",

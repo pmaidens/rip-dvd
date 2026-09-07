@@ -33,7 +33,8 @@ export function sanitizeText(value, maximum = MAX_COMMAND_BYTES, privatePaths = 
     .replace(/(\bAuthorization\s*:\s*(?:Basic|Bearer)\s+)[^\r\n]*/giu, "$1[REDACTED]")
     .replace(/(\bBearer\s+)[A-Z0-9._~+/-]+=*/giu, "$1[REDACTED]")
     .replace(/(\b(?:private[_-]?key|password|secret|token|api[_-]?key)\b\s*:\s*)[^\r\n]*/giu, "$1[REDACTED]")
-    .replace(/(--?(?:private-key|password|secret|token|key)\s+)[^\s]+/giu, "$1[REDACTED]")
+    .replace(/(--?(?:private-key|password|secret|token|key)\s+)(["'])[^"'\r\n]*\2/giu, "$1$2[REDACTED]$2")
+    .replace(/(--?(?:private-key|password|secret|token|key)\s+)[^\r\n]*?(?=\s+--?[A-Z][A-Z0-9-]*(?:\s|=)|$)/gimu, "$1[REDACTED]")
     .replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/giu, "$1[REDACTED]@")
     .replace(/[\t ]+$/gmu, "");
   return tailBytes(redacted, maximum);
@@ -110,6 +111,9 @@ export function runStreaming(executable, arguments_, options) {
       env: options.env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    const abort = () => child.kill("SIGTERM");
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
     let stdout = "";
     let stderr = "";
     let log = "";
@@ -156,6 +160,7 @@ export function runStreaming(executable, arguments_, options) {
       resolvePromise({ status: 1, stdout, stderr });
     });
     child.on("close", (status) => {
+      options.signal?.removeEventListener("abort", abort);
       stdoutSanitizer.flush();
       stderrSanitizer.flush();
       flushLog();

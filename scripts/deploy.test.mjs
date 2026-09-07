@@ -90,6 +90,7 @@ describe("deployment review classifier", () => {
       { status: "M", path: "apps/web/package.json" },
       { status: "M", path: "pnpm-workspace.yaml" },
       { status: "M", path: ".node-version" },
+      { status: "M", path: ".npmrc" },
       { status: "M", path: "tsconfig.base.json" },
     ];
 
@@ -140,11 +141,17 @@ describe("deployment review classifier", () => {
       "2".repeat(40),
       [],
       [{ status: "M", path: "package.json" }],
-      "+password: correct horse battery staple\n",
+      [
+        "+password: correct horse battery staple",
+        "+tool --token quoted secret with spaces --verbose",
+      ].join("\n"),
     );
 
     assert.ok(bundle.reasons.includes("docker_build_input"));
-    assert.doesNotMatch(bundle.relevantDiff, /correct horse|battery staple/u);
+    assert.doesNotMatch(
+      bundle.relevantDiff,
+      /correct horse|battery staple|quoted secret|secret with spaces/u,
+    );
   });
 });
 
@@ -160,6 +167,8 @@ describe("deployment output privacy", () => {
         "password: colon password with spaces",
         "token: colon-token",
         "api-key: colon-api-key",
+        "tool --password correct horse battery staple --verbose",
+        "tool --token 'quoted secret with spaces' --verbose",
         "https://user:password@example.test/path",
         "/media/movies/Private Title/movie.mkv",
         "/mnt/sandisk/rip-dvd/originals/private.iso",
@@ -169,7 +178,7 @@ describe("deployment output privacy", () => {
       ].join("\n"),
     );
 
-    assert.doesNotMatch(sanitized, /plain secret|secret with spaces|private-host|json-secret|hunter2|bearer-secret|basic-secret|colon password|password with spaces|colon-token|colon-api-key|Private Title|private\.iso|secret-body/u);
+    assert.doesNotMatch(sanitized, /plain secret|secret with spaces|correct horse|battery staple|quoted secret|private-host|json-secret|hunter2|bearer-secret|basic-secret|colon password|password with spaces|colon-token|colon-api-key|Private Title|private\.iso|secret-body/u);
     assert.match(sanitized, /TOKEN=\[REDACTED\]/u);
     assert.match(sanitized, /\[REDACTED_MEDIA_PATH\]/u);
     assert.match(sanitized, /\[REDACTED PRIVATE KEY\]/u);
@@ -192,7 +201,8 @@ describe("deployment output privacy", () => {
     const sanitizer = createStreamSanitizer((text) => { output += text; });
 
     sanitizer.write("password: stream secret with ");
-    sanitizer.write("spaces\nAuthorization: Basic basic-secret\n");
+    sanitizer.write("spaces\ntool --token stream secret with spaces --verbose\n");
+    sanitizer.write("Authorization: Basic basic-secret\n");
     sanitizer.flush();
 
     assert.doesNotMatch(output, /stream secret|secret with spaces|basic-secret/u);
@@ -252,12 +262,39 @@ describe("deployment locking", () => {
     process.env.RIP_DVD_DEPLOY_STATE_DIR = directory;
     process.env.PATH = `${commands}:${previousPath}`;
     try {
-      const release = await acquireLock("original-run");
+      const lock = await acquireLock("original-run");
       const owner = resolve(directory, "run.lock.owner.json");
       writeFileSync(owner, '{"pid":999999,"runId":"replacement-run"}\n');
 
-      await assert.rejects(release, /ownership changed/u);
+      await assert.rejects(lock.release, /ownership changed/u);
       assert.equal(existsSync(owner), true);
+    } finally {
+      if (previousDirectory === undefined) {
+        delete process.env.RIP_DVD_DEPLOY_STATE_DIR;
+      } else {
+        process.env.RIP_DVD_DEPLOY_STATE_DIR = previousDirectory;
+      }
+      process.env.PATH = previousPath;
+      rmSync(directory, { recursive: true });
+    }
+  });
+
+  it("detects an operating-system lock helper lost after acquisition", async () => {
+    const directory = mkdtempSync(resolve(tmpdir(), "rip-dvd-deploy-lock-loss-"));
+    const previousDirectory = process.env.RIP_DVD_DEPLOY_STATE_DIR;
+    const previousPath = process.env.PATH;
+    const commands = resolve(directory, "commands");
+    mkdirSync(commands);
+    const flock = resolve(commands, "flock");
+    writeFileSync(flock, "#!/bin/sh\nprintf 'RIP_DVD_LOCKED\\n'\n");
+    chmodSync(flock, 0o755);
+    process.env.RIP_DVD_DEPLOY_STATE_DIR = directory;
+    process.env.PATH = `${commands}:${previousPath}`;
+    try {
+      const lock = await acquireLock("lost-run");
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+
+      await assert.rejects(lock.assertHeld, /lock was lost/u);
     } finally {
       if (previousDirectory === undefined) {
         delete process.env.RIP_DVD_DEPLOY_STATE_DIR;
