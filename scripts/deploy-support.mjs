@@ -14,8 +14,8 @@ export function tailBytes(value, maximum = MAX_COMMAND_BYTES) {
   return `[earlier output omitted]\n${buffer.subarray(buffer.length - maximum).toString("utf8")}`;
 }
 
-export function sanitizeText(value, maximum = MAX_COMMAND_BYTES) {
-  const withoutPrivateKeys = tailBytes(value, maximum)
+export function sanitizeText(value, maximum = MAX_COMMAND_BYTES, privatePaths = []) {
+  const withoutPrivateKeys = String(value ?? "")
     .replace(/-----BEGIN [^-]+ PRIVATE KEY-----[\s\S]*?-----END [^-]+ PRIVATE KEY-----/giu, "[REDACTED PRIVATE KEY]")
     .split(/\r?\n/u)
     .map((line) =>
@@ -24,16 +24,20 @@ export function sanitizeText(value, maximum = MAX_COMMAND_BYTES) {
         : line,
     )
     .join("\n");
-  return withoutPrivateKeys
+  const withoutConfiguredPaths = privatePaths
+    .filter((path) => typeof path === "string" && path !== "/" && path.length > 1)
+    .reduce((text, path) => text.replaceAll(path, "[REDACTED_MEDIA_PATH]"), withoutPrivateKeys);
+  const redacted = withoutConfiguredPaths
     .replace(/\b([A-Z][A-Z0-9_]*)\s*=\s*[^\s]+/giu, "$1=[REDACTED]")
     .replace(/(["'][^"']*(?:private[_-]?key|password|secret|token|api[_-]?key)[^"']*["']\s*:\s*)(["'])[^"'\r\n]*\2/giu, "$1$2[REDACTED]$2")
     .replace(/(\bBearer\s+)[A-Z0-9._~+/-]+=*/giu, "$1[REDACTED]")
     .replace(/(--?(?:private-key|password|secret|token|key)\s+)[^\s]+/giu, "$1[REDACTED]")
     .replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/giu, "$1[REDACTED]@")
     .replace(/[\t ]+$/gmu, "");
+  return tailBytes(redacted, maximum);
 }
 
-export function createStreamSanitizer(write) {
+export function createStreamSanitizer(write, privatePaths = []) {
   let pending = "";
   let insidePrivateKey = false;
 
@@ -47,7 +51,7 @@ export function createStreamSanitizer(write) {
       write("[REDACTED PRIVATE KEY]\n");
       return;
     }
-    write(sanitizeText(line));
+    write(sanitizeText(line, MAX_COMMAND_BYTES, privatePaths));
   };
 
   return {
@@ -75,16 +79,26 @@ export function runCheckedSync(executable, arguments_, options = {}) {
     maxBuffer: MAX_COMMAND_BYTES * 2,
     stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
   });
-  const stdout = tailBytes(result.stdout);
-  const stderr = sanitizeText(result.stderr);
+  const rawStdout = String(result.stdout ?? "");
+  const rawStderr = String(result.stderr ?? "");
+  const stdoutTruncated = Buffer.byteLength(rawStdout) > MAX_COMMAND_BYTES;
+  const stderrTruncated = Buffer.byteLength(rawStderr) > MAX_COMMAND_BYTES;
+  const stdout = tailBytes(rawStdout);
+  const stderr = sanitizeText(rawStderr);
   if (result.error || result.status !== 0) {
     if (options.allowFailure) {
-      return { status: result.status ?? 1, stdout, stderr };
+      return {
+        status: result.status ?? 1,
+        stdout,
+        stderr,
+        stdoutTruncated,
+        stderrTruncated,
+      };
     }
     const reason = result.error?.message ?? stderr.trim() ?? `exit ${result.status}`;
     throw new Error(`${executable} failed: ${reason}`);
   }
-  return { status: 0, stdout, stderr };
+  return { status: 0, stdout, stderr, stdoutTruncated, stderrTruncated };
 }
 
 export function runStreaming(executable, arguments_, options) {
@@ -122,14 +136,20 @@ export function runStreaming(executable, arguments_, options) {
       log = tailBytes(`${log}${text}`, MAX_LOG_BYTES);
       if (!flushTimer) flushTimer = setTimeout(flushLog, 250);
     };
-    const stdoutSanitizer = createStreamSanitizer((text) => record("stdout", text));
-    const stderrSanitizer = createStreamSanitizer((text) => record("stderr", text));
+    const stdoutSanitizer = createStreamSanitizer(
+      (text) => record("stdout", text),
+      options.privatePaths,
+    );
+    const stderrSanitizer = createStreamSanitizer(
+      (text) => record("stderr", text),
+      options.privatePaths,
+    );
     child.stdout.on("data", (chunk) => stdoutSanitizer.write(chunk));
     child.stderr.on("data", (chunk) => stderrSanitizer.write(chunk));
     child.on("error", (error) => {
       stdoutSanitizer.flush();
       stderrSanitizer.flush();
-      record("stderr", sanitizeText(error.message, 2000));
+      record("stderr", sanitizeText(error.message, 2000, options.privatePaths));
       flushLog();
       resolvePromise({ status: 1, stdout, stderr });
     });

@@ -1,138 +1,46 @@
 #!/usr/bin/env node
 
 import { createHash, randomUUID } from "node:crypto";
-import {
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { hostname } from "node:os";
-import { dirname, resolve } from "node:path";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { buildReviewBundle, parseNameStatus } from "./deploy-review.mjs";
 import {
-  MAX_LOG_BYTES,
+  assertIdentity,
+  checkResources,
+  independentVerify,
+  loadConfig,
+  runtimeSnapshot,
+  stopAndVerifyRuntime,
+} from "./deploy-runtime.mjs";
+import {
+  RESULT_SCHEMA_VERSION,
+  DeploymentError,
+  acquireLock,
+  appendBoundedLog,
+  atomicWriteJson,
+  emitResult,
+  exitCodeFor,
+  isTerminalState,
+  makeResult,
+  progress,
+  readJson,
+  stateDirectory,
+} from "./deploy-state.mjs";
+import {
   REPOSITORY_ROOT,
   runCheckedSync,
   runStreaming,
   sanitizeText,
-  tailBytes,
 } from "./deploy-support.mjs";
-import { buildReviewBundle, parseNameStatus } from "./deploy-review.mjs";
 
 export { sanitizeText } from "./deploy-support.mjs";
 export { classifyReview } from "./deploy-review.mjs";
 
 const SCRIPT_PATH = resolve(REPOSITORY_ROOT, "scripts/deploy.mjs");
-const RESULT_PREFIX = "RIP_DVD_RESULT_JSON=";
-const RESULT_SCHEMA_VERSION = 1;
-const MAX_RESULT_BYTES = 65_536;
 const FULL_SHA = /^[0-9a-f]{40}$/u;
-const TERMINAL_STATES = new Set([
-  "active_work",
-  "already_current",
-  "concurrent_run",
-  "pre_migration_failure",
-  "post_migration_failure",
-  "planned",
-  "review_required",
-  "stale_plan",
-  "success",
-  "validation_failure",
-  "verification_failure",
-]);
-const EXIT_CODES = {
-  active_work: 20,
-  concurrent_run: 26,
-  post_migration_failure: 24,
-  pre_migration_failure: 23,
-  review_required: 21,
-  stale_plan: 22,
-  validation_failure: 10,
-  verification_failure: 25,
-};
-const POST_MIGRATION_STAGES = new Set(["migration", "verification", "complete"]);
-
-class DeploymentError extends Error {
-  constructor(state, message, details = {}) {
-    super(message);
-    this.name = "DeploymentError";
-    this.state = state;
-    this.details = details;
-  }
-}
-
-function stateDirectory() {
-  if (process.env.RIP_DVD_DEPLOY_STATE_DIR) {
-    return resolve(process.env.RIP_DVD_DEPLOY_STATE_DIR);
-  }
-  const path = runCheckedSync("git", ["rev-parse", "--git-path", "rip-dvd-deployment"]).stdout.trim();
-  return resolve(REPOSITORY_ROOT, path);
-}
-
-function atomicWriteJson(path, value) {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, {
-    encoding: "utf8",
-    flag: "wx",
-    mode: 0o600,
-  });
-  renameSync(temporary, path);
-}
-
-function readJson(path, label) {
-  try {
-    return JSON.parse(readFileSync(path, "utf8"));
-  } catch (error) {
-    throw new DeploymentError("validation_failure", `${label} is unavailable or invalid`, {
-      error: sanitizeText(error.message, 1000),
-    });
-  }
-}
-
-function appendBoundedLog(path, line) {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  let current = "";
-  try {
-    current = readFileSync(path, "utf8");
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
-  const next = tailBytes(`${current}${new Date().toISOString()} ${sanitizeText(line, 32_768)}\n`, MAX_LOG_BYTES);
-  writeFileSync(path, next, { encoding: "utf8", mode: 0o600 });
-}
-
-function compactResult(result) {
-  const serialized = JSON.stringify(result);
-  if (Buffer.byteLength(serialized) <= MAX_RESULT_BYTES) return result;
-  return {
-    schemaVersion: RESULT_SCHEMA_VERSION,
-    command: result.command,
-    state: result.state,
-    phase: result.phase,
-    runId: result.runId,
-    oldCommit: result.oldCommit,
-    targetCommit: result.targetCommit,
-    message: sanitizeText(result.message, 2000),
-    details: { truncated: true },
-  };
-}
-
-function emitResult(result, { persist = true } = {}) {
-  const normalized = compactResult({
-    schemaVersion: RESULT_SCHEMA_VERSION,
-    ...result,
-  });
-  if (persist) {
-    const directory = stateDirectory();
-    atomicWriteJson(resolve(directory, "last-result.json"), normalized);
-  }
-  process.stdout.write(`${RESULT_PREFIX}${JSON.stringify(normalized)}\n`);
-  return normalized;
-}
+const POST_QUIESCENCE_STAGES = new Set(["quiescing", "migration", "verification", "complete"]);
 
 function parseArguments(arguments_) {
   const [subcommand = "help", ...rest] = arguments_;
@@ -169,213 +77,6 @@ function usage() {
   ].join("\n");
 }
 
-function loadConfig(path) {
-  let source;
-  if (path === "-") {
-    source = readFileSync(0, "utf8");
-  } else if (typeof path === "string") {
-    source = readFileSync(resolve(path), "utf8");
-  } else {
-    throw new DeploymentError("validation_failure", "plan requires --config PATH or --config -");
-  }
-  let raw;
-  try {
-    raw = JSON.parse(source);
-  } catch {
-    throw new DeploymentError("validation_failure", "Deployment configuration is not valid JSON");
-  }
-  const requiredStrings = [
-    "expectedHostname",
-    "expectedRepositoryRoot",
-    "expectedRemoteUrl",
-  ];
-  for (const key of requiredStrings) {
-    if (typeof raw[key] !== "string" || raw[key].length === 0) {
-      throw new DeploymentError("validation_failure", `Deployment configuration requires ${key}`);
-    }
-  }
-  const expectedDrives = raw.expectedDrives ?? [];
-  if (!Array.isArray(expectedDrives)) {
-    throw new DeploymentError("validation_failure", "expectedDrives must be an array");
-  }
-  for (const drive of expectedDrives) {
-    if (!drive || typeof drive.serialNumber !== "string" || typeof drive.applicationId !== "string") {
-      throw new DeploymentError("validation_failure", "Each expected drive requires serialNumber and applicationId");
-    }
-  }
-  return {
-    expectedHostname: raw.expectedHostname,
-    expectedRepositoryRoot: resolve(raw.expectedRepositoryRoot),
-    expectedRemoteUrl: raw.expectedRemoteUrl,
-    branch: raw.branch ?? "main",
-    upstream: raw.upstream ?? "origin/main",
-    remote: raw.remote ?? "origin",
-    targetRef: raw.targetRef ?? "origin/main",
-    healthUrl: raw.healthUrl ?? "http://127.0.0.1:3000/api/health",
-    dashboardUrl: raw.dashboardUrl ?? "http://127.0.0.1:3000/api/dashboard",
-    storagePaths: raw.storagePaths ?? ["/", "/mnt/sandisk"],
-    minimumRootFreeBytes: raw.minimumRootFreeBytes ?? 4 * 1024 ** 3,
-    minimumMemoryAvailableBytes: raw.minimumMemoryAvailableBytes ?? 512 * 1024 ** 2,
-    expectedDrives,
-  };
-}
-
-function normalizedRemote(value) {
-  return value.trim().replace(/^git@github\.com:/u, "https://github.com/").replace(/\.git$/u, "");
-}
-
-function assertIdentity(config) {
-  const actualHost = process.env.RIP_DVD_DEPLOY_HOSTNAME_OVERRIDE ?? hostname();
-  if (actualHost !== config.expectedHostname) {
-    throw new DeploymentError("validation_failure", "Deployment host identity does not match", {
-      expected: config.expectedHostname,
-      actual: actualHost,
-    });
-  }
-  const actualRoot = resolve(runCheckedSync("git", ["rev-parse", "--show-toplevel"]).stdout.trim());
-  if (actualRoot !== config.expectedRepositoryRoot || actualRoot !== REPOSITORY_ROOT) {
-    throw new DeploymentError("validation_failure", "Repository root identity does not match", {
-      expected: config.expectedRepositoryRoot,
-      actual: actualRoot,
-    });
-  }
-  const remote = runCheckedSync("git", ["remote", "get-url", config.remote]).stdout.trim();
-  if (normalizedRemote(remote) !== normalizedRemote(config.expectedRemoteUrl)) {
-    throw new DeploymentError("validation_failure", "Repository remote identity does not match", {
-      expected: normalizedRemote(config.expectedRemoteUrl),
-      actual: normalizedRemote(remote),
-    });
-  }
-  const branch = runCheckedSync("git", ["branch", "--show-current"]).stdout.trim();
-  const upstream = runCheckedSync("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).stdout.trim();
-  if (branch !== config.branch || upstream !== config.upstream) {
-    throw new DeploymentError("validation_failure", "Branch or upstream does not match", {
-      expectedBranch: config.branch,
-      actualBranch: branch,
-      expectedUpstream: config.upstream,
-      actualUpstream: upstream,
-    });
-  }
-  const dirty = runCheckedSync("git", ["status", "--porcelain", "--untracked-files=normal"]).stdout;
-  if (dirty.length > 0) {
-    throw new DeploymentError("validation_failure", "Checkout has local changes", {
-      paths: sanitizeText(dirty, 32_768).trim().split(/\r?\n/u),
-    });
-  }
-  runCheckedSync("docker", ["compose", "config", "--quiet"]);
-}
-
-function parseMemoryAvailable(output) {
-  const line = output.split(/\r?\n/u).find((candidate) => candidate.trimStart().startsWith("Mem:"));
-  const fields = line?.trim().split(/\s+/u) ?? [];
-  const available = Number(fields[6]);
-  if (!Number.isFinite(available)) throw new Error("free did not report available memory");
-  return available;
-}
-
-function parseDiskRows(output) {
-  const lines = output.trim().split(/\r?\n/u).slice(1);
-  return lines.map((line) => {
-    const fields = line.trim().split(/\s+/u);
-    return {
-      filesystem: fields[0],
-      availableBytes: Number(fields[3]) * 1024,
-      usedPercent: fields[4],
-      path: fields.at(-1),
-    };
-  });
-}
-
-function checkResources(config) {
-  const memoryAvailableBytes = parseMemoryAvailable(runCheckedSync("free", ["--bytes"]).stdout);
-  const disks = parseDiskRows(runCheckedSync("df", ["-Pk", ...config.storagePaths]).stdout);
-  const root = disks.find((disk) => disk.path === "/") ?? disks[0];
-  if (!root || root.availableBytes < config.minimumRootFreeBytes) {
-    throw new DeploymentError("validation_failure", "Root filesystem lacks deployment build space", {
-      requiredBytes: config.minimumRootFreeBytes,
-      availableBytes: root?.availableBytes ?? null,
-    });
-  }
-  if (memoryAvailableBytes < config.minimumMemoryAvailableBytes) {
-    throw new DeploymentError("validation_failure", "Host lacks available memory for a deployment build", {
-      requiredBytes: config.minimumMemoryAvailableBytes,
-      availableBytes: memoryAvailableBytes,
-    });
-  }
-  return { memoryAvailableBytes, disks };
-}
-
-function parseDashboard(output) {
-  let dashboard;
-  try {
-    dashboard = JSON.parse(output);
-  } catch {
-    throw new Error("Dashboard returned malformed JSON");
-  }
-  const drives = (dashboard.opticalDrives?.items ?? []).map((drive) => ({
-    id: String(drive.id ?? ""),
-    displayName: String(drive.displayName ?? ""),
-    state: String(drive.state ?? ""),
-    inspection: drive.currentInspection
-      ? { id: String(drive.currentInspection.id ?? ""), status: String(drive.currentInspection.status ?? "") }
-      : null,
-  }));
-  const discs = (dashboard.detectedDiscs?.items ?? []).map((disc) => ({
-    id: String(disc.id ?? ""),
-    archiveRequest: disc.archiveRequest
-      ? { id: String(disc.archiveRequest.id ?? ""), status: String(disc.archiveRequest.status ?? "") }
-      : null,
-  }));
-  const archiveJobs = (dashboard.archiveJobs?.items ?? []).map((job) => ({
-    id: String(job.id ?? ""),
-    status: String(job.status ?? ""),
-  }));
-  const encodeJobs = (dashboard.encodeJobs?.items ?? []).map((job) => ({
-    id: String(job.id ?? ""),
-    status: String(job.status ?? ""),
-  }));
-  return { drives, discs, archiveJobs, encodeJobs };
-}
-
-function activeWork(dashboard) {
-  const active = [];
-  for (const drive of dashboard.drives) {
-    if (drive.inspection?.status === "running") active.push({ kind: "disc_inspection", driveId: drive.id, ...drive.inspection });
-  }
-  for (const disc of dashboard.discs) {
-    if (["pending", "running", "cancellation_requested"].includes(disc.archiveRequest?.status)) {
-      active.push({ kind: "archive_request", discId: disc.id, ...disc.archiveRequest });
-    }
-  }
-  for (const job of dashboard.archiveJobs) {
-    if (job.status === "running") active.push({ kind: "archive_job", ...job });
-  }
-  for (const job of dashboard.encodeJobs) {
-    if (["queued", "running", "cancellation_requested"].includes(job.status)) active.push({ kind: "encode_job", ...job });
-  }
-  return active;
-}
-
-function runtimeSnapshot(config) {
-  const health = runCheckedSync("curl", ["--fail", "--silent", "--show-error", "--max-time", "10", config.healthUrl]);
-  const dashboard = parseDashboard(runCheckedSync("curl", ["--fail", "--silent", "--show-error", "--max-time", "10", config.dashboardUrl]).stdout);
-  const driveChecks = verifyDrives(config, dashboard);
-  const failedUnits = runCheckedSync("systemctl", ["--failed", "--no-legend", "--plain"], { allowFailure: true }).stdout
-    .trim()
-    .split(/\r?\n/u)
-    .filter(Boolean)
-    .map((line) => sanitizeText(line, 1000));
-  return {
-    health: sanitizeText(health.stdout, 2000).trim(),
-    dashboard,
-    driveChecks,
-    activeWork: activeWork(dashboard),
-    compose: sanitizeText(runCheckedSync("docker", ["compose", "ps"]).stdout, 16_384),
-    dockerDiskUsage: sanitizeText(runCheckedSync("docker", ["system", "df"]).stdout, 16_384),
-    failedUnits,
-  };
-}
-
 function gitPlan(config) {
   const oldCommit = runCheckedSync("git", ["rev-parse", "HEAD"]).stdout.trim();
   runCheckedSync("git", ["fetch", "--prune", config.remote]);
@@ -387,13 +88,18 @@ function gitPlan(config) {
   if (ancestry.status !== 0) {
     throw new DeploymentError("validation_failure", "Current commit is not an ancestor of the deployment target", { oldCommit, targetCommit });
   }
-  const commitOutput = runCheckedSync("git", ["log", "--format=%H%x09%s", "--no-merges", `${oldCommit}..${targetCommit}`]).stdout;
+  const commitResult = runCheckedSync("git", ["log", "--format=%H%x09%s", "--no-merges", `${oldCommit}..${targetCommit}`]);
+  const commitOutput = commitResult.stdout;
   const commits = commitOutput.trim().split(/\r?\n/u).filter(Boolean).map((line) => {
     const [sha, ...subject] = line.split("\t");
-    return { sha, subject: sanitizeText(subject.join("\t"), 1000) };
+    return {
+      sha,
+      subject: sanitizeText(subject.join("\t"), 1000, config.storagePaths),
+    };
   });
-  const files = parseNameStatus(runCheckedSync("git", ["diff", "--name-status", "-z", `${oldCommit}..${targetCommit}`]).stdout);
-  const diff = runCheckedSync("git", [
+  const filesResult = runCheckedSync("git", ["diff", "--name-status", "-z", `${oldCommit}..${targetCommit}`]);
+  const files = parseNameStatus(filesResult.stdout);
+  const diffResult = runCheckedSync("git", [
     "diff",
     "--no-ext-diff",
     "--unified=40",
@@ -405,37 +111,25 @@ function gitPlan(config) {
     "scripts",
     ".env.example",
     "*lock*",
+    "packages/config",
     "packages/data-access/drizzle",
     "packages/data-access/src",
-  ]).stdout;
-  return { oldCommit, targetCommit, commits, files, diff };
+  ]);
+  return {
+    oldCommit,
+    targetCommit,
+    commits,
+    files,
+    diff: diffResult.stdout,
+    inventoryIncomplete:
+      commitResult.stdoutTruncated
+      || filesResult.stdoutTruncated
+      || diffResult.stdoutTruncated,
+  };
 }
 
 function planId(oldCommit, targetCommit) {
   return createHash("sha256").update(`${oldCommit}\0${targetCommit}`).digest("hex").slice(0, 24);
-}
-
-function progress(run, phase, message, details = {}) {
-  const directory = stateDirectory();
-  const next = { ...run, phase, message, details, updatedAt: new Date().toISOString() };
-  atomicWriteJson(resolve(directory, "status.json"), next);
-  appendBoundedLog(resolve(directory, "deployment.log"), `${phase}: ${message}`);
-  process.stdout.write(`${message}\n`);
-  return next;
-}
-
-function makeResult(commandName, state, plan, message, details = {}, run = {}) {
-  return {
-    command: commandName,
-    state,
-    phase: run.phase ?? state,
-    runId: run.runId,
-    planId: plan?.planId,
-    oldCommit: plan?.oldCommit,
-    targetCommit: plan?.targetCommit,
-    message,
-    details,
-  };
 }
 
 function createPlan(options) {
@@ -449,6 +143,7 @@ function createPlan(options) {
     phase: "preflight",
     runId: randomUUID(),
     startedAt: new Date().toISOString(),
+    _privatePaths: config.storagePaths,
   };
   let release = () => {};
   try {
@@ -459,7 +154,17 @@ function createPlan(options) {
     const runtime = runtimeSnapshot(config);
     run = progress(run, "fetch", "Fetching the deployment remote and freezing the reviewed target.");
     const git = gitPlan(config);
-    const review = buildReviewBundle(git.oldCommit, git.targetCommit, git.commits, git.files, git.diff);
+    const review = buildReviewBundle(
+      git.oldCommit,
+      git.targetCommit,
+      git.commits,
+      git.files,
+      git.diff,
+      {
+        inventoryIncomplete: git.inventoryIncomplete,
+        privatePaths: config.storagePaths,
+      },
+    );
     const plan = {
       schemaVersion: 1,
       planId: planId(git.oldCommit, git.targetCommit),
@@ -492,13 +197,13 @@ function createPlan(options) {
     if (runtime.activeWork.length > 0) {
       run = progress(run, "active_work", "Active disc work blocks deployment before checkout changes.", { activeWork: runtime.activeWork });
       const result = emitResult(makeResult("plan", "active_work", plan, run.message, { activeWork: runtime.activeWork, reviewRequired: review.reviewRequired }, run));
-      process.exitCode = EXIT_CODES.active_work;
+      process.exitCode = exitCodeFor("active_work");
       return result;
     }
     if (review.reviewRequired) {
       run = progress(run, "review_required", "The frozen commit range requires human semantic review.", { reasons: review.reasons });
       const result = emitResult(makeResult("plan", "review_required", plan, run.message, { reasons: review.reasons, reviewBundle: resolve(directory, "review-bundle.json") }, run));
-      process.exitCode = EXIT_CODES.review_required;
+      process.exitCode = exitCodeFor("review_required");
       return result;
     }
     run = progress(run, "planned", "Deployment plan is ready for the frozen target.");
@@ -510,12 +215,12 @@ function createPlan(options) {
         makeResult("plan", failure.state, undefined, failure.message, failure.details, run),
         { persist: false },
       );
-      process.exitCode = EXIT_CODES.concurrent_run;
+      process.exitCode = exitCodeFor("concurrent_run");
       return result;
     }
     run = progress(run, failure.state, failure.message, failure.details);
     const result = emitResult(makeResult("plan", failure.state, undefined, failure.message, failure.details, run));
-    process.exitCode = EXIT_CODES[failure.state] ?? 1;
+    process.exitCode = exitCodeFor(failure.state);
     return result;
   } finally {
     release();
@@ -524,36 +229,6 @@ function createPlan(options) {
 
 function loadPlan() {
   return readJson(resolve(stateDirectory(), "plan.json"), "Deployment plan");
-}
-
-function processAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === "EPERM";
-  }
-}
-
-function acquireLock(runId) {
-  const lock = resolve(stateDirectory(), "run.lock");
-  try {
-    mkdirSync(lock, { mode: 0o700 });
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
-    let owner = {};
-    try {
-      owner = JSON.parse(readFileSync(resolve(lock, "owner.json"), "utf8"));
-    } catch {}
-    if (processAlive(owner.pid)) {
-      throw new DeploymentError("concurrent_run", "Another deployment process is running", owner);
-    }
-    rmSync(lock, { recursive: true, force: true });
-    mkdirSync(lock, { mode: 0o700 });
-  }
-  atomicWriteJson(resolve(lock, "owner.json"), { pid: process.pid, runId, startedAt: new Date().toISOString() });
-  return () => rmSync(lock, { recursive: true, force: true });
 }
 
 function assertFreshPlan(plan, options) {
@@ -602,7 +277,7 @@ function assertFreshPlan(plan, options) {
 }
 
 function updateFailureState(stage) {
-  return POST_MIGRATION_STAGES.has(stage)
+  return POST_QUIESCENCE_STAGES.has(stage)
     ? "post_migration_failure"
     : "pre_migration_failure";
 }
@@ -621,61 +296,6 @@ function readUpdateEvidence(path) {
   return evidence;
 }
 
-function verifyDrives(config, dashboard) {
-  const output = runCheckedSync("docker", ["compose", "exec", "-T", "archive-worker", "lsblk", "--json", "--output", "PATH,TYPE,MODEL,SERIAL"]).stdout;
-  let parsed;
-  try {
-    parsed = JSON.parse(output);
-  } catch {
-    throw new Error("archive-worker lsblk returned malformed JSON");
-  }
-  const physical = (parsed.blockdevices ?? []).filter((device) => device.type === "rom");
-  const checks = config.expectedDrives.map((expected) => {
-    const hardware = physical.filter((device) => String(device.serial ?? "").trim() === expected.serialNumber);
-    const application = dashboard.drives.filter((drive) => drive.id === expected.applicationId);
-    return {
-      serialNumber: expected.serialNumber,
-      applicationId: expected.applicationId,
-      hardwareMatches: hardware.length,
-      applicationMatches: application.length,
-      applicationState: application[0]?.state ?? null,
-    };
-  });
-  const mismatch = checks.find((check) => check.hardwareMatches !== 1 || check.applicationMatches !== 1 || ["missing", "disabled"].includes(check.applicationState));
-  if (mismatch) throw new Error(`Physical optical-drive identity check failed for ${mismatch.serialNumber}`);
-  return checks;
-}
-
-function independentVerify(plan, expectedCommit) {
-  const head = runCheckedSync("git", ["rev-parse", "HEAD"]).stdout.trim();
-  const dirty = runCheckedSync("git", ["status", "--porcelain", "--untracked-files=normal"]).stdout;
-  if (head !== expectedCommit || dirty.length > 0) throw new Error("Checkout verification failed after deployment");
-  runCheckedSync("docker", ["compose", "config", "--quiet"]);
-  const web = runCheckedSync("docker", ["compose", "ps", "--quiet", "web"]).stdout.trim();
-  if (!web) throw new Error("Web service container is unavailable");
-  const webStatus = runCheckedSync("docker", ["inspect", "--format", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}", web]).stdout.trim();
-  if (webStatus !== "healthy") throw new Error(`Web service is ${webStatus || "unknown"}`);
-  const services = new Set(runCheckedSync("docker", ["compose", "ps", "--status", "running", "--services"]).stdout.trim().split(/\r?\n/u));
-  for (const service of ["web", "archive-worker", "encode-worker"]) {
-    if (!services.has(service)) throw new Error(`Runtime service is not running: ${service}`);
-  }
-  runCheckedSync("curl", ["--fail", "--silent", "--show-error", "--max-time", "10", plan.config.healthUrl]);
-  const dashboard = parseDashboard(runCheckedSync("curl", ["--fail", "--silent", "--show-error", "--max-time", "10", plan.config.dashboardUrl]).stdout);
-  const drives = verifyDrives(plan.config, dashboard);
-  const failedUnitsAfter = runCheckedSync("systemctl", ["--failed", "--no-legend", "--plain"], { allowFailure: true }).stdout.trim().split(/\r?\n/u).filter(Boolean).map((line) => sanitizeText(line, 1000));
-  const newFailedUnits = failedUnitsAfter.filter((line) => !plan.failedUnitsBefore.includes(line));
-  if (newFailedUnits.length > 0) throw new Error(`New failed systemd units: ${newFailedUnits.join(", ")}`);
-  const logs = runCheckedSync("docker", ["compose", "logs", "--since", "10m", "--no-color", "web", "archive-worker", "encode-worker"], { allowFailure: true }).stdout
-    .split(/\r?\n/u)
-    .filter((line) => /error|fail|fatal|panic|unhandled|exception|unhealthy/iu.test(line))
-    .map((line) => sanitizeText(line, 4000))
-    .slice(-200);
-  if (logs.length > 0) {
-    throw new Error("Recent runtime logs contain error indicators; inspect the sanitized diagnostics");
-  }
-  return { head, webStatus, services: [...services], drives, failedUnitsAfter, suspiciousLogs: logs };
-}
-
 async function applyPlan(options) {
   const plan = loadPlan();
   let run = {
@@ -688,6 +308,7 @@ async function applyPlan(options) {
     oldCommit: plan.oldCommit,
     targetCommit: plan.targetCommit,
     startedAt: new Date().toISOString(),
+    _privatePaths: plan.config.storagePaths,
   };
   let release = () => {};
   try {
@@ -701,6 +322,7 @@ async function applyPlan(options) {
     run = progress(run, "apply", `Applying reviewed commit ${plan.targetCommit}.`);
     const updater = await runStreaming("sh", [resolve(REPOSITORY_ROOT, "scripts/update.sh"), "--target", plan.targetCommit], {
       logPath: resolve(stateDirectory(), "run-output.log"),
+      privatePaths: plan.config.storagePaths,
       env: {
         ...process.env,
         RIP_DVD_CONTROLLER_LOCK_HELD: "1",
@@ -708,13 +330,17 @@ async function applyPlan(options) {
         RIP_DVD_UPDATE_STAGE_FILE: stagePath,
       },
     });
-    appendBoundedLog(resolve(stateDirectory(), "deployment.log"), `${updater.stdout}\n${updater.stderr}`);
+    appendBoundedLog(
+      resolve(stateDirectory(), "deployment.log"),
+      `${updater.stdout}\n${updater.stderr}`,
+      plan.config.storagePaths,
+    );
     if (updater.status !== 0) {
       let stage = "unknown";
       try { stage = readFileSync(stagePath, "utf8").trim(); } catch {}
       const state = updateFailureState(stage);
       throw new DeploymentError(state, state === "post_migration_failure"
-        ? "Deployment failed after runtime services were stopped; keep them stopped and use recovery guidance."
+        ? "Deployment failed at or after runtime quiescence; controller containment is required."
         : "Deployment failed before migration; the old runtime should still be running.", {
         stage,
         exitCode: updater.status,
@@ -725,8 +351,7 @@ async function applyPlan(options) {
     try {
       backup = readUpdateEvidence(evidencePath).backup;
     } catch (error) {
-      runCheckedSync("sh", [resolve(REPOSITORY_ROOT, "scripts/compose-stop.sh")], { allowFailure: true });
-      throw new DeploymentError("verification_failure", "Deployment evidence verification failed; runtime services were stopped", {
+      throw new DeploymentError("verification_failure", "Deployment evidence verification failed", {
         error: sanitizeText(error.message, 4000),
       });
     }
@@ -735,8 +360,7 @@ async function applyPlan(options) {
     try {
       verification = independentVerify(plan, plan.targetCommit);
     } catch (error) {
-      runCheckedSync("sh", [resolve(REPOSITORY_ROOT, "scripts/compose-stop.sh")], { allowFailure: true });
-      throw new DeploymentError("verification_failure", "Independent deployment verification failed; runtime services were stopped", {
+      throw new DeploymentError("verification_failure", "Independent deployment verification failed", {
         error: sanitizeText(error.message, 4000),
         backup,
       });
@@ -755,9 +379,27 @@ async function applyPlan(options) {
           error.message,
           { stage },
         );
+    if (["post_migration_failure", "verification_failure"].includes(failure.state)) {
+      try {
+        failure.details = {
+          ...failure.details,
+          containment: { verified: true, ...stopAndVerifyRuntime() },
+        };
+        failure.message = `${failure.message} Runtime services are stopped and verified.`;
+      } catch (containmentError) {
+        failure.details = {
+          ...failure.details,
+          containment: {
+            verified: false,
+            error: sanitizeText(containmentError.message, 4000, plan.config.storagePaths),
+          },
+        };
+        failure.message = `${failure.message} Runtime containment could not be verified.`;
+      }
+    }
     run = progress(run, failure.state, failure.message, failure.details);
     const result = emitResult(makeResult("apply", failure.state, plan, failure.message, failure.details, run));
-    process.exitCode = EXIT_CODES[failure.state] ?? 1;
+    process.exitCode = exitCodeFor(failure.state);
     return result;
   } finally {
     release();
@@ -769,7 +411,7 @@ async function startRun(options) {
   const plan = loadPlan();
   if (!FULL_SHA.test(options.target ?? "") || options.target !== plan.targetCommit) {
     const result = emitResult(makeResult("run", "stale_plan", plan, "Run target must equal the plan's frozen full SHA"));
-    process.exitCode = EXIT_CODES.stale_plan;
+    process.exitCode = exitCodeFor("stale_plan");
     return result;
   }
   const screenArguments = ["-DmS", "rip-dvd-update", process.execPath, SCRIPT_PATH, "apply", "--target", options.target];
@@ -782,7 +424,7 @@ async function startRun(options) {
   const started = runCheckedSync("screen", screenArguments, { allowFailure: true });
   if (started.status !== 0) {
     const result = emitResult(makeResult("run", "validation_failure", plan, "Could not start the deployment Screen session", { error: started.stderr }));
-    process.exitCode = EXIT_CODES.validation_failure;
+    process.exitCode = exitCodeFor("validation_failure");
     return result;
   }
   return emitResult(makeResult("run", "running", plan, "Deployment started in GNU Screen session rip-dvd-update. Use status after reconnecting."));
@@ -795,10 +437,10 @@ function showStatus() {
     status = readJson(resolve(directory, "status.json"), "Deployment status");
   } catch (error) {
     const result = emitResult(makeResult("status", "validation_failure", undefined, error.message, error.details));
-    process.exitCode = EXIT_CODES.validation_failure;
+    process.exitCode = exitCodeFor("validation_failure");
     return result;
   }
-  const state = TERMINAL_STATES.has(status.phase) ? status.phase : "running";
+  const state = isTerminalState(status.phase) ? status.phase : "running";
   let updateStage;
   if (status.phase === "apply") {
     try {
@@ -835,7 +477,7 @@ function showReview() {
       : "The frozen commit range has no classified review reasons",
     { review },
   ));
-  if (review.reviewRequired) process.exitCode = EXIT_CODES.review_required;
+  if (review.reviewRequired) process.exitCode = exitCodeFor("review_required");
   return result;
 }
 
@@ -847,7 +489,7 @@ function verifyCurrent() {
     return emitResult(makeResult("verify", "success", plan, "Current deployment passed independent verification", { verification }));
   } catch (error) {
     const result = emitResult(makeResult("verify", "verification_failure", plan, "Current deployment verification failed", { error: sanitizeText(error.message, 4000) }));
-    process.exitCode = EXIT_CODES.verification_failure;
+    process.exitCode = exitCodeFor("verification_failure");
     return result;
   }
 }
@@ -867,32 +509,37 @@ function diagnostics() {
   }));
 }
 
-export function main(arguments_ = process.argv.slice(2)) {
-  let options;
+export async function main(arguments_ = process.argv.slice(2)) {
+  let options = { subcommand: arguments_[0] ?? "help" };
   try {
     options = parseArguments(arguments_);
+    if (options.subcommand === "help" || options.subcommand === "--help") {
+      process.stdout.write(`${usage()}\n`);
+      return emitResult(
+        makeResult("help", "success", undefined, "Displayed deployment CLI usage"),
+        { persist: false },
+      );
+    }
+    if (options.subcommand === "plan") return await createPlan(options);
+    if (options.subcommand === "apply") return await applyPlan(options);
+    if (options.subcommand === "run") return await startRun(options);
+    if (options.subcommand === "status") return await showStatus();
+    if (options.subcommand === "review") return await showReview();
+    if (options.subcommand === "verify") return await verifyCurrent();
+    if (options.subcommand === "diagnostics") return await diagnostics();
+    throw new DeploymentError("validation_failure", `Unknown command: ${options.subcommand}`);
   } catch (error) {
-    const failure = error instanceof DeploymentError ? error : new DeploymentError("validation_failure", error.message);
+    const failure = error instanceof DeploymentError
+      ? error
+      : new DeploymentError("validation_failure", error.message);
     process.stderr.write(`${usage()}\n`);
-    const result = emitResult(makeResult("unknown", failure.state, undefined, failure.message, failure.details), { persist: false });
-    process.exitCode = EXIT_CODES[failure.state] ?? 1;
+    const result = emitResult(
+      makeResult(options.subcommand, failure.state, undefined, failure.message, failure.details),
+      { persist: false },
+    );
+    process.exitCode = exitCodeFor(failure.state);
     return result;
   }
-  if (options.subcommand === "help" || options.subcommand === "--help") {
-    process.stdout.write(`${usage()}\n`);
-    return;
-  }
-  if (options.subcommand === "plan") return createPlan(options);
-  if (options.subcommand === "apply") return applyPlan(options);
-  if (options.subcommand === "run") return startRun(options);
-  if (options.subcommand === "status") return showStatus();
-  if (options.subcommand === "review") return showReview();
-  if (options.subcommand === "verify") return verifyCurrent();
-  if (options.subcommand === "diagnostics") return diagnostics();
-  process.stderr.write(`${usage()}\n`);
-  const result = emitResult(makeResult(options.subcommand, "validation_failure", undefined, `Unknown command: ${options.subcommand}`), { persist: false });
-  process.exitCode = EXIT_CODES.validation_failure;
-  return result;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

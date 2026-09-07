@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { classifyReview, sanitizeText } from "./deploy.mjs";
-import { createStreamSanitizer } from "./deploy-support.mjs";
+import { buildReviewBundle } from "./deploy-review.mjs";
+import { createStreamSanitizer, runCheckedSync } from "./deploy-support.mjs";
 
 describe("deployment review classifier", () => {
   it("requires review for migrations and schema changes without migrations", () => {
@@ -70,6 +71,44 @@ describe("deployment review classifier", () => {
       ["required_environment"],
     );
   });
+
+  it("keeps the persisted review bundle within its byte limit", () => {
+    const longName = "x".repeat(1100);
+    const files = Array.from(
+      { length: 50 },
+      (_, index) => ({ status: "M", path: `apps/web/${index}-${longName}.ts` }),
+    );
+    const commits = Array.from(
+      { length: 20 },
+      (_, index) => ({ sha: String(index).padStart(40, "0"), subject: longName }),
+    );
+
+    const bundle = buildReviewBundle("1".repeat(40), "2".repeat(40), commits, files, "");
+
+    assert.ok(Buffer.byteLength(`${JSON.stringify(bundle, null, 2)}\n`) <= 48 * 1024);
+    assert.equal(bundle.reviewRequired, true);
+    assert.ok(bundle.reasons.includes("review_bundle_limit_exceeded"));
+    assert.equal(bundle.limits.exceeded.representation, true);
+  });
+
+  it("marks incomplete Git inventory for mandatory review", () => {
+    const bundle = buildReviewBundle(
+      "1".repeat(40),
+      "2".repeat(40),
+      [],
+      [],
+      "",
+      { inventoryIncomplete: true },
+    );
+    assert.equal(bundle.reviewRequired, true);
+    assert.ok(bundle.reasons.includes("git_inventory_incomplete"));
+
+    const result = runCheckedSync(process.execPath, [
+      "-e",
+      "process.stdout.write('x'.repeat(1_100_000))",
+    ]);
+    assert.equal(result.stdoutTruncated, true);
+  });
 });
 
 describe("deployment output privacy", () => {
@@ -105,5 +144,18 @@ describe("deployment output privacy", () => {
     sanitizer.flush();
 
     assert.equal(output, "safe before\n[REDACTED PRIVATE KEY]\nsafe after\n");
+  });
+
+  it("redacts private keys and configured paths before truncation", () => {
+    const privateKey = [
+      "-----BEGIN OPENSSH PRIVATE KEY-----",
+      "sensitive-body".repeat(100),
+      "-----END OPENSSH PRIVATE KEY-----",
+      "/srv/private-library/movie.iso",
+    ].join("\n");
+    const sanitized = sanitizeText(privateKey, 100, ["/srv/private-library"]);
+
+    assert.doesNotMatch(sanitized, /sensitive-body|\/srv\/private-library/u);
+    assert.match(sanitized, /\[REDACTED_MEDIA_PATH\]/u);
   });
 });

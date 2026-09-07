@@ -174,7 +174,7 @@ set_stage build
 printf 'Building deployment images sequentially while current services remain running...\n'
 sh "$repository_root/scripts/compose-build.sh"
 
-set_stage migration
+set_stage startup_preflight
 printf 'Migrating and starting the updated services...\n'
 sh "$repository_root/scripts/compose-start.sh"
 
@@ -224,7 +224,6 @@ if ! verify_updated_services; then
   exit 1
 fi
 
-set_stage complete
 if [ -n "$result_file" ]; then
   result_temporary="$result_file.tmp.$$"
   umask 077
@@ -232,4 +231,5 @@ if [ -n "$result_file" ]; then
     "$backup_filename" "$backup_size" > "$result_temporary"
   mv "$result_temporary" "$result_file"
 fi
+set_stage complete
 printf 'rip-dvd update complete: %s -> %s\n' "$previous_commit" "$current_commit"

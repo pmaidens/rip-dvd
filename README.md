@@ -496,6 +496,10 @@ Pass a non-secret JSON configuration file to the planner:
 }
 ```
 
+`expectedDrives` must contain at least one drive, with unique nonempty
+`serialNumber` and `applicationId` values. This keeps physical-drive identity
+verification from succeeding without checking hardware.
+
 The normal command sequence is:
 
 ```bash
@@ -520,8 +524,9 @@ semantic review, authorize only the frozen SHA with
 `--approve-review REVIEWED_FULL_SHA`. The classifier flags migrations,
 schema changes without migrations, Compose mounts and devices, required
 environment changes, Dockerfiles, lockfiles, deployment and recovery scripts,
-and optical-drive identity policy. It identifies review work. It does not prove
-arbitrary SQL or configuration safe.
+and optical-drive identity policy. Truncated Git inventories or bounded review
+bundles also require review rather than failing open. The classifier identifies
+review work. It does not prove arbitrary SQL or configuration safe.
 
 Every command ends with one bounded line prefixed
 `RIP_DVD_RESULT_JSON=`. Result states distinguish `planned`,

@@ -5,6 +5,10 @@ const MAX_REVIEW_BUNDLE_BYTES = 48 * 1024;
 const MAX_FILES = 300;
 const MAX_COMMITS = 100;
 
+function serializedBundleBytes(bundle) {
+  return Buffer.byteLength(`${JSON.stringify(bundle, null, 2)}\n`);
+}
+
 export function parseNameStatus(output) {
   const parts = output.split("\0").filter((part) => part.length > 0);
   const files = [];
@@ -44,21 +48,29 @@ export function classifyReview(files, diff) {
   return [...reasons].sort();
 }
 
-export function buildReviewBundle(oldCommit, targetCommit, commits, files, diff) {
-  const reasons = classifyReview(files, diff);
+export function buildReviewBundle(
+  oldCommit,
+  targetCommit,
+  commits,
+  files,
+  diff,
+  { inventoryIncomplete = false, privatePaths = [] } = {},
+) {
+  const reasons = new Set(classifyReview(files, diff));
   const exceeded = {
     commits: commits.length > MAX_COMMITS,
     files: files.length > MAX_FILES,
     diffBytes: Buffer.byteLength(diff) > MAX_REVIEW_DIFF_BYTES,
+    representation: false,
   };
-  if (Object.values(exceeded).some(Boolean)) reasons.push("review_bundle_limit_exceeded");
-  reasons.sort();
+  if (inventoryIncomplete) reasons.add("git_inventory_incomplete");
+  if (Object.values(exceeded).some(Boolean)) reasons.add("review_bundle_limit_exceeded");
   const bundle = {
     schemaVersion: 1,
     oldCommit,
     targetCommit,
-    reviewRequired: reasons.length > 0,
-    reasons,
+    reviewRequired: reasons.size > 0,
+    reasons: [...reasons].sort(),
     limits: {
       commits: MAX_COMMITS,
       files: MAX_FILES,
@@ -71,23 +83,37 @@ export function buildReviewBundle(oldCommit, targetCommit, commits, files, diff)
       },
     },
     caveat: "The classifier identifies risky change classes. It does not prove SQL, configuration, or recovery changes are semantically safe.",
-    commits: commits.slice(0, MAX_COMMITS),
-    files: files.slice(0, MAX_FILES),
-    relevantDiff: sanitizeText(diff, MAX_REVIEW_DIFF_BYTES),
+    commits: commits.slice(0, MAX_COMMITS).map((commit) => ({
+      ...commit,
+      subject: sanitizeText(commit.subject, 1000, privatePaths),
+    })),
+    files: files.slice(0, MAX_FILES).map((file) => Object.fromEntries(
+      Object.entries(file).map(([key, value]) => [
+        key,
+        typeof value === "string" ? sanitizeText(value, 4096, privatePaths) : value,
+      ]),
+    )),
+    relevantDiff: sanitizeText(diff, MAX_REVIEW_DIFF_BYTES, privatePaths),
   };
-  while (Buffer.byteLength(JSON.stringify(bundle)) > MAX_REVIEW_BUNDLE_BYTES) {
-    if (Buffer.byteLength(bundle.relevantDiff) > 4096) {
+  while (serializedBundleBytes(bundle) > MAX_REVIEW_BUNDLE_BYTES) {
+    if (!exceeded.representation) {
+      exceeded.representation = true;
+      reasons.add("review_bundle_limit_exceeded");
+      bundle.reviewRequired = true;
+      bundle.reasons = [...reasons].sort();
+    }
+    if (Buffer.byteLength(bundle.relevantDiff) > 0) {
       bundle.relevantDiff = tailBytes(
         bundle.relevantDiff,
-        Math.max(4096, Math.floor(Buffer.byteLength(bundle.relevantDiff) / 2)),
+        Math.max(0, Math.floor(Buffer.byteLength(bundle.relevantDiff) / 2)),
       );
-    } else if (bundle.files.length > 50) {
-      bundle.files = bundle.files.slice(0, Math.ceil(bundle.files.length / 2));
-    } else if (bundle.commits.length > 20) {
-      bundle.commits = bundle.commits.slice(0, Math.ceil(bundle.commits.length / 2));
+      if (Buffer.byteLength(bundle.relevantDiff) <= 32) bundle.relevantDiff = "";
+    } else if (bundle.files.length > 0) {
+      bundle.files.pop();
+    } else if (bundle.commits.length > 0) {
+      bundle.commits.pop();
     } else {
-      bundle.relevantDiff = "[diff omitted to preserve the bounded review contract]";
-      break;
+      throw new Error("Review bundle metadata exceeds its maximum size");
     }
   }
   return bundle;
