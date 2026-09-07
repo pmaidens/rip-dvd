@@ -618,8 +618,7 @@ describe("encode output validation", () => {
         "/media/subtitled.mkv",
         new AbortController().signal,
         {
-          expectedVobSubStreams: cleanedSubtitleStreams
-            .slice(1)
+          expectedVobSubStreams: [...cleanedSubtitleStreams.slice(1), ...emptySubtitleStreams]
             .map((stream) => ({ languageCode: stream.tags.language })),
         },
       ),
@@ -638,6 +637,78 @@ describe("encode output validation", () => {
       signal: expect.any(AbortSignal),
       timeoutMs: 300_000,
     });
+  });
+
+  it.each<{
+    name: string;
+    count?: unknown;
+    packetFault?: "missing" | "duplicate" | "unexpected" | "stderr";
+    beforeFault?: "language" | "title" | "disposition";
+    afterFault?: "missing" | "extra" | "language" | "title" | "empty";
+    failure?: string;
+  }>([
+    { name: "absent packet count" },
+    { name: "explicit string zero", count: "0" },
+    { name: "explicit numeric zero", count: 0 },
+    ...[null, "N/A", "", "-1", "1.5", "0garbage", -1, 0.5, {}, "9007199254740992"].map((count) => ({
+      name: `invalid count ${JSON.stringify(count)}`, count, failure: "subtitle packet probe returned an invalid result",
+    })),
+    { name: "missing packet stream", packetFault: "missing", failure: "subtitle packet probe returned an invalid result" },
+    { name: "duplicate packet stream", packetFault: "duplicate", failure: "subtitle packet probe returned an invalid result" },
+    { name: "unexpected packet stream", packetFault: "unexpected", failure: "subtitle packet probe returned an invalid result" },
+    { name: "packet read errors", packetFault: "stderr", failure: "subtitle packet probe reported unreadable data" },
+    { name: "empty track language mismatch", beforeFault: "language", failure: "has language fra, expected eng" },
+    { name: "empty track title mismatch", beforeFault: "title", failure: "has title Wrong, expected title Main" },
+    { name: "empty track disposition mismatch", beforeFault: "disposition", failure: "unexpected default or forced disposition" },
+    { name: "cleanup drops populated source", afterFault: "missing", failure: "expected 1 source VobSub stream, found 0" },
+    { name: "cleanup keeps extra source", afterFault: "extra", failure: "expected 1 source VobSub stream, found 2" },
+    { name: "cleanup changes language", afterFault: "language", failure: "has language eng, expected spa" },
+    { name: "cleanup changes title", afterFault: "title", failure: "has title Wrong, expected title Commentary" },
+    { name: "cleanup leaves empty track", afterFault: "empty", failure: "subtitle cleanup left an empty VobSub stream" },
+  ])("accounts for empty source streams with $name", async ({
+    count, packetFault, beforeFault, afterFault, failure,
+  }) => {
+    const source = [
+      { index: 2, codec_name: "dvd_subtitle", disposition: { default: 0, forced: beforeFault === "disposition" ? 1 : 0 }, tags: {
+        language: beforeFault === "language" ? "fra" : "eng", title: beforeFault === "title" ? "Wrong" : "Main",
+      } },
+      { index: 3, codec_name: "dvd_subtitle", disposition: { default: 0, forced: 0 }, tags: { language: "spa", title: "Commentary" } },
+    ];
+    const retained = { ...source[1]!, index: 2, tags: {
+      language: afterFault === "language" ? "eng" : "spa",
+      title: afterFault === "title" ? "Wrong" : "Commentary",
+    } };
+    const packetStreams = [
+      { index: 2, codec_name: "dvd_subtitle", nb_read_packets: count },
+      { index: 3, codec_name: "dvd_subtitle", nb_read_packets: "10" },
+    ];
+    if (packetFault === "missing") packetStreams.shift();
+    if (packetFault === "duplicate") packetStreams.push(packetStreams[0]!);
+    if (packetFault === "unexpected") packetStreams.push({ index: 9, codec_name: "dvd_subtitle", nb_read_packets: "0" });
+    const originalRunner = createMediaToolRunner({
+      subtitleStreams: source, subtitlePacketStreams: packetStreams,
+      subtitlePacketStderr: packetFault === "stderr" ? "read error" : "",
+    });
+    const cleanedRunner = createMediaToolRunner({
+      subtitleStreams: afterFault === "missing" ? [] : afterFault === "extra" ? [retained, { ...retained, index: 3 }] : [retained],
+      ...(afterFault === "empty" ? { subtitlePacketStreams: [{ index: 2, codec_name: "dvd_subtitle", nb_read_packets: "0" }] } : {}),
+    });
+    let cleaned = false;
+    const repairer = { removeEmptyVobSubStreams: vi.fn(async () => { cleaned = true; }) };
+    const validator = createNodeEncodeOutputValidator({
+      repairer, runMediaTool: (request) => (cleaned ? cleanedRunner : originalRunner)(request),
+    });
+    const expectations = { expectedVobSubStreams: [
+      { languageCode: "eng", title: "Main" }, { languageCode: "spa", title: "Commentary" },
+    ] };
+    const result = validator.prepareAndValidate("/media/bonus.mkv", new AbortController().signal, expectations);
+    if (failure) await expect(result).rejects.toThrow(failure);
+    else await expect(result).resolves.toBeUndefined();
+    expect(repairer.removeEmptyVobSubStreams).toHaveBeenCalledTimes(failure && !afterFault ? 0 : 1);
+    if (cleaned) expect(repairer.removeEmptyVobSubStreams).toHaveBeenCalledWith(expect.objectContaining({
+      emptyStreamIndexes: [2], retainedSubtitleDispositions: [{ default: false, forced: false }],
+    }));
+    expect(expectations.expectedVobSubStreams).toHaveLength(2);
   });
 
   it("rejects VobSub packet read errors reported by ffprobe", async () => {
