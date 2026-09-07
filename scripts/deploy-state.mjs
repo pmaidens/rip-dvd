@@ -282,10 +282,12 @@ export function acquireLock(runId) {
         },
         async release() {
           releasing = true;
-          const publishedOwner = readLockOwner(ownerPath);
           try {
-            if (publishedOwner.runId === runId && publishedOwner.pid === process.pid) {
-              rmSync(ownerPath, { force: true });
+            if (!lossError && child.exitCode === null) {
+              const publishedOwner = readLockOwner(ownerPath);
+              if (publishedOwner.runId === runId && publishedOwner.pid === process.pid) {
+                rmSync(ownerPath, { force: true });
+              }
             }
           } finally {
             await closeLock(child);

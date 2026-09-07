@@ -257,7 +257,7 @@ describe("deployment locking", () => {
     try {
       const running = runStreaming(
         "sh",
-        ["-c", "sleep 60 & printf '%s\\n' \"$!\" > \"$CHILD_PID_FILE\"; wait"],
+        ["-c", "(trap '' TERM; while :; do sleep 60; done) & printf '%s\\n' \"$!\" > \"$CHILD_PID_FILE\"; wait"],
         {
           env: { ...process.env, CHILD_PID_FILE: childPidPath },
           killProcessGroup: true,

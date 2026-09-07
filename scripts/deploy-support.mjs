@@ -112,23 +112,36 @@ export function runStreaming(executable, arguments_, options) {
       env: options.env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    let aborted = false;
     let killTimer;
     const signalChild = (signal) => {
-      if (child.exitCode !== null) return;
       if (options.killProcessGroup === true && child.pid) {
         try {
           process.kill(-child.pid, signal);
         } catch (error) {
           if (error?.code !== "ESRCH") throw error;
         }
-      } else {
+      } else if (child.exitCode === null) {
         child.kill(signal);
       }
     };
     const abort = () => {
+      aborted = true;
       signalChild("SIGTERM");
       killTimer = setTimeout(() => signalChild("SIGKILL"), 5_000);
-      killTimer.unref();
+    };
+    const waitForProcessGroupExit = async () => {
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        try {
+          process.kill(-child.pid, 0);
+        } catch (error) {
+          if (error?.code === "ESRCH") return;
+          throw error;
+        }
+        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      }
+      signalChild("SIGKILL");
     };
     options.signal?.addEventListener("abort", abort, { once: true });
     if (options.signal?.aborted) abort();
@@ -177,8 +190,12 @@ export function runStreaming(executable, arguments_, options) {
       flushLog();
       resolvePromise({ status: 1, stdout, stderr });
     });
-    child.on("close", (status) => {
+    child.on("close", async (status) => {
       options.signal?.removeEventListener("abort", abort);
+      if (aborted && options.killProcessGroup === true) {
+        signalChild("SIGKILL");
+        await waitForProcessGroupExit();
+      }
       if (killTimer) clearTimeout(killTimer);
       stdoutSanitizer.flush();
       stderrSanitizer.flush();
