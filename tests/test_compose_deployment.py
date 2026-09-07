@@ -8,6 +8,8 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+OLD_COMMIT = "1" * 40
+TARGET_COMMIT = "2" * 40
 
 
 def compose_config(
@@ -64,6 +66,14 @@ def write_fake_docker(directory: pathlib.Path) -> None:
         "  esac\n"
         "fi\n"
         "case \"$*\" in\n"
+        "  'compose --profile maintenance run --rm --no-deps backup')\n"
+        "    if [ -z \"${DOCKER_SKIP_BACKUP_FILE:-}\" ]; then\n"
+        "      mkdir -p \"${RIP_DVD_BACKUP_HOST_PATH}\"\n"
+        "      printf 'backup fixture\\n' > "
+        "\"${RIP_DVD_BACKUP_HOST_PATH}/rip-dvd-test.sqlite\"\n"
+        "    fi\n"
+        "    printf 'SQLite backup written to /backups/rip-dvd-test.sqlite\\n'\n"
+        "    ;;\n"
         "  'compose ps --quiet web') printf 'web-container\\n' ;;\n"
         "  'inspect --format {{if .State.Health}}{{.State.Health.Status}}"
         "{{else}}{{.State.Status}}{{end}} web-container') "
@@ -108,7 +118,7 @@ def run_update_script(
         temporary = pathlib.Path(directory)
         calls = temporary / "calls"
         pull_marker = temporary / "pulled"
-
+        update_state = temporary / "state"
         git = temporary / "git"
         git.write_text(
             "#!/bin/sh\n"
@@ -117,6 +127,8 @@ def run_update_script(
             "  'rev-parse --show-toplevel') printf '%s\\n' \"$UPDATE_ROOT\" ;;\n"
             "  'rev-parse --git-path rip-dvd-update.lock') "
             "printf '%s\\n' \"$UPDATE_LOCK_FILE\" ;;\n"
+            "  'rev-parse --git-path rip-dvd-deployment') "
+            "printf '%s\\n' \"$UPDATE_STATE_DIR\" ;;\n"
             "  'status --porcelain --untracked-files=normal') "
             "printf '%s' \"${GIT_STATUS_OUTPUT:-}\" ;;\n"
             "  'symbolic-ref --quiet --short HEAD') printf 'main\\n' ;;\n"
@@ -124,14 +136,16 @@ def run_update_script(
             "printf 'origin/main\\n' ;;\n"
             "  'rev-parse HEAD')\n"
             "    if [ -f \"$UPDATE_PULL_MARKER\" ]; then\n"
-            "      printf 'new-commit\\n'\n"
+            f"      printf '{TARGET_COMMIT}\\n'\n"
             "    else\n"
-            "      printf 'old-commit\\n'\n"
+            f"      printf '{OLD_COMMIT}\\n'\n"
             "    fi\n"
             "    ;;\n"
-            "  'pull --ff-only')\n"
-            "    [ -z \"${GIT_PULL_FAIL_STATUS:-}\" ] || "
-            "exit \"$GIT_PULL_FAIL_STATUS\"\n"
+            f"  'cat-file -e {TARGET_COMMIT}^{{commit}}') exit 0 ;;\n"
+            f"  'merge-base --is-ancestor {OLD_COMMIT} {TARGET_COMMIT}') exit 0 ;;\n"
+            f"  'merge --ff-only {TARGET_COMMIT}')\n"
+            "    [ -z \"${GIT_MERGE_FAIL_STATUS:-}\" ] || "
+            "exit \"$GIT_MERGE_FAIL_STATUS\"\n"
             "    : > \"$UPDATE_PULL_MARKER\"\n"
             "    ;;\n"
             "  *) exit 64 ;;\n"
@@ -142,11 +156,26 @@ def run_update_script(
         write_fake_docker(temporary)
 
         flock = temporary / "flock"
-        flock.write_text("#!/bin/sh\nexit \"${FLOCK_STATUS:-0}\"\n")
+        flock.write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  '-n 8') [ \"${CREATE_CONTROLLER_LOCK:-0}\" != 1 ] ;;\n"
+            "  *) exit \"${FLOCK_STATUS:-0}\" ;;\n"
+            "esac\n"
+        )
         flock.chmod(0o755)
 
+        stat = temporary / "stat"
+        stat.write_text("#!/bin/sh\nprintf '15\\n'\n")
+        stat.chmod(0o755)
+
         result = subprocess.run(
-            ["sh", str(ROOT / "scripts" / "update.sh")],
+            [
+                "sh",
+                str(ROOT / "scripts" / "update.sh"),
+                "--target",
+                TARGET_COMMIT,
+            ],
             capture_output=True,
             check=False,
             cwd=temporary,
@@ -159,6 +188,7 @@ def run_update_script(
                 "UPDATE_LOCK_FILE": str(temporary / "update.lock"),
                 "UPDATE_PULL_MARKER": str(pull_marker),
                 "UPDATE_ROOT": str(ROOT),
+                "UPDATE_STATE_DIR": str(update_state),
                 **(environment or {}),
             },
             text=True,
@@ -287,14 +317,18 @@ class ComposeDeploymentTests(unittest.TestCase):
         )
         self.assertEqual(archive["group_add"], ["24"])
 
-    def test_build_script_builds_every_deployable_image_from_the_repo(self) -> None:
+    def test_build_script_builds_every_deployable_image_sequentially(self) -> None:
         result, calls = run_compose_script("compose-build.sh")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             calls,
             [
-                f"{ROOT}||compose --profile maintenance build migrate backup web archive-worker encode-worker"
+                f"{ROOT}||compose --progress plain --profile maintenance build migrate",
+                f"{ROOT}||compose --progress plain --profile maintenance build backup",
+                f"{ROOT}||compose --progress plain --profile maintenance build web",
+                f"{ROOT}||compose --progress plain --profile maintenance build archive-worker",
+                f"{ROOT}||compose --progress plain --profile maintenance build encode-worker",
             ],
         )
 
@@ -328,7 +362,9 @@ class ComposeDeploymentTests(unittest.TestCase):
             start_script.index('compose-migrate.sh'),
         )
 
-    def test_update_script_backs_up_pulls_builds_starts_and_verifies(self) -> None:
+    def test_update_script_backs_up_merges_exact_target_builds_starts_and_verifies(
+        self,
+    ) -> None:
         result, calls = run_update_script()
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -337,12 +373,12 @@ class ComposeDeploymentTests(unittest.TestCase):
             for index, call in enumerate(calls)
             if "compose --profile maintenance run --rm --no-deps backup" in call
         )
-        pull = calls.index("git|pull --ff-only")
-        build = next(
+        merge = calls.index(f"git|merge --ff-only {TARGET_COMMIT}")
+        builds = [
             index
             for index, call in enumerate(calls)
-            if "compose --profile maintenance build" in call
-        )
+            if "compose --progress plain --profile maintenance build" in call
+        ]
         first_stop = next(
             index
             for index, call in enumerate(calls)
@@ -364,13 +400,14 @@ class ComposeDeploymentTests(unittest.TestCase):
             if call.startswith("docker|inspect --format")
         )
 
-        self.assertLess(backup, pull)
-        self.assertLess(pull, build)
-        self.assertLess(build, first_stop)
+        self.assertLess(backup, merge)
+        self.assertEqual(len(builds), 5)
+        self.assertLess(merge, builds[0])
+        self.assertLess(builds[-1], first_stop)
         self.assertLess(first_stop, migrate)
         self.assertLess(migrate, start)
         self.assertLess(start, health)
-        self.assertIn("old-commit -> new-commit", result.stdout)
+        self.assertIn(f"{OLD_COMMIT} -> {TARGET_COMMIT}", result.stdout)
 
     def test_update_script_refuses_a_dirty_checkout_before_backup(self) -> None:
         result, calls = run_update_script(
@@ -379,19 +416,30 @@ class ComposeDeploymentTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("local changes", result.stderr)
-        self.assertNotIn("git|pull --ff-only", calls)
+        self.assertNotIn(f"git|merge --ff-only {TARGET_COMMIT}", calls)
+        self.assertFalse(any(call.startswith("docker|") for call in calls))
+
+    def test_update_script_refuses_a_concurrent_controller_run(self) -> None:
+        result, calls = run_update_script(
+            environment={"CREATE_CONTROLLER_LOCK": "1"}
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("deployment controller is running", result.stderr)
         self.assertFalse(any(call.startswith("docker|") for call in calls))
 
     def test_update_build_failure_leaves_existing_services_running(self) -> None:
         result, calls = run_update_script(
             environment={
-                "DOCKER_FAIL_MATCH": "compose --profile maintenance build",
+                "DOCKER_FAIL_MATCH": (
+                    "compose --progress plain --profile maintenance build web"
+                ),
                 "DOCKER_FAIL_STATUS": "72",
             }
         )
 
         self.assertEqual(result.returncode, 72, result.stderr)
-        self.assertIn("git|pull --ff-only", calls)
+        self.assertIn(f"git|merge --ff-only {TARGET_COMMIT}", calls)
         self.assertFalse(any("compose stop --timeout 30" in call for call in calls))
 
     def test_update_verification_failure_stops_partial_runtime(self) -> None:
@@ -799,6 +847,7 @@ class ComposeDeploymentTests(unittest.TestCase):
 
         for script in (
             "scripts/update.sh",
+            "scripts/deploy.mjs",
             "scripts/compose-build.sh",
             "scripts/compose-migrate.sh",
             "scripts/compose-start.sh",

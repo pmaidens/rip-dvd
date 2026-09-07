@@ -458,7 +458,8 @@ commands instead of expanding the web image's attack surface.
 Use the deployment scripts from the repository root:
 
 ```bash
-./scripts/update.sh
+node scripts/deploy.mjs --help
+./scripts/update.sh --target REVIEWED_FULL_SHA
 ./scripts/compose-build.sh
 ./scripts/compose-migrate.sh
 ./scripts/compose-start.sh
@@ -466,28 +467,91 @@ Use the deployment scripts from the repository root:
 ./scripts/compose-stop.sh
 ```
 
-For routine updates on an installed host, run `scripts/update.sh`. It refuses
-dirty checkouts, detached HEADs, branches without an upstream, and concurrent
-updates. The updater takes an online SQLite backup before using
-`git pull --ff-only`, builds the new images while the existing services remain
-running, and then uses the normal quiesce, migration, and startup path. It
-verifies that the web service is healthy and both workers are running. If
-verification fails, it stops all runtime services rather than leaving a partial
-deployment running. The checkout and database are not automatically rolled
-back; correct the error or follow the documented restore procedure, then rerun
-the updater.
+For routine installed-host updates, use `scripts/deploy.mjs`. It has no LLM
+dependency. `plan` checks the host and repository identities, runtime state,
+available resources, active disc work, and current health. It then fetches the
+configured remote, freezes one full target SHA, checks ancestry, and writes a
+bounded review bundle. Fetching changes remote-tracking refs, but planning does
+not change `HEAD` or the running services.
+
+Pass a non-secret JSON configuration file to the planner:
+
+```json
+{
+  "expectedHostname": "installed-hostname",
+  "expectedRepositoryRoot": "/opt/rip-dvd",
+  "expectedRemoteUrl": "https://github.com/example/rip-dvd.git",
+  "branch": "main",
+  "upstream": "origin/main",
+  "targetRef": "origin/main",
+  "healthUrl": "http://127.0.0.1:3000/api/health",
+  "readinessUrl": "http://127.0.0.1:3000/api/deployment-readiness",
+  "storagePaths": ["/", "/mnt/storage"],
+  "expectedDrives": [
+    {
+      "serialNumber": "physical-drive-serial",
+      "applicationId": "stored-optical-drive-id"
+    }
+  ]
+}
+```
+
+`expectedDrives` must contain at least one drive, with unique nonempty
+`serialNumber` and `applicationId` values. The readiness endpoint ties those
+pairs to the application's stored device path and the physical drive reported
+inside the Archive Worker. `storagePaths` must include `/`; resource thresholds
+must be nonnegative integer byte counts.
+
+The normal command sequence is:
+
+```bash
+node scripts/deploy.mjs plan --config /path/to/deployment.json
+node scripts/deploy.mjs run --target REVIEWED_FULL_SHA
+node scripts/deploy.mjs status
+```
+
+`run` starts `apply` in the named GNU Screen session `rip-dvd-update`.
+Use `apply` for a foreground run, `review` to read the frozen bounded review
+bundle, `verify` for independent checks, and `diagnostics` for the last 200
+sanitized runtime log lines and current
+resource state. The controller stores its plan, current phase, review bundle,
+last result, and rolling 1 MiB sanitized log under the Git path
+`rip-dvd-deployment`. A lost SSH session does not stop a Screen run. Reconnect
+with `status` or `screen -r rip-dvd-update`.
+
+Active Disc Inspection, Archive Request, Archive Job, or Encode Job work blocks
+before `HEAD` changes and is checked again after image builds, immediately
+before runtime quiescence. A human can override both checks with
+`--allow-active-work`. Risky changes produce `review_required`; after
+semantic review, authorize only the frozen SHA with
+`--approve-review REVIEWED_FULL_SHA`. The classifier flags migrations,
+schema changes without migrations, Compose mounts and devices, required
+environment changes, Dockerfiles, lockfiles, deployment and recovery scripts,
+and optical-drive identity policy. Truncated Git inventories or bounded review
+bundles also require review rather than failing open. The classifier identifies
+review work. It does not prove arbitrary SQL or configuration safe.
+
+Every command ends with one bounded line prefixed
+`RIP_DVD_RESULT_JSON=`. Result states distinguish `planned`,
+`already_current`, `active_work`, `review_required`, `stale_plan`,
+`pre_migration_failure`, `post_migration_failure`,
+`verification_failure`, `concurrent_run`, and `success`.
 
 The updater runs from a temporary snapshot of itself. This prevents a pull
 that changes `scripts/update.sh` from mixing old and new shell instructions in
-one update. Run it locally or over SSH from the repository root:
+one update. The controller calls it with the frozen target. It never fetches or
+pulls, and it refuses a short or different commit:
 
 ```bash
 cd /opt/rip-dvd
-./scripts/update.sh
+./scripts/update.sh --target REVIEWED_FULL_SHA
 ```
 
 `scripts/compose-build.sh` builds the migration, backup, web, archive-worker,
-and encode-worker images as separate targets. `scripts/compose-migrate.sh`
+and encode-worker images one at a time in that order. `scripts/update.sh`
+verifies the pre-migration backup file before changing `HEAD`, fast-forwards
+only to the named commit, and leaves the old runtime serving during all five
+builds. `scripts/compose-migrate.sh`
 stops the web, archive, and encode runtimes before running versioned Drizzle
 migrations in a one-shot non-root container; if the bounded stop fails, no DDL
 is attempted. `scripts/compose-start.sh` refuses implicit rebuilds, uses that
