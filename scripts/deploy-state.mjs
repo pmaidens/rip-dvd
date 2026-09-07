@@ -248,7 +248,11 @@ export function acquireLock(runId) {
           readLockOwner(ownerPath),
         ));
       } else if (!releasing) {
-        lossError = new Error("The operating-system deployment lock was lost");
+        lossError = new DeploymentError(
+          "concurrent_run",
+          "The operating-system deployment lock was lost",
+          { lockLost: true },
+        );
         resolveLoss(lossError);
       }
     });
@@ -269,30 +273,23 @@ export function acquireLock(runId) {
         async assertHeld() {
           await new Promise((resolve) => setImmediate(resolve));
           if (lossError || child.exitCode !== null) {
-            throw lossError ?? new Error("The operating-system deployment lock was lost");
+            throw lossError ?? new DeploymentError(
+              "concurrent_run",
+              "The operating-system deployment lock was lost",
+              { lockLost: true },
+            );
           }
         },
         async release() {
-          const priorLoss = lossError
-            ?? (child.exitCode === null
-              ? undefined
-              : new Error("The operating-system deployment lock was lost"));
           releasing = true;
-          let ownershipError;
           const publishedOwner = readLockOwner(ownerPath);
-          if (publishedOwner.runId !== runId || publishedOwner.pid !== process.pid) {
-            ownershipError = new DeploymentError(
-              "concurrent_run",
-              "Deployment lock ownership changed before release",
-            );
-          }
           try {
-            if (!ownershipError) rmSync(ownerPath);
+            if (publishedOwner.runId === runId && publishedOwner.pid === process.pid) {
+              rmSync(ownerPath, { force: true });
+            }
           } finally {
             await closeLock(child);
           }
-          if (ownershipError) throw ownershipError;
-          if (priorLoss) throw priorLoss;
         },
       });
     });

@@ -15,7 +15,7 @@ import { describe, it } from "node:test";
 import { classifyReview, sanitizeText } from "./deploy.mjs";
 import { buildReviewBundle } from "./deploy-review.mjs";
 import { acquireLock, emitResult } from "./deploy-state.mjs";
-import { createStreamSanitizer, runCheckedSync } from "./deploy-support.mjs";
+import { createStreamSanitizer, runCheckedSync, runStreaming } from "./deploy-support.mjs";
 
 describe("deployment review classifier", () => {
   it("requires review for migrations and schema changes without migrations", () => {
@@ -250,6 +250,38 @@ describe("deployment output privacy", () => {
 });
 
 describe("deployment locking", () => {
+  it("terminates updater descendants when an operation is aborted", async () => {
+    const directory = mkdtempSync(resolve(tmpdir(), "rip-dvd-deploy-abort-"));
+    const childPidPath = resolve(directory, "child.pid");
+    const controller = new AbortController();
+    try {
+      const running = runStreaming(
+        "sh",
+        ["-c", "sleep 60 & printf '%s\\n' \"$!\" > \"$CHILD_PID_FILE\"; wait"],
+        {
+          env: { ...process.env, CHILD_PID_FILE: childPidPath },
+          killProcessGroup: true,
+          logPath: resolve(directory, "run.log"),
+          privatePaths: [],
+          signal: controller.signal,
+        },
+      );
+      for (let attempt = 0; attempt < 100 && !existsSync(childPidPath); attempt += 1) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+      }
+      assert.equal(existsSync(childPidPath), true);
+      const childPid = Number.parseInt(readFileSync(childPidPath, "utf8"), 10);
+
+      controller.abort();
+      const result = await running;
+
+      assert.notEqual(result.status, 0);
+      assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+    } finally {
+      rmSync(directory, { recursive: true });
+    }
+  });
+
   it("does not release a lock whose ownership changed", async () => {
     const directory = mkdtempSync(resolve(tmpdir(), "rip-dvd-deploy-lock-"));
     const previousDirectory = process.env.RIP_DVD_DEPLOY_STATE_DIR;
@@ -266,7 +298,7 @@ describe("deployment locking", () => {
       const owner = resolve(directory, "run.lock.owner.json");
       writeFileSync(owner, '{"pid":999999,"runId":"replacement-run"}\n');
 
-      await assert.rejects(lock.release, /ownership changed/u);
+      await lock.release();
       assert.equal(existsSync(owner), true);
     } finally {
       if (previousDirectory === undefined) {

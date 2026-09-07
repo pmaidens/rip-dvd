@@ -359,6 +359,7 @@ async function applyPlan(options) {
       logPath: resolve(stateDirectory(), "run-output.log"),
       privatePaths: plan.config.storagePaths,
       signal: updateAbort.signal,
+      killProcessGroup: true,
       env: {
         ...process.env,
         RIP_DVD_CONTROLLER_LOCK_HELD: "1",
@@ -371,8 +372,9 @@ async function applyPlan(options) {
     });
     const updater = await Promise.race([
       updaterPromise,
-      lock.lost.then((error) => {
+      lock.lost.then(async (error) => {
         updateAbort.abort();
+        await updaterPromise;
         throw error;
       }),
     ]);

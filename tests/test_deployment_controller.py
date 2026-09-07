@@ -301,7 +301,13 @@ printf '/dev/data 10000000 1 8000000 1%% %s\n' "${DATA_MOUNT_PATH:-/mnt/sandisk}
             "#!/bin/sh\n"
             "if [ \"${FLOCK_CONTENDED:-0}\" = 1 ]; then exit 1; fi\n"
             "printf 'RIP_DVD_LOCKED\\n'\n"
-            "if [ \"${FLOCK_EXIT_AFTER_LOCK:-0}\" = 1 ]; then exit 0; fi\n"
+            "if [ \"${FLOCK_EXIT_AFTER_LOCK:-0}\" = 1 ]; then\n"
+            "  if [ -n \"${FLOCK_REPLACEMENT_STATUS:-}\" ]; then\n"
+            "    while ! grep -q '\"phase\": \"fetch\"' \"$RIP_DVD_DEPLOY_STATE_DIR/status.json\" 2>/dev/null; do sleep 0.01; done\n"
+            "    printf '%s\\n' \"$FLOCK_REPLACEMENT_STATUS\" > \"$RIP_DVD_DEPLOY_STATE_DIR/status.json\"\n"
+            "  fi\n"
+            "  exit 0\n"
+            "fi\n"
             "cat >/dev/null\n",
         )
         write_executable(self.commands / "stat", "#!/bin/sh\nprintf '8\n'\n")
@@ -435,13 +441,22 @@ class DeploymentControllerTests(unittest.TestCase):
         )
 
     def test_plan_fails_when_operating_system_lock_is_lost(self) -> None:
-        result = self.plan({"FLOCK_EXIT_AFTER_LOCK": "1"})
+        replacement_status = '{"phase":"apply","message":"replacement running"}'
+        result = self.plan({
+            "FLOCK_EXIT_AFTER_LOCK": "1",
+            "FLOCK_REPLACEMENT_STATUS": replacement_status,
+        })
 
-        self.assertEqual(result.returncode, 10)
+        self.assertEqual(result.returncode, 26)
         self.assertEqual(
-            self.harness.result(result)["state"], "validation_failure"
+            self.harness.result(result)["state"], "concurrent_run"
         )
         self.assertIn("lock was lost", result.stdout)
+        self.assertEqual(result.stdout.count("RIP_DVD_RESULT_JSON="), 1)
+        self.assertEqual(
+            (self.harness.state / "status.json").read_text().strip(),
+            replacement_status,
+        )
 
     def test_review_classifier_fails_closed_beyond_bundle_file_limit(self) -> None:
         planned = self.plan({"GIT_CHANGE_KIND": "many"})

@@ -108,10 +108,28 @@ export function runStreaming(executable, arguments_, options) {
   return new Promise((resolvePromise) => {
     const child = spawn(executable, arguments_, {
       cwd: options.cwd ?? REPOSITORY_ROOT,
+      detached: options.killProcessGroup === true,
       env: options.env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const abort = () => child.kill("SIGTERM");
+    let killTimer;
+    const signalChild = (signal) => {
+      if (child.exitCode !== null) return;
+      if (options.killProcessGroup === true && child.pid) {
+        try {
+          process.kill(-child.pid, signal);
+        } catch (error) {
+          if (error?.code !== "ESRCH") throw error;
+        }
+      } else {
+        child.kill(signal);
+      }
+    };
+    const abort = () => {
+      signalChild("SIGTERM");
+      killTimer = setTimeout(() => signalChild("SIGKILL"), 5_000);
+      killTimer.unref();
+    };
     options.signal?.addEventListener("abort", abort, { once: true });
     if (options.signal?.aborted) abort();
     let stdout = "";
@@ -161,6 +179,7 @@ export function runStreaming(executable, arguments_, options) {
     });
     child.on("close", (status) => {
       options.signal?.removeEventListener("abort", abort);
+      if (killTimer) clearTimeout(killTimer);
       stdoutSanitizer.flush();
       stderrSanitizer.flush();
       flushLog();
