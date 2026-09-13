@@ -74,6 +74,11 @@ import type {
   DvdCompletenessProver,
 } from "./dvd-completeness-prover.js";
 import {
+  createNodeDvdGeometryValidator,
+  DvdGeometryValidationError,
+  type DvdGeometryValidator,
+} from "./dvd-geometry-validator.js";
+import {
   DVD_WATCHABLE_SALVAGE_POLICY_VERSION,
   formatRejectedDvdSalvage,
   type DvdSalvageValidator,
@@ -1387,6 +1392,7 @@ export interface PreserveDvdArchiveOptions {
   completenessProver?: DvdCompletenessProver;
   fingerprint: string;
   expectedTitleMap?: DvdTitleMap;
+  geometryValidator?: DvdGeometryValidator;
   originalsLibraryPath: string;
   runner: DvdCopyRunner;
   salvageValidator?: DvdSalvageValidator;
@@ -1446,6 +1452,83 @@ async function movePartialAside(
   }
   await authorizeMutation?.();
   await rename(partialPath, failedPath);
+}
+
+async function validateNormalDvdGeometry({
+  expectedByteCount,
+  geometryValidator,
+  imagePath,
+  signal,
+}: {
+  expectedByteCount: number;
+  geometryValidator: DvdGeometryValidator;
+  imagePath: string;
+  signal: AbortSignal;
+}): Promise<void> {
+  try {
+    await geometryValidator.validate({
+      expectedByteCount,
+      imagePath,
+      signal,
+    });
+  } catch (error) {
+    if (signal.aborted || error instanceof DvdGeometryValidationError) {
+      throw error;
+    }
+    throw new DvdGeometryValidationError(
+      "DVD volume geometry validation failed",
+      { cause: error },
+    );
+  }
+  signal.throwIfAborted();
+}
+
+async function quarantineInvalidNormalDvdGeometry({
+  archivePath,
+  authorizeMutation,
+  error,
+  existingPublishedFilesystemIdentity,
+  rescueIdentity,
+  rescueWorkspace,
+  root,
+}: {
+  archivePath: string;
+  authorizeMutation?: () => void | Promise<void>;
+  error: unknown;
+  existingPublishedFilesystemIdentity?: string;
+  rescueIdentity: DvdRescueIdentity;
+  rescueWorkspace: DvdRescueWorkspace;
+  root: string;
+}): Promise<never> {
+  const cleanupErrors: unknown[] = [];
+  try {
+    await quarantineDvdRescueWorkspace(
+      root,
+      rescueIdentity,
+      rescueWorkspace,
+      authorizeMutation,
+    );
+  } catch (cleanupError) {
+    cleanupErrors.push(cleanupError);
+  }
+  if (existingPublishedFilesystemIdentity !== undefined) {
+    try {
+      await quarantinePublishedArchive(
+        archivePath,
+        existingPublishedFilesystemIdentity,
+        authorizeMutation,
+      );
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+  }
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(
+      [error, ...cleanupErrors],
+      "DVD volume geometry rejection quarantine failed",
+    );
+  }
+  throw error;
 }
 
 export async function quarantinePublishedArchive(
@@ -2135,6 +2218,7 @@ export async function preserveDvdArchive({
   devicePath,
   fingerprint,
   expectedTitleMap,
+  geometryValidator = createNodeDvdGeometryValidator(),
   originalsLibraryPath,
   runner,
   salvageValidator,
@@ -2308,9 +2392,28 @@ export async function preserveDvdArchive({
     }
     await authorizeCopy?.();
     signal.throwIfAborted();
+    onProgress({ phase: "verifying", progressPercent: 99 });
+    try {
+      await validateNormalDvdGeometry({
+        expectedByteCount: safeSizeBytes,
+        geometryValidator,
+        imagePath: rescueWorkspace.imagePath,
+        signal,
+      });
+    } catch (error) {
+      return await quarantineInvalidNormalDvdGeometry({
+        archivePath,
+        authorizeMutation,
+        error,
+        existingPublishedFilesystemIdentity:
+          rescueWorkspace.imageFilesystemIdentity,
+        rescueIdentity: rescueIdentity!,
+        rescueWorkspace,
+        root,
+      });
+    }
     await verifySource();
     signal.throwIfAborted();
-    onProgress({ phase: "verifying", progressPercent: 99 });
     await sync(rescueWorkspace.imagePath);
     const salvageDecision = await evaluateDvdSalvage({
       expectedTitleMap,
@@ -2393,6 +2496,36 @@ export async function preserveDvdArchive({
     }
     await authorizeCopy?.();
     signal.throwIfAborted();
+    let existingPublishedFilesystemIdentity: string | undefined;
+    if (existingArchive !== null) {
+      if (!matchesRescueImageIdentity(
+        existingArchive,
+        rescueWorkspace.imageFilesystemIdentity,
+        safeSizeBytes,
+      )) {
+        throw new Error("Existing DVD archive conflicts with rescue state");
+      }
+      existingPublishedFilesystemIdentity = filesystemIdentity(existingArchive);
+    }
+    onProgress({ phase: "verifying", progressPercent: 99 });
+    try {
+      await validateNormalDvdGeometry({
+        expectedByteCount: safeSizeBytes,
+        geometryValidator,
+        imagePath: rescueWorkspace.imagePath,
+        signal,
+      });
+    } catch (error) {
+      return await quarantineInvalidNormalDvdGeometry({
+        archivePath,
+        authorizeMutation,
+        error,
+        existingPublishedFilesystemIdentity,
+        rescueIdentity: rescueIdentity!,
+        rescueWorkspace,
+        root,
+      });
+    }
     await verifySource();
     signal.throwIfAborted();
     await authorizeMutation?.();
@@ -2693,6 +2826,13 @@ export async function preserveDvdArchive({
         verifySource,
       });
     }
+    onProgress({ phase: "verifying", progressPercent: 99 });
+    await validateNormalDvdGeometry({
+      expectedByteCount: copyOperationSizeBytes,
+      geometryValidator,
+      imagePath: partialPath,
+      signal,
+    });
     await verifySource();
     signal.throwIfAborted();
     await authorizeMutation?.();
@@ -2783,6 +2923,20 @@ export async function preserveDvdArchive({
     // A rejected operation is not proof that the helper exited. Do not return
     // control until OS-level closure releases the copy tombstone.
     await runner.waitForInactive(safeDevicePath, partialPath);
+    if (
+      error instanceof DvdGeometryValidationError &&
+      !signal.aborted &&
+      rescueWorkspace !== null &&
+      rescueIdentity !== undefined
+    ) {
+      await quarantineDvdRescueWorkspace(
+        root,
+        rescueIdentity,
+        rescueWorkspace,
+        authorizeMutation,
+      );
+      rescueWorkspace = null;
+    }
     const isReadFailure = error instanceof DvdReadFailureError;
     const isOutOfRangeFailure =
       isReadFailure && error.readFailure.category === "out_of_range";

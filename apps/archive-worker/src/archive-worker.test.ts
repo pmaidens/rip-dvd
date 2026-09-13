@@ -39,10 +39,11 @@ import {
   type OpticalDriveHardware,
 } from "./archive-worker.js";
 import {
-  preserveDvdArchive,
+  preserveDvdArchive as preserveDvdArchiveImplementation,
   type DvdCopyRunner,
 } from "./dvd-archiver.js";
 import type { DvdCompletenessProver } from "./dvd-completeness-prover.js";
+import { createNodeDvdGeometryValidator } from "./dvd-geometry-validator.js";
 import {
   createCleanDvdRecoveryResult,
   createDamagedDvdRecoveryResult,
@@ -72,6 +73,9 @@ import {
 const temporaryDirectories: string[] = [];
 const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
 const supportsLinuxWriterOwnership = existsSync("/proc/self/fd");
+const passingDvdGeometryValidator = {
+  async validate() {},
+};
 
 type DvdReadFailureCategory = NonBoundaryDvdReadFailureResult["category"];
 
@@ -219,6 +223,7 @@ const dvdReadFailureCases = [
 
 function pollArchiveWorkerOnce(options: PollArchiveWorkerOptions): Promise<void> {
   return pollArchiveWorkerWithDefaults({
+    geometryValidator: passingDvdGeometryValidator,
     ...options,
     rescueWorkspaceLock:
       options.rescueWorkspaceLock ?? testRescueWorkspaceLock,
@@ -254,10 +259,45 @@ async function pollArchiveWorker(options: PollArchiveWorkerOptions): Promise<voi
 
 function runArchiveWorker(options: RunArchiveWorkerOptions): Promise<void> {
   return runArchiveWorkerWithDefaults({
+    geometryValidator: passingDvdGeometryValidator,
     ...options,
     rescueWorkspaceLock:
       options.rescueWorkspaceLock ?? testRescueWorkspaceLock,
   });
+}
+
+function preserveDvdArchive(
+  options: Parameters<typeof preserveDvdArchiveImplementation>[0],
+) {
+  return preserveDvdArchiveImplementation({
+    geometryValidator: passingDvdGeometryValidator,
+    ...options,
+  });
+}
+
+function createIsoImageWithDeclaredSectorCount(
+  totalSectorCount: number,
+  declaredSectorCount: number,
+): Buffer {
+  const sectorSize = 2_048;
+  const image = Buffer.alloc(totalSectorCount * sectorSize);
+  const primary = image.subarray(16 * sectorSize, 17 * sectorSize);
+  primary[0] = 1;
+  primary.write("CD001", 1, "ascii");
+  primary[6] = 1;
+  primary.writeUInt32LE(declaredSectorCount, 80);
+  primary.writeUInt32BE(declaredSectorCount, 84);
+  primary.writeUInt16LE(1, 120);
+  primary.writeUInt16BE(1, 122);
+  primary.writeUInt16LE(1, 124);
+  primary.writeUInt16BE(1, 126);
+  primary.writeUInt16LE(sectorSize, 128);
+  primary.writeUInt16BE(sectorSize, 130);
+  const terminator = image.subarray(17 * sectorSize, 18 * sectorSize);
+  terminator[0] = 255;
+  terminator.write("CD001", 1, "ascii");
+  terminator[6] = 1;
+  return image;
 }
 
 const salvageFailureCases: readonly ({
@@ -1118,6 +1158,94 @@ describe("archive worker polling", () => {
     expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);
     expect(salvageValidator.validate).not.toHaveBeenCalled();
     expect(completenessProver.prove).not.toHaveBeenCalled();
+  });
+
+  it("keeps geometry-invalid clean output out of the archive catalog", async () => {
+    const access = openTestDataAccess();
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-invalid-geometry-"),
+    );
+    temporaryDirectories.push(originalsLibraryPath);
+    const image = createIsoImageWithDeclaredSectorCount(600, 601);
+    const fingerprint = `dvdmeta-sha256:${"b".repeat(64)}`;
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      displayName: "Archive drive",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      serialNumber: "ARCHIVE-GEOMETRY-001",
+    };
+    const drive = access.catalog.reconcileOpticalDrives([
+      { ...discoveredDrive, isConfiguredDevice: true },
+    ])[0]!;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint,
+      scanData,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const hardware: OpticalDriveHardware = {
+      ...stableDeviceBinding(),
+      discover: vi.fn().mockResolvedValue([discoveredDrive]),
+      scanDvd: vi.fn().mockResolvedValue({
+        fingerprint,
+        scanData,
+        sizeBytes: image.byteLength,
+        volumeLabel: "TRUNCATED_DISC",
+      }),
+    };
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
+        writeFileSync(outputPath, image);
+        return createCleanDvdRecoveryResult(sizeBytes);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: discoveredDrive.devicePath,
+      copyRunner,
+      geometryValidator: createNodeDvdGeometryValidator(),
+      hardware,
+      log: vi.fn(),
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-geometry-test",
+    });
+
+    expect(access.archiveJobs.list(["failed"])).toEqual([
+      expect.objectContaining({
+        archiveRequestId: request.id,
+        errorMessage: "DVD ISO volume-space declaration exceeds the image",
+        originalDiscArchiveId: null,
+        status: "failed",
+      }),
+    ]);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(access.archiveRequests.list(["needs_attention"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    const entries = readdirSync(realpathSync(originalsLibraryPath));
+    expect(entries.some((entry) => entry.endsWith(".iso"))).toBe(false);
+    expect(entries.filter((entry) =>
+      entry.endsWith(".iso.rip-dvd-partial.failed")
+    )).toHaveLength(1);
   });
 
   it.each(dvdReadFailureCases)("persists one $category diagnosis for the initial Archive Job attempt", async ({

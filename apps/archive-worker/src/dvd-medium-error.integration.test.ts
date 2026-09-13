@@ -259,6 +259,7 @@ function createFixture(archiveRequestId: string) {
       devicePath: "/dev/sr0",
       expectedTitleMap,
       fingerprint: `dvdmeta-sha256:${digest}`,
+      geometryValidator: { async validate() {} },
       originalsLibraryPath,
       signal: new AbortController().signal,
       sizeBytes: content.byteLength,
