@@ -607,12 +607,11 @@ async function hasValidUdfAnchor(
     return false;
   }
   const descriptor = await reader.readSector(lba);
-  try {
-    validateUdfTag(descriptor, [2], lba);
-    return true;
-  } catch {
+  if (descriptor.readUInt16LE(0) !== 2) {
     return false;
   }
+  validateUdfTag(descriptor, [2], lba);
+  return true;
 }
 
 async function validateUdfGeometry(
@@ -647,12 +646,15 @@ async function validateUdfGeometry(
     const hasRecognitionFragment = recognitionDescriptors.some(
       ({ descriptor }) => hasUdfRecognitionSignature(descriptor),
     );
-    const hasAnchorEvidence = await Promise.all([
+    let hasAnchorEvidence = false;
+    for (const lba of [
       256,
       reader.totalSectorCount - 257,
       reader.totalSectorCount - 1,
-    ].map((lba) => hasValidUdfAnchor(reader, lba)));
-    if (hasRecognitionFragment || hasAnchorEvidence.some(Boolean)) {
+    ]) {
+      hasAnchorEvidence ||= await hasValidUdfAnchor(reader, lba);
+    }
+    if (hasRecognitionFragment || hasAnchorEvidence) {
       geometryError("DVD UDF recognition sequence is incomplete");
     }
     return undefined;
@@ -730,11 +732,10 @@ async function validateUdfGeometry(
     if (alternate.every((byte) => byte === 0)) {
       continue;
     }
-    try {
-      validateUdfTag(alternate, [2], alternateLba);
-    } catch {
+    if (alternate.readUInt16LE(0) !== 2) {
       continue;
     }
+    validateUdfTag(alternate, [2], alternateLba);
     if (!alternate.subarray(16, 32).equals(anchor.subarray(16, 32))) {
       geometryError("DVD UDF anchor geometry views disagree");
     }

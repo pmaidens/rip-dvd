@@ -228,6 +228,16 @@ describe("normal DVD volume geometry validation", () => {
     await expect(validateFixture(writeFixture(image))).resolves.toBeUndefined();
   });
 
+  it("rejects a malformed claimed UDF anchor behind a valid ISO view", async () => {
+    const image = Buffer.alloc(600 * DVD_SECTOR_SIZE_BYTES);
+    writeIsoGeometry(image, 600);
+    sector(image, 256).writeUInt16LE(2, 0);
+
+    await expect(validateFixture(writeFixture(image))).rejects.toThrow(
+      "DVD UDF descriptor tag is malformed",
+    );
+  });
+
   it("rejects an ISO volume-space declaration beyond EOF", async () => {
     const image = Buffer.alloc(600 * DVD_SECTOR_SIZE_BYTES);
     writeIsoGeometry(image, 601);
@@ -300,6 +310,17 @@ describe("normal DVD volume geometry validation", () => {
     writeUdfGeometry(image);
 
     await expect(validateFixture(writeFixture(image))).resolves.toBeUndefined();
+  });
+
+  it("rejects a malformed claimed UDF alternate anchor", async () => {
+    const image = Buffer.alloc(600 * DVD_SECTOR_SIZE_BYTES);
+    writeIsoGeometry(image, 600);
+    writeUdfGeometry(image);
+    sector(image, 599)[16] = 1;
+
+    await expect(validateFixture(writeFixture(image))).rejects.toThrow(
+      "DVD UDF descriptor CRC is malformed",
+    );
   });
 
   it("fails closed when ISO and UDF geometry views disagree", async () => {
