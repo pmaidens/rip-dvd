@@ -10,6 +10,7 @@ import { confirmAuthorizedDrive } from "./authorized-optical-drive.js";
 import type { CompletedDiscInspection } from "./disc-inspection-runner.js";
 import type { DvdSalvageValidator } from "./dvd-salvage-validator.js";
 import type { DvdCompletenessProver } from "./dvd-completeness-prover.js";
+import type { DvdGeometryValidator } from "./dvd-geometry-validator.js";
 import type { DvdRescueWorkspaceLock } from "./dvd-rescue-workspace-lock.js";
 import {
   DvdArchiveReadFailureError,
@@ -24,6 +25,7 @@ export interface RunArchiveJobOptions {
   configuredCanonicalPath: string;
   completenessProver?: DvdCompletenessProver;
   copyRunner: DvdCopyRunner;
+  geometryValidator?: DvdGeometryValidator;
   hardware: OpticalDriveHardware;
   log(message: string): void;
   originalsLibraryPath: string;
@@ -39,6 +41,7 @@ export async function runArchiveJob({
   configuredCanonicalPath,
   completenessProver,
   copyRunner,
+  geometryValidator,
   hardware,
   log,
   originalsLibraryPath,
@@ -142,6 +145,7 @@ export async function runArchiveJob({
           devicePath: binding.drive.devicePath,
           expectedTitleMap: scanData,
           fingerprint: disc.fingerprint,
+          geometryValidator,
           originalsLibraryPath,
           runner: copyRunner,
           salvageValidator,

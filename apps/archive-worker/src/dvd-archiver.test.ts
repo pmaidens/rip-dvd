@@ -24,7 +24,7 @@ import type { ArchiveJobProgress } from "@rip-dvd/data-access";
 
 import {
   DvdArchiveReadFailureError,
-  preserveDvdArchive,
+  preserveDvdArchive as preserveDvdArchiveImplementation,
   createNodeDvdCopyRunner,
   quarantinePublishedArchive,
   withCancelledDvdArchiveInactive,
@@ -36,7 +36,9 @@ import {
   DvdReadFailureError,
   DVD_READ_FAILURE_RESULT_PREFIX,
   DVD_RECOVERY_RESULT_PREFIX,
+  DVD_SECTOR_SIZE_BYTES,
 } from "./dvd-recovery-contracts.js";
+import { createNodeDvdGeometryValidator } from "./dvd-geometry-validator.js";
 import {
   createOutOfRangeDvdReadFailure,
   createOutOfRangeDvdReadFailureResult,
@@ -52,6 +54,48 @@ const orphanedWriterPids: number[] = [];
 const supportsLinuxWriterOwnership =
   existsSync("/proc/self/fd") &&
   spawnSync("flock", ["--version"], { stdio: "ignore" }).status === 0;
+const passingDvdGeometryValidator = {
+  async validate() {},
+};
+
+function preserveDvdArchive(
+  options: Parameters<typeof preserveDvdArchiveImplementation>[0],
+) {
+  return preserveDvdArchiveImplementation({
+    geometryValidator: passingDvdGeometryValidator,
+    ...options,
+  });
+}
+
+function createIsoGeometryImage(
+  totalSectorCount: number,
+  declaredSectorCount: number,
+): Buffer {
+  const image = Buffer.alloc(totalSectorCount * DVD_SECTOR_SIZE_BYTES);
+  const primary = image.subarray(
+    16 * DVD_SECTOR_SIZE_BYTES,
+    17 * DVD_SECTOR_SIZE_BYTES,
+  );
+  primary[0] = 1;
+  primary.write("CD001", 1, "ascii");
+  primary[6] = 1;
+  primary.writeUInt32LE(declaredSectorCount, 80);
+  primary.writeUInt32BE(declaredSectorCount, 84);
+  primary.writeUInt16LE(1, 120);
+  primary.writeUInt16BE(1, 122);
+  primary.writeUInt16LE(1, 124);
+  primary.writeUInt16BE(1, 126);
+  primary.writeUInt16LE(DVD_SECTOR_SIZE_BYTES, 128);
+  primary.writeUInt16BE(DVD_SECTOR_SIZE_BYTES, 130);
+  const terminator = image.subarray(
+    17 * DVD_SECTOR_SIZE_BYTES,
+    18 * DVD_SECTOR_SIZE_BYTES,
+  );
+  terminator[0] = 255;
+  terminator.write("CD001", 1, "ascii");
+  terminator[6] = 1;
+  return image;
+}
 
 function emitCleanRecoveryProtocol(
   stderr: EventEmitter,
@@ -2555,9 +2599,56 @@ describe("DVD archive publication", () => {
         etaSeconds: 2,
       },
       { phase: "copying", progressPercent: 99, progressBytes: 9 },
+      { phase: "verifying", progressPercent: 99 },
       { phase: "finalizing", progressPercent: 99 },
     ]);
     expect(verifySource).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a clean partial whose ISO geometry crosses EOF before sync or publication", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const content = createIsoGeometryImage(600, 601);
+    const digest = "1".repeat(64);
+    const archivePath = join(root, `dvdmeta-${digest}.iso`);
+    const unrelatedPath = join(root, "operator-owned-note.txt");
+    writeFileSync(unrelatedPath, "keep");
+    let partialPath: string | undefined;
+    const sync = vi.fn(async (_path: string) => undefined);
+    const verifySource = vi.fn(async () => undefined);
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
+        partialPath = outputPath;
+        writeFileSync(outputPath, content);
+        return createCleanDvdRecoveryResult(sizeBytes);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    await expect(preserveDvdArchive({
+      devicePath: "/dev/sr0",
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      geometryValidator: createNodeDvdGeometryValidator(),
+      originalsLibraryPath,
+      runner,
+      signal: new AbortController().signal,
+      sizeBytes: content.byteLength,
+      sync,
+      verifySource,
+      onProgress: () => undefined,
+    })).rejects.toThrow(
+      "DVD ISO volume-space declaration exceeds the image",
+    );
+
+    expect(sync).not.toHaveBeenCalled();
+    expect(verifySource).not.toHaveBeenCalled();
+    expect(existsSync(archivePath)).toBe(false);
+    expect(partialPath).toBeDefined();
+    expect(existsSync(partialPath!)).toBe(false);
+    expect(readFileSync(`${partialPath}.failed`)).toEqual(content);
+    expect(readFileSync(unrelatedPath, "utf8")).toBe("keep");
   });
 
   it("rejects malformed recovery evidence before publishing a complete image", async () => {

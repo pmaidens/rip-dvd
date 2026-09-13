@@ -17,6 +17,7 @@ import {
 } from "../../archive-worker/src/dvd-rescue-workspace-lock.js";
 
 const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
+const passingDvdGeometryValidator = { async validate() {} };
 
 export async function pollArchiveWorkerForTest(
   options: PollArchiveWorkerOptions,
@@ -29,6 +30,7 @@ export async function pollArchiveWorkerForTest(
   let elapsedMs = 0;
   try {
     await pollArchiveWorker({
+      geometryValidator: passingDvdGeometryValidator,
       ...options,
       rescueWorkspaceLock:
         options.rescueWorkspaceLock ?? testRescueWorkspaceLock,

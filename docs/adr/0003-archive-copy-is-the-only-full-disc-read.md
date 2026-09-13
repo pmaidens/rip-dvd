@@ -17,6 +17,17 @@ sectors never count as damage. The published file ends at the proven boundary,
 its actual size becomes the Original Disc Archive size, and the Disc Inspection
 reported size remains in separate Archive Boundary Evidence.
 
+Before normal DVD publication, the worker also checks the actual partial-image
+sector count against every supported ISO 9660 and UDF volume-geometry view. The
+check reads only bounded, top-level filesystem descriptors; it does not walk
+path tables, directories, DVD navigation data, title maps, or every referenced
+file extent. Missing ISO or UDF metadata is acceptable when another supported
+view supplies valid geometry, but malformed, out-of-image, or conflicting views
+fail closed. A failure quarantines only the worker-owned partial image before
+filesystem synchronization, catalog persistence, or publication. This narrow
+geometry gate is separate from the stricter corrected-boundary completeness
+proof described above.
+
 Both publication paths require stable Optical Drive identity and
 media-generation evidence, a current Archive Job claim, filesystem
 synchronization, and atomic no-overwrite publication. The worker no longer
