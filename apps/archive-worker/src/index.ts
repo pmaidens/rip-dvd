@@ -6,6 +6,7 @@ import { runConfiguredAsyncWorker } from "@rip-dvd/worker-runtime";
 import { runArchiveWorker } from "./archive-worker.js";
 import { createNodeDvdCopyRunner } from "./dvd-archiver.js";
 import { createNodeDvdCompletenessProver } from "./dvd-completeness-prover.js";
+import { createNodeDvdGeometryValidator } from "./dvd-geometry-validator.js";
 import { createLinuxOpticalDriveHardware } from "./optical-drive-hardware.js";
 import { createNodeDvdSalvageValidator } from "./dvd-salvage-validator.js";
 
@@ -31,6 +32,7 @@ await runConfiguredAsyncWorker(
           stallTimeoutMs: config.archiveCopyStallTimeoutMs,
         }),
         hardware: createLinuxOpticalDriveHardware(),
+        geometryValidator: createNodeDvdGeometryValidator(),
         log,
         originalsLibraryPath: config.originalsLibraryPath,
         salvageValidator: createNodeDvdSalvageValidator(),
