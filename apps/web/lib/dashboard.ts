@@ -1573,6 +1573,24 @@ function readDashboardSnapshotRecords(
         archiveRequestSource.value.map((request) => [request.id, request]),
       )
     : null;
+  const latestJobByDetectedDiscId = archiveJobSource.status === "loaded"
+    ? archiveJobSource.value.reduce((latestByDisc, job) => {
+        const latest = latestByDisc.get(job.detectedDiscId);
+        const jobIsRunning = job.status === "running";
+        const latestIsRunning = latest?.status === "running";
+        if (
+          latest === undefined ||
+          (jobIsRunning && !latestIsRunning) ||
+          (jobIsRunning === latestIsRunning && job.updatedAt > latest.updatedAt) ||
+          (jobIsRunning === latestIsRunning &&
+            job.updatedAt.getTime() === latest.updatedAt.getTime() &&
+            job.id > latest.id)
+        ) {
+          latestByDisc.set(job.detectedDiscId, job);
+        }
+        return latestByDisc;
+      }, new Map<ArchiveJob["detectedDiscId"], ArchiveJob>())
+    : null;
 
   const opticalDrives =
     opticalDriveSource.status === "error" ||
@@ -1633,13 +1651,28 @@ function readDashboardSnapshotRecords(
     detectedDiscSource.status === "error" ||
     drivesById === null ||
     requestByDiscId === null ||
+    requestsById === null ||
+    latestJobByDetectedDiscId === null ||
     jobsByRequestId === null
       ? unavailable<DashboardDetectedDisc>()
       : (() => {
           return loaded(
             detectedDiscSource.value.map((disc) => {
               const drive = drivesById.get(disc.opticalDriveId);
-              const request = requestByDiscId.get(disc.id);
+              const latestDiscJob = latestJobByDetectedDiscId.get(disc.id);
+              const linkedRequest = latestDiscJob === undefined
+                ? undefined
+                : requestsById.get(latestDiscJob.archiveRequestId);
+              const ownedRequest = requestByDiscId.get(disc.id);
+              const request = linkedRequest === undefined
+                ? ownedRequest
+                : ownedRequest === undefined
+                  ? linkedRequest
+                  : !["fulfilled", "cancelled"].includes(linkedRequest.status) &&
+                      (["fulfilled", "cancelled"].includes(ownedRequest.status) ||
+                        linkedRequest.updatedAt > ownedRequest.updatedAt)
+                    ? linkedRequest
+                    : ownedRequest;
               const requestJobs = request === undefined
                 ? []
                 : (jobsByRequestId.get(request.id) ?? []);

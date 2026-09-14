@@ -14,6 +14,7 @@ import {
   withSnapshotOverrides,
 } from "../test/data-access-fixture";
 import {
+  completeDiscInspection,
   pollArchiveWorkerForTest as pollArchiveWorker,
   startArchiveJob,
 } from "../test/archive-job-fixture";
@@ -24,6 +25,130 @@ import { DashboardView } from "./operations-dashboard";
 const dataAccessFixture = useDataAccessFixture();
 
 describe("database-backed dashboard over HTTP", () => {
+  it("projects a running Archive Request onto its cross-drive continuation disc", async () => {
+    const access = dataAccessFixture.create();
+    const fingerprint = `dvdmeta-sha256:${"a".repeat(64)}`;
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const firstDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/private-first-drive",
+      displayName: "HP drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const secondDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/private-second-drive",
+      displayName: "Optiarc drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const registerDisc = (
+      opticalDriveId: typeof firstDrive.id,
+      volumeLabel: string,
+    ) => {
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId,
+        discKind: "dvd",
+        fingerprint,
+        scanData,
+        volumeLabel,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      return disc;
+    };
+
+    const firstDisc = registerDisc(firstDrive.id, "DETECTED_DISC_A");
+    const firstInspection = completeDiscInspection(
+      access,
+      firstDisc,
+      "first-generation",
+      8_192,
+    );
+    const request = access.archiveRequests.create({
+      detectedDiscId: firstDisc.id,
+    });
+    const firstAttempt = access.archiveJobs.startForInspection(
+      firstInspection.id,
+      "first-worker",
+    )!;
+    access.archiveJobs.fail(firstAttempt, "first drive could not read sector");
+    access.archiveRequests.retry(request.id);
+    access.discInspections.clearCurrent({
+      opticalDriveId: firstDrive.id,
+      reasonCode: "drive_unavailable",
+    });
+
+    const secondDisc = registerDisc(secondDrive.id, "DETECTED_DISC_B");
+    const secondInspection = completeDiscInspection(
+      access,
+      secondDisc,
+      "second-generation",
+      8_192,
+    );
+    const secondAttempt = access.archiveJobs.startForInspection(
+      secondInspection.id,
+      "second-worker",
+    )!;
+
+    expect(
+      access.archiveRequests.listRelevantForDetectedDiscs([secondDisc.id]),
+    ).toEqual([
+      expect.objectContaining({
+        id: request.id,
+        detectedDiscId: firstDisc.id,
+        status: "running",
+      }),
+    ]);
+
+    const response = createDashboardResponse(access);
+    const dashboard = (await response.json()) as DashboardSnapshot;
+    const currentDisc = dashboard.detectedDiscs.status === "loaded"
+      ? dashboard.detectedDiscs.items.find(({ id }) => id === secondDisc.id)
+      : undefined;
+    expect(currentDisc?.archiveRequest).toMatchObject({
+      id: request.id,
+      status: "running",
+      attemptCount: 2,
+    });
+    expect(dashboard.archiveJobs).toEqual({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          id: firstAttempt.id,
+          archiveRequestId: request.id,
+          detectedDiscId: firstDisc.id,
+          attemptOrdinal: 1,
+          opticalDriveName: "HP drive",
+          status: "failed",
+        }),
+        expect.objectContaining({
+          id: secondAttempt.id,
+          archiveRequestId: request.id,
+          detectedDiscId: secondDisc.id,
+          attemptOrdinal: 2,
+          opticalDriveName: "Optiarc drive",
+          status: "running",
+        }),
+      ]),
+    });
+
+    const dashboardHtml = renderToStaticMarkup(
+      <DashboardView state={dashboard} section="discs" />,
+    );
+    expect(dashboardHtml).toContain("Cancel archive");
+    expect(dashboardHtml).toContain("Attempt 2 · 2 total");
+    expect(dashboardHtml).toContain("1 older attempt");
+  });
+
   it("carries a coalesced Encode Worker Incident through HTTP, investigation, copy, and recovery", async () => {
     const { access, databasePath } = dataAccessFixture.createWithDatabasePath();
     const diagnostic =
