@@ -7964,7 +7964,7 @@ export function createDataAccessInternal(
             );
           }
           return uniqueIds.flatMap((detectedDiscId) => {
-            const request = database
+            const ownedRequest = database
               .select()
               .from(archiveRequests)
               .where(eq(archiveRequests.detectedDiscId, detectedDiscId))
@@ -7975,7 +7975,38 @@ export function createDataAccessInternal(
               )
               .limit(1)
               .get();
-            return request === undefined ? [] : [request];
+            const attemptedRequest = database
+              .select({ request: archiveRequests })
+              .from(archiveJobs)
+              .innerJoin(
+                archiveRequests,
+                eq(archiveRequests.id, archiveJobs.archiveRequestId),
+              )
+              .where(eq(archiveJobs.detectedDiscId, detectedDiscId))
+              .orderBy(
+                sql`case when ${archiveJobs.status} = 'running' then 0 else 1 end`,
+                desc(archiveJobs.updatedAt),
+                desc(archiveJobs.id),
+              )
+              .limit(1)
+              .get()?.request;
+            const relevantRequest = [ownedRequest, attemptedRequest].filter(
+              (request): request is NonNullable<typeof request> =>
+                request !== undefined,
+            ).sort((left, right) => {
+              const leftIsActive = !["fulfilled", "cancelled"].includes(
+                left.status,
+              );
+              const rightIsActive = !["fulfilled", "cancelled"].includes(
+                right.status,
+              );
+              if (leftIsActive !== rightIsActive) {
+                return leftIsActive ? -1 : 1;
+              }
+              return right.updatedAt.getTime() - left.updatedAt.getTime() ||
+                (left.id < right.id ? 1 : left.id === right.id ? 0 : -1);
+            })[0];
+            return relevantRequest === undefined ? [] : [relevantRequest];
           });
         },
 

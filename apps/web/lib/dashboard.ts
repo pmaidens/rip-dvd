@@ -1307,7 +1307,7 @@ function readDashboardSnapshotRecords(
     activityLimit === undefined || archiveRequestSource.status === "error"
       ? []
       : access.archiveJobs.listLatestForRequests(
-          archiveRequestSource.value.map((request) => request.id),
+          [...new Set(archiveRequestSource.value.map((request) => request.id))],
         ),
   );
   const encodeJobSource = readSource(() =>
@@ -1573,6 +1573,25 @@ function readDashboardSnapshotRecords(
         archiveRequestSource.value.map((request) => [request.id, request]),
       )
     : null;
+  const relevantJobByDetectedDiscId = archiveJobSource.status === "loaded"
+    ? archiveJobSource.value.reduce((relevantByDisc, job) => {
+        const relevant = relevantByDisc.get(job.detectedDiscId);
+        const jobIsRunning = job.status === "running";
+        const relevantIsRunning = relevant?.status === "running";
+        if (
+          relevant === undefined ||
+          (jobIsRunning && !relevantIsRunning) ||
+          (jobIsRunning === relevantIsRunning &&
+            job.updatedAt > relevant.updatedAt) ||
+          (jobIsRunning === relevantIsRunning &&
+            job.updatedAt.getTime() === relevant.updatedAt.getTime() &&
+            job.id > relevant.id)
+        ) {
+          relevantByDisc.set(job.detectedDiscId, job);
+        }
+        return relevantByDisc;
+      }, new Map<ArchiveJob["detectedDiscId"], ArchiveJob>())
+    : null;
 
   const opticalDrives =
     opticalDriveSource.status === "error" ||
@@ -1633,13 +1652,28 @@ function readDashboardSnapshotRecords(
     detectedDiscSource.status === "error" ||
     drivesById === null ||
     requestByDiscId === null ||
+    requestsById === null ||
+    relevantJobByDetectedDiscId === null ||
     jobsByRequestId === null
       ? unavailable<DashboardDetectedDisc>()
       : (() => {
           return loaded(
             detectedDiscSource.value.map((disc) => {
               const drive = drivesById.get(disc.opticalDriveId);
-              const request = requestByDiscId.get(disc.id);
+              const relevantDiscJob = relevantJobByDetectedDiscId.get(disc.id);
+              const linkedRequest = relevantDiscJob === undefined
+                ? undefined
+                : requestsById.get(relevantDiscJob.archiveRequestId);
+              const ownedRequest = requestByDiscId.get(disc.id);
+              const request = linkedRequest === undefined
+                ? ownedRequest
+                : ownedRequest === undefined
+                  ? linkedRequest
+                  : !["fulfilled", "cancelled"].includes(linkedRequest.status) &&
+                      (["fulfilled", "cancelled"].includes(ownedRequest.status) ||
+                        linkedRequest.updatedAt > ownedRequest.updatedAt)
+                    ? linkedRequest
+                    : ownedRequest;
               const requestJobs = request === undefined
                 ? []
                 : (jobsByRequestId.get(request.id) ?? []);
