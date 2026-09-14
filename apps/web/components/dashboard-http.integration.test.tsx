@@ -25,7 +25,7 @@ import { DashboardView } from "./operations-dashboard";
 const dataAccessFixture = useDataAccessFixture();
 
 describe("database-backed dashboard over HTTP", () => {
-  it("projects a running Archive Request onto its cross-drive continuation disc", async () => {
+  it("projects a running Archive Request onto a matching Detected Disc in another Optical Drive", async () => {
     const access = dataAccessFixture.create();
     const fingerprint = `dvdmeta-sha256:${"a".repeat(64)}`;
     const scanData = {

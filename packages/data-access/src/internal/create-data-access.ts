@@ -7963,7 +7963,7 @@ export function createDataAccessInternal(
               `related Detected Disc reads are limited to ${RELATED_ACTIVITY_ROOT_LIMIT} roots`,
             );
           }
-          const requests = uniqueIds.flatMap((detectedDiscId) => {
+          return uniqueIds.flatMap((detectedDiscId) => {
             const ownedRequest = database
               .select()
               .from(archiveRequests)
@@ -7990,14 +7990,24 @@ export function createDataAccessInternal(
               )
               .limit(1)
               .get()?.request;
-            return [ownedRequest, attemptedRequest].filter(
+            const relevantRequest = [ownedRequest, attemptedRequest].filter(
               (request): request is NonNullable<typeof request> =>
                 request !== undefined,
-            );
+            ).sort((left, right) => {
+              const leftIsActive = !["fulfilled", "cancelled"].includes(
+                left.status,
+              );
+              const rightIsActive = !["fulfilled", "cancelled"].includes(
+                right.status,
+              );
+              if (leftIsActive !== rightIsActive) {
+                return leftIsActive ? -1 : 1;
+              }
+              return right.updatedAt.getTime() - left.updatedAt.getTime() ||
+                (left.id < right.id ? 1 : left.id === right.id ? 0 : -1);
+            })[0];
+            return relevantRequest === undefined ? [] : [relevantRequest];
           });
-          return [...new Map(
-            requests.map((request) => [request.id, request]),
-          ).values()];
         },
 
         hasPendingRequestForDetectedDiscFingerprint(detectedDiscId) {
