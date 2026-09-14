@@ -7963,8 +7963,8 @@ export function createDataAccessInternal(
               `related Detected Disc reads are limited to ${RELATED_ACTIVITY_ROOT_LIMIT} roots`,
             );
           }
-          return uniqueIds.flatMap((detectedDiscId) => {
-            const request = database
+          const requests = uniqueIds.flatMap((detectedDiscId) => {
+            const ownedRequest = database
               .select()
               .from(archiveRequests)
               .where(eq(archiveRequests.detectedDiscId, detectedDiscId))
@@ -7975,8 +7975,29 @@ export function createDataAccessInternal(
               )
               .limit(1)
               .get();
-            return request === undefined ? [] : [request];
+            const attemptedRequest = database
+              .select({ request: archiveRequests })
+              .from(archiveJobs)
+              .innerJoin(
+                archiveRequests,
+                eq(archiveRequests.id, archiveJobs.archiveRequestId),
+              )
+              .where(eq(archiveJobs.detectedDiscId, detectedDiscId))
+              .orderBy(
+                sql`case when ${archiveJobs.status} = 'running' then 0 else 1 end`,
+                desc(archiveJobs.updatedAt),
+                desc(archiveJobs.id),
+              )
+              .limit(1)
+              .get()?.request;
+            return [ownedRequest, attemptedRequest].filter(
+              (request): request is NonNullable<typeof request> =>
+                request !== undefined,
+            );
           });
+          return [...new Map(
+            requests.map((request) => [request.id, request]),
+          ).values()];
         },
 
         hasPendingRequestForDetectedDiscFingerprint(detectedDiscId) {
