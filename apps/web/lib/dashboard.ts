@@ -1307,7 +1307,7 @@ function readDashboardSnapshotRecords(
     activityLimit === undefined || archiveRequestSource.status === "error"
       ? []
       : access.archiveJobs.listLatestForRequests(
-          archiveRequestSource.value.map((request) => request.id),
+          [...new Set(archiveRequestSource.value.map((request) => request.id))],
         ),
   );
   const encodeJobSource = readSource(() =>
@@ -1573,22 +1573,23 @@ function readDashboardSnapshotRecords(
         archiveRequestSource.value.map((request) => [request.id, request]),
       )
     : null;
-  const latestJobByDetectedDiscId = archiveJobSource.status === "loaded"
-    ? archiveJobSource.value.reduce((latestByDisc, job) => {
-        const latest = latestByDisc.get(job.detectedDiscId);
+  const relevantJobByDetectedDiscId = archiveJobSource.status === "loaded"
+    ? archiveJobSource.value.reduce((relevantByDisc, job) => {
+        const relevant = relevantByDisc.get(job.detectedDiscId);
         const jobIsRunning = job.status === "running";
-        const latestIsRunning = latest?.status === "running";
+        const relevantIsRunning = relevant?.status === "running";
         if (
-          latest === undefined ||
-          (jobIsRunning && !latestIsRunning) ||
-          (jobIsRunning === latestIsRunning && job.updatedAt > latest.updatedAt) ||
-          (jobIsRunning === latestIsRunning &&
-            job.updatedAt.getTime() === latest.updatedAt.getTime() &&
-            job.id > latest.id)
+          relevant === undefined ||
+          (jobIsRunning && !relevantIsRunning) ||
+          (jobIsRunning === relevantIsRunning &&
+            job.updatedAt > relevant.updatedAt) ||
+          (jobIsRunning === relevantIsRunning &&
+            job.updatedAt.getTime() === relevant.updatedAt.getTime() &&
+            job.id > relevant.id)
         ) {
-          latestByDisc.set(job.detectedDiscId, job);
+          relevantByDisc.set(job.detectedDiscId, job);
         }
-        return latestByDisc;
+        return relevantByDisc;
       }, new Map<ArchiveJob["detectedDiscId"], ArchiveJob>())
     : null;
 
@@ -1652,17 +1653,17 @@ function readDashboardSnapshotRecords(
     drivesById === null ||
     requestByDiscId === null ||
     requestsById === null ||
-    latestJobByDetectedDiscId === null ||
+    relevantJobByDetectedDiscId === null ||
     jobsByRequestId === null
       ? unavailable<DashboardDetectedDisc>()
       : (() => {
           return loaded(
             detectedDiscSource.value.map((disc) => {
               const drive = drivesById.get(disc.opticalDriveId);
-              const latestDiscJob = latestJobByDetectedDiscId.get(disc.id);
-              const linkedRequest = latestDiscJob === undefined
+              const relevantDiscJob = relevantJobByDetectedDiscId.get(disc.id);
+              const linkedRequest = relevantDiscJob === undefined
                 ? undefined
-                : requestsById.get(latestDiscJob.archiveRequestId);
+                : requestsById.get(relevantDiscJob.archiveRequestId);
               const ownedRequest = requestByDiscId.get(disc.id);
               const request = linkedRequest === undefined
                 ? ownedRequest
