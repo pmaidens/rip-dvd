@@ -18,6 +18,7 @@ import {
 import type { DvdSalvageValidator } from "./dvd-salvage-validator.js";
 import type { DvdCompletenessProver } from "./dvd-completeness-prover.js";
 import type { DvdGeometryValidator } from "./dvd-geometry-validator.js";
+import type { DvdEndpointProver } from "./dvd-endpoint-prover.js";
 import {
   defaultDvdRescueWorkspaceLock,
   type DvdRescueWorkspaceLock,
@@ -44,6 +45,7 @@ export interface PollArchiveWorkerOptions {
   configuredDevicePath: string;
   copyRunner?: DvdCopyRunner;
   geometryValidator?: DvdGeometryValidator;
+  endpointProver?: DvdEndpointProver;
   hardware: OpticalDriveHardware;
   log(message: string): void;
   originalsLibraryPath?: string;
@@ -145,6 +147,7 @@ async function pollArchiveWorkerWithDriveAdmission(
     configuredDevicePath,
     copyRunner,
     geometryValidator,
+    endpointProver,
     hardware,
     log,
     originalsLibraryPath,
@@ -310,6 +313,7 @@ async function pollArchiveWorkerWithDriveAdmission(
         configuredCanonicalPath,
         copyRunner,
         geometryValidator,
+        endpointProver,
         hardware,
         log,
         originalsLibraryPath,

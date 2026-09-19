@@ -1,7 +1,6 @@
 import type { DataAccess } from "@rip-dvd/data-access";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
-  createNormalDvdArchiveBoundaryEvidence,
 } from "@rip-dvd/data-access";
 import { decodeDvdTitleMap } from "@rip-dvd/data-access/dvd-scan";
 
@@ -11,6 +10,7 @@ import type { CompletedDiscInspection } from "./disc-inspection-runner.js";
 import type { DvdSalvageValidator } from "./dvd-salvage-validator.js";
 import type { DvdCompletenessProver } from "./dvd-completeness-prover.js";
 import type { DvdGeometryValidator } from "./dvd-geometry-validator.js";
+import type { DvdEndpointProver } from "./dvd-endpoint-prover.js";
 import type { DvdRescueWorkspaceLock } from "./dvd-rescue-workspace-lock.js";
 import {
   DvdArchiveReadFailureError,
@@ -26,6 +26,7 @@ export interface RunArchiveJobOptions {
   completenessProver?: DvdCompletenessProver;
   copyRunner: DvdCopyRunner;
   geometryValidator?: DvdGeometryValidator;
+  endpointProver?: DvdEndpointProver;
   hardware: OpticalDriveHardware;
   log(message: string): void;
   originalsLibraryPath: string;
@@ -42,6 +43,7 @@ export async function runArchiveJob({
   completenessProver,
   copyRunner,
   geometryValidator,
+  endpointProver,
   hardware,
   log,
   originalsLibraryPath,
@@ -148,6 +150,7 @@ export async function runArchiveJob({
           geometryValidator,
           originalsLibraryPath,
           runner: copyRunner,
+          endpointProver,
           salvageValidator,
           revalidateReadFailure,
           signal: archiveSignal,
@@ -159,11 +162,15 @@ export async function runArchiveJob({
         });
         try {
           authorizeClaim();
+          const boundaryEvidence =
+            preserved.correctedBoundaryEvidence ??
+            preserved.normalBoundaryEvidence;
+          if (boundaryEvidence === undefined) {
+            throw new Error("DVD endpoint proof is unavailable");
+          }
           access.archiveJobs.publish(claim, {
             archivePath: preserved.archivePath,
-            boundaryEvidence:
-              preserved.correctedBoundaryEvidence ??
-                createNormalDvdArchiveBoundaryEvidence(archiveSizeBytes),
+            boundaryEvidence,
             integrityEvidence: preserved.integrityEvidence,
             sizeBytes: preserved.sizeBytes,
           });

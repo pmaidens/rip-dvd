@@ -9,28 +9,85 @@ import {
 import { DomainInvariantError } from "./errors.js";
 
 describe("DVD archive-boundary evidence", () => {
-  it("records the reported and published size for a normal full-size archive", () => {
-    expect(createNormalDvdArchiveBoundaryEvidence(8_192)).toEqual({
-      policyVersion: "dvd-archive-boundary-v1",
+  it("records independent endpoint proof for a normal full-size archive", () => {
+    expect(createNormalDvdArchiveBoundaryEvidence({
+      reportedSizeBytes: 8_192,
+      endpointProof: {
+        proofVersion: "dvd-normal-endpoint-proof-v1",
+        confirmationCount: 2,
+        firstExcludedLba: 4,
+        outOfRangeEvidence: {
+          classifierVersion: "scsi-read-classifier-v2",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 0x72,
+          senseKey: 0x05,
+          asc: 0x21,
+          ascq: 0,
+        },
+      },
+    })).toEqual({
+      policyVersion: "dvd-archive-boundary-v2",
       reportedSizeBytes: 8_192,
       publishedSizeBytes: 8_192,
       excludedSectorCount: 0,
+      endpointProof: {
+        proofVersion: "dvd-normal-endpoint-proof-v1",
+        confirmationCount: 2,
+        firstExcludedLba: 4,
+        outOfRangeEvidence: {
+          classifierVersion: "scsi-read-classifier-v2",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 0x72,
+          senseKey: 0x05,
+          asc: 0x21,
+          ascq: 0,
+        },
+      },
     });
     expect(DVD_ARCHIVE_BOUNDARY_POLICY_VERSION).toBe(
-      "dvd-archive-boundary-v1",
+      "dvd-archive-boundary-v2",
     );
   });
 
   it.each([
-    0,
-    -1,
-    9_000_000_001,
-    Number.MAX_SAFE_INTEGER + 1,
-    Number.NaN,
-  ])("rejects an unbounded reported size of %s", (reportedSizeBytes) => {
-    expect(() =>
-      createNormalDvdArchiveBoundaryEvidence(reportedSizeBytes)
-    ).toThrow(DomainInvariantError);
+    ["zero size", { reportedSizeBytes: 0 }],
+    ["unaligned size", { reportedSizeBytes: 8_191 }],
+    ["wrong first excluded LBA", {
+      endpointProof: { firstExcludedLba: 3 },
+    }],
+    ["one confirmation", { endpointProof: { confirmationCount: 1 } }],
+    ["non-out-of-range response", {
+      endpointProof: { outOfRangeEvidence: { asc: 0x20 } },
+    }],
+  ])("rejects normal evidence with %s", (_reason, override) => {
+    const endpointProof = {
+      proofVersion: "dvd-normal-endpoint-proof-v1",
+      confirmationCount: 2,
+      firstExcludedLba: 4,
+      ...(override as { endpointProof?: Record<string, unknown> }).endpointProof,
+      outOfRangeEvidence: {
+        classifierVersion: "scsi-read-classifier-v2",
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseResponseCode: 0x70,
+        senseKey: 0x05,
+        asc: 0x21,
+        ascq: 0,
+        ...(override as {
+          endpointProof?: { outOfRangeEvidence?: Record<string, unknown> };
+        }).endpointProof?.outOfRangeEvidence,
+      },
+    };
+    expect(() => createNormalDvdArchiveBoundaryEvidence({
+      reportedSizeBytes: 8_192,
+      ...override,
+      endpointProof,
+    } as never)).toThrow(DomainInvariantError);
   });
 
   it("records a sector-precise corrected boundary and its bounded out-of-range evidence", () => {
@@ -217,6 +274,37 @@ describe("DVD archive-boundary evidence", () => {
         asc: 0x21,
       }),
     }));
+  });
+
+  it("reconstructs normal endpoint proof", () => {
+    expect(archiveBoundaryEvidenceFromRecord({
+      boundaryPolicyVersion: "dvd-archive-boundary-v2",
+      boundaryReportedSizeBytes: 8_192,
+      boundaryPublishedSizeBytes: 8_192,
+      boundaryExcludedSectorCount: 0,
+      boundaryFirstExcludedLba: 4,
+      boundaryMaximumReferencedLba: null,
+      boundaryReadFailureClassifierVersion: "scsi-read-classifier-v2",
+      boundaryReadFailureScsiStatus: 2,
+      boundaryReadFailureHostStatus: 0,
+      boundaryReadFailureDriverStatus: 8,
+      boundaryReadFailureSenseResponseCode: 0x70,
+      boundaryReadFailureSenseKey: 0x05,
+      boundaryReadFailureAsc: 0x21,
+      boundaryReadFailureAscq: 0,
+    })).toMatchObject({
+      policyVersion: "dvd-archive-boundary-v2",
+      excludedSectorCount: 0,
+      endpointProof: {
+        proofVersion: "dvd-normal-endpoint-proof-v1",
+        confirmationCount: 2,
+        firstExcludedLba: 4,
+        outOfRangeEvidence: {
+          classifierVersion: "scsi-read-classifier-v2",
+          asc: 0x21,
+        },
+      },
+    });
   });
 
   it("rejects a partial persisted record", () => {
