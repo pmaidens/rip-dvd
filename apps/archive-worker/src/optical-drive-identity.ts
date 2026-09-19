@@ -8,6 +8,7 @@ import {
 } from "./optical-media-generation.js";
 
 export type OpticalDriveIdentityPhase =
+  | "after DVD settling"
   | "before DVD settling"
   | "before DVD persistence"
   | "before DVD scanning"

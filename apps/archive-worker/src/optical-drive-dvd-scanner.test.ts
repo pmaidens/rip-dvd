@@ -49,11 +49,6 @@ describe("Optical Drive DVD scan coordinator", () => {
             "Title: 01, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
           ].join("\n"),
           stderr: "",
-        })
-        .mockResolvedValueOnce({
-          exitCode: 0,
-          stdout: "1024\n",
-          stderr: "",
         }),
     };
     const identity = createBoundOpticalDriveIdentity({
@@ -70,8 +65,12 @@ describe("Optical Drive DVD scan coordinator", () => {
     const signal = new AbortController().signal;
     const binding = await identity.bind({ devicePath: "/dev/sr0" }, signal);
 
-    const first = await scanner.scan(binding, signal);
-    const repeated = await scanner.scan(binding, signal);
+    const first = await scanner.scan(binding, signal, {
+      expectedMediaCapacityBytes: 2_048,
+    });
+    const repeated = await scanner.scan(binding, signal, {
+      expectedMediaCapacityBytes: 2_048,
+    });
 
     expect(first).toMatchObject({
       fingerprint: expect.stringMatching(/^dvdmeta-sha256:[0-9a-f]{64}$/),
@@ -81,7 +80,39 @@ describe("Optical Drive DVD scan coordinator", () => {
       ...first,
       isNewMediumObservation: false,
     });
-    expect(runner.run).toHaveBeenCalledTimes(2);
+    expect(runner.run).toHaveBeenCalledOnce();
+  });
+
+  it("does not reuse cached metadata after direct capacity changes", async () => {
+    const run = vi.fn()
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: validMetadata("CAPACITY_CHANGED_DISC"),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: validMetadata("CAPACITY_CHANGED_DISC"),
+        stderr: "",
+      });
+    const { binding, scanner, signal } = await createScannerFixture({
+      runner: { run },
+    });
+
+    const oldScan = await scanner.scan(binding, signal, {
+      expectedMediaCapacityBytes: 2_048,
+    });
+    const currentScan = await scanner.scan(binding, signal, {
+      expectedMediaCapacityBytes: 4_096,
+    });
+
+    expect(oldScan).toMatchObject({ sizeBytes: 2_048 });
+    expect(currentScan).toMatchObject({
+      isNewMediumObservation: true,
+      sizeBytes: 4_096,
+    });
+    expect(currentScan?.fingerprint).not.toBe(oldScan?.fingerprint);
+    expect(run).toHaveBeenCalledTimes(2);
   });
 
   it("reports an empty Optical Drive with a structured no-medium outcome", async () => {
@@ -95,7 +126,9 @@ describe("Optical Drive DVD scan coordinator", () => {
       },
     });
 
-    await expect(scanner.scan(binding, signal)).rejects.toEqual(
+    await expect(scanner.scan(binding, signal, {
+      expectedMediaCapacityBytes: 2_048,
+    })).rejects.toEqual(
       expect.objectContaining<Partial<DiscInspectionError>>({
         kind: "abort",
         reasonCode: "no_medium",
@@ -114,7 +147,9 @@ describe("Optical Drive DVD scan coordinator", () => {
       },
     });
 
-    await expect(scanner.scan(binding, signal)).rejects.toEqual(
+    await expect(scanner.scan(binding, signal, {
+      expectedMediaCapacityBytes: 2_048,
+    })).rejects.toEqual(
       expect.objectContaining<Partial<DiscInspectionError>>({
         kind: "retry",
         reasonCode: "drive_not_ready",
@@ -132,7 +167,9 @@ describe("Optical Drive DVD scan coordinator", () => {
       runner: { run },
     });
 
-    await expect(scanner.scan(binding, signal)).rejects.toEqual(
+    await expect(scanner.scan(binding, signal, {
+      expectedMediaCapacityBytes: 2_048,
+    })).rejects.toEqual(
       expect.objectContaining<Partial<DiscInspectionError>>({
         kind: "retry",
         reasonCode: "metadata_read_failed",
@@ -175,18 +212,15 @@ describe("Optical Drive DVD scan coordinator", () => {
           exitCode: 4,
           stdout: "",
           stderr: "Can't open ifo 5!",
-        })
-        .mockResolvedValueOnce({
-          exitCode: 0,
-          stdout: "4096\n",
-          stderr: "",
         }),
     };
     const { binding, scanner, signal } = await createScannerFixture({
       runner,
     });
 
-    await expect(scanner.scan(binding, signal)).resolves.toMatchObject({
+    await expect(scanner.scan(binding, signal, {
+      expectedMediaCapacityBytes: 4_096,
+    })).resolves.toMatchObject({
       fingerprint: expect.stringMatching(/^dvdmeta-sha256:[0-9a-f]{64}$/),
       scanData: {
         titles: [{ number: 1 }, { number: 2 }],
@@ -205,13 +239,7 @@ describe("Optical Drive DVD scan coordinator", () => {
       ["-q", "-t", "5", "-Oh", "-a", "-c", "-s", "/dev/sr0"],
       expect.any(Object),
     );
-    expect(runner.run).toHaveBeenNthCalledWith(
-      7,
-      "blockdev",
-      ["--getsize64", "/dev/sr0"],
-      expect.any(Object),
-    );
-    expect(runner.run).toHaveBeenCalledTimes(7);
+    expect(runner.run).toHaveBeenCalledTimes(6);
   });
 
   it("reports malformed lsdvd output as a structured metadata failure", async () => {
@@ -225,7 +253,9 @@ describe("Optical Drive DVD scan coordinator", () => {
       },
     });
 
-    await expect(scanner.scan(binding, signal)).rejects.toEqual(
+    await expect(scanner.scan(binding, signal, {
+      expectedMediaCapacityBytes: 2_048,
+    })).rejects.toEqual(
       expect.objectContaining<Partial<DiscInspectionError>>({
         kind: "fail",
         reasonCode: "invalid_metadata",
@@ -233,49 +263,20 @@ describe("Optical Drive DVD scan coordinator", () => {
     );
   });
 
-  it("reports a blockdev failure as a structured content-size retry", async () => {
+  it("requires settled direct capacity instead of reading block-device size", async () => {
     const { binding, scanner, signal } = await createScannerFixture({
       runner: {
-        run: vi.fn()
-          .mockResolvedValueOnce({
-            exitCode: 0,
-            stdout: validMetadata("SIZE_FAILURE"),
-            stderr: "",
-          })
-          .mockResolvedValueOnce({
-            exitCode: 1,
-            stdout: "",
-            stderr: "read failed",
-          }),
+        run: vi.fn().mockResolvedValue({
+          exitCode: 0,
+          stdout: validMetadata("MISSING_DIRECT_CAPACITY"),
+          stderr: "",
+        }),
       },
     });
 
-    await expect(scanner.scan(binding, signal)).rejects.toEqual(
-      expect.objectContaining<Partial<DiscInspectionError>>({
-        kind: "retry",
-        reasonCode: "content_size_failed",
-      }),
-    );
-  });
-
-  it("reports an invalid content size as a structured contract failure", async () => {
-    const { binding, scanner, signal } = await createScannerFixture({
-      runner: {
-        run: vi.fn()
-          .mockResolvedValueOnce({
-            exitCode: 0,
-            stdout: validMetadata("INVALID_SIZE"),
-            stderr: "",
-          })
-          .mockResolvedValueOnce({
-            exitCode: 0,
-            stdout: "not-a-size",
-            stderr: "",
-          }),
-      },
-    });
-
-    await expect(scanner.scan(binding, signal)).rejects.toEqual(
+    await expect(scanner.scan(binding, signal, {
+      expectedMediaCapacityBytes: undefined as never,
+    })).rejects.toEqual(
       expect.objectContaining<Partial<DiscInspectionError>>({
         kind: "fail",
         reasonCode: "invalid_content",
@@ -283,26 +284,25 @@ describe("Optical Drive DVD scan coordinator", () => {
     );
   });
 
-  it("preserves the AbortSignal reason across the content-size boundary", async () => {
-    const controller = new AbortController();
-    const shutdown = new Error("worker shutdown");
-    const { binding, scanner } = await createScannerFixture({
+  it("reports an invalid content size as a structured contract failure", async () => {
+    const { binding, scanner, signal } = await createScannerFixture({
       runner: {
-        run: vi.fn()
-          .mockResolvedValueOnce({
-            exitCode: 0,
-            stdout: validMetadata("ABORTED_READ"),
-            stderr: "",
-          })
-          .mockImplementationOnce(async () => {
-            controller.abort(shutdown);
-            throw shutdown;
-          }),
+        run: vi.fn().mockResolvedValue({
+          exitCode: 0,
+          stdout: validMetadata("INVALID_SIZE"),
+          stderr: "",
+        }),
       },
-      signal: controller.signal,
     });
 
-    await expect(scanner.scan(binding, controller.signal)).rejects.toBe(shutdown);
+    await expect(scanner.scan(binding, signal, {
+      expectedMediaCapacityBytes: 0,
+    })).rejects.toEqual(
+      expect.objectContaining<Partial<DiscInspectionError>>({
+        kind: "fail",
+        reasonCode: "invalid_content",
+      }),
+    );
   });
 
   it("reports a changed medium generation as a structured abort", async () => {
@@ -312,6 +312,7 @@ describe("Optical Drive DVD scan coordinator", () => {
     });
 
     await expect(scanner.scan(binding, signal, {
+      expectedMediaCapacityBytes: 2_048,
       expectedMediaGeneration: "generation-17",
     })).rejects.toEqual(
       expect.objectContaining<Partial<DiscInspectionError>>({

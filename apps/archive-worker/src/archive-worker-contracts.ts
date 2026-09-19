@@ -30,7 +30,7 @@ export interface OpticalDriveHardware {
   scanDvd(
     binding: BoundOpticalDrive,
     signal: AbortSignal,
-    options?: DiscInspectionScanOptions,
+    options: DiscInspectionScanOptions,
   ): Promise<ScannedDvd | null>;
   observeMedia(
     binding: BoundOpticalDrive,

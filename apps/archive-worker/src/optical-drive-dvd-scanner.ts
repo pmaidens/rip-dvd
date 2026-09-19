@@ -34,7 +34,7 @@ export interface OpticalDriveDvdScanner {
   scan(
     binding: BoundOpticalDrive,
     signal: AbortSignal,
-    options?: DiscInspectionScanOptions,
+    options: DiscInspectionScanOptions,
   ): Promise<ScannedDvd | null>;
 }
 
@@ -48,7 +48,7 @@ export interface DiscInspectionMetadata {
 }
 
 export interface DiscInspectionScanOptions {
-  expectedMediaCapacityBytes?: number;
+  expectedMediaCapacityBytes: number;
   expectedMediaGeneration?: string;
   onMetadata?(metadata: DiscInspectionMetadata): void;
   onPhase?(phase: "reading_metadata" | "confirming_media"): void;
@@ -200,44 +200,26 @@ async function inspectDvd(
 }
 
 async function readDvdIdentity(
-  devicePath: string,
-  signal: AbortSignal,
-  runner: CommandRunner,
   metadata: NonNullable<Awaited<ReturnType<typeof inspectDvd>>>,
   options: DiscInspectionScanOptions,
 ): Promise<{ fingerprint: string; sizeBytes: number }> {
-  let sizeBytes: number;
   if (options.expectedMediaCapacityBytes === undefined) {
-    const sizeResult = await runner.run(
-      "blockdev",
-      ["--getsize64", devicePath],
-      {
-        maxBufferBytes: 128,
-        signal,
-        timeoutMs: OPTICAL_DRIVE_COMMAND_TIMEOUT_MS,
-      },
+    throw new DiscInspectionError(
+      "fail",
+      "invalid_content",
+      "Settled direct DVD capacity is required for disc identity",
     );
-    if (sizeResult.exitCode !== 0) {
-      const failure = commandFailure("blockdev", sizeResult);
-      throw new DiscInspectionError(
-        "retry",
-        "content_size_failed",
-        failure.message,
-        { cause: failure },
-      );
-    }
-    try {
-      sizeBytes = requireDvdContentSize(Number(sizeResult.stdout.trim()));
-    } catch (error) {
-      throw new DiscInspectionError(
-        "fail",
-        "invalid_content",
-        "blockdev returned an invalid DVD size",
-        { cause: error },
-      );
-    }
-  } else {
+  }
+  let sizeBytes: number;
+  try {
     sizeBytes = requireDvdContentSize(options.expectedMediaCapacityBytes);
+  } catch (error) {
+    throw new DiscInspectionError(
+      "fail",
+      "invalid_content",
+      "Settled direct DVD capacity is invalid",
+      { cause: error },
+    );
   }
   options.onMetadata?.({
     audioStreamCount: metadata.titles.reduce(
@@ -273,7 +255,7 @@ export function createOpticalDriveDvdScanner({
   runner,
 }: OpticalDriveDvdScannerOptions): OpticalDriveDvdScanner {
   return {
-    async scan(binding, signal, options = {}) {
+    async scan(binding, signal, options) {
       const safeDevicePath = await identity.requireCurrent(
         binding,
         "before DVD scanning",
@@ -291,7 +273,11 @@ export function createOpticalDriveDvdScanner({
         throw mediaChanged("DVD medium changed before scanning");
       }
       const cached = cache.find(safeDevicePath, generationBefore);
-      if (cached !== undefined) {
+      if (
+        cached !== undefined &&
+        (cached.result === null ||
+          cached.result.sizeBytes === options.expectedMediaCapacityBytes)
+      ) {
         await identity.requireCurrent(binding, "during DVD scanning", signal);
         if (cached.result === null) {
           throw new DiscInspectionError(
@@ -328,9 +314,6 @@ export function createOpticalDriveDvdScanner({
       }
 
       const { fingerprint, sizeBytes } = await readDvdIdentity(
-        safeDevicePath,
-        signal,
-        runner,
         metadata,
         options,
       );
