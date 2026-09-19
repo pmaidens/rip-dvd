@@ -1,13 +1,20 @@
 import { DomainInvariantError } from "./errors.js";
 
 export const DVD_ARCHIVE_BOUNDARY_POLICY_VERSION =
+  "dvd-archive-boundary-v2" as const;
+export const DVD_NORMAL_ENDPOINT_PROOF_VERSION =
+  "dvd-normal-endpoint-proof-v1" as const;
+
+const LEGACY_DVD_ARCHIVE_BOUNDARY_POLICY_VERSION =
   "dvd-archive-boundary-v1" as const;
 
 const DVD_SECTOR_SIZE_BYTES = 2_048;
 const MAX_DVD_CONTENT_BYTES = 9_000_000_000;
 
 interface DvdArchiveBoundaryEvidenceBase {
-  policyVersion: typeof DVD_ARCHIVE_BOUNDARY_POLICY_VERSION;
+  policyVersion:
+    | typeof DVD_ARCHIVE_BOUNDARY_POLICY_VERSION
+    | typeof LEGACY_DVD_ARCHIVE_BOUNDARY_POLICY_VERSION;
   reportedSizeBytes: number;
   publishedSizeBytes: number;
   excludedSectorCount: number;
@@ -26,17 +33,32 @@ export interface DvdArchiveBoundaryOutOfRangeEvidence {
 
 export interface NormalDvdArchiveBoundaryEvidence
   extends DvdArchiveBoundaryEvidenceBase {
+  policyVersion: typeof DVD_ARCHIVE_BOUNDARY_POLICY_VERSION;
+  excludedSectorCount: 0;
+  endpointProof: {
+    proofVersion: typeof DVD_NORMAL_ENDPOINT_PROOF_VERSION;
+    confirmationCount: 2;
+    firstExcludedLba: number;
+    outOfRangeEvidence: DvdArchiveBoundaryOutOfRangeEvidence;
+  };
+}
+
+interface LegacyNormalDvdArchiveBoundaryEvidence
+  extends DvdArchiveBoundaryEvidenceBase {
+  policyVersion: typeof LEGACY_DVD_ARCHIVE_BOUNDARY_POLICY_VERSION;
   excludedSectorCount: 0;
 }
 
 export interface CorrectedDvdArchiveBoundaryEvidence
   extends DvdArchiveBoundaryEvidenceBase {
+  policyVersion: typeof LEGACY_DVD_ARCHIVE_BOUNDARY_POLICY_VERSION;
   firstExcludedLba: number;
   maximumReferencedLba: number;
   outOfRangeEvidence: DvdArchiveBoundaryOutOfRangeEvidence;
 }
 
 export type ArchiveBoundaryEvidence =
+  | LegacyNormalDvdArchiveBoundaryEvidence
   | NormalDvdArchiveBoundaryEvidence
   | CorrectedDvdArchiveBoundaryEvidence;
 
@@ -69,19 +91,88 @@ function correctedEvidenceError(): DomainInvariantError {
   );
 }
 
+function normalizeOutOfRangeEvidence(
+  outOfRangeEvidence: DvdArchiveBoundaryOutOfRangeEvidence,
+  invalidEvidence: () => DomainInvariantError,
+): DvdArchiveBoundaryOutOfRangeEvidence {
+  if (
+    typeof outOfRangeEvidence !== "object" ||
+    outOfRangeEvidence === null ||
+    typeof outOfRangeEvidence.classifierVersion !== "string" ||
+    outOfRangeEvidence.classifierVersion.length === 0 ||
+    outOfRangeEvidence.classifierVersion.length > 128 ||
+    !Number.isSafeInteger(outOfRangeEvidence.scsiStatus) ||
+    outOfRangeEvidence.scsiStatus < 0 ||
+    outOfRangeEvidence.scsiStatus > 0xff ||
+    (outOfRangeEvidence.scsiStatus & 0xfe) !== 2 ||
+    outOfRangeEvidence.hostStatus !== 0 ||
+    !Number.isSafeInteger(outOfRangeEvidence.driverStatus) ||
+    outOfRangeEvidence.driverStatus < 0 ||
+    outOfRangeEvidence.driverStatus > 0xffff ||
+    ((outOfRangeEvidence.driverStatus & 0x0f) !== 0 &&
+      (outOfRangeEvidence.driverStatus & 0x0f) !== 8) ||
+    (outOfRangeEvidence.senseResponseCode !== 0x70 &&
+      outOfRangeEvidence.senseResponseCode !== 0x72) ||
+    outOfRangeEvidence.senseKey !== 0x05 ||
+    outOfRangeEvidence.asc !== 0x21 ||
+    outOfRangeEvidence.ascq !== 0
+  ) {
+    throw invalidEvidence();
+  }
+  return {
+    classifierVersion: outOfRangeEvidence.classifierVersion,
+    scsiStatus: outOfRangeEvidence.scsiStatus,
+    hostStatus: outOfRangeEvidence.hostStatus,
+    driverStatus: outOfRangeEvidence.driverStatus,
+    senseResponseCode: outOfRangeEvidence.senseResponseCode,
+    senseKey: outOfRangeEvidence.senseKey,
+    asc: outOfRangeEvidence.asc,
+    ascq: outOfRangeEvidence.ascq,
+  };
+}
+
 export function createNormalDvdArchiveBoundaryEvidence(
-  reportedSizeBytes: number,
+  {
+    reportedSizeBytes,
+    endpointProof,
+  }: {
+    reportedSizeBytes: number;
+    endpointProof: NormalDvdArchiveBoundaryEvidence["endpointProof"];
+  },
 ): NormalDvdArchiveBoundaryEvidence {
-  if (!isValidDvdSize(reportedSizeBytes)) {
+  const invalidEvidence = () => new DomainInvariantError(
+    "Normal DVD archive-boundary evidence is invalid",
+  );
+  if (
+    !isValidDvdSize(reportedSizeBytes) ||
+    reportedSizeBytes % DVD_SECTOR_SIZE_BYTES !== 0 ||
+    typeof endpointProof !== "object" ||
+    endpointProof === null ||
+    endpointProof.proofVersion !== DVD_NORMAL_ENDPOINT_PROOF_VERSION ||
+    endpointProof.confirmationCount !== 2 ||
+    !Number.isSafeInteger(endpointProof.firstExcludedLba) ||
+    endpointProof.firstExcludedLba !==
+      reportedSizeBytes / DVD_SECTOR_SIZE_BYTES
+  ) {
     throw new DomainInvariantError(
-      "DVD archive-boundary reported size is invalid",
+      "Normal DVD archive-boundary evidence is invalid",
     );
   }
+  const outOfRangeEvidence = normalizeOutOfRangeEvidence(
+    endpointProof.outOfRangeEvidence,
+    invalidEvidence,
+  );
   return {
     policyVersion: DVD_ARCHIVE_BOUNDARY_POLICY_VERSION,
     reportedSizeBytes,
     publishedSizeBytes: reportedSizeBytes,
     excludedSectorCount: 0,
+    endpointProof: {
+      proofVersion: DVD_NORMAL_ENDPOINT_PROOF_VERSION,
+      confirmationCount: 2,
+      firstExcludedLba: endpointProof.firstExcludedLba,
+      outOfRangeEvidence,
+    },
   };
 }
 
@@ -114,45 +205,22 @@ export function createCorrectedDvdArchiveBoundaryEvidence({
     excludedByteCount <= 0 ||
     excludedByteCount % DVD_SECTOR_SIZE_BYTES !== 0 ||
     typeof outOfRangeEvidence !== "object" ||
-    outOfRangeEvidence === null ||
-    typeof outOfRangeEvidence.classifierVersion !== "string" ||
-    outOfRangeEvidence.classifierVersion.length === 0 ||
-    outOfRangeEvidence.classifierVersion.length > 128 ||
-    !Number.isSafeInteger(outOfRangeEvidence.scsiStatus) ||
-    outOfRangeEvidence.scsiStatus < 0 ||
-    outOfRangeEvidence.scsiStatus > 0xff ||
-    (outOfRangeEvidence.scsiStatus & 0xfe) !== 2 ||
-    outOfRangeEvidence.hostStatus !== 0 ||
-    !Number.isSafeInteger(outOfRangeEvidence.driverStatus) ||
-    outOfRangeEvidence.driverStatus < 0 ||
-    outOfRangeEvidence.driverStatus > 0xffff ||
-    ((outOfRangeEvidence.driverStatus & 0x0f) !== 0 &&
-      (outOfRangeEvidence.driverStatus & 0x0f) !== 8) ||
-    (outOfRangeEvidence.senseResponseCode !== 0x70 &&
-      outOfRangeEvidence.senseResponseCode !== 0x72) ||
-    outOfRangeEvidence.senseKey !== 0x05 ||
-    outOfRangeEvidence.asc !== 0x21 ||
-    outOfRangeEvidence.ascq !== 0
+    outOfRangeEvidence === null
   ) {
     throw correctedEvidenceError();
   }
+  const normalizedOutOfRangeEvidence = normalizeOutOfRangeEvidence(
+    outOfRangeEvidence,
+    correctedEvidenceError,
+  );
   return {
-    policyVersion: DVD_ARCHIVE_BOUNDARY_POLICY_VERSION,
+    policyVersion: LEGACY_DVD_ARCHIVE_BOUNDARY_POLICY_VERSION,
     reportedSizeBytes,
     publishedSizeBytes,
     excludedSectorCount: excludedByteCount / DVD_SECTOR_SIZE_BYTES,
     firstExcludedLba,
     maximumReferencedLba,
-    outOfRangeEvidence: {
-      classifierVersion: outOfRangeEvidence.classifierVersion,
-      scsiStatus: outOfRangeEvidence.scsiStatus,
-      hostStatus: outOfRangeEvidence.hostStatus,
-      driverStatus: outOfRangeEvidence.driverStatus,
-      senseResponseCode: outOfRangeEvidence.senseResponseCode,
-      senseKey: outOfRangeEvidence.senseKey,
-      asc: outOfRangeEvidence.asc,
-      ascq: outOfRangeEvidence.ascq,
-    },
+    outOfRangeEvidence: normalizedOutOfRangeEvidence,
   };
 }
 
@@ -166,19 +234,45 @@ export function validateNormalDvdArchiveBoundaryEvidence(
     );
   }
   const evidence = value as Partial<NormalDvdArchiveBoundaryEvidence>;
-  if (typeof evidence.reportedSizeBytes !== "number") {
+  if (
+    typeof evidence.reportedSizeBytes !== "number" ||
+    evidence.endpointProof === undefined
+  ) {
     throw new DomainInvariantError(
       "Normal DVD archive-boundary evidence is invalid",
     );
   }
-  const normalized = createNormalDvdArchiveBoundaryEvidence(
-    evidence.reportedSizeBytes,
-  );
+  const normalized = createNormalDvdArchiveBoundaryEvidence({
+    reportedSizeBytes: evidence.reportedSizeBytes,
+    endpointProof: evidence.endpointProof,
+  });
   if (
     evidence.policyVersion !== normalized.policyVersion ||
     evidence.publishedSizeBytes !== normalized.publishedSizeBytes ||
     evidence.excludedSectorCount !== normalized.excludedSectorCount ||
-    publishedArchiveSizeBytes !== normalized.publishedSizeBytes
+    publishedArchiveSizeBytes !== normalized.publishedSizeBytes ||
+    evidence.endpointProof.proofVersion !==
+      normalized.endpointProof.proofVersion ||
+    evidence.endpointProof.confirmationCount !==
+      normalized.endpointProof.confirmationCount ||
+    evidence.endpointProof.firstExcludedLba !==
+      normalized.endpointProof.firstExcludedLba ||
+    evidence.endpointProof.outOfRangeEvidence.classifierVersion !==
+      normalized.endpointProof.outOfRangeEvidence.classifierVersion ||
+    evidence.endpointProof.outOfRangeEvidence.scsiStatus !==
+      normalized.endpointProof.outOfRangeEvidence.scsiStatus ||
+    evidence.endpointProof.outOfRangeEvidence.hostStatus !==
+      normalized.endpointProof.outOfRangeEvidence.hostStatus ||
+    evidence.endpointProof.outOfRangeEvidence.driverStatus !==
+      normalized.endpointProof.outOfRangeEvidence.driverStatus ||
+    evidence.endpointProof.outOfRangeEvidence.senseResponseCode !==
+      normalized.endpointProof.outOfRangeEvidence.senseResponseCode ||
+    evidence.endpointProof.outOfRangeEvidence.senseKey !==
+      normalized.endpointProof.outOfRangeEvidence.senseKey ||
+    evidence.endpointProof.outOfRangeEvidence.asc !==
+      normalized.endpointProof.outOfRangeEvidence.asc ||
+    evidence.endpointProof.outOfRangeEvidence.ascq !==
+      normalized.endpointProof.outOfRangeEvidence.ascq
   ) {
     throw new DomainInvariantError(
       "Normal DVD archive-boundary evidence is invalid",
@@ -280,16 +374,55 @@ export function archiveBoundaryEvidenceFromRecord(
     );
   }
   if (boundaryExcludedSectorCount === 0) {
-    if (values.slice(4).some((value) => value !== null)) {
+    if (
+      boundaryPolicyVersion ===
+        LEGACY_DVD_ARCHIVE_BOUNDARY_POLICY_VERSION &&
+      values.slice(4).every((value) => value === null)
+    ) {
+      return {
+        policyVersion: LEGACY_DVD_ARCHIVE_BOUNDARY_POLICY_VERSION,
+        reportedSizeBytes: boundaryReportedSizeBytes,
+        publishedSizeBytes: boundaryPublishedSizeBytes,
+        excludedSectorCount: 0,
+      };
+    }
+    if (
+      boundaryPolicyVersion !== DVD_ARCHIVE_BOUNDARY_POLICY_VERSION ||
+      boundaryFirstExcludedLba === null ||
+      boundaryMaximumReferencedLba !== null ||
+      boundaryReadFailureClassifierVersion === null ||
+      boundaryReadFailureScsiStatus === null ||
+      boundaryReadFailureHostStatus === null ||
+      boundaryReadFailureDriverStatus === null ||
+      boundaryReadFailureSenseResponseCode === null ||
+      boundaryReadFailureSenseKey === null ||
+      boundaryReadFailureAsc === null ||
+      boundaryReadFailureAscq === null
+    ) {
       throw new DomainInvariantError(
         "Persisted archive-boundary evidence is contradictory",
       );
     }
     return validateNormalDvdArchiveBoundaryEvidence({
-      policyVersion: boundaryPolicyVersion,
+      policyVersion: DVD_ARCHIVE_BOUNDARY_POLICY_VERSION,
       reportedSizeBytes: boundaryReportedSizeBytes,
       publishedSizeBytes: boundaryPublishedSizeBytes,
       excludedSectorCount: boundaryExcludedSectorCount,
+      endpointProof: {
+        proofVersion: DVD_NORMAL_ENDPOINT_PROOF_VERSION,
+        confirmationCount: 2,
+        firstExcludedLba: boundaryFirstExcludedLba,
+        outOfRangeEvidence: {
+          classifierVersion: boundaryReadFailureClassifierVersion,
+          scsiStatus: boundaryReadFailureScsiStatus,
+          hostStatus: boundaryReadFailureHostStatus,
+          driverStatus: boundaryReadFailureDriverStatus,
+          senseResponseCode: boundaryReadFailureSenseResponseCode,
+          senseKey: boundaryReadFailureSenseKey,
+          asc: boundaryReadFailureAsc,
+          ascq: boundaryReadFailureAscq,
+        },
+      },
     }, boundaryPublishedSizeBytes);
   }
   if (

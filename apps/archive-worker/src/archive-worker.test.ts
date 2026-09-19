@@ -44,6 +44,10 @@ import {
   type DvdCopyRunner,
 } from "./dvd-archiver.js";
 import type { DvdCompletenessProver } from "./dvd-completeness-prover.js";
+import type {
+  DvdEndpointProver,
+  DvdNormalEndpointProof,
+} from "./dvd-endpoint-prover.js";
 import { createNodeDvdGeometryValidator } from "./dvd-geometry-validator.js";
 import {
   createCleanDvdRecoveryResult,
@@ -76,6 +80,35 @@ const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
 const supportsLinuxWriterOwnership = existsSync("/proc/self/fd");
 const passingDvdGeometryValidator = {
   async validate() {},
+};
+
+function confirmedEndpointProof(
+  firstExcludedLba: number,
+): DvdNormalEndpointProof {
+  return {
+    proofVersion: "dvd-normal-endpoint-proof-v1",
+    confirmationCount: 2,
+    firstExcludedLba,
+    outOfRangeEvidence: {
+      classifierVersion: "scsi-read-classifier-v2",
+      scsiStatus: 2,
+      hostStatus: 0,
+      driverStatus: 8,
+      senseResponseCode: 0x70,
+      senseKey: 0x05,
+      asc: 0x21,
+      ascq: 0,
+    },
+  };
+}
+
+const testEndpointProver: DvdEndpointProver = {
+  async prove({ authorizeProbe, firstExcludedLba }) {
+    for (let index = 0; index < 4; index += 1) {
+      await authorizeProbe();
+    }
+    return confirmedEndpointProof(firstExcludedLba);
+  },
 };
 
 type DvdReadFailureCategory = NonBoundaryDvdReadFailureResult["category"];
@@ -226,6 +259,7 @@ function pollArchiveWorkerOnce(options: PollArchiveWorkerOptions): Promise<void>
   return pollArchiveWorkerWithDefaults({
     geometryValidator: passingDvdGeometryValidator,
     ...options,
+    endpointProver: options.endpointProver ?? testEndpointProver,
     rescueWorkspaceLock:
       options.rescueWorkspaceLock ?? testRescueWorkspaceLock,
   });
@@ -262,6 +296,7 @@ function runArchiveWorker(options: RunArchiveWorkerOptions): Promise<void> {
   return runArchiveWorkerWithDefaults({
     geometryValidator: passingDvdGeometryValidator,
     ...options,
+    endpointProver: options.endpointProver ?? testEndpointProver,
     rescueWorkspaceLock:
       options.rescueWorkspaceLock ?? testRescueWorkspaceLock,
   });
@@ -671,6 +706,7 @@ async function prepareMatchingOpticalDriveRescueContinuation(
 async function exerciseReadFailureFence({
   beforeFailure,
   beforeReadFailurePersistence,
+  endpointAction,
   expectedPollError,
   observeMediaGeneration,
   rescueWorkspaceLock,
@@ -689,6 +725,13 @@ async function exerciseReadFailureFence({
       ReturnType<typeof openTestDataAccess>["archiveRequests"]["create"]
     >["id"],
   ) => void;
+  endpointAction?: (
+    authorizeProbe: () => void | Promise<void>,
+    access: ReturnType<typeof openTestDataAccess>,
+    requestId: ReturnType<
+      ReturnType<typeof openTestDataAccess>["archiveRequests"]["create"]
+    >["id"],
+  ) => void | Promise<void>;
   expectedPollError?: Error;
   observeMediaGeneration?: () => Promise<string>;
   rescueWorkspaceLock?: DvdRescueWorkspaceLock;
@@ -732,8 +775,12 @@ async function exerciseReadFailureFence({
   const binding = stableDeviceBinding();
   const log = vi.fn();
   const copyRunner: DvdCopyRunner = {
-    copy: vi.fn(async ({ authorizeStart }) => {
+    copy: vi.fn(async ({ authorizeStart, outputPath, sizeBytes }) => {
       await authorizeStart?.();
+      if (endpointAction !== undefined) {
+        writeFileSync(outputPath, Buffer.alloc(sizeBytes, 29));
+        return createCleanDvdRecoveryResult(sizeBytes);
+      }
       beforeFailure?.(access, request.id);
       throw readFailure;
     }),
@@ -758,6 +805,16 @@ async function exerciseReadFailureFence({
       access,
       configuredDevicePath: discoveredDrive.devicePath,
       copyRunner,
+      ...(endpointAction === undefined
+        ? {}
+        : {
+            endpointProver: {
+              async prove({ authorizeProbe, firstExcludedLba }) {
+                await endpointAction(authorizeProbe, access, request.id);
+                return confirmedEndpointProof(firstExcludedLba);
+              },
+            },
+          }),
       hardware: {
         ...binding,
         ...(observeMediaGeneration === undefined
@@ -1094,6 +1151,7 @@ describe("archive worker polling", () => {
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
     const request = access.archiveRequests.create({ detectedDiscId: disc.id });
     let scanCount = 0;
+    const archiveBytes = Buffer.alloc(2 * 2_048, 17);
     const hardware: OpticalDriveHardware = {
       ...stableDeviceBinding(),
       discover: vi.fn().mockResolvedValue([discoveredDrive]),
@@ -1105,16 +1163,16 @@ describe("archive worker polling", () => {
         return {
           fingerprint,
           scanData,
-          sizeBytes: 9,
+          sizeBytes: archiveBytes.byteLength,
           volumeLabel: "EXAMPLE_DISC",
         };
       }),
     };
     const copyRunner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath, onBytesCopied, sizeBytes }) => {
-        onBytesCopied(4);
-        writeFileSync(outputPath, "dvd-image");
-        onBytesCopied(9);
+        onBytesCopied(2_048);
+        writeFileSync(outputPath, archiveBytes);
+        onBytesCopied(archiveBytes.byteLength);
         return createCleanDvdRecoveryResult(sizeBytes);
       }),
       isActive: () => false,
@@ -1151,18 +1209,24 @@ describe("archive worker polling", () => {
     expect(archive).toMatchObject({
       detectedDiscId: disc.id,
       fingerprint,
-      sizeBytes: 9,
-      boundaryPolicyVersion: "dvd-archive-boundary-v1",
-      boundaryReportedSizeBytes: 9,
-      boundaryPublishedSizeBytes: 9,
+      sizeBytes: archiveBytes.byteLength,
+      boundaryPolicyVersion: "dvd-archive-boundary-v2",
+      boundaryReportedSizeBytes: archiveBytes.byteLength,
+      boundaryPublishedSizeBytes: archiveBytes.byteLength,
       boundaryExcludedSectorCount: 0,
+      boundaryFirstExcludedLba: 2,
+      boundaryMaximumReferencedLba: null,
+      boundaryReadFailureClassifierVersion: "scsi-read-classifier-v2",
+      boundaryReadFailureSenseKey: 5,
+      boundaryReadFailureAsc: 33,
+      boundaryReadFailureAscq: 0,
       integrity: "clean_read",
       integrityPolicyVersion: "dvd-recovery-v1",
       badSectorCount: 0,
       badAreaCount: 0,
       badSectorRanges: [],
     });
-    expect(readFileSync(archive.archivePath, "utf8")).toBe("dvd-image");
+    expect(readFileSync(archive.archivePath)).toEqual(archiveBytes);
     expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);
     expect(salvageValidator.validate).not.toHaveBeenCalled();
     expect(completenessProver.prove).not.toHaveBeenCalled();
@@ -1254,6 +1318,173 @@ describe("archive worker polling", () => {
     expect(entries.filter((entry) =>
       entry.endsWith(".iso.rip-dvd-partial.failed")
     )).toHaveLength(1);
+  });
+
+  it("rejects an underestimated accepted size when the first excluded DVD block is readable", async () => {
+    const access = openTestDataAccess();
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-originals-readable-endpoint-"),
+    );
+    temporaryDirectories.push(originalsLibraryPath);
+    const fingerprint = `dvdmeta-sha256:${"1".repeat(64)}`;
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      serialNumber: "READABLE-ENDPOINT-001",
+    };
+    const drive = access.catalog.reconcileOpticalDrives([
+      { ...discoveredDrive, isConfiguredDevice: true },
+    ])[0]!;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint,
+      scanData,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const acceptedSizeBytes = 2 * 2_048;
+    let partialPath = "";
+    const endpointFailure = new Error(
+      "DVD endpoint probe found readable data at first excluded LBA 2",
+    );
+    const endpointProver: DvdEndpointProver = {
+      prove: vi.fn(async ({ authorizeProbe }) => {
+        await authorizeProbe();
+        throw endpointFailure;
+      }),
+    };
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: discoveredDrive.devicePath,
+      copyRunner: {
+        copy: vi.fn(async ({ outputPath, sizeBytes }) => {
+          partialPath = outputPath;
+          writeFileSync(outputPath, Buffer.alloc(sizeBytes, 19));
+          return createCleanDvdRecoveryResult(sizeBytes);
+        }),
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      endpointProver,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([discoveredDrive]),
+        scanDvd: vi.fn().mockResolvedValue({
+          fingerprint,
+          scanData,
+          sizeBytes: acceptedSizeBytes,
+        }),
+      },
+      log: vi.fn(),
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-readable-endpoint",
+    });
+
+    expect(endpointProver.prove).toHaveBeenCalledWith(expect.objectContaining({
+      devicePath: discoveredDrive.devicePath,
+      firstExcludedLba: 2,
+    }));
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(access.archiveJobs.list(["failed"])).toEqual([
+      expect.objectContaining({
+        archiveRequestId: request.id,
+        errorMessage: endpointFailure.message,
+        originalDiscArchiveId: null,
+      }),
+    ]);
+    expect(access.archiveRequests.list(["needs_attention"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    expect(existsSync(partialPath)).toBe(false);
+    expect(readFileSync(`${partialPath}.failed`)).toHaveLength(
+      acceptedSizeBytes,
+    );
+  });
+
+  it("rejects endpoint evidence after the Detected Disc source changes", async () => {
+    let sourceChanged = false;
+    const scenario = await exerciseReadFailureFence({
+      async endpointAction(authorizeProbe) {
+        await authorizeProbe();
+        sourceChanged = true;
+        await authorizeProbe();
+      },
+      observeMediaGeneration: vi.fn(async () =>
+        sourceChanged
+          ? "replacement-media-generation"
+          : "test-media-generation"
+      ),
+    });
+
+    expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(scenario.access.archiveJobs.list(["failed"])).toEqual([
+      expect.objectContaining({
+        errorMessage: "DVD medium changed during archiving",
+        originalDiscArchiveId: null,
+      }),
+    ]);
+  });
+
+  it("lets Archive Request cancellation win between endpoint reads", async () => {
+    const scenario = await exerciseReadFailureFence({
+      async endpointAction(authorizeProbe, access, requestId) {
+        await authorizeProbe();
+        access.archiveRequests.cancel(requestId);
+        await authorizeProbe();
+      },
+    });
+
+    expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(scenario.access.archiveJobs.list(["aborted"])).toEqual([
+      expect.objectContaining({
+        errorMessage: "Archive cancelled by operator",
+        originalDiscArchiveId: null,
+      }),
+    ]);
+    expect(scenario.access.archiveRequests.list(["cancelled"]))
+      .toEqual([expect.objectContaining({ id: scenario.request.id })]);
+  });
+
+  it("rejects endpoint evidence after the active Archive Job claim expires", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-22T13:00:00.000Z"));
+    let claimExpiredAt: Date | undefined;
+    const scenario = await exerciseReadFailureFence({
+      async endpointAction(authorizeProbe) {
+        await authorizeProbe();
+        claimExpiredAt = new Date(
+          Date.now() + ARCHIVE_JOB_LEASE_DURATION_MS + 1,
+        );
+        vi.setSystemTime(claimExpiredAt);
+        await authorizeProbe();
+      },
+    });
+
+    expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(scenario.access.archiveJobs.list(["running"])).toHaveLength(1);
+    vi.setSystemTime(claimExpiredAt!);
+    expect(scenario.access.archiveJobs.recoverExpiredClaims()).toEqual([
+      expect.objectContaining({
+        errorMessage: "Archive worker lease expired",
+        originalDiscArchiveId: null,
+      }),
+    ]);
+    expect(scenario.access.archiveRequests.list(["needs_attention"]))
+      .toEqual([expect.objectContaining({ id: scenario.request.id })]);
   });
 
   it.each(dvdReadFailureCases)("persists one $category diagnosis for the initial Archive Job attempt", async ({
@@ -4142,11 +4373,10 @@ describe("archive worker polling", () => {
       { devicePath: "/dev/sr0", serialNumber: "COPY-ADMISSION-001" },
       { devicePath: "/dev/sr1", serialNumber: "COPY-ADMISSION-002" },
     ];
-    const contents = ["dvd-one", "dvd-two"];
+    const contents = [Buffer.alloc(2_048, 1), Buffer.alloc(2_048, 2)];
     const fingerprints = contents.map((content) => {
-      const bytes = Buffer.from(content);
-      const hasher = createRawDvdContentIdHasher(bytes.byteLength);
-      hasher.update(bytes);
+      const hasher = createRawDvdContentIdHasher(content.byteLength);
+      hasher.update(content);
       return hasher.digest();
     });
     const drives = discoveredDrives.map((drive) =>
@@ -4158,6 +4388,7 @@ describe("archive worker polling", () => {
     );
     const requests = drives.map((drive, index) => {
       const fingerprint = fingerprints[index]!;
+      const content = contents[index]!;
       const disc = access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
         discKind: "dvd",
@@ -4175,7 +4406,7 @@ describe("archive worker polling", () => {
             },
           ],
         },
-        sizeBytes: 7,
+        sizeBytes: content.byteLength,
       });
       access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
       return access.archiveRequests.create({ detectedDiscId: disc.id });
@@ -4195,7 +4426,7 @@ describe("archive worker polling", () => {
           outputPath.includes(fingerprint.slice("sha256:".length)),
         );
         writeFileSync(outputPath, contents[contentIndex]!);
-        onBytesCopied(7);
+        onBytesCopied(contents[contentIndex]!.byteLength);
       } finally {
         activeCopies -= 1;
       }
@@ -4235,7 +4466,7 @@ describe("archive worker polling", () => {
                 },
               ],
             },
-            sizeBytes: 7,
+            sizeBytes: contents[index]!.byteLength,
           };
         }),
       },
@@ -4277,11 +4508,10 @@ describe("archive worker polling", () => {
       { devicePath: "/dev/sr0", serialNumber: "PRIORITY-LOW" },
       { devicePath: "/dev/sr1", serialNumber: "PRIORITY-HIGH" },
     ];
-    const contents = ["low-dvd", "high-dvd"];
+    const contents = [Buffer.alloc(2_048, 3), Buffer.alloc(2_048, 4)];
     const fingerprints = contents.map((content) => {
-      const bytes = Buffer.from(content);
-      const hasher = createRawDvdContentIdHasher(bytes.byteLength);
-      hasher.update(bytes);
+      const hasher = createRawDvdContentIdHasher(content.byteLength);
+      hasher.update(content);
       return hasher.digest();
     });
     const drives = discoveredDrives.map((drive) =>
@@ -4309,7 +4539,7 @@ describe("archive worker polling", () => {
             subtitles: [],
           }],
         },
-        sizeBytes: Buffer.byteLength(content),
+        sizeBytes: content.byteLength,
       });
       access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
       const started = beginSettledDiscInspection(access, {
@@ -4323,7 +4553,7 @@ describe("archive worker polling", () => {
         chapterCount: 4,
         subtitleStreamCount: 0,
         titleCount: 1,
-        totalBytes: Buffer.byteLength(content),
+        totalBytes: content.byteLength,
         volumeLabel: null,
       });
       access.discInspections.record(started.claim!, {
@@ -4343,7 +4573,7 @@ describe("archive worker polling", () => {
         );
         copiedFingerprints.push(fingerprints[contentIndex]!);
         writeFileSync(outputPath, contents[contentIndex]!);
-        onBytesCopied(Buffer.byteLength(contents[contentIndex]!));
+        onBytesCopied(contents[contentIndex]!.byteLength);
         return createCleanDvdRecoveryResult(sizeBytes);
       }),
       isActive: () => false,

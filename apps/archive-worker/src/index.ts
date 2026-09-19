@@ -7,6 +7,7 @@ import { runArchiveWorker } from "./archive-worker.js";
 import { createNodeDvdCopyRunner } from "./dvd-archiver.js";
 import { createNodeDvdCompletenessProver } from "./dvd-completeness-prover.js";
 import { createNodeDvdGeometryValidator } from "./dvd-geometry-validator.js";
+import { createNodeDvdEndpointProver } from "./dvd-endpoint-prover.js";
 import { createLinuxOpticalDriveHardware } from "./optical-drive-hardware.js";
 import { createNodeDvdSalvageValidator } from "./dvd-salvage-validator.js";
 
@@ -21,16 +22,18 @@ await runConfiguredAsyncWorker(
       databasePath: config.databasePath,
       originalsLibraryPath: config.originalsLibraryPath,
     });
+    const copyRunner = createNodeDvdCopyRunner({
+      maxActiveCopies: config.archiveWorkerConcurrency,
+      stallTimeoutMs: config.archiveCopyStallTimeoutMs,
+    });
     try {
       await runArchiveWorker({
         access,
         concurrency: config.archiveWorkerConcurrency,
         configuredDevicePath: config.archiveDevicePath,
         completenessProver: createNodeDvdCompletenessProver(),
-        copyRunner: createNodeDvdCopyRunner({
-          maxActiveCopies: config.archiveWorkerConcurrency,
-          stallTimeoutMs: config.archiveCopyStallTimeoutMs,
-        }),
+        copyRunner,
+        endpointProver: createNodeDvdEndpointProver({ copyRunner }),
         hardware: createLinuxOpticalDriveHardware(),
         geometryValidator: createNodeDvdGeometryValidator(),
         log,

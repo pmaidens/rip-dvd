@@ -26,7 +26,6 @@ import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   DISC_INSPECTION_LEASE_DURATION_MS,
   createCorrectedDvdArchiveBoundaryEvidence,
-  createNormalDvdArchiveBoundaryEvidence,
   createDataAccess,
   createCleanReadArchiveIntegrityEvidence,
   createDiscSelectionSourceIdentity,
@@ -41,6 +40,9 @@ import {
   RecordNotFoundError,
   StaleJobAttemptError,
 } from "./index.js";
+import {
+  createNormalDvdArchiveBoundaryEvidenceForTest,
+} from "./disc-settling-fixture.js";
 import type {
   DetectedDiscId,
   DiscKind,
@@ -8088,6 +8090,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260912212844_normal-dvd-endpoint-proof",
+      },
+      {
         name: "20260901193553_encode_publication_recovery_failures",
       },
       {
@@ -8113,9 +8118,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260825052933_slippery_famine",
-      },
-      {
-        name: "20260823160205_flat_fixer",
       },
     ]);
     expect(
@@ -12102,7 +12104,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       opticalDriveId: drive.id,
       mediaGeneration: "501",
       fingerprint: "publication-disc",
-      sizeBytes: 1_000,
+      sizeBytes: 2_048,
     });
     const request = access.archiveRequests.create({
       detectedDiscId: disc.id,
@@ -12119,8 +12121,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
 
     expect(() => access.archiveJobs.publish(claim, {
       archivePath: "/media/originals/publication.iso",
-      sizeBytes: 1_000,
-      boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(1_000),
+      sizeBytes: 2_048,
+      boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(2_048),
       integrityEvidence: {
         integrity: "clean_read",
         policyVersion: "",
@@ -12135,7 +12137,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ]);
 
     const validBoundaryEvidence =
-      createNormalDvdArchiveBoundaryEvidence(1_000);
+      createNormalDvdArchiveBoundaryEvidenceForTest(2_048);
     const invalidBoundaryEvidence = [
       {},
       { ...validBoundaryEvidence, policyVersion: "x".repeat(129) },
@@ -12147,7 +12149,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       expect(() => access.archiveJobs.publish(claim, {
         archivePath: "/media/originals/publication.iso",
         boundaryEvidence: boundaryEvidence as never,
-        sizeBytes: 1_000,
+        sizeBytes: 2_048,
         integrityEvidence: createCleanReadArchiveIntegrityEvidence(
           "dvd-recovery-v1",
         ),
@@ -12157,8 +12159,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
 
     expect(() => access.archiveJobs.publish(claim, {
       archivePath: "/media/originals/publication.iso",
-      boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(900),
-      sizeBytes: 900,
+      boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(4_096),
+      sizeBytes: 4_096,
       integrityEvidence: createCleanReadArchiveIntegrityEvidence(
         "dvd-recovery-v1",
       ),
@@ -12168,7 +12170,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const completed = access.archiveJobs.publish(claim, {
       archivePath: "/media/originals/publication.iso",
       boundaryEvidence: validBoundaryEvidence,
-      sizeBytes: 1_000,
+      sizeBytes: 2_048,
       integrityEvidence: {
         integrity: "clean_read",
         policyVersion: "dvd-recovery-v1",
@@ -12192,10 +12194,20 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       expect.objectContaining({
         archivePath: "/media/originals/publication.iso",
         fingerprint: "publication-disc",
-        boundaryPolicyVersion: "dvd-archive-boundary-v1",
-        boundaryReportedSizeBytes: 1_000,
-        boundaryPublishedSizeBytes: 1_000,
+        boundaryPolicyVersion: "dvd-archive-boundary-v2",
+        boundaryReportedSizeBytes: 2_048,
+        boundaryPublishedSizeBytes: 2_048,
         boundaryExcludedSectorCount: 0,
+        boundaryFirstExcludedLba: 1,
+        boundaryMaximumReferencedLba: null,
+        boundaryReadFailureClassifierVersion: "scsi-read-classifier-v2",
+        boundaryReadFailureScsiStatus: 2,
+        boundaryReadFailureHostStatus: 0,
+        boundaryReadFailureDriverStatus: 8,
+        boundaryReadFailureSenseResponseCode: 0x72,
+        boundaryReadFailureSenseKey: 0x05,
+        boundaryReadFailureAsc: 0x21,
+        boundaryReadFailureAscq: 0,
         integrity: "clean_read",
         integrityPolicyVersion: "dvd-recovery-v1",
         badSectorCount: 0,
@@ -12295,7 +12307,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       opticalDriveId: drive.id,
       mediaGeneration: "recovered-archive",
       fingerprint: "recovered-archive",
-      sizeBytes: 1_000,
+      sizeBytes: 2_048,
     });
     access.archiveRequests.create({ detectedDiscId: disc.id });
     const claim = access.archiveJobs.startForInspection(
@@ -12305,8 +12317,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
 
     access.archiveJobs.publish(claim, {
       archivePath: "/media/originals/recovered.iso",
-      boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(1_000),
-      sizeBytes: 1_000,
+      boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(2_048),
+      sizeBytes: 2_048,
       integrityEvidence: createUnknownArchiveIntegrityEvidence(),
     });
 
@@ -12333,7 +12345,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       opticalDriveId: drive.id,
       mediaGeneration: "watchable-salvage",
       fingerprint: "watchable-salvage",
-      sizeBytes: 100_000,
+      sizeBytes: 204_800,
     });
     const request = access.archiveRequests.create({ detectedDiscId: disc.id });
     const claim = access.archiveJobs.startForInspection(
@@ -12343,8 +12355,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
 
     access.archiveJobs.publish(claim, {
       archivePath: "/media/originals/watchable-salvage.iso",
-      boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(100_000),
-      sizeBytes: 100_000,
+      boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(204_800),
+      sizeBytes: 204_800,
       integrityEvidence: createWatchableSalvageArchiveIntegrityEvidence(
         "dvd-watchable-salvage-v2",
         [
@@ -12394,7 +12406,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       opticalDriveId: drive.id,
       mediaGeneration: "integrity-constraint",
       fingerprint: "integrity-constraint",
-      sizeBytes: 1_000,
+      sizeBytes: 2_048,
     });
     access.archiveRequests.create({ detectedDiscId: disc.id });
     const claim = access.archiveJobs.startForInspection(
@@ -12403,8 +12415,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     )!;
     access.archiveJobs.publish(claim, {
       archivePath: "/media/originals/integrity-constraint.iso",
-      boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(1_000),
-      sizeBytes: 1_000,
+      boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(2_048),
+      sizeBytes: 2_048,
       integrityEvidence: createCleanReadArchiveIntegrityEvidence(
         "constraint-policy-v1",
       ),
@@ -12417,6 +12429,15 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       "boundary_reported_size_bytes",
       "boundary_published_size_bytes",
       "boundary_excluded_sector_count",
+      "boundary_first_excluded_lba",
+      "boundary_read_failure_classifier_version",
+      "boundary_read_failure_scsi_status",
+      "boundary_read_failure_host_status",
+      "boundary_read_failure_driver_status",
+      "boundary_read_failure_sense_response_code",
+      "boundary_read_failure_sense_key",
+      "boundary_read_failure_asc",
+      "boundary_read_failure_ascq",
     ] as const;
     for (const column of boundaryColumns) {
       expect(() =>
@@ -12430,6 +12451,16 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       "boundary_published_size_bytes = 999",
       "boundary_excluded_sector_count = 1",
       "size_bytes = 999",
+      "boundary_first_excluded_lba = 2",
+      "boundary_maximum_referenced_lba = 0",
+      "boundary_read_failure_classifier_version = ''",
+      "boundary_read_failure_scsi_status = 0",
+      "boundary_read_failure_host_status = 1",
+      "boundary_read_failure_driver_status = 2",
+      "boundary_read_failure_sense_response_code = 113",
+      "boundary_read_failure_sense_key = 4",
+      "boundary_read_failure_asc = 32",
+      "boundary_read_failure_ascq = 1",
     ]) {
       expect(() =>
         sqlite.exec(`update original_disc_archives set ${mutation}`),
@@ -12622,11 +12653,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       access.archiveJobs.publish(claim, {
         archivePath: join(archiveDirectory, "current.iso"),
         boundaryEvidence:
-          createNormalDvdArchiveBoundaryEvidence(archiveBytes.byteLength),
+          createNormalDvdArchiveBoundaryEvidenceForTest(2_048),
         integrityEvidence: createCleanReadArchiveIntegrityEvidence(
           "test-clean-v1",
         ),
-        sizeBytes: archiveBytes.byteLength,
+        sizeBytes: 2_048,
       }),
     ).toThrow(StaleJobAttemptError);
     expect(access.catalog.listOriginalDiscArchives({ ids: [legacyArchive.id] }))
@@ -12745,11 +12776,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(() =>
       access.archiveJobs.publish(publicationRace.claim, {
         archivePath: "/media/originals/cancelled-race.iso",
-        boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(1_000),
+        boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(2_048),
         integrityEvidence: createCleanReadArchiveIntegrityEvidence(
           "test-clean-v1",
         ),
-        sizeBytes: 1_000,
+        sizeBytes: 2_048,
       }),
     ).toThrow(StaleJobAttemptError);
     expect(access.catalog.listOriginalDiscArchives()).toEqual([]);

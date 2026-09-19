@@ -31,6 +31,7 @@ import {
   parseDvdRecoveryResultProtocol,
   type DvdRecoveryResult,
 } from "./dvd-recovery-contracts.js";
+import type { DvdEndpointProofRequest } from "./dvd-endpoint-prover.js";
 import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
 
 const nativeTestExecutable =
@@ -257,6 +258,31 @@ function createFixture(archiveRequestId: string) {
     baseOptions: {
       archiveRequestId,
       devicePath: "/dev/sr0",
+      endpointProver: {
+        async prove({
+          authorizeProbe,
+          firstExcludedLba,
+        }: DvdEndpointProofRequest) {
+          for (let fence = 0; fence < 4; fence += 1) {
+            await authorizeProbe();
+          }
+          return {
+            proofVersion: "dvd-normal-endpoint-proof-v1" as const,
+            confirmationCount: 2 as const,
+            firstExcludedLba,
+            outOfRangeEvidence: {
+              classifierVersion: "scsi-read-classifier-v2",
+              scsiStatus: 2,
+              hostStatus: 0 as const,
+              driverStatus: 8,
+              senseResponseCode: 0x72 as const,
+              senseKey: 0x05 as const,
+              asc: 0x21 as const,
+              ascq: 0 as const,
+            },
+          };
+        },
+      },
       expectedTitleMap,
       fingerprint: `dvdmeta-sha256:${digest}`,
       geometryValidator: { async validate() {} },

@@ -32,6 +32,8 @@
 #define READ_FAILURE_EXIT_STATUS 3
 #define BOUNDARY_PROOF_VERSION "dvd-sector-boundary-proof-v1"
 #define BOUNDARY_CONFIRMATION_READS 2
+#define ENDPOINT_PROOF_VERSION "dvd-normal-endpoint-proof-v1"
+#define ENDPOINT_PROOF_PREFIX "rip-dvd-endpoint-proof "
 
 #ifdef RIP_DVD_READER_TESTING
 #define MAX_TEST_FAULTS 64
@@ -236,6 +238,20 @@ static int parse_size(const char *text, uint64_t *size_bytes)
         return 1;
     }
     *size_bytes = (uint64_t)value;
+    return 0;
+}
+
+static int parse_endpoint_lba(const char *text, uint64_t *lba)
+{
+    char *end = NULL;
+    errno = 0;
+    unsigned long long value = strtoull(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' || value == 0 ||
+        value > MAX_DVD_CONTENT_BYTES / DVDCSS_BLOCK_SIZE) {
+        fprintf(stderr, "DVD endpoint proof boundary is invalid\n");
+        return 1;
+    }
+    *lba = (uint64_t)value;
     return 0;
 }
 
@@ -1167,6 +1183,100 @@ static int normalized_failure_evidence_matches(
         left->sense.asc == right->sense.asc &&
         left->sense.ascq == right->sense.ascq &&
         left->sense.information_lba == right->sense.information_lba;
+}
+
+static const char *endpoint_probe_failure_name(
+    const struct backend_read_result *result)
+{
+    switch (result->status) {
+    case BACKEND_READ_SUCCESS:
+        return "readable_data";
+    case BACKEND_READ_MEDIUM_ERROR:
+        return "medium_error";
+    case BACKEND_READ_TERMINAL_FAILURE:
+        return read_failure_category_name(result->failure.category);
+    case BACKEND_READ_OUT_OF_RANGE_ERROR:
+        return "conflicting_out_of_range";
+    case BACKEND_READ_END:
+        return "unclassified_end";
+    case BACKEND_READ_FATAL:
+        return "fatal";
+    }
+    return "unknown";
+}
+
+static int emit_endpoint_proof(const struct read_failure *failure,
+                               uint64_t first_excluded_lba)
+{
+    const struct rip_dvd_scsi_completion *completion = &failure->completion;
+    const struct decoded_sense *sense = &failure->sense;
+    if (!completion->captured || !sense->has_response_code ||
+        !sense->has_sense_key || !sense->has_asc || !sense->has_ascq) {
+        fprintf(stderr, "DVD endpoint proof evidence is incomplete\n");
+        return 1;
+    }
+    char output[1024];
+    int length = snprintf(
+        output, sizeof(output), ENDPOINT_PROOF_PREFIX
+        "{\"protocolVersion\":1,\"proofVersion\":\""
+        ENDPOINT_PROOF_VERSION
+        "\",\"confirmationCount\":%d,\"firstExcludedLba\":%" PRIu64
+        ",\"classifierVersion\":\"" READ_FAILURE_CLASSIFIER_VERSION
+        "\",\"scsiStatus\":%" PRIu8
+        ",\"hostStatus\":%" PRIu16
+        ",\"driverStatus\":%" PRIu16
+        ",\"senseResponseCode\":%" PRIu8
+        ",\"senseKey\":%" PRIu8
+        ",\"asc\":%" PRIu8 ",\"ascq\":%" PRIu8 "}\n",
+        BOUNDARY_CONFIRMATION_READS, first_excluded_lba,
+        completion->scsi_status, completion->host_status,
+        completion->driver_status, sense->response_code,
+        sense->sense_key, sense->asc, sense->ascq);
+    if (length <= 0 || (size_t)length >= sizeof(output)) {
+        fprintf(stderr, "DVD endpoint proof exceeded its bound\n");
+        return 1;
+    }
+    return write_terminal_output(output, (size_t)length);
+}
+
+static int prove_normal_endpoint(struct read_backend *backend,
+                                 uint64_t first_excluded_lba)
+{
+    unsigned char buffer[DVDCSS_BLOCK_SIZE];
+    struct backend_read_result first = { 0 };
+    for (uint32_t ordinal = 0;
+         ordinal < BOUNDARY_CONFIRMATION_READS; ordinal++) {
+        struct backend_read_result result = boundary_probe_read(
+            backend, buffer, first_excluded_lba, 1, ordinal);
+        if (result.status == BACKEND_READ_FATAL) {
+            fprintf(stderr,
+                    "DVD endpoint probe rejected first excluded LBA %" PRIu64
+                    ": fatal\n",
+                    first_excluded_lba);
+            return 1;
+        }
+        if (result.status != BACKEND_READ_OUT_OF_RANGE_ERROR ||
+            !result.failure.sense.has_information_lba ||
+            result.failure.sense.information_lba != first_excluded_lba) {
+            fprintf(stderr,
+                    "DVD endpoint probe rejected first excluded LBA %" PRIu64
+                    ": %s\n",
+                    first_excluded_lba,
+                    endpoint_probe_failure_name(&result));
+            return 1;
+        }
+        if (ordinal == 0) {
+            first = result;
+        } else if (!normalized_failure_evidence_matches(
+                       &first.failure, &result.failure)) {
+            fprintf(stderr,
+                    "DVD endpoint probe rejected conflicting evidence at "
+                    "first excluded LBA %" PRIu64 "\n",
+                    first_excluded_lba);
+            return 1;
+        }
+    }
+    return emit_endpoint_proof(&first.failure, first_excluded_lba);
 }
 
 static void record_boundary_medium_error(
@@ -2209,6 +2319,7 @@ static int initialize_test_backend(const char *source_path,
                                    const char *fault_text,
                                    const char *delay_text,
                                    const char *result_mode,
+                                   int allow_first_excluded_fault,
                                    uint64_t *size_bytes,
                                    enum test_result_mode *test_result_mode,
                                    struct read_backend *backend)
@@ -2248,8 +2359,11 @@ static int initialize_test_backend(const char *source_path,
         fprintf(stderr, "DVD test fault allocation failed\n");
         return 1;
     }
+    uint64_t total_sector_count = *size_bytes / DVDCSS_BLOCK_SIZE;
     int fault_status = parse_test_faults(
-        faults, *size_bytes / DVDCSS_BLOCK_SIZE, backend);
+        faults,
+        total_sector_count + (allow_first_excluded_fault ? 1 : 0),
+        backend);
     free(faults);
     if (fault_status != 0) {
         return 2;
@@ -2623,7 +2737,7 @@ static int run_test_copy(int argc, char **argv)
     enum test_result_mode test_result_mode;
     struct read_backend backend;
     int setup_status = initialize_test_backend(
-        argv[2], argv[4], argv[5], argv[6], argv[7], &size_bytes,
+        argv[2], argv[4], argv[5], argv[6], argv[7], 0, &size_bytes,
         &test_result_mode, &backend);
     if (setup_status != 0) {
         return setup_status;
@@ -2644,7 +2758,7 @@ static int run_test_resume(int argc, char **argv)
     enum test_result_mode test_result_mode;
     struct read_backend backend;
     int setup_status = initialize_test_backend(
-        argv[2], argv[4], argv[5], argv[6], argv[7], &size_bytes,
+        argv[2], argv[4], argv[5], argv[6], argv[7], 0, &size_bytes,
         &test_result_mode, &backend);
     if (setup_status != 0) {
         return setup_status;
@@ -2679,7 +2793,7 @@ static int run_test_boundary_resume(int argc, char **argv)
     enum test_result_mode test_result_mode;
     struct read_backend backend;
     int setup_status = initialize_test_backend(
-        argv[2], argv[4], argv[5], argv[6], argv[7], &size_bytes,
+        argv[2], argv[4], argv[5], argv[6], argv[7], 0, &size_bytes,
         &test_result_mode, &backend);
     if (setup_status != 0) {
         return setup_status;
@@ -2692,6 +2806,31 @@ static int run_test_boundary_resume(int argc, char **argv)
     int status = run_boundary_resume(
         &backend, argv[3], size_bytes, image_byte_count, argv[9],
         test_result_mode);
+    return close_test_backend(&backend, status);
+}
+
+static int run_test_endpoint(int argc, char **argv)
+{
+    if (argc != 7) {
+        fprintf(stderr,
+                "usage: %s endpoint-test SOURCE SIZE FAULTS DELAY MODE\n",
+                argv[0]);
+        return 2;
+    }
+    uint64_t size_bytes = 0;
+    enum test_result_mode test_result_mode;
+    struct read_backend backend;
+    int setup_status = initialize_test_backend(
+        argv[2], argv[3], argv[4], argv[5], argv[6], 1, &size_bytes,
+        &test_result_mode, &backend);
+    if (setup_status != 0) {
+        return setup_status;
+    }
+    if (test_result_mode != TEST_RESULT_VALID) {
+        return close_test_backend(&backend, 2);
+    }
+    int status = prove_normal_endpoint(
+        &backend, size_bytes / DVDCSS_BLOCK_SIZE);
     return close_test_backend(&backend, status);
 }
 #endif
@@ -2711,7 +2850,34 @@ int main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "resume-boundary-test") == 0) {
         return run_test_boundary_resume(argc, argv);
     }
+    if (argc > 1 && strcmp(argv[1], "endpoint-test") == 0) {
+        return run_test_endpoint(argc, argv);
+    }
 #endif
+    int authorized_endpoint = argc > 1 &&
+        strcmp(argv[1], "probe-endpoint-authorized") == 0;
+    if (authorized_endpoint) {
+        if (argc != 4) {
+            fprintf(stderr, "DVD endpoint proof arguments are invalid\n");
+            return 2;
+        }
+        uint64_t first_excluded_lba = 0;
+        if (parse_endpoint_lba(argv[3], &first_excluded_lba) != 0) {
+            return 2;
+        }
+        dvdcss_t dvdcss = dvdcss_open(argv[2]);
+        if (dvdcss == NULL) {
+            fprintf(stderr, "DVD content open failed\n");
+            return 1;
+        }
+        struct read_backend backend = { .dvdcss = dvdcss };
+        int status = prove_normal_endpoint(&backend, first_excluded_lba);
+        if (dvdcss_close(dvdcss) != 0 && status == 0) {
+            fprintf(stderr, "DVD content close failed\n");
+            status = 1;
+        }
+        return status;
+    }
     int authorized_copy = argc > 1 &&
         strcmp(argv[1], "copy-authorized") == 0;
     int authorized_resume = argc > 1 &&
