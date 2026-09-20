@@ -83,6 +83,9 @@ describe("Linux Optical Drive hardware boundary", () => {
     deviceInstanceToken: "test-device-instance",
     drive: { devicePath },
   });
+  const scanOptions = (expectedMediaCapacityBytes = 2_048) => ({
+    expectedMediaCapacityBytes,
+  });
   const createTestOpticalDriveHardware = (
     options?: Parameters<typeof createLinuxOpticalDriveHardware>[0],
   ) =>
@@ -91,6 +94,158 @@ describe("Linux Optical Drive hardware boundary", () => {
       deviceInstanceObserver:
         options?.deviceInstanceObserver ?? stableDeviceInstanceObserver(),
     });
+
+  it("observes direct DVD capacity between stable generation and drive fences", async () => {
+    const signal = new AbortController().signal;
+    const runner: CommandRunner = {
+      run: vi.fn().mockResolvedValue({
+        exitCode: 0,
+        signal: null,
+        stderr: "",
+        stdout: "0x230540 0x800\n",
+      }),
+    };
+    const mediaGenerationObserver = stableMediaGenerationObserver();
+    const deviceInstanceObserver = stableDeviceInstanceObserver();
+    const onMediaGeneration = vi.fn();
+    const hardware = createTestOpticalDriveHardware({
+      deviceInstanceObserver,
+      mediaGenerationObserver,
+      platform: "linux",
+      runner,
+    });
+
+    await expect(
+      hardware.observeMedia(boundOpticalDrive(), signal, { onMediaGeneration }),
+    ).resolves.toEqual({
+      capacityBytes: 4_700_372_992,
+      mediaGeneration: "1",
+    });
+    expect(runner.run).toHaveBeenCalledWith(
+      "sg_readcap",
+      ["--brief", "--readonly", "/dev/sr0"],
+      {
+        maxBufferBytes: 128,
+        signal,
+        timeoutMs: 90_000,
+      },
+    );
+    expect(mediaGenerationObserver.observe).toHaveBeenCalledTimes(2);
+    expect(deviceInstanceObserver.observe).toHaveBeenCalledTimes(2);
+    expect(onMediaGeneration).toHaveBeenCalledExactlyOnceWith("1");
+  });
+
+  it("discards direct capacity when media generation changes during the command", async () => {
+    const mediaGenerationObserver: MediaGenerationObserver = {
+      observe: vi
+        .fn()
+        .mockResolvedValueOnce("generation-41")
+        .mockResolvedValueOnce("generation-43"),
+    };
+    const hardware = createTestOpticalDriveHardware({
+      mediaGenerationObserver,
+      platform: "linux",
+      runner: {
+        run: vi.fn().mockResolvedValue({
+          exitCode: 0,
+          signal: null,
+          stderr: "",
+          stdout: "0x230540 0x800\n",
+        }),
+      },
+    });
+
+    await expect(
+      hardware.observeMedia(
+        boundOpticalDrive(),
+        new AbortController().signal,
+      ),
+    ).resolves.toEqual({
+      capacityBytes: null,
+      mediaGeneration: "generation-43",
+    });
+  });
+
+  it("checks the bound Optical Drive again after direct capacity observation", async () => {
+    const deviceInstanceObserver: MediaGenerationObserver = {
+      observe: vi
+        .fn()
+        .mockResolvedValueOnce("test-device-instance")
+        .mockResolvedValueOnce("replacement-device-instance"),
+    };
+    const hardware = createTestOpticalDriveHardware({
+      deviceInstanceObserver,
+      mediaGenerationObserver: stableMediaGenerationObserver(),
+      platform: "linux",
+      runner: {
+        run: vi.fn().mockResolvedValue({
+          exitCode: 0,
+          signal: null,
+          stderr: "",
+          stdout: "0x230540 0x800\n",
+        }),
+      },
+    });
+
+    await expect(
+      hardware.observeMedia(
+        boundOpticalDrive(),
+        new AbortController().signal,
+      ),
+    ).rejects.toEqual(expect.objectContaining<Partial<DiscInspectionError>>({
+      kind: "abort",
+      reasonCode: "drive_identity_changed",
+    }));
+  });
+
+  it("runs the post-command fences after a direct capacity timeout", async () => {
+    const timeout = new Error("device command timed out");
+    const mediaGenerationObserver = stableMediaGenerationObserver();
+    const deviceInstanceObserver = stableDeviceInstanceObserver();
+    const hardware = createTestOpticalDriveHardware({
+      deviceInstanceObserver,
+      mediaGenerationObserver,
+      platform: "linux",
+      runner: { run: vi.fn().mockRejectedValue(timeout) },
+    });
+
+    await expect(
+      hardware.observeMedia(
+        boundOpticalDrive(),
+        new AbortController().signal,
+      ),
+    ).rejects.toEqual(expect.objectContaining<Partial<DiscInspectionError>>({
+      cause: timeout,
+      kind: "fail",
+      reasonCode: "content_size_failed",
+    }));
+    expect(mediaGenerationObserver.observe).toHaveBeenCalledTimes(2);
+    expect(deviceInstanceObserver.observe).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves cancellation during direct capacity observation", async () => {
+    const controller = new AbortController();
+    const shutdown = new Error("worker shutdown");
+    const mediaGenerationObserver = stableMediaGenerationObserver();
+    const deviceInstanceObserver = stableDeviceInstanceObserver();
+    const hardware = createTestOpticalDriveHardware({
+      deviceInstanceObserver,
+      mediaGenerationObserver,
+      platform: "linux",
+      runner: {
+        run: vi.fn(async () => {
+          controller.abort(shutdown);
+          throw shutdown;
+        }),
+      },
+    });
+
+    await expect(
+      hardware.observeMedia(boundOpticalDrive(), controller.signal),
+    ).rejects.toBe(shutdown);
+    expect(mediaGenerationObserver.observe).toHaveBeenCalledOnce();
+    expect(deviceInstanceObserver.observe).toHaveBeenCalledOnce();
+  });
 
   it("hashes DVD bytes through the libdvdcss reader", async () => {
     const stdout = new EventEmitter();
@@ -663,7 +818,11 @@ describe("Linux Optical Drive hardware boundary", () => {
     });
 
     await expect(
-      hardware.scanDvd(boundOpticalDrive(), new AbortController().signal),
+      hardware.scanDvd(
+        boundOpticalDrive(),
+        new AbortController().signal,
+        scanOptions(),
+      ),
     ).rejects.toThrow("media generation is unavailable");
     expect(runner.run).not.toHaveBeenCalled();
   });
@@ -733,11 +892,6 @@ describe("Linux Optical Drive hardware boundary", () => {
           exitCode: 0,
           stdout: summary,
           stderr: "",
-        })
-        .mockResolvedValueOnce({
-          exitCode: 0,
-          stdout: "4700000000\n",
-          stderr: "",
         }),
     };
     const metadataFingerprint = expect.stringMatching(
@@ -759,10 +913,16 @@ describe("Linux Optical Drive hardware boundary", () => {
         serialNumber: "DRIVE-001",
       },
     ]);
-    await expect(hardware.scanDvd(boundOpticalDrive(), signal)).resolves.toEqual({
+    await expect(
+      hardware.scanDvd(
+        boundOpticalDrive(),
+        signal,
+        scanOptions(4_700_372_992),
+      ),
+    ).resolves.toEqual({
       fingerprint: metadataFingerprint,
       isNewMediumObservation: true,
-      sizeBytes: 4_700_000_000,
+      sizeBytes: 4_700_372_992,
       volumeLabel: "EXAMPLE_DISC",
       scanData: {
         schemaVersion: 2,
@@ -841,18 +1001,11 @@ describe("Linux Optical Drive hardware boundary", () => {
         timeoutMs: 90_000,
       }),
     );
-    expect(runner.run).toHaveBeenNthCalledWith(
-      3,
-      "blockdev",
-      ["--getsize64", "/dev/sr0"],
-      expect.objectContaining({ signal, timeoutMs: 90_000 }),
-    );
   });
 
   it("accepts Bookworm lsdvd blank and comma-containing language labels", async () => {
     const runner: CommandRunner = {
-      run: vi.fn()
-        .mockResolvedValueOnce({
+      run: vi.fn().mockResolvedValueOnce({
           exitCode: 0,
           stdout: [
             "Disc Title: LANGUAGE_DISC",
@@ -861,8 +1014,7 @@ describe("Linux Optical Drive hardware boundary", () => {
             "  Subtitle: 1, Language: lv - Latvian, Lettish, Content: Normal, Stream id: 0x20,",
           ].join("\n"),
           stderr: "",
-        })
-        .mockResolvedValueOnce({ exitCode: 0, stdout: "1024\n", stderr: "" }),
+        }),
     };
     const hardware = createTestOpticalDriveHardware({
       platform: "linux",
@@ -871,7 +1023,11 @@ describe("Linux Optical Drive hardware boundary", () => {
     });
 
     await expect(
-      hardware.scanDvd(boundOpticalDrive(), new AbortController().signal),
+      hardware.scanDvd(
+        boundOpticalDrive(),
+        new AbortController().signal,
+        scanOptions(),
+      ),
     ).resolves.toMatchObject({
       scanData: {
         titles: [
@@ -926,13 +1082,11 @@ describe("Linux Optical Drive hardware boundary", () => {
     );
     const scan = async (summary: string) => {
       const runner: CommandRunner = {
-        run: vi.fn()
-          .mockResolvedValueOnce({ exitCode: 0, stdout: summary, stderr: "" })
-          .mockResolvedValueOnce({
-            exitCode: 0,
-            stdout: "4700000000\n",
-            stderr: "",
-          }),
+        run: vi.fn().mockResolvedValueOnce({
+          exitCode: 0,
+          stdout: summary,
+          stderr: "",
+        }),
       };
       const hardware = createTestOpticalDriveHardware({
         platform: "linux",
@@ -942,6 +1096,7 @@ describe("Linux Optical Drive hardware boundary", () => {
       const result = await hardware.scanDvd(
         boundOpticalDrive(),
         new AbortController().signal,
+        scanOptions(4_700_372_992),
       );
       return { result, runner };
     };
@@ -1022,8 +1177,8 @@ describe("Linux Optical Drive hardware boundary", () => {
       },
     ]);
     expect(legacy.result?.fingerprint).toBe(maintained.result?.fingerprint);
-    expect(legacy.runner.run).toHaveBeenCalledTimes(2);
-    expect(maintained.runner.run).toHaveBeenCalledTimes(2);
+    expect(legacy.runner.run).toHaveBeenCalledOnce();
+    expect(maintained.runner.run).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -1060,7 +1215,11 @@ describe("Linux Optical Drive hardware boundary", () => {
     });
 
     await expect(
-      hardware.scanDvd(boundOpticalDrive(), new AbortController().signal),
+      hardware.scanDvd(
+        boundOpticalDrive(),
+        new AbortController().signal,
+        scanOptions(),
+      ),
     ).rejects.toThrow(message);
     expect(runner.run).toHaveBeenCalledOnce();
   });
@@ -1085,9 +1244,6 @@ describe("Linux Optical Drive hardware boundary", () => {
             stderr: "",
           };
         }
-        if (executable === "blockdev") {
-          return { exitCode: 0, stdout: "4700000000\n", stderr: "" };
-        }
         throw new Error(`Unexpected command: ${executable}`);
       }),
     };
@@ -1098,7 +1254,11 @@ describe("Linux Optical Drive hardware boundary", () => {
     });
 
     await expect(
-      hardware.scanDvd(boundOpticalDrive(), new AbortController().signal),
+      hardware.scanDvd(
+        boundOpticalDrive(),
+        new AbortController().signal,
+        scanOptions(4_700_372_992),
+      ),
     ).resolves.toMatchObject({
       volumeLabel: "PROTECTED_DISC",
       scanData: {
@@ -1175,7 +1335,11 @@ describe("Linux Optical Drive hardware boundary", () => {
     });
 
     await expect(
-      hardware.scanDvd(boundOpticalDrive(), new AbortController().signal),
+      hardware.scanDvd(
+        boundOpticalDrive(),
+        new AbortController().signal,
+        scanOptions(),
+      ),
     ).rejects.toThrow("lsdvd returned invalid stream ordinals");
     expect(runner.run).toHaveBeenCalledOnce();
   });
@@ -1214,7 +1378,11 @@ describe("Linux Optical Drive hardware boundary", () => {
     });
 
     await expect(
-      hardware.scanDvd(boundOpticalDrive(), new AbortController().signal),
+      hardware.scanDvd(
+        boundOpticalDrive(),
+        new AbortController().signal,
+        scanOptions(),
+      ),
     ).rejects.toThrow("lsdvd returned an invalid DVD title map");
     expect(runner.run).toHaveBeenCalledOnce();
   });
@@ -1235,7 +1403,6 @@ describe("Linux Optical Drive hardware boundary", () => {
       run: vi.fn()
         .mockResolvedValueOnce(discovery)
         .mockResolvedValueOnce({ exitCode: 0, stdout: summary, stderr: "" })
-        .mockResolvedValueOnce({ exitCode: 0, stdout: "1024\n", stderr: "" })
         .mockResolvedValueOnce(discovery),
     };
     const mediaGenerationObserver = stableMediaGenerationObserver();
@@ -1247,9 +1414,17 @@ describe("Linux Optical Drive hardware boundary", () => {
     const signal = new AbortController().signal;
 
     await hardware.discover(signal);
-    const first = await hardware.scanDvd(boundOpticalDrive(), signal);
+    const first = await hardware.scanDvd(
+      boundOpticalDrive(),
+      signal,
+      scanOptions(),
+    );
     await hardware.discover(signal);
-    const repeated = await hardware.scanDvd(boundOpticalDrive(), signal);
+    const repeated = await hardware.scanDvd(
+      boundOpticalDrive(),
+      signal,
+      scanOptions(),
+    );
 
     expect(first).toMatchObject({ isNewMediumObservation: true });
     expect(repeated).toEqual({
@@ -1275,8 +1450,7 @@ describe("Linux Optical Drive hardware boundary", () => {
           stdout: "",
           stderr: "Device not ready",
         })
-        .mockResolvedValueOnce({ exitCode: 0, stdout: summary, stderr: "" })
-        .mockResolvedValueOnce({ exitCode: 0, stdout: "1024\n", stderr: "" }),
+        .mockResolvedValueOnce({ exitCode: 0, stdout: summary, stderr: "" }),
     };
     const mediaGenerationObserver: MediaGenerationObserver = {
       observe: vi.fn().mockResolvedValue("17"),
@@ -1288,14 +1462,16 @@ describe("Linux Optical Drive hardware boundary", () => {
     });
     const signal = new AbortController().signal;
 
-    await expect(hardware.scanDvd(boundOpticalDrive(), signal)).rejects.toThrow(
-      "temporarily not ready",
-    );
-    await expect(hardware.scanDvd(boundOpticalDrive(), signal)).resolves.toMatchObject({
+    await expect(
+      hardware.scanDvd(boundOpticalDrive(), signal, scanOptions()),
+    ).rejects.toThrow("temporarily not ready");
+    await expect(
+      hardware.scanDvd(boundOpticalDrive(), signal, scanOptions()),
+    ).resolves.toMatchObject({
       volumeLabel: "SPUN_UP_DISC",
       fingerprint: expect.stringMatching(/^dvdmeta-sha256:[0-9a-f]{64}$/),
     });
-    expect(runner.run).toHaveBeenCalledTimes(3);
+    expect(runner.run).toHaveBeenCalledTimes(2);
   });
 
   it("detects an inserted DVD when the media generation does not advance", async () => {
@@ -1315,11 +1491,6 @@ describe("Linux Optical Drive hardware boundary", () => {
               "Title: 01, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
             ].join("\n"),
             stderr: "",
-          })
-          .mockResolvedValueOnce({
-            exitCode: 0,
-            stdout: "1024\n",
-            stderr: "",
           }),
       };
       const hardware = createTestOpticalDriveHardware({
@@ -1329,7 +1500,9 @@ describe("Linux Optical Drive hardware boundary", () => {
       });
       const signal = new AbortController().signal;
 
-      await expect(hardware.scanDvd(boundOpticalDrive(), signal)).rejects.toEqual(
+      await expect(
+        hardware.scanDvd(boundOpticalDrive(), signal, scanOptions()),
+      ).rejects.toEqual(
         expect.objectContaining<Partial<DiscInspectionError>>({
           kind: "abort",
           reasonCode: "no_medium",
@@ -1340,12 +1513,14 @@ describe("Linux Optical Drive hardware boundary", () => {
       // than five seconds after the previous lsdvd call completed.
       now.mockReturnValue(5_000);
 
-      await expect(hardware.scanDvd(boundOpticalDrive(), signal)).resolves.toMatchObject({
+      await expect(
+        hardware.scanDvd(boundOpticalDrive(), signal, scanOptions()),
+      ).resolves.toMatchObject({
         volumeLabel: "INSERTED_DISC",
         fingerprint: expect.stringMatching(/^dvdmeta-sha256:[0-9a-f]{64}$/),
         isNewMediumObservation: true,
       });
-      expect(runner.run).toHaveBeenCalledTimes(3);
+      expect(runner.run).toHaveBeenCalledTimes(2);
     } finally {
       now.mockRestore();
     }
@@ -1370,14 +1545,12 @@ describe("Linux Optical Drive hardware boundary", () => {
           stdout: metadata("DISC_A"),
           stderr: "",
         })
-        .mockResolvedValueOnce({ exitCode: 0, stdout: "1024\n", stderr: "" })
         // Disc B replaces A without another discovery call.
         .mockResolvedValueOnce({
           exitCode: 0,
           stdout: metadata("DISC_B"),
           stderr: "",
-        })
-        .mockResolvedValueOnce({ exitCode: 0, stdout: "1024\n", stderr: "" }),
+        }),
     };
     const hardware = createTestOpticalDriveHardware({
       platform: "linux",
@@ -1394,17 +1567,23 @@ describe("Linux Optical Drive hardware boundary", () => {
     });
     const signal = new AbortController().signal;
 
-    await expect(hardware.scanDvd(boundOpticalDrive(), signal)).rejects.toEqual(
+    await expect(
+      hardware.scanDvd(boundOpticalDrive(), signal, scanOptions()),
+    ).rejects.toEqual(
       expect.objectContaining<Partial<DiscInspectionError>>({
         kind: "abort",
         reasonCode: "no_medium",
       }),
     );
-    await expect(hardware.scanDvd(boundOpticalDrive(), signal)).resolves.toMatchObject({
+    await expect(
+      hardware.scanDvd(boundOpticalDrive(), signal, scanOptions()),
+    ).resolves.toMatchObject({
       volumeLabel: "DISC_A",
       fingerprint: expect.stringMatching(/^dvdmeta-sha256:[0-9a-f]{64}$/),
     });
-    await expect(hardware.scanDvd(boundOpticalDrive(), signal)).resolves.toMatchObject({
+    await expect(
+      hardware.scanDvd(boundOpticalDrive(), signal, scanOptions()),
+    ).resolves.toMatchObject({
       volumeLabel: "DISC_B",
       fingerprint: expect.stringMatching(/^dvdmeta-sha256:[0-9a-f]{64}$/),
     });
@@ -1416,9 +1595,11 @@ describe("Linux Optical Drive hardware boundary", () => {
       "Title: 01, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
     ].join("\n");
     const runner: CommandRunner = {
-      run: vi.fn()
-        .mockResolvedValueOnce({ exitCode: 0, stdout: summary, stderr: "" })
-        .mockResolvedValueOnce({ exitCode: 0, stdout: "1024\n", stderr: "" }),
+      run: vi.fn().mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: summary,
+        stderr: "",
+      }),
     };
     const hardware = createTestOpticalDriveHardware({
       platform: "linux",
@@ -1431,7 +1612,11 @@ describe("Linux Optical Drive hardware boundary", () => {
     });
 
     await expect(
-      hardware.scanDvd(boundOpticalDrive(), new AbortController().signal),
+      hardware.scanDvd(
+        boundOpticalDrive(),
+        new AbortController().signal,
+        scanOptions(),
+      ),
     ).rejects.toThrow("DVD medium changed during scanning");
   });
 
@@ -1443,14 +1628,11 @@ describe("Linux Optical Drive hardware boundary", () => {
     ].join("\n");
     const createHardware = () => {
       const runner: CommandRunner = {
-        run: vi
-          .fn()
-          .mockResolvedValueOnce({ exitCode: 0, stdout: summary, stderr: "" })
-          .mockResolvedValueOnce({
-            exitCode: 0,
-            stdout: "4700000000\n",
-            stderr: "",
-          }),
+        run: vi.fn().mockResolvedValueOnce({
+          exitCode: 0,
+          stdout: summary,
+          stderr: "",
+        }),
       };
       return createTestOpticalDriveHardware({
         platform: "linux",
@@ -1460,8 +1642,16 @@ describe("Linux Optical Drive hardware boundary", () => {
     };
     const signal = new AbortController().signal;
 
-    const first = await createHardware().scanDvd(boundOpticalDrive(), signal);
-    const second = await createHardware().scanDvd(boundOpticalDrive(), signal);
+    const first = await createHardware().scanDvd(
+      boundOpticalDrive(),
+      signal,
+      scanOptions(4_700_372_992),
+    );
+    const second = await createHardware().scanDvd(
+      boundOpticalDrive(),
+      signal,
+      scanOptions(4_700_372_992),
+    );
 
     expect(first?.scanData.titles).toEqual(second?.scanData.titles);
     expect(first?.fingerprint).toBe(second?.fingerprint);
@@ -1612,14 +1802,11 @@ describe("Linux Optical Drive hardware boundary", () => {
       "Title: 01, Length: 01:30:00.000 Chapters: 12, Cells: 12, Audio streams: 0, Subpictures: 0",
     ].join("\n");
     const runner: CommandRunner = {
-      run: vi
-        .fn()
-        .mockResolvedValueOnce({ exitCode: 0, stdout: summary, stderr: "" })
-        .mockResolvedValueOnce({
-          exitCode: 0,
-          stdout: "4700000000\n",
-          stderr: "",
-        }),
+      run: vi.fn().mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: summary,
+        stderr: "",
+      }),
     };
     const hardware = createTestOpticalDriveHardware({
       platform: "linux",
@@ -1632,7 +1819,11 @@ describe("Linux Optical Drive hardware boundary", () => {
     });
 
     await expect(
-      hardware.scanDvd(boundOpticalDrive(), new AbortController().signal),
+      hardware.scanDvd(
+        boundOpticalDrive(),
+        new AbortController().signal,
+        scanOptions(4_700_372_992),
+      ),
     ).rejects.toThrow("DVD medium changed during scanning");
   });
 
@@ -1686,7 +1877,7 @@ describe("Linux Optical Drive hardware boundary", () => {
         platform: "linux",
         runner: emptyRunner,
         mediaGenerationObserver: stableMediaGenerationObserver(),
-      }).scanDvd(boundOpticalDrive(), signal),
+      }).scanDvd(boundOpticalDrive(), signal, scanOptions()),
     ).rejects.toEqual(expect.objectContaining<Partial<DiscInspectionError>>({
       kind: "abort",
       reasonCode: "no_medium",
@@ -1704,7 +1895,7 @@ describe("Linux Optical Drive hardware boundary", () => {
         platform: "linux",
         runner: failedRunner,
         mediaGenerationObserver: stableMediaGenerationObserver(),
-      }).scanDvd(boundOpticalDrive(), signal),
+      }).scanDvd(boundOpticalDrive(), signal, scanOptions()),
     ).rejects.toThrow(/^lsdvd exited with status 2: .{1,500}$/);
 
     const malformedRunner: CommandRunner = {
@@ -1719,7 +1910,7 @@ describe("Linux Optical Drive hardware boundary", () => {
         platform: "linux",
         runner: malformedRunner,
         mediaGenerationObserver: stableMediaGenerationObserver(),
-      }).scanDvd(boundOpticalDrive(), signal),
+      }).scanDvd(boundOpticalDrive(), signal, scanOptions()),
     ).rejects.toThrow("malformed DVD title summary");
 
     const partiallyMalformedRunner: CommandRunner = {
@@ -1738,13 +1929,17 @@ describe("Linux Optical Drive hardware boundary", () => {
         platform: "linux",
         runner: partiallyMalformedRunner,
         mediaGenerationObserver: stableMediaGenerationObserver(),
-      }).scanDvd(boundOpticalDrive(), signal),
+      }).scanDvd(boundOpticalDrive(), signal, scanOptions()),
     ).rejects.toThrow("malformed DVD title summary");
     await expect(
       createTestOpticalDriveHardware({
         platform: "linux",
         runner: malformedRunner,
-      }).scanDvd(boundOpticalDrive("../../etc/passwd"), signal),
+      }).scanDvd(
+        boundOpticalDrive("../../etc/passwd"),
+        signal,
+        scanOptions(),
+      ),
     ).rejects.toThrow("unsafe device path");
   });
 });
