@@ -1,17 +1,13 @@
 import { platform as operatingSystem } from "node:os";
 
-import { DVD_LOGICAL_SECTOR_BYTES } from "@rip-dvd/data-access";
-
 import type { OpticalDriveHardware } from "./archive-worker.js";
 import { DiscInspectionError } from "./disc-inspection-error.js";
-import { requireDvdContentSize } from "./dvd-content-policy.js";
+import { decodeDirectDvdCapacity } from "./direct-dvd-capacity.js";
 import {
   commandFailure,
   MAX_OPTICAL_DRIVE_COMMAND_OUTPUT_BYTES,
   nodeCommandRunner,
   OPTICAL_DRIVE_COMMAND_TIMEOUT_MS,
-  reportsDriveUnavailable,
-  reportsNoMedium,
   type CommandRunner,
 } from "./optical-drive-command-runner.js";
 import { decodeLsblkOpticalDrives } from "./optical-drive-discovery.js";
@@ -60,14 +56,6 @@ interface LinuxOpticalDriveHardwareOptions {
   runner?: CommandRunner;
 }
 
-function requireSettlingMediaCapacity(value: unknown): number {
-  const capacityBytes = requireDvdContentSize(value);
-  if (capacityBytes % DVD_LOGICAL_SECTOR_BYTES !== 0) {
-    throw new Error("DVD capacity is not sector aligned");
-  }
-  return capacityBytes;
-}
-
 export function createLinuxOpticalDriveHardware({
   platform = operatingSystem(),
   runner = nodeCommandRunner,
@@ -111,7 +99,7 @@ export function createLinuxOpticalDriveHardware({
       return identity.bind(drive, signal);
     },
 
-    scanDvd(binding, signal, options?: DiscInspectionScanOptions) {
+    scanDvd(binding, signal, options: DiscInspectionScanOptions) {
       return scanner.scan(binding, signal, options);
     },
 
@@ -127,42 +115,47 @@ export function createLinuxOpticalDriveHardware({
       );
       scanCache.observe(safeDevicePath, mediaGeneration);
       options?.onMediaGeneration(mediaGeneration);
-      const capacityResult = await runner.run(
-        "blockdev",
-        ["--getsize64", safeDevicePath],
+      const capacityOutcome = await runner.run(
+        "sg_readcap",
+        ["--brief", "--readonly", safeDevicePath],
         {
           maxBufferBytes: 128,
           signal,
           timeoutMs: OPTICAL_DRIVE_COMMAND_TIMEOUT_MS,
         },
+      ).then(
+        (result) => ({ kind: "result" as const, result }),
+        (error: unknown) => ({ error, kind: "error" as const }),
       );
-      if (capacityResult.exitCode !== 0) {
-        if (reportsNoMedium(capacityResult)) {
-          return null;
-        }
-        if (reportsDriveUnavailable(capacityResult)) {
-          throw new DiscInspectionError(
-            "retry",
-            "drive_unavailable",
-            "Optical Drive is unavailable during settling",
-          );
-        }
+      signal.throwIfAborted();
+      const mediaGenerationAfter = await mediaGenerationObserver.observe(
+        safeDevicePath,
+        signal,
+      );
+      scanCache.observe(safeDevicePath, mediaGenerationAfter);
+      await identity.requireCurrent(binding, "after DVD settling", signal);
+      if (mediaGenerationAfter !== mediaGeneration) {
+        return { mediaGeneration: mediaGenerationAfter, capacityBytes: null };
+      }
+      if (capacityOutcome.kind === "error") {
+        const message = capacityOutcome.error instanceof Error
+          ? capacityOutcome.error.message
+          : String(capacityOutcome.error);
+        throw new DiscInspectionError(
+          "fail",
+          "content_size_failed",
+          `Direct DVD capacity observation failed: ${message}`,
+          { cause: capacityOutcome.error },
+        );
+      }
+      const decoded = decodeDirectDvdCapacity(capacityOutcome.result);
+      if (decoded.kind === "no_medium") {
+        return null;
+      }
+      if (decoded.kind === "retryable") {
         return { mediaGeneration, capacityBytes: null };
       }
-      const serializedCapacity = capacityResult.stdout.trim();
-      if (!/^\d+$/.test(serializedCapacity)) {
-        return { mediaGeneration, capacityBytes: null };
-      }
-      try {
-        return {
-          mediaGeneration,
-          capacityBytes: requireSettlingMediaCapacity(
-            Number(serializedCapacity),
-          ),
-        };
-      } catch {
-        return { mediaGeneration, capacityBytes: null };
-      }
+      return { mediaGeneration, capacityBytes: decoded.capacityBytes };
     },
 
     async observeMediaGeneration(binding, signal) {

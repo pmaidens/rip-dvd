@@ -186,7 +186,7 @@ COPY --from=worker-runtime-base --chown=node:node /app /app
 
 FROM worker-runtime-base AS archive-worker
 RUN apt-get update \
-  && apt-get install --yes --no-install-recommends handbrake-cli libssl3 lsdvd util-linux \
+  && apt-get install --yes --no-install-recommends handbrake-cli libssl3 lsdvd sg3-utils util-linux \
   && rm -rf /var/lib/apt/lists/* \
   && lsblk --json --output PATH,TYPE,TRAN,VENDOR,MODEL,SERIAL >/dev/null \
   && node -e "const { constants } = require('node:fs'); if (!Number.isInteger(constants.O_NONBLOCK)) process.exit(1)"

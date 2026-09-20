@@ -25,6 +25,7 @@ import {
   type DvdSalvageRejectionReason,
 } from "@rip-dvd/data-access";
 import { createRawDvdContentIdHasher } from "@rip-dvd/data-access/dvd-content-id";
+import { createDvdMetadataFingerprint } from "@rip-dvd/data-access/dvd-metadata-fingerprint";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import {
   beginSettledDiscInspectionForTest,
@@ -361,6 +362,13 @@ interface SimulatedLinuxOpticalDrive extends DiscoveredOpticalDrive {
   transport?: string;
 }
 
+function directCapacityOutput(capacityBytes: number): string {
+  if (!Number.isSafeInteger(capacityBytes) || capacityBytes % 2_048 !== 0) {
+    throw new Error("Test DVD capacity must be sector aligned");
+  }
+  return `0x${(capacityBytes / 2_048).toString(16)} 0x800\n`;
+}
+
 function createLinuxSettlingHardware({
   capacityResult,
   deviceInstanceObserver,
@@ -395,8 +403,8 @@ function createLinuxSettlingHardware({
           stderr: "",
         };
       }
-      if (executable === "blockdev") {
-        return await capacityResult(arguments_[1]!, options.signal);
+      if (executable === "sg_readcap") {
+        return await capacityResult(arguments_[2]!, options.signal);
       }
       throw new Error(`Unexpected command: ${executable}`);
     }),
@@ -5934,8 +5942,8 @@ describe("archive worker polling", () => {
     });
 
     const observedPaths = vi.mocked(runner.run).mock.calls
-      .filter(([executable]) => executable === "blockdev")
-      .map(([, arguments_]) => arguments_[1]);
+      .filter(([executable]) => executable === "sg_readcap")
+      .map(([, arguments_]) => arguments_[2]);
     expect(observedPaths).toHaveLength(2);
     expect(observedPaths).toEqual(expect.arrayContaining(["/dev/sr0", "/dev/sr1"]));
     expect(access.catalog.listOpticalDrives({ ids: [secondDrive.id] })).toEqual([
@@ -5969,7 +5977,7 @@ describe("archive worker polling", () => {
     let mediumPresent = true;
     const { hardware, runner } = createLinuxSettlingHardware({
       capacityResult: () => mediumPresent
-        ? { exitCode: 0, stdout: "4700372992\n", stderr: "" }
+        ? { exitCode: 0, stdout: directCapacityOutput(4_700_372_992), stderr: "" }
         : {
             exitCode: 1,
             stdout: "",
@@ -6034,7 +6042,7 @@ describe("archive worker polling", () => {
     const { hardware, runner } = createLinuxSettlingHardware({
       capacityResult: () => ({
         exitCode: 0,
-        stdout: "4700372992\n",
+        stdout: directCapacityOutput(4_700_372_992),
         stderr: "",
       }),
       drives: () => [{
@@ -6104,11 +6112,11 @@ describe("archive worker polling", () => {
     let accessible = true;
     const { hardware, runner } = createLinuxSettlingHardware({
       capacityResult: () => accessible
-        ? { exitCode: 0, stdout: "4700372992\n", stderr: "" }
+        ? { exitCode: 0, stdout: directCapacityOutput(4_700_372_992), stderr: "" }
         : {
             exitCode: 1,
             stdout: "",
-            stderr: "blockdev: cannot open /dev/sr0: Permission denied",
+            stderr: "sg_readcap: cannot open /dev/sr0: Permission denied",
           },
       drives: () => [{
         devicePath: "/dev/sr0",
@@ -6179,7 +6187,7 @@ describe("archive worker polling", () => {
     const { hardware, runner } = createLinuxSettlingHardware({
       capacityResult: () => ({
         exitCode: 0,
-        stdout: "4700372992\n",
+        stdout: directCapacityOutput(4_700_372_992),
         stderr: "",
       }),
       deviceInstanceObserver: mediaGenerationObserver,
@@ -6206,7 +6214,7 @@ describe("archive worker polling", () => {
     expect(access.catalog.listDetectedDiscs()).toEqual([]);
     expect(
       vi.mocked(runner.run).mock.calls.filter(
-        ([executable]) => executable === "blockdev",
+        ([executable]) => executable === "sg_readcap",
       ),
     ).toHaveLength(0);
     expect(runner.run).not.toHaveBeenCalledWith(
@@ -6218,7 +6226,7 @@ describe("archive worker polling", () => {
     access.close();
   });
 
-  it("classifies media probe permission loss before blockdev as drive_unavailable", async () => {
+  it("classifies media probe permission loss before direct capacity as drive_unavailable", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const access = openTestDataAccess();
     let accessible = true;
@@ -6242,7 +6250,7 @@ describe("archive worker polling", () => {
     const { hardware, runner } = createLinuxSettlingHardware({
       capacityResult: () => ({
         exitCode: 0,
-        stdout: "4700372992\n",
+        stdout: directCapacityOutput(4_700_372_992),
         stderr: "",
       }),
       deviceInstanceObserver: mediaGenerationObserver,
@@ -6289,7 +6297,7 @@ describe("archive worker polling", () => {
     ]);
     expect(
       vi.mocked(runner.run).mock.calls.filter(
-        ([executable]) => executable === "blockdev",
+        ([executable]) => executable === "sg_readcap",
       ),
     ).toHaveLength(1);
     expect(runner.run).not.toHaveBeenCalledWith(
@@ -6357,7 +6365,7 @@ describe("archive worker polling", () => {
     access.close();
   });
 
-  it("persists a claimed capacity-probe failure through normal retry state", async () => {
+  it("fails closed after a claimed direct-capacity probe crashes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-22T16:30:00.000Z"));
     const access = openTestDataAccess();
@@ -6383,12 +6391,13 @@ describe("archive worker polling", () => {
 
     const [inspection] = access.discInspections.list();
     expect(inspection).toMatchObject({
-      status: "running",
-      phase: "retry_wait",
+      status: "failed",
+      phase: "settling",
       attemptCount: 1,
       consecutiveFailureCount: 1,
-      reasonCode: "unknown",
-      diagnostic: "capacity probe crashed",
+      reasonCode: "content_size_failed",
+      diagnostic:
+        "Direct DVD capacity observation failed: capacity probe crashed",
       claimToken: null,
       claimUpdatedAt: null,
     });
@@ -6397,11 +6406,12 @@ describe("archive worker polling", () => {
         attemptNumber: 1,
         outcome: "failed",
         phase: "settling",
-        reasonCode: "unknown",
+        reasonCode: "content_size_failed",
       }),
     ]);
     expect(log).toHaveBeenCalledWith(
-      "DVD scan failed for /dev/sr0: capacity probe crashed",
+      "DVD scan failed for /dev/sr0: " +
+        "Direct DVD capacity observation failed: capacity probe crashed",
     );
     access.close();
   });
@@ -6475,18 +6485,18 @@ describe("archive worker polling", () => {
     },
   );
 
-  it("keeps invalid capacity observations settling until the exact timeout", async () => {
+  it("keeps transient direct-capacity observations settling until the exact timeout", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-22T17:00:00.000Z"));
     const access = openTestDataAccess();
     const capacityResults: CommandResult[] = [
-      { exitCode: 0, stdout: "0\n", stderr: "" },
-      { exitCode: 0, stdout: "-2048\n", stderr: "" },
-      { exitCode: 0, stdout: "not-a-number\n", stderr: "" },
-      { exitCode: 0, stdout: "2049\n", stderr: "" },
-      { exitCode: 0, stdout: "Infinity\n", stderr: "" },
-      { exitCode: 0, stdout: "0x1269c0000\n", stderr: "" },
-      { exitCode: 1, stdout: "", stderr: "capacity unavailable" },
+      { exitCode: 2, stdout: "", stderr: "device becoming ready" },
+      { exitCode: 6, stdout: "", stderr: "unit attention" },
+      { exitCode: 2, stdout: "", stderr: "device becoming ready" },
+      { exitCode: 6, stdout: "", stderr: "unit attention" },
+      { exitCode: 2, stdout: "", stderr: "device becoming ready" },
+      { exitCode: 6, stdout: "", stderr: "unit attention" },
+      { exitCode: 2, stdout: "", stderr: "device becoming ready" },
     ];
     let capacityIndex = 0;
     const { hardware, runner } = createLinuxSettlingHardware({
@@ -6885,12 +6895,15 @@ describe("archive worker polling", () => {
     access.close();
   });
 
-  it("settles three matching media observations over five seconds before scanning", async () => {
+  it("ignores stale block-device size and carries direct capacity into the Archive Job", async () => {
     vi.useFakeTimers();
     const startedAt = new Date("2026-08-22T18:00:00.000Z");
     vi.setSystemTime(startedAt);
     const access = openTestDataAccess();
-    const mediaCapacityBytes = 4_700_372_992;
+    const staleBlockDeviceCapacityBytes = 4_700_372_992;
+    const mediaCapacityBytes = 4_700_375_040;
+    let directCapacityBytes = staleBlockDeviceCapacityBytes;
+    let mediaGeneration = "old-media-generation";
     const run = vi.fn(async (executable: string) => {
       if (executable === "lsblk") {
         return {
@@ -6907,25 +6920,34 @@ describe("archive worker polling", () => {
           stderr: "",
         };
       }
+      if (executable === "sg_readcap") {
+        return {
+          exitCode: 0,
+          stdout: directCapacityOutput(directCapacityBytes),
+          stderr: "",
+        };
+      }
       if (executable === "blockdev") {
         return {
           exitCode: 0,
-          stdout: `${mediaCapacityBytes}\n`,
+          stdout: `${staleBlockDeviceCapacityBytes}\n`,
           stderr: "",
         };
       }
       if (executable === "rip-dvd-lsdvd") {
-        expect(access.discInspections.list({ currentOnly: true })).toEqual([
-          expect.objectContaining({
-            phase: "reading_metadata",
-            mediaGeneration: "test-media-generation",
-            mediaCapacityBytes,
-            stableObservationCount: 3,
-            settlingQuietWindowStartedAt: expect.any(Date),
-            settlingStartedAt: expect.any(Date),
-            settlingResetCount: 0,
-          }),
-        ]);
+        if (mediaGeneration === "current-media-generation") {
+          expect(access.discInspections.list({ currentOnly: true })).toEqual([
+            expect.objectContaining({
+              phase: "reading_metadata",
+              mediaGeneration,
+              mediaCapacityBytes,
+              stableObservationCount: 3,
+              settlingQuietWindowStartedAt: expect.any(Date),
+              settlingStartedAt: expect.any(Date),
+              settlingResetCount: 0,
+            }),
+          ]);
+        }
         return {
           exitCode: 0,
           stdout: [
@@ -6942,16 +6964,22 @@ describe("archive worker polling", () => {
       platform: "linux",
       runner,
       mediaGenerationObserver: {
-        observe: vi.fn().mockResolvedValue("test-media-generation"),
+        observe: vi.fn(async () => mediaGeneration),
       },
     });
-    const settlingWaits = createControlledSettlingWaits();
-    const poll = () => pollArchiveWorkerOnce({
+    const pollOptions = {
       access,
       configuredDevicePath: "/dev/sr0",
       hardware,
       log: vi.fn(),
       signal: new AbortController().signal,
+    };
+    await pollArchiveWorker(pollOptions);
+    directCapacityBytes = mediaCapacityBytes;
+    mediaGeneration = "current-media-generation";
+    const settlingWaits = createControlledSettlingWaits();
+    const poll = () => pollArchiveWorkerOnce({
+      ...pollOptions,
       waitForNextSettlingObservation: settlingWaits.wait,
     });
 
@@ -6962,7 +6990,7 @@ describe("archive worker polling", () => {
       expect.objectContaining({
         id: inspectionId,
         phase: "settling",
-        mediaGeneration: "test-media-generation",
+        mediaGeneration,
         mediaCapacityBytes,
         stableObservationCount: 1,
         settlingQuietWindowStartedAt: expect.any(Date),
@@ -6977,7 +7005,7 @@ describe("archive worker polling", () => {
       run.mock.calls.filter(([executable]) =>
         executable === "rip-dvd-lsdvd"
       ),
-    ).toHaveLength(0);
+    ).toHaveLength(1);
 
     settlingWaits.releaseNext();
     await settlingWaits.waitUntilPending();
@@ -6992,7 +7020,7 @@ describe("archive worker polling", () => {
       run.mock.calls.filter(([executable]) =>
         executable === "rip-dvd-lsdvd"
       ),
-    ).toHaveLength(0);
+    ).toHaveLength(1);
 
     settlingWaits.releaseNext();
     await polling;
@@ -7001,10 +7029,13 @@ describe("archive worker polling", () => {
       run.mock.calls.filter(([executable]) =>
         executable === "rip-dvd-lsdvd"
       ),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
+    expect(
+      run.mock.calls.filter(([executable]) => executable === "sg_readcap"),
+    ).toHaveLength(6);
     expect(
       run.mock.calls.filter(([executable]) => executable === "blockdev"),
-    ).toHaveLength(3);
+    ).toHaveLength(0);
     expect(settlingWaits.wait).toHaveBeenCalledTimes(2);
     expect(settlingWaits.wait).toHaveBeenCalledWith(
       2_500,
@@ -7014,17 +7045,68 @@ describe("archive worker polling", () => {
       expect.objectContaining({
         id: inspectionId,
         status: "completed",
-        mediaGeneration: "test-media-generation",
+        mediaGeneration,
         mediaCapacityBytes,
         stableObservationCount: 3,
+        totalBytes: mediaCapacityBytes,
       }),
     ]);
-    expect(access.catalog.listDetectedDiscs()).toEqual([
+    const directFingerprint = createDvdMetadataFingerprint({
+      sizeBytes: mediaCapacityBytes,
+      titles: [{
+        number: 1,
+        durationSeconds: 60,
+        chapters: 1,
+        audioStreams: [],
+        subtitles: [],
+      }],
+      volumeLabel: "SETTLED_DISC",
+    });
+    const staleFingerprint = createDvdMetadataFingerprint({
+      sizeBytes: staleBlockDeviceCapacityBytes,
+      titles: [{
+        number: 1,
+        durationSeconds: 60,
+        chapters: 1,
+        audioStreams: [],
+        subtitles: [],
+      }],
+      volumeLabel: "SETTLED_DISC",
+    });
+    expect(access.catalog.listDetectedDiscs()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fingerprint: staleFingerprint }),
       expect.objectContaining({
-        fingerprint: expect.stringMatching(/^dvdmeta-sha256:/),
+        fingerprint: directFingerprint,
+        scanData: expect.objectContaining({ contentId: directFingerprint }),
         volumeLabel: "SETTLED_DISC",
       }),
-    ]);
+    ]));
+    expect(directFingerprint).not.toBe(staleFingerprint);
+
+    const disc = access.catalog.listDetectedDiscs().find(
+      ({ fingerprint }) => fingerprint === directFingerprint,
+    );
+    access.archiveRequests.create({ detectedDiscId: disc!.id });
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-direct-capacity-archive-"),
+    );
+    temporaryDirectories.push(originalsLibraryPath);
+    const copy = vi.fn(async () => {
+      throw new Error("stop after observing Archive Job input");
+    });
+    await pollArchiveWorkerOnce({
+      ...pollOptions,
+      copyRunner: {
+        copy,
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      originalsLibraryPath,
+    });
+    expect(copy).toHaveBeenCalledWith(
+      expect.objectContaining({ sizeBytes: mediaCapacityBytes }),
+    );
     access.close();
   });
 
@@ -7199,10 +7281,10 @@ describe("archive worker polling", () => {
             stderr: "",
           };
         }
-        if (executable === "blockdev") {
+        if (executable === "sg_readcap") {
           return {
             exitCode: 0,
-            stdout: `${mediaCapacityBytes}\n`,
+            stdout: directCapacityOutput(mediaCapacityBytes),
             stderr: "",
           };
         }
@@ -7308,17 +7390,17 @@ describe("archive worker polling", () => {
   it.each([
     {
       checkpoint: "before metadata collection",
-      changedObservation: 4,
+      changedObservation: 7,
       expectedMetadataReads: 0,
     },
     {
       checkpoint: "after metadata collection",
-      changedObservation: 5,
+      changedObservation: 8,
       expectedMetadataReads: 1,
     },
     {
       checkpoint: "before Detected Disc registration",
-      changedObservation: 6,
+      changedObservation: 9,
       expectedMetadataReads: 1,
     },
   ])(
@@ -7341,10 +7423,10 @@ describe("archive worker polling", () => {
             stderr: "",
           };
         }
-        if (executable === "blockdev") {
+        if (executable === "sg_readcap") {
           return {
             exitCode: 0,
-            stdout: "4700372992\n",
+            stdout: directCapacityOutput(4_700_372_992),
             stderr: "",
           };
         }
@@ -7496,8 +7578,8 @@ describe("archive worker polling", () => {
             stderr: "",
           };
         }
-        if (executable === "blockdev") {
-          return { exitCode: 0, stdout: "2048\n", stderr: "" };
+        if (executable === "sg_readcap") {
+          return { exitCode: 0, stdout: directCapacityOutput(2_048), stderr: "" };
         }
         throw new Error(`Unexpected command: ${executable}`);
       }),
@@ -7693,8 +7775,8 @@ describe("archive worker polling", () => {
             stderr: "",
           };
         }
-        if (executable === "blockdev") {
-          return { exitCode: 0, stdout: "2048\n", stderr: "" };
+        if (executable === "sg_readcap") {
+          return { exitCode: 0, stdout: directCapacityOutput(2_048), stderr: "" };
         }
         throw new Error(`Unexpected command: ${executable}`);
       }),
@@ -7768,8 +7850,8 @@ describe("archive worker polling", () => {
             stderr: "",
           };
         }
-        if (executable === "blockdev") {
-          return { exitCode: 0, stdout: "2048\n", stderr: "" };
+        if (executable === "sg_readcap") {
+          return { exitCode: 0, stdout: directCapacityOutput(2_048), stderr: "" };
         }
         throw new Error(`Unexpected command: ${executable}`);
       }),
