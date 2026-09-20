@@ -7,6 +7,15 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        find: "@rip-dvd/data-access/archive-audit-records",
+        replacement: fileURLToPath(
+          new URL(
+            "../../packages/data-access/src/archive-audit-records.ts",
+            import.meta.url,
+          ),
+        ),
+      },
+      {
         find: "@rip-dvd/data-access/dvd-content-id",
         replacement: fileURLToPath(
           new URL(
