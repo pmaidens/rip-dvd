@@ -6,6 +6,7 @@
     "node": ">=22.23.1 <23"
   },
   "scripts": {
+    "audit:archives": "pnpm --filter @rip-dvd/data-access build && pnpm --filter @rip-dvd/archive-worker build && pnpm --filter @rip-dvd/archive-worker audit:archives",
     "build": "pnpm -r --if-present build",
     "check": "pnpm check:toolchain && pnpm typecheck && pnpm test",
     "check:toolchain": "node scripts/check-toolchain.mjs",

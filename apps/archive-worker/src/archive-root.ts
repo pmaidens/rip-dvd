@@ -1,7 +1,18 @@
 import { lstat, mkdir, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 export const MAX_ARCHIVE_PATH_BYTES = 4_096;
+
+export function isPathInsideArchiveRoot(
+  archiveRoot: string,
+  candidatePath: string,
+): boolean {
+  const pathFromRoot = relative(archiveRoot, candidatePath);
+  return pathFromRoot !== "" &&
+    pathFromRoot !== ".." &&
+    !pathFromRoot.startsWith(`..${sep}`) &&
+    !isAbsolute(pathFromRoot);
+}
 
 export async function requireSafeArchiveRoot(path: string): Promise<string> {
   const resolved = resolve(path);

@@ -20,8 +20,28 @@ export interface DvdGeometryValidator {
   validate(request: DvdGeometryValidationRequest): Promise<void>;
 }
 
+export type DvdGeometryIssue =
+  | "definite_truncation"
+  | "malformed_metadata"
+  | "unsupported_layout";
+
+export interface DvdImageGeometry {
+  imageSectorCount: number;
+  isoVolumeSectorCount: number | null;
+  udfMaximumDeclaredSectorCount: number | null;
+}
+
 export class DvdGeometryValidationError extends Error {
   override readonly name = "DvdGeometryValidationError";
+
+  constructor(
+    message: string,
+    readonly issue: DvdGeometryIssue = "malformed_metadata",
+    readonly geometry: DvdImageGeometry | null = null,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+  }
 }
 
 interface IsoGeometryView {
@@ -72,8 +92,34 @@ interface DvdGeometryReader {
   totalSectorCount: number;
 }
 
-function geometryError(message: string): never {
-  throw new DvdGeometryValidationError(message);
+function geometryError(
+  message: string,
+  issue: DvdGeometryIssue = "malformed_metadata",
+  geometry: DvdImageGeometry | null = null,
+): never {
+  throw new DvdGeometryValidationError(message, issue, geometry);
+}
+
+function enrichGeometryError(
+  error: unknown,
+  geometry: DvdImageGeometry,
+): never {
+  if (!(error instanceof DvdGeometryValidationError)) {
+    throw error;
+  }
+  throw new DvdGeometryValidationError(
+    error.message,
+    error.issue,
+    {
+      imageSectorCount: geometry.imageSectorCount,
+      isoVolumeSectorCount:
+        error.geometry?.isoVolumeSectorCount ?? geometry.isoVolumeSectorCount,
+      udfMaximumDeclaredSectorCount:
+        error.geometry?.udfMaximumDeclaredSectorCount ??
+        geometry.udfMaximumDeclaredSectorCount,
+    },
+    { cause: error },
+  );
 }
 
 function sameFileMetadata(left: BigIntStats, right: BigIntStats): boolean {
@@ -95,10 +141,20 @@ function requireExtentInsideImage(
     extent.startLba < 0 ||
     !Number.isSafeInteger(extent.sectorCount) ||
     extent.sectorCount <= 0 ||
-    !Number.isSafeInteger(endLba) ||
-    endLba > totalSectorCount
+    !Number.isSafeInteger(endLba)
   ) {
-    geometryError(`DVD ${description} exceeds the image`);
+    geometryError(`DVD ${description} is malformed`);
+  }
+  if (endLba > totalSectorCount) {
+    geometryError(
+      `DVD ${description} exceeds the image`,
+      "definite_truncation",
+      {
+        imageSectorCount: totalSectorCount,
+        isoVolumeSectorCount: null,
+        udfMaximumDeclaredSectorCount: endLba,
+      },
+    );
   }
 }
 
@@ -189,7 +245,10 @@ async function validateIsoGeometry(
         descriptor.toString("latin1", 88, 91),
       )
     ) {
-      geometryError("DVD ISO supplementary volume is unsupported");
+      geometryError(
+        "DVD ISO supplementary volume is unsupported",
+        "unsupported_layout",
+      );
     }
     if (type === 1) {
       primaryViewCount += 1;
@@ -227,7 +286,15 @@ async function validateIsoGeometry(
       geometryError("DVD ISO volume geometry is malformed");
     }
     if (volumeSpaceSize > reader.totalSectorCount) {
-      geometryError("DVD ISO volume-space declaration exceeds the image");
+      geometryError(
+        "DVD ISO volume-space declaration exceeds the image",
+        "definite_truncation",
+        {
+          imageSectorCount: reader.totalSectorCount,
+          isoVolumeSectorCount: volumeSpaceSize,
+          udfMaximumDeclaredSectorCount: null,
+        },
+      );
     }
     views.push({
       logicalBlockSize,
@@ -268,7 +335,10 @@ function udfDescriptorCrcLength(buffer: Buffer, identifier: number): number {
     }
     return crcLength;
   }
-  geometryError("DVD UDF descriptor type is unsupported");
+  geometryError(
+    "DVD UDF descriptor type is unsupported",
+    "unsupported_layout",
+  );
 }
 
 function validateUdfTag(
@@ -439,7 +509,10 @@ async function parseUdfDescriptorSequence(
       break;
     }
     if (identifier === 3) {
-      geometryError("DVD UDF volume descriptor continuation is unsupported");
+      geometryError(
+        "DVD UDF volume descriptor continuation is unsupported",
+        "unsupported_layout",
+      );
     }
     if (identifier === 1) {
       if (sawPrimaryVolume) {
@@ -528,7 +601,10 @@ async function parseUdfDescriptorSequence(
           mapLength !== 6 ||
           mapOffset + mapLength > mapEnd
         ) {
-          geometryError("DVD UDF partition map is unsupported");
+          geometryError(
+            "DVD UDF partition map is unsupported",
+            "unsupported_layout",
+          );
         }
         partitionNumbersByReference.push(
           descriptor.readUInt16LE(mapOffset + 4),
@@ -683,7 +759,10 @@ async function validateUdfGeometry(
   }
   for (let index = beginningIndex + 1; index < terminatorIndex; index += 1) {
     if (index !== nsrIndex) {
-      geometryError("DVD UDF recognition sequence is unsupported");
+      geometryError(
+        "DVD UDF recognition sequence is unsupported",
+        "unsupported_layout",
+      );
     }
   }
   if (reader.totalSectorCount <= 256) {
@@ -775,7 +854,7 @@ async function validateOpenedImage(
   handle: FileHandle,
   totalSectorCount: number,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<DvdImageGeometry> {
   let sectorReadCount = 0;
   const maximumSectorReads =
     MAX_ISO_DESCRIPTOR_SECTORS +
@@ -809,24 +888,56 @@ async function validateOpenedImage(
     },
   };
   const isoGeometry = await validateIsoGeometry(reader);
-  const udfGeometry = await validateUdfGeometry(reader);
+  let udfGeometry: UdfGeometryView | undefined;
+  try {
+    udfGeometry = await validateUdfGeometry(reader);
+  } catch (error) {
+    enrichGeometryError(error, {
+      imageSectorCount: totalSectorCount,
+      isoVolumeSectorCount: isoGeometry?.volumeSpaceSize ?? null,
+      udfMaximumDeclaredSectorCount: null,
+    });
+  }
   if (isoGeometry === undefined && udfGeometry === undefined) {
-    geometryError("DVD image has no supported filesystem geometry view");
+    geometryError(
+      "DVD image has no supported filesystem geometry view",
+      "unsupported_layout",
+      {
+        imageSectorCount: totalSectorCount,
+        isoVolumeSectorCount: null,
+        udfMaximumDeclaredSectorCount: null,
+      },
+    );
   }
   if (
     isoGeometry !== undefined &&
     udfGeometry !== undefined &&
     udfGeometry.maximumDeclaredSectorCount > isoGeometry.volumeSpaceSize
   ) {
-    geometryError("DVD ISO and UDF geometry views disagree");
+    geometryError(
+      "DVD ISO and UDF geometry views disagree",
+      "malformed_metadata",
+      {
+        imageSectorCount: totalSectorCount,
+        isoVolumeSectorCount: isoGeometry.volumeSpaceSize,
+        udfMaximumDeclaredSectorCount:
+          udfGeometry.maximumDeclaredSectorCount,
+      },
+    );
   }
+  return {
+    imageSectorCount: totalSectorCount,
+    isoVolumeSectorCount: isoGeometry?.volumeSpaceSize ?? null,
+    udfMaximumDeclaredSectorCount:
+      udfGeometry?.maximumDeclaredSectorCount ?? null,
+  };
 }
 
-export async function validateDvdImageGeometry({
+export async function inspectDvdImageGeometry({
   expectedByteCount,
   imagePath,
   signal,
-}: DvdGeometryValidationRequest): Promise<void> {
+}: DvdGeometryValidationRequest): Promise<DvdImageGeometry> {
   signal.throwIfAborted();
   let safeExpectedByteCount: number;
   try {
@@ -834,6 +945,8 @@ export async function validateDvdImageGeometry({
   } catch (error) {
     throw new DvdGeometryValidationError(
       "DVD volume geometry image size is invalid",
+      "malformed_metadata",
+      null,
       { cause: error },
     );
   }
@@ -857,8 +970,9 @@ export async function validateDvdImageGeometry({
     if (!before.isFile() || !sameFileMetadata(pathMetadata, before)) {
       geometryError("DVD volume geometry image changed before validation");
     }
+    let geometry: DvdImageGeometry;
     try {
-      await validateOpenedImage(
+      geometry = await validateOpenedImage(
         handle,
         safeExpectedByteCount / DVD_SECTOR_SIZE_BYTES,
         signal,
@@ -869,6 +983,8 @@ export async function validateDvdImageGeometry({
       }
       throw new DvdGeometryValidationError(
         "DVD volume geometry validation failed",
+        "malformed_metadata",
+        null,
         { cause: error },
       );
     }
@@ -876,9 +992,16 @@ export async function validateDvdImageGeometry({
     if (!sameFileMetadata(before, await handle.stat({ bigint: true }))) {
       geometryError("DVD volume geometry image changed during validation");
     }
+    return geometry;
   } finally {
     await handle.close();
   }
+}
+
+export async function validateDvdImageGeometry(
+  request: DvdGeometryValidationRequest,
+): Promise<void> {
+  await inspectDvdImageGeometry(request);
 }
 
 export function createNodeDvdGeometryValidator(): DvdGeometryValidator {

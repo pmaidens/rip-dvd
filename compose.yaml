@@ -45,6 +45,24 @@ services:
       - rip-dvd-data:/data
       - ${RIP_DVD_BACKUP_HOST_PATH:-./backups}:/backups
 
+  archive-audit:
+    profiles: ["maintenance"]
+    build:
+      context: .
+      dockerfile: docker/runtime.Dockerfile
+      target: archive-worker
+    entrypoint: ["node", "apps/archive-worker/dist/archive-audit-entry.js"]
+    environment:
+      RIP_DVD_DATABASE_PATH: /data/rip-dvd.sqlite
+      RIP_DVD_ORIGINALS_LIBRARY_PATH: /media/originals
+    network_mode: none
+    read_only: true
+    volumes:
+      # SQLite WAL readers may need the shared-memory sidecar even though the
+      # audit connection is opened read-only with query_only enabled.
+      - rip-dvd-data:/data
+      - ${RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH:-rip-dvd-originals}:/media/originals:ro
+
   web:
     build:
       context: .

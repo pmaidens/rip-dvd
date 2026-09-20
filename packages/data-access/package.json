@@ -34,6 +34,10 @@
       "types": "./src/encode-queue-search.ts",
       "default": "./dist/encode-queue-search.js"
     },
+    "./archive-audit-records": {
+      "types": "./src/archive-audit-records.ts",
+      "default": "./dist/archive-audit-records.js"
+    },
     "./legacy-sidecars": {
       "types": "./src/legacy-sidecars.ts",
       "default": "./dist/legacy-sidecars.js"
