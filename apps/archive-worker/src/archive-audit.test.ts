@@ -1,4 +1,10 @@
 import type { ArchiveAuditRecord } from "@rip-dvd/data-access/archive-audit-records";
+import type {
+  DetectedDiscId,
+  DiscInspectionId,
+  OpticalDriveId,
+  OriginalDiscArchiveId,
+} from "@rip-dvd/data-access";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -9,15 +15,20 @@ import {
 
 const IMAGE_BYTES = 600 * 2_048;
 
+const archiveId = (value: string) => value as OriginalDiscArchiveId;
+const detectedDiscId = (value: string) => value as DetectedDiscId;
+const discInspectionId = (value: string) => value as DiscInspectionId;
+const opticalDriveId = (value: string) => value as OpticalDriveId;
+
 function auditRecord(
   id: string,
   overrides: Partial<ArchiveAuditRecord> = {},
 ): ArchiveAuditRecord {
   return {
-    archiveId: `archive-${id}`,
-    detectedDiscId: `disc-${id}`,
-    opticalDriveId: `drive-${id}`,
-    discInspectionId: `inspection-${id}`,
+    archiveId: archiveId(`archive-${id}`),
+    detectedDiscId: detectedDiscId(`disc-${id}`),
+    opticalDriveId: opticalDriveId(`drive-${id}`),
+    discInspectionId: discInspectionId(`inspection-${id}`),
     mediaGeneration: `generation-${id}`,
     discInspectionCapacityBytes: IMAGE_BYTES,
     archivePath: `/archives/${id}.iso`,
@@ -25,6 +36,7 @@ function auditRecord(
     recordedSizeBytes: IMAGE_BYTES,
     reportedBoundarySizeBytes: IMAGE_BYTES,
     publishedBoundarySizeBytes: IMAGE_BYTES,
+    boundaryExcludedSectorCount: 0,
     archivedAt: new Date(`2026-09-${String(Number(id) + 1).padStart(2, "0")}T12:00:00.000Z`),
     ...overrides,
   };
@@ -48,15 +60,15 @@ describe("Original Disc Archive audit", () => {
   it("classifies bounded deterministic fixtures without exposing paths", async () => {
     const records = [
       auditRecord("1", {
-        opticalDriveId: "drive-cluster",
+        opticalDriveId: opticalDriveId("drive-cluster"),
         mediaGeneration: "generation-prior",
       }),
       auditRecord("2", {
-        opticalDriveId: "drive-cluster",
+        opticalDriveId: opticalDriveId("drive-cluster"),
         mediaGeneration: "generation-current",
       }),
-      auditRecord("3", { opticalDriveId: "drive-legitimate-a" }),
-      auditRecord("4", { opticalDriveId: "drive-legitimate-b" }),
+      auditRecord("3", { opticalDriveId: opticalDriveId("drive-legitimate-a") }),
+      auditRecord("4", { opticalDriveId: opticalDriveId("drive-legitimate-b") }),
       auditRecord("5"),
       auditRecord("6"),
       auditRecord("7"),
@@ -188,8 +200,8 @@ describe("Original Disc Archive audit", () => {
   it("does not treat equal sizes without same-drive generation reuse as suspicious", async () => {
     const report = await runArchiveAudit({
       records: [
-        auditRecord("1", { opticalDriveId: "drive-a" }),
-        auditRecord("2", { opticalDriveId: "drive-b" }),
+        auditRecord("1", { opticalDriveId: opticalDriveId("drive-a") }),
+        auditRecord("2", { opticalDriveId: opticalDriveId("drive-b") }),
       ],
       recordsTruncated: false,
       recordLimit: 2,
@@ -206,5 +218,32 @@ describe("Original Disc Archive audit", () => {
       "consistent",
     ]);
     expect(report.counts.suspiciousCapacityReuseSignals).toBe(0);
+  });
+
+  it("compares reported boundaries while accepting proven excluded tails", async () => {
+    const report = await runArchiveAudit({
+      records: [
+        auditRecord("1", {
+          reportedBoundarySizeBytes: IMAGE_BYTES - 2_048,
+        }),
+        auditRecord("2", {
+          reportedBoundarySizeBytes: IMAGE_BYTES + 2_048,
+          boundaryExcludedSectorCount: 1,
+        }),
+      ],
+      recordsTruncated: false,
+      recordLimit: 2,
+      concurrency: 1,
+      fileTimeoutMs: 5_000,
+      runtimeTimeoutMs: 120_000,
+      originalsLibraryPath: "/archives",
+      fileInspector: { inspect: async () => successfulInspection() },
+      signal: new AbortController().signal,
+    });
+
+    expect(report.findings.map(({ classification }) => classification)).toEqual([
+      "size_mismatch",
+      "consistent",
+    ]);
   });
 });

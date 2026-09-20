@@ -1,5 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
 
+import type {
+  DetectedDiscId,
+  DiscInspectionId,
+  OpticalDriveId,
+  OriginalDiscArchiveId,
+} from "./types.js";
+
 export const ARCHIVE_AUDIT_DEFAULT_RECORD_LIMIT = 100;
 export const ARCHIVE_AUDIT_MAX_RECORD_LIMIT = 1_000;
 export const ARCHIVE_AUDIT_MAX_PATH_BYTES = 4_096;
@@ -9,10 +16,10 @@ const MAX_MEDIA_GENERATION_BYTES = 64;
 const SQLITE_BUSY_TIMEOUT_MS = 5_000;
 
 export interface ArchiveAuditRecord {
-  archiveId: string;
-  detectedDiscId: string;
-  opticalDriveId: string;
-  discInspectionId: string | null;
+  archiveId: OriginalDiscArchiveId;
+  detectedDiscId: DetectedDiscId;
+  opticalDriveId: OpticalDriveId;
+  discInspectionId: DiscInspectionId | null;
   mediaGeneration: string | null;
   discInspectionCapacityBytes: number | null;
   archivePath: string | null;
@@ -20,6 +27,7 @@ export interface ArchiveAuditRecord {
   recordedSizeBytes: number | null;
   reportedBoundarySizeBytes: number | null;
   publishedBoundarySizeBytes: number | null;
+  boundaryExcludedSectorCount: number | null;
   archivedAt: Date;
 }
 
@@ -46,6 +54,7 @@ interface ArchiveAuditRow {
   recorded_size_bytes: unknown;
   reported_boundary_size_bytes: unknown;
   published_boundary_size_bytes: unknown;
+  boundary_excluded_sector_count: unknown;
   archived_at: unknown;
 }
 
@@ -84,6 +93,23 @@ function nullableBoundedText(
   return requireBoundedText(value, tooLong, field);
 }
 
+function requireDomainId<Id extends string>(
+  value: unknown,
+  tooLong: unknown,
+  field: string,
+): Id {
+  return requireBoundedText(value, tooLong, field) as Id;
+}
+
+function nullableDomainId<Id extends string>(
+  value: unknown,
+  tooLong: unknown,
+  field: string,
+): Id | null {
+  const bounded = nullableBoundedText(value, tooLong, field);
+  return bounded === null ? null : bounded as Id;
+}
+
 function nullableSize(value: unknown, field: string): number | null {
   if (value === null) {
     return null;
@@ -113,22 +139,22 @@ function archiveAuditRecordFromRow(row: ArchiveAuditRow): ArchiveAuditRecord {
     throw new Error("Archive audit path is invalid");
   }
   return {
-    archiveId: requireBoundedText(
+    archiveId: requireDomainId<OriginalDiscArchiveId>(
       row.archive_id,
       row.archive_id_too_long,
       "archive identity",
     ),
-    detectedDiscId: requireBoundedText(
+    detectedDiscId: requireDomainId<DetectedDiscId>(
       row.detected_disc_id,
       row.detected_disc_id_too_long,
       "Detected Disc identity",
     ),
-    opticalDriveId: requireBoundedText(
+    opticalDriveId: requireDomainId<OpticalDriveId>(
       row.optical_drive_id,
       row.optical_drive_id_too_long,
       "Optical Drive identity",
     ),
-    discInspectionId: nullableBoundedText(
+    discInspectionId: nullableDomainId<DiscInspectionId>(
       row.disc_inspection_id,
       row.disc_inspection_id_too_long,
       "Disc Inspection identity",
@@ -153,6 +179,10 @@ function archiveAuditRecordFromRow(row: ArchiveAuditRow): ArchiveAuditRecord {
       row.published_boundary_size_bytes,
       "published boundary size",
     ),
+    boundaryExcludedSectorCount: nullableSize(
+      row.boundary_excluded_sector_count,
+      "excluded boundary sector count",
+    ),
     archivedAt,
   };
 }
@@ -172,65 +202,75 @@ export function readArchiveAuditRecords(
     sqlite.exec("PRAGMA query_only = ON");
     sqlite.exec("PRAGMA trusted_schema = OFF");
     const rows = sqlite.prepare(`
-      with bounded_archives as materialized (
+      with bounded_archive_records as materialized (
         select
-          substr(archive.id, 1, ${MAX_DOMAIN_ID_BYTES + 1}) as archive_id,
-          length(cast(archive.id as blob)) > ${MAX_DOMAIN_ID_BYTES}
-            as archive_id_too_long,
-          substr(archive.detected_disc_id, 1, ${MAX_DOMAIN_ID_BYTES + 1})
-            as detected_disc_id,
-          length(cast(archive.detected_disc_id as blob)) > ${MAX_DOMAIN_ID_BYTES}
-            as detected_disc_id_too_long,
-          substr(disc.optical_drive_id, 1, ${MAX_DOMAIN_ID_BYTES + 1})
-            as optical_drive_id,
-          length(cast(disc.optical_drive_id as blob)) > ${MAX_DOMAIN_ID_BYTES}
-            as optical_drive_id_too_long,
-          (disc.id is null or drive.id is null) as record_relationship_invalid,
-          substr(inspection.id, 1, ${MAX_DOMAIN_ID_BYTES + 1})
-            as disc_inspection_id,
-          coalesce(
-            length(cast(inspection.id as blob)) > ${MAX_DOMAIN_ID_BYTES},
-            0
-          ) as disc_inspection_id_too_long,
-          substr(inspection.media_generation, 1, ${MAX_MEDIA_GENERATION_BYTES + 1})
-            as media_generation,
-          coalesce(
-            length(cast(inspection.media_generation as blob)) > ${MAX_MEDIA_GENERATION_BYTES},
-            0
-          ) as media_generation_too_long,
-          inspection.media_capacity_bytes as disc_inspection_capacity_bytes,
-          case
-            when length(cast(archive.archive_path as blob)) between 1 and ${ARCHIVE_AUDIT_MAX_PATH_BYTES}
-              then archive.archive_path
-            else null
-          end as archive_path,
-          length(cast(archive.archive_path as blob)) not between 1 and ${ARCHIVE_AUDIT_MAX_PATH_BYTES}
-            as archive_path_rejected,
-          archive.size_bytes as recorded_size_bytes,
-          archive.boundary_reported_size_bytes as reported_boundary_size_bytes,
-          archive.boundary_published_size_bytes as published_boundary_size_bytes,
+          archive.id,
+          archive.detected_disc_id,
+          archive.archive_path,
+          archive.size_bytes,
+          archive.boundary_reported_size_bytes,
+          archive.boundary_published_size_bytes,
+          archive.boundary_excluded_sector_count,
           archive.archived_at
         from original_disc_archives as archive
-        left join detected_discs as disc on disc.id = archive.detected_disc_id
-        left join optical_drives as drive on drive.id = disc.optical_drive_id
-        left join archive_jobs as publication_job on publication_job.id = (
-          select candidate.id
-          from archive_jobs as candidate
-          where
-            candidate.original_disc_archive_id = archive.id
-            and candidate.status = 'completed'
-          order by candidate.completed_at desc, candidate.id desc
-          limit 1
-        )
-        left join disc_inspections as inspection
-          on inspection.id = publication_job.disc_inspection_id
         where archive.disc_kind = 'dvd' and archive.archive_format = 'iso'
         order by archive.archived_at asc, archive.id asc
         limit ?
       )
-      select archive.*
-      from bounded_archives as archive
-      order by archive.archived_at asc, archive.archive_id asc
+      select
+        substr(archive.id, 1, ${MAX_DOMAIN_ID_BYTES + 1}) as archive_id,
+        length(cast(archive.id as blob)) > ${MAX_DOMAIN_ID_BYTES}
+          as archive_id_too_long,
+        substr(archive.detected_disc_id, 1, ${MAX_DOMAIN_ID_BYTES + 1})
+          as detected_disc_id,
+        length(cast(archive.detected_disc_id as blob)) > ${MAX_DOMAIN_ID_BYTES}
+          as detected_disc_id_too_long,
+        substr(disc.optical_drive_id, 1, ${MAX_DOMAIN_ID_BYTES + 1})
+          as optical_drive_id,
+        length(cast(disc.optical_drive_id as blob)) > ${MAX_DOMAIN_ID_BYTES}
+          as optical_drive_id_too_long,
+        (disc.id is null or drive.id is null) as record_relationship_invalid,
+        substr(inspection.id, 1, ${MAX_DOMAIN_ID_BYTES + 1})
+          as disc_inspection_id,
+        coalesce(
+          length(cast(inspection.id as blob)) > ${MAX_DOMAIN_ID_BYTES},
+          0
+        ) as disc_inspection_id_too_long,
+        substr(inspection.media_generation, 1, ${MAX_MEDIA_GENERATION_BYTES + 1})
+          as media_generation,
+        coalesce(
+          length(cast(inspection.media_generation as blob)) > ${MAX_MEDIA_GENERATION_BYTES},
+          0
+        ) as media_generation_too_long,
+        inspection.media_capacity_bytes as disc_inspection_capacity_bytes,
+        case
+          when length(cast(archive.archive_path as blob)) between 1 and ${ARCHIVE_AUDIT_MAX_PATH_BYTES}
+            then archive.archive_path
+          else null
+        end as archive_path,
+        length(cast(archive.archive_path as blob)) not between 1 and ${ARCHIVE_AUDIT_MAX_PATH_BYTES}
+          as archive_path_rejected,
+        archive.size_bytes as recorded_size_bytes,
+        archive.boundary_reported_size_bytes as reported_boundary_size_bytes,
+        archive.boundary_published_size_bytes as published_boundary_size_bytes,
+        archive.boundary_excluded_sector_count as boundary_excluded_sector_count,
+        archive.archived_at
+      from bounded_archive_records as archive
+      left join detected_discs as disc on disc.id = archive.detected_disc_id
+      left join optical_drives as drive on drive.id = disc.optical_drive_id
+      left join archive_jobs as publication_job on publication_job.id = (
+        select
+          candidate.id
+        from archive_jobs as candidate
+        where
+          candidate.original_disc_archive_id = archive.id
+          and candidate.status = 'completed'
+        order by candidate.completed_at desc, candidate.id desc
+        limit 1
+      )
+      left join disc_inspections as inspection
+        on inspection.id = publication_job.disc_inspection_id
+      order by archive.archived_at asc, archive.id asc
     `).all(boundedLimit + 1) as unknown as ArchiveAuditRow[];
     return {
       records: rows.slice(0, boundedLimit).map(archiveAuditRecordFromRow),

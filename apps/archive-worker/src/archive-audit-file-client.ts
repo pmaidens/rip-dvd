@@ -6,6 +6,7 @@ import type {
   ArchiveAuditFileInspector,
   ArchiveAuditFileOutcome,
 } from "./archive-audit.js";
+import type { DvdImageGeometry } from "./dvd-geometry-validator.js";
 
 const MAX_HELPER_OUTPUT_BYTES = 4_096;
 const FILE_OUTCOMES = new Set<ArchiveAuditFileOutcome>([
@@ -32,6 +33,25 @@ function isNullableSectorCount(value: unknown): value is number | null {
     (Number.isSafeInteger(value) && (value as number) >= 0);
 }
 
+function parseGeometry(value: unknown): DvdImageGeometry | null | undefined {
+  if (value === null) {
+    return null;
+  }
+  if (
+    typeof value !== "object" ||
+    !("imageSectorCount" in value) ||
+    !Number.isSafeInteger(value.imageSectorCount) ||
+    (value.imageSectorCount as number) <= 0 ||
+    !("isoVolumeSectorCount" in value) ||
+    !isNullableSectorCount(value.isoVolumeSectorCount) ||
+    !("udfMaximumDeclaredSectorCount" in value) ||
+    !isNullableSectorCount(value.udfMaximumDeclaredSectorCount)
+  ) {
+    return undefined;
+  }
+  return value as DvdImageGeometry;
+}
+
 function parseInspection(value: string): ArchiveAuditFileInspection | null {
   let parsed: unknown;
   try {
@@ -51,27 +71,31 @@ function parseInspection(value: string): ArchiveAuditFileInspection | null {
   ) {
     return null;
   }
-  if (parsed.geometry !== null) {
-    if (
-      typeof parsed.geometry !== "object" ||
-      !("imageSectorCount" in parsed.geometry) ||
-      !isNullableSectorCount(parsed.geometry.imageSectorCount) ||
-      parsed.geometry.imageSectorCount === null ||
-      !("isoVolumeSectorCount" in parsed.geometry) ||
-      !isNullableSectorCount(parsed.geometry.isoVolumeSectorCount) ||
-      !("udfMaximumDeclaredSectorCount" in parsed.geometry) ||
-      !isNullableSectorCount(parsed.geometry.udfMaximumDeclaredSectorCount)
-    ) {
-      return null;
-    }
+  const geometry = parseGeometry(parsed.geometry);
+  if (geometry === undefined) return null;
+  const actualSizeBytes = parsed.actualSizeBytes;
+  const outcome = parsed.outcome as ArchiveAuditFileOutcome;
+  if (outcome === "ok" || outcome === "definite_truncation") {
+    return actualSizeBytes !== null && geometry !== null
+      ? { actualSizeBytes, geometry, outcome }
+      : null;
   }
-  if (
-    parsed.outcome === "ok" &&
-    (parsed.actualSizeBytes === null || parsed.geometry === null)
-  ) {
-    return null;
+  if (outcome === "malformed_metadata") {
+    return { actualSizeBytes, geometry, outcome };
   }
-  return parsed as ArchiveAuditFileInspection;
+  if (outcome === "unsupported_layout") {
+    return actualSizeBytes !== null
+      ? { actualSizeBytes, geometry, outcome }
+      : null;
+  }
+  if (outcome === "read_error") {
+    return geometry === null
+      ? { actualSizeBytes, geometry, outcome }
+      : null;
+  }
+  return actualSizeBytes === null && geometry === null
+    ? { actualSizeBytes, geometry, outcome }
+    : null;
 }
 
 export interface BoundedArchiveAuditFileInspectorOptions {

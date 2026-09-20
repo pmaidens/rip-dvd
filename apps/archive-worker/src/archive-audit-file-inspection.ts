@@ -1,21 +1,15 @@
 import { lstat, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { resolve } from "node:path";
 
 import type { ArchiveAuditFileInspection } from "./archive-audit.js";
+import {
+  isPathInsideArchiveRoot,
+  MAX_ARCHIVE_PATH_BYTES,
+} from "./archive-root.js";
 import {
   DvdGeometryValidationError,
   inspectDvdImageGeometry,
 } from "./dvd-geometry-validator.js";
-
-const MAX_AUDIT_PATH_BYTES = 4_096;
-
-function isContainedPath(root: string, candidate: string): boolean {
-  const pathFromRoot = relative(root, candidate);
-  return pathFromRoot !== "" &&
-    pathFromRoot !== ".." &&
-    !pathFromRoot.startsWith(`..${sep}`) &&
-    !isAbsolute(pathFromRoot);
-}
 
 function isMissingFileError(error: unknown): boolean {
   return error !== null &&
@@ -33,8 +27,8 @@ export async function inspectArchiveAuditFile(
   if (
     archivePath.length === 0 ||
     originalsLibraryPath.length === 0 ||
-    Buffer.byteLength(archivePath) > MAX_AUDIT_PATH_BYTES ||
-    Buffer.byteLength(originalsLibraryPath) > MAX_AUDIT_PATH_BYTES
+    Buffer.byteLength(archivePath) > MAX_ARCHIVE_PATH_BYTES ||
+    Buffer.byteLength(originalsLibraryPath) > MAX_ARCHIVE_PATH_BYTES
   ) {
     return {
       actualSizeBytes: null,
@@ -64,7 +58,7 @@ export async function inspectArchiveAuditFile(
   }
 
   const resolvedArchivePath = resolve(archivePath);
-  if (!isContainedPath(resolvedRoot, resolvedArchivePath)) {
+  if (!isPathInsideArchiveRoot(resolvedRoot, resolvedArchivePath)) {
     return {
       actualSizeBytes: null,
       geometry: null,
@@ -107,7 +101,7 @@ export async function inspectArchiveAuditFile(
       outcome: isMissingFileError(error) ? "missing_file" : "read_error",
     };
   }
-  if (!isContainedPath(canonicalRoot, canonicalArchivePath)) {
+  if (!isPathInsideArchiveRoot(canonicalRoot, canonicalArchivePath)) {
     return {
       actualSizeBytes: null,
       geometry: null,
@@ -134,6 +128,15 @@ export async function inspectArchiveAuditFile(
       throw error;
     }
     if (error instanceof DvdGeometryValidationError) {
+      if (error.issue === "definite_truncation") {
+        return error.geometry === null
+          ? { actualSizeBytes, geometry: null, outcome: "read_error" }
+          : {
+              actualSizeBytes,
+              geometry: error.geometry,
+              outcome: "definite_truncation",
+            };
+      }
       return {
         actualSizeBytes,
         geometry: error.geometry,
