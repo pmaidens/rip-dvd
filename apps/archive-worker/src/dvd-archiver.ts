@@ -1477,6 +1477,8 @@ async function validateNormalDvdGeometry({
     }
     throw new DvdGeometryValidationError(
       "DVD volume geometry validation failed",
+      "malformed_metadata",
+      null,
       { cause: error },
     );
   }

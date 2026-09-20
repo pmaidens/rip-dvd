@@ -184,6 +184,43 @@ disc; otherwise it stops without changing the backup or queue.
 
 A job is pending when its source ISO exists and its final output `.mkv` does not. A job is complete when the final output exists. Failed or interrupted partial files are moved aside with a `.failed` suffix before retrying. The ISO remains as the long-term original backup either way.
 
+### Audit Original Disc Archives
+
+The repository includes a read-only audit for DVD Original Disc Archives. It
+compares the catalog size, Archive Boundary Evidence, actual file size, Disc
+Inspection capacity, and the bounded ISO 9660 or UDF geometry used by normal
+archive publication.
+
+Run it against the Compose deployment with:
+
+```bash
+docker compose --profile maintenance run --rm archive-audit \
+  --limit 100 \
+  --concurrency 2 \
+  --file-timeout-ms 5000 \
+  --runtime-timeout-ms 120000
+```
+
+For a local checkout, set `RIP_DVD_DATABASE_PATH` and
+`RIP_DVD_ORIGINALS_LIBRARY_PATH`, then run `pnpm audit:archives`. The command
+prints one bounded JSON report. It opens SQLite read-only with query-only mode,
+never changes archive files, and does not create Archive Requests or Archive
+Jobs. Archive paths and raw filesystem errors are not included in the report.
+
+The primary classifications are `definite_truncation`,
+`suspicious_capacity_reuse`, `consistent`, `size_mismatch`, `missing_file`,
+`malformed_metadata`, `unsupported_layout`, `containment_rejection`,
+`not_regular_file`, `read_error`, and `read_timeout`. Only supported filesystem
+geometry beyond EOF is definite truncation. Repeated capacity across distinct
+media generations on one Optical Drive is reported separately as suspicious
+and is never promoted to proof of truncation by itself.
+
+The defaults cap the audit at 100 archives, two concurrent file helpers, five
+seconds per file, and two minutes overall. The hard limits are 1,000 archives,
+eight helpers, 30 seconds per file, and ten minutes overall. A `truncated` value
+of `true` in the report means more matching archives remain outside the chosen
+record limit.
+
 ### Import legacy sidecars into SQLite
 
 After configuring the TypeScript application, import an existing originals
