@@ -18,7 +18,7 @@ function fixture() {
     stdout: (message) => stdout.push(message),
     stderr: (message) => stderr.push(message),
   };
-  const readRecords = vi.fn(() => ({ records: [], truncated: false }));
+  const readRecords = vi.fn(async () => ({ records: [], truncated: false }));
   const dependencies: ArchiveAuditCliDependencies = {
     createFileInspector: vi.fn(() => ({
       inspect: async () => ({
@@ -51,6 +51,7 @@ describe("archive audit command", () => {
     expect(scenario.readRecords).toHaveBeenCalledWith(
       "/data/catalog.sqlite",
       7,
+      expect.any(AbortSignal),
     );
     expect(scenario.stderr).toEqual([]);
     expect(JSON.parse(scenario.stdout.join(""))).toMatchObject({
@@ -65,6 +66,28 @@ describe("archive audit command", () => {
       },
       findings: [],
     });
+  });
+
+  it("includes the database projection in the overall runtime limit", async () => {
+    const scenario = fixture();
+    scenario.dependencies.readRecords = vi.fn((_path, _limit, signal) =>
+      new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        });
+      })
+    );
+
+    await expect(runArchiveAuditCli(
+      ["--runtime-timeout-ms", "1"],
+      scenario.host,
+      scenario.dependencies,
+    )).resolves.toBe(1);
+
+    expect(scenario.stdout).toEqual([]);
+    expect(scenario.stderr).toEqual([
+      `${JSON.stringify({ error: "archive_audit_runtime_timeout" })}\n`,
+    ]);
   });
 
   it("fails with a bounded error instead of echoing invalid input", async () => {

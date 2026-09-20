@@ -41,6 +41,7 @@ function createAuditDatabase(): string {
       size_bytes integer,
       boundary_reported_size_bytes integer,
       boundary_published_size_bytes integer,
+      boundary_excluded_sector_count integer,
       archived_at integer not null
     );
     create table archive_jobs (
@@ -61,11 +62,11 @@ function createAuditDatabase(): string {
       ('inspection-2', 'generation-2', 1228800);
     insert into original_disc_archives values
       ('archive-1', 'disc-1', 'dvd', 'iso', '/archives/one.iso',
-       1228800, 1228800, 1228800, 1000),
+       1228800, 1228800, 1228800, 0, 1000),
       ('archive-2', 'disc-2', 'dvd', 'iso', '/archives/two.iso',
-       1228800, 1228800, 1228800, 2000),
+       1228800, 1228800, 1228800, 0, 2000),
       ('archive-cd', 'disc-cd', 'cd', 'bin_cue', '/archives/cd.bin',
-       1000, null, null, 3000);
+       1000, null, null, null, 3000);
     insert into archive_jobs values
       ('job-old', 'archive-1', 'inspection-old', 'completed', 900),
       ('job-1', 'archive-1', 'inspection-1', 'completed', 1100),
@@ -96,6 +97,7 @@ describe("read-only archive audit records", () => {
         recordedSizeBytes: 1_228_800,
         reportedBoundarySizeBytes: 1_228_800,
         publishedBoundarySizeBytes: 1_228_800,
+        boundaryExcludedSectorCount: 0,
         archivedAt: new Date(1_000),
       }],
     });

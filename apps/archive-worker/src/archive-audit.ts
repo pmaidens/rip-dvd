@@ -6,22 +6,38 @@ export const ARCHIVE_AUDIT_SCHEMA_VERSION = 1;
 export const ARCHIVE_AUDIT_COMMAND_VERSION = "archive-audit-v1";
 export const ARCHIVE_AUDIT_MAX_CONCURRENCY = 8;
 
-export type ArchiveAuditFileOutcome =
-  | "ok"
-  | "definite_truncation"
-  | "malformed_metadata"
-  | "unsupported_layout"
-  | "missing_file"
-  | "containment_rejection"
-  | "not_regular_file"
-  | "read_error"
-  | "read_timeout";
+export type ArchiveAuditFileInspection =
+  | {
+      actualSizeBytes: number;
+      geometry: DvdImageGeometry;
+      outcome: "ok" | "definite_truncation";
+    }
+  | {
+      actualSizeBytes: number | null;
+      geometry: DvdImageGeometry | null;
+      outcome: "malformed_metadata";
+    }
+  | {
+      actualSizeBytes: number;
+      geometry: DvdImageGeometry | null;
+      outcome: "unsupported_layout";
+    }
+  | {
+      actualSizeBytes: null;
+      geometry: null;
+      outcome:
+        | "missing_file"
+        | "containment_rejection"
+        | "not_regular_file"
+        | "read_timeout";
+    }
+  | {
+      actualSizeBytes: number | null;
+      geometry: null;
+      outcome: "read_error";
+    };
 
-export interface ArchiveAuditFileInspection {
-  actualSizeBytes: number | null;
-  geometry: DvdImageGeometry | null;
-  outcome: ArchiveAuditFileOutcome;
-}
+export type ArchiveAuditFileOutcome = ArchiveAuditFileInspection["outcome"];
 
 export interface ArchiveAuditFileInspector {
   inspect(
@@ -72,10 +88,10 @@ export interface ArchiveAuditCapacityReuseSignal {
 }
 
 export interface ArchiveAuditFinding {
-  archiveId: string;
-  detectedDiscId: string;
-  opticalDriveId: string;
-  discInspectionId: string | null;
+  archiveId: ArchiveAuditRecord["archiveId"];
+  detectedDiscId: ArchiveAuditRecord["detectedDiscId"];
+  opticalDriveId: ArchiveAuditRecord["opticalDriveId"];
+  discInspectionId: ArchiveAuditRecord["discInspectionId"];
   mediaGeneration: string | null;
   archivedAt: string;
   recordedSizeBytes: number | null;
@@ -143,6 +159,34 @@ function geometryInBytes(
   };
 }
 
+function boundaryEvidenceMatchesActualSize(
+  record: ArchiveAuditRecord,
+  actualSizeBytes: number,
+): boolean {
+  const reported = record.reportedBoundarySizeBytes;
+  const published = record.publishedBoundarySizeBytes;
+  const excludedSectors = record.boundaryExcludedSectorCount;
+  if (
+    reported === null &&
+    published === null &&
+    excludedSectors === null
+  ) {
+    return true;
+  }
+  if (
+    reported === null ||
+    published !== actualSizeBytes ||
+    excludedSectors === null
+  ) {
+    return false;
+  }
+  if (reported === actualSizeBytes) {
+    return excludedSectors === 0;
+  }
+  return reported > actualSizeBytes &&
+    reported - actualSizeBytes === excludedSectors * 2_048;
+}
+
 function primaryResult(
   record: ArchiveAuditRecord,
   inspection: ArchiveAuditFileInspection,
@@ -152,13 +196,10 @@ function primaryResult(
 > {
   const declaredGeometry = geometryInBytes(inspection.geometry);
   if (inspection.outcome === "ok") {
-    const expectedSizes = [
-      record.recordedSizeBytes,
-      record.publishedBoundarySizeBytes,
-    ].filter((value): value is number => value !== null);
     const hasSizeMismatch =
-      inspection.actualSizeBytes === null ||
-      expectedSizes.some((size) => size !== inspection.actualSizeBytes);
+      record.recordedSizeBytes !== null &&
+        record.recordedSizeBytes !== inspection.actualSizeBytes ||
+      !boundaryEvidenceMatchesActualSize(record, inspection.actualSizeBytes);
     return hasSizeMismatch
       ? {
           actualSizeBytes: inspection.actualSizeBytes,

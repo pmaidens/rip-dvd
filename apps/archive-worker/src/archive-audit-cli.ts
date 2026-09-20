@@ -1,7 +1,6 @@
 import {
   ARCHIVE_AUDIT_DEFAULT_RECORD_LIMIT,
   ARCHIVE_AUDIT_MAX_RECORD_LIMIT,
-  readArchiveAuditRecords,
 } from "@rip-dvd/data-access/archive-audit-records";
 
 import {
@@ -10,6 +9,10 @@ import {
   runArchiveAudit,
 } from "./archive-audit.js";
 import { createBoundedArchiveAuditFileInspector } from "./archive-audit-file-client.js";
+import {
+  type ArchiveAuditRecordReader,
+  createBoundedArchiveAuditRecordReader,
+} from "./archive-audit-record-reader.js";
 
 const DEFAULT_CONCURRENCY = 2;
 const DEFAULT_FILE_TIMEOUT_MS = 5_000;
@@ -97,7 +100,7 @@ export interface ArchiveAuditCliHost {
 
 export interface ArchiveAuditCliDependencies {
   createFileInspector(timeoutMs: number): ArchiveAuditFileInspector;
-  readRecords: typeof readArchiveAuditRecords;
+  readRecords: ArchiveAuditRecordReader["read"];
   runAudit: typeof runArchiveAudit;
 }
 
@@ -110,7 +113,7 @@ const nodeCliHost: ArchiveAuditCliHost = {
 const nodeCliDependencies: ArchiveAuditCliDependencies = {
   createFileInspector: (timeoutMs) =>
     createBoundedArchiveAuditFileInspector({ timeoutMs }),
-  readRecords: readArchiveAuditRecords,
+  readRecords: createBoundedArchiveAuditRecordReader().read,
   runAudit: runArchiveAudit,
 };
 
@@ -136,7 +139,11 @@ export async function runArchiveAuditCli(
       controller.abort(new Error("Archive audit runtime limit reached"));
     }, options.runtimeTimeoutMs);
     try {
-      const page = dependencies.readRecords(databasePath, options.limit);
+      const page = await dependencies.readRecords(
+        databasePath,
+        options.limit,
+        controller.signal,
+      );
       const report = await dependencies.runAudit({
         records: page.records,
         recordsTruncated: page.truncated,
