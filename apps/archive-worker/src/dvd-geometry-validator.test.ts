@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  DvdGeometryValidationError,
+  inspectDvdImageGeometry,
   validateDvdImageGeometry,
 } from "./dvd-geometry-validator.js";
 import { proveDvdImageLayoutCompleteness } from "./dvd-layout-classifier.js";
@@ -220,12 +222,34 @@ function validateFixture(fixture: {
   });
 }
 
+function inspectFixture(fixture: {
+  imagePath: string;
+  sizeBytes: number;
+}) {
+  return inspectDvdImageGeometry({
+    expectedByteCount: fixture.sizeBytes,
+    imagePath: fixture.imagePath,
+    signal: new AbortController().signal,
+  });
+}
+
 describe("normal DVD volume geometry validation", () => {
   it("accepts exact ISO geometry without an optional UDF view", async () => {
     const image = Buffer.alloc(600 * DVD_SECTOR_SIZE_BYTES);
     writeIsoGeometry(image, 600);
 
     await expect(validateFixture(writeFixture(image))).resolves.toBeUndefined();
+  });
+
+  it("returns the supported declared geometry for read-only audits", async () => {
+    const image = Buffer.alloc(600 * DVD_SECTOR_SIZE_BYTES);
+    writeIsoGeometry(image, 599);
+
+    await expect(inspectFixture(writeFixture(image))).resolves.toEqual({
+      imageSectorCount: 600,
+      isoVolumeSectorCount: 599,
+      udfMaximumDeclaredSectorCount: null,
+    });
   });
 
   it("rejects a malformed claimed UDF anchor behind a valid ISO view", async () => {
@@ -245,6 +269,20 @@ describe("normal DVD volume geometry validation", () => {
     await expect(validateFixture(writeFixture(image))).rejects.toThrow(
       "DVD ISO volume-space declaration exceeds the image",
     );
+  });
+
+  it("reports geometry beyond EOF as definite truncation", async () => {
+    const image = Buffer.alloc(600 * DVD_SECTOR_SIZE_BYTES);
+    writeIsoGeometry(image, 601);
+
+    await expect(inspectFixture(writeFixture(image))).rejects.toMatchObject({
+      issue: "definite_truncation",
+      geometry: {
+        imageSectorCount: 600,
+        isoVolumeSectorCount: 601,
+        udfMaximumDeclaredSectorCount: null,
+      },
+    } satisfies Partial<DvdGeometryValidationError>);
   });
 
   it("fails closed when supported ISO geometry views disagree", async () => {
@@ -413,5 +451,19 @@ describe("normal DVD volume geometry validation", () => {
     await expect(validateFixture(writeFixture(image))).rejects.toThrow(
       "DVD volume geometry image size is not sector aligned",
     );
+  });
+
+  it("distinguishes unsupported layouts from malformed metadata", async () => {
+    const unsupported = Buffer.alloc(600 * DVD_SECTOR_SIZE_BYTES);
+    const malformed = Buffer.alloc(600 * DVD_SECTOR_SIZE_BYTES);
+    writeIsoGeometry(malformed, 600);
+    sector(malformed, 16).writeUInt32BE(599, 84);
+
+    await expect(inspectFixture(writeFixture(unsupported))).rejects.toMatchObject({
+      issue: "unsupported_layout",
+    } satisfies Partial<DvdGeometryValidationError>);
+    await expect(inspectFixture(writeFixture(malformed))).rejects.toMatchObject({
+      issue: "malformed_metadata",
+    } satisfies Partial<DvdGeometryValidationError>);
   });
 });

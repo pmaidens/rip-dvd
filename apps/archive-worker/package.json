@@ -5,6 +5,7 @@
   "type": "module",
   "files": ["dist"],
   "scripts": {
+    "audit:archives": "node dist/archive-audit-entry.js",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
     "test": "vitest run --config vitest.config.ts",
