@@ -31,7 +31,10 @@ import {
   type DvdCopyRunner,
   type PreserveDvdArchiveOptions,
 } from "./dvd-archiver.js";
-import type { DvdEndpointProver } from "./dvd-endpoint-prover.js";
+import {
+  DvdReadableEndpointError,
+  type DvdEndpointProver,
+} from "./dvd-endpoint-prover.js";
 import {
   createCleanDvdRecoveryResult,
   createDamagedDvdRecoveryResult,
@@ -3559,6 +3562,95 @@ describe("DVD archive publication", () => {
     expect(readFileSync(recovered.archivePath)).toEqual(rescuedImage);
     expect(existsSync(rescuePaths.imagePath)).toBe(false);
     expect(existsSync(rescuePaths.mapPath)).toBe(false);
+  });
+
+  it("quarantines damaged rescue state when its first excluded block is readable", async () => {
+    const fixture = await createInterruptedDamagedPublication(
+      "archive-request:readable-damaged-rescue-endpoint",
+      "7".repeat(64),
+    );
+    const endpointFailure = new DvdReadableEndpointError(2);
+    const noCopy = vi.fn();
+
+    await expect(preserveDvdArchive({
+      ...fixture.baseOptions,
+      endpointProver: {
+        prove: vi.fn().mockRejectedValue(endpointFailure),
+      },
+      runner: {
+        copy: noCopy,
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      salvageValidator: {
+        validate: vi.fn().mockResolvedValue({
+          badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+          outcome: "accepted",
+        }),
+      },
+      signal: new AbortController().signal,
+    })).rejects.toBe(endpointFailure);
+
+    expect(noCopy).not.toHaveBeenCalled();
+    expect(existsSync(fixture.rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(fixture.rescuePaths.mapPath)).toBe(false);
+    expect(existsSync(fixture.interrupted.archivePath)).toBe(false);
+    expect(readFileSync(`${fixture.interrupted.archivePath}.failed`)).toEqual(
+      fixture.rescuedImage,
+    );
+    expect(readdirSync(fixture.root).some((entry) =>
+      entry.startsWith(`${basename(fixture.rescuePaths.imagePath)}.invalid-`)
+    )).toBe(true);
+  });
+
+  it("quarantines clean rescue state when its first excluded block is readable", async () => {
+    const fixture = await createInterruptedDamagedPublication(
+      "archive-request:readable-clean-rescue-endpoint",
+      "8".repeat(64),
+    );
+    unlinkSync(fixture.interrupted.archivePath);
+    const rescueMap = JSON.parse(
+      readFileSync(fixture.rescuePaths.mapPath, "utf8"),
+    );
+    rescueMap.recoveryProtocol = {
+      protocolVersion: 1,
+      declaredByteCount: fixture.rescuedImage.byteLength,
+      recoveredByteCount: fixture.rescuedImage.byteLength,
+      recoveryPolicyVersion: "dvd-recovery-v1",
+      badSectorCount: 0,
+      badAreaCount: 0,
+      badSectorBitmapHex: "",
+    };
+    writeFileSync(
+      fixture.rescuePaths.mapPath,
+      `${JSON.stringify(rescueMap)}\n`,
+    );
+    const endpointFailure = new DvdReadableEndpointError(2);
+    const noCopy = vi.fn();
+
+    await expect(preserveDvdArchive({
+      ...fixture.baseOptions,
+      endpointProver: {
+        prove: vi.fn().mockRejectedValue(endpointFailure),
+      },
+      runner: {
+        copy: noCopy,
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      signal: new AbortController().signal,
+    })).rejects.toBe(endpointFailure);
+
+    expect(noCopy).not.toHaveBeenCalled();
+    expect(existsSync(fixture.rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(fixture.rescuePaths.mapPath)).toBe(false);
+    expect(existsSync(fixture.interrupted.archivePath)).toBe(false);
+    expect(existsSync(`${fixture.interrupted.archivePath}.failed`)).toBe(false);
+    expect(readdirSync(fixture.root).some((entry) =>
+      entry.startsWith(`${basename(fixture.rescuePaths.imagePath)}.invalid-`)
+    )).toBe(true);
   });
 
   it("rejects an orphan salvage result when validation reads a replacement image", async () => {

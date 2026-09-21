@@ -75,9 +75,10 @@ import type {
   DvdCompletenessProof,
   DvdCompletenessProver,
 } from "./dvd-completeness-prover.js";
-import type {
-  DvdEndpointProver,
-  DvdNormalEndpointProof,
+import {
+  DvdReadableEndpointError,
+  type DvdEndpointProver,
+  type DvdNormalEndpointProof,
 } from "./dvd-endpoint-prover.js";
 import {
   createNodeDvdGeometryValidator,
@@ -1553,6 +1554,37 @@ async function quarantineInvalidNormalDvdGeometry({
   rescueWorkspace: DvdRescueWorkspace;
   root: string;
 }): Promise<never> {
+  return await quarantineRejectedNormalDvdRescue({
+    archivePath,
+    authorizeMutation,
+    cleanupFailureMessage: "DVD volume geometry rejection quarantine failed",
+    error,
+    existingPublishedFilesystemIdentity,
+    rescueIdentity,
+    rescueWorkspace,
+    root,
+  });
+}
+
+async function quarantineRejectedNormalDvdRescue({
+  archivePath,
+  authorizeMutation,
+  cleanupFailureMessage,
+  error,
+  existingPublishedFilesystemIdentity,
+  rescueIdentity,
+  rescueWorkspace,
+  root,
+}: {
+  archivePath: string;
+  authorizeMutation?: () => void | Promise<void>;
+  cleanupFailureMessage: string;
+  error: unknown;
+  existingPublishedFilesystemIdentity?: string;
+  rescueIdentity: DvdRescueIdentity;
+  rescueWorkspace: DvdRescueWorkspace;
+  root: string;
+}): Promise<never> {
   const cleanupErrors: unknown[] = [];
   try {
     await quarantineDvdRescueWorkspace(
@@ -1578,10 +1610,49 @@ async function quarantineInvalidNormalDvdGeometry({
   if (cleanupErrors.length > 0) {
     throw new AggregateError(
       [error, ...cleanupErrors],
-      "DVD volume geometry rejection quarantine failed",
+      cleanupFailureMessage,
     );
   }
   throw error;
+}
+
+async function quarantineReadableNormalDvdEndpoint({
+  archivePath,
+  authorizeMutation,
+  error,
+  existingPublishedFilesystemIdentity,
+  rescueIdentity,
+  rescueWorkspace,
+  root,
+}: {
+  archivePath: string;
+  authorizeMutation?: () => void | Promise<void>;
+  error: unknown;
+  existingPublishedFilesystemIdentity?: string;
+  rescueIdentity: DvdRescueIdentity;
+  rescueWorkspace: DvdRescueWorkspace;
+  root: string;
+}): Promise<never> {
+  if (!(error instanceof DvdReadableEndpointError)) {
+    if (existingPublishedFilesystemIdentity !== undefined) {
+      await quarantinePublishedArchive(
+        archivePath,
+        existingPublishedFilesystemIdentity,
+        authorizeMutation,
+      );
+    }
+    throw error;
+  }
+  return await quarantineRejectedNormalDvdRescue({
+    archivePath,
+    authorizeMutation,
+    cleanupFailureMessage: "DVD readable endpoint quarantine failed",
+    error,
+    existingPublishedFilesystemIdentity,
+    rescueIdentity,
+    rescueWorkspace,
+    root,
+  });
 }
 
 export async function quarantinePublishedArchive(
@@ -2497,12 +2568,16 @@ export async function preserveDvdArchive({
         verifySource,
       });
     } catch (error) {
-      await quarantinePublishedArchive(
+      return await quarantineReadableNormalDvdEndpoint({
         archivePath,
-        rescueWorkspace.imageFilesystemIdentity,
         authorizeMutation,
-      );
-      throw error;
+        error,
+        existingPublishedFilesystemIdentity:
+          rescueWorkspace.imageFilesystemIdentity,
+        rescueIdentity: rescueIdentity!,
+        rescueWorkspace,
+        root,
+      });
     }
     await verifySource();
     signal.throwIfAborted();
@@ -2612,14 +2687,15 @@ export async function preserveDvdArchive({
         verifySource,
       });
     } catch (error) {
-      if (existingArchive !== null) {
-        await quarantinePublishedArchive(
-          archivePath,
-          rescueWorkspace.imageFilesystemIdentity,
-          authorizeMutation,
-        );
-      }
-      throw error;
+      return await quarantineReadableNormalDvdEndpoint({
+        archivePath,
+        authorizeMutation,
+        error,
+        existingPublishedFilesystemIdentity,
+        rescueIdentity: rescueIdentity!,
+        rescueWorkspace,
+        root,
+      });
     }
     await authorizeMutation?.();
     signal.throwIfAborted();

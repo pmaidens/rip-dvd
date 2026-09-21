@@ -31,6 +31,18 @@ export interface DvdEndpointProver {
   prove(request: DvdEndpointProofRequest): Promise<DvdNormalEndpointProof>;
 }
 
+export class DvdReadableEndpointError extends Error {
+  readonly firstExcludedLba: number;
+
+  constructor(firstExcludedLba: number) {
+    super(
+      `DVD endpoint probe found readable data at first excluded LBA ${firstExcludedLba}`,
+    );
+    this.name = "DvdReadableEndpointError";
+    this.firstExcludedLba = firstExcludedLba;
+  }
+}
+
 interface DvdEndpointReadablePipe {
   destroy(): void;
   on(event: "data", listener: (chunk: Buffer) => void): void;
@@ -297,6 +309,13 @@ function runEndpointProofProcess({
         authorizationCount !== 4
       ) {
         const detail = optionalBoundedText(diagnostics, 500);
+        if (
+          detail ===
+            `DVD endpoint probe rejected first excluded LBA ${firstExcludedLba}: readable_data`
+        ) {
+          reject(new DvdReadableEndpointError(firstExcludedLba));
+          return;
+        }
         reject(new Error(
           `DVD endpoint proof failed${
             detail
