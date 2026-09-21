@@ -3653,6 +3653,92 @@ describe("DVD archive publication", () => {
     )).toBe(true);
   });
 
+  it("quarantines newly accepted damaged rescue state at a readable endpoint", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const archiveRequestId = "archive-request:readable-new-salvage-endpoint";
+    const digest = "9".repeat(64);
+    const sizeBytes = 2 * 2_048;
+    const image = Buffer.alloc(sizeBytes, 6);
+    image.fill(0, 2_048);
+    const endpointFailure = new DvdReadableEndpointError(2);
+
+    await expect(preserveDvdArchive({
+      archiveRequestId,
+      devicePath: "/dev/sr0",
+      endpointProver: { prove: vi.fn().mockRejectedValue(endpointFailure) },
+      expectedTitleMap: {
+        schemaVersion: 2,
+        contentId: `dvdmeta-sha256:${digest}`,
+        titles: [],
+      },
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      originalsLibraryPath,
+      runner: {
+        copy: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, image);
+          return createDamagedDvdRecoveryResult(sizeBytes, [
+            { startLba: 1, sectorCount: 1 },
+          ]);
+        }),
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      salvageValidator: {
+        validate: vi.fn().mockResolvedValue({
+          badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+          outcome: "accepted",
+        }),
+      },
+      signal: new AbortController().signal,
+      sizeBytes,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    })).rejects.toBe(endpointFailure);
+
+    const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
+    expect(existsSync(rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(rescuePaths.mapPath)).toBe(false);
+    expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
+    expect(readdirSync(root).some((entry) =>
+      entry.startsWith(`${basename(rescuePaths.imagePath)}.invalid-`)
+    )).toBe(true);
+  });
+
+  it("quarantines resumed damaged rescue state at a readable endpoint", async () => {
+    const fixture = await createInterruptedDamagedPublication(
+      "archive-request:readable-resumed-rescue-endpoint",
+      "a".repeat(64),
+    );
+    unlinkSync(fixture.interrupted.archivePath);
+    const endpointFailure = new DvdReadableEndpointError(2);
+    const resumeCopy = vi.fn(async ({ outputPath, sizeBytes }) => {
+      writeFileSync(outputPath, Buffer.alloc(sizeBytes, 6));
+      return createCleanDvdRecoveryResult(sizeBytes);
+    });
+
+    await expect(preserveDvdArchive({
+      ...fixture.baseOptions,
+      endpointProver: { prove: vi.fn().mockRejectedValue(endpointFailure) },
+      runner: {
+        copy: resumeCopy,
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      signal: new AbortController().signal,
+    })).rejects.toBe(endpointFailure);
+
+    expect(resumeCopy).toHaveBeenCalledOnce();
+    expect(existsSync(fixture.rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(fixture.rescuePaths.mapPath)).toBe(false);
+    expect(existsSync(fixture.interrupted.archivePath)).toBe(false);
+    expect(readdirSync(fixture.root).some((entry) =>
+      entry.startsWith(`${basename(fixture.rescuePaths.imagePath)}.invalid-`)
+    )).toBe(true);
+  });
+
   it("rejects an orphan salvage result when validation reads a replacement image", async () => {
     const fixture = await createInterruptedDamagedPublication(
       "33333333-3333-4333-8333-333333333335",
