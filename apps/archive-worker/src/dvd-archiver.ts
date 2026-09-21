@@ -3103,7 +3103,8 @@ export async function preserveDvdArchive({
     // control until OS-level closure releases the copy tombstone.
     await runner.waitForInactive(safeDevicePath, partialPath);
     if (
-      error instanceof DvdGeometryValidationError &&
+      (error instanceof DvdGeometryValidationError ||
+        error instanceof DvdReadableEndpointError) &&
       !signal.aborted &&
       rescueWorkspace !== null &&
       rescueIdentity !== undefined
