@@ -249,6 +249,21 @@ describe("DVD archive-boundary evidence", () => {
     });
   });
 
+  it.each([
+    ["a non-positive size", 0, 0],
+    ["different reported and published sizes", 8_192, 4_096],
+  ])(
+    "rejects legacy normal records with %s",
+    (_reason, reportedSizeBytes, publishedSizeBytes) => {
+      expect(() => archiveBoundaryEvidenceFromRecord({
+        boundaryPolicyVersion: "dvd-archive-boundary-v1",
+        boundaryReportedSizeBytes: reportedSizeBytes,
+        boundaryPublishedSizeBytes: publishedSizeBytes,
+        boundaryExcludedSectorCount: 0,
+      })).toThrow(DomainInvariantError);
+    },
+  );
+
   it("reconstructs corrected boundary evidence", () => {
     expect(archiveBoundaryEvidenceFromRecord({
       boundaryPolicyVersion: "dvd-archive-boundary-v1",

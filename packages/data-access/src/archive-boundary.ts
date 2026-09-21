@@ -281,6 +281,36 @@ export function validateNormalDvdArchiveBoundaryEvidence(
   return normalized;
 }
 
+function validateLegacyNormalDvdArchiveBoundaryEvidence(
+  value: unknown,
+  publishedArchiveSizeBytes: number,
+): LegacyNormalDvdArchiveBoundaryEvidence {
+  if (typeof value !== "object" || value === null) {
+    throw new DomainInvariantError(
+      "Normal DVD archive-boundary evidence is invalid",
+    );
+  }
+  const evidence = value as Partial<LegacyNormalDvdArchiveBoundaryEvidence>;
+  if (
+    evidence.policyVersion !== LEGACY_DVD_ARCHIVE_BOUNDARY_POLICY_VERSION ||
+    typeof evidence.reportedSizeBytes !== "number" ||
+    !isValidDvdSize(evidence.reportedSizeBytes) ||
+    evidence.publishedSizeBytes !== evidence.reportedSizeBytes ||
+    evidence.excludedSectorCount !== 0 ||
+    publishedArchiveSizeBytes !== evidence.publishedSizeBytes
+  ) {
+    throw new DomainInvariantError(
+      "Normal DVD archive-boundary evidence is invalid",
+    );
+  }
+  return {
+    policyVersion: LEGACY_DVD_ARCHIVE_BOUNDARY_POLICY_VERSION,
+    reportedSizeBytes: evidence.reportedSizeBytes,
+    publishedSizeBytes: evidence.publishedSizeBytes,
+    excludedSectorCount: 0,
+  };
+}
+
 export function validateDvdArchiveBoundaryEvidence(
   value: unknown,
   publishedArchiveSizeBytes: number,
@@ -379,12 +409,12 @@ export function archiveBoundaryEvidenceFromRecord(
         LEGACY_DVD_ARCHIVE_BOUNDARY_POLICY_VERSION &&
       values.slice(4).every((value) => value === null)
     ) {
-      return {
+      return validateLegacyNormalDvdArchiveBoundaryEvidence({
         policyVersion: LEGACY_DVD_ARCHIVE_BOUNDARY_POLICY_VERSION,
         reportedSizeBytes: boundaryReportedSizeBytes,
         publishedSizeBytes: boundaryPublishedSizeBytes,
         excludedSectorCount: 0,
-      };
+      }, boundaryPublishedSizeBytes);
     }
     if (
       boundaryPolicyVersion !== DVD_ARCHIVE_BOUNDARY_POLICY_VERSION ||

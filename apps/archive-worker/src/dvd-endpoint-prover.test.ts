@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createNodeDvdEndpointProver,
+  DvdReadableEndpointError,
   parseDvdEndpointProof,
 } from "./dvd-endpoint-prover.js";
 
@@ -81,6 +82,52 @@ function createEndpointChild(payload = endpointPayload()) {
   return child;
 }
 
+function createRejectedEndpointChild(diagnostics: string) {
+  const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+  const ready = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+  let grantCount = 0;
+  const child = Object.assign(new EventEmitter(), {
+    pid: 123,
+    stderr,
+    stdio: [
+      null,
+      null,
+      stderr,
+      null,
+      null,
+      null,
+      ready,
+      Object.assign(new EventEmitter(), {
+        destroy: vi.fn(),
+        write: vi.fn((_chunk: string, callback: (error?: Error) => void) => {
+          callback();
+          grantCount += 1;
+          queueMicrotask(() => {
+            if (grantCount < 4) {
+              ready.emit(
+                "data",
+                Buffer.from("rip-dvd-boundary-probe-authorization-ready\n"),
+              );
+              return;
+            }
+            stderr.emit("data", Buffer.from(`${diagnostics}\n`));
+            child.emit("close", 1, null);
+          });
+          return true;
+        }),
+      }),
+    ],
+    kill: vi.fn(() => true),
+  });
+  queueMicrotask(() => {
+    ready.emit(
+      "data",
+      Buffer.from("rip-dvd-boundary-probe-authorization-ready\n"),
+    );
+  });
+  return child;
+}
+
 describe("DVD normal endpoint proof", () => {
   it("requires four authorization fences around two matching reads", async () => {
     const child = createEndpointChild();
@@ -138,6 +185,29 @@ describe("DVD normal endpoint proof", () => {
       firstExcludedLba: 4,
       signal: new AbortController().signal,
     })).rejects.toThrow("DVD endpoint proof is malformed");
+  });
+
+  it("classifies readable data at the requested endpoint", async () => {
+    const firstExcludedLba = 4;
+    const child = createRejectedEndpointChild(
+      `DVD endpoint probe rejected first excluded LBA ${firstExcludedLba}: readable_data`,
+    );
+    const prover = createNodeDvdEndpointProver({
+      copyRunner: {
+        withDeviceInactive: async (_devicePath, operation) => operation(),
+      },
+      spawnProcess: () => child,
+      timeoutMs: 1_000,
+    });
+
+    const rejection = prover.prove({
+      authorizeProbe() {},
+      devicePath: "/dev/sr0",
+      firstExcludedLba,
+      signal: new AbortController().signal,
+    });
+    await expect(rejection).rejects.toBeInstanceOf(DvdReadableEndpointError);
+    await expect(rejection).rejects.toMatchObject({ firstExcludedLba });
   });
 
   it("propagates a failed claim, source, or cancellation fence", async () => {
