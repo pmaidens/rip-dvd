@@ -31,18 +31,17 @@ function requiredString(value: unknown, name: string): string {
 function profileSettings(value: unknown): { preset: string; container: "mkv" } {
   const settings = value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown> : null;
-  if (!settings || typeof settings.preset !== "string" ||
-      !isHandBrakePreset(settings.preset) || settings.container !== "mkv") {
+  const preset = typeof settings?.preset === "string" ? settings.preset.trim() : null;
+  if (!preset || !isHandBrakePreset(preset) || settings?.container !== "mkv") {
     throw new InvalidProfileInputError("A supported HandBrake preset and MKV container are required.");
   }
-  return { preset: settings.preset, container: "mkv" };
+  return { preset, container: "mkv" };
 }
 
 export function toEncodingProfileDto(profile: EncodingProfile) {
   const preset = typeof profile.settings.preset === "string"
     ? profile.settings.preset : null;
   const container = profile.settings.container === "mkv" ? "mkv" as const : null;
-  const settingsValid = preset !== null && isHandBrakePreset(preset) && container === "mkv";
   return {
     id: String(profile.id),
     key: profile.key,
@@ -54,10 +53,10 @@ export function toEncodingProfileDto(profile: EncodingProfile) {
     createdAt: profile.createdAt.toISOString(),
     updatedAt: profile.updatedAt.toISOString(),
     eligibility: {
-      newEncodeJobs: profile.isActive && settingsValid,
+      newEncodeJobs: profile.isActive && profile.mediaDomain === "dvd_video",
       blockingReasons: [
         ...(!profile.isActive ? ["inactive"] : []),
-        ...(!settingsValid ? ["unsupported_settings"] : []),
+        ...(profile.mediaDomain !== "dvd_video" ? ["wrong_media_domain"] : []),
       ],
       canCreateVersion: true,
       canActivate: !profile.isActive,

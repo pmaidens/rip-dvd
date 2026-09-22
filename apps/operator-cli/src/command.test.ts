@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import { afterEach, expect, it, vi } from "vitest";
 import type { CatalogMetadataLookup } from "@rip-dvd/application";
@@ -10,6 +11,7 @@ import {
 } from "@rip-dvd/data-access/test-support";
 
 import { createApplicationOperations } from "@rip-dvd/application";
+import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 
 import { runCommand } from "./command.js";
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "./operator-workflow.test-support.js";
@@ -603,6 +605,57 @@ function addScannedDisc(current: ReturnType<typeof createOperatorWorkflowFixture
   return disc.id;
 }
 
+function seedEncodeJobForProfile(
+  current: ReturnType<typeof createOperatorWorkflowFixture>,
+  profileId: string,
+) {
+  const access = createLegacySidecarDataAccess({
+    databasePath: current.databasePath,
+    mediaLibraryPath: current.mediaLibraryPath,
+    originalsLibraryPath: current.originalsLibraryPath,
+  });
+  try {
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/synthetic-profile-disc", isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "synthetic-profile-history-disc",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: join(current.originalsLibraryPath, "synthetic-history.iso"),
+      fingerprint: "synthetic-profile-history-disc",
+    });
+    const item = access.catalog.createMediaItem({ kind: "movie", title: "Synthetic history" });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    access.catalog.completeCatalogReview(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt,
+      "reviewed_with_selections",
+    );
+    const profile = access.encodingProfiles.list({ mediaDomain: "dvd_video" })
+      .find((candidate) => candidate.id === profileId);
+    if (!profile) throw new Error("Expected synthetic Encoding Profile");
+    return access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath: join(current.mediaLibraryPath, "synthetic-history.mkv"),
+    }).id;
+  } finally {
+    access.close();
+  }
+}
+
 it("generates a key without submitting work and rejects a missing key before opening SQLite", async () => {
   const current = fixture();
   const generated = await current.run(["generate-key"]);
@@ -716,6 +769,7 @@ it("manages Encoding Profile versions with durable replay and revision-bound sta
   const created = await current.run(createArgs);
   expect(created.exitCode).toBe(0);
   const first = (created.result as { profile: { id: string } }).profile;
+  const historicalJobId = seedEncodeJobForProfile(current, first.id);
   expect((await current.run(["list-encoding-profiles"])).result).toMatchObject({
     schemaVersion: 1,
     profiles: [expect.objectContaining({
@@ -779,6 +833,12 @@ it("manages Encoding Profile versions with durable replay and revision-bound sta
       expect.objectContaining({ id: second.id, isActive: false }),
     ],
   });
+  const history = current.openAccess();
+  expect(history.encodeJobs.list().find((job) => job.id === historicalJobId)?.encodingProfileId)
+    .toBe(first.id);
+  expect(history.encodingProfiles.list({ mediaDomain: "dvd_video" })[0]?.settings)
+    .toEqual({ preset: "Fast 480p30", container: "mkv" });
+  history.close();
 });
 
 it("validates Encoding Profile inputs before mutation and keeps media domains separate", async () => {

@@ -1169,6 +1169,29 @@ export interface CatalogAccess {
   }): DiscSelectionActionAvailability[];
 }
 
+export type EncodingProfileMutation = {
+  mutationKey: string;
+  mediaDomain: MediaDomain;
+} & (
+  | {
+      operation: "create";
+      key: string;
+      displayName: string;
+      settings: Record<string, unknown>;
+    }
+  | {
+      operation: "createVersion";
+      sourceProfileId: EncodingProfileId;
+      settings: Record<string, unknown>;
+    }
+  | {
+      operation: "setActive";
+      id: EncodingProfileId;
+      isActive: boolean;
+      expectedRevision: string;
+    }
+);
+
 export interface EncodingProfileAccess {
   previewStateChange(input: {
     id: EncodingProfileId;
@@ -1179,18 +1202,7 @@ export interface EncodingProfileAccess {
     activeVersion: EncodingProfile | null;
     revision: string;
   };
-  submit(input: {
-    mutationKey: string;
-    operation: "create" | "createVersion" | "setActive";
-    key?: string;
-    displayName?: string;
-    sourceProfileId?: EncodingProfileId;
-    id?: EncodingProfileId;
-    mediaDomain: MediaDomain;
-    settings?: Record<string, unknown>;
-    isActive?: boolean;
-    expectedRevision?: string;
-  }): EncodingProfile;
+  submit(input: EncodingProfileMutation): EncodingProfile;
   create(input: {
     key: string;
     displayName: string;

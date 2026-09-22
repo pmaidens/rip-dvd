@@ -6855,26 +6855,16 @@ export function createDataAccessInternal(
           }
           let profile: EncodingProfile;
           if (input.operation === "create") {
-            if (input.key === undefined || input.displayName === undefined || input.settings === undefined) {
-              throw new DomainInvariantError("Invalid Encoding Profile creation input");
-            }
             profile = createProfile(transaction, {
               key: input.key, displayName: input.displayName,
               mediaDomain: input.mediaDomain, settings: input.settings,
             });
           } else if (input.operation === "createVersion") {
-            if (input.sourceProfileId === undefined || input.settings === undefined) {
-              throw new DomainInvariantError("Invalid Encoding Profile version input");
-            }
             profile = createProfileVersion(transaction, {
               sourceProfileId: input.sourceProfileId,
               mediaDomain: input.mediaDomain, settings: input.settings,
             });
           } else {
-            if (input.id === undefined || input.isActive === undefined ||
-                input.expectedRevision === undefined) {
-              throw new DomainInvariantError("Encoding Profile preview acknowledgement is required");
-            }
             const current = previewProfileState(transaction, {
               id: input.id, mediaDomain: input.mediaDomain, isActive: input.isActive,
             });

@@ -78,6 +78,7 @@ const commandDefinitions = [
   },
   {
     name: "list-encoding-profiles",
+    category: "encoding_profile",
     description: "List DVD video Encoding Profile versions and eligibility.",
     usage: "rip-dvd-operator list-encoding-profiles",
     inputs: { arguments: [], options: [] },
@@ -85,6 +86,7 @@ const commandDefinitions = [
   },
   {
     name: "create-encoding-profile",
+    category: "encoding_profile",
     description: "Create an active DVD video Encoding Profile.",
     usage: "rip-dvd-operator create-encoding-profile --key <key> --profile-key <name> --display-name <name> --preset <HandBrake preset>",
     inputs: { arguments: [], options: ["--key", "--profile-key", "--display-name", "--preset"] },
@@ -92,6 +94,7 @@ const commandDefinitions = [
   },
   {
     name: "version-encoding-profile",
+    category: "encoding_profile",
     description: "Create an inactive version of an Encoding Profile.",
     usage: "rip-dvd-operator version-encoding-profile --key <key> --source-profile-id <id> --preset <HandBrake preset>",
     inputs: { arguments: [], options: ["--key", "--source-profile-id", "--preset"] },
@@ -99,6 +102,7 @@ const commandDefinitions = [
   },
   {
     name: "preview-encoding-profile-state",
+    category: "encoding_profile",
     description: "Preview activation or deactivation and obtain its revision.",
     usage: "rip-dvd-operator preview-encoding-profile-state --id <id> --active <true|false>",
     inputs: { arguments: [], options: ["--id", "--active"] },
@@ -106,6 +110,7 @@ const commandDefinitions = [
   },
   {
     name: "activate-encoding-profile",
+    category: "encoding_profile",
     description: "Activate a version using an acknowledged preview revision.",
     usage: "rip-dvd-operator activate-encoding-profile --key <key> --id <id> --revision <revision> --acknowledge",
     inputs: { arguments: [], options: ["--key", "--id", "--revision", "--acknowledge"] },
@@ -113,6 +118,7 @@ const commandDefinitions = [
   },
   {
     name: "deactivate-encoding-profile",
+    category: "encoding_profile",
     description: "Deactivate a version using an acknowledged preview revision.",
     usage: "rip-dvd-operator deactivate-encoding-profile --key <key> --id <id> --revision <revision> --acknowledge",
     inputs: { arguments: [], options: ["--key", "--id", "--revision", "--acknowledge"] },
@@ -471,11 +477,9 @@ function waitArguments(rest: readonly string[]) {
   return { kind, id, timeoutMs, pollMs };
 }
 
-const profileCommands = [
-  "list-encoding-profiles", "create-encoding-profile", "version-encoding-profile",
-  "preview-encoding-profile-state", "activate-encoding-profile",
-  "deactivate-encoding-profile",
-] as const;
+const profileCommands = commandDefinitions.filter(
+  (definition) => "category" in definition && definition.category === "encoding_profile",
+);
 
 function profileOptions(args: readonly string[], allowed: readonly string[]): Map<string, string> {
   const options = new Map<string, string>();
@@ -510,16 +514,12 @@ function profileKey(options: Map<string, string>): string {
   }
 }
 
-function runProfileCommand(name: typeof profileCommands[number], args: readonly string[], openAccess: CommandIO["openAccess"]) {
-  const allowed: Record<typeof profileCommands[number], readonly string[]> = {
-    "list-encoding-profiles": [],
-    "create-encoding-profile": ["--key", "--profile-key", "--display-name", "--preset"],
-    "version-encoding-profile": ["--key", "--source-profile-id", "--preset"],
-    "preview-encoding-profile-state": ["--id", "--active"],
-    "activate-encoding-profile": ["--key", "--id", "--revision", "--acknowledge"],
-    "deactivate-encoding-profile": ["--key", "--id", "--revision", "--acknowledge"],
-  };
-  const options = profileOptions(args, allowed[name]);
+function runProfileCommand(name: string, args: readonly string[], openAccess: CommandIO["openAccess"]) {
+  const definition = profileCommands.find((item) => item.name === name);
+  if (!definition) {
+    throw new CommandFailure("UNKNOWN_COMMAND", "Unknown command.", 2);
+  }
+  const options = profileOptions(args, definition.inputs.options);
   const mutationKey = name === "create-encoding-profile" || name === "version-encoding-profile" ||
     name === "activate-encoding-profile" || name === "deactivate-encoding-profile"
     ? profileKey(options) : undefined;
@@ -650,12 +650,12 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
       emit(io.stdout, runDiscSelection(rest, io));
       return 0;
     }
-    if (profileCommands.some((command) => command === name)) {
+    if (profileCommands.some((command) => command.name === name)) {
       if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
         emit(io.stdout, help(name));
         return 0;
       }
-      emit(io.stdout, runProfileCommand(name as typeof profileCommands[number], rest, io.openAccess));
+      emit(io.stdout, runProfileCommand(name, rest, io.openAccess));
       return 0;
     }
     if (name !== "health" && name !== "readiness") {

@@ -362,3 +362,34 @@ it("requires keys and acknowledged current previews for profile mutations", asyn
   expect(stale.status).toBe(409);
   expect(access.encodingProfiles.list({ ids: [second.id] })[0]?.isActive).toBe(false);
 });
+
+it("keeps web preset normalization and reports queue eligibility for historical settings", async () => {
+  const access = dataAccessFixture.create();
+  const created = await createEncodingProfilesRoute(mutationRequest({
+    method: "POST",
+    body: JSON.stringify({
+      key: "synthetic-trimmed", displayName: "Synthetic trimmed",
+      settings: { preset: " Fast 480p30 ", container: "mkv" },
+    }),
+  }), () => access, getTrustedOrigin);
+  expect(created.status).toBe(201);
+  expect(await created.json()).toMatchObject({
+    profile: { settings: { preset: "Fast 480p30", container: "mkv" } },
+  });
+  const historical = access.encodingProfiles.create({
+    key: "synthetic-historical", displayName: "Synthetic historical",
+    mediaDomain: "dvd_video", settings: { preset: "Fast 480p30" },
+  });
+  const listed = await createEncodingProfilesRoute(
+    new Request(`${trustedOrigin}/api/encoding-profiles`),
+    () => access, getTrustedOrigin,
+  );
+  expect(listed.status).toBe(200);
+  expect(await listed.json()).toMatchObject({
+    profiles: expect.arrayContaining([expect.objectContaining({
+      id: historical.id,
+      settings: { preset: "Fast 480p30", container: null },
+      eligibility: expect.objectContaining({ newEncodeJobs: true, blockingReasons: [] }),
+    })]),
+  });
+});
