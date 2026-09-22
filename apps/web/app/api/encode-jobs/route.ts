@@ -1,10 +1,8 @@
 import { loadConfig } from "@rip-dvd/config";
 import {
   createApplicationOperations,
-  generateMutationKey,
   InvalidEncodeJobInputError,
   InvalidMutationKeyError,
-  parseMutationKey,
   parseEncodeEnqueueInput,
   readQueueOptions,
   resolveQueueLogicalJobs,
@@ -213,9 +211,6 @@ export async function createEncodeJobsRoute(
       return problem;
     }
     const body = asRecord(await request.json().catch(() => null));
-    const mutationKey = body?.mutationKey === undefined
-      ? generateMutationKey()
-      : parseMutationKey(body.mutationKey);
     if (request.method === "PATCH") {
       const encodeJobId = boundedString(body?.encodeJobId);
       const action = body?.action === undefined ? "requeue" : body.action;
@@ -234,12 +229,15 @@ export async function createEncodeJobsRoute(
         });
       }
       const job = action === "cancel"
-        ? operations.cancelEncodeJob({ encodeJobId, mutationKey })
+        ? operations.cancelEncodeJob({
+          encodeJobId,
+          mutationKey: body.mutationKey,
+        })
         : operations.requeueEncodeJob({
           encodeJobId,
           outputPath: body.outputPath,
           priority: body.priority,
-          mutationKey,
+          mutationKey: body.mutationKey,
           expectedRevision: body.expectedRevision,
           acknowledgeReplacement: body.acknowledgeReplacement,
           mediaLibraryPath: config.mediaLibraryPath,
@@ -252,7 +250,7 @@ export async function createEncodeJobsRoute(
       encodingProfileId: body.encodingProfileId,
       outputPath: body.outputPath,
       priority: body.priority,
-      mutationKey,
+      mutationKey: body.mutationKey,
     });
     const job = createApplicationOperations(getAccess()).enqueueEncodeJob({
       ...input, mediaLibraryPath: config.mediaLibraryPath,

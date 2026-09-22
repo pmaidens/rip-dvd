@@ -440,7 +440,15 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
   expect(queue.result).toMatchObject({
     selections: expect.arrayContaining([expect.objectContaining({
       id: correctedSelection.id,
-      queueAction: { name: "enqueue", eligible: true, reason: null },
+      queueAction: {
+        name: "enqueue",
+        eligible: true,
+        requiredInputs: [
+          "mutationKey", "discSelectionId", "encodingProfileId", "outputPath",
+        ],
+        reason: null,
+        blockingReasons: [],
+      },
     })]),
   });
   const resolved = await current.run([
@@ -472,12 +480,22 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
       id: correctedSelection.id,
       queueAction: {
         name: "enqueue", eligible: false,
+        requiredInputs: [
+          "mutationKey", "discSelectionId", "encodingProfileId", "outputPath",
+        ],
         reason: "Suggested output path is reserved; choose another path.",
+        blockingReasons: [{
+          code: "INVALID_TRANSITION",
+          message: "Suggested output path is reserved; choose another path.",
+        }],
         alternate: {
           name: "enqueue-with-output-path",
           eligible: true,
-          requiredInputs: ["outputPath"],
+          requiredInputs: [
+            "mutationKey", "discSelectionId", "encodingProfileId", "outputPath",
+          ],
           reason: "Choose an unreserved output path inside the media library.",
+          blockingReasons: [],
         },
       },
     })]) });
@@ -519,7 +537,8 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
   const alternateAction = {
     name: "requeue-with-output-path",
     eligible: true,
-    requiredInputs: ["outputPath"],
+    requiredInputs: ["mutationKey", "encodeJobId", "outputPath"],
+    blockingReasons: [],
   };
   expect((await current.run(["encode-queue", "--encoding-profile-id", profile.id])).result)
     .toMatchObject({ selections: expect.arrayContaining([expect.objectContaining({
@@ -565,7 +584,11 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
       availableActions: expect.arrayContaining([expect.objectContaining({
         name: "requeue",
         eligible: true,
-        requiredInputs: ["expectedRevision", "acknowledgeReplacement"],
+        requiredInputs: [
+          "mutationKey", "encodeJobId", "expectedRevision",
+          "acknowledgeReplacement",
+        ],
+        blockingReasons: [],
         preview: {
           name: "preview-requeue",
           requiredInputs: ["encodeJobId"],
@@ -620,7 +643,11 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
         name: "requeue",
         eligible: true,
         reason: null,
-        requiredInputs: ["expectedRevision", "acknowledgeReplacement"],
+        requiredInputs: [
+          "mutationKey", "encodeJobId", "expectedRevision",
+          "acknowledgeReplacement",
+        ],
+        blockingReasons: [],
         preview: {
           name: "preview-requeue",
           requiredInputs: ["encodeJobId"],

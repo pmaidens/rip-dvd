@@ -979,40 +979,42 @@ export function createDataAccessInternal(
   }
 
   function replayEncodeMutation(
+    transaction: MutationTransaction,
     mutationKey: string | undefined,
     operation: string,
     semanticInput: string,
   ): EncodeJob | null {
     if (mutationKey === undefined) return null;
-    const previous = database.select().from(mutationInvocations)
-      .where(eq(mutationInvocations.key, mutationKey)).get();
-    if (!previous) return null;
-    if (previous.operation !== operation || previous.semanticInput !== semanticInput) {
-      throw new MutationKeyConflictError();
-    }
-    const outcome = JSON.parse(previous.outcome) as EncodeJob;
-    for (const field of ["claimedAt", "startedAt", "completedAt", "verifiedAt", "createdAt", "updatedAt"] as const) {
-      if (outcome[field] !== null) outcome[field] = new Date(outcome[field]);
-    }
-    return outcome;
+    return readMutationInvocation(
+      transaction,
+      mutationKey,
+      operation,
+      semanticInput,
+      (stored) => {
+        const outcome = JSON.parse(stored) as EncodeJob;
+        for (const field of [
+          "claimedAt", "startedAt", "completedAt", "verifiedAt", "createdAt",
+          "updatedAt",
+        ] as const) {
+          if (outcome[field] !== null) outcome[field] = new Date(outcome[field]);
+        }
+        return outcome;
+      },
+    ) ?? null;
   }
 
   function saveEncodeMutation(
+    transaction: MutationTransaction,
     mutationKey: string | undefined,
     operation: string,
     semanticInput: string,
     outcome: EncodeJob,
   ): EncodeJob {
-    if (mutationKey !== undefined) {
-      database.insert(mutationInvocations).values({
-        key: mutationKey,
-        operation,
-        semanticInput,
-        outcome: JSON.stringify(outcome),
-        createdAt: now(),
-      }).run();
-    }
-    return outcome;
+    return mutationKey === undefined
+      ? outcome
+      : recordMutationInvocation(
+        transaction, mutationKey, operation, semanticInput, outcome, now(),
+      );
   }
 
   function encodeRequeueSemanticInput(
@@ -3717,6 +3719,7 @@ export function createDataAccessInternal(
       return database.transaction((transaction) => {
         const semanticInput = encodeRequeueSemanticInput(id, options);
         const replay = replayEncodeMutation(
+          transaction,
           options?.mutationKey, "encode_job.requeue", semanticInput,
         );
         if (replay) return replay;
@@ -3820,6 +3823,7 @@ export function createDataAccessInternal(
         if (requeued) {
           clearCorrectedEncodePublicationAuthority(transaction, requeued.id);
           return saveEncodeMutation(
+            transaction,
             options?.mutationKey, "encode_job.requeue", semanticInput, requeued,
           );
         }
@@ -10126,8 +10130,14 @@ export function createDataAccessInternal(
           outputPath,
           priority: input.priority ?? 0,
         });
-        const previous = replayEncodeMutation(
-          input.mutationKey, "encode_job.enqueue", semanticInput,
+        const previous = database.transaction(
+          (transaction) => replayEncodeMutation(
+            transaction,
+            input.mutationKey,
+            "encode_job.enqueue",
+            semanticInput,
+          ),
+          { behavior: "immediate" },
         );
         if (previous) return previous;
         const selectReviewState = (
@@ -10188,6 +10198,7 @@ export function createDataAccessInternal(
         return database.transaction(
           (transaction) => {
             const replay = replayEncodeMutation(
+              transaction,
               input.mutationKey, "encode_job.enqueue", semanticInput,
             );
             if (replay) return replay;
@@ -10217,7 +10228,13 @@ export function createDataAccessInternal(
               )
               .get();
             if (existing) {
-              return saveEncodeMutation(input.mutationKey, "encode_job.enqueue", semanticInput, existing);
+              return saveEncodeMutation(
+                transaction,
+                input.mutationKey,
+                "encode_job.enqueue",
+                semanticInput,
+                existing,
+              );
             }
             const outputOwner = transaction
               .select({ id: encodeJobs.id })
@@ -10274,21 +10291,27 @@ export function createDataAccessInternal(
               .onConflictDoNothing()
               .run();
 
-            return saveEncodeMutation(input.mutationKey, "encode_job.enqueue", semanticInput, requireRow(
-              transaction
-                .select()
-                .from(encodeJobs)
-                .where(
-                  and(
-                    eq(encodeJobs.discSelectionId, input.discSelectionId),
-                    eq(encodeJobs.encodingProfileId, input.encodingProfileId),
-                    isNull(encodeJobs.predecessorEncodeJobId),
-                  ),
-                )
-                .get(),
-              "encode job",
-              `${input.discSelectionId}/${input.encodingProfileId}`,
-            ));
+            return saveEncodeMutation(
+              transaction,
+              input.mutationKey,
+              "encode_job.enqueue",
+              semanticInput,
+              requireRow(
+                transaction
+                  .select()
+                  .from(encodeJobs)
+                  .where(
+                    and(
+                      eq(encodeJobs.discSelectionId, input.discSelectionId),
+                      eq(encodeJobs.encodingProfileId, input.encodingProfileId),
+                      isNull(encodeJobs.predecessorEncodeJobId),
+                    ),
+                  )
+                  .get(),
+                "encode job",
+                `${input.discSelectionId}/${input.encodingProfileId}`,
+              ),
+            );
           },
           { behavior: "immediate" },
         );
@@ -10300,10 +10323,12 @@ export function createDataAccessInternal(
         return database.transaction(
           (transaction) => {
             const replay = replayEncodeMutation(
+              transaction,
               mutationKey, "encode_job.cancel", semanticInput,
             );
             if (replay) return replay;
             return saveEncodeMutation(
+              transaction,
               mutationKey, "encode_job.cancel", semanticInput,
               requestEncodeJobCancellation(transaction, id, timestamp),
             );
@@ -12020,8 +12045,14 @@ export function createDataAccessInternal(
           expectedRevision: options?.expectedRevision,
           acknowledgeReplacement: options?.acknowledgeReplacement,
         });
-        const replay = replayEncodeMutation(
-          options?.mutationKey, "encode_job.requeue", semanticInput,
+        const replay = database.transaction(
+          (transaction) => replayEncodeMutation(
+            transaction,
+            options?.mutationKey,
+            "encode_job.requeue",
+            semanticInput,
+          ),
+          { behavior: "immediate" },
         );
         if (replay) return replay;
         if (options?.mutationKey !== undefined && outputPath !== undefined) {
@@ -12043,8 +12074,14 @@ export function createDataAccessInternal(
             acknowledgeReplacement: options?.acknowledgeReplacement,
           });
         } catch (error) {
-          const racedReplay = replayEncodeMutation(
-            options?.mutationKey, "encode_job.requeue", semanticInput,
+          const racedReplay = database.transaction(
+            (transaction) => replayEncodeMutation(
+              transaction,
+              options?.mutationKey,
+              "encode_job.requeue",
+              semanticInput,
+            ),
+            { behavior: "immediate" },
           );
           if (racedReplay) return racedReplay;
           throw error;

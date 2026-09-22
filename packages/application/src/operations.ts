@@ -174,65 +174,90 @@ export function encodeRequeueAvailability(
   job: EncodeJob,
   selectionEligible: boolean,
 ) {
+  const replacesOutput = job.status === "completed" || job.replaceExistingOutput;
+  const requiredInputs = replacesOutput
+    ? [
+      "mutationKey", "encodeJobId", "expectedRevision",
+      "acknowledgeReplacement",
+    ]
+    : ["mutationKey", "encodeJobId"];
+  const blocked = (reason: string) => ({
+    eligible: false,
+    requiredInputs,
+    reason,
+    blockingReasons: [{ code: "INVALID_TRANSITION", message: reason }],
+  });
   if (!["completed", "failed", "cancelled"].includes(job.status)) {
-    return { eligible: false, reason: `Encode Job is ${job.status}.` };
+    return blocked(`Encode Job is ${job.status}.`);
   }
   if (!selectionEligible) {
-    return {
-      eligible: false,
-      reason: "Requires an active Disc Selection with completed Catalog Review.",
-    };
+    return blocked(
+      "Requires an active Disc Selection with completed Catalog Review.",
+    );
   }
   if (job.partialCleanupOutputPath !== null ||
     job.partialCleanupClaimToken !== null || job.partialCleanupLeaseToken !== null) {
-    return { eligible: false, reason: "Encode Job has pending output cleanup." };
+    return blocked("Encode Job has pending output cleanup.");
   }
   if (job.publicationPending) {
-    return { eligible: false, reason: "Encode Job has pending output publication." };
+    return blocked("Encode Job has pending output publication.");
   }
   if (access.encodeJobs.hasReservedOutputPathConflict(job)) {
+    const reason = "Encode Job output is reserved by another job.";
     return {
       eligible: false,
-      reason: "Encode Job output is reserved by another job.",
+      requiredInputs,
+      reason,
+      blockingReasons: [{ code: "INVALID_TRANSITION", message: reason }],
       alternate: (job.status === "failed" || job.status === "cancelled") &&
         !job.replaceExistingOutput
         ? {
           name: "requeue-with-output-path",
           eligible: true,
-          requiredInputs: ["outputPath"],
+          requiredInputs: ["mutationKey", "encodeJobId", "outputPath"],
           reason: "Choose an unreserved output path inside the media library.",
+          blockingReasons: [],
         }
         : null,
     };
   }
-  const replacesOutput = job.status === "completed" || job.replaceExistingOutput;
   return replacesOutput
     ? {
       eligible: true,
       reason: null,
-      requiredInputs: ["expectedRevision", "acknowledgeReplacement"],
+      requiredInputs,
+      blockingReasons: [],
       preview: {
         name: "preview-requeue",
         requiredInputs: ["encodeJobId"],
         provides: ["expectedRevision"],
       },
     }
-    : { eligible: true, reason: null };
+    : { eligible: true, requiredInputs, reason: null, blockingReasons: [] };
 }
 
 function encodeActions(job: EncodeJob, requeue: ReturnType<typeof encodeRequeueAvailability>) {
+  const cancellationEligible = ["queued", "running"].includes(job.status);
+  const cancellationReason = cancellationEligible ? null :
+    `Encode Job is ${job.status}.`;
   return [{
     name: "request-cancellation",
-    eligible: ["queued", "running"].includes(job.status),
-    reason: ["queued", "running"].includes(job.status) ? null :
-      `Encode Job is ${job.status}.`,
+    eligible: cancellationEligible,
+    requiredInputs: ["mutationKey", "encodeJobId"],
+    reason: cancellationReason,
+    blockingReasons: cancellationReason === null ? [] : [{
+      code: "INVALID_TRANSITION",
+      message: cancellationReason,
+    }],
   }, {
     name: "requeue",
     ...requeue,
   }, {
     name: "verify-output",
     eligible: true,
+    requiredInputs: ["encodeJobId"],
     reason: null,
+    blockingReasons: [],
   }];
 }
 

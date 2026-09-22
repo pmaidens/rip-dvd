@@ -15,6 +15,7 @@ import {
 
 import { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
 import { mediaOutputPath, suggestedMediaOutputPath } from "./media-output-path.js";
+import { parseMutationKey } from "./mutation-key.js";
 import { encodeRequeueAvailability } from "./operations.js";
 
 const ENCODE_SELECTION_PAGE_SIZE = 100;
@@ -62,7 +63,7 @@ export function enqueueEncodeJob(
     encodingProfileId: unknown;
     outputPath: unknown;
     priority?: unknown;
-    mutationKey?: string;
+    mutationKey: unknown;
   },
 ): EncodeJob {
   return access.encodeJobs.enqueue(parseEncodeEnqueueInput(mediaLibraryPath, input));
@@ -75,7 +76,7 @@ export function parseEncodeEnqueueInput(
     encodingProfileId: unknown;
     outputPath: unknown;
     priority?: unknown;
-    mutationKey?: string;
+    mutationKey: unknown;
   },
 ) {
   const discSelectionId = requiredId(input.discSelectionId) as DiscSelectionId;
@@ -88,7 +89,7 @@ export function parseEncodeEnqueueInput(
   return {
     discSelectionId, encodingProfileId, outputPath,
     priority: priority as number,
-    mutationKey: input.mutationKey,
+    mutationKey: parseMutationKey(input.mutationKey),
   };
 }
 
@@ -99,7 +100,7 @@ export function requeueEncodeJob(
     encodeJobId: unknown;
     outputPath?: unknown;
     priority?: unknown;
-    mutationKey?: string;
+    mutationKey: unknown;
     expectedRevision?: unknown;
     acknowledgeReplacement?: unknown;
   },
@@ -117,7 +118,7 @@ export function requeueEncodeJob(
   return access.encodeJobs.requeue(encodeJobId, {
     outputPath,
     priority: input.priority as number | undefined,
-    mutationKey: input.mutationKey,
+    mutationKey: parseMutationKey(input.mutationKey),
     expectedRevision,
     acknowledgeReplacement: input.acknowledgeReplacement === true,
   });
@@ -145,11 +146,11 @@ export function previewEncodeRequeue(
 
 export function cancelEncodeJob(
   access: DataAccess,
-  input: { encodeJobId: unknown; mutationKey?: string },
+  input: { encodeJobId: unknown; mutationKey: unknown },
 ): EncodeJob {
   return access.encodeJobs.requestCancellation(
     requiredId(input.encodeJobId) as EncodeJobId,
-    input.mutationKey,
+    parseMutationKey(input.mutationKey),
   );
 }
 
@@ -265,29 +266,65 @@ export function readQueueOptions(
           snapshot.encodeJobs.find(logicalJob.id);
         const suggestedPathReserved = suggestedOutputPath !== null &&
           snapshot.encodeJobs.hasReservedOutputPath(suggestedOutputPath);
+        const enqueueRequiredInputs = [
+          "mutationKey", "discSelectionId", "encodingProfileId", "outputPath",
+        ];
+        const unavailableAction = (
+          name: "enqueue" | "requeue",
+          requiredInputs: string[],
+          reason: string,
+        ) => ({
+          name,
+          eligible: false,
+          requiredInputs,
+          reason,
+          blockingReasons: [{ code: "INVALID_TRANSITION", message: reason }],
+        });
         const queueAction = encodingProfileId === undefined
-          ? { name: "enqueue", eligible: false, reason: "Select an Encoding Profile." }
+          ? unavailableAction(
+            "enqueue", enqueueRequiredInputs, "Select an Encoding Profile.",
+          )
           : logicalJob !== null
             ? { name: "requeue", ...(
               requeue === null
-                ? { eligible: false, reason: "Encode Job is unavailable." }
+                ? unavailableAction(
+                  "requeue",
+                  ["mutationKey", "encodeJobId"],
+                  "Encode Job is unavailable.",
+                )
                 : encodeRequeueAvailability(snapshot, requeue, true)
             ) }
             : suggestedOutputPath === null
-              ? { name: "enqueue", eligible: false, reason: "A valid output path is unavailable." }
+              ? unavailableAction(
+                "enqueue",
+                enqueueRequiredInputs,
+                "A valid output path is unavailable.",
+              )
               : suggestedPathReserved
                 ? {
                   name: "enqueue",
                   eligible: false,
+                  requiredInputs: enqueueRequiredInputs,
                   reason: "Suggested output path is reserved; choose another path.",
+                  blockingReasons: [{
+                    code: "INVALID_TRANSITION",
+                    message: "Suggested output path is reserved; choose another path.",
+                  }],
                   alternate: {
                     name: "enqueue-with-output-path",
                     eligible: true,
-                    requiredInputs: ["outputPath"],
+                    requiredInputs: enqueueRequiredInputs,
                     reason: "Choose an unreserved output path inside the media library.",
+                    blockingReasons: [],
                   },
                 }
-              : { name: "enqueue", eligible: true, reason: null };
+              : {
+                name: "enqueue",
+                eligible: true,
+                requiredInputs: enqueueRequiredInputs,
+                reason: null,
+                blockingReasons: [],
+              };
         return {
           id: selection.id,
           mediaItemId: selection.mediaItemId,
