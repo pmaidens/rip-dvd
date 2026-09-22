@@ -37,6 +37,40 @@ interface CommandIO {
   stderr(text: string): void;
 }
 
+type RecoveryOperations = ReturnType<typeof createApplicationOperations>;
+type RecoveryCommandSpec = {
+  description: string;
+  targetFlag: "--archive-request-id" | "--disc-inspection-id";
+  run(operations: RecoveryOperations, mutationKey: string, id: string): unknown;
+};
+
+const recoveryCommands = {
+  "cancel-archive-request": {
+    description: "Cancel an Archive Request.",
+    targetFlag: "--archive-request-id",
+    run: (operations, mutationKey, id) =>
+      operations.cancelArchiveRequest({ mutationKey, archiveRequestId: id }),
+  },
+  "retry-archive-request": {
+    description: "Retry an Archive Request needing attention.",
+    targetFlag: "--archive-request-id",
+    run: (operations, mutationKey, id) =>
+      operations.retryArchiveRequest({ mutationKey, archiveRequestId: id }),
+  },
+  "retry-disc-inspection": {
+    description: "Request a Disc Inspection retry.",
+    targetFlag: "--disc-inspection-id",
+    run: (operations, mutationKey, id) =>
+      operations.retryDiscInspection({ mutationKey, discInspectionId: id }),
+  },
+} satisfies Record<string, RecoveryCommandSpec>;
+
+type RecoveryCommand = keyof typeof recoveryCommands;
+
+function isRecoveryCommand(name: string): name is RecoveryCommand {
+  return Object.hasOwn(recoveryCommands, name);
+}
+
 const commandDefinitions = [
   {
     name: "generate-key",
@@ -52,14 +86,13 @@ const commandDefinitions = [
     inputs: { arguments: [], options: ["--key", "--detected-disc-id"] },
     example: "rip-dvd-operator submit-archive-request --key 00000000-0000-4000-8000-000000000001 --detected-disc-id <id>",
   },
-  ...(["cancel-archive-request", "retry-archive-request", "retry-disc-inspection"] as const)
-    .map((name) => ({
+  ...Object.entries(recoveryCommands)
+    .map(([name, command]) => ({
       name,
-      description: `${name.replaceAll("-", " ")} through the supported workflow.`,
-      usage: `rip-dvd-operator ${name} --key <key> --${name === "retry-disc-inspection" ? "disc-inspection-id" : "archive-request-id"} <id>`,
-      inputs: { arguments: [], options: ["--key", name === "retry-disc-inspection"
-        ? "--disc-inspection-id" : "--archive-request-id"] },
-      example: `rip-dvd-operator ${name} --key 00000000-0000-4000-8000-000000000001 --${name === "retry-disc-inspection" ? "disc-inspection-id" : "archive-request-id"} <id>`,
+      description: command.description,
+      usage: `rip-dvd-operator ${name} --key <key> ${command.targetFlag} <id>`,
+      inputs: { arguments: [], options: ["--key", command.targetFlag] },
+      example: `rip-dvd-operator ${name} --key 00000000-0000-4000-8000-000000000001 ${command.targetFlag} <id>`,
     })),
   {
     name: "catalog-review",
@@ -194,10 +227,8 @@ export class CommandFailure extends Error {
   }
 }
 
-type RecoveryCommand = "cancel-archive-request" | "retry-archive-request" | "retry-disc-inspection";
-
 function recoveryInputs(name: RecoveryCommand, args: readonly string[]) {
-  const idFlag = name === "retry-disc-inspection" ? "--disc-inspection-id" : "--archive-request-id";
+  const idFlag = recoveryCommands[name].targetFlag;
   const options = new Map<string, string>();
   for (let index = 0; index < args.length; index += 2) {
     const option = args[index];
@@ -228,14 +259,7 @@ function runRecoveryCommand(name: RecoveryCommand, input: ReturnType<typeof reco
   try {
     return withAccess(io.openAccess, (access) => {
       const operations = createApplicationOperations(access);
-      switch (name) {
-        case "cancel-archive-request":
-          return operations.cancelArchiveRequest({ mutationKey: input.mutationKey, archiveRequestId: input.id });
-        case "retry-archive-request":
-          return operations.retryArchiveRequest({ mutationKey: input.mutationKey, archiveRequestId: input.id });
-        case "retry-disc-inspection":
-          return operations.retryDiscInspection({ mutationKey: input.mutationKey, discInspectionId: input.id });
-      }
+      return recoveryCommands[name].run(operations, input.mutationKey, input.id);
     });
   } catch (error) {
     if (error instanceof MutationKeyConflictError) {
@@ -684,8 +708,7 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
       emit(io.stdout, submitArchiveRequest(submissionInputs(rest), io.openAccess));
       return 0;
     }
-    if (name === "cancel-archive-request" || name === "retry-archive-request" ||
-      name === "retry-disc-inspection") {
+    if (isRecoveryCommand(name)) {
       if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
         emit(io.stdout, help(name));
         return 0;
