@@ -1431,7 +1431,10 @@ describe("Encode Jobs API", () => {
       mediaLibraryPath: "/media/movies",
       webTrustedOrigin: "http://localhost:3000",
     });
-    const retry = () =>
+    const retry = (replacement?: {
+      expectedRevision: string;
+      acknowledgeReplacement: true;
+    }) =>
       createEncodeJobsRoute(
         new Request("http://localhost:3000/api/encode-jobs", {
           method: "PATCH",
@@ -1440,7 +1443,7 @@ describe("Encode Jobs API", () => {
             Host: "localhost:3000",
             Origin: "http://localhost:3000",
           },
-          body: JSON.stringify({ encodeJobId: original.id }),
+          body: JSON.stringify({ encodeJobId: original.id, ...replacement }),
         }),
         () => access,
         config,
@@ -1504,11 +1507,63 @@ describe("Encode Jobs API", () => {
     });
     expect(access.encodeJobs.claimNext("late-completed-post-retry")).toBeNull();
 
-    expect((await (await retry()).json()).job).toMatchObject({
+    expect((await retry()).status).toBe(400);
+    const previewResponse = await createEncodeJobsRoute(
+      new Request("http://localhost:3000/api/encode-jobs", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          action: "preview_requeue",
+          encodeJobId: original.id,
+        }),
+      }),
+      () => access,
+      config,
+    );
+    expect(previewResponse.status).toBe(200);
+    const { preview } = await previewResponse.json() as {
+      preview: { revision: string; acknowledgementRequired: boolean };
+    };
+    expect(preview).toMatchObject({ acknowledgementRequired: true });
+    access.encodeJobs.requeue(original.id);
+    const refreshedClaim = access.encodeJobs.claimNext("refresh-completed-api-job");
+    if (!refreshedClaim) throw new Error("Expected refreshed Encode Job claim");
+    access.encodeJobs.complete(refreshedClaim);
+    expect((await retry({
+      expectedRevision: preview.revision,
+      acknowledgeReplacement: true,
+    })).status).toBe(409);
+    const refreshedPreviewResponse = await createEncodeJobsRoute(
+      new Request("http://localhost:3000/api/encode-jobs", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          action: "preview_requeue",
+          encodeJobId: original.id,
+        }),
+      }),
+      () => access,
+      config,
+    );
+    const refreshedPreview = (await refreshedPreviewResponse.json()) as {
+      preview: { revision: string };
+    };
+    expect((await (await retry({
+      expectedRevision: refreshedPreview.preview.revision,
+      acknowledgeReplacement: true,
+    })).json()).job).toMatchObject({
       id: original.id,
       status: "queued",
       progressPercent: 0,
-      completedAt: completedBody.job.completedAt,
+      completedAt: expect.any(String),
     });
     expect(access.encodeJobs.list()).toHaveLength(1);
   });

@@ -204,6 +204,7 @@ eligibility, and the number of affected archives, including those referencing de
 hierarchy, TMDB uniqueness, and reference rules remain enforced during the
 mutation. Validation and eligibility failures return JSON errors with stable
 codes and exit status 2.
+
 # Encode Job commands
 
 Use `encode-queue` to read eligible Disc Selections, active DVD video Encoding
@@ -229,6 +230,8 @@ rip-dvd-operator encode-resolve --encoding-profile-id <profile-id> --disc-select
 rip-dvd-operator encode-enqueue --key <key> --disc-selection-id <selection-id> --encoding-profile-id <profile-id> --output-path /media/movies/example.mkv
 rip-dvd-operator encode-cancel --key <key> --encode-job-id <job-id>
 rip-dvd-operator encode-requeue --key <new-key> --encode-job-id <job-id>
+rip-dvd-operator encode-requeue-preview --encode-job-id <completed-job-id>
+rip-dvd-operator encode-requeue --key <new-key> --encode-job-id <completed-job-id> --revision <preview-revision> --acknowledge
 ```
 
 An initial `encode-enqueue` is deduplicated by Disc Selection and Encoding
@@ -237,7 +240,10 @@ If another job reserves its output path, supply `--output-path` with a safe
 path inside the configured media library when requeueing a failed or cancelled
 job. Queue and detail results expose this as an alternate action requiring
 `outputPath`. A completed job keeps its output path; a different `--output-path` is
-rejected so the worker can apply its existing replacement checks. Running
+rejected so the worker can apply its existing replacement checks. Requeueing a
+completed job or a failed replacement first requires `encode-requeue-preview`.
+Pass its `revision` with `--acknowledge`; a later job change returns
+`STALE_ENCODE_PREVIEW`. Running
 cancellation remains cooperative; the worker
 settles it after observing the request. Malformed inputs return exit 2 with a
 JSON error. Database or configuration failures return exit 1.

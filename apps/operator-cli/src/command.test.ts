@@ -4,7 +4,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it, vi } from "vitest";
 import type { CatalogMetadataLookup } from "@rip-dvd/application";
-import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
+import {
+  createCleanReadArchiveIntegrityEvidence,
+  type EncodeJobId,
+} from "@rip-dvd/data-access";
 import {
   beginSettledDiscInspectionForTest,
   createNormalDvdArchiveBoundaryEvidenceForTest,
@@ -428,7 +431,7 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
     key: "synthetic-second-encode",
     displayName: "Second synthetic encode",
     mediaDomain: "dvd_video",
-    settings: {},
+    settings: { preset: "Fast 480p30", container: "mkv" },
   });
   setup.close();
 
@@ -550,10 +553,42 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
   finish.close();
   expect((await current.run(["wait", "encode-jobs", jobId, "--timeout-ms", "0"])).result)
     .toMatchObject({ outcome: "settled", current: { id: jobId, status: "completed" } });
+  const stalePreview = await current.run([
+    "encode-requeue-preview", "--encode-job-id", jobId,
+  ]);
+  expect(stalePreview.result).toMatchObject({
+    encodeJobId: jobId,
+    status: "completed",
+    revision: expect.any(String),
+    replacesOutput: true,
+    acknowledgementRequired: true,
+  });
+  expect((await current.run([
+    "encode-requeue", "--key", "synthetic-completed-missing-ack",
+    "--encode-job-id", jobId,
+  ])).result).toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
+  const refresh = current.openAccess();
+  refresh.encodeJobs.requeue(jobId as EncodeJobId);
+  const refreshedClaim = refresh.encodeJobs.claimNext("synthetic-preview-refresh-worker");
+  expect(refreshedClaim?.id).toBe(jobId);
+  refresh.encodeJobs.complete(refreshedClaim!);
+  refresh.close();
+  expect((await current.run([
+    "encode-requeue", "--key", "synthetic-completed-stale-key",
+    "--encode-job-id", jobId,
+    "--revision", (stalePreview.result as { revision: string }).revision,
+    "--acknowledge",
+  ])).result).toMatchObject({ error: { code: "STALE_ENCODE_PREVIEW" } });
+  const currentPreview = await current.run([
+    "encode-requeue-preview", "--encode-job-id", jobId,
+  ]);
+  const currentRevision = (currentPreview.result as { revision: string }).revision;
   expect((await current.run([
     "encode-requeue", "--key", "synthetic-completed-path-key",
     "--encode-job-id", jobId,
     "--output-path", `${current.mediaLibraryPath}/unsupported-change.mkv`,
+    "--revision", currentRevision,
+    "--acknowledge",
   ])).result).toMatchObject({ error: { code: "ENCODE_JOB_REJECTED" } });
   expect((await current.run(["inspect", "encode-jobs", jobId])).result)
     .toMatchObject({ item: { status: "completed" } });
@@ -582,6 +617,15 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
   expect((await current.run(cancelArgs)).result).toEqual(request.result);
   expect((await current.run(["wait", "encode-jobs", competingId, "--timeout-ms", "0"])).result)
     .toMatchObject({ outcome: "settled", current: { status: "cancelled" } });
+  const replacementArgs = [
+    "encode-requeue", "--key", "synthetic-completed-requeue-key",
+    "--encode-job-id", jobId, "--revision", currentRevision, "--acknowledge",
+  ];
+  const replacement = await current.run(replacementArgs);
+  expect(replacement.result).toMatchObject({
+    job: { id: jobId, status: "queued", outputPath: replacementPath },
+  });
+  expect((await current.run(replacementArgs)).result).toEqual(replacement.result);
 });
 
 it("returns one durable Encode Job to concurrent processes using the same key", async () => {
@@ -659,6 +703,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       "encode-queue",
       "encode-resolve",
       "encode-enqueue",
+      "encode-requeue-preview",
       "encode-requeue",
       "encode-cancel",
       "catalog-review",

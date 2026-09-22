@@ -29,6 +29,7 @@ import type { CatalogMetadataLookup, CatalogMetadataSelection } from "./catalog-
 import {
   cancelEncodeJob,
   enqueueEncodeJob,
+  previewEncodeRequeue,
   readQueueOptions,
   requeueEncodeJob,
   resolveQueueLogicalJobs,
@@ -224,6 +225,8 @@ export function createApplicationOperations(
       enqueueEncodeJob(access, input.mediaLibraryPath, input),
     requeueEncodeJob: (input: Parameters<typeof requeueEncodeJob>[2] & { mediaLibraryPath: string }) =>
       requeueEncodeJob(access, input.mediaLibraryPath, input),
+    previewEncodeRequeue: (input: Parameters<typeof previewEncodeRequeue>[1]) =>
+      previewEncodeRequeue(access, input),
     cancelEncodeJob: (input: Parameters<typeof cancelEncodeJob>[1]) =>
       cancelEncodeJob(access, input),
     submitArchiveRequest: (input: {
@@ -342,6 +345,7 @@ export {
   cancelEncodeJob,
   enqueueEncodeJob,
   parseEncodeEnqueueInput,
+  previewEncodeRequeue,
   readQueueOptions,
   requeueEncodeJob,
   resolveQueueLogicalJobs,

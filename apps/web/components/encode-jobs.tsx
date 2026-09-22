@@ -973,13 +973,42 @@ async function requestEncodeJobRequeue(
   encodeJobId: EncodeJobId,
   fetcher: EncodeJobsFetch = fetch,
 ): Promise<Response> {
+  const previewResponse = await fetcher("/api/encode-jobs", {
+    method: "PATCH",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ action: "preview_requeue", encodeJobId }),
+  });
+  if (!previewResponse.ok) {
+    throw new Error(await errorMessage(previewResponse, "Encode Job retry preview failed"));
+  }
+  const { preview } = await previewResponse.json() as {
+    preview: {
+      revision: string;
+      acknowledgementRequired: boolean;
+      outputPath: string | null;
+    };
+  };
+  if (preview.acknowledgementRequired && !window.confirm(
+    `Re-encode and replace the existing output at ${preview.outputPath}?`,
+  )) {
+    throw new Error("Encode Job replacement was not acknowledged");
+  }
   const response = await fetcher("/api/encode-jobs", {
     method: "PATCH",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ action: "requeue", encodeJobId, mutationKey: crypto.randomUUID() }),
+    body: JSON.stringify({
+      action: "requeue",
+      encodeJobId,
+      mutationKey: crypto.randomUUID(),
+      expectedRevision: preview.revision,
+      acknowledgeReplacement: preview.acknowledgementRequired,
+    }),
   });
   if (!response.ok) {
     throw new Error(await errorMessage(response, "Encode Job retry failed"));

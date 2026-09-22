@@ -1020,7 +1020,11 @@ export function createDataAccessInternal(
     options?: EncodeJobRequeueOptions,
   ): string {
     return JSON.stringify({
-      id, outputPath: options?.outputPath ?? null, priority: options?.priority ?? null,
+      id,
+      outputPath: options?.outputPath ?? null,
+      priority: options?.priority ?? null,
+      expectedRevision: options?.expectedRevision ?? null,
+      acknowledgeReplacement: options?.acknowledgeReplacement ?? false,
     });
   }
 
@@ -3716,6 +3720,29 @@ export function createDataAccessInternal(
           options?.mutationKey, "encode_job.requeue", semanticInput,
         );
         if (replay) return replay;
+        if (
+          options?.mutationKey !== undefined &&
+          (expectedStatus === "completed" || current.replaceExistingOutput)
+        ) {
+          const latest = transaction.select({
+            status: encodeJobs.status,
+            replaceExistingOutput: encodeJobs.replaceExistingOutput,
+            updatedAt: encodeJobs.updatedAt,
+          }).from(encodeJobs).where(eq(encodeJobs.id, id)).get();
+          if (options.acknowledgeReplacement !== true || !options.expectedRevision) {
+            throw new DomainInvariantError(
+              "Encode Job replacement consequences must be acknowledged",
+            );
+          }
+          if (
+            latest === undefined ||
+            latest.status !== expectedStatus ||
+            latest.replaceExistingOutput !== current.replaceExistingOutput ||
+            latest.updatedAt.toISOString() !== options.expectedRevision
+          ) {
+            throw new DomainInvariantError("Encode Job replacement preview is stale");
+          }
+        }
         const outputOwner = transaction
           .select({ id: encodeJobs.id })
           .from(encodeJobs)
@@ -11988,7 +12015,10 @@ export function createDataAccessInternal(
           throw new DomainInvariantError("priority must be a safe integer");
         }
         const semanticInput = encodeRequeueSemanticInput(id, {
-          outputPath, priority: options?.priority,
+          outputPath,
+          priority: options?.priority,
+          expectedRevision: options?.expectedRevision,
+          acknowledgeReplacement: options?.acknowledgeReplacement,
         });
         const replay = replayEncodeMutation(
           options?.mutationKey, "encode_job.requeue", semanticInput,
@@ -12009,6 +12039,8 @@ export function createDataAccessInternal(
             outputPath,
             priority: options?.priority,
             mutationKey: options?.mutationKey,
+            expectedRevision: options?.expectedRevision,
+            acknowledgeReplacement: options?.acknowledgeReplacement,
           });
         } catch (error) {
           const racedReplay = replayEncodeMutation(

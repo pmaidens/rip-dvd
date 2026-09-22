@@ -540,17 +540,31 @@ describe("EncodeJobsView", () => {
     const profileId = "profile-v2" as EncodingProfileId;
     const jobId = "job-1" as EncodeJobId;
     const canonicalOutputPath = "/media/movies/Queue Me (2001).mkv";
-    const fetcher = vi.fn(async (input: RequestInfo | URL) =>
-      String(input).includes("selectionOffset")
-        ? Response.json({ selections: [], profiles: [], page: {} })
-        : Response.json({
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("selectionOffset")) {
+        return Response.json({ selections: [], profiles: [], page: {} });
+      }
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) as {
+        action?: string;
+      } : null;
+      if (body?.action === "preview_requeue") {
+        return Response.json({
+          preview: {
+            revision: "2026-09-22T12:00:00.000Z",
+            acknowledgementRequired: false,
+            outputPath: null,
+          },
+        });
+      }
+      return Response.json({
             job: {
               id: "job-1",
               encodingProfileId: profileId,
               status: "queued",
               outputPath: canonicalOutputPath,
             },
-          }));
+          });
+    });
 
     await requestEncodeJobOptions({
       selectionOffset: 100,
@@ -604,17 +618,67 @@ describe("EncodeJobsView", () => {
       },
       body: expect.any(String),
     });
+    expect(fetcher).toHaveBeenNthCalledWith(5, "/api/encode-jobs", {
+      method: "PATCH",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: expect.any(String),
+    });
     for (const [index, expected] of [
       { discSelectionId: "selection-1", encodingProfileId: "profile-v2", outputPath: "/media/movies/Queue Me (2001).mkv" },
       { action: "cancel", encodeJobId: "job-1" },
-      { action: "requeue", encodeJobId: "job-1" },
+      { action: "preview_requeue", encodeJobId: "job-1" },
+      { action: "requeue", encodeJobId: "job-1", expectedRevision: "2026-09-22T12:00:00.000Z" },
     ].entries()) {
       const request = (fetcher.mock.calls[index + 1] as unknown as [string, RequestInit])[1];
-      expect(JSON.parse(request.body as string)).toMatchObject({
-        ...expected,
-        mutationKey: expect.any(String),
-      });
+      const body = JSON.parse(request.body as string);
+      expect(body).toMatchObject(expected);
+      if (expected.action !== "preview_requeue") {
+        expect(body).toMatchObject({ mutationKey: expect.any(String) });
+      }
     }
+  });
+
+  it("requires explicit confirmation before a completed output is replaced", async () => {
+    const jobId = "completed-job" as EncodeJobId;
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirm);
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { action: string };
+      if (body.action === "preview_requeue") {
+        return Response.json({
+          preview: {
+            revision: "2026-09-22T12:00:00.000Z",
+            acknowledgementRequired: true,
+            outputPath: "/media/movies/Example.mkv",
+          },
+        });
+      }
+      return Response.json({ job: { id: jobId, status: "queued" } });
+    });
+
+    await expect(retryEncodeJob(jobId, fetcher)).rejects.toThrow(
+      "replacement was not acknowledged",
+    );
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(confirm).toHaveBeenCalledWith(
+      "Re-encode and replace the existing output at /media/movies/Example.mkv?",
+    );
+
+    confirm.mockReturnValue(true);
+    await retryEncodeJob(jobId, fetcher);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    const mutation = JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body));
+    expect(mutation).toMatchObject({
+      action: "requeue",
+      encodeJobId: jobId,
+      expectedRevision: "2026-09-22T12:00:00.000Z",
+      acknowledgeReplacement: true,
+      mutationKey: expect.any(String),
+    });
+    vi.unstubAllGlobals();
   });
 
   it("resolves selected-profile jobs for bounded replacement recovery", async () => {

@@ -133,10 +133,17 @@ const commandDefinitions = [
     example: "rip-dvd-operator encode-enqueue --key 00000000-0000-4000-8000-000000000001 --disc-selection-id <id> --encoding-profile-id <id> --output-path /media/movies/example.mkv",
   },
   {
+    name: "encode-requeue-preview",
+    description: "Preview the current consequences of requeueing an Encode Job.",
+    usage: "rip-dvd-operator encode-requeue-preview --encode-job-id <id>",
+    inputs: { arguments: [], options: ["--encode-job-id"] },
+    example: "rip-dvd-operator encode-requeue-preview --encode-job-id <id>",
+  },
+  {
     name: "encode-requeue",
     description: "Explicitly requeue a terminal Encode Job, optionally resolving a failed output conflict.",
-    usage: "rip-dvd-operator encode-requeue --key <key> --encode-job-id <id> [--output-path <absolute .mkv path>] [--priority <integer>]",
-    inputs: { arguments: [], options: ["--key", "--encode-job-id", "--output-path", "--priority"] },
+    usage: "rip-dvd-operator encode-requeue --key <key> --encode-job-id <id> [--output-path <absolute .mkv path>] [--priority <integer>] [--revision <preview-revision> --acknowledge]",
+    inputs: { arguments: [], options: ["--key", "--encode-job-id", "--output-path", "--priority", "--revision", "--acknowledge"] },
     example: "rip-dvd-operator encode-requeue --key 00000000-0000-4000-8000-000000000001 --encode-job-id <id>",
   },
   {
@@ -791,19 +798,28 @@ function runProfileCommand(name: string, args: readonly string[], openAccess: Co
   }
 }
 
-function encodeOptions(rest: readonly string[], repeatable?: string): Map<string, string[]> {
-  if (rest.length % 2 !== 0) {
-    throw new CommandFailure("INVALID_ARGUMENTS", "Encode options require values.", 2);
-  }
+function encodeOptions(
+  rest: readonly string[],
+  repeatable?: string,
+  booleanOptions: readonly string[] = [],
+): Map<string, string[]> {
   const options = new Map<string, string[]>();
-  for (let index = 0; index < rest.length; index += 2) {
+  for (let index = 0; index < rest.length;) {
     const name = rest[index]!;
-    const value = rest[index + 1]!;
-    if (!name.startsWith("--") || value.length === 0 || value.startsWith("--") ||
-      (options.has(name) && name !== repeatable)) {
+    if (!name.startsWith("--") || (options.has(name) && name !== repeatable)) {
       throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Encode options.", 2);
     }
+    if (booleanOptions.includes(name)) {
+      options.set(name, ["true"]);
+      index += 1;
+      continue;
+    }
+    const value = rest[index + 1];
+    if (value === undefined || value.length === 0 || value.startsWith("--")) {
+      throw new CommandFailure("INVALID_ARGUMENTS", "Encode options require values.", 2);
+    }
     options.set(name, [...(options.get(name) ?? []), value]);
+    index += 2;
   }
   return options;
 }
@@ -860,12 +876,17 @@ function encodeMediaLibraryPath(io: CommandIO): string {
 }
 
 function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) {
-  const options = encodeOptions(rest, name === "encode-resolve" ? "--disc-selection-id" : undefined);
+  const options = encodeOptions(
+    rest,
+    name === "encode-resolve" ? "--disc-selection-id" : undefined,
+    name === "encode-requeue" ? ["--acknowledge"] : [],
+  );
   const permitted: Record<string, string[]> = {
     "encode-queue": ["--history-group", "--query", "--encoding-profile-id", "--selection-offset", "--profile-offset"],
     "encode-resolve": ["--encoding-profile-id", "--disc-selection-id"],
     "encode-enqueue": ["--key", "--disc-selection-id", "--encoding-profile-id", "--output-path", "--priority"],
-    "encode-requeue": ["--key", "--encode-job-id", "--output-path", "--priority"],
+    "encode-requeue-preview": ["--encode-job-id"],
+    "encode-requeue": ["--key", "--encode-job-id", "--output-path", "--priority", "--revision", "--acknowledge"],
     "encode-cancel": ["--key", "--encode-job-id"],
   };
   onlyEncodeOptions(options, permitted[name]!);
@@ -873,7 +894,8 @@ function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) 
   if (["encode-enqueue", "encode-requeue", "encode-cancel"].includes(name)) {
     mutationKey = encodeKey(options);
   }
-  const mediaLibraryPath = name === "encode-cancel" || name === "encode-resolve"
+  const mediaLibraryPath = name === "encode-cancel" || name === "encode-resolve" ||
+    name === "encode-requeue-preview"
     ? undefined : encodeMediaLibraryPath(io);
   const priority = encodePriority(options);
   const rawQuery = options.get("--query")?.[0];
@@ -914,6 +936,11 @@ function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) 
           }),
         };
       }
+      if (name === "encode-requeue-preview") {
+        return operations.previewEncodeRequeue({
+          encodeJobId: encodeId(options, "--encode-job-id"),
+        });
+      }
       const job = name === "encode-enqueue"
         ? operations.enqueueEncodeJob({
           mutationKey,
@@ -926,6 +953,8 @@ function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) 
           ? operations.requeueEncodeJob({
             mutationKey, encodeJobId: encodeId(options, "--encode-job-id"),
             outputPath: options.get("--output-path")?.[0], priority,
+            expectedRevision: options.get("--revision")?.[0],
+            acknowledgeReplacement: options.has("--acknowledge"),
             mediaLibraryPath: mediaLibraryPath!,
           })
           : operations.cancelEncodeJob({
@@ -940,6 +969,9 @@ function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) 
     }
     if (error instanceof InvalidEncodeJobInputError) {
       throw new CommandFailure("INVALID_ARGUMENTS", error.message, 2);
+    }
+    if (error instanceof DomainInvariantError && error.message.includes("preview is stale")) {
+      throw new CommandFailure("STALE_ENCODE_PREVIEW", error.message, 2);
     }
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("NOT_FOUND", error.message, 2);
@@ -1012,7 +1044,7 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         : await runCatalogReview(rest, io));
       return 0;
     }
-    if (["encode-queue", "encode-resolve", "encode-enqueue", "encode-requeue", "encode-cancel"].includes(name)) {
+    if (["encode-queue", "encode-resolve", "encode-enqueue", "encode-requeue-preview", "encode-requeue", "encode-cancel"].includes(name)) {
       if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
         emit(io.stdout, help(name));
       } else {

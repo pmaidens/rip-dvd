@@ -2464,6 +2464,18 @@ async function renderMutationDashboard(
         path === mutationCase.requestPath &&
         init?.method === mutationCase.requestMethod
       ) {
+        const body = typeof init.body === "string"
+          ? JSON.parse(init.body) as { action?: string }
+          : null;
+        if (body?.action === "preview_requeue") {
+          return Response.json({
+            preview: {
+              revision: "2026-09-22T12:00:00.000Z",
+              acknowledgementRequired: false,
+              outputPath: null,
+            },
+          });
+        }
         return mutationResponse.promise;
       }
       if (path === "/api/encoding-profiles") {
@@ -2509,7 +2521,9 @@ async function renderMutationDashboard(
       fetcher.mock.calls.filter(
         ([input, init]) =>
           String(input) === mutationCase.requestPath &&
-          init?.method === mutationCase.requestMethod,
+          init?.method === mutationCase.requestMethod &&
+          (typeof init.body !== "string" ||
+            (JSON.parse(init.body) as { action?: string }).action !== "preview_requeue"),
       ).length,
   };
 }

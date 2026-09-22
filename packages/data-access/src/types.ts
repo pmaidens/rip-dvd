@@ -1004,6 +1004,8 @@ export interface EncodeJobRequeueOptions {
   outputPath?: string;
   priority?: number;
   mutationKey?: string;
+  expectedRevision?: string;
+  acknowledgeReplacement?: boolean;
 }
 
 export interface DiscoveredOpticalDrive {

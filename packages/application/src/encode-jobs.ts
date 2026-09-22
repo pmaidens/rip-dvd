@@ -95,7 +95,14 @@ export function parseEncodeEnqueueInput(
 export function requeueEncodeJob(
   access: DataAccess,
   mediaLibraryPath: string,
-  input: { encodeJobId: unknown; outputPath?: unknown; priority?: unknown; mutationKey?: string },
+  input: {
+    encodeJobId: unknown;
+    outputPath?: unknown;
+    priority?: unknown;
+    mutationKey?: string;
+    expectedRevision?: unknown;
+    acknowledgeReplacement?: unknown;
+  },
 ): EncodeJob {
   const encodeJobId = requiredId(input.encodeJobId) as EncodeJobId;
   const outputPath = input.outputPath === undefined
@@ -104,11 +111,48 @@ export function requeueEncodeJob(
     (input.priority !== undefined && !Number.isSafeInteger(input.priority))) {
     throw new InvalidEncodeJobInputError("Invalid Encode Job output path or priority");
   }
+  const current = access.encodeJobs.find(encodeJobId);
+  if (current === null) {
+    throw new RecordNotFoundError("Encode Job", encodeJobId);
+  }
+  const replacesOutput = current.status === "completed" || current.replaceExistingOutput;
+  const expectedRevision = typeof input.expectedRevision === "string"
+    ? input.expectedRevision
+    : undefined;
+  if (replacesOutput && (
+    input.acknowledgeReplacement !== true || expectedRevision === undefined
+  )) {
+    throw new InvalidEncodeJobInputError(
+      "Preview and acknowledge the current Encode Job replacement before requeueing",
+    );
+  }
   return access.encodeJobs.requeue(encodeJobId, {
     outputPath,
     priority: input.priority as number | undefined,
     mutationKey: input.mutationKey,
+    expectedRevision,
+    acknowledgeReplacement: input.acknowledgeReplacement === true,
   });
+}
+
+export function previewEncodeRequeue(
+  access: DataAccess,
+  input: { encodeJobId: unknown },
+) {
+  const encodeJobId = requiredId(input.encodeJobId) as EncodeJobId;
+  const job = access.encodeJobs.find(encodeJobId);
+  if (job === null) {
+    throw new RecordNotFoundError("Encode Job", encodeJobId);
+  }
+  const replacesOutput = job.status === "completed" || job.replaceExistingOutput;
+  return {
+    encodeJobId: job.id,
+    status: job.status,
+    revision: job.updatedAt.toISOString(),
+    replacesOutput,
+    outputPath: replacesOutput ? job.outputPath : null,
+    acknowledgementRequired: replacesOutput,
+  };
 }
 
 export function cancelEncodeJob(

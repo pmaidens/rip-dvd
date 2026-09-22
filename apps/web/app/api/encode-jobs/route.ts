@@ -222,11 +222,17 @@ export async function createEncodeJobsRoute(
       if (
         !body ||
         !encodeJobId ||
-        (action !== "cancel" && action !== "requeue")
+        (action !== "cancel" && action !== "requeue" &&
+          action !== "preview_requeue")
       ) {
         return response({ error: "Invalid Encode Job command" }, 400);
       }
       const operations = createApplicationOperations(getAccess());
+      if (action === "preview_requeue") {
+        return response({
+          preview: operations.previewEncodeRequeue({ encodeJobId }),
+        });
+      }
       const job = action === "cancel"
         ? operations.cancelEncodeJob({ encodeJobId, mutationKey })
         : operations.requeueEncodeJob({
@@ -234,6 +240,8 @@ export async function createEncodeJobsRoute(
           outputPath: body.outputPath,
           priority: body.priority,
           mutationKey,
+          expectedRevision: body.expectedRevision,
+          acknowledgeReplacement: body.acknowledgeReplacement,
           mediaLibraryPath: config.mediaLibraryPath,
         });
       return response({ job: serializeJob(job) });
