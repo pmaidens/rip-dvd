@@ -174,8 +174,14 @@ it("offers prior mappings for review without adopting them", () => {
         sourceArchive: {
           id: sourceArchive.id,
           catalogReviewOutcome: "reviewed_with_selections",
+          integrityPolicyVersion: null,
+          badSectorCountsByTitle: null,
         },
-        targetArchive: { id: freshArchive.id },
+        targetArchive: {
+          id: freshArchive.id,
+          integrityPolicyVersion: "dvd-recovery-v1",
+          badSectorCountsByTitle: null,
+        },
         mappings: [{
           state: "valid",
           reason: null,
@@ -223,6 +229,44 @@ it("offers prior mappings for review without adopting them", () => {
     )).toThrow(
       "Fresh re-archive review is completed through Re-archive Acceptance",
     );
+  } finally {
+    access.close();
+  }
+});
+
+it("keeps intentional source overlap valid against the fresh inspection", () => {
+  const { access, freshArchive, sourceArchive } = fixture();
+  try {
+    const bonusFeature = access.catalog.createMediaItem({
+      kind: "bonus_feature",
+      title: "Synthetic alternate edit",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: sourceArchive.id,
+      mediaItemId: bonusFeature.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      label: "Alternate edit",
+    });
+
+    const proposal = proposalFromReview(access, freshArchive.id);
+    expect(proposal.mappings.map(({ state, reason }) => ({ state, reason })))
+      .toEqual([
+        { state: "valid", reason: null },
+        { state: "valid", reason: null },
+      ]);
+    expect(proposal).toMatchObject({
+      state: "ready",
+      mappings: [
+        { state: "valid" },
+        {
+          state: "valid",
+          proposedMapping: {
+            mediaItemId: bonusFeature.id,
+            sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+          },
+        },
+      ],
+    });
   } finally {
     access.close();
   }

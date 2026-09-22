@@ -95,6 +95,13 @@ export interface CatalogReviewReplacementEncodeInput {
   priority?: number;
 }
 
+export interface CatalogReviewRearchiveMappingInput {
+  sourceDiscSelectionId: string;
+  mediaItemId: string;
+  sourceIdentity: DiscSelectionSourceIdentityInput;
+  label: string | null;
+}
+
 export type CatalogReviewCommand =
   | {
       action:
@@ -102,12 +109,7 @@ export type CatalogReviewCommand =
         | "save_rearchive_mapping_proposal";
       catalogRevision: string;
       sourceCatalogRevision: string;
-      mappings: Array<{
-        sourceDiscSelectionId: string;
-        mediaItemId: string;
-        sourceIdentity: DiscSelectionSourceIdentityInput;
-        label: string | null;
-      }>;
+      mappings: CatalogReviewRearchiveMappingInput[];
     }
   | {
       action: "create_episodic_mapping_proposal";

@@ -448,20 +448,18 @@ export type RearchiveMappingProposalState =
   | "incompatible"
   | "stale";
 
+export interface RearchiveMappingProposalSelection {
+  mediaItemId: MediaItemId;
+  sourceIdentity: DiscSelectionSourceIdentityInput;
+  label: string | null;
+}
+
 export interface RearchiveMappingProposalMapping {
   state: "valid" | "incomplete" | "incompatible" | "stale";
   reason: string | null;
   sourceDiscSelectionId: DiscSelectionId;
-  priorMapping: {
-    mediaItemId: MediaItemId;
-    sourceIdentity: DiscSelectionSourceIdentityInput;
-    label: string | null;
-  } | null;
-  proposedMapping: {
-    mediaItemId: MediaItemId;
-    sourceIdentity: DiscSelectionSourceIdentityInput;
-    label: string | null;
-  };
+  priorMapping: RearchiveMappingProposalSelection | null;
+  proposedMapping: RearchiveMappingProposalSelection;
 }
 
 export interface RearchiveMappingProposalReview {
@@ -474,11 +472,9 @@ export interface RearchiveMappingProposalReview {
   mappings: RearchiveMappingProposalMapping[];
 }
 
-export interface RearchiveMappingProposalMappingInput {
+export interface RearchiveMappingProposalMappingInput
+  extends RearchiveMappingProposalSelection {
   sourceDiscSelectionId: DiscSelectionId;
-  mediaItemId: MediaItemId;
-  sourceIdentity: DiscSelectionSourceIdentityInput;
-  label: string | null;
 }
 
 export interface RearchiveMappingProposalInput {

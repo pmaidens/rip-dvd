@@ -67,7 +67,7 @@ export function serializeDiscSelection(selection: DiscSelection) {
   };
 }
 
-export function serializeRearchiveEvidence(
+export function serializeArchiveEvidence(
   archive: ReturnType<DataAccess["catalog"]["listOriginalDiscArchives"]>[number],
   discLabel: string | null,
 ) {
@@ -79,9 +79,11 @@ export function serializeRearchiveEvidence(
     archiveFormat: archive.archiveFormat,
     boundaryEvidence: archiveBoundaryEvidenceFromRecord(archive),
     integrity: archive.integrity,
+    integrityPolicyVersion: archive.integrityPolicyVersion,
     badSectorCount: archive.badSectorCount,
     badAreaCount: archive.badAreaCount,
     badSectorRanges: archive.badSectorRanges,
+    badSectorCountsByTitle: archive.badSectorCountsByTitle,
     archivedAt: archive.archivedAt.toISOString(),
     catalogReviewedAt: archive.catalogReviewedAt?.toISOString() ?? null,
     catalogReviewOutcome: archive.catalogReviewOutcome,
@@ -100,11 +102,11 @@ export function serializeRearchiveMappingProposal(
     persisted: proposal.persisted,
     catalogRevision: proposal.catalogRevision,
     sourceCatalogRevision: proposal.sourceCatalogRevision,
-    sourceArchive: serializeRearchiveEvidence(
+    sourceArchive: serializeArchiveEvidence(
       proposal.sourceArchive,
       discLabels.source,
     ),
-    targetArchive: serializeRearchiveEvidence(
+    targetArchive: serializeArchiveEvidence(
       proposal.targetArchive,
       discLabels.target,
     ),
@@ -358,21 +360,7 @@ export function readCatalogReview(
       automaticCataloging: {
         configured: automaticCatalogingConfigured,
       },
-      archive: {
-        id: archive.id,
-        detectedDiscId: archive.detectedDiscId,
-        discLabel: disc.volumeLabel ?? "Unlabeled disc",
-        discKind: archive.discKind,
-        archiveFormat: archive.archiveFormat,
-        boundaryEvidence: archiveBoundaryEvidenceFromRecord(archive),
-        integrity: archive.integrity,
-        badSectorCount: archive.badSectorCount,
-        badAreaCount: archive.badAreaCount,
-        badSectorRanges: archive.badSectorRanges,
-        archivedAt: archive.archivedAt.toISOString(),
-        catalogReviewedAt: archive.catalogReviewedAt?.toISOString() ?? null,
-        catalogReviewOutcome: archive.catalogReviewOutcome,
-      },
+      archive: serializeArchiveEvidence(archive, disc.volumeLabel),
       reviewOutcome: archive.catalogReviewOutcome,
       rawScan: {
         titles: rawTitles,

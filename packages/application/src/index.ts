@@ -14,7 +14,6 @@ import type {
   OriginalDiscArchiveId,
   EncodeQueueHistoryGroup,
   DiscSelectionId,
-  DiscSelectionSourceIdentityInput,
   MediaItemId,
   RearchiveMappingProposalInput,
   RearchiveMappingProposalReview,
@@ -25,6 +24,7 @@ import {
   serializeRearchiveMappingProposal,
   type CatalogReviewPageCoordinates,
 } from "./catalog-review-read.js";
+import type { CatalogReviewRearchiveMappingInput } from "./catalog-review-command.js";
 import { suggestCatalogReview } from "./catalog-suggestion.js";
 import { generateMutationKey, InvalidMutationKeyError, parseMutationKey } from "./mutation-key.js";
 import {
@@ -60,12 +60,7 @@ export interface RearchiveMappingProposalOperationInput {
   originalDiscArchiveId: string;
   catalogRevision: string;
   sourceCatalogRevision: string;
-  mappings: readonly {
-    sourceDiscSelectionId: string;
-    mediaItemId: string;
-    sourceIdentity: DiscSelectionSourceIdentityInput;
-    label: string | null;
-  }[];
+  mappings: readonly CatalogReviewRearchiveMappingInput[];
 }
 
 function rearchiveMappingProposalInput(

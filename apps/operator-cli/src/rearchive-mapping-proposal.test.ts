@@ -65,6 +65,10 @@ it("shows, previews, and saves an edited Re-archive Mapping Proposal", async () 
   expect(preview.result).toMatchObject({
     state: "ready",
     persisted: false,
+    targetArchive: {
+      integrityPolicyVersion: "dvd-recovery-v1",
+      badSectorCountsByTitle: null,
+    },
     mappings: [{
       state: "valid",
       proposedMapping: {

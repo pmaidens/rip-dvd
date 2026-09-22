@@ -47,6 +47,21 @@ function RearchiveArchiveEvidence({
         </span>
         <ArchiveIntegrityDescription {...archive} />
         <p>
+          Integrity policy: {archive.integrityPolicyVersion ?? "not recorded"}
+        </p>
+        {archive.badSectorCountsByTitle !== null &&
+            archive.badSectorCountsByTitle.length > 0
+          ? (
+            <p>
+              Unreadable sectors by title: {
+                archive.badSectorCountsByTitle.map((count) =>
+                  `Title ${count.titleNumber}: ${count.badSectorCount}`
+                ).join("; ")
+              }
+            </p>
+          )
+          : null}
+        <p>
           Boundary evidence: {archive.boundaryEvidence === null
             ? "not recorded"
             : `${archive.boundaryEvidence.policyVersion}; ${

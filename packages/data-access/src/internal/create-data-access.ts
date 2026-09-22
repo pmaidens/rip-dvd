@@ -4427,7 +4427,6 @@ export function createDataAccessInternal(
     let hasStaleMapping = revisionsAreStale;
     let hasIncompleteMapping = sourceSelections.length === 0;
     let hasIncompatibleMapping = false;
-    const sourceTracker = createDiscSelectionSourceOverlapTracker();
     const mappings: RearchiveMappingProposalMapping[] = sourceSelections.map(
       (sourceSelection) => {
       const proposed = proposedMappingsById.get(sourceSelection.id);
@@ -4489,20 +4488,6 @@ export function createDataAccessInternal(
             proposed.sourceIdentity,
           );
           sourceIdentity = validatedSourceIdentity;
-          const persistedSource = serializeDiscSelectionSourceIdentity(
-            validatedSourceIdentity,
-          );
-          if (discSelectionSourceOverlapsTracker(
-            persistedSource,
-            sourceTracker,
-          )) {
-            reason = "The proposed DVD sources overlap";
-          } else {
-            addDiscSelectionSourceToOverlapTracker(
-              sourceTracker,
-              persistedSource,
-            );
-          }
         } catch (error) {
           reason = error instanceof Error
             ? error.message

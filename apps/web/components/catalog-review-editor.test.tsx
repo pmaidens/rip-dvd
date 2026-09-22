@@ -154,9 +154,11 @@ function catalogReview({
       archiveFormat: "iso",
       boundaryEvidence: null,
       integrity: "unknown",
+      integrityPolicyVersion: null,
       badSectorCount: null,
       badAreaCount: null,
       badSectorRanges: null,
+      badSectorCountsByTitle: null,
       archivedAt: "2026-08-03T18:00:00.000Z",
       catalogReviewedAt: null,
       catalogReviewOutcome: "needs_review",
@@ -2250,6 +2252,12 @@ describe("CatalogReviewView", () => {
         archivedAt: "2026-08-10T06:00:00.000Z",
         catalogReviewedAt: "2026-08-10T07:00:00.000Z",
         catalogReviewOutcome: "reviewed_with_selections",
+        integrity: "watchable_salvage",
+        integrityPolicyVersion: "dvd-recovery-v1",
+        badSectorCount: 2,
+        badAreaCount: 1,
+        badSectorRanges: [{ startLba: 120, sectorCount: 2 }],
+        badSectorCountsByTitle: [{ titleNumber: 1, badSectorCount: 2 }],
       },
       targetArchive: review.archive,
       mappings: [{
@@ -2336,6 +2344,10 @@ describe("CatalogReviewView", () => {
     expect(container.textContent).toContain("Re-archive Mapping Proposal");
     expect(container.textContent).toContain("Prior archive");
     expect(container.textContent).toContain("Fresh archive");
+    expect(container.textContent).toContain("Integrity policy: dvd-recovery-v1");
+    expect(container.textContent).toContain(
+      "Unreadable sectors by title: Title 1: 2",
+    );
     expect(container.textContent).not.toContain("Manual catalog tools");
     expect(container.textContent).not.toContain("Complete review");
 
@@ -2426,9 +2438,11 @@ describe("CatalogReviewView", () => {
               archiveFormat: "iso",
               boundaryEvidence: null,
               integrity: "clean_read",
+              integrityPolicyVersion: "dvd-recovery-v1",
               badSectorCount: 0,
               badAreaCount: 0,
               badSectorRanges: [],
+              badSectorCountsByTitle: null,
               archivedAt: "2026-08-03T18:00:00.000Z",
               catalogReviewedAt: null,
               catalogReviewOutcome: "needs_review",
@@ -2643,9 +2657,11 @@ describe("CatalogReviewView", () => {
               archiveFormat: "iso",
               boundaryEvidence: null,
               integrity: "unknown",
+              integrityPolicyVersion: null,
               badSectorCount: null,
               badAreaCount: null,
               badSectorRanges: null,
+              badSectorCountsByTitle: null,
               archivedAt: "2026-08-03T19:00:00.000Z",
               catalogReviewedAt: null,
               catalogReviewOutcome: "needs_review",

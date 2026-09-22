@@ -267,7 +267,11 @@ describe("Catalog Review API", () => {
         state: "ready",
         persisted: false,
         sourceArchive: { id: sourceArchive.id },
-        targetArchive: { id: targetArchive.id },
+        targetArchive: {
+          id: targetArchive.id,
+          integrityPolicyVersion: "test-clean-v1",
+          badSectorCountsByTitle: null,
+        },
       },
     });
     expect(JSON.stringify(review.rearchiveProposal)).not.toMatch(
@@ -541,9 +545,11 @@ describe("Catalog Review API", () => {
         archiveFormat: "iso",
         boundaryEvidence: null,
         integrity: "unknown",
+        integrityPolicyVersion: null,
         badSectorCount: null,
         badAreaCount: null,
         badSectorRanges: null,
+        badSectorCountsByTitle: null,
         archivedAt: archive.archivedAt.toISOString(),
         catalogReviewedAt: null,
         catalogReviewOutcome: "needs_review",

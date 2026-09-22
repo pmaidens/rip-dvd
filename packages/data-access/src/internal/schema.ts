@@ -94,6 +94,15 @@ import type {
   WorkerIncidentSchemaVersion,
 } from "../types.js";
 
+function discSelectionShapeConstraint(table: {
+  kind: AnySQLiteColumn;
+  titleNumber: AnySQLiteColumn;
+  chapterStart: AnySQLiteColumn;
+  chapterEnd: AnySQLiteColumn;
+}) {
+  return sql`(${table.kind} = 'main_feature' and ${table.titleNumber} is null and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_title' and typeof(${table.titleNumber}) = 'integer' and ${table.titleNumber} > 0 and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_chapters' and typeof(${table.titleNumber}) = 'integer' and ${table.titleNumber} > 0 and typeof(${table.chapterStart}) = 'integer' and ${table.chapterStart} > 0 and typeof(${table.chapterEnd}) = 'integer' and ${table.chapterEnd} >= ${table.chapterStart})`;
+}
+
 const createdAt = () => integer("created_at", { mode: "timestamp_ms" }).notNull();
 const updatedAt = () => integer("updated_at", { mode: "timestamp_ms" }).notNull();
 
@@ -818,7 +827,7 @@ export const discSelections = sqliteTable(
     ),
     check(
       "disc_selections_shape_check",
-      sql`(${table.kind} = 'main_feature' and ${table.titleNumber} is null and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_title' and typeof(${table.titleNumber}) = 'integer' and ${table.titleNumber} > 0 and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_chapters' and typeof(${table.titleNumber}) = 'integer' and ${table.titleNumber} > 0 and typeof(${table.chapterStart}) = 'integer' and ${table.chapterStart} > 0 and typeof(${table.chapterEnd}) = 'integer' and ${table.chapterEnd} >= ${table.chapterStart})`,
+      discSelectionShapeConstraint(table),
     ),
   ],
 );
@@ -899,7 +908,7 @@ export const rearchiveMappingProposalItems = sqliteTable(
     ),
     check(
       "rearchive_mapping_proposal_items_shape_check",
-      sql`(${table.kind} = 'main_feature' and ${table.titleNumber} is null and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_title' and typeof(${table.titleNumber}) = 'integer' and ${table.titleNumber} > 0 and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_chapters' and typeof(${table.titleNumber}) = 'integer' and ${table.titleNumber} > 0 and typeof(${table.chapterStart}) = 'integer' and ${table.chapterStart} > 0 and typeof(${table.chapterEnd}) = 'integer' and ${table.chapterEnd} >= ${table.chapterStart})`,
+      discSelectionShapeConstraint(table),
     ),
   ],
 );
