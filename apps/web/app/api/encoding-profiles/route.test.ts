@@ -380,6 +380,10 @@ it("keeps web preset normalization and reports queue eligibility for historical 
     key: "synthetic-historical", displayName: "Synthetic historical",
     mediaDomain: "dvd_video", settings: { preset: "Fast 480p30" },
   });
+  const unavailable = access.encodingProfiles.create({
+    key: "synthetic-unavailable", displayName: "Synthetic unavailable",
+    mediaDomain: "dvd_video", settings: { preset: "Removed preset", container: "mp4" },
+  });
   const listed = await createEncodingProfilesRoute(
     new Request(`${trustedOrigin}/api/encoding-profiles`),
     () => access, getTrustedOrigin,
@@ -390,6 +394,12 @@ it("keeps web preset normalization and reports queue eligibility for historical 
       id: historical.id,
       settings: { preset: "Fast 480p30", container: null },
       eligibility: expect.objectContaining({ newEncodeJobs: true, blockingReasons: [] }),
+    }), expect.objectContaining({
+      id: unavailable.id,
+      eligibility: expect.objectContaining({
+        newEncodeJobs: false,
+        blockingReasons: ["unsupported_preset", "unsupported_container"],
+      }),
     })]),
   });
 });

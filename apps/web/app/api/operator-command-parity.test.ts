@@ -280,7 +280,7 @@ it("returns the same operational records and evidence through web and CLI", asyn
   }
 });
 
-it("shares Encoding Profile validation, replay, preview, and activation between web and CLI", async () => {
+it("shares Encoding Profile validation, replay, preview, and state changes between web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
   const access = fixture.openAccess();
   const { createEncodingProfilesRoute } = await import("./encoding-profiles/route");
@@ -295,6 +295,22 @@ it("shares Encoding Profile validation, replay, preview, and activation between 
       body: JSON.stringify(body),
     }), () => access, trustedOrigin);
   try {
+    const invalidBody = {
+      mutationKey: "synthetic-profile-parity-invalid-0001",
+      key: "synthetic-invalid", displayName: "Synthetic invalid",
+      settings: { preset: "Unsupported preset", container: "mkv" },
+    };
+    const invalidWeb = await mutate("POST", invalidBody);
+    const invalidCli = await fixture.run([
+      "create-encoding-profile", "--key", invalidBody.mutationKey,
+      "--profile-key", invalidBody.key, "--display-name", invalidBody.displayName,
+      "--preset", invalidBody.settings.preset,
+    ]);
+    expect(invalidWeb.status).toBe(400);
+    expect(invalidCli.exitCode).toBe(2);
+    expect(invalidCli.result).toMatchObject({
+      error: { code: "INVALID_ENCODING_PROFILE", message: (await invalidWeb.json()).error },
+    });
     const key = "synthetic-profile-parity-key-0001";
     const created = await mutate("POST", {
       mutationKey: key, key: "synthetic-parity", displayName: "Synthetic parity",
@@ -340,6 +356,40 @@ it("shares Encoding Profile validation, replay, preview, and activation between 
       "activate-encoding-profile", "--key", "synthetic-profile-parity-key-0003",
       "--id", versionBody.profile.id, "--revision", preview.revision, "--acknowledge",
     ])).result).toEqual(await activated.json());
+    const deactivateUrl = `${endpoint}?preview-profile-id=${encodeURIComponent(versionBody.profile.id)}&is-active=false`;
+    const webDeactivatePreview = await createEncodingProfilesRoute(
+      new Request(deactivateUrl), () => access, trustedOrigin,
+    );
+    expect(webDeactivatePreview.status).toBe(200);
+    const deactivatePreview = await webDeactivatePreview.json() as { revision: string };
+    expect((await fixture.run([
+      "preview-encoding-profile-state", "--id", versionBody.profile.id, "--active", "false",
+    ])).result).toEqual(deactivatePreview);
+    const deactivated = await fixture.run([
+      "deactivate-encoding-profile", "--key", "synthetic-profile-parity-key-0004",
+      "--id", versionBody.profile.id, "--revision", deactivatePreview.revision, "--acknowledge",
+    ]);
+    expect(deactivated.exitCode).toBe(0);
+    const webDeactivationReplay = await mutate("PATCH", {
+      mutationKey: "synthetic-profile-parity-key-0004",
+      id: versionBody.profile.id, isActive: false,
+      expectedRevision: deactivatePreview.revision, acknowledge: true,
+    });
+    expect(webDeactivationReplay.status).toBe(200);
+    expect(await webDeactivationReplay.json()).toEqual(deactivated.result);
+    const staleWeb = await mutate("PATCH", {
+      mutationKey: "synthetic-profile-parity-key-0005",
+      id: versionBody.profile.id, isActive: true,
+      expectedRevision: preview.revision, acknowledge: true,
+    });
+    const staleCli = await fixture.run([
+      "activate-encoding-profile", "--key", "synthetic-profile-parity-key-0005",
+      "--id", versionBody.profile.id, "--revision", preview.revision, "--acknowledge",
+    ]);
+    expect(staleWeb.status).toBe(409);
+    expect(staleCli.result).toMatchObject({
+      error: { code: "STALE_PROFILE_PREVIEW", message: (await staleWeb.json()).error },
+    });
     const list = await createEncodingProfilesRoute(
       new Request(endpoint), () => access, trustedOrigin,
     );

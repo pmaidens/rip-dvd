@@ -42,6 +42,13 @@ export function toEncodingProfileDto(profile: EncodingProfile) {
   const preset = typeof profile.settings.preset === "string"
     ? profile.settings.preset : null;
   const container = profile.settings.container === "mkv" ? "mkv" as const : null;
+  const blockingReasons = [
+    ...(!profile.isActive ? ["inactive"] : []),
+    ...(profile.mediaDomain !== "dvd_video" ? ["wrong_media_domain"] : []),
+    ...(preset === null || !isHandBrakePreset(preset) ? ["unsupported_preset"] : []),
+    ...(profile.settings.container !== undefined && container === null
+      ? ["unsupported_container"] : []),
+  ];
   return {
     id: String(profile.id),
     key: profile.key,
@@ -53,11 +60,8 @@ export function toEncodingProfileDto(profile: EncodingProfile) {
     createdAt: profile.createdAt.toISOString(),
     updatedAt: profile.updatedAt.toISOString(),
     eligibility: {
-      newEncodeJobs: profile.isActive && profile.mediaDomain === "dvd_video",
-      blockingReasons: [
-        ...(!profile.isActive ? ["inactive"] : []),
-        ...(profile.mediaDomain !== "dvd_video" ? ["wrong_media_domain"] : []),
-      ],
+      newEncodeJobs: blockingReasons.length === 0,
+      blockingReasons,
       canCreateVersion: true,
       canActivate: !profile.isActive,
       canDeactivate: profile.isActive,
