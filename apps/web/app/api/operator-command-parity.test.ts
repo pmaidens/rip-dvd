@@ -1,8 +1,7 @@
 import { expect, it } from "vitest";
-import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import type { CatalogMetadataLookup } from "@rip-dvd/application";
 
-import { createOperatorWorkflowFixture } from "../../../operator-cli/src/operator-workflow.test-support.js";
+import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../operator-cli/src/operator-workflow.test-support.js";
 import { createCatalogReviewRoute } from "./catalog-reviews/[id]/route";
 import { createCatalogSuggestionRoute } from "./catalog-reviews/[id]/suggestion/route";
 import { createDeploymentReadinessResponse } from "./deployment-readiness/route";
@@ -29,35 +28,10 @@ it("returns the same health and readiness results through web and CLI adapters",
 
 it("returns the same Catalog Review detail and candidates through web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
-  const seed = createLegacySidecarDataAccess({
-    databasePath: fixture.databasePath,
-    mediaLibraryPath: fixture.mediaLibraryPath,
-    originalsLibraryPath: fixture.originalsLibraryPath,
-  });
-  const drive = seed.catalog.upsertOpticalDrive({ devicePath: "/dev/synthetic-parity", isPresent: true });
-  const contentId = `sha256:${"b".repeat(64)}`;
-  const disc = seed.catalog.registerDetectedDisc({
-    opticalDriveId: drive.id,
-    discKind: "dvd",
-    fingerprint: contentId,
-    volumeLabel: "EXAMPLE_FILM_2020",
-    scanData: {
-      schemaVersion: 2,
-      contentId,
-      titles: [{ number: 1, durationSeconds: 5_400, chapters: 12, audioStreams: [], subtitles: [] }],
-    },
-  });
-  seed.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-  seed.catalog.updateDetectedDiscStatus(disc.id, "approved");
-  const archive = seed.catalog.createOriginalDiscArchive({
-    detectedDiscId: disc.id,
-    discKind: "dvd",
-    archiveFormat: "iso",
-    archivePath: "/media/originals/example-film-parity.iso",
-    fingerprint: contentId,
-  });
-  seed.close();
+  const { archive, previousSelection, correctedSelection, predecessor } =
+    seedCatalogReviewForReadFixture(fixture);
   const access = fixture.openAccess();
+  const selectionsBefore = access.catalog.listDiscSelections({ originalDiscArchiveId: archive.id });
   const lookup: CatalogMetadataLookup = {
     search: async () => [{ id: 42, kind: "movie", title: "Example Film", year: 2020 }],
     getTvDetails: async () => ({ seasons: [] }),
@@ -73,7 +47,24 @@ it("returns the same Catalog Review detail and candidates through web and CLI", 
       () => false,
     );
     expect(detail.status).toBe(200);
-    expect((await fixture.run(["catalog-review", "show", archive.id])).result).toEqual(await detail.json());
+    const detailResult = await detail.json();
+    expect(detailResult).toMatchObject({
+      discSelections: [{
+        id: correctedSelection.id,
+        actionAvailability: {
+          state: "correction_lineage",
+          availableActions: ["correct", "remove"],
+          reason: expect.stringContaining("immutable correction lineage"),
+        },
+      }],
+      correctionHistory: [{
+        supersededDiscSelection: { id: previousSelection.id },
+        replacementDiscSelection: { id: correctedSelection.id },
+      }],
+      correctionEncodeHistory: [{ predecessorEncodeJob: { id: predecessor.id } }],
+    });
+    expect((await fixture.run(["catalog-review", "show", archive.id], null)).result)
+      .toEqual(detailResult);
 
     const suggestion = await createCatalogSuggestionRoute(
       new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}/suggestion`),
@@ -84,7 +75,47 @@ it("returns the same Catalog Review detail and candidates through web and CLI", 
     expect(suggestion.status).toBe(200);
     expect((await fixture.run(["catalog-review", "suggest", archive.id], lookup)).result)
       .toEqual(await suggestion.json());
-    expect(access.catalog.listDiscSelections({ originalDiscArchiveId: archive.id })).toEqual([]);
+
+    access.catalog.createMediaItem({ kind: "movie", title: "Example Film", year: 2020 });
+    access.catalog.createMediaItem({ kind: "movie", title: "EXAMPLE FILM", year: 2020 });
+    const blocked = await createCatalogSuggestionRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}/suggestion`),
+      archive.id,
+      () => access,
+      () => lookup,
+    );
+    const blockedResult = await blocked.json();
+    expect(blockedResult).toMatchObject({
+      status: "needs_review",
+      reason: "ambiguous_catalog_match",
+      candidates: [{ id: 42, kind: "movie", title: "Example Film", year: 2020 }],
+    });
+    expect((await fixture.run(["catalog-review", "suggest", archive.id], lookup)).result)
+      .toEqual(blockedResult);
+
+    const uncertainLookup: CatalogMetadataLookup = {
+      ...lookup,
+      search: async () => [
+        { id: 42, kind: "movie", title: "Example Film", year: 2020 },
+        { id: 43, kind: "movie", title: "Example Film", year: 2020 },
+      ],
+    };
+    const uncertain = await createCatalogSuggestionRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}/suggestion`),
+      archive.id,
+      () => access,
+      () => uncertainLookup,
+    );
+    const uncertainResult = await uncertain.json();
+    expect(uncertainResult).toMatchObject({
+      status: "needs_review",
+      reason: "ambiguous_metadata_match",
+      candidates: [{ id: 42 }, { id: 43 }],
+    });
+    expect((await fixture.run(["catalog-review", "suggest", archive.id], uncertainLookup)).result)
+      .toEqual(uncertainResult);
+    expect(access.catalog.listDiscSelections({ originalDiscArchiveId: archive.id }))
+      .toEqual(selectionsBefore);
   } finally {
     access.close();
     fixture.dispose();

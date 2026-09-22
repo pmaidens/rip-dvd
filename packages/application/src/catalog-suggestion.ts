@@ -69,6 +69,7 @@ function ambiguousLocalCatalogMatch(
   return {
     status: "needs_review",
     hints: suggestion.hints,
+    candidates: suggestion.candidates,
     reason: "ambiguous_catalog_match",
     message:
       `More than one local ${description} matches this disc. Choose the intended catalog item manually.`,
@@ -81,6 +82,7 @@ function catalogIdentityConflict(
   return {
     status: "needs_review",
     hints: suggestion.hints,
+    candidates: suggestion.candidates,
     reason: "catalog_identity_conflict",
     message:
       "The matching local catalog item identifies different TMDB content. Choose the intended item manually.",

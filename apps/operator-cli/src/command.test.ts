@@ -2,12 +2,12 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, expect, it } from "vitest";
-import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
+import type { CatalogMetadataLookup } from "@rip-dvd/application";
 
 import { createApplicationOperations } from "@rip-dvd/application";
 
 import { runCommand } from "./command.js";
-import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
+import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "./operator-workflow.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 
@@ -71,50 +71,45 @@ it("reports deployment readiness from persisted Optical Drive and Disc Inspectio
 
 it("inspects a Catalog Review and exposes metadata candidates through read-only commands", async () => {
   const current = fixture();
-  const seed = createLegacySidecarDataAccess({
-    databasePath: current.databasePath,
-    mediaLibraryPath: current.mediaLibraryPath,
-    originalsLibraryPath: current.originalsLibraryPath,
-  });
-  const drive = seed.catalog.upsertOpticalDrive({ devicePath: "/dev/synthetic-disc", isPresent: true });
-  const contentId = `sha256:${"a".repeat(64)}`;
-  const disc = seed.catalog.registerDetectedDisc({
-    opticalDriveId: drive.id,
-    discKind: "dvd",
-    fingerprint: contentId,
-    volumeLabel: "EXAMPLE_FILM_2020",
-    scanData: {
-      schemaVersion: 2,
-      contentId,
-      titles: [{ number: 1, durationSeconds: 5_400, chapters: 12, audioStreams: [], subtitles: [] }],
-    },
-  });
-  seed.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-  seed.catalog.updateDetectedDiscStatus(disc.id, "approved");
-  const archive = seed.catalog.createOriginalDiscArchive({
-    detectedDiscId: disc.id,
-    discKind: "dvd",
-    archiveFormat: "iso",
-    archivePath: "/media/originals/example-film.iso",
-    fingerprint: contentId,
-  });
-  seed.close();
+  const { archive, previousSelection, correctedSelection, predecessor } =
+    seedCatalogReviewForReadFixture(current);
+  const before = current.openAccess();
+  const revision = before.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt.toISOString();
+  const selectionsBefore = before.catalog.listDiscSelections({ originalDiscArchiveId: archive.id });
+  before.close();
 
   const detail = await current.run(["catalog-review", "show", archive.id]);
   expect(detail.exitCode).toBe(0);
   expect(detail.result).toMatchObject({
-    catalogRevision: archive.updatedAt.toISOString(),
+    catalogRevision: revision,
     archive: { id: archive.id, discLabel: "EXAMPLE_FILM_2020" },
-    correctionHistory: [],
-    discSelections: [],
+    rawScan: { titles: [{ number: 1, durationSeconds: 5_400 }] },
+    correctionHistory: [{
+      supersededDiscSelection: { id: previousSelection.id, sourceIdentity: { kind: "main_feature" } },
+      replacementDiscSelection: { id: correctedSelection.id, sourceIdentity: { kind: "main_feature" } },
+      reason: "Correct the synthetic mapping.",
+    }],
+    correctionEncodeHistory: [{
+      replacementDiscSelectionId: correctedSelection.id,
+      predecessorEncodeJob: { id: predecessor.id, status: "completed" },
+    }],
+    discSelections: [{
+      id: correctedSelection.id,
+      sourceIdentity: { kind: "main_feature" },
+      actionAvailability: {
+        state: "correction_lineage",
+        availableActions: ["correct", "remove"],
+        reason: expect.stringContaining("immutable correction lineage"),
+      },
+    }],
   });
 
-  const suggestion = await current.run(
-    ["catalog-review", "suggest", archive.id],
-    { search: async () => [{ id: 42, kind: "movie", title: "Example Film", year: 2020 }],
-      getTvDetails: async () => ({ seasons: [] }),
-      getTvSeason: async () => { throw new Error("Unexpected season request"); } },
-  );
+  const lookup: CatalogMetadataLookup = {
+    search: async () => [{ id: 42, kind: "movie", title: "Example Film", year: 2020 }],
+    getTvDetails: async () => ({ seasons: [] }),
+    getTvSeason: async () => { throw new Error("Unexpected season request"); },
+  };
+  const suggestion = await current.run(["catalog-review", "suggest", archive.id], lookup);
   expect(suggestion.exitCode).toBe(0);
   expect(suggestion.result).toMatchObject({
     status: "ready",
@@ -123,14 +118,13 @@ it("inspects a Catalog Review and exposes metadata candidates through read-only 
   });
   const selected = await current.run(
     ["catalog-review", "suggest", archive.id, "--tmdb-id", "42", "--media-type", "movie"],
-    { search: async () => [{ id: 42, kind: "movie", title: "Example Film", year: 2020 }],
-      getTvDetails: async () => ({ seasons: [] }),
-      getTvSeason: async () => { throw new Error("Unexpected season request"); } },
+    lookup,
   );
   expect(selected.result).toMatchObject({ status: "ready", proposal: { tmdbId: 42 } });
 
   const after = current.openAccess();
-  expect(after.catalog.listDiscSelections({ originalDiscArchiveId: archive.id })).toEqual([]);
+  expect(after.catalog.listDiscSelections({ originalDiscArchiveId: archive.id })).toEqual(selectionsBefore);
+  expect(after.catalog.findMediaItemByTmdbIdentity({ mediaType: "movie", tmdbId: 42 })).toBeNull();
   after.close();
 
   const invalidOffset = await current.run(["catalog-review", "show", archive.id, "--selection-offset", "-1"]);

@@ -297,15 +297,18 @@ async function runCatalogReview(rest: readonly string[], io: CommandIO) {
     access = io.openAccess();
     const operations = createApplicationOperations(access);
     const credential = tmdbCredentialFromEnvironment();
+    const lookup = io.getLookup
+      ? io.getLookup()
+      : credential === null ? null : createTmdbCatalogLookup(credential);
     const result = input.action === "show"
       ? operations.catalogReview(
         input.id,
         input.coordinates,
-        credential !== null,
+        lookup !== null,
       )
       : await operations.catalogSuggestion(
         input.id,
-        io.getLookup ? io.getLookup() : credential === null ? null : createTmdbCatalogLookup(credential),
+        lookup,
         input.selection,
       );
     if (result === null) {
