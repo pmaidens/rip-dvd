@@ -312,9 +312,9 @@ function addScannedDisc(current: ReturnType<typeof createOperatorWorkflowFixture
   return disc.id;
 }
 
-it("generates a key without submitting work and rejects a missing key before opening SQLite", () => {
+it("generates a key without submitting work and rejects a missing key before opening SQLite", async () => {
   const current = fixture();
-  const generated = current.run(["generate-key"]);
+  const generated = await current.run(["generate-key"]);
   expect(generated.exitCode).toBe(0);
   expect(generated.result).toEqual({
     mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
@@ -325,7 +325,7 @@ it("generates a key without submitting work and rejects a missing key before ope
 
   let opened = false;
   const stdout: string[] = [];
-  const exitCode = runCommand(["submit-archive-request", "--detected-disc-id", "disc-id"], {
+  const exitCode = await runCommand(["submit-archive-request", "--detected-disc-id", "disc-id"], {
     openAccess: () => { opened = true; throw new Error("unexpected open"); },
     stdout: (text) => stdout.push(text),
     stderr: () => {},
@@ -335,7 +335,7 @@ it("generates a key without submitting work and rejects a missing key before ope
   expect(JSON.parse(stdout.join(""))).toMatchObject({ error: { code: "INVALID_MUTATION_KEY" } });
 });
 
-it("replays the original Archive Request outcome after a lost response and restart", () => {
+it("replays the original Archive Request outcome after a lost response and restart", async () => {
   const current = fixture();
   const detectedDiscId = addScannedDisc(current, "synthetic-replay-disc");
   const mutationKey = "00000000-0000-4000-8000-000000000101";
@@ -347,7 +347,7 @@ it("replays the original Archive Request outcome after a lost response and resta
   access.archiveRequests.cancel(committed.archiveRequest.id);
   access.close();
 
-  const replay = current.run([
+  const replay = await current.run([
     "submit-archive-request", "--key", mutationKey,
     "--detected-disc-id", detectedDiscId,
   ]);
@@ -360,18 +360,18 @@ it("replays the original Archive Request outcome after a lost response and resta
   reader.close();
 });
 
-it("keeps invocation keys separate from same-name Detected Discs and eligibility", () => {
+it("keeps invocation keys separate from same-name Detected Discs and eligibility", async () => {
   const current = fixture();
   const firstId = addScannedDisc(current, "synthetic-disc-one");
   const secondId = addScannedDisc(current, "synthetic-disc-two");
   const key = "00000000-0000-4000-8000-000000000102";
-  const first = current.run([
+  const first = await current.run([
     "submit-archive-request", "--key", key, "--detected-disc-id", firstId,
   ]);
-  const changedTarget = current.run([
+  const changedTarget = await current.run([
     "submit-archive-request", "--key", key, "--detected-disc-id", secondId,
   ]);
-  const second = current.run([
+  const second = await current.run([
     "submit-archive-request", "--key", "00000000-0000-4000-8000-000000000103",
     "--detected-disc-id", secondId,
   ]);
