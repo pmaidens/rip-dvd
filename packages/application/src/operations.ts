@@ -125,33 +125,36 @@ function recentWork<T extends { status: string; updatedAt: Date; id: string }>(
 }
 
 function requestActions(request: ArchiveRequest) {
+  const reason = `Archive Request is ${request.status}.`;
   return [
-    {
-      name: "cancel",
-      eligible: ["pending", "running", "needs_attention"].includes(request.status),
-      reason: ["pending", "running", "needs_attention"].includes(request.status)
-        ? null : `Archive Request is ${request.status}.`,
-    },
-    {
-      name: "retry",
-      eligible: request.status === "needs_attention",
-      reason: request.status === "needs_attention" ? null :
-        `Archive Request is ${request.status}.`,
-    },
+    recoveryAction("cancel", ["pending", "running", "needs_attention"].includes(request.status), reason, "archiveRequestId"),
+    recoveryAction("retry", request.status === "needs_attention", reason, "archiveRequestId"),
   ];
 }
 
 function inspectionActions(inspection: DiscInspection) {
   const eligible = inspection.isCurrent && inspection.status === "failed" &&
     inspection.manualRetryRequestedAt === null;
-  return [{
-    name: "retry",
+  const reason = inspection.manualRetryRequestedAt !== null
+    ? "Retry already requested."
+    : inspection.isCurrent ? `Disc Inspection is ${inspection.status}.`
+    : "Disc Inspection is no longer current.";
+  return [recoveryAction("retry", eligible, reason, "discInspectionId")];
+}
+
+function recoveryAction(
+  name: "cancel" | "retry",
+  eligible: boolean,
+  reason: string,
+  targetInput: "archiveRequestId" | "discInspectionId",
+) {
+  return {
+    name,
     eligible,
-    reason: eligible ? null : inspection.manualRetryRequestedAt !== null
-      ? "Retry already requested."
-      : inspection.isCurrent ? `Disc Inspection is ${inspection.status}.`
-      : "Disc Inspection is no longer current.",
-  }];
+    requiredInputs: ["mutationKey", targetInput],
+    reason: eligible ? null : reason,
+    blockingReasons: eligible ? [] : [{ code: "INVALID_TRANSITION", message: reason }],
+  };
 }
 
 export function encodeRequeueAvailability(
@@ -200,12 +203,15 @@ function encodeActions(job: EncodeJob, requeue: ReturnType<typeof encodeRequeueA
 function detectedDiscActions(disc: DetectedDisc, relevantRequest: ArchiveRequest | null) {
   const eligible = disc.status === "scanned" ||
     (disc.status === "approved" && relevantRequest?.status === "cancelled");
+  const reason = relevantRequest && relevantRequest.status !== "cancelled"
+    ? `Archive Request is ${relevantRequest.status}.`
+    : `Detected Disc is ${disc.status}.`;
   return [{
     name: "request-archive",
     eligible,
-    reason: eligible ? null : relevantRequest && relevantRequest.status !== "cancelled"
-      ? `Archive Request is ${relevantRequest.status}.`
-      : `Detected Disc is ${disc.status}.`,
+    requiredInputs: ["mutationKey", "detectedDiscId"],
+    reason: eligible ? null : reason,
+    blockingReasons: eligible ? [] : [{ code: "INVALID_TRANSITION", message: reason }],
   }];
 }
 

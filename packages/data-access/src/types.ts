@@ -1290,6 +1290,10 @@ export interface DiscInspectionAccess {
   renew(claim: DiscInspectionClaim): DiscInspection;
   record(claim: DiscInspectionClaim, event: DiscInspectionEvent): DiscInspection;
   requestRetry(id: DiscInspectionId): DiscInspection;
+  requestRetryWithReplay(input: {
+    mutationKey: string;
+    id: DiscInspectionId;
+  }): Pick<DiscInspection, "id" | "status" | "phase">;
   clearCurrent(input: {
     opticalDriveId: OpticalDriveId;
     mediaGeneration?: string;
@@ -1319,6 +1323,14 @@ export interface ArchiveRequestAccess {
   }): ArchiveRequest;
   cancel(id: ArchiveRequestId): ArchiveRequest;
   retry(id: ArchiveRequestId): ArchiveRequest;
+  cancelWithReplay(input: {
+    mutationKey: string;
+    id: ArchiveRequestId;
+  }): Pick<ArchiveRequest, "id" | "status">;
+  retryWithReplay(input: {
+    mutationKey: string;
+    id: ArchiveRequestId;
+  }): Pick<ArchiveRequest, "id" | "status">;
   list(
     statuses?: ArchiveRequestStatus[],
     options?: ChronologicalListOptions,

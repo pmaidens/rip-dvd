@@ -37,6 +37,40 @@ interface CommandIO {
   stderr(text: string): void;
 }
 
+type RecoveryOperations = ReturnType<typeof createApplicationOperations>;
+type RecoveryCommandSpec = {
+  description: string;
+  targetFlag: "--archive-request-id" | "--disc-inspection-id";
+  run(operations: RecoveryOperations, mutationKey: string, id: string): unknown;
+};
+
+const recoveryCommands = {
+  "cancel-archive-request": {
+    description: "Cancel an Archive Request.",
+    targetFlag: "--archive-request-id",
+    run: (operations, mutationKey, id) =>
+      operations.cancelArchiveRequest({ mutationKey, archiveRequestId: id }),
+  },
+  "retry-archive-request": {
+    description: "Retry an Archive Request needing attention.",
+    targetFlag: "--archive-request-id",
+    run: (operations, mutationKey, id) =>
+      operations.retryArchiveRequest({ mutationKey, archiveRequestId: id }),
+  },
+  "retry-disc-inspection": {
+    description: "Request a Disc Inspection retry.",
+    targetFlag: "--disc-inspection-id",
+    run: (operations, mutationKey, id) =>
+      operations.retryDiscInspection({ mutationKey, discInspectionId: id }),
+  },
+} satisfies Record<string, RecoveryCommandSpec>;
+
+type RecoveryCommand = keyof typeof recoveryCommands;
+
+function isRecoveryCommand(name: string): name is RecoveryCommand {
+  return Object.hasOwn(recoveryCommands, name);
+}
+
 const commandDefinitions = [
   {
     name: "generate-key",
@@ -52,6 +86,14 @@ const commandDefinitions = [
     inputs: { arguments: [], options: ["--key", "--detected-disc-id"] },
     example: "rip-dvd-operator submit-archive-request --key 00000000-0000-4000-8000-000000000001 --detected-disc-id <id>",
   },
+  ...Object.entries(recoveryCommands)
+    .map(([name, command]) => ({
+      name,
+      description: command.description,
+      usage: `rip-dvd-operator ${name} --key <key> ${command.targetFlag} <id>`,
+      inputs: { arguments: [], options: ["--key", command.targetFlag] },
+      example: `rip-dvd-operator ${name} --key 00000000-0000-4000-8000-000000000001 ${command.targetFlag} <id>`,
+    })),
   {
     name: "catalog-review",
     description: "Inspect an archive's Catalog Review or discover metadata candidates.",
@@ -179,8 +221,58 @@ export class CommandFailure extends Error {
     readonly code: string,
     message: string,
     readonly exitCode: CommandExitCode,
+    readonly blockingReasons?: readonly { code: string; message: string }[],
   ) {
     super(message);
+  }
+}
+
+function recoveryInputs(name: RecoveryCommand, args: readonly string[]) {
+  const idFlag = recoveryCommands[name].targetFlag;
+  const options = new Map<string, string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const option = args[index];
+    const value = args[index + 1];
+    if ((option !== "--key" && option !== idFlag) || !value ||
+      value.startsWith("--") || options.has(option)) {
+      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid recovery action options.", 2);
+    }
+    options.set(option, value);
+  }
+  let mutationKey: string;
+  try {
+    mutationKey = parseMutationKey(options.get("--key"));
+  } catch (error) {
+    if (error instanceof InvalidMutationKeyError) {
+      throw new CommandFailure("INVALID_MUTATION_KEY", error.message, 2);
+    }
+    throw error;
+  }
+  const id = options.get(idFlag)?.trim();
+  if (options.size !== 2 || !id || id.length > 256) {
+    throw new CommandFailure("INVALID_ARGUMENTS", `${idFlag} is required.`, 2);
+  }
+  return { mutationKey, id };
+}
+
+function runRecoveryCommand(name: RecoveryCommand, input: ReturnType<typeof recoveryInputs>, io: CommandIO) {
+  try {
+    return withAccess(io.openAccess, (access) => {
+      const operations = createApplicationOperations(access);
+      return recoveryCommands[name].run(operations, input.mutationKey, input.id);
+    });
+  } catch (error) {
+    if (error instanceof MutationKeyConflictError) {
+      throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    if (error instanceof RecordNotFoundError) {
+      throw new CommandFailure("NOT_FOUND", "Recovery target was not found.", 2);
+    }
+    if (error instanceof InvalidStatusTransitionError || error instanceof DomainInvariantError) {
+      throw new CommandFailure("ACTION_BLOCKED", error.message, 2,
+        [{ code: "INVALID_TRANSITION", message: error.message }]);
+    }
+    throw new CommandFailure("RECOVERY_UNAVAILABLE", "Recovery action is unavailable.", 1);
   }
 }
 
@@ -616,6 +708,14 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
       emit(io.stdout, submitArchiveRequest(submissionInputs(rest), io.openAccess));
       return 0;
     }
+    if (isRecoveryCommand(name)) {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+        return 0;
+      }
+      emit(io.stdout, runRecoveryCommand(name, recoveryInputs(name, rest), io));
+      return 0;
+    }
     if (name === "catalog-review") {
       if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
         emit(io.stdout, help(name));
@@ -684,7 +784,8 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
     return 0;
   } catch (error) {
     if (error instanceof CommandFailure) {
-      emit(io.stdout, { error: { code: error.code, message: error.message } });
+      emit(io.stdout, { error: { code: error.code, message: error.message,
+        ...(error.blockingReasons ? { blockingReasons: error.blockingReasons } : {}) } });
       io.stderr(`${error.message}\n`);
       return error.exitCode;
     }
