@@ -12546,26 +12546,48 @@ export function createDataAccessInternal(
           };
         });
       },
-      completeIncomplete(claim, reason) {
+      completeIncomplete(claim, input) {
         if (claim.claimToken === null) {
           throw new StaleJobAttemptError("archive audit run", claim.id);
         }
-        const timestamp = now();
-        const row = database.update(archiveAuditRuns).set({
-          status: "completed",
-          progressPhase: "completed",
-          resultStatus: "incomplete",
-          incompleteReason: reason,
-          claimToken: null,
-          claimedAt: null,
-          completedAt: timestamp,
-          updatedAt: timestamp,
-        }).where(and(eq(archiveAuditRuns.id, claim.id),
-          eq(archiveAuditRuns.status, "running"),
-          eq(archiveAuditRuns.claimToken, claim.claimToken)))
-          .returning().get();
-        if (row === undefined) throw new StaleJobAttemptError("archive audit run", claim.id);
-        return toArchiveAuditRun(row);
+        const claimToken = claim.claimToken;
+        return database.transaction((transaction) => {
+          const current = transaction.select().from(archiveAuditRuns)
+            .where(eq(archiveAuditRuns.id, claim.id)).get();
+          if (current?.status !== "running" || current.claimToken !== claimToken ||
+            current.recordCount === null || input.findings.length > current.recordCount) {
+            throw new StaleJobAttemptError("archive audit run", claim.id);
+          }
+          transaction.delete(archiveAuditFindings)
+            .where(eq(archiveAuditFindings.archiveAuditRunId, claim.id)).run();
+          if (input.findings.length > 0) {
+            transaction.insert(archiveAuditFindings).values(input.findings.map((finding, sequence) => ({
+              archiveAuditRunId: claim.id,
+              sequence,
+              finding: JSON.stringify(finding),
+            }))).run();
+          }
+          const timestamp = now();
+          const row = requireRow(transaction.update(archiveAuditRuns).set({
+            status: "completed",
+            progressPhase: "completed",
+            recordsProcessed: input.findings.length,
+            resultStatus: "incomplete",
+            incompleteReason: input.reason,
+            claimToken: null,
+            claimedAt: null,
+            completedAt: timestamp,
+            updatedAt: timestamp,
+          }).where(and(eq(archiveAuditRuns.id, claim.id),
+            eq(archiveAuditRuns.status, "running"),
+            eq(archiveAuditRuns.claimToken, claimToken))).returning().get(),
+          "archive audit run", claim.id);
+          return {
+            ...toArchiveAuditRunSummary(row),
+            counts: countArchiveAuditFindings(input.findings),
+            findings: input.findings,
+          };
+        });
       },
       fail(claim) {
         if (claim.claimToken === null) return null;

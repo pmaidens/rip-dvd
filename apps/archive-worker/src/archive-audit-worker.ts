@@ -1,6 +1,4 @@
-import { setTimeout as delay } from "node:timers/promises";
-
-import type { DataAccess } from "@rip-dvd/data-access";
+import type { ArchiveAuditFinding, DataAccess } from "@rip-dvd/data-access";
 
 import {
   createBoundedArchiveAuditFileInspector,
@@ -10,9 +8,11 @@ import {
   type ArchiveAuditRecordReader,
 } from "./archive-audit-record-reader.js";
 import {
+  addArchiveAuditCapacityReuseSignals,
   runArchiveAudit,
   type ArchiveAuditFileInspector,
 } from "./archive-audit.js";
+import { runDurableWorkPoller } from "./durable-work-poller.js";
 import {
   recordArchiveAuditPollIncident,
   recordArchiveClaimRecoveryIncident,
@@ -82,6 +82,7 @@ export async function pollArchiveAudit({
         clearInterval(heartbeat);
       }
     }, 5_000);
+    const retainedFindings: ArchiveAuditFinding[] = [];
     try {
       const page = await dependencies.readRecords(
         databasePath,
@@ -100,6 +101,7 @@ export async function pollArchiveAudit({
         fileInspector: dependencies.createFileInspector(claim.bounds.fileTimeoutMs),
         signal: controller.signal,
         onFinding: (finding, index) => {
+          retainedFindings[index] = finding;
           access.archiveAudits.recordFinding(claim, { finding, index });
         },
       });
@@ -109,7 +111,12 @@ export async function pollArchiveAudit({
       });
     } catch {
       if (runtimeTimedOut) {
-        access.archiveAudits.completeIncomplete(claim, "runtime_timeout");
+        const findings = retainedFindings.filter((finding) => finding !== undefined);
+        addArchiveAuditCapacityReuseSignals(findings);
+        access.archiveAudits.completeIncomplete(claim, {
+          findings,
+          reason: "runtime_timeout",
+        });
       } else {
         access.archiveAudits.fail(claim);
       }
@@ -134,17 +141,12 @@ export async function runArchiveAuditWorker(input: {
   log(message: string): void;
   signal: AbortSignal;
 }): Promise<void> {
-  while (!input.signal.aborted) {
-    try {
-      const handled = await pollArchiveAudit(input);
-      if (handled) continue;
-    } catch {
-      input.log("Archive audit worker poll failed.");
-    }
-    try {
-      await delay(input.intervalMs, undefined, { signal: input.signal });
-    } catch {
-      if (!input.signal.aborted) throw new Error("Archive audit worker wait failed");
-    }
-  }
+  await runDurableWorkPoller({
+    intervalMs: input.intervalMs,
+    signal: input.signal,
+    log: input.log,
+    poll: () => pollArchiveAudit(input),
+    pollFailureMessage: "Archive audit worker poll failed.",
+    waitFailureMessage: "Archive audit worker wait failed",
+  });
 }

@@ -241,6 +241,89 @@ it("submits a bounded archive audit and observes its retained findings after rec
     ...args.slice(0, 3), "--limit", "2", "--concurrency", "1",
     "--file-timeout-ms", "4000", "--runtime-timeout-ms", "9000",
   ])).result).toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
+
+  const partialSubmission = await current.run([
+    "submit-archive-audit", "--key", "synthetic-partial-archive-audit-key",
+    "--limit", "2", "--concurrency", "1",
+    "--file-timeout-ms", "4000", "--runtime-timeout-ms", "25",
+  ]);
+  const partialId = (partialSubmission.result as {
+    archiveAuditRun: { id: string };
+  }).archiveAuditRun.id;
+  const page = records.readArchiveAuditRecords(current.databasePath, 1) as {
+    records: Array<Record<string, unknown>>;
+  };
+  const firstRecord = page.records[0]!;
+  const partialWorkerAccess = current.openAccess();
+  let partialInspection = 0;
+  expect(await archiveAuditWorker.pollArchiveAudit({
+    access: partialWorkerAccess,
+    databasePath: current.databasePath,
+    originalsLibraryPath: current.originalsLibraryPath,
+    dependencies: {
+      readRecords: async () => ({
+        records: [firstRecord, {
+          ...firstRecord,
+          archiveId: "archive-synthetic-pending",
+          detectedDiscId: "disc-synthetic-pending",
+          discInspectionId: "inspection-synthetic-pending",
+          mediaGeneration: "generation-synthetic-pending",
+        }],
+        truncated: true,
+      }),
+      createFileInspector: () => ({
+        inspect(_path: string, _root: string, signal: AbortSignal) {
+          partialInspection += 1;
+          if (partialInspection === 1) {
+            return Promise.resolve({
+              actualSizeBytes: null, geometry: null, outcome: "missing_file",
+            });
+          }
+          return new Promise((_, reject) => {
+            signal.addEventListener(
+              "abort",
+              () => reject(signal.reason),
+              { once: true },
+            );
+          });
+        },
+      }),
+    },
+  })).toBe(true);
+  partialWorkerAccess.close();
+
+  expect((await current.run([
+    "wait", "archive-audits", partialId, "--timeout-ms", "0",
+  ])).result).toMatchObject({
+    outcome: "settled",
+    current: {
+      id: partialId,
+      status: "completed",
+      resultStatus: "incomplete",
+      incompleteReason: "runtime_timeout",
+      truncated: true,
+      progress: { phase: "completed", recordCount: 2, recordsProcessed: 1 },
+      findings: [{
+        archiveId: archive.id,
+        classification: "missing_file",
+        diagnosticDetails: expect.arrayContaining([
+          { kind: "original-disc-archives", id: archive.id },
+        ]),
+        availableActions: [expect.objectContaining({
+          name: "submit-filesystem-verification",
+          effect: "read_only_inspection",
+        })],
+      }],
+    },
+  });
+  expect((await current.run(["inspect", "archive-audits", partialId])).result)
+    .toMatchObject({ item: {
+      id: partialId,
+      resultStatus: "incomplete",
+      incompleteReason: "runtime_timeout",
+      progress: { recordCount: 2, recordsProcessed: 1 },
+      findings: [{ archiveId: archive.id, classification: "missing_file" }],
+    } });
 });
 
 it("reports deployment readiness from persisted Optical Drive and Disc Inspection state", async () => {

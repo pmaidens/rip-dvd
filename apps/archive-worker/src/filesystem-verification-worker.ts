@@ -1,6 +1,5 @@
-import { setTimeout as delay } from "node:timers/promises";
-
 import type { DataAccess } from "@rip-dvd/data-access";
+import { runDurableWorkPoller } from "./durable-work-poller.js";
 import {
   recordArchiveClaimRecoveryIncident,
   recordFilesystemVerificationPollIncident,
@@ -61,17 +60,12 @@ export async function runFilesystemVerificationWorker(input: {
   log(message: string): void;
   signal: AbortSignal;
 }): Promise<void> {
-  while (!input.signal.aborted) {
-    try {
-      const handled = await pollFilesystemVerification(input.access, input.log);
-      if (handled) continue;
-    } catch {
-      input.log("Filesystem verification worker poll failed.");
-    }
-    try {
-      await delay(input.intervalMs, undefined, { signal: input.signal });
-    } catch {
-      if (!input.signal.aborted) throw new Error("Verification worker wait failed");
-    }
-  }
+  await runDurableWorkPoller({
+    intervalMs: input.intervalMs,
+    signal: input.signal,
+    log: input.log,
+    poll: () => pollFilesystemVerification(input.access, input.log),
+    pollFailureMessage: "Filesystem verification worker poll failed.",
+    waitFailureMessage: "Verification worker wait failed",
+  });
 }

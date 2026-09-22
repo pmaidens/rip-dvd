@@ -44,7 +44,7 @@ it("retains partial findings and marks a bounded runtime result incomplete", asy
     const submitted = access.archiveAudits.submit({
       mutationKey: "synthetic-partial-archive-audit",
       bounds: {
-        recordLimit: 2,
+        recordLimit: 3,
         concurrency: 1,
         fileTimeoutMs: 5_000,
         runtimeTimeoutMs: 25,
@@ -58,17 +58,21 @@ it("retains partial findings and marks a bounded runtime result incomplete", asy
       originalsLibraryPath: directory,
       dependencies: {
         readRecords: async () => ({
-          records: [auditRecord("one"), auditRecord("two")],
+          records: [auditRecord("one"), auditRecord("two"), auditRecord("three")],
           truncated: true,
         }),
         createFileInspector: () => ({
           inspect(_path, _root, signal) {
             inspection += 1;
-            if (inspection === 1) {
+            if (inspection <= 2) {
               return Promise.resolve({
-                actualSizeBytes: null,
-                geometry: null,
-                outcome: "missing_file" as const,
+                actualSizeBytes: 2_048,
+                geometry: {
+                  imageSectorCount: 1,
+                  isoVolumeSectorCount: null,
+                  udfMaximumDeclaredSectorCount: null,
+                },
+                outcome: "ok" as const,
               });
             }
             return new Promise((_, reject) => {
@@ -82,16 +86,23 @@ it("retains partial findings and marks a bounded runtime result incomplete", asy
     expect(access.archiveAudits.find(submitted.id)).toMatchObject({
       status: "completed",
       progressPhase: "completed",
-      recordCount: 2,
-      recordsProcessed: 1,
+      recordCount: 3,
+      recordsProcessed: 2,
       truncated: true,
       resultStatus: "incomplete",
       incompleteReason: "runtime_timeout",
-      findings: [{
-        archiveId: "archive-one",
-        classification: "missing_file",
-        reason: "archive_file_is_missing",
-      }],
+      findings: [
+        {
+          archiveId: "archive-one",
+          classification: "suspicious_capacity_reuse",
+          reason: "distinct_media_generations_reused_exact_capacity",
+        },
+        {
+          archiveId: "archive-two",
+          classification: "suspicious_capacity_reuse",
+          reason: "distinct_media_generations_reused_exact_capacity",
+        },
+      ],
     });
   } finally {
     access.close();

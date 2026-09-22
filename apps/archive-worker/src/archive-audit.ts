@@ -202,7 +202,9 @@ function primaryResult(
   };
 }
 
-function addCapacityReuseSignals(findings: ArchiveAuditFinding[]): void {
+export function addArchiveAuditCapacityReuseSignals(
+  findings: ArchiveAuditFinding[],
+): void {
   const groups = new Map<string, ArchiveAuditFinding[]>();
   for (const finding of findings) {
     const capacityBytes = finding.discInspectionCapacityBytes ??
@@ -324,7 +326,7 @@ export async function runArchiveAudit({
   await Promise.all(
     Array.from({ length: Math.min(concurrency, records.length) }, worker),
   );
-  addCapacityReuseSignals(findings);
+  addArchiveAuditCapacityReuseSignals(findings);
 
   const counts = countArchiveAuditFindings(findings);
   return {

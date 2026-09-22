@@ -1615,7 +1615,10 @@ export interface ArchiveAuditAccess {
   ): ArchiveAuditRun;
   completeIncomplete(
     claim: ArchiveAuditRunSummary,
-    reason: ArchiveAuditIncompleteReason,
+    input: {
+      findings: readonly ArchiveAuditFinding[];
+      reason: ArchiveAuditIncompleteReason;
+    },
   ): ArchiveAuditRun;
   fail(claim: ArchiveAuditRunSummary): ArchiveAuditRun | null;
 }
