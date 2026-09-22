@@ -65,6 +65,8 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
+  window.localStorage.clear();
+  vi.stubGlobal("confirm", vi.fn(() => true));
 });
 
 afterEach(async () => {
@@ -80,6 +82,25 @@ function stubDeferredCatalogReviewRequests(): PendingRequest[] {
       requests.push({ url: String(input), resolve });
     })));
   return requests;
+}
+
+function availableDiscSelectionPreview(
+  catalogRevision: string,
+  affectedEncodeJobs: readonly { id: string; status: string }[] = [],
+) {
+  return {
+    state: "available",
+    catalogRevision,
+    previewToken: "preview-token",
+    affectedEncodeJobs,
+    consequences: {
+      currentSelection: "superseded",
+      createsReplacementSelection: true,
+      requestsEncodeJobCancellation: affectedEncodeJobs.map((job) => job.id),
+      preservesEncodeJobHistory: affectedEncodeJobs.length > 0,
+      reopensCatalogReview: true,
+    },
+  };
 }
 
 function catalogReview({
@@ -745,8 +766,7 @@ describe("CatalogReviewEditor", () => {
         const body = JSON.parse(String(init.body)) as Record<string, unknown>;
         postedCommands.push(body);
         if (body.preview === true) {
-          return Response.json({ state: "available", catalogRevision: review.catalogRevision,
-            previewToken: "preview-token" });
+          return Response.json(availableDiscSelectionPreview(review.catalogRevision));
         }
         return Response.json({});
       }
@@ -805,6 +825,9 @@ describe("CatalogReviewEditor", () => {
         expectedCatalogRevision: review.catalogRevision, previewToken: "preview-token",
         acknowledge: true },
     ]);
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining(
+      "Current selection will be superseded.\nA replacement Disc Selection will be created.\nNo active Encode Jobs are affected.",
+    ));
   });
 
   it("updates a job-free Disc Selection without resubmitting unchanged source or label values", async () => {
@@ -1975,14 +1998,15 @@ describe("CatalogReviewView", () => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       postedBodies.push(body);
       if (body.preview === true) {
-        return Response.json({ state: "available",
-          catalogRevision: "2026-08-11T06:00:00.000Z", previewToken: "preview-token" });
+        return Response.json(availableDiscSelectionPreview("2026-08-11T06:00:00.000Z"));
       }
       return Response.json({});
     };
 
     for (const action of CATALOG_REVIEW_COMMAND_ACTIONS) {
-      await mutateCatalogReview("archive-1", commands[action], fetcher);
+      await mutateCatalogReview("archive-1", commands[action], fetcher, {
+        confirmDiscSelectionPreview: () => true,
+      });
     }
 
     const consequential = new Set(["repair_disc_selection", "correct_disc_selection",

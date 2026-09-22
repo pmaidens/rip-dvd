@@ -262,6 +262,23 @@ const DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
 const ENCODE_JOB_FAILURE_REPORT_JOB_LIMIT = 400;
 
+function discSelectionMutationEvidence(
+  jobs: readonly { id: EncodeJobId; status: EncodeJobStatus }[],
+) {
+  const affectedEncodeJobs = jobs
+    .filter((job) => job.status === "queued" || job.status === "running" ||
+      job.status === "cancellation_requested")
+    .sort((left, right) => left.id.localeCompare(right.id));
+  return {
+    affectedEncodeJobs,
+    historicalEncodeJobCount: jobs.length,
+    evidenceHash: createHash("sha256").update(JSON.stringify({
+      affectedEncodeJobs,
+      historicalEncodeJobCount: jobs.length,
+    })).digest("hex"),
+  };
+}
+
 interface EncodeJobAttemptFailureOptions extends EncodeJobFailureOptions {
   failureReports?: readonly ValidatedEncodeJobFailureReportInput[];
 }
@@ -4556,15 +4573,8 @@ export function createDataAccessInternal(
             const jobs = transaction.select({ id: encodeJobs.id, status: encodeJobs.status })
               .from(encodeJobs)
               .where(eq(encodeJobs.discSelectionId, mutation.discSelectionId))
-              .orderBy(asc(encodeJobs.id))
               .all();
-            const affectedEncodeJobs = jobs.filter((job) =>
-              job.status === "queued" || job.status === "running" ||
-              job.status === "cancellation_requested");
-            const evidenceHash = createHash("sha256").update(JSON.stringify({
-              affectedEncodeJobs,
-              historicalEncodeJobCount: jobs.length,
-            })).digest("hex");
+            const { evidenceHash } = discSelectionMutationEvidence(jobs);
             if (evidenceHash !== expectedPreviewEvidenceHash) {
               throw new DomainInvariantError(
                 "Disc Selection preview is stale because Encode Job history changed",
@@ -7155,14 +7165,13 @@ export function createDataAccessInternal(
           }
           const jobs = transaction.select({ id: encodeJobs.id, status: encodeJobs.status })
             .from(encodeJobs).where(eq(encodeJobs.discSelectionId, discSelectionId))
-            .orderBy(asc(encodeJobs.id)).all();
+            .all();
+          const evidence = discSelectionMutationEvidence(jobs);
           return {
             catalogRevision: archive.updatedAt.toISOString(),
             discSelection: selection,
             actionAvailability: availability,
-            affectedEncodeJobs: jobs.filter((job) =>
-              job.status === "queued" || job.status === "running" || job.status === "cancellation_requested"),
-            historicalEncodeJobCount: jobs.length,
+            ...evidence,
           };
         });
       },

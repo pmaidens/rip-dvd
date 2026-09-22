@@ -59,6 +59,7 @@ import { EncodeOutputValidationError } from "../../encode-worker/src/encode-outp
 import {
   pollArchiveWorkerForTest as pollArchiveWorker,
 } from "../test/archive-job-fixture";
+import { previewAndApplyDiscSelection } from "../test/disc-selection-mutation";
 import { createArchiveRequestsRoute } from "../app/api/archive-requests/route";
 import { createCatalogReviewRoute } from "../app/api/catalog-reviews/[id]/route";
 import { createMediaItemSearchRoute } from "../app/api/media-items/route";
@@ -126,37 +127,12 @@ function createMutationRequest(path: string, body: unknown): Request {
   });
 }
 
-let catalogSelectionMutationKeyIndex = 0;
-
-async function previewAndApplyCatalogSelection(
+function invokeCatalogSelectionMutation(
   access: DataAccess,
   archiveId: string,
-  command: Record<string, unknown>,
 ) {
-  const previewResponse = await createCatalogReviewRoute(
-    createMutationRequest(`/api/catalog-reviews/${archiveId}`, { ...command, preview: true }),
-    archiveId,
-    () => access,
-    () => trustedOrigin,
-  );
-  const preview = await previewResponse.json() as {
-    state: string;
-    catalogRevision?: string;
-    previewToken?: string;
-  };
-  if (previewResponse.status !== 200 || preview.state !== "available" ||
-      !preview.catalogRevision || !preview.previewToken) {
-    throw new Error("Expected available Disc Selection preview");
-  }
-  catalogSelectionMutationKeyIndex += 1;
-  return createCatalogReviewRoute(
-    createMutationRequest(`/api/catalog-reviews/${archiveId}`, {
-      ...command,
-      mutationKey: `00000000-0000-4000-8000-${String(catalogSelectionMutationKeyIndex).padStart(12, "0")}`,
-      expectedCatalogRevision: preview.catalogRevision,
-      previewToken: preview.previewToken,
-      acknowledge: true,
-    }),
+  return (body: Record<string, unknown>) => createCatalogReviewRoute(
+    createMutationRequest(`/api/catalog-reviews/${archiveId}`, body),
     archiveId,
     () => access,
     () => trustedOrigin,
@@ -1585,7 +1561,7 @@ describe("end-to-end operations dashboard workflow", () => {
       expect.objectContaining({ id: job.id, status: "running" }),
     ]);
 
-    const response = await previewAndApplyCatalogSelection(access, archive.id, {
+    const response = await previewAndApplyDiscSelection(invokeCatalogSelectionMutation(access, archive.id), {
         action: "correct_disc_selection",
         discSelectionId: selection.id,
         catalogRevision: access.catalog.listOriginalDiscArchives({
@@ -2527,7 +2503,7 @@ describe("end-to-end operations dashboard workflow", () => {
       mediaItem: { id: string };
       discSelection: { id: string };
     };
-    const removeMistakenSelection = await previewAndApplyCatalogSelection(access, archive.id, {
+    const removeMistakenSelection = await previewAndApplyDiscSelection(invokeCatalogSelectionMutation(access, archive.id), {
       action: "delete_disc_selection",
       discSelectionId: mistakenProposal.discSelection.id,
     });
@@ -2892,7 +2868,7 @@ describe("end-to-end operations dashboard workflow", () => {
     });
     const correctedSourceItem = (await correctedSourceItemResponse.json())
       .mediaItem as { id: string };
-    const correctionResponse = await previewAndApplyCatalogSelection(access, archive.id, {
+    const correctionResponse = await previewAndApplyDiscSelection(invokeCatalogSelectionMutation(access, archive.id), {
       action: "correct_disc_selection",
       discSelectionId: selection.id,
       catalogRevision: access.catalog.listOriginalDiscArchives({

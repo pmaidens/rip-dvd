@@ -602,6 +602,7 @@ export interface DiscSelectionMutationPreview {
   actionAvailability: DiscSelectionActionAvailability;
   affectedEncodeJobs: readonly { id: EncodeJobId; status: EncodeJobStatus }[];
   historicalEncodeJobCount: number;
+  evidenceHash: string;
 }
 
 export interface CreateMediaItemInput {

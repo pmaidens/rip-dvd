@@ -27,10 +27,13 @@ import {
   withSnapshotOverrides,
 } from "../../../../test/data-access-fixture";
 import { startArchiveJob } from "../../../../test/archive-job-fixture";
+import {
+  acknowledgedDiscSelectionCommand,
+  previewAndApplyDiscSelection,
+} from "../../../../test/disc-selection-mutation";
 import { createCatalogReviewRoute } from "./route";
 
 const dataAccessFixture = useDataAccessFixture();
-let discSelectionMutationKeyIndex = 0;
 
 function postCatalogReview(
   access: DataAccess,
@@ -53,40 +56,11 @@ function postCatalogReview(
   );
 }
 
-async function discSelectionApplication(
+function invokeDiscSelectionMutation(
   access: DataAccess,
   archiveId: string,
-  command: Record<string, unknown>,
 ) {
-  const previewResponse = await postCatalogReview(access, archiveId, {
-    ...command, preview: true,
-  });
-  const preview = await previewResponse.json() as {
-    state: string;
-    catalogRevision?: string;
-    previewToken?: string;
-  };
-  if (previewResponse.status !== 200 || preview.state !== "available" ||
-      !preview.catalogRevision || !preview.previewToken) {
-    throw new Error("Expected an available Disc Selection preview");
-  }
-  discSelectionMutationKeyIndex += 1;
-  return {
-    ...command,
-    mutationKey: `00000000-0000-4000-8000-${String(discSelectionMutationKeyIndex).padStart(12, "0")}`,
-    expectedCatalogRevision: preview.catalogRevision,
-    previewToken: preview.previewToken,
-    acknowledge: true,
-  };
-}
-
-async function previewAndApplyDiscSelection(
-  access: DataAccess,
-  archiveId: string,
-  command: Record<string, unknown>,
-) {
-  return postCatalogReview(access, archiveId,
-    await discSelectionApplication(access, archiveId, command));
+  return (body: Record<string, unknown>) => postCatalogReview(access, archiveId, body);
 }
 
 function keyedMediaItemBody(body: unknown, access: DataAccess): unknown {
@@ -1137,7 +1111,7 @@ describe("Catalog Review API", () => {
         `Disc Selection ${mistakenSelection.id} cannot be updated because Encode Job history must keep its provenance (job ${completed.id})`,
     });
 
-    const correctionResponse = await previewAndApplyDiscSelection(access, archive.id, {
+    const correctionResponse = await previewAndApplyDiscSelection(invokeDiscSelectionMutation(access, archive.id), {
       action: "correct_disc_selection",
       discSelectionId: mistakenSelection.id,
       catalogRevision,
@@ -1309,7 +1283,7 @@ describe("Catalog Review API", () => {
     );
 
     completeCatalogReview(access, archive.id);
-    const secondCorrectionResponse = await previewAndApplyDiscSelection(access, archive.id, {
+    const secondCorrectionResponse = await previewAndApplyDiscSelection(invokeDiscSelectionMutation(access, archive.id), {
       action: "correct_disc_selection",
       discSelectionId: correctionBody.discSelection.id,
       catalogRevision: access.catalog.listOriginalDiscArchives({
@@ -1374,7 +1348,7 @@ describe("Catalog Review API", () => {
       }),
     ]);
 
-    const deleteResponse = await previewAndApplyDiscSelection(access, archive.id, {
+    const deleteResponse = await previewAndApplyDiscSelection(invokeDiscSelectionMutation(access, archive.id), {
       action: "delete_disc_selection",
       discSelectionId: secondCorrection.discSelection.id,
     });
@@ -2047,7 +2021,7 @@ describe("Catalog Review API", () => {
     expect(await unacknowledgedRepair.json()).toEqual({
       error: "Invalid Disc Selection mutation key",
     });
-    const repairApplication = await discSelectionApplication(access, archive.id, repairCommand);
+    const repairApplication = await acknowledgedDiscSelectionCommand(invokeDiscSelectionMutation(access, archive.id), repairCommand);
     const repairResponse = await postCatalogReview(access, archive.id, repairApplication);
     expect(repairResponse.status).toBe(200);
     const repairOutcome = await repairResponse.json();
@@ -2956,7 +2930,7 @@ describe("Catalog Review API", () => {
       () => access,
       () => "http://localhost:3000",
     );
-    const removeSelectionResponse = await previewAndApplyDiscSelection(access, archive.id, {
+    const removeSelectionResponse = await previewAndApplyDiscSelection(invokeDiscSelectionMutation(access, archive.id), {
       action: "delete_disc_selection",
       discSelectionId: selection.id,
     });
@@ -3330,7 +3304,7 @@ describe("Catalog Review API", () => {
       })[0]!.updatedAt.toISOString(),
       outcome: "reviewed_with_selections",
     })).status).toBe(200);
-    const deleteResponse = await previewAndApplyDiscSelection(access, archive.id, {
+    const deleteResponse = await previewAndApplyDiscSelection(invokeDiscSelectionMutation(access, archive.id), {
       action: "delete_disc_selection",
       discSelectionId: firstSelection.id,
     });

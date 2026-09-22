@@ -46,19 +46,30 @@ function blockedReason(command: PreviewSelectionCommand, reason: string | null):
   return "This Disc Selection action is unavailable";
 }
 
-export function previewDiscSelection(
+function readDiscSelectionPreview(
   access: DataAccess,
   archiveId: OriginalDiscArchiveId,
   selectionId: DiscSelectionId,
 ) {
   const preview = access.catalog.previewDiscSelectionMutation(archiveId, selectionId);
   return {
-    catalogRevision: preview.catalogRevision,
-    discSelection: serializeDiscSelection(preview.discSelection),
-    actionAvailability: preview.actionAvailability,
-    affectedEncodeJobs: preview.affectedEncodeJobs,
-    historicalEncodeJobCount: preview.historicalEncodeJobCount,
+    details: {
+      catalogRevision: preview.catalogRevision,
+      discSelection: serializeDiscSelection(preview.discSelection),
+      actionAvailability: preview.actionAvailability,
+      affectedEncodeJobs: preview.affectedEncodeJobs,
+      historicalEncodeJobCount: preview.historicalEncodeJobCount,
+    },
+    evidenceHash: preview.evidenceHash,
   };
+}
+
+export function previewDiscSelection(
+  access: DataAccess,
+  archiveId: OriginalDiscArchiveId,
+  selectionId: DiscSelectionId,
+) {
+  return readDiscSelectionPreview(access, archiveId, selectionId).details;
 }
 
 function discSelectionMutation(
@@ -121,20 +132,6 @@ function previewToken(
   }`;
 }
 
-function previewEvidence(current: ReturnType<typeof previewDiscSelection>) {
-  return {
-    affectedEncodeJobs: [...current.affectedEncodeJobs]
-      .sort((left, right) => left.id.localeCompare(right.id)),
-    historicalEncodeJobCount: current.historicalEncodeJobCount,
-  };
-}
-
-type PreviewEvidence = ReturnType<typeof previewEvidence>;
-
-function previewEvidenceHash(evidence: PreviewEvidence): string {
-  return createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
-}
-
 function evidenceHashFromPreviewToken(token: string): string | null {
   const [encoded, digest, extra] = token.split(".");
   if (!encoded || !digest || extra !== undefined || !/^[a-f0-9]{64}$/.test(digest)) return null;
@@ -157,7 +154,10 @@ export function previewDiscSelectionChange(
   if (command.action === "create_disc_selection") {
     throw new DomainInvariantError("Disc Selection creation does not require a preview");
   }
-  const current = previewDiscSelection(access, archiveId, command.discSelectionId as DiscSelectionId);
+  const preview = readDiscSelectionPreview(
+    access, archiveId, command.discSelectionId as DiscSelectionId,
+  );
+  const current = preview.details;
   if (!isActionAvailable(command, current.actionAvailability.availableActions)) {
     return {
       ...current,
@@ -178,13 +178,13 @@ export function previewDiscSelectionChange(
     expectedCatalogRevision: catalogRevision,
     mutation,
   });
-  const evidence = previewEvidence(current);
-  const evidenceHash = previewEvidenceHash(evidence);
   return {
     ...current,
     action: command.action,
     state: "available" as const,
-    previewToken: previewToken(archiveId, current.catalogRevision, mutation, evidenceHash),
+    previewToken: previewToken(
+      archiveId, current.catalogRevision, mutation, preview.evidenceHash,
+    ),
     proposedDiscSelection: mutation.action === "delete" ? null : {
       mediaItemId: proposed.discSelection.mediaItemId,
       sourceIdentity: proposed.discSelection.sourceIdentity,
