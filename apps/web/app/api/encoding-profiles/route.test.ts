@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { createApplicationOperations } from "@rip-dvd/application";
 
 import { useDataAccessFixture } from "../../../test/data-access-fixture";
 import { createEncodingProfilesRoute } from "./route";
 
 const dataAccessFixture = useDataAccessFixture();
 const trustedOrigin = "http://localhost";
+let nextKey = 1;
 
 function mutationRequest({
   method,
@@ -15,6 +17,16 @@ function mutationRequest({
   body: string;
   headers?: Record<string, string>;
 }): Request {
+  let submittedBody = body;
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    if (parsed && !Array.isArray(parsed) && typeof parsed === "object" && parsed.mutationKey === undefined) {
+      submittedBody = JSON.stringify({
+        ...parsed,
+        mutationKey: `synthetic-profile-mutation-${nextKey++}`,
+      });
+    }
+  } catch { /* Preserve malformed input. */ }
   return new Request(`${trustedOrigin}/api/encoding-profiles`, {
     method,
     headers: {
@@ -23,7 +35,7 @@ function mutationRequest({
       Origin: trustedOrigin,
       ...headers,
     },
-    body,
+    body: submittedBody,
   });
 }
 
@@ -64,6 +76,7 @@ describe("Encoding Profiles API", () => {
     expect(listResponse.status).toBe(200);
     expect(listResponse.headers.get("Cache-Control")).toBe("no-store");
     expect(await listResponse.json()).toEqual({
+      schemaVersion: 1,
       profiles: [
         expect.objectContaining({
           key: "dvd-library",
@@ -139,7 +152,11 @@ describe("Encoding Profiles API", () => {
     const activateResponse = await createEncodingProfilesRoute(
       mutationRequest({
         method: "PATCH",
-        body: JSON.stringify({ id: versionTwo.id, isActive: true }),
+        body: JSON.stringify({
+          id: versionTwo.id, isActive: true, acknowledge: true,
+          expectedRevision: createApplicationOperations(access)
+            .previewEncodingProfileState({ id: versionTwo.id, isActive: true }).revision,
+        }),
       }),
       () => access,
       getTrustedOrigin,
@@ -159,7 +176,11 @@ describe("Encoding Profiles API", () => {
     const deactivateResponse = await createEncodingProfilesRoute(
       mutationRequest({
         method: "PATCH",
-        body: JSON.stringify({ id: versionTwo.id, isActive: false }),
+        body: JSON.stringify({
+          id: versionTwo.id, isActive: false, acknowledge: true,
+          expectedRevision: createApplicationOperations(access)
+            .previewEncodingProfileState({ id: versionTwo.id, isActive: false }).revision,
+        }),
       }),
       () => access,
       getTrustedOrigin,
@@ -294,5 +315,91 @@ describe("Encoding Profiles API", () => {
     expect(
       access.encodingProfiles.list({ mediaDomain: "dvd_video" }),
     ).toEqual([]);
+  });
+});
+
+it("requires keys and acknowledged current previews for profile mutations", async () => {
+  const access = dataAccessFixture.create();
+  const first = access.encodingProfiles.create({
+    key: "synthetic-preview", displayName: "Synthetic preview",
+    mediaDomain: "dvd_video", settings: { preset: "Fast 480p30", container: "mkv" },
+  });
+  const second = access.encodingProfiles.createVersion({
+    sourceProfileId: first.id, mediaDomain: "dvd_video",
+    settings: { preset: "HQ 480p30 Surround", container: "mkv" },
+  });
+  const missingKey = await createEncodingProfilesRoute(new Request(trustedOrigin + "/api/encoding-profiles", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Host: "localhost", Origin: trustedOrigin },
+    body: JSON.stringify({
+      key: "missing-key", displayName: "Missing key",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    }),
+  }), () => access, getTrustedOrigin);
+  expect(missingKey.status).toBe(400);
+  const previewResponse = await createEncodingProfilesRoute(
+    new Request(`${trustedOrigin}/api/encoding-profiles?preview-profile-id=${second.id}&is-active=true`),
+    () => access, getTrustedOrigin,
+  );
+  expect(previewResponse.status).toBe(200);
+  const preview = await previewResponse.json() as {
+    revision: string; replacesActiveVersion: boolean; currentActive: { id: string };
+  };
+  expect(preview.replacesActiveVersion).toBe(true);
+  expect(preview.currentActive.id).toBe(first.id);
+  const missingAcknowledgement = await createEncodingProfilesRoute(mutationRequest({
+    method: "PATCH",
+    body: JSON.stringify({ id: second.id, isActive: true, expectedRevision: preview.revision }),
+  }), () => access, getTrustedOrigin);
+  expect(missingAcknowledgement.status).toBe(400);
+  access.encodingProfiles.setActive({ id: first.id, mediaDomain: "dvd_video", isActive: false });
+  const stale = await createEncodingProfilesRoute(mutationRequest({
+    method: "PATCH",
+    body: JSON.stringify({
+      id: second.id, isActive: true, expectedRevision: preview.revision, acknowledge: true,
+    }),
+  }), () => access, getTrustedOrigin);
+  expect(stale.status).toBe(409);
+  expect(access.encodingProfiles.list({ ids: [second.id] })[0]?.isActive).toBe(false);
+});
+
+it("keeps web preset normalization and reports queue eligibility for historical settings", async () => {
+  const access = dataAccessFixture.create();
+  const created = await createEncodingProfilesRoute(mutationRequest({
+    method: "POST",
+    body: JSON.stringify({
+      key: "synthetic-trimmed", displayName: "Synthetic trimmed",
+      settings: { preset: " Fast 480p30 ", container: "mkv" },
+    }),
+  }), () => access, getTrustedOrigin);
+  expect(created.status).toBe(201);
+  expect(await created.json()).toMatchObject({
+    profile: { settings: { preset: "Fast 480p30", container: "mkv" } },
+  });
+  const historical = access.encodingProfiles.create({
+    key: "synthetic-historical", displayName: "Synthetic historical",
+    mediaDomain: "dvd_video", settings: { preset: "Fast 480p30" },
+  });
+  const unavailable = access.encodingProfiles.create({
+    key: "synthetic-unavailable", displayName: "Synthetic unavailable",
+    mediaDomain: "dvd_video", settings: { preset: "Removed preset", container: "mp4" },
+  });
+  const listed = await createEncodingProfilesRoute(
+    new Request(`${trustedOrigin}/api/encoding-profiles`),
+    () => access, getTrustedOrigin,
+  );
+  expect(listed.status).toBe(200);
+  expect(await listed.json()).toMatchObject({
+    profiles: expect.arrayContaining([expect.objectContaining({
+      id: historical.id,
+      settings: { preset: "Fast 480p30", container: null },
+      eligibility: expect.objectContaining({ newEncodeJobs: true, blockingReasons: [] }),
+    }), expect.objectContaining({
+      id: unavailable.id,
+      eligibility: expect.objectContaining({
+        newEncodeJobs: false,
+        blockingReasons: ["unsupported_preset", "unsupported_container"],
+      }),
+    })]),
   });
 });

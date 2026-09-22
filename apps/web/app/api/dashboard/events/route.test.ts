@@ -102,7 +102,7 @@ describe("GET /api/dashboard/events", () => {
       key: "activity-profile",
       displayName: "Activity profile",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     for (let index = 0; index < 25; index += 1) {
       vi.setSystemTime(new Date(Date.UTC(2026, 6, 26, 18, 0, index)));
@@ -342,7 +342,7 @@ describe("GET /api/dashboard/events", () => {
       key: "streamed-profile",
       displayName: "DVD library",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     access.encodeJobs.enqueue({
       discSelectionId: selection.id,

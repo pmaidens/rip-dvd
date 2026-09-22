@@ -25,6 +25,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@rip-dvd/config": "workspace:*",
     "@rip-dvd/data-access": "workspace:*"
   }
 }

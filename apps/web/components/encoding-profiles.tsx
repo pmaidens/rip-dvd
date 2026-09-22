@@ -251,6 +251,11 @@ export function EncodingProfilesManager({
   const [versionSourceId, setVersionSourceId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [hasRequestError, setHasRequestError] = useState(false);
+  const pendingMutation = useRef<{
+    input: string;
+    body: Record<string, unknown>;
+    key: string;
+  } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -297,20 +302,57 @@ export function EncodingProfilesManager({
     setIsSaving(true);
     setHasRequestError(false);
     try {
+      const input = JSON.stringify({ method, body });
+      let mutationBody = pendingMutation.current?.input === input
+        ? pendingMutation.current.body : body as Record<string, unknown>;
+      if (method === "PATCH" && pendingMutation.current?.input !== input) {
+        const id = String(mutationBody.id);
+        const isActive = Boolean(mutationBody.isActive);
+        const previewResponse = await fetch(
+          `/api/encoding-profiles?preview-profile-id=${encodeURIComponent(id)}&is-active=${isActive}`,
+          { cache: "no-store" },
+        );
+        if (!previewResponse.ok) throw new Error("Encoding Profile preview failed");
+        const preview = await previewResponse.json() as {
+          revision: string;
+          profile: EncodingProfileDto;
+          currentActive: EncodingProfileDto | null;
+          replacesActiveVersion: boolean;
+        };
+        const consequence = preview.replacesActiveVersion
+          ? ` This replaces active version ${preview.currentActive?.version}.`
+          : isActive ? " This version becomes active."
+          : " New Encode Jobs cannot use this version.";
+        if (!window.confirm(
+          `${isActive ? "Activate" : "Deactivate"} ${preview.profile.displayName} version ${preview.profile.version}?${consequence}`,
+        )) return;
+        mutationBody = {
+          ...mutationBody,
+          expectedRevision: preview.revision,
+          acknowledge: true,
+        };
+      }
+      const mutationKey = pendingMutation.current?.input === input
+        ? pendingMutation.current.key : crypto.randomUUID();
+      pendingMutation.current = { input, body: mutationBody, key: mutationKey };
       const response = await fetch("/api/encoding-profiles", {
         method,
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ ...mutationBody, mutationKey }),
       });
       if (!response.ok) {
+        if (response.status === 400 || response.status === 404 || response.status === 409) {
+          pendingMutation.current = null;
+        }
         throw new Error("Encoding Profile mutation failed");
       }
       if (mounted.current) {
         onSuccess?.();
       }
+      pendingMutation.current = null;
       await load();
       if (mounted.current) {
         onChanged();

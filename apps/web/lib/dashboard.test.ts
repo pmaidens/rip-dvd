@@ -88,7 +88,7 @@ function seedEncodeJob(
     key: "enrichment-profile",
     displayName: "Enriched profile",
     mediaDomain: "dvd_video",
-    settings: {},
+    settings: { preset: "Fast 480p30" },
   });
   const job = access.encodeJobs.enqueue({
     discSelectionId: selection.id,
@@ -408,7 +408,7 @@ describe("readDashboardSnapshot", () => {
       key: "newer-history-profile",
       displayName: "Newer history profile",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     access.encodeJobs.enqueue({
       discSelectionId: selection.id,

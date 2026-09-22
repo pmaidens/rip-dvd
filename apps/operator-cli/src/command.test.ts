@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import { afterEach, expect, it, vi } from "vitest";
 import type { CatalogMetadataLookup } from "@rip-dvd/application";
@@ -10,6 +11,7 @@ import {
 } from "@rip-dvd/data-access/test-support";
 
 import { createApplicationOperations } from "@rip-dvd/application";
+import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 
 import { runCommand } from "./command.js";
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "./operator-workflow.test-support.js";
@@ -237,6 +239,12 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       "submit-archive-request",
       "catalog-review",
       "disc-selection",
+      "list-encoding-profiles",
+      "create-encoding-profile",
+      "version-encoding-profile",
+      "preview-encoding-profile-state",
+      "activate-encoding-profile",
+      "deactivate-encoding-profile",
       "health",
       "readiness",
       "inspect",
@@ -543,6 +551,19 @@ it("runs as a separate process without the web service", () => {
     error: { code: "NOT_FOUND", message: "Operational record was not found." },
   });
 
+  const profile = invoke(
+    "create-encoding-profile", "--key", "synthetic-process-profile-key-001",
+    "--profile-key", "process-example", "--display-name", "Process example",
+    "--preset", "Fast 480p30",
+  );
+  expect(profile.status).toBe(0);
+  expect(profile.stderr).toBe("");
+  const listedProfiles = invoke("list-encoding-profiles");
+  expect(listedProfiles.status).toBe(0);
+  expect(JSON.parse(listedProfiles.stdout)).toMatchObject({
+    profiles: [expect.objectContaining({ key: "process-example", isActive: true })],
+  });
+
   const invalid = invoke("health", "--invalid");
   expect(invalid.status).toBe(2);
   expect(invalid.stderr).toBe("health takes no arguments.\n");
@@ -584,6 +605,57 @@ function addScannedDisc(current: ReturnType<typeof createOperatorWorkflowFixture
   return disc.id;
 }
 
+function seedEncodeJobForProfile(
+  current: ReturnType<typeof createOperatorWorkflowFixture>,
+  profileId: string,
+) {
+  const access = createLegacySidecarDataAccess({
+    databasePath: current.databasePath,
+    mediaLibraryPath: current.mediaLibraryPath,
+    originalsLibraryPath: current.originalsLibraryPath,
+  });
+  try {
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/synthetic-profile-disc", isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "synthetic-profile-history-disc",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: join(current.originalsLibraryPath, "synthetic-history.iso"),
+      fingerprint: "synthetic-profile-history-disc",
+    });
+    const item = access.catalog.createMediaItem({ kind: "movie", title: "Synthetic history" });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    access.catalog.completeCatalogReview(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt,
+      "reviewed_with_selections",
+    );
+    const profile = access.encodingProfiles.list({ mediaDomain: "dvd_video" })
+      .find((candidate) => candidate.id === profileId);
+    if (!profile) throw new Error("Expected synthetic Encoding Profile");
+    return access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath: join(current.mediaLibraryPath, "synthetic-history.mkv"),
+    }).id;
+  } finally {
+    access.close();
+  }
+}
+
 it("generates a key without submitting work and rejects a missing key before opening SQLite", async () => {
   const current = fixture();
   const generated = await current.run(["generate-key"]);
@@ -605,6 +677,26 @@ it("generates a key without submitting work and rejects a missing key before ope
   expect(exitCode).toBe(2);
   expect(opened).toBe(false);
   expect(JSON.parse(stdout.join(""))).toMatchObject({ error: { code: "INVALID_MUTATION_KEY" } });
+});
+
+it("rejects missing Encoding Profile mutation keys before opening SQLite", async () => {
+  for (const args of [
+    ["create-encoding-profile", "--profile-key", "synthetic", "--display-name", "Synthetic", "--preset", "Fast 480p30"],
+    ["version-encoding-profile", "--source-profile-id", "synthetic-id", "--preset", "Fast 480p30"],
+    ["activate-encoding-profile", "--id", "synthetic-id", "--revision", "synthetic-revision", "--acknowledge"],
+    ["deactivate-encoding-profile", "--id", "synthetic-id", "--revision", "synthetic-revision", "--acknowledge"],
+  ]) {
+    let opened = false;
+    const stdout: string[] = [];
+    const exitCode = await runCommand(args, {
+      openAccess: () => { opened = true; throw new Error("unexpected open"); },
+      stdout: (text) => stdout.push(text),
+      stderr: () => {},
+    });
+    expect(exitCode).toBe(2);
+    expect(opened).toBe(false);
+    expect(JSON.parse(stdout.join(""))).toMatchObject({ error: { code: "INVALID_MUTATION_KEY" } });
+  }
 });
 
 it("replays the original Archive Request outcome after a lost response and restart", async () => {
@@ -684,4 +776,137 @@ it("serializes concurrent submissions from separate processes", async () => {
   expect(reader.archiveRequests.list()).toHaveLength(1);
   expect(reader.archiveJobs.list()).toEqual([]);
   reader.close();
+});
+
+it("manages Encoding Profile versions with durable replay and revision-bound state changes", async () => {
+  const current = fixture();
+  const createKey = "00000000-0000-4000-8000-000000000201";
+  const createArgs = [
+    "create-encoding-profile", "--key", createKey,
+    "--profile-key", "synthetic-dvd", "--display-name", "Synthetic DVD",
+    "--preset", "Fast 480p30",
+  ];
+  const created = await current.run(createArgs);
+  expect(created.exitCode).toBe(0);
+  const first = (created.result as { profile: { id: string } }).profile;
+  const historicalJobId = seedEncodeJobForProfile(current, first.id);
+  expect((await current.run(["list-encoding-profiles"])).result).toMatchObject({
+    schemaVersion: 1,
+    profiles: [expect.objectContaining({
+      id: first.id, version: 1, isActive: true,
+      eligibility: expect.objectContaining({ newEncodeJobs: true, blockingReasons: [] }),
+    })],
+  });
+  const changedInput = await current.run([...createArgs.slice(0, -1), "HQ 480p30 Surround"]);
+  expect(changedInput.result).toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
+  expect((await current.run([
+    "version-encoding-profile", "--key", createKey,
+    "--source-profile-id", first.id, "--preset", "HQ 480p30 Surround",
+  ])).result).toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
+
+  const versionArgs = [
+    "version-encoding-profile", "--key", "00000000-0000-4000-8000-000000000202",
+    "--source-profile-id", first.id, "--preset", "HQ 480p30 Surround",
+  ];
+  const versioned = await current.run(versionArgs);
+  expect(versioned.exitCode).toBe(0);
+  const second = (versioned.result as { profile: { id: string } }).profile;
+  expect((await current.run(versionArgs)).result).toEqual(versioned.result);
+  const oldPreview = (await current.run([
+    "preview-encoding-profile-state", "--id", first.id, "--active", "true",
+  ])).result as { revision: string };
+  const preview = (await current.run([
+    "preview-encoding-profile-state", "--id", second.id, "--active", "true",
+  ])).result as { revision: string; replacesActiveVersion: boolean };
+  expect(preview.replacesActiveVersion).toBe(true);
+  const activateArgs = [
+    "activate-encoding-profile", "--key", "00000000-0000-4000-8000-000000000203",
+    "--id", second.id, "--revision", preview.revision, "--acknowledge",
+  ];
+  expect((await current.run(activateArgs.slice(0, -1))).result).toMatchObject({
+    error: { code: "INVALID_ENCODING_PROFILE" },
+  });
+  const activated = await current.run(activateArgs);
+  expect(activated.exitCode).toBe(0);
+  expect((await current.run([
+    "activate-encoding-profile", "--key", "00000000-0000-4000-8000-000000000204",
+    "--id", first.id, "--revision", oldPreview.revision, "--acknowledge",
+  ])).result).toMatchObject({ error: { code: "STALE_PROFILE_PREVIEW" } });
+  const activeList = (await current.run(["list-encoding-profiles"])).result as {
+    profiles: Array<{ id: string; isActive: boolean; settings: { preset: string } }>;
+  };
+  expect(activeList.profiles).toEqual([
+    expect.objectContaining({ id: first.id, isActive: false, settings: { preset: "Fast 480p30", container: "mkv" } }),
+    expect.objectContaining({ id: second.id, isActive: true, settings: { preset: "HQ 480p30 Surround", container: "mkv" } }),
+  ]);
+  const deactivatePreview = (await current.run([
+    "preview-encoding-profile-state", "--id", second.id, "--active", "false",
+  ])).result as { revision: string };
+  expect((await current.run([
+    "deactivate-encoding-profile", "--key", "00000000-0000-4000-8000-000000000205",
+    "--id", second.id, "--revision", deactivatePreview.revision, "--acknowledge",
+  ])).exitCode).toBe(0);
+  expect((await current.run(activateArgs)).result).toEqual(activated.result);
+  expect((await current.run(["list-encoding-profiles"])).result).toMatchObject({
+    profiles: [
+      expect.objectContaining({ id: first.id, isActive: false }),
+      expect.objectContaining({ id: second.id, isActive: false }),
+    ],
+  });
+  const history = current.openAccess();
+  expect(history.encodeJobs.list().find((job) => job.id === historicalJobId)?.encodingProfileId)
+    .toBe(first.id);
+  expect(history.encodingProfiles.list({ mediaDomain: "dvd_video" })[0]?.settings)
+    .toEqual({ preset: "Fast 480p30", container: "mkv" });
+  history.close();
+});
+
+it("validates Encoding Profile inputs before mutation and keeps media domains separate", async () => {
+  const current = fixture();
+  const key = "00000000-0000-4000-8000-000000000206";
+  expect((await current.run([
+    "create-encoding-profile", "--key", key,
+    "--profile-key", "synthetic", "--display-name", "Synthetic",
+    "--preset", "Unsupported preset",
+  ])).result).toMatchObject({ error: { code: "INVALID_ENCODING_PROFILE" } });
+  const access = current.openAccess();
+  const audio = access.encodingProfiles.create({
+    key: "synthetic-audio", displayName: "Synthetic audio", mediaDomain: "audio",
+    settings: { codec: "flac" },
+  });
+  access.close();
+  expect((await current.run([
+    "version-encoding-profile", "--key", key,
+    "--source-profile-id", audio.id, "--preset", "Fast 480p30",
+  ])).result).toMatchObject({ error: { code: "ENCODING_PROFILE_REJECTED" } });
+  expect((await current.run(["list-encoding-profiles"])).result).toEqual({ schemaVersion: 1, profiles: [] });
+});
+
+it("serializes concurrent same-key Encoding Profile creation across CLI processes", async () => {
+  const current = fixture();
+  const entry = fileURLToPath(new URL("../dist/entry.js", import.meta.url));
+  const environment = {
+    ...process.env,
+    NODE_NO_WARNINGS: "1",
+    RIP_DVD_DATABASE_PATH: current.databasePath,
+    RIP_DVD_MEDIA_LIBRARY_PATH: current.mediaLibraryPath,
+    RIP_DVD_ORIGINALS_LIBRARY_PATH: current.originalsLibraryPath,
+  };
+  const invoke = () => new Promise<{ status: number | null; stdout: string }>((resolve) => {
+    const child = spawn(process.execPath, [entry,
+      "create-encoding-profile", "--key", "synthetic-concurrent-profile-key-001",
+      "--profile-key", "concurrent-synthetic", "--display-name", "Concurrent synthetic",
+      "--preset", "Fast 480p30",
+    ], { env: environment });
+    let stdout = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+    child.on("close", (status) => resolve({ status, stdout }));
+  });
+  const [first, second] = await Promise.all([invoke(), invoke()]);
+  expect(first.status).toBe(0);
+  expect(second.status).toBe(0);
+  expect(JSON.parse(first.stdout)).toEqual(JSON.parse(second.stdout));
+  expect((await current.run(["list-encoding-profiles"])).result).toMatchObject({
+    profiles: [expect.objectContaining({ key: "concurrent-synthetic" })],
+  });
 });

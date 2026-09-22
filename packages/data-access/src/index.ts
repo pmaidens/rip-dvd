@@ -36,6 +36,14 @@ export type {
 } from "./archive-boundary.js";
 export { normalizeMediaItemSearchTitle } from "./media-item-title-search.js";
 export {
+  encodingProfileQueueBlockingReasons,
+  encodingProfileSettingsBlockingReasons,
+} from "./encoding-profile-eligibility.js";
+export type {
+  EncodingProfileQueueBlockingReason,
+  EncodingProfileSettingsBlockingReason,
+} from "./encoding-profile-eligibility.js";
+export {
   ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH,
   validateEncodeQueueSearchQuery,
 } from "./encode-queue-search.js";

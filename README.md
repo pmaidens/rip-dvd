@@ -1301,8 +1301,38 @@ profiles are active, new versions start inactive, activating a version
 atomically deactivates its sibling version, and the active version may be
 deactivated without selecting a replacement. The web API exposes the same
 workflow at `GET`, `POST`, and `PATCH /api/encoding-profiles`; it is fixed to
-the `dvd_video` media domain while the shared facade requires explicit domain
-scope for version and activation commands.
+the `dvd_video` media domain. Data-access methods scope version and activation
+commands to an explicit media domain.
+
+The operator CLI covers these DVD video profile workflows:
+
+```bash
+rip-dvd-operator list-encoding-profiles
+rip-dvd-operator create-encoding-profile --key <mutation-key> \
+  --profile-key dvd-example --display-name "DVD example" --preset "Fast 480p30"
+rip-dvd-operator version-encoding-profile --key <mutation-key> \
+  --source-profile-id <profile-id> --preset "HQ 480p30 Surround"
+rip-dvd-operator preview-encoding-profile-state --id <profile-id> --active true
+rip-dvd-operator activate-encoding-profile --key <mutation-key> \
+  --id <profile-id> --revision <preview-revision> --acknowledge
+rip-dvd-operator preview-encoding-profile-state --id <profile-id> --active false
+rip-dvd-operator deactivate-encoding-profile --key <mutation-key> \
+  --id <profile-id> --revision <preview-revision> --acknowledge
+```
+
+Use a fresh mutation key for each requested change. Reuse that key with the
+same inputs after a lost response to recover the original result. Reusing it
+for another operation or changed inputs returns `MUTATION_KEY_CONFLICT`.
+Listing includes every DVD video version, its settings, timestamps, and new
+Encode Job eligibility. A state preview identifies the current active version
+and whether activation replaces it. The revision is tied to the target,
+requested state, and current versions. If another change occurs after preview,
+the state command returns `STALE_PROFILE_PREVIEW`; preview again and use a new
+mutation key. The web controls use the same mutation and preview rules.
+For API callers, `POST` accepts `mutationKey` with either `key`, `displayName`,
+and `settings`, or `sourceProfileId` and `settings`. `GET` with
+`preview-profile-id` and `is-active` returns a state preview. `PATCH` requires
+`mutationKey`, `id`, `isActive`, `expectedRevision`, and `acknowledge: true`.
 
 ### Queue Encode Jobs
 

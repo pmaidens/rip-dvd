@@ -106,7 +106,7 @@ export function seedCatalogReviewForReadFixture(
       key: "synthetic-review-profile",
       displayName: "Synthetic review profile",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     access.encodeJobs.enqueue({
       discSelectionId: previousSelection.id,

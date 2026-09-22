@@ -2,6 +2,7 @@ import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
   discSelectionSourceDescription,
+  encodingProfileQueueBlockingReasons,
   InvalidStatusTransitionError,
   RecordNotFoundError,
   validateEncodeQueueSearchQuery,
@@ -11,6 +12,7 @@ import {
   type EncodeQueueHistoryGroup,
   type EncodeJob,
   type EncodeJobId,
+  type EncodingProfile,
   type EncodingProfileId,
 } from "@rip-dvd/data-access";
 
@@ -29,6 +31,10 @@ export const runtime = "nodejs";
 
 const ENCODE_SELECTION_PAGE_SIZE = 100;
 const ENCODE_PROFILE_PAGE_SIZE = 100;
+
+function isQueueEligibleProfile(profile: EncodingProfile): boolean {
+  return encodingProfileQueueBlockingReasons(profile).length === 0;
+}
 
 interface EncodeJobsRuntimeConfig {
   mediaLibraryPath: string;
@@ -155,7 +161,7 @@ function readQueueOptions(
         ids: [encodingProfileId],
         mediaDomain: "dvd_video",
         activeOnly: true,
-      }).length !== 1
+      }).filter(isQueueEligibleProfile).length !== 1
     ) {
       throw new RecordNotFoundError(
         "active DVD video Encoding Profile",
@@ -170,12 +176,21 @@ function readQueueOptions(
       offset: selectionOffset,
     });
     const selections = selectionPage.selections.map(({ selection }) => selection);
-    const profileRecords = snapshot.encodingProfiles.list({
-      mediaDomain: "dvd_video",
-      activeOnly: true,
-      limit: ENCODE_PROFILE_PAGE_SIZE + 1,
-      offset: profileOffset,
-    });
+    const eligibleProfiles: EncodingProfile[] = [];
+    for (let offset = 0; eligibleProfiles.length <= profileOffset + ENCODE_PROFILE_PAGE_SIZE;
+      offset += ENCODE_PROFILE_PAGE_SIZE) {
+      const batch = snapshot.encodingProfiles.list({
+        mediaDomain: "dvd_video",
+        activeOnly: true,
+        limit: ENCODE_PROFILE_PAGE_SIZE,
+        offset,
+      });
+      eligibleProfiles.push(...batch.filter(isQueueEligibleProfile));
+      if (batch.length < ENCODE_PROFILE_PAGE_SIZE) break;
+    }
+    const profileRecords = eligibleProfiles.slice(
+      profileOffset, profileOffset + ENCODE_PROFILE_PAGE_SIZE + 1,
+    );
     const hasNextProfile = profileRecords.length > ENCODE_PROFILE_PAGE_SIZE;
     const profiles = profileRecords.slice(0, ENCODE_PROFILE_PAGE_SIZE);
     const mediaItemIds = [
@@ -277,7 +292,7 @@ function resolveQueueLogicalJobs(
         ids: [encodingProfileId],
         mediaDomain: "dvd_video",
         activeOnly: true,
-      }).length !== 1
+      }).filter(isQueueEligibleProfile).length !== 1
     ) {
       throw new RecordNotFoundError(
         "active DVD video Encoding Profile",

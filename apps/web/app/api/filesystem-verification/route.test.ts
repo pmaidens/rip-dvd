@@ -47,7 +47,7 @@ function createVerificationRecords() {
     key: "api-verification",
     displayName: "API verification",
     mediaDomain: "dvd_video",
-    settings: {},
+    settings: { preset: "Fast 480p30" },
   });
   const job = access.encodeJobs.enqueue({
     discSelectionId: selection.id,
@@ -78,7 +78,7 @@ describe("Filesystem Verification API", () => {
         key: `verification-history-${index}`,
         displayName: `Verification history ${index}`,
         mediaDomain: "dvd_video",
-        settings: { index },
+        settings: { preset: "Fast 480p30", index },
       });
       jobs.push(
         access.encodeJobs.enqueue({

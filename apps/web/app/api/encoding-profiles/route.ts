@@ -1,21 +1,15 @@
-import type {
-  DataAccess,
-  EncodingProfileId,
-} from "@rip-dvd/data-access";
-import { isHandBrakePreset, loadConfig } from "@rip-dvd/config";
+import { createApplicationOperations, InvalidMutationKeyError, InvalidProfileInputError } from "@rip-dvd/application";
+import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
+  MutationKeyConflictError,
   RecordNotFoundError,
+  type DataAccess,
 } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../lib/data-access";
-import {
-  trustedMutationRequestProblem,
-} from "../../../lib/server/trusted-mutation-request";
-import {
-  toEncodingProfileDto,
-  type DvdVideoEncodingSettings,
-} from "../../../lib/encoding-profiles";
+import { trustedMutationRequestProblem } from "../../../lib/server/trusted-mutation-request";
+
 export const dynamic = "force-dynamic";
 
 function response(body: unknown, status = 200): Response {
@@ -27,30 +21,7 @@ function response(body: unknown, status = 200): Response {
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function requiredString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0
-    ? value.trim()
-    : null;
-}
-
-function parseDvdVideoSettings(
-  value: unknown,
-): DvdVideoEncodingSettings | null {
-  const settings = asRecord(value);
-  const preset = requiredString(settings?.preset);
-  if (
-    !settings ||
-    !preset ||
-    !isHandBrakePreset(preset) ||
-    settings.container !== "mkv"
-  ) {
-    return null;
-  }
-  return { preset, container: "mkv" };
+    ? value as Record<string, unknown> : null;
 }
 
 export async function createEncodingProfilesRoute(
@@ -60,73 +31,57 @@ export async function createEncodingProfilesRoute(
 ): Promise<Response> {
   try {
     if (request.method === "GET") {
-      const access = getAccess();
-      return response({
-        profiles: access.encodingProfiles
-          .list({ mediaDomain: "dvd_video" })
-          .map(toEncodingProfileDto),
-      });
-    }
-
-    if (request.method === "POST" || request.method === "PATCH") {
-      const problem = trustedMutationRequestProblem(
-        request,
-        getTrustedOrigin(),
-      );
-      if (problem) {
-        return problem;
+      const operations = createApplicationOperations(getAccess());
+      const url = new URL(request.url);
+      const previewId = url.searchParams.get("preview-profile-id");
+      if (previewId !== null) {
+        const isActive = url.searchParams.get("is-active");
+        if (isActive !== "true" && isActive !== "false") {
+          return response({ error: "Invalid Encoding Profile state" }, 400);
+        }
+        return response(operations.previewEncodingProfileState({
+          id: previewId, isActive: isActive === "true",
+        }));
       }
+      return response(operations.listEncodingProfiles());
     }
 
+    if (request.method !== "POST" && request.method !== "PATCH") {
+      return response({ error: "Method not allowed" }, 405);
+    }
+    const problem = trustedMutationRequestProblem(request, getTrustedOrigin());
+    if (problem) return problem;
+    const body = asRecord(await request.json().catch(() => null));
+    if (!body) return response({ error: "Invalid Encoding Profile" }, 400);
+    const operations = createApplicationOperations(getAccess());
     if (request.method === "POST") {
-      const access = getAccess();
-      const body = asRecord(await request.json().catch(() => null));
-      const sourceProfileId = requiredString(body?.sourceProfileId);
-      const key = requiredString(body?.key);
-      const displayName = requiredString(body?.displayName);
-      const settings = parseDvdVideoSettings(body?.settings);
-      if (!body || !settings) {
-        return response({ error: "Invalid Encoding Profile" }, 400);
-      }
-      if (sourceProfileId) {
-        const profile = access.encodingProfiles.createVersion({
-          sourceProfileId: sourceProfileId as EncodingProfileId,
-          mediaDomain: "dvd_video",
-          settings,
-        });
-        return response({ profile: toEncodingProfileDto(profile) }, 201);
-      }
-      if (!key || !displayName) {
-        return response({ error: "Invalid Encoding Profile" }, 400);
-      }
-      const profile = access.encodingProfiles.create({
-        key,
-        displayName,
-        mediaDomain: "dvd_video",
-        settings,
-      });
-      return response({ profile: toEncodingProfileDto(profile) }, 201);
+      const created = body.sourceProfileId === undefined
+        ? operations.createEncodingProfile({
+            mutationKey: body.mutationKey,
+            key: body.key,
+            displayName: body.displayName,
+            settings: body.settings,
+          })
+        : operations.createEncodingProfileVersion({
+            mutationKey: body.mutationKey,
+            sourceProfileId: body.sourceProfileId,
+            settings: body.settings,
+          });
+      return response(created, 201);
     }
-
-    if (request.method === "PATCH") {
-      const access = getAccess();
-      const body = asRecord(await request.json().catch(() => null));
-      const id = requiredString(body?.id);
-      if (!body || !id || typeof body.isActive !== "boolean") {
-        return response({ error: "Invalid Encoding Profile state" }, 400);
-      }
-      const profile = access.encodingProfiles.setActive({
-        id: id as EncodingProfileId,
-        mediaDomain: "dvd_video",
-        isActive: body.isActive,
-      });
-      return response({ profile: toEncodingProfileDto(profile) });
-    }
-
-    return response({ error: "Method not allowed" }, 405);
+    return response(operations.setEncodingProfileActive({
+      mutationKey: body.mutationKey,
+      id: body.id,
+      isActive: body.isActive,
+      expectedRevision: body.expectedRevision,
+      acknowledge: body.acknowledge,
+    }));
   } catch (error) {
-    if (error instanceof DomainInvariantError) {
-      return response({ error: error.message }, 400);
+    if (error instanceof InvalidProfileInputError ||
+        error instanceof InvalidMutationKeyError ||
+        error instanceof MutationKeyConflictError ||
+        error instanceof DomainInvariantError) {
+      return response({ error: error.message }, error.message.includes("stale") ? 409 : 400);
     }
     if (error instanceof RecordNotFoundError) {
       return response({ error: "Encoding Profile not found" }, 404);
@@ -138,11 +93,9 @@ export async function createEncodingProfilesRoute(
 export function GET(request: Request): Promise<Response> {
   return createEncodingProfilesRoute(request);
 }
-
 export function POST(request: Request): Promise<Response> {
   return createEncodingProfilesRoute(request);
 }
-
 export function PATCH(request: Request): Promise<Response> {
   return createEncodingProfilesRoute(request);
 }

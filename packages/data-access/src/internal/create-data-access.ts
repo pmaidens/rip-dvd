@@ -10,6 +10,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 
 import {
   and,
@@ -106,6 +107,7 @@ import {
 } from "../disc-selection-source-identity.js";
 import { createDvdMetadataFingerprint } from "../dvd-metadata-fingerprint.js";
 import { createWatchableSalvageArchiveIntegrityEvidence } from "../archive-integrity.js";
+import { encodingProfileQueueBlockingReasons } from "../encoding-profile-eligibility.js";
 import { validateDvdArchiveBoundaryEvidence } from "../archive-boundary.js";
 import { isArchiveReadFailureEvidenceConsistent } from "../archive-read-failure.js";
 import {
@@ -191,6 +193,7 @@ import type {
   EncodeJobProgress,
   EncodeJobRequeueOptions,
   EncodeJobStatus,
+  EncodingProfile,
   EncodingProfileId,
   MediaDomain,
   MediaItemMaintenance,
@@ -4271,6 +4274,109 @@ export function createDataAccessInternal(
     }
   }
 
+  type ProfileTransaction = Parameters<Parameters<typeof database.transaction>[0]>[0];
+
+  function previewProfileState(
+    transaction: ProfileTransaction,
+    input: { id: EncodingProfileId; mediaDomain: MediaDomain; isActive: boolean },
+  ) {
+    const target = requireEncodingProfileInDomain(transaction, input.id, input.mediaDomain);
+    const versions = transaction.select().from(encodingProfiles).where(and(
+      eq(encodingProfiles.mediaDomain, target.mediaDomain),
+      eq(encodingProfiles.key, target.key),
+    )).orderBy(asc(encodingProfiles.version)).all();
+    const revision = createHash("sha256").update(JSON.stringify({
+      targetId: input.id,
+      requestedActiveState: input.isActive,
+      versions: versions.map(({ id, version, isActive, updatedAt }) => ({
+        id, version, isActive, updatedAt: updatedAt.toISOString(),
+      })),
+    })).digest("hex");
+    return {
+      target,
+      activeVersion: versions.find((version) => version.isActive) ?? null,
+      revision,
+    };
+  }
+
+  function createProfile(
+    transaction: ProfileTransaction,
+    input: Parameters<DataAccess["encodingProfiles"]["create"]>[0],
+  ) {
+    const timestamp = now();
+    const id = newId<EncodingProfileId>();
+    const key = requireNonEmpty(input.key, "key");
+    const existing = transaction.select({ id: encodingProfiles.id })
+      .from(encodingProfiles).where(and(
+        eq(encodingProfiles.mediaDomain, input.mediaDomain),
+        eq(encodingProfiles.key, key),
+      )).get();
+    if (existing) {
+      throw new DomainInvariantError("Encoding Profile key already exists in this media domain");
+    }
+    return requireRow(transaction.insert(encodingProfiles).values({
+      id, key,
+      displayName: requireNonEmpty(input.displayName, "displayName"),
+      mediaDomain: input.mediaDomain,
+      version: 1,
+      isActive: true,
+      settings: input.settings,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }).returning().get(), "encoding profile", id);
+  }
+
+  function createProfileVersion(
+    transaction: ProfileTransaction,
+    input: Parameters<DataAccess["encodingProfiles"]["createVersion"]>[0],
+  ) {
+    const timestamp = now();
+    const source = requireEncodingProfileInDomain(
+      transaction, input.sourceProfileId, input.mediaDomain,
+    );
+    const latest = requireRow(transaction.select({ version: encodingProfiles.version })
+      .from(encodingProfiles).where(and(
+        eq(encodingProfiles.mediaDomain, source.mediaDomain),
+        eq(encodingProfiles.key, source.key),
+      )).orderBy(desc(encodingProfiles.version)).limit(1).get(),
+    "encoding profile", source.id);
+    const version = requirePositiveSafeInteger(latest.version + 1, "version");
+    const id = newId<EncodingProfileId>();
+    return requireRow(transaction.insert(encodingProfiles).values({
+      id, key: source.key, displayName: source.displayName,
+      mediaDomain: source.mediaDomain, version, isActive: false,
+      settings: input.settings, createdAt: timestamp, updatedAt: timestamp,
+    }).returning().get(), "encoding profile", id);
+  }
+
+  function setProfileActive(
+    transaction: ProfileTransaction,
+    input: Parameters<DataAccess["encodingProfiles"]["setActive"]>[0],
+  ) {
+    const profile = requireEncodingProfileInDomain(transaction, input.id, input.mediaDomain);
+    const latestUpdate = transaction.select({ updatedAt: encodingProfiles.updatedAt })
+      .from(encodingProfiles).where(and(
+        eq(encodingProfiles.mediaDomain, profile.mediaDomain),
+        eq(encodingProfiles.key, profile.key),
+      )).orderBy(desc(encodingProfiles.updatedAt)).limit(1).get();
+    const timestamp = new Date(Math.max(
+      Date.now(), (latestUpdate?.updatedAt.getTime() ?? 0) + 1,
+    ));
+    if (input.isActive) {
+      transaction.update(encodingProfiles).set({ isActive: false, updatedAt: timestamp })
+        .where(and(
+          eq(encodingProfiles.mediaDomain, profile.mediaDomain),
+          eq(encodingProfiles.key, profile.key),
+          eq(encodingProfiles.isActive, true),
+          ne(encodingProfiles.id, profile.id),
+        )).run();
+    }
+    return requireRow(transaction.update(encodingProfiles)
+      .set({ isActive: input.isActive, updatedAt: timestamp })
+      .where(eq(encodingProfiles.id, profile.id)).returning().get(),
+    "encoding profile", profile.id);
+  }
+
   const access: LegacySidecarDataAccess = {
     readConsistentSnapshot(read) {
       const snapshotAccess: ConsistentReadAccess = {
@@ -6726,103 +6832,67 @@ export function createDataAccessInternal(
     },
 
     encodingProfiles: {
-      create(input) {
-        const timestamp = now();
-        const id = newId<EncodingProfileId>();
-        const key = requireNonEmpty(input.key, "key");
-        return database.transaction(
-          (transaction) => {
-            const existing = transaction
-              .select({ id: encodingProfiles.id })
-              .from(encodingProfiles)
-              .where(
-                and(
-                  eq(encodingProfiles.mediaDomain, input.mediaDomain),
-                  eq(encodingProfiles.key, key),
-                ),
-              )
-              .get();
-            if (existing) {
-              throw new DomainInvariantError(
-                "Encoding Profile key already exists in this media domain",
-              );
+      previewStateChange(input) {
+        return database.transaction((transaction) => previewProfileState(transaction, input));
+      },
+
+      submit(input) {
+        return database.transaction((transaction) => {
+          const { mutationKey, ...semanticFields } = input;
+          const semanticInput = JSON.stringify(semanticFields);
+          const previous = transaction.select().from(mutationInvocations)
+            .where(eq(mutationInvocations.key, mutationKey)).get();
+          if (previous) {
+            if (previous.operation !== `encoding_profile.${input.operation}` ||
+                previous.semanticInput !== semanticInput) {
+              throw new MutationKeyConflictError();
             }
-            return requireRow(
-              transaction
-                .insert(encodingProfiles)
-                .values({
-                  id,
-                  key,
-                  displayName: requireNonEmpty(
-                    input.displayName,
-                    "displayName",
-                  ),
-                  mediaDomain: input.mediaDomain,
-                  version: 1,
-                  isActive: true,
-                  settings: input.settings,
-                  createdAt: timestamp,
-                  updatedAt: timestamp,
-                })
-                .returning()
-                .get(),
-              "encoding profile",
-              id,
-            );
-          },
-          { behavior: "immediate" },
-        );
+            const saved = JSON.parse(previous.outcome) as EncodingProfile;
+            return {
+              ...saved,
+              createdAt: new Date(saved.createdAt),
+              updatedAt: new Date(saved.updatedAt),
+            };
+          }
+          let profile: EncodingProfile;
+          if (input.operation === "create") {
+            profile = createProfile(transaction, {
+              key: input.key, displayName: input.displayName,
+              mediaDomain: input.mediaDomain, settings: input.settings,
+            });
+          } else if (input.operation === "createVersion") {
+            profile = createProfileVersion(transaction, {
+              sourceProfileId: input.sourceProfileId,
+              mediaDomain: input.mediaDomain, settings: input.settings,
+            });
+          } else {
+            const current = previewProfileState(transaction, {
+              id: input.id, mediaDomain: input.mediaDomain, isActive: input.isActive,
+            });
+            if (current.revision !== input.expectedRevision) {
+              throw new DomainInvariantError("Encoding Profile preview is stale");
+            }
+            profile = setProfileActive(transaction, {
+              id: input.id, mediaDomain: input.mediaDomain, isActive: input.isActive,
+            });
+          }
+          transaction.insert(mutationInvocations).values({
+            key: mutationKey,
+            operation: `encoding_profile.${input.operation}`,
+            semanticInput,
+            outcome: JSON.stringify(profile),
+            createdAt: now(),
+          }).run();
+          return profile;
+        }, { behavior: "immediate" });
+      },
+
+      create(input) {
+        return database.transaction((transaction) => createProfile(transaction, input), { behavior: "immediate" });
       },
 
       createVersion(input) {
-        const timestamp = now();
-        return database.transaction((transaction) => {
-          const source = requireEncodingProfileInDomain(
-            transaction,
-            input.sourceProfileId,
-            input.mediaDomain,
-          );
-          const latest = requireRow(
-            transaction
-              .select({ version: encodingProfiles.version })
-              .from(encodingProfiles)
-              .where(
-                and(
-                  eq(encodingProfiles.mediaDomain, source.mediaDomain),
-                  eq(encodingProfiles.key, source.key),
-                ),
-              )
-              .orderBy(desc(encodingProfiles.version))
-              .limit(1)
-              .get(),
-            "encoding profile",
-            source.id,
-          );
-          const version = requirePositiveSafeInteger(
-            latest.version + 1,
-            "version",
-          );
-          const id = newId<EncodingProfileId>();
-          return requireRow(
-            transaction
-              .insert(encodingProfiles)
-              .values({
-                id,
-                key: source.key,
-                displayName: source.displayName,
-                mediaDomain: source.mediaDomain,
-                version,
-                isActive: false,
-                settings: input.settings,
-                createdAt: timestamp,
-                updatedAt: timestamp,
-              })
-              .returning()
-              .get(),
-            "encoding profile",
-            id,
-          );
-        }, { behavior: "immediate" });
+        return database.transaction((transaction) => createProfileVersion(transaction, input), { behavior: "immediate" });
       },
 
       find(input) {
@@ -6844,40 +6914,7 @@ export function createDataAccessInternal(
       },
 
       setActive(input) {
-        const timestamp = now();
-        return database.transaction((transaction) => {
-          const profile = requireEncodingProfileInDomain(
-            transaction,
-            input.id,
-            input.mediaDomain,
-          );
-
-          if (input.isActive) {
-            transaction
-              .update(encodingProfiles)
-              .set({ isActive: false, updatedAt: timestamp })
-              .where(
-                and(
-                  eq(encodingProfiles.mediaDomain, profile.mediaDomain),
-                  eq(encodingProfiles.key, profile.key),
-                  eq(encodingProfiles.isActive, true),
-                  ne(encodingProfiles.id, profile.id),
-                ),
-              )
-              .run();
-          }
-
-          return requireRow(
-            transaction
-              .update(encodingProfiles)
-              .set({ isActive: input.isActive, updatedAt: timestamp })
-              .where(eq(encodingProfiles.id, profile.id))
-              .returning()
-              .get(),
-            "encoding profile",
-            profile.id,
-          );
-        }, { behavior: "immediate" });
+        return database.transaction((transaction) => setProfileActive(transaction, input), { behavior: "immediate" });
       },
 
       list(input = {}) {
@@ -9845,6 +9882,7 @@ export function createDataAccessInternal(
                   id: encodingProfiles.id,
                   isActive: encodingProfiles.isActive,
                   mediaDomain: encodingProfiles.mediaDomain,
+                  settings: encodingProfiles.settings,
                 })
                 .from(encodingProfiles)
                 .where(eq(encodingProfiles.id, input.encodingProfileId))
@@ -9852,9 +9890,10 @@ export function createDataAccessInternal(
               "encoding profile",
               input.encodingProfileId,
             );
-            if (!profile.isActive || profile.mediaDomain !== "dvd_video") {
+            const profileBlockingReasons = encodingProfileQueueBlockingReasons(profile);
+            if (profileBlockingReasons.length > 0) {
               throw new DomainInvariantError(
-                "Encode Jobs require an active DVD video Encoding Profile",
+                `Encode Jobs require an active DVD video Encoding Profile with supported settings: ${profileBlockingReasons.join(", ")}`,
               );
             }
             transaction

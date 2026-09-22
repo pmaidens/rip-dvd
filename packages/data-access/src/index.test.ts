@@ -2009,7 +2009,7 @@ describe("data-access facade", () => {
       key: "exact-overlap",
       displayName: "Exact overlap",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const historicalSelection = wholeTitleSelections[0]!;
     const historicalJob = access.encodeJobs.enqueue({
@@ -2821,7 +2821,7 @@ describe("data-access facade", () => {
       key: "review-boundary",
       displayName: "Review boundary",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     expect(() =>
       access.encodeJobs.enqueue({
@@ -3327,7 +3327,7 @@ describe("data-access facade", () => {
       key: "large-catalog",
       displayName: "Large catalog",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
 
     const sqlite = new DatabaseSync(databasePath);
@@ -3638,7 +3638,7 @@ describe("data-access facade", () => {
       key: "preserved-removal-history",
       displayName: "Preserved removal history",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const job = access.encodeJobs.enqueue({
       discSelectionId: selection.id,
@@ -3676,7 +3676,7 @@ describe("data-access facade", () => {
       key: "completed-selection-correction",
       displayName: "Completed selection correction",
       mediaDomain: "dvd_video",
-      settings: { preset: "HQ" },
+      settings: { preset: "HQ 480p30 Surround" },
     });
     const queued = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -3857,7 +3857,7 @@ describe("data-access facade", () => {
       key: "replacement-plan-opt-out",
       displayName: "Replacement plan opt-out",
       mediaDomain: "dvd_video",
-      settings: { preset: "HQ" },
+      settings: { preset: "HQ 480p30 Surround" },
     });
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -3976,7 +3976,7 @@ describe("data-access facade", () => {
       key: "replacement-plan-opt-in",
       displayName: "Replacement plan opt-in",
       mediaDomain: "dvd_video",
-      settings: { preset: "HQ" },
+      settings: { preset: "HQ 480p30 Surround" },
     });
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -4375,7 +4375,7 @@ describe("data-access facade", () => {
       key: "correction-history-boundaries",
       displayName: "Correction history boundaries",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const historySize = 201;
     const selections = Array.from({ length: historySize }, (_, index) =>
@@ -4634,7 +4634,7 @@ describe("data-access facade", () => {
       key: "replacement-waits-for-cancellation",
       displayName: "Replacement waits for cancellation",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -4710,7 +4710,7 @@ describe("data-access facade", () => {
       key: "replacement-retained-final-cancellation",
       displayName: "Replacement retained final cancellation",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -4802,13 +4802,13 @@ describe("data-access facade", () => {
         key,
         displayName: key,
         mediaDomain: "dvd_video",
-        settings: {},
+        settings: { preset: "Fast 480p30" },
       });
       const competingProfile = access.encodingProfiles.create({
         key: `${key}-competing`,
         displayName: `${key} competing`,
         mediaDomain: "dvd_video",
-        settings: {},
+        settings: { preset: "Fast 480p30" },
       });
       const predecessor = access.encodeJobs.enqueue({
         discSelectionId: mistakenSelection.id,
@@ -4887,7 +4887,7 @@ describe("data-access facade", () => {
       key: "replacement-cleanup-wait",
       displayName: "Replacement cleanup wait",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -4939,7 +4939,7 @@ describe("data-access facade", () => {
       key: "replacement-review-race",
       displayName: "Replacement review race",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -5014,7 +5014,7 @@ describe("data-access facade", () => {
       key: "replacement-reservation-succession-race",
       displayName: "Replacement reservation succession race",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -5098,7 +5098,7 @@ describe("data-access facade", () => {
       key,
       displayName: key,
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -5162,7 +5162,7 @@ describe("data-access facade", () => {
       key: "replacement-failed-opt-out",
       displayName: "Replacement failed opt-out",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -5208,7 +5208,7 @@ describe("data-access facade", () => {
       key: "replacement-failed-changed-path",
       displayName: "Replacement failed changed path",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -5263,7 +5263,7 @@ describe("data-access facade", () => {
       key: "replacement-failed-cleanup-reservation",
       displayName: "Replacement failed cleanup reservation",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -5323,7 +5323,7 @@ describe("data-access facade", () => {
       key: "replacement-plan-lineage",
       displayName: "Replacement plan lineage",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -5412,7 +5412,7 @@ describe("data-access facade", () => {
       key: "replacement-plan-multiple-lineage-jobs",
       displayName: "Replacement plan multiple lineage jobs",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const firstPredecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -5541,13 +5541,13 @@ describe("data-access facade", () => {
       key: "replacement-plan-prior-profile",
       displayName: "Replacement plan prior profile",
       mediaDomain: "dvd_video",
-      settings: { preset: "Fast" },
+      settings: { preset: "Fast 480p30" },
     });
     const overrideProfile = access.encodingProfiles.create({
       key: "replacement-plan-override-profile",
       displayName: "Replacement plan override profile",
       mediaDomain: "dvd_video",
-      settings: { preset: "HQ" },
+      settings: { preset: "HQ 480p30 Surround" },
     });
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -5632,7 +5632,7 @@ describe("data-access facade", () => {
       key: "replacement-claim-predecessor-race",
       displayName: "Replacement claim predecessor race",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -5725,13 +5725,13 @@ describe("data-access facade", () => {
       key: "active-correction-running",
       displayName: "Active correction running",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const queuedProfile = access.encodingProfiles.create({
       key: "active-correction-queued",
       displayName: "Active correction queued",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const runningJob = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -5800,13 +5800,13 @@ describe("data-access facade", () => {
       key: "terminal-correction-failed",
       displayName: "Terminal correction failed",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const cancelledProfile = access.encodingProfiles.create({
       key: "terminal-correction-cancelled",
       displayName: "Terminal correction cancelled",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const failedJob = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -5881,7 +5881,7 @@ describe("data-access facade", () => {
       key: "concurrent-selection-correction",
       displayName: "Concurrent selection correction",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const queuedJob = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -5964,7 +5964,7 @@ describe("data-access facade", () => {
       key: "matrix-completed-correction",
       displayName: "Matrix completed correction",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const completedJob = completedFixture.access.encodeJobs.enqueue({
       discSelectionId: completedFixture.mistakenSelection.id,
@@ -5988,7 +5988,7 @@ describe("data-access facade", () => {
       key: "matrix-failed-correction",
       displayName: "Matrix failed correction",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const failedJob = failedFixture.access.encodeJobs.enqueue({
       discSelectionId: failedFixture.mistakenSelection.id,
@@ -6013,7 +6013,7 @@ describe("data-access facade", () => {
         key: "matrix-cancelled-correction",
         displayName: "Matrix cancelled correction",
         mediaDomain: "dvd_video",
-        settings: {},
+        settings: { preset: "Fast 480p30" },
       });
     const cancelledJob = cancelledFixture.access.encodeJobs.enqueue({
       discSelectionId: cancelledFixture.mistakenSelection.id,
@@ -6031,7 +6031,7 @@ describe("data-access facade", () => {
       key: "matrix-running-correction",
       displayName: "Matrix running correction",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const runningJob = runningFixture.access.encodeJobs.enqueue({
       discSelectionId: runningFixture.mistakenSelection.id,
@@ -6054,7 +6054,7 @@ describe("data-access facade", () => {
       key: "matrix-legacy-correction",
       displayName: "Matrix legacy correction",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const legacyJob = legacyFixture.access.encodeJobs.enqueue({
       discSelectionId: legacyFixture.mistakenSelection.id,
@@ -6084,7 +6084,7 @@ describe("data-access facade", () => {
       key: "matrix-queued-correction",
       displayName: "Matrix queued correction",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const queuedJob = queuedFixture.access.encodeJobs.enqueue({
       discSelectionId: queuedFixture.mistakenSelection.id,
@@ -6176,7 +6176,7 @@ describe("data-access facade", () => {
       key: "stale-selection-correction",
       displayName: "Stale selection correction",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const queuedJob = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -6266,7 +6266,7 @@ describe("data-access facade", () => {
       key: "unsafe-legacy-selection",
       displayName: "Unsafe legacy selection",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     access.encodeJobs.enqueue({
       discSelectionId: selection.id,
@@ -6436,7 +6436,7 @@ describe("data-access facade", () => {
       key: "concurrent-review",
       displayName: "Concurrent review",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     completeCatalogReview(access, archive.id);
 
@@ -8806,7 +8806,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         id, key, display_name, media_domain, version, settings,
         created_at, updated_at
       ) values
-        ('legacy-profile', 'legacy', 'Legacy DVD', 'dvd_video', 1, '{}', 0, 0);
+        ('legacy-profile', 'legacy', 'Legacy DVD', 'dvd_video', 1, '{"preset":"Fast 480p30"}', 0, 0);
       insert into encode_jobs (
         id, disc_selection_id, encoding_profile_id, output_path, status,
         progress_percent, claimed_by, claim_token, claimed_at, started_at,
@@ -9317,7 +9317,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       key: "version-boundary",
       displayName: "Version boundary",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     access.close();
 
@@ -9332,7 +9332,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       reopened.encodingProfiles.createVersion({
         sourceProfileId: profile.id,
         mediaDomain: "dvd_video",
-        settings: {},
+        settings: { preset: "Fast 480p30" },
       }),
     ).toThrow(DomainInvariantError);
     reopened.close();
@@ -9842,7 +9842,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       key: "frozen-evidence",
       displayName: "Frozen evidence",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const job = access.encodeJobs.enqueue({
       discSelectionId: selection.id,
@@ -12976,10 +12976,24 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       mediaDomain: "audio",
       settings: {},
     });
+    const unsupportedPresetProfile = access.encodingProfiles.create({
+      key: "unsupported-preset",
+      displayName: "Unsupported preset",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Removed preset", container: "mkv" },
+    });
+    const unsupportedContainerProfile = access.encodingProfiles.create({
+      key: "unsupported-container",
+      displayName: "Unsupported container",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mp4" },
+    });
 
     for (const encodingProfileId of [
       inactiveDvdProfile.id,
       activeAudioProfile.id,
+      unsupportedPresetProfile.id,
+      unsupportedContainerProfile.id,
     ]) {
       expect(() =>
         access.encodeJobs.enqueue({
@@ -13055,13 +13069,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       key: "cancel-queued-first",
       displayName: "Cancel queued first",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const secondProfile = access.encodingProfiles.create({
       key: "cancel-queued-second",
       displayName: "Cancel queued second",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const outputPath = "/media/movies/Cancel Queued.mkv";
     const queued = access.encodeJobs.enqueue({
@@ -13140,7 +13154,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       key: "requeue-cancelled",
       displayName: "Requeue cancelled",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     completeCatalogReview(access, archive.id);
     const job = access.encodeJobs.enqueue({
@@ -13219,13 +13233,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       key: "cancel-reencode-original",
       displayName: "Cancel reencode original",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const competingProfile = access.encodingProfiles.create({
       key: "cancel-reencode-competing",
       displayName: "Cancel reencode competing",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const outputPath = "/media/movies/Cancel Reencode.mkv";
     const job = access.encodeJobs.enqueue({
@@ -13295,13 +13309,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       key: "cancel-running-wins",
       displayName: "Cancel running wins",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const completionProfile = access.encodingProfiles.create({
       key: "complete-running-wins",
       displayName: "Complete running wins",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const cancellationJob = access.encodeJobs.enqueue({
       discSelectionId: selection.id,
@@ -13412,7 +13426,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       key: "abandoned-cancellation",
       displayName: "Abandoned cancellation",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const job = access.encodeJobs.enqueue({
       discSelectionId: selection.id,
@@ -13518,7 +13532,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       key: "cancel-claim-race",
       displayName: "Cancel claim race",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const job = access.encodeJobs.enqueue({
       discSelectionId: selection.id,
@@ -13587,7 +13601,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       key: "cancel-completion-race",
       displayName: "Cancel completion race",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const job = access.encodeJobs.enqueue({
       discSelectionId: selection.id,
@@ -13662,7 +13676,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         key,
         displayName: key,
         mediaDomain: "dvd_video",
-        settings: {},
+        settings: { preset: "Fast 480p30" },
       });
       const predecessor = access.encodeJobs.enqueue({
         discSelectionId: mistakenSelection.id,

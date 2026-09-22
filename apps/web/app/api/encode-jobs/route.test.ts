@@ -609,13 +609,13 @@ describe("Encode Jobs API", () => {
       key: "completed-profile-order-older",
       displayName: "Older completed profile",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const newerProfile = access.encodingProfiles.create({
       key: "completed-profile-order-newer",
       displayName: "Newer completed profile",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const deepHistoryJobIds: string[] = [];
     for (let index = 0; index < 101; index += 1) {
@@ -623,7 +623,7 @@ describe("Encode Jobs API", () => {
         key: `completed-profile-order-${index}`,
         displayName: `Historical completed profile ${index}`,
         mediaDomain: "dvd_video",
-        settings: {},
+        settings: { preset: "Fast 480p30" },
       });
       const job = access.encodeJobs.enqueue({
         discSelectionId: candidate.selection.id,
@@ -845,7 +845,7 @@ describe("Encode Jobs API", () => {
       key: "tentative-completion-profile",
       displayName: "Tentative completion profile",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const job = access.encodeJobs.enqueue({
       discSelectionId: candidate.selection.id,
@@ -960,7 +960,7 @@ describe("Encode Jobs API", () => {
       key: "bounded-selection-profile",
       displayName: "Bounded selection profile",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     for (const [index, candidate] of completed.entries()) {
       access.encodeJobs.enqueue({
@@ -1229,6 +1229,12 @@ describe("Encode Jobs API", () => {
         mediaDomain: "dvd_video",
         settings: { preset: "Fast 480p30", container: "mkv" },
       }).id);
+    const unavailableProfile = access.encodingProfiles.create({
+      key: "profile-050-unavailable",
+      displayName: "Unavailable profile",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Removed preset", container: "mkv" },
+    });
     const inactiveProfile = access.encodingProfiles.create({
       key: "inactive-profile",
       displayName: "Inactive profile",
@@ -1292,6 +1298,37 @@ describe("Encode Jobs API", () => {
     });
     expect(secondPage.selections).toEqual(firstPage.selections);
     expect(secondPage.page).toEqual(firstPage.page);
+    const unavailableResponse = await createEncodeJobsRoute(
+      new Request(`http://localhost:3000/api/encode-jobs?encodingProfileId=${unavailableProfile.id}`),
+      () => access,
+      () => ({
+        mediaLibraryPath: "/media/movies",
+        webTrustedOrigin: "http://localhost:3000",
+      }),
+    );
+    expect(unavailableResponse.status).toBe(404);
+    const rejectedQueue = await createEncodeJobsRoute(
+      new Request("http://localhost:3000/api/encode-jobs", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          discSelectionId: reviewed.selection.id,
+          encodingProfileId: unavailableProfile.id,
+          outputPath: "/media/movies/Unavailable.mkv",
+        }),
+      }),
+      () => access,
+      () => ({
+        mediaLibraryPath: "/media/movies",
+        webTrustedOrigin: "http://localhost:3000",
+      }),
+    );
+    expect(rejectedQueue.status).toBe(409);
+    expect(access.encodeJobs.list()).toEqual([]);
   });
 
   it("keeps repeated queue submissions idempotent after completion", async () => {
@@ -1483,7 +1520,7 @@ describe("Encode Jobs API", () => {
       key: "cancel-profile",
       displayName: "Cancel profile",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const queued = access.encodeJobs.enqueue({
       discSelectionId: reviewed.selection.id,
@@ -1526,7 +1563,7 @@ describe("Encode Jobs API", () => {
       key: "running-cancel-profile",
       displayName: "Running cancel profile",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const runningJob = access.encodeJobs.enqueue({
       discSelectionId: reviewed.selection.id,

@@ -94,6 +94,9 @@ importers:
 
   packages/application:
     dependencies:
+      '@rip-dvd/config':
+        specifier: workspace:*
+        version: link:../config
       '@rip-dvd/data-access':
         specifier: workspace:*
         version: link:../data-access
@@ -102,6 +105,9 @@ importers:
 
   packages/data-access:
     dependencies:
+      '@rip-dvd/config':
+        specifier: workspace:*
+        version: link:../config
       drizzle-orm:
         specifier: 1.0.0-rc.4
         version: 1.0.0-rc.4

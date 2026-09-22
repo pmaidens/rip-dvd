@@ -2511,7 +2511,7 @@ try {
       key: "reviewed-split-path-owner",
       displayName: "Path owner",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     setup.encodeJobs.enqueue({
       discSelectionId: pathOwner.selection.id,
@@ -3056,7 +3056,7 @@ try {
       key: "bootstrap-race",
       displayName: "Bootstrap race",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     importer.encodeJobs.enqueue({
       discSelectionId: selection.id,

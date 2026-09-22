@@ -1169,7 +1169,40 @@ export interface CatalogAccess {
   }): DiscSelectionActionAvailability[];
 }
 
+export type EncodingProfileMutation = {
+  mutationKey: string;
+  mediaDomain: MediaDomain;
+} & (
+  | {
+      operation: "create";
+      key: string;
+      displayName: string;
+      settings: Record<string, unknown>;
+    }
+  | {
+      operation: "createVersion";
+      sourceProfileId: EncodingProfileId;
+      settings: Record<string, unknown>;
+    }
+  | {
+      operation: "setActive";
+      id: EncodingProfileId;
+      isActive: boolean;
+      expectedRevision: string;
+    }
+);
+
 export interface EncodingProfileAccess {
+  previewStateChange(input: {
+    id: EncodingProfileId;
+    mediaDomain: MediaDomain;
+    isActive: boolean;
+  }): {
+    target: EncodingProfile;
+    activeVersion: EncodingProfile | null;
+    revision: string;
+  };
+  submit(input: EncodingProfileMutation): EncodingProfile;
   create(input: {
     key: string;
     displayName: string;
