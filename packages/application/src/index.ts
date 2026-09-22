@@ -5,9 +5,11 @@ import { encodingProfileQueueBlockingReasons } from "@rip-dvd/data-access";
 import type {
   ConsistentReadAccess,
   DataAccess,
+  ArchiveRequestId,
   DetectedDiscId,
   EncodingProfile,
   EncodingProfileId,
+  DiscInspectionId,
   OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 
@@ -222,6 +224,27 @@ export function createApplicationOperations(
           updatedAt: request.updatedAt.toISOString(),
         },
       };
+    },
+    cancelArchiveRequest: (input: { mutationKey: unknown; archiveRequestId: string }) => {
+      const mutationKey = parseMutationKey(input.mutationKey);
+      const archiveRequest = access.archiveRequests.cancelWithReplay({
+        mutationKey, id: input.archiveRequestId as ArchiveRequestId,
+      });
+      return { archiveRequest };
+    },
+    retryArchiveRequest: (input: { mutationKey: unknown; archiveRequestId: string }) => {
+      const mutationKey = parseMutationKey(input.mutationKey);
+      const archiveRequest = access.archiveRequests.retryWithReplay({
+        mutationKey, id: input.archiveRequestId as ArchiveRequestId,
+      });
+      return { archiveRequest };
+    },
+    retryDiscInspection: (input: { mutationKey: unknown; discInspectionId: string }) => {
+      const mutationKey = parseMutationKey(input.mutationKey);
+      const inspection = access.discInspections.requestRetryWithReplay({
+        mutationKey, id: input.discInspectionId as DiscInspectionId,
+      });
+      return { inspection };
     },
     catalogReview: (
       id: OriginalDiscArchiveId,

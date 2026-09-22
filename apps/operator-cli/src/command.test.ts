@@ -237,6 +237,9 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
     commands: [
       "generate-key",
       "submit-archive-request",
+      "cancel-archive-request",
+      "retry-archive-request",
+      "retry-disc-inspection",
       "catalog-review",
       "disc-selection",
       "list-encoding-profiles",
@@ -337,7 +340,7 @@ it("inspects full attempts and keeps request intent separate from job attempts",
       id: disc.id,
       archiveRequests: [expect.objectContaining({ id: request.id })],
       currentArchiveRequest: { id: request.id, status: "pending" },
-      availableActions: [{ name: "request-archive", eligible: false }],
+      availableActions: [expect.objectContaining({ name: "request-archive", eligible: false })],
     },
   });
   const timedOut = await current.run([
@@ -487,7 +490,7 @@ it("observes a later transition during a bounded wait", async () => {
     expect((await current.run(["inspect", "detected-discs", disc.id])).result).toMatchObject({
       item: {
         currentArchiveRequest: { id: request.id, status: "cancelled" },
-        availableActions: [{ name: "request-archive", eligible: true }],
+        availableActions: [expect.objectContaining({ name: "request-archive", eligible: true })],
       },
     });
   } finally {
@@ -722,6 +725,114 @@ it("replays the original Archive Request outcome after a lost response and resta
   expect(reader.archiveRequests.list()[0]?.status).toBe("cancelled");
   expect(reader.archiveJobs.list()).toEqual([]);
   reader.close();
+});
+
+it("cancels waiting work immediately and replays the original outcome", async () => {
+  const current = fixture();
+  const detectedDiscId = addScannedDisc(current, "synthetic-cancel-disc");
+  const access = current.openAccess();
+  const request = access.archiveRequests.create({ detectedDiscId });
+  access.close();
+  const key = "00000000-0000-4000-8000-000000000201";
+  const args = ["cancel-archive-request", "--key", key, "--archive-request-id", request.id];
+
+  const cancelled = await current.run(args);
+  expect(cancelled.exitCode).toBe(0);
+  expect(cancelled.result).toEqual({ archiveRequest: { id: request.id, status: "cancelled" } });
+  expect((await current.run(["inspect", "archive-requests", request.id])).result)
+    .toMatchObject({ item: { status: "cancelled", archiveJobs: [] } });
+  expect((await current.run(args)).result).toEqual(cancelled.result);
+
+  const blocked = await current.run([
+    "cancel-archive-request", "--key", "00000000-0000-4000-8000-000000000202",
+    "--archive-request-id", request.id,
+  ]);
+  expect(blocked.result).toMatchObject({ error: {
+    code: "ACTION_BLOCKED",
+    blockingReasons: [{ code: "INVALID_TRANSITION" }],
+  } });
+  const conflict = await current.run([
+    "retry-archive-request", "--key", key, "--archive-request-id", request.id,
+  ]);
+  expect(conflict.result).toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
+});
+
+it("retries unsuccessful Archive Requests and failed Disc Inspections while retaining attempts", async () => {
+  const current = fixture();
+  const detectedDiscId = addScannedDisc(current, "synthetic-retry-disc");
+  const access = current.openAccess();
+  const drive = access.catalog.listOpticalDrives()[0]!;
+  const request = access.archiveRequests.create({ detectedDiscId });
+  const started = beginSettledDiscInspectionForTest(access, {
+    opticalDriveId: drive.id,
+    mediaGeneration: "synthetic-retry-generation",
+    mediaCapacityBytes: 2_048,
+  });
+  access.discInspections.record(started.claim, {
+    type: "metadata", volumeLabel: "SYNTHETIC_DISC", titleCount: 0, chapterCount: 0,
+    audioStreamCount: 0, subtitleStreamCount: 0, totalBytes: 2_048,
+  });
+  const completedInspection = access.discInspections.record(started.claim, {
+    type: "complete", detectedDiscId,
+  });
+  started.restoreSystemTime();
+  const firstClaim = access.archiveJobs.startForInspection(completedInspection.id, "synthetic-worker")!;
+  access.archiveJobs.fail(firstClaim, "Synthetic read failure");
+  access.close();
+
+  const key = "00000000-0000-4000-8000-000000000203";
+  const args = ["retry-archive-request", "--key", key, "--archive-request-id", request.id];
+  const retried = await current.run(args);
+  expect(retried.result).toEqual({ archiveRequest: { id: request.id, status: "pending" } });
+  expect((await current.run(["inspect", "archive-requests", request.id])).result).toMatchObject({
+    item: { status: "pending", archiveJobs: [{ id: firstClaim.id, status: "failed", attemptOrdinal: 1 }] },
+  });
+  const resumedAccess = current.openAccess();
+  const secondClaim = resumedAccess.archiveJobs.startForInspection(completedInspection.id, "synthetic-worker")!;
+  resumedAccess.close();
+  expect(secondClaim.archiveRequestId).toBe(request.id);
+  expect(secondClaim.attemptOrdinal).toBe(2);
+  expect((await current.run(args)).result).toEqual(retried.result);
+
+  const cancel = await current.run([
+    "cancel-archive-request", "--key", "00000000-0000-4000-8000-000000000204",
+    "--archive-request-id", request.id,
+  ]);
+  expect(cancel.result).toEqual({
+    archiveRequest: { id: request.id, status: "cancellation_requested" },
+  });
+  const cancellationAccess = current.openAccess();
+  expect(cancellationAccess.archiveJobs.find(secondClaim.id)?.status).toBe("running");
+  cancellationAccess.archiveJobs.abort(secondClaim, "Synthetic operator cancellation");
+  cancellationAccess.close();
+  expect((await current.run(["inspect", "archive-requests", request.id])).result)
+    .toMatchObject({ item: { status: "cancelled", archiveJobs: [
+      { id: firstClaim.id, status: "failed" }, { id: secondClaim.id, status: "aborted" },
+    ] } });
+
+  const failedAccess = current.openAccess();
+  const failedStart = beginSettledDiscInspectionForTest(failedAccess, {
+    opticalDriveId: drive.id,
+    mediaGeneration: "synthetic-failed-generation",
+    mediaCapacityBytes: 2_048,
+  });
+  const failed = failedAccess.discInspections.record(failedStart.claim, {
+    type: "fail", reasonCode: "invalid_metadata",
+  });
+  failedStart.restoreSystemTime();
+  failedAccess.close();
+  const inspectionKey = "00000000-0000-4000-8000-000000000205";
+  const inspectionArgs = ["retry-disc-inspection", "--key", inspectionKey,
+    "--disc-inspection-id", failed.id];
+  const inspectionRetry = await current.run(inspectionArgs);
+  expect(inspectionRetry.result).toMatchObject({ inspection: { id: failed.id, status: "failed" } });
+  expect((await current.run(["inspect", "disc-inspections", failed.id])).result)
+    .toMatchObject({ item: {
+      manualRetryRequestedAt: expect.any(String),
+      availableActions: [expect.objectContaining({ eligible: false,
+        blockingReasons: [{ code: "INVALID_TRANSITION", message: "Retry already requested." }] })],
+    } });
+  expect((await current.run(inspectionArgs)).result).toEqual(inspectionRetry.result);
 });
 
 it("keeps invocation keys separate from same-name Detected Discs and eligibility", async () => {

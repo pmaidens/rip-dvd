@@ -1736,18 +1736,22 @@ export async function requestArchiveApproval(
 }
 
 const pendingArchiveApprovalKeys = new Map<string, string>();
+const pendingRecoveryKeys = new Map<string, string>();
 
 async function requestWorkflowMutation(
   path: string,
   method: "POST" | "DELETE",
   fetcher: DashboardFetch = fetch,
 ): Promise<void> {
+  const mutationKey = pendingRecoveryKeys.get(path) ?? crypto.randomUUID();
+  pendingRecoveryKeys.set(path, mutationKey);
   const response = await fetcher(path, {
     method,
     headers: { "Content-Type": "application/json" },
-    body: "{}",
+    body: JSON.stringify({ mutationKey }),
   });
   if (!response.ok) throw new Error("Workflow mutation failed");
+  pendingRecoveryKeys.delete(path);
 }
 
 export const requestArchiveRequestCancellation = (id: string) =>

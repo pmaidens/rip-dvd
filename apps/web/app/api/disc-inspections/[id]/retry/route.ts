@@ -1,12 +1,11 @@
+import { createApplicationOperations } from "@rip-dvd/application";
 import { loadConfig } from "@rip-dvd/config";
-import {
-  type DataAccess,
-  type DiscInspectionId,
-} from "@rip-dvd/data-access";
+import type { DataAccess } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../../../lib/data-access";
 import {
-  noStoreJsonResponse,
+  recoveryMutationResponse,
+  requiredMutationKey,
   runTrustedMutationRoute,
 } from "../../../../../lib/server/trusted-mutation-route";
 
@@ -24,17 +23,11 @@ export async function createDiscInspectionRetryRoute(
       notFoundError: "Disc Inspection not found",
       unavailableError: "Disc Inspection retry is unavailable",
     },
-    () => {
-      const retried = getAccess().discInspections.requestRetry(
-        id as DiscInspectionId,
-      );
-      return noStoreJsonResponse({
-        inspection: {
-          id: retried.id,
-          status: retried.status,
-          phase: retried.phase,
-        },
-      });
+    async () => {
+      const mutationKey = await requiredMutationKey(request);
+      if (mutationKey instanceof Response) return mutationKey;
+      return recoveryMutationResponse(() =>
+        createApplicationOperations(getAccess()).retryDiscInspection({ mutationKey, discInspectionId: id }));
     },
   );
 }

@@ -52,6 +52,15 @@ const commandDefinitions = [
     inputs: { arguments: [], options: ["--key", "--detected-disc-id"] },
     example: "rip-dvd-operator submit-archive-request --key 00000000-0000-4000-8000-000000000001 --detected-disc-id <id>",
   },
+  ...(["cancel-archive-request", "retry-archive-request", "retry-disc-inspection"] as const)
+    .map((name) => ({
+      name,
+      description: `${name.replaceAll("-", " ")} through the supported workflow.`,
+      usage: `rip-dvd-operator ${name} --key <key> --${name === "retry-disc-inspection" ? "disc-inspection-id" : "archive-request-id"} <id>`,
+      inputs: { arguments: [], options: ["--key", name === "retry-disc-inspection"
+        ? "--disc-inspection-id" : "--archive-request-id"] },
+      example: `rip-dvd-operator ${name} --key 00000000-0000-4000-8000-000000000001 --${name === "retry-disc-inspection" ? "disc-inspection-id" : "archive-request-id"} <id>`,
+    })),
   {
     name: "catalog-review",
     description: "Inspect an archive's Catalog Review or discover metadata candidates.",
@@ -179,8 +188,67 @@ export class CommandFailure extends Error {
     readonly code: string,
     message: string,
     readonly exitCode: CommandExitCode,
+    readonly blockingReasons?: readonly { code: string; message: string }[],
   ) {
     super(message);
+  }
+}
+
+type RecoveryCommand = "cancel-archive-request" | "retry-archive-request" | "retry-disc-inspection";
+
+function recoveryInputs(name: RecoveryCommand, args: readonly string[]) {
+  const idFlag = name === "retry-disc-inspection" ? "--disc-inspection-id" : "--archive-request-id";
+  const options = new Map<string, string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const option = args[index];
+    const value = args[index + 1];
+    if ((option !== "--key" && option !== idFlag) || !value ||
+      value.startsWith("--") || options.has(option)) {
+      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid recovery action options.", 2);
+    }
+    options.set(option, value);
+  }
+  let mutationKey: string;
+  try {
+    mutationKey = parseMutationKey(options.get("--key"));
+  } catch (error) {
+    if (error instanceof InvalidMutationKeyError) {
+      throw new CommandFailure("INVALID_MUTATION_KEY", error.message, 2);
+    }
+    throw error;
+  }
+  const id = options.get(idFlag)?.trim();
+  if (options.size !== 2 || !id || id.length > 256) {
+    throw new CommandFailure("INVALID_ARGUMENTS", `${idFlag} is required.`, 2);
+  }
+  return { mutationKey, id };
+}
+
+function runRecoveryCommand(name: RecoveryCommand, input: ReturnType<typeof recoveryInputs>, io: CommandIO) {
+  try {
+    return withAccess(io.openAccess, (access) => {
+      const operations = createApplicationOperations(access);
+      switch (name) {
+        case "cancel-archive-request":
+          return operations.cancelArchiveRequest({ mutationKey: input.mutationKey, archiveRequestId: input.id });
+        case "retry-archive-request":
+          return operations.retryArchiveRequest({ mutationKey: input.mutationKey, archiveRequestId: input.id });
+        case "retry-disc-inspection":
+          return operations.retryDiscInspection({ mutationKey: input.mutationKey, discInspectionId: input.id });
+      }
+    });
+  } catch (error) {
+    if (error instanceof MutationKeyConflictError) {
+      throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    if (error instanceof RecordNotFoundError) {
+      throw new CommandFailure("NOT_FOUND", "Recovery target was not found.", 2);
+    }
+    if (error instanceof InvalidStatusTransitionError || error instanceof DomainInvariantError) {
+      throw new CommandFailure("ACTION_BLOCKED", error.message, 2,
+        [{ code: "INVALID_TRANSITION", message: error.message }]);
+    }
+    throw new CommandFailure("RECOVERY_UNAVAILABLE", "Recovery action is unavailable.", 1);
   }
 }
 
@@ -616,6 +684,15 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
       emit(io.stdout, submitArchiveRequest(submissionInputs(rest), io.openAccess));
       return 0;
     }
+    if (name === "cancel-archive-request" || name === "retry-archive-request" ||
+      name === "retry-disc-inspection") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+        return 0;
+      }
+      emit(io.stdout, runRecoveryCommand(name, recoveryInputs(name, rest), io));
+      return 0;
+    }
     if (name === "catalog-review") {
       if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
         emit(io.stdout, help(name));
@@ -684,7 +761,8 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
     return 0;
   } catch (error) {
     if (error instanceof CommandFailure) {
-      emit(io.stdout, { error: { code: error.code, message: error.message } });
+      emit(io.stdout, { error: { code: error.code, message: error.message,
+        ...(error.blockingReasons ? { blockingReasons: error.blockingReasons } : {}) } });
       io.stderr(`${error.message}\n`);
       return error.exitCode;
     }

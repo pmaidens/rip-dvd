@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createApplicationOperations } from "@rip-dvd/application";
 
 import { useDataAccessFixture } from "../../test/data-access-fixture";
 import {
@@ -16,7 +17,7 @@ const trustedOrigin = "http://localhost:3000";
 function mutation(
   path: string,
   method: "POST" | "DELETE" = "POST",
-  body: unknown = {},
+  body: unknown = { mutationKey: "00000000-0000-4000-8000-000000000001" },
 ) {
   return new Request(`${trustedOrigin}${path}`, {
     method,
@@ -47,6 +48,37 @@ function scannedDisc() {
 }
 
 describe("Disc Inspection and Archive Request mutation routes", () => {
+  it("requires a key and replays web cancellation through shared operations", async () => {
+    const { access, disc } = scannedDisc();
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const path = `/api/archive-requests/${request.id}`;
+    const missing = await createArchiveRequestCancellationRoute(
+      mutation(path, "DELETE", {}), request.id, () => access, () => trustedOrigin,
+    );
+    expect(missing.status).toBe(400);
+    expect(access.archiveRequests.find(request.id)?.status).toBe("pending");
+    const key = "00000000-0000-4000-8000-000000000011";
+    const invoke = () => createArchiveRequestCancellationRoute(
+      mutation(path, "DELETE", { mutationKey: key }), request.id,
+      () => access, () => trustedOrigin,
+    );
+    const first = await invoke();
+    expect(first.status).toBe(200);
+    const outcome = await first.json();
+    expect(await (await invoke()).json()).toEqual(outcome);
+    expect(createApplicationOperations(access).cancelArchiveRequest({
+      mutationKey: key, archiveRequestId: request.id,
+    })).toEqual(outcome);
+    const blocked = await createArchiveRequestCancellationRoute(
+      mutation(path, "DELETE", { mutationKey: "00000000-0000-4000-8000-000000000012" }),
+      request.id, () => access, () => trustedOrigin,
+    );
+    expect(blocked.status).toBe(409);
+    expect(await blocked.json()).toMatchObject({ error: {
+      code: "ACTION_BLOCKED", blockingReasons: [{ code: "INVALID_TRANSITION" }],
+    } });
+  });
+
   it("cancels a pending Archive Request immediately", async () => {
     const { access, disc } = scannedDisc();
     const archiveRequest = access.archiveRequests.create({ detectedDiscId: disc.id });

@@ -3671,6 +3671,62 @@ export function createDataAccessInternal(
     },
   });
 
+  function replayRecoveryMutation<T extends { id: string; status: string }>(
+    mutationKey: string,
+    operation: string,
+    targetId: string,
+    mutate: (transaction: Parameters<Parameters<typeof database.transaction>[0]>[0]) => T,
+  ): T {
+    const result = database.transaction((transaction): { id: string; status: string; phase?: string } => {
+      const semanticInput = JSON.stringify({ targetId });
+      const previous = transaction.select().from(mutationInvocations)
+        .where(eq(mutationInvocations.key, mutationKey)).get();
+      if (previous) {
+        if (previous.operation !== operation || previous.semanticInput !== semanticInput) {
+          throw new MutationKeyConflictError();
+        }
+        return JSON.parse(previous.outcome) as T;
+      }
+      const outcome = mutate(transaction);
+      transaction.insert(mutationInvocations).values({
+        key: mutationKey,
+        operation,
+        semanticInput,
+        outcome: JSON.stringify(outcome),
+        createdAt: now(),
+      }).run();
+      return outcome;
+    }, { behavior: "immediate" });
+    return result as T;
+  }
+
+  function cancelArchiveRequest(
+    transaction: Parameters<Parameters<typeof database.transaction>[0]>[0],
+    id: ArchiveRequestId,
+  ) {
+    const timestamp = now();
+    const current = requireRow(
+      transaction.select().from(archiveRequests)
+        .where(eq(archiveRequests.id, id)).get(),
+      "archive request", id,
+    );
+    if (["cancelled", "fulfilled", "cancellation_requested"].includes(current.status)) {
+      return current;
+    }
+    const active = current.status === "running";
+    return requireRow(
+      transaction.update(archiveRequests).set({
+        status: active ? "cancellation_requested" : "cancelled",
+        cancellationRequestedAt: timestamp,
+        cancelledAt: active ? null : timestamp,
+        updatedAt: timestamp,
+      }).where(and(
+        eq(archiveRequests.id, id), eq(archiveRequests.status, current.status),
+      )).returning().get(),
+      "archive request", id,
+    );
+  }
+
   function createArchiveRequest(input: {
     detectedDiscId: DetectedDiscId;
     priority?: number;
@@ -8023,6 +8079,20 @@ export function createDataAccessInternal(
         return requested;
       },
 
+      requestRetryWithReplay({ mutationKey, id }) {
+        return replayRecoveryMutation(mutationKey, "disc_inspection.retry", id, () => {
+          const current = database.select().from(discInspections)
+            .where(eq(discInspections.id, id)).get();
+          if (current?.manualRetryRequestedAt !== null && current?.manualRetryRequestedAt !== undefined) {
+            throw new InvalidStatusTransitionError(
+              "disc inspection", "retry already requested", "retry requested",
+            );
+          }
+          const retried = this.requestRetry(id);
+          return { id: retried.id, status: retried.status, phase: retried.phase };
+        });
+      },
+
       clearCurrent(input) {
         const timestamp = now();
         return database.transaction((transaction) => {
@@ -8215,47 +8285,8 @@ export function createDataAccessInternal(
       submit: ({ mutationKey, detectedDiscId }) =>
         createArchiveRequest({ detectedDiscId }, mutationKey),
       cancel(id) {
-        const timestamp = now();
-        return database.transaction((transaction) => {
-          const current = requireRow(
-            transaction
-              .select()
-              .from(archiveRequests)
-              .where(eq(archiveRequests.id, id))
-              .get(),
-            "archive request",
-            id,
-          );
-          if (
-            current.status === "cancelled" ||
-            current.status === "fulfilled" ||
-            current.status === "cancellation_requested"
-          ) {
-            return current;
-          }
-          const active = current.status === "running";
-          const status = active ? "cancellation_requested" : "cancelled";
-          return requireRow(
-            transaction
-              .update(archiveRequests)
-              .set({
-                status,
-                cancellationRequestedAt: timestamp,
-                cancelledAt: active ? null : timestamp,
-                updatedAt: timestamp,
-              })
-              .where(
-                and(
-                  eq(archiveRequests.id, id),
-                  eq(archiveRequests.status, current.status),
-                ),
-              )
-              .returning()
-              .get(),
-            "archive request",
-            id,
-          );
-        }, { behavior: "immediate" });
+        return database.transaction((transaction) =>
+          cancelArchiveRequest(transaction, id), { behavior: "immediate" });
       },
 
       retry(id) {
@@ -8292,6 +8323,27 @@ export function createDataAccessInternal(
           );
         }
         return retried;
+      },
+
+      cancelWithReplay({ mutationKey, id }) {
+        return replayRecoveryMutation(mutationKey, "archive_request.cancel", id, (transaction) => {
+          const current = database.select().from(archiveRequests)
+            .where(eq(archiveRequests.id, id)).get();
+          if (current && !["pending", "running", "needs_attention"].includes(current.status)) {
+            throw new InvalidStatusTransitionError(
+              "archive request", current.status, "cancelled",
+            );
+          }
+          const cancelled = cancelArchiveRequest(transaction, id);
+          return { id: cancelled.id, status: cancelled.status };
+        });
+      },
+
+      retryWithReplay({ mutationKey, id }) {
+        return replayRecoveryMutation(mutationKey, "archive_request.retry", id, () => {
+          const retried = this.retry(id);
+          return { id: retried.id, status: retried.status };
+        });
       },
 
         list: listArchiveRequests,

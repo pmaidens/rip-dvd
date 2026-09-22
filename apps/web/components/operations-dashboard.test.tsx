@@ -23,6 +23,7 @@ import {
   catalogReviewActivityRevision,
   requestActionOverview,
   requestArchiveApproval,
+  requestArchiveRequestCancellation,
   requestFilesystemVerification,
   type DashboardLoadState,
 } from "./operations-dashboard";
@@ -1851,6 +1852,19 @@ describe("DashboardView", () => {
       .mockResolvedValueOnce(new Response(null, { status: 201 }));
     await expect(requestArchiveApproval("retry-disc", fetcher)).rejects.toThrow("response lost");
     await requestArchiveApproval("retry-disc", fetcher);
+    const first = JSON.parse(fetcher.mock.calls[0]![1]!.body as string);
+    const second = JSON.parse(fetcher.mock.calls[1]![1]!.body as string);
+    expect(first.mutationKey).toBe(second.mutationKey);
+  });
+
+  it("reuses a recovery key after a lost response", async () => {
+    const fetcher = vi.fn()
+      .mockRejectedValueOnce(new Error("response lost"))
+      .mockResolvedValueOnce(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(requestArchiveRequestCancellation("synthetic-request"))
+      .rejects.toThrow("response lost");
+    await requestArchiveRequestCancellation("synthetic-request");
     const first = JSON.parse(fetcher.mock.calls[0]![1]!.body as string);
     const second = JSON.parse(fetcher.mock.calls[1]![1]!.body as string);
     expect(first.mutationKey).toBe(second.mutationKey);
