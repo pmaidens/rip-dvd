@@ -155,8 +155,8 @@ export function previewDiscSelectionChange(
   archiveId: OriginalDiscArchiveId,
   command: SelectionCommand,
 ) {
-  if (command.action === "create_disc_selection") {
-    throw new DomainInvariantError("Disc Selection creation does not require a preview");
+  if (!discSelectionCommandRequiresPreview(command)) {
+    throw new DomainInvariantError("This Disc Selection change does not require a preview");
   }
   const preview = readDiscSelectionPreview(
     access, archiveId, command.discSelectionId as DiscSelectionId,

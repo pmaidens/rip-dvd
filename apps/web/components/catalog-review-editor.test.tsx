@@ -16,6 +16,7 @@ import {
 import {
   CATALOG_REVIEW_COMMAND_ACTIONS,
   type CatalogReviewCommand,
+  type ConsequentialDiscSelectionCommand,
 } from "../lib/catalog-review-command";
 
 import {
@@ -88,10 +89,12 @@ function stubDeferredCatalogReviewRequests(): PendingRequest[] {
 
 function availableDiscSelectionPreview(
   catalogRevision: string,
+  action: ConsequentialDiscSelectionCommand["action"],
   affectedEncodeJobs: readonly { id: string; status: string }[] = [],
 ) {
   return {
     state: "available",
+    action,
     catalogRevision,
     previewToken: "preview-token",
     affectedEncodeJobs,
@@ -232,7 +235,9 @@ describe("CatalogReviewEditor", () => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       firstAttemptBodies.push(body);
       return body.preview === true
-        ? Response.json(availableDiscSelectionPreview(review.catalogRevision))
+        ? Response.json(availableDiscSelectionPreview(
+          review.catalogRevision, "delete_disc_selection",
+        ))
         : Response.json({ error: "Response unavailable" }, { status: 503 });
     };
     await expect(mutateCatalogReview("archive-a", command, firstAttempt, {
@@ -807,7 +812,9 @@ describe("CatalogReviewEditor", () => {
         const body = JSON.parse(String(init.body)) as Record<string, unknown>;
         postedCommands.push(body);
         if (body.preview === true) {
-          return Response.json(availableDiscSelectionPreview(review.catalogRevision));
+          return Response.json(availableDiscSelectionPreview(
+            review.catalogRevision, "correct_disc_selection",
+          ));
         }
         return Response.json({});
       }
@@ -908,7 +915,9 @@ describe("CatalogReviewEditor", () => {
         const body = JSON.parse(String(init.body)) as Record<string, unknown>;
         postedCommands.push(body);
         if (body.preview === true) {
-          return Response.json(availableDiscSelectionPreview(review.catalogRevision));
+          return Response.json(availableDiscSelectionPreview(
+            review.catalogRevision, "update_disc_selection",
+          ));
         }
         return Response.json({ message: "Mapping changed; review required" });
       }
@@ -2049,7 +2058,14 @@ describe("CatalogReviewView", () => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       postedBodies.push(body);
       if (body.preview === true) {
-        return Response.json(availableDiscSelectionPreview("2026-08-11T06:00:00.000Z"));
+        const action = body.action;
+        if (action !== "repair_disc_selection" && action !== "correct_disc_selection" &&
+            action !== "delete_disc_selection") {
+          throw new Error("Expected a consequential Disc Selection command");
+        }
+        return Response.json(availableDiscSelectionPreview(
+          "2026-08-11T06:00:00.000Z", action,
+        ));
       }
       return Response.json({});
     };

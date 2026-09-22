@@ -6,9 +6,13 @@ import {
   resumePendingCatalogReviewMutation,
 } from "./catalog-review-state";
 
-function availablePreview() {
+function availablePreview(
+  action: "update_disc_selection" | "repair_disc_selection" |
+    "correct_disc_selection" | "delete_disc_selection" = "delete_disc_selection",
+) {
   return {
     state: "available",
+    action,
     catalogRevision: "2026-08-11T06:00:00.000Z",
     previewToken: "preview-token",
     affectedEncodeJobs: [{ id: "encode-job-1", status: "queued" }],
@@ -204,5 +208,45 @@ describe("catalog review request state", () => {
       discSelectionId: "selection-3",
       preview: true,
     }]);
+  });
+
+  it("accepts a correction preview that retains a failed job output reservation", async () => {
+    const base = availablePreview("correct_disc_selection");
+    const preview = {
+      ...base,
+      affectedEncodeJobs: [{ id: "encode-job-failed", status: "failed" }],
+      outputReservationReleaseJobs: [{ id: "encode-job-failed", status: "failed" }],
+      consequences: {
+        ...base.consequences,
+        requestsEncodeJobCancellation: [],
+        releasesOutputReservations: [],
+      },
+    } as const;
+    const bodies: Record<string, unknown>[] = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      bodies.push(body);
+      return body.preview === true
+        ? Response.json(preview)
+        : Response.json({ message: "Mapping changed; review required" });
+    };
+    const command = {
+      action: "correct_disc_selection" as const,
+      discSelectionId: "selection-4",
+      catalogRevision: "2026-08-11T06:00:00.000Z",
+      selection: {
+        mediaItemId: "media-item-2",
+        sourceIdentity: { kind: "dvd_title" as const, titleNumber: 2 },
+      },
+    };
+
+    await expect(mutateCatalogReview("archive-4", command, fetcher, {
+      storage: memoryStorage(),
+      confirmDiscSelectionPreview: () => true,
+    })).resolves.toEqual({ message: "Mapping changed; review required" });
+
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toEqual({ ...command, preview: true });
+    expect(bodies[1]).toMatchObject({ ...command, acknowledge: true });
   });
 });

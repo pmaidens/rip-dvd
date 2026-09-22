@@ -121,6 +121,12 @@ it("previews consequential changes, rejects stale decisions, and applies eligibl
   expect(mismatched.result).toMatchObject({ error: { code: "SELECTION_REJECTED" } });
   const deletionPreview = await current.run(["disc-selection", "preview", "delete", archive.id, selectionId]);
   const staleDecision = deletionPreview.result as { catalogRevision: string; previewToken: string };
+  const unnecessaryPreview = await current.run(["disc-selection", "preview", "update", archive.id, selectionId,
+    "--label", "Main feature"]);
+  expect(unnecessaryPreview.result).toMatchObject({ error: {
+    code: "SELECTION_REJECTED",
+    message: "This Disc Selection change does not require a preview",
+  } });
   const updated = await current.run(["disc-selection", "update", archive.id, selectionId,
     "--key", key(5), "--label", "Main feature"]);
   expect(updated.result).toMatchObject({ discSelection: { label: "Main feature" } });

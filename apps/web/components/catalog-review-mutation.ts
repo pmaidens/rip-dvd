@@ -25,6 +25,7 @@ function postCatalogReview(
 
 export interface DiscSelectionChangePreview {
   state: "available";
+  action: ConsequentialDiscSelectionCommand["action"];
   catalogRevision: string;
   previewToken: string;
   affectedEncodeJobs: readonly { id: string; status: string }[];
@@ -202,7 +203,7 @@ async function requestDiscSelectionPreview(
     throw new Error("reason" in body && typeof body.reason === "string"
       ? body.reason.slice(0, 512) : "Disc Selection change is blocked");
   }
-  const preview = availableDiscSelectionPreview(body);
+  const preview = availableDiscSelectionPreview(body, command.action);
   if (preview === null) throw new Error("Catalog review mutation failed");
   return preview;
 }
@@ -239,7 +240,7 @@ function readPendingCatalogReviewMutation(
     const command = storedConsequentialSelectionCommand(parsed.command);
     if (command === null || parsed.identity !== JSON.stringify([archiveId, command])) return undefined;
     const preview = "preview" in parsed && parsed.preview !== undefined
-      ? availableDiscSelectionPreview(parsed.preview) : undefined;
+      ? availableDiscSelectionPreview(parsed.preview, command.action) : undefined;
     if ("preview" in parsed && parsed.preview !== undefined && preview === null) return undefined;
     return {
       archiveId,
@@ -295,9 +296,13 @@ function deletePendingCatalogReviewMutation(
   }
 }
 
-function availableDiscSelectionPreview(value: unknown): DiscSelectionChangePreview | null {
+function availableDiscSelectionPreview(
+  value: unknown,
+  expectedAction: ConsequentialDiscSelectionCommand["action"],
+): DiscSelectionChangePreview | null {
   if (typeof value !== "object" || value === null || !("state" in value) ||
-      value.state !== "available" || !("catalogRevision" in value) ||
+      value.state !== "available" || !("action" in value) || value.action !== expectedAction ||
+      !("catalogRevision" in value) ||
       typeof value.catalogRevision !== "string" || !("previewToken" in value) ||
       typeof value.previewToken !== "string" || !("affectedEncodeJobs" in value) ||
       !Array.isArray(value.affectedEncodeJobs) ||
@@ -326,8 +331,11 @@ function availableDiscSelectionPreview(value: unknown): DiscSelectionChangePrevi
       typeof consequences.preservesEncodeJobHistory !== "boolean" ||
       !("reopensCatalogReview" in consequences) ||
       typeof consequences.reopensCatalogReview !== "boolean") return null;
+  const releasedReservationIds = expectedAction === "repair_disc_selection" ||
+      expectedAction === "delete_disc_selection"
+    ? outputReservationReleaseJobs.map((job) => job.id) : [];
   if (JSON.stringify(consequences.releasesOutputReservations) !==
-      JSON.stringify(outputReservationReleaseJobs.map((job) => job.id))) return null;
+      JSON.stringify(releasedReservationIds)) return null;
   return value as unknown as DiscSelectionChangePreview;
 }
 
