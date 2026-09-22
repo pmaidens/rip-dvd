@@ -469,10 +469,25 @@ it("preserves archive history while adding nullable Re-archive lineage", () => {
     ).all(),
   ).toEqual(expect.arrayContaining([
     { name: "original_disc_archives_detected_disc_idx", unique: 0 },
+    { name: "original_disc_archives_detected_disc_unique", unique: 1 },
     { name: "original_disc_archives_fingerprint_idx", unique: 0 },
+    { name: "original_disc_archives_fingerprint_unique", unique: 1 },
     { name: "original_disc_archives_path_unique", unique: 1 },
     { name: "original_disc_archives_rearchive_source_idx", unique: 0 },
   ]));
+  expect(
+    sqlite.prepare(`
+      SELECT sql FROM sqlite_schema
+      WHERE name IN (
+        'original_disc_archives_detected_disc_unique',
+        'original_disc_archives_fingerprint_unique'
+      )
+      ORDER BY name
+    `).all(),
+  ).toEqual([
+    { sql: expect.stringMatching(/WHERE .*rearchive_source_archive_id.*is null/i) },
+    { sql: expect.stringMatching(/WHERE .*rearchive_source_archive_id.*is null/i) },
+  ]);
   sqlite.close();
 });
 

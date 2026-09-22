@@ -1632,6 +1632,17 @@ export function createDataAccessInternal(
     requestedDiscStatus: DetectedDiscStatus;
   };
 
+  function requiredArchiveRequestDiscStatus(
+    request: Pick<
+      typeof archiveRequests.$inferSelect,
+      "rearchiveSourceArchiveId"
+    >,
+  ): "approved" | "archived" {
+    return request.rearchiveSourceArchiveId === null
+      ? "approved"
+      : "archived";
+  }
+
   function archiveRequestMatchesDvdContinuationIdentity(
     currentDisc: Pick<
       typeof detectedDiscs.$inferSelect,
@@ -1641,14 +1652,11 @@ export function createDataAccessInternal(
     candidate: ArchiveRequestDvdContinuationCandidate,
     requestDeclaredByteCount: number | null,
   ): boolean {
-    const expectedRequestedDiscStatus =
-      candidate.request.rearchiveSourceArchiveId === null
-        ? "approved"
-        : "archived";
     if (
       currentDisc.discKind !== "dvd" ||
       currentDeclaredByteCount === null ||
-      candidate.requestedDiscStatus !== expectedRequestedDiscStatus
+      candidate.requestedDiscStatus !==
+        requiredArchiveRequestDiscStatus(candidate.request)
     ) {
       return false;
     }
@@ -9013,11 +9021,8 @@ export function createDataAccessInternal(
               return false;
             }
             if (candidate.requestedDiscId === disc.id) {
-              const expectedStatus =
-                candidate.request.rearchiveSourceArchiveId === null
-                  ? "approved"
-                  : "archived";
-              return candidate.requestedDiscStatus === expectedStatus;
+              return candidate.requestedDiscStatus ===
+                requiredArchiveRequestDiscStatus(candidate.request);
             }
             return archiveRequestMatchesDvdContinuationIdentity(
               disc,
@@ -9195,13 +9200,10 @@ export function createDataAccessInternal(
           const exactRequest = requestCandidates.find(
             (candidate) => candidate.requestedDiscId === disc.id,
           );
-          const exactRequestExpectedStatus =
-            exactRequest?.request.rearchiveSourceArchiveId === null
-              ? "approved"
-              : "archived";
           if (
             exactRequest !== undefined &&
-            exactRequest.requestedDiscStatus !== exactRequestExpectedStatus
+            exactRequest.requestedDiscStatus !==
+              requiredArchiveRequestDiscStatus(exactRequest.request)
           ) {
             throw new DomainInvariantError(
               `pending Archive Request references a ${exactRequest.requestedDiscStatus} Detected Disc`,

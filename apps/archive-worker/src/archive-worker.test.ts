@@ -913,6 +913,98 @@ async function exerciseReadinessResume(
   return { copyRunner, salvageValidator, scenario };
 }
 
+function createRearchiveWorkerScenario(
+  variant: "347" | "348" | "349",
+  fingerprintFill: string,
+) {
+  const originalsLibraryPath = mkdtempSync(
+    join(tmpdir(), `rip-dvd-rearchive-${variant}-`),
+  );
+  temporaryDirectories.push(originalsLibraryPath);
+  const access = openTestDataAccess(originalsLibraryPath);
+  const fingerprint = `dvdmeta-sha256:${fingerprintFill.repeat(64)}`;
+  const scanData = {
+    schemaVersion: 2 as const,
+    contentId: fingerprint,
+    titles: [{
+      number: 1,
+      durationSeconds: 5_400,
+      chapters: 12,
+      audioStreams: [],
+      subtitles: [],
+    }],
+  };
+  const discoveredDrive = {
+    devicePath: "/dev/sr0",
+    displayName: "Synthetic Re-archive Drive",
+    serialNumber: `SYNTHETIC-REARCHIVE-${variant}`,
+  };
+  const drive = access.catalog.reconcileOpticalDrives([
+    { ...discoveredDrive, isConfiguredDevice: true },
+  ])[0]!;
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint,
+    scanData,
+    volumeLabel: "SYNTHETIC_REARCHIVE",
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+  const sourceBytes = Buffer.alloc(4_096, 17);
+  const sourcePath = join(originalsLibraryPath, `source-${variant}.iso`);
+  writeFileSync(sourcePath, sourceBytes);
+  const sourceArchive = access.catalog.createOriginalDiscArchive({
+    detectedDiscId: disc.id,
+    discKind: "dvd",
+    archiveFormat: "iso",
+    archivePath: sourcePath,
+    fingerprint,
+    sizeBytes: sourceBytes.byteLength,
+  });
+  const mediaItem = access.catalog.createMediaItem({
+    kind: "movie",
+    title: "Synthetic Re-archive Feature",
+  });
+  const sourceSelection = access.catalog.createDiscSelection({
+    originalDiscArchiveId: sourceArchive.id,
+    mediaItemId: mediaItem.id,
+    sourceIdentity: { kind: "main_feature" },
+  });
+  access.catalog.completeCatalogReview(
+    sourceArchive.id,
+    access.catalog.listOriginalDiscArchives({
+      ids: [sourceArchive.id],
+    })[0]!.updatedAt,
+    "reviewed_with_selections",
+  );
+  const request = access.archiveRequests.submitRearchive({
+    mutationKey: `00000000-0000-4000-8000-000000000${variant}`,
+    sourceArchiveId: sourceArchive.id,
+  });
+  const hardware: OpticalDriveHardware = {
+    ...stableDeviceBinding(),
+    discover: vi.fn().mockResolvedValue([discoveredDrive]),
+    scanDvd: vi.fn().mockResolvedValue({
+      fingerprint,
+      scanData,
+      sizeBytes: sourceBytes.byteLength,
+      volumeLabel: "SYNTHETIC_REARCHIVE",
+    }),
+  };
+  return {
+    access,
+    discoveredDrive,
+    hardware,
+    originalsLibraryPath,
+    request,
+    sourceArchive,
+    sourceBytes,
+    sourcePath,
+    sourceSelection,
+  };
+}
+
 afterEach(() => {
   vi.useRealTimers();
   for (const directory of temporaryDirectories.splice(0)) {
@@ -1231,6 +1323,142 @@ describe("archive worker polling", () => {
     expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);
     expect(salvageValidator.validate).not.toHaveBeenCalled();
     expect(completenessProver.prove).not.toHaveBeenCalled();
+  });
+
+  it("publishes a Re-archive Request to a fresh generation without adopting source mappings", async () => {
+    const scenario = createRearchiveWorkerScenario("347", "7");
+    const freshBytes = Buffer.alloc(scenario.sourceBytes.byteLength, 29);
+    let copyPath: string | undefined;
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
+        copyPath = outputPath;
+        writeFileSync(outputPath, freshBytes);
+        return createCleanDvdRecoveryResult(sizeBytes);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    await pollArchiveWorker({
+      access: scenario.access,
+      configuredDevicePath: scenario.discoveredDrive.devicePath,
+      copyRunner,
+      hardware: scenario.hardware,
+      log: vi.fn(),
+      originalsLibraryPath: scenario.originalsLibraryPath,
+      signal: new AbortController().signal,
+      workerId: "rearchive-success-worker",
+    });
+
+    const archives = scenario.access.catalog.listOriginalDiscArchives();
+    const freshArchive = archives.find(({ id }) =>
+      id !== scenario.sourceArchive.id
+    );
+    expect(copyPath).toContain(scenario.request.id);
+    expect(readFileSync(scenario.sourcePath)).toEqual(scenario.sourceBytes);
+    expect(freshArchive).toMatchObject({
+      rearchiveSourceArchiveId: scenario.sourceArchive.id,
+      catalogReviewOutcome: "needs_review",
+    });
+    expect(readFileSync(freshArchive!.archivePath)).toEqual(freshBytes);
+    expect(scenario.access.catalog.listDiscSelections({
+      originalDiscArchiveId: scenario.sourceArchive.id,
+    })).toEqual([expect.objectContaining({ id: scenario.sourceSelection.id })]);
+    expect(scenario.access.catalog.listDiscSelections({
+      originalDiscArchiveId: freshArchive!.id,
+    })).toEqual([]);
+    expect(scenario.hardware.confirmOpticalDrive).toHaveBeenCalled();
+  });
+
+  it("keeps the source generation and history when a fresh Re-archive copy fails", async () => {
+    const scenario = createRearchiveWorkerScenario("348", "8");
+    let copyPath: string | undefined;
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath }) => {
+        copyPath = outputPath;
+        writeFileSync(outputPath, Buffer.alloc(scenario.sourceBytes.length, 31));
+        throw new Error("Synthetic Re-archive copy failure");
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    await pollArchiveWorker({
+      access: scenario.access,
+      configuredDevicePath: scenario.discoveredDrive.devicePath,
+      copyRunner,
+      hardware: scenario.hardware,
+      log: vi.fn(),
+      originalsLibraryPath: scenario.originalsLibraryPath,
+      signal: new AbortController().signal,
+      workerId: "rearchive-failure-worker",
+    });
+
+    expect(copyPath).toContain(scenario.request.id);
+    expect(readFileSync(scenario.sourcePath)).toEqual(scenario.sourceBytes);
+    expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({ id: scenario.sourceArchive.id }),
+    ]);
+    expect(scenario.access.archiveRequests.find(scenario.request.id)?.status)
+      .toBe("needs_attention");
+    expect(scenario.access.catalog.listDiscSelections({
+      originalDiscArchiveId: scenario.sourceArchive.id,
+    })).toEqual([expect.objectContaining({ id: scenario.sourceSelection.id })]);
+  });
+
+  it("keeps the source generation and history when a fresh Re-archive copy is cancelled", async () => {
+    vi.useFakeTimers();
+    const scenario = createRearchiveWorkerScenario("349", "9");
+    let copyPath: string | undefined;
+    let copyStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      copyStarted = resolve;
+    });
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(({ outputPath, signal }) => {
+        copyPath = outputPath;
+        writeFileSync(outputPath, Buffer.alloc(scenario.sourceBytes.length, 37));
+        copyStarted();
+        return new Promise<never>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => reject(signal.reason),
+            { once: true },
+          );
+        });
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const polling = pollArchiveWorker({
+      access: scenario.access,
+      configuredDevicePath: scenario.discoveredDrive.devicePath,
+      copyRunner,
+      hardware: scenario.hardware,
+      log: vi.fn(),
+      originalsLibraryPath: scenario.originalsLibraryPath,
+      signal: new AbortController().signal,
+      workerId: "rearchive-cancellation-worker",
+    });
+    await started;
+
+    scenario.access.archiveRequests.cancel(scenario.request.id);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await polling;
+
+    expect(copyPath).toContain(scenario.request.id);
+    expect(readFileSync(scenario.sourcePath)).toEqual(scenario.sourceBytes);
+    expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({ id: scenario.sourceArchive.id }),
+    ]);
+    expect(scenario.access.archiveRequests.find(scenario.request.id)?.status)
+      .toBe("cancelled");
+    expect(scenario.access.catalog.listDiscSelections({
+      originalDiscArchiveId: scenario.sourceArchive.id,
+    })).toEqual([expect.objectContaining({ id: scenario.sourceSelection.id })]);
   });
 
   it("keeps geometry-invalid clean output out of the archive catalog", async () => {

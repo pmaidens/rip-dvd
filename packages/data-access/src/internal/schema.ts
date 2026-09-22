@@ -620,8 +620,14 @@ export const originalDiscArchives = sqliteTable(
     index("original_disc_archives_detected_disc_idx").on(
       table.detectedDiscId,
     ),
+    uniqueIndex("original_disc_archives_detected_disc_unique")
+      .on(table.detectedDiscId)
+      .where(sql`${table.rearchiveSourceArchiveId} is null`),
     uniqueIndex("original_disc_archives_path_unique").on(table.archivePath),
     index("original_disc_archives_fingerprint_idx").on(table.fingerprint),
+    uniqueIndex("original_disc_archives_fingerprint_unique")
+      .on(table.fingerprint)
+      .where(sql`${table.rearchiveSourceArchiveId} is null`),
     index("original_disc_archives_rearchive_source_idx").on(
       table.rearchiveSourceArchiveId,
       table.archivedAt,

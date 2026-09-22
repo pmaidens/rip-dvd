@@ -210,12 +210,10 @@ async function pollArchiveWorkerWithDriveAdmission(
           throw new Error("Cancelled Archive Job has no Archive Request");
         }
         await withCancelledDvdArchiveInactive({
-          ...(request.rearchiveSourceArchiveId === null
-            ? {}
-            : { archiveGenerationId: request.id }),
           archiveRequestId: claim.archiveRequestId,
           devicePath: drive.devicePath,
           fingerprint: disc.fingerprint,
+          isRearchive: request.rearchiveSourceArchiveId !== null,
           mutation: () => {
             access.archiveJobs.finalizeExpiredCancellation(claim);
             return undefined;

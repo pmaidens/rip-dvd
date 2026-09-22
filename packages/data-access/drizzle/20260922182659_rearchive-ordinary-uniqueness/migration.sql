@@ -1,0 +1,2 @@
+CREATE UNIQUE INDEX `original_disc_archives_detected_disc_unique` ON `original_disc_archives` (`detected_disc_id`) WHERE "original_disc_archives"."rearchive_source_archive_id" is null;--> statement-breakpoint
+CREATE UNIQUE INDEX `original_disc_archives_fingerprint_unique` ON `original_disc_archives` (`fingerprint`) WHERE "original_disc_archives"."rearchive_source_archive_id" is null;

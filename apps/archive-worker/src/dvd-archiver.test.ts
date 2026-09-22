@@ -2657,7 +2657,7 @@ describe("DVD archive publication", () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);
     const digest = "7".repeat(64);
-    const archiveGenerationId = "00000000-0000-4000-8000-000000000347";
+    const archiveRequestId = "00000000-0000-4000-8000-000000000347";
     const retainedPath = join(root, `dvdmeta-${digest}.iso`);
     const retainedContent = Buffer.alloc(2_048, 17);
     const freshContent = Buffer.alloc(2_048, 29);
@@ -2674,10 +2674,10 @@ describe("DVD archive publication", () => {
     const verifySource = vi.fn(async () => undefined);
 
     const fresh = await preserveDvdArchive({
-      archiveGenerationId,
-      archiveRequestId: archiveGenerationId,
+      archiveRequestId,
       devicePath: "/dev/sr0",
       fingerprint: `dvdmeta-sha256:${digest}`,
+      isRearchive: true,
       originalsLibraryPath,
       runner,
       signal: new AbortController().signal,
@@ -2688,7 +2688,7 @@ describe("DVD archive publication", () => {
 
     expect(fresh.archivePath).toBe(join(
       root,
-      `dvdmeta-${digest}-${archiveGenerationId}.iso`,
+      `dvdmeta-${digest}-${archiveRequestId}.iso`,
     ));
     expect(readFileSync(retainedPath)).toEqual(retainedContent);
     expect(readFileSync(fresh.archivePath)).toEqual(freshContent);

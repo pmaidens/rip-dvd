@@ -1773,7 +1773,7 @@ const pendingArchiveApprovalKeys = new Map<string, string>();
 const pendingRearchiveKeys = new Map<string, string>();
 const pendingRecoveryKeys = new Map<string, string>();
 
-export async function requestRearchiveApproval(
+export async function submitRearchiveRequest(
   sourceArchiveId: string,
   fetcher: DashboardFetch = fetch,
 ): Promise<void> {
@@ -2107,7 +2107,7 @@ export function OperationsDashboard({
   );
   const [requestRearchive] = useState(() =>
     createDashboardMutationRunner({
-      request: requestRearchiveApproval,
+      request: submitRearchiveRequest,
       setBusyId: setRequestingRearchiveArchiveId,
       setFailed: setRearchiveRequestFailed,
       refresh: () => setRequestNumber((value) => value + 1),

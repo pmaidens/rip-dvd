@@ -26,7 +26,7 @@ import {
   requestArchiveRequestCancellation,
   requestFilesystemVerification,
   waitForFilesystemVerificationRun,
-  requestRearchiveApproval,
+  submitRearchiveRequest,
   type DashboardLoadState,
 } from "./operations-dashboard";
 import {
@@ -1940,9 +1940,9 @@ describe("DashboardView", () => {
     const fetcher = vi.fn()
       .mockRejectedValueOnce(new Error("response lost"))
       .mockResolvedValueOnce(new Response(null, { status: 201 }));
-    await expect(requestRearchiveApproval("source-archive", fetcher))
+    await expect(submitRearchiveRequest("source-archive", fetcher))
       .rejects.toThrow("response lost");
-    await requestRearchiveApproval("source-archive", fetcher);
+    await submitRearchiveRequest("source-archive", fetcher);
     expect(fetcher.mock.calls[0]![0]).toBe("/api/rearchive-requests");
     const first = JSON.parse(fetcher.mock.calls[0]![1]!.body as string);
     const second = JSON.parse(fetcher.mock.calls[1]![1]!.body as string);
