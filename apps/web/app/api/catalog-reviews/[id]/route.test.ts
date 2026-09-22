@@ -270,6 +270,9 @@ describe("Catalog Review API", () => {
         targetArchive: { id: targetArchive.id },
       },
     });
+    expect(JSON.stringify(review.rearchiveProposal)).not.toMatch(
+      /archivePath|fingerprint/,
+    );
     const proposal = {
       catalogRevision: review.rearchiveProposal.catalogRevision,
       sourceCatalogRevision: review.rearchiveProposal.sourceCatalogRevision,
@@ -318,11 +321,13 @@ describe("Catalog Review API", () => {
       { action: "preview_rearchive_mapping_proposal", ...proposal },
     );
     expect(previewResponse.status).toBe(200);
-    await expect(previewResponse.json()).resolves.toMatchObject({
+    const preview = await previewResponse.json();
+    expect(preview).toMatchObject({
       state: "ready",
       persisted: false,
       mappings: [{ state: "valid" }],
     });
+    expect(JSON.stringify(preview)).not.toMatch(/archivePath|fingerprint/);
 
     const mutation = {
       action: "save_rearchive_mapping_proposal",
@@ -340,6 +345,7 @@ describe("Catalog Review API", () => {
       message: "Re-archive Mapping Proposal saved",
       proposal: { state: "ready", persisted: true },
     });
+    expect(JSON.stringify(saved)).not.toMatch(/archivePath|fingerprint/);
     const replayResponse = await postCatalogReview(
       access,
       targetArchive.id,

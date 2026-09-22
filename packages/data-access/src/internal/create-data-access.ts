@@ -4335,10 +4335,30 @@ export function createDataAccessInternal(
 
   type RearchiveProposalReader = CatalogTransaction | typeof database;
 
+  function listActiveRearchiveSourceSelections(
+    reader: RearchiveProposalReader,
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ) {
+    return reader
+      .select()
+      .from(discSelections)
+      .where(and(
+        eq(
+          discSelections.originalDiscArchiveId,
+          originalDiscArchiveId,
+        ),
+        eq(discSelections.isCatalogActive, true),
+      ))
+      .orderBy(asc(discSelections.createdAt), asc(discSelections.id))
+      .all()
+      .map(toDiscSelection);
+  }
+
   function evaluateRearchiveMappingProposal(
     reader: RearchiveProposalReader,
     input: RearchiveMappingProposalInput,
     persisted: boolean,
+    providedSourceSelections?: ReturnType<typeof toDiscSelection>[],
   ): RearchiveMappingProposalReview {
     const targetArchive = requireRow(
       reader
@@ -4381,22 +4401,8 @@ export function createDataAccessInternal(
     const validator = createArchivedDvdSelectionValidator(
       targetDisc.scanData,
     );
-    const sourceSelections = reader
-      .select()
-      .from(discSelections)
-      .where(and(
-        eq(
-          discSelections.originalDiscArchiveId,
-          sourceArchive.id,
-        ),
-        eq(discSelections.isCatalogActive, true),
-      ))
-      .orderBy(asc(discSelections.createdAt), asc(discSelections.id))
-      .all()
-      .map(toDiscSelection);
-    const currentSelectionsById = new Map(
-      sourceSelections.map((selection) => [selection.id, selection]),
-    );
+    const sourceSelections = providedSourceSelections ??
+      listActiveRearchiveSourceSelections(reader, sourceArchive.id);
     const proposedMappingsById = new Map<
       DiscSelectionId,
       RearchiveMappingProposalInput["mappings"][number]
@@ -4585,16 +4591,10 @@ export function createDataAccessInternal(
       ))
       .get();
     if (saved === undefined) {
-      const sourceSelections = reader
-        .select()
-        .from(discSelections)
-        .where(and(
-          eq(discSelections.originalDiscArchiveId, sourceArchive.id),
-          eq(discSelections.isCatalogActive, true),
-        ))
-        .orderBy(asc(discSelections.createdAt), asc(discSelections.id))
-        .all()
-        .map(toDiscSelection);
+      const sourceSelections = listActiveRearchiveSourceSelections(
+        reader,
+        sourceArchive.id,
+      );
       return evaluateRearchiveMappingProposal(reader, {
         originalDiscArchiveId,
         catalogRevision: targetArchive.updatedAt,
@@ -4605,7 +4605,7 @@ export function createDataAccessInternal(
           sourceIdentity: selection.sourceIdentity,
           label: selection.label,
         })),
-      }, false);
+      }, false, sourceSelections);
     }
     const mappings = reader
       .select()

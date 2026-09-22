@@ -73,6 +73,7 @@ it("shows, previews, and saves an edited Re-archive Mapping Proposal", async () 
       },
     }],
   });
+  expect(JSON.stringify(preview.result)).not.toMatch(/archivePath|fingerprint/);
 
   const args = [
     "catalog-review",
@@ -101,6 +102,7 @@ it("shows, previews, and saves an edited Re-archive Mapping Proposal", async () 
       }],
     },
   });
+  expect(JSON.stringify(saved.result)).not.toMatch(/archivePath|fingerprint/);
   expect((await current.run(
     [...args, "--stdin"],
     null,

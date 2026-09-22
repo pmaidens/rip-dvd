@@ -17,9 +17,14 @@ import type {
   DiscSelectionSourceIdentityInput,
   MediaItemId,
   RearchiveMappingProposalInput,
+  RearchiveMappingProposalReview,
 } from "@rip-dvd/data-access";
 
-import { readCatalogReview, type CatalogReviewPageCoordinates } from "./catalog-review-read.js";
+import {
+  readCatalogReview,
+  serializeRearchiveMappingProposal,
+  type CatalogReviewPageCoordinates,
+} from "./catalog-review-read.js";
 import { suggestCatalogReview } from "./catalog-suggestion.js";
 import { generateMutationKey, InvalidMutationKeyError, parseMutationKey } from "./mutation-key.js";
 import {
@@ -96,6 +101,24 @@ function rearchiveMappingProposalInput(
       label: mapping.label,
     })),
   };
+}
+
+function presentRearchiveMappingProposal(
+  access: DataAccess,
+  proposal: RearchiveMappingProposalReview,
+) {
+  const discLabels = new Map(
+    access.catalog.listDetectedDiscs(undefined, {
+      ids: [
+        proposal.sourceArchive.detectedDiscId,
+        proposal.targetArchive.detectedDiscId,
+      ],
+    }).map((disc) => [disc.id, disc.volumeLabel]),
+  );
+  return serializeRearchiveMappingProposal(proposal, {
+    source: discLabels.get(proposal.sourceArchive.detectedDiscId) ?? null,
+    target: discLabels.get(proposal.targetArchive.detectedDiscId) ?? null,
+  });
 }
 
 function requiredString(value: unknown, name: string): string {
@@ -419,18 +442,24 @@ export function createApplicationOperations(
     ) => readCatalogReview(access, id, coordinates, automaticCatalogingConfigured),
     previewRearchiveMappingProposal: (
       input: RearchiveMappingProposalOperationInput,
-    ) => access.catalog.previewRearchiveMappingProposal(
-      rearchiveMappingProposalInput(input),
+    ) => presentRearchiveMappingProposal(
+      access,
+      access.catalog.previewRearchiveMappingProposal(
+        rearchiveMappingProposalInput(input),
+      ),
     ),
     saveRearchiveMappingProposal: (
       input: RearchiveMappingProposalOperationInput & { mutationKey: unknown },
-    ) => ({
-      message: "Re-archive Mapping Proposal saved",
-      proposal: access.catalog.saveRearchiveMappingProposal({
+    ) => {
+      const proposal = access.catalog.saveRearchiveMappingProposal({
         ...rearchiveMappingProposalInput(input),
         mutationKey: parseMutationKey(input.mutationKey),
-      }),
-    }),
+      });
+      return {
+        message: "Re-archive Mapping Proposal saved",
+        proposal: presentRearchiveMappingProposal(access, proposal),
+      };
+    },
     catalogSuggestion: (
       id: OriginalDiscArchiveId,
       lookup: CatalogMetadataLookup | null,

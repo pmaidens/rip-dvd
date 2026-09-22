@@ -2238,8 +2238,8 @@ describe("CatalogReviewView", () => {
     }];
     review.discSelections = [];
     review.rearchiveProposal = {
-      state: "ready",
-      persisted: false,
+      state: "stale",
+      persisted: true,
       catalogRevision: review.catalogRevision,
       sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
       sourceArchive: {
@@ -2266,22 +2266,65 @@ describe("CatalogReviewView", () => {
           sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
           label: null,
         },
+      }, {
+        state: "stale",
+        reason: "The prior Disc Selection is no longer active on the source archive",
+        sourceDiscSelectionId: "removed-source-selection",
+        priorMapping: null,
+        proposedMapping: {
+          mediaItemId: review.mediaItems[0]!.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+          label: "Removed selection",
+        },
       }],
     };
     const postedBodies: Record<string, unknown>[] = [];
-    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith("/api/media-items?")) {
+        return Response.json({
+          results: [{
+            mediaItem: {
+              id: "catalog-search-result",
+              parentId: null,
+              kind: "movie",
+              title: "Catalog Search Result",
+              year: 2024,
+              seasonNumber: null,
+              episodeNumber: null,
+            },
+            ancestors: [],
+            suggestion: "exact",
+            maintenance: {
+              childCount: 0,
+              discSelectionReferenceCount: 0,
+              referencedArchiveCount: 0,
+              otherArchiveCount: 0,
+              deletionAvailability: { state: "available", reason: null },
+            },
+          }],
+          page: {
+            offset: 0,
+            limit: 20,
+            hasPrevious: false,
+            hasNext: false,
+          },
+        });
+      }
       if (init?.method !== "POST") return Response.json(review);
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       postedBodies.push(body);
       if (body.action === "preview_rearchive_mapping_proposal") {
+        const [proposedMapping] = body.mappings as Array<{
+          mediaItemId: string;
+          sourceIdentity: { kind: "dvd_title"; titleNumber: number };
+          label: string | null;
+        }>;
         return Response.json({
           ...review.rearchiveProposal,
+          state: "ready",
           mappings: [{
             ...review.rearchiveProposal!.mappings[0],
-            proposedMapping: {
-              ...review.rearchiveProposal!.mappings[0]!.proposedMapping,
-              sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
-            },
+            proposedMapping,
           }],
         });
       }
@@ -2296,6 +2339,28 @@ describe("CatalogReviewView", () => {
     expect(container.textContent).not.toContain("Manual catalog tools");
     expect(container.textContent).not.toContain("Complete review");
 
+    const removeStale = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Remove stale proposal row",
+    );
+    if (!removeStale) throw new Error("Expected the stale-row recovery action");
+    await act(async () => removeStale.click());
+
+    const findMediaItem = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Find another Media Item",
+    );
+    if (!findMediaItem) throw new Error("Expected full-catalog Media Item search");
+    await act(async () => findMediaItem.click());
+    const search = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Search full catalog",
+    );
+    if (!search) throw new Error("Expected the full-catalog search action");
+    await act(async () => search.click());
+    const catalogResult = container.querySelector<HTMLInputElement>(
+      'input[value="catalog-search-result"]',
+    );
+    if (!catalogResult) throw new Error("Expected a full-catalog search result");
+    await act(async () => catalogResult.click());
+
     const titleNumber = container.querySelector<HTMLInputElement>(
       '.rearchive-mapping-proposal input[type="number"]',
     );
@@ -2308,7 +2373,7 @@ describe("CatalogReviewView", () => {
       titleNumber.dispatchEvent(new Event("input", { bubbles: true }));
     });
     const save = [...container.querySelectorAll("button")].find(
-      (button) => button.textContent === "Save reviewed proposal",
+      (button) => button.textContent === "Save proposal changes",
     );
     if (!save) throw new Error("Expected a save proposal button");
     expect(save.disabled).toBe(true);
@@ -2327,7 +2392,7 @@ describe("CatalogReviewView", () => {
         sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
         mappings: [{
           sourceDiscSelectionId: "source-selection-1",
-          mediaItemId: review.mediaItems[0]!.id,
+          mediaItemId: "catalog-search-result",
           sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
           label: null,
         }],
@@ -2338,7 +2403,7 @@ describe("CatalogReviewView", () => {
         sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
         mappings: [{
           sourceDiscSelectionId: "source-selection-1",
-          mediaItemId: review.mediaItems[0]!.id,
+          mediaItemId: "catalog-search-result",
           sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
           label: null,
         }],

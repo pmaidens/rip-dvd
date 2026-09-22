@@ -271,7 +271,8 @@ it("persists an edited proposal with revision checks and replay", () => {
       }],
     };
 
-    expect(operations.previewRearchiveMappingProposal(input)).toMatchObject({
+    const preview = operations.previewRearchiveMappingProposal(input);
+    expect(preview).toMatchObject({
       state: "ready",
       persisted: false,
       mappings: [{
@@ -282,6 +283,7 @@ it("persists an edited proposal with revision checks and replay", () => {
         },
       }],
     });
+    expect(JSON.stringify(preview)).not.toMatch(/archivePath|fingerprint/);
     const mutation = {
       ...input,
       mutationKey: "00000000-0000-4000-8000-000000000448",
@@ -302,6 +304,7 @@ it("persists an edited proposal with revision checks and replay", () => {
         }],
       },
     });
+    expect(JSON.stringify(saved)).not.toMatch(/archivePath|fingerprint/);
     expect(operations.saveRearchiveMappingProposal(mutation)).toEqual(saved);
     expect(proposalFromReview(access, freshArchive.id)).toMatchObject({
       state: "ready",

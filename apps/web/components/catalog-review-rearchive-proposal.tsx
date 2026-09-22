@@ -4,12 +4,14 @@ import { useEffect, useState } from "react";
 import type { DiscSelectionSourceIdentityInput } from "@rip-dvd/data-access";
 
 import type {
+  CatalogReviewArchiveEvidence,
   CatalogReviewMediaItem,
   CatalogReviewRearchiveProposal,
   SaveRearchiveMappingProposalInput,
 } from "./catalog-review-model";
 import { ArchiveBoundaryDescription } from "./archive-boundary-description";
 import { ArchiveIntegrityDescription } from "./archive-integrity-description";
+import { CatalogReviewMediaItemSearchPicker } from "./catalog-review-media-item-search-picker";
 
 function sourceIdentityForKind(
   kind: DiscSelectionSourceIdentityInput["kind"],
@@ -25,6 +27,40 @@ function sourceIdentityLabel(
   if (source.kind === "main_feature") return "Main feature";
   if (source.kind === "dvd_title") return `Title ${source.titleNumber}`;
   return `Title ${source.titleNumber}, chapters ${source.chapterStart}–${source.chapterEnd}`;
+}
+
+function RearchiveArchiveEvidence({
+  heading,
+  archive,
+}: {
+  heading: string;
+  archive: CatalogReviewArchiveEvidence;
+}) {
+  return (
+    <div>
+      <dt>{heading}</dt>
+      <dd>
+        <span>
+          {archive.discKind.toUpperCase()} · {
+            archive.archiveFormat.toUpperCase()
+          } · {archive.integrity.replaceAll("_", " ")}
+        </span>
+        <ArchiveIntegrityDescription {...archive} />
+        <p>
+          Boundary evidence: {archive.boundaryEvidence === null
+            ? "not recorded"
+            : `${archive.boundaryEvidence.policyVersion}; ${
+              archive.boundaryEvidence.publishedSizeBytes.toLocaleString(
+                "en-US",
+              )
+            } published bytes`}
+        </p>
+        <ArchiveBoundaryDescription
+          boundaryEvidence={archive.boundaryEvidence}
+        />
+      </dd>
+    </div>
+  );
 }
 
 export function CatalogReviewRearchiveProposal({
@@ -51,6 +87,10 @@ export function CatalogReviewRearchiveProposal({
   const [preview, setPreview] = useState(proposal);
   const [isPreviewCurrent, setIsPreviewCurrent] = useState(true);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [additionalMediaItems, setAdditionalMediaItems] = useState<
+    CatalogReviewMediaItem[]
+  >([]);
+  const [searchMappingId, setSearchMappingId] = useState<string | null>(null);
 
   useEffect(() => {
     setMappings(proposal.mappings.map((mapping) => ({
@@ -60,6 +100,8 @@ export function CatalogReviewRearchiveProposal({
     setPreview(proposal);
     setIsPreviewCurrent(true);
     setPreviewError(null);
+    setAdditionalMediaItems([]);
+    setSearchMappingId(null);
   }, [proposal]);
 
   const updateMapping = (
@@ -82,7 +124,14 @@ export function CatalogReviewRearchiveProposal({
       mapping,
     ]),
   );
-  const mediaItemsById = new Map(mediaItems.map((item) => [item.id, item]));
+  const selectableMediaItems = [
+    ...new Map(
+      [...mediaItems, ...additionalMediaItems].map((item) => [item.id, item]),
+    ).values(),
+  ];
+  const mediaItemsById = new Map(
+    selectableMediaItems.map((item) => [item.id, item]),
+  );
 
   return (
     <section
@@ -100,50 +149,14 @@ export function CatalogReviewRearchiveProposal({
         Acceptance.
       </p>
       <dl className="catalog-summary-list">
-        <div>
-          <dt>Prior archive</dt>
-          <dd>
-            <span>
-              {proposal.sourceArchive.discKind.toUpperCase()} · {
-                proposal.sourceArchive.archiveFormat.toUpperCase()
-              } · {proposal.sourceArchive.integrity.replaceAll("_", " ")}
-            </span>
-            <ArchiveIntegrityDescription {...proposal.sourceArchive} />
-            <p>
-              Boundary evidence: {proposal.sourceArchive.boundaryEvidence === null
-                ? "not recorded"
-                : `${proposal.sourceArchive.boundaryEvidence.policyVersion}; ${
-                  proposal.sourceArchive.boundaryEvidence.publishedSizeBytes
-                    .toLocaleString("en-US")
-                } published bytes`}
-            </p>
-            <ArchiveBoundaryDescription
-              boundaryEvidence={proposal.sourceArchive.boundaryEvidence}
-            />
-          </dd>
-        </div>
-        <div>
-          <dt>Fresh archive</dt>
-          <dd>
-            <span>
-              {proposal.targetArchive.discKind.toUpperCase()} · {
-                proposal.targetArchive.archiveFormat.toUpperCase()
-              } · {proposal.targetArchive.integrity.replaceAll("_", " ")}
-            </span>
-            <ArchiveIntegrityDescription {...proposal.targetArchive} />
-            <p>
-              Boundary evidence: {proposal.targetArchive.boundaryEvidence === null
-                ? "not recorded"
-                : `${proposal.targetArchive.boundaryEvidence.policyVersion}; ${
-                  proposal.targetArchive.boundaryEvidence.publishedSizeBytes
-                    .toLocaleString("en-US")
-                } published bytes`}
-            </p>
-            <ArchiveBoundaryDescription
-              boundaryEvidence={proposal.targetArchive.boundaryEvidence}
-            />
-          </dd>
-        </div>
+        <RearchiveArchiveEvidence
+          heading="Prior archive"
+          archive={proposal.sourceArchive}
+        />
+        <RearchiveArchiveEvidence
+          heading="Fresh archive"
+          archive={proposal.targetArchive}
+        />
         <div>
           <dt>Review state</dt>
           <dd>{preview.state.replaceAll("_", " ")}</dd>
@@ -187,11 +200,49 @@ export function CatalogReviewRearchiveProposal({
                   }),
                 )}
               >
-                {mediaItems.map((item) => (
+                {selectableMediaItems.map((item) => (
                   <option key={item.id} value={item.id}>{item.title}</option>
                 ))}
               </select>
             </label>
+            <button
+              type="button"
+              disabled={isSaving}
+              onClick={() => setSearchMappingId((current) =>
+                current === mapping.sourceDiscSelectionId
+                  ? null
+                  : mapping.sourceDiscSelectionId
+              )}
+            >
+              {searchMappingId === mapping.sourceDiscSelectionId
+                ? "Close Media Item search"
+                : "Find another Media Item"}
+            </button>
+            {searchMappingId === mapping.sourceDiscSelectionId ? (
+              <CatalogReviewMediaItemSearchPicker
+                initialQuery={
+                  mediaItemsById.get(mapping.mediaItemId)?.title ?? ""
+                }
+                selectedMediaItemId={mapping.mediaItemId}
+                inputName={`rearchiveMediaItemId-${mapping.sourceDiscSelectionId}`}
+                isSaving={isSaving}
+                onSelect={(result) => {
+                  setAdditionalMediaItems((current) =>
+                    current.some((item) => item.id === result.mediaItem.id)
+                      ? current
+                      : [...current, result.mediaItem]
+                  );
+                  updateMapping(
+                    mapping.sourceDiscSelectionId,
+                    (current) => ({
+                      ...current,
+                      mediaItemId: result.mediaItem.id,
+                    }),
+                  );
+                  setSearchMappingId(null);
+                }}
+              />
+            ) : null}
             <label>
               Source
               <select
@@ -303,6 +354,24 @@ export function CatalogReviewRearchiveProposal({
                 ? status?.reason ?? "Preview required"
                 : "Preview required after editing"}
             </p>
+            {prior === null ? (
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={() => {
+                  setMappings((current) => current.filter(
+                    (candidate) =>
+                      candidate.sourceDiscSelectionId !==
+                        mapping.sourceDiscSelectionId,
+                  ));
+                  setSearchMappingId(null);
+                  setIsPreviewCurrent(false);
+                  setPreviewError(null);
+                }}
+              >
+                Remove stale proposal row
+              </button>
+            ) : null}
           </fieldset>
         );
       })}

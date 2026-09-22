@@ -9,6 +9,7 @@ import {
   type MediaItem,
   type MediaItemMaintenance,
   type OriginalDiscArchiveId,
+  type RearchiveMappingProposalReview,
 } from "@rip-dvd/data-access";
 import { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
 
@@ -66,7 +67,7 @@ export function serializeDiscSelection(selection: DiscSelection) {
   };
 }
 
-function serializeRearchiveEvidence(
+export function serializeRearchiveEvidence(
   archive: ReturnType<DataAccess["catalog"]["listOriginalDiscArchives"]>[number],
   discLabel: string | null,
 ) {
@@ -84,6 +85,30 @@ function serializeRearchiveEvidence(
     archivedAt: archive.archivedAt.toISOString(),
     catalogReviewedAt: archive.catalogReviewedAt?.toISOString() ?? null,
     catalogReviewOutcome: archive.catalogReviewOutcome,
+  };
+}
+
+export function serializeRearchiveMappingProposal(
+  proposal: RearchiveMappingProposalReview,
+  discLabels: {
+    source: string | null;
+    target: string | null;
+  },
+) {
+  return {
+    state: proposal.state,
+    persisted: proposal.persisted,
+    catalogRevision: proposal.catalogRevision,
+    sourceCatalogRevision: proposal.sourceCatalogRevision,
+    sourceArchive: serializeRearchiveEvidence(
+      proposal.sourceArchive,
+      discLabels.source,
+    ),
+    targetArchive: serializeRearchiveEvidence(
+      proposal.targetArchive,
+      discLabels.target,
+    ),
+    mappings: proposal.mappings,
   };
 }
 
@@ -357,22 +382,13 @@ export function readCatalogReview(
       ...(rearchiveProposal === null || rearchiveSourceDisc === undefined
         ? {}
         : {
-          rearchiveProposal: {
-            state: rearchiveProposal.state,
-            persisted: rearchiveProposal.persisted,
-            catalogRevision: rearchiveProposal.catalogRevision,
-            sourceCatalogRevision:
-              rearchiveProposal.sourceCatalogRevision,
-            sourceArchive: serializeRearchiveEvidence(
-              rearchiveProposal.sourceArchive,
-              rearchiveSourceDisc.volumeLabel,
-            ),
-            targetArchive: serializeRearchiveEvidence(
-              rearchiveProposal.targetArchive,
-              disc.volumeLabel,
-            ),
-            mappings: rearchiveProposal.mappings,
-          },
+          rearchiveProposal: serializeRearchiveMappingProposal(
+            rearchiveProposal,
+            {
+              source: rearchiveSourceDisc.volumeLabel,
+              target: disc.volumeLabel,
+            },
+          ),
         }),
       mediaItems: reviewMediaItems.map((item) =>
         serializeMediaItem(item, maintenanceByMediaItemId.get(item.id))
