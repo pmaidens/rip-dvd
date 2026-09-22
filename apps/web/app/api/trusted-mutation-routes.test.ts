@@ -9,6 +9,7 @@ import { createDiscInspectionRetryRoute } from "./disc-inspections/[id]/retry/ro
 import { createEncodeJobsRoute } from "./encode-jobs/route";
 import { createEncodingProfilesRoute } from "./encoding-profiles/route";
 import { createFilesystemVerificationRoute } from "./filesystem-verification/route";
+import { createRearchiveRequestsRoute } from "./rearchive-requests/route";
 
 type GetTrustedOrigin = () => string;
 
@@ -38,6 +39,13 @@ const mutationRoutes = [
     unavailableError: "Archive Request creation is unavailable",
     run: (request, getAccess, getTrustedOrigin) =>
       createArchiveRequestsRoute(request, getAccess, getTrustedOrigin),
+  },
+  {
+    name: "Re-archive Requests",
+    path: "/api/rearchive-requests",
+    unavailableError: "Re-archive Request creation is unavailable",
+    run: (request, getAccess, getTrustedOrigin) =>
+      createRearchiveRequestsRoute(request, getAccess, getTrustedOrigin),
   },
   {
     method: "DELETE",

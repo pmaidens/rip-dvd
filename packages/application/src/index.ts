@@ -257,6 +257,32 @@ export function createApplicationOperations(
         },
       };
     },
+    submitRearchiveRequest: (input: {
+      mutationKey: unknown;
+      sourceArchiveId: string;
+    }) => {
+      const mutationKey = parseMutationKey(input.mutationKey);
+      const sourceArchiveId = input.sourceArchiveId.trim();
+      if (sourceArchiveId === "") {
+        throw new Error("Original Disc Archive ID is required.");
+      }
+      const request = access.archiveRequests.submitRearchive({
+        mutationKey,
+        sourceArchiveId: sourceArchiveId as OriginalDiscArchiveId,
+      });
+      return {
+        archiveRequest: {
+          id: request.id,
+          detectedDiscId: request.detectedDiscId,
+          rearchiveSourceArchiveId: request.rearchiveSourceArchiveId,
+          status: request.status,
+          priority: request.priority,
+          waiting: access.archiveRequests.waitingStatus(request.id),
+          createdAt: request.createdAt.toISOString(),
+          updatedAt: request.updatedAt.toISOString(),
+        },
+      };
+    },
     cancelArchiveRequest: (input: { mutationKey: unknown; archiveRequestId: string }) => {
       const mutationKey = parseMutationKey(input.mutationKey);
       const archiveRequest = access.archiveRequests.cancelWithReplay({

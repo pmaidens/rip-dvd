@@ -1565,7 +1565,7 @@ export function createDataAccessInternal(
   }
 
   function attemptedDeclaredByteCountsForArchiveRequest(
-    transaction: CatalogTransaction,
+    transaction: Pick<typeof database, "select">,
     archiveRequestId: ArchiveRequestId,
   ): (number | null)[] {
     return transaction
@@ -1586,7 +1586,7 @@ export function createDataAccessInternal(
   }
 
   function attemptedDeclaredByteCountForArchiveRequest(
-    transaction: CatalogTransaction,
+    transaction: Pick<typeof database, "select">,
     archiveRequestId: ArchiveRequestId,
   ): number | null {
     return uniqueDeclaredByteCount(
@@ -1598,7 +1598,7 @@ export function createDataAccessInternal(
   }
 
   function declaredByteCountForArchiveRequest(
-    transaction: CatalogTransaction,
+    transaction: Pick<typeof database, "select">,
     archiveRequestId: ArchiveRequestId,
     requestedDetectedDiscId: DetectedDiscId,
   ): number | null {
@@ -1641,10 +1641,14 @@ export function createDataAccessInternal(
     candidate: ArchiveRequestDvdContinuationCandidate,
     requestDeclaredByteCount: number | null,
   ): boolean {
+    const expectedRequestedDiscStatus =
+      candidate.request.rearchiveSourceArchiveId === null
+        ? "approved"
+        : "archived";
     if (
       currentDisc.discKind !== "dvd" ||
       currentDeclaredByteCount === null ||
-      candidate.requestedDiscStatus !== "approved"
+      candidate.requestedDiscStatus !== expectedRequestedDiscStatus
     ) {
       return false;
     }
@@ -2989,6 +2993,10 @@ export function createDataAccessInternal(
             fingerprintOrContentIdAlias,
           ),
         ),
+      )
+      .orderBy(
+        asc(originalDiscArchives.archivedAt),
+        asc(originalDiscArchives.id),
       )
       .get();
     if (direct !== undefined || !isDvdMetadataFingerprint(
@@ -4821,10 +4829,13 @@ export function createDataAccessInternal(
             access.archiveRequests.list(statuses, options),
           listForDetectedDisc: (id) =>
             access.archiveRequests.listForDetectedDisc(id),
+          listForRearchiveSources: (ids) =>
+            access.archiveRequests.listForRearchiveSources(ids),
           listRelevantForDetectedDiscs: (detectedDiscIds) =>
             access.archiveRequests.listRelevantForDetectedDiscs(
               detectedDiscIds,
             ),
+          waitingStatus: (id) => access.archiveRequests.waitingStatus(id),
         },
         archiveJobs: {
           find: (id) => access.archiveJobs.find(id),
@@ -5249,6 +5260,7 @@ export function createDataAccessInternal(
                     "pending",
                     "needs_attention",
                   ]),
+                  isNull(archiveRequests.rearchiveSourceArchiveId),
                   exists(
                     transaction
                       .select({ id: detectedDiscs.id })
@@ -8692,9 +8704,120 @@ export function createDataAccessInternal(
           .orderBy(asc(archiveRequests.createdAt), asc(archiveRequests.id))
           .all();
       },
+      listForRearchiveSources(ids) {
+        if (ids.length === 0) {
+          return [];
+        }
+        return database.select().from(archiveRequests)
+          .where(inArray(archiveRequests.rearchiveSourceArchiveId, [...ids]))
+          .orderBy(asc(archiveRequests.createdAt), asc(archiveRequests.id))
+          .all();
+      },
       create: createArchiveRequest,
       submit: ({ mutationKey, detectedDiscId }) =>
         createArchiveRequest({ detectedDiscId }, mutationKey),
+      submitRearchive({ mutationKey, sourceArchiveId }) {
+        const timestamp = now();
+        return database.transaction((transaction) => {
+          const semanticInput = JSON.stringify({ sourceArchiveId });
+          const previous = readMutationInvocation(
+            transaction,
+            mutationKey,
+            "archive_request.submit_rearchive",
+            semanticInput,
+            (stored) => {
+              const outcome = JSON.parse(stored) as ArchiveRequest;
+              return {
+                ...outcome,
+                cancellationRequestedAt:
+                  outcome.cancellationRequestedAt === null
+                    ? null
+                    : new Date(outcome.cancellationRequestedAt),
+                fulfilledAt:
+                  outcome.fulfilledAt === null
+                    ? null
+                    : new Date(outcome.fulfilledAt),
+                cancelledAt:
+                  outcome.cancelledAt === null
+                    ? null
+                    : new Date(outcome.cancelledAt),
+                createdAt: new Date(outcome.createdAt),
+                updatedAt: new Date(outcome.updatedAt),
+              };
+            },
+          );
+          if (previous !== undefined) {
+            return previous;
+          }
+          const source = requireRow(
+            transaction
+              .select({
+                archive: originalDiscArchives,
+                fingerprint: detectedDiscs.fingerprint,
+              })
+              .from(originalDiscArchives)
+              .innerJoin(
+                detectedDiscs,
+                eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+              )
+              .where(eq(originalDiscArchives.id, sourceArchiveId))
+              .get(),
+            "original disc archive",
+            sourceArchiveId,
+          );
+          const active = transaction
+            .select({ request: archiveRequests })
+            .from(archiveRequests)
+            .innerJoin(
+              detectedDiscs,
+              eq(detectedDiscs.id, archiveRequests.detectedDiscId),
+            )
+            .where(
+              and(
+                eq(detectedDiscs.fingerprint, source.fingerprint),
+                inArray(archiveRequests.status, [
+                  "pending",
+                  "running",
+                  "needs_attention",
+                  "cancellation_requested",
+                ]),
+              ),
+            )
+            .orderBy(asc(archiveRequests.createdAt), asc(archiveRequests.id))
+            .get()?.request;
+          if (
+            active !== undefined &&
+            active.rearchiveSourceArchiveId !== sourceArchiveId
+          ) {
+            throw new DomainInvariantError(
+              "Matching archive work is already active for this disc",
+            );
+          }
+          const outcome = active ?? requireRow(
+            transaction
+              .insert(archiveRequests)
+              .values({
+                id: newId<ArchiveRequestId>(),
+                detectedDiscId: source.archive.detectedDiscId,
+                rearchiveSourceArchiveId: sourceArchiveId,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .returning()
+              .get(),
+            "archive request",
+            sourceArchiveId,
+          );
+          return recordMutationInvocation(
+            transaction,
+            mutationKey,
+            "archive_request.submit_rearchive",
+            semanticInput,
+            outcome,
+            timestamp,
+          );
+        }, { behavior: "immediate" });
+      },
       cancel(id) {
         return database.transaction((transaction) =>
           cancelArchiveRequest(transaction, id), { behavior: "immediate" });
@@ -8850,6 +8973,85 @@ export function createDataAccessInternal(
             .limit(1)
             .get() !== undefined;
         },
+
+        waitingStatus(id) {
+          const candidate = database
+            .select({
+              request: archiveRequests,
+              requestedDiscId: requestedDetectedDiscRecords.id,
+              requestedDiscScanData: requestedDetectedDiscRecords.scanData,
+              requestedDiscStatus: requestedDetectedDiscRecords.status,
+            })
+            .from(archiveRequests)
+            .innerJoin(
+              requestedDetectedDiscRecords,
+              eq(requestedDetectedDiscRecords.id, archiveRequests.detectedDiscId),
+            )
+            .where(eq(archiveRequests.id, id))
+            .get();
+          if (candidate === undefined || candidate.request.status !== "pending") {
+            return null;
+          }
+          const currentInspections = database
+            .select({
+              disc: detectedDiscs,
+              inspection: discInspections,
+            })
+            .from(discInspections)
+            .leftJoin(
+              detectedDiscs,
+              eq(detectedDiscs.id, discInspections.detectedDiscId),
+            )
+            .where(eq(discInspections.isCurrent, true))
+            .all();
+          const ready = currentInspections.some(({ disc, inspection }) => {
+            if (
+              disc === null ||
+              inspection.status !== "completed" ||
+              inspection.totalBytes === null
+            ) {
+              return false;
+            }
+            if (candidate.requestedDiscId === disc.id) {
+              const expectedStatus =
+                candidate.request.rearchiveSourceArchiveId === null
+                  ? "approved"
+                  : "archived";
+              return candidate.requestedDiscStatus === expectedStatus;
+            }
+            return archiveRequestMatchesDvdContinuationIdentity(
+              disc,
+              inspection.totalBytes,
+              candidate,
+              declaredByteCountForArchiveRequest(
+                database,
+                candidate.request.id,
+                candidate.requestedDiscId,
+              ),
+            );
+          });
+          if (ready) {
+            return {
+              code: "ready_for_archive_worker",
+              message:
+                "A completed Disc Inspection matches this Archive Request and is ready for the Archive Worker.",
+            };
+          }
+          if (currentInspections.some(({ inspection }) =>
+            inspection.status === "running"
+          )) {
+            return {
+              code: "matching_inspection_incomplete",
+              message:
+                "A current Disc Inspection must complete before the inserted disc can be matched.",
+            };
+          }
+          return {
+            code: "matching_disc_required",
+            message:
+              "Insert the disc matching the requested Original Disc Archive and wait for Disc Inspection to complete.",
+          };
+        },
       },
 
       archiveJobs: {
@@ -8993,9 +9195,13 @@ export function createDataAccessInternal(
           const exactRequest = requestCandidates.find(
             (candidate) => candidate.requestedDiscId === disc.id,
           );
+          const exactRequestExpectedStatus =
+            exactRequest?.request.rearchiveSourceArchiveId === null
+              ? "approved"
+              : "archived";
           if (
             exactRequest !== undefined &&
-            exactRequest.requestedDiscStatus !== "approved"
+            exactRequest.requestedDiscStatus !== exactRequestExpectedStatus
           ) {
             throw new DomainInvariantError(
               `pending Archive Request references a ${exactRequest.requestedDiscStatus} Detected Disc`,
@@ -9026,6 +9232,7 @@ export function createDataAccessInternal(
             return null;
           }
           if (
+            request.rearchiveSourceArchiveId === null &&
             findOriginalArchiveByFingerprintOrContentIdAlias(
               disc.fingerprint,
               transaction,
@@ -9644,9 +9851,12 @@ export function createDataAccessInternal(
           const checkedAt = now();
           const current = querySource
             .select({
+              archiveRequestId: archiveJobs.archiveRequestId,
               detectedDiscId: archiveJobs.detectedDiscId,
               discKind: detectedDiscs.discKind,
               fingerprint: detectedDiscs.fingerprint,
+              rearchiveSourceArchiveId:
+                archiveRequests.rearchiveSourceArchiveId,
               sourceInspectionId: archiveJobs.discInspectionId,
               sourceInspectionTotalBytes: discInspections.totalBytes,
             })
@@ -9721,7 +9931,31 @@ export function createDataAccessInternal(
             "detected disc",
             current.detectedDiscId,
           );
+          const rearchiveSource =
+            current.rearchiveSourceArchiveId === null
+              ? null
+              : requireRow(
+                  transaction
+                    .select()
+                    .from(originalDiscArchives)
+                    .where(eq(
+                      originalDiscArchives.id,
+                      current.rearchiveSourceArchiveId,
+                    ))
+                    .get(),
+                  "original disc archive",
+                  current.rearchiveSourceArchiveId,
+                );
           if (
+            rearchiveSource !== null &&
+            rearchiveSource.fingerprint !== disc.fingerprint
+          ) {
+            throw new DomainInvariantError(
+              "Re-archive source does not match the Archive Job disc identity",
+            );
+          }
+          if (
+            rearchiveSource === null &&
             findOriginalArchiveByFingerprintOrContentIdAlias(
               disc.fingerprint,
               transaction,
@@ -9742,6 +9976,7 @@ export function createDataAccessInternal(
               .values({
                 id: newId<OriginalDiscArchiveId>(),
                 detectedDiscId: disc.id,
+                rearchiveSourceArchiveId: rearchiveSource?.id ?? null,
                 discKind: disc.discKind,
                 archiveFormat: "iso",
                 archivePath,
@@ -9789,6 +10024,19 @@ export function createDataAccessInternal(
             .set({ status: "archived", updatedAt: timestamp })
             .where(eq(detectedDiscs.fingerprint, disc.fingerprint))
             .run();
+          const requestFulfillmentScope = rearchiveSource === null
+            ? exists(
+                transaction
+                  .select({ id: detectedDiscs.id })
+                  .from(detectedDiscs)
+                  .where(
+                    and(
+                      eq(detectedDiscs.id, archiveRequests.detectedDiscId),
+                      eq(detectedDiscs.fingerprint, disc.fingerprint),
+                    ),
+                  ),
+              )
+            : eq(archiveRequests.id, current.archiveRequestId);
           transaction
             .update(archiveRequests)
             .set({
@@ -9803,17 +10051,7 @@ export function createDataAccessInternal(
                   "running",
                   "needs_attention",
                 ]),
-                exists(
-                  transaction
-                    .select({ id: detectedDiscs.id })
-                    .from(detectedDiscs)
-                    .where(
-                      and(
-                        eq(detectedDiscs.id, archiveRequests.detectedDiscId),
-                        eq(detectedDiscs.fingerprint, disc.fingerprint),
-                      ),
-                    ),
-                ),
+                requestFulfillmentScope,
               ),
             )
             .run();

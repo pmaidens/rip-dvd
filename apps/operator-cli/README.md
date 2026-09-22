@@ -1,3 +1,21 @@
+# Archive Request commands
+
+Every preservation mutation requires a key chosen before submission. A normal
+Archive Request targets a Detected Disc. A Re-archive Request targets the exact
+Original Disc Archive that should remain as its predecessor.
+
+```sh
+rip-dvd-operator submit-archive-request --key <key> --detected-disc-id <id>
+rip-dvd-operator request-rearchive --key <key> --source-archive-id <id>
+```
+
+`request-rearchive` creates fresh request-owned copy state and returns the new
+Archive Request ID, lineage target, and current waiting reason. Use `inspect
+archive-requests <request-id>` or `wait archive-requests <request-id>` to follow
+it. Retrying a failed request continues that same request and rescue state. It
+does not create a fresh generation. The prior archive and its catalog history
+remain unchanged when the request succeeds, fails, or is cancelled.
+
 # Catalog Review read commands
 
 Run the server-local `rip-dvd-operator` executable with the same database and

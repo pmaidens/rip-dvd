@@ -10,6 +10,7 @@ import { createArchiveRequestCancellationRoute } from "./archive-requests/[id]/r
 import { createArchiveRequestRetryRoute } from "./archive-requests/[id]/retry/route";
 import { createArchiveRequestsRoute } from "./archive-requests/route";
 import { createDiscInspectionRetryRoute } from "./disc-inspections/[id]/retry/route";
+import { createRearchiveRequestsRoute } from "./rearchive-requests/route";
 
 const fixture = useDataAccessFixture();
 const trustedOrigin = "http://localhost:3000";
@@ -124,6 +125,47 @@ describe("Disc Inspection and Archive Request mutation routes", () => {
     expect(access.archiveRequests.list(["pending"])).toEqual([
       expect.objectContaining({ detectedDiscId: disc.id }),
     ]);
+  });
+
+  it("creates and replays a Re-archive Request through shared application logic", async () => {
+    const { access, disc } = scannedDisc();
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const source = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/originals/synthetic-rearchive-source.iso",
+      fingerprint: disc.fingerprint,
+    });
+    const key = "00000000-0000-4000-8000-000000000347";
+    const invoke = () => createRearchiveRequestsRoute(
+      mutation("/api/rearchive-requests", "POST", {
+        mutationKey: key,
+        sourceArchiveId: source.id,
+      }),
+      () => access,
+      () => trustedOrigin,
+    );
+
+    const first = await invoke();
+    expect(first.status).toBe(201);
+    const outcome = await first.json();
+    expect(outcome).toMatchObject({
+      archiveRequest: {
+        rearchiveSourceArchiveId: source.id,
+        status: "pending",
+        waiting: { code: "matching_disc_required" },
+      },
+    });
+    expect(await (await invoke()).json()).toEqual(outcome);
+    expect(createApplicationOperations(access).submitRearchiveRequest({
+      mutationKey: key,
+      sourceArchiveId: source.id,
+    })).toEqual(outcome);
+    expect(access.archiveRequests.list(["pending"])).toEqual([
+      expect.objectContaining({ rearchiveSourceArchiveId: source.id }),
+    ]);
+    expect(access.archiveRequests.list(["fulfilled"])).toHaveLength(1);
   });
 
   it("retries a request needing attention without rewriting its prior attempt", async () => {

@@ -1061,6 +1061,8 @@ export function DashboardView({
   onCancelEncodeJob = () => undefined,
   cancellingEncodeJobId = null,
   onOpenCatalogReview = () => undefined,
+  onRequestRearchive = () => undefined,
+  requestingRearchiveArchiveId = null,
   onCatalogReviewPage = () => undefined,
   onCatalogReviewView = () => undefined,
   onCatalogReviewSearch = () => undefined,
@@ -1083,6 +1085,8 @@ export function DashboardView({
   onCancelEncodeJob?: (id: DashboardEncodeJob["id"]) => void;
   cancellingEncodeJobId?: DashboardEncodeJob["id"] | null;
   onOpenCatalogReview?: (id: string) => void;
+  onRequestRearchive?: (id: string) => void;
+  requestingRearchiveArchiveId?: string | null;
   onCatalogReviewPage?: (cursor: string | null) => void;
   onCatalogReviewView?: (view: CatalogReviewArchiveView) => void;
   onCatalogReviewSearch?: (
@@ -1643,7 +1647,37 @@ export function DashboardView({
             <FilesystemVerificationResult
               {...toFilesystemVerificationDisplay(archive)}
             />
+            {archive.rearchiveRequest &&
+                !["fulfilled", "cancelled"].includes(
+                  archive.rearchiveRequest.status,
+                ) ? (
+              <div className="nested-operation">
+                {archive.rearchiveRequest.waiting ? (
+                  <p role="status">{archive.rearchiveRequest.waiting.message}</p>
+                ) : null}
+                <ArchiveRequestItem
+                  request={archive.rearchiveRequest}
+                  onCancel={onCancelArchiveRequest}
+                  onRetry={onRetryArchiveRequest}
+                  busy={busyWorkflowId === archive.rearchiveRequest.id}
+                />
+              </div>
+            ) : null}
             <div className="operation-actions">
+              {!archive.rearchiveRequest ||
+                  ["fulfilled", "cancelled"].includes(
+                    archive.rearchiveRequest.status,
+                  ) ? (
+                <button
+                  type="button"
+                  disabled={requestingRearchiveArchiveId !== null}
+                  onClick={() => onRequestRearchive(archive.id)}
+                >
+                  {requestingRearchiveArchiveId === archive.id
+                    ? "Requesting fresh archive…"
+                    : "Request fresh archive"}
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => onOpenCatalogReview(archive.id)}
@@ -1736,7 +1770,28 @@ export async function requestArchiveApproval(
 }
 
 const pendingArchiveApprovalKeys = new Map<string, string>();
+const pendingRearchiveKeys = new Map<string, string>();
 const pendingRecoveryKeys = new Map<string, string>();
+
+export async function requestRearchiveApproval(
+  sourceArchiveId: string,
+  fetcher: DashboardFetch = fetch,
+): Promise<void> {
+  let mutationKey = pendingRearchiveKeys.get(sourceArchiveId);
+  if (mutationKey === undefined) {
+    mutationKey = crypto.randomUUID();
+    pendingRearchiveKeys.set(sourceArchiveId, mutationKey);
+  }
+  const response = await fetcher("/api/rearchive-requests", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sourceArchiveId, mutationKey }),
+  });
+  if (!response.ok) {
+    throw new Error("Re-archive Request creation failed");
+  }
+  pendingRearchiveKeys.delete(sourceArchiveId);
+}
 
 async function requestWorkflowMutation(
   path: string,
@@ -1980,6 +2035,9 @@ export function OperationsDashboard({
     string | null
   >(null);
   const [archiveApprovalFailed, setArchiveApprovalFailed] = useState(false);
+  const [requestingRearchiveArchiveId, setRequestingRearchiveArchiveId] =
+    useState<string | null>(null);
+  const [rearchiveRequestFailed, setRearchiveRequestFailed] = useState(false);
   const [busyWorkflowId, setBusyWorkflowId] = useState<string | null>(null);
   const [workflowMutationFailed, setWorkflowMutationFailed] = useState(false);
   const workflowMutationInFlight = React.useRef(false);
@@ -2044,6 +2102,14 @@ export function OperationsDashboard({
       request: requestArchiveApproval,
       setBusyId: setApprovingDetectedDiscId,
       setFailed: setArchiveApprovalFailed,
+      refresh: () => setRequestNumber((value) => value + 1),
+    }),
+  );
+  const [requestRearchive] = useState(() =>
+    createDashboardMutationRunner({
+      request: requestRearchiveApproval,
+      setBusyId: setRequestingRearchiveArchiveId,
+      setFailed: setRearchiveRequestFailed,
       refresh: () => setRequestNumber((value) => value + 1),
     }),
   );
@@ -2373,6 +2439,12 @@ export function OperationsDashboard({
         </p>
       ) : null}
 
+      {rearchiveRequestFailed ? (
+        <p className="job-error" role="status">
+          Re-archive Request creation failed. Refresh the archive state and try again.
+        </p>
+      ) : null}
+
       {workflowMutationFailed ? (
         <p className="job-error" role="status">
           The requested workflow change failed. Refresh the state and try again.
@@ -2433,6 +2505,8 @@ export function OperationsDashboard({
           onCancelEncodeJob={(id) => void requestEncodeCancellation(id)}
           cancellingEncodeJobId={cancellingEncodeJobId}
           onOpenCatalogReview={setCatalogReviewArchiveId}
+          onRequestRearchive={(id) => void requestRearchive(id)}
+          requestingRearchiveArchiveId={requestingRearchiveArchiveId}
           onCatalogReviewPage={setCatalogReviewCursor}
           catalogReviewView={catalogReviewView}
           catalogReviewQuery={catalogReviewQuery}

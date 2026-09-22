@@ -452,6 +452,7 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
       if (!request) return null;
       return {
         ...request,
+        waiting: access.archiveRequests.waitingStatus(request.id),
         detectedDisc: access.catalog.listDetectedDiscs(undefined, {
           ids: [request.detectedDiscId],
         }).map(visibleDisc)[0] ?? null,
@@ -485,7 +486,16 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
         }).map(visibleDisc)[0] ?? null,
         archiveJobs: access.archiveJobs.listForArchive(archive.id)
           .map(visibleArchiveJob),
-        availableActions: [{ name: "verify-archive", eligible: true, reason: null }],
+        availableActions: [
+          { name: "verify-archive", eligible: true, reason: null },
+          {
+            name: "request-rearchive",
+            eligible: true,
+            requiredInputs: ["mutationKey", "sourceArchiveId"],
+            reason: null,
+            blockingReasons: [],
+          },
+        ],
       };
     }
     case "encode-jobs": {

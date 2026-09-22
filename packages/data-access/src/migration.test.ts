@@ -11,8 +11,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, expect, it } from "vitest";
 
-import { createDataAccess } from "./index.js";
-import { completeCatalogReview } from "./catalog.test-support.js";
+import { createDataAccess, type EncodeJobId } from "./index.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 import {
   boundedSettlingMigration,
@@ -56,48 +55,78 @@ function createMigrationsThrough(lastMigration: string): string {
 }
 
 function seedEncodeJob(
-  access: ReturnType<typeof createLegacySidecarDataAccess>,
+  databasePath: string,
   key: string,
 ) {
-  const drive = access.catalog.upsertOpticalDrive({
-    devicePath: `/dev/${key}`,
-    isPresent: true,
-  });
-  const disc = access.catalog.registerDetectedDisc({
-    opticalDriveId: drive.id,
-    discKind: "dvd",
-    fingerprint: `${key}-disc`,
-  });
-  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-  access.catalog.updateDetectedDiscStatus(disc.id, "approved");
-  const archive = access.catalog.createOriginalDiscArchive({
-    detectedDiscId: disc.id,
-    discKind: "dvd",
-    archiveFormat: "iso",
-    archivePath: `/originals/${key}.iso`,
-    fingerprint: disc.fingerprint,
-  });
-  const item = access.catalog.createMediaItem({
-    kind: "movie",
-    title: key,
-  });
-  const selection = access.catalog.createDiscSelection({
-    originalDiscArchiveId: archive.id,
-    mediaItemId: item.id,
-    sourceIdentity: { kind: "main_feature" },
-  });
-  completeCatalogReview(access, archive.id);
-  const profile = access.encodingProfiles.create({
+  const sqlite = new DatabaseSync(databasePath);
+  const ids = {
+    archive: `${key}-archive`,
+    disc: `${key}-disc`,
+    drive: `${key}-drive`,
+    item: `${key}-item`,
+    job: `${key}-job`,
+    profile: `${key}-profile`,
+    selection: `${key}-selection`,
+  };
+  sqlite.prepare(`
+    INSERT INTO optical_drives (
+      id, device_path, is_present, last_seen_at, created_at, updated_at
+    ) VALUES (?, ?, 1, 1, 1, 1)
+  `).run(ids.drive, `/dev/${key}`);
+  sqlite.prepare(`
+    INSERT INTO detected_discs (
+      id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+      created_at, updated_at
+    ) VALUES (?, ?, 'dvd', ?, 'archived', 1, 1, 1)
+  `).run(ids.disc, ids.drive, `${key}-fingerprint`);
+  sqlite.prepare(`
+    INSERT INTO original_disc_archives (
+      id, detected_disc_id, disc_kind, archive_format, archive_path,
+      fingerprint, archived_at, catalog_reviewed_at, catalog_review_outcome,
+      created_at, updated_at
+    ) VALUES (
+      ?, ?, 'dvd', 'iso', ?, ?, 1, 1, 'reviewed_with_selections', 1, 1
+    )
+  `).run(
+    ids.archive,
+    ids.disc,
+    `/originals/${key}.iso`,
+    `${key}-fingerprint`,
+  );
+  sqlite.prepare(`
+    INSERT INTO media_items (id, kind, title, created_at, updated_at)
+    VALUES (?, 'movie', ?, 1, 1)
+  `).run(ids.item, key);
+  sqlite.prepare(`
+    INSERT INTO disc_selections (
+      id, original_disc_archive_id, media_item_id, source_key, kind,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, 'dvd:main-feature', 'main_feature', 1, 1)
+  `).run(ids.selection, ids.archive, ids.item);
+  sqlite.prepare(`
+    INSERT INTO encoding_profiles (
+      id, key, display_name, media_domain, version, is_active, settings,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, 'dvd_video', 1, 1, ?, 1, 1)
+  `).run(
+    ids.profile,
     key,
-    displayName: key,
-    mediaDomain: "dvd_video",
-    settings: { preset: "Fast 480p30" },
-  });
-  return access.encodeJobs.enqueue({
-    discSelectionId: selection.id,
-    encodingProfileId: profile.id,
-    outputPath: `/media/${key}.mkv`,
-  });
+    key,
+    JSON.stringify({ preset: "Fast 480p30" }),
+  );
+  sqlite.prepare(`
+    INSERT INTO encode_jobs (
+      id, disc_selection_id, encoding_profile_id, output_path, status,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 'queued', 1, 1)
+  `).run(
+    ids.job,
+    ids.selection,
+    ids.profile,
+    `/media/${key}.mkv`,
+  );
+  sqlite.close();
+  return { id: ids.job as EncodeJobId };
 }
 
 function readApplicationSchema(sqlite: DatabaseSync): unknown[] {
@@ -366,6 +395,87 @@ it("migrates historical Original Disc Archives with null boundary evidence", () 
   migratedSqlite.close();
 });
 
+it("preserves archive history while adding nullable Re-archive lineage", () => {
+  const databasePath = createDatabasePath("rip-dvd-rearchive-migration-");
+  const previousMigrations = createMigrationsThrough(
+    "20260922161825_operation-detail-lookups",
+  );
+  const previousAccess = createDataAccess({
+    databasePath,
+    migrationsFolder: previousMigrations,
+  });
+  previousAccess.close();
+  const historical = new DatabaseSync(databasePath);
+  historical.exec(`
+    INSERT INTO optical_drives (
+      id, device_path, is_enabled, configuration_default_resolved,
+      is_configured_target, is_present, last_seen_at, created_at, updated_at
+    ) VALUES (
+      'rearchive-migration-drive', '/dev/rearchive-migration', 0, 1,
+      0, 0, 1, 1, 1
+    );
+    INSERT INTO detected_discs (
+      id, optical_drive_id, disc_kind, fingerprint, status,
+      detected_at, created_at, updated_at
+    ) VALUES (
+      'rearchive-migration-disc', 'rearchive-migration-drive', 'dvd',
+      'synthetic-rearchive-migration', 'archived', 1, 1, 1
+    );
+    INSERT INTO archive_requests (
+      id, detected_disc_id, status, priority, fulfilled_at,
+      created_at, updated_at
+    ) VALUES (
+      'rearchive-migration-request', 'rearchive-migration-disc',
+      'fulfilled', 0, 1, 1, 1
+    );
+    INSERT INTO original_disc_archives (
+      id, detected_disc_id, disc_kind, archive_format, archive_path,
+      fingerprint, size_bytes, archived_at, created_at, updated_at
+    ) VALUES (
+      'rearchive-migration-archive', 'rearchive-migration-disc', 'dvd', 'iso',
+      '/originals/synthetic-rearchive-migration.iso',
+      'synthetic-rearchive-migration', 2048, 1, 1, 1
+    );
+  `);
+  historical.close();
+
+  const migratedAccess = createDataAccess({ databasePath });
+  expect(migratedAccess.archiveRequests.find(
+    "rearchive-migration-request" as never,
+  )).toMatchObject({
+    id: "rearchive-migration-request",
+    rearchiveSourceArchiveId: null,
+    status: "fulfilled",
+  });
+  expect(migratedAccess.catalog.listOriginalDiscArchives({
+    ids: ["rearchive-migration-archive" as never],
+  })).toEqual([
+    expect.objectContaining({
+      id: "rearchive-migration-archive",
+      rearchiveSourceArchiveId: null,
+      archivePath: "/originals/synthetic-rearchive-migration.iso",
+    }),
+  ]);
+  migratedAccess.close();
+
+  const sqlite = new DatabaseSync(databasePath);
+  expect(sqlite.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  expect(sqlite.prepare("PRAGMA quick_check").get()).toEqual({
+    quick_check: "ok",
+  });
+  expect(
+    sqlite.prepare(
+      "SELECT name, \"unique\" FROM pragma_index_list('original_disc_archives') ORDER BY name",
+    ).all(),
+  ).toEqual(expect.arrayContaining([
+    { name: "original_disc_archives_detected_disc_idx", unique: 0 },
+    { name: "original_disc_archives_fingerprint_idx", unique: 0 },
+    { name: "original_disc_archives_path_unique", unique: 1 },
+    { name: "original_disc_archives_rearchive_source_idx", unique: 0 },
+  ]));
+  sqlite.close();
+});
+
 it("preserves historical Encode Jobs without inventing Failure Reports", () => {
   const databasePath = createDatabasePath("rip-dvd-encode-report-migration-");
   const previousMigrations = createMigrationsThrough(
@@ -375,7 +485,7 @@ it("preserves historical Encode Jobs without inventing Failure Reports", () => {
     databasePath,
     migrationsFolder: previousMigrations,
   });
-  const job = seedEncodeJob(previousAccess, "historical-encode");
+  const job = seedEncodeJob(databasePath, "historical-encode");
   const claim = previousAccess.encodeJobs.claimNext("historical-worker");
   if (claim === null) {
     throw new Error("Expected historical Encode Job claim");
@@ -414,45 +524,7 @@ it("migrates command reports and accepts every new Encode failure category", () 
     databasePath,
     migrationsFolder: commandReportMigrations,
   });
-  const drive = previousAccess.catalog.upsertOpticalDrive({
-    devicePath: "/dev/expanded-encode",
-    isPresent: true,
-  });
-  const disc = previousAccess.catalog.registerDetectedDisc({
-    opticalDriveId: drive.id,
-    discKind: "dvd",
-    fingerprint: "expanded-encode-disc",
-  });
-  previousAccess.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-  previousAccess.catalog.updateDetectedDiscStatus(disc.id, "approved");
-  const archive = previousAccess.catalog.createOriginalDiscArchive({
-    detectedDiscId: disc.id,
-    discKind: "dvd",
-    archiveFormat: "iso",
-    archivePath: "/originals/expanded-encode.iso",
-    fingerprint: disc.fingerprint,
-  });
-  const item = previousAccess.catalog.createMediaItem({
-    kind: "movie",
-    title: "Expanded Encode Reports",
-  });
-  const selection = previousAccess.catalog.createDiscSelection({
-    originalDiscArchiveId: archive.id,
-    mediaItemId: item.id,
-    sourceIdentity: { kind: "main_feature" },
-  });
-  completeCatalogReview(previousAccess, archive.id);
-  const profile = previousAccess.encodingProfiles.create({
-    key: "expanded-encode",
-    displayName: "Expanded encode",
-    mediaDomain: "dvd_video",
-    settings: { preset: "Fast 480p30" },
-  });
-  const job = previousAccess.encodeJobs.enqueue({
-    discSelectionId: selection.id,
-    encodingProfileId: profile.id,
-    outputPath: "/media/expanded-encode.mkv",
-  });
+  const job = seedEncodeJob(databasePath, "expanded-encode");
   const commandClaim = previousAccess.encodeJobs.claimNext("command-worker");
   if (!commandClaim) throw new Error("Expected command report claim");
   previousAccess.encodeJobs.fail(commandClaim, "HandBrake command failed");
@@ -558,7 +630,7 @@ it("preserves every previously accepted command Failure Report", () => {
     databasePath,
     migrationsFolder: previousMigrations,
   });
-  const job = seedEncodeJob(previousAccess, "previous-command-report");
+  const job = seedEncodeJob(databasePath, "previous-command-report");
   const claim = previousAccess.encodeJobs.claimNext("previous-report-worker");
   if (claim === null) {
     throw new Error("Expected previous Encode Job claim");

@@ -96,6 +96,13 @@ const commandDefinitions = [
     inputs: { arguments: [], options: ["--key", "--detected-disc-id"] },
     example: "rip-dvd-operator submit-archive-request --key 00000000-0000-4000-8000-000000000001 --detected-disc-id <id>",
   },
+  {
+    name: "request-rearchive",
+    description: "Request a fresh archive while retaining a prior Original Disc Archive.",
+    usage: "rip-dvd-operator request-rearchive --key <key> --source-archive-id <id>",
+    inputs: { arguments: [], options: ["--key", "--source-archive-id"] },
+    example: "rip-dvd-operator request-rearchive --key 00000000-0000-4000-8000-000000000001 --source-archive-id <id>",
+  },
   ...Object.entries(recoveryCommands)
     .map(([name, command]) => ({
       name,
@@ -566,6 +573,88 @@ function submitArchiveAudit(
     throw new CommandFailure(
       "ARCHIVE_AUDIT_UNAVAILABLE",
       "Archive audit submission is unavailable.",
+      1,
+    );
+  } finally {
+    access?.close();
+  }
+}
+
+function rearchiveInputs(args: readonly string[]): {
+  mutationKey: string;
+  sourceArchiveId: string;
+} {
+  const options = new Map<string, string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const name = args[index];
+    const value = args[index + 1];
+    if (
+      (name !== "--key" && name !== "--source-archive-id") ||
+      value === undefined ||
+      value.startsWith("--") ||
+      options.has(name)
+    ) {
+      throw new CommandFailure(
+        "INVALID_ARGUMENTS",
+        "Invalid Re-archive Request options.",
+        2,
+      );
+    }
+    options.set(name, value);
+  }
+  let mutationKey: string;
+  try {
+    mutationKey = parseMutationKey(options.get("--key"));
+  } catch (error) {
+    if (error instanceof InvalidMutationKeyError) {
+      throw new CommandFailure("INVALID_MUTATION_KEY", error.message, 2);
+    }
+    throw error;
+  }
+  const sourceArchiveId = options.get("--source-archive-id")?.trim();
+  if (!sourceArchiveId) {
+    throw new CommandFailure(
+      "INVALID_ARGUMENTS",
+      "Original Disc Archive ID is required.",
+      2,
+    );
+  }
+  return { mutationKey, sourceArchiveId };
+}
+
+function requestRearchive(
+  input: ReturnType<typeof rearchiveInputs>,
+  openAccess: CommandIO["openAccess"],
+) {
+  let access: DataAccess | undefined;
+  try {
+    access = openAccess();
+    return createApplicationOperations(access).submitRearchiveRequest(input);
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    if (error instanceof MutationKeyConflictError) {
+      throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    if (error instanceof RecordNotFoundError) {
+      throw new CommandFailure(
+        "ORIGINAL_DISC_ARCHIVE_NOT_FOUND",
+        "Original Disc Archive not found.",
+        2,
+      );
+    }
+    if (
+      error instanceof DomainInvariantError ||
+      error instanceof InvalidStatusTransitionError
+    ) {
+      throw new CommandFailure(
+        "REARCHIVE_REQUEST_REJECTED",
+        "Re-archive Request is not eligible.",
+        2,
+      );
+    }
+    throw new CommandFailure(
+      "REARCHIVE_REQUEST_UNAVAILABLE",
+      "Re-archive Request submission is unavailable.",
       1,
     );
   } finally {
@@ -1075,6 +1164,14 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         return 0;
       }
       emit(io.stdout, submitArchiveRequest(submissionInputs(rest), io.openAccess));
+      return 0;
+    }
+    if (name === "request-rearchive") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+        return 0;
+      }
+      emit(io.stdout, requestRearchive(rearchiveInputs(rest), io.openAccess));
       return 0;
     }
     if (isRecoveryCommand(name)) {

@@ -13,7 +13,7 @@ import type {
 } from "../lib/dashboard";
 import type { DashboardInvestigation } from "../lib/investigation";
 
-import type { EncodeJobId } from "@rip-dvd/data-access";
+import type { ArchiveRequestId, EncodeJobId } from "@rip-dvd/data-access";
 
 import {
   ActionOverview,
@@ -26,6 +26,7 @@ import {
   requestArchiveRequestCancellation,
   requestFilesystemVerification,
   waitForFilesystemVerificationRun,
+  requestRearchiveApproval,
   type DashboardLoadState,
 } from "./operations-dashboard";
 import {
@@ -813,8 +814,60 @@ describe("DashboardView", () => {
     expect(html).toContain("Reviewed Aug");
     expect(html).toContain("Needle Movie");
     expect(html).toContain("Needle Extra");
+    expect(html).toContain("Request fresh archive");
     expect(html).toContain("Open review");
     expect(html).not.toContain("Review catalog");
+  });
+
+  it("shows why an active Re-archive Request is waiting", () => {
+    const waitingMessage =
+      "Insert the disc matching the requested Original Disc Archive and wait for Disc Inspection to complete.";
+    const html = renderToStaticMarkup(
+      <DashboardView
+        section="catalog"
+        catalogReviewView="reviewed"
+        state={{
+          opticalDrives: { status: "loaded", items: [] },
+          detectedDiscs: { status: "loaded", items: [] },
+          archiveJobs: { status: "loaded", items: [] },
+          encodeJobs: { status: "loaded", items: [] },
+          catalogReview: {
+            status: "loaded",
+            items: [{
+              id: "rearchive-source",
+              discLabel: "SYNTHETIC_SOURCE",
+              discKind: "dvd",
+              archiveFormat: "iso",
+              integrity: "clean_read",
+              badSectorCount: 0,
+              badAreaCount: 0,
+              badSectorRanges: [],
+              archivedAt: "2026-08-10T12:00:00.000Z",
+              catalogReviewedAt: "2026-08-11T12:00:00.000Z",
+              catalogReviewOutcome: "archive_only",
+              mappedMediaItemCount: 0,
+              mappedMediaItemTitles: [],
+              rearchiveRequest: {
+                id: "pending-rearchive" as ArchiveRequestId,
+                status: "pending",
+                attemptCount: 0,
+                latestFailureDetail: null,
+                waiting: {
+                  code: "matching_disc_required",
+                  message: waitingMessage,
+                },
+                createdAt: "2026-08-12T12:00:00.000Z",
+                updatedAt: "2026-08-12T12:00:00.000Z",
+              },
+            }],
+          },
+        }}
+      />,
+    );
+
+    expect(html).toContain(waitingMessage);
+    expect(html).toContain("Cancel request");
+    expect(html).not.toContain("Request fresh archive");
   });
 
   it("renders populated operations with path-free worker failure details", () => {
@@ -1880,6 +1933,23 @@ describe("DashboardView", () => {
     await requestArchiveApproval("retry-disc", fetcher);
     const first = JSON.parse(fetcher.mock.calls[0]![1]!.body as string);
     const second = JSON.parse(fetcher.mock.calls[1]![1]!.body as string);
+    expect(first.mutationKey).toBe(second.mutationKey);
+  });
+
+  it("submits and safely replays a Re-archive Request", async () => {
+    const fetcher = vi.fn()
+      .mockRejectedValueOnce(new Error("response lost"))
+      .mockResolvedValueOnce(new Response(null, { status: 201 }));
+    await expect(requestRearchiveApproval("source-archive", fetcher))
+      .rejects.toThrow("response lost");
+    await requestRearchiveApproval("source-archive", fetcher);
+    expect(fetcher.mock.calls[0]![0]).toBe("/api/rearchive-requests");
+    const first = JSON.parse(fetcher.mock.calls[0]![1]!.body as string);
+    const second = JSON.parse(fetcher.mock.calls[1]![1]!.body as string);
+    expect(first).toEqual({
+      sourceArchiveId: "source-archive",
+      mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    });
     expect(first.mutationKey).toBe(second.mutationKey);
   });
 

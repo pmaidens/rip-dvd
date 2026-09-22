@@ -1206,6 +1206,22 @@ function requirePartialInactive(partialPath: string): void {
 const UUID_V4_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
+function dvdArchivePublicationStem(
+  fingerprint: string,
+  archiveGenerationId?: string,
+): string {
+  if (
+    archiveGenerationId !== undefined &&
+    !UUID_V4_PATTERN.test(archiveGenerationId)
+  ) {
+    throw new Error("DVD archive generation is invalid");
+  }
+  const stem = dvdArchiveStem(fingerprint);
+  return archiveGenerationId === undefined
+    ? stem
+    : `${stem}-${archiveGenerationId}`;
+}
+
 function discoverAttemptPartialPaths(root: string, digest: string): string[] {
   const prefix = `.${digest}.`;
   const suffix = ".iso.rip-dvd-partial";
@@ -1247,18 +1263,23 @@ function discoverAttemptPartialPaths(root: string, digest: string): string[] {
 }
 
 async function quarantineCancelledCorrectedPublication({
+  archiveGenerationId,
   archiveRequestId,
   fingerprint,
   root,
   sizeBytes,
 }: {
+  archiveGenerationId?: string;
   archiveRequestId: string;
   fingerprint: string;
   root: string;
   sizeBytes: number;
 }): Promise<void> {
   const safeSizeBytes = requireDvdContentSize(sizeBytes);
-  const archivePath = join(root, `${dvdArchiveStem(fingerprint)}.iso`);
+  const archivePath = join(
+    root,
+    `${dvdArchivePublicationStem(fingerprint, archiveGenerationId)}.iso`,
+  );
   if (
     dirname(archivePath) !== root ||
     Buffer.byteLength(archivePath) > MAX_ARCHIVE_PATH_BYTES ||
@@ -1316,6 +1337,7 @@ type CancelledDvdArchiveIdentity =
   | { archiveRequestId: string; sizeBytes?: number };
 
 export async function withCancelledDvdArchiveInactive({
+  archiveGenerationId,
   archiveRequestId,
   devicePath,
   fingerprint,
@@ -1326,6 +1348,7 @@ export async function withCancelledDvdArchiveInactive({
   sizeBytes,
   workspaceLock = defaultDvdRescueWorkspaceLock,
 }: {
+  archiveGenerationId?: string;
   devicePath: string;
   fingerprint: string;
   mutation: () => void | Promise<void>;
@@ -1339,7 +1362,7 @@ export async function withCancelledDvdArchiveInactive({
     throw new Error("Detected Disc fingerprint is invalid");
   }
   const root = await requireSafeArchiveRoot(originalsLibraryPath);
-  const digest = dvdArchiveStem(fingerprint);
+  const digest = dvdArchivePublicationStem(fingerprint, archiveGenerationId);
   const task = () =>
     runner.withDeviceInactive(safeDevicePath, async () => {
       const partialPaths = [
@@ -1372,6 +1395,7 @@ export async function withCancelledDvdArchiveInactive({
           }
         } else {
           await quarantineCancelledCorrectedPublication({
+            archiveGenerationId,
             archiveRequestId,
             fingerprint,
             root,
@@ -1392,6 +1416,7 @@ export async function withCancelledDvdArchiveInactive({
 }
 
 export interface PreserveDvdArchiveOptions {
+  archiveGenerationId?: string;
   archiveRequestId?: string;
   authorizeCopy?(): void | Promise<void>;
   authorizeMutation?(): void | Promise<void>;
@@ -2335,6 +2360,7 @@ async function publishCorrectedDvdBoundary({
 }
 
 export async function preserveDvdArchive({
+  archiveGenerationId,
   archiveRequestId,
   authorizeCopy,
   authorizeMutation,
@@ -2362,7 +2388,7 @@ export async function preserveDvdArchive({
     throw new Error("Detected Disc fingerprint is invalid");
   }
   const root = await requireSafeArchiveRoot(originalsLibraryPath);
-  const digest = dvdArchiveStem(fingerprint);
+  const digest = dvdArchivePublicationStem(fingerprint, archiveGenerationId);
   const archivePath = join(root, `${digest}.iso`);
   const legacyPartialPath = join(root, `.${digest}.iso.rip-dvd-partial`);
   const attemptPartialPath = join(

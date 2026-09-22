@@ -2653,6 +2653,49 @@ describe("DVD archive publication", () => {
     expect(verifySource).toHaveBeenCalledTimes(5);
   });
 
+  it("publishes a re-archive generation beside the retained source file", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const digest = "7".repeat(64);
+    const archiveGenerationId = "00000000-0000-4000-8000-000000000347";
+    const retainedPath = join(root, `dvdmeta-${digest}.iso`);
+    const retainedContent = Buffer.alloc(2_048, 17);
+    const freshContent = Buffer.alloc(2_048, 29);
+    writeFileSync(retainedPath, retainedContent);
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
+        writeFileSync(outputPath, freshContent);
+        return createCleanDvdRecoveryResult(sizeBytes);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const verifySource = vi.fn(async () => undefined);
+
+    const fresh = await preserveDvdArchive({
+      archiveGenerationId,
+      archiveRequestId: archiveGenerationId,
+      devicePath: "/dev/sr0",
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      originalsLibraryPath,
+      runner,
+      signal: new AbortController().signal,
+      sizeBytes: freshContent.byteLength,
+      verifySource,
+      onProgress: () => undefined,
+    });
+
+    expect(fresh.archivePath).toBe(join(
+      root,
+      `dvdmeta-${digest}-${archiveGenerationId}.iso`,
+    ));
+    expect(readFileSync(retainedPath)).toEqual(retainedContent);
+    expect(readFileSync(fresh.archivePath)).toEqual(freshContent);
+    expect(verifySource).toHaveBeenCalledTimes(5);
+    await fresh.finalizePublication?.();
+  });
+
   it("rejects a clean partial whose ISO geometry crosses EOF before sync or publication", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);

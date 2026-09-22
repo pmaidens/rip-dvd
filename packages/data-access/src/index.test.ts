@@ -1222,7 +1222,8 @@ describe("data-access facade", () => {
           name !== "20260828154312_luxuriant_human_robot" &&
           name !== "20260828160945_fancy_chimera" &&
           name !== "20260828164042_married_lady_ursula" &&
-          name !== "20260922161825_operation-detail-lookups",
+          name !== "20260922161825_operation-detail-lookups" &&
+          name !== "20260922174811_rearchive-lineage",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8136,6 +8137,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         name: "20260922185615_durable-archive-audits",
       },
       {
+        name: "20260922174811_rearchive-lineage",
+      },
+      {
         name: "20260922170551_durable-filesystem-verification",
       },
       {
@@ -8158,9 +8162,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260901175437_reflective_tattoo",
-      },
-      {
-        name: "20260901172324_glorious_cargill",
       },
     ]);
     expect(
@@ -12261,6 +12262,178 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(() => access.archiveJobs.fail(claim, "stale failure")).toThrow(
       StaleJobAttemptError,
     );
+    access.close();
+  });
+
+  it("creates a fresh re-archive generation without adopting or overwriting its source", () => {
+    const access = openTestDatabase();
+    const fingerprint = `dvdmeta-sha256:${"9".repeat(64)}`;
+    const scanData = {
+      schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 5_400,
+        chapters: 12,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const sourceDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/rearchive-source",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const sourceDisc = completeDiscInspection(access, {
+      opticalDriveId: sourceDrive.id,
+      mediaGeneration: "rearchive-source-generation",
+      fingerprint,
+      scanData,
+      sizeBytes: 4_096,
+      volumeLabel: "SYNTHETIC_FEATURE",
+    });
+    const sourceRequest = access.archiveRequests.create({
+      detectedDiscId: sourceDisc.disc.id,
+    });
+    const sourceClaim = access.archiveJobs.startForInspection(
+      sourceDisc.inspection.id,
+      "source-publisher",
+    )!;
+    const sourceJob = access.archiveJobs.publish(sourceClaim, {
+      archivePath: "/media/originals/synthetic-source.iso",
+      boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(4_096),
+      sizeBytes: 4_096,
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "dvd-recovery-v1",
+      ),
+    });
+    const sourceArchive = access.catalog.listOriginalDiscArchives({
+      ids: [sourceJob.originalDiscArchiveId!],
+    })[0]!;
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic feature",
+    });
+    const sourceSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: sourceArchive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    completeCatalogReview(access, sourceArchive.id);
+    access.discInspections.clearCurrent({
+      opticalDriveId: sourceDrive.id,
+    });
+
+    const request = access.archiveRequests.submitRearchive({
+      mutationKey: "00000000-0000-4000-8000-000000000347",
+      sourceArchiveId: sourceArchive.id,
+    });
+    expect(request).toMatchObject({
+      detectedDiscId: sourceArchive.detectedDiscId,
+      rearchiveSourceArchiveId: sourceArchive.id,
+      status: "pending",
+    });
+    expect(access.archiveRequests.waitingStatus(request.id)).toMatchObject({
+      code: "matching_disc_required",
+    });
+    expect(access.archiveRequests.submitRearchive({
+      mutationKey: "00000000-0000-4000-8000-000000000348",
+      sourceArchiveId: sourceArchive.id,
+    })).toMatchObject({ id: request.id });
+
+    const wrongFingerprint = `dvdmeta-sha256:${"8".repeat(64)}`;
+    const wrongDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/rearchive-wrong-disc",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const wrongDisc = completeDiscInspection(access, {
+      opticalDriveId: wrongDrive.id,
+      mediaGeneration: "rearchive-wrong-generation",
+      fingerprint: wrongFingerprint,
+      scanData: { ...scanData, contentId: wrongFingerprint },
+      sizeBytes: 4_096,
+      volumeLabel: "SYNTHETIC_FEATURE",
+    });
+    expect(access.archiveJobs.startForInspection(
+      wrongDisc.inspection.id,
+      "wrong-disc-worker",
+    )).toBeNull();
+    expect(access.archiveRequests.waitingStatus(request.id)).toMatchObject({
+      code: "matching_disc_required",
+    });
+
+    const matchingDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/rearchive-matching-disc",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const matchingDisc = completeDiscInspection(access, {
+      opticalDriveId: matchingDrive.id,
+      mediaGeneration: "rearchive-matching-generation",
+      fingerprint,
+      scanData,
+      sizeBytes: 4_096,
+      volumeLabel: "SYNTHETIC_FEATURE",
+    });
+    expect(matchingDisc.disc.status).toBe("archived");
+    expect(access.archiveRequests.waitingStatus(request.id)).toMatchObject({
+      code: "ready_for_archive_worker",
+    });
+    const failedClaim = access.archiveJobs.startForInspection(
+      matchingDisc.inspection.id,
+      "rearchive-worker-1",
+    )!;
+    access.archiveJobs.fail(failedClaim, "Synthetic fresh-copy failure");
+    expect(access.catalog.listOriginalDiscArchives()).toHaveLength(1);
+    expect(access.archiveRequests.find(request.id)?.status)
+      .toBe("needs_attention");
+
+    access.archiveRequests.retry(request.id);
+    const successfulClaim = access.archiveJobs.startForInspection(
+      matchingDisc.inspection.id,
+      "rearchive-worker-2",
+    )!;
+    const completed = access.archiveJobs.publish(successfulClaim, {
+      archivePath: "/media/originals/synthetic-fresh-generation.iso",
+      boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(4_096),
+      sizeBytes: 4_096,
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "dvd-recovery-v1",
+      ),
+    });
+    const replacement = access.catalog.listOriginalDiscArchives({
+      ids: [completed.originalDiscArchiveId!],
+    })[0]!;
+    expect(replacement).toMatchObject({
+      rearchiveSourceArchiveId: sourceArchive.id,
+      archivePath: "/media/originals/synthetic-fresh-generation.iso",
+      catalogReviewOutcome: "needs_review",
+      catalogReviewedAt: null,
+    });
+    expect(access.catalog.listOriginalDiscArchives({
+      ids: [sourceArchive.id],
+    })[0]).toMatchObject({
+      archivePath: "/media/originals/synthetic-source.iso",
+      catalogReviewOutcome: "reviewed_with_selections",
+    });
+    expect(access.catalog.listDiscSelections({ ids: [sourceSelection.id] }))
+      .toEqual([
+        expect.objectContaining({
+          id: sourceSelection.id,
+          originalDiscArchiveId: sourceArchive.id,
+        }),
+      ]);
+
+    const cancelled = access.archiveRequests.submitRearchive({
+      mutationKey: "00000000-0000-4000-8000-000000000349",
+      sourceArchiveId: replacement.id,
+    });
+    expect(access.archiveRequests.cancel(cancelled.id).status)
+      .toBe("cancelled");
+    expect(access.catalog.listOriginalDiscArchives()).toHaveLength(2);
+    expect(access.archiveRequests.find(sourceRequest.id)?.status)
+      .toBe("fulfilled");
     access.close();
   });
 
