@@ -4176,22 +4176,34 @@ export function createDataAccessInternal(
         },
         discInspections: {
           list: (options) => access.discInspections.list(options),
+          listAttempts: (id) => access.discInspections.listAttempts(id),
         },
-      archiveRequests: {
+        archiveRequests: {
+          find: (id) => access.archiveRequests.find(id),
           list: (statuses, options) =>
             access.archiveRequests.list(statuses, options),
+          listForDetectedDisc: (id) =>
+            access.archiveRequests.listForDetectedDisc(id),
           listRelevantForDetectedDiscs: (detectedDiscIds) =>
             access.archiveRequests.listRelevantForDetectedDiscs(
               detectedDiscIds,
             ),
         },
         archiveJobs: {
+          find: (id) => access.archiveJobs.find(id),
           list: (statuses, options) => access.archiveJobs.list(statuses, options),
+          listForInspection: (id) => access.archiveJobs.listForInspection(id),
+          listForArchive: (id) => access.archiveJobs.listForArchive(id),
           listLatestForRequests: (archiveRequestIds) =>
             access.archiveJobs.listLatestForRequests(archiveRequestIds),
         },
         encodeJobs: {
+          find: (id) => access.encodeJobs.find(id),
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
+          listForDiscSelection: (id) =>
+            access.encodeJobs.listForDiscSelection(id),
+          hasReservedOutputPathConflict: (job) =>
+            access.encodeJobs.hasReservedOutputPathConflict(job),
           resolveQueueLogicalJobs: (options) =>
             access.encodeJobs.resolveQueueLogicalJobs(options),
           listQueueDiscSelections: (options) =>
@@ -4211,6 +4223,7 @@ export function createDataAccessInternal(
             access.encodeJobs.listRetainedOutputSummaries(ids),
         },
         workerIncidents: {
+          find: (id) => access.workerIncidents.find(id),
           list: (options) => access.workerIncidents.list(options),
         },
       };
@@ -4833,6 +4846,9 @@ export function createDataAccessInternal(
         const conditions = [
           options?.ids
             ? inArray(originalDiscArchives.id, [...options.ids])
+            : undefined,
+          options?.detectedDiscId
+            ? eq(originalDiscArchives.detectedDiscId, options.detectedDiscId)
             : undefined,
           options?.uncatalogedOnly
             ? notExists(
@@ -7938,6 +7954,12 @@ export function createDataAccessInternal(
         const conditions = [
           options.currentOnly ? eq(discInspections.isCurrent, true) : undefined,
           options.ids ? inArray(discInspections.id, [...options.ids]) : undefined,
+          options.opticalDriveId
+            ? eq(discInspections.opticalDriveId, options.opticalDriveId)
+            : undefined,
+          options.detectedDiscId
+            ? eq(discInspections.detectedDiscId, options.detectedDiscId)
+            : undefined,
         ].filter((condition) => condition !== undefined);
         const query = database
           .select()
@@ -7975,6 +7997,16 @@ export function createDataAccessInternal(
     },
 
     archiveRequests: {
+      find(id) {
+        return database.select().from(archiveRequests)
+          .where(eq(archiveRequests.id, id)).get() ?? null;
+      },
+      listForDetectedDisc(id) {
+        return database.select().from(archiveRequests)
+          .where(eq(archiveRequests.detectedDiscId, id))
+          .orderBy(asc(archiveRequests.createdAt), asc(archiveRequests.id))
+          .all();
+      },
       create: createArchiveRequest,
       submit: ({ mutationKey, detectedDiscId }) =>
         createArchiveRequest({ detectedDiscId }, mutationKey),
@@ -8154,6 +8186,22 @@ export function createDataAccessInternal(
       },
 
       archiveJobs: {
+        find(id) {
+          return database.select().from(archiveJobs)
+            .where(eq(archiveJobs.id, id)).get() ?? null;
+        },
+        listForInspection(id) {
+          return database.select().from(archiveJobs)
+            .where(eq(archiveJobs.discInspectionId, id))
+            .orderBy(asc(archiveJobs.createdAt), asc(archiveJobs.id))
+            .all();
+        },
+        listForArchive(id) {
+          return database.select().from(archiveJobs)
+            .where(eq(archiveJobs.originalDiscArchiveId, id))
+            .orderBy(asc(archiveJobs.createdAt), asc(archiveJobs.id))
+            .all();
+        },
       startForInspection(inspectionId, workerIdInput) {
         const timestamp = now();
         const workerId = requireNonEmpty(workerIdInput, "workerId");
@@ -9276,6 +9324,24 @@ export function createDataAccessInternal(
     },
 
     encodeJobs: {
+      find(id) {
+        return database.select().from(encodeJobs)
+          .where(eq(encodeJobs.id, id)).get() ?? null;
+      },
+      listForDiscSelection(id) {
+        return database.select().from(encodeJobs)
+          .where(eq(encodeJobs.discSelectionId, id))
+          .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
+          .all();
+      },
+      hasReservedOutputPathConflict(job) {
+        return database.select({ id: encodeJobs.id }).from(encodeJobs)
+          .where(and(
+            eq(encodeJobs.outputPath, job.outputPath),
+            eq(encodeJobs.reservesOutputPath, true),
+            ne(encodeJobs.id, job.id),
+          )).limit(1).get() !== undefined;
+      },
       resolveQueueLogicalJobs(options) {
         if (
           options.discSelectionIds.length >
@@ -11377,6 +11443,10 @@ export function createDataAccessInternal(
     },
 
     workerIncidents: {
+      find(id) {
+        return database.select().from(workerIncidents)
+          .where(eq(workerIncidents.id, id)).get() ?? null;
+      },
       record(input) {
         const normalized = normalizeRecordWorkerIncidentInput(input);
         const timestamp = now();

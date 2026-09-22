@@ -1,8 +1,13 @@
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { CatalogMetadataLookup } from "@rip-dvd/application";
+import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
+import {
+  beginSettledDiscInspectionForTest,
+  createNormalDvdArchiveBoundaryEvidenceForTest,
+} from "@rip-dvd/data-access/test-support";
 
 import { createApplicationOperations } from "@rip-dvd/application";
 
@@ -18,9 +23,39 @@ function fixture() {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const current of fixtures.splice(0)) {
     current.dispose();
   }
+});
+
+it("dates recovered Worker Incident activity by the recovery event", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-01T00:00:00.000Z"));
+  const current = fixture();
+  const access = current.openAccess();
+  const identity = {
+    workerKind: "archive", reasonCode: "claim_recovery_failure",
+    phase: "claim_recovery", retryability: "automatic", schemaVersion: 1,
+    evidence: { recoveryArea: "expired_archive_job_claim" },
+  } as const;
+  const incident = access.workerIncidents.record(identity);
+  vi.setSystemTime(new Date("2026-09-01T00:00:01.000Z"));
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/synthetic-drive", isEnabled: true, isPresent: true,
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id, discKind: "dvd", fingerprint: "synthetic-incident-disc",
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  access.archiveRequests.create({ detectedDiscId: disc.id });
+  vi.setSystemTime(new Date("2026-09-01T00:00:02.000Z"));
+  access.workerIncidents.resolve(identity);
+  access.close();
+
+  expect((await current.run(["inspect", "activity", "--limit", "1"])).result).toMatchObject({
+    items: [{ kind: "worker-incidents", id: incident.id, status: "recovered" }],
+  });
 });
 
 it("reports database health as JSON through the public command runner", async () => {
@@ -203,6 +238,8 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       "catalog-review",
       "health",
       "readiness",
+      "inspect",
+      "wait",
       "commands",
       "help",
     ],
@@ -241,6 +278,228 @@ it("returns a stable failure without exposing database errors", async () => {
   expect(stderr).toEqual(["Application health is unavailable.\n"]);
 });
 
+it("inspects full attempts and keeps request intent separate from job attempts", async () => {
+  const current = fixture();
+  const access = current.openAccess();
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/sr0", isEnabled: true, isPresent: true,
+  });
+  const started = access.discInspections.beginOrResume({
+    opticalDriveId: drive.id,
+    mediaGeneration: "synthetic-generation",
+    mediaCapacityBytes: 2_048,
+  });
+  access.discInspections.record(started.claim!, {
+    type: "fail", reasonCode: "metadata_read_failed", diagnostic: "synthetic read failure",
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint: "synthetic-fingerprint",
+    volumeLabel: "SYNTHETIC_DISC",
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+  access.close();
+
+  const inspection = await current.run(["inspect", "disc-inspections", started.inspection.id]);
+  expect(inspection.exitCode).toBe(0);
+  expect(inspection.result).toMatchObject({
+    schemaVersion: 1,
+    kind: "disc-inspections",
+    item: {
+      id: started.inspection.id,
+      mediaGeneration: "synthetic-generation",
+      mediaCapacityBytes: 2_048,
+      attempts: [expect.objectContaining({
+        attemptNumber: 1, outcome: "failed", reasonCode: "metadata_read_failed",
+      })],
+      availableActions: [expect.objectContaining({ name: "retry", eligible: true })],
+    },
+  });
+  expect(JSON.stringify(inspection.result)).not.toContain("claimToken");
+
+  const requestDetail = await current.run(["inspect", "archive-requests", request.id]);
+  expect(requestDetail.result).toMatchObject({
+    item: { id: request.id, status: "pending", archiveJobs: [] },
+  });
+  expect((await current.run(["inspect", "detected-discs", disc.id])).result).toMatchObject({
+    item: {
+      id: disc.id,
+      archiveRequests: [expect.objectContaining({ id: request.id })],
+      currentArchiveRequest: { id: request.id, status: "pending" },
+      availableActions: [{ name: "request-archive", eligible: false }],
+    },
+  });
+  const timedOut = await current.run([
+    "wait", "archive-requests", request.id, "--timeout-ms", "0",
+  ]);
+  expect(timedOut.exitCode).toBe(3);
+  expect(timedOut.stderr).toBe("");
+  expect(timedOut.result).toMatchObject({
+    outcome: "timeout", current: { id: request.id, status: "pending", archiveJobs: [] },
+  });
+  expect((await current.run(["inspect", "archive-requests", request.id])).result)
+    .toMatchObject({ item: { status: "pending" } });
+
+  const settled = await current.run([
+    "wait", "disc-inspections", started.inspection.id, "--timeout-ms", "0",
+  ]);
+  expect(settled.exitCode).toBe(0);
+  expect(settled.result).toMatchObject({ outcome: "settled", current: { status: "failed" } });
+
+  const retryAccess = current.openAccess();
+  retryAccess.discInspections.requestRetry(started.inspection.id);
+  retryAccess.close();
+  const retryPending = await current.run([
+    "wait", "disc-inspections", started.inspection.id, "--timeout-ms", "0",
+  ]);
+  expect(retryPending.exitCode).toBe(3);
+  expect(retryPending.result).toMatchObject({ outcome: "timeout", current: {
+    status: "failed", manualRetryRequestedAt: expect.any(String),
+  } });
+});
+
+it("reports encode action eligibility and correction evidence through the public command", async () => {
+  const current = fixture();
+  const access = current.openAccess();
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/synthetic-drive", isEnabled: true, isPresent: true,
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id, discKind: "dvd", fingerprint: "synthetic-encode-disc",
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  access.archiveRequests.create({ detectedDiscId: disc.id });
+  const started = beginSettledDiscInspectionForTest(access, {
+    opticalDriveId: drive.id, mediaGeneration: "synthetic-encode-generation",
+    mediaCapacityBytes: 2_048,
+  });
+  access.discInspections.record(started.claim, {
+    type: "metadata", volumeLabel: "SYNTHETIC_DISC", titleCount: 0, chapterCount: 0,
+    audioStreamCount: 0, subtitleStreamCount: 0, totalBytes: 2_048,
+  });
+  const inspection = access.discInspections.record(started.claim, {
+    type: "complete", detectedDiscId: disc.id,
+  });
+  started.restoreSystemTime();
+  const claim = access.archiveJobs.startForInspection(inspection.id, "synthetic-worker")!;
+  const completed = access.archiveJobs.publish(claim, {
+    archivePath: "/synthetic/original.iso", sizeBytes: 2_048,
+    boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(2_048),
+    integrityEvidence: createCleanReadArchiveIntegrityEvidence("dvd-recovery-v1"),
+  });
+  const archive = access.catalog.listOriginalDiscArchives({ ids: [completed.originalDiscArchiveId!] })[0]!;
+  const item = access.catalog.createMediaItem({ kind: "movie", title: "Synthetic Movie" });
+  const selection = access.catalog.createDiscSelection({
+    originalDiscArchiveId: archive.id, mediaItemId: item.id,
+    sourceIdentity: { kind: "main_feature" },
+  });
+  const revisedArchive = access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!;
+  access.catalog.completeCatalogReview(archive.id, revisedArchive.updatedAt, "reviewed_with_selections");
+  const profile = access.encodingProfiles.create({
+    key: "synthetic-encode", displayName: "Synthetic encode", mediaDomain: "dvd_video",
+    settings: { preset: "Fast 480p30" },
+  });
+  const job = access.encodeJobs.enqueue({
+    discSelectionId: selection.id, encodingProfileId: profile.id,
+    outputPath: "/synthetic/output.mkv",
+  });
+  access.close();
+
+  const result = await current.run(["inspect", "encode-jobs", job.id]);
+  expect(result.exitCode).toBe(0);
+  expect(result.result).toMatchObject({ item: {
+    id: job.id,
+    history: [expect.objectContaining({ id: job.id })],
+    correctionLinks: [expect.objectContaining({ id: job.id })],
+    retainedOutputs: [],
+    availableActions: expect.arrayContaining([
+      expect.objectContaining({ name: "requeue", eligible: false }),
+      expect.objectContaining({ name: "verify-output", eligible: true }),
+    ]),
+  } });
+  expect(JSON.stringify(result.result)).not.toContain("/synthetic/output.mkv");
+
+  const writer = current.openAccess();
+  const claimed = writer.encodeJobs.claimNext("synthetic-encode-worker")!;
+  const cleanup = writer.encodeJobs.registerPartialCleanup(claimed);
+  writer.encodeJobs.fail(claimed, "Synthetic encode failure");
+  writer.close();
+  expect((await current.run(["inspect", "encode-jobs", job.id])).result).toMatchObject({ item: {
+    status: "failed",
+    availableActions: expect.arrayContaining([
+      expect.objectContaining({
+        name: "requeue", eligible: false,
+        reason: "Encode Job has pending output cleanup.",
+      }),
+    ]),
+  } });
+  const cleanupWriter = current.openAccess();
+  cleanupWriter.encodeJobs.completePartialCleanup(cleanup);
+  cleanupWriter.close();
+  expect((await current.run(["inspect", "encode-jobs", job.id])).result).toMatchObject({ item: {
+    status: "failed",
+    availableActions: expect.arrayContaining([
+      expect.objectContaining({ name: "requeue", eligible: true, reason: null }),
+    ]),
+  } });
+});
+
+it("observes a later transition during a bounded wait", async () => {
+  const current = fixture();
+  const access = current.openAccess();
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/sr0", isEnabled: true, isPresent: true,
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id, discKind: "dvd", fingerprint: "synthetic-wait-disc",
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+  access.close();
+  const transition = setTimeout(() => {
+    const writer = current.openAccess();
+    try {
+      writer.archiveRequests.cancel(request.id);
+    } finally {
+      writer.close();
+    }
+  }, 20);
+  try {
+    const result = await current.run([
+      "wait", "archive-requests", request.id,
+      "--timeout-ms", "500", "--poll-ms", "100",
+    ]);
+    expect(result.exitCode).toBe(0);
+    expect(result.result).toMatchObject({
+      outcome: "settled", current: { status: "cancelled" },
+    });
+    expect((await current.run(["inspect", "detected-discs", disc.id])).result).toMatchObject({
+      item: {
+        currentArchiveRequest: { id: request.id, status: "cancelled" },
+        availableActions: [{ name: "request-archive", eligible: true }],
+      },
+    });
+  } finally {
+    clearTimeout(transition);
+  }
+});
+
+it("validates inspection and wait arguments before opening the database", async () => {
+  const current = fixture();
+  expect((await current.run(["inspect", "disc-inspections", "--limit", "101"])).result)
+    .toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
+  expect((await current.run(["inspect", "disc-inspections", "missing-id"])).result)
+    .toMatchObject({ error: { code: "NOT_FOUND" } });
+  expect((await current.run([
+    "wait", "archive-jobs", "missing-id", "--timeout-ms", "0",
+  ])).result).toMatchObject({ error: { code: "NOT_FOUND" } });
+  expect((await current.run([
+    "wait", "archive-jobs", "missing-id", "--timeout-ms", "3600001",
+  ])).result).toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
+});
+
 it("runs as a separate process without the web service", () => {
   const paths = fixture();
   const entry = fileURLToPath(new URL("../dist/entry.js", import.meta.url));
@@ -269,6 +528,18 @@ it("runs as a separate process without the web service", () => {
     schemaVersion: 1,
     activeWork: [],
     opticalDrives: [],
+  });
+
+  const inspection = invoke("inspect", "activity");
+  expect(inspection.status).toBe(0);
+  expect(JSON.parse(inspection.stdout)).toEqual({
+    schemaVersion: 1, kind: "activity", items: [],
+  });
+
+  const missingWait = invoke("wait", "archive-requests", "synthetic-missing-id", "--timeout-ms", "0");
+  expect(missingWait.status).toBe(2);
+  expect(JSON.parse(missingWait.stdout)).toEqual({
+    error: { code: "NOT_FOUND", message: "Operational record was not found." },
   });
 
   const invalid = invoke("health", "--invalid");

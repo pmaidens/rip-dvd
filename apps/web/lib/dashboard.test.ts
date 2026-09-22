@@ -304,6 +304,10 @@ describe("readDashboardSnapshot", () => {
       ? snapshot.encodeJobs.items.find(({ id }) => id === job.id)
       : undefined;
 
+    expect(failedJob).toMatchObject({
+      requeueable: false,
+      requeueReason: "Encode Job has pending output cleanup.",
+    });
     expect(failedJob?.investigations).toEqual([
       expect.objectContaining({
         reasonCode: "encode.publication_recovery_failed",
