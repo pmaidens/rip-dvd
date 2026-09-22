@@ -1829,15 +1829,31 @@ describe("DashboardView", () => {
   });
 
   it("submits a same-origin JSON Archive Request", async () => {
-    const fetcher = vi.fn(async () => new Response(null, { status: 201 }));
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(null, { status: 201 }));
 
     await requestArchiveApproval("disc-1", fetcher);
 
     expect(fetcher).toHaveBeenCalledWith("/api/archive-requests", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ detectedDiscId: "disc-1" }),
+      body: expect.any(String),
     });
+    expect(JSON.parse(fetcher.mock.calls[0]![1]!.body as string)).toEqual({
+      detectedDiscId: "disc-1",
+      mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    });
+  });
+
+  it("reuses the web mutation key when a response is lost", async () => {
+    const fetcher = vi.fn()
+      .mockRejectedValueOnce(new Error("response lost"))
+      .mockResolvedValueOnce(new Response(null, { status: 201 }));
+    await expect(requestArchiveApproval("retry-disc", fetcher)).rejects.toThrow("response lost");
+    await requestArchiveApproval("retry-disc", fetcher);
+    const first = JSON.parse(fetcher.mock.calls[0]![1]!.body as string);
+    const second = JSON.parse(fetcher.mock.calls[1]![1]!.body as string);
+    expect(first.mutationKey).toBe(second.mutationKey);
   });
 
   it("requests the exact action overview without caching", async () => {

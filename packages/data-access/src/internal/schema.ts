@@ -367,6 +367,20 @@ export const archiveRequests = sqliteTable(
   ],
 );
 
+export const mutationInvocations = sqliteTable(
+  "mutation_invocations",
+  {
+    key: text("key").notNull().primaryKey(),
+    operation: text("operation").notNull(),
+    semanticInput: text("semantic_input").notNull(),
+    outcome: text("outcome").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check("mutation_invocations_key_not_null", sql`${table.key} is not null`),
+  ],
+);
+
 export const originalDiscArchives = sqliteTable(
   "original_disc_archives",
   {

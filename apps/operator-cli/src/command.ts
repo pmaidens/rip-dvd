@@ -1,5 +1,16 @@
-import { createApplicationOperations } from "@rip-dvd/application";
-import type { DataAccess } from "@rip-dvd/data-access";
+import {
+  createApplicationOperations,
+  generateMutationKey,
+  InvalidMutationKeyError,
+  parseMutationKey,
+} from "@rip-dvd/application";
+import {
+  DomainInvariantError,
+  InvalidStatusTransitionError,
+  MutationKeyConflictError,
+  RecordNotFoundError,
+  type DataAccess,
+} from "@rip-dvd/data-access";
 
 export type CommandExitCode = 0 | 1 | 2;
 
@@ -10,6 +21,20 @@ interface CommandIO {
 }
 
 const commandDefinitions = [
+  {
+    name: "generate-key",
+    description: "Generate a mutation key without submitting work.",
+    usage: "rip-dvd-operator generate-key",
+    inputs: { arguments: [], options: [] },
+    example: "rip-dvd-operator generate-key",
+  },
+  {
+    name: "submit-archive-request",
+    description: "Submit an Archive Request for a Detected Disc.",
+    usage: "rip-dvd-operator submit-archive-request --key <key> --detected-disc-id <id>",
+    inputs: { arguments: [], options: ["--key", "--detected-disc-id"] },
+    example: "rip-dvd-operator submit-archive-request --key 00000000-0000-4000-8000-000000000001 --detected-disc-id <id>",
+  },
   {
     name: "health",
     description: "Check application database health.",
@@ -95,6 +120,76 @@ function runOperation(
   }
 }
 
+function submissionInputs(args: readonly string[]): {
+  mutationKey: string;
+  detectedDiscId: string;
+} {
+  const options = new Map<string, string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const name = args[index];
+    const value = args[index + 1];
+    if (
+      (name !== "--key" && name !== "--detected-disc-id") ||
+      value === undefined ||
+      value.startsWith("--") ||
+      options.has(name)
+    ) {
+      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Archive Request options.", 2);
+    }
+    options.set(name, value);
+  }
+  let mutationKey: string;
+  try {
+    mutationKey = parseMutationKey(options.get("--key"));
+  } catch (error) {
+    if (error instanceof InvalidMutationKeyError) {
+      throw new CommandFailure("INVALID_MUTATION_KEY", error.message, 2);
+    }
+    throw error;
+  }
+  const detectedDiscId = options.get("--detected-disc-id")?.trim();
+  if (!detectedDiscId) {
+    throw new CommandFailure("INVALID_ARGUMENTS", "Detected Disc ID is required.", 2);
+  }
+  return { mutationKey, detectedDiscId };
+}
+
+function submitArchiveRequest(
+  input: ReturnType<typeof submissionInputs>,
+  openAccess: CommandIO["openAccess"],
+) {
+  let access: DataAccess | undefined;
+  try {
+    access = openAccess();
+    return createApplicationOperations(access).submitArchiveRequest(input);
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    if (error instanceof MutationKeyConflictError) {
+      throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    if (error instanceof RecordNotFoundError) {
+      throw new CommandFailure("DETECTED_DISC_NOT_FOUND", "Detected Disc not found.", 2);
+    }
+    if (
+      error instanceof DomainInvariantError ||
+      error instanceof InvalidStatusTransitionError
+    ) {
+      throw new CommandFailure(
+        "ARCHIVE_REQUEST_REJECTED",
+        "Archive Request is not eligible.",
+        2,
+      );
+    }
+    throw new CommandFailure(
+      "ARCHIVE_REQUEST_UNAVAILABLE",
+      "Archive Request submission is unavailable.",
+      1,
+    );
+  } finally {
+    access?.close();
+  }
+}
+
 export function runCommand(args: readonly string[], io: CommandIO): CommandExitCode {
   try {
     const [name, ...rest] = args;
@@ -113,6 +208,21 @@ export function runCommand(args: readonly string[], io: CommandIO): CommandExitC
         schemaVersion: 1,
         commands: commandDefinitions.map(({ name }) => name),
       });
+      return 0;
+    }
+    if (name === "generate-key") {
+      if (rest.length > 0) {
+        throw new CommandFailure("INVALID_ARGUMENTS", "generate-key takes no arguments.", 2);
+      }
+      emit(io.stdout, { mutationKey: generateMutationKey() });
+      return 0;
+    }
+    if (name === "submit-archive-request") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+        return 0;
+      }
+      emit(io.stdout, submitArchiveRequest(submissionInputs(rest), io.openAccess));
       return 0;
     }
     if (name !== "health" && name !== "readiness") {

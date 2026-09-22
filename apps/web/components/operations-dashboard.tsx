@@ -1719,15 +1719,23 @@ export async function requestArchiveApproval(
   detectedDiscId: string,
   fetcher: DashboardFetch = fetch,
 ): Promise<void> {
+  let mutationKey = pendingArchiveApprovalKeys.get(detectedDiscId);
+  if (mutationKey === undefined) {
+    mutationKey = crypto.randomUUID();
+    pendingArchiveApprovalKeys.set(detectedDiscId, mutationKey);
+  }
   const response = await fetcher("/api/archive-requests", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ detectedDiscId }),
+    body: JSON.stringify({ detectedDiscId, mutationKey }),
   });
   if (!response.ok) {
     throw new Error("Archive Request creation failed");
   }
+  pendingArchiveApprovalKeys.delete(detectedDiscId);
 }
+
+const pendingArchiveApprovalKeys = new Map<string, string>();
 
 async function requestWorkflowMutation(
   path: string,

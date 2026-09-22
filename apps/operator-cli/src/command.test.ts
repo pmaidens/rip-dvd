@@ -1,7 +1,9 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, expect, it } from "vitest";
+
+import { createApplicationOperations } from "@rip-dvd/application";
 
 import { runCommand } from "./command.js";
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
@@ -86,7 +88,14 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
   expect(runCommand(["commands"], io)).toBe(0);
   expect(JSON.parse(stdout.pop()!)).toEqual({
     schemaVersion: 1,
-    commands: ["health", "readiness", "commands", "help"],
+    commands: [
+      "generate-key",
+      "submit-archive-request",
+      "health",
+      "readiness",
+      "commands",
+      "help",
+    ],
   });
   expect(runCommand(["health", "--help"], io)).toBe(0);
   expect(JSON.parse(stdout.pop()!)).toMatchObject({
@@ -173,4 +182,124 @@ it("runs as a separate process without the web service", () => {
       message: "Application configuration is missing or invalid.",
     },
   });
+});
+
+function addScannedDisc(current: ReturnType<typeof createOperatorWorkflowFixture>, fingerprint: string) {
+  const access = current.openAccess();
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/sr0",
+    isEnabled: true,
+    isPresent: true,
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint,
+    volumeLabel: "SYNTHETIC_DISC",
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  access.close();
+  return disc.id;
+}
+
+it("generates a key without submitting work and rejects a missing key before opening SQLite", () => {
+  const current = fixture();
+  const generated = current.run(["generate-key"]);
+  expect(generated.exitCode).toBe(0);
+  expect(generated.result).toEqual({
+    mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
+  });
+  const reader = current.openAccess();
+  expect(reader.archiveRequests.list()).toEqual([]);
+  reader.close();
+
+  let opened = false;
+  const stdout: string[] = [];
+  const exitCode = runCommand(["submit-archive-request", "--detected-disc-id", "disc-id"], {
+    openAccess: () => { opened = true; throw new Error("unexpected open"); },
+    stdout: (text) => stdout.push(text),
+    stderr: () => {},
+  });
+  expect(exitCode).toBe(2);
+  expect(opened).toBe(false);
+  expect(JSON.parse(stdout.join(""))).toMatchObject({ error: { code: "INVALID_MUTATION_KEY" } });
+});
+
+it("replays the original Archive Request outcome after a lost response and restart", () => {
+  const current = fixture();
+  const detectedDiscId = addScannedDisc(current, "synthetic-replay-disc");
+  const mutationKey = "00000000-0000-4000-8000-000000000101";
+  const access = current.openAccess();
+  const committed = createApplicationOperations(access).submitArchiveRequest({
+    mutationKey,
+    detectedDiscId,
+  });
+  access.archiveRequests.cancel(committed.archiveRequest.id);
+  access.close();
+
+  const replay = current.run([
+    "submit-archive-request", "--key", mutationKey,
+    "--detected-disc-id", detectedDiscId,
+  ]);
+  expect(replay.exitCode).toBe(0);
+  expect(replay.result).toEqual(committed);
+  const reader = current.openAccess();
+  expect(reader.archiveRequests.list()).toHaveLength(1);
+  expect(reader.archiveRequests.list()[0]?.status).toBe("cancelled");
+  expect(reader.archiveJobs.list()).toEqual([]);
+  reader.close();
+});
+
+it("keeps invocation keys separate from same-name Detected Discs and eligibility", () => {
+  const current = fixture();
+  const firstId = addScannedDisc(current, "synthetic-disc-one");
+  const secondId = addScannedDisc(current, "synthetic-disc-two");
+  const key = "00000000-0000-4000-8000-000000000102";
+  const first = current.run([
+    "submit-archive-request", "--key", key, "--detected-disc-id", firstId,
+  ]);
+  const changedTarget = current.run([
+    "submit-archive-request", "--key", key, "--detected-disc-id", secondId,
+  ]);
+  const second = current.run([
+    "submit-archive-request", "--key", "00000000-0000-4000-8000-000000000103",
+    "--detected-disc-id", secondId,
+  ]);
+  expect(first.exitCode).toBe(0);
+  expect(changedTarget.result).toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
+  expect(second.exitCode).toBe(0);
+  expect(second.result).not.toEqual(first.result);
+  const reader = current.openAccess();
+  expect(reader.archiveRequests.list()).toHaveLength(2);
+  reader.close();
+});
+
+it("serializes concurrent submissions from separate processes", async () => {
+  const current = fixture();
+  const detectedDiscId = addScannedDisc(current, "synthetic-concurrent-disc");
+  const entry = fileURLToPath(new URL("../dist/entry.js", import.meta.url));
+  const environment = {
+    ...process.env,
+    NODE_NO_WARNINGS: "1",
+    RIP_DVD_DATABASE_PATH: current.databasePath,
+    RIP_DVD_MEDIA_LIBRARY_PATH: current.mediaLibraryPath,
+    RIP_DVD_ORIGINALS_LIBRARY_PATH: current.originalsLibraryPath,
+  };
+  const invoke = () => new Promise<{ status: number | null; stdout: string }>((resolve) => {
+    const child = spawn(process.execPath, [entry, "submit-archive-request", "--key",
+      "00000000-0000-4000-8000-000000000104", "--detected-disc-id", detectedDiscId], {
+      env: environment,
+    });
+    let stdout = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+    child.on("close", (status) => resolve({ status, stdout }));
+  });
+  const [first, second] = await Promise.all([invoke(), invoke()]);
+  expect(first.status).toBe(0);
+  expect(second.status).toBe(0);
+  expect(JSON.parse(first.stdout)).toEqual(JSON.parse(second.stdout));
+  const reader = current.openAccess();
+  expect(reader.archiveRequests.list()).toHaveLength(1);
+  expect(reader.archiveJobs.list()).toEqual([]);
+  reader.close();
 });

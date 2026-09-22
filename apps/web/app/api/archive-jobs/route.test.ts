@@ -6,6 +6,25 @@ import { createArchiveRequestsRoute } from "../archive-requests/route";
 const dataAccessFixture = useDataAccessFixture();
 
 describe("Archive Requests API", () => {
+  it("rejects a missing mutation key before opening data access", async () => {
+    const getAccess = vi.fn();
+    const response = await createArchiveRequestsRoute(
+      new Request("http://localhost:3000/api/archive-requests", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({ detectedDiscId: "disc-id" }),
+      }),
+      getAccess,
+      () => "http://localhost:3000",
+    );
+    expect(response.status).toBe(400);
+    expect(getAccess).not.toHaveBeenCalled();
+  });
+
   it("creates durable preservation intent without creating an Archive Job", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
@@ -28,7 +47,10 @@ describe("Archive Requests API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify({ detectedDiscId: disc.id }),
+        body: JSON.stringify({
+          detectedDiscId: disc.id,
+          mutationKey: "00000000-0000-4000-8000-000000000001",
+        }),
       }),
       () => access,
       () => "http://localhost:3000",
@@ -49,6 +71,56 @@ describe("Archive Requests API", () => {
     expect(access.archiveRequests.list()).toEqual([
       expect.objectContaining({ id: body.archiveRequest.id, status: "pending" }),
     ]);
+    expect(access.archiveJobs.list()).toEqual([]);
+  });
+
+  it("returns the original web outcome for a repeated key and rejects a changed target", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const firstDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "synthetic-web-first",
+      volumeLabel: "SYNTHETIC_DISC",
+    });
+    const secondDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "synthetic-web-second",
+      volumeLabel: "SYNTHETIC_DISC",
+    });
+    access.catalog.updateDetectedDiscStatus(firstDisc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(secondDisc.id, "scanned");
+    const submit = (detectedDiscId: string) => createArchiveRequestsRoute(
+      new Request("http://localhost:3000/api/archive-requests", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          detectedDiscId,
+          mutationKey: "00000000-0000-4000-8000-000000000002",
+        }),
+      }),
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const original = await submit(firstDisc.id);
+    expect(original.status).toBe(201);
+    const outcome = await original.json();
+    access.archiveRequests.cancel(outcome.archiveRequest.id);
+    const replay = await submit(firstDisc.id);
+    expect(replay.status).toBe(201);
+    expect(await replay.json()).toEqual(outcome);
+    const conflict = await submit(secondDisc.id);
+    expect(conflict.status).toBe(409);
+    expect(access.archiveRequests.list()).toHaveLength(1);
     expect(access.archiveJobs.list()).toEqual([]);
   });
 

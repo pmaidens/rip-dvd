@@ -19,6 +19,13 @@ export class DomainInvariantError extends Error {
   }
 }
 
+export class MutationKeyConflictError extends DomainInvariantError {
+  constructor() {
+    super("Mutation key has already been used for different operation or inputs");
+    this.name = "MutationKeyConflictError";
+  }
+}
+
 export class StaleJobAttemptError extends Error {
   constructor(recordType: string, id: string) {
     super(`Stale ${recordType} attempt: ${id}`);

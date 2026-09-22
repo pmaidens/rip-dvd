@@ -1,4 +1,31 @@
-import type { ConsistentReadAccess, DataAccess } from "@rip-dvd/data-access";
+import { randomUUID } from "node:crypto";
+
+import type {
+  ConsistentReadAccess,
+  DataAccess,
+  DetectedDiscId,
+} from "@rip-dvd/data-access";
+
+export class InvalidMutationKeyError extends Error {
+  constructor() {
+    super("A mutation key of 8 to 128 safe characters is required.");
+    this.name = "InvalidMutationKeyError";
+  }
+}
+
+export function parseMutationKey(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(value)
+  ) {
+    throw new InvalidMutationKeyError();
+  }
+  return value;
+}
+
+export function generateMutationKey(): string {
+  return randomUUID();
+}
 
 function readDeploymentReadiness(access: ConsistentReadAccess) {
   const inspections = access.discInspections
@@ -35,10 +62,34 @@ function readDeploymentReadiness(access: ConsistentReadAccess) {
 }
 
 export function createApplicationOperations(
-  access: Pick<DataAccess, "checkHealth" | "readConsistentSnapshot">,
+  access: Pick<DataAccess, "checkHealth" | "readConsistentSnapshot" | "archiveRequests">,
 ) {
   return {
     health: () => access.checkHealth(),
     readiness: () => access.readConsistentSnapshot(readDeploymentReadiness),
+    submitArchiveRequest: (input: {
+      mutationKey: unknown;
+      detectedDiscId: string;
+    }) => {
+      const mutationKey = parseMutationKey(input.mutationKey);
+      const detectedDiscId = input.detectedDiscId.trim();
+      if (detectedDiscId === "") {
+        throw new Error("Detected Disc ID is required.");
+      }
+      const request = access.archiveRequests.submit({
+        mutationKey,
+        detectedDiscId: detectedDiscId as DetectedDiscId,
+      });
+      return {
+        archiveRequest: {
+          id: request.id,
+          detectedDiscId: request.detectedDiscId,
+          status: request.status,
+          priority: request.priority,
+          createdAt: request.createdAt.toISOString(),
+          updatedAt: request.updatedAt.toISOString(),
+        },
+      };
+    },
   };
 }

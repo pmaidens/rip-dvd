@@ -73,6 +73,7 @@ describe("Disc Inspection and Archive Request mutation routes", () => {
     const response = await createArchiveRequestsRoute(
       mutation("/api/archive-requests", "POST", {
         detectedDiscId: disc.id,
+        mutationKey: "00000000-0000-4000-8000-000000000001",
       }),
       () => access,
       () => trustedOrigin,
