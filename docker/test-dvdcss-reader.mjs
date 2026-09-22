@@ -2230,6 +2230,59 @@ if (
   );
 }
 
+// VALID clear means the information bytes are unspecified, not an LBA.
+const unlocatedEndpointSense = Buffer.from(fixedOutOfRangeSense(7), "hex");
+unlocatedEndpointSense[0] = 0x70;
+for (const informationBytes of [0, 7]) {
+  const sense = Buffer.from(unlocatedEndpointSense);
+  sense.writeUInt32BE(informationBytes, 3);
+  const result = runEndpointTest(
+    40,
+    rawCompletionFault(40, "always", sense.toString("hex")),
+  );
+  if (
+    result.status !== 0 ||
+    JSON.stringify(endpointProof(result.stderr)) !== JSON.stringify({
+      ...confirmedEndpointProof,
+      senseResponseCode: 0x70,
+    }) ||
+    (result.stderr.match(/test-read 40 1/g) ?? []).length !== 2
+  ) {
+    throw new Error(`unlocated fixed endpoint proof failed: ${result.stderr}`);
+  }
+}
+
+// Neither a multi-sector copy failure nor corrected-boundary recovery may
+// infer the failed sector from this unlocated response.
+const unlocatedCopy = runTestCopy(
+  "unlocated-out-of-range",
+  rawCompletionFault(35, "always", unlocatedEndpointSense.toString("hex")),
+);
+if (
+  unlocatedCopy.status !== 3 ||
+  readFailureResult(unlocatedCopy.stderr).category !== "unknown"
+) {
+  throw new Error(`unlocated copy failure was accepted: ${unlocatedCopy.stderr}`);
+}
+
+const unlocatedBoundary = runTestCopy(
+  "unlocated-boundary-confirmation",
+  [
+    rawCompletionFault(35, 1, fixedOutOfRangeSense(35)),
+    rawCompletionFault(35, "always", unlocatedEndpointSense.toString("hex")),
+  ].join(","),
+);
+if (
+  unlocatedBoundary.status !== 3 ||
+  readFailureResult(unlocatedBoundary.stderr).boundaryProofVersion !== undefined ||
+  unlocatedBoundary.stderr.includes(recoveryResultPrefix) ||
+  !testReads(unlocatedBoundary.stderr).some(({ lba, blocks }) =>
+    lba === 35 && blocks === 1
+  )
+) {
+  throw new Error(`unlocated boundary was accepted: ${unlocatedBoundary.stderr}`);
+}
+
 const rejectedEndpointResponses = [
   ["readable-data", 35, "none", "readable_data"],
   ["unclassified-end", 40, "none", "unclassified_end"],
@@ -2276,11 +2329,48 @@ const rejectedEndpointResponses = [
     "unknown",
   ],
   ["generic-failure", 40, "generic@40@always", "unknown"],
+  ...[
+    ["truncated-fixed", unlocatedEndpointSense.subarray(0, 14)],
+    ["short-declared-fixed", Buffer.from(unlocatedEndpointSense).fill(6, 7, 8)],
+    ["long-declared-fixed", Buffer.from(unlocatedEndpointSense).fill(11, 7, 8)],
+    ["deferred-fixed", Buffer.from(unlocatedEndpointSense).fill(0x71, 0, 1)],
+    ["overflow-fixed", Buffer.from(unlocatedEndpointSense).fill(0x15, 2, 3)],
+    ["wrong-ascq", Buffer.from(unlocatedEndpointSense).fill(1, 13, 14)],
+    ["missing-descriptor-information", Buffer.from("7205210000000000", "hex")],
+    ["malformed-descriptor", Buffer.from("7205210000000002000a", "hex")],
+  ].map(([name, sense]) => [
+    name,
+    40,
+    rawCompletionFault(40, "always", sense.toString("hex")),
+    "rejected",
+  ]),
+  ...[
+    { scsiStatus: 0 },
+    { hostStatus: 7 },
+    { driverStatus: 4 },
+    { driverStatus: 3 },
+  ].map((completion, index) => [
+    `unlocated-invalid-completion-${index}`,
+    40,
+    rawCompletionFault(
+      40, "always", unlocatedEndpointSense.toString("hex"), completion,
+    ),
+    "rejected",
+  ]),
+  [
+    "conflicting-information-presence",
+    40,
+    [
+      rawCompletionFault(40, 1, unlocatedEndpointSense.toString("hex")),
+      rawCompletionFault(40, "always", fixedOutOfRangeSense(40)),
+    ].join(","),
+    "conflicting evidence",
+  ],
   [
     "wrong-information-lba",
     40,
     rawCompletionFault(40, "always", fixedOutOfRangeSense(39)),
-    "unknown",
+    "invalid_out_of_range_evidence",
   ],
   [
     "conflicting-confirmations",

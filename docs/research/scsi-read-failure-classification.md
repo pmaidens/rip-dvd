@@ -82,7 +82,7 @@ Apply precedence in this order:
 7. Current sense key `02h` is `not_ready`. Keep it terminal unless a separate bounded delay-and-retry state is added. `2/04/07` and `2/04/08` are temporary according to MMC, but treating them as medium damage would eventually write zeros for an undamaged disc.
 8. Sense keys `04h`, `06h`, and `07h` remain `hardware_error`, `unit_attention`, and `protection_error`.
 9. `ILLEGAL REQUEST / 6Fh` is `protection_error`. The current `ASCQ <= 05h` test is stale. T10 now assigns DVD copy-protection values through `6Fh/0Ah`, including binding, permission, and drive-host pairing failures ([T10 ASC/ASCQ assignments](https://www.t10.org/lists/asc-num.htm#ASC_6F)). Match the ASC, not a frozen ASCQ range.
-10. `ILLEGAL REQUEST / 21h/00h` is an out-of-range candidate only for current sense with a valid information LBA inside the request. Keep the existing boundary proof before truncating or publishing an image. T10 assigns `21h/00h` as `LOGICAL BLOCK ADDRESS OUT OF RANGE` for C/DVD devices ([T10 ASC/ASCQ assignments](https://www.t10.org/lists/asc-num.htm#ASC_21)).
+10. For copy and corrected-boundary recovery, `ILLEGAL REQUEST / 21h/00h` is an out-of-range candidate only for current sense with a valid information LBA inside the request. Keep the existing boundary proof before truncating or publishing an image. T10 assigns `21h/00h` as `LOGICAL BLOCK ADDRESS OUT OF RANGE` for C/DVD devices ([T10 ASC/ASCQ assignments](https://www.t10.org/lists/asc-num.htm#ASC_21)).
 11. Other sense keys remain terminal `unknown` until the application has a distinct policy for them. In particular, `BLANK CHECK` and `ABORTED COMMAND` should not borrow the medium-damage zero-substitution policy merely because another library groups them nearby.
 
 T10's current assignment table confirms the important DVD read tuples: `11h/00h`, `01h`, `02h`, `05h`, and `06h` are read or ECC failures, while `11h/0Dh` through `11h/11h` are also assigned to C/DVD reads ([T10 `11h` assignments](https://www.t10.org/lists/asc-num.htm#ASC_11)). A hardcoded five-value ASCQ list will keep aging badly. Key-driven recovery avoids that problem.
@@ -123,3 +123,13 @@ Keep malformed buffers terminal, but move these currently rejected cases into ac
 - driver suggestion bits combined with `DRIVER_SENSE`, if legacy compatibility is intentionally supported.
 
 Retain tests that prevent unsafe location use: malformed response codes, too-short headers, descriptor-length overruns, duplicate information descriptors, VALID clear, contradictory LBAs, deferred errors, and out-of-range boundary candidates without full proof.
+
+### Normal endpoint exception
+
+The normal endpoint proof has an independently selected first excluded LBA and
+issues two single-sector reads there. Complete current fixed-format
+`05/21/00` sense with VALID clear can prove this endpoint using the requested
+address, without interpreting the information bytes. Completion validation
+and matching confirmations still apply. This exception does not classify
+unlocated copy failures as out-of-range and does not relax corrected-boundary
+recovery. See [ADR 0003](../adr/0003-archive-copy-is-the-only-full-disc-read.md).
