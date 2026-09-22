@@ -11,7 +11,6 @@ import { createHash } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
-import { createHash } from "node:crypto";
 
 import {
   and,
