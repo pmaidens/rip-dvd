@@ -5825,6 +5825,12 @@ export function createDataAccessInternal(
           options?.detectedDiscId
             ? eq(originalDiscArchives.detectedDiscId, options.detectedDiscId)
             : undefined,
+          options?.rearchiveSourceArchiveId
+            ? eq(
+                originalDiscArchives.rearchiveSourceArchiveId,
+                options.rearchiveSourceArchiveId,
+              )
+            : undefined,
           options?.uncatalogedOnly
             ? notExists(
                 database
@@ -7491,7 +7497,7 @@ export function createDataAccessInternal(
             : undefined,
           options?.encodeEligibleOnly
             ? encodeEligibleDiscSelectionCondition()
-            : options?.ids === undefined
+            : options?.ids === undefined && !options?.includeHistorical
               ? eq(discSelections.isCatalogActive, true)
               : undefined,
         ].filter((condition) => condition !== undefined);

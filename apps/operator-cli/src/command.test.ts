@@ -1503,6 +1503,230 @@ it("requests Re-archiving with an explicit source and reports why it is waiting"
   });
 });
 
+it("inspects retained archive lineage, historical references, and storage observations", async () => {
+  const current = fixture();
+  const access = createLegacySidecarDataAccess({
+    databasePath: current.databasePath,
+    mediaLibraryPath: current.mediaLibraryPath,
+    originalsLibraryPath: current.originalsLibraryPath,
+  });
+  const contentId = `dvdmeta-sha256:${"3".repeat(64)}`;
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/synthetic-retained-archive",
+    isEnabled: true,
+    isPresent: true,
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint: contentId,
+    volumeLabel: "MATCHING_LABEL",
+    scanData: {
+      schemaVersion: 2,
+      contentId,
+      titles: [{
+        number: 1,
+        durationSeconds: 5_400,
+        chapters: 12,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    },
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+  const sourceArchive = access.catalog.createOriginalDiscArchive({
+    detectedDiscId: disc.id,
+    discKind: "dvd",
+    archiveFormat: "iso",
+    archivePath: join(current.originalsLibraryPath, "retained-source.iso"),
+    fingerprint: contentId,
+    sizeBytes: 2_048,
+  });
+  const previousItem = access.catalog.createMediaItem({
+    kind: "movie",
+    title: "Previous synthetic mapping",
+  });
+  const currentItem = access.catalog.createMediaItem({
+    kind: "movie",
+    title: "Current synthetic mapping",
+  });
+  const historicalSelection = access.catalog.createDiscSelection({
+    originalDiscArchiveId: sourceArchive.id,
+    mediaItemId: previousItem.id,
+    sourceIdentity: { kind: "main_feature" },
+  });
+  access.catalog.completeCatalogReview(
+    sourceArchive.id,
+    access.catalog.listOriginalDiscArchives({ ids: [sourceArchive.id] })[0]!
+      .updatedAt,
+    "reviewed_with_selections",
+  );
+  const profile = access.encodingProfiles.create({
+    key: "retained-archive-reference",
+    displayName: "Retained archive reference",
+    mediaDomain: "dvd_video",
+    settings: { preset: "Fast 480p30" },
+  });
+  const historicalJob = access.encodeJobs.enqueue({
+    discSelectionId: historicalSelection.id,
+    encodingProfileId: profile.id,
+    outputPath: join(current.mediaLibraryPath, "historical-reference.mkv"),
+  });
+  const historicalClaim = access.encodeJobs.claimNext("synthetic-reference-worker");
+  if (!historicalClaim) throw new Error("Expected historical Encode Job claim");
+  access.encodeJobs.complete(historicalClaim);
+  const currentSelection = access.catalog.correctDiscSelection(
+    historicalSelection.id,
+    {
+      originalDiscArchiveId: sourceArchive.id,
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [sourceArchive.id],
+      })[0]!.updatedAt,
+      mediaItemId: currentItem.id,
+      sourceIdentity: { kind: "main_feature" },
+      reason: "Synthetic correction preserves the earlier reference.",
+    },
+  ).discSelection;
+
+  access.filesystemVerification.submit({
+    mutationKey: "00000000-0000-4000-8000-000000000351",
+    target: "original_disc_archive",
+    targetId: sourceArchive.id,
+  });
+  const verificationClaim = access.filesystemVerification.claimNext();
+  if (!verificationClaim) throw new Error("Expected filesystem verification claim");
+  await access.filesystemVerification.execute(verificationClaim);
+
+  const rearchiveRequest = access.archiveRequests.submitRearchive({
+    mutationKey: "00000000-0000-4000-8000-000000000352",
+    sourceArchiveId: sourceArchive.id,
+  });
+  const started = beginSettledDiscInspectionForTest(access, {
+    opticalDriveId: drive.id,
+    mediaGeneration: "synthetic-retained-generation",
+    mediaCapacityBytes: 2_048,
+  });
+  access.discInspections.record(started.claim, {
+    type: "metadata",
+    volumeLabel: "MATCHING_LABEL",
+    titleCount: 1,
+    chapterCount: 12,
+    audioStreamCount: 0,
+    subtitleStreamCount: 0,
+    totalBytes: 2_048,
+  });
+  const inspection = access.discInspections.record(started.claim, {
+    type: "complete",
+    detectedDiscId: disc.id,
+  });
+  started.restoreSystemTime();
+  const archiveClaim = access.archiveJobs.startForInspection(
+    inspection.id,
+    "synthetic-retained-worker",
+  );
+  if (!archiveClaim) throw new Error("Expected Re-archive Archive Job claim");
+  const completed = access.archiveJobs.publish(archiveClaim, {
+    archivePath: join(current.originalsLibraryPath, "retained-fresh.iso"),
+    sizeBytes: 2_048,
+    boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(2_048),
+    integrityEvidence: createCleanReadArchiveIntegrityEvidence("dvd-recovery-v1"),
+  });
+  const freshArchive = access.catalog.listOriginalDiscArchives({
+    ids: [completed.originalDiscArchiveId!],
+  })[0]!;
+
+  const otherDrive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/synthetic-same-label",
+    isPresent: true,
+  });
+  const otherDisc = access.catalog.registerDetectedDisc({
+    opticalDriveId: otherDrive.id,
+    discKind: "dvd",
+    fingerprint: "synthetic-distinct-disc",
+    volumeLabel: "MATCHING_LABEL",
+  });
+  access.catalog.updateDetectedDiscStatus(otherDisc.id, "scanned");
+  access.catalog.updateDetectedDiscStatus(otherDisc.id, "approved");
+  const unrelatedArchive = access.catalog.createOriginalDiscArchive({
+    detectedDiscId: otherDisc.id,
+    discKind: "dvd",
+    archiveFormat: "iso",
+    archivePath: join(current.originalsLibraryPath, "same-label-unrelated.iso"),
+    fingerprint: otherDisc.fingerprint,
+  });
+  access.close();
+
+  const sourceInspection = await current.run([
+    "inspect",
+    "original-disc-archives",
+    sourceArchive.id,
+  ]);
+  expect(sourceInspection.exitCode).toBe(0);
+  expect(sourceInspection.result).toMatchObject({
+    item: {
+      id: sourceArchive.id,
+      storage: {
+        recordedSizeBytes: 2_048,
+        verification: {
+          status: "missing",
+          message: expect.any(String),
+          observedAt: expect.any(String),
+        },
+      },
+      lineage: {
+        previousArchive: null,
+        newArchives: [{
+          id: freshArchive.id,
+          rearchiveSourceArchiveId: sourceArchive.id,
+          storage: {
+            recordedSizeBytes: 2_048,
+            verification: { status: "unknown", observedAt: null },
+          },
+        }],
+        rearchiveRequests: [expect.objectContaining({
+          id: rearchiveRequest.id,
+          rearchiveSourceArchiveId: sourceArchive.id,
+        })],
+      },
+      references: {
+        discSelections: expect.arrayContaining([
+          expect.objectContaining({
+            id: historicalSelection.id,
+            catalogStatus: "historical",
+          }),
+          expect.objectContaining({
+            id: currentSelection.id,
+            catalogStatus: "active",
+          }),
+        ]),
+        encodeJobs: [expect.objectContaining({
+          id: historicalJob.id,
+          discSelectionId: historicalSelection.id,
+          status: "completed",
+        })],
+      },
+    },
+  });
+  expect(JSON.stringify(sourceInspection.result)).not.toContain(
+    unrelatedArchive.id,
+  );
+
+  expect((await current.run([
+    "inspect",
+    "original-disc-archives",
+    freshArchive.id,
+  ])).result).toMatchObject({
+    item: {
+      id: freshArchive.id,
+      lineage: {
+        previousArchive: { id: sourceArchive.id },
+        newArchives: [],
+      },
+    },
+  });
+});
+
 it("marks fresh re-archive unavailable for unsupported disc kinds", async () => {
   const current = fixture();
   const access = createLegacySidecarDataAccess({
