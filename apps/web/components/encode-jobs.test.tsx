@@ -540,17 +540,31 @@ describe("EncodeJobsView", () => {
     const profileId = "profile-v2" as EncodingProfileId;
     const jobId = "job-1" as EncodeJobId;
     const canonicalOutputPath = "/media/movies/Queue Me (2001).mkv";
-    const fetcher = vi.fn(async (input: RequestInfo | URL) =>
-      String(input).includes("selectionOffset")
-        ? Response.json({ selections: [], profiles: [], page: {} })
-        : Response.json({
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("selectionOffset")) {
+        return Response.json({ selections: [], profiles: [], page: {} });
+      }
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) as {
+        action?: string;
+      } : null;
+      if (body?.action === "preview_requeue") {
+        return Response.json({
+          preview: {
+            revision: "2026-09-22T12:00:00.000Z",
+            acknowledgementRequired: false,
+            outputPath: null,
+          },
+        });
+      }
+      return Response.json({
             job: {
               id: "job-1",
               encodingProfileId: profileId,
               status: "queued",
               outputPath: canonicalOutputPath,
             },
-          }));
+          });
+    });
 
     await requestEncodeJobOptions({
       selectionOffset: 100,
@@ -586,11 +600,7 @@ describe("EncodeJobsView", () => {
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        discSelectionId: "selection-1",
-        encodingProfileId: "profile-v2",
-        outputPath: "/media/movies/Queue Me (2001).mkv",
-      }),
+      body: expect.any(String),
     });
     expect(fetcher).toHaveBeenNthCalledWith(3, "/api/encode-jobs", {
       method: "PATCH",
@@ -598,7 +608,7 @@ describe("EncodeJobsView", () => {
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ action: "cancel", encodeJobId: "job-1" }),
+      body: expect.any(String),
     });
     expect(fetcher).toHaveBeenNthCalledWith(4, "/api/encode-jobs", {
       method: "PATCH",
@@ -606,8 +616,153 @@ describe("EncodeJobsView", () => {
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ action: "requeue", encodeJobId: "job-1" }),
+      body: expect.any(String),
     });
+    expect(fetcher).toHaveBeenNthCalledWith(5, "/api/encode-jobs", {
+      method: "PATCH",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: expect.any(String),
+    });
+    for (const [index, expected] of [
+      { discSelectionId: "selection-1", encodingProfileId: "profile-v2", outputPath: "/media/movies/Queue Me (2001).mkv" },
+      { action: "cancel", encodeJobId: "job-1" },
+      { action: "preview_requeue", encodeJobId: "job-1" },
+      { action: "requeue", encodeJobId: "job-1", expectedRevision: "2026-09-22T12:00:00.000Z" },
+    ].entries()) {
+      const request = (fetcher.mock.calls[index + 1] as unknown as [string, RequestInit])[1];
+      const body = JSON.parse(request.body as string);
+      expect(body).toMatchObject(expected);
+      if (expected.action !== "preview_requeue") {
+        expect(body).toMatchObject({ mutationKey: expect.any(String) });
+      }
+    }
+  });
+
+  it("reuses Encode Job mutation bodies after a lost response", async () => {
+    const selectionId = "lost-response-selection" as DiscSelectionId;
+    const profileId = "lost-response-profile" as EncodingProfileId;
+    const jobId = "lost-response-job" as EncodeJobId;
+    const input = {
+      discSelectionId: selectionId,
+      encodingProfileId: profileId,
+      outputPath: "/media/movies/Lost response.mkv",
+    };
+    const enqueueBodies: string[] = [];
+    const enqueueFetcher = vi.fn(async (
+      _request: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      enqueueBodies.push(String(init?.body));
+      if (enqueueBodies.length === 1) {
+        throw new Error("Response connection closed");
+      }
+      return Response.json({
+        job: {
+          id: jobId,
+          encodingProfileId: profileId,
+          status: "queued",
+          outputPath: input.outputPath,
+        },
+      });
+    });
+
+    await expect(queueEncodeJob(input, enqueueFetcher)).rejects.toThrow(
+      "Response connection closed",
+    );
+    await expect(queueEncodeJob(input, enqueueFetcher)).resolves.toMatchObject({
+      id: jobId,
+      status: "queued",
+    });
+    expect(enqueueBodies[1]).toBe(enqueueBodies[0]);
+
+    const cancellationBodies: string[] = [];
+    const cancellationFetcher = vi.fn(async (
+      _request: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      cancellationBodies.push(String(init?.body));
+      if (cancellationBodies.length === 1) {
+        throw new Error("Response connection closed");
+      }
+      return Response.json({ job: { id: jobId, status: "cancelled" } });
+    });
+    await expect(cancelEncodeJob(jobId, cancellationFetcher)).rejects.toThrow(
+      "Response connection closed",
+    );
+    await expect(cancelEncodeJob(jobId, cancellationFetcher)).resolves.toBeUndefined();
+    expect(cancellationBodies[1]).toBe(cancellationBodies[0]);
+
+    const requeueBodies: string[] = [];
+    const requeueFetcher = vi.fn(async (
+      _request: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const body = String(init?.body);
+      requeueBodies.push(body);
+      const parsed = JSON.parse(body) as { action: string };
+      if (parsed.action === "preview_requeue") {
+        return Response.json({
+          preview: {
+            revision: "2026-09-22T12:00:00.000Z",
+            acknowledgementRequired: false,
+            outputPath: null,
+          },
+        });
+      }
+      if (requeueBodies.length === 2) {
+        throw new Error("Response connection closed");
+      }
+      return Response.json({ job: { id: jobId, status: "queued" } });
+    });
+    await expect(retryEncodeJob(jobId, requeueFetcher)).rejects.toThrow(
+      "Response connection closed",
+    );
+    await expect(retryEncodeJob(jobId, requeueFetcher)).resolves.toBeUndefined();
+    expect(requeueBodies).toHaveLength(3);
+    expect(requeueBodies[2]).toBe(requeueBodies[1]);
+  });
+
+  it("requires explicit confirmation before a completed output is replaced", async () => {
+    const jobId = "completed-job" as EncodeJobId;
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirm);
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { action: string };
+      if (body.action === "preview_requeue") {
+        return Response.json({
+          preview: {
+            revision: "2026-09-22T12:00:00.000Z",
+            acknowledgementRequired: true,
+            outputPath: "/media/movies/Example.mkv",
+          },
+        });
+      }
+      return Response.json({ job: { id: jobId, status: "queued" } });
+    });
+
+    await expect(retryEncodeJob(jobId, fetcher)).rejects.toThrow(
+      "replacement was not acknowledged",
+    );
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(confirm).toHaveBeenCalledWith(
+      "Re-encode and replace the existing output at /media/movies/Example.mkv?",
+    );
+
+    confirm.mockReturnValue(true);
+    await retryEncodeJob(jobId, fetcher);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    const mutation = JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body));
+    expect(mutation).toMatchObject({
+      action: "requeue",
+      encodeJobId: jobId,
+      expectedRevision: "2026-09-22T12:00:00.000Z",
+      acknowledgeReplacement: true,
+      mutationKey: expect.any(String),
+    });
+    vi.unstubAllGlobals();
   });
 
   it("resolves selected-profile jobs for bounded replacement recovery", async () => {

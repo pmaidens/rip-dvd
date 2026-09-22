@@ -4,7 +4,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it, vi } from "vitest";
 import type { CatalogMetadataLookup } from "@rip-dvd/application";
-import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
+import {
+  createCleanReadArchiveIntegrityEvidence,
+  type EncodeJobId,
+} from "@rip-dvd/data-access";
 import {
   beginSettledDiscInspectionForTest,
   createNormalDvdArchiveBoundaryEvidenceForTest,
@@ -414,6 +417,320 @@ it("accepts Media Item JSON from stdin and files in the server-local executable"
   expect(JSON.parse(rejected.stdout)).toMatchObject({ error: { code: "INVALID_MUTATION_KEY" } });
 });
 
+it("manages Encode Jobs through keyed commands and retains replay and later history", async () => {
+  const current = fixture();
+  const { archive, correctedSelection } = seedCatalogReviewForReadFixture(current);
+  const setup = current.openAccess();
+  setup.catalog.completeCatalogReview(
+    archive.id,
+    setup.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt,
+    "reviewed_with_selections",
+  );
+  const profile = setup.encodingProfiles.list({ mediaDomain: "dvd_video", activeOnly: true })[0]!;
+  const secondProfile = setup.encodingProfiles.create({
+    key: "synthetic-second-encode",
+    displayName: "Second synthetic encode",
+    mediaDomain: "dvd_video",
+    settings: { preset: "Fast 480p30", container: "mkv" },
+  });
+  setup.close();
+
+  const queue = await current.run(["encode-queue", "--encoding-profile-id", profile.id]);
+  expect(queue.exitCode).toBe(0);
+  expect(queue.result).toMatchObject({
+    selections: expect.arrayContaining([expect.objectContaining({
+      id: correctedSelection.id,
+      queueAction: {
+        name: "enqueue",
+        eligible: true,
+        requiredInputs: [
+          "mutationKey", "discSelectionId", "encodingProfileId", "outputPath",
+        ],
+        reason: null,
+        blockingReasons: [],
+      },
+    })]),
+  });
+  const resolved = await current.run([
+    "encode-resolve", "--encoding-profile-id", profile.id,
+    "--disc-selection-id", correctedSelection.id,
+  ]);
+  expect(resolved.result).toEqual({
+    resolvedDiscSelections: [{ discSelectionId: correctedSelection.id, logicalJob: null }],
+  });
+
+  const outputPath = (queue.result as {
+    selections: { id: string; suggestedOutputPath: string }[];
+  }).selections.find(({ id }) => id === correctedSelection.id)!.suggestedOutputPath;
+  const enqueueArgs = [
+    "encode-enqueue", "--key", "synthetic-encode-key-1",
+    "--disc-selection-id", correctedSelection.id,
+    "--encoding-profile-id", profile.id,
+    "--output-path", outputPath,
+  ];
+  const queued = await current.run(enqueueArgs);
+  expect(queued.exitCode).toBe(0);
+  expect(queued.result).toMatchObject({
+    job: { id: expect.any(String), status: "queued", outputPath },
+    work: { kind: "encode-jobs", id: expect.any(String) },
+  });
+  const jobId = (queued.result as { job: { id: string } }).job.id;
+  expect((await current.run(["encode-queue", "--encoding-profile-id", secondProfile.id])).result)
+    .toMatchObject({ selections: expect.arrayContaining([expect.objectContaining({
+      id: correctedSelection.id,
+      queueAction: {
+        name: "enqueue", eligible: false,
+        requiredInputs: [
+          "mutationKey", "discSelectionId", "encodingProfileId", "outputPath",
+        ],
+        reason: "Suggested output path is reserved; choose another path.",
+        blockingReasons: [{
+          code: "INVALID_TRANSITION",
+          message: "Suggested output path is reserved; choose another path.",
+        }],
+        alternate: {
+          name: "enqueue-with-output-path",
+          eligible: true,
+          requiredInputs: [
+            "mutationKey", "discSelectionId", "encodingProfileId", "outputPath",
+          ],
+          reason: "Choose an unreserved output path inside the media library.",
+          blockingReasons: [],
+        },
+      },
+    })]) });
+  expect((await current.run(enqueueArgs)).result).toEqual(queued.result);
+  const entry = fileURLToPath(new URL("../dist/entry.js", import.meta.url));
+  const restarted = spawnSync(process.execPath, [entry, ...enqueueArgs], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      NODE_NO_WARNINGS: "1",
+      RIP_DVD_DATABASE_PATH: current.databasePath,
+      RIP_DVD_MEDIA_LIBRARY_PATH: current.mediaLibraryPath,
+      RIP_DVD_ORIGINALS_LIBRARY_PATH: current.originalsLibraryPath,
+    },
+  });
+  expect(restarted.status).toBe(0);
+  expect(JSON.parse(restarted.stdout)).toEqual(queued.result);
+  expect((await current.run([...enqueueArgs.slice(0, -1), `${current.mediaLibraryPath}/changed.mkv`])).result)
+    .toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
+  expect((await current.run(enqueueArgs.filter((value, index) => index !== 1 && index !== 2))).result)
+    .toMatchObject({ error: { code: "INVALID_MUTATION_KEY" } });
+
+  const cancelled = await current.run([
+    "encode-cancel", "--key", "synthetic-cancel-key-1", "--encode-job-id", jobId,
+  ]);
+  expect(cancelled.result).toMatchObject({ job: { id: jobId, status: "cancelled" } });
+  expect((await current.run(enqueueArgs)).result).toEqual(queued.result);
+  expect((await current.run([
+    "encode-cancel", "--key", "synthetic-cancel-key-1", "--encode-job-id", jobId,
+  ])).result).toEqual(cancelled.result);
+
+  const competing = await current.run([
+    "encode-enqueue", "--key", "synthetic-encode-key-2",
+    "--disc-selection-id", correctedSelection.id,
+    "--encoding-profile-id", secondProfile.id,
+    "--output-path", outputPath,
+  ]);
+  expect(competing.exitCode).toBe(0);
+  const alternateAction = {
+    name: "requeue-with-output-path",
+    eligible: true,
+    requiredInputs: ["mutationKey", "encodeJobId", "outputPath"],
+    blockingReasons: [],
+  };
+  expect((await current.run(["encode-queue", "--encoding-profile-id", profile.id])).result)
+    .toMatchObject({ selections: expect.arrayContaining([expect.objectContaining({
+      id: correctedSelection.id,
+      queueAction: expect.objectContaining({
+        name: "requeue", eligible: false,
+        alternate: expect.objectContaining(alternateAction),
+      }),
+    })]) });
+  expect((await current.run(["inspect", "encode-jobs", jobId])).result)
+    .toMatchObject({ item: { availableActions: expect.arrayContaining([
+      expect.objectContaining({
+        name: "requeue", eligible: false,
+        alternate: expect.objectContaining(alternateAction),
+      }),
+    ]) } });
+  const blocked = await current.run([
+    "encode-requeue", "--key", "synthetic-requeue-key-1", "--encode-job-id", jobId,
+  ]);
+  expect(blocked.result).toMatchObject({ error: { code: "ENCODE_JOB_REJECTED" } });
+  const replacementPath = `${current.mediaLibraryPath}/synthetic-retry.mkv`;
+  const requeueArgs = [
+    "encode-requeue", "--key", "synthetic-requeue-key-1", "--encode-job-id", jobId,
+    "--output-path", replacementPath,
+  ];
+  const requeued = await current.run(requeueArgs);
+  expect(requeued.result).toMatchObject({ job: { id: jobId, status: "queued", outputPath: replacementPath } });
+  expect((await current.run(requeueArgs)).result).toEqual(requeued.result);
+  expect((await current.run(["inspect", "encode-jobs", jobId])).result).toMatchObject({
+    item: { id: jobId, status: "queued" },
+  });
+
+  const finish = current.openAccess();
+  const claimed = finish.encodeJobs.claimNext("synthetic-encode-worker");
+  expect(claimed?.id).toBe(jobId);
+  finish.encodeJobs.complete(claimed!);
+  finish.close();
+  expect((await current.run(requeueArgs)).result).toEqual(requeued.result);
+  expect((await current.run(["wait", "encode-jobs", jobId, "--timeout-ms", "0"])).result)
+    .toMatchObject({ outcome: "settled", current: { id: jobId, status: "completed" } });
+  expect((await current.run(["inspect", "encode-jobs", jobId])).result).toMatchObject({
+    item: {
+      availableActions: expect.arrayContaining([expect.objectContaining({
+        name: "requeue",
+        eligible: true,
+        requiredInputs: [
+          "mutationKey", "encodeJobId", "expectedRevision",
+          "acknowledgeReplacement",
+        ],
+        blockingReasons: [],
+        preview: {
+          name: "preview-requeue",
+          requiredInputs: ["encodeJobId"],
+          provides: ["expectedRevision"],
+        },
+      })]),
+    },
+  });
+  const stalePreview = await current.run([
+    "encode-requeue-preview", "--encode-job-id", jobId,
+  ]);
+  expect(stalePreview.result).toMatchObject({
+    encodeJobId: jobId,
+    status: "completed",
+    revision: expect.any(String),
+    replacesOutput: true,
+    acknowledgementRequired: true,
+  });
+  expect((await current.run([
+    "encode-requeue", "--key", "synthetic-completed-missing-ack",
+    "--encode-job-id", jobId,
+  ])).result).toMatchObject({ error: { code: "ENCODE_JOB_REJECTED" } });
+  const refresh = current.openAccess();
+  refresh.encodeJobs.requeue(jobId as EncodeJobId);
+  const refreshedClaim = refresh.encodeJobs.claimNext("synthetic-preview-refresh-worker");
+  expect(refreshedClaim?.id).toBe(jobId);
+  refresh.encodeJobs.complete(refreshedClaim!);
+  refresh.close();
+  expect((await current.run([
+    "encode-requeue", "--key", "synthetic-completed-stale-key",
+    "--encode-job-id", jobId,
+    "--revision", (stalePreview.result as { revision: string }).revision,
+    "--acknowledge",
+  ])).result).toMatchObject({ error: { code: "STALE_ENCODE_PREVIEW" } });
+  const currentPreview = await current.run([
+    "encode-requeue-preview", "--encode-job-id", jobId,
+  ]);
+  const currentRevision = (currentPreview.result as { revision: string }).revision;
+  expect((await current.run([
+    "encode-requeue", "--key", "synthetic-completed-path-key",
+    "--encode-job-id", jobId,
+    "--output-path", `${current.mediaLibraryPath}/unsupported-change.mkv`,
+    "--revision", currentRevision,
+    "--acknowledge",
+  ])).result).toMatchObject({ error: { code: "ENCODE_JOB_REJECTED" } });
+  expect((await current.run(["inspect", "encode-jobs", jobId])).result)
+    .toMatchObject({ item: { status: "completed" } });
+  expect((await current.run(["encode-queue", "--history-group", "re_encode", "--encoding-profile-id", profile.id])).result)
+    .toMatchObject({ selections: expect.arrayContaining([expect.objectContaining({
+      id: correctedSelection.id,
+      queueAction: {
+        name: "requeue",
+        eligible: true,
+        reason: null,
+        requiredInputs: [
+          "mutationKey", "encodeJobId", "expectedRevision",
+          "acknowledgeReplacement",
+        ],
+        blockingReasons: [],
+        preview: {
+          name: "preview-requeue",
+          requiredInputs: ["encodeJobId"],
+          provides: ["expectedRevision"],
+        },
+      },
+    })]) });
+
+  const competingId = (competing.result as { job: { id: string } }).job.id;
+  const running = current.openAccess();
+  const runningClaim = running.encodeJobs.claimNext("synthetic-cancellation-worker");
+  expect(runningClaim?.id).toBe(competingId);
+  running.close();
+  const cancelArgs = [
+    "encode-cancel", "--key", "synthetic-running-cancel-key",
+    "--encode-job-id", competingId,
+  ];
+  const request = await current.run(cancelArgs);
+  expect(request.result).toMatchObject({ job: { id: competingId, status: "cancellation_requested" } });
+  expect((await current.run(["wait", "encode-jobs", competingId, "--timeout-ms", "0"])).result)
+    .toMatchObject({ outcome: "timeout", current: { status: "cancellation_requested" } });
+  const settle = current.openAccess();
+  settle.encodeJobs.completeCancellation(runningClaim!);
+  settle.close();
+  expect((await current.run(cancelArgs)).result).toEqual(request.result);
+  expect((await current.run(["wait", "encode-jobs", competingId, "--timeout-ms", "0"])).result)
+    .toMatchObject({ outcome: "settled", current: { status: "cancelled" } });
+  const replacementArgs = [
+    "encode-requeue", "--key", "synthetic-completed-requeue-key",
+    "--encode-job-id", jobId, "--revision", currentRevision, "--acknowledge",
+  ];
+  const replacement = await current.run(replacementArgs);
+  expect(replacement.result).toMatchObject({
+    job: { id: jobId, status: "queued", outputPath: replacementPath },
+  });
+  expect((await current.run(replacementArgs)).result).toEqual(replacement.result);
+});
+
+it("returns one durable Encode Job to concurrent processes using the same key", async () => {
+  const current = fixture();
+  const { archive, correctedSelection } = seedCatalogReviewForReadFixture(current);
+  const setup = current.openAccess();
+  setup.catalog.completeCatalogReview(
+    archive.id,
+    setup.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt,
+    "reviewed_with_selections",
+  );
+  const profile = setup.encodingProfiles.list({ mediaDomain: "dvd_video", activeOnly: true })[0]!;
+  setup.close();
+  const entry = fileURLToPath(new URL("../dist/entry.js", import.meta.url));
+  const args = [
+    entry, "encode-enqueue", "--key", "synthetic-concurrent-encode-key",
+    "--disc-selection-id", correctedSelection.id,
+    "--encoding-profile-id", profile.id,
+    "--output-path", `${current.mediaLibraryPath}/concurrent.mkv`,
+  ];
+  const invoke = () => new Promise<{ status: number | null; result: unknown }>((resolve, reject) => {
+    const child = spawn(process.execPath, args, {
+      env: {
+        ...process.env,
+        NODE_NO_WARNINGS: "1",
+        RIP_DVD_DATABASE_PATH: current.databasePath,
+        RIP_DVD_MEDIA_LIBRARY_PATH: current.mediaLibraryPath,
+        RIP_DVD_ORIGINALS_LIBRARY_PATH: current.originalsLibraryPath,
+      },
+    });
+    let output = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { output += chunk; });
+    child.on("error", reject);
+    child.on("close", (status) => {
+      try { resolve({ status, result: JSON.parse(output) as unknown }); }
+      catch (error) { reject(error); }
+    });
+  });
+  const [first, second] = await Promise.all([invoke(), invoke()]);
+  expect(first.status).toBe(0);
+  expect(second.status).toBe(0);
+  expect(second.result).toEqual(first.result);
+  const check = current.openAccess();
+  expect(check.encodeJobs.listForDiscSelection(correctedSelection.id)).toHaveLength(1);
+  check.close();
+});
+
 it("discovers commands and rejects unsupported invocations without opening SQLite", async () => {
   const stdout: string[] = [];
   const io = {
@@ -441,6 +758,12 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       "retry-archive-request",
       "retry-disc-inspection",
       "submit-filesystem-verification",
+      "encode-queue",
+      "encode-resolve",
+      "encode-enqueue",
+      "encode-requeue-preview",
+      "encode-requeue",
+      "encode-cancel",
       "catalog-review",
       "disc-selection",
       "list-encoding-profiles",
@@ -630,7 +953,11 @@ it("reports encode action eligibility and correction evidence through the public
     retainedOutputs: [],
     availableActions: expect.arrayContaining([
       expect.objectContaining({ name: "requeue", eligible: false }),
-      expect.objectContaining({ name: "verify-output", eligible: true }),
+      expect.objectContaining({
+        name: "verify-output",
+        eligible: true,
+        requiredInputs: ["mutationKey", "encodeJobId"],
+      }),
     ]),
   } });
   expect(JSON.stringify(result.result)).not.toContain("/synthetic/output.mkv");

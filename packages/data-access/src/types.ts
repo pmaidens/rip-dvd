@@ -1003,6 +1003,9 @@ export interface EncodeJobFailureReport extends EncodeJobFailureReportInput {
 export interface EncodeJobRequeueOptions {
   outputPath?: string;
   priority?: number;
+  mutationKey?: string;
+  expectedRevision?: string;
+  acknowledgeReplacement?: boolean;
 }
 
 export interface DiscoveredOpticalDrive {
@@ -1389,6 +1392,7 @@ export interface EncodeJobAccess {
   find(id: EncodeJobId): EncodeJob | null;
   listForDiscSelection(id: DiscSelectionId): EncodeJob[];
   hasReservedOutputPathConflict(job: Pick<EncodeJob, "id" | "outputPath">): boolean;
+  hasReservedOutputPath(outputPath: string): boolean;
   resolveQueueLogicalJobs(options: {
     discSelectionIds: readonly DiscSelectionId[];
     encodingProfileId: EncodingProfileId;
@@ -1405,8 +1409,9 @@ export interface EncodeJobAccess {
     encodingProfileId: EncodingProfileId;
     outputPath: string;
     priority?: number;
+    mutationKey?: string;
   }): EncodeJob;
-  requestCancellation(id: EncodeJobId): EncodeJob;
+  requestCancellation(id: EncodeJobId, mutationKey?: string): EncodeJob;
   claimNext(workerId: string): RunningEncodeJob | null;
   renewClaim(claim: RunningEncodeJob): ClaimedEncodeJob;
   completeCancellation(claim: RunningEncodeJob): EncodeJob;
@@ -1598,6 +1603,7 @@ export interface ConsistentReadAccess {
     | "list"
     | "listForDiscSelection"
     | "hasReservedOutputPathConflict"
+    | "hasReservedOutputPath"
     | "resolveQueueLogicalJobs"
     | "listQueueDiscSelections"
     | "listDiscSelectionCorrectionEncodeJobLinks"

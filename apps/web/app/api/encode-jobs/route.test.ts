@@ -105,6 +105,18 @@ describe("Encode Jobs API", () => {
         hasCompletedEncode: false,
         priorCompletedJob: null,
         logicalJob: null,
+        queueAction: {
+          name: "enqueue",
+          eligible: false,
+          requiredInputs: [
+            "mutationKey", "discSelectionId", "encodingProfileId", "outputPath",
+          ],
+          reason: "Select an Encoding Profile.",
+          blockingReasons: [{
+            code: "INVALID_TRANSITION",
+            message: "Select an Encoding Profile.",
+          }],
+        },
         suggestedOutputPath:
           "/media/movies/Encode API reviewed (2026)/Encode API reviewed (2026).mkv",
       }],
@@ -468,6 +480,21 @@ describe("Encode Jobs API", () => {
           status: "completed",
           outputPath: "/media/movies/Completed history.mkv",
         }),
+        queueAction: {
+          name: "requeue",
+          eligible: true,
+          reason: null,
+          requiredInputs: [
+            "mutationKey", "encodeJobId", "expectedRevision",
+            "acknowledgeReplacement",
+          ],
+          blockingReasons: [],
+          preview: {
+            name: "preview-requeue",
+            requiredInputs: ["encodeJobId"],
+            provides: ["expectedRevision"],
+          },
+        },
       }),
     ]);
 
@@ -1316,6 +1343,7 @@ describe("Encode Jobs API", () => {
           Origin: "http://localhost:3000",
         },
         body: JSON.stringify({
+          mutationKey: "synthetic-unavailable-profile-mutation",
           discSelectionId: reviewed.selection.id,
           encodingProfileId: unavailableProfile.id,
           outputPath: "/media/movies/Unavailable.mkv",
@@ -1341,7 +1369,7 @@ describe("Encode Jobs API", () => {
       mediaDomain: "dvd_video",
       settings: { preset: "Fast 480p30", container: "mkv" },
     });
-    const request = (outputPath: string) =>
+    const request = (outputPath: string, mutationKey: string) =>
       new Request("http://localhost:3000/api/encode-jobs", {
         method: "POST",
         headers: {
@@ -1350,6 +1378,7 @@ describe("Encode Jobs API", () => {
           Origin: "http://localhost:3000",
         },
         body: JSON.stringify({
+          mutationKey,
           discSelectionId: reviewed.selection.id,
           encodingProfileId: profile.id,
           outputPath,
@@ -1361,7 +1390,10 @@ describe("Encode Jobs API", () => {
     });
 
     const queuedResponse = await createEncodeJobsRoute(
-      request("/media/movies/Encode API queue.mkv"),
+      request(
+        "/media/movies/Encode API queue.mkv",
+        "synthetic-queue-initial-mutation",
+      ),
       () => access,
       config,
     );
@@ -1376,7 +1408,10 @@ describe("Encode Jobs API", () => {
     });
 
     const repeated = await createEncodeJobsRoute(
-      request("/media/movies/ignored-while-queued.mkv"),
+      request(
+        "/media/movies/ignored-while-queued.mkv",
+        "synthetic-queue-repeated-mutation",
+      ),
       () => access,
       config,
     );
@@ -1395,7 +1430,10 @@ describe("Encode Jobs API", () => {
     access.encodeJobs.complete(claim);
 
     const repeatedCompletedResponse = await createEncodeJobsRoute(
-      request("/media/movies/Encode API queue.mkv"),
+      request(
+        "/media/movies/Encode API queue.mkv",
+        "synthetic-queue-completed-mutation",
+      ),
       () => access,
       config,
     );
@@ -1430,8 +1468,13 @@ describe("Encode Jobs API", () => {
       mediaLibraryPath: "/media/movies",
       webTrustedOrigin: "http://localhost:3000",
     });
-    const retry = () =>
-      createEncodeJobsRoute(
+    let retryMutationSequence = 0;
+    const retry = (replacement?: {
+      expectedRevision: string;
+      acknowledgeReplacement: true;
+    }) => {
+      retryMutationSequence += 1;
+      return createEncodeJobsRoute(
         new Request("http://localhost:3000/api/encode-jobs", {
           method: "PATCH",
           headers: {
@@ -1439,11 +1482,16 @@ describe("Encode Jobs API", () => {
             Host: "localhost:3000",
             Origin: "http://localhost:3000",
           },
-          body: JSON.stringify({ encodeJobId: original.id }),
+          body: JSON.stringify({
+            mutationKey: `synthetic-retry-mutation-${retryMutationSequence}`,
+            encodeJobId: original.id,
+            ...replacement,
+          }),
         }),
         () => access,
         config,
       );
+    };
 
     const firstClaim = access.encodeJobs.claimNext("failed-api-job");
     if (!firstClaim) {
@@ -1452,8 +1500,10 @@ describe("Encode Jobs API", () => {
     access.encodeJobs.updateProgress(firstClaim, 37);
     access.encodeJobs.fail(firstClaim, "HandBrake failed");
 
-    const repeatSubmission = () =>
-      createEncodeJobsRoute(
+    let repeatedEnqueueSequence = 0;
+    const repeatSubmission = () => {
+      repeatedEnqueueSequence += 1;
+      return createEncodeJobsRoute(
         new Request("http://localhost:3000/api/encode-jobs", {
           method: "POST",
           headers: {
@@ -1462,6 +1512,8 @@ describe("Encode Jobs API", () => {
             Origin: "http://localhost:3000",
           },
           body: JSON.stringify({
+            mutationKey:
+              `synthetic-repeated-enqueue-mutation-${repeatedEnqueueSequence}`,
             discSelectionId: reviewed.selection.id,
             encodingProfileId: profile.id,
             outputPath: "/media/movies/Encode API retry.mkv",
@@ -1470,6 +1522,7 @@ describe("Encode Jobs API", () => {
         () => access,
         config,
       );
+    };
 
     expect((await (await repeatSubmission()).json()).job).toMatchObject({
       id: original.id,
@@ -1503,11 +1556,63 @@ describe("Encode Jobs API", () => {
     });
     expect(access.encodeJobs.claimNext("late-completed-post-retry")).toBeNull();
 
-    expect((await (await retry()).json()).job).toMatchObject({
+    expect((await retry()).status).toBe(409);
+    const previewResponse = await createEncodeJobsRoute(
+      new Request("http://localhost:3000/api/encode-jobs", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          action: "preview_requeue",
+          encodeJobId: original.id,
+        }),
+      }),
+      () => access,
+      config,
+    );
+    expect(previewResponse.status).toBe(200);
+    const { preview } = await previewResponse.json() as {
+      preview: { revision: string; acknowledgementRequired: boolean };
+    };
+    expect(preview).toMatchObject({ acknowledgementRequired: true });
+    access.encodeJobs.requeue(original.id);
+    const refreshedClaim = access.encodeJobs.claimNext("refresh-completed-api-job");
+    if (!refreshedClaim) throw new Error("Expected refreshed Encode Job claim");
+    access.encodeJobs.complete(refreshedClaim);
+    expect((await retry({
+      expectedRevision: preview.revision,
+      acknowledgeReplacement: true,
+    })).status).toBe(409);
+    const refreshedPreviewResponse = await createEncodeJobsRoute(
+      new Request("http://localhost:3000/api/encode-jobs", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          action: "preview_requeue",
+          encodeJobId: original.id,
+        }),
+      }),
+      () => access,
+      config,
+    );
+    const refreshedPreview = (await refreshedPreviewResponse.json()) as {
+      preview: { revision: string };
+    };
+    expect((await (await retry({
+      expectedRevision: refreshedPreview.preview.revision,
+      acknowledgeReplacement: true,
+    })).json()).job).toMatchObject({
       id: original.id,
       status: "queued",
       progressPercent: 0,
-      completedAt: completedBody.job.completedAt,
+      completedAt: expect.any(String),
     });
     expect(access.encodeJobs.list()).toHaveLength(1);
   });
@@ -1531,8 +1636,10 @@ describe("Encode Jobs API", () => {
       mediaLibraryPath: "/media/movies",
       webTrustedOrigin: "http://localhost:3000",
     });
-    const cancel = (encodeJobId: string, origin = "http://localhost:3000") =>
-      createEncodeJobsRoute(
+    let cancelMutationSequence = 0;
+    const cancel = (encodeJobId: string, origin = "http://localhost:3000") => {
+      cancelMutationSequence += 1;
+      return createEncodeJobsRoute(
         new Request("http://localhost:3000/api/encode-jobs", {
           method: "PATCH",
           headers: {
@@ -1543,11 +1650,16 @@ describe("Encode Jobs API", () => {
               ? "same-origin"
               : "cross-site",
           },
-          body: JSON.stringify({ action: "cancel", encodeJobId }),
+          body: JSON.stringify({
+            action: "cancel",
+            mutationKey: `synthetic-cancel-mutation-${cancelMutationSequence}`,
+            encodeJobId,
+          }),
         }),
         () => access,
         config,
       );
+    };
 
     const cancelled = await cancel(queued.id);
     expect(cancelled.status).toBe(200);
@@ -1593,7 +1705,11 @@ describe("Encode Jobs API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify({ action: "cancel", encodeJobId: "" }),
+        body: JSON.stringify({
+          action: "cancel",
+          mutationKey: "synthetic-malformed-cancel-mutation",
+          encodeJobId: "",
+        }),
       }),
       () => access,
       config,
@@ -1635,6 +1751,7 @@ describe("Encode Jobs API", () => {
             Origin: "http://localhost:3000",
           },
           body: JSON.stringify({
+            mutationKey: `synthetic-blocked-mutation-${encodingProfileId}`,
             discSelectionId: unreviewed.selection.id,
             encodingProfileId,
             outputPath: "/media/movies/Blocked.mkv",
@@ -1657,6 +1774,7 @@ describe("Encode Jobs API", () => {
       webTrustedOrigin: "http://localhost:3000",
     });
     const body = JSON.stringify({
+      mutationKey: "synthetic-unsafe-output-mutation",
       discSelectionId: "selection-1",
       encodingProfileId: "profile-1",
       outputPath: "/media/originals/not-a-media-output.mkv",
@@ -1676,6 +1794,25 @@ describe("Encode Jobs API", () => {
       config,
     );
     expect(unsafePath.status).toBe(400);
+
+    const missingMutationKey = await createEncodeJobsRoute(
+      new Request("http://localhost:3000/api/encode-jobs", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          discSelectionId: "selection-1",
+          encodingProfileId: "profile-1",
+          outputPath: "/media/movies/Synthetic.mkv",
+        }),
+      }),
+      getAccess,
+      config,
+    );
+    expect(missingMutationKey.status).toBe(400);
 
     const crossOrigin = await createEncodeJobsRoute(
       new Request("http://localhost:3000/api/encode-jobs", {
@@ -1720,6 +1857,7 @@ describe("Encode Jobs API", () => {
             Origin: "http://localhost:3000",
           },
           body: JSON.stringify({
+            mutationKey: `synthetic-output-owner-${encodingProfileId}`,
             discSelectionId: reviewed.selection.id,
             encodingProfileId,
             outputPath: "/media/movies/One owner.mkv",

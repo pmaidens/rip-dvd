@@ -11,6 +11,8 @@ import type {
   FilesystemVerificationTarget,
   EncodeJobId,
   OriginalDiscArchiveId,
+  EncodeQueueHistoryGroup,
+  DiscSelectionId,
 } from "@rip-dvd/data-access";
 
 import { readCatalogReview, type CatalogReviewPageCoordinates } from "./catalog-review-read.js";
@@ -24,6 +26,14 @@ import {
   type MediaItemCommand,
 } from "./media-item-operations.js";
 import type { CatalogMetadataLookup, CatalogMetadataSelection } from "./catalog-automation.js";
+import {
+  cancelEncodeJob,
+  enqueueEncodeJob,
+  previewEncodeRequeue,
+  readQueueOptions,
+  requeueEncodeJob,
+  resolveQueueLogicalJobs,
+} from "./encode-jobs.js";
 
 export class InvalidProfileInputError extends Error {
   constructor(message = "Invalid Encoding Profile input.") {
@@ -195,6 +205,30 @@ export function createApplicationOperations(
         mediaDomain: "dvd_video", isActive: input.isActive, expectedRevision,
       })) };
     },
+    encodeQueueOptions: (input: {
+      mediaLibraryPath: string;
+      selectionOffset?: number;
+      profileOffset?: number;
+      historyGroup?: EncodeQueueHistoryGroup;
+      query?: string;
+      encodingProfileId?: EncodingProfileId;
+    }) => readQueueOptions(
+      access, input.selectionOffset ?? 0, input.profileOffset ?? 0,
+      input.mediaLibraryPath, input.historyGroup ?? "not_encoded",
+      input.query, input.encodingProfileId,
+    ),
+    resolveEncodeQueue: (input: {
+      discSelectionIds: readonly DiscSelectionId[];
+      encodingProfileId: EncodingProfileId;
+    }) => resolveQueueLogicalJobs(access, input.discSelectionIds, input.encodingProfileId),
+    enqueueEncodeJob: (input: Parameters<typeof enqueueEncodeJob>[2] & { mediaLibraryPath: string }) =>
+      enqueueEncodeJob(access, input.mediaLibraryPath, input),
+    requeueEncodeJob: (input: Parameters<typeof requeueEncodeJob>[2] & { mediaLibraryPath: string }) =>
+      requeueEncodeJob(access, input.mediaLibraryPath, input),
+    previewEncodeRequeue: (input: Parameters<typeof previewEncodeRequeue>[1]) =>
+      previewEncodeRequeue(access, input),
+    cancelEncodeJob: (input: Parameters<typeof cancelEncodeJob>[1]) =>
+      cancelEncodeJob(access, input),
     submitArchiveRequest: (input: {
       mutationKey: unknown;
       detectedDiscId: string;
@@ -305,3 +339,15 @@ export * from "./catalog-automation.js";
 export * from "./tmdb-catalog-adapter.js";
 export { suggestCatalogReview } from "./catalog-suggestion.js";
 export { executeDiscSelectionCommand, previewDiscSelection, previewDiscSelectionChange } from "./disc-selection-operations.js";
+export { InvalidEncodeJobInputError } from "./encode-jobs.js";
+export { mediaOutputPath, suggestedMediaOutputPath } from "./media-output-path.js";
+export {
+  cancelEncodeJob,
+  enqueueEncodeJob,
+  parseEncodeEnqueueInput,
+  previewEncodeRequeue,
+  readQueueOptions,
+  requeueEncodeJob,
+  resolveQueueLogicalJobs,
+  serializeJob,
+} from "./encode-jobs.js";

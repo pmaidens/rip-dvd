@@ -91,6 +91,7 @@ const trustedOrigin = "http://localhost:3000";
 const temporaryDirectories: string[] = [];
 const openAccess: DataAccess[] = [];
 const openEventStreams: AbortController[] = [];
+let mutationSequence = 0;
 
 afterEach(() => {
   for (const controller of openEventStreams.splice(0)) {
@@ -105,6 +106,14 @@ afterEach(() => {
 });
 
 function createMutationRequest(path: string, body: unknown): Request {
+  mutationSequence += 1;
+  const keyedBody = body !== null && typeof body === "object" &&
+      !Array.isArray(body) && !("mutationKey" in body)
+    ? {
+      mutationKey: `synthetic-workflow-mutation-${mutationSequence}`,
+      ...body,
+    }
+    : body;
   return new Request(`${trustedOrigin}${path}`, {
     method: "POST",
     headers: {
@@ -113,7 +122,7 @@ function createMutationRequest(path: string, body: unknown): Request {
       Origin: trustedOrigin,
       "Sec-Fetch-Site": "same-origin",
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(keyedBody),
   });
 }
 
@@ -2591,6 +2600,7 @@ describe("end-to-end operations dashboard workflow", () => {
         },
         body: JSON.stringify({
           action: "cancel",
+          mutationKey: "synthetic-encode-cancel-queued",
           encodeJobId: queuedEncodeJob.id,
         }),
       }),
@@ -2623,6 +2633,7 @@ describe("end-to-end operations dashboard workflow", () => {
         },
         body: JSON.stringify({
           action: "requeue",
+          mutationKey: "synthetic-encode-requeue-cancelled",
           encodeJobId: queuedEncodeJob.id,
         }),
       }),
@@ -2680,6 +2691,7 @@ describe("end-to-end operations dashboard workflow", () => {
         },
         body: JSON.stringify({
           action: "cancel",
+          mutationKey: "synthetic-encode-cancel-running",
           encodeJobId: queuedEncodeJob.id,
         }),
       }),
@@ -2723,6 +2735,7 @@ describe("end-to-end operations dashboard workflow", () => {
         },
         body: JSON.stringify({
           action: "requeue",
+          mutationKey: "synthetic-encode-requeue-after-cancel",
           encodeJobId: queuedEncodeJob.id,
         }),
       }),
@@ -2782,6 +2795,7 @@ describe("end-to-end operations dashboard workflow", () => {
         },
         body: JSON.stringify({
           action: "requeue",
+          mutationKey: "synthetic-encode-requeue-after-failure",
           encodeJobId: queuedEncodeJob.id,
         }),
       }),
@@ -2929,14 +2943,12 @@ describe("end-to-end operations dashboard workflow", () => {
     expect((await outputVerification.json()).verificationRun).toMatchObject({ status: "queued" });
     await access.filesystemVerification.execute(access.filesystemVerification.claimNext()!);
     await access.filesystemVerification.execute(access.filesystemVerification.claimNext()!);
-    expect(inspectPath).toHaveBeenNthCalledWith(
-      1,
+    expect(inspectPath).toHaveBeenCalledWith(
       archive.archivePath,
       originalsLibraryPath,
       archive.sizeBytes,
     );
-    expect(inspectPath).toHaveBeenNthCalledWith(
-      2,
+    expect(inspectPath).toHaveBeenCalledWith(
       outputPath,
       mediaLibraryPath,
     );

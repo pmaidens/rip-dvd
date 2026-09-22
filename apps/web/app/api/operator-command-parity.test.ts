@@ -16,6 +16,82 @@ import { createHealthResponse } from "./health/route";
 import { createOperationsResponse } from "./operations/route";
 import { createMediaItemSearchRoute } from "./media-items/route";
 import { createMediaItemPreviewRoute } from "./media-items/[id]/route";
+import { createEncodeJobsRoute } from "./encode-jobs/route";
+
+it("shares Encode Job validation and keyed outcomes across web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive, correctedSelection } = seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    access.catalog.completeCatalogReview(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt,
+      "reviewed_with_selections",
+    );
+    const profile = access.encodingProfiles.list({ mediaDomain: "dvd_video", activeOnly: true })[0]!;
+    const outputPath = join(fixture.mediaLibraryPath, "synthetic-parity.mkv");
+    const key = "synthetic-encode-parity-key";
+    const config = () => ({
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      webTrustedOrigin: "http://localhost:3000",
+    });
+    const request = (body: object, method = "POST") => new Request("http://localhost:3000/api/encode-jobs", {
+      method,
+      headers: { "Content-Type": "application/json", Host: "localhost:3000", Origin: "http://localhost:3000" },
+      body: JSON.stringify(body),
+    });
+    const web = await createEncodeJobsRoute(request({
+      mutationKey: key,
+      discSelectionId: correctedSelection.id,
+      encodingProfileId: profile.id,
+      outputPath,
+    }), () => access, config);
+    expect(web.status).toBe(200);
+    const webResult = await web.json();
+    const cli = await fixture.run([
+      "encode-enqueue", "--key", key,
+      "--disc-selection-id", correctedSelection.id,
+      "--encoding-profile-id", profile.id,
+      "--output-path", outputPath,
+    ]);
+    expect(cli.exitCode).toBe(0);
+    expect(cli.result).toMatchObject({ job: webResult.job });
+    const conflict = await fixture.run([
+      "encode-enqueue", "--key", key,
+      "--disc-selection-id", correctedSelection.id,
+      "--encoding-profile-id", profile.id,
+      "--output-path", join(fixture.mediaLibraryPath, "different.mkv"),
+    ]);
+    expect(conflict.result).toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
+    const jobId = webResult.job.id as string;
+    const cancelled = await fixture.run([
+      "encode-cancel", "--key", "synthetic-encode-parity-cancel",
+      "--encode-job-id", jobId,
+    ]);
+    expect(cancelled.exitCode).toBe(0);
+    const webCancelled = await createEncodeJobsRoute(request({
+      action: "cancel", encodeJobId: jobId,
+      mutationKey: "synthetic-encode-parity-cancel",
+    }, "PATCH"), () => access, config);
+    expect(webCancelled.status).toBe(200);
+    expect(await webCancelled.json()).toMatchObject({ job: (cancelled.result as { job: object }).job });
+    const webRequeued = await createEncodeJobsRoute(request({
+      action: "requeue", encodeJobId: jobId,
+      mutationKey: "synthetic-encode-parity-requeue",
+    }, "PATCH"), () => access, config);
+    expect(webRequeued.status).toBe(200);
+    const requeued = await fixture.run([
+      "encode-requeue", "--key", "synthetic-encode-parity-requeue",
+      "--encode-job-id", jobId,
+    ]);
+    expect(requeued.exitCode).toBe(0);
+    expect(requeued.result).toMatchObject({ job: (await webRequeued.json()).job });
+    expect(access.encodeJobs.list()).toHaveLength(2);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
 
 it("returns the same health and readiness results through web and CLI adapters", async () => {
   const fixture = createOperatorWorkflowFixture();

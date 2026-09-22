@@ -1392,10 +1392,12 @@ Cancelled jobs expose deliberate requeue only while their Disc Selection remains
 active and its Catalog Review is complete. The dashboard also exposes explicit
 Retry encode and Re-encode actions for failed and completed jobs. An explicit
 requeue of a completed job, or of a failed replacement that still owns its prior
-final, keeps its authoritative output path and path reservation even if the
-retry supplies a different path. A failed job without a retained output may
-move to the requested path. Repeated submissions also leave queued and running
-rows unchanged.
+final, keeps its authoritative output path and path reservation. Keyed web and
+CLI requeues reject a different path for these jobs and require a current
+replacement preview plus explicit acknowledgement. Unkeyed internal recovery
+calls retain the authoritative path if a caller supplies another path. A failed
+job without a retained output may move to the requested path. Repeated
+submissions also leave queued and running rows unchanged.
 
 When a Disc Selection Correction affects existing Encode Jobs, the Catalog
 Review completion panel lists those jobs and proposes each prior Encoding
