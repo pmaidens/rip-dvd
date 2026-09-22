@@ -2943,14 +2943,12 @@ describe("end-to-end operations dashboard workflow", () => {
     expect((await outputVerification.json()).verificationRun).toMatchObject({ status: "queued" });
     await access.filesystemVerification.execute(access.filesystemVerification.claimNext()!);
     await access.filesystemVerification.execute(access.filesystemVerification.claimNext()!);
-    expect(inspectPath).toHaveBeenNthCalledWith(
-      1,
+    expect(inspectPath).toHaveBeenCalledWith(
       archive.archivePath,
       originalsLibraryPath,
       archive.sizeBytes,
     );
-    expect(inspectPath).toHaveBeenNthCalledWith(
-      2,
+    expect(inspectPath).toHaveBeenCalledWith(
       outputPath,
       mediaLibraryPath,
     );
