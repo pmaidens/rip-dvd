@@ -114,7 +114,7 @@ export function previewMediaItemChange(
       }
     }
     const requiresAcknowledgement = action === "delete" ||
-      state.maintenance.referencedArchiveCount > 0 || state.maintenance.childCount > 0 ||
+      state.impact.affectedArchiveCount > 0 ||
       (proposedInput?.parentId !== undefined && proposedInput.parentId !== state.mediaItem.parentId) ||
       (proposedInput?.kind !== undefined && proposedInput.kind !== state.mediaItem.kind);
     return {
@@ -124,12 +124,13 @@ export function previewMediaItemChange(
       requiresAcknowledgement,
       revision: JSON.stringify({ updatedAt: state.revision,
         referencedArchiveCount: state.maintenance.referencedArchiveCount,
-        childCount: state.maintenance.childCount, changes: proposedInput }),
+        childCount: state.maintenance.childCount,
+        impactRevision: state.impact.revision, changes: proposedInput }),
       consequence: action === "delete"
         ? "This Media Item and its metadata identity will be removed."
         : `${Object.keys(proposedInput ?? {}).join(", ")} will change for this Media Item` +
-          (state.maintenance.referencedArchiveCount > 0
-            ? ` and ${state.maintenance.referencedArchiveCount} referencing archive(s)` : "") + ".",
+          (state.impact.affectedArchiveCount > 0
+            ? ` and ${state.impact.affectedArchiveCount} affected archive(s)` : "") + ".",
       availability,
     };
   });
@@ -141,7 +142,7 @@ function readMediaItemState(catalog: SnapshotCatalogAccess, id: MediaItemId) {
   const maintenance = catalog.listMediaItemMaintenance({ ids: [id] })[0];
   if (!maintenance) throw new DomainInvariantError(`Media Item ${id} is missing maintenance state`);
   return { mediaItem: serializeMediaItem(item), tmdbIdentity: catalog.findTmdbIdentityByMediaItemId(id),
-    revision: item.updatedAt.toISOString(), maintenance };
+    revision: item.updatedAt.toISOString(), maintenance, impact: catalog.inspectMediaItemImpact(id) };
 }
 
 export function showMediaItem(access: DataAccess, id: MediaItemId) {
@@ -166,7 +167,8 @@ export function mutateMediaItem(
   const options = { mutationKey, requirePreviewIfAffected: true,
     ...(acknowledged === null ? {} : { expectedUpdatedAt: new Date(acknowledged.updatedAt),
       expectedReferencedArchiveCount: acknowledged.referencedArchiveCount,
-      expectedChildCount: acknowledged.childCount }) };
+      expectedChildCount: acknowledged.childCount,
+      expectedImpactRevision: acknowledged.impactRevision }) };
   if (command.action === "update_media_item") {
     const item = access.catalog.updateMediaItem(
       command.mediaItemId as MediaItemId,
@@ -179,7 +181,7 @@ export function mutateMediaItem(
 }
 
 function parseAcknowledgedRevision(value: string | undefined, changes: object | null):
-  { updatedAt: string; referencedArchiveCount: number; childCount: number } | null {
+  { updatedAt: string; referencedArchiveCount: number; childCount: number; impactRevision: string } | null {
   if (value === undefined) return null;
   let parsed: unknown;
   try { parsed = JSON.parse(value); } catch { parsed = null; }
@@ -192,9 +194,10 @@ function parseAcknowledgedRevision(value: string | undefined, changes: object | 
       new Date(updatedAt).toISOString() !== updatedAt ||
       !Number.isSafeInteger(state.referencedArchiveCount) ||
       !Number.isSafeInteger(state.childCount) ||
+      typeof state.impactRevision !== "string" || !/^[0-9a-f]{64}$/.test(state.impactRevision) ||
       JSON.stringify(state.changes) !== JSON.stringify(changes)) {
     throw new DomainInvariantError("Preview and acknowledge the proposed Media Item change");
   }
   return { updatedAt, referencedArchiveCount: state.referencedArchiveCount as number,
-    childCount: state.childCount as number };
+    childCount: state.childCount as number, impactRevision: state.impactRevision as string };
 }

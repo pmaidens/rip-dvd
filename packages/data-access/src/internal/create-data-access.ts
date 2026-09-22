@@ -7,6 +7,7 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -1996,6 +1997,39 @@ export function createDataAccessInternal(
     });
   }
 
+  function inspectMediaItemImpact(
+    id: MediaItemId,
+    querySource: Pick<typeof database, "select"> = database,
+  ): { affectedArchiveCount: number; revision: string } {
+    const directChildren = querySource.select({ id: mediaItems.id }).from(mediaItems)
+      .where(eq(mediaItems.parentId, id)).orderBy(asc(mediaItems.id)).all()
+      .map((row) => row.id);
+    const descendants: MediaItemId[] = [id];
+    let frontier = directChildren;
+    while (frontier.length > 0) {
+      descendants.push(...frontier);
+      const next: MediaItemId[] = [];
+      for (let offset = 0; offset < frontier.length; offset += 500) {
+        next.push(...querySource.select({ id: mediaItems.id }).from(mediaItems)
+          .where(inArray(mediaItems.parentId, frontier.slice(offset, offset + 500))).all()
+          .map((row) => row.id));
+      }
+      frontier = next;
+    }
+    const references: Array<{ id: DiscSelectionId; archiveId: OriginalDiscArchiveId; mediaItemId: MediaItemId }> = [];
+    for (let offset = 0; offset < descendants.length; offset += 500) {
+      references.push(...querySource.select({ id: discSelections.id,
+        archiveId: discSelections.originalDiscArchiveId,
+        mediaItemId: discSelections.mediaItemId }).from(discSelections)
+        .where(inArray(discSelections.mediaItemId, descendants.slice(offset, offset + 500))).all());
+    }
+    references.sort((left, right) => left.id.localeCompare(right.id));
+    return {
+      affectedArchiveCount: new Set(references.map((reference) => reference.archiveId)).size,
+      revision: createHash("sha256").update(JSON.stringify({ directChildren, references })).digest("hex"),
+    };
+  }
+
   function activeDiscSelectionSourceOverlapExists(
     transaction: CatalogTransaction,
     archiveId: OriginalDiscArchiveId,
@@ -2374,11 +2408,14 @@ export function createDataAccessInternal(
   function requireMediaItemMaintenanceRevision(
     maintenance: MediaItemMaintenance,
     options: MediaItemMutationOptions | undefined,
+    impactRevision: string,
   ): void {
     if ((options?.expectedReferencedArchiveCount !== undefined &&
         maintenance.referencedArchiveCount !== options.expectedReferencedArchiveCount) ||
         (options?.expectedChildCount !== undefined &&
-        maintenance.childCount !== options.expectedChildCount)) {
+        maintenance.childCount !== options.expectedChildCount) ||
+        (options?.expectedImpactRevision !== undefined &&
+        impactRevision !== options.expectedImpactRevision)) {
       throw new DomainInvariantError("Media Item changed; preview again before saving");
     }
   }
@@ -4536,6 +4573,7 @@ export function createDataAccessInternal(
             access.catalog.listMediaItemMaintenance(options),
           previewMediaItemUpdate: (id, input) =>
             access.catalog.previewMediaItemUpdate(id, input),
+          inspectMediaItemImpact: (id) => access.catalog.inspectMediaItemImpact(id),
           findTmdbIdentityByMediaItemId: (id) =>
             access.catalog.findTmdbIdentityByMediaItemId(id),
           searchMediaItems: (options) =>
@@ -5964,7 +6002,8 @@ export function createDataAccessInternal(
           "media_item.update",
           JSON.stringify({ id, input, expectedUpdatedAt: options?.expectedUpdatedAt?.toISOString(),
             expectedReferencedArchiveCount: options?.expectedReferencedArchiveCount,
-            expectedChildCount: options?.expectedChildCount }),
+            expectedChildCount: options?.expectedChildCount,
+            expectedImpactRevision: options?.expectedImpactRevision }),
           () => {
           const current = requireRow(
             transaction
@@ -5977,9 +6016,10 @@ export function createDataAccessInternal(
           );
           requireMediaItemRevision(current, options?.expectedUpdatedAt);
           const maintenance = readMediaItemMaintenance([id], undefined, transaction)[0]!;
-          requireMediaItemMaintenanceRevision(maintenance, options);
+          const impact = inspectMediaItemImpact(id, transaction);
+          requireMediaItemMaintenanceRevision(maintenance, options, impact.revision);
           if (options?.requirePreviewIfAffected && options.expectedUpdatedAt === undefined &&
-              (maintenance.referencedArchiveCount > 0 || maintenance.childCount > 0 ||
+              (impact.affectedArchiveCount > 0 ||
                 (input.parentId !== undefined && input.parentId !== current.parentId) ||
                 (input.kind !== undefined && input.kind !== current.kind))) {
             throw new DomainInvariantError("Preview and acknowledge the current Media Item revision");
@@ -6010,7 +6050,8 @@ export function createDataAccessInternal(
           "media_item.delete",
           JSON.stringify({ id, expectedUpdatedAt: options?.expectedUpdatedAt?.toISOString(),
             expectedReferencedArchiveCount: options?.expectedReferencedArchiveCount,
-            expectedChildCount: options?.expectedChildCount }),
+            expectedChildCount: options?.expectedChildCount,
+            expectedImpactRevision: options?.expectedImpactRevision }),
           () => {
           const current = requireRow(
             transaction
@@ -6027,7 +6068,8 @@ export function createDataAccessInternal(
             undefined,
             transaction,
           )[0]!;
-          requireMediaItemMaintenanceRevision(maintenance, options);
+          requireMediaItemMaintenanceRevision(maintenance, options,
+            inspectMediaItemImpact(id, transaction).revision);
           if (maintenance.deletionAvailability.state === "unavailable") {
             throw new DomainInvariantError(
               `Media Item deletion is unavailable: ${
@@ -6053,6 +6095,10 @@ export function createDataAccessInternal(
         const current = requireRow(database.select().from(mediaItems)
           .where(eq(mediaItems.id, id)).get(), "media item", id);
         return projectMediaItemUpdate(database, current, input);
+      },
+
+      inspectMediaItemImpact(id) {
+        return inspectMediaItemImpact(id);
       },
 
       listMediaItemMaintenance(options) {

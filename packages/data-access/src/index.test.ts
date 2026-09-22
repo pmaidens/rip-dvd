@@ -6553,6 +6553,17 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("allows ordinary metadata changes to an unreferenced parent without acknowledgement", () => {
+    const access = openTestDatabase();
+    const parent = access.catalog.createMediaItem({ kind: "tv_show", title: "Example Show" });
+    access.catalog.createMediaItem({ kind: "season", title: "Season One", parentId: parent.id,
+      seasonNumber: 1 });
+    expect(access.catalog.updateMediaItem(parent.id, { title: "Corrected Show" }, {
+      requirePreviewIfAffected: true,
+    }).title).toBe("Corrected Show");
+    access.close();
+  });
+
   it("preserves active Disc Selection references when deleting a Media Item", () => {
     const access = openTestDatabase();
     const drive = access.catalog.upsertOpticalDrive({
@@ -6592,12 +6603,26 @@ describe("data-access facade", () => {
     expect(() => access.catalog.updateMediaItem(item.id, { title: "Revised movie" }, {
       requirePreviewIfAffected: true,
     })).toThrow("Preview and acknowledge the current Media Item revision");
+    const impact = access.catalog.inspectMediaItemImpact(item.id);
+    access.catalog.deleteDiscSelection(selection.id);
+    const replacement = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const replacementImpact = access.catalog.inspectMediaItemImpact(item.id);
+    expect(replacementImpact.affectedArchiveCount).toBe(impact.affectedArchiveCount);
+    expect(replacementImpact.revision).not.toBe(impact.revision);
+    expect(() => access.catalog.updateMediaItem(item.id, { title: "Revised movie" }, {
+      expectedUpdatedAt: item.updatedAt,
+      expectedImpactRevision: impact.revision,
+    })).toThrow("Media Item changed; preview again before saving");
 
     expect(() => access.catalog.deleteMediaItem(item.id)).toThrow(
       "Media Item deletion is unavailable: 1 Disc Selection reference",
     );
     expect(access.catalog.listMediaItems({ ids: [item.id] })).toHaveLength(1);
-    expect(access.catalog.listDiscSelections({ ids: [selection.id] }))
+    expect(access.catalog.listDiscSelections({ ids: [replacement.id] }))
       .toHaveLength(1);
     expect(access.catalog.listMediaItemMaintenance({
       ids: [item.id],

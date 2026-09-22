@@ -558,6 +558,7 @@ export interface MediaItemMutationOptions {
   expectedUpdatedAt?: Date;
   expectedReferencedArchiveCount?: number;
   expectedChildCount?: number;
+  expectedImpactRevision?: string;
   requirePreviewIfAffected?: boolean;
 }
 
@@ -1108,6 +1109,10 @@ export interface CatalogAccess {
     id: MediaItemId,
     input: Parameters<CatalogAccess["updateMediaItem"]>[1],
   ): MediaItem;
+  inspectMediaItemImpact(id: MediaItemId): {
+    affectedArchiveCount: number;
+    revision: string;
+  };
   deleteMediaItem(id: MediaItemId, options?: MediaItemMutationOptions): MediaItem;
   listMediaItemMaintenance(options: {
     ids: readonly MediaItemId[];
@@ -1534,6 +1539,7 @@ export type SnapshotCatalogAccess = Pick<
   | "listMediaItems"
   | "listMediaItemMaintenance"
   | "previewMediaItemUpdate"
+  | "inspectMediaItemImpact"
   | "findTmdbIdentityByMediaItemId"
   | "searchMediaItems"
   | "listDiscSelections"

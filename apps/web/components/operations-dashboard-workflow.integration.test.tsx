@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { DatabaseSync } from "node:sqlite";
 
+import { createApplicationOperations } from "@rip-dvd/application";
 import type { DataAccess, MediaItemId } from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -1996,11 +1997,16 @@ describe("end-to-end operations dashboard workflow", () => {
             body.action === "delete_media_item")) {
         const id = "mediaItemId" in body && typeof body.mediaItemId === "string"
           ? body.mediaItemId as MediaItemId : null;
-        const item = id === null ? null : access.catalog.listMediaItems({ ids: [id] })[0];
+        const preview = id === null ? null : createApplicationOperations(access).previewMediaItemChange(
+          id, body.action === "delete_media_item" ? "delete" : "update",
+          body.action === "update_media_item" && "changes" in body
+            ? body.changes as Parameters<ReturnType<typeof createApplicationOperations>["previewMediaItemChange"]>[2]
+            : undefined,
+        );
         input = {
           ...body,
           mutationKey: crypto.randomUUID(),
-          ...(item ? { acknowledgedRevision: item.updatedAt.toISOString() } : {}),
+          ...(preview ? { acknowledgedRevision: preview.revision } : {}),
         };
       }
       return createCatalogReviewRoute(

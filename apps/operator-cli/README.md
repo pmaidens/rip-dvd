@@ -126,7 +126,7 @@ its children, kind, or parent, and all deletes require a preview revision as
 `--acknowledge`. Preview an update with the same changes you intend to submit;
 quote the returned revision when passing it to the shell. A stale revision
 returns `STALE_MEDIA_ITEM_REVISION`. A preview shows the proposed result,
-eligibility, and the number of direct archive references or children affected. Catalog
+eligibility, and the number of affected archives, including those referencing descendants. Catalog
 hierarchy, TMDB uniqueness, and reference rules remain enforced during the
 mutation. Validation and eligibility failures return JSON errors with stable
 codes and exit status 2.

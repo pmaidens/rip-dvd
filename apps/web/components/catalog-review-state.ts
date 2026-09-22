@@ -330,6 +330,7 @@ export function useCatalogReviewState({
             revision: string;
             consequence: string;
             maintenance: { referencedArchiveCount: number };
+            impact?: { affectedArchiveCount: number };
             availability: { state: string; reason: string | null };
             requiresAcknowledgement: boolean;
           };
@@ -338,7 +339,7 @@ export function useCatalogReviewState({
           }
           if (details.requiresAcknowledgement) {
             if (!window.confirm(
-              `${details.consequence} Referenced by ${details.maintenance.referencedArchiveCount} archive(s). Continue?`,
+              `${details.consequence} Affects ${details.impact?.affectedArchiveCount ?? details.maintenance.referencedArchiveCount} archive(s). Continue?`,
             )) return;
             pending.revision = details.revision;
           }

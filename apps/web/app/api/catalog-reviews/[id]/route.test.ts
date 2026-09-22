@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import { createApplicationOperations } from "@rip-dvd/application";
 import {
   createCleanReadArchiveIntegrityEvidence,
   createCorrectedDvdArchiveBoundaryEvidence,
@@ -36,11 +37,16 @@ function keyedMediaItemBody(body: unknown, access: DataAccess): unknown {
         body.action !== "delete_media_item")) return body;
   const itemId = "mediaItemId" in body && typeof body.mediaItemId === "string"
     ? body.mediaItemId as MediaItemId : null;
-  const item = itemId === null ? null : access.catalog.listMediaItems({ ids: [itemId] })[0];
+  const preview = itemId === null ? null : createApplicationOperations(access).previewMediaItemChange(
+    itemId, body.action === "delete_media_item" ? "delete" : "update",
+    body.action === "update_media_item" && "changes" in body
+      ? body.changes as Parameters<ReturnType<typeof createApplicationOperations>["previewMediaItemChange"]>[2]
+      : undefined,
+  );
   return {
     ...body,
     mutationKey: crypto.randomUUID(),
-    ...(item ? { acknowledgedRevision: item.updatedAt.toISOString() } : {}),
+    ...(preview ? { acknowledgedRevision: preview.revision } : {}),
   };
 }
 

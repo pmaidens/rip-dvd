@@ -1728,7 +1728,7 @@ describe("CatalogReviewEditor", () => {
       if (url === "/api/media-items/unused-movie?action=delete") {
         return Response.json({
           revision: JSON.stringify({ updatedAt: "2026-08-03T18:00:00.000Z",
-            referencedArchiveCount: 0, childCount: 0, changes: null }),
+            referencedArchiveCount: 0, childCount: 0, impactRevision: "0".repeat(64), changes: null }),
           requiresAcknowledgement: true,
           consequence: "This Media Item and its metadata identity will be removed.",
           maintenance: { referencedArchiveCount: 0 },
@@ -1777,7 +1777,7 @@ describe("CatalogReviewEditor", () => {
       mediaItemId: "unused-movie",
       mutationKey: expect.any(String),
       acknowledgedRevision: JSON.stringify({ updatedAt: "2026-08-03T18:00:00.000Z",
-        referencedArchiveCount: 0, childCount: 0, changes: null }),
+        referencedArchiveCount: 0, childCount: 0, impactRevision: "0".repeat(64), changes: null }),
     })]);
     expect(container.textContent).toContain("Media Item deleted");
   });
