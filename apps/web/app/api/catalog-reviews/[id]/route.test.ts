@@ -16,9 +16,9 @@ import {
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import {
-  beginSettledDiscInspectionForTest,
   createNormalDvdArchiveBoundaryEvidenceForTest,
 } from "@rip-dvd/data-access/test-support";
+import { seedRearchiveReviewFixtureForTest } from "@rip-dvd/data-access/rearchive-test-support";
 
 import type {
   CatalogReviewDiscSelectionActionAvailability,
@@ -68,110 +68,15 @@ function invokeDiscSelectionMutation(
 function createRearchiveReviewFixture(
   access: ReturnType<typeof dataAccessFixture.create>,
 ) {
-  const fingerprint = `dvdmeta-sha256:${"7".repeat(64)}`;
-  const scanData = {
-    schemaVersion: 2 as const,
-    contentId: fingerprint,
-    titles: [1, 2].map((number) => ({
-      number,
-      durationSeconds: number === 1 ? 5_400 : 900,
-      chapters: number === 1 ? 12 : 3,
-      audioStreams: [],
-      subtitles: [],
-    })),
-  };
-  const sourceDrive = access.catalog.upsertOpticalDrive({
-    devicePath: "/dev/synthetic-web-rearchive-source",
-    isEnabled: true,
-    isPresent: true,
-  });
-  const sourceDisc = access.catalog.registerDetectedDisc({
-    opticalDriveId: sourceDrive.id,
-    discKind: "dvd",
-    fingerprint,
-    scanData,
-    sizeBytes: 4_096,
-    volumeLabel: "SYNTHETIC_WEB_REARCHIVE",
-  });
-  access.catalog.updateDetectedDiscStatus(sourceDisc.id, "scanned");
-  access.catalog.updateDetectedDiscStatus(sourceDisc.id, "approved");
-  const sourceArchive = access.catalog.createOriginalDiscArchive({
-    detectedDiscId: sourceDisc.id,
-    discKind: "dvd",
-    archiveFormat: "iso",
-    archivePath: "/media/originals/synthetic-web-rearchive-source.iso",
-    fingerprint,
-    sizeBytes: 4_096,
-  });
-  const mediaItem = access.catalog.createMediaItem({
-    kind: "movie",
-    title: "Synthetic web re-archive",
-  });
-  const sourceSelection = access.catalog.createDiscSelection({
-    originalDiscArchiveId: sourceArchive.id,
-    mediaItemId: mediaItem.id,
-    sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
-    label: "Feature",
-  });
-  completeCatalogReview(access, sourceArchive.id);
-  access.archiveRequests.submitRearchive({
+  return seedRearchiveReviewFixtureForTest(access, {
+    fixtureId: "web-rearchive-review",
     mutationKey: "00000000-0000-4000-8000-000000000648",
-    sourceArchiveId: sourceArchive.id,
-  });
-  const targetDrive = access.catalog.upsertOpticalDrive({
-    devicePath: "/dev/synthetic-web-rearchive-target",
-    isEnabled: true,
-    isPresent: true,
-  });
-  const started = beginSettledDiscInspectionForTest(access, {
-    opticalDriveId: targetDrive.id,
-    mediaGeneration: "synthetic-web-rearchive-generation",
-    mediaCapacityBytes: 4_096,
-  });
-  access.discInspections.record(started.claim!, {
-    type: "metadata",
+    sourceArchivePath: "/media/originals/synthetic-web-rearchive-source.iso",
+    targetArchivePath: "/media/originals/synthetic-web-rearchive-target.iso",
     volumeLabel: "SYNTHETIC_WEB_REARCHIVE",
-    titleCount: 2,
-    chapterCount: 15,
-    audioStreamCount: 0,
-    subtitleStreamCount: 0,
-    totalBytes: 4_096,
+    mediaItemTitle: "Synthetic web re-archive",
+    integrityPolicyVersion: "test-clean-v1",
   });
-  const targetDisc = access.catalog.registerDetectedDisc({
-    opticalDriveId: targetDrive.id,
-    discKind: "dvd",
-    fingerprint,
-    scanData,
-    sizeBytes: 4_096,
-    volumeLabel: "SYNTHETIC_WEB_REARCHIVE",
-  });
-  const inspection = access.discInspections.record(started.claim!, {
-    type: "complete",
-    detectedDiscId: targetDisc.id,
-  });
-  started.restoreSystemTime();
-  const claim = access.archiveJobs.startForInspection(
-    inspection.id,
-    "synthetic-web-rearchive-worker",
-  );
-  if (!claim) throw new Error("Expected the Re-archive Request to start");
-  const completed = access.archiveJobs.publish(claim, {
-    archivePath: "/media/originals/synthetic-web-rearchive-target.iso",
-    boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(4_096),
-    sizeBytes: 4_096,
-    integrityEvidence: createCleanReadArchiveIntegrityEvidence(
-      "test-clean-v1",
-    ),
-  });
-  const targetArchive = access.catalog.listOriginalDiscArchives({
-    ids: [completed.originalDiscArchiveId!],
-  })[0]!;
-  return {
-    mediaItem,
-    sourceArchive,
-    sourceSelection,
-    targetArchive,
-  };
 }
 
 function keyedCatalogMutationBody(

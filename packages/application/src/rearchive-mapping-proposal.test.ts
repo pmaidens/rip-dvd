@@ -2,14 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import {
-  createCleanReadArchiveIntegrityEvidence,
-} from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
-import {
-  beginSettledDiscInspectionForTest,
-  createNormalDvdArchiveBoundaryEvidenceForTest,
-} from "@rip-dvd/data-access/test-support";
+import { seedRearchiveReviewFixtureForTest } from "@rip-dvd/data-access/rearchive-test-support";
 import { afterEach, expect, it } from "vitest";
 
 import { createApplicationOperations } from "./index.js";
@@ -26,121 +20,22 @@ function fixture() {
     mediaLibraryPath: join(directory, "media"),
     originalsLibraryPath: join(directory, "originals"),
   });
-  const fingerprint = `dvdmeta-sha256:${"a".repeat(64)}`;
-  const scanData = {
-    schemaVersion: 2 as const,
-    contentId: fingerprint,
-    titles: [
-      {
-        number: 1,
-        durationSeconds: 5_400,
-        chapters: 12,
-        audioStreams: [],
-        subtitles: [],
-      },
-      {
-        number: 2,
-        durationSeconds: 900,
-        chapters: 3,
-        audioStreams: [],
-        subtitles: [],
-      },
-    ],
-  };
-  const sourceDrive = access.catalog.upsertOpticalDrive({
-    devicePath: "/dev/synthetic-rearchive-review-source",
-    isEnabled: true,
-    isPresent: true,
-  });
-  const sourceDisc = access.catalog.registerDetectedDisc({
-    opticalDriveId: sourceDrive.id,
-    discKind: "dvd",
-    fingerprint,
-    scanData,
-    sizeBytes: 4_096,
-    volumeLabel: "SYNTHETIC_REARCHIVE_REVIEW",
-  });
-  access.catalog.updateDetectedDiscStatus(sourceDisc.id, "scanned");
-  access.catalog.updateDetectedDiscStatus(sourceDisc.id, "approved");
-  const sourceArchive = access.catalog.createOriginalDiscArchive({
-    detectedDiscId: sourceDisc.id,
-    discKind: "dvd",
-    archiveFormat: "iso",
-    archivePath: join(directory, "originals", "source.iso"),
-    fingerprint,
-    sizeBytes: 4_096,
-  });
-  const movie = access.catalog.createMediaItem({
-    kind: "movie",
-    title: "Synthetic feature",
-  });
-  const sourceSelection = access.catalog.createDiscSelection({
-    originalDiscArchiveId: sourceArchive.id,
-    mediaItemId: movie.id,
-    sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
-    label: "Feature",
-  });
-  access.catalog.completeCatalogReview(
-    sourceArchive.id,
-    access.catalog.listOriginalDiscArchives({ ids: [sourceArchive.id] })[0]!
-      .updatedAt,
-    "reviewed_with_selections",
-  );
-
-  const request = access.archiveRequests.submitRearchive({
+  const seeded = seedRearchiveReviewFixtureForTest(access, {
+    fixtureId: "application-rearchive-review",
     mutationKey: "00000000-0000-4000-8000-000000000348",
-    sourceArchiveId: sourceArchive.id,
-  });
-  const freshDrive = access.catalog.upsertOpticalDrive({
-    devicePath: "/dev/synthetic-rearchive-review-fresh",
-    isEnabled: true,
-    isPresent: true,
-  });
-  const started = beginSettledDiscInspectionForTest(access, {
-    opticalDriveId: freshDrive.id,
-    mediaGeneration: "synthetic-rearchive-review-generation",
-    mediaCapacityBytes: 4_096,
-  });
-  access.discInspections.record(started.claim!, {
-    type: "metadata",
+    sourceArchivePath: join(directory, "originals", "source.iso"),
+    targetArchivePath: join(directory, "originals", "fresh.iso"),
     volumeLabel: "SYNTHETIC_REARCHIVE_REVIEW",
-    titleCount: 2,
-    chapterCount: 15,
-    audioStreamCount: 0,
-    subtitleStreamCount: 0,
-    totalBytes: 4_096,
+    mediaItemTitle: "Synthetic feature",
+    integrityPolicyVersion: "dvd-recovery-v1",
   });
-  const observed = access.catalog.registerDetectedDisc({
-    opticalDriveId: freshDrive.id,
-    discKind: "dvd",
-    fingerprint,
-    scanData,
-    sizeBytes: 4_096,
-    volumeLabel: "SYNTHETIC_REARCHIVE_REVIEW",
-  });
-  const inspected = access.discInspections.record(started.claim!, {
-    type: "complete",
-    detectedDiscId: observed.id,
-  });
-  started.restoreSystemTime();
-  const claim = access.archiveJobs.startForInspection(
-    inspected.id,
-    "synthetic-rearchive-review-worker",
-  );
-  if (!claim) throw new Error("Expected the Re-archive Request to start");
-  const job = access.archiveJobs.publish(claim, {
-    archivePath: join(directory, "originals", "fresh.iso"),
-    boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(4_096),
-    sizeBytes: 4_096,
-    integrityEvidence: createCleanReadArchiveIntegrityEvidence(
-      "dvd-recovery-v1",
-    ),
-  });
-  const freshArchive = access.catalog.listOriginalDiscArchives({
-    ids: [job.originalDiscArchiveId!],
-  })[0]!;
-  expect(request.status).toBe("pending");
-  return { access, freshArchive, movie, sourceArchive, sourceSelection };
+  return {
+    access,
+    freshArchive: seeded.targetArchive,
+    movie: seeded.mediaItem,
+    sourceArchive: seeded.sourceArchive,
+    sourceSelection: seeded.sourceSelection,
+  };
 }
 
 afterEach(() => {

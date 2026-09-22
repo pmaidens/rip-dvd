@@ -2894,9 +2894,9 @@ export function createDataAccessInternal(
     return validated;
   }
 
-  function requireReviewableDiscSelections(
+  function requireCatalogReviewCompletionArchive(
     archiveId: OriginalDiscArchiveId,
-    querySource: Pick<typeof database, "select"> = database,
+    querySource: Pick<typeof database, "select">,
   ): typeof originalDiscArchives.$inferSelect {
     const archive = requireRow(
       querySource
@@ -2917,6 +2917,17 @@ export function createDataAccessInternal(
         "Fresh re-archive review is completed through Re-archive Acceptance",
       );
     }
+    return archive;
+  }
+
+  function requireReviewableDiscSelections(
+    archiveId: OriginalDiscArchiveId,
+    querySource: Pick<typeof database, "select"> = database,
+  ): typeof originalDiscArchives.$inferSelect {
+    const archive = requireCatalogReviewCompletionArchive(
+      archiveId,
+      querySource,
+    );
     const scanData = requireRow(
       querySource
         .select({ scanData: detectedDiscs.scanData })
@@ -2987,25 +2998,10 @@ export function createDataAccessInternal(
     archiveId: OriginalDiscArchiveId,
     querySource: Pick<typeof database, "select"> = database,
   ): typeof originalDiscArchives.$inferSelect {
-    const archive = requireRow(
-      querySource
-        .select()
-        .from(originalDiscArchives)
-        .where(eq(originalDiscArchives.id, archiveId))
-        .get(),
-      "original disc archive",
+    const archive = requireCatalogReviewCompletionArchive(
       archiveId,
+      querySource,
     );
-    if (archive.discKind !== "dvd") {
-      throw new DomainInvariantError(
-        "Catalog review currently requires a DVD Original Disc Archive",
-      );
-    }
-    if (archive.rearchiveSourceArchiveId !== null) {
-      throw new DomainInvariantError(
-        "Fresh re-archive review is completed through Re-archive Acceptance",
-      );
-    }
     const activeSelection = querySource
       .select({ id: discSelections.id })
       .from(discSelections)

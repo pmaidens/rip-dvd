@@ -45,6 +45,10 @@
     "./test-support": {
       "types": "./src/disc-settling-fixture.ts",
       "default": "./dist/disc-settling-fixture.js"
+    },
+    "./rearchive-test-support": {
+      "types": "./src/rearchive-review-fixture.ts",
+      "default": "./dist/rearchive-review-fixture.js"
     }
   },
   "files": ["dist", "drizzle"],
