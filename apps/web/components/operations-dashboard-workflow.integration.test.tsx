@@ -1153,6 +1153,7 @@ describe("end-to-end operations dashboard workflow", () => {
     const response = await createCatalogReviewRoute(
       createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
         action: "create_episodic_mapping_proposal",
+        mutationKey: "00000000-0000-4000-8000-000000000101",
         catalogRevision: reviewedArchive.updatedAt.toISOString(),
         tvShow: { choice: "use_existing", mediaItemId: show.id },
         season: { choice: "use_existing", mediaItemId: season.id },
@@ -2049,6 +2050,7 @@ describe("end-to-end operations dashboard workflow", () => {
 
     const failedProposal = await catalogMutation({
       action: "create_mapping_proposal",
+      mutationKey: "00000000-0000-4000-8000-000000000102",
       catalogRevision: archiveOnlyReview.catalogRevision,
       target: {
         choice: "create_new",
@@ -2066,6 +2068,7 @@ describe("end-to-end operations dashboard workflow", () => {
 
     const proposalResponse = await catalogMutation({
       action: "create_mapping_proposal",
+      mutationKey: "00000000-0000-4000-8000-000000000103",
       catalogRevision: archiveOnlyReview.catalogRevision,
       target: {
         choice: "create_new",
@@ -2269,6 +2272,7 @@ describe("end-to-end operations dashboard workflow", () => {
     })[0]!.updatedAt.toISOString();
     const additionalProposal = await catalogMutation({
       action: "create_mapping_proposal",
+      mutationKey: "00000000-0000-4000-8000-000000000104",
       catalogRevision: reviewedRevision,
       target: {
         choice: "use_existing",
@@ -2461,6 +2465,7 @@ describe("end-to-end operations dashboard workflow", () => {
 
     const mistakenProposalResponse = await catalogMutation({
       action: "create_mapping_proposal",
+      mutationKey: "00000000-0000-4000-8000-000000000105",
       catalogRevision: access.catalog.listOriginalDiscArchives({
         ids: [archive.id],
       })[0]!.updatedAt.toISOString(),

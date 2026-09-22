@@ -565,6 +565,7 @@ export interface MediaItemMutationOptions {
 interface CreateMappingProposalBaseInput {
   originalDiscArchiveId: OriginalDiscArchiveId;
   catalogRevision: Date;
+  mutationKey?: string;
   discSelection: {
     sourceIdentity: DiscSelectionSourceIdentityInput;
     label?: string;
@@ -625,6 +626,7 @@ export interface EpisodicMappingEpisodeInput {
 export interface CreateEpisodicMappingProposalInput {
   originalDiscArchiveId: OriginalDiscArchiveId;
   catalogRevision: Date;
+  mutationKey?: string;
   tvShow: EpisodicMappingTvShowTarget;
   season: EpisodicMappingSeasonTarget;
   episodes: readonly EpisodicMappingEpisodeInput[];

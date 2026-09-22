@@ -4,19 +4,22 @@ import {
   MutationKeyConflictError,
   RecordNotFoundError,
   type DataAccess,
-  type CreateMediaItemInput,
   type DiscSelectionId,
   type EncodeJobId,
   type EncodingProfileId,
-  type MediaItemId,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import { loadConfig } from "@rip-dvd/config";
-import { createApplicationOperations, executeDiscSelectionCommand, InvalidMutationKeyError, serializeDiscSelection, serializeMediaItem } from "@rip-dvd/application";
+import {
+  applyMappingProposal,
+  createApplicationOperations,
+  executeDiscSelectionCommand,
+  InvalidMutationKeyError,
+  parseMutationKey,
+} from "@rip-dvd/application";
 
 import {
   parseCatalogReviewCommand,
-  type CatalogReviewMediaItemInput,
 } from "../../../../lib/catalog-review-command";
 import { getDataAccess } from "../../../../lib/data-access";
 import {
@@ -49,30 +52,6 @@ function recordOffset(request: Request, parameter: string): number | null {
   }
   const offset = Number(value);
   return Number.isSafeInteger(offset) ? offset : null;
-}
-
-function createMediaItemInput(
-  input: CatalogReviewMediaItemInput,
-): CreateMediaItemInput {
-  return {
-    ...(input.parentId
-      ? { parentId: input.parentId as MediaItemId }
-      : {}),
-    kind: input.kind,
-    title: input.title,
-    ...(input.year === null || input.year === undefined
-      ? {}
-      : { year: input.year }),
-    ...(input.seasonNumber === null || input.seasonNumber === undefined
-      ? {}
-      : { seasonNumber: input.seasonNumber }),
-    ...(input.episodeNumber === null || input.episodeNumber === undefined
-      ? {}
-      : { episodeNumber: input.episodeNumber }),
-    ...(input.tmdbIdentity === undefined
-      ? {}
-      : { tmdbIdentity: input.tmdbIdentity }),
-  };
 }
 
 export async function createCatalogReviewRoute(
@@ -160,7 +139,7 @@ export async function createCatalogReviewRoute(
     ) {
       return response({ error: "Original Disc Archive not found" }, 404);
     }
-    const body = await request.json().catch(() => null);
+    const body: unknown = await request.json().catch(() => null);
     const parsedCommand = parseCatalogReviewCommand(
       body,
       {
@@ -188,89 +167,22 @@ export async function createCatalogReviewRoute(
     }
     const command = parsedCommand.command;
 
-    switch (command.action) {
-      case "create_episodic_mapping_proposal": {
-        const proposal = access.catalog.createEpisodicMappingProposal({
-          originalDiscArchiveId: archiveId,
-          catalogRevision: new Date(command.catalogRevision),
-          tvShow: command.tvShow.choice === "create_new"
-            ? {
-                choice: "create_new",
-                title: command.tvShow.title,
-                ...(command.tvShow.year === null ||
-                    command.tvShow.year === undefined
-                  ? {}
-                  : { year: command.tvShow.year }),
-                ...(command.tvShow.tmdbIdentity === undefined
-                  ? {}
-                  : { tmdbIdentity: command.tvShow.tmdbIdentity }),
-              }
-            : {
-                choice: "use_existing",
-                mediaItemId: command.tvShow.mediaItemId as MediaItemId,
-                ...(command.tvShow.tmdbIdentity === undefined
-                  ? {}
-                  : { tmdbIdentity: command.tvShow.tmdbIdentity }),
-              },
-          season: command.season.choice === "create_new"
-            ? command.season
-            : {
-                choice: "use_existing",
-                mediaItemId: command.season.mediaItemId as MediaItemId,
-              },
-          episodes: command.episodes.map(({
-            existingMediaItemId,
-            ...episode
-          }) => ({
-            ...episode,
-            ...(existingMediaItemId === undefined
-              ? {}
-              : {
-                existingMediaItemId: existingMediaItemId as MediaItemId,
-              }),
-          })),
-          ...(command.completeReview ? { completeReview: true } : {}),
-        });
-        return response({
-          message: command.completeReview
-            ? "Cataloged and review completed"
-            : "Mapping changed; review required",
-          tvShow: serializeMediaItem(proposal.tvShow),
-          season: serializeMediaItem(proposal.season),
-          episodes: proposal.episodes.map((episode) => ({
-            mediaItem: serializeMediaItem(episode.mediaItem),
-            discSelection: serializeDiscSelection(episode.discSelection),
-          })),
-        }, 201);
-      }
+    let proposalMutationKey: string | undefined;
+    if (command.action === "create_mapping_proposal" ||
+        command.action === "create_episodic_mapping_proposal") {
+      const value = typeof body === "object" && body !== null &&
+        !Array.isArray(body) && "mutationKey" in body
+        ? body.mutationKey : undefined;
+      proposalMutationKey = parseMutationKey(value);
+    }
 
-      case "create_mapping_proposal": {
-        const proposal = access.catalog.createMappingProposal({
-          originalDiscArchiveId: archiveId,
-          catalogRevision: new Date(command.catalogRevision),
-          ...(command.target.choice === "create_new"
-            ? { mediaItem: createMediaItemInput(command.target.mediaItem) }
-            : {
-              existingMediaItemId:
-                command.target.mediaItemId as MediaItemId,
-              ...(command.target.tmdbIdentity === undefined
-                ? {}
-                : {
-                  existingMediaItemTmdbIdentity:
-                    command.target.tmdbIdentity,
-                }),
-            }),
-          discSelection: command.discSelection,
-          ...(command.completeReview ? { completeReview: true } : {}),
-        });
-        return response({
-          message: command.completeReview
-            ? "Cataloged and review completed"
-            : "Mapping changed; review required",
-          mediaItem: serializeMediaItem(proposal.mediaItem),
-          discSelection: serializeDiscSelection(proposal.discSelection),
-        }, 201);
-      }
+    switch (command.action) {
+      case "create_episodic_mapping_proposal":
+      case "create_mapping_proposal":
+        return response(
+          applyMappingProposal(access, archiveId, command, proposalMutationKey!),
+          201,
+        );
 
       case "create_media_item": {
         const mutationKey = typeof body === "object" && body !== null && "mutationKey" in body

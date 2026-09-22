@@ -3823,6 +3823,14 @@ export function createDataAccessInternal(
     return outcome;
   }
 
+  function decodeMappingProposalOutcome<T>(stored: string): T {
+    return JSON.parse(stored, (field, value: unknown) =>
+      (field === "createdAt" || field === "updatedAt") &&
+          typeof value === "string"
+        ? new Date(value)
+        : value) as T;
+  }
+
   function replayRecoveryMutation<T extends { id: string; status: string }>(
     mutationKey: string,
     operation: string,
@@ -5740,7 +5748,20 @@ export function createDataAccessInternal(
         const timestamp = now();
         const mediaItemId = newId<MediaItemId>();
         const discSelectionId = newId<DiscSelectionId>();
+        const { mutationKey, ...semanticFields } = input;
+        const semanticInput = JSON.stringify(semanticFields);
         return database.transaction((transaction) => {
+          const replay = mutationKey === undefined ? undefined
+            : readMutationInvocation(
+              transaction,
+              mutationKey,
+              "mapping_proposal.movie",
+              semanticInput,
+              decodeMappingProposalOutcome<ReturnType<
+                typeof access.catalog.createMappingProposal
+              >>,
+            );
+          if (replay !== undefined) return replay;
           const currentArchive = requireRow(
             transaction
               .select({ updatedAt: originalDiscArchives.updatedAt })
@@ -5814,7 +5835,15 @@ export function createDataAccessInternal(
             input,
             timestamp,
           );
-          return { mediaItem, discSelection };
+          const outcome = { mediaItem, discSelection };
+          return mutationKey === undefined ? outcome : recordMutationInvocation(
+            transaction,
+            mutationKey,
+            "mapping_proposal.movie",
+            semanticInput,
+            outcome,
+            timestamp,
+          );
         }, { behavior: "immediate" });
       },
 
@@ -5833,7 +5862,20 @@ export function createDataAccessInternal(
           );
         }
         const timestamp = now();
+        const { mutationKey, ...semanticFields } = input;
+        const semanticInput = JSON.stringify(semanticFields);
         return database.transaction((transaction) => {
+          const replay = mutationKey === undefined ? undefined
+            : readMutationInvocation(
+              transaction,
+              mutationKey,
+              "mapping_proposal.episodic",
+              semanticInput,
+              decodeMappingProposalOutcome<ReturnType<
+                typeof access.catalog.createEpisodicMappingProposal
+              >>,
+            );
+          if (replay !== undefined) return replay;
           const currentArchive = requireRow(
             transaction
               .select({ updatedAt: originalDiscArchives.updatedAt })
@@ -5990,7 +6032,15 @@ export function createDataAccessInternal(
             input,
             timestamp,
           );
-          return { tvShow, season, episodes };
+          const outcome = { tvShow, season, episodes };
+          return mutationKey === undefined ? outcome : recordMutationInvocation(
+            transaction,
+            mutationKey,
+            "mapping_proposal.episodic",
+            semanticInput,
+            outcome,
+            timestamp,
+          );
         }, { behavior: "immediate" });
       },
 

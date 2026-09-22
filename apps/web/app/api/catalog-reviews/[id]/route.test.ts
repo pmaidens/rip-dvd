@@ -407,6 +407,7 @@ describe("Catalog Review API", () => {
 
     const assistedOverlap = await mutate({
       action: "create_mapping_proposal",
+      mutationKey: "00000000-0000-4000-8000-000000000001",
       catalogRevision: review.catalogRevision,
       target: {
         choice: "create_new",
@@ -2649,6 +2650,7 @@ describe("Catalog Review API", () => {
 
     const response = await mutation({
       action: "create_mapping_proposal",
+      mutationKey: "00000000-0000-4000-8000-000000000002",
       catalogRevision: archive.updatedAt.toISOString(),
       target: {
         choice: "create_new",
@@ -2682,8 +2684,42 @@ describe("Catalog Review API", () => {
       originalDiscArchiveId: archive.id,
     })).toHaveLength(1);
 
+    const replayResponse = await mutation({
+      action: "create_mapping_proposal",
+      mutationKey: "00000000-0000-4000-8000-000000000002",
+      catalogRevision: archive.updatedAt.toISOString(),
+      target: {
+        choice: "create_new",
+        mediaItem: { kind: "bonus_feature", title: "Route Proposal Disc 2" },
+      },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
+        label: "Deleted scene",
+      },
+    });
+    expect(replayResponse.status).toBe(201);
+    await expect(replayResponse.json()).resolves.toEqual(responseBody);
+    expect(access.catalog.listMediaItems()).toHaveLength(2);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toHaveLength(1);
+
+    const keyConflictResponse = await mutation({
+      action: "create_mapping_proposal",
+      mutationKey: "00000000-0000-4000-8000-000000000002",
+      catalogRevision: archive.updatedAt.toISOString(),
+      target: { choice: "use_existing", mediaItemId: exactTitleMatch.id },
+      discSelection: { sourceIdentity: { kind: "dvd_title", titleNumber: 5 } },
+    });
+    expect(keyConflictResponse.status).toBe(409);
+    await expect(keyConflictResponse.json()).resolves.toEqual({
+      error: "Mutation key has already been used for different operation or inputs",
+      code: "MUTATION_KEY_CONFLICT",
+    });
+
     const reuseResponse = await mutation({
       action: "create_mapping_proposal",
+      mutationKey: "00000000-0000-4000-8000-000000000003",
       catalogRevision: access.catalog.listOriginalDiscArchives({
         ids: [archive.id],
       })[0]!.updatedAt.toISOString(),
@@ -2708,6 +2744,7 @@ describe("Catalog Review API", () => {
 
     const staleResponse = await mutation({
       action: "create_mapping_proposal",
+      mutationKey: "00000000-0000-4000-8000-000000000004",
       catalogRevision: archive.updatedAt.toISOString(),
       target: {
         choice: "create_new",
@@ -2961,6 +2998,7 @@ describe("Catalog Review API", () => {
     );
     const validProposal = {
       action: "create_episodic_mapping_proposal",
+      mutationKey: "00000000-0000-4000-8000-000000000005",
       catalogRevision: archive.updatedAt.toISOString(),
       tvShow: {
         choice: "create_new",
