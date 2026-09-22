@@ -34,9 +34,12 @@ export async function requiredMutationKey(request: Request): Promise<string | Re
   }
 }
 
-export function recoveryMutationResponse(mutate: () => unknown): Response {
+export function recoveryMutationResponse(
+  mutate: () => unknown,
+  status = 200,
+): Response {
   try {
-    return noStoreJsonResponse(mutate());
+    return noStoreJsonResponse(mutate(), status);
   } catch (error) {
     if (error instanceof MutationKeyConflictError) {
       return noStoreJsonResponse({ error: {

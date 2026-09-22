@@ -310,6 +310,7 @@ export interface DiscInspectionAttempt {
 export interface ArchiveRequest {
   id: ArchiveRequestId;
   detectedDiscId: DetectedDiscId;
+  rearchiveSourceArchiveId: OriginalDiscArchiveId | null;
   status: ArchiveRequestStatus;
   priority: number;
   cancellationRequestedAt: Date | null;
@@ -322,6 +323,7 @@ export interface ArchiveRequest {
 export interface OriginalDiscArchive {
   id: OriginalDiscArchiveId;
   detectedDiscId: DetectedDiscId;
+  rearchiveSourceArchiveId: OriginalDiscArchiveId | null;
   discKind: DiscKind;
   archiveFormat: ArchiveFormat;
   archivePath: string;
@@ -1411,6 +1413,9 @@ export interface DiscInspectionAccess {
 export interface ArchiveRequestAccess {
   find(id: ArchiveRequestId): ArchiveRequest | null;
   listForDetectedDisc(id: DetectedDiscId): ArchiveRequest[];
+  listForRearchiveSources(
+    ids: readonly OriginalDiscArchiveId[],
+  ): ArchiveRequest[];
   create(input: {
     detectedDiscId: DetectedDiscId;
     priority?: number;
@@ -1418,6 +1423,10 @@ export interface ArchiveRequestAccess {
   submit(input: {
     mutationKey: string;
     detectedDiscId: DetectedDiscId;
+  }): ArchiveRequest;
+  submitRearchive(input: {
+    mutationKey: string;
+    sourceArchiveId: OriginalDiscArchiveId;
   }): ArchiveRequest;
   cancel(id: ArchiveRequestId): ArchiveRequest;
   retry(id: ArchiveRequestId): ArchiveRequest;
@@ -1439,6 +1448,15 @@ export interface ArchiveRequestAccess {
   hasPendingRequestForDetectedDiscFingerprint(
     detectedDiscId: DetectedDiscId,
   ): boolean;
+  waitingStatus(id: ArchiveRequestId): ArchiveRequestWaitingStatus | null;
+}
+
+export interface ArchiveRequestWaitingStatus {
+  code:
+    | "matching_disc_required"
+    | "matching_inspection_incomplete"
+    | "source_continuity_unavailable"
+    | "ready_for_archive_worker";
 }
 
 export interface EncodeJobAccess {
@@ -1674,7 +1692,12 @@ export interface ConsistentReadAccess {
   readonly discInspections: Pick<DiscInspectionAccess, "list" | "listAttempts">;
   readonly archiveRequests: Pick<
     ArchiveRequestAccess,
-    "find" | "list" | "listForDetectedDisc" | "listRelevantForDetectedDiscs"
+    | "find"
+    | "list"
+    | "listForDetectedDisc"
+    | "listForRearchiveSources"
+    | "listRelevantForDetectedDiscs"
+    | "waitingStatus"
   >;
   readonly archiveJobs: Pick<
     ArchiveJobAccess,

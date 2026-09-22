@@ -68,7 +68,10 @@ export async function runArchiveJob({
   if (!claim) {
     return;
   }
-
+  const request = access.archiveRequests.find(claim.archiveRequestId);
+  if (request === null) {
+    throw new Error("Archive Job has no Archive Request");
+  }
   const claimController = new AbortController();
   const archiveSignal = AbortSignal.any([signal, claimController.signal]);
   const heartbeat = setInterval(() => {
@@ -136,7 +139,7 @@ export async function runArchiveJob({
       task: async () => {
         authorizeClaim();
         const preserved = await preserveDvdArchive({
-          archiveRequestId: claim.archiveRequestId,
+          archiveRequest: request,
           authorizeCopy: async () => {
             authorizeClaim();
             await verifySource();

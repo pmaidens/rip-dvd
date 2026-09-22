@@ -351,6 +351,11 @@ export const archiveRequests = sqliteTable(
       .$type<DetectedDiscId>()
       .notNull()
       .references(() => detectedDiscs.id, { onDelete: "restrict" }),
+    rearchiveSourceArchiveId: text("rearchive_source_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .references((): AnySQLiteColumn => originalDiscArchives.id, {
+        onDelete: "restrict",
+      }),
     status: text("status", { enum: ARCHIVE_REQUEST_STATUSES })
       .notNull()
       .default("pending"),
@@ -370,6 +375,11 @@ export const archiveRequests = sqliteTable(
       .where(sql`${table.status} in ('pending', 'running', 'needs_attention', 'cancellation_requested')`),
     index("archive_requests_disc_created_idx").on(
       table.detectedDiscId, table.createdAt, table.id,
+    ),
+    index("archive_requests_rearchive_source_idx").on(
+      table.rearchiveSourceArchiveId,
+      table.createdAt,
+      table.id,
     ),
     index("archive_requests_status_idx").on(
       table.status,
@@ -533,6 +543,11 @@ export const originalDiscArchives = sqliteTable(
       .$type<DetectedDiscId>()
       .notNull()
       .references(() => detectedDiscs.id, { onDelete: "restrict" }),
+    rearchiveSourceArchiveId: text("rearchive_source_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .references((): AnySQLiteColumn => originalDiscArchives.id, {
+        onDelete: "restrict",
+      }),
     discKind: text("disc_kind", { enum: DISC_KINDS }).notNull(),
     archiveFormat: text("archive_format", { enum: ARCHIVE_FORMATS }).notNull(),
     archivePath: text("archive_path").notNull(),
@@ -598,11 +613,26 @@ export const originalDiscArchives = sqliteTable(
   },
   (table) => [
     check("original_disc_archives_id_not_null", sql`${table.id} is not null`),
-    uniqueIndex("original_disc_archives_detected_disc_unique").on(
+    check(
+      "original_disc_archives_rearchive_source_check",
+      sql`${table.rearchiveSourceArchiveId} is null or ${table.rearchiveSourceArchiveId} <> ${table.id}`,
+    ),
+    index("original_disc_archives_detected_disc_idx").on(
       table.detectedDiscId,
     ),
+    uniqueIndex("original_disc_archives_detected_disc_unique")
+      .on(table.detectedDiscId)
+      .where(sql`${table.rearchiveSourceArchiveId} is null`),
     uniqueIndex("original_disc_archives_path_unique").on(table.archivePath),
-    uniqueIndex("original_disc_archives_fingerprint_unique").on(table.fingerprint),
+    index("original_disc_archives_fingerprint_idx").on(table.fingerprint),
+    uniqueIndex("original_disc_archives_fingerprint_unique")
+      .on(table.fingerprint)
+      .where(sql`${table.rearchiveSourceArchiveId} is null`),
+    index("original_disc_archives_rearchive_source_idx").on(
+      table.rearchiveSourceArchiveId,
+      table.archivedAt,
+      table.id,
+    ),
     check(
       "original_disc_archives_kind_check",
       sql`${table.discKind} in (${sqliteStringLiterals(DISC_KINDS)})`,

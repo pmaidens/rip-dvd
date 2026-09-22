@@ -29,6 +29,7 @@ import {
   quarantinePublishedArchive,
   withCancelledDvdArchiveInactive,
   type DvdCopyRunner,
+  type DvdArchiveRequestContext,
   type PreserveDvdArchiveOptions,
 } from "./dvd-archiver.js";
 import {
@@ -116,10 +117,34 @@ const testEndpointProver: DvdEndpointProver = {
   },
 };
 
-function preserveDvdArchive(options: PreserveDvdArchiveOptions) {
+type TestArchiveRequestIdentity =
+  | { archiveRequestId?: undefined; isRearchive?: undefined }
+  | { archiveRequestId: string; isRearchive?: false }
+  | { archiveRequestId: string; isRearchive: true };
+
+type TestPreserveDvdArchiveOptions =
+  Omit<PreserveDvdArchiveOptions, "archiveRequest"> &
+  TestArchiveRequestIdentity;
+
+function preserveDvdArchive({
+  archiveRequestId,
+  isRearchive,
+  ...options
+}: TestPreserveDvdArchiveOptions) {
   return preserveDvdArchiveImplementation({
     geometryValidator: passingDvdGeometryValidator,
     ...options,
+    ...(archiveRequestId === undefined
+      ? {}
+      : {
+          archiveRequest: {
+            id: archiveRequestId as DvdArchiveRequestContext["id"],
+            rearchiveSourceArchiveId: isRearchive
+              ? ("synthetic-source-archive" as
+                DvdArchiveRequestContext["rearchiveSourceArchiveId"])
+              : null,
+          },
+        }),
     endpointProver: options.endpointProver ?? testEndpointProver,
   });
 }
@@ -576,7 +601,10 @@ describe("DVD archive publication", () => {
     writeFileSync(retentionMapPath, "interrupted rescue map\n");
     const mutation = vi.fn();
     const options = {
-      archiveRequestId,
+      archiveRequest: {
+        id: archiveRequestId as DvdArchiveRequestContext["id"],
+        rearchiveSourceArchiveId: null,
+      },
       devicePath: "/dev/sr0",
       fingerprint: `dvdmeta-sha256:${digest}`,
       mutation,
@@ -2651,6 +2679,49 @@ describe("DVD archive publication", () => {
       { phase: "finalizing", progressPercent: 99 },
     ]);
     expect(verifySource).toHaveBeenCalledTimes(5);
+  });
+
+  it("publishes a re-archive generation beside the retained source file", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const digest = "7".repeat(64);
+    const archiveRequestId = "00000000-0000-4000-8000-000000000347";
+    const retainedPath = join(root, `dvdmeta-${digest}.iso`);
+    const retainedContent = Buffer.alloc(2_048, 17);
+    const freshContent = Buffer.alloc(2_048, 29);
+    writeFileSync(retainedPath, retainedContent);
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
+        writeFileSync(outputPath, freshContent);
+        return createCleanDvdRecoveryResult(sizeBytes);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const verifySource = vi.fn(async () => undefined);
+
+    const fresh = await preserveDvdArchive({
+      archiveRequestId,
+      devicePath: "/dev/sr0",
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      isRearchive: true,
+      originalsLibraryPath,
+      runner,
+      signal: new AbortController().signal,
+      sizeBytes: freshContent.byteLength,
+      verifySource,
+      onProgress: () => undefined,
+    });
+
+    expect(fresh.archivePath).toBe(join(
+      root,
+      `dvdmeta-${digest}-${archiveRequestId}.iso`,
+    ));
+    expect(readFileSync(retainedPath)).toEqual(retainedContent);
+    expect(readFileSync(fresh.archivePath)).toEqual(freshContent);
+    expect(verifySource).toHaveBeenCalledTimes(5);
+    await fresh.finalizePublication?.();
   });
 
   it("rejects a clean partial whose ISO geometry crosses EOF before sync or publication", async () => {

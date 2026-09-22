@@ -1,4 +1,8 @@
-import { encodeRequeueAvailability } from "@rip-dvd/application";
+import {
+  describeArchiveRequestWaitingStatus,
+  encodeRequeueAvailability,
+} from "@rip-dvd/application";
+import type { PresentedArchiveRequestWaitingStatus } from "@rip-dvd/application";
 import type {
   ArchiveBoundaryEvidence,
   ArchiveFormat,
@@ -204,6 +208,9 @@ export interface DashboardCatalogReviewItem {
   verificationStatus?: FilesystemVerificationStatus | null;
   verificationMessage?: string | null;
   verifiedAt?: string | null;
+  rearchiveRequest?: (DashboardArchiveRequest & {
+    waiting: PresentedArchiveRequestWaitingStatus | null;
+  }) | null;
 }
 
 export interface DashboardPage {
@@ -1413,6 +1420,18 @@ function readDashboardSnapshotRecords(
     (catalogReviewCursor?.direction === "newer"
       ? catalogReviewCursor
       : undefined);
+  const rearchiveRequestSource = readSource(() =>
+    access.archiveRequests.listForRearchiveSources(
+      catalogReviewArchives.map((archive) => archive.id),
+    )
+  );
+  const rearchiveJobSource = readSource(() =>
+    rearchiveRequestSource.status === "error"
+      ? []
+      : access.archiveJobs.listLatestForRequests(
+          rearchiveRequestSource.value.map((request) => request.id),
+        )
+  );
   const relevantDetectedDiscIds =
     activityLimit === undefined
       ? undefined
@@ -1994,13 +2013,37 @@ function readDashboardSnapshotRecords(
       );
 
   const catalogReview =
-    archiveSource.status === "error"
+    archiveSource.status === "error" ||
+      rearchiveRequestSource.status === "error" ||
+      rearchiveJobSource.status === "error"
       ? unavailable<DashboardCatalogReviewItem>()
       : {
           status: "loaded" as const,
           items: catalogReviewArchives.map((archive) => {
             const boundaryEvidence =
               archiveBoundaryEvidenceFromRecord(archive);
+            const rearchiveRequest = rearchiveRequestSource.value
+              .filter((request) =>
+                request.rearchiveSourceArchiveId === archive.id
+              )
+              .toSorted((left, right) => {
+                const leftActive = !["fulfilled", "cancelled"].includes(
+                  left.status,
+                );
+                const rightActive = !["fulfilled", "cancelled"].includes(
+                  right.status,
+                );
+                if (leftActive !== rightActive) {
+                  return leftActive ? -1 : 1;
+                }
+                return right.updatedAt.getTime() - left.updatedAt.getTime() ||
+                  right.id.localeCompare(left.id);
+              })[0];
+            const latestRearchiveJob = rearchiveRequest === undefined
+              ? undefined
+              : rearchiveJobSource.value.find(
+                  (job) => job.archiveRequestId === rearchiveRequest.id,
+                );
             return {
               id: archive.id,
               activityRevision: archive.updatedAt.toISOString(),
@@ -2021,6 +2064,22 @@ function readDashboardSnapshotRecords(
               verificationStatus: archive.verificationStatus,
               verificationMessage: archive.verificationMessage,
               verifiedAt: archive.verifiedAt?.toISOString() ?? null,
+              rearchiveRequest: rearchiveRequest === undefined
+                ? null
+                : {
+                    id: rearchiveRequest.id,
+                    status: rearchiveRequest.status,
+                    attemptCount: latestRearchiveJob?.attemptOrdinal ?? 0,
+                    latestFailureDetail:
+                      archiveJobFailure(latestRearchiveJob),
+                    waiting: describeArchiveRequestWaitingStatus(
+                      access.archiveRequests.waitingStatus(
+                        rearchiveRequest.id,
+                      ),
+                    ),
+                    createdAt: rearchiveRequest.createdAt.toISOString(),
+                    updatedAt: rearchiveRequest.updatedAt.toISOString(),
+                  },
             };
           }),
           ...(activityLimit !== undefined &&

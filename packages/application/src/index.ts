@@ -35,6 +35,7 @@ import {
   requeueEncodeJob,
   resolveQueueLogicalJobs,
 } from "./encode-jobs.js";
+import { describeArchiveRequestWaitingStatus } from "./archive-request-waiting-status.js";
 
 export class InvalidProfileInputError extends Error {
   constructor(message = "Invalid Encoding Profile input.") {
@@ -86,6 +87,10 @@ export function toEncodingProfileDto(profile: EncodingProfile) {
 }
 
 export { generateMutationKey, InvalidMutationKeyError, parseMutationKey };
+export {
+  describeArchiveRequestWaitingStatus,
+  type PresentedArchiveRequestWaitingStatus,
+} from "./archive-request-waiting-status.js";
 export { applyMappingProposal } from "./mapping-proposal-operations.js";
 export type { MappingProposalCommand } from "./mapping-proposal-operations.js";
 
@@ -252,6 +257,34 @@ export function createApplicationOperations(
           detectedDiscId: request.detectedDiscId,
           status: request.status,
           priority: request.priority,
+          createdAt: request.createdAt.toISOString(),
+          updatedAt: request.updatedAt.toISOString(),
+        },
+      };
+    },
+    submitRearchiveRequest: (input: {
+      mutationKey: unknown;
+      sourceArchiveId: string;
+    }) => {
+      const mutationKey = parseMutationKey(input.mutationKey);
+      const sourceArchiveId = input.sourceArchiveId.trim();
+      if (sourceArchiveId === "") {
+        throw new Error("Original Disc Archive ID is required.");
+      }
+      const request = access.archiveRequests.submitRearchive({
+        mutationKey,
+        sourceArchiveId: sourceArchiveId as OriginalDiscArchiveId,
+      });
+      return {
+        archiveRequest: {
+          id: request.id,
+          detectedDiscId: request.detectedDiscId,
+          rearchiveSourceArchiveId: request.rearchiveSourceArchiveId,
+          status: request.status,
+          priority: request.priority,
+          waiting: describeArchiveRequestWaitingStatus(
+            access.archiveRequests.waitingStatus(request.id),
+          ),
           createdAt: request.createdAt.toISOString(),
           updatedAt: request.updatedAt.toISOString(),
         },

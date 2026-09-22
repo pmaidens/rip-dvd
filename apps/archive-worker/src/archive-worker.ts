@@ -205,8 +205,12 @@ async function pollArchiveWorkerWithDriveAdmission(
         if (drive === undefined) {
           throw new Error("Cancelled Archive Job has no Optical Drive");
         }
+        const request = access.archiveRequests.find(claim.archiveRequestId);
+        if (request === null) {
+          throw new Error("Cancelled Archive Job has no Archive Request");
+        }
         await withCancelledDvdArchiveInactive({
-          archiveRequestId: claim.archiveRequestId,
+          archiveRequest: request,
           devicePath: drive.devicePath,
           fingerprint: disc.fingerprint,
           mutation: () => {

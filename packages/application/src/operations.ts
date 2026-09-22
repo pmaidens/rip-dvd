@@ -24,6 +24,8 @@ import {
   type WorkerIncidentId,
 } from "@rip-dvd/data-access";
 
+import { describeArchiveRequestWaitingStatus } from "./archive-request-waiting-status.js";
+
 export const OPERATION_KINDS = [
   "optical-drives",
   "detected-discs",
@@ -452,6 +454,9 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
       if (!request) return null;
       return {
         ...request,
+        waiting: describeArchiveRequestWaitingStatus(
+          access.archiveRequests.waitingStatus(request.id),
+        ),
         detectedDisc: access.catalog.listDetectedDiscs(undefined, {
           ids: [request.detectedDiscId],
         }).map(visibleDisc)[0] ?? null,
@@ -478,6 +483,10 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
     case "original-disc-archives": {
       const archive = access.catalog.listOriginalDiscArchives({ ids: [id as OriginalDiscArchiveId] })[0];
       if (!archive) return null;
+      const rearchiveEligible = archive.discKind === "dvd";
+      const rearchiveReason = rearchiveEligible
+        ? null
+        : "Fresh re-archive requests are supported only for DVD archives";
       return {
         ...visibleArchive(archive),
         detectedDisc: access.catalog.listDetectedDiscs(undefined, {
@@ -485,7 +494,18 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
         }).map(visibleDisc)[0] ?? null,
         archiveJobs: access.archiveJobs.listForArchive(archive.id)
           .map(visibleArchiveJob),
-        availableActions: [{ name: "verify-archive", eligible: true, reason: null }],
+        availableActions: [
+          { name: "verify-archive", eligible: true, reason: null },
+          {
+            name: "request-rearchive",
+            eligible: rearchiveEligible,
+            requiredInputs: ["mutationKey", "sourceArchiveId"],
+            reason: rearchiveReason,
+            blockingReasons: rearchiveReason === null
+              ? []
+              : [rearchiveReason],
+          },
+        ],
       };
     }
     case "encode-jobs": {

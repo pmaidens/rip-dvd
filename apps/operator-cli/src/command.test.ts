@@ -938,6 +938,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
     commands: [
       "generate-key",
       "submit-archive-request",
+      "request-rearchive",
       "cancel-archive-request",
       "retry-archive-request",
       "retry-disc-inspection",
@@ -1439,6 +1440,116 @@ it("replays the original Archive Request outcome after a lost response and resta
   expect(reader.archiveRequests.list()[0]?.status).toBe("cancelled");
   expect(reader.archiveJobs.list()).toEqual([]);
   reader.close();
+});
+
+it("requests Re-archiving with an explicit source and reports why it is waiting", async () => {
+  const current = fixture();
+  const detectedDiscId = addScannedDisc(current, "synthetic-rearchive-source");
+  const access = createLegacySidecarDataAccess({
+    databasePath: current.databasePath,
+    mediaLibraryPath: current.mediaLibraryPath,
+    originalsLibraryPath: current.originalsLibraryPath,
+  });
+  access.catalog.updateDetectedDiscStatus(detectedDiscId, "approved");
+  const source = access.catalog.createOriginalDiscArchive({
+    detectedDiscId,
+    discKind: "dvd",
+    archiveFormat: "iso",
+    archivePath: join(current.originalsLibraryPath, "synthetic-rearchive-source.iso"),
+    fingerprint: "synthetic-rearchive-source",
+  });
+  access.close();
+  const args = [
+    "request-rearchive",
+    "--key",
+    "00000000-0000-4000-8000-000000000347",
+    "--source-archive-id",
+    source.id,
+  ];
+
+  const submitted = await current.run(args);
+  expect(submitted.exitCode).toBe(0);
+  expect(submitted.result).toMatchObject({
+    archiveRequest: {
+      rearchiveSourceArchiveId: source.id,
+      status: "pending",
+      waiting: { code: "matching_disc_required" },
+    },
+  });
+  expect((await current.run(args)).result).toEqual(submitted.result);
+  const requestId = (submitted.result as {
+    archiveRequest: { id: string };
+  }).archiveRequest.id;
+  expect((await current.run([
+    "inspect",
+    "archive-requests",
+    requestId,
+  ])).result).toMatchObject({
+    item: {
+      rearchiveSourceArchiveId: source.id,
+      waiting: { code: "matching_disc_required" },
+    },
+  });
+  expect((await current.run([
+    "inspect",
+    "original-disc-archives",
+    source.id,
+  ])).result).toMatchObject({
+    item: {
+      availableActions: expect.arrayContaining([
+        expect.objectContaining({ name: "request-rearchive", eligible: true }),
+      ]),
+    },
+  });
+});
+
+it("marks fresh re-archive unavailable for unsupported disc kinds", async () => {
+  const current = fixture();
+  const access = createLegacySidecarDataAccess({
+    databasePath: current.databasePath,
+    mediaLibraryPath: current.mediaLibraryPath,
+    originalsLibraryPath: current.originalsLibraryPath,
+  });
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/synthetic-blu-ray",
+    isPresent: true,
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "blu_ray",
+    fingerprint: "synthetic-blu-ray-source",
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+  const archive = access.catalog.createOriginalDiscArchive({
+    detectedDiscId: disc.id,
+    discKind: "blu_ray",
+    archiveFormat: "iso",
+    archivePath: join(
+      current.originalsLibraryPath,
+      "synthetic-blu-ray-source.iso",
+    ),
+    fingerprint: disc.fingerprint,
+  });
+  access.close();
+
+  const inspected = await current.run([
+    "inspect",
+    "original-disc-archives",
+    archive.id,
+  ]);
+  expect(inspected.result).toMatchObject({
+    item: {
+      availableActions: expect.arrayContaining([
+        expect.objectContaining({
+          name: "request-rearchive",
+          eligible: false,
+          reason:
+            "Fresh re-archive requests are supported only for DVD archives",
+        }),
+      ]),
+    },
+  });
 });
 
 it("cancels waiting work immediately and replays the original outcome", async () => {
