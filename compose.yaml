@@ -73,8 +73,6 @@ services:
       <<: *runtime-environment
     volumes:
       - rip-dvd-data:/data
-      - ${RIP_DVD_MEDIA_LIBRARY_HOST_PATH:-rip-dvd-media}:/media/movies:ro
-      - ${RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH:-rip-dvd-originals}:/media/originals:ro
 
   web:
     build:

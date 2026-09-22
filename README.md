@@ -587,7 +587,7 @@ The runtime mount and hardware boundary is deliberately narrow:
 
 | Service | SQLite data | Media Library | Original Disc Archive | Optical device |
 | --- | --- | --- | --- | --- |
-| web | read/write | read-only verification | read-only verification | none |
+| web | read/write | none | none | none |
 | archive worker | read/write | read-only verification | read/write | block device read-only; matching SCSI-generic device for CSS authentication |
 | encode worker | read/write | read/write | read-only | none |
 | migration | read/write | none | none | none |

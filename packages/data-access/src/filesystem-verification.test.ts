@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { completeCatalogReview } from "./catalog.test-support.js";
 import { MutationKeyConflictError, StaleJobAttemptError } from "./errors.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
+import type { OriginalDiscArchiveId } from "./types.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -121,7 +122,7 @@ describe("explicit filesystem verification", () => {
     expect(submitted).toMatchObject({ status: "queued", progressPhase: "queued" });
     expect(access.filesystemVerification.submit(input)).toEqual(submitted);
     expect(() => access.filesystemVerification.submit({
-      ...input, target: "encode_job_output",
+      ...input, targetId: "different-archive" as OriginalDiscArchiveId,
     })).toThrow(MutationKeyConflictError);
     const stale = access.filesystemVerification.claimNext()!;
     expect(stale).toMatchObject({ id: submitted.id, status: "running", progressPhase: "checking" });

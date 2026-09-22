@@ -1,5 +1,5 @@
 import { loadConfig } from "@rip-dvd/config";
-import { createApplicationOperations, InvalidMutationKeyError, parseMutationKey } from "@rip-dvd/application";
+import { createApplicationOperations, InvalidMutationKeyError } from "@rip-dvd/application";
 import {
   DomainInvariantError,
   MutationKeyConflictError,
@@ -198,14 +198,6 @@ export async function createFilesystemVerificationRoute(
     const body = asRecord(await request.json().catch(() => null));
     const target = verificationTarget(body?.target);
     const id = boundedString(body?.id);
-    try {
-      parseMutationKey(body?.mutationKey);
-    } catch (error) {
-      if (error instanceof InvalidMutationKeyError) {
-        return response({ error: "Invalid mutation key" }, 400);
-      }
-      throw error;
-    }
     if (!body || !target || !id) {
       return response({ error: "Invalid filesystem verification" }, 400);
     }
@@ -215,6 +207,9 @@ export async function createFilesystemVerificationRoute(
       targetId: id,
     }), 201);
   } catch (error) {
+    if (error instanceof InvalidMutationKeyError) {
+      return response({ error: "Invalid mutation key" }, 400);
+    }
     if (error instanceof RecordNotFoundError) {
       return response({ error: "Verification target not found" }, 404);
     }

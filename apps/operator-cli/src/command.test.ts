@@ -128,7 +128,9 @@ it("submits filesystem verification with replay, status, and bounded waiting", a
   ]);
   const failedId = (failedSubmission.result as { verificationRun: { id: string } }).verificationRun.id;
   const failureWorker = current.openAccess();
-  failureWorker.filesystemVerification.fail(failureWorker.filesystemVerification.claimNext()!);
+  vi.spyOn(failureWorker.filesystemVerification, "execute")
+    .mockRejectedValueOnce(new Error("synthetic verification failure"));
+  expect(await verificationWorker.pollFilesystemVerification(failureWorker)).toBe(true);
   failureWorker.close();
   expect((await current.run([
     "wait", "filesystem-verifications", failedId, "--timeout-ms", "0",

@@ -157,8 +157,6 @@ USER node
 FROM runtime-base AS web
 ENV HOSTNAME="0.0.0.0"
 ENV PORT="3000"
-RUN mkdir --parents /media/movies /media/originals \
-  && chown node:node /media/movies /media/originals
 COPY --from=web-builder --chown=node:node /app/apps/web/.next/standalone ./
 COPY --from=web-builder --chown=node:node /app/apps/web/.next/static ./apps/web/.next/static
 COPY --from=shared-builder --chown=node:node /app/packages/data-access/drizzle ./packages/data-access/drizzle

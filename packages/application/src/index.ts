@@ -254,10 +254,10 @@ export function createApplicationOperations(
       if (targetId.length === 0 || targetId.length > 256) {
         throw new RangeError("Invalid verification target ID.");
       }
-      const run = access.filesystemVerification.submit({
-        mutationKey, target: input.target,
-        targetId: targetId as OriginalDiscArchiveId | EncodeJobId,
-      });
+      const targetReference = input.target === "original_disc_archive"
+        ? { target: input.target, targetId: targetId as OriginalDiscArchiveId }
+        : { target: input.target, targetId: targetId as EncodeJobId };
+      const run = access.filesystemVerification.submit({ mutationKey, ...targetReference });
       return { verificationRun: {
         id: run.id,
         target: run.target,

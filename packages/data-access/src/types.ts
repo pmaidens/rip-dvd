@@ -82,10 +82,11 @@ export type FilesystemVerificationStatus =
   (typeof FILESYSTEM_VERIFICATION_STATUSES)[number];
 export type FilesystemVerificationTarget = "original_disc_archive" | "encode_job_output";
 export type FilesystemVerificationRunStatus = "queued" | "running" | "completed" | "failed";
-export interface FilesystemVerificationRun {
+export type FilesystemVerificationTargetReference =
+  | { target: "original_disc_archive"; targetId: OriginalDiscArchiveId }
+  | { target: "encode_job_output"; targetId: EncodeJobId };
+interface FilesystemVerificationRunBase {
   id: FilesystemVerificationRunId;
-  target: FilesystemVerificationTarget;
-  targetId: OriginalDiscArchiveId | EncodeJobId;
   status: FilesystemVerificationRunStatus;
   progressPhase: "queued" | "checking" | "completed";
   resultStatus: FilesystemVerificationStatus | null;
@@ -97,6 +98,8 @@ export interface FilesystemVerificationRun {
   createdAt: Date;
   updatedAt: Date;
 }
+export type FilesystemVerificationRun = FilesystemVerificationRunBase &
+  FilesystemVerificationTargetReference;
 export type RetainedEncodeOutputState =
   (typeof RETAINED_ENCODE_OUTPUT_STATES)[number];
 export type WorkerKind = (typeof WORKER_KINDS)[number];
@@ -1530,11 +1533,8 @@ export interface EncodeJobAccess {
 }
 
 export interface FilesystemVerificationAccess {
-  submit(input: {
-    mutationKey: string;
-    target: FilesystemVerificationTarget;
-    targetId: OriginalDiscArchiveId | EncodeJobId;
-  }): FilesystemVerificationRun;
+  submit(input: { mutationKey: string } & FilesystemVerificationTargetReference):
+    FilesystemVerificationRun;
   find(id: FilesystemVerificationRunId): FilesystemVerificationRun | null;
   list(options: { limit: number }): FilesystemVerificationRun[];
   listActive(): FilesystemVerificationRun[];
