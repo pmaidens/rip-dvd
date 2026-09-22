@@ -2,6 +2,7 @@ import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
 import type {
   ArchiveBoundaryEvidence,
   CatalogReviewCoverage,
+  CatalogReviewActionAvailability,
   CatalogReviewOutcome,
   ArchiveIntegrity,
   UnreadableSectorRange,
@@ -166,6 +167,7 @@ export interface CatalogReviewDto {
   };
   archive: {
     id: string;
+    detectedDiscId: string;
     discLabel: string;
     discKind: string;
     archiveFormat: string;
@@ -181,6 +183,7 @@ export interface CatalogReviewDto {
   reviewOutcome: CatalogReviewOutcome;
   rawScan: { titles: DvdTitle[] };
   coverage: CatalogReviewCoverage;
+  reviewActionAvailability: CatalogReviewActionAvailability;
   mediaItems: CatalogReviewMediaItem[];
   correctionHistory: CatalogReviewDiscSelectionCorrection[];
   correctionEncodeHistory: CatalogReviewCorrectionEncodeHistory[];

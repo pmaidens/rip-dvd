@@ -34,6 +34,7 @@ function review(selectionCount = 0): CatalogReviewDto {
     automaticCataloging: { configured: true },
     archive: {
       id: "archive-1",
+      detectedDiscId: "disc-1",
       discLabel: "THE_IRON_GIANT_1999",
       discKind: "dvd",
       archiveFormat: "iso",
@@ -47,6 +48,15 @@ function review(selectionCount = 0): CatalogReviewDto {
       catalogReviewOutcome: "needs_review",
     },
     reviewOutcome: "needs_review",
+    reviewActionAvailability: selectionCount > 0
+      ? {
+        completeWithSelections: { state: "available", reason: null },
+        completeArchiveOnly: { state: "blocked", reason: "Archive-only Review cannot contain Disc Selections" },
+      }
+      : {
+        completeWithSelections: { state: "blocked", reason: "Catalog review requires at least one Disc Selection" },
+        completeArchiveOnly: { state: "available", reason: null },
+      },
     rawScan: { titles: [] },
     coverage: {
       discSelectionCount: selectionCount,

@@ -259,6 +259,7 @@ export function CatalogReviewView({
             <CatalogReviewCompletion
               isSaving={isSaving}
               coverage={review.coverage}
+              actionAvailability={review.reviewActionAvailability}
               reviewOutcome={review.reviewOutcome}
               archiveOnlySelected={archiveOnlySelected}
               replacementPlan={review.replacementPlan}

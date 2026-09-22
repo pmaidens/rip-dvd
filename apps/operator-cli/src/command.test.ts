@@ -2,11 +2,12 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, expect, it } from "vitest";
+import type { CatalogMetadataLookup } from "@rip-dvd/application";
 
 import { createApplicationOperations } from "@rip-dvd/application";
 
 import { runCommand } from "./command.js";
-import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
+import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "./operator-workflow.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 
@@ -22,8 +23,8 @@ afterEach(() => {
   }
 });
 
-it("reports database health as JSON through the public command runner", () => {
-  const result = fixture().run(["health"]);
+it("reports database health as JSON through the public command runner", async () => {
+  const result = await fixture().run(["health"]);
 
   expect(result.exitCode).toBe(0);
   expect(result.stderr).toBe("");
@@ -36,7 +37,7 @@ it("reports database health as JSON through the public command runner", () => {
   });
 });
 
-it("reports deployment readiness from persisted Optical Drive and Disc Inspection state", () => {
+it("reports deployment readiness from persisted Optical Drive and Disc Inspection state", async () => {
   const current = fixture();
   const seed = current.openAccess();
   const drive = seed.catalog.upsertOpticalDrive({
@@ -51,7 +52,7 @@ it("reports deployment readiness from persisted Optical Drive and Disc Inspectio
     mediaCapacityBytes: 2_048,
   }).inspection;
   seed.close();
-  const result = current.run(["readiness"]);
+  const result = await current.run(["readiness"]);
 
   expect(result.exitCode).toBe(0);
   expect(result.stderr).toBe("");
@@ -68,7 +69,115 @@ it("reports deployment readiness from persisted Optical Drive and Disc Inspectio
   });
 });
 
-it("discovers commands and rejects unsupported invocations without opening SQLite", () => {
+it("inspects a Catalog Review and exposes metadata candidates through read-only commands", async () => {
+  const current = fixture();
+  const { archive, previousSelection, correctedSelection, predecessor } =
+    seedCatalogReviewForReadFixture(current);
+  const before = current.openAccess();
+  const revision = before.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt.toISOString();
+  const selectionsBefore = before.catalog.listDiscSelections({ originalDiscArchiveId: archive.id });
+  before.close();
+
+  const detail = await current.run(["catalog-review", "show", archive.id]);
+  expect(detail.exitCode).toBe(0);
+  expect(detail.result).toMatchObject({
+    catalogRevision: revision,
+    archive: { id: archive.id, detectedDiscId: archive.detectedDiscId, discLabel: "EXAMPLE_FILM_2020" },
+    reviewActionAvailability: {
+      completeWithSelections: { state: "available", reason: null },
+      completeArchiveOnly: {
+        state: "blocked",
+        reason: "Archive-only Review cannot contain Disc Selections",
+      },
+    },
+    rawScan: { titles: [{ number: 1, durationSeconds: 5_400 }] },
+    correctionHistory: [{
+      supersededDiscSelection: { id: previousSelection.id, sourceIdentity: { kind: "main_feature" } },
+      replacementDiscSelection: { id: correctedSelection.id, sourceIdentity: { kind: "main_feature" } },
+      reason: "Correct the synthetic mapping.",
+    }],
+    correctionEncodeHistory: [{
+      replacementDiscSelectionId: correctedSelection.id,
+      predecessorEncodeJob: { id: predecessor.id, status: "completed" },
+    }],
+    discSelections: [{
+      id: correctedSelection.id,
+      sourceIdentity: { kind: "main_feature" },
+      actionAvailability: {
+        state: "correction_lineage",
+        availableActions: ["correct", "remove"],
+        reason: expect.stringContaining("immutable correction lineage"),
+      },
+    }],
+  });
+
+  const lookup: CatalogMetadataLookup = {
+    search: async () => [{ id: 42, kind: "movie", title: "Example Film", year: 2020 }],
+    getTvDetails: async () => ({ seasons: [] }),
+    getTvSeason: async () => { throw new Error("Unexpected season request"); },
+  };
+  const suggestion = await current.run(["catalog-review", "suggest", archive.id], lookup);
+  expect(suggestion.exitCode).toBe(0);
+  expect(suggestion.result).toMatchObject({
+    status: "ready",
+    candidates: [{ id: 42, kind: "movie", title: "Example Film", year: 2020 }],
+    proposal: { kind: "movie", tmdbId: 42 },
+  });
+  const selected = await current.run(
+    ["catalog-review", "suggest", archive.id, "--tmdb-id", "42", "--media-type", "movie"],
+    lookup,
+  );
+  expect(selected.result).toMatchObject({ status: "ready", proposal: { tmdbId: 42 } });
+
+  const after = current.openAccess();
+  expect(after.catalog.listDiscSelections({ originalDiscArchiveId: archive.id })).toEqual(selectionsBefore);
+  expect(after.catalog.findMediaItemByTmdbIdentity({ mediaType: "movie", tmdbId: 42 })).toBeNull();
+  after.close();
+
+  const invalidOffset = await current.run(["catalog-review", "show", archive.id, "--selection-offset", "-1"]);
+  expect(invalidOffset.exitCode).toBe(2);
+  expect(invalidOffset.result).toEqual({
+    error: { code: "INVALID_ARGUMENTS", message: "Invalid Catalog Review offset." },
+  });
+  const missing = await current.run(["catalog-review", "show", "missing-archive"]);
+  expect(missing.exitCode).toBe(2);
+  expect(missing.result).toEqual({
+    error: { code: "REVIEW_NOT_FOUND", message: "Original Disc Archive not found." },
+  });
+
+  const entry = fileURLToPath(new URL("../dist/entry.js", import.meta.url));
+  const processResult = spawnSync(process.execPath, [entry, "catalog-review", "show", archive.id], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      NODE_NO_WARNINGS: "1",
+      RIP_DVD_DATABASE_PATH: current.databasePath,
+      RIP_DVD_MEDIA_LIBRARY_PATH: current.mediaLibraryPath,
+      RIP_DVD_ORIGINALS_LIBRARY_PATH: current.originalsLibraryPath,
+    },
+  });
+  expect(processResult.status).toBe(0);
+  expect(processResult.stderr).toBe("");
+  expect(JSON.parse(processResult.stdout)).toEqual(detail.result);
+
+  const finalize = current.openAccess();
+  finalize.catalog.completeCatalogReview(
+    archive.id,
+    finalize.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt,
+    "reviewed_with_selections",
+  );
+  finalize.close();
+  const completed = await current.run(["catalog-review", "show", archive.id]);
+  expect(completed.result).toMatchObject({
+    reviewOutcome: "reviewed_with_selections",
+    reviewActionAvailability: {
+      completeWithSelections: { state: "blocked", reason: "Catalog review is already complete" },
+      completeArchiveOnly: { state: "blocked", reason: "Archive-only Review cannot contain Disc Selections" },
+    },
+  });
+});
+
+it("discovers commands and rejects unsupported invocations without opening SQLite", async () => {
   const stdout: string[] = [];
   const io = {
     openAccess: () => { throw new Error("should not open SQLite"); },
@@ -76,7 +185,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
     stderr: () => {},
   };
 
-  expect(runCommand([], io)).toBe(0);
+  expect(await runCommand([], io)).toBe(0);
   expect(JSON.parse(stdout.pop()!)).toMatchObject({
     schemaVersion: 1,
     usage: "rip-dvd-operator <command>",
@@ -85,36 +194,37 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       expect.objectContaining({ name: "readiness", example: "rip-dvd-operator readiness" }),
     ]),
   });
-  expect(runCommand(["commands"], io)).toBe(0);
+  expect(await runCommand(["commands"], io)).toBe(0);
   expect(JSON.parse(stdout.pop()!)).toEqual({
     schemaVersion: 1,
     commands: [
       "generate-key",
       "submit-archive-request",
+      "catalog-review",
       "health",
       "readiness",
       "commands",
       "help",
     ],
   });
-  expect(runCommand(["health", "--help"], io)).toBe(0);
+  expect(await runCommand(["health", "--help"], io)).toBe(0);
   expect(JSON.parse(stdout.pop()!)).toMatchObject({
     command: { name: "health", usage: "rip-dvd-operator health" },
   });
-  expect(runCommand(["health", "--unexpected"], io)).toBe(2);
+  expect(await runCommand(["health", "--unexpected"], io)).toBe(2);
   expect(JSON.parse(stdout.pop()!)).toEqual({
     error: { code: "INVALID_ARGUMENTS", message: "health takes no arguments." },
   });
-  expect(runCommand(["retired-command"], io)).toBe(2);
+  expect(await runCommand(["retired-command"], io)).toBe(2);
   expect(JSON.parse(stdout.pop()!)).toEqual({
     error: { code: "UNKNOWN_COMMAND", message: "Unknown command." },
   });
 });
 
-it("returns a stable failure without exposing database errors", () => {
+it("returns a stable failure without exposing database errors", async () => {
   const stdout: string[] = [];
   const stderr: string[] = [];
-  const exitCode = runCommand(["health"], {
+  const exitCode = await runCommand(["health"], {
     openAccess: () => { throw new Error("private path and SQLite detail"); },
     stdout: (text) => stdout.push(text),
     stderr: (text) => stderr.push(text),
@@ -202,9 +312,9 @@ function addScannedDisc(current: ReturnType<typeof createOperatorWorkflowFixture
   return disc.id;
 }
 
-it("generates a key without submitting work and rejects a missing key before opening SQLite", () => {
+it("generates a key without submitting work and rejects a missing key before opening SQLite", async () => {
   const current = fixture();
-  const generated = current.run(["generate-key"]);
+  const generated = await current.run(["generate-key"]);
   expect(generated.exitCode).toBe(0);
   expect(generated.result).toEqual({
     mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
@@ -215,7 +325,7 @@ it("generates a key without submitting work and rejects a missing key before ope
 
   let opened = false;
   const stdout: string[] = [];
-  const exitCode = runCommand(["submit-archive-request", "--detected-disc-id", "disc-id"], {
+  const exitCode = await runCommand(["submit-archive-request", "--detected-disc-id", "disc-id"], {
     openAccess: () => { opened = true; throw new Error("unexpected open"); },
     stdout: (text) => stdout.push(text),
     stderr: () => {},
@@ -225,7 +335,7 @@ it("generates a key without submitting work and rejects a missing key before ope
   expect(JSON.parse(stdout.join(""))).toMatchObject({ error: { code: "INVALID_MUTATION_KEY" } });
 });
 
-it("replays the original Archive Request outcome after a lost response and restart", () => {
+it("replays the original Archive Request outcome after a lost response and restart", async () => {
   const current = fixture();
   const detectedDiscId = addScannedDisc(current, "synthetic-replay-disc");
   const mutationKey = "00000000-0000-4000-8000-000000000101";
@@ -237,7 +347,7 @@ it("replays the original Archive Request outcome after a lost response and resta
   access.archiveRequests.cancel(committed.archiveRequest.id);
   access.close();
 
-  const replay = current.run([
+  const replay = await current.run([
     "submit-archive-request", "--key", mutationKey,
     "--detected-disc-id", detectedDiscId,
   ]);
@@ -250,18 +360,18 @@ it("replays the original Archive Request outcome after a lost response and resta
   reader.close();
 });
 
-it("keeps invocation keys separate from same-name Detected Discs and eligibility", () => {
+it("keeps invocation keys separate from same-name Detected Discs and eligibility", async () => {
   const current = fixture();
   const firstId = addScannedDisc(current, "synthetic-disc-one");
   const secondId = addScannedDisc(current, "synthetic-disc-two");
   const key = "00000000-0000-4000-8000-000000000102";
-  const first = current.run([
+  const first = await current.run([
     "submit-archive-request", "--key", key, "--detected-disc-id", firstId,
   ]);
-  const changedTarget = current.run([
+  const changedTarget = await current.run([
     "submit-archive-request", "--key", key, "--detected-disc-id", secondId,
   ]);
-  const second = current.run([
+  const second = await current.run([
     "submit-archive-request", "--key", "00000000-0000-4000-8000-000000000103",
     "--detected-disc-id", secondId,
   ]);

@@ -154,6 +154,7 @@ import type {
   ArchiveRequestId,
   ArchiveRequest,
   ArchiveRequestStatus,
+  CatalogReviewActionAvailability,
   CatalogReviewCoverage,
   ClaimedEncodeJob,
   ChronologicalListOptions,
@@ -2626,40 +2627,79 @@ export function createDataAccessInternal(
     );
   }
 
+  function requireArchiveOnlyReview(
+    archiveId: OriginalDiscArchiveId,
+    querySource: Pick<typeof database, "select"> = database,
+  ): typeof originalDiscArchives.$inferSelect {
+    const archive = requireRow(
+      querySource
+        .select()
+        .from(originalDiscArchives)
+        .where(eq(originalDiscArchives.id, archiveId))
+        .get(),
+      "original disc archive",
+      archiveId,
+    );
+    if (archive.discKind !== "dvd") {
+      throw new DomainInvariantError(
+        "Catalog review currently requires a DVD Original Disc Archive",
+      );
+    }
+    const activeSelection = querySource
+      .select({ id: discSelections.id })
+      .from(discSelections)
+      .where(and(
+        eq(discSelections.originalDiscArchiveId, archiveId),
+        eq(discSelections.isCatalogActive, true),
+      ))
+      .limit(1)
+      .get();
+    if (activeSelection) {
+      throw new DomainInvariantError(
+        "Archive-only Review cannot contain Disc Selections",
+      );
+    }
+    return archive;
+  }
+
   function validateArchiveOnlyOutsideWriter(
     archiveId: OriginalDiscArchiveId,
   ): typeof originalDiscArchives.$inferSelect {
-    return database.transaction((transaction) => {
-      const archive = requireRow(
-        transaction
-          .select()
-          .from(originalDiscArchives)
-          .where(eq(originalDiscArchives.id, archiveId))
-          .get(),
-        "original disc archive",
-        archiveId,
-      );
-      if (archive.discKind !== "dvd") {
-        throw new DomainInvariantError(
-          "Catalog review currently requires a DVD Original Disc Archive",
-        );
+    return database.transaction(
+      (transaction) => requireArchiveOnlyReview(archiveId, transaction),
+      { behavior: "deferred" },
+    );
+  }
+
+  function readCatalogReviewActionAvailability(
+    archiveId: OriginalDiscArchiveId,
+  ): CatalogReviewActionAvailability {
+    const availability = (
+      validate: (id: OriginalDiscArchiveId) => typeof originalDiscArchives.$inferSelect,
+    ): CatalogReviewActionAvailability["completeWithSelections"] => {
+      try {
+        const archive = validate(archiveId);
+        if (archive.legacyCutoverPending) {
+          return {
+            state: "blocked",
+            reason: "Catalog review cannot be completed while legacy cutover repair is pending",
+          };
+        }
+        if (archive.catalogReviewedAt !== null) {
+          return { state: "blocked", reason: "Catalog review is already complete" };
+        }
+        return { state: "available", reason: null };
+      } catch (error) {
+        if (error instanceof DomainInvariantError) {
+          return { state: "blocked", reason: error.message };
+        }
+        throw error;
       }
-      const activeSelection = transaction
-        .select({ id: discSelections.id })
-        .from(discSelections)
-        .where(and(
-          eq(discSelections.originalDiscArchiveId, archiveId),
-          eq(discSelections.isCatalogActive, true),
-        ))
-        .limit(1)
-        .get();
-      if (activeSelection) {
-        throw new DomainInvariantError(
-          "Archive-only Review cannot contain Disc Selections",
-        );
-      }
-      return archive;
-    }, { behavior: "deferred" });
+    };
+    return {
+      completeWithSelections: availability(requireReviewableDiscSelections),
+      completeArchiveOnly: availability(requireArchiveOnlyReview),
+    };
   }
 
   function requireCurrentCatalogValidation(
@@ -4122,6 +4162,8 @@ export function createDataAccessInternal(
             access.catalog.listDiscSelections(options),
           getCatalogReviewCoverage: (originalDiscArchiveId) =>
             access.catalog.getCatalogReviewCoverage(originalDiscArchiveId),
+          getCatalogReviewActionAvailability: (originalDiscArchiveId) =>
+            access.catalog.getCatalogReviewActionAvailability(originalDiscArchiveId),
           listDiscSelectionSupersessions: (options) =>
             access.catalog.listDiscSelectionSupersessions(options),
           listCorrectedEncodeReplacementPlans: (options) =>
@@ -6370,6 +6412,10 @@ export function createDataAccessInternal(
 
       getCatalogReviewCoverage(originalDiscArchiveId) {
         return getCatalogReviewCoverage(originalDiscArchiveId);
+      },
+
+      getCatalogReviewActionAvailability(originalDiscArchiveId) {
+        return readCatalogReviewActionAvailability(originalDiscArchiveId);
       },
 
       listDiscSelectionSupersessions(options) {

@@ -213,6 +213,7 @@ describe("Catalog Review API", () => {
       automaticCataloging: { configured: false },
       archive: {
         id: archive.id,
+        detectedDiscId: disc.id,
         discLabel: "EPISODE_DISC",
         discKind: "dvd",
         archiveFormat: "iso",
@@ -226,6 +227,13 @@ describe("Catalog Review API", () => {
         catalogReviewOutcome: "needs_review",
       },
       reviewOutcome: "needs_review",
+      reviewActionAvailability: {
+        completeWithSelections: {
+          state: "blocked",
+          reason: "Catalog review requires at least one Disc Selection",
+        },
+        completeArchiveOnly: { state: "available", reason: null },
+      },
       rawScan: {
         titles: [{
           number: 1,

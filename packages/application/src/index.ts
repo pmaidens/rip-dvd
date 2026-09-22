@@ -4,7 +4,12 @@ import type {
   ConsistentReadAccess,
   DataAccess,
   DetectedDiscId,
+  OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
+
+import { readCatalogReview, type CatalogReviewPageCoordinates } from "./catalog-review-read.js";
+import { suggestCatalogReview } from "./catalog-suggestion.js";
+import type { CatalogMetadataLookup, CatalogMetadataSelection } from "./catalog-automation.js";
 
 export class InvalidMutationKeyError extends Error {
   constructor() {
@@ -62,7 +67,7 @@ function readDeploymentReadiness(access: ConsistentReadAccess) {
 }
 
 export function createApplicationOperations(
-  access: Pick<DataAccess, "checkHealth" | "readConsistentSnapshot" | "archiveRequests">,
+  access: DataAccess,
 ) {
   return {
     health: () => access.checkHealth(),
@@ -91,5 +96,24 @@ export function createApplicationOperations(
         },
       };
     },
+    catalogReview: (
+      id: OriginalDiscArchiveId,
+      coordinates: CatalogReviewPageCoordinates,
+      automaticCatalogingConfigured: boolean,
+    ) => readCatalogReview(access, id, coordinates, automaticCatalogingConfigured),
+    catalogSuggestion: (
+      id: OriginalDiscArchiveId,
+      lookup: CatalogMetadataLookup | null,
+      selection?: CatalogMetadataSelection,
+    ) => suggestCatalogReview(access, id, lookup, selection),
   };
 }
+
+export { formatVolumeLabel } from "./catalog-label.js";
+export { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
+export { readCatalogReview, serializeDiscSelection, serializeMediaItem } from "./catalog-review-read.js";
+export type { CatalogReviewPageCoordinates } from "./catalog-review-read.js";
+export * from "./catalog-review-types.js";
+export * from "./catalog-automation.js";
+export * from "./tmdb-catalog-adapter.js";
+export { suggestCatalogReview } from "./catalog-suggestion.js";
