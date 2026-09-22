@@ -2954,6 +2954,7 @@ describe("end-to-end operations dashboard workflow", () => {
       outputPath,
       mediaLibraryPath,
     );
+    expect(inspectPath).toHaveBeenCalledTimes(2);
     const verifiedDashboard = await readDashboard(access);
     expect(verifiedDashboard.html).toContain("File is accessible.");
     const readInventory = (target: "encode_job_output" | "original_disc_archive") => {

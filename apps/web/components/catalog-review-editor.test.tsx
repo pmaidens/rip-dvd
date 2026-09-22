@@ -37,12 +37,14 @@ interface PendingRequest {
 
 function withoutProposalKeys(commands: unknown[]): Record<string, unknown>[] {
   return commands.map((value) => {
-    const { mutationKey, ...command } = value as Record<string, unknown>;
+    const record = value as Record<string, unknown>;
+    const { mutationKey, ...command } = record;
     if (command.action === "create_mapping_proposal" ||
         command.action === "create_episodic_mapping_proposal") {
       expect(mutationKey).toMatch(/^[0-9a-f-]{36}$/);
+      return command;
     }
-    return command;
+    return record;
   });
 }
 
