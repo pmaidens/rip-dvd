@@ -953,7 +953,11 @@ it("reports encode action eligibility and correction evidence through the public
     retainedOutputs: [],
     availableActions: expect.arrayContaining([
       expect.objectContaining({ name: "requeue", eligible: false }),
-      expect.objectContaining({ name: "verify-output", eligible: true }),
+      expect.objectContaining({
+        name: "verify-output",
+        eligible: true,
+        requiredInputs: ["mutationKey", "encodeJobId"],
+      }),
     ]),
   } });
   expect(JSON.stringify(result.result)).not.toContain("/synthetic/output.mkv");

@@ -255,7 +255,7 @@ function encodeActions(job: EncodeJob, requeue: ReturnType<typeof encodeRequeueA
   }, {
     name: "verify-output",
     eligible: true,
-    requiredInputs: ["encodeJobId"],
+    requiredInputs: ["mutationKey", "encodeJobId"],
     reason: null,
     blockingReasons: [],
   }];
