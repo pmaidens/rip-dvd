@@ -2078,6 +2078,7 @@ describe("CatalogReviewView", () => {
 
     const consequential = new Set(["repair_disc_selection", "correct_disc_selection",
       "delete_disc_selection"]);
+    const keyedDiscSelections = new Set(["create_disc_selection", "update_disc_selection"]);
     expect(withoutProposalKeys(postedBodies)).toEqual(
       CATALOG_REVIEW_COMMAND_ACTIONS.flatMap((action) => {
         const command = commands[action];
@@ -2086,7 +2087,9 @@ describe("CatalogReviewView", () => {
           { ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
             expectedCatalogRevision: "2026-08-11T06:00:00.000Z",
             previewToken: "preview-token", acknowledge: true },
-        ] : [command];
+        ] : keyedDiscSelections.has(action)
+          ? [{ ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/) }]
+          : [command];
       }),
     );
   });

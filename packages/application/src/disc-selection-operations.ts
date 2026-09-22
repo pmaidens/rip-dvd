@@ -13,14 +13,12 @@ import {
 
 import {
   discSelectionCommandRequiresPreview,
-  type CatalogReviewCommand,
+  type DiscSelectionCommand,
 } from "./catalog-review-command.js";
 import { serializeDiscSelection } from "./catalog-review-read.js";
+import { parseMutationKey } from "./mutation-key.js";
 
-type SelectionCommand = Extract<CatalogReviewCommand, {
-  action: "create_disc_selection" | "update_disc_selection" | "repair_disc_selection" |
-    "correct_disc_selection" | "delete_disc_selection";
-}>;
+type SelectionCommand = DiscSelectionCommand;
 
 type PreviewSelectionCommand = Exclude<SelectionCommand, { action: "create_disc_selection" }>;
 
@@ -227,9 +225,10 @@ export function executeDiscSelectionCommand(
   } = {},
 ) {
   const mutation = discSelectionMutation(archiveId, command);
+  const mutationKey = parseMutationKey(options.mutationKey);
   const requiresPreview = discSelectionCommandRequiresPreview(command);
-  if (requiresPreview && (!options.mutationKey || options.acknowledged !== true ||
-      !options.expectedCatalogRevision || !options.previewToken)) {
+  if (requiresPreview && (options.acknowledged !== true || !options.expectedCatalogRevision ||
+      !options.previewToken)) {
     throw new DomainInvariantError("Disc Selection preview acknowledgement is required");
   }
   if (!requiresPreview && (options.acknowledged === true || options.expectedCatalogRevision ||
@@ -254,7 +253,7 @@ export function executeDiscSelectionCommand(
   const result = access.catalog.mutateDiscSelection({
     originalDiscArchiveId: archiveId,
     mutation,
-    ...(options.mutationKey ? { mutationKey: options.mutationKey } : {}),
+    mutationKey,
     ...(options.expectedCatalogRevision ? { expectedCatalogRevision: options.expectedCatalogRevision } : {}),
     ...(expectedPreviewEvidenceHash ? { expectedPreviewEvidenceHash } : {}),
   });

@@ -221,28 +221,32 @@ export async function createCatalogReviewRoute(
         }));
       }
 
+      case "create_disc_selection":
       case "update_disc_selection":
       case "repair_disc_selection":
       case "correct_disc_selection":
       case "delete_disc_selection": {
         const consequential = discSelectionCommandRequiresPreview(command);
-        if (!consequential) {
-          if (bodyRecord?.preview === true) {
+        if (bodyRecord?.preview === true) {
+          if (!consequential) {
             return response({ error: "This Disc Selection change does not require a preview" }, 400);
           }
-          return response(executeDiscSelectionCommand(access, archiveId, command));
-        }
-        if (bodyRecord?.preview === true) {
           return response(previewDiscSelectionChange(access, archiveId, command));
         }
-        const expectedCatalogRevision = requestRevision(bodyRecord?.expectedCatalogRevision);
-        const previewToken = bodyRecord?.previewToken;
         let mutationKey: string;
         try {
           mutationKey = parseMutationKey(bodyRecord?.mutationKey);
         } catch {
           return response({ error: "Invalid Disc Selection mutation key" }, 400);
         }
+        if (!consequential) {
+          return response(
+            executeDiscSelectionCommand(access, archiveId, command, { mutationKey }),
+            command.action === "create_disc_selection" ? 201 : 200,
+          );
+        }
+        const expectedCatalogRevision = requestRevision(bodyRecord?.expectedCatalogRevision);
+        const previewToken = bodyRecord?.previewToken;
         if (bodyRecord?.acknowledge !== true || expectedCatalogRevision === null ||
             typeof previewToken !== "string" || previewToken.length > 4_096) {
           return response({ error: "Disc Selection preview acknowledgement is required" }, 400);
@@ -253,12 +257,6 @@ export async function createCatalogReviewRoute(
           }),
         );
       }
-
-      case "create_disc_selection":
-        return response(
-          executeDiscSelectionCommand(access, archiveId, command),
-          201,
-        );
 
       case "complete_review": {
         let mediaLibraryPath: string | null = null;

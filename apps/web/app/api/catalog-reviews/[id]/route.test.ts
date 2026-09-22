@@ -63,10 +63,16 @@ function invokeDiscSelectionMutation(
   return (body: Record<string, unknown>) => postCatalogReview(access, archiveId, body);
 }
 
-function keyedMediaItemBody(body: unknown, access: DataAccess): unknown {
-  if (typeof body !== "object" || body === null || !("action" in body) ||
-      (body.action !== "create_media_item" && body.action !== "update_media_item" &&
-        body.action !== "delete_media_item")) return body;
+function keyedCatalogMutationBody(body: unknown, access: DataAccess): unknown {
+  if (typeof body !== "object" || body === null || !("action" in body)) return body;
+  if ((body.action === "create_disc_selection" || body.action === "update_disc_selection" ||
+      body.action === "repair_disc_selection" || body.action === "correct_disc_selection" ||
+      body.action === "delete_disc_selection") && !("preview" in body) &&
+      !("mutationKey" in body)) {
+    return { ...body, mutationKey: crypto.randomUUID() };
+  }
+  if (body.action !== "create_media_item" && body.action !== "update_media_item" &&
+      body.action !== "delete_media_item") return body;
   const itemId = "mediaItemId" in body && typeof body.mediaItemId === "string"
     ? body.mediaItemId as MediaItemId : null;
   const preview = itemId === null ? null : createApplicationOperations(access).previewMediaItemChange(
@@ -383,7 +389,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(keyedMediaItemBody(body, access)),
+        body: JSON.stringify(keyedCatalogMutationBody(body, access)),
       }),
       archive.id,
       () => access,
@@ -608,7 +614,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(keyedMediaItemBody(body, access)),
+        body: JSON.stringify(keyedCatalogMutationBody(body, access)),
       }),
       archive.id,
       () => access,
@@ -761,7 +767,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(keyedMediaItemBody(body, access)),
+        body: JSON.stringify(keyedCatalogMutationBody(body, access)),
       }),
       archive.id,
       () => access,
@@ -804,6 +810,16 @@ describe("Catalog Review API", () => {
     expect(blankLabelResponse.status).toBe(400);
     expect(access.catalog.listDiscSelections({ ids: [selection.id] })[0])
       .toMatchObject({ label: "Original label" });
+
+    const unkeyedLabelResponse = await postCatalogReview(access, archive.id, {
+      action: "update_disc_selection",
+      discSelectionId: selection.id,
+      changes: { label: null },
+    });
+    expect(unkeyedLabelResponse.status).toBe(400);
+    await expect(unkeyedLabelResponse.json()).resolves.toEqual({
+      error: "Invalid Disc Selection mutation key",
+    });
 
     const clearLabelResponse = await mutate({
       action: "update_disc_selection",
@@ -1109,6 +1125,7 @@ describe("Catalog Review API", () => {
           action: "update_disc_selection",
           discSelectionId: mistakenSelection.id,
           changes: { label: "Must use supersession" },
+          mutationKey: crypto.randomUUID(),
         }),
       }),
       archive.id,
@@ -2006,6 +2023,7 @@ describe("Catalog Review API", () => {
           action: "update_disc_selection",
           discSelectionId: selection.id,
           changes: { label: "Must use unsafe repair" },
+          mutationKey: crypto.randomUUID(),
         }),
       }),
       archive.id,
@@ -2196,7 +2214,7 @@ describe("Catalog Review API", () => {
             Host: "localhost:3000",
             Origin: "http://localhost:3000",
           },
-          body: JSON.stringify(keyedMediaItemBody(body, client)),
+          body: JSON.stringify(keyedCatalogMutationBody(body, client)),
         }),
         archive.id,
         () => client,
@@ -2655,7 +2673,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(keyedMediaItemBody(body, access)),
+        body: JSON.stringify(keyedCatalogMutationBody(body, access)),
       }),
       archive.id,
       () => access,
@@ -2828,7 +2846,7 @@ describe("Catalog Review API", () => {
             Host: "localhost:3000",
             Origin: "http://localhost:3000",
           },
-          body: JSON.stringify(keyedMediaItemBody(body, access)),
+          body: JSON.stringify(keyedCatalogMutationBody(body, access)),
         },
       ),
       archives[0]!.id,
@@ -2934,7 +2952,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(keyedMediaItemBody(body, access)),
+        body: JSON.stringify(keyedCatalogMutationBody(body, access)),
       }),
       archive.id,
       () => access,
@@ -3008,7 +3026,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(keyedMediaItemBody(body, access)),
+        body: JSON.stringify(keyedCatalogMutationBody(body, access)),
       }),
       archive.id,
       () => access,
@@ -3134,7 +3152,7 @@ describe("Catalog Review API", () => {
             Host: "localhost:3000",
             Origin: "http://localhost:3000",
           },
-          body: JSON.stringify(keyedMediaItemBody(body, access)),
+          body: JSON.stringify(keyedCatalogMutationBody(body, access)),
         }),
         archive.id,
         () => access,
@@ -3146,9 +3164,9 @@ describe("Catalog Review API", () => {
       discSelectionId: "missing-selection",
       selection: { kind: "main_feature" },
     });
-    expect(invalidMissingRepair.status).toBe(404);
+    expect(invalidMissingRepair.status).toBe(400);
     await expect(invalidMissingRepair.json()).resolves.toEqual({
-      error: "Disc Selection not found",
+      error: "Invalid Disc Selection",
     });
 
     const showResponse = await mutate({

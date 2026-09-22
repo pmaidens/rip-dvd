@@ -10,6 +10,7 @@ import {
   type CatalogReviewCommand,
 } from "./catalog-review-command.js";
 import { executeDiscSelectionCommand } from "./disc-selection-operations.js";
+import { InvalidMutationKeyError } from "./mutation-key.js";
 
 const archiveId = "archive-1" as OriginalDiscArchiveId;
 const selection = {
@@ -64,11 +65,11 @@ describe("Disc Selection preview policy", () => {
     const mutateDiscSelection = vi.fn();
     const access = { catalog: { mutateDiscSelection } } as unknown as DataAccess;
     const incompleteOptions = [
-      {},
+      { mutationKey: "00000000-0000-4000-8000-000000000001" },
       {
+        mutationKey: "00000000-0000-4000-8000-000000000001",
         acknowledged: true as const,
         expectedCatalogRevision: new Date("2026-01-01T00:00:00.000Z"),
-        previewToken: "invalid-token",
       },
       {
         mutationKey: "00000000-0000-4000-8000-000000000001",
@@ -84,6 +85,29 @@ describe("Disc Selection preview policy", () => {
             "Disc Selection preview acknowledgement is required",
           ));
       }
+    }
+    expect(mutateDiscSelection).not.toHaveBeenCalled();
+  });
+
+  it("requires a valid mutation key for every Disc Selection mutation", () => {
+    const mutateDiscSelection = vi.fn();
+    const access = { catalog: { mutateDiscSelection } } as unknown as DataAccess;
+    const commands = [
+      {
+        action: "create_disc_selection",
+        selection,
+      },
+      {
+        action: "update_disc_selection",
+        discSelectionId: "selection-1",
+        changes: { label: "Main feature" },
+      },
+      ...consequentialCommands,
+    ] satisfies CatalogReviewCommand[];
+
+    for (const command of commands) {
+      expect(() => executeDiscSelectionCommand(access, archiveId, command))
+        .toThrowError(InvalidMutationKeyError);
     }
     expect(mutateDiscSelection).not.toHaveBeenCalled();
   });

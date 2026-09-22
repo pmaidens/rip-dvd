@@ -168,6 +168,21 @@ export type ConsequentialDiscSelectionCommand =
       action: "repair_disc_selection" | "correct_disc_selection" | "delete_disc_selection";
     }>;
 
+export type DiscSelectionCommand = Extract<CatalogReviewCommand, {
+  action: "create_disc_selection" | "update_disc_selection" | "repair_disc_selection" |
+    "correct_disc_selection" | "delete_disc_selection";
+}>;
+
+export function isDiscSelectionCommand(
+  command: CatalogReviewCommand,
+): command is DiscSelectionCommand {
+  return command.action === "create_disc_selection" ||
+    command.action === "update_disc_selection" ||
+    command.action === "repair_disc_selection" ||
+    command.action === "correct_disc_selection" ||
+    command.action === "delete_disc_selection";
+}
+
 export function discSelectionCommandRequiresPreview(
   command: CatalogReviewCommand,
 ): command is ConsequentialDiscSelectionCommand {

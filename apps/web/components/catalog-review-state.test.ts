@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   mutateCatalogReview,
@@ -35,6 +35,10 @@ function memoryStorage() {
     setItem: (key: string, value: string) => void values.set(key, value),
     removeItem: (key: string) => void values.delete(key),
   };
+}
+
+function pendingMutationStorageKey(archiveId: string): string {
+  return `rip-dvd.catalog-review-mutation.v2:${encodeURIComponent(archiveId)}`;
 }
 
 describe("catalog review request state", () => {
@@ -248,5 +252,81 @@ describe("catalog review request state", () => {
     expect(bodies).toHaveLength(2);
     expect(bodies[0]).toEqual({ ...command, preview: true });
     expect(bodies[1]).toMatchObject({ ...command, acknowledge: true });
+  });
+
+  it.each([
+    {
+      name: "creation",
+      command: {
+        action: "create_disc_selection" as const,
+        selection: {
+          mediaItemId: "media-item-5",
+          sourceIdentity: { kind: "dvd_title" as const, titleNumber: 1 },
+        },
+      },
+    },
+    {
+      name: "ordinary update",
+      command: {
+        action: "update_disc_selection" as const,
+        discSelectionId: "selection-5",
+        changes: { label: "Main feature" },
+      },
+    },
+  ])("replays a keyed Disc Selection $name after an ambiguous response and restart", async ({
+    name,
+    command,
+  }) => {
+    const archiveId = `archive-5-${name}`;
+    const storage = memoryStorage();
+    const bodies: Record<string, unknown>[] = [];
+    const failedFetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({ error: "Response unavailable" }, { status: 503 });
+    };
+
+    await expect(mutateCatalogReview(archiveId, command, failedFetcher, { storage }))
+      .rejects.toThrow("Response unavailable");
+    await expect(resumePendingCatalogReviewMutation(archiveId, async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({ message: "Mapping changed; review required" });
+    }, { storage })).resolves.toEqual({ message: "Mapping changed; review required" });
+
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toEqual(bodies[1]);
+    expect(bodies[0]).toMatchObject({
+      ...command,
+      mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    });
+  });
+
+  it.each([
+    { action: "update_disc_selection", discSelectionId: "selection-6" },
+    { action: "repair_disc_selection", discSelectionId: "selection-6" },
+    {
+      action: "correct_disc_selection",
+      discSelectionId: "selection-6",
+      catalogRevision: "2026-08-11T06:00:00.000Z",
+    },
+    { action: "delete_disc_selection" },
+  ])("removes a malformed stored $action command", async (command) => {
+    const archiveId = `archive-invalid-${command.action}`;
+    const storage = memoryStorage();
+    const key = pendingMutationStorageKey(archiveId);
+    storage.setItem(key, JSON.stringify({
+      archiveId,
+      command,
+      identity: JSON.stringify([archiveId, command]),
+      mutationKey: "00000000-0000-4000-8000-000000000006",
+    }));
+    const fetcher = vi.fn(async () => Response.json({}));
+
+    await expect(resumePendingCatalogReviewMutation(archiveId, fetcher, { storage }))
+      .resolves.toBeNull();
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(storage.getItem(key)).toBeNull();
   });
 });

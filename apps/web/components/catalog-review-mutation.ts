@@ -1,9 +1,14 @@
 "use client";
 
+import { MEDIA_ITEM_KINDS } from "@rip-dvd/data-access/catalog-kinds";
+
 import {
   discSelectionCommandRequiresPreview,
+  isDiscSelectionCommand,
+  parseCatalogReviewCommand,
   type CatalogReviewCommand,
   type ConsequentialDiscSelectionCommand,
+  type DiscSelectionCommand,
 } from "../lib/catalog-review-command";
 
 type CatalogReviewFetch = (
@@ -55,7 +60,7 @@ interface CatalogReviewMutationOptions {
 
 interface PendingCatalogReviewMutation {
   archiveId: string;
-  command: ConsequentialDiscSelectionCommand;
+  command: DiscSelectionCommand;
   identity: string;
   mutationKey: string;
   preview?: DiscSelectionChangePreview;
@@ -82,23 +87,33 @@ export async function mutateCatalogReview(
   const storage = options.storage === undefined
     ? browserMutationStorage() : options.storage;
   let pending: PendingCatalogReviewMutation | undefined;
-  if (discSelectionCommandRequiresPreview(command)) {
+  if (isDiscSelectionCommand(command)) {
     pending = readPendingCatalogReviewMutation(archiveId, storage);
     if (pending?.identity !== identity) {
-      if (pending?.acknowledged === true) {
+      if (pending !== undefined && pendingCatalogReviewMutationIsReady(pending)) {
         throw new Error(
-          "A previously acknowledged Disc Selection change must be recovered before another change",
+          "A pending Disc Selection change must be recovered before another change",
         );
       }
       deletePendingCatalogReviewMutation(archiveId, storage);
       pending = undefined;
     }
-    pending = await prepareDiscSelectionMutation(
-      archiveId, command, fetcher, options, identity, storage, pending,
-    );
-    if (pending === undefined) return { message: null, cancelled: true };
+    if (discSelectionCommandRequiresPreview(command)) {
+      pending = await prepareDiscSelectionMutation(
+        archiveId, command, fetcher, options, identity, storage, pending,
+      );
+      if (pending === undefined) return { message: null, cancelled: true };
+    } else {
+      pending ??= {
+        archiveId,
+        command,
+        identity,
+        mutationKey: crypto.randomUUID(),
+      };
+      writePendingCatalogReviewMutation(archiveId, pending, storage);
+    }
   }
-  const response = pending?.preview
+  const response = pending !== undefined
     ? await applyPendingCatalogReviewMutation(pending, fetcher)
     : await postCatalogReview(archiveId, {
       ...command,
@@ -161,7 +176,7 @@ export async function resumePendingCatalogReviewMutation(
   const storage = options.storage === undefined
     ? browserMutationStorage() : options.storage;
   const pending = readPendingCatalogReviewMutation(archiveId, storage);
-  if (pending?.acknowledged !== true || pending.preview === undefined) return null;
+  if (pending === undefined || !pendingCatalogReviewMutationIsReady(pending)) return null;
   const response = await applyPendingCatalogReviewMutation(pending, fetcher);
   if (!response.ok) {
     if (!ambiguousMutationResponse(response.status)) {
@@ -177,8 +192,14 @@ function applyPendingCatalogReviewMutation(
   pending: PendingCatalogReviewMutation,
   fetcher: CatalogReviewFetch,
 ): Promise<Response> {
+  if (!discSelectionCommandRequiresPreview(pending.command)) {
+    return postCatalogReview(pending.archiveId, {
+      ...pending.command,
+      mutationKey: pending.mutationKey,
+    }, fetcher);
+  }
   const preview = pending.preview;
-  if (preview === undefined) {
+  if (pending.acknowledged !== true || preview === undefined) {
     throw new Error("Disc Selection preview acknowledgement is required");
   }
   return postCatalogReview(pending.archiveId, {
@@ -188,6 +209,13 @@ function applyPendingCatalogReviewMutation(
     previewToken: preview.previewToken,
     acknowledge: true,
   }, fetcher);
+}
+
+function pendingCatalogReviewMutationIsReady(
+  pending: PendingCatalogReviewMutation,
+): boolean {
+  return !discSelectionCommandRequiresPreview(pending.command) ||
+    (pending.acknowledged === true && pending.preview !== undefined);
 }
 
 async function requestDiscSelectionPreview(
@@ -228,41 +256,62 @@ function readPendingCatalogReviewMutation(
   storage: CatalogReviewMutationStorage | null,
 ): PendingCatalogReviewMutation | undefined {
   if (storage === null) return pendingCatalogReviewMutations.get(archiveId);
+  let saved: string | null;
   try {
-    const saved = storage.getItem(pendingCatalogReviewMutationKey(archiveId));
-    if (saved === null) return pendingCatalogReviewMutations.get(archiveId);
-    const parsed: unknown = JSON.parse(saved);
-    if (typeof parsed !== "object" || parsed === null ||
-        !("archiveId" in parsed) || parsed.archiveId !== archiveId ||
-        !("identity" in parsed) || typeof parsed.identity !== "string" ||
-        !("command" in parsed) || !("mutationKey" in parsed) ||
-        typeof parsed.mutationKey !== "string") return undefined;
-    const command = storedConsequentialSelectionCommand(parsed.command);
-    if (command === null || parsed.identity !== JSON.stringify([archiveId, command])) return undefined;
-    const preview = "preview" in parsed && parsed.preview !== undefined
-      ? availableDiscSelectionPreview(parsed.preview, command.action) : undefined;
-    if ("preview" in parsed && parsed.preview !== undefined && preview === null) return undefined;
-    return {
-      archiveId,
-      command,
-      identity: parsed.identity,
-      mutationKey: parsed.mutationKey,
-      ...(preview ? { preview } : {}),
-      ...("acknowledged" in parsed && parsed.acknowledged === true
-        ? { acknowledged: true } : {}),
-    };
+    saved = storage.getItem(pendingCatalogReviewMutationKey(archiveId));
   } catch {
     return pendingCatalogReviewMutations.get(archiveId);
   }
+  if (saved === null) return pendingCatalogReviewMutations.get(archiveId);
+  const discardStored = () => {
+    try {
+      storage.removeItem(pendingCatalogReviewMutationKey(archiveId));
+    } catch {
+      // Ignore cleanup failure and retain any in-memory recovery command.
+    }
+    return pendingCatalogReviewMutations.get(archiveId);
+  };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(saved);
+  } catch {
+    return discardStored();
+  }
+  if (typeof parsed !== "object" || parsed === null ||
+      !("archiveId" in parsed) || parsed.archiveId !== archiveId ||
+      !("identity" in parsed) || typeof parsed.identity !== "string" ||
+      !("command" in parsed) || !("mutationKey" in parsed) ||
+      typeof parsed.mutationKey !== "string") return discardStored();
+  const command = storedDiscSelectionCommand(parsed.command);
+  if (command === null || parsed.identity !== JSON.stringify([archiveId, command])) {
+    return discardStored();
+  }
+  const requiresPreview = discSelectionCommandRequiresPreview(command);
+  const previewValue = "preview" in parsed ? parsed.preview : undefined;
+  const hasPreview = previewValue !== undefined;
+  const preview = hasPreview && requiresPreview
+    ? availableDiscSelectionPreview(previewValue, command.action) : undefined;
+  if ((hasPreview && preview === undefined) ||
+      (!requiresPreview && ("preview" in parsed || "acknowledged" in parsed)) ||
+      ("acknowledged" in parsed && parsed.acknowledged === true && preview === undefined)) {
+    return discardStored();
+  }
+  return {
+    archiveId,
+    command,
+    identity: parsed.identity,
+    mutationKey: parsed.mutationKey,
+    ...(preview ? { preview } : {}),
+    ...("acknowledged" in parsed && parsed.acknowledged === true
+      ? { acknowledged: true } : {}),
+  };
 }
 
-function storedConsequentialSelectionCommand(
+function storedDiscSelectionCommand(
   value: unknown,
-): ConsequentialDiscSelectionCommand | null {
-  if (typeof value !== "object" || value === null || !("action" in value) ||
-      !("discSelectionId" in value) || typeof value.discSelectionId !== "string") return null;
-  const command = value as CatalogReviewCommand;
-  return discSelectionCommandRequiresPreview(command) ? command : null;
+): DiscSelectionCommand | null {
+  const parsed = parseCatalogReviewCommand(value, { mediaItemKinds: MEDIA_ITEM_KINDS });
+  return parsed.ok && isDiscSelectionCommand(parsed.command) ? parsed.command : null;
 }
 
 function writePendingCatalogReviewMutation(

@@ -1339,6 +1339,7 @@ describe("end-to-end operations dashboard workflow", () => {
         action: "update_disc_selection",
         discSelectionId: selection.id,
         changes: { label: "   " },
+        mutationKey: crypto.randomUUID(),
       }),
       archive.id,
       () => access,
@@ -1386,6 +1387,7 @@ describe("end-to-end operations dashboard workflow", () => {
         action: "update_disc_selection",
         discSelectionId: selection.id,
         changes: { label: null },
+        mutationKey: crypto.randomUUID(),
       }),
       archive.id,
       () => access,
@@ -2020,6 +2022,12 @@ describe("end-to-end operations dashboard workflow", () => {
           mutationKey: crypto.randomUUID(),
           ...(preview ? { acknowledgedRevision: preview.revision } : {}),
         };
+      } else if (typeof body === "object" && body !== null && "action" in body &&
+          (body.action === "create_disc_selection" || body.action === "update_disc_selection" ||
+            body.action === "repair_disc_selection" || body.action === "correct_disc_selection" ||
+            body.action === "delete_disc_selection") && !("preview" in body) &&
+          !("mutationKey" in body)) {
+        input = { ...body, mutationKey: crypto.randomUUID() };
       }
       return createCatalogReviewRoute(
         createMutationRequest(`/api/catalog-reviews/${archive.id}`, input),
