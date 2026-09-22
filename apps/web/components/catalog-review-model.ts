@@ -167,6 +167,7 @@ export interface CatalogReviewDto {
   };
   archive: {
     id: string;
+    detectedDiscId: string;
     discLabel: string;
     discKind: string;
     archiveFormat: string;

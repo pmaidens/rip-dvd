@@ -293,6 +293,7 @@ export function readCatalogReview(
       },
       archive: {
         id: archive.id,
+        detectedDiscId: archive.detectedDiscId,
         discLabel: disc.volumeLabel ?? "Unlabeled disc",
         discKind: archive.discKind,
         archiveFormat: archive.archiveFormat,

@@ -34,6 +34,7 @@ function review(selectionCount = 0): CatalogReviewDto {
     automaticCataloging: { configured: true },
     archive: {
       id: "archive-1",
+      detectedDiscId: "disc-1",
       discLabel: "THE_IRON_GIANT_1999",
       discKind: "dvd",
       archiveFormat: "iso",

@@ -86,6 +86,7 @@ function catalogReview({
     catalogRevision: "2026-08-11T06:00:00.000Z",
     archive: {
       id: archiveId,
+      detectedDiscId: `${archiveId}-disc`,
       discLabel,
       discKind: "dvd",
       archiveFormat: "iso",
@@ -1957,6 +1958,7 @@ describe("CatalogReviewView", () => {
             catalogRevision: "2026-08-03T18:00:00.000Z",
             archive: {
               id: "archive-1",
+              detectedDiscId: "disc-1",
               discLabel: "EPISODE_DISC_2_2005",
               discKind: "dvd",
               archiveFormat: "iso",
@@ -2173,6 +2175,7 @@ describe("CatalogReviewView", () => {
             catalogRevision: "2026-08-03T19:00:00.000Z",
             archive: {
               id: "archive-1",
+              detectedDiscId: "disc-1",
               discLabel: "PAGED_DISC",
               discKind: "dvd",
               archiveFormat: "iso",

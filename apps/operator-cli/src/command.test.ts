@@ -82,7 +82,7 @@ it("inspects a Catalog Review and exposes metadata candidates through read-only 
   expect(detail.exitCode).toBe(0);
   expect(detail.result).toMatchObject({
     catalogRevision: revision,
-    archive: { id: archive.id, discLabel: "EXAMPLE_FILM_2020" },
+    archive: { id: archive.id, detectedDiscId: archive.detectedDiscId, discLabel: "EXAMPLE_FILM_2020" },
     reviewActionAvailability: {
       completeWithSelections: { state: "available", reason: null },
       completeArchiveOnly: {

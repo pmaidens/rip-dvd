@@ -213,6 +213,7 @@ describe("Catalog Review API", () => {
       automaticCataloging: { configured: false },
       archive: {
         id: archive.id,
+        detectedDiscId: disc.id,
         discLabel: "EPISODE_DISC",
         discKind: "dvd",
         archiveFormat: "iso",
