@@ -11,24 +11,21 @@ import {
   OPERATION_KINDS,
   validOperationLimit,
   waitForOperation,
-  parseCatalogReviewCommand,
   tmdbCredentialFromEnvironment,
   type CatalogMetadataLookup,
   type CatalogMetadataSelection,
   type CatalogReviewPageCoordinates,
-  type MediaItemCommand,
 } from "@rip-dvd/application";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
-  MEDIA_ITEM_KINDS,
   MutationKeyConflictError,
   RecordNotFoundError,
   type OriginalDiscArchiveId,
   type DataAccess,
-  type MediaItemId,
 } from "@rip-dvd/data-access";
 import { runDiscSelection } from "./disc-selection.js";
+import { runMediaItem } from "./media-item.js";
 
 export type CommandExitCode = 0 | 1 | 2 | 3;
 
@@ -590,6 +587,8 @@ function waitArguments(rest: readonly string[]) {
   return { kind, id, timeoutMs, pollMs };
 }
 
+
+
 const profileCommands = commandDefinitions.filter(
   (definition) => "category" in definition && definition.category === "encoding_profile",
 );
@@ -692,184 +691,6 @@ function runProfileCommand(name: string, args: readonly string[], openAccess: Co
   } finally {
     access?.close();
   }
-}
-
-function mediaOptions(args: readonly string[]): Map<string, string> {
-  if (args.length % 2 !== 0) {
-    throw new CommandFailure("INVALID_ARGUMENTS", "Media Item options require values.", 2);
-  }
-  const options = new Map<string, string>();
-  for (let index = 0; index < args.length; index += 2) {
-    const name = args[index]!;
-    const value = args[index + 1]!;
-    if (!name.startsWith("--") || value.startsWith("--") || options.has(name)) {
-      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Media Item options.", 2);
-    }
-    options.set(name, value);
-  }
-  return options;
-}
-
-function mediaItemId(value: string | undefined): MediaItemId {
-  if (!value || value.trim().length === 0 || value.length > 256) {
-    throw new CommandFailure("INVALID_ARGUMENTS", "A valid Media Item ID is required.", 2);
-  }
-  return value as MediaItemId;
-}
-
-async function mediaItemDocument(
-  options: Map<string, string>,
-  io: CommandIO,
-): Promise<Record<string, unknown>> {
-  const inline = options.get("--json");
-  const file = options.get("--file");
-  if (inline !== undefined && file !== undefined) {
-    throw new CommandFailure("INVALID_ARGUMENTS", "Use either --json or --file.", 2);
-  }
-  let document: unknown = {};
-  try {
-    if (inline !== undefined) {
-      document = JSON.parse(inline === "-" ? await io.readStdin?.() ?? "" : inline);
-    } else if (file !== undefined) {
-      document = JSON.parse(io.readFile?.(file) ?? "");
-    }
-  } catch {
-    throw new CommandFailure("INVALID_INPUT", "Media Item input must be a JSON object.", 2);
-  }
-  if (typeof document !== "object" || document === null || Array.isArray(document)) {
-    throw new CommandFailure("INVALID_INPUT", "Media Item input must be a JSON object.", 2);
-  }
-  const fieldFlags = {
-    "--kind": "kind",
-    "--title": "title",
-    "--parent-id": "parentId",
-    "--year": "year",
-    "--season-number": "seasonNumber",
-    "--episode-number": "episodeNumber",
-  } as const;
-  const result = { ...document } as Record<string, unknown>;
-  for (const [flag, field] of Object.entries(fieldFlags)) {
-    const value = options.get(flag);
-    if (value === undefined) continue;
-    if (Object.hasOwn(result, field)) {
-      throw new CommandFailure("INVALID_ARGUMENTS", "Duplicate Media Item input field.", 2);
-    }
-    result[field] = field === "year" || field === "seasonNumber" || field === "episodeNumber"
-      ? /^(0|[1-9]\d*)$/.test(value) ? Number(value) : Number.NaN
-      : value;
-  }
-  const tmdbId = options.get("--tmdb-id");
-  const tmdbType = options.get("--tmdb-type");
-  if ((tmdbId === undefined) !== (tmdbType === undefined)) {
-    throw new CommandFailure("INVALID_ARGUMENTS", "TMDB ID and type must be supplied together.", 2);
-  }
-  if (tmdbId !== undefined) {
-    if (Object.hasOwn(result, "tmdbIdentity")) {
-      throw new CommandFailure("INVALID_ARGUMENTS", "Duplicate TMDB identity.", 2);
-    }
-    result.tmdbIdentity = { mediaType: tmdbType, tmdbId: Number(tmdbId) };
-  }
-  return result;
-}
-
-async function runMediaItem(rest: readonly string[], io: CommandIO) {
-  const [action, ...argumentsAndOptions] = rest;
-  if (action === "search") {
-    const options = mediaOptions(argumentsAndOptions);
-    if ([...options.keys()].some((key) => !["--query", "--offset", "--archive-id"].includes(key))) {
-      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Media Item search option.", 2);
-    }
-    const query = options.get("--query") ?? "";
-    const offset = nonnegativeInteger(options.get("--offset") ?? "0");
-    if (offset === null) throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Media Item offset.", 2);
-    const archiveId = options.get("--archive-id");
-    if (archiveId !== undefined && (archiveId.trim().length === 0 || archiveId.length > 256)) {
-      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Original Disc Archive ID.", 2);
-    }
-    return withAccess(io.openAccess, (access) =>
-      createApplicationOperations(access).searchMediaItems({
-        query,
-        offset,
-        ...(archiveId === undefined ? {} : { archiveId: archiveId as OriginalDiscArchiveId }),
-      }));
-  }
-  if (action === "show") {
-    if (argumentsAndOptions.length !== 1) {
-      throw new CommandFailure("INVALID_ARGUMENTS", "Expected media-item show <id>.", 2);
-    }
-    return withAccess(io.openAccess, (access) =>
-      createApplicationOperations(access).showMediaItem(mediaItemId(argumentsAndOptions[0])));
-  }
-  if (action === "preview") {
-    const [kind, id, ...extra] = argumentsAndOptions;
-    if (kind !== "update" && kind !== "delete") {
-      throw new CommandFailure("INVALID_ARGUMENTS", "Expected media-item preview <update|delete> <id>.", 2);
-    }
-    let changes: Extract<MediaItemCommand, { action: "update_media_item" }>["changes"] | undefined;
-    if (kind === "delete") {
-      if (extra.length > 0) throw new CommandFailure("INVALID_ARGUMENTS", "Delete preview takes no changes.", 2);
-    } else {
-      const options = mediaOptions(extra);
-      const allowed = ["--json", "--file", "--kind", "--title", "--parent-id", "--year", "--season-number", "--episode-number"];
-      if ([...options.keys()].some((key) => !allowed.includes(key))) {
-        throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Media Item preview option.", 2);
-      }
-      const document = await mediaItemDocument(options, io);
-      const parsed = parseCatalogReviewCommand({ action: "update_media_item", mediaItemId: id,
-        changes: document }, { mediaItemKinds: MEDIA_ITEM_KINDS });
-      if (!parsed.ok || parsed.command.action !== "update_media_item") {
-        throw new CommandFailure("INVALID_INPUT", parsed.ok ? "Invalid Media Item update." : parsed.error, 2);
-      }
-      changes = parsed.command.changes;
-    }
-    return withAccess(io.openAccess, (access) =>
-      createApplicationOperations(access).previewMediaItemChange(mediaItemId(id), kind, changes));
-  }
-  if (action !== "create" && action !== "update" && action !== "delete") {
-    throw new CommandFailure("INVALID_ARGUMENTS", "Unknown Media Item action.", 2);
-  }
-  const id = action === "create" ? undefined : mediaItemId(argumentsAndOptions[0]);
-  const options = mediaOptions(action === "create" ? argumentsAndOptions : argumentsAndOptions.slice(1));
-  const allowed = action === "delete"
-    ? ["--key", "--acknowledge"]
-    : action === "create"
-    ? ["--key", "--json", "--file", "--kind", "--title", "--parent-id", "--year", "--season-number", "--episode-number", "--tmdb-id", "--tmdb-type"]
-    : ["--key", "--acknowledge", "--json", "--file", "--kind", "--title", "--parent-id", "--year", "--season-number", "--episode-number"];
-  if ([...options.keys()].some((key) => !allowed.includes(key))) {
-    throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Media Item mutation option.", 2);
-  }
-  let mutationKey: string;
-  try {
-    mutationKey = parseMutationKey(options.get("--key"));
-  } catch (error) {
-    if (error instanceof InvalidMutationKeyError) {
-      throw new CommandFailure("INVALID_MUTATION_KEY", error.message, 2);
-    }
-    throw error;
-  }
-  let command: MediaItemCommand;
-  if (action === "delete") {
-    command = { action: "delete_media_item", mediaItemId: id! };
-  } else {
-    const document = await mediaItemDocument(options, io);
-    const parsed = parseCatalogReviewCommand(
-      action === "create"
-        ? { action: "create_media_item", mediaItem: document }
-        : { action: "update_media_item", mediaItemId: id, changes: document },
-      { mediaItemKinds: MEDIA_ITEM_KINDS },
-    );
-    if (!parsed.ok || (parsed.command.action !== "create_media_item" &&
-        parsed.command.action !== "update_media_item")) {
-      throw new CommandFailure("INVALID_INPUT", parsed.ok ? "Invalid Media Item action." : parsed.error, 2);
-    }
-    command = parsed.command;
-  }
-  return withAccess(io.openAccess, (access) =>
-    createApplicationOperations(access).mutateMediaItem({
-      mutationKey,
-      command,
-      ...(options.has("--acknowledge") ? { acknowledgedRevision: options.get("--acknowledge") } : {}),
-    }));
 }
 
 

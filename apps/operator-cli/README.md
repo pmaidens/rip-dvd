@@ -121,8 +121,8 @@ Every mutation needs a key generated before submission with `generate-key`
 or another stable source. Repeating a key and the same inputs returns the
 original result, including after a process restart. A changed operation or
 input with the same key returns `MUTATION_KEY_CONFLICT`. Ordinary updates
-to an unused Media Item run directly. Updates that affect a referenced item,
-its children, kind, or parent, and all deletes require a preview revision as
+to an unused Media Item run directly. Updates that affect an archive through
+the item or its descendants, change the item's kind or parent, and all deletes require a preview revision as
 `--acknowledge`. Preview an update with the same changes you intend to submit;
 quote the returned revision when passing it to the shell. A stale revision
 returns `STALE_MEDIA_ITEM_REVISION`. A preview shows the proposed result,
