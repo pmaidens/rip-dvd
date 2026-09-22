@@ -1,6 +1,7 @@
 import {
   DomainInvariantError,
   RecordNotFoundError,
+  StaleCatalogRevisionError,
   type ConsistentReadAccess,
   type CorrectedEncodeReplacementInput,
   type CorrectedEncodeReplacementPlan,
@@ -74,7 +75,7 @@ function planCatalogReviewCompletion(
     throw new RecordNotFoundError("original disc archive", archiveId);
   }
   if (archive.updatedAt.toISOString() !== command.catalogRevision) {
-    throw new DomainInvariantError(
+    throw new StaleCatalogRevisionError(
       "Catalog review changed; preview completion again",
     );
   }

@@ -144,6 +144,7 @@ import {
   InvalidStatusTransitionError,
   MutationKeyConflictError,
   RecordNotFoundError,
+  StaleCatalogRevisionError,
   StaleJobAttemptError,
 } from "../errors.js";
 import type { LegacySidecarDataAccess } from "../legacy-sidecar-types.js";
@@ -2949,10 +2950,17 @@ export function createDataAccessInternal(
 
   function validateDiscSelectionsOutsideWriter(
     archiveId: OriginalDiscArchiveId,
+    catalogRevision: Date,
   ): typeof originalDiscArchives.$inferSelect {
     return database.transaction(
-      (transaction) =>
-        requireReviewableDiscSelections(archiveId, transaction),
+      (transaction) => {
+        requireCatalogReviewCompletionRevision(
+          archiveId,
+          catalogRevision,
+          transaction,
+        );
+        return requireReviewableDiscSelections(archiveId, transaction);
+      },
       { behavior: "deferred" },
     );
   }
@@ -2994,11 +3002,40 @@ export function createDataAccessInternal(
 
   function validateArchiveOnlyOutsideWriter(
     archiveId: OriginalDiscArchiveId,
+    catalogRevision: Date,
   ): typeof originalDiscArchives.$inferSelect {
     return database.transaction(
-      (transaction) => requireArchiveOnlyReview(archiveId, transaction),
+      (transaction) => {
+        requireCatalogReviewCompletionRevision(
+          archiveId,
+          catalogRevision,
+          transaction,
+        );
+        return requireArchiveOnlyReview(archiveId, transaction);
+      },
       { behavior: "deferred" },
     );
+  }
+
+  function requireCatalogReviewCompletionRevision(
+    archiveId: OriginalDiscArchiveId,
+    catalogRevision: Date,
+    querySource: Pick<typeof database, "select">,
+  ): void {
+    const archive = requireRow(
+      querySource
+        .select({ updatedAt: originalDiscArchives.updatedAt })
+        .from(originalDiscArchives)
+        .where(eq(originalDiscArchives.id, archiveId))
+        .get(),
+      "original disc archive",
+      archiveId,
+    );
+    if (archive.updatedAt.getTime() !== catalogRevision.getTime()) {
+      throw new StaleCatalogRevisionError(
+        "Catalog review changed; reload before completing review",
+      );
+    }
   }
 
   function readCatalogReviewActionAvailability(
@@ -3035,6 +3072,7 @@ export function createDataAccessInternal(
   function requireCurrentCatalogValidation(
     validatedArchive: typeof originalDiscArchives.$inferSelect,
     querySource: Pick<typeof database, "select">,
+    staleCatalogRevision = false,
   ): typeof originalDiscArchives.$inferSelect {
     const currentArchive = querySource
       .select()
@@ -3046,6 +3084,11 @@ export function createDataAccessInternal(
       .get();
     if (currentArchive) {
       return currentArchive;
+    }
+    if (staleCatalogRevision) {
+      throw new StaleCatalogRevisionError(
+        "Catalog review changed; reload before completing review",
+      );
     }
     throw new DomainInvariantError(
       "Catalog changed during validation; retry the operation",
@@ -6122,12 +6165,13 @@ export function createDataAccessInternal(
         }
         const timestamp = now();
         const validatedArchive = outcome === "reviewed_with_selections"
-          ? validateDiscSelectionsOutsideWriter(id)
-          : validateArchiveOnlyOutsideWriter(id);
+          ? validateDiscSelectionsOutsideWriter(id, catalogRevision)
+          : validateArchiveOnlyOutsideWriter(id, catalogRevision);
         return database.transaction((transaction) => {
           const archive = requireCurrentCatalogValidation(
             validatedArchive,
             transaction,
+            true,
           );
           return completeCatalogReviewTransition(
             transaction,
@@ -6213,8 +6257,8 @@ export function createDataAccessInternal(
         }
         const timestamp = now();
         const validatedArchive = outcome === "reviewed_with_selections"
-          ? validateDiscSelectionsOutsideWriter(id)
-          : validateArchiveOnlyOutsideWriter(id);
+          ? validateDiscSelectionsOutsideWriter(id, catalogRevision)
+          : validateArchiveOnlyOutsideWriter(id, catalogRevision);
         return database.transaction((transaction) => {
           if (options?.mutationKey !== undefined) {
             const replay = readMutationInvocation(
@@ -6229,9 +6273,10 @@ export function createDataAccessInternal(
           const archive = requireCurrentCatalogValidation(
             validatedArchive,
             transaction,
+            true,
           );
           if (archive.updatedAt.getTime() !== catalogRevision.getTime()) {
-            throw new DomainInvariantError(
+            throw new StaleCatalogRevisionError(
               "Catalog review changed; reload before completing review",
             );
           }

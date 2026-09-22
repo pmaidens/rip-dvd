@@ -10,6 +10,7 @@ import {
   MEDIA_ITEM_KINDS,
   MutationKeyConflictError,
   RecordNotFoundError,
+  StaleCatalogRevisionError,
   type DataAccess,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
@@ -128,11 +129,12 @@ function withCompletionAccess<T>(
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("NOT_FOUND", error.message, 2);
     }
+    if (error instanceof StaleCatalogRevisionError) {
+      throw new CommandFailure("STALE_CATALOG_REVISION", error.message, 2);
+    }
     if (error instanceof DomainInvariantError) {
       throw new CommandFailure(
-        error.message.includes("Catalog review changed;")
-          ? "STALE_CATALOG_REVISION"
-          : "REVIEW_COMPLETION_REJECTED",
+        "REVIEW_COMPLETION_REJECTED",
         error.message,
         2,
       );

@@ -321,6 +321,70 @@ it("accepts completion plans from files and rejects stale revisions and invalid 
   reader.close();
 });
 
+it("reports stale revisions before changed outcome eligibility", async () => {
+  const reviewed = fixture();
+  const reviewedPlan = await reviewPlan(reviewed.current, reviewed.archive.id);
+  const reviewedCommand = {
+    action: "complete_review",
+    catalogRevision: reviewedPlan.catalogRevision,
+    outcome: "reviewed_with_selections",
+    replacementEncodes: [],
+  };
+  const reviewedPreview = (await reviewed.current.run([
+    "catalog-review", "preview-completion", reviewed.archive.id,
+    "--json", JSON.stringify(reviewedCommand),
+  ])).result as { catalogRevision: string; previewToken: string };
+  const reviewedAccess = reviewed.current.openAccess();
+  reviewedAccess.catalog.deleteDiscSelection(reviewed.correctedSelection.id);
+  reviewedAccess.close();
+  const reviewedResult = await reviewed.current.run([
+    "catalog-review", "complete", reviewed.archive.id,
+    "--key", key(4), "--revision", reviewedPreview.catalogRevision,
+    "--preview-token", reviewedPreview.previewToken, "--acknowledge",
+    "--json", JSON.stringify(reviewedCommand),
+  ]);
+  expect(reviewedResult.result).toMatchObject({
+    error: { code: "STALE_CATALOG_REVISION" },
+  });
+
+  const archiveOnly = fixture();
+  const archiveOnlyAccess = archiveOnly.current.openAccess();
+  archiveOnlyAccess.catalog.deleteDiscSelection(
+    archiveOnly.correctedSelection.id,
+  );
+  archiveOnlyAccess.close();
+  const archiveOnlyPlan = await reviewPlan(
+    archiveOnly.current,
+    archiveOnly.archive.id,
+  );
+  const archiveOnlyCommand = {
+    action: "complete_review",
+    catalogRevision: archiveOnlyPlan.catalogRevision,
+    outcome: "archive_only",
+    replacementEncodes: [],
+  };
+  const archiveOnlyPreview = (await archiveOnly.current.run([
+    "catalog-review", "preview-completion", archiveOnly.archive.id,
+    "--json", JSON.stringify(archiveOnlyCommand),
+  ])).result as { catalogRevision: string; previewToken: string };
+  const changedAccess = archiveOnly.current.openAccess();
+  changedAccess.catalog.createDiscSelection({
+    originalDiscArchiveId: archiveOnly.archive.id,
+    mediaItemId: archiveOnly.correctedSelection.mediaItemId,
+    sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+  });
+  changedAccess.close();
+  const archiveOnlyResult = await archiveOnly.current.run([
+    "catalog-review", "complete", archiveOnly.archive.id,
+    "--key", key(5), "--revision", archiveOnlyPreview.catalogRevision,
+    "--preview-token", archiveOnlyPreview.previewToken, "--acknowledge",
+    "--json", JSON.stringify(archiveOnlyCommand),
+  ]);
+  expect(archiveOnlyResult.result).toMatchObject({
+    error: { code: "STALE_CATALOG_REVISION" },
+  });
+});
+
 it("binds failed output-reservation releases to the accepted preview", async () => {
   const { current, archive, predecessor, partialCleanupClaim } = fixture({
     predecessorOutcome: "failed_cleanup_pending",
