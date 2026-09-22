@@ -109,3 +109,57 @@ it("retains partial findings and marks a bounded runtime result incomplete", asy
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+it("settles a runtime timeout while bounded records are still loading", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "rip-dvd-archive-audit-worker-"));
+  const databasePath = join(directory, "catalog.sqlite");
+  const access = createLegacySidecarDataAccess({
+    databasePath,
+    mediaLibraryPath: directory,
+    originalsLibraryPath: directory,
+  });
+  try {
+    const submitted = access.archiveAudits.submit({
+      mutationKey: "synthetic-record-loading-timeout",
+      bounds: {
+        recordLimit: 1,
+        concurrency: 1,
+        fileTimeoutMs: 5_000,
+        runtimeTimeoutMs: 25,
+      },
+    });
+
+    expect(await pollArchiveAudit({
+      access,
+      databasePath,
+      originalsLibraryPath: directory,
+      dependencies: {
+        readRecords: async (_path, _limit, signal) =>
+          new Promise((_, reject) => {
+            signal.addEventListener(
+              "abort",
+              () => reject(signal.reason),
+              { once: true },
+            );
+          }),
+        createFileInspector: () => {
+          throw new Error("file inspection should not begin");
+        },
+      },
+    })).toBe(true);
+
+    expect(access.archiveAudits.find(submitted.id)).toMatchObject({
+      status: "completed",
+      progressPhase: "completed",
+      recordCount: null,
+      recordsProcessed: 0,
+      truncated: null,
+      resultStatus: "incomplete",
+      incompleteReason: "runtime_timeout",
+      findings: [],
+    });
+  } finally {
+    access.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
