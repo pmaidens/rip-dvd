@@ -1548,10 +1548,6 @@ export interface FilesystemVerificationAccess {
     offset?: number;
   }): OriginalDiscArchive[];
   listEncodeJobOutputs(options: { limit: number; offset?: number }): EncodeJob[];
-  verifyOriginalDiscArchive(
-    id: OriginalDiscArchiveId,
-  ): Promise<OriginalDiscArchive>;
-  verifyEncodeJobOutput(id: EncodeJobId): Promise<EncodeJob>;
 }
 
 export interface WorkerIncidentAccess {

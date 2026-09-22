@@ -4,6 +4,8 @@ This package is the only runtime persistence boundary for rip-dvd. Its public
 interface speaks in Optical Drives, Disc Inspections, Detected Discs, Archive
 Requests, Original Disc Archives, Media Items, Disc Selections, Encoding
 Profiles, Archive Jobs, Encode Jobs, and Retained Encode Outputs.
+Filesystem Verification Runs are durable diagnostic aggregates in the same
+facade.
 Drizzle tables, SQL, SQLite connections, and transaction objects remain
 private. The migration-only `@rip-dvd/data-access/legacy-sidecars` entrypoint is
 the sole format-named exception; it converts legacy persistence into those
@@ -16,6 +18,14 @@ foreign keys, normal synchronization, and a 5000 ms busy timeout, then applies
 the checked-in Drizzle migrations. A short-lived lock file beside the database
 serializes first-run migrations across web and worker processes; stale locks
 expire after five minutes. Opening an already-migrated file is safe.
+
+Filesystem Verification Runs require a caller-supplied mutation key and replay
+the original submission for the same semantic input. The Archive Worker claims
+queued runs with opaque attempt tokens, renews the one-minute lease while a
+probe is active, and fences completion and failure by that token. Each recovery
+pass requeues at most 100 expired claims in deterministic order. The shared
+operations interface exposes bounded list, detail, and wait reads by durable
+run ID; verification results never expose recorded paths or raw diagnostics.
 
 `catalog.reconcileOpticalDrives()` applies one complete discovery snapshot in a
 short transaction. Seen drives become present and advance `lastSeenAt`; drives

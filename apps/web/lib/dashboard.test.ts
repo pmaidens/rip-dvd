@@ -40,6 +40,7 @@ import {
 } from "../test/archive-job-fixture";
 import {
   completeCatalogReview,
+  executeFilesystemVerificationForTest,
   useDataAccessFixture,
   withSnapshotOverrides,
 } from "../test/data-access-fixture";
@@ -511,10 +512,12 @@ describe("readDashboardSnapshot", () => {
       fingerprint: reviewDisc.fingerprint,
     });
 
-    await access.filesystemVerification.verifyEncodeJobOutput(job.id);
-    await access.filesystemVerification.verifyOriginalDiscArchive(
-      reviewArchive.id,
-    );
+    await executeFilesystemVerificationForTest(access, {
+      target: "encode_job_output", targetId: job.id,
+    });
+    await executeFilesystemVerificationForTest(access, {
+      target: "original_disc_archive", targetId: reviewArchive.id,
+    });
     const dashboard = readDashboardSnapshot(access, { activityLimit: 20 });
 
     expect(dashboard.encodeJobs).toEqual({

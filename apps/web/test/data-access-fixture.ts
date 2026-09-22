@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   type ConsistentReadAccess,
   type DataAccess,
+  type FilesystemVerificationTargetReference,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import {
@@ -23,6 +24,21 @@ type SnapshotOverrides = {
   workerIncidents?: Partial<ConsistentReadAccess["workerIncidents"]>;
   filesystemVerification?: Partial<ConsistentReadAccess["filesystemVerification"]>;
 };
+
+let verificationInvocation = 0;
+
+export async function executeFilesystemVerificationForTest(
+  access: DataAccess,
+  target: FilesystemVerificationTargetReference,
+): Promise<void> {
+  const run = access.filesystemVerification.submit({
+    mutationKey: `web-verification-test-${verificationInvocation++}`,
+    ...target,
+  });
+  const claim = access.filesystemVerification.claimNext();
+  if (claim?.id !== run.id) throw new Error("Expected queued filesystem verification");
+  await access.filesystemVerification.execute(claim);
+}
 
 export function completeCatalogReview(
   access: DataAccess,

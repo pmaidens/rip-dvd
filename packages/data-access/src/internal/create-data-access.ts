@@ -12257,67 +12257,6 @@ export function createDataAccessInternal(
           .all()
           .reverse();
       },
-      async verifyOriginalDiscArchive(id) {
-        const archive = requireRow(
-          database
-            .select()
-            .from(originalDiscArchives)
-            .where(eq(originalDiscArchives.id, id))
-            .get(),
-          "original disc archive",
-          id,
-        );
-        const verification = await inspectFilesystemPath(
-          archive.archivePath,
-          originalsVerificationRoot,
-          archive.sizeBytes ?? undefined,
-        );
-        return requireRow(
-          database
-            .update(originalDiscArchives)
-            .set(verification)
-            .where(
-              and(
-                eq(originalDiscArchives.id, id),
-                eq(originalDiscArchives.archivePath, archive.archivePath),
-              ),
-            )
-            .returning()
-            .get(),
-          "original disc archive",
-          id,
-        );
-      },
-      async verifyEncodeJobOutput(id) {
-        const job = requireRow(
-          database
-            .select()
-            .from(encodeJobs)
-            .where(eq(encodeJobs.id, id))
-            .get(),
-          "encode job",
-          id,
-        );
-        const verification = await inspectFilesystemPath(
-          job.outputPath,
-          mediaVerificationRoot,
-        );
-        return requireRow(
-          database
-            .update(encodeJobs)
-            .set(verification)
-            .where(
-              and(
-                eq(encodeJobs.id, id),
-                eq(encodeJobs.outputPath, job.outputPath),
-              ),
-            )
-            .returning()
-            .get(),
-          "encode job",
-          id,
-        );
-      },
     },
 
     legacySidecars: legacySidecarMigration
