@@ -519,7 +519,10 @@ function runProfileCommand(name: string, args: readonly string[], openAccess: Co
   if (!definition) {
     throw new CommandFailure("UNKNOWN_COMMAND", "Unknown command.", 2);
   }
-  const options = profileOptions(args, definition.inputs.options);
+  const allowedOptions: readonly string[] = definition.inputs.options;
+  const options = profileOptions(args, allowedOptions);
+  const mutationKey = allowedOptions.includes("--key")
+    ? mutationKeyFromOptions(options) : undefined;
   let access: DataAccess | undefined;
   try {
     access = openAccess();
@@ -529,13 +532,13 @@ function runProfileCommand(name: string, args: readonly string[], openAccess: Co
         return operations.listEncodingProfiles();
       case "create-encoding-profile":
         return operations.createEncodingProfile({
-          mutationKey: mutationKeyFromOptions(options), key: options.get("--profile-key"),
+          mutationKey, key: options.get("--profile-key"),
           displayName: options.get("--display-name"),
           settings: { preset: options.get("--preset"), container: "mkv" },
         });
       case "version-encoding-profile":
         return operations.createEncodingProfileVersion({
-          mutationKey: mutationKeyFromOptions(options), sourceProfileId: options.get("--source-profile-id"),
+          mutationKey, sourceProfileId: options.get("--source-profile-id"),
           settings: { preset: options.get("--preset"), container: "mkv" },
         });
       case "preview-encoding-profile-state":
@@ -547,7 +550,7 @@ function runProfileCommand(name: string, args: readonly string[], openAccess: Co
       case "activate-encoding-profile":
       case "deactivate-encoding-profile":
         return operations.setEncodingProfileActive({
-          mutationKey: mutationKeyFromOptions(options), id: options.get("--id"),
+          mutationKey, id: options.get("--id"),
           isActive: name === "activate-encoding-profile",
           expectedRevision: options.get("--revision"),
           acknowledge: options.has("--acknowledge"),

@@ -679,6 +679,26 @@ it("generates a key without submitting work and rejects a missing key before ope
   expect(JSON.parse(stdout.join(""))).toMatchObject({ error: { code: "INVALID_MUTATION_KEY" } });
 });
 
+it("rejects missing Encoding Profile mutation keys before opening SQLite", async () => {
+  for (const args of [
+    ["create-encoding-profile", "--profile-key", "synthetic", "--display-name", "Synthetic", "--preset", "Fast 480p30"],
+    ["version-encoding-profile", "--source-profile-id", "synthetic-id", "--preset", "Fast 480p30"],
+    ["activate-encoding-profile", "--id", "synthetic-id", "--revision", "synthetic-revision", "--acknowledge"],
+    ["deactivate-encoding-profile", "--id", "synthetic-id", "--revision", "synthetic-revision", "--acknowledge"],
+  ]) {
+    let opened = false;
+    const stdout: string[] = [];
+    const exitCode = await runCommand(args, {
+      openAccess: () => { opened = true; throw new Error("unexpected open"); },
+      stdout: (text) => stdout.push(text),
+      stderr: () => {},
+    });
+    expect(exitCode).toBe(2);
+    expect(opened).toBe(false);
+    expect(JSON.parse(stdout.join(""))).toMatchObject({ error: { code: "INVALID_MUTATION_KEY" } });
+  }
+});
+
 it("replays the original Archive Request outcome after a lost response and restart", async () => {
   const current = fixture();
   const detectedDiscId = addScannedDisc(current, "synthetic-replay-disc");
