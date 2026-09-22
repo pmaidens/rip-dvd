@@ -1080,6 +1080,7 @@ const WORKER_INCIDENT_RECOVERY_AREA_LABELS: Record<
   string
 > = {
   expired_archive_job_claim: "Expired Archive Job claim",
+  filesystem_verification: "Filesystem verification",
   active_publication: "Active publication",
   expired_publication_mutation: "Expired publication mutation",
   expired_encode_job_claim: "Expired Encode Job claim",

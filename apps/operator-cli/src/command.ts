@@ -349,21 +349,22 @@ function runOperation(
   }
 }
 
-function submissionInputs(args: readonly string[]): {
-  mutationKey: string;
-  detectedDiscId: string;
-} {
+function mutationOptions(
+  args: readonly string[],
+  allowed: readonly string[],
+  invalidOptionsMessage: string,
+): { options: Map<string, string>; mutationKey: string } {
   const options = new Map<string, string>();
   for (let index = 0; index < args.length; index += 2) {
     const name = args[index];
     const value = args[index + 1];
     if (
-      (name !== "--key" && name !== "--detected-disc-id") ||
+      !allowed.includes(name) ||
       value === undefined ||
       value.startsWith("--") ||
       options.has(name)
     ) {
-      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Archive Request options.", 2);
+      throw new CommandFailure("INVALID_ARGUMENTS", invalidOptionsMessage, 2);
     }
     options.set(name, value);
   }
@@ -376,6 +377,16 @@ function submissionInputs(args: readonly string[]): {
     }
     throw error;
   }
+  return { options, mutationKey };
+}
+
+function submissionInputs(args: readonly string[]): {
+  mutationKey: string;
+  detectedDiscId: string;
+} {
+  const { options, mutationKey } = mutationOptions(
+    args, ["--key", "--detected-disc-id"], "Invalid Archive Request options.",
+  );
   const detectedDiscId = options.get("--detected-disc-id")?.trim();
   if (!detectedDiscId) {
     throw new CommandFailure("INVALID_ARGUMENTS", "Detected Disc ID is required.", 2);
@@ -420,25 +431,9 @@ function submitArchiveRequest(
 }
 
 function verificationInputs(args: readonly string[]) {
-  const options = new Map<string, string>();
-  for (let index = 0; index < args.length; index += 2) {
-    const name = args[index];
-    const value = args[index + 1];
-    if ((name !== "--key" && name !== "--target" && name !== "--id") ||
-      value === undefined || value.startsWith("--") || options.has(name)) {
-      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid verification options.", 2);
-    }
-    options.set(name, value);
-  }
-  let mutationKey: string;
-  try {
-    mutationKey = parseMutationKey(options.get("--key"));
-  } catch (error) {
-    if (error instanceof InvalidMutationKeyError) {
-      throw new CommandFailure("INVALID_MUTATION_KEY", error.message, 2);
-    }
-    throw error;
-  }
+  const { options, mutationKey } = mutationOptions(
+    args, ["--key", "--target", "--id"], "Invalid verification options.",
+  );
   const target = options.get("--target");
   const targetId = options.get("--id")?.trim();
   if ((target !== "original_disc_archive" && target !== "encode_job_output") ||

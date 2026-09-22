@@ -123,6 +123,7 @@ services:
       - "${RIP_DVD_ARCHIVE_CSS_DEVICE_PATH:-/dev/sg1}:${RIP_DVD_ARCHIVE_CSS_DEVICE_PATH:-/dev/sg1}:r"
     volumes:
       - rip-dvd-data:/data
+      - ${RIP_DVD_MEDIA_LIBRARY_HOST_PATH:-rip-dvd-media}:/media/movies:ro
       - ${RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH:-rip-dvd-originals}:/media/originals
     restart: unless-stopped
 

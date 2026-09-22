@@ -204,8 +204,8 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/* \
   && lsblk --json --output PATH,TYPE,TRAN,VENDOR,MODEL,SERIAL >/dev/null \
   && node -e "const { constants } = require('node:fs'); if (!Number.isInteger(constants.O_NONBLOCK)) process.exit(1)"
-RUN mkdir --parents /media/originals \
-  && chown node:node /media/originals
+RUN mkdir --parents /media/movies /media/originals \
+  && chown node:node /media/movies /media/originals
 COPY --from=dvdcss-reader-builder /usr/local/bin/rip-dvd-dvdcss-reader /usr/local/bin/rip-dvd-dvdcss-reader
 COPY --from=dvdcss-reader-builder /usr/local/lib/libdvdcss.so.2.4.0 /usr/local/lib/libdvdcss.so.2
 COPY --from=dvdcss-reader-builder /usr/local/lib/libdvdcss-sg-io.so.0 /usr/local/lib/libdvdcss-sg-io.so.0

@@ -25,6 +25,7 @@ import {
   requestArchiveApproval,
   requestArchiveRequestCancellation,
   requestFilesystemVerification,
+  waitForFilesystemVerificationRun,
   type DashboardLoadState,
 } from "./operations-dashboard";
 import {
@@ -37,6 +38,20 @@ vi.mock("../lib/dashboard-activity", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../lib/dashboard-activity")>();
   return { ...actual, watchDashboardActivity: vi.fn() };
+});
+
+it("reports a verification run as pending when the bounded web wait expires", async () => {
+  vi.useFakeTimers();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = vi.fn(async () => Response.json({ item: { status: "running" } }));
+  try {
+    const waiting = waitForFilesystemVerificationRun("synthetic-run");
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(await waiting).toBe("pending");
+  } finally {
+    globalThis.fetch = originalFetch;
+    vi.useRealTimers();
+  }
 });
 
 const sectionNames = [

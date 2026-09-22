@@ -13,6 +13,7 @@ import {
   type EncodeJob,
   type EncodeJobId,
   type FilesystemVerificationRun,
+  type FilesystemVerificationRunId,
   type OriginalDiscArchive,
   type OriginalDiscArchiveId,
   type OpticalDriveId,
@@ -415,7 +416,7 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
       return incident ? visibleIncident(incident) : null;
     }
     case "filesystem-verifications": {
-      const run = access.filesystemVerification.find(id);
+      const run = access.filesystemVerification.find(id as FilesystemVerificationRunId);
       return run === null ? null : visibleVerificationRun(run);
     }
   }

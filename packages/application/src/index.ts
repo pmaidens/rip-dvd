@@ -9,6 +9,7 @@ import type {
   EncodingProfileId,
   DiscInspectionId,
   FilesystemVerificationTarget,
+  EncodeJobId,
   OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 
@@ -253,7 +254,10 @@ export function createApplicationOperations(
       if (targetId.length === 0 || targetId.length > 256) {
         throw new RangeError("Invalid verification target ID.");
       }
-      const run = access.filesystemVerification.submit({ mutationKey, target: input.target, targetId });
+      const run = access.filesystemVerification.submit({
+        mutationKey, target: input.target,
+        targetId: targetId as OriginalDiscArchiveId | EncodeJobId,
+      });
       return { verificationRun: {
         id: run.id,
         target: run.target,

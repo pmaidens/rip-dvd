@@ -1782,7 +1782,7 @@ export async function requestFilesystemVerification(
   return body.verificationRun.id;
 }
 
-async function waitForFilesystemVerificationRun(id: string): Promise<void> {
+export async function waitForFilesystemVerificationRun(id: string): Promise<"completed" | "pending"> {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const response = await fetch(`/api/operations?kind=filesystem-verifications&id=${encodeURIComponent(id)}`, {
@@ -1790,10 +1790,11 @@ async function waitForFilesystemVerificationRun(id: string): Promise<void> {
     });
     if (!response.ok) throw new Error("Verification run is unavailable");
     const body = await response.json() as { item?: { status?: string } };
-    if (body.item?.status === "completed") return;
+    if (body.item?.status === "completed") return "completed";
     if (body.item?.status === "failed") throw new Error("Verification run failed");
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
+  return "pending";
 }
 
 interface DashboardMutationRunnerOptions<Id extends string> {
@@ -2002,7 +2003,32 @@ export function OperationsDashboard({
   >(null);
   const [filesystemVerificationFailed, setFilesystemVerificationFailed] =
     useState(false);
+  const [pendingFilesystemVerification, setPendingFilesystemVerification] =
+    useState<{ id: string; targetKey: string } | null>(null);
   const verificationSubmissionKeys = React.useRef(new Map<string, string>());
+  React.useEffect(() => {
+    if (pendingFilesystemVerification === null) return;
+    let polling = false;
+    const timer = setInterval(() => {
+      if (polling) return;
+      polling = true;
+      void fetch(`/api/operations?kind=filesystem-verifications&id=${encodeURIComponent(pendingFilesystemVerification.id)}`, {
+        cache: "no-store",
+      }).then(async (response) => {
+        if (!response.ok) return;
+        const body = await response.json() as { item?: { status?: string } };
+        if (body.item?.status === "completed" || body.item?.status === "failed") {
+          clearInterval(timer);
+          setPendingFilesystemVerification(null);
+          setFilesystemVerificationFailed(body.item.status === "failed");
+          setRequestNumber((value) => value + 1);
+        }
+      }).catch(() => {
+        // A disconnected browser can resume polling when the connection returns.
+      }).finally(() => { polling = false; });
+    }, 2_000);
+    return () => clearInterval(timer);
+  }, [pendingFilesystemVerification]);
   const [approveDetectedDisc] = useState(() =>
     createDashboardMutationRunner({
       request: requestArchiveApproval,
@@ -2172,7 +2198,7 @@ export function OperationsDashboard({
     target: FilesystemVerificationTarget,
     id: string,
   ) => {
-    if (verifyingFilesystemTarget !== null) {
+    if (verifyingFilesystemTarget !== null || pendingFilesystemVerification !== null) {
       return;
     }
     const targetKey = `${target}:${id}`;
@@ -2183,8 +2209,12 @@ export function OperationsDashboard({
       verificationSubmissionKeys.current.set(targetKey, mutationKey);
       const runId = await requestFilesystemVerification(target, id, fetch, mutationKey);
       verificationSubmissionKeys.current.delete(targetKey);
-      await waitForFilesystemVerificationRun(runId);
-      setRequestNumber((value) => value + 1);
+      const outcome = await waitForFilesystemVerificationRun(runId);
+      if (outcome === "pending") {
+        setPendingFilesystemVerification({ id: runId, targetKey });
+      } else {
+        setRequestNumber((value) => value + 1);
+      }
     } catch {
       setFilesystemVerificationFailed(true);
     } finally {
@@ -2357,11 +2387,18 @@ export function OperationsDashboard({
         </p>
       ) : null}
 
+      {pendingFilesystemVerification ? (
+        <p role="status">
+          Filesystem verification is still running (run {pendingFilesystemVerification.id}).
+          This page will update when it finishes.
+        </p>
+      ) : null}
+
       {page === "verification" ? (
         <FilesystemVerificationInventory
           refreshKey={requestNumber}
           onVerify={(target, id) => void verifyFilesystem(target, id)}
-          verifyingTarget={verifyingFilesystemTarget}
+          verifyingTarget={verifyingFilesystemTarget ?? pendingFilesystemVerification?.targetKey ?? null}
         />
       ) : page === "overview" ? (
         <ActionOverview state={actionOverview} />

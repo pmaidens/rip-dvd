@@ -83,16 +83,16 @@ export type FilesystemVerificationStatus =
 export type FilesystemVerificationTarget = "original_disc_archive" | "encode_job_output";
 export type FilesystemVerificationRunStatus = "queued" | "running" | "completed" | "failed";
 export interface FilesystemVerificationRun {
-  id: string;
+  id: FilesystemVerificationRunId;
   target: FilesystemVerificationTarget;
-  targetId: string;
+  targetId: OriginalDiscArchiveId | EncodeJobId;
   status: FilesystemVerificationRunStatus;
   progressPhase: "queued" | "checking" | "completed";
   resultStatus: FilesystemVerificationStatus | null;
   resultMessage: string | null;
   verifiedAt: Date | null;
   failureCode: string | null;
-  claimToken: string | null;
+  claimToken: FilesystemVerificationClaimToken | null;
   claimedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -135,6 +135,8 @@ export type DiscInspectionClaimToken = DomainId<"DiscInspectionClaim">;
 export type EncodeJobClaimToken = DomainId<"EncodeJobClaim">;
 export type EncodeJobCleanupClaimToken = DomainId<"EncodeJobCleanupClaim">;
 export type WorkerIncidentId = DomainId<"WorkerIncident">;
+export type FilesystemVerificationRunId = DomainId<"FilesystemVerificationRun">;
+export type FilesystemVerificationClaimToken = DomainId<"FilesystemVerificationClaim">;
 
 declare const encodeOutputFilesystemIdentityBrand: unique symbol;
 export type EncodeOutputFilesystemIdentity = string & {
@@ -1531,13 +1533,14 @@ export interface FilesystemVerificationAccess {
   submit(input: {
     mutationKey: string;
     target: FilesystemVerificationTarget;
-    targetId: string;
+    targetId: OriginalDiscArchiveId | EncodeJobId;
   }): FilesystemVerificationRun;
-  find(id: string): FilesystemVerificationRun | null;
+  find(id: FilesystemVerificationRunId): FilesystemVerificationRun | null;
   list(options: { limit: number }): FilesystemVerificationRun[];
   listActive(): FilesystemVerificationRun[];
   claimNext(): FilesystemVerificationRun | null;
   recoverExpiredClaims(): number;
+  renewClaim(claim: FilesystemVerificationRun): boolean;
   execute(claim: FilesystemVerificationRun): Promise<FilesystemVerificationRun>;
   fail(claim: FilesystemVerificationRun): FilesystemVerificationRun | null;
   listOriginalDiscArchives(options: {

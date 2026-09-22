@@ -28,8 +28,20 @@ await runConfiguredAsyncWorker(
       maxActiveCopies: config.archiveWorkerConcurrency,
       stallTimeoutMs: config.archiveCopyStallTimeoutMs,
     });
+    const workers = new AbortController();
+    const stopWorkers = () => workers.abort(signal.reason);
+    signal.addEventListener("abort", stopWorkers, { once: true });
+    if (signal.aborted) stopWorkers();
+    const stopOnFailure = async (work: Promise<void>): Promise<void> => {
+      try {
+        await work;
+      } catch (error) {
+        workers.abort(error);
+        throw error;
+      }
+    };
     try {
-      await Promise.all([runArchiveWorker({
+      const results = await Promise.allSettled([stopOnFailure(runArchiveWorker({
         access,
         concurrency: config.archiveWorkerConcurrency,
         configuredDevicePath: config.archiveDevicePath,
@@ -42,15 +54,19 @@ await runConfiguredAsyncWorker(
         originalsLibraryPath: config.originalsLibraryPath,
         salvageValidator: createNodeDvdSalvageValidator(),
         pollIntervalMs: config.workerPollIntervalMs,
-        signal,
+        signal: workers.signal,
         workerId: `archive-worker:${process.pid}:${randomUUID()}`,
-      }), runFilesystemVerificationWorker({
+      })), stopOnFailure(runFilesystemVerificationWorker({
         access,
         intervalMs: config.workerPollIntervalMs,
         log,
-        signal,
-      })]);
+        signal: workers.signal,
+      }))]);
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
     } finally {
+      workers.abort();
+      signal.removeEventListener("abort", stopWorkers);
       access.close();
     }
   },

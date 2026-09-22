@@ -135,7 +135,12 @@ describe("explicit filesystem verification", () => {
     expect(reconnected.filesystemVerification.submit(input)).toEqual(submitted);
     expect(reconnected.filesystemVerification.find(submitted.id)?.status).toBe("running");
     vi.setSystemTime(new Date("2026-01-01T00:00:16.000Z"));
+    expect(reconnected.filesystemVerification.renewClaim(stale)).toBe(true);
+    vi.setSystemTime(new Date("2026-01-01T00:01:01.000Z"));
+    expect(reconnected.filesystemVerification.recoverExpiredClaims()).toBe(0);
+    vi.setSystemTime(new Date("2026-01-01T00:01:17.000Z"));
     expect(reconnected.filesystemVerification.recoverExpiredClaims()).toBe(1);
+    expect(reconnected.filesystemVerification.renewClaim(stale)).toBe(false);
     const recovered = reconnected.filesystemVerification.claimNext()!;
     expect(recovered.claimToken).not.toBe(stale.claimToken);
     await expect(reconnected.filesystemVerification.execute(stale))

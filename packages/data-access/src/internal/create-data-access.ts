@@ -185,6 +185,8 @@ import type {
   EncodeJobClaimToken,
   EncodeJobCleanupClaimToken,
   EncodeJobId,
+  FilesystemVerificationRunId,
+  FilesystemVerificationClaimToken,
   EncodeJob,
   EncodeJobFailureOptions,
   EncodeJobFailureReport,
@@ -12085,10 +12087,11 @@ export function createDataAccessInternal(
           } else {
             throw new DomainInvariantError("Unknown verification target");
           }
-          const id = newId<string>();
+          const id = newId<FilesystemVerificationRunId>();
           const timestamp = now();
           const run = requireRow(transaction.insert(filesystemVerificationRuns).values({
-            id, target: input.target, targetId, status: "queued", progressPhase: "queued",
+            id, target: input.target, targetId: targetId as OriginalDiscArchiveId | EncodeJobId,
+            status: "queued", progressPhase: "queued",
             createdAt: timestamp, updatedAt: timestamp,
           }).returning().get(), "verification run", id);
           transaction.insert(mutationInvocations).values({
@@ -12131,8 +12134,17 @@ export function createDataAccessInternal(
           updatedAt: now(),
         }).where(and(
           eq(filesystemVerificationRuns.status, "running"),
-          lt(filesystemVerificationRuns.claimedAt, new Date(now().getTime() - 15_000)),
+          lt(filesystemVerificationRuns.claimedAt, new Date(now().getTime() - 60_000)),
         )).returning({ id: filesystemVerificationRuns.id }).all().length;
+      },
+      renewClaim(claim) {
+        if (claim.claimToken === null) return false;
+        return database.update(filesystemVerificationRuns).set({
+          claimedAt: now(), updatedAt: now(),
+        }).where(and(eq(filesystemVerificationRuns.id, claim.id),
+          eq(filesystemVerificationRuns.status, "running"),
+          eq(filesystemVerificationRuns.claimToken, claim.claimToken)))
+          .returning({ id: filesystemVerificationRuns.id }).get() !== undefined;
       },
       claimNext() {
         return database.transaction((transaction) => {
@@ -12143,7 +12155,7 @@ export function createDataAccessInternal(
           if (!next) return null;
           return transaction.update(filesystemVerificationRuns).set({
             status: "running", progressPhase: "checking",
-            claimToken: newId<string>(), claimedAt: now(), updatedAt: now(),
+            claimToken: newId<FilesystemVerificationClaimToken>(), claimedAt: now(), updatedAt: now(),
           }).where(and(eq(filesystemVerificationRuns.id, next.id),
             eq(filesystemVerificationRuns.status, "queued"))).returning().get() ?? null;
         });

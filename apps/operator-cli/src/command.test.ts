@@ -101,8 +101,13 @@ it("submits filesystem verification with replay, status, and bounded waiting", a
   expect(timedOut.result).toMatchObject({ outcome: "timeout", current: { id, status: "queued" } });
 
   const worker = current.openAccess();
-  const claim = worker.filesystemVerification.claimNext()!;
-  await worker.filesystemVerification.execute(claim);
+  const workerModulePath: string = fileURLToPath(
+    new URL("../../archive-worker/src/filesystem-verification-worker.ts", import.meta.url),
+  );
+  const verificationWorker = await import(workerModulePath) as {
+    pollFilesystemVerification(access: typeof worker): Promise<boolean>;
+  };
+  expect(await verificationWorker.pollFilesystemVerification(worker)).toBe(true);
   worker.close();
   const settled = await current.run([
     "wait", "filesystem-verifications", id, "--timeout-ms", "0",

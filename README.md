@@ -588,7 +588,7 @@ The runtime mount and hardware boundary is deliberately narrow:
 | Service | SQLite data | Media Library | Original Disc Archive | Optical device |
 | --- | --- | --- | --- | --- |
 | web | read/write | read-only verification | read-only verification | none |
-| archive worker | read/write | none | read/write | block device read-only; matching SCSI-generic device for CSS authentication |
+| archive worker | read/write | read-only verification | read/write | block device read-only; matching SCSI-generic device for CSS authentication |
 | encode worker | read/write | read/write | read-only | none |
 | migration | read/write | none | none | none |
 | backup | read/write for WAL locking | none | none | none |
@@ -795,14 +795,15 @@ state from library files or process streams.
 Original Disc Archives and Encode Jobs have explicit **Verify archive file**
 and **Verify output file** actions. A separately paged Filesystem Verification
 inventory keeps every known output and archive reachable after it leaves the
-bounded operations history or completes catalog review. These actions inspect
-only the selected database-recorded path through the read-only library mounts,
-then store an accessible, missing, inaccessible, or unexpected-error result
-with a verification time in SQLite. The probe runs in a short-lived helper
-process with a three-second deadline and a two-helper admission ceiling, so a
-stalled mount cannot block the Next.js request event loop or create unbounded
-work. Media Library root canonicalization happens inside that bounded explicit
-helper; opening the shared data-access facade never touches the Media Library.
+bounded operations history or completes catalog review. These actions queue
+durable verification runs. The archive worker inspects only the selected
+database-recorded path through its library mounts, then stores an accessible,
+missing, inaccessible, or unexpected-error result with a verification time in
+SQLite. The probe runs in a short-lived helper process with a three-second
+deadline and a two-helper admission ceiling, so a stalled mount cannot block
+the archive worker or create unbounded work. Media Library root canonicalization
+happens inside that bounded explicit helper; opening the shared data-access
+facade never touches the Media Library.
 The dashboard and SSE snapshots show stored results and normalized, path-free
 worker failure reasons without exposing raw diagnostics or paths.
 Ordinary dashboard, catalog, and queue reads continue to trust SQLite and never

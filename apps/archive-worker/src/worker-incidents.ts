@@ -10,13 +10,19 @@ interface ArchiveWorkerIncidentOptions {
 
 export type ArchiveWorkerRecoveryArea =
   | "expired_archive_job_claim"
-  | "expired_cancellation";
+  | "expired_cancellation"
+  | "filesystem_verification";
 
 const pollIncident = {
   workerKind: "archive",
   reasonCode: "poll_failure",
   phase: "polling",
   evidence: {},
+} as const;
+
+const filesystemVerificationPollIncident = {
+  ...pollIncident,
+  evidence: { recoveryArea: "filesystem_verification" },
 } as const;
 
 function claimRecoveryIncident(recoveryArea: ArchiveWorkerRecoveryArea) {
@@ -78,6 +84,18 @@ export function resolveArchivePollIncident(
   options: ArchiveWorkerIncidentOptions,
 ): void {
   resolveIncident(options, pollIncident);
+}
+
+export function recordFilesystemVerificationPollIncident(
+  options: ArchiveWorkerIncidentOptions,
+): void {
+  recordIncident(options, filesystemVerificationPollIncident);
+}
+
+export function resolveFilesystemVerificationPollIncident(
+  options: ArchiveWorkerIncidentOptions,
+): void {
+  resolveIncident(options, filesystemVerificationPollIncident);
 }
 
 export function recordArchiveClaimRecoveryIncident(

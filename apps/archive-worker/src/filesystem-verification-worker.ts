@@ -1,19 +1,58 @@
 import { setTimeout as delay } from "node:timers/promises";
 
 import type { DataAccess } from "@rip-dvd/data-access";
+import {
+  recordArchiveClaimRecoveryIncident,
+  recordFilesystemVerificationPollIncident,
+  resolveArchiveClaimRecoveryIncident,
+  resolveFilesystemVerificationPollIncident,
+} from "./worker-incidents.js";
 
-export async function pollFilesystemVerification(access: DataAccess): Promise<boolean> {
-  access.filesystemVerification.recoverExpiredClaims();
-  const claim = access.filesystemVerification.claimNext();
-  if (claim === null) return false;
+export async function pollFilesystemVerification(
+  access: DataAccess,
+  log: (message: string) => void = () => {},
+): Promise<boolean> {
+  const incidentOptions = { access, log };
   try {
-    await access.filesystemVerification.execute(claim);
+    access.filesystemVerification.recoverExpiredClaims();
+    resolveArchiveClaimRecoveryIncident(incidentOptions, "filesystem_verification");
   } catch {
-    // A stale claim cannot change a newer attempt. Other failures retain a
-    // generic outcome; filesystem paths and raw diagnostics stay private.
-    access.filesystemVerification.fail(claim);
+    recordArchiveClaimRecoveryIncident(incidentOptions, "filesystem_verification");
+    throw new Error("Filesystem verification claim recovery failed");
   }
-  return true;
+  try {
+    const claim = access.filesystemVerification.claimNext();
+    if (claim === null) {
+      resolveFilesystemVerificationPollIncident(incidentOptions);
+      return false;
+    }
+    let heartbeatError: unknown;
+    const heartbeat = setInterval(() => {
+      try {
+        if (!access.filesystemVerification.renewClaim(claim)) {
+          throw new Error("Filesystem verification claim expired");
+        }
+      } catch (error) {
+        heartbeatError = error;
+        clearInterval(heartbeat);
+      }
+    }, 5_000);
+    try {
+      await access.filesystemVerification.execute(claim);
+    } catch {
+      // A stale claim cannot change a newer attempt. Other failures retain a
+      // generic outcome; filesystem paths and raw diagnostics stay private.
+      access.filesystemVerification.fail(claim);
+    } finally {
+      clearInterval(heartbeat);
+    }
+    if (heartbeatError !== undefined) throw heartbeatError;
+    resolveFilesystemVerificationPollIncident(incidentOptions);
+    return true;
+  } catch {
+    recordFilesystemVerificationPollIncident(incidentOptions);
+    throw new Error("Filesystem verification poll failed");
+  }
 }
 
 export async function runFilesystemVerificationWorker(input: {
@@ -24,7 +63,7 @@ export async function runFilesystemVerificationWorker(input: {
 }): Promise<void> {
   while (!input.signal.aborted) {
     try {
-      const handled = await pollFilesystemVerification(input.access);
+      const handled = await pollFilesystemVerification(input.access, input.log);
       if (handled) continue;
     } catch {
       input.log("Filesystem verification worker poll failed.");
