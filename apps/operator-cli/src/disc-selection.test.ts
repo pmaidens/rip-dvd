@@ -57,6 +57,12 @@ it("accepts equivalent flags, inline JSON, stdin, and optional file input withou
     sourceIdentity: { kind: "dvd_title", titleNumber: 1 } } });
   const replay = await current.run(["disc-selection", "create", archive.id, "--key", key(1), "--json", json]);
   expect(replay.result).toEqual(created.result);
+  const stdinReplay = await current.run(["disc-selection", "create", archive.id, "--key", key(1), "--stdin"], null, json);
+  expect(stdinReplay.result).toEqual(created.result);
+  const filePath = join(current.mediaLibraryPath, "selection.json");
+  writeFileSync(filePath, json);
+  const fileReplay = await current.run(["disc-selection", "create", archive.id, "--key", key(1), "--file", filePath]);
+  expect(fileReplay.result).toEqual(created.result);
   const conflict = await current.run(["disc-selection", "create", archive.id, "--key", key(1), "--json",
     JSON.stringify({ mediaItemId: first.id, sourceIdentity: { kind: "dvd_title", titleNumber: 2 } })]);
   expect(conflict.result).toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
@@ -64,7 +70,6 @@ it("accepts equivalent flags, inline JSON, stdin, and optional file input withou
   const stdin = await current.run(["disc-selection", "create", archive.id, "--key", key(2), "--stdin"], null,
     JSON.stringify({ mediaItemId: first.id, sourceIdentity: { kind: "dvd_title", titleNumber: 2 } }));
   expect(stdin.exitCode).toBe(0);
-  const filePath = join(current.mediaLibraryPath, "selection.json");
   writeFileSync(filePath, JSON.stringify({ mediaItemId: first.id,
     sourceIdentity: { kind: "dvd_chapters", titleNumber: 1, chapterStart: 1, chapterEnd: 2 } }));
   const file = await current.run(["disc-selection", "create", archive.id, "--key", key(3), "--file", filePath]);
@@ -75,7 +80,7 @@ it("accepts equivalent flags, inline JSON, stdin, and optional file input withou
 });
 
 it("previews consequential changes, rejects stale decisions, and applies eligible updates and deletions", async () => {
-  const { current, archive, first } = fixture();
+  const { current, archive, first, second } = fixture();
   const created = await current.run(["disc-selection", "create", archive.id,
     "--key", key(4), "--media-item-id", first.id, "--source-kind", "main_feature"]);
   expect(created.exitCode).toBe(0);
@@ -83,6 +88,13 @@ it("previews consequential changes, rejects stale decisions, and applies eligibl
   const preview = await current.run(["disc-selection", "preview", archive.id, selectionId]);
   expect(preview.result).toMatchObject({ actionAvailability: { state: "editable" }, historicalEncodeJobCount: 0 });
   const staleRevision = (preview.result as { catalogRevision: string }).catalogRevision;
+  const unreviewedReplacement = await current.run(["disc-selection", "update", archive.id, selectionId,
+    "--key", key(12), "--media-item-id", second.id]);
+  expect(unreviewedReplacement.result).toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
+  const replaced = await current.run(["disc-selection", "update", archive.id, selectionId,
+    "--key", key(12), "--media-item-id", second.id,
+    "--revision", staleRevision, "--acknowledge"]);
+  expect(replaced.result).toMatchObject({ discSelection: { mediaItemId: second.id } });
   const updated = await current.run(["disc-selection", "update", archive.id, selectionId,
     "--key", key(5), "--label", "Main feature"]);
   expect(updated.result).toMatchObject({ discSelection: { label: "Main feature" } });
@@ -120,7 +132,8 @@ it("rejects invalid sources and protects locked Encode Job provenance", async ()
     availableActions: ["correct"] }, affectedEncodeJobs: [{ status: "queued" }] });
   const currentRevision = (preview.result as { catalogRevision: string }).catalogRevision;
   const updated = await current.run(["disc-selection", "update", archive.id, selectionId,
-    "--key", key(9), "--media-item-id", second.id]);
+    "--key", key(9), "--media-item-id", second.id,
+    "--revision", currentRevision, "--acknowledge"]);
   expect(updated.result).toMatchObject({ error: { code: "SELECTION_REJECTED" } });
   const deleted = await current.run(["disc-selection", "delete", archive.id, selectionId,
     "--key", key(10), "--revision", currentRevision, "--acknowledge"]);

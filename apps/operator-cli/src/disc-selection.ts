@@ -176,14 +176,6 @@ export function runDiscSelection(rest: readonly string[], io: SelectionIO): unkn
   if (mutationAction !== "correct" && options.has("--reason")) {
     invalid("A correction reason applies only to correction.");
   }
-  const consequential = mutationAction === "repair" || mutationAction === "correct" || mutationAction === "delete";
-  if (consequential && !options.has("--acknowledge")) {
-    invalid("Acknowledgement of a Disc Selection preview is required.");
-  }
-  if (!consequential && (options.has("--acknowledge") || options.has("--revision"))) {
-    invalid("Preview acknowledgement applies only to repair, correction, and deletion.");
-  }
-  const expectedCatalogRevision = consequential ? revision(options.get("--revision")) : undefined;
   let mutationKey: string;
   try {
     mutationKey = parseMutationKey(options.get("--key"));
@@ -194,6 +186,19 @@ export function runDiscSelection(rest: readonly string[], io: SelectionIO): unkn
     throw error;
   }
   const input = payload(mutationAction, options, io);
+  const changes = input && typeof input === "object" && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : {};
+  const consequential = mutationAction === "repair" || mutationAction === "correct" ||
+    mutationAction === "delete" || (mutationAction === "update" &&
+      ("mediaItemId" in changes || "sourceIdentity" in changes));
+  if (consequential && !options.has("--acknowledge")) {
+    invalid("Acknowledgement of a Disc Selection preview is required.");
+  }
+  if (!consequential && (options.has("--acknowledge") || options.has("--revision"))) {
+    invalid("This Disc Selection change does not require a preview.");
+  }
+  const expectedCatalogRevision = consequential ? revision(options.get("--revision")) : undefined;
   const commandBody = {
     action: mutations[mutationAction],
     ...(selectionId ? { discSelectionId: selectionId } : {}),

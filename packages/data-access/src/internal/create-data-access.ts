@@ -6405,6 +6405,9 @@ export function createDataAccessInternal(
       },
 
       mutateDiscSelection(input) {
+        if (activeDiscSelectionTransaction !== null) {
+          throw new DomainInvariantError("Nested Disc Selection mutations are unavailable");
+        }
         const { mutation, originalDiscArchiveId, mutationKey, expectedCatalogRevision } = input;
         const semanticInput = JSON.stringify({ originalDiscArchiveId, expectedCatalogRevision, mutation });
         return database.transaction((transaction) => {
@@ -6461,6 +6464,7 @@ export function createDataAccessInternal(
               throw new RecordNotFoundError("disc selection", mutation.discSelectionId);
             }
           }
+          const previousTransaction = activeDiscSelectionTransaction;
           activeDiscSelectionTransaction = transaction;
           try {
             const result = (() => {
@@ -6493,7 +6497,7 @@ export function createDataAccessInternal(
             }
             return result;
           } finally {
-            activeDiscSelectionTransaction = null;
+            activeDiscSelectionTransaction = previousTransaction;
           }
         }, { behavior: "immediate" });
       },

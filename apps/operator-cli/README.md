@@ -55,9 +55,10 @@ rip-dvd-operator disc-selection delete <archive-id> <selection-id> --key <key> \
 
 `create`, `update`, `repair`, `correct`, and `delete` require a previously
 chosen mutation key. Repeating an identical invocation returns its original
-result. Reusing the key with different inputs fails. `repair`, `correct`, and
-`delete` also require the revision returned by `preview` and the
-`--acknowledge` flag. A changed Catalog Review revision rejects the decision.
+result. Reusing the key with different inputs fails. `update` with a new Media
+Item or source, `repair`, `correct`, and `delete` also require the revision
+returned by `preview` and the `--acknowledge` flag. A changed Catalog Review
+revision rejects the decision.
 The catalog enforces the same archive binding, source validation, and Encode
 Job provenance rules as the web editor.
 

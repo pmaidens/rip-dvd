@@ -70,7 +70,7 @@ const commandDefinitions = [
     usage: "rip-dvd-operator disc-selection <show|preview|create|update|repair|correct|delete> <archive-id> [selection-id] [options]",
     inputs: {
       arguments: ["action", "archive-id", "selection-id (except create)"],
-      options: ["mutations: --key <key>", "repair, correct, delete: --revision <catalog-revision> --acknowledge",
+      options: ["mutations: --key <key>", "mapping updates, repair, correct, delete: --revision <catalog-revision> --acknowledge",
         "selection input: flags or --json <object> or --stdin or --file <path>"],
     },
     example: "rip-dvd-operator disc-selection create <archive-id> --key <key> --media-item-id <id> --source-kind main_feature",
