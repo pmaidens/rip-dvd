@@ -4,6 +4,7 @@ import { createDataAccess } from "@rip-dvd/data-access";
 import { runConfiguredAsyncWorker } from "@rip-dvd/worker-runtime";
 
 import { runArchiveWorker } from "./archive-worker.js";
+import { runArchiveAuditWorker } from "./archive-audit-worker.js";
 import { createNodeDvdCopyRunner } from "./dvd-archiver.js";
 import { createNodeDvdCompletenessProver } from "./dvd-completeness-prover.js";
 import { createNodeDvdGeometryValidator } from "./dvd-geometry-validator.js";
@@ -58,6 +59,13 @@ await runConfiguredAsyncWorker(
         workerId: `archive-worker:${process.pid}:${randomUUID()}`,
       })), stopOnFailure(runFilesystemVerificationWorker({
         access,
+        intervalMs: config.workerPollIntervalMs,
+        log,
+        signal: workers.signal,
+      })), stopOnFailure(runArchiveAuditWorker({
+        access,
+        databasePath: config.databasePath,
+        originalsLibraryPath: config.originalsLibraryPath,
         intervalMs: config.workerPollIntervalMs,
         log,
         signal: workers.signal,

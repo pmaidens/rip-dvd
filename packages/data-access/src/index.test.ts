@@ -674,6 +674,8 @@ describe("data-access facade", () => {
       .all() as Array<{ name: string; sql: string }>;
     expect(identifierTables.map(({ name }) => name)).toEqual(
       expect.arrayContaining([
+        "archive_audit_findings",
+        "archive_audit_runs",
         "archive_requests",
         "disc_inspection_attempts",
         "disc_inspections",
@@ -684,11 +686,13 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(21);
+    expect(identifierTables).toHaveLength(23);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "legacy_cutover_staged_sidecars"
           ? sql.includes("PRIMARY KEY(`originals_library_path`, `sidecar_path`)")
+          : name === "archive_audit_findings"
+            ? sql.includes("PRIMARY KEY(`archive_audit_run_id`, `sequence`)")
           : name === "mutation_invocations"
             ? sql.includes("mutation_invocations_key_not_null")
             : sql.includes(`${name}_id_not_null`),
@@ -8129,6 +8133,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260922185615_durable-archive-audits",
+      },
+      {
         name: "20260922170551_durable-filesystem-verification",
       },
       {
@@ -8154,9 +8161,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260901172324_glorious_cargill",
-      },
-      {
-        name: "20260828164042_married_lady_ursula",
       },
     ]);
     expect(

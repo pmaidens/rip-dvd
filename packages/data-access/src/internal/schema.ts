@@ -57,6 +57,12 @@ import {
 } from "../encode-job-failure-report.js";
 import type {
   ArchiveRequestId,
+  ArchiveAuditRunId,
+  ArchiveAuditClaimToken,
+  ArchiveAuditRunStatus,
+  ArchiveAuditProgressPhase,
+  ArchiveAuditResultStatus,
+  ArchiveAuditIncompleteReason,
   ArchiveJobId,
   ArchiveJobClaimToken,
   ArchiveReadFailureCategory,
@@ -439,6 +445,83 @@ export const filesystemVerificationRuns = sqliteTable(
             ${table.claimToken} is null and ${table.resultStatus} is not null and ${table.failureCode} is null) or
           (${table.status} = 'failed' and ${table.progressPhase} = 'completed' and
             ${table.claimToken} is null and ${table.resultStatus} is null and ${table.failureCode} is not null)`),
+  ],
+);
+
+export const archiveAuditRuns = sqliteTable(
+  "archive_audit_runs",
+  {
+    id: text("id").$type<ArchiveAuditRunId>().notNull().primaryKey(),
+    status: text("status").$type<ArchiveAuditRunStatus>().notNull(),
+    progressPhase: text("progress_phase").$type<ArchiveAuditProgressPhase>().notNull(),
+    recordLimit: integer("record_limit").notNull(),
+    concurrency: integer("concurrency").notNull(),
+    fileTimeoutMs: integer("file_timeout_ms").notNull(),
+    runtimeTimeoutMs: integer("runtime_timeout_ms").notNull(),
+    recordCount: integer("record_count"),
+    recordsProcessed: integer("records_processed").notNull(),
+    truncated: integer("truncated", { mode: "boolean" }),
+    resultStatus: text("result_status").$type<ArchiveAuditResultStatus>(),
+    incompleteReason: text("incomplete_reason").$type<ArchiveAuditIncompleteReason>(),
+    failureCode: text("failure_code"),
+    claimToken: text("claim_token").$type<ArchiveAuditClaimToken>(),
+    claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
+    startedAt: integer("started_at", { mode: "timestamp_ms" }),
+    completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    check("archive_audit_runs_id_not_null", sql`${table.id} is not null`),
+    index("archive_audit_runs_status_created_idx").on(table.status, table.createdAt, table.id),
+    check("archive_audit_runs_status_check",
+      sql`${table.status} in ('queued', 'running', 'completed', 'failed')`),
+    check("archive_audit_runs_phase_check",
+      sql`${table.progressPhase} in ('queued', 'reading_records', 'auditing', 'completed')`),
+    check("archive_audit_runs_bounds_check",
+      sql`${table.recordLimit} between 1 and 1000 and ${table.concurrency} between 1 and 8 and ${table.fileTimeoutMs} between 1 and 30000 and ${table.runtimeTimeoutMs} between 1 and 600000`),
+    check("archive_audit_runs_progress_check",
+      sql`${table.recordsProcessed} >= 0 and (${table.recordCount} is null or (${table.recordCount} >= 0 and ${table.recordsProcessed} <= ${table.recordCount}))`),
+    check("archive_audit_runs_claim_check",
+      sql`(${table.claimToken} is null) = (${table.claimedAt} is null)`),
+    check("archive_audit_runs_result_check",
+      sql`${table.resultStatus} is null or ${table.resultStatus} in ('complete', 'incomplete')`),
+    check("archive_audit_runs_incomplete_check",
+      sql`(${table.resultStatus} = 'incomplete') = (${table.incompleteReason} is not null) and (${table.incompleteReason} is null or ${table.incompleteReason} = 'runtime_timeout')`),
+    check("archive_audit_runs_state_check", sql`
+      (${table.status} = 'queued' and ${table.progressPhase} = 'queued' and
+        ${table.claimToken} is null and ${table.recordCount} is null and
+        ${table.recordsProcessed} = 0 and ${table.truncated} is null and
+        ${table.resultStatus} is null and ${table.failureCode} is null and
+        ${table.startedAt} is null and ${table.completedAt} is null) or
+      (${table.status} = 'running' and ${table.progressPhase} in ('reading_records', 'auditing') and
+        ${table.claimToken} is not null and ${table.resultStatus} is null and
+        ${table.failureCode} is null and ${table.startedAt} is not null and
+        ${table.completedAt} is null and
+        ((${table.progressPhase} = 'reading_records' and ${table.recordCount} is null and ${table.truncated} is null) or
+         (${table.progressPhase} = 'auditing' and ${table.recordCount} is not null and ${table.truncated} is not null))) or
+      (${table.status} = 'completed' and ${table.progressPhase} = 'completed' and
+        ${table.claimToken} is null and ${table.resultStatus} is not null and
+        ${table.failureCode} is null and ${table.startedAt} is not null and ${table.completedAt} is not null) or
+      (${table.status} = 'failed' and ${table.progressPhase} = 'completed' and
+        ${table.claimToken} is null and ${table.resultStatus} is null and
+        ${table.failureCode} is not null and ${table.startedAt} is not null and ${table.completedAt} is not null)`),
+  ],
+);
+
+export const archiveAuditFindings = sqliteTable(
+  "archive_audit_findings",
+  {
+    archiveAuditRunId: text("archive_audit_run_id").$type<ArchiveAuditRunId>()
+      .notNull().references(() => archiveAuditRuns.id, { onDelete: "cascade" }),
+    sequence: integer("sequence").notNull(),
+    finding: text("finding").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.archiveAuditRunId, table.sequence] }),
+    check("archive_audit_findings_sequence_check", sql`${table.sequence} >= 0`),
+    check("archive_audit_findings_json_check",
+      sql`json_valid(${table.finding}) and json_type(${table.finding}) = 'object'`),
   ],
 );
 

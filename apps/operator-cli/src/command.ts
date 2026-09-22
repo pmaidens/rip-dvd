@@ -112,6 +112,16 @@ const commandDefinitions = [
     example: "rip-dvd-operator submit-filesystem-verification --key 00000000-0000-4000-8000-000000000001 --target original_disc_archive --id <id>",
   },
   {
+    name: "submit-archive-audit",
+    description: "Queue a bounded, read-only Original Disc Archive audit.",
+    usage: "rip-dvd-operator submit-archive-audit --key <key> [--limit 1..1000] [--concurrency 1..8] [--file-timeout-ms 1..30000] [--runtime-timeout-ms 1..600000]",
+    inputs: {
+      arguments: [],
+      options: ["--key", "--limit", "--concurrency", "--file-timeout-ms", "--runtime-timeout-ms"],
+    },
+    example: "rip-dvd-operator submit-archive-audit --key 00000000-0000-4000-8000-000000000001 --limit 100",
+  },
+  {
     name: "encode-queue",
     description: "Read Encode Job options and paged history.",
     usage: "rip-dvd-operator encode-queue [--history-group not_encoded|re_encode] [--query <text>] [--encoding-profile-id <id>] [--selection-offset <n>] [--profile-offset <n>]",
@@ -509,6 +519,55 @@ function submitFilesystemVerification(
       throw new CommandFailure("VERIFICATION_TARGET_NOT_FOUND", "Verification target not found.", 2);
     }
     throw new CommandFailure("VERIFICATION_UNAVAILABLE", "Verification submission is unavailable.", 1);
+  } finally {
+    access?.close();
+  }
+}
+
+function archiveAuditInputs(args: readonly string[]) {
+  const { options, mutationKey } = mutationOptions(
+    args,
+    ["--key", "--limit", "--concurrency", "--file-timeout-ms", "--runtime-timeout-ms"],
+    "Invalid archive audit options.",
+  );
+  const bounded = (name: string, fallback: number, maximum: number) => {
+    const raw = options.get(name);
+    if (raw === undefined) return fallback;
+    const value = positiveInteger(raw);
+    if (value === null || value > maximum) {
+      throw new CommandFailure("INVALID_ARGUMENTS", `Invalid ${name} value.`, 2);
+    }
+    return value;
+  };
+  return {
+    mutationKey,
+    bounds: {
+      recordLimit: bounded("--limit", 100, 1_000),
+      concurrency: bounded("--concurrency", 2, 8),
+      fileTimeoutMs: bounded("--file-timeout-ms", 5_000, 30_000),
+      runtimeTimeoutMs: bounded("--runtime-timeout-ms", 120_000, 600_000),
+    },
+  };
+}
+
+function submitArchiveAudit(
+  input: ReturnType<typeof archiveAuditInputs>,
+  openAccess: CommandIO["openAccess"],
+) {
+  let access: DataAccess | undefined;
+  try {
+    access = openAccess();
+    return createApplicationOperations(access).submitArchiveAudit(input);
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    if (error instanceof MutationKeyConflictError) {
+      throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    throw new CommandFailure(
+      "ARCHIVE_AUDIT_UNAVAILABLE",
+      "Archive audit submission is unavailable.",
+      1,
+    );
   } finally {
     access?.close();
   }
@@ -1032,6 +1091,14 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         return 0;
       }
       emit(io.stdout, submitFilesystemVerification(verificationInputs(rest), io.openAccess));
+      return 0;
+    }
+    if (name === "submit-archive-audit") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+        return 0;
+      }
+      emit(io.stdout, submitArchiveAudit(archiveAuditInputs(rest), io.openAccess));
       return 0;
     }
     if (name === "catalog-review") {

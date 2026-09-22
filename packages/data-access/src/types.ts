@@ -43,6 +43,10 @@ import type {
   DiscSelectionSourceIdentityInput,
 } from "./disc-selection-source-identity.js";
 import type { ArchiveBoundaryEvidence } from "./archive-boundary.js";
+import type {
+  ArchiveAuditCounts,
+  ArchiveAuditFinding,
+} from "./archive-audit-types.js";
 
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
 export type ArchiveIntegrity = (typeof ARCHIVE_INTEGRITIES)[number];
@@ -100,6 +104,38 @@ interface FilesystemVerificationRunBase {
 }
 export type FilesystemVerificationRun = FilesystemVerificationRunBase &
   FilesystemVerificationTargetReference;
+export type ArchiveAuditRunStatus = "queued" | "running" | "completed" | "failed";
+export type ArchiveAuditProgressPhase = "queued" | "reading_records" | "auditing" | "completed";
+export type ArchiveAuditResultStatus = "complete" | "incomplete";
+export type ArchiveAuditIncompleteReason = "runtime_timeout";
+export interface ArchiveAuditBounds {
+  recordLimit: number;
+  concurrency: number;
+  fileTimeoutMs: number;
+  runtimeTimeoutMs: number;
+}
+export interface ArchiveAuditRunSummary {
+  id: ArchiveAuditRunId;
+  status: ArchiveAuditRunStatus;
+  progressPhase: ArchiveAuditProgressPhase;
+  bounds: ArchiveAuditBounds;
+  recordCount: number | null;
+  recordsProcessed: number;
+  truncated: boolean | null;
+  resultStatus: ArchiveAuditResultStatus | null;
+  incompleteReason: ArchiveAuditIncompleteReason | null;
+  failureCode: string | null;
+  claimToken: ArchiveAuditClaimToken | null;
+  claimedAt: Date | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+export interface ArchiveAuditRun extends ArchiveAuditRunSummary {
+  counts: ArchiveAuditCounts;
+  findings: readonly ArchiveAuditFinding[];
+}
 export type RetainedEncodeOutputState =
   (typeof RETAINED_ENCODE_OUTPUT_STATES)[number];
 export type WorkerKind = (typeof WORKER_KINDS)[number];
@@ -140,6 +176,8 @@ export type EncodeJobCleanupClaimToken = DomainId<"EncodeJobCleanupClaim">;
 export type WorkerIncidentId = DomainId<"WorkerIncident">;
 export type FilesystemVerificationRunId = DomainId<"FilesystemVerificationRun">;
 export type FilesystemVerificationClaimToken = DomainId<"FilesystemVerificationClaim">;
+export type ArchiveAuditRunId = DomainId<"ArchiveAuditRun">;
+export type ArchiveAuditClaimToken = DomainId<"ArchiveAuditClaim">;
 
 declare const encodeOutputFilesystemIdentityBrand: unique symbol;
 export type EncodeOutputFilesystemIdentity = string & {
@@ -1555,6 +1593,36 @@ export interface FilesystemVerificationAccess {
   listEncodeJobOutputs(options: { limit: number; offset?: number }): EncodeJob[];
 }
 
+export interface ArchiveAuditAccess {
+  submit(input: { mutationKey: string; bounds: ArchiveAuditBounds }): ArchiveAuditRunSummary;
+  find(id: ArchiveAuditRunId): ArchiveAuditRun | null;
+  list(options: { limit: number }): ArchiveAuditRunSummary[];
+  listActive(): ArchiveAuditRunSummary[];
+  claimNext(): ArchiveAuditRunSummary | null;
+  recoverExpiredClaims(): number;
+  renewClaim(claim: ArchiveAuditRunSummary): boolean;
+  beginAudit(
+    claim: ArchiveAuditRunSummary,
+    input: { recordCount: number; truncated: boolean },
+  ): ArchiveAuditRunSummary;
+  recordFinding(
+    claim: ArchiveAuditRunSummary,
+    input: { index: number; finding: ArchiveAuditFinding },
+  ): void;
+  complete(
+    claim: ArchiveAuditRunSummary,
+    input: { findings: readonly ArchiveAuditFinding[]; resultStatus: "complete" },
+  ): ArchiveAuditRun;
+  completeIncomplete(
+    claim: ArchiveAuditRunSummary,
+    input: {
+      findings: readonly ArchiveAuditFinding[];
+      reason: ArchiveAuditIncompleteReason;
+    },
+  ): ArchiveAuditRun;
+  fail(claim: ArchiveAuditRunSummary): ArchiveAuditRun | null;
+}
+
 export interface WorkerIncidentAccess {
   find(id: WorkerIncidentId): WorkerIncident | null;
   record(input: RecordWorkerIncidentInput): WorkerIncident;
@@ -1614,6 +1682,7 @@ export interface ConsistentReadAccess {
   >;
   readonly workerIncidents: Pick<WorkerIncidentAccess, "find" | "list">;
   readonly filesystemVerification: Pick<FilesystemVerificationAccess, "find" | "list" | "listActive">;
+  readonly archiveAudits: Pick<ArchiveAuditAccess, "find" | "list" | "listActive">;
 }
 
 export interface DataAccess {
@@ -1625,6 +1694,7 @@ export interface DataAccess {
   readonly encodeJobs: EncodeJobAccess;
   readonly workerIncidents: WorkerIncidentAccess;
   readonly filesystemVerification: FilesystemVerificationAccess;
+  readonly archiveAudits: ArchiveAuditAccess;
   readConsistentSnapshot<T>(read: (access: ConsistentReadAccess) => T): T;
   checkHealth(): ServiceHealth;
   close(): void;

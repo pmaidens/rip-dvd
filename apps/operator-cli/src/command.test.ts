@@ -88,6 +88,9 @@ it("submits filesystem verification with replay, status, and bounded waiting", a
   expect((await current.run(args.slice(0, 1))).result).toMatchObject({
     error: { code: "INVALID_MUTATION_KEY" },
   });
+  expect((await current.run([
+    "submit-archive-audit", "--key", "synthetic-invalid-bound", "--limit", "1001",
+  ])).result).toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
   const submitted = await current.run(args);
   expect(submitted.exitCode).toBe(0);
   expect(submitted.result).toMatchObject({ verificationRun: {
@@ -140,6 +143,187 @@ it("submits filesystem verification with replay, status, and bounded waiting", a
   ])).result).toMatchObject({
     outcome: "settled", current: { status: "failed", failureCode: "VERIFICATION_UNAVAILABLE" },
   });
+});
+
+it("submits a bounded archive audit and observes its retained findings after reconnecting", async () => {
+  const current = fixture();
+  const { archive } = seedCatalogReviewForReadFixture(current);
+  const args = [
+    "submit-archive-audit", "--key", "synthetic-archive-audit-key",
+    "--limit", "1", "--concurrency", "1",
+    "--file-timeout-ms", "4000", "--runtime-timeout-ms", "9000",
+  ];
+
+  expect((await current.run(args.slice(0, 1))).result).toMatchObject({
+    error: { code: "INVALID_MUTATION_KEY" },
+  });
+  const submitted = await current.run(args);
+  expect(submitted.exitCode).toBe(0);
+  expect(submitted.result).toMatchObject({ archiveAuditRun: {
+    status: "queued",
+    progress: { phase: "queued", recordsProcessed: 0, recordCount: null },
+    bounds: {
+      recordLimit: 1, concurrency: 1, fileTimeoutMs: 4_000, runtimeTimeoutMs: 9_000,
+    },
+  } });
+  expect((await current.run(args)).result).toEqual(submitted.result);
+
+  const id = (submitted.result as { archiveAuditRun: { id: string } }).archiveAuditRun.id;
+  expect((await current.run(["inspect", "archive-audits", id])).result)
+    .toMatchObject({ item: { id, status: "queued", findings: [] } });
+  expect((await current.run([
+    "wait", "archive-audits", id, "--timeout-ms", "0",
+  ])).exitCode).toBe(3);
+
+  const workerAccess = current.openAccess();
+  const workerModulePath: string = fileURLToPath(
+    new URL("../../archive-worker/src/archive-audit-worker.ts", import.meta.url),
+  );
+  const archiveAuditWorker = await import(workerModulePath) as {
+    pollArchiveAudit(input: {
+      access: typeof workerAccess;
+      databasePath: string;
+      originalsLibraryPath: string;
+      dependencies: {
+        readRecords(path: string, limit: number, signal: AbortSignal): Promise<unknown>;
+        createFileInspector(timeoutMs: number): unknown;
+      };
+    }): Promise<boolean>;
+  };
+  const recordsModulePath: string = fileURLToPath(
+    new URL("../../../packages/data-access/src/archive-audit-records.ts", import.meta.url),
+  );
+  const records = await import(recordsModulePath) as {
+    readArchiveAuditRecords(path: string, limit: number): unknown;
+  };
+  expect(await archiveAuditWorker.pollArchiveAudit({
+    access: workerAccess,
+    databasePath: current.databasePath,
+    originalsLibraryPath: current.originalsLibraryPath,
+    dependencies: {
+      readRecords: async (path, limit) => records.readArchiveAuditRecords(path, limit),
+      createFileInspector: () => ({
+        inspect: async () => ({ actualSizeBytes: null, geometry: null, outcome: "missing_file" }),
+      }),
+    },
+  })).toBe(true);
+  expect(workerAccess.filesystemVerification.list({ limit: 10 })).toEqual([]);
+  workerAccess.close();
+
+  const settled = await current.run([
+    "wait", "archive-audits", id, "--timeout-ms", "0",
+  ]);
+  expect(settled.exitCode).toBe(0);
+  expect(settled.result).toMatchObject({
+    outcome: "settled",
+    current: {
+      id,
+      status: "completed",
+      resultStatus: "complete",
+      truncated: false,
+      findings: [{
+        archiveId: archive.id,
+        classification: "missing_file",
+        diagnosticDetails: expect.arrayContaining([
+          { kind: "original-disc-archives", id: archive.id },
+        ]),
+        availableActions: [{
+          name: "submit-filesystem-verification",
+          eligible: true,
+          requiredInputs: ["mutationKey"],
+          arguments: { target: "original_disc_archive", id: archive.id },
+        }],
+      }],
+    },
+  });
+  expect((await current.run(args)).result).toEqual(submitted.result);
+  expect((await current.run([
+    ...args.slice(0, 3), "--limit", "2", "--concurrency", "1",
+    "--file-timeout-ms", "4000", "--runtime-timeout-ms", "9000",
+  ])).result).toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
+
+  const partialSubmission = await current.run([
+    "submit-archive-audit", "--key", "synthetic-partial-archive-audit-key",
+    "--limit", "2", "--concurrency", "1",
+    "--file-timeout-ms", "4000", "--runtime-timeout-ms", "25",
+  ]);
+  const partialId = (partialSubmission.result as {
+    archiveAuditRun: { id: string };
+  }).archiveAuditRun.id;
+  const page = records.readArchiveAuditRecords(current.databasePath, 1) as {
+    records: Array<Record<string, unknown>>;
+  };
+  const firstRecord = page.records[0]!;
+  const partialWorkerAccess = current.openAccess();
+  let partialInspection = 0;
+  expect(await archiveAuditWorker.pollArchiveAudit({
+    access: partialWorkerAccess,
+    databasePath: current.databasePath,
+    originalsLibraryPath: current.originalsLibraryPath,
+    dependencies: {
+      readRecords: async () => ({
+        records: [firstRecord, {
+          ...firstRecord,
+          archiveId: "archive-synthetic-pending",
+          detectedDiscId: "disc-synthetic-pending",
+          discInspectionId: "inspection-synthetic-pending",
+          mediaGeneration: "generation-synthetic-pending",
+        }],
+        truncated: true,
+      }),
+      createFileInspector: () => ({
+        inspect(_path: string, _root: string, signal: AbortSignal) {
+          partialInspection += 1;
+          if (partialInspection === 1) {
+            return Promise.resolve({
+              actualSizeBytes: null, geometry: null, outcome: "missing_file",
+            });
+          }
+          return new Promise((_, reject) => {
+            signal.addEventListener(
+              "abort",
+              () => reject(signal.reason),
+              { once: true },
+            );
+          });
+        },
+      }),
+    },
+  })).toBe(true);
+  partialWorkerAccess.close();
+
+  expect((await current.run([
+    "wait", "archive-audits", partialId, "--timeout-ms", "0",
+  ])).result).toMatchObject({
+    outcome: "settled",
+    current: {
+      id: partialId,
+      status: "completed",
+      resultStatus: "incomplete",
+      incompleteReason: "runtime_timeout",
+      truncated: true,
+      progress: { phase: "completed", recordCount: 2, recordsProcessed: 1 },
+      findings: [{
+        archiveId: archive.id,
+        classification: "missing_file",
+        diagnosticDetails: expect.arrayContaining([
+          { kind: "original-disc-archives", id: archive.id },
+        ]),
+        availableActions: [expect.objectContaining({
+          name: "submit-filesystem-verification",
+          effect: "read_only_inspection",
+        })],
+      }],
+    },
+  });
+  expect((await current.run(["inspect", "archive-audits", partialId])).result)
+    .toMatchObject({ item: {
+      id: partialId,
+      resultStatus: "incomplete",
+      incompleteReason: "runtime_timeout",
+      progress: { recordCount: 2, recordsProcessed: 1 },
+      findings: [{ archiveId: archive.id, classification: "missing_file" }],
+    } });
 });
 
 it("reports deployment readiness from persisted Optical Drive and Disc Inspection state", async () => {
@@ -758,6 +942,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       "retry-archive-request",
       "retry-disc-inspection",
       "submit-filesystem-verification",
+      "submit-archive-audit",
       "encode-queue",
       "encode-resolve",
       "encode-enqueue",

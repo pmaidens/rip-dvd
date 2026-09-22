@@ -3,6 +3,7 @@ import { encodingProfileQueueBlockingReasons } from "@rip-dvd/data-access";
 import type {
   ConsistentReadAccess,
   DataAccess,
+  ArchiveAuditBounds,
   ArchiveRequestId,
   DetectedDiscId,
   EncodingProfile,
@@ -115,6 +116,8 @@ function readDeploymentReadiness(access: ConsistentReadAccess) {
     .map(({ id, status }) => ({ kind: "encode_job", id, status }));
   const verificationRuns = access.filesystemVerification.listActive()
     .map(({ id, status }) => ({ kind: "filesystem_verification", id, status }));
+  const archiveAudits = access.archiveAudits.listActive()
+    .map(({ id, status }) => ({ kind: "archive_audit", id, status }));
   const opticalDrives = access.catalog.listOpticalDrives().map((drive) => ({
     id: drive.id,
     devicePath: drive.devicePath,
@@ -130,6 +133,7 @@ function readDeploymentReadiness(access: ConsistentReadAccess) {
       ...archiveRequests,
       ...archiveJobs,
       ...encodeJobs,
+      ...archiveAudits,
       ...verificationRuns,
     ],
     opticalDrives,
@@ -298,6 +302,25 @@ export function createApplicationOperations(
         targetId: run.targetId,
         status: run.status,
         progressPhase: run.progressPhase,
+        createdAt: run.createdAt.toISOString(),
+        updatedAt: run.updatedAt.toISOString(),
+      } };
+    },
+    submitArchiveAudit: (input: {
+      mutationKey: unknown;
+      bounds: ArchiveAuditBounds;
+    }) => {
+      const mutationKey = parseMutationKey(input.mutationKey);
+      const run = access.archiveAudits.submit({ mutationKey, bounds: input.bounds });
+      return { archiveAuditRun: {
+        id: run.id,
+        status: run.status,
+        bounds: run.bounds,
+        progress: {
+          phase: run.progressPhase,
+          recordCount: run.recordCount,
+          recordsProcessed: run.recordsProcessed,
+        },
         createdAt: run.createdAt.toISOString(),
         updatedAt: run.updatedAt.toISOString(),
       } };

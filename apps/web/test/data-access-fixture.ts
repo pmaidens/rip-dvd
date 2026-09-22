@@ -23,6 +23,7 @@ type SnapshotOverrides = {
   encodeJobs?: Partial<ConsistentReadAccess["encodeJobs"]>;
   workerIncidents?: Partial<ConsistentReadAccess["workerIncidents"]>;
   filesystemVerification?: Partial<ConsistentReadAccess["filesystemVerification"]>;
+  archiveAudits?: Partial<ConsistentReadAccess["archiveAudits"]>;
 };
 
 let verificationInvocation = 0;
@@ -94,6 +95,10 @@ export function withSnapshotOverrides(
           filesystemVerification: {
             ...snapshotAccess.filesystemVerification,
             ...overrides.filesystemVerification,
+          },
+          archiveAudits: {
+            ...snapshotAccess.archiveAudits,
+            ...overrides.archiveAudits,
           },
         }),
       );
