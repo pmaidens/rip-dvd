@@ -4243,6 +4243,8 @@ export function createDataAccessInternal(
             const outcome = JSON.parse(stored) as ArchiveRequest;
             return {
               ...outcome,
+              rearchiveSourceArchiveId:
+                outcome.rearchiveSourceArchiveId ?? null,
               cancellationRequestedAt: outcome.cancellationRequestedAt === null
                 ? null : new Date(outcome.cancellationRequestedAt),
               fulfilledAt: outcome.fulfilledAt === null
@@ -8999,6 +9001,7 @@ export function createDataAccessInternal(
             )
             .where(
               and(
+                eq(detectedDiscs.discKind, source.archive.discKind),
                 inArray(archiveRequests.status, [
                   "pending",
                   "running",

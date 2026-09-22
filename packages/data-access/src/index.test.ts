@@ -10323,6 +10323,88 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
+  it("normalizes missing lineage when replaying a legacy Archive Request outcome", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/legacy-request-replay",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "synthetic-legacy-request-replay",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const mutationKey = "00000000-0000-4000-8000-000000000339";
+    const original = access.archiveRequests.submit({
+      mutationKey,
+      detectedDiscId: disc.id,
+    });
+    access.close();
+
+    const sqlite = new DatabaseSync(databasePath);
+    const stored = sqlite.prepare(
+      "SELECT outcome FROM mutation_invocations WHERE key = ?",
+    ).get(mutationKey) as { outcome: string };
+    const legacyOutcome = JSON.parse(stored.outcome) as Record<string, unknown>;
+    delete legacyOutcome.rearchiveSourceArchiveId;
+    sqlite.prepare(
+      "UPDATE mutation_invocations SET outcome = ? WHERE key = ?",
+    ).run(JSON.stringify(legacyOutcome), mutationKey);
+    sqlite.close();
+
+    const replayAccess = openTestDatabase(databasePath);
+    expect(replayAccess.archiveRequests.submit({
+      mutationKey,
+      detectedDiscId: disc.id,
+    })).toMatchObject({
+      id: original.id,
+      rearchiveSourceArchiveId: null,
+    });
+    replayAccess.close();
+  });
+
+  it("ignores unrelated active disc kinds when checking re-archive identity", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/rearchive-active-bound",
+      isPresent: true,
+    });
+    const sourceDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "synthetic-bounded-rearchive-source",
+    });
+    access.catalog.updateDetectedDiscStatus(sourceDisc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(sourceDisc.id, "approved");
+    const sourceArchive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: sourceDisc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Synthetic Bounded Source.iso",
+      fingerprint: sourceDisc.fingerprint,
+    });
+    for (let index = 0; index < 257; index += 1) {
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "blu_ray",
+        fingerprint: `synthetic-unrelated-blu-ray-${index}`,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.archiveRequests.create({ detectedDiscId: disc.id });
+    }
+
+    expect(access.archiveRequests.submitRearchive({
+      mutationKey: "00000000-0000-4000-8000-000000000338",
+      sourceArchiveId: sourceArchive.id,
+    })).toMatchObject({
+      rearchiveSourceArchiveId: sourceArchive.id,
+      status: "pending",
+    });
+    access.close();
+  });
+
   it("rejects contradictory cross-drive kinds before archive publication", () => {
     const access = openTestDatabase();
     const firstDrive = access.catalog.upsertOpticalDrive({
