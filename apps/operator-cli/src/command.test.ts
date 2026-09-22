@@ -448,7 +448,9 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
     resolvedDiscSelections: [{ discSelectionId: correctedSelection.id, logicalJob: null }],
   });
 
-  const outputPath = `${current.mediaLibraryPath}/synthetic-encode.mkv`;
+  const outputPath = (queue.result as {
+    selections: { id: string; suggestedOutputPath: string }[];
+  }).selections.find(({ id }) => id === correctedSelection.id)!.suggestedOutputPath;
   const enqueueArgs = [
     "encode-enqueue", "--key", "synthetic-encode-key-1",
     "--disc-selection-id", correctedSelection.id,
@@ -462,6 +464,14 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
     work: { kind: "encode-jobs", id: expect.any(String) },
   });
   const jobId = (queued.result as { job: { id: string } }).job.id;
+  expect((await current.run(["encode-queue", "--encoding-profile-id", secondProfile.id])).result)
+    .toMatchObject({ selections: expect.arrayContaining([expect.objectContaining({
+      id: correctedSelection.id,
+      queueAction: {
+        name: "enqueue", eligible: false,
+        reason: "Suggested output path is reserved; choose another path.",
+      },
+    })]) });
   expect((await current.run(enqueueArgs)).result).toEqual(queued.result);
   const entry = fileURLToPath(new URL("../dist/entry.js", import.meta.url));
   const restarted = spawnSync(process.execPath, [entry, ...enqueueArgs], {
@@ -520,6 +530,13 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
   finish.close();
   expect((await current.run(["wait", "encode-jobs", jobId, "--timeout-ms", "0"])).result)
     .toMatchObject({ outcome: "settled", current: { id: jobId, status: "completed" } });
+  expect((await current.run([
+    "encode-requeue", "--key", "synthetic-completed-path-key",
+    "--encode-job-id", jobId,
+    "--output-path", `${current.mediaLibraryPath}/unsupported-change.mkv`,
+  ])).result).toMatchObject({ error: { code: "ENCODE_JOB_REJECTED" } });
+  expect((await current.run(["inspect", "encode-jobs", jobId])).result)
+    .toMatchObject({ item: { status: "completed" } });
   expect((await current.run(["encode-queue", "--history-group", "re_encode", "--encoding-profile-id", profile.id])).result)
     .toMatchObject({ selections: expect.arrayContaining([expect.objectContaining({
       id: correctedSelection.id,
@@ -545,6 +562,51 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
   expect((await current.run(cancelArgs)).result).toEqual(request.result);
   expect((await current.run(["wait", "encode-jobs", competingId, "--timeout-ms", "0"])).result)
     .toMatchObject({ outcome: "settled", current: { status: "cancelled" } });
+});
+
+it("returns one durable Encode Job to concurrent processes using the same key", async () => {
+  const current = fixture();
+  const { archive, correctedSelection } = seedCatalogReviewForReadFixture(current);
+  const setup = current.openAccess();
+  setup.catalog.completeCatalogReview(
+    archive.id,
+    setup.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt,
+    "reviewed_with_selections",
+  );
+  const profile = setup.encodingProfiles.list({ mediaDomain: "dvd_video", activeOnly: true })[0]!;
+  setup.close();
+  const entry = fileURLToPath(new URL("../dist/entry.js", import.meta.url));
+  const args = [
+    entry, "encode-enqueue", "--key", "synthetic-concurrent-encode-key",
+    "--disc-selection-id", correctedSelection.id,
+    "--encoding-profile-id", profile.id,
+    "--output-path", `${current.mediaLibraryPath}/concurrent.mkv`,
+  ];
+  const invoke = () => new Promise<{ status: number | null; result: unknown }>((resolve, reject) => {
+    const child = spawn(process.execPath, args, {
+      env: {
+        ...process.env,
+        NODE_NO_WARNINGS: "1",
+        RIP_DVD_DATABASE_PATH: current.databasePath,
+        RIP_DVD_MEDIA_LIBRARY_PATH: current.mediaLibraryPath,
+        RIP_DVD_ORIGINALS_LIBRARY_PATH: current.originalsLibraryPath,
+      },
+    });
+    let output = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { output += chunk; });
+    child.on("error", reject);
+    child.on("close", (status) => {
+      try { resolve({ status, result: JSON.parse(output) as unknown }); }
+      catch (error) { reject(error); }
+    });
+  });
+  const [first, second] = await Promise.all([invoke(), invoke()]);
+  expect(first.status).toBe(0);
+  expect(second.status).toBe(0);
+  expect(second.result).toEqual(first.result);
+  const check = current.openAccess();
+  expect(check.encodeJobs.listForDiscSelection(correctedSelection.id)).toHaveLength(1);
+  check.close();
 });
 
 it("discovers commands and rejects unsupported invocations without opening SQLite", async () => {

@@ -1015,6 +1015,15 @@ export function createDataAccessInternal(
     return outcome;
   }
 
+  function encodeRequeueSemanticInput(
+    id: EncodeJobId,
+    options?: EncodeJobRequeueOptions,
+  ): string {
+    return JSON.stringify({
+      id, outputPath: options?.outputPath ?? null, priority: options?.priority ?? null,
+    });
+  }
+
   const encodeQueueDiscSelectionPageStatement = sqlite.prepare(`
     with requested_selection as (
       select
@@ -3702,9 +3711,7 @@ export function createDataAccessInternal(
         current.replaceExistingOutput;
       const targetOutputPath = effectiveOutputPath ?? current.outputPath;
       return database.transaction((transaction) => {
-        const semanticInput = JSON.stringify({
-          id, outputPath: options?.outputPath ?? null, priority: options?.priority ?? null,
-        });
+        const semanticInput = encodeRequeueSemanticInput(id, options);
         const replay = replayEncodeMutation(
           options?.mutationKey, "encode_job.requeue", semanticInput,
         );
@@ -4692,6 +4699,8 @@ export function createDataAccessInternal(
             access.encodeJobs.listForDiscSelection(id),
           hasReservedOutputPathConflict: (job) =>
             access.encodeJobs.hasReservedOutputPathConflict(job),
+          hasReservedOutputPath: (outputPath) =>
+            access.encodeJobs.hasReservedOutputPath(outputPath),
           resolveQueueLogicalJobs: (options) =>
             access.encodeJobs.resolveQueueLogicalJobs(options),
           listQueueDiscSelections: (options) =>
@@ -9853,6 +9862,13 @@ export function createDataAccessInternal(
             ne(encodeJobs.id, job.id),
           )).limit(1).get() !== undefined;
       },
+      hasReservedOutputPath(outputPath) {
+        return database.select({ id: encodeJobs.id }).from(encodeJobs)
+          .where(and(
+            eq(encodeJobs.outputPath, outputPath),
+            eq(encodeJobs.reservesOutputPath, true),
+          )).limit(1).get() !== undefined;
+      },
       resolveQueueLogicalJobs(options) {
         if (
           options.discSelectionIds.length >
@@ -11971,13 +11987,23 @@ export function createDataAccessInternal(
         ) {
           throw new DomainInvariantError("priority must be a safe integer");
         }
-        const semanticInput = JSON.stringify({
-          id, outputPath: outputPath ?? null, priority: options?.priority ?? null,
+        const semanticInput = encodeRequeueSemanticInput(id, {
+          outputPath, priority: options?.priority,
         });
         const replay = replayEncodeMutation(
           options?.mutationKey, "encode_job.requeue", semanticInput,
         );
         if (replay) return replay;
+        if (options?.mutationKey !== undefined && outputPath !== undefined) {
+          const current = database.select().from(encodeJobs)
+            .where(eq(encodeJobs.id, id)).get();
+          if (current && (current.status === "completed" || current.replaceExistingOutput) &&
+            current.outputPath !== outputPath) {
+            throw new DomainInvariantError(
+              "This Encode Job must retain its output path when requeued",
+            );
+          }
+        }
         try {
           return encodeJobQueue.requeue(id, {
             outputPath,

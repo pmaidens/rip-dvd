@@ -231,6 +231,8 @@ export function readQueueOptions(
           });
         const requeue = logicalJob === null ? null :
           snapshot.encodeJobs.find(logicalJob.id);
+        const suggestedPathReserved = suggestedOutputPath !== null &&
+          snapshot.encodeJobs.hasReservedOutputPath(suggestedOutputPath);
         const queueAction = encodingProfileId === undefined
           ? { name: "enqueue", eligible: false, reason: "Select an Encoding Profile." }
           : logicalJob !== null
@@ -241,6 +243,8 @@ export function readQueueOptions(
             ) }
             : suggestedOutputPath === null
               ? { name: "enqueue", eligible: false, reason: "A valid output path is unavailable." }
+              : suggestedPathReserved
+                ? { name: "enqueue", eligible: false, reason: "Suggested output path is reserved; choose another path." }
               : { name: "enqueue", eligible: true, reason: null };
         return {
           id: selection.id,

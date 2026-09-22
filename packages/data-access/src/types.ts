@@ -1390,6 +1390,7 @@ export interface EncodeJobAccess {
   find(id: EncodeJobId): EncodeJob | null;
   listForDiscSelection(id: DiscSelectionId): EncodeJob[];
   hasReservedOutputPathConflict(job: Pick<EncodeJob, "id" | "outputPath">): boolean;
+  hasReservedOutputPath(outputPath: string): boolean;
   resolveQueueLogicalJobs(options: {
     discSelectionIds: readonly DiscSelectionId[];
     encodingProfileId: EncodingProfileId;
@@ -1600,6 +1601,7 @@ export interface ConsistentReadAccess {
     | "list"
     | "listForDiscSelection"
     | "hasReservedOutputPathConflict"
+    | "hasReservedOutputPath"
     | "resolveQueueLogicalJobs"
     | "listQueueDiscSelections"
     | "listDiscSelectionCorrectionEncodeJobLinks"

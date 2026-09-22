@@ -35,8 +35,8 @@ it("shares Encode Job validation and keyed outcomes across web and CLI", async (
       mediaLibraryPath: fixture.mediaLibraryPath,
       webTrustedOrigin: "http://localhost:3000",
     });
-    const request = (body: object) => new Request("http://localhost:3000/api/encode-jobs", {
-      method: "POST",
+    const request = (body: object, method = "POST") => new Request("http://localhost:3000/api/encode-jobs", {
+      method,
       headers: { "Content-Type": "application/json", Host: "localhost:3000", Origin: "http://localhost:3000" },
       body: JSON.stringify(body),
     });
@@ -63,6 +63,29 @@ it("shares Encode Job validation and keyed outcomes across web and CLI", async (
       "--output-path", join(fixture.mediaLibraryPath, "different.mkv"),
     ]);
     expect(conflict.result).toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
+    const jobId = webResult.job.id as string;
+    const cancelled = await fixture.run([
+      "encode-cancel", "--key", "synthetic-encode-parity-cancel",
+      "--encode-job-id", jobId,
+    ]);
+    expect(cancelled.exitCode).toBe(0);
+    const webCancelled = await createEncodeJobsRoute(request({
+      action: "cancel", encodeJobId: jobId,
+      mutationKey: "synthetic-encode-parity-cancel",
+    }, "PATCH"), () => access, config);
+    expect(webCancelled.status).toBe(200);
+    expect(await webCancelled.json()).toMatchObject({ job: (cancelled.result as { job: object }).job });
+    const webRequeued = await createEncodeJobsRoute(request({
+      action: "requeue", encodeJobId: jobId,
+      mutationKey: "synthetic-encode-parity-requeue",
+    }, "PATCH"), () => access, config);
+    expect(webRequeued.status).toBe(200);
+    const requeued = await fixture.run([
+      "encode-requeue", "--key", "synthetic-encode-parity-requeue",
+      "--encode-job-id", jobId,
+    ]);
+    expect(requeued.exitCode).toBe(0);
+    expect(requeued.result).toMatchObject({ job: (await webRequeued.json()).job });
     expect(access.encodeJobs.list()).toHaveLength(2);
   } finally {
     access.close();

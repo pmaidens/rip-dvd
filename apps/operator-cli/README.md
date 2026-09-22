@@ -214,7 +214,8 @@ eligibility reason when blocked. `--query`, `--selection-offset`, and
 repeated `--disc-selection-id` flags and reports the logical job for each one
 under the chosen profile. `inspect encode-jobs [id]` gives status, failure
 reports, actions, and history; `wait encode-jobs <id> --timeout-ms <n>` waits
-without cancelling work.
+without cancelling work. When a suggested path is reserved, `queueAction`
+names that conflict; choose another path for enqueue.
 
 Every Encode Job mutation requires a key created before submission. Generate
 one with `rip-dvd-operator generate-key` and keep it for retries. The same key
@@ -234,7 +235,8 @@ An initial `encode-enqueue` is deduplicated by Disc Selection and Encoding
 Profile, including after completion. Use `encode-requeue` for a terminal job.
 If another job reserves its output path, supply `--output-path` with a safe
 path inside the configured media library when requeueing a failed or cancelled
-job. A completed job keeps its output path so the worker can apply its existing
-replacement checks. Running cancellation remains cooperative; the worker
+job. A completed job keeps its output path; a different `--output-path` is
+rejected so the worker can apply its existing replacement checks. Running
+cancellation remains cooperative; the worker
 settles it after observing the request. Malformed inputs return exit 2 with a
 JSON error. Database or configuration failures return exit 1.
