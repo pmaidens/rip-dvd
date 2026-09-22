@@ -1,6 +1,7 @@
 "use client";
 
 import { MEDIA_ITEM_KINDS } from "@rip-dvd/data-access/catalog-kinds";
+import { parseMutationKey } from "@rip-dvd/application/mutation-key";
 
 import {
   discSelectionCommandRequiresPreview,
@@ -26,6 +27,32 @@ function postCatalogReview(
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+function catalogReviewMutationIdentity(
+  archiveId: string,
+  command: CatalogReviewCommand,
+): string {
+  return JSON.stringify(canonicalJsonValue([archiveId, command]));
+}
+
+function canonicalJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => entry === undefined ? null : canonicalJsonValue(entry));
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, entry]) => entry !== undefined)
+        .sort(([left], [right]) => {
+          if (left < right) return -1;
+          if (left > right) return 1;
+          return 0;
+        })
+        .map(([key, entry]) => [key, canonicalJsonValue(entry)]),
+    );
+  }
+  return value;
 }
 
 export interface DiscSelectionChangePreview {
@@ -75,7 +102,7 @@ export async function mutateCatalogReview(
   fetcher: CatalogReviewFetch = fetch,
   options: CatalogReviewMutationOptions = {},
 ): Promise<{ message: string | null; cancelled?: true }> {
-  const identity = JSON.stringify([archiveId, command]);
+  const identity = catalogReviewMutationIdentity(archiveId, command);
   const proposalIdentity = command.action === "create_mapping_proposal" ||
       command.action === "create_episodic_mapping_proposal"
     ? JSON.stringify({ archiveId, command }) : null;
@@ -282,8 +309,14 @@ function readPendingCatalogReviewMutation(
       !("identity" in parsed) || typeof parsed.identity !== "string" ||
       !("command" in parsed) || !("mutationKey" in parsed) ||
       typeof parsed.mutationKey !== "string") return discardStored();
+  let mutationKey: string;
+  try {
+    mutationKey = parseMutationKey(parsed.mutationKey);
+  } catch {
+    return discardStored();
+  }
   const command = storedDiscSelectionCommand(parsed.command);
-  if (command === null || parsed.identity !== JSON.stringify([archiveId, command])) {
+  if (command === null || parsed.identity !== catalogReviewMutationIdentity(archiveId, command)) {
     return discardStored();
   }
   const requiresPreview = discSelectionCommandRequiresPreview(command);
@@ -291,7 +324,7 @@ function readPendingCatalogReviewMutation(
   const hasPreview = previewValue !== undefined;
   const preview = hasPreview && requiresPreview
     ? availableDiscSelectionPreview(previewValue, command.action) : undefined;
-  if ((hasPreview && preview === undefined) ||
+  if ((hasPreview && preview === null) ||
       (!requiresPreview && ("preview" in parsed || "acknowledged" in parsed)) ||
       ("acknowledged" in parsed && parsed.acknowledged === true && preview === undefined)) {
     return discardStored();
@@ -300,7 +333,7 @@ function readPendingCatalogReviewMutation(
     archiveId,
     command,
     identity: parsed.identity,
-    mutationKey: parsed.mutationKey,
+    mutationKey,
     ...(preview ? { preview } : {}),
     ...("acknowledged" in parsed && parsed.acknowledged === true
       ? { acknowledged: true } : {}),
@@ -352,8 +385,8 @@ function availableDiscSelectionPreview(
   if (typeof value !== "object" || value === null || !("state" in value) ||
       value.state !== "available" || !("action" in value) || value.action !== expectedAction ||
       !("catalogRevision" in value) ||
-      typeof value.catalogRevision !== "string" || !("previewToken" in value) ||
-      typeof value.previewToken !== "string" || !("affectedEncodeJobs" in value) ||
+      !validCatalogRevision(value.catalogRevision) || !("previewToken" in value) ||
+      !validPreviewToken(value.previewToken) || !("affectedEncodeJobs" in value) ||
       !Array.isArray(value.affectedEncodeJobs) ||
       !("outputReservationReleaseJobs" in value) ||
       !Array.isArray(value.outputReservationReleaseJobs) || !("consequences" in value) ||
@@ -386,6 +419,17 @@ function availableDiscSelectionPreview(
   if (JSON.stringify(consequences.releasesOutputReservations) !==
       JSON.stringify(releasedReservationIds)) return null;
   return value as unknown as DiscSelectionChangePreview;
+}
+
+function validCatalogRevision(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const parsed = new Date(value);
+  return Number.isSafeInteger(parsed.getTime()) && parsed.toISOString() === value;
+}
+
+function validPreviewToken(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 4_096 &&
+    /^[A-Za-z0-9_-]+\.[a-f0-9]{64}$/.test(value);
 }
 
 function ambiguousMutationResponse(status: number): boolean {

@@ -6,6 +6,8 @@ import {
   resumePendingCatalogReviewMutation,
 } from "./catalog-review-state";
 
+const previewToken = `eyJ0ZXN0Ijp0cnVlfQ.${"a".repeat(64)}`;
+
 function availablePreview(
   action: "update_disc_selection" | "repair_disc_selection" |
     "correct_disc_selection" | "delete_disc_selection" = "delete_disc_selection",
@@ -14,7 +16,7 @@ function availablePreview(
     state: "available",
     action,
     catalogRevision: "2026-08-11T06:00:00.000Z",
-    previewToken: "preview-token",
+    previewToken,
     affectedEncodeJobs: [{ id: "encode-job-1", status: "queued" }],
     outputReservationReleaseJobs: [],
     consequences: {
@@ -180,7 +182,7 @@ describe("catalog review request state", () => {
     expect(bodies[1]).toMatchObject({ ...command,
       mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
       expectedCatalogRevision: "2026-08-11T06:00:00.000Z",
-      previewToken: "preview-token", acknowledge: true });
+      previewToken, acknowledge: true });
   });
 
   it("does not apply a consequential change until its affected jobs are confirmed", async () => {
@@ -258,19 +260,19 @@ describe("catalog review request state", () => {
     {
       name: "creation",
       command: {
-        action: "create_disc_selection" as const,
         selection: {
-          mediaItemId: "media-item-5",
           sourceIdentity: { kind: "dvd_title" as const, titleNumber: 1 },
+          mediaItemId: "media-item-5",
         },
+        action: "create_disc_selection" as const,
       },
     },
     {
       name: "ordinary update",
       command: {
-        action: "update_disc_selection" as const,
-        discSelectionId: "selection-5",
         changes: { label: "Main feature" },
+        discSelectionId: "selection-5",
+        action: "update_disc_selection" as const,
       },
     },
   ])("replays a keyed Disc Selection $name after an ambiguous response and restart", async ({
@@ -329,4 +331,45 @@ describe("catalog review request state", () => {
     expect(fetcher).not.toHaveBeenCalled();
     expect(storage.getItem(key)).toBeNull();
   });
+
+  it.each(["mutationKey", "catalogRevision", "previewToken"] as const)(
+    "removes stored recovery with an invalid %s",
+    async (field) => {
+      const archiveId = `archive-invalid-${field}`;
+      const storage = memoryStorage();
+      const command = {
+        action: "delete_disc_selection" as const,
+        discSelectionId: "selection-7",
+      };
+      const failedFetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return body.preview === true
+          ? Response.json(availablePreview())
+          : Response.json({ error: "Response unavailable" }, { status: 503 });
+      };
+      await expect(mutateCatalogReview(archiveId, command, failedFetcher, {
+        storage,
+        confirmDiscSelectionPreview: () => true,
+      })).rejects.toThrow("Response unavailable");
+
+      const key = pendingMutationStorageKey(archiveId);
+      const savedJson = storage.getItem(key);
+      if (savedJson === null) throw new Error("Expected stored recovery command");
+      const saved = JSON.parse(savedJson) as {
+        mutationKey: string;
+        preview: { catalogRevision: string; previewToken: string };
+      };
+      if (field === "mutationKey") saved.mutationKey = "invalid";
+      if (field === "catalogRevision") saved.preview.catalogRevision = "invalid";
+      if (field === "previewToken") saved.preview.previewToken = "invalid";
+      storage.setItem(key, JSON.stringify(saved));
+      const recoveryFetcher = vi.fn(async () => Response.json({}));
+
+      await expect(resumePendingCatalogReviewMutation(
+        archiveId, recoveryFetcher, { storage },
+      )).resolves.toBeNull();
+      expect(recoveryFetcher).not.toHaveBeenCalled();
+      expect(storage.getItem(key)).toBeNull();
+    },
+  );
 });

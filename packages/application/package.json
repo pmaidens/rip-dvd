@@ -17,6 +17,10 @@
     "./catalog-label": {
       "types": "./src/catalog-label.ts",
       "default": "./dist/catalog-label.js"
+    },
+    "./mutation-key": {
+      "types": "./src/mutation-key.ts",
+      "default": "./dist/mutation-key.js"
     }
   },
   "files": ["dist"],

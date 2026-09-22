@@ -60,6 +60,7 @@ const archiveOnlyActionAvailability = {
 
 let container: HTMLDivElement;
 let root: Root;
+const previewToken = `eyJ0ZXN0Ijp0cnVlfQ.${"a".repeat(64)}`;
 
 beforeEach(() => {
   (globalThis as typeof globalThis & {
@@ -96,7 +97,7 @@ function availableDiscSelectionPreview(
     state: "available",
     action,
     catalogRevision,
-    previewToken: "preview-token",
+    previewToken,
     affectedEncodeJobs,
     outputReservationReleaseJobs: [],
     consequences: {
@@ -870,7 +871,7 @@ describe("CatalogReviewEditor", () => {
     expect(postedCommands).toEqual([
       { ...command, preview: true },
       { ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
-        expectedCatalogRevision: review.catalogRevision, previewToken: "preview-token",
+        expectedCatalogRevision: review.catalogRevision, previewToken,
         acknowledge: true },
     ]);
     expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining(
@@ -956,7 +957,7 @@ describe("CatalogReviewEditor", () => {
     expect(postedCommands).toEqual([
       { ...command, preview: true },
       { ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
-        expectedCatalogRevision: review.catalogRevision, previewToken: "preview-token",
+        expectedCatalogRevision: review.catalogRevision, previewToken,
         acknowledge: true },
     ]);
     expect(container.textContent).toContain(
@@ -2086,7 +2087,7 @@ describe("CatalogReviewView", () => {
           { ...command, preview: true },
           { ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
             expectedCatalogRevision: "2026-08-11T06:00:00.000Z",
-            previewToken: "preview-token", acknowledge: true },
+            previewToken, acknowledge: true },
         ] : keyedDiscSelections.has(action)
           ? [{ ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/) }]
           : [command];
