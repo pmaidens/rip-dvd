@@ -1,3 +1,5 @@
+import { createApplicationOperations } from "@rip-dvd/application";
+
 import { getDataAccess } from "../../lib/data-access";
 
 export const dynamic = "force-dynamic";
@@ -54,7 +56,7 @@ function document(content: string): string {
 
 export function GET(): Response {
   try {
-    const health = getDataAccess().checkHealth();
+    const health = createApplicationOperations(getDataAccess()).health();
     return new Response(
       document(`<section class="card" aria-label="Database health">
         <dl>

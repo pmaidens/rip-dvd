@@ -12,9 +12,11 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .node-version ./
 COPY scripts/check-toolchain.mjs scripts/check-toolchain.mjs
 COPY docker/runtime.Dockerfile docker/runtime.Dockerfile
 COPY apps/web/package.json apps/web/package.json
+COPY apps/operator-cli/package.json apps/operator-cli/package.json
 COPY apps/archive-worker/package.json apps/archive-worker/package.json
 COPY apps/encode-worker/package.json apps/encode-worker/package.json
 COPY packages/config/package.json packages/config/package.json
+COPY packages/application/package.json packages/application/package.json
 COPY packages/data-access/package.json packages/data-access/package.json
 COPY packages/worker-runtime/package.json packages/worker-runtime/package.json
 RUN pnpm install --frozen-lockfile
@@ -80,10 +82,12 @@ RUN gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
 FROM dependencies AS shared-builder
 COPY tsconfig.base.json ./
 COPY packages/config packages/config
+COPY packages/application packages/application
 COPY packages/data-access packages/data-access
 COPY packages/worker-runtime packages/worker-runtime
 RUN pnpm --filter @rip-dvd/config build \
   && pnpm --filter @rip-dvd/data-access build \
+  && pnpm --filter @rip-dvd/application build \
   && pnpm --filter @rip-dvd/worker-runtime build
 
 FROM dependencies AS validation
@@ -131,6 +135,11 @@ RUN pnpm --filter @rip-dvd/encode-worker build \
 FROM shared-builder AS deployment-tools-builder
 RUN pnpm --filter @rip-dvd/data-access --prod deploy --legacy /deployment-tools
 
+FROM shared-builder AS operator-cli-builder
+COPY apps/operator-cli apps/operator-cli
+RUN pnpm --filter @rip-dvd/operator-cli build \
+  && pnpm --filter @rip-dvd/operator-cli --prod deploy --legacy /operator-cli
+
 FROM node:22.23.1-bookworm-slim AS runtime-base
 ENV NODE_ENV="production"
 WORKDIR /app
@@ -163,6 +172,11 @@ RUN ln --symbolic \
 USER node
 EXPOSE 3000
 CMD ["node", "apps/web/server.js"]
+
+FROM runtime-base AS operator-cli
+COPY --from=operator-cli-builder --chown=node:node /operator-cli ./apps/operator-cli
+USER node
+ENTRYPOINT ["node", "apps/operator-cli/dist/entry.js"]
 
 FROM runtime-base AS worker-runtime-base
 COPY --from=shared-builder --chown=node:node /app/packages/config/package.json ./packages/config/package.json
