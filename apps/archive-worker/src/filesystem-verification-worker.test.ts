@@ -56,7 +56,7 @@ it("executes queued verification and retains its result for later readers", asyn
     );
     const profile = access.encodingProfiles.create({
       key: "synthetic-verification-profile", displayName: "Synthetic Profile",
-      mediaDomain: "dvd_video", settings: {},
+      mediaDomain: "dvd_video", settings: { preset: "Fast 480p30", container: "mkv" },
     });
     const outputPath = join(directory, "synthetic-output.mkv");
     writeFileSync(outputPath, "synthetic output");
