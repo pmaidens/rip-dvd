@@ -1440,7 +1440,7 @@ export type SnapshotCatalogAccess = Pick<
 export interface ConsistentReadAccess {
   readonly catalog: SnapshotCatalogAccess;
   readonly encodingProfiles: Pick<EncodingProfileAccess, "list">;
-  readonly discInspections: Pick<DiscInspectionAccess, "list">;
+  readonly discInspections: Pick<DiscInspectionAccess, "list" | "listAttempts">;
   readonly archiveRequests: Pick<
     ArchiveRequestAccess,
     "list" | "listRelevantForDetectedDiscs"

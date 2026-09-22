@@ -4176,6 +4176,7 @@ export function createDataAccessInternal(
         },
         discInspections: {
           list: (options) => access.discInspections.list(options),
+          listAttempts: (id) => access.discInspections.listAttempts(id),
         },
       archiveRequests: {
           list: (statuses, options) =>

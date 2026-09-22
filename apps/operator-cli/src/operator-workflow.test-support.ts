@@ -6,7 +6,7 @@ import { createDataAccess } from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import type { CatalogMetadataLookup } from "@rip-dvd/application";
 
-import { runCommand } from "./command.js";
+import { runCommand, runCommandAsync } from "./command.js";
 
 export function createOperatorWorkflowFixture() {
   const directory = mkdtempSync(join(tmpdir(), "rip-dvd-operator-cli-"));
@@ -33,6 +33,21 @@ export function createOperatorWorkflowFixture() {
       const exitCode = await runCommand(args, {
         openAccess,
         ...(lookup === undefined ? {} : { getLookup: () => lookup }),
+        stdout: (text) => stdout.push(text),
+        stderr: (text) => stderr.push(text),
+      });
+      return {
+        exitCode,
+        stdout: stdout.join(""),
+        stderr: stderr.join(""),
+        result: JSON.parse(stdout.join("")) as unknown,
+      };
+    },
+    async runAsync(args: readonly string[]) {
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      const exitCode = await runCommandAsync(args, {
+        openAccess,
         stdout: (text) => stdout.push(text),
         stderr: (text) => stderr.push(text),
       });

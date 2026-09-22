@@ -203,6 +203,8 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       "catalog-review",
       "health",
       "readiness",
+      "inspect",
+      "wait",
       "commands",
       "help",
     ],
@@ -241,6 +243,128 @@ it("returns a stable failure without exposing database errors", async () => {
   expect(stderr).toEqual(["Application health is unavailable.\n"]);
 });
 
+it("inspects full attempts and keeps request intent separate from job attempts", async () => {
+  const current = fixture();
+  const access = current.openAccess();
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/sr0", isEnabled: true, isPresent: true,
+  });
+  const started = access.discInspections.beginOrResume({
+    opticalDriveId: drive.id,
+    mediaGeneration: "synthetic-generation",
+    mediaCapacityBytes: 2_048,
+  });
+  access.discInspections.record(started.claim!, {
+    type: "fail", reasonCode: "metadata_read_failed", diagnostic: "synthetic read failure",
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint: "synthetic-fingerprint",
+    volumeLabel: "SYNTHETIC_DISC",
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+  access.close();
+
+  const inspection = current.run(["inspect", "disc-inspections", started.inspection.id]);
+  expect(inspection.exitCode).toBe(0);
+  expect(inspection.result).toMatchObject({
+    schemaVersion: 1,
+    kind: "disc-inspections",
+    item: {
+      id: started.inspection.id,
+      mediaGeneration: "synthetic-generation",
+      mediaCapacityBytes: 2_048,
+      attempts: [expect.objectContaining({
+        attemptNumber: 1, outcome: "failed", reasonCode: "metadata_read_failed",
+      })],
+      availableActions: [expect.objectContaining({ name: "retry", eligible: true })],
+    },
+  });
+  expect(JSON.stringify(inspection.result)).not.toContain("claimToken");
+
+  const requestDetail = current.run(["inspect", "archive-requests", request.id]);
+  expect(requestDetail.result).toMatchObject({
+    item: { id: request.id, status: "pending", archiveJobs: [] },
+  });
+  const timedOut = await current.runAsync([
+    "wait", "archive-requests", request.id, "--timeout-ms", "0",
+  ]);
+  expect(timedOut.exitCode).toBe(3);
+  expect(timedOut.stderr).toBe("");
+  expect(timedOut.result).toMatchObject({
+    outcome: "timeout", current: { id: request.id, status: "pending", archiveJobs: [] },
+  });
+  expect(current.run(["inspect", "archive-requests", request.id]).result)
+    .toMatchObject({ item: { status: "pending" } });
+
+  const settled = await current.runAsync([
+    "wait", "disc-inspections", started.inspection.id, "--timeout-ms", "0",
+  ]);
+  expect(settled.exitCode).toBe(0);
+  expect(settled.result).toMatchObject({ outcome: "settled", current: { status: "failed" } });
+
+  const retryAccess = current.openAccess();
+  retryAccess.discInspections.requestRetry(started.inspection.id);
+  retryAccess.close();
+  const retryPending = await current.runAsync([
+    "wait", "disc-inspections", started.inspection.id, "--timeout-ms", "0",
+  ]);
+  expect(retryPending.exitCode).toBe(3);
+  expect(retryPending.result).toMatchObject({ outcome: "timeout", current: {
+    status: "failed", manualRetryRequestedAt: expect.any(String),
+  } });
+});
+
+it("observes a later transition during a bounded wait", async () => {
+  const current = fixture();
+  const access = current.openAccess();
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/sr0", isEnabled: true, isPresent: true,
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id, discKind: "dvd", fingerprint: "synthetic-wait-disc",
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+  access.close();
+  const transition = setTimeout(() => {
+    const writer = current.openAccess();
+    try {
+      writer.archiveRequests.cancel(request.id);
+    } finally {
+      writer.close();
+    }
+  }, 20);
+  try {
+    const result = await current.runAsync([
+      "wait", "archive-requests", request.id,
+      "--timeout-ms", "500", "--poll-ms", "100",
+    ]);
+    expect(result.exitCode).toBe(0);
+    expect(result.result).toMatchObject({
+      outcome: "settled", current: { status: "cancelled" },
+    });
+  } finally {
+    clearTimeout(transition);
+  }
+});
+
+it("validates inspection and wait arguments before opening the database", async () => {
+  const current = fixture();
+  expect(current.run(["inspect", "disc-inspections", "--limit", "101"]).result)
+    .toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
+  expect(current.run(["inspect", "disc-inspections", "missing-id"]).result)
+    .toMatchObject({ error: { code: "NOT_FOUND" } });
+  expect((await current.runAsync([
+    "wait", "archive-jobs", "missing-id", "--timeout-ms", "0",
+  ])).result).toMatchObject({ error: { code: "NOT_FOUND" } });
+  expect((await current.runAsync([
+    "wait", "archive-jobs", "missing-id", "--timeout-ms", "3600001",
+  ])).result).toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
+});
+
 it("runs as a separate process without the web service", () => {
   const paths = fixture();
   const entry = fileURLToPath(new URL("../dist/entry.js", import.meta.url));
@@ -269,6 +393,18 @@ it("runs as a separate process without the web service", () => {
     schemaVersion: 1,
     activeWork: [],
     opticalDrives: [],
+  });
+
+  const inspection = invoke("inspect", "activity");
+  expect(inspection.status).toBe(0);
+  expect(JSON.parse(inspection.stdout)).toEqual({
+    schemaVersion: 1, kind: "activity", items: [],
+  });
+
+  const missingWait = invoke("wait", "archive-requests", "synthetic-missing-id", "--timeout-ms", "0");
+  expect(missingWait.status).toBe(2);
+  expect(JSON.parse(missingWait.stdout)).toEqual({
+    error: { code: "NOT_FOUND", message: "Operational record was not found." },
   });
 
   const invalid = invoke("health", "--invalid");

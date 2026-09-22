@@ -4,6 +4,12 @@ import {
   generateMutationKey,
   InvalidMutationKeyError,
   parseMutationKey,
+  inspectOperations,
+  isOperationKind,
+  isWaitableKind,
+  OPERATION_KINDS,
+  validOperationLimit,
+  waitForOperation,
   tmdbCredentialFromEnvironment,
   type CatalogMetadataLookup,
   type CatalogMetadataSelection,
@@ -18,7 +24,7 @@ import {
   type DataAccess,
 } from "@rip-dvd/data-access";
 
-export type CommandExitCode = 0 | 1 | 2;
+export type CommandExitCode = 0 | 1 | 2 | 3;
 
 interface CommandIO {
   openAccess(): DataAccess;
@@ -68,6 +74,26 @@ const commandDefinitions = [
     usage: "rip-dvd-operator readiness",
     inputs: { arguments: [], options: [] },
     example: "rip-dvd-operator readiness",
+  },
+  {
+    name: "inspect",
+    description: "List operational records or inspect one record and its evidence.",
+    usage: "rip-dvd-operator inspect <kind> [id] [--limit 1..100]",
+    inputs: {
+      arguments: [`kind: ${OPERATION_KINDS.join(", ")}`, "id (optional)"],
+      options: ["--limit 1..100 (lists only; default 50)"],
+    },
+    example: "rip-dvd-operator inspect disc-inspections synthetic-id",
+  },
+  {
+    name: "wait",
+    description: "Wait for existing background work without changing it.",
+    usage: "rip-dvd-operator wait <kind> <id> --timeout-ms <0..3600000> [--poll-ms 100..5000]",
+    inputs: {
+      arguments: ["kind", "id"],
+      options: ["--timeout-ms 0..3600000 (required)", "--poll-ms 100..5000 (default 500)"],
+    },
+    example: "rip-dvd-operator wait archive-requests synthetic-id --timeout-ms 30000",
   },
   {
     name: "commands",
@@ -323,6 +349,71 @@ async function runCatalogReview(rest: readonly string[], io: CommandIO) {
   }
 }
 
+function withAccess<T>(openAccess: CommandIO["openAccess"], read: (access: DataAccess) => T): T {
+  const access = openAccess();
+  try {
+    return read(access);
+  } finally {
+    access.close();
+  }
+}
+
+function numericOption(rest: readonly string[], flag: string): number | undefined {
+  const index = rest.indexOf(flag);
+  if (index === -1) return undefined;
+  if (index !== rest.lastIndexOf(flag) || index === rest.length - 1 ||
+    !/^\d+$/.test(rest[index + 1]!)) {
+    throw new CommandFailure("INVALID_ARGUMENTS", `Invalid ${flag} option.`, 2);
+  }
+  return Number(rest[index + 1]);
+}
+
+function inspectCommand(rest: readonly string[], io: CommandIO) {
+  const [kind, id] = rest;
+  if (kind === undefined || !isOperationKind(kind)) {
+    throw new CommandFailure("INVALID_ARGUMENTS", "Unknown operation kind.", 2);
+  }
+  const optionIndex = rest.indexOf("--limit");
+  const positional = optionIndex === -1 ? rest : rest.slice(0, optionIndex);
+  const limit = numericOption(rest, "--limit");
+  if (positional.length > 2 || (optionIndex !== -1 && optionIndex !== rest.length - 2) ||
+    (limit !== undefined && (!validOperationLimit(limit) || positional.length === 2)) ||
+    (kind === "activity" && positional.length === 2) ||
+    (positional.length === 2 && (id === undefined || id.length === 0 ||
+      id.length > 256 || id.startsWith("--")))) {
+    throw new CommandFailure("INVALID_ARGUMENTS", "Invalid inspect arguments.", 2);
+  }
+  try {
+    const result = withAccess(io.openAccess, (access) =>
+      inspectOperations(access, kind, { ...(positional.length === 2 ? { id } : {}), limit }));
+    if ("item" in result && result.item === null) {
+      throw new CommandFailure("NOT_FOUND", "Operational record was not found.", 2);
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    throw new CommandFailure("INSPECTION_UNAVAILABLE", "Operational inspection is unavailable.", 1);
+  }
+}
+
+function waitArguments(rest: readonly string[]) {
+  const [kind, id] = rest;
+  const timeoutMs = numericOption(rest, "--timeout-ms");
+  const pollMs = numericOption(rest, "--poll-ms") ?? 500;
+  const flags = rest.slice(2);
+  const expectedCount = 2 + (flags.includes("--poll-ms") ? 2 : 0);
+  if (kind === undefined || !isWaitableKind(kind) || !id || id.length > 256 ||
+    timeoutMs === undefined || !Number.isSafeInteger(timeoutMs) || timeoutMs > 3_600_000 ||
+    !Number.isSafeInteger(pollMs) || pollMs < 100 || pollMs > 5_000 ||
+    flags.length !== expectedCount ||
+    !flags.includes("--timeout-ms") ||
+    (flags.some((flag, index) => index % 2 === 0 &&
+      flag !== "--timeout-ms" && flag !== "--poll-ms"))) {
+    throw new CommandFailure("INVALID_ARGUMENTS", "Invalid wait arguments.", 2);
+  }
+  return { kind, id, timeoutMs, pollMs };
+}
+
 export async function runCommand(args: readonly string[], io: CommandIO): Promise<CommandExitCode> {
   try {
     const [name, ...rest] = args;
@@ -366,6 +457,36 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
       emit(io.stdout, await runCatalogReview(rest, io));
       return 0;
     }
+    if (name === "inspect") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+      } else {
+        emit(io.stdout, inspectCommand(rest, io));
+      }
+      return 0;
+    }
+    if (name === "wait") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+        return 0;
+      }
+      const { kind, id, timeoutMs, pollMs } = waitArguments(rest);
+      let access: DataAccess | undefined;
+      try {
+        access = io.openAccess();
+        const result = await waitForOperation(access, kind, id, timeoutMs, pollMs);
+        if (result.outcome === "not_found") {
+          throw new CommandFailure("NOT_FOUND", "Operational record was not found.", 2);
+        }
+        emit(io.stdout, result);
+        return result.outcome === "timeout" ? 3 : 0;
+      } catch (error) {
+        if (error instanceof CommandFailure) throw error;
+        throw new CommandFailure("WAIT_UNAVAILABLE", "Operational wait is unavailable.", 1);
+      } finally {
+        access?.close();
+      }
+    }
     if (name !== "health" && name !== "readiness") {
       throw new CommandFailure("UNKNOWN_COMMAND", "Unknown command.", 2);
     }
@@ -391,3 +512,5 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
     return 1;
   }
 }
+
+export const runCommandAsync = runCommand;

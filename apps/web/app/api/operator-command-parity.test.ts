@@ -1,4 +1,10 @@
 import { expect, it } from "vitest";
+import { join } from "node:path";
+import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
+import {
+  beginSettledDiscInspectionForTest,
+  createNormalDvdArchiveBoundaryEvidenceForTest,
+} from "@rip-dvd/data-access/test-support";
 import type { CatalogMetadataLookup } from "@rip-dvd/application";
 
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../operator-cli/src/operator-workflow.test-support.js";
@@ -6,6 +12,7 @@ import { createCatalogReviewRoute } from "./catalog-reviews/[id]/route";
 import { createCatalogSuggestionRoute } from "./catalog-reviews/[id]/suggestion/route";
 import { createDeploymentReadinessResponse } from "./deployment-readiness/route";
 import { createHealthResponse } from "./health/route";
+import { createOperationsResponse } from "./operations/route";
 
 it("returns the same health and readiness results through web and CLI adapters", async () => {
   const fixture = createOperatorWorkflowFixture();
@@ -123,6 +130,114 @@ it("returns the same Catalog Review detail and candidates through web and CLI", 
       .toEqual(uncertainResult);
     expect(access.catalog.listDiscSelections({ originalDiscArchiveId: archive.id }))
       .toEqual(selectionsBefore);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("returns the same operational records and evidence through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const access = fixture.openAccess();
+  try {
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0", isEnabled: true, isPresent: true,
+    });
+    const started = access.discInspections.beginOrResume({
+      opticalDriveId: drive.id,
+      mediaGeneration: "synthetic-generation",
+      mediaCapacityBytes: 2_048,
+    });
+    access.discInspections.record(started.claim!, {
+      type: "fail", reasonCode: "metadata_read_failed", diagnostic: "synthetic read failure",
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "synthetic-fingerprint",
+      volumeLabel: "SYNTHETIC_DISC",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const archiveDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr1", isEnabled: true, isPresent: true,
+    });
+    const archivedDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: archiveDrive.id,
+      discKind: "dvd",
+      fingerprint: "synthetic-archived-fingerprint",
+      volumeLabel: "SYNTHETIC_ARCHIVED_DISC",
+    });
+    access.catalog.updateDetectedDiscStatus(archivedDisc.id, "scanned");
+    const settled = beginSettledDiscInspectionForTest(access, {
+      opticalDriveId: archiveDrive.id,
+      mediaGeneration: "synthetic-archived-generation",
+      mediaCapacityBytes: 2_048,
+    });
+    access.discInspections.record(settled.claim, {
+      type: "metadata", volumeLabel: archivedDisc.volumeLabel,
+      titleCount: 0, chapterCount: 0, audioStreamCount: 0,
+      subtitleStreamCount: 0, totalBytes: 2_048,
+    });
+    const completedInspection = access.discInspections.record(settled.claim, {
+      type: "complete", detectedDiscId: archivedDisc.id,
+    });
+    settled.restoreSystemTime();
+    access.archiveRequests.create({ detectedDiscId: archivedDisc.id });
+    const job = access.archiveJobs.startForInspection(
+      completedInspection.id, "synthetic-worker",
+    )!;
+    const completedJob = access.archiveJobs.publish(job, {
+      archivePath: join(fixture.originalsLibraryPath, "synthetic.iso"),
+      sizeBytes: 2_048,
+      boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(2_048),
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence("dvd-recovery-v1"),
+    });
+    const archiveId = completedJob.originalDiscArchiveId!;
+    const incident = access.workerIncidents.record({
+      schemaVersion: 1,
+      workerKind: "archive",
+      reasonCode: "poll_failure",
+      phase: "polling",
+      retryability: "automatic",
+      evidence: {},
+    });
+
+    for (const kind of [
+      "optical-drives", "detected-discs", "disc-inspections", "archive-requests",
+      "archive-jobs", "original-disc-archives", "encode-jobs", "worker-incidents", "activity",
+    ]) {
+      const response = createOperationsResponse(access,
+        new Request(`http://localhost/api/operations?kind=${kind}`));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(fixture.run(["inspect", kind]).result).toEqual(await response.json());
+    }
+    for (const [kind, id] of [
+      ["optical-drives", drive.id],
+      ["detected-discs", disc.id],
+      ["disc-inspections", started.inspection.id],
+      ["archive-requests", request.id],
+      ["archive-jobs", completedJob.id],
+      ["original-disc-archives", archiveId],
+      ["worker-incidents", incident.id],
+    ]) {
+      const response = createOperationsResponse(access,
+        new Request(`http://localhost/api/operations?kind=${kind}&id=${id}`));
+      expect(response.status).toBe(200);
+      expect(fixture.run(["inspect", kind, id]).result).toEqual(await response.json());
+    }
+    expect(fixture.run(["inspect", "disc-inspections", started.inspection.id]).result)
+      .toMatchObject({ item: {
+        attempts: [expect.objectContaining({ reasonCode: "metadata_read_failed" })],
+        availableActions: [expect.objectContaining({ eligible: true })],
+      } });
+    expect(fixture.run(["inspect", "original-disc-archives", archiveId]).result)
+      .toMatchObject({ item: {
+        boundaryReportedSizeBytes: 2_048,
+        boundaryPublishedSizeBytes: 2_048,
+        integrity: "clean_read",
+      } });
   } finally {
     access.close();
     fixture.dispose();

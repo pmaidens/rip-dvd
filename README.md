@@ -415,16 +415,19 @@ copied bytes. Set `RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS` to a positive millisecond
 value to change that cutoff. This watchdog is separate from the overall archive
 operation timeout.
 
-### Server-local JSON health commands
+### Server-local JSON inspection commands
 
-The staged `rip-dvd-operator` command checks the TypeScript application's
-database health and deployment readiness without starting the web service.
+The staged `rip-dvd-operator` command checks health, readiness, and operational
+records without starting the web service.
 The existing `rip-dvd` executable keeps its legacy behavior during this stage.
 Run the commands in the Compose deployment with:
 
 ```bash
 docker compose --profile maintenance run --rm operator-cli health
 docker compose --profile maintenance run --rm operator-cli readiness
+docker compose --profile maintenance run --rm operator-cli inspect disc-inspections
+docker compose --profile maintenance run --rm operator-cli inspect archive-requests <request-id>
+docker compose --profile maintenance run --rm operator-cli wait archive-requests <request-id> --timeout-ms 30000
 docker compose --profile maintenance run --rm operator-cli help
 ```
 
@@ -439,9 +442,28 @@ Each invocation writes one JSON document to stdout. `health` returns the same
 database status as `/api/health`. `readiness` returns the same versioned active
 work and Optical Drive snapshot as `/api/deployment-readiness`; it describes
 deployment activity rather than promising that every drive can start work.
+`inspect <kind>` lists at most 50 records by default, with `--limit 1..100`.
+`inspect <kind> <id>` returns one record with its relationships, evidence, and
+known action eligibility where applicable. The supported kinds are
+`optical-drives`, `detected-discs`,
+`disc-inspections`, `archive-requests`, `archive-jobs`,
+`original-disc-archives`, `encode-jobs`, `worker-incidents`, and `activity`.
+Disc Inspection detail includes every persisted attempt and its source
+continuity and settled-capacity evidence. Archive Request detail keeps intent
+separate from Archive Job attempts. Archive and job detail includes the
+persisted integrity, boundary, progress, and failure evidence. The equivalent
+web read is `GET /api/operations?kind=<kind>&id=<id>`; omit `id` for a list.
+
+`wait <kind> <id> --timeout-ms <milliseconds>` polls existing Disc Inspection,
+Archive Request, Archive Job, or Encode Job state for up to one hour. It returns
+`outcome: settled` with the current record when work reaches a terminal or
+attention-needed state. Timeout returns `outcome: timeout` with current state
+and never cancels work. The optional `--poll-ms` range is 100..5000 and
+defaults to 500.
 `help`, `help health`, and `commands` describe the available commands and
 inputs. Exit code `0` means the command completed, `1` means a configuration
-or application operation failed, and `2` means the invocation is invalid.
+or application operation failed, `2` means the invocation is invalid or its
+record was not found, and `3` means a wait timed out.
 Failures return a stable JSON `error.code` without database paths or raw
 exceptions. Diagnostics, if emitted, go to stderr.
 
