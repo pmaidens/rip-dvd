@@ -17,11 +17,20 @@
     "./catalog-label": {
       "types": "./src/catalog-label.ts",
       "default": "./dist/catalog-label.js"
+    },
+    "./mutation-key": {
+      "types": "./src/mutation-key.ts",
+      "default": "./dist/mutation-key.js"
+    },
+    "./disc-selection-preview-token": {
+      "types": "./src/disc-selection-preview-token.ts",
+      "default": "./dist/disc-selection-preview-token.js"
     }
   },
   "files": ["dist"],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

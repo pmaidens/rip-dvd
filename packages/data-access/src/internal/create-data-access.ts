@@ -189,6 +189,7 @@ import type {
   DiscSelectionId,
   DiscSelectionMutationInput,
   DiscSelectionMutationResult,
+  DiscSelectionPreviewDecisionInput,
   DiscSelectionActionAvailability,
   DiscSelectionCorrectionEncodeJobLink,
   DiscSelectionCorrectionRetainedOutputSummary,
@@ -261,6 +262,35 @@ const DISC_SELECTION_SUPERSESSION_HISTORY_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
 const ENCODE_JOB_FAILURE_REPORT_JOB_LIMIT = 400;
+
+function discSelectionMutationEvidence(
+  jobs: readonly {
+    id: EncodeJobId;
+    status: EncodeJobStatus;
+    reservesOutputPath: boolean;
+  }[],
+) {
+  const affectedEncodeJobs = jobs
+    .filter((job) => job.status === "queued" || job.status === "running" ||
+      job.status === "cancellation_requested")
+    .map(({ id, status }) => ({ id, status }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const outputReservationReleaseJobs = jobs
+    .filter((job): job is typeof job & { status: "failed" } =>
+      job.status === "failed" && job.reservesOutputPath)
+    .map(({ id, status }) => ({ id, status }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  return {
+    affectedEncodeJobs,
+    outputReservationReleaseJobs,
+    historicalEncodeJobCount: jobs.length,
+    evidenceHash: createHash("sha256").update(JSON.stringify({
+      affectedEncodeJobs,
+      outputReservationReleaseJobs,
+      historicalEncodeJobCount: jobs.length,
+    })).digest("hex"),
+  };
+}
 
 interface EncodeJobAttemptFailureOptions extends EncodeJobFailureOptions {
   failureReports?: readonly ValidatedEncodeJobFailureReportInput[];
@@ -4487,6 +4517,17 @@ export function createDataAccessInternal(
     }
   }
 
+  function discSelectionPreviewSemanticInput(
+    input: Pick<DiscSelectionPreviewDecisionInput,
+      "originalDiscArchiveId" | "expectedCatalogRevision" | "mutation">,
+  ): string {
+    return JSON.stringify({
+      originalDiscArchiveId: input.originalDiscArchiveId,
+      expectedCatalogRevision: input.expectedCatalogRevision,
+      mutation: input.mutation,
+    });
+  }
+
   function performDiscSelectionMutation(
     input: DiscSelectionMutationInput,
     previewOnly: boolean,
@@ -4494,8 +4535,10 @@ export function createDataAccessInternal(
     if (activeDiscSelectionTransaction !== null) {
       throw new DomainInvariantError("Nested Disc Selection mutations are unavailable");
     }
-    const { mutation, originalDiscArchiveId, mutationKey, expectedCatalogRevision } = input;
-    const semanticInput = JSON.stringify({ originalDiscArchiveId, expectedCatalogRevision, mutation });
+    const { mutation, originalDiscArchiveId, mutationKey, expectedCatalogRevision,
+      previewToken } = input;
+    const semanticInput = JSON.stringify({ originalDiscArchiveId, expectedCatalogRevision,
+      previewToken, mutation });
     try {
       return database.transaction((transaction) => {
         if (mutationKey !== undefined) {
@@ -4526,6 +4569,36 @@ export function createDataAccessInternal(
             } as ReturnType<typeof access.catalog.mutateDiscSelection>;
           }
         }
+        let expectedPreviewEvidenceHash: string | undefined;
+        if (previewToken !== undefined) {
+          if (expectedCatalogRevision === undefined) {
+            throw new DomainInvariantError(
+              "Disc Selection preview does not match the proposed change",
+            );
+          }
+          const previewDecision = transaction.select().from(mutationInvocations)
+            .where(eq(mutationInvocations.key, previewToken)).get();
+          if (previewDecision?.operation !== "disc_selection.preview" ||
+              previewDecision.semanticInput !== discSelectionPreviewSemanticInput({
+                originalDiscArchiveId,
+                expectedCatalogRevision,
+                mutation,
+              })) {
+            throw new DomainInvariantError(
+              "Disc Selection preview does not match the proposed change",
+            );
+          }
+          const savedPreview = JSON.parse(previewDecision.outcome) as {
+            expectedPreviewEvidenceHash?: unknown;
+          };
+          if (typeof savedPreview.expectedPreviewEvidenceHash !== "string" ||
+              !/^[a-f0-9]{64}$/.test(savedPreview.expectedPreviewEvidenceHash)) {
+            throw new DomainInvariantError(
+              "Disc Selection preview does not match the proposed change",
+            );
+          }
+          expectedPreviewEvidenceHash = savedPreview.expectedPreviewEvidenceHash;
+        }
         const archive = requireRow(transaction.select({ updatedAt: originalDiscArchives.updatedAt })
           .from(originalDiscArchives)
           .where(eq(originalDiscArchives.id, originalDiscArchiveId)).get(),
@@ -4544,11 +4617,39 @@ export function createDataAccessInternal(
           throw new DomainInvariantError("Disc Selection cannot move between Original Disc Archives");
         }
         if (mutation.action !== "create") {
-          const current = requireRow(transaction.select({ originalDiscArchiveId: discSelections.originalDiscArchiveId })
+          const current = requireRow(transaction.select()
             .from(discSelections).where(eq(discSelections.id, mutation.discSelectionId)).get(),
           "disc selection", mutation.discSelectionId);
           if (current.originalDiscArchiveId !== originalDiscArchiveId) {
             throw new RecordNotFoundError("disc selection", mutation.discSelectionId);
+          }
+          if (expectedPreviewEvidenceHash !== undefined) {
+            const jobs = transaction.select({
+              id: encodeJobs.id,
+              status: encodeJobs.status,
+              reservesOutputPath: encodeJobs.reservesOutputPath,
+            })
+              .from(encodeJobs)
+              .where(eq(encodeJobs.discSelectionId, mutation.discSelectionId))
+              .all();
+            const { evidenceHash } = discSelectionMutationEvidence(jobs);
+            if (evidenceHash !== expectedPreviewEvidenceHash) {
+              throw new DomainInvariantError(
+                "Disc Selection preview is stale because Encode Job history changed",
+              );
+            }
+          }
+          if (mutation.action === "repair") {
+            const source = requireRow(transaction.select({ scanData: detectedDiscs.scanData })
+              .from(originalDiscArchives)
+              .innerJoin(detectedDiscs, eq(detectedDiscs.id, originalDiscArchives.detectedDiscId))
+              .where(eq(originalDiscArchives.id, originalDiscArchiveId)).get(),
+            "original disc archive", originalDiscArchiveId);
+            if (!requiresLegacyDiscSelectionRepair(
+              current, createArchivedDvdSelectionValidator(source.scanData),
+            )) {
+              throw new DomainInvariantError("Disc Selection does not need unsafe legacy repair");
+            }
           }
         }
         const previousTransaction = activeDiscSelectionTransaction;
@@ -4575,6 +4676,10 @@ export function createDataAccessInternal(
           })();
           if (previewOnly) {
             throw new DiscSelectionPreviewRollback(result);
+          }
+          if (previewToken !== undefined) {
+            transaction.delete(mutationInvocations)
+              .where(eq(mutationInvocations.key, previewToken)).run();
           }
           if (mutationKey !== undefined) {
             transaction.insert(mutationInvocations).values({
@@ -7104,6 +7209,18 @@ export function createDataAccessInternal(
         return performDiscSelectionMutation({ ...input, mutationKey: undefined }, true);
       },
 
+      recordDiscSelectionPreviewDecision(input) {
+        database.insert(mutationInvocations).values({
+          key: input.previewToken,
+          operation: "disc_selection.preview",
+          semanticInput: discSelectionPreviewSemanticInput(input),
+          outcome: JSON.stringify({
+            expectedPreviewEvidenceHash: input.expectedPreviewEvidenceHash,
+          }),
+          createdAt: now(),
+        }).run();
+      },
+
       previewDiscSelectionMutation(originalDiscArchiveId, discSelectionId) {
         return database.transaction((transaction) => {
           const archive = requireRow(transaction.select({ updatedAt: originalDiscArchives.updatedAt })
@@ -7120,15 +7237,19 @@ export function createDataAccessInternal(
           if (!availability) {
             throw new RecordNotFoundError("disc selection", discSelectionId);
           }
-          const jobs = transaction.select({ id: encodeJobs.id, status: encodeJobs.status })
-            .from(encodeJobs).where(eq(encodeJobs.discSelectionId, discSelectionId)).all();
+          const jobs = transaction.select({
+            id: encodeJobs.id,
+            status: encodeJobs.status,
+            reservesOutputPath: encodeJobs.reservesOutputPath,
+          })
+            .from(encodeJobs).where(eq(encodeJobs.discSelectionId, discSelectionId))
+            .all();
+          const evidence = discSelectionMutationEvidence(jobs);
           return {
             catalogRevision: archive.updatedAt.toISOString(),
             discSelection: selection,
             actionAvailability: availability,
-            affectedEncodeJobs: jobs.filter((job) =>
-              job.status === "queued" || job.status === "running" || job.status === "cancellation_requested"),
-            historicalEncodeJobCount: jobs.length,
+            ...evidence,
           };
         });
       },

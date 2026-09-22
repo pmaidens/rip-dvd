@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 export class InvalidMutationKeyError extends Error {
   constructor() {
     super("A mutation key of 8 to 128 safe characters is required.");
@@ -15,5 +13,5 @@ export function parseMutationKey(value: unknown): string {
 }
 
 export function generateMutationKey(): string {
-  return randomUUID();
+  return crypto.randomUUID();
 }

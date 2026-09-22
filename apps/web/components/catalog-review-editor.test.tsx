@@ -16,6 +16,7 @@ import {
 import {
   CATALOG_REVIEW_COMMAND_ACTIONS,
   type CatalogReviewCommand,
+  type ConsequentialDiscSelectionCommand,
 } from "../lib/catalog-review-command";
 
 import {
@@ -37,12 +38,14 @@ interface PendingRequest {
 
 function withoutProposalKeys(commands: unknown[]): Record<string, unknown>[] {
   return commands.map((value) => {
-    const { mutationKey, ...command } = value as Record<string, unknown>;
+    const record = value as Record<string, unknown>;
+    const { mutationKey, ...command } = record;
     if (command.action === "create_mapping_proposal" ||
         command.action === "create_episodic_mapping_proposal") {
       expect(mutationKey).toMatch(/^[0-9a-f-]{36}$/);
+      return command;
     }
-    return command;
+    return record;
   });
 }
 
@@ -57,6 +60,7 @@ const archiveOnlyActionAvailability = {
 
 let container: HTMLDivElement;
 let root: Root;
+const previewToken = "disc-selection-preview:00000000-0000-4000-8000-000000000001";
 
 beforeEach(() => {
   (globalThis as typeof globalThis & {
@@ -65,6 +69,8 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
+  window.localStorage.clear();
+  vi.stubGlobal("confirm", vi.fn(() => true));
 });
 
 afterEach(async () => {
@@ -80,6 +86,29 @@ function stubDeferredCatalogReviewRequests(): PendingRequest[] {
       requests.push({ url: String(input), resolve });
     })));
   return requests;
+}
+
+function availableDiscSelectionPreview(
+  catalogRevision: string,
+  action: ConsequentialDiscSelectionCommand["action"],
+  affectedEncodeJobs: readonly { id: string; status: string }[] = [],
+) {
+  return {
+    state: "available",
+    action,
+    catalogRevision,
+    previewToken,
+    affectedEncodeJobs,
+    outputReservationReleaseJobs: [],
+    consequences: {
+      currentSelection: "superseded",
+      createsReplacementSelection: true,
+      requestsEncodeJobCancellation: affectedEncodeJobs.map((job) => job.id),
+      releasesOutputReservations: [],
+      preservesEncodeJobHistory: affectedEncodeJobs.length > 0,
+      reopensCatalogReview: true,
+    },
+  };
 }
 
 function catalogReview({
@@ -193,6 +222,45 @@ function renderCatalogReviewEditor(archiveId: string): void {
 }
 
 describe("CatalogReviewEditor", () => {
+  it("recovers an acknowledged Disc Selection mutation when the archive reloads", async () => {
+    const review = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "RECOVERY_DISC",
+    });
+    const command = {
+      action: "delete_disc_selection" as const,
+      discSelectionId: review.discSelections[0]!.id,
+    };
+    const firstAttemptBodies: Record<string, unknown>[] = [];
+    const firstAttempt = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      firstAttemptBodies.push(body);
+      return body.preview === true
+        ? Response.json(availableDiscSelectionPreview(
+          review.catalogRevision, "delete_disc_selection",
+        ))
+        : Response.json({ error: "Response unavailable" }, { status: 503 });
+    };
+    await expect(mutateCatalogReview("archive-a", command, firstAttempt, {
+      confirmDiscSelectionPreview: () => true,
+    })).rejects.toThrow("Response unavailable");
+
+    const recoveredBodies: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        recoveredBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return Response.json({ message: "Mapping changed; review required" });
+      }
+      return Response.json(review);
+    }));
+
+    await act(async () => renderCatalogReviewEditor("archive-a"));
+
+    expect(firstAttemptBodies).toHaveLength(2);
+    expect(recoveredBodies).toEqual([firstAttemptBodies[1]]);
+    expect(container.textContent).toContain("Mapping changed; review required");
+  });
+
   it("accepts an automatic movie proposal and completes review in one request", async () => {
     const review = catalogReview({
       archiveId: "archive-a",
@@ -742,7 +810,13 @@ describe("CatalogReviewEditor", () => {
       init?: RequestInit,
     ) => {
       if (init?.method === "POST") {
-        postedCommands.push(JSON.parse(String(init.body)) as unknown);
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        postedCommands.push(body);
+        if (body.preview === true) {
+          return Response.json(availableDiscSelectionPreview(
+            review.catalogRevision, "correct_disc_selection",
+          ));
+        }
         return Response.json({});
       }
       return Response.json(review);
@@ -784,7 +858,7 @@ describe("CatalogReviewEditor", () => {
       }));
     });
 
-    expect(postedCommands).toEqual([{
+    const command = {
       action: "correct_disc_selection",
       discSelectionId: review.discSelections[0]!.id,
       catalogRevision: review.catalogRevision,
@@ -793,7 +867,16 @@ describe("CatalogReviewEditor", () => {
         mediaItemId: review.mediaItems[0]!.id,
         sourceIdentity: { kind: "main_feature" },
       },
-    }]);
+    };
+    expect(postedCommands).toEqual([
+      { ...command, preview: true },
+      { ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        expectedCatalogRevision: review.catalogRevision, previewToken,
+        acknowledge: true },
+    ]);
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining(
+      "Current selection will be superseded.\nA replacement Disc Selection will be created.\nNo active Encode Jobs are affected.",
+    ));
   });
 
   it("updates a job-free Disc Selection without resubmitting unchanged source or label values", async () => {
@@ -830,7 +913,13 @@ describe("CatalogReviewEditor", () => {
       init?: RequestInit,
     ) => {
       if (init?.method === "POST") {
-        postedCommands.push(JSON.parse(String(init.body)) as unknown);
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        postedCommands.push(body);
+        if (body.preview === true) {
+          return Response.json(availableDiscSelectionPreview(
+            review.catalogRevision, "update_disc_selection",
+          ));
+        }
         return Response.json({ message: "Mapping changed; review required" });
       }
       return Response.json(review);
@@ -860,11 +949,17 @@ describe("CatalogReviewEditor", () => {
       submit.click();
     });
 
-    expect(postedCommands).toEqual([{
+    const command = {
       action: "update_disc_selection",
       discSelectionId: review.discSelections[0]!.id,
       changes: { mediaItemId: "episode-2" },
-    }]);
+    };
+    expect(postedCommands).toEqual([
+      { ...command, preview: true },
+      { ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        expectedCatalogRevision: review.catalogRevision, previewToken,
+        acknowledge: true },
+    ]);
     expect(container.textContent).toContain(
       "Mapping changed; review required",
     );
@@ -1961,17 +2056,43 @@ describe("CatalogReviewView", () => {
     } satisfies Record<CatalogReviewCommand["action"], CatalogReviewCommand>;
     const postedBodies: unknown[] = [];
     const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
-      postedBodies.push(JSON.parse(String(init?.body)) as unknown);
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      postedBodies.push(body);
+      if (body.preview === true) {
+        const action = body.action;
+        if (action !== "repair_disc_selection" && action !== "correct_disc_selection" &&
+            action !== "delete_disc_selection") {
+          throw new Error("Expected a consequential Disc Selection command");
+        }
+        return Response.json(availableDiscSelectionPreview(
+          "2026-08-11T06:00:00.000Z", action,
+        ));
+      }
       return Response.json({});
     };
 
     for (const action of CATALOG_REVIEW_COMMAND_ACTIONS) {
-      await mutateCatalogReview("archive-1", commands[action], fetcher);
+      await mutateCatalogReview("archive-1", commands[action], fetcher, {
+        confirmDiscSelectionPreview: () => true,
+      });
     }
 
-    expect(withoutProposalKeys(postedBodies)).toEqual(CATALOG_REVIEW_COMMAND_ACTIONS.map(
-      (action) => commands[action],
-    ));
+    const consequential = new Set(["repair_disc_selection", "correct_disc_selection",
+      "delete_disc_selection"]);
+    const keyedDiscSelections = new Set(["create_disc_selection", "update_disc_selection"]);
+    expect(withoutProposalKeys(postedBodies)).toEqual(
+      CATALOG_REVIEW_COMMAND_ACTIONS.flatMap((action) => {
+        const command = commands[action];
+        return consequential.has(action) ? [
+          { ...command, preview: true },
+          { ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
+            expectedCatalogRevision: "2026-08-11T06:00:00.000Z",
+            previewToken, acknowledge: true },
+        ] : keyedDiscSelections.has(action)
+          ? [{ ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/) }]
+          : [command];
+      }),
+    );
   });
 
   it("shows archived DVD evidence separately from editable hierarchy and reviewed mappings", () => {

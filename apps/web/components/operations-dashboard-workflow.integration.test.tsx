@@ -59,6 +59,7 @@ import { EncodeOutputValidationError } from "../../encode-worker/src/encode-outp
 import {
   pollArchiveWorkerForTest as pollArchiveWorker,
 } from "../test/archive-job-fixture";
+import { previewAndApplyDiscSelection } from "../test/disc-selection-mutation";
 import { createArchiveRequestsRoute } from "../app/api/archive-requests/route";
 import { createCatalogReviewRoute } from "../app/api/catalog-reviews/[id]/route";
 import { createMediaItemSearchRoute } from "../app/api/media-items/route";
@@ -124,6 +125,18 @@ function createMutationRequest(path: string, body: unknown): Request {
     },
     body: JSON.stringify(keyedBody),
   });
+}
+
+function invokeCatalogSelectionMutation(
+  access: DataAccess,
+  archiveId: string,
+) {
+  return (body: Record<string, unknown>) => createCatalogReviewRoute(
+    createMutationRequest(`/api/catalog-reviews/${archiveId}`, body),
+    archiveId,
+    () => access,
+    () => trustedOrigin,
+  );
 }
 
 async function readDashboard(access: DataAccess): Promise<{
@@ -1326,6 +1339,7 @@ describe("end-to-end operations dashboard workflow", () => {
         action: "update_disc_selection",
         discSelectionId: selection.id,
         changes: { label: "   " },
+        mutationKey: crypto.randomUUID(),
       }),
       archive.id,
       () => access,
@@ -1335,15 +1349,12 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
       .toMatchObject({ catalogReviewOutcome: "reviewed_with_selections" });
 
-    const updated = await createCatalogReviewRoute(
-      createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
+    const updated = await previewAndApplyDiscSelection(
+      invokeCatalogSelectionMutation(access, archive.id), {
         action: "update_disc_selection",
         discSelectionId: selection.id,
         changes: { mediaItemId: correctedItem.id },
-      }),
-      archive.id,
-      () => access,
-      () => trustedOrigin,
+      },
     );
     expect(updated.status).toBe(200);
     await expect(updated.json()).resolves.toEqual({
@@ -1376,6 +1387,7 @@ describe("end-to-end operations dashboard workflow", () => {
         action: "update_disc_selection",
         discSelectionId: selection.id,
         changes: { label: null },
+        mutationKey: crypto.randomUUID(),
       }),
       archive.id,
       () => access,
@@ -1421,15 +1433,12 @@ describe("end-to-end operations dashboard workflow", () => {
       [wholeEditable.id, wholeTarget.sourceIdentity],
       [rangeEditable.id, selection.sourceIdentity],
     ] as const) {
-      const overlapUpdate = await createCatalogReviewRoute(
-        createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
+      const overlapUpdate = await previewAndApplyDiscSelection(
+        invokeCatalogSelectionMutation(access, archive.id), {
           action: "update_disc_selection",
           discSelectionId,
           changes: { sourceIdentity },
-        }),
-        archive.id,
-        () => access,
-        () => trustedOrigin,
+        },
       );
       expect(overlapUpdate.status).toBe(200);
     }
@@ -1548,8 +1557,7 @@ describe("end-to-end operations dashboard workflow", () => {
       expect.objectContaining({ id: job.id, status: "running" }),
     ]);
 
-    const response = await createCatalogReviewRoute(
-      createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
+    const response = await previewAndApplyDiscSelection(invokeCatalogSelectionMutation(access, archive.id), {
         action: "correct_disc_selection",
         discSelectionId: selection.id,
         catalogRevision: access.catalog.listOriginalDiscArchives({
@@ -1560,11 +1568,7 @@ describe("end-to-end operations dashboard workflow", () => {
           mediaItemId: correctedItem.id,
           sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
         },
-      }),
-      archive.id,
-      () => access,
-      () => trustedOrigin,
-    );
+    });
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
@@ -2018,6 +2022,12 @@ describe("end-to-end operations dashboard workflow", () => {
           mutationKey: crypto.randomUUID(),
           ...(preview ? { acknowledgedRevision: preview.revision } : {}),
         };
+      } else if (typeof body === "object" && body !== null && "action" in body &&
+          (body.action === "create_disc_selection" || body.action === "update_disc_selection" ||
+            body.action === "repair_disc_selection" || body.action === "correct_disc_selection" ||
+            body.action === "delete_disc_selection") && !("preview" in body) &&
+          !("mutationKey" in body)) {
+        input = { ...body, mutationKey: crypto.randomUUID() };
       }
       return createCatalogReviewRoute(
         createMutationRequest(`/api/catalog-reviews/${archive.id}`, input),
@@ -2495,7 +2505,7 @@ describe("end-to-end operations dashboard workflow", () => {
       mediaItem: { id: string };
       discSelection: { id: string };
     };
-    const removeMistakenSelection = await catalogMutation({
+    const removeMistakenSelection = await previewAndApplyDiscSelection(invokeCatalogSelectionMutation(access, archive.id), {
       action: "delete_disc_selection",
       discSelectionId: mistakenProposal.discSelection.id,
     });
@@ -2860,7 +2870,7 @@ describe("end-to-end operations dashboard workflow", () => {
     });
     const correctedSourceItem = (await correctedSourceItemResponse.json())
       .mediaItem as { id: string };
-    const correctionResponse = await catalogMutation({
+    const correctionResponse = await previewAndApplyDiscSelection(invokeCatalogSelectionMutation(access, archive.id), {
       action: "correct_disc_selection",
       discSelectionId: selection.id,
       catalogRevision: access.catalog.listOriginalDiscArchives({
@@ -2952,6 +2962,7 @@ describe("end-to-end operations dashboard workflow", () => {
       outputPath,
       mediaLibraryPath,
     );
+    expect(inspectPath).toHaveBeenCalledTimes(2);
     const verifiedDashboard = await readDashboard(access);
     expect(verifiedDashboard.html).toContain("File is accessible.");
     const readInventory = (target: "encode_job_output" | "original_disc_archive") => {

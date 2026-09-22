@@ -6,6 +6,11 @@ import type { CompletedCatalogReviewOutcome } from "@rip-dvd/data-access";
 import type { AutomaticCatalogProposal } from "../lib/catalog-automation";
 import type { CatalogReviewCommand } from "../lib/catalog-review-command";
 import type { CatalogReviewReplacementEncodeInput } from "../lib/catalog-review-command";
+import {
+  discSelectionPreviewConfirmation,
+  mutateCatalogReview,
+  resumePendingCatalogReviewMutation,
+} from "./catalog-review-mutation";
 import type {
   CatalogReviewDto,
   CatalogReviewLoadState,
@@ -18,6 +23,11 @@ import type {
   SaveMediaItemInput,
   UpdateDiscSelectionInput,
 } from "./catalog-review-model";
+
+export {
+  mutateCatalogReview,
+  resumePendingCatalogReviewMutation,
+} from "./catalog-review-mutation";
 
 type CatalogReviewFetch = (
   input: RequestInfo | URL,
@@ -109,68 +119,6 @@ export async function requestCatalogReview(
   return response.json() as Promise<CatalogReviewDto>;
 }
 
-const pendingProposalKeys = new Map<string, string>();
-
-export async function mutateCatalogReview(
-  archiveId: string,
-  command: CatalogReviewCommand,
-  fetcher: CatalogReviewFetch = fetch,
-): Promise<{ message: string | null }> {
-  const isProposal = command.action === "create_mapping_proposal" ||
-    command.action === "create_episodic_mapping_proposal";
-  const proposalIdentity = isProposal ? JSON.stringify({ archiveId, command }) : null;
-  let mutationKey: string | undefined;
-  if (proposalIdentity !== null) {
-    mutationKey = pendingProposalKeys.get(proposalIdentity);
-    if (mutationKey === undefined) {
-      mutationKey = crypto.randomUUID();
-      pendingProposalKeys.set(proposalIdentity, mutationKey);
-    }
-  }
-  const response = await fetcher(
-    `/api/catalog-reviews/${encodeURIComponent(archiveId)}`,
-    {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ ...command, ...(mutationKey ? { mutationKey } : {}) }),
-    },
-  );
-  if (!response.ok) {
-    let message = "Catalog review mutation failed";
-    try {
-      const body: unknown = await response.json();
-      if (
-        typeof body === "object" &&
-        body !== null &&
-        "error" in body &&
-        typeof body.error === "string" &&
-        body.error.trim() !== ""
-      ) {
-        message = body.error.trim().slice(0, 512);
-      }
-    } catch {
-      // Keep the bounded generic message for non-JSON error responses.
-    }
-    throw new Error(message);
-  }
-  if (proposalIdentity !== null) pendingProposalKeys.delete(proposalIdentity);
-  try {
-    const body: unknown = await response.json();
-    return {
-      message:
-        typeof body === "object" && body !== null && "message" in body &&
-          typeof body.message === "string" && body.message.trim() !== ""
-          ? body.message.trim().slice(0, 512)
-          : null,
-    };
-  } catch {
-    return { message: null };
-  }
-}
-
 interface UseCatalogReviewStateOptions {
   archiveId: string;
   activityRevision?: string;
@@ -228,6 +176,13 @@ export function useCatalogReviewState({
       return;
     }
     try {
+      const recovered = await resumePendingCatalogReviewMutation(archiveId);
+      if (!requestScope.current?.isCurrent(archiveId, request)) {
+        return;
+      }
+      if (recovered !== null) {
+        setMutationNotice(recovered.message);
+      }
       const review = await requestCatalogReview(
         archiveId,
         {
@@ -364,7 +319,16 @@ export function useCatalogReviewState({
           ...(pending.revision ? { acknowledgedRevision: pending.revision } : {}),
         };
       }
-      const result = await mutateCatalogReview(archiveId, submittedCommand);
+      const result = await mutateCatalogReview(
+        archiveId,
+        submittedCommand,
+        fetch,
+        {
+          confirmDiscSelectionPreview: (preview) =>
+            window.confirm(discSelectionPreviewConfirmation(preview)),
+        },
+      );
+      if (result.cancelled) return;
       if (pendingKey !== null) pendingMediaItemKeys.current.delete(pendingKey);
       setMutationNotice(result.message);
       setEditingMediaItemId(null);

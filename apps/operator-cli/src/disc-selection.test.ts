@@ -1,5 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { afterEach, expect, it } from "vitest";
@@ -8,6 +9,7 @@ import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 const key = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
+const supportedDvdSettings = { preset: "Fast 480p30", container: "mkv" } as const;
 
 function fixture() {
   const current = createOperatorWorkflowFixture();
@@ -41,6 +43,18 @@ function fixture() {
   const second = access.catalog.createMediaItem({ kind: "movie", title: "Alternative Film" });
   access.close();
   return { current, archive, first, second };
+}
+
+function markUnsafeLegacySelections(databasePath: string, selectionIds: readonly string[]): void {
+  const sqlite = new DatabaseSync(databasePath);
+  try {
+    const markUnsafe = sqlite.prepare(
+      "update disc_selections set source_key = 'legacy:noncanonical' where id = ?",
+    );
+    for (const selectionId of selectionIds) markUnsafe.run(selectionId);
+  } finally {
+    sqlite.close();
+  }
 }
 
 afterEach(() => {
@@ -95,6 +109,15 @@ it("previews consequential changes, rejects stale decisions, and applies eligibl
   const unreviewedReplacement = await current.run(["disc-selection", "update", archive.id, selectionId,
     "--key", key(12), "--media-item-id", second.id]);
   expect(unreviewedReplacement.result).toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
+  const unissuedDecision = await current.run(["disc-selection", "update", archive.id, selectionId,
+    "--key", key(14), "--media-item-id", second.id,
+    "--revision", replacementDecision.catalogRevision,
+    "--preview-token", "disc-selection-preview:00000000-0000-4000-8000-000000000099",
+    "--acknowledge"]);
+  expect(unissuedDecision.result).toMatchObject({ error: {
+    code: "SELECTION_REJECTED",
+    message: "Disc Selection preview does not match the proposed change",
+  } });
   const replaced = await current.run(["disc-selection", "update", archive.id, selectionId,
     "--key", key(12), "--media-item-id", second.id,
     "--revision", replacementDecision.catalogRevision, "--preview-token", replacementDecision.previewToken,
@@ -107,6 +130,12 @@ it("previews consequential changes, rejects stale decisions, and applies eligibl
   expect(mismatched.result).toMatchObject({ error: { code: "SELECTION_REJECTED" } });
   const deletionPreview = await current.run(["disc-selection", "preview", "delete", archive.id, selectionId]);
   const staleDecision = deletionPreview.result as { catalogRevision: string; previewToken: string };
+  const unnecessaryPreview = await current.run(["disc-selection", "preview", "update", archive.id, selectionId,
+    "--label", "Main feature"]);
+  expect(unnecessaryPreview.result).toMatchObject({ error: {
+    code: "SELECTION_REJECTED",
+    message: "This Disc Selection change does not require a preview",
+  } });
   const updated = await current.run(["disc-selection", "update", archive.id, selectionId,
     "--key", key(5), "--label", "Main feature"]);
   expect(updated.result).toMatchObject({ discSelection: { label: "Main feature" } });
@@ -136,7 +165,7 @@ it("rejects invalid sources and protects locked Encode Job provenance", async ()
   const selectionId = (created.result as { discSelection: { id: string } }).discSelection.id;
   const access = current.openAccess();
   const profile = access.encodingProfiles.create({ key: "synthetic-profile", displayName: "Synthetic profile",
-    mediaDomain: "dvd_video", settings: { preset: "Fast 480p30" } });
+    mediaDomain: "dvd_video", settings: supportedDvdSettings });
   access.catalog.completeCatalogReview(archive.id,
     access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt, "reviewed_with_selections");
   access.encodeJobs.enqueue({ discSelectionId: selectionId as Parameters<typeof access.encodeJobs.enqueue>[0]["discSelectionId"],
@@ -147,18 +176,48 @@ it("rejects invalid sources and protects locked Encode Job provenance", async ()
     availableActions: ["correct"] }, affectedEncodeJobs: [{ status: "queued" }] });
   const updated = await current.run(["disc-selection", "preview", "update", archive.id, selectionId,
     "--media-item-id", second.id]);
-  expect(updated.result).toMatchObject({ error: { code: "SELECTION_REJECTED" } });
+  expect(updated.result).toMatchObject({ state: "blocked", actionAvailability: {
+    state: "locked_provenance", availableActions: ["correct"] } });
   const deleted = await current.run(["disc-selection", "preview", "delete", archive.id, selectionId]);
-  expect(deleted.result).toMatchObject({ error: { code: "SELECTION_REJECTED" } });
+  expect(deleted.result).toMatchObject({ state: "blocked", actionAvailability: {
+    state: "locked_provenance", availableActions: ["correct"] } });
   const invalidProposal = await current.run(["disc-selection", "preview", "correct", archive.id, selectionId,
     "--media-item-id", second.id, "--source-kind", "dvd_title", "--title-number", "99"]);
   expect(invalidProposal.result).toMatchObject({ error: { code: "SELECTION_REJECTED" } });
   const preview = await current.run(["disc-selection", "preview", "correct", archive.id, selectionId,
     "--media-item-id", second.id, "--source-kind", "main_feature"]);
   expect(preview.result).toMatchObject({ proposedDiscSelection: { mediaItemId: second.id } });
+  expect(preview.result).toMatchObject({ state: "available", consequences: {
+    currentSelection: "superseded", createsReplacementSelection: true,
+    requestsEncodeJobCancellation: [expect.any(String)],
+    preservesEncodeJobHistory: true, reopensCatalogReview: true,
+  } });
   const afterPreview = await current.run(["disc-selection", "show", archive.id, selectionId]);
   expect(afterPreview.result).toMatchObject({ affectedEncodeJobs: [{ status: "queued" }] });
-  const decision = preview.result as { catalogRevision: string; previewToken: string };
+  const staleDecision = preview.result as { catalogRevision: string; previewToken: string };
+  const changedJobs = current.openAccess();
+  const jobId = (detail.result as { affectedEncodeJobs: { id: string }[] }).affectedEncodeJobs[0]!.id;
+  const running = changedJobs.encodeJobs.claimNext("synthetic-cancellation-worker");
+  if (!running || running.id !== jobId) throw new Error("Expected original synthetic Encode Job claim");
+  changedJobs.encodeJobs.requestCancellation(running.id);
+  const additionalProfile = changedJobs.encodingProfiles.create({ key: "additional-synthetic-profile",
+    displayName: "Additional synthetic profile", mediaDomain: "dvd_video", settings: supportedDvdSettings });
+  const additionalJob = changedJobs.encodeJobs.enqueue({ discSelectionId: selectionId as Parameters<
+    typeof changedJobs.encodeJobs.enqueue>[0]["discSelectionId"], encodingProfileId: additionalProfile.id,
+    outputPath: join(current.mediaLibraryPath, "additional-synthetic-film.mkv") });
+  changedJobs.close();
+  const stale = await current.run(["disc-selection", "correct", archive.id, selectionId,
+    "--key", key(10), "--revision", staleDecision.catalogRevision,
+    "--preview-token", staleDecision.previewToken, "--acknowledge",
+    "--media-item-id", second.id, "--source-kind", "main_feature"]);
+  expect(stale.result).toMatchObject({ error: { code: "SELECTION_REJECTED",
+    message: "Disc Selection preview is stale because Encode Job history changed" } });
+  const currentPreview = await current.run(["disc-selection", "preview", "correct", archive.id, selectionId,
+    "--media-item-id", second.id, "--source-kind", "main_feature"]);
+  expect(currentPreview.result).toMatchObject({ consequences: {
+    requestsEncodeJobCancellation: [additionalJob.id],
+  } });
+  const decision = currentPreview.result as { catalogRevision: string; previewToken: string };
   const corrected = await current.run(["disc-selection", "correct", archive.id, selectionId,
     "--key", key(11), "--revision", decision.catalogRevision, "--preview-token", decision.previewToken,
     "--acknowledge",
@@ -166,4 +225,114 @@ it("rejects invalid sources and protects locked Encode Job provenance", async ()
   expect(corrected.result).toMatchObject({ discSelection: { mediaItemId: second.id },
     supersession: { supersededDiscSelectionId: selectionId } });
   expect((corrected.result as { discSelection: { id: string } }).discSelection.id).not.toBe(selectionId);
+  const review = await current.run(["catalog-review", "show", archive.id]);
+  expect(review.result).toMatchObject({ reviewOutcome: "needs_review", correctionHistory: [
+    { supersededDiscSelection: { id: selectionId },
+      replacementDiscSelection: { id: (corrected.result as { discSelection: { id: string } }).discSelection.id } },
+  ] });
+  expect((await current.run(["inspect", "encode-jobs", jobId])).result).toMatchObject({
+    item: { id: jobId, status: "cancellation_requested",
+      history: expect.arrayContaining([expect.objectContaining({ discSelectionId: selectionId })]) },
+  });
+  expect((await current.run(["inspect", "encode-jobs", additionalJob.id])).result).toMatchObject({
+    item: { id: additionalJob.id, status: "cancelled" },
+  });
+});
+
+it("previews unsafe legacy repair and quarantine while preserving completed Encode Job history", async () => {
+  const { current, archive, first, second } = fixture();
+  const access = current.openAccess();
+  const selection = access.catalog.createDiscSelection({
+    originalDiscArchiveId: archive.id, mediaItemId: first.id,
+    sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+  });
+  const other = access.catalog.createDiscSelection({
+    originalDiscArchiveId: archive.id, mediaItemId: second.id,
+    sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+  });
+  const profile = access.encodingProfiles.create({ key: "legacy-recovery", displayName: "Legacy recovery",
+    mediaDomain: "dvd_video", settings: supportedDvdSettings });
+  access.catalog.completeCatalogReview(archive.id,
+    access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt, "reviewed_with_selections");
+  const firstJob = access.encodeJobs.enqueue({ discSelectionId: selection.id,
+    encodingProfileId: profile.id, outputPath: join(current.mediaLibraryPath, "first.mkv") });
+  const secondJob = access.encodeJobs.enqueue({ discSelectionId: other.id,
+    encodingProfileId: profile.id, outputPath: join(current.mediaLibraryPath, "second.mkv") });
+  const firstClaim = access.encodeJobs.claimNext("synthetic-repair-worker")!;
+  access.encodeJobs.complete(firstClaim);
+  const secondClaim = access.encodeJobs.claimNext("synthetic-repair-worker")!;
+  access.encodeJobs.fail(secondClaim, "Synthetic failed encode");
+  access.close();
+  markUnsafeLegacySelections(current.databasePath, [selection.id, other.id]);
+
+  const show = await current.run(["disc-selection", "show", archive.id, selection.id]);
+  expect(show.result).toMatchObject({ actionAvailability: { state: "needs_repair",
+    availableActions: ["repair", "remove"] }, historicalEncodeJobCount: 1 });
+  const blockedCorrection = await current.run(["disc-selection", "preview", "correct", archive.id,
+    selection.id, "--media-item-id", second.id, "--source-kind", "dvd_title", "--title-number", "1"]);
+  expect(blockedCorrection.result).toMatchObject({ state: "blocked", action: "correct_disc_selection",
+    actionAvailability: { state: "needs_repair" } });
+  expect(blockedCorrection.result).not.toHaveProperty("previewToken");
+
+  const proposal = ["--media-item-id", second.id, "--source-kind", "dvd_title", "--title-number", "1"];
+  const repairPreview = await current.run(["disc-selection", "preview", "repair", archive.id,
+    selection.id, ...proposal]);
+  expect(repairPreview.result).toMatchObject({ state: "available", consequences: {
+    currentSelection: "deactivated", createsReplacementSelection: true,
+    requestsEncodeJobCancellation: [], releasesOutputReservations: [],
+    preservesEncodeJobHistory: true, reopensCatalogReview: true,
+  } });
+  const repairDecision = repairPreview.result as { catalogRevision: string; previewToken: string };
+  const repaired = await current.run(["disc-selection", "repair", archive.id, selection.id,
+    "--key", key(20), "--revision", repairDecision.catalogRevision,
+    "--preview-token", repairDecision.previewToken, "--acknowledge", ...proposal]);
+  expect(repaired.result).toMatchObject({ discSelection: { mediaItemId: second.id } });
+  const replacementId = (repaired.result as { discSelection: { id: string } }).discSelection.id;
+  expect(replacementId).not.toBe(selection.id);
+  expect((await current.run(["disc-selection", "show", archive.id, replacementId])).result)
+    .toMatchObject({ actionAvailability: { state: "editable", availableActions: ["update", "remove"] } });
+  expect((await current.run(["inspect", "encode-jobs", firstJob.id])).result)
+    .toMatchObject({ item: { history: [expect.objectContaining({ discSelectionId: selection.id })] } });
+
+  const removal = await current.run(["disc-selection", "preview", "delete", archive.id, other.id]);
+  expect(removal.result).toMatchObject({ state: "available", consequences: {
+    currentSelection: "deactivated", createsReplacementSelection: false,
+    releasesOutputReservations: [secondJob.id], preservesEncodeJobHistory: true,
+  } });
+  expect(removal.result).toMatchObject({
+    outputReservationReleaseJobs: [{ id: secondJob.id, status: "failed" }],
+  });
+  const removalDecision = removal.result as { catalogRevision: string; previewToken: string };
+  const quarantined = await current.run(["disc-selection", "delete", archive.id, other.id,
+    "--key", key(21), "--revision", removalDecision.catalogRevision,
+    "--preview-token", removalDecision.previewToken, "--acknowledge"]);
+  expect(quarantined.result).toMatchObject({ deletionComplete: true });
+  expect((await current.run(["inspect", "encode-jobs", secondJob.id])).result)
+    .toMatchObject({ item: { reservesOutputPath: false,
+      history: [expect.objectContaining({ discSelectionId: other.id })] } });
+  expect((await current.run(["catalog-review", "show", archive.id])).result)
+    .toMatchObject({ reviewOutcome: "needs_review",
+      discSelections: [expect.objectContaining({ id: replacementId })] });
+});
+
+it("returns a structured blocked repair while an unsafe legacy selection has active work", async () => {
+  const { current, archive, first } = fixture();
+  const access = current.openAccess();
+  const selection = access.catalog.createDiscSelection({ originalDiscArchiveId: archive.id,
+    mediaItemId: first.id, sourceIdentity: { kind: "dvd_title", titleNumber: 1 } });
+  const profile = access.encodingProfiles.create({ key: "active-repair", displayName: "Active repair",
+    mediaDomain: "dvd_video", settings: supportedDvdSettings });
+  access.catalog.completeCatalogReview(archive.id,
+    access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt, "reviewed_with_selections");
+  const job = access.encodeJobs.enqueue({ discSelectionId: selection.id, encodingProfileId: profile.id,
+    outputPath: join(current.mediaLibraryPath, "active.mkv") });
+  access.close();
+  markUnsafeLegacySelections(current.databasePath, [selection.id]);
+  const preview = await current.run(["disc-selection", "preview", "repair", archive.id, selection.id,
+    "--media-item-id", first.id, "--source-kind", "dvd_title", "--title-number", "1"]);
+  expect(preview.exitCode).toBe(0);
+  expect(preview.result).toMatchObject({ state: "blocked", relatedEncodeJob: { id: job.id, status: "queued" },
+    actionAvailability: { state: "needs_repair", availableActions: [] },
+    reason: expect.stringContaining("direct mutation is unavailable") });
+  expect(preview.result).not.toHaveProperty("previewToken");
 });

@@ -585,6 +585,15 @@ export interface DiscSelectionMutationInput {
   mutationKey?: string;
   originalDiscArchiveId: OriginalDiscArchiveId;
   expectedCatalogRevision?: Date;
+  previewToken?: string;
+  mutation: DiscSelectionMutation;
+}
+
+export interface DiscSelectionPreviewDecisionInput {
+  previewToken: string;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  expectedCatalogRevision: Date;
+  expectedPreviewEvidenceHash: string;
   mutation: DiscSelectionMutation;
 }
 
@@ -600,7 +609,12 @@ export interface DiscSelectionMutationPreview {
   discSelection: DiscSelection;
   actionAvailability: DiscSelectionActionAvailability;
   affectedEncodeJobs: readonly { id: EncodeJobId; status: EncodeJobStatus }[];
+  outputReservationReleaseJobs: readonly {
+    id: EncodeJobId;
+    status: "failed";
+  }[];
   historicalEncodeJobCount: number;
+  evidenceHash: string;
 }
 
 export interface CreateMediaItemInput {
@@ -1212,6 +1226,7 @@ export interface CatalogAccess {
   deleteDiscSelection(id: DiscSelectionId): DeleteDiscSelectionResult;
   mutateDiscSelection(input: DiscSelectionMutationInput): DiscSelectionMutationResult;
   previewDiscSelectionChange(input: DiscSelectionMutationInput): DiscSelectionMutationResult;
+  recordDiscSelectionPreviewDecision(input: DiscSelectionPreviewDecisionInput): void;
   previewDiscSelectionMutation(
     originalDiscArchiveId: OriginalDiscArchiveId,
     discSelectionId: DiscSelectionId,

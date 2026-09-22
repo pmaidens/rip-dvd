@@ -153,6 +153,47 @@ export type CatalogReviewCommand =
       replacementEncodes: CatalogReviewReplacementEncodeInput[];
     };
 
+type UpdateDiscSelectionCommand = Extract<CatalogReviewCommand, {
+  action: "update_disc_selection";
+}>;
+
+export type ConsequentialDiscSelectionCommand =
+  | (Omit<UpdateDiscSelectionCommand, "changes"> & {
+      changes: UpdateDiscSelectionCommand["changes"] & (
+        | { mediaItemId: string }
+        | { sourceIdentity: DiscSelectionSourceIdentityInput }
+      );
+    })
+  | Extract<CatalogReviewCommand, {
+      action: "repair_disc_selection" | "correct_disc_selection" | "delete_disc_selection";
+    }>;
+
+export type DiscSelectionCommand = Extract<CatalogReviewCommand, {
+  action: "create_disc_selection" | "update_disc_selection" | "repair_disc_selection" |
+    "correct_disc_selection" | "delete_disc_selection";
+}>;
+
+export function isDiscSelectionCommand(
+  command: CatalogReviewCommand,
+): command is DiscSelectionCommand {
+  return command.action === "create_disc_selection" ||
+    command.action === "update_disc_selection" ||
+    command.action === "repair_disc_selection" ||
+    command.action === "correct_disc_selection" ||
+    command.action === "delete_disc_selection";
+}
+
+export function discSelectionCommandRequiresPreview(
+  command: CatalogReviewCommand,
+): command is ConsequentialDiscSelectionCommand {
+  if (command.action === "update_disc_selection") {
+    return "mediaItemId" in command.changes || "sourceIdentity" in command.changes;
+  }
+  return command.action === "repair_disc_selection" ||
+    command.action === "correct_disc_selection" ||
+    command.action === "delete_disc_selection";
+}
+
 export type CatalogReviewCommandValidationError =
   | "Invalid catalog review mutation"
   | "Unknown catalog review mutation"

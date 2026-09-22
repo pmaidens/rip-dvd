@@ -5,7 +5,11 @@ import {
   previewDiscSelectionChange,
   InvalidMutationKeyError,
 } from "@rip-dvd/application";
-import { parseCatalogReviewCommand } from "@rip-dvd/application/catalog-review-command";
+import {
+  discSelectionCommandRequiresPreview,
+  parseCatalogReviewCommand,
+} from "@rip-dvd/application/catalog-review-command";
+import { isDiscSelectionPreviewToken } from "@rip-dvd/application/disc-selection-preview-token";
 import {
   DomainInvariantError,
   MutationKeyConflictError,
@@ -228,10 +232,10 @@ export function runDiscSelection(rest: readonly string[], io: SelectionIO): unkn
       return previewDiscSelectionChange(access, archiveId, command);
     });
   }
-  const changes = input && typeof input === "object" && !Array.isArray(input)
-    ? input as Record<string, unknown> : {};
-  const consequential = action === "repair" || action === "correct" || action === "delete" ||
-    (action === "update" && ("mediaItemId" in changes || "sourceIdentity" in changes));
+  const command = parsedCommand(
+    action, selectionId, input, options.get("--revision"), options.get("--reason"),
+  );
+  const consequential = discSelectionCommandRequiresPreview(command);
   if (consequential && !options.has("--acknowledge")) {
     invalid("Acknowledgement of a Disc Selection preview is required.");
   }
@@ -240,13 +244,13 @@ export function runDiscSelection(rest: readonly string[], io: SelectionIO): unkn
   }
   const expectedCatalogRevision = consequential ? revision(options.get("--revision")) : undefined;
   const previewToken = options.get("--preview-token");
-  if (consequential && (!previewToken || !/^[a-f0-9]{64}$/.test(previewToken))) {
+  if (consequential && !isDiscSelectionPreviewToken(previewToken)) {
     invalid("A matching Disc Selection preview token is required.");
   }
-  const command = parsedCommand(action, selectionId, input, expectedCatalogRevision?.toISOString(), options.get("--reason"));
   return withSelectionAccess(io, (access) => executeDiscSelectionCommand(access, archiveId, command, {
     mutationKey,
     ...(expectedCatalogRevision ? { expectedCatalogRevision } : {}),
     ...(previewToken ? { previewToken } : {}),
+    ...(options.has("--acknowledge") ? { acknowledged: true } : {}),
   }));
 }

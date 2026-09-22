@@ -16,9 +16,11 @@ import {
   executeDiscSelectionCommand,
   InvalidMutationKeyError,
   parseMutationKey,
+  previewDiscSelectionChange,
 } from "@rip-dvd/application";
 
 import {
+  discSelectionCommandRequiresPreview,
   parseCatalogReviewCommand,
 } from "../../../../lib/catalog-review-command";
 import { getDataAccess } from "../../../../lib/data-access";
@@ -36,6 +38,18 @@ function response(body: unknown, status = 200): Response {
     status,
     headers: { "Cache-Control": "no-store" },
   });
+}
+
+function requestRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown> : null;
+}
+
+function requestRevision(value: unknown): Date | null {
+  if (typeof value !== "string") return null;
+  const revision = new Date(value);
+  return Number.isSafeInteger(revision.getTime()) && revision.toISOString() === value
+    ? revision : null;
 }
 
 function recordOffset(request: Request, parameter: string): number | null {
@@ -140,6 +154,7 @@ export async function createCatalogReviewRoute(
       return response({ error: "Original Disc Archive not found" }, 404);
     }
     const body: unknown = await request.json().catch(() => null);
+    const bodyRecord = requestRecord(body);
     const parsedCommand = parseCatalogReviewCommand(
       body,
       {
@@ -149,11 +164,13 @@ export async function createCatalogReviewRoute(
     const targetedDiscSelectionId = parsedCommand.ok
       ? parsedCommand.command.action === "update_disc_selection" ||
           parsedCommand.command.action === "repair_disc_selection" ||
-          parsedCommand.command.action === "correct_disc_selection"
+          parsedCommand.command.action === "correct_disc_selection" ||
+          parsedCommand.command.action === "delete_disc_selection"
         ? parsedCommand.command.discSelectionId
         : null
       : parsedCommand.targetedDiscSelectionId ?? null;
-    if (targetedDiscSelectionId !== null) {
+    const mayReplay = bodyRecord !== null && typeof bodyRecord.mutationKey === "string";
+    if (targetedDiscSelectionId !== null && !mayReplay) {
       const existing = access.catalog.listDiscSelections({
         ids: [targetedDiscSelectionId as DiscSelectionId],
         originalDiscArchiveId: archiveId,
@@ -208,11 +225,38 @@ export async function createCatalogReviewRoute(
       case "update_disc_selection":
       case "repair_disc_selection":
       case "correct_disc_selection":
-      case "delete_disc_selection":
+      case "delete_disc_selection": {
+        const consequential = discSelectionCommandRequiresPreview(command);
+        if (bodyRecord?.preview === true) {
+          if (!consequential) {
+            return response({ error: "This Disc Selection change does not require a preview" }, 400);
+          }
+          return response(previewDiscSelectionChange(access, archiveId, command));
+        }
+        let mutationKey: string;
+        try {
+          mutationKey = parseMutationKey(bodyRecord?.mutationKey);
+        } catch {
+          return response({ error: "Invalid Disc Selection mutation key" }, 400);
+        }
+        if (!consequential) {
+          return response(
+            executeDiscSelectionCommand(access, archiveId, command, { mutationKey }),
+            command.action === "create_disc_selection" ? 201 : 200,
+          );
+        }
+        const expectedCatalogRevision = requestRevision(bodyRecord?.expectedCatalogRevision);
+        const previewToken = bodyRecord?.previewToken;
+        if (bodyRecord?.acknowledge !== true || expectedCatalogRevision === null ||
+            typeof previewToken !== "string" || previewToken.length > 4_096) {
+          return response({ error: "Disc Selection preview acknowledgement is required" }, 400);
+        }
         return response(
-          executeDiscSelectionCommand(access, archiveId, command),
-          command.action === "create_disc_selection" ? 201 : 200,
+          executeDiscSelectionCommand(access, archiveId, command, {
+            mutationKey, expectedCatalogRevision, previewToken, acknowledged: true,
+          }),
         );
+      }
 
       case "complete_review": {
         let mediaLibraryPath: string | null = null;
