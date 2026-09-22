@@ -130,7 +130,7 @@ function withCompletionAccess<T>(
     }
     if (error instanceof DomainInvariantError) {
       throw new CommandFailure(
-        error.message.includes("changed; preview")
+        error.message.includes("Catalog review changed;")
           ? "STALE_CATALOG_REVISION"
           : "REVIEW_COMPLETION_REJECTED",
         error.message,

@@ -336,7 +336,10 @@ export function useCatalogReviewState({
                 preview.consequences.replacementEncodes.length
               } corrected replacement encode(s), omitting ${
                 preview.consequences.omittedReplacementEncodeCount
-              } eligible replacement(s)?`,
+              } eligible replacement(s), and release ${
+                preview.consequences
+                  .failedOutputReservationReleaseEncodeJobIds.length
+              } failed output reservation(s)?`,
             ),
         },
       );

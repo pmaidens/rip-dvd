@@ -3899,6 +3899,7 @@ describe("data-access facade", () => {
       proposedOutputPath: predecessor.outputPath,
       predecessorStatus: "completed",
       predecessorReady: true,
+      releasesFailedOutputReservation: false,
     }]);
 
     const completion = access.catalog.completeCatalogReviewWithReplacements(
@@ -4922,12 +4923,16 @@ describe("data-access facade", () => {
       predecessorEncodeJobId: predecessor.id,
       predecessorStatus: "failed",
       predecessorReady: false,
+      releasesFailedOutputReservation: false,
     });
     access.encodeJobs.completePartialCleanup(cleanup);
     expect(access.catalog.listCorrectedEncodeReplacementPlans({
       originalDiscArchiveId: archive.id,
       limit: 100,
-    })[0]).toMatchObject({ predecessorReady: true });
+    })[0]).toMatchObject({
+      predecessorReady: true,
+      releasesFailedOutputReservation: true,
+    });
     access.close();
   });
 
@@ -5383,6 +5388,7 @@ describe("data-access facade", () => {
       proposedOutputPath: predecessor.outputPath,
       predecessorStatus: "completed",
       predecessorReady: true,
+      releasesFailedOutputReservation: false,
     }]);
     const replacement = access.catalog
       .completeCatalogReviewWithReplacements(

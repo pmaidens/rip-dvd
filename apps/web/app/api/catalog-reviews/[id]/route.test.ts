@@ -1282,6 +1282,7 @@ describe("Catalog Review API", () => {
     const affectedJobs = Array.from({ length: 101 }, (_, index) => ({
       ...review.replacementPlan.jobs[0],
       predecessorEncodeJobId: `${completed.id}-${index}`,
+      releasesFailedOutputReservation: false,
     }));
     const activeProfiles = Array.from({ length: 101 }, (_, index) => ({
       ...profile,

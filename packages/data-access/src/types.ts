@@ -881,6 +881,7 @@ export interface CorrectedEncodeReplacementPlan {
   proposedOutputPath: string;
   predecessorStatus: EncodeJobStatus;
   predecessorReady: boolean;
+  releasesFailedOutputReservation: boolean;
 }
 
 export interface CorrectedEncodeReplacementInput {

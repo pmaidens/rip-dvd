@@ -149,8 +149,9 @@ queueing replacements.
 Use `outcome: "archive_only"` only when the review has no Disc Selections, and
 leave `replacementEncodes` empty for that outcome. Preview validates the whole
 plan, resolves output paths inside the configured media library, reports
-selected and omitted replacements, and returns an opaque `previewToken` bound
-to the exact plan and catalog revision.
+selected and omitted replacements plus the exact failed predecessor output
+reservations it will release, and returns an opaque `previewToken` bound to the
+exact plan and catalog revision.
 
 ```sh
 rip-dvd-operator catalog-review preview-completion <archive-id> \

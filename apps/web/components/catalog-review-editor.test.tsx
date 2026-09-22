@@ -127,7 +127,7 @@ function availableCompletionPreview(
       replacementEncodes: command.replacementEncodes,
       availableReplacementEncodeCount: command.replacementEncodes.length,
       omittedReplacementEncodeCount: 0,
-      releasesEligibleFailedOutputReservations: true,
+      failedOutputReservationReleaseEncodeJobIds: [],
     },
   };
 }

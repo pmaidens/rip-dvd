@@ -3660,7 +3660,9 @@ export function createDataAccessInternal(
       predecessor.partial_cleanup_claim_token,
       predecessor.partial_cleanup_lease_token,
       predecessor.publication_pending,
-      predecessor.publication_completion_pending
+      predecessor.publication_completion_pending,
+      predecessor.reserves_output_path,
+      predecessor.replace_existing_output
     from correction_lineage
     inner join disc_selections as active_replacement
       on active_replacement.id =
@@ -3739,14 +3741,11 @@ export function createDataAccessInternal(
       partial_cleanup_lease_token: EncodeJobCleanupClaimToken | null;
       publication_pending: number;
       publication_completion_pending: number;
+      reserves_output_path: number;
+      replace_existing_output: number;
     }>;
-    return rows.map((row) => ({
-      predecessorEncodeJobId: row.predecessor_encode_job_id,
-      replacementDiscSelectionId: row.replacement_disc_selection_id,
-      proposedEncodingProfileId: row.proposed_encoding_profile_id,
-      proposedOutputPath: row.proposed_output_path,
-      predecessorStatus: row.predecessor_status,
-      predecessorReady: isEncodeJobSafelyTerminal({
+    return rows.map((row) => {
+      const predecessorReady = isEncodeJobSafelyTerminal({
         status: row.predecessor_status,
         partialCleanupOutputPath: row.partial_cleanup_output_path,
         partialCleanupClaimToken: row.partial_cleanup_claim_token,
@@ -3754,8 +3753,20 @@ export function createDataAccessInternal(
         publicationPending: row.publication_pending === 1,
         publicationCompletionPending:
           row.publication_completion_pending === 1,
-      }),
-    }));
+      });
+      return {
+        predecessorEncodeJobId: row.predecessor_encode_job_id,
+        replacementDiscSelectionId: row.replacement_disc_selection_id,
+        proposedEncodingProfileId: row.proposed_encoding_profile_id,
+        proposedOutputPath: row.proposed_output_path,
+        predecessorStatus: row.predecessor_status,
+        predecessorReady,
+        releasesFailedOutputReservation:
+          row.predecessor_status === "failed" && predecessorReady &&
+          row.reserves_output_path === 1 &&
+          row.replace_existing_output === 0,
+      };
+    });
   }
 
   function readAllCorrectedEncodeReplacementPlans(
@@ -6321,6 +6332,8 @@ export function createDataAccessInternal(
             const saved = JSON.parse(decision.outcome) as {
               expectedPreviewEvidence?: unknown;
             };
+            const availableReplacements =
+              readAllCorrectedEncodeReplacementPlans(id);
             const previewEvidence = JSON.stringify({
               replacementConsequences: candidates.map((candidate) => ({
                 ...candidate.input,
@@ -6330,10 +6343,15 @@ export function createDataAccessInternal(
                 predecessorReady: candidate.plan.predecessorReady,
                 replacesExistingOutput: candidate.replaceExistingOutput,
               })),
-              availableReplacementPredecessorIds:
-                readAllCorrectedEncodeReplacementPlans(id).map(
-                  (replacement) => replacement.predecessorEncodeJobId,
-                ),
+              availableReplacementPredecessorIds: availableReplacements.map(
+                (replacement) => replacement.predecessorEncodeJobId,
+              ),
+              failedOutputReservationReleaseEncodeJobIds:
+                availableReplacements
+                  .filter((replacement) =>
+                    replacement.releasesFailedOutputReservation
+                  )
+                  .map((replacement) => replacement.predecessorEncodeJobId),
             });
             if (saved.expectedPreviewEvidence !== previewEvidence) {
               throw new DomainInvariantError(

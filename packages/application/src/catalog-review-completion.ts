@@ -181,6 +181,9 @@ function planCatalogReviewCompletion(
     availableReplacementPredecessorIds: availableReplacements.map(
       (replacement) => replacement.predecessorEncodeJobId,
     ),
+    failedOutputReservationReleaseEncodeJobIds: availableReplacements
+      .filter((replacement) => replacement.releasesFailedOutputReservation)
+      .map((replacement) => replacement.predecessorEncodeJobId),
   });
   return {
     normalizedReplacements,
@@ -198,7 +201,11 @@ function planCatalogReviewCompletion(
           (replacement) =>
             !predecessorIds.has(replacement.predecessorEncodeJobId),
         ).length,
-        releasesEligibleFailedOutputReservations: true,
+        failedOutputReservationReleaseEncodeJobIds: availableReplacements
+          .filter((replacement) =>
+            replacement.releasesFailedOutputReservation
+          )
+          .map((replacement) => replacement.predecessorEncodeJobId),
       },
     },
   };
