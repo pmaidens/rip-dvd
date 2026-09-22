@@ -1170,6 +1170,27 @@ export interface CatalogAccess {
 }
 
 export interface EncodingProfileAccess {
+  previewStateChange(input: {
+    id: EncodingProfileId;
+    mediaDomain: MediaDomain;
+    isActive: boolean;
+  }): {
+    target: EncodingProfile;
+    activeVersion: EncodingProfile | null;
+    revision: string;
+  };
+  submit(input: {
+    mutationKey: string;
+    operation: "create" | "createVersion" | "setActive";
+    key?: string;
+    displayName?: string;
+    sourceProfileId?: EncodingProfileId;
+    id?: EncodingProfileId;
+    mediaDomain: MediaDomain;
+    settings?: Record<string, unknown>;
+    isActive?: boolean;
+    expectedRevision?: string;
+  }): EncodingProfile;
   create(input: {
     key: string;
     displayName: string;

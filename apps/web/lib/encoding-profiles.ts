@@ -1,10 +1,7 @@
-import type { EncodingProfile, MediaDomain } from "@rip-dvd/data-access";
+import { toEncodingProfileDto } from "@rip-dvd/application";
+import type { MediaDomain } from "@rip-dvd/data-access";
 
-export interface DvdVideoEncodingSettings extends Record<string, unknown> {
-  preset: string;
-  container: "mkv";
-}
-
+export { toEncodingProfileDto };
 export interface EncodingProfileDto {
   id: string;
   key: string;
@@ -12,28 +9,13 @@ export interface EncodingProfileDto {
   mediaDomain: MediaDomain;
   version: number;
   isActive: boolean;
-  settings: {
-    preset: string | null;
-    container: "mkv" | null;
-  };
+  settings: { preset: string | null; container: "mkv" | null };
+  createdAt?: string;
+  updatedAt?: string;
+  eligibility?: ReturnType<typeof toEncodingProfileDto>["eligibility"];
 }
 
-export function toEncodingProfileDto(
-  profile: EncodingProfile,
-): EncodingProfileDto {
-  return {
-    id: profile.id,
-    key: profile.key,
-    displayName: profile.displayName,
-    mediaDomain: profile.mediaDomain,
-    version: profile.version,
-    isActive: profile.isActive,
-    settings: {
-      preset:
-        typeof profile.settings.preset === "string"
-          ? profile.settings.preset
-          : null,
-      container: profile.settings.container === "mkv" ? "mkv" : null,
-    },
-  };
+export interface DvdVideoEncodingSettings extends Record<string, unknown> {
+  preset: string;
+  container: "mkv";
 }

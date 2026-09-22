@@ -279,3 +279,73 @@ it("returns the same operational records and evidence through web and CLI", asyn
     fixture.dispose();
   }
 });
+
+it("shares Encoding Profile validation, replay, preview, and activation between web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const access = fixture.openAccess();
+  const { createEncodingProfilesRoute } = await import("./encoding-profiles/route");
+  const endpoint = "http://localhost/api/encoding-profiles";
+  const trustedOrigin = () => "http://localhost";
+  const mutate = (method: "POST" | "PATCH", body: unknown) =>
+    createEncodingProfilesRoute(new Request(endpoint, {
+      method,
+      headers: {
+        "Content-Type": "application/json", Host: "localhost", Origin: "http://localhost",
+      },
+      body: JSON.stringify(body),
+    }), () => access, trustedOrigin);
+  try {
+    const key = "synthetic-profile-parity-key-0001";
+    const created = await mutate("POST", {
+      mutationKey: key, key: "synthetic-parity", displayName: "Synthetic parity",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    expect(created.status).toBe(201);
+    const createdBody = await created.json() as { profile: { id: string } };
+    expect((await fixture.run([
+      "create-encoding-profile", "--key", key, "--profile-key", "synthetic-parity",
+      "--display-name", "Synthetic parity", "--preset", "Fast 480p30",
+    ])).result).toEqual(createdBody);
+
+    const version = await fixture.run([
+      "version-encoding-profile", "--key", "synthetic-profile-parity-key-0002",
+      "--source-profile-id", createdBody.profile.id, "--preset", "HQ 480p30 Surround",
+    ]);
+    expect(version.exitCode).toBe(0);
+    const versionBody = version.result as { profile: { id: string } };
+    const webReplay = await mutate("POST", {
+      mutationKey: "synthetic-profile-parity-key-0002",
+      sourceProfileId: createdBody.profile.id,
+      settings: { preset: "HQ 480p30 Surround", container: "mkv" },
+    });
+    expect(webReplay.status).toBe(201);
+    expect(await webReplay.json()).toEqual(versionBody);
+
+    const previewUrl = `${endpoint}?preview-profile-id=${encodeURIComponent(versionBody.profile.id)}&is-active=true`;
+    const webPreview = await createEncodingProfilesRoute(
+      new Request(previewUrl), () => access, trustedOrigin,
+    );
+    expect(webPreview.status).toBe(200);
+    const preview = await webPreview.json() as { revision: string };
+    expect((await fixture.run([
+      "preview-encoding-profile-state", "--id", versionBody.profile.id, "--active", "true",
+    ])).result).toEqual({ ...preview });
+    const activated = await mutate("PATCH", {
+      mutationKey: "synthetic-profile-parity-key-0003",
+      id: versionBody.profile.id, isActive: true,
+      expectedRevision: preview.revision, acknowledge: true,
+    });
+    expect(activated.status).toBe(200);
+    expect((await fixture.run([
+      "activate-encoding-profile", "--key", "synthetic-profile-parity-key-0003",
+      "--id", versionBody.profile.id, "--revision", preview.revision, "--acknowledge",
+    ])).result).toEqual(await activated.json());
+    const list = await createEncodingProfilesRoute(
+      new Request(endpoint), () => access, trustedOrigin,
+    );
+    expect((await fixture.run(["list-encoding-profiles"])).result).toEqual(await list.json());
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});

@@ -3,6 +3,7 @@ import {
   createTmdbCatalogLookup,
   generateMutationKey,
   InvalidMutationKeyError,
+  InvalidProfileInputError,
   parseMutationKey,
   inspectOperations,
   isOperationKind,
@@ -74,6 +75,48 @@ const commandDefinitions = [
         "selection input: flags or --json <object> or --stdin or --file <path>"],
     },
     example: "rip-dvd-operator disc-selection create <archive-id> --key <key> --media-item-id <id> --source-kind main_feature",
+  },
+  {
+    name: "list-encoding-profiles",
+    description: "List DVD video Encoding Profile versions and eligibility.",
+    usage: "rip-dvd-operator list-encoding-profiles",
+    inputs: { arguments: [], options: [] },
+    example: "rip-dvd-operator list-encoding-profiles",
+  },
+  {
+    name: "create-encoding-profile",
+    description: "Create an active DVD video Encoding Profile.",
+    usage: "rip-dvd-operator create-encoding-profile --key <key> --profile-key <name> --display-name <name> --preset <HandBrake preset>",
+    inputs: { arguments: [], options: ["--key", "--profile-key", "--display-name", "--preset"] },
+    example: "rip-dvd-operator create-encoding-profile --key 00000000-0000-4000-8000-000000000001 --profile-key dvd-example --display-name 'DVD example' --preset 'Fast 480p30'",
+  },
+  {
+    name: "version-encoding-profile",
+    description: "Create an inactive version of an Encoding Profile.",
+    usage: "rip-dvd-operator version-encoding-profile --key <key> --source-profile-id <id> --preset <HandBrake preset>",
+    inputs: { arguments: [], options: ["--key", "--source-profile-id", "--preset"] },
+    example: "rip-dvd-operator version-encoding-profile --key 00000000-0000-4000-8000-000000000002 --source-profile-id <id> --preset 'HQ 480p30 Surround'",
+  },
+  {
+    name: "preview-encoding-profile-state",
+    description: "Preview activation or deactivation and obtain its revision.",
+    usage: "rip-dvd-operator preview-encoding-profile-state --id <id> --active <true|false>",
+    inputs: { arguments: [], options: ["--id", "--active"] },
+    example: "rip-dvd-operator preview-encoding-profile-state --id <id> --active true",
+  },
+  {
+    name: "activate-encoding-profile",
+    description: "Activate a version using an acknowledged preview revision.",
+    usage: "rip-dvd-operator activate-encoding-profile --key <key> --id <id> --revision <revision> --acknowledge",
+    inputs: { arguments: [], options: ["--key", "--id", "--revision", "--acknowledge"] },
+    example: "rip-dvd-operator activate-encoding-profile --key 00000000-0000-4000-8000-000000000003 --id <id> --revision <revision> --acknowledge",
+  },
+  {
+    name: "deactivate-encoding-profile",
+    description: "Deactivate a version using an acknowledged preview revision.",
+    usage: "rip-dvd-operator deactivate-encoding-profile --key <key> --id <id> --revision <revision> --acknowledge",
+    inputs: { arguments: [], options: ["--key", "--id", "--revision", "--acknowledge"] },
+    example: "rip-dvd-operator deactivate-encoding-profile --key 00000000-0000-4000-8000-000000000004 --id <id> --revision <revision> --acknowledge",
   },
   {
     name: "health",
@@ -428,6 +471,104 @@ function waitArguments(rest: readonly string[]) {
   return { kind, id, timeoutMs, pollMs };
 }
 
+const profileCommands = [
+  "list-encoding-profiles", "create-encoding-profile", "version-encoding-profile",
+  "preview-encoding-profile-state", "activate-encoding-profile",
+  "deactivate-encoding-profile",
+] as const;
+
+function profileOptions(args: readonly string[], allowed: readonly string[]): Map<string, string> {
+  const options = new Map<string, string>();
+  for (let index = 0; index < args.length;) {
+    const name = args[index]!;
+    if (!allowed.includes(name) || options.has(name)) {
+      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Encoding Profile options.", 2);
+    }
+    if (name === "--acknowledge") {
+      options.set(name, "true");
+      index += 1;
+      continue;
+    }
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Encoding Profile options.", 2);
+    }
+    options.set(name, value);
+    index += 2;
+  }
+  return options;
+}
+
+function profileKey(options: Map<string, string>): string {
+  try {
+    return parseMutationKey(options.get("--key"));
+  } catch (error) {
+    if (error instanceof InvalidMutationKeyError) {
+      throw new CommandFailure("INVALID_MUTATION_KEY", error.message, 2);
+    }
+    throw error;
+  }
+}
+
+function runProfileCommand(name: typeof profileCommands[number], args: readonly string[], openAccess: CommandIO["openAccess"]) {
+  const allowed: Record<typeof profileCommands[number], readonly string[]> = {
+    "list-encoding-profiles": [],
+    "create-encoding-profile": ["--key", "--profile-key", "--display-name", "--preset"],
+    "version-encoding-profile": ["--key", "--source-profile-id", "--preset"],
+    "preview-encoding-profile-state": ["--id", "--active"],
+    "activate-encoding-profile": ["--key", "--id", "--revision", "--acknowledge"],
+    "deactivate-encoding-profile": ["--key", "--id", "--revision", "--acknowledge"],
+  };
+  const options = profileOptions(args, allowed[name]);
+  const mutationKey = name === "create-encoding-profile" || name === "version-encoding-profile" ||
+    name === "activate-encoding-profile" || name === "deactivate-encoding-profile"
+    ? profileKey(options) : undefined;
+  let access: DataAccess | undefined;
+  try {
+    access = openAccess();
+    const operations = createApplicationOperations(access);
+    if (name === "list-encoding-profiles") return operations.listEncodingProfiles();
+    if (name === "create-encoding-profile") return operations.createEncodingProfile({
+      mutationKey, key: options.get("--profile-key"), displayName: options.get("--display-name"),
+      settings: { preset: options.get("--preset"), container: "mkv" },
+    });
+    if (name === "version-encoding-profile") return operations.createEncodingProfileVersion({
+      mutationKey, sourceProfileId: options.get("--source-profile-id"),
+      settings: { preset: options.get("--preset"), container: "mkv" },
+    });
+    if (name === "preview-encoding-profile-state") return operations.previewEncodingProfileState({
+      id: options.get("--id"),
+      isActive: options.get("--active") === "true" ? true :
+        options.get("--active") === "false" ? false : undefined,
+    });
+    return operations.setEncodingProfileActive({
+      mutationKey, id: options.get("--id"), isActive: name === "activate-encoding-profile",
+      expectedRevision: options.get("--revision"),
+      acknowledge: options.has("--acknowledge"),
+    });
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    if (error instanceof MutationKeyConflictError) {
+      throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    if (error instanceof RecordNotFoundError) {
+      throw new CommandFailure("ENCODING_PROFILE_NOT_FOUND", "Encoding Profile not found.", 2);
+    }
+    if (error instanceof InvalidProfileInputError || error instanceof InvalidMutationKeyError) {
+      throw new CommandFailure("INVALID_ENCODING_PROFILE", error.message, 2);
+    }
+    if (error instanceof DomainInvariantError) {
+      throw new CommandFailure(
+        error.message.includes("stale") ? "STALE_PROFILE_PREVIEW" : "ENCODING_PROFILE_REJECTED",
+        error.message, 2,
+      );
+    }
+    throw new CommandFailure("ENCODING_PROFILE_UNAVAILABLE", "Encoding Profiles are unavailable.", 1);
+  } finally {
+    access?.close();
+  }
+}
+
 export async function runCommand(args: readonly string[], io: CommandIO): Promise<CommandExitCode> {
   try {
     const [name, ...rest] = args;
@@ -507,6 +648,14 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         return 0;
       }
       emit(io.stdout, runDiscSelection(rest, io));
+      return 0;
+    }
+    if (profileCommands.some((command) => command === name)) {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+        return 0;
+      }
+      emit(io.stdout, runProfileCommand(name as typeof profileCommands[number], rest, io.openAccess));
       return 0;
     }
     if (name !== "health" && name !== "readiness") {

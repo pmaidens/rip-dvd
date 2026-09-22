@@ -94,6 +94,9 @@ importers:
 
   packages/application:
     dependencies:
+      '@rip-dvd/config':
+        specifier: workspace:*
+        version: link:../config
       '@rip-dvd/data-access':
         specifier: workspace:*
         version: link:../data-access
