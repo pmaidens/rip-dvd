@@ -87,7 +87,7 @@ rip-dvd-operator catalog-review save-rearchive-proposal <fresh-archive-id> \
 For save input, change `action` to `save_rearchive_mapping_proposal` without
 changing the reviewed fields. Every active prior Disc Selection must appear
 exactly once. Proposed Media Items must still exist, and DVD title or chapter
-coordinates must be valid and non-overlapping in the fresh inspection. A
+coordinates must be valid in the fresh inspection. A
 changed prior or fresh Catalog Review revision returns
 `STALE_CATALOG_REVISION`; incomplete and incompatible proposals return
 `REARCHIVE_PROPOSAL_INCOMPLETE` and `REARCHIVE_PROPOSAL_INCOMPATIBLE`.

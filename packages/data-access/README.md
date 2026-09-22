@@ -236,8 +236,8 @@ Fresh re-archive generations use `rearchive_mapping_proposals` and
 fresh archive to its prior archive, records both Catalog Review revisions, and
 stores one ordered proposed mapping for every currently active prior Disc
 Selection. Preview validates Media Item existence, fresh archived-scan source
-coordinates, complete prior-selection coverage, and non-overlap without a
-write. Save repeats that validation inside one immediate transaction, advances
+coordinates, and complete prior-selection coverage without a write. Save
+repeats that validation inside one immediate transaction, advances
 the fresh catalog revision, replaces the draft atomically, and records the full
 result under the caller's invocation key. The draft item identifiers are
 intentional snapshots rather than foreign keys to Disc Selections or Media

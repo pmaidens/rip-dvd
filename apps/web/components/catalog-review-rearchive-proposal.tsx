@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DiscSelectionSourceIdentityInput } from "@rip-dvd/data-access";
 
 import type {
@@ -106,8 +106,10 @@ export function CatalogReviewRearchiveProposal({
     CatalogReviewMediaItem[]
   >([]);
   const [searchMappingId, setSearchMappingId] = useState<string | null>(null);
+  const previewRequestId = useRef(0);
 
   useEffect(() => {
+    previewRequestId.current += 1;
     setMappings(proposal.mappings.map((mapping) => ({
       sourceDiscSelectionId: mapping.sourceDiscSelectionId,
       ...mapping.proposedMapping,
@@ -125,6 +127,7 @@ export function CatalogReviewRearchiveProposal({
       mapping: SaveRearchiveMappingProposalInput["mappings"][number],
     ) => SaveRearchiveMappingProposalInput["mappings"][number],
   ) => {
+    previewRequestId.current += 1;
     setIsPreviewCurrent(false);
     setPreviewError(null);
     setMappings((current) => current.map((mapping) =>
@@ -374,6 +377,7 @@ export function CatalogReviewRearchiveProposal({
                 type="button"
                 disabled={isSaving}
                 onClick={() => {
+                  previewRequestId.current += 1;
                   setMappings((current) => current.filter(
                     (candidate) =>
                       candidate.sourceDiscSelectionId !==
@@ -400,11 +404,16 @@ export function CatalogReviewRearchiveProposal({
           type="button"
           disabled={isSaving}
           onClick={() => {
+            const requestId = previewRequestId.current + 1;
+            previewRequestId.current = requestId;
+            setIsPreviewCurrent(false);
             setPreviewError(null);
             void onPreview({ mappings }).then((result) => {
+              if (previewRequestId.current !== requestId) return;
               setPreview(result);
               setIsPreviewCurrent(true);
             }).catch((error) => {
+              if (previewRequestId.current !== requestId) return;
               setIsPreviewCurrent(false);
               setPreviewError(error instanceof Error
                 ? error.message

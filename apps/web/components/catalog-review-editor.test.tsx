@@ -2287,6 +2287,10 @@ describe("CatalogReviewView", () => {
       }],
     };
     const postedBodies: Record<string, unknown>[] = [];
+    const pendingPreviewResponses: Array<{
+      response: Response;
+      resolve(response: Response): void;
+    }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input).startsWith("/api/media-items?")) {
         return Response.json({
@@ -2327,13 +2331,16 @@ describe("CatalogReviewView", () => {
           sourceIdentity: { kind: "dvd_title"; titleNumber: number };
           label: string | null;
         }>;
-        return Response.json({
+        const response = Response.json({
           ...review.rearchiveProposal,
           state: "ready",
           mappings: [{
             ...review.rearchiveProposal!.mappings[0],
             proposedMapping,
           }],
+        });
+        return new Promise<Response>((resolve) => {
+          pendingPreviewResponses.push({ response, resolve });
         });
       }
       return Response.json({ message: "Re-archive Mapping Proposal saved" });
@@ -2394,6 +2401,26 @@ describe("CatalogReviewView", () => {
     );
     if (!preview) throw new Error("Expected a preview proposal button");
     await act(async () => preview.click());
+    expect(pendingPreviewResponses).toHaveLength(1);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set?.call(titleNumber, "3");
+      titleNumber.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      const pending = pendingPreviewResponses[0]!;
+      pending.resolve(pending.response);
+    });
+    expect(save.disabled).toBe(true);
+
+    await act(async () => preview.click());
+    expect(pendingPreviewResponses).toHaveLength(2);
+    await act(async () => {
+      const pending = pendingPreviewResponses[1]!;
+      pending.resolve(pending.response);
+    });
     expect(save.disabled).toBe(false);
     await act(async () => save.click());
 
@@ -2410,13 +2437,24 @@ describe("CatalogReviewView", () => {
         }],
       },
       {
+        action: "preview_rearchive_mapping_proposal",
+        catalogRevision: review.catalogRevision,
+        sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+        mappings: [{
+          sourceDiscSelectionId: "source-selection-1",
+          mediaItemId: "catalog-search-result",
+          sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
+          label: null,
+        }],
+      },
+      {
         action: "save_rearchive_mapping_proposal",
         catalogRevision: review.catalogRevision,
         sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
         mappings: [{
           sourceDiscSelectionId: "source-selection-1",
           mediaItemId: "catalog-search-result",
-          sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+          sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
           label: null,
         }],
       },
