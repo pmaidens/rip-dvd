@@ -11,7 +11,10 @@ import {
   type UpdateDiscSelectionInput,
 } from "@rip-dvd/data-access";
 
-import type { CatalogReviewCommand } from "./catalog-review-command.js";
+import {
+  discSelectionCommandRequiresPreview,
+  type CatalogReviewCommand,
+} from "./catalog-review-command.js";
 import { serializeDiscSelection } from "./catalog-review-read.js";
 
 type SelectionCommand = Extract<CatalogReviewCommand, {
@@ -216,9 +219,23 @@ export function executeDiscSelectionCommand(
   access: DataAccess,
   archiveId: OriginalDiscArchiveId,
   command: SelectionCommand,
-  options: { mutationKey?: string; expectedCatalogRevision?: Date; previewToken?: string } = {},
+  options: {
+    mutationKey?: string;
+    expectedCatalogRevision?: Date;
+    previewToken?: string;
+    acknowledged?: true;
+  } = {},
 ) {
   const mutation = discSelectionMutation(archiveId, command);
+  const requiresPreview = discSelectionCommandRequiresPreview(command);
+  if (requiresPreview && (!options.mutationKey || options.acknowledged !== true ||
+      !options.expectedCatalogRevision || !options.previewToken)) {
+    throw new DomainInvariantError("Disc Selection preview acknowledgement is required");
+  }
+  if (!requiresPreview && (options.acknowledged === true || options.expectedCatalogRevision ||
+      options.previewToken)) {
+    throw new DomainInvariantError("This Disc Selection change does not require a preview");
+  }
   let expectedPreviewEvidenceHash: string | undefined;
   if (options.previewToken !== undefined) {
     if (!options.expectedCatalogRevision || mutation.action === "create") {

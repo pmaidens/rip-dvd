@@ -20,6 +20,7 @@ import {
 } from "@rip-dvd/application";
 
 import {
+  discSelectionCommandRequiresPreview,
   parseCatalogReviewCommand,
 } from "../../../../lib/catalog-review-command";
 import { getDataAccess } from "../../../../lib/data-access";
@@ -224,8 +225,7 @@ export async function createCatalogReviewRoute(
       case "repair_disc_selection":
       case "correct_disc_selection":
       case "delete_disc_selection": {
-        const consequential = command.action !== "update_disc_selection" ||
-          "mediaItemId" in command.changes || "sourceIdentity" in command.changes;
+        const consequential = discSelectionCommandRequiresPreview(command);
         if (!consequential) {
           if (bodyRecord?.preview === true) {
             return response({ error: "This Disc Selection change does not require a preview" }, 400);
@@ -249,7 +249,7 @@ export async function createCatalogReviewRoute(
         }
         return response(
           executeDiscSelectionCommand(access, archiveId, command, {
-            mutationKey, expectedCatalogRevision, previewToken,
+            mutationKey, expectedCatalogRevision, previewToken, acknowledged: true,
           }),
         );
       }

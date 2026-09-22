@@ -1,11 +1,27 @@
 "use client";
 
-import type { CatalogReviewCommand } from "../lib/catalog-review-command";
+import {
+  discSelectionCommandRequiresPreview,
+  type CatalogReviewCommand,
+  type ConsequentialDiscSelectionCommand,
+} from "../lib/catalog-review-command";
 
 type CatalogReviewFetch = (
   input: RequestInfo | URL,
   init?: RequestInit,
 ) => Promise<Response>;
+
+function postCatalogReview(
+  archiveId: string,
+  body: unknown,
+  fetcher: CatalogReviewFetch,
+): Promise<Response> {
+  return fetcher(`/api/catalog-reviews/${encodeURIComponent(archiveId)}`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
 
 export interface DiscSelectionChangePreview {
   state: "available";
@@ -38,7 +54,7 @@ interface CatalogReviewMutationOptions {
 
 interface PendingCatalogReviewMutation {
   archiveId: string;
-  command: ConsequentialSelectionCommand;
+  command: ConsequentialDiscSelectionCommand;
   identity: string;
   mutationKey: string;
   preview?: DiscSelectionChangePreview;
@@ -65,7 +81,7 @@ export async function mutateCatalogReview(
   const storage = options.storage === undefined
     ? browserMutationStorage() : options.storage;
   let pending: PendingCatalogReviewMutation | undefined;
-  if (isConsequentialSelectionCommand(command)) {
+  if (discSelectionCommandRequiresPreview(command)) {
     pending = readPendingCatalogReviewMutation(archiveId, storage);
     if (pending?.identity !== identity) {
       if (pending?.acknowledged === true) {
@@ -83,20 +99,10 @@ export async function mutateCatalogReview(
   }
   const response = pending?.preview
     ? await applyPendingCatalogReviewMutation(pending, fetcher)
-    : await fetcher(
-      `/api/catalog-reviews/${encodeURIComponent(archiveId)}`,
-      {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          ...command,
-          ...(proposalMutationKey ? { mutationKey: proposalMutationKey } : {}),
-        }),
-      },
-    );
+    : await postCatalogReview(archiveId, {
+      ...command,
+      ...(proposalMutationKey ? { mutationKey: proposalMutationKey } : {}),
+    }, fetcher);
   if (!response.ok) {
     if (pending !== undefined && !ambiguousMutationResponse(response.status)) {
       deletePendingCatalogReviewMutation(archiveId, storage);
@@ -108,25 +114,9 @@ export async function mutateCatalogReview(
   return { message: await catalogReviewMutationMessage(response) };
 }
 
-type ConsequentialSelectionCommand = Extract<CatalogReviewCommand, {
-  action: "update_disc_selection" | "repair_disc_selection" |
-    "correct_disc_selection" | "delete_disc_selection";
-}>;
-
-function isConsequentialSelectionCommand(
-  command: CatalogReviewCommand,
-): command is ConsequentialSelectionCommand {
-  if (command.action === "update_disc_selection") {
-    return "mediaItemId" in command.changes || "sourceIdentity" in command.changes;
-  }
-  return command.action === "repair_disc_selection" ||
-    command.action === "correct_disc_selection" ||
-    command.action === "delete_disc_selection";
-}
-
 async function prepareDiscSelectionMutation(
   archiveId: string,
-  command: ConsequentialSelectionCommand,
+  command: ConsequentialDiscSelectionCommand,
   fetcher: CatalogReviewFetch,
   options: CatalogReviewMutationOptions,
   identity: string,
@@ -190,35 +180,21 @@ function applyPendingCatalogReviewMutation(
   if (preview === undefined) {
     throw new Error("Disc Selection preview acknowledgement is required");
   }
-  return fetcher(
-    `/api/catalog-reviews/${encodeURIComponent(pending.archiveId)}`,
-    {
-      method: "POST",
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...pending.command,
-        mutationKey: pending.mutationKey,
-        expectedCatalogRevision: preview.catalogRevision,
-        previewToken: preview.previewToken,
-        acknowledge: true,
-      }),
-    },
-  );
+  return postCatalogReview(pending.archiveId, {
+    ...pending.command,
+    mutationKey: pending.mutationKey,
+    expectedCatalogRevision: preview.catalogRevision,
+    previewToken: preview.previewToken,
+    acknowledge: true,
+  }, fetcher);
 }
 
 async function requestDiscSelectionPreview(
   archiveId: string,
-  command: ConsequentialSelectionCommand,
+  command: ConsequentialDiscSelectionCommand,
   fetcher: CatalogReviewFetch,
 ): Promise<DiscSelectionChangePreview> {
-  const response = await fetcher(
-    `/api/catalog-reviews/${encodeURIComponent(archiveId)}`,
-    {
-      method: "POST",
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify({ ...command, preview: true }),
-    },
-  );
+  const response = await postCatalogReview(archiveId, { ...command, preview: true }, fetcher);
   if (!response.ok) throw await catalogReviewMutationError(response);
   const body: unknown = await response.json();
   if (typeof body === "object" && body !== null && "state" in body &&
@@ -279,11 +255,13 @@ function readPendingCatalogReviewMutation(
   }
 }
 
-function storedConsequentialSelectionCommand(value: unknown): ConsequentialSelectionCommand | null {
+function storedConsequentialSelectionCommand(
+  value: unknown,
+): ConsequentialDiscSelectionCommand | null {
   if (typeof value !== "object" || value === null || !("action" in value) ||
       !("discSelectionId" in value) || typeof value.discSelectionId !== "string") return null;
   const command = value as CatalogReviewCommand;
-  return isConsequentialSelectionCommand(command) ? command : null;
+  return discSelectionCommandRequiresPreview(command) ? command : null;
 }
 
 function writePendingCatalogReviewMutation(
