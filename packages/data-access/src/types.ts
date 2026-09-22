@@ -1144,6 +1144,7 @@ export interface CatalogAccess {
     cursor?: OriginalDiscArchiveListCursor;
     ids?: readonly OriginalDiscArchiveId[];
     detectedDiscId?: DetectedDiscId;
+    rearchiveSourceArchiveId?: OriginalDiscArchiveId;
     limit?: number;
     offset?: number;
     uncatalogedOnly?: boolean;
@@ -1237,6 +1238,7 @@ export interface CatalogAccess {
     ids?: readonly DiscSelectionId[];
     originalDiscArchiveId?: OriginalDiscArchiveId;
     encodeEligibleOnly?: boolean;
+    includeHistorical?: boolean;
     limit?: number;
     offset?: number;
   }): DiscSelection[];

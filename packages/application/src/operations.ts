@@ -98,7 +98,17 @@ function visibleEncodeJob({
 }
 
 function visibleArchive({ archivePath: _archivePath, ...archive }: OriginalDiscArchive) {
-  return archive;
+  return {
+    ...archive,
+    storage: {
+      recordedSizeBytes: archive.sizeBytes,
+      verification: {
+        status: archive.verificationStatus ?? "unknown",
+        message: archive.verificationMessage,
+        observedAt: archive.verifiedAt,
+      },
+    },
+  };
 }
 
 function visibleDrive({ devicePath: _devicePath, serialNumber: _serialNumber, ...drive }:
@@ -483,6 +493,26 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
     case "original-disc-archives": {
       const archive = access.catalog.listOriginalDiscArchives({ ids: [id as OriginalDiscArchiveId] })[0];
       if (!archive) return null;
+      const previousArchive = archive.rearchiveSourceArchiveId === null
+        ? null
+        : access.catalog.listOriginalDiscArchives({
+            ids: [archive.rearchiveSourceArchiveId],
+          })[0] ?? null;
+      const newArchives = access.catalog.listOriginalDiscArchives({
+        rearchiveSourceArchiveId: archive.id,
+      });
+      const discSelections = access.catalog.listDiscSelections({
+        originalDiscArchiveId: archive.id,
+        includeHistorical: true,
+      });
+      const activeDiscSelectionIds = new Set(
+        access.catalog.listDiscSelections({
+          originalDiscArchiveId: archive.id,
+        }).map(({ id }) => id),
+      );
+      const encodeJobs = discSelections.flatMap((selection) =>
+        access.encodeJobs.listForDiscSelection(selection.id)
+      );
       const rearchiveEligible = archive.discKind === "dvd";
       const rearchiveReason = rearchiveEligible
         ? null
@@ -494,6 +524,23 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
         }).map(visibleDisc)[0] ?? null,
         archiveJobs: access.archiveJobs.listForArchive(archive.id)
           .map(visibleArchiveJob),
+        lineage: {
+          previousArchive: previousArchive === null
+            ? null
+            : visibleArchive(previousArchive),
+          newArchives: newArchives.map(visibleArchive),
+          rearchiveRequests: access.archiveRequests
+            .listForRearchiveSources([archive.id]),
+        },
+        references: {
+          discSelections: discSelections.map((selection) => ({
+            ...selection,
+            catalogStatus: activeDiscSelectionIds.has(selection.id)
+              ? "active"
+              : "historical",
+          })),
+          encodeJobs: encodeJobs.map(visibleEncodeJob),
+        },
         availableActions: [
           { name: "verify-archive", eligible: true, reason: null },
           {
