@@ -191,21 +191,40 @@ compares the catalog size, Archive Boundary Evidence, actual file size, Disc
 Inspection capacity, and the bounded ISO 9660 or UDF geometry used by normal
 archive publication.
 
-Run it against the Compose deployment with:
+Submit a tracked audit against the Compose deployment with a mutation key:
 
 ```bash
-docker compose --profile maintenance run --rm archive-audit \
+docker compose --profile maintenance run --rm operator-cli \
+  submit-archive-audit --key <key> \
   --limit 100 \
   --concurrency 2 \
   --file-timeout-ms 5000 \
   --runtime-timeout-ms 120000
+docker compose --profile maintenance run --rm operator-cli \
+  inspect archive-audits <audit-run-id>
+docker compose --profile maintenance run --rm operator-cli \
+  wait archive-audits <audit-run-id> --timeout-ms 120000
 ```
 
-For a local checkout, set `RIP_DVD_DATABASE_PATH` and
-`RIP_DVD_ORIGINALS_LIBRARY_PATH`, then run `pnpm audit:archives`. The command
-prints one bounded JSON report. It opens SQLite read-only with query-only mode,
-never changes archive files, and does not create Archive Requests or Archive
-Jobs. Archive paths and raw filesystem errors are not included in the report.
+The submission returns a durable run ID immediately. The Archive Worker reads
+the catalog through the existing bounded read-only projection and retains each
+path-free finding in SQLite. A later CLI session can inspect progress or wait
+for the same run. Repeating the same key and bounds returns the original run;
+reusing the key with different bounds fails.
+
+`resultStatus: complete` means the worker finished the selected bounded set.
+`truncated: true` means more matching archives exist beyond `--limit`.
+`resultStatus: incomplete` includes an `incompleteReason` and retains any
+findings completed before the runtime bound. A worker failure records `failed`
+without discarding findings already retained. Findings link to supported
+operation detail and show the read-only filesystem verification action when it
+can gather more evidence. The audit never changes archive files, creates
+Archive Requests or Archive Jobs, submits verification, or performs repairs.
+Archive paths and raw filesystem errors are not included in results.
+
+The direct `pnpm audit:archives` command remains available for an untracked
+one-shot maintenance report. Set `RIP_DVD_DATABASE_PATH` and
+`RIP_DVD_ORIGINALS_LIBRARY_PATH` before running it locally.
 
 The primary classifications are `definite_truncation`,
 `suspicious_capacity_reuse`, `consistent`, `size_mismatch`, `missing_file`,
@@ -430,7 +449,9 @@ docker compose --profile maintenance run --rm operator-cli inspect archive-reque
 docker compose --profile maintenance run --rm operator-cli wait archive-requests synthetic-request-id --timeout-ms 30000
 docker compose --profile maintenance run --rm operator-cli generate-key
 docker compose --profile maintenance run --rm operator-cli submit-filesystem-verification --key 00000000-0000-4000-8000-000000000001 --target original_disc_archive --id synthetic-archive-id
+docker compose --profile maintenance run --rm operator-cli submit-archive-audit --key 00000000-0000-4000-8000-000000000002 --limit 100
 docker compose --profile maintenance run --rm operator-cli inspect filesystem-verifications
+docker compose --profile maintenance run --rm operator-cli inspect archive-audits
 docker compose --profile maintenance run --rm operator-cli wait filesystem-verifications synthetic-run-id --timeout-ms 30000
 docker compose --profile maintenance run --rm operator-cli help
 ```
@@ -451,7 +472,7 @@ deployment activity rather than promising that every drive can start work.
 known action eligibility where applicable. The supported kinds are
 `optical-drives`, `detected-discs`,
 `disc-inspections`, `archive-requests`, `archive-jobs`,
-`original-disc-archives`, `encode-jobs`, `filesystem-verifications`,
+`original-disc-archives`, `encode-jobs`, `archive-audits`, `filesystem-verifications`,
 `worker-incidents`, and `activity`.
 Disc Inspection detail includes every persisted attempt and its source
 continuity and settled-capacity evidence. Archive Request detail keeps intent
@@ -460,7 +481,7 @@ persisted integrity, boundary, progress, and failure evidence. The equivalent
 web read is `GET /api/operations?kind=<kind>&id=<id>`; omit `id` for a list.
 
 `wait <kind> <id> --timeout-ms <milliseconds>` polls existing Disc Inspection,
-Archive Request, Archive Job, Encode Job, or filesystem verification state for up to one hour. It returns
+Archive Request, Archive Job, Encode Job, archive audit, or filesystem verification state for up to one hour. It returns
 `outcome: settled` with the current record when work reaches a terminal or
 attention-needed state. Timeout returns `outcome: timeout` with current state
 and never cancels work. The optional `--poll-ms` range is 100..5000 and

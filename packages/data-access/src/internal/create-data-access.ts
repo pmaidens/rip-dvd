@@ -56,6 +56,8 @@ import { assignDvdContentIdAlias } from "./dvd-content-id-alias.js";
 import {
   archiveRequests,
   archiveJobs,
+  archiveAuditFindings,
+  archiveAuditRuns,
   correctedEncodePublicationAuthorities,
   detectedDiscs,
   discInspectionAttempts,
@@ -146,7 +148,15 @@ import {
 } from "../errors.js";
 import type { LegacySidecarDataAccess } from "../legacy-sidecar-types.js";
 import { normalizeMediaItemSearchTitle } from "../media-item-title-search.js";
+import {
+  countArchiveAuditFindings,
+  type ArchiveAuditFinding,
+} from "../archive-audit-types.js";
 import type {
+  ArchiveAuditClaimToken,
+  ArchiveAuditRun,
+  ArchiveAuditRunId,
+  ArchiveAuditRunSummary,
   ArchiveJobClaimToken,
   ArchiveJobId,
   ArchiveJob,
@@ -915,6 +925,34 @@ function toFilesystemVerificationRun(
   return row.target === "original_disc_archive"
     ? { ...row, target: row.target, targetId: row.targetId as OriginalDiscArchiveId }
     : { ...row, target: row.target, targetId: row.targetId as EncodeJobId };
+}
+
+type ArchiveAuditRunRow = typeof archiveAuditRuns.$inferSelect;
+
+function toArchiveAuditRunSummary(row: ArchiveAuditRunRow): ArchiveAuditRunSummary {
+  return {
+    id: row.id,
+    status: row.status,
+    progressPhase: row.progressPhase,
+    bounds: {
+      recordLimit: row.recordLimit,
+      concurrency: row.concurrency,
+      fileTimeoutMs: row.fileTimeoutMs,
+      runtimeTimeoutMs: row.runtimeTimeoutMs,
+    },
+    recordCount: row.recordCount,
+    recordsProcessed: row.recordsProcessed,
+    truncated: row.truncated,
+    resultStatus: row.resultStatus,
+    incompleteReason: row.incompleteReason,
+    failureCode: row.failureCode,
+    claimToken: row.claimToken,
+    claimedAt: row.claimedAt,
+    startedAt: row.startedAt,
+    completedAt: row.completedAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
 export function createDataAccessInternal(
@@ -4662,6 +4700,24 @@ export function createDataAccessInternal(
     "encoding profile", profile.id);
   }
 
+  function readArchiveAuditFindings(id: ArchiveAuditRunId): ArchiveAuditFinding[] {
+    return database.select({ finding: archiveAuditFindings.finding })
+      .from(archiveAuditFindings)
+      .where(eq(archiveAuditFindings.archiveAuditRunId, id))
+      .orderBy(asc(archiveAuditFindings.sequence))
+      .all()
+      .map(({ finding }) => JSON.parse(finding) as ArchiveAuditFinding);
+  }
+
+  function toArchiveAuditRun(row: ArchiveAuditRunRow): ArchiveAuditRun {
+    const findings = readArchiveAuditFindings(row.id);
+    return {
+      ...toArchiveAuditRunSummary(row),
+      counts: countArchiveAuditFindings(findings),
+      findings,
+    };
+  }
+
   const access: LegacySidecarDataAccess = {
     readConsistentSnapshot(read) {
       const snapshotAccess: ConsistentReadAccess = {
@@ -4758,6 +4814,11 @@ export function createDataAccessInternal(
           find: (id) => access.filesystemVerification.find(id),
           list: (options) => access.filesystemVerification.list(options),
           listActive: () => access.filesystemVerification.listActive(),
+        },
+        archiveAudits: {
+          find: (id) => access.archiveAudits.find(id),
+          list: (options) => access.archiveAudits.list(options),
+          listActive: () => access.archiveAudits.listActive(),
         },
       };
       sqlite.exec("BEGIN");
@@ -12244,6 +12305,284 @@ export function createDataAccessInternal(
             .limit(resolvedLimit)
             .all();
         return [...active, ...resolved];
+      },
+    },
+
+    archiveAudits: {
+      submit(input) {
+        const bounds = {
+          recordLimit: requireSafeIntegerInRange(input.bounds.recordLimit,
+            "Archive audit record limit", 1, 1_000),
+          concurrency: requireSafeIntegerInRange(input.bounds.concurrency,
+            "Archive audit concurrency", 1, 8),
+          fileTimeoutMs: requireSafeIntegerInRange(input.bounds.fileTimeoutMs,
+            "Archive audit file timeout", 1, 30_000),
+          runtimeTimeoutMs: requireSafeIntegerInRange(input.bounds.runtimeTimeoutMs,
+            "Archive audit runtime timeout", 1, 600_000),
+        };
+        const semanticInput = JSON.stringify(bounds);
+        return database.transaction((transaction) => {
+          const operation = "archive_audit.submit";
+          const previous = readMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            (stored) => {
+              const outcome = JSON.parse(stored) as ArchiveAuditRunRow & {
+                claimedAt: string | null;
+                startedAt: string | null;
+                completedAt: string | null;
+                createdAt: string;
+                updatedAt: string;
+              };
+              return toArchiveAuditRunSummary({
+                ...outcome,
+                claimedAt: outcome.claimedAt === null ? null : new Date(outcome.claimedAt),
+                startedAt: outcome.startedAt === null ? null : new Date(outcome.startedAt),
+                completedAt: outcome.completedAt === null ? null : new Date(outcome.completedAt),
+                createdAt: new Date(outcome.createdAt),
+                updatedAt: new Date(outcome.updatedAt),
+              });
+            },
+          );
+          if (previous !== undefined) return previous;
+          const timestamp = now();
+          const id = newId<ArchiveAuditRunId>();
+          const row = requireRow(transaction.insert(archiveAuditRuns).values({
+            id,
+            status: "queued",
+            progressPhase: "queued",
+            recordLimit: bounds.recordLimit,
+            concurrency: bounds.concurrency,
+            fileTimeoutMs: bounds.fileTimeoutMs,
+            runtimeTimeoutMs: bounds.runtimeTimeoutMs,
+            recordsProcessed: 0,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          }).returning().get(), "archive audit run", id);
+          recordMutationInvocation(transaction, input.mutationKey, operation,
+            semanticInput, row, timestamp);
+          return toArchiveAuditRunSummary(row);
+        });
+      },
+      find(id) {
+        const row = database.select().from(archiveAuditRuns)
+          .where(eq(archiveAuditRuns.id, id)).get();
+        return row === undefined ? null : toArchiveAuditRun(row);
+      },
+      list(options) {
+        const limit = requireSafeIntegerInRange(options.limit, "limit", 1, 100);
+        const active = database.select().from(archiveAuditRuns)
+          .where(inArray(archiveAuditRuns.status, ["queued", "running"]))
+          .orderBy(desc(archiveAuditRuns.createdAt), desc(archiveAuditRuns.id))
+          .limit(limit).all();
+        const remaining = limit - active.length;
+        return (remaining === 0 ? active : [...active,
+          ...database.select().from(archiveAuditRuns)
+            .where(inArray(archiveAuditRuns.status, ["completed", "failed"]))
+            .orderBy(desc(archiveAuditRuns.createdAt), desc(archiveAuditRuns.id))
+            .limit(remaining).all(),
+        ]).map(toArchiveAuditRunSummary);
+      },
+      listActive() {
+        return database.select().from(archiveAuditRuns)
+          .where(inArray(archiveAuditRuns.status, ["queued", "running"]))
+          .orderBy(desc(archiveAuditRuns.createdAt), desc(archiveAuditRuns.id))
+          .all().map(toArchiveAuditRunSummary);
+      },
+      recoverExpiredClaims() {
+        const timestamp = now();
+        const expiredBefore = new Date(timestamp.getTime() - 60_000);
+        return database.transaction((transaction) => {
+          const expiredIds = transaction.select({ id: archiveAuditRuns.id })
+            .from(archiveAuditRuns)
+            .where(and(eq(archiveAuditRuns.status, "running"),
+              lt(archiveAuditRuns.claimedAt, expiredBefore)))
+            .orderBy(asc(archiveAuditRuns.claimedAt), asc(archiveAuditRuns.id))
+            .limit(JOB_RECOVERY_LIMIT).all().map(({ id }) => id);
+          if (expiredIds.length === 0) return 0;
+          transaction.delete(archiveAuditFindings)
+            .where(inArray(archiveAuditFindings.archiveAuditRunId, expiredIds)).run();
+          return transaction.update(archiveAuditRuns).set({
+            status: "queued",
+            progressPhase: "queued",
+            recordCount: null,
+            recordsProcessed: 0,
+            truncated: null,
+            claimToken: null,
+            claimedAt: null,
+            startedAt: null,
+            updatedAt: timestamp,
+          }).where(and(inArray(archiveAuditRuns.id, expiredIds),
+            eq(archiveAuditRuns.status, "running"),
+            lt(archiveAuditRuns.claimedAt, expiredBefore)))
+            .returning({ id: archiveAuditRuns.id }).all().length;
+        });
+      },
+      renewClaim(claim) {
+        if (claim.claimToken === null) return false;
+        const timestamp = now();
+        return database.update(archiveAuditRuns).set({
+          claimedAt: timestamp,
+          updatedAt: timestamp,
+        }).where(and(eq(archiveAuditRuns.id, claim.id),
+          eq(archiveAuditRuns.status, "running"),
+          eq(archiveAuditRuns.claimToken, claim.claimToken)))
+          .returning({ id: archiveAuditRuns.id }).get() !== undefined;
+      },
+      claimNext() {
+        return database.transaction((transaction) => {
+          const next = transaction.select().from(archiveAuditRuns)
+            .where(eq(archiveAuditRuns.status, "queued"))
+            .orderBy(asc(archiveAuditRuns.createdAt), asc(archiveAuditRuns.id))
+            .limit(1).get();
+          if (!next) return null;
+          const timestamp = now();
+          const claimed = transaction.update(archiveAuditRuns).set({
+            status: "running",
+            progressPhase: "reading_records",
+            claimToken: newId<ArchiveAuditClaimToken>(),
+            claimedAt: timestamp,
+            startedAt: timestamp,
+            updatedAt: timestamp,
+          }).where(and(eq(archiveAuditRuns.id, next.id),
+            eq(archiveAuditRuns.status, "queued"))).returning().get();
+          return claimed === undefined ? null : toArchiveAuditRunSummary(claimed);
+        });
+      },
+      beginAudit(claim, input) {
+        if (claim.claimToken === null) {
+          throw new StaleJobAttemptError("archive audit run", claim.id);
+        }
+        const claimToken = claim.claimToken;
+        const recordCount = requireSafeIntegerInRange(input.recordCount,
+          "Archive audit record count", 0, claim.bounds.recordLimit);
+        return database.transaction((transaction) => {
+          const current = transaction.select().from(archiveAuditRuns)
+            .where(eq(archiveAuditRuns.id, claim.id)).get();
+          if (current?.status !== "running" || current.claimToken !== claimToken) {
+            throw new StaleJobAttemptError("archive audit run", claim.id);
+          }
+          transaction.delete(archiveAuditFindings)
+            .where(eq(archiveAuditFindings.archiveAuditRunId, claim.id)).run();
+          return toArchiveAuditRunSummary(requireRow(
+            transaction.update(archiveAuditRuns).set({
+              progressPhase: "auditing",
+              recordCount,
+              recordsProcessed: 0,
+              truncated: input.truncated,
+              updatedAt: now(),
+            }).where(and(eq(archiveAuditRuns.id, claim.id),
+              eq(archiveAuditRuns.status, "running"),
+              eq(archiveAuditRuns.claimToken, claimToken)))
+              .returning().get(),
+            "archive audit run", claim.id,
+          ));
+        });
+      },
+      recordFinding(claim, input) {
+        if (claim.claimToken === null || !Number.isSafeInteger(input.index) ||
+          input.index < 0 || input.index >= claim.bounds.recordLimit) {
+          throw new StaleJobAttemptError("archive audit run", claim.id);
+        }
+        database.transaction((transaction) => {
+          const current = transaction.select().from(archiveAuditRuns)
+            .where(eq(archiveAuditRuns.id, claim.id)).get();
+          if (current?.status !== "running" || current.progressPhase !== "auditing" ||
+            current.claimToken !== claim.claimToken) {
+            throw new StaleJobAttemptError("archive audit run", claim.id);
+          }
+          transaction.insert(archiveAuditFindings).values({
+            archiveAuditRunId: claim.id,
+            sequence: input.index,
+            finding: JSON.stringify(input.finding),
+          }).run();
+          transaction.update(archiveAuditRuns).set({
+            recordsProcessed: sql`${archiveAuditRuns.recordsProcessed} + 1`,
+            updatedAt: now(),
+          }).where(eq(archiveAuditRuns.id, claim.id)).run();
+        });
+      },
+      complete(claim, input) {
+        if (claim.claimToken === null) {
+          throw new StaleJobAttemptError("archive audit run", claim.id);
+        }
+        const claimToken = claim.claimToken;
+        return database.transaction((transaction) => {
+          const current = transaction.select().from(archiveAuditRuns)
+            .where(eq(archiveAuditRuns.id, claim.id)).get();
+          if (current?.status !== "running" || current.claimToken !== claimToken ||
+            current.recordCount !== input.findings.length) {
+            throw new StaleJobAttemptError("archive audit run", claim.id);
+          }
+          transaction.delete(archiveAuditFindings)
+            .where(eq(archiveAuditFindings.archiveAuditRunId, claim.id)).run();
+          if (input.findings.length > 0) {
+            transaction.insert(archiveAuditFindings).values(input.findings.map((finding, sequence) => ({
+              archiveAuditRunId: claim.id,
+              sequence,
+              finding: JSON.stringify(finding),
+            }))).run();
+          }
+          const timestamp = now();
+          const row = requireRow(transaction.update(archiveAuditRuns).set({
+            status: "completed",
+            progressPhase: "completed",
+            recordsProcessed: input.findings.length,
+            resultStatus: input.resultStatus,
+            claimToken: null,
+            claimedAt: null,
+            completedAt: timestamp,
+            updatedAt: timestamp,
+          }).where(and(eq(archiveAuditRuns.id, claim.id),
+            eq(archiveAuditRuns.status, "running"),
+            eq(archiveAuditRuns.claimToken, claimToken))).returning().get(),
+          "archive audit run", claim.id);
+          return {
+            ...toArchiveAuditRunSummary(row),
+            counts: countArchiveAuditFindings(input.findings),
+            findings: input.findings,
+          };
+        });
+      },
+      completeIncomplete(claim, reason) {
+        if (claim.claimToken === null) {
+          throw new StaleJobAttemptError("archive audit run", claim.id);
+        }
+        const timestamp = now();
+        const row = database.update(archiveAuditRuns).set({
+          status: "completed",
+          progressPhase: "completed",
+          resultStatus: "incomplete",
+          incompleteReason: reason,
+          claimToken: null,
+          claimedAt: null,
+          completedAt: timestamp,
+          updatedAt: timestamp,
+        }).where(and(eq(archiveAuditRuns.id, claim.id),
+          eq(archiveAuditRuns.status, "running"),
+          eq(archiveAuditRuns.claimToken, claim.claimToken)))
+          .returning().get();
+        if (row === undefined) throw new StaleJobAttemptError("archive audit run", claim.id);
+        return toArchiveAuditRun(row);
+      },
+      fail(claim) {
+        if (claim.claimToken === null) return null;
+        const timestamp = now();
+        const row = database.update(archiveAuditRuns).set({
+          status: "failed",
+          progressPhase: "completed",
+          failureCode: "ARCHIVE_AUDIT_UNAVAILABLE",
+          claimToken: null,
+          claimedAt: null,
+          completedAt: timestamp,
+          updatedAt: timestamp,
+        }).where(and(eq(archiveAuditRuns.id, claim.id),
+          eq(archiveAuditRuns.status, "running"),
+          eq(archiveAuditRuns.claimToken, claim.claimToken)))
+          .returning().get();
+        return row === undefined ? null : toArchiveAuditRun(row);
       },
     },
 

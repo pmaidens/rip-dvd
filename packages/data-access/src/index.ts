@@ -28,6 +28,12 @@ export {
   DVD_ARCHIVE_BOUNDARY_POLICY_VERSION,
   DVD_NORMAL_ENDPOINT_PROOF_VERSION,
 } from "./archive-boundary.js";
+export {
+  ARCHIVE_AUDIT_COMMAND_VERSION,
+  ARCHIVE_AUDIT_SCHEMA_VERSION,
+  countArchiveAuditFindings,
+} from "./archive-audit-types.js";
+export type * from "./archive-audit-types.js";
 export type {
   ArchiveBoundaryEvidence,
   CorrectedDvdArchiveBoundaryEvidence,

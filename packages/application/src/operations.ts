@@ -2,6 +2,9 @@ import {
   WORKER_KINDS,
   type ArchiveJob,
   type ArchiveJobId,
+  type ArchiveAuditRun,
+  type ArchiveAuditRunId,
+  type ArchiveAuditRunSummary,
   type ArchiveRequest,
   type ArchiveRequestId,
   type ConsistentReadAccess,
@@ -29,6 +32,7 @@ export const OPERATION_KINDS = [
   "archive-jobs",
   "original-disc-archives",
   "encode-jobs",
+  "archive-audits",
   "filesystem-verifications",
   "worker-incidents",
   "activity",
@@ -36,7 +40,7 @@ export const OPERATION_KINDS = [
 
 export type OperationKind = (typeof OPERATION_KINDS)[number];
 export type WaitableKind = Extract<OperationKind,
-  "disc-inspections" | "archive-requests" | "archive-jobs" | "encode-jobs" | "filesystem-verifications"
+  "disc-inspections" | "archive-requests" | "archive-jobs" | "encode-jobs" | "archive-audits" | "filesystem-verifications"
 >;
 
 const DEFAULT_LIMIT = 50;
@@ -52,7 +56,7 @@ export function isOperationKind(value: string): value is OperationKind {
 
 export function isWaitableKind(value: string): value is WaitableKind {
   return value === "disc-inspections" || value === "archive-requests" ||
-    value === "archive-jobs" || value === "encode-jobs" ||
+    value === "archive-jobs" || value === "encode-jobs" || value === "archive-audits" ||
     value === "filesystem-verifications";
 }
 
@@ -120,6 +124,47 @@ function visibleVerificationRun({
   ...run
 }: FilesystemVerificationRun) {
   return run;
+}
+
+function visibleArchiveAuditSummary({
+  claimToken: _claimToken,
+  claimedAt: _claimedAt,
+  progressPhase,
+  recordCount,
+  recordsProcessed,
+  ...run
+}: ArchiveAuditRunSummary) {
+  return {
+    ...run,
+    progress: { phase: progressPhase, recordCount, recordsProcessed },
+  };
+}
+
+function visibleArchiveAuditRun(run: ArchiveAuditRun) {
+  const { findings, counts, ...summary } = run;
+  return {
+    ...visibleArchiveAuditSummary(summary),
+    counts,
+    findings: findings.map((finding) => ({
+      ...finding,
+      diagnosticDetails: [
+        { kind: "original-disc-archives", id: finding.archiveId },
+        { kind: "detected-discs", id: finding.detectedDiscId },
+        { kind: "optical-drives", id: finding.opticalDriveId },
+        ...(finding.discInspectionId === null ? [] : [{
+          kind: "disc-inspections", id: finding.discInspectionId,
+        }]),
+      ],
+      availableActions: finding.classification === "consistent" ? [] : [{
+        name: "submit-filesystem-verification",
+        eligible: true,
+        requiredInputs: ["mutationKey"],
+        arguments: { target: "original_disc_archive", id: finding.archiveId },
+        reason: null,
+        effect: "read_only_inspection",
+      }],
+    })),
+  };
 }
 
 function recentWork<T extends { status: string; updatedAt: Date; id: string }>(
@@ -300,6 +345,10 @@ function activity(access: ConsistentReadAccess, limit: number) {
       kind: "encode-jobs", id: item.id, status: item.status,
       occurredAt: item.updatedAt,
     })),
+    ...access.archiveAudits.list({ limit }).map((item) => ({
+      kind: "archive-audits", id: item.id, status: item.status,
+      occurredAt: item.updatedAt,
+    })),
     ...access.filesystemVerification.list({ limit }).map((item) => ({
       kind: "filesystem-verifications", id: item.id, status: item.status,
       occurredAt: item.updatedAt,
@@ -340,6 +389,8 @@ function readList(access: ConsistentReadAccess, kind: OperationKind, limit: numb
       return recentWork(access.encodeJobs.list(undefined, {
         policy: boundedPolicy(limit),
       }), ["queued", "running", "cancellation_requested"], limit).map(visibleEncodeJob);
+    case "archive-audits":
+      return access.archiveAudits.list({ limit }).map(visibleArchiveAuditSummary);
     case "filesystem-verifications":
       return access.filesystemVerification.list({ limit }).map(visibleVerificationRun);
     case "worker-incidents":
@@ -468,6 +519,10 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
       const run = access.filesystemVerification.find(id as FilesystemVerificationRunId);
       return run === null ? null : visibleVerificationRun(run);
     }
+    case "archive-audits": {
+      const run = access.archiveAudits.find(id as ArchiveAuditRunId);
+      return run === null ? null : visibleArchiveAuditRun(run);
+    }
   }
 }
 
@@ -492,6 +547,7 @@ const TERMINAL_STATUSES: Record<WaitableKind, readonly string[]> = {
   "archive-requests": ["fulfilled", "cancelled", "needs_attention"],
   "archive-jobs": ["completed", "failed", "cancelled", "aborted"],
   "encode-jobs": ["completed", "failed", "cancelled"],
+  "archive-audits": ["completed", "failed"],
   "filesystem-verifications": ["completed", "failed"],
 };
 
