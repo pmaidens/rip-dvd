@@ -473,6 +473,12 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
       queueAction: {
         name: "enqueue", eligible: false,
         reason: "Suggested output path is reserved; choose another path.",
+        alternate: {
+          name: "enqueue-with-output-path",
+          eligible: true,
+          requiredInputs: ["outputPath"],
+          reason: "Choose an unreserved output path inside the media library.",
+        },
       },
     })]) });
   expect((await current.run(enqueueArgs)).result).toEqual(queued.result);

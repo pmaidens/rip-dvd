@@ -216,7 +216,8 @@ repeated `--disc-selection-id` flags and reports the logical job for each one
 under the chosen profile. `inspect encode-jobs [id]` gives status, failure
 reports, actions, and history; `wait encode-jobs <id> --timeout-ms <n>` waits
 without cancelling work. When a suggested path is reserved, `queueAction`
-names that conflict; choose another path for enqueue.
+names that conflict and exposes an eligible `enqueue-with-output-path`
+alternate requiring `outputPath`.
 
 Every Encode Job mutation requires a key created before submission. Generate
 one with `rip-dvd-operator generate-key` and keep it for retries. The same key

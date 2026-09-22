@@ -276,7 +276,17 @@ export function readQueueOptions(
             : suggestedOutputPath === null
               ? { name: "enqueue", eligible: false, reason: "A valid output path is unavailable." }
               : suggestedPathReserved
-                ? { name: "enqueue", eligible: false, reason: "Suggested output path is reserved; choose another path." }
+                ? {
+                  name: "enqueue",
+                  eligible: false,
+                  reason: "Suggested output path is reserved; choose another path.",
+                  alternate: {
+                    name: "enqueue-with-output-path",
+                    eligible: true,
+                    requiredInputs: ["outputPath"],
+                    reason: "Choose an unreserved output path inside the media library.",
+                  },
+                }
               : { name: "enqueue", eligible: true, reason: null };
         return {
           id: selection.id,
