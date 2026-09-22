@@ -17,6 +17,10 @@
     "./catalog-label": {
       "types": "./src/catalog-label.ts",
       "default": "./dist/catalog-label.js"
+    },
+    "./catalog-review-command": {
+      "types": "./src/catalog-review-command.ts",
+      "default": "./dist/catalog-review-command.js"
     }
   },
   "files": ["dist"],

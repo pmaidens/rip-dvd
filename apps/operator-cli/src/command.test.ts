@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { join } from "node:path";
-
 import { afterEach, expect, it, vi } from "vitest";
 import type { CatalogMetadataLookup } from "@rip-dvd/application";
 import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
@@ -9,6 +9,7 @@ import {
   beginSettledDiscInspectionForTest,
   createNormalDvdArchiveBoundaryEvidenceForTest,
 } from "@rip-dvd/data-access/test-support";
+import type { MediaItemId } from "@rip-dvd/data-access";
 
 import { createApplicationOperations } from "@rip-dvd/application";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
@@ -214,6 +215,136 @@ it("inspects a Catalog Review and exposes metadata candidates through read-only 
   });
 });
 
+it("maintains Media Items through keyed flags, structured input, previews, and replay", async () => {
+  const current = fixture();
+  expect((await current.run([
+    "media-item", "create", "--kind", "movie", "--title", "Missing key",
+  ])).result).toMatchObject({ error: { code: "INVALID_MUTATION_KEY" } });
+  expect((await current.run([
+    "media-item", "create", "--key", "media-invalid-001", "--json",
+    JSON.stringify({ kind: "episode", title: "Orphan", episodeNumber: 1, parentId: "missing-season" }),
+  ])).result).toMatchObject({ error: { code: "MEDIA_ITEM_NOT_FOUND" } });
+  const beforeCreate = current.openAccess();
+  expect(beforeCreate.catalog.listMediaItems()).toEqual([]);
+  beforeCreate.close();
+  const create = await current.run([
+    "media-item", "create", "--key", "media-create-001",
+    "--kind", "tv_show", "--title", "Example Show",
+    "--tmdb-id", "42", "--tmdb-type", "tv_show",
+  ]);
+  expect(create.exitCode).toBe(0);
+  const show = (create.result as { mediaItem: { id: string } }).mediaItem;
+  expect((await current.run(["media-item", "show", show.id])).result).toMatchObject({
+    mediaItem: { id: show.id, title: "Example Show" },
+    tmdbIdentity: { mediaType: "tv_show", tmdbId: 42 },
+  });
+  const replay = await current.run([
+    "media-item", "create", "--key", "media-create-001",
+    "--kind", "tv_show", "--title", "Example Show",
+    "--tmdb-id", "42", "--tmdb-type", "tv_show",
+  ]);
+  expect(replay.result).toEqual(create.result);
+  const collision = await current.run([
+    "media-item", "create", "--key", "media-create-001",
+    "--kind", "tv_show", "--title", "Another Show",
+  ]);
+  expect(collision.result).toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
+
+  const season = await current.run([
+    "media-item", "create", "--key", "media-create-002", "--json",
+    JSON.stringify({ kind: "season", title: "Season One", seasonNumber: 1, parentId: show.id }),
+  ]);
+  expect(season.exitCode).toBe(0);
+  const seasonId = (season.result as { mediaItem: { id: string } }).mediaItem.id;
+  const file = join(dirname(current.databasePath), "episode.json");
+  writeFileSync(file, JSON.stringify({
+    kind: "episode", title: "Pilot", episodeNumber: 1, parentId: seasonId,
+  }));
+  const episode = await current.run([
+    "media-item", "create", "--key", "media-create-003", "--file", file,
+  ]);
+  expect(episode.exitCode).toBe(0);
+  const episodeId = (episode.result as { mediaItem: { id: string } }).mediaItem.id;
+  const search = await current.run(["media-item", "search", "--query", "Pilot"]);
+  expect(search.result).toMatchObject({
+    results: [{ mediaItem: { id: episodeId }, ancestors: [{ id: show.id }, { id: seasonId }] }],
+  });
+  const preview = await current.run(["media-item", "preview", "update", episodeId]);
+  expect(preview.result).toMatchObject({ action: "update", maintenance: { childCount: 0 } });
+  const revision = (preview.result as { revision: string }).revision;
+  const changed = await current.run([
+    "media-item", "update", episodeId, "--key", "media-update-001",
+    "--acknowledge", revision, "--json", "-",
+  ], undefined, JSON.stringify({ title: "Revised Pilot" }));
+  expect(changed.result).toMatchObject({ mediaItem: { title: "Revised Pilot" } });
+  expect((await current.run([
+    "media-item", "update", episodeId, "--key", "media-update-001",
+    "--acknowledge", revision, "--title", "Revised Pilot",
+  ])).result).toEqual(changed.result);
+  const stale = await current.run([
+    "media-item", "update", episodeId, "--key", "media-update-002",
+    "--acknowledge", revision, "--title", "Stale Title",
+  ]);
+  expect(stale.result).toMatchObject({ error: { code: "STALE_MEDIA_ITEM_REVISION" } });
+  const after = current.openAccess();
+  expect(after.catalog.listMediaItems({ ids: [episodeId as MediaItemId] })[0]?.title).toBe("Revised Pilot");
+  expect(after.catalog.findMediaItemByTmdbIdentity({ mediaType: "tv_show", tmdbId: 42 })?.id).toBe(show.id);
+  after.close();
+
+  const showDeletePreview = await current.run(["media-item", "preview", "delete", show.id]);
+  const blocked = await current.run([
+    "media-item", "delete", show.id, "--key", "media-delete-001",
+    "--acknowledge", (showDeletePreview.result as { revision: string }).revision,
+  ]);
+  expect(blocked.result).toMatchObject({ error: { code: "MEDIA_ITEM_ACTION_REJECTED" } });
+  const episodeDeletePreview = await current.run(["media-item", "preview", "delete", episodeId]);
+  const episodeRevision = (episodeDeletePreview.result as { revision: string }).revision;
+  const deleted = await current.run([
+    "media-item", "delete", episodeId, "--key", "media-delete-002",
+    "--acknowledge", episodeRevision,
+  ]);
+  expect(deleted.result).toMatchObject({ mediaItem: { id: episodeId } });
+  expect((await current.run([
+    "media-item", "delete", episodeId, "--key", "media-delete-002",
+    "--acknowledge", episodeRevision,
+  ])).result).toEqual(deleted.result);
+});
+
+it("accepts Media Item JSON from stdin and files in the server-local executable", () => {
+  const current = fixture();
+  const entry = fileURLToPath(new URL("../dist/entry.js", import.meta.url));
+  const environment = {
+    ...process.env,
+    NODE_NO_WARNINGS: "1",
+    RIP_DVD_DATABASE_PATH: current.databasePath,
+    RIP_DVD_MEDIA_LIBRARY_PATH: current.mediaLibraryPath,
+    RIP_DVD_ORIGINALS_LIBRARY_PATH: current.originalsLibraryPath,
+  };
+  const piped = spawnSync(process.execPath, [
+    entry, "media-item", "create", "--key", "media-process-001", "--json", "-",
+  ], {
+    encoding: "utf8",
+    env: environment,
+    input: JSON.stringify({ kind: "movie", title: "Piped Example" }),
+  });
+  expect(piped.status).toBe(0);
+  expect(piped.stderr).toBe("");
+  expect(JSON.parse(piped.stdout)).toMatchObject({ mediaItem: { title: "Piped Example" } });
+  const file = join(dirname(current.databasePath), "media-item.json");
+  writeFileSync(file, JSON.stringify({ kind: "movie", title: "File Example" }));
+  const fromFile = spawnSync(process.execPath, [
+    entry, "media-item", "create", "--key", "media-process-002", "--file", file,
+  ], { encoding: "utf8", env: environment });
+  expect(fromFile.status).toBe(0);
+  expect(fromFile.stderr).toBe("");
+  expect(JSON.parse(fromFile.stdout)).toMatchObject({ mediaItem: { title: "File Example" } });
+  const rejected = spawnSync(process.execPath, [
+    entry, "media-item", "create", "--kind", "movie", "--title", "Unkeyed Example",
+  ], { encoding: "utf8", env: environment });
+  expect(rejected.status).toBe(2);
+  expect(JSON.parse(rejected.stdout)).toMatchObject({ error: { code: "INVALID_MUTATION_KEY" } });
+});
+
 it("discovers commands and rejects unsupported invocations without opening SQLite", async () => {
   const stdout: string[] = [];
   const io = {
@@ -248,6 +379,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       "preview-encoding-profile-state",
       "activate-encoding-profile",
       "deactivate-encoding-profile",
+      "media-item",
       "health",
       "readiness",
       "inspect",

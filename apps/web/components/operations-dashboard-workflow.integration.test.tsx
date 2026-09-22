@@ -1989,13 +1989,27 @@ describe("end-to-end operations dashboard workflow", () => {
     });
     expect(catalogReviewHtml).toContain("Archive only");
 
-    const catalogMutation = (body: unknown) =>
-      createCatalogReviewRoute(
-        createMutationRequest(`/api/catalog-reviews/${archive.id}`, body),
+    const catalogMutation = (body: unknown) => {
+      let input = body;
+      if (typeof body === "object" && body !== null && "action" in body &&
+          (body.action === "create_media_item" || body.action === "update_media_item" ||
+            body.action === "delete_media_item")) {
+        const id = "mediaItemId" in body && typeof body.mediaItemId === "string"
+          ? body.mediaItemId as MediaItemId : null;
+        const item = id === null ? null : access.catalog.listMediaItems({ ids: [id] })[0];
+        input = {
+          ...body,
+          mutationKey: crypto.randomUUID(),
+          ...(item ? { acknowledgedRevision: item.updatedAt.toISOString() } : {}),
+        };
+      }
+      return createCatalogReviewRoute(
+        createMutationRequest(`/api/catalog-reviews/${archive.id}`, input),
         archive.id,
         () => access,
         () => trustedOrigin,
       );
+    };
     const archiveOnlyCompletion = await catalogMutation({
       action: "complete_review",
       catalogRevision: catalogReview.catalogRevision,

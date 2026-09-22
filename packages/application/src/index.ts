@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { isHandBrakePreset } from "@rip-dvd/config";
 import { encodingProfileQueueBlockingReasons } from "@rip-dvd/data-access";
 
@@ -15,6 +14,14 @@ import type {
 
 import { readCatalogReview, type CatalogReviewPageCoordinates } from "./catalog-review-read.js";
 import { suggestCatalogReview } from "./catalog-suggestion.js";
+import { generateMutationKey, InvalidMutationKeyError, parseMutationKey } from "./mutation-key.js";
+import {
+  mutateMediaItem,
+  previewMediaItemChange,
+  searchMediaItems,
+  showMediaItem,
+  type MediaItemCommand,
+} from "./media-item-operations.js";
 import type { CatalogMetadataLookup, CatalogMetadataSelection } from "./catalog-automation.js";
 
 export class InvalidProfileInputError extends Error {
@@ -66,26 +73,7 @@ export function toEncodingProfileDto(profile: EncodingProfile) {
   };
 }
 
-export class InvalidMutationKeyError extends Error {
-  constructor() {
-    super("A mutation key of 8 to 128 safe characters is required.");
-    this.name = "InvalidMutationKeyError";
-  }
-}
-
-export function parseMutationKey(value: unknown): string {
-  if (
-    typeof value !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(value)
-  ) {
-    throw new InvalidMutationKeyError();
-  }
-  return value;
-}
-
-export function generateMutationKey(): string {
-  return randomUUID();
-}
+export { generateMutationKey, InvalidMutationKeyError, parseMutationKey };
 
 export {
   encodeRequeueAvailability,
@@ -256,6 +244,18 @@ export function createApplicationOperations(
       lookup: CatalogMetadataLookup | null,
       selection?: CatalogMetadataSelection,
     ) => suggestCatalogReview(access, id, lookup, selection),
+    searchMediaItems: (input: Parameters<typeof searchMediaItems>[1]) =>
+      searchMediaItems(access, input),
+    showMediaItem: (id: Parameters<typeof showMediaItem>[1]) => showMediaItem(access, id),
+    previewMediaItemChange: (
+      id: Parameters<typeof previewMediaItemChange>[1],
+      action: "update" | "delete",
+    ) => previewMediaItemChange(access, id, action),
+    mutateMediaItem: (input: {
+      mutationKey: unknown;
+      command: MediaItemCommand;
+      acknowledgedRevision?: string;
+    }) => mutateMediaItem(access, input),
   };
 }
 
@@ -264,6 +264,8 @@ export { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
 export { readCatalogReview, serializeDiscSelection, serializeMediaItem } from "./catalog-review-read.js";
 export type { CatalogReviewPageCoordinates } from "./catalog-review-read.js";
 export * from "./catalog-review-types.js";
+export * from "./catalog-review-command.js";
+export type { MediaItemCommand } from "./media-item-operations.js";
 export * from "./catalog-automation.js";
 export * from "./tmdb-catalog-adapter.js";
 export { suggestCatalogReview } from "./catalog-suggestion.js";

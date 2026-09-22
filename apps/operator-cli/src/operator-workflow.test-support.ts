@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -32,6 +32,7 @@ export function createOperatorWorkflowFixture() {
       const stderr: string[] = [];
       const exitCode = await runCommand(args, {
         openAccess,
+        readFile: (path) => readFileSync(path, "utf8"),
         ...(lookup === undefined ? {} : { getLookup: () => lookup }),
         ...(stdin === undefined ? {} : { readStdin: () => stdin }),
         stdout: (text) => stdout.push(text),

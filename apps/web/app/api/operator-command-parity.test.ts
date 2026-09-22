@@ -6,6 +6,7 @@ import {
   createNormalDvdArchiveBoundaryEvidenceForTest,
 } from "@rip-dvd/data-access/test-support";
 import type { CatalogMetadataLookup } from "@rip-dvd/application";
+import type { MediaItemId } from "@rip-dvd/data-access";
 
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../operator-cli/src/operator-workflow.test-support.js";
 import { createCatalogReviewRoute } from "./catalog-reviews/[id]/route";
@@ -13,6 +14,8 @@ import { createCatalogSuggestionRoute } from "./catalog-reviews/[id]/suggestion/
 import { createDeploymentReadinessResponse } from "./deployment-readiness/route";
 import { createHealthResponse } from "./health/route";
 import { createOperationsResponse } from "./operations/route";
+import { createMediaItemSearchRoute } from "./media-items/route";
+import { createMediaItemPreviewRoute } from "./media-items/[id]/route";
 
 it("returns the same health and readiness results through web and CLI adapters", async () => {
   const fixture = createOperatorWorkflowFixture();
@@ -394,6 +397,95 @@ it("shares Encoding Profile validation, replay, preview, and state changes betwe
       new Request(endpoint), () => access, trustedOrigin,
     );
     expect((await fixture.run(["list-encoding-profiles"])).result).toEqual(await list.json());
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("shares Media Item search, revision previews, keyed mutations, and replay between web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive } = seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  const route = (body: unknown) => createCatalogReviewRoute(
+    new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Host: "localhost:3000",
+        Origin: "http://localhost:3000",
+      },
+      body: JSON.stringify(body),
+    }),
+    archive.id,
+    () => access,
+    () => "http://localhost:3000",
+  );
+  try {
+    const created = await route({
+      action: "create_media_item", mutationKey: "media-parity-create",
+      mediaItem: { kind: "movie", title: "Synthetic Extra Film", tmdbIdentity: { mediaType: "movie", tmdbId: 123 } },
+    });
+    expect(created.status).toBe(201);
+    const createdBody = await created.json();
+    const itemId = createdBody.mediaItem.id as string;
+    expect((await fixture.run([
+      "media-item", "create", "--key", "media-parity-create", "--kind", "movie",
+      "--title", "Synthetic Extra Film", "--tmdb-type", "movie", "--tmdb-id", "123",
+    ])).result).toEqual(createdBody);
+    const search = await createMediaItemSearchRoute(
+      new Request("http://localhost:3000/api/media-items?query=Synthetic%20Extra"),
+      () => access,
+    );
+    expect((await fixture.run(["media-item", "search", "--query", "Synthetic Extra"])).result)
+      .toEqual(await search.json());
+    const preview = await createMediaItemPreviewRoute(
+      new Request(`http://localhost:3000/api/media-items/${itemId}?action=update`),
+      itemId,
+      () => access,
+    );
+    const previewBody = await preview.json();
+    expect((await fixture.run(["media-item", "preview", "update", itemId])).result)
+      .toEqual(previewBody);
+    const missingKey = await route({
+      action: "update_media_item", mediaItemId: itemId,
+      acknowledgedRevision: previewBody.revision,
+      changes: { title: "Unkeyed change" },
+    });
+    expect(missingKey.status).toBe(400);
+    expect(access.catalog.listMediaItems({ ids: [itemId as MediaItemId] })[0]?.title)
+      .toBe("Synthetic Extra Film");
+    const updated = await fixture.run([
+      "media-item", "update", itemId, "--key", "media-parity-update",
+      "--acknowledge", previewBody.revision, "--title", "Synthetic Revised Film",
+    ]);
+    expect(updated.exitCode).toBe(0);
+    const webReplay = await route({
+      action: "update_media_item", mutationKey: "media-parity-update",
+      mediaItemId: itemId,
+      acknowledgedRevision: previewBody.revision,
+      changes: { title: "Synthetic Revised Film" },
+    });
+    expect(webReplay.status).toBe(200);
+    expect(await webReplay.json()).toEqual(updated.result);
+    const stale = await route({
+      action: "update_media_item", mutationKey: "media-parity-stale",
+      mediaItemId: itemId, acknowledgedRevision: previewBody.revision,
+      changes: { title: "Stale replacement" },
+    });
+    expect(stale.status).toBe(409);
+    expect(access.catalog.listMediaItems({ ids: [itemId as MediaItemId] })[0]?.title)
+      .toBe("Synthetic Revised Film");
+    const deletePreview = await fixture.run(["media-item", "preview", "delete", itemId]);
+    const revision = (deletePreview.result as { revision: string }).revision;
+    const deleted = await route({
+      action: "delete_media_item", mutationKey: "media-parity-delete",
+      mediaItemId: itemId, acknowledgedRevision: revision,
+    });
+    expect(deleted.status).toBe(200);
+    expect((await fixture.run([
+      "media-item", "delete", itemId, "--key", "media-parity-delete", "--acknowledge", revision,
+    ])).result).toEqual(await deleted.json());
   } finally {
     access.close();
     fixture.dispose();

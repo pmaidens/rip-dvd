@@ -8,6 +8,7 @@ import {
   createCleanReadArchiveIntegrityEvidence,
   createCorrectedDvdArchiveBoundaryEvidence,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
+  type DataAccess,
   type EncodeJobStatus,
   type MediaItem,
   type MediaItemId,
@@ -28,6 +29,20 @@ import { startArchiveJob } from "../../../../test/archive-job-fixture";
 import { createCatalogReviewRoute } from "./route";
 
 const dataAccessFixture = useDataAccessFixture();
+
+function keyedMediaItemBody(body: unknown, access: DataAccess): unknown {
+  if (typeof body !== "object" || body === null || !("action" in body) ||
+      (body.action !== "create_media_item" && body.action !== "update_media_item" &&
+        body.action !== "delete_media_item")) return body;
+  const itemId = "mediaItemId" in body && typeof body.mediaItemId === "string"
+    ? body.mediaItemId as MediaItemId : null;
+  const item = itemId === null ? null : access.catalog.listMediaItems({ ids: [itemId] })[0];
+  return {
+    ...body,
+    mutationKey: crypto.randomUUID(),
+    ...(item ? { acknowledgedRevision: item.updatedAt.toISOString() } : {}),
+  };
+}
 
 describe("Catalog Review API", () => {
   it("keeps locked-provenance job statuses aligned with data access", () => {
@@ -330,7 +345,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(keyedMediaItemBody(body, access)),
       }),
       archive.id,
       () => access,
@@ -554,7 +569,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(keyedMediaItemBody(body, access)),
       }),
       archive.id,
       () => access,
@@ -707,7 +722,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(keyedMediaItemBody(body, access)),
       }),
       archive.id,
       () => access,
@@ -2145,7 +2160,7 @@ describe("Catalog Review API", () => {
             Host: "localhost:3000",
             Origin: "http://localhost:3000",
           },
-          body: JSON.stringify(body),
+          body: JSON.stringify(keyedMediaItemBody(body, client)),
         }),
         archive.id,
         () => client,
@@ -2615,7 +2630,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(keyedMediaItemBody(body, access)),
       }),
       archive.id,
       () => access,
@@ -2752,7 +2767,7 @@ describe("Catalog Review API", () => {
             Host: "localhost:3000",
             Origin: "http://localhost:3000",
           },
-          body: JSON.stringify(body),
+          body: JSON.stringify(keyedMediaItemBody(body, access)),
         },
       ),
       archives[0]!.id,
@@ -2858,7 +2873,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(keyedMediaItemBody(body, access)),
       }),
       archive.id,
       () => access,
@@ -2932,7 +2947,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(keyedMediaItemBody(body, access)),
       }),
       archive.id,
       () => access,
@@ -3057,7 +3072,7 @@ describe("Catalog Review API", () => {
             Host: "localhost:3000",
             Origin: "http://localhost:3000",
           },
-          body: JSON.stringify(body),
+          body: JSON.stringify(keyedMediaItemBody(body, access)),
         }),
         archive.id,
         () => access,
