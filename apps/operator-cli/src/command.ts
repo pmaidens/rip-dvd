@@ -584,33 +584,11 @@ function rearchiveInputs(args: readonly string[]): {
   mutationKey: string;
   sourceArchiveId: string;
 } {
-  const options = new Map<string, string>();
-  for (let index = 0; index < args.length; index += 2) {
-    const name = args[index];
-    const value = args[index + 1];
-    if (
-      (name !== "--key" && name !== "--source-archive-id") ||
-      value === undefined ||
-      value.startsWith("--") ||
-      options.has(name)
-    ) {
-      throw new CommandFailure(
-        "INVALID_ARGUMENTS",
-        "Invalid Re-archive Request options.",
-        2,
-      );
-    }
-    options.set(name, value);
-  }
-  let mutationKey: string;
-  try {
-    mutationKey = parseMutationKey(options.get("--key"));
-  } catch (error) {
-    if (error instanceof InvalidMutationKeyError) {
-      throw new CommandFailure("INVALID_MUTATION_KEY", error.message, 2);
-    }
-    throw error;
-  }
+  const { options, mutationKey } = mutationOptions(
+    args,
+    ["--key", "--source-archive-id"],
+    "Invalid Re-archive Request options.",
+  );
   const sourceArchiveId = options.get("--source-archive-id")?.trim();
   if (!sourceArchiveId) {
     throw new CommandFailure(
