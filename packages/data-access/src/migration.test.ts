@@ -434,7 +434,7 @@ it("preserves archive history while adding nullable Re-archive lineage", () => {
     ) VALUES (
       'rearchive-migration-archive', 'rearchive-migration-disc', 'dvd', 'iso',
       '/originals/synthetic-rearchive-migration.iso',
-      'synthetic-rearchive-migration', 2048, 1, 1, 1
+      'synthetic-rearchive-migration', NULL, 1, 1, 1
     );
   `);
   historical.close();
@@ -454,6 +454,7 @@ it("preserves archive history while adding nullable Re-archive lineage", () => {
       id: "rearchive-migration-archive",
       rearchiveSourceArchiveId: null,
       archivePath: "/originals/synthetic-rearchive-migration.iso",
+      sizeBytes: null,
     }),
   ]);
   migratedAccess.close();

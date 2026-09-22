@@ -1664,10 +1664,11 @@ export function DashboardView({
               </div>
             ) : null}
             <div className="operation-actions">
-              {!archive.rearchiveRequest ||
+              {archive.discKind === "dvd" &&
+                (!archive.rearchiveRequest ||
                   ["fulfilled", "cancelled"].includes(
                     archive.rearchiveRequest.status,
-                  ) ? (
+                  )) ? (
                 <button
                   type="button"
                   disabled={requestingRearchiveArchiveId !== null}

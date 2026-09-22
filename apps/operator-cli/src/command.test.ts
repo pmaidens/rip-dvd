@@ -1503,6 +1503,55 @@ it("requests Re-archiving with an explicit source and reports why it is waiting"
   });
 });
 
+it("marks fresh re-archive unavailable for unsupported disc kinds", async () => {
+  const current = fixture();
+  const access = createLegacySidecarDataAccess({
+    databasePath: current.databasePath,
+    mediaLibraryPath: current.mediaLibraryPath,
+    originalsLibraryPath: current.originalsLibraryPath,
+  });
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/synthetic-blu-ray",
+    isPresent: true,
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "blu_ray",
+    fingerprint: "synthetic-blu-ray-source",
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+  const archive = access.catalog.createOriginalDiscArchive({
+    detectedDiscId: disc.id,
+    discKind: "blu_ray",
+    archiveFormat: "iso",
+    archivePath: join(
+      current.originalsLibraryPath,
+      "synthetic-blu-ray-source.iso",
+    ),
+    fingerprint: disc.fingerprint,
+  });
+  access.close();
+
+  const inspected = await current.run([
+    "inspect",
+    "original-disc-archives",
+    archive.id,
+  ]);
+  expect(inspected.result).toMatchObject({
+    item: {
+      availableActions: expect.arrayContaining([
+        expect.objectContaining({
+          name: "request-rearchive",
+          eligible: false,
+          reason:
+            "Fresh re-archive requests are supported only for DVD archives",
+        }),
+      ]),
+    },
+  });
+});
+
 it("cancels waiting work immediately and replays the original outcome", async () => {
   const current = fixture();
   const detectedDiscId = addScannedDisc(current, "synthetic-cancel-disc");

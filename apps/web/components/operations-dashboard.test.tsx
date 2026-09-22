@@ -819,6 +819,42 @@ describe("DashboardView", () => {
     expect(html).not.toContain("Review catalog");
   });
 
+  it("does not offer fresh re-archive for unsupported disc kinds", () => {
+    const html = renderToStaticMarkup(
+      <DashboardView
+        section="catalog"
+        catalogReviewView="reviewed"
+        state={{
+          opticalDrives: { status: "loaded", items: [] },
+          detectedDiscs: { status: "loaded", items: [] },
+          archiveJobs: { status: "loaded", items: [] },
+          encodeJobs: { status: "loaded", items: [] },
+          catalogReview: {
+            status: "loaded",
+            items: [{
+              id: "unsupported-rearchive-source",
+              discLabel: "SYNTHETIC_BLU_RAY",
+              discKind: "blu_ray",
+              archiveFormat: "iso",
+              integrity: "unknown",
+              badSectorCount: null,
+              badAreaCount: null,
+              badSectorRanges: null,
+              archivedAt: "2026-08-10T12:00:00.000Z",
+              catalogReviewedAt: "2026-08-11T12:00:00.000Z",
+              catalogReviewOutcome: "archive_only",
+              mappedMediaItemCount: 0,
+              mappedMediaItemTitles: [],
+            }],
+          },
+        }}
+      />,
+    );
+
+    expect(html).toContain("SYNTHETIC_BLU_RAY");
+    expect(html).not.toContain("Request fresh archive");
+  });
+
   it("shows why an active Re-archive Request is waiting", () => {
     const waitingMessage =
       "Insert the disc matching the requested Original Disc Archive and wait for Disc Inspection to complete.";

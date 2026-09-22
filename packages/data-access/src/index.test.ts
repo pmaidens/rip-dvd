@@ -10042,6 +10042,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const access = openTestDatabase();
     const firstDrive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
+      isEnabled: true,
       isPresent: true,
     });
     const secondDrive = access.catalog.upsertOpticalDrive({
@@ -10051,7 +10052,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     });
     const rawFingerprint = `sha256:${"a".repeat(64)}`;
     const volumeLabel = "LEGACY_ARCHIVE";
-    const sizeBytes = 4_699_998_208;
+    const sizeBytes = 8 * 2_048;
+    const publishedSizeBytes = 6 * 2_048;
     const titles = [{
       number: 1,
       durationSeconds: 5_400,
@@ -10070,10 +10072,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         content: "Normal",
       }],
     }];
-    const firstDisc = access.catalog.registerDetectedDisc({
+    const source = completeDiscInspection(access, {
       opticalDriveId: firstDrive.id,
-      discKind: "dvd",
+      mediaGeneration: "legacy-raw-source",
       fingerprint: rawFingerprint,
+      sizeBytes,
       volumeLabel,
       scanData: {
         schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
@@ -10081,16 +10084,38 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         titles,
       },
     });
-    access.catalog.updateDetectedDiscStatus(firstDisc.id, "scanned");
-    access.catalog.updateDetectedDiscStatus(firstDisc.id, "approved");
-    const archive = access.catalog.createOriginalDiscArchive({
-      detectedDiscId: firstDisc.id,
-      discKind: "dvd",
-      archiveFormat: "iso",
+    access.archiveRequests.create({ detectedDiscId: source.disc.id });
+    const sourceClaim = access.archiveJobs.startForInspection(
+      source.inspection.id,
+      "legacy-source-worker",
+    )!;
+    const sourceJob = access.archiveJobs.publish(sourceClaim, {
       archivePath: "/media/originals/Legacy Archive.iso",
-      fingerprint: rawFingerprint,
-      sizeBytes,
+      boundaryEvidence: createCorrectedDvdArchiveBoundaryEvidence({
+        reportedSizeBytes: sizeBytes,
+        publishedSizeBytes,
+        firstExcludedLba: 6,
+        maximumReferencedLba: 5,
+        outOfRangeEvidence: {
+          classifierVersion: "scsi-read-classifier-v2",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 0x70,
+          senseKey: 0x05,
+          asc: 0x21,
+          ascq: 0,
+        },
+      }),
+      sizeBytes: publishedSizeBytes,
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "dvd-recovery-v1",
+      ),
     });
+    const archive = access.catalog.listOriginalDiscArchives({
+      ids: [sourceJob.originalDiscArchiveId!],
+    })[0]!;
+    access.discInspections.clearCurrent({ opticalDriveId: firstDrive.id });
     const metadataFingerprint = createDvdMetadataFingerprint({
       sizeBytes,
       titles,
@@ -10144,13 +10169,147 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       ),
     });
     expect(access.catalog.listOriginalDiscArchives()).toEqual([
-      expect.objectContaining({ id: archive.id, fingerprint: rawFingerprint }),
+      expect.objectContaining({
+        id: archive.id,
+        fingerprint: rawFingerprint,
+        sizeBytes: publishedSizeBytes,
+        boundaryReportedSizeBytes: sizeBytes,
+      }),
       expect.objectContaining({
         id: completed.originalDiscArchiveId,
         fingerprint: metadataFingerprint,
         rearchiveSourceArchiveId: archive.id,
       }),
     ]);
+    access.close();
+  });
+
+  it("reports unavailable continuity evidence for a matching migrated archive", () => {
+    const access = openTestDatabase();
+    const fingerprint = `dvdmeta-sha256:${"b".repeat(64)}`;
+    const scanData = {
+      schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 4_800,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const sourceDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/migrated-source",
+      isPresent: true,
+    });
+    const sourceDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: sourceDrive.id,
+      discKind: "dvd",
+      fingerprint,
+      scanData,
+    });
+    access.catalog.updateDetectedDiscStatus(sourceDisc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(sourceDisc.id, "approved");
+    const sourceArchive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: sourceDisc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Synthetic Migrated Archive.iso",
+      fingerprint,
+    });
+    const request = access.archiveRequests.submitRearchive({
+      mutationKey: "00000000-0000-4000-8000-000000000345",
+      sourceArchiveId: sourceArchive.id,
+    });
+    const currentDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/migrated-current",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const current = completeDiscInspection(access, {
+      opticalDriveId: currentDrive.id,
+      mediaGeneration: "migrated-current-generation",
+      fingerprint,
+      scanData,
+      sizeBytes: 4_096,
+    });
+
+    expect(access.archiveRequests.waitingStatus(request.id)).toEqual({
+      code: "source_continuity_unavailable",
+    });
+    expect(access.archiveJobs.startForInspection(
+      current.inspection.id,
+      "migrated-rearchive-worker",
+    )).toBeNull();
+    access.close();
+  });
+
+  it("rejects fresh re-archive requests for unsupported disc kinds", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/unsupported-rearchive-source",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "blu_ray",
+      fingerprint: "synthetic-blu-ray-source",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "blu_ray",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Synthetic Blu-ray Source.iso",
+      fingerprint: disc.fingerprint,
+    });
+
+    expect(() => access.archiveRequests.submitRearchive({
+      mutationKey: "00000000-0000-4000-8000-000000000344",
+      sourceArchiveId: archive.id,
+    })).toThrow("Fresh re-archive requests are supported only for DVD archives");
+    access.close();
+  });
+
+  it("bounds re-archive source reads and returns only the latest relevant request", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/rearchive-history-source",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "synthetic-rearchive-history",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Synthetic Re-archive History.iso",
+      fingerprint: disc.fingerprint,
+    });
+    const first = access.archiveRequests.submitRearchive({
+      mutationKey: "00000000-0000-4000-8000-000000000340",
+      sourceArchiveId: archive.id,
+    });
+    access.archiveRequests.cancel(first.id);
+    const latest = access.archiveRequests.submitRearchive({
+      mutationKey: "00000000-0000-4000-8000-000000000341",
+      sourceArchiveId: archive.id,
+    });
+
+    expect(access.archiveRequests.listForRearchiveSources([archive.id]))
+      .toEqual([expect.objectContaining({ id: latest.id })]);
+    expect(() => access.archiveRequests.listForRearchiveSources(
+      Array.from(
+        { length: 257 },
+        (_, index) => `synthetic-archive-${index}` as OriginalDiscArchiveId,
+      ),
+    )).toThrow("related Original Disc Archive reads are limited to 256 roots");
     access.close();
   });
 

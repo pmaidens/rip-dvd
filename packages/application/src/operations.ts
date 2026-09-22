@@ -483,6 +483,10 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
     case "original-disc-archives": {
       const archive = access.catalog.listOriginalDiscArchives({ ids: [id as OriginalDiscArchiveId] })[0];
       if (!archive) return null;
+      const rearchiveEligible = archive.discKind === "dvd";
+      const rearchiveReason = rearchiveEligible
+        ? null
+        : "Fresh re-archive requests are supported only for DVD archives";
       return {
         ...visibleArchive(archive),
         detectedDisc: access.catalog.listDetectedDiscs(undefined, {
@@ -494,10 +498,12 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
           { name: "verify-archive", eligible: true, reason: null },
           {
             name: "request-rearchive",
-            eligible: true,
+            eligible: rearchiveEligible,
             requiredInputs: ["mutationKey", "sourceArchiveId"],
-            reason: null,
-            blockingReasons: [],
+            reason: rearchiveReason,
+            blockingReasons: rearchiveReason === null
+              ? []
+              : [rearchiveReason],
           },
         ],
       };

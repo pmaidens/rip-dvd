@@ -16,6 +16,8 @@ export function describeArchiveRequestWaitingStatus(
       "Insert the disc matching the requested Original Disc Archive and wait for Disc Inspection to complete.",
     matching_inspection_incomplete:
       "A current Disc Inspection must complete before the inserted disc can be matched.",
+    source_continuity_unavailable:
+      "The matching disc is present, but the source archive lacks the disc-size evidence required to authorize a fresh copy.",
     ready_for_archive_worker:
       "A completed Disc Inspection matches this Archive Request and is ready for the Archive Worker.",
   } satisfies Record<ArchiveRequestWaitingStatus["code"], string>;

@@ -1440,6 +1440,7 @@ export interface ArchiveRequestWaitingStatus {
   code:
     | "matching_disc_required"
     | "matching_inspection_incomplete"
+    | "source_continuity_unavailable"
     | "ready_for_archive_worker";
 }
 
