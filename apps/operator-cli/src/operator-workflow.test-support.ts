@@ -33,6 +33,7 @@ export function createOperatorWorkflowFixture() {
       const exitCode = await runCommand(args, {
         openAccess,
         readFile: (path) => readFileSync(path, "utf8"),
+        mediaLibraryPath: () => mediaLibraryPath,
         ...(lookup === undefined ? {} : { getLookup: () => lookup }),
         ...(stdin === undefined ? {} : { readStdin: () => stdin }),
         stdout: (text) => stdout.push(text),

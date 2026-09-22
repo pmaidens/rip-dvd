@@ -955,7 +955,7 @@ export async function queueEncodeJob(
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(input),
+    body: JSON.stringify({ ...input, mutationKey: crypto.randomUUID() }),
   });
   if (!response.ok) {
     throw new Error(await errorMessage(response, "Encode Job queueing failed"));
@@ -979,7 +979,7 @@ async function requestEncodeJobRequeue(
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ action: "requeue", encodeJobId }),
+    body: JSON.stringify({ action: "requeue", encodeJobId, mutationKey: crypto.randomUUID() }),
   });
   if (!response.ok) {
     throw new Error(await errorMessage(response, "Encode Job retry failed"));
@@ -1015,7 +1015,7 @@ export async function cancelEncodeJob(
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ action: "cancel", encodeJobId }),
+    body: JSON.stringify({ action: "cancel", encodeJobId, mutationKey: crypto.randomUUID() }),
   });
   if (!response.ok) {
     throw new Error(

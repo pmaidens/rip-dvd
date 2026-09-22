@@ -586,11 +586,7 @@ describe("EncodeJobsView", () => {
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        discSelectionId: "selection-1",
-        encodingProfileId: "profile-v2",
-        outputPath: "/media/movies/Queue Me (2001).mkv",
-      }),
+      body: expect.any(String),
     });
     expect(fetcher).toHaveBeenNthCalledWith(3, "/api/encode-jobs", {
       method: "PATCH",
@@ -598,7 +594,7 @@ describe("EncodeJobsView", () => {
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ action: "cancel", encodeJobId: "job-1" }),
+      body: expect.any(String),
     });
     expect(fetcher).toHaveBeenNthCalledWith(4, "/api/encode-jobs", {
       method: "PATCH",
@@ -606,8 +602,19 @@ describe("EncodeJobsView", () => {
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ action: "requeue", encodeJobId: "job-1" }),
+      body: expect.any(String),
     });
+    for (const [index, expected] of [
+      { discSelectionId: "selection-1", encodingProfileId: "profile-v2", outputPath: "/media/movies/Queue Me (2001).mkv" },
+      { action: "cancel", encodeJobId: "job-1" },
+      { action: "requeue", encodeJobId: "job-1" },
+    ].entries()) {
+      const request = (fetcher.mock.calls[index + 1] as unknown as [string, RequestInit])[1];
+      expect(JSON.parse(request.body as string)).toMatchObject({
+        ...expected,
+        mutationKey: expect.any(String),
+      });
+    }
   });
 
   it("resolves selected-profile jobs for bounded replacement recovery", async () => {

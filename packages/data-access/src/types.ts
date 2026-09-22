@@ -1003,6 +1003,7 @@ export interface EncodeJobFailureReport extends EncodeJobFailureReportInput {
 export interface EncodeJobRequeueOptions {
   outputPath?: string;
   priority?: number;
+  mutationKey?: string;
 }
 
 export interface DiscoveredOpticalDrive {
@@ -1405,8 +1406,9 @@ export interface EncodeJobAccess {
     encodingProfileId: EncodingProfileId;
     outputPath: string;
     priority?: number;
+    mutationKey?: string;
   }): EncodeJob;
-  requestCancellation(id: EncodeJobId): EncodeJob;
+  requestCancellation(id: EncodeJobId, mutationKey?: string): EncodeJob;
   claimNext(workerId: string): RunningEncodeJob | null;
   renewClaim(claim: RunningEncodeJob): ClaimedEncodeJob;
   completeCancellation(claim: RunningEncodeJob): EncodeJob;

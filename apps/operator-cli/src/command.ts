@@ -15,15 +15,21 @@ import {
   type CatalogMetadataLookup,
   type CatalogMetadataSelection,
   type CatalogReviewPageCoordinates,
+  InvalidEncodeJobInputError,
+  serializeJob,
 } from "@rip-dvd/application";
+import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
   MutationKeyConflictError,
   RecordNotFoundError,
+  validateEncodeQueueSearchQuery,
   type OriginalDiscArchiveId,
   type FilesystemVerificationTarget,
   type DataAccess,
+  type DiscSelectionId,
+  type EncodingProfileId,
 } from "@rip-dvd/data-access";
 import { runDiscSelection } from "./disc-selection.js";
 import { runMediaItem } from "./media-item.js";
@@ -33,6 +39,7 @@ export type CommandExitCode = 0 | 1 | 2 | 3;
 
 interface CommandIO {
   openAccess(): DataAccess;
+  mediaLibraryPath?(): string;
   getLookup?(): CatalogMetadataLookup | null;
   readStdin?(): string;
   readFile?(path: string): string;
@@ -103,6 +110,41 @@ const commandDefinitions = [
     usage: "rip-dvd-operator submit-filesystem-verification --key <key> --target <original_disc_archive|encode_job_output> --id <id>",
     inputs: { arguments: [], options: ["--key", "--target", "--id"] },
     example: "rip-dvd-operator submit-filesystem-verification --key 00000000-0000-4000-8000-000000000001 --target original_disc_archive --id <id>",
+  },
+  {
+    name: "encode-queue",
+    description: "Read Encode Job options and paged history.",
+    usage: "rip-dvd-operator encode-queue [--history-group not_encoded|re_encode] [--query <text>] [--encoding-profile-id <id>] [--selection-offset <n>] [--profile-offset <n>]",
+    inputs: { arguments: [], options: ["--history-group", "--query", "--encoding-profile-id", "--selection-offset", "--profile-offset"] },
+    example: "rip-dvd-operator encode-queue --history-group re_encode",
+  },
+  {
+    name: "encode-resolve",
+    description: "Resolve selected Disc Selections against one Encoding Profile.",
+    usage: "rip-dvd-operator encode-resolve --encoding-profile-id <id> --disc-selection-id <id> [--disc-selection-id <id> ...]",
+    inputs: { arguments: [], options: ["--encoding-profile-id", "--disc-selection-id (repeat up to 100)"] },
+    example: "rip-dvd-operator encode-resolve --encoding-profile-id <id> --disc-selection-id <id>",
+  },
+  {
+    name: "encode-enqueue",
+    description: "Enqueue an Encode Job, deduplicating the initial logical job.",
+    usage: "rip-dvd-operator encode-enqueue --key <key> --disc-selection-id <id> --encoding-profile-id <id> --output-path <absolute .mkv path> [--priority <integer>]",
+    inputs: { arguments: [], options: ["--key", "--disc-selection-id", "--encoding-profile-id", "--output-path", "--priority"] },
+    example: "rip-dvd-operator encode-enqueue --key 00000000-0000-4000-8000-000000000001 --disc-selection-id <id> --encoding-profile-id <id> --output-path /media/movies/example.mkv",
+  },
+  {
+    name: "encode-requeue",
+    description: "Explicitly requeue a terminal Encode Job, optionally resolving a failed output conflict.",
+    usage: "rip-dvd-operator encode-requeue --key <key> --encode-job-id <id> [--output-path <absolute .mkv path>] [--priority <integer>]",
+    inputs: { arguments: [], options: ["--key", "--encode-job-id", "--output-path", "--priority"] },
+    example: "rip-dvd-operator encode-requeue --key 00000000-0000-4000-8000-000000000001 --encode-job-id <id>",
+  },
+  {
+    name: "encode-cancel",
+    description: "Cancel queued work or request cooperative cancellation of running work.",
+    usage: "rip-dvd-operator encode-cancel --key <key> --encode-job-id <id>",
+    inputs: { arguments: [], options: ["--key", "--encode-job-id"] },
+    example: "rip-dvd-operator encode-cancel --key 00000000-0000-4000-8000-000000000001 --encode-job-id <id>",
   },
   {
     name: "catalog-review",
@@ -749,6 +791,165 @@ function runProfileCommand(name: string, args: readonly string[], openAccess: Co
   }
 }
 
+function encodeOptions(rest: readonly string[], repeatable?: string): Map<string, string[]> {
+  if (rest.length % 2 !== 0) {
+    throw new CommandFailure("INVALID_ARGUMENTS", "Encode options require values.", 2);
+  }
+  const options = new Map<string, string[]>();
+  for (let index = 0; index < rest.length; index += 2) {
+    const name = rest[index]!;
+    const value = rest[index + 1]!;
+    if (!name.startsWith("--") || value.length === 0 || value.startsWith("--") ||
+      (options.has(name) && name !== repeatable)) {
+      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Encode options.", 2);
+    }
+    options.set(name, [...(options.get(name) ?? []), value]);
+  }
+  return options;
+}
+
+function onlyEncodeOptions(options: Map<string, string[]>, allowed: readonly string[]): void {
+  if ([...options.keys()].some((name) => !allowed.includes(name))) {
+    throw new CommandFailure("INVALID_ARGUMENTS", "Unknown Encode option.", 2);
+  }
+}
+
+function encodeId(options: Map<string, string[]>, name: string): string {
+  const value = options.get(name)?.[0]?.trim();
+  if (!value || value.length > 256) {
+    throw new CommandFailure("INVALID_ARGUMENTS", `${name} requires an ID.`, 2);
+  }
+  return value;
+}
+
+function encodeKey(options: Map<string, string[]>): string {
+  try {
+    return parseMutationKey(options.get("--key")?.[0]);
+  } catch (error) {
+    if (error instanceof InvalidMutationKeyError) {
+      throw new CommandFailure("INVALID_MUTATION_KEY", error.message, 2);
+    }
+    throw error;
+  }
+}
+
+function encodeOffset(options: Map<string, string[]>, name: string): number {
+  const value = options.get(name)?.[0];
+  const parsed = value === undefined ? 0 : nonnegativeInteger(value);
+  if (parsed === null) {
+    throw new CommandFailure("INVALID_ARGUMENTS", `${name} requires a nonnegative integer.`, 2);
+  }
+  return parsed;
+}
+
+function encodePriority(options: Map<string, string[]>): number | undefined {
+  const value = options.get("--priority")?.[0];
+  if (value === undefined) return undefined;
+  if (!/^-?(0|[1-9]\d*)$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Encode priority.", 2);
+  }
+  return Number(value);
+}
+
+function encodeMediaLibraryPath(io: CommandIO): string {
+  try {
+    return io.mediaLibraryPath?.() ?? loadConfig().mediaLibraryPath;
+  } catch {
+    throw new CommandFailure("CONFIGURATION_ERROR", "Media library configuration is unavailable.", 1);
+  }
+}
+
+function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) {
+  const options = encodeOptions(rest, name === "encode-resolve" ? "--disc-selection-id" : undefined);
+  const permitted: Record<string, string[]> = {
+    "encode-queue": ["--history-group", "--query", "--encoding-profile-id", "--selection-offset", "--profile-offset"],
+    "encode-resolve": ["--encoding-profile-id", "--disc-selection-id"],
+    "encode-enqueue": ["--key", "--disc-selection-id", "--encoding-profile-id", "--output-path", "--priority"],
+    "encode-requeue": ["--key", "--encode-job-id", "--output-path", "--priority"],
+    "encode-cancel": ["--key", "--encode-job-id"],
+  };
+  onlyEncodeOptions(options, permitted[name]!);
+  let mutationKey: string | undefined;
+  if (["encode-enqueue", "encode-requeue", "encode-cancel"].includes(name)) {
+    mutationKey = encodeKey(options);
+  }
+  const mediaLibraryPath = name === "encode-cancel" || name === "encode-resolve"
+    ? undefined : encodeMediaLibraryPath(io);
+  const priority = encodePriority(options);
+  const rawQuery = options.get("--query")?.[0];
+  const queryValidation = rawQuery === undefined ? undefined : validateEncodeQueueSearchQuery(rawQuery);
+  if (queryValidation !== undefined && !queryValidation.valid) {
+    throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Disc Selection search query.", 2);
+  }
+  const query = queryValidation?.valid ? queryValidation.query : undefined;
+  const historyGroup = options.get("--history-group")?.[0] ?? "not_encoded";
+  if (historyGroup !== "not_encoded" && historyGroup !== "re_encode") {
+    throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Encode Job history group.", 2);
+  }
+  const selectionIds = options.get("--disc-selection-id");
+  if (name === "encode-resolve" &&
+    (!selectionIds?.length || selectionIds.length > 100 ||
+      selectionIds.some((id) => id.trim().length === 0 || id.length > 256))) {
+    throw new CommandFailure("INVALID_ARGUMENTS", "Expected 1 to 100 Disc Selection IDs.", 2);
+  }
+  try {
+    return withAccess(io.openAccess, (access) => {
+      const operations = createApplicationOperations(access);
+      if (name === "encode-queue") {
+        return operations.encodeQueueOptions({
+          mediaLibraryPath: mediaLibraryPath!,
+          selectionOffset: encodeOffset(options, "--selection-offset"),
+          profileOffset: encodeOffset(options, "--profile-offset"),
+          historyGroup, query,
+          encodingProfileId: options.has("--encoding-profile-id")
+            ? encodeId(options, "--encoding-profile-id") as EncodingProfileId
+            : undefined,
+        });
+      }
+      if (name === "encode-resolve") {
+        return {
+          resolvedDiscSelections: operations.resolveEncodeQueue({
+            encodingProfileId: encodeId(options, "--encoding-profile-id") as EncodingProfileId,
+            discSelectionIds: selectionIds!.map((id) => id.trim()) as DiscSelectionId[],
+          }),
+        };
+      }
+      const job = name === "encode-enqueue"
+        ? operations.enqueueEncodeJob({
+          mutationKey,
+          discSelectionId: encodeId(options, "--disc-selection-id"),
+          encodingProfileId: encodeId(options, "--encoding-profile-id"),
+          outputPath: options.get("--output-path")?.[0], priority,
+          mediaLibraryPath: mediaLibraryPath!,
+        })
+        : name === "encode-requeue"
+          ? operations.requeueEncodeJob({
+            mutationKey, encodeJobId: encodeId(options, "--encode-job-id"),
+            outputPath: options.get("--output-path")?.[0], priority,
+            mediaLibraryPath: mediaLibraryPath!,
+          })
+          : operations.cancelEncodeJob({
+            mutationKey, encodeJobId: encodeId(options, "--encode-job-id"),
+          });
+      return { job: serializeJob(job), work: { kind: "encode-jobs", id: job.id } };
+    });
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    if (error instanceof MutationKeyConflictError) {
+      throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    if (error instanceof InvalidEncodeJobInputError) {
+      throw new CommandFailure("INVALID_ARGUMENTS", error.message, 2);
+    }
+    if (error instanceof RecordNotFoundError) {
+      throw new CommandFailure("NOT_FOUND", error.message, 2);
+    }
+    if (error instanceof DomainInvariantError || error instanceof InvalidStatusTransitionError) {
+      throw new CommandFailure("ENCODE_JOB_REJECTED", error.message, 2);
+    }
+    throw new CommandFailure("ENCODE_JOB_UNAVAILABLE", "Encode Job operation is unavailable.", 1);
+  }
+}
 
 export async function runCommand(args: readonly string[], io: CommandIO): Promise<CommandExitCode> {
   try {
@@ -809,6 +1010,14 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
       emit(io.stdout, rest[0] === "apply-proposal"
         ? runMappingProposal(rest.slice(1), io)
         : await runCatalogReview(rest, io));
+      return 0;
+    }
+    if (["encode-queue", "encode-resolve", "encode-enqueue", "encode-requeue", "encode-cancel"].includes(name)) {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+      } else {
+        emit(io.stdout, runEncodeCommand(name, rest, io));
+      }
       return 0;
     }
     if (name === "inspect") {

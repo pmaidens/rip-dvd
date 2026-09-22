@@ -204,3 +204,37 @@ eligibility, and the number of affected archives, including those referencing de
 hierarchy, TMDB uniqueness, and reference rules remain enforced during the
 mutation. Validation and eligibility failures return JSON errors with stable
 codes and exit status 2.
+# Encode Job commands
+
+Use `encode-queue` to read eligible Disc Selections, active DVD video Encoding
+Profiles, suggested output paths, and paged `not_encoded` or `re_encode`
+history. Supply `--encoding-profile-id` to see each row's `queueAction`, with an
+eligibility reason when blocked. `--query`, `--selection-offset`, and
+`--profile-offset` narrow or page the result. `encode-resolve` accepts up to 100
+repeated `--disc-selection-id` flags and reports the logical job for each one
+under the chosen profile. `inspect encode-jobs [id]` gives status, failure
+reports, actions, and history; `wait encode-jobs <id> --timeout-ms <n>` waits
+without cancelling work.
+
+Every Encode Job mutation requires a key created before submission. Generate
+one with `rip-dvd-operator generate-key` and keep it for retries. The same key
+and inputs return the original result after a lost response or later status
+change. A key reused with different inputs returns `MUTATION_KEY_CONFLICT`.
+Each successful mutation returns `job.id` and `work: { kind: "encode-jobs", id }`.
+
+```sh
+rip-dvd-operator encode-queue --encoding-profile-id <profile-id>
+rip-dvd-operator encode-resolve --encoding-profile-id <profile-id> --disc-selection-id <selection-id>
+rip-dvd-operator encode-enqueue --key <key> --disc-selection-id <selection-id> --encoding-profile-id <profile-id> --output-path /media/movies/example.mkv
+rip-dvd-operator encode-cancel --key <key> --encode-job-id <job-id>
+rip-dvd-operator encode-requeue --key <new-key> --encode-job-id <job-id>
+```
+
+An initial `encode-enqueue` is deduplicated by Disc Selection and Encoding
+Profile, including after completion. Use `encode-requeue` for a terminal job.
+If another job reserves its output path, supply `--output-path` with a safe
+path inside the configured media library when requeueing a failed or cancelled
+job. A completed job keeps its output path so the worker can apply its existing
+replacement checks. Running cancellation remains cooperative; the worker
+settles it after observing the request. Malformed inputs return exit 2 with a
+JSON error. Database or configuration failures return exit 1.

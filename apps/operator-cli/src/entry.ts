@@ -8,6 +8,7 @@ import { CommandFailure, runCommand } from "./command.js";
 process.exitCode = await runCommand(process.argv.slice(2), {
   readStdin: () => readFileSync(0, "utf8"),
   readFile: (path) => readFileSync(path, "utf8"),
+  mediaLibraryPath: () => loadConfig().mediaLibraryPath,
   openAccess: () => {
     let config;
     try {

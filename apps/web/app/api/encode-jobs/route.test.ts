@@ -105,6 +105,7 @@ describe("Encode Jobs API", () => {
         hasCompletedEncode: false,
         priorCompletedJob: null,
         logicalJob: null,
+        queueAction: { name: "enqueue", eligible: false, reason: "Select an Encoding Profile." },
         suggestedOutputPath:
           "/media/movies/Encode API reviewed (2026)/Encode API reviewed (2026).mkv",
       }],
