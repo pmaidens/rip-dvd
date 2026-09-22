@@ -73,6 +73,8 @@ services:
       <<: *runtime-environment
     volumes:
       - rip-dvd-data:/data
+      - ${RIP_DVD_MEDIA_LIBRARY_HOST_PATH:-rip-dvd-media}:/media/movies:ro
+      - ${RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH:-rip-dvd-originals}:/media/originals:ro
 
   web:
     build:
@@ -87,8 +89,6 @@ services:
       - "${RIP_DVD_WEB_BIND_ADDRESS:-127.0.0.1}:${RIP_DVD_WEB_PORT:-3000}:3000"
     volumes:
       - rip-dvd-data:/data
-      - ${RIP_DVD_MEDIA_LIBRARY_HOST_PATH:-rip-dvd-media}:/media/movies:ro
-      - ${RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH:-rip-dvd-originals}:/media/originals:ro
     healthcheck:
       test:
         [
