@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   DomainInvariantError,
   type DataAccess,
@@ -109,6 +111,32 @@ describe("Disc Selection preview policy", () => {
       expect(() => executeDiscSelectionCommand(access, archiveId, command))
         .toThrowError(InvalidMutationKeyError);
     }
+    expect(mutateDiscSelection).not.toHaveBeenCalled();
+  });
+
+  it("rejects a recomputed checksum token for a changed proposal", () => {
+    const mutateDiscSelection = vi.fn();
+    const access = { catalog: { mutateDiscSelection } } as unknown as DataAccess;
+    const payload = JSON.stringify({
+      archiveId,
+      mutation: { action: "delete", discSelectionId: "selection-2" },
+      evidenceHash: "a".repeat(64),
+    });
+    const forgedToken = `${Buffer.from(payload).toString("base64url")}.${
+      createHash("sha256").update(payload).digest("hex")
+    }`;
+
+    expect(() => executeDiscSelectionCommand(access, archiveId, {
+      action: "delete_disc_selection",
+      discSelectionId: "selection-1",
+    }, {
+      mutationKey: "00000000-0000-4000-8000-000000000001",
+      acknowledged: true,
+      expectedCatalogRevision: new Date("2026-01-01T00:00:00.000Z"),
+      previewToken: forgedToken,
+    })).toThrowError(new DomainInvariantError(
+      "Disc Selection preview does not match the proposed change",
+    ));
     expect(mutateDiscSelection).not.toHaveBeenCalled();
   });
 });

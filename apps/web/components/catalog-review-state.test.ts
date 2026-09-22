@@ -6,7 +6,7 @@ import {
   resumePendingCatalogReviewMutation,
 } from "./catalog-review-state";
 
-const previewToken = `eyJ0ZXN0Ijp0cnVlfQ.${"a".repeat(64)}`;
+const previewToken = "disc-selection-preview:00000000-0000-4000-8000-000000000001";
 
 function availablePreview(
   action: "update_disc_selection" | "repair_disc_selection" |

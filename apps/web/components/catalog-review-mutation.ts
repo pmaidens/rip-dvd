@@ -1,7 +1,8 @@
 "use client";
 
-import { MEDIA_ITEM_KINDS } from "@rip-dvd/data-access/catalog-kinds";
+import { isDiscSelectionPreviewToken } from "@rip-dvd/application/disc-selection-preview-token";
 import { parseMutationKey } from "@rip-dvd/application/mutation-key";
+import { MEDIA_ITEM_KINDS } from "@rip-dvd/data-access/catalog-kinds";
 
 import {
   discSelectionCommandRequiresPreview,
@@ -386,7 +387,7 @@ function availableDiscSelectionPreview(
       value.state !== "available" || !("action" in value) || value.action !== expectedAction ||
       !("catalogRevision" in value) ||
       !validCatalogRevision(value.catalogRevision) || !("previewToken" in value) ||
-      !validPreviewToken(value.previewToken) || !("affectedEncodeJobs" in value) ||
+      !isDiscSelectionPreviewToken(value.previewToken) || !("affectedEncodeJobs" in value) ||
       !Array.isArray(value.affectedEncodeJobs) ||
       !("outputReservationReleaseJobs" in value) ||
       !Array.isArray(value.outputReservationReleaseJobs) || !("consequences" in value) ||
@@ -425,11 +426,6 @@ function validCatalogRevision(value: unknown): value is string {
   if (typeof value !== "string") return false;
   const parsed = new Date(value);
   return Number.isSafeInteger(parsed.getTime()) && parsed.toISOString() === value;
-}
-
-function validPreviewToken(value: unknown): value is string {
-  return typeof value === "string" && value.length <= 4_096 &&
-    /^[A-Za-z0-9_-]+\.[a-f0-9]{64}$/.test(value);
 }
 
 function ambiguousMutationResponse(status: number): boolean {

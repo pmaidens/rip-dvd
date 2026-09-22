@@ -585,7 +585,15 @@ export interface DiscSelectionMutationInput {
   mutationKey?: string;
   originalDiscArchiveId: OriginalDiscArchiveId;
   expectedCatalogRevision?: Date;
-  expectedPreviewEvidenceHash?: string;
+  previewToken?: string;
+  mutation: DiscSelectionMutation;
+}
+
+export interface DiscSelectionPreviewDecisionInput {
+  previewToken: string;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  expectedCatalogRevision: Date;
+  expectedPreviewEvidenceHash: string;
   mutation: DiscSelectionMutation;
 }
 
@@ -1218,6 +1226,7 @@ export interface CatalogAccess {
   deleteDiscSelection(id: DiscSelectionId): DeleteDiscSelectionResult;
   mutateDiscSelection(input: DiscSelectionMutationInput): DiscSelectionMutationResult;
   previewDiscSelectionChange(input: DiscSelectionMutationInput): DiscSelectionMutationResult;
+  recordDiscSelectionPreviewDecision(input: DiscSelectionPreviewDecisionInput): void;
   previewDiscSelectionMutation(
     originalDiscArchiveId: OriginalDiscArchiveId,
     discSelectionId: DiscSelectionId,

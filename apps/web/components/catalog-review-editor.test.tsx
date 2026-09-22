@@ -60,7 +60,7 @@ const archiveOnlyActionAvailability = {
 
 let container: HTMLDivElement;
 let root: Root;
-const previewToken = `eyJ0ZXN0Ijp0cnVlfQ.${"a".repeat(64)}`;
+const previewToken = "disc-selection-preview:00000000-0000-4000-8000-000000000001";
 
 beforeEach(() => {
   (globalThis as typeof globalThis & {

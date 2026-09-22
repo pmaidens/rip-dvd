@@ -109,6 +109,15 @@ it("previews consequential changes, rejects stale decisions, and applies eligibl
   const unreviewedReplacement = await current.run(["disc-selection", "update", archive.id, selectionId,
     "--key", key(12), "--media-item-id", second.id]);
   expect(unreviewedReplacement.result).toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
+  const unissuedDecision = await current.run(["disc-selection", "update", archive.id, selectionId,
+    "--key", key(14), "--media-item-id", second.id,
+    "--revision", replacementDecision.catalogRevision,
+    "--preview-token", "disc-selection-preview:00000000-0000-4000-8000-000000000099",
+    "--acknowledge"]);
+  expect(unissuedDecision.result).toMatchObject({ error: {
+    code: "SELECTION_REJECTED",
+    message: "Disc Selection preview does not match the proposed change",
+  } });
   const replaced = await current.run(["disc-selection", "update", archive.id, selectionId,
     "--key", key(12), "--media-item-id", second.id,
     "--revision", replacementDecision.catalogRevision, "--preview-token", replacementDecision.previewToken,

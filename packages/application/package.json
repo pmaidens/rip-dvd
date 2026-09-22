@@ -21,6 +21,10 @@
     "./mutation-key": {
       "types": "./src/mutation-key.ts",
       "default": "./dist/mutation-key.js"
+    },
+    "./disc-selection-preview-token": {
+      "types": "./src/disc-selection-preview-token.ts",
+      "default": "./dist/disc-selection-preview-token.js"
     }
   },
   "files": ["dist"],

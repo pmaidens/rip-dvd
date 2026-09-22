@@ -189,6 +189,7 @@ import type {
   DiscSelectionId,
   DiscSelectionMutationInput,
   DiscSelectionMutationResult,
+  DiscSelectionPreviewDecisionInput,
   DiscSelectionActionAvailability,
   DiscSelectionCorrectionEncodeJobLink,
   DiscSelectionCorrectionRetainedOutputSummary,
@@ -4516,6 +4517,17 @@ export function createDataAccessInternal(
     }
   }
 
+  function discSelectionPreviewSemanticInput(
+    input: Pick<DiscSelectionPreviewDecisionInput,
+      "originalDiscArchiveId" | "expectedCatalogRevision" | "mutation">,
+  ): string {
+    return JSON.stringify({
+      originalDiscArchiveId: input.originalDiscArchiveId,
+      expectedCatalogRevision: input.expectedCatalogRevision,
+      mutation: input.mutation,
+    });
+  }
+
   function performDiscSelectionMutation(
     input: DiscSelectionMutationInput,
     previewOnly: boolean,
@@ -4524,9 +4536,9 @@ export function createDataAccessInternal(
       throw new DomainInvariantError("Nested Disc Selection mutations are unavailable");
     }
     const { mutation, originalDiscArchiveId, mutationKey, expectedCatalogRevision,
-      expectedPreviewEvidenceHash } = input;
+      previewToken } = input;
     const semanticInput = JSON.stringify({ originalDiscArchiveId, expectedCatalogRevision,
-      expectedPreviewEvidenceHash, mutation });
+      previewToken, mutation });
     try {
       return database.transaction((transaction) => {
         if (mutationKey !== undefined) {
@@ -4556,6 +4568,36 @@ export function createDataAccessInternal(
               } } : {}),
             } as ReturnType<typeof access.catalog.mutateDiscSelection>;
           }
+        }
+        let expectedPreviewEvidenceHash: string | undefined;
+        if (previewToken !== undefined) {
+          if (expectedCatalogRevision === undefined) {
+            throw new DomainInvariantError(
+              "Disc Selection preview does not match the proposed change",
+            );
+          }
+          const previewDecision = transaction.select().from(mutationInvocations)
+            .where(eq(mutationInvocations.key, previewToken)).get();
+          if (previewDecision?.operation !== "disc_selection.preview" ||
+              previewDecision.semanticInput !== discSelectionPreviewSemanticInput({
+                originalDiscArchiveId,
+                expectedCatalogRevision,
+                mutation,
+              })) {
+            throw new DomainInvariantError(
+              "Disc Selection preview does not match the proposed change",
+            );
+          }
+          const savedPreview = JSON.parse(previewDecision.outcome) as {
+            expectedPreviewEvidenceHash?: unknown;
+          };
+          if (typeof savedPreview.expectedPreviewEvidenceHash !== "string" ||
+              !/^[a-f0-9]{64}$/.test(savedPreview.expectedPreviewEvidenceHash)) {
+            throw new DomainInvariantError(
+              "Disc Selection preview does not match the proposed change",
+            );
+          }
+          expectedPreviewEvidenceHash = savedPreview.expectedPreviewEvidenceHash;
         }
         const archive = requireRow(transaction.select({ updatedAt: originalDiscArchives.updatedAt })
           .from(originalDiscArchives)
@@ -4634,6 +4676,10 @@ export function createDataAccessInternal(
           })();
           if (previewOnly) {
             throw new DiscSelectionPreviewRollback(result);
+          }
+          if (previewToken !== undefined) {
+            transaction.delete(mutationInvocations)
+              .where(eq(mutationInvocations.key, previewToken)).run();
           }
           if (mutationKey !== undefined) {
             transaction.insert(mutationInvocations).values({
@@ -7161,6 +7207,18 @@ export function createDataAccessInternal(
 
       previewDiscSelectionChange(input) {
         return performDiscSelectionMutation({ ...input, mutationKey: undefined }, true);
+      },
+
+      recordDiscSelectionPreviewDecision(input) {
+        database.insert(mutationInvocations).values({
+          key: input.previewToken,
+          operation: "disc_selection.preview",
+          semanticInput: discSelectionPreviewSemanticInput(input),
+          outcome: JSON.stringify({
+            expectedPreviewEvidenceHash: input.expectedPreviewEvidenceHash,
+          }),
+          createdAt: now(),
+        }).run();
       },
 
       previewDiscSelectionMutation(originalDiscArchiveId, discSelectionId) {

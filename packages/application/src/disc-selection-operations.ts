@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import {
   DomainInvariantError,
   type DataAccess,
@@ -16,6 +14,10 @@ import {
   type DiscSelectionCommand,
 } from "./catalog-review-command.js";
 import { serializeDiscSelection } from "./catalog-review-read.js";
+import {
+  createDiscSelectionPreviewToken,
+  isDiscSelectionPreviewToken,
+} from "./disc-selection-preview-token.js";
 import { parseMutationKey } from "./mutation-key.js";
 
 type SelectionCommand = DiscSelectionCommand;
@@ -119,35 +121,6 @@ function discSelectionMutation(
   return mutation;
 }
 
-function previewToken(
-  archiveId: OriginalDiscArchiveId,
-  catalogRevision: string,
-  mutation: DiscSelectionMutation,
-  evidenceHash: string,
-): string {
-  const payload = JSON.stringify({
-    version: 1,
-    archiveId, catalogRevision, mutation, evidenceHash,
-  });
-  return `${Buffer.from(payload).toString("base64url")}.${
-    createHash("sha256").update(payload).digest("hex")
-  }`;
-}
-
-function evidenceHashFromPreviewToken(token: string): string | null {
-  const [encoded, digest, extra] = token.split(".");
-  if (!encoded || !digest || extra !== undefined || !/^[a-f0-9]{64}$/.test(digest)) return null;
-  try {
-    const payload = Buffer.from(encoded, "base64url").toString("utf8");
-    if (createHash("sha256").update(payload).digest("hex") !== digest) return null;
-    const parsed = JSON.parse(payload) as { evidenceHash?: unknown };
-    return typeof parsed.evidenceHash === "string" && /^[a-f0-9]{64}$/.test(parsed.evidenceHash)
-      ? parsed.evidenceHash : null;
-  } catch {
-    return null;
-  }
-}
-
 export function previewDiscSelectionChange(
   access: DataAccess,
   archiveId: OriginalDiscArchiveId,
@@ -180,13 +153,19 @@ export function previewDiscSelectionChange(
     expectedCatalogRevision: catalogRevision,
     mutation,
   });
+  const previewToken = createDiscSelectionPreviewToken();
+  access.catalog.recordDiscSelectionPreviewDecision({
+    previewToken,
+    originalDiscArchiveId: archiveId,
+    expectedCatalogRevision: catalogRevision,
+    expectedPreviewEvidenceHash: preview.evidenceHash,
+    mutation,
+  });
   return {
     ...current,
     action: command.action,
     state: "available" as const,
-    previewToken: previewToken(
-      archiveId, current.catalogRevision, mutation, preview.evidenceHash,
-    ),
+    previewToken,
     proposedDiscSelection: mutation.action === "delete" ? null : {
       mediaItemId: proposed.discSelection.mediaItemId,
       sourceIdentity: proposed.discSelection.sourceIdentity,
@@ -235,18 +214,11 @@ export function executeDiscSelectionCommand(
       options.previewToken)) {
     throw new DomainInvariantError("This Disc Selection change does not require a preview");
   }
-  let expectedPreviewEvidenceHash: string | undefined;
   if (options.previewToken !== undefined) {
     if (!options.expectedCatalogRevision || mutation.action === "create") {
       throw new DomainInvariantError("Disc Selection preview does not match the proposed change");
     }
-    expectedPreviewEvidenceHash = evidenceHashFromPreviewToken(options.previewToken) ?? undefined;
-    if (!expectedPreviewEvidenceHash) {
-      throw new DomainInvariantError("Disc Selection preview does not match the proposed change");
-    }
-    if (options.previewToken !== previewToken(
-      archiveId, options.expectedCatalogRevision.toISOString(), mutation, expectedPreviewEvidenceHash,
-    )) {
+    if (!isDiscSelectionPreviewToken(options.previewToken)) {
       throw new DomainInvariantError("Disc Selection preview does not match the proposed change");
     }
   }
@@ -255,7 +227,7 @@ export function executeDiscSelectionCommand(
     mutation,
     mutationKey,
     ...(options.expectedCatalogRevision ? { expectedCatalogRevision: options.expectedCatalogRevision } : {}),
-    ...(expectedPreviewEvidenceHash ? { expectedPreviewEvidenceHash } : {}),
+    ...(options.previewToken ? { previewToken: options.previewToken } : {}),
   });
   return {
     message: "Mapping changed; review required",
