@@ -3179,6 +3179,39 @@ export function createDataAccessInternal(
     }) === fingerprintOrContentIdAlias;
   }
 
+  function originalArchivesShareDiscIdentity(
+    firstArchiveId: OriginalDiscArchiveId,
+    secondArchiveId: OriginalDiscArchiveId,
+    querySource: Pick<typeof database, "select"> = database,
+  ): boolean {
+    if (firstArchiveId === secondArchiveId) {
+      return true;
+    }
+    const archives = querySource
+      .select({
+        fingerprint: originalDiscArchives.fingerprint,
+        id: originalDiscArchives.id,
+      })
+      .from(originalDiscArchives)
+      .where(inArray(originalDiscArchives.id, [
+        firstArchiveId,
+        secondArchiveId,
+      ]))
+      .all();
+    const firstArchive = archives.find(({ id }) => id === firstArchiveId);
+    const secondArchive = archives.find(({ id }) => id === secondArchiveId);
+    return firstArchive !== undefined && secondArchive !== undefined &&
+      (originalArchiveMatchesFingerprintOrContentIdAlias(
+        firstArchiveId,
+        secondArchive.fingerprint,
+        querySource,
+      ) || originalArchiveMatchesFingerprintOrContentIdAlias(
+        secondArchiveId,
+        firstArchive.fingerprint,
+        querySource,
+      ));
+  }
+
   function hasPendingArchiveRequestForDisc(
     disc: Pick<
       typeof detectedDiscs.$inferSelect,
@@ -8985,13 +9018,24 @@ export function createDataAccessInternal(
             );
           }
           const matchingActiveRequests = activeCandidates.filter(
-            (candidate) =>
-              candidate.discKind === source.archive.discKind &&
-              originalArchiveMatchesFingerprintOrContentIdAlias(
+            (candidate) => {
+              if (candidate.discKind !== source.archive.discKind) {
+                return false;
+              }
+              if (originalArchiveMatchesFingerprintOrContentIdAlias(
                 sourceArchiveId,
                 candidate.fingerprint,
                 transaction,
-              ),
+              )) {
+                return true;
+              }
+              return candidate.request.rearchiveSourceArchiveId !== null &&
+                originalArchivesShareDiscIdentity(
+                  sourceArchiveId,
+                  candidate.request.rearchiveSourceArchiveId,
+                  transaction,
+                );
+            },
           );
           if (matchingActiveRequests.length > 1) {
             throw new DomainInvariantError(

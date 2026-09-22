@@ -10181,6 +10181,16 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         rearchiveSourceArchiveId: archive.id,
       }),
     ]);
+    const rawSourceRequest = access.archiveRequests.submitRearchive({
+      mutationKey: "00000000-0000-4000-8000-000000000343",
+      sourceArchiveId: archive.id,
+    });
+    expect(() => access.archiveRequests.submitRearchive({
+      mutationKey: "00000000-0000-4000-8000-000000000342",
+      sourceArchiveId: completed.originalDiscArchiveId!,
+    })).toThrow("Matching archive work is already active for this disc");
+    expect(access.archiveRequests.list(["pending"]))
+      .toEqual([expect.objectContaining({ id: rawSourceRequest.id })]);
     access.close();
   });
 
