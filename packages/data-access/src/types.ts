@@ -1225,6 +1225,10 @@ export interface ArchiveRequestAccess {
     detectedDiscId: DetectedDiscId;
     priority?: number;
   }): ArchiveRequest;
+  submit(input: {
+    mutationKey: string;
+    detectedDiscId: DetectedDiscId;
+  }): ArchiveRequest;
   cancel(id: ArchiveRequestId): ArchiveRequest;
   retry(id: ArchiveRequestId): ArchiveRequest;
   list(

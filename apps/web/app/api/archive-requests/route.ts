@@ -1,8 +1,10 @@
-import { loadConfig } from "@rip-dvd/config";
 import {
-  type DataAccess,
-  type DetectedDiscId,
-} from "@rip-dvd/data-access";
+  createApplicationOperations,
+  InvalidMutationKeyError,
+  parseMutationKey,
+} from "@rip-dvd/application";
+import { loadConfig } from "@rip-dvd/config";
+import type { DataAccess } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../lib/data-access";
 import {
@@ -27,6 +29,18 @@ export async function createArchiveRequestsRoute(
     },
     async () => {
       const body = (await request.json().catch(() => null)) as unknown;
+      const mutationKey =
+        typeof body === "object" && body !== null && !Array.isArray(body)
+          ? (body as Record<string, unknown>).mutationKey
+          : undefined;
+      try {
+        parseMutationKey(mutationKey);
+      } catch (error) {
+        if (error instanceof InvalidMutationKeyError) {
+          return noStoreJsonResponse({ error: "Invalid mutation key" }, 400);
+        }
+        throw error;
+      }
       const detectedDiscId =
         typeof body === "object" &&
         body !== null &&
@@ -37,20 +51,11 @@ export async function createArchiveRequestsRoute(
       if (detectedDiscId === "") {
         return noStoreJsonResponse({ error: "Invalid Archive Request" }, 400);
       }
-      const archiveRequest = getAccess().archiveRequests.create({
-        detectedDiscId: detectedDiscId as DetectedDiscId,
-      });
       return noStoreJsonResponse(
-        {
-          archiveRequest: {
-            id: archiveRequest.id,
-            detectedDiscId: archiveRequest.detectedDiscId,
-            status: archiveRequest.status,
-            priority: archiveRequest.priority,
-            createdAt: archiveRequest.createdAt.toISOString(),
-            updatedAt: archiveRequest.updatedAt.toISOString(),
-          },
-        },
+        createApplicationOperations(getAccess()).submitArchiveRequest({
+          mutationKey,
+          detectedDiscId,
+        }),
         201,
       );
     },

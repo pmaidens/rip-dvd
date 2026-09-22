@@ -1808,6 +1808,7 @@ describe("end-to-end operations dashboard workflow", () => {
     const approval = await createArchiveRequestsRoute(
       createMutationRequest("/api/archive-requests", {
         detectedDiscId: detectedDisc.id,
+        mutationKey: "00000000-0000-4000-8000-000000000001",
       }),
       () => access,
       () => trustedOrigin,

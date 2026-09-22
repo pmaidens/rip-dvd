@@ -445,6 +445,40 @@ or application operation failed, and `2` means the invocation is invalid.
 Failures return a stable JSON `error.code` without database paths or raw
 exceptions. Diagnostics, if emitted, go to stderr.
 
+### Submit an Archive Request with a mutation key
+
+Generate a key before submitting. This command does not open the database or
+create work:
+
+```bash
+docker compose --profile maintenance run --rm operator-cli generate-key
+```
+
+It returns `{"mutationKey":"<key>"}`. Keep that key and submit an Archive
+Request for a Detected Disc ID from the application's current disc view:
+
+```bash
+docker compose --profile maintenance run --rm operator-cli \
+  submit-archive-request --key <key> --detected-disc-id <detected-disc-id>
+```
+
+The result has an `archiveRequest` object with its durable `id`, target
+`detectedDiscId`, `status`, `priority`, `createdAt`, and `updatedAt`. It returns
+as soon as the request is committed. A worker creates Archive Jobs only when
+it starts attempts. `help submit-archive-request` describes both required
+options. A missing or malformed key fails before database access with
+`INVALID_MUTATION_KEY`. A key reused with another target or operation fails
+with `MUTATION_KEY_CONFLICT`.
+
+Repeat the same command with the same key and target if the response is lost.
+The application returns the original submission result, including its original
+status and timestamps, even if the request has since progressed. Current work
+state comes from the dashboard until CLI status commands are added. A fresh key
+does not override archive eligibility rules. The web Archive Request endpoint
+uses the same durable replay record; its POST body contains `detectedDiscId`
+and `mutationKey`, and the dashboard retains a pending key for a retry after a
+failed response.
+
 ### TypeScript roadmap and implementation frontier
 
 [GitHub issue #5](https://github.com/pmaidens/rip-dvd/issues/5) is the umbrella

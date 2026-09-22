@@ -679,17 +679,18 @@ describe("data-access facade", () => {
         "disc_inspections",
         "disc_selection_supersessions",
         "encode_job_failure_reports",
+        "mutation_invocations",
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(19);
+    expect(identifierTables).toHaveLength(20);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "legacy_cutover_staged_sidecars"
-          ? sql.includes(
-              "PRIMARY KEY(`originals_library_path`, `sidecar_path`)",
-            )
-          : sql.includes(`${name}_id_not_null`),
+          ? sql.includes("PRIMARY KEY(`originals_library_path`, `sidecar_path`)")
+          : name === "mutation_invocations"
+            ? sql.includes("mutation_invocations_key_not_null")
+            : sql.includes(`${name}_id_not_null`),
       ),
     ).toBe(true);
     expect(() =>
@@ -8090,6 +8091,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260922160403_long_maximus",
+      },
+      {
         name: "20260912212844_normal-dvd-endpoint-proof",
       },
       {
@@ -8115,9 +8119,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260828154312_luxuriant_human_robot",
-      },
-      {
-        name: "20260825052933_slippery_famine",
       },
     ]);
     expect(

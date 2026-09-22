@@ -67,6 +67,7 @@ import {
   legacyCutoverStagedSidecars,
   mediaItemTmdbIdentities,
   mediaItems,
+  mutationInvocations,
   opticalDrives,
   originalDiscArchiveContentIds,
   originalDiscArchives,
@@ -136,6 +137,7 @@ import {
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
+  MutationKeyConflictError,
   RecordNotFoundError,
   StaleJobAttemptError,
 } from "../errors.js";
@@ -150,6 +152,7 @@ import type {
   ArchiveJobProgress,
   ArchiveReadFailureCategory,
   ArchiveRequestId,
+  ArchiveRequest,
   ArchiveRequestStatus,
   CatalogReviewCoverage,
   ClaimedEncodeJob,
@@ -3615,9 +3618,54 @@ export function createDataAccessInternal(
   function createArchiveRequest(input: {
     detectedDiscId: DetectedDiscId;
     priority?: number;
-  }) {
+  }, mutationKey?: string) {
     const timestamp = now();
     return database.transaction((transaction) => {
+      const semanticInput = JSON.stringify({
+        detectedDiscId: input.detectedDiscId,
+      });
+      if (mutationKey !== undefined) {
+        const previous = transaction
+          .select()
+          .from(mutationInvocations)
+          .where(eq(mutationInvocations.key, mutationKey))
+          .get();
+        if (previous) {
+          if (
+            previous.operation !== "archive_request.submit" ||
+            previous.semanticInput !== semanticInput
+          ) {
+            throw new MutationKeyConflictError();
+          }
+          const outcome = JSON.parse(previous.outcome) as ArchiveRequest;
+          return {
+            ...outcome,
+            cancellationRequestedAt: outcome.cancellationRequestedAt === null
+              ? null : new Date(outcome.cancellationRequestedAt),
+            fulfilledAt: outcome.fulfilledAt === null
+              ? null : new Date(outcome.fulfilledAt),
+            cancelledAt: outcome.cancelledAt === null
+              ? null : new Date(outcome.cancelledAt),
+            createdAt: new Date(outcome.createdAt),
+            updatedAt: new Date(outcome.updatedAt),
+          };
+        }
+      }
+      const saveOutcome = (outcome: ArchiveRequest): ArchiveRequest => {
+        if (mutationKey !== undefined) {
+          transaction
+            .insert(mutationInvocations)
+            .values({
+              key: mutationKey,
+              operation: "archive_request.submit",
+              semanticInput,
+              outcome: JSON.stringify(outcome),
+              createdAt: timestamp,
+            })
+            .run();
+        }
+        return outcome;
+      };
       const disc = requireRow(
         transaction
           .select()
@@ -3683,11 +3731,13 @@ export function createDataAccessInternal(
         )
         .get();
       if (existing) {
-        return archiveRequestWithCreationPriority(
-          transaction,
-          existing,
-          input.priority,
-          timestamp,
+        return saveOutcome(
+          archiveRequestWithCreationPriority(
+            transaction,
+            existing,
+            input.priority,
+            timestamp,
+          ),
         );
       }
       const declaredByteCount = disc.discKind === "dvd"
@@ -3744,52 +3794,58 @@ export function createDataAccessInternal(
         }
         const reusableRequest = reusableRequests[0]?.request;
         if (reusableRequest?.status === "needs_attention") {
-          return requireRow(
-            transaction
-              .update(archiveRequests)
-              .set({
-                status: "pending",
-                priority: input.priority ?? reusableRequest.priority,
-                cancellationRequestedAt: null,
-                fulfilledAt: null,
-                cancelledAt: null,
-                updatedAt: timestamp,
-              })
-              .where(
-                and(
-                  eq(archiveRequests.id, reusableRequest.id),
-                  eq(archiveRequests.status, "needs_attention"),
-                ),
-              )
-              .returning()
-              .get(),
-            "archive request",
-            reusableRequest.id,
+          return saveOutcome(
+            requireRow(
+              transaction
+                .update(archiveRequests)
+                .set({
+                  status: "pending",
+                  priority: input.priority ?? reusableRequest.priority,
+                  cancellationRequestedAt: null,
+                  fulfilledAt: null,
+                  cancelledAt: null,
+                  updatedAt: timestamp,
+                })
+                .where(
+                  and(
+                    eq(archiveRequests.id, reusableRequest.id),
+                    eq(archiveRequests.status, "needs_attention"),
+                  ),
+                )
+                .returning()
+                .get(),
+              "archive request",
+              reusableRequest.id,
+            ),
           );
         }
         if (reusableRequest !== undefined) {
-          return archiveRequestWithCreationPriority(
-            transaction,
-            reusableRequest,
-            input.priority,
-            timestamp,
+          return saveOutcome(
+            archiveRequestWithCreationPriority(
+              transaction,
+              reusableRequest,
+              input.priority,
+              timestamp,
+            ),
           );
         }
       }
-      return requireRow(
-        transaction
-          .insert(archiveRequests)
-          .values({
-            id: newId<ArchiveRequestId>(),
-            detectedDiscId: disc.id,
-            priority: input.priority ?? 0,
-            createdAt: timestamp,
-            updatedAt: timestamp,
-          })
-          .returning()
-          .get(),
-        "archive request",
-        disc.id,
+      return saveOutcome(
+        requireRow(
+          transaction
+            .insert(archiveRequests)
+            .values({
+              id: newId<ArchiveRequestId>(),
+              detectedDiscId: disc.id,
+              priority: input.priority ?? 0,
+              createdAt: timestamp,
+              updatedAt: timestamp,
+            })
+            .returning()
+            .get(),
+          "archive request",
+          disc.id,
+        ),
       );
     }, { behavior: "immediate" });
   }
@@ -7874,6 +7930,8 @@ export function createDataAccessInternal(
 
     archiveRequests: {
       create: createArchiveRequest,
+      submit: ({ mutationKey, detectedDiscId }) =>
+        createArchiveRequest({ detectedDiscId }, mutationKey),
       cancel(id) {
         const timestamp = now();
         return database.transaction((transaction) => {
