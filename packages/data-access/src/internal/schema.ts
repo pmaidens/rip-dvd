@@ -94,6 +94,15 @@ import type {
   WorkerIncidentSchemaVersion,
 } from "../types.js";
 
+function discSelectionShapeConstraint(table: {
+  kind: AnySQLiteColumn;
+  titleNumber: AnySQLiteColumn;
+  chapterStart: AnySQLiteColumn;
+  chapterEnd: AnySQLiteColumn;
+}) {
+  return sql`(${table.kind} = 'main_feature' and ${table.titleNumber} is null and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_title' and typeof(${table.titleNumber}) = 'integer' and ${table.titleNumber} > 0 and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_chapters' and typeof(${table.titleNumber}) = 'integer' and ${table.titleNumber} > 0 and typeof(${table.chapterStart}) = 'integer' and ${table.chapterStart} > 0 and typeof(${table.chapterEnd}) = 'integer' and ${table.chapterEnd} >= ${table.chapterStart})`;
+}
+
 const createdAt = () => integer("created_at", { mode: "timestamp_ms" }).notNull();
 const updatedAt = () => integer("updated_at", { mode: "timestamp_ms" }).notNull();
 
@@ -818,7 +827,88 @@ export const discSelections = sqliteTable(
     ),
     check(
       "disc_selections_shape_check",
-      sql`(${table.kind} = 'main_feature' and ${table.titleNumber} is null and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_title' and typeof(${table.titleNumber}) = 'integer' and ${table.titleNumber} > 0 and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_chapters' and typeof(${table.titleNumber}) = 'integer' and ${table.titleNumber} > 0 and typeof(${table.chapterStart}) = 'integer' and ${table.chapterStart} > 0 and typeof(${table.chapterEnd}) = 'integer' and ${table.chapterEnd} >= ${table.chapterStart})`,
+      discSelectionShapeConstraint(table),
+    ),
+  ],
+);
+
+export const rearchiveMappingProposals = sqliteTable(
+  "rearchive_mapping_proposals",
+  {
+    targetArchiveId: text("target_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .primaryKey()
+      .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
+    sourceArchiveId: text("source_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
+    sourceCatalogRevision: integer("source_catalog_revision", {
+      mode: "timestamp_ms",
+    }).notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    check(
+      "rearchive_mapping_proposals_distinct_archives_check",
+      sql`${table.targetArchiveId} <> ${table.sourceArchiveId}`,
+    ),
+    index("rearchive_mapping_proposals_source_idx").on(
+      table.sourceArchiveId,
+      table.updatedAt,
+      table.targetArchiveId,
+    ),
+  ],
+);
+
+export const rearchiveMappingProposalItems = sqliteTable(
+  "rearchive_mapping_proposal_items",
+  {
+    targetArchiveId: text("target_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .references(() => rearchiveMappingProposals.targetArchiveId, {
+        onDelete: "cascade",
+      }),
+    sourceDiscSelectionId: text("source_disc_selection_id")
+      .$type<DiscSelectionId>()
+      .notNull(),
+    mediaItemId: text("media_item_id")
+      .$type<MediaItemId>()
+      .notNull(),
+    ordinal: integer("ordinal").notNull(),
+    kind: text("kind", { enum: DISC_SELECTION_KINDS }).notNull(),
+    titleNumber: integer("title_number"),
+    chapterStart: integer("chapter_start"),
+    chapterEnd: integer("chapter_end"),
+    label: text("label"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.targetArchiveId, table.sourceDiscSelectionId],
+    }),
+    uniqueIndex("rearchive_mapping_proposal_items_ordinal_unique").on(
+      table.targetArchiveId,
+      table.ordinal,
+    ),
+    index("rearchive_mapping_proposal_items_media_item_idx").on(
+      table.mediaItemId,
+    ),
+    check(
+      "rearchive_mapping_proposal_items_ordinal_check",
+      sql`typeof(${table.ordinal}) = 'integer' and ${table.ordinal} >= 0`,
+    ),
+    check(
+      "rearchive_mapping_proposal_items_kind_check",
+      sql`${table.kind} in (${sqliteStringLiterals(DISC_SELECTION_KINDS)})`,
+    ),
+    check(
+      "rearchive_mapping_proposal_items_shape_check",
+      discSelectionShapeConstraint(table),
     ),
   ],
 );

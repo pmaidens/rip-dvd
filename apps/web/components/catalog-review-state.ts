@@ -13,6 +13,7 @@ import {
 } from "./catalog-review-mutation";
 import type {
   CatalogReviewDto,
+  CatalogReviewRearchiveProposal,
   CatalogReviewLoadState,
   CreateDiscSelectionInput,
   CreateEpisodicMappingProposalInput,
@@ -21,6 +22,7 @@ import type {
   EpisodicMappingProposal,
   MappingProposal,
   SaveMediaItemInput,
+  SaveRearchiveMappingProposalInput,
   UpdateDiscSelectionInput,
 } from "./catalog-review-model";
 
@@ -525,6 +527,59 @@ export function useCatalogReviewState({
     void mutate(command, true);
   }
 
+  async function previewRearchiveMappingProposal(
+    input: SaveRearchiveMappingProposalInput,
+  ): Promise<CatalogReviewRearchiveProposal> {
+    if (state.status !== "loaded" || state.review.rearchiveProposal === undefined) {
+      throw new Error("Re-archive Mapping Proposal is unavailable");
+    }
+    const current = state.review.rearchiveProposal;
+    const response = await fetch(
+      `/api/catalog-reviews/${encodeURIComponent(archiveId)}`,
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "preview_rearchive_mapping_proposal",
+          catalogRevision: current.catalogRevision,
+          sourceCatalogRevision: current.sourceCatalogRevision,
+          mappings: input.mappings,
+        }),
+      },
+    );
+    if (!response.ok) {
+      let message = "Re-archive Mapping Proposal preview failed";
+      try {
+        const body = await response.json() as { error?: unknown };
+        if (typeof body.error === "string" && body.error.trim() !== "") {
+          message = body.error.trim().slice(0, 512);
+        }
+      } catch {
+        // Keep the bounded generic message for a non-JSON response.
+      }
+      throw new Error(message);
+    }
+    return response.json() as Promise<CatalogReviewRearchiveProposal>;
+  }
+
+  function saveRearchiveMappingProposal(
+    input: SaveRearchiveMappingProposalInput,
+  ) {
+    if (state.status !== "loaded" || state.review.rearchiveProposal === undefined) {
+      return;
+    }
+    const current = state.review.rearchiveProposal;
+    void mutate({
+      action: "save_rearchive_mapping_proposal",
+      catalogRevision: current.catalogRevision,
+      sourceCatalogRevision: current.sourceCatalogRevision,
+      mappings: input.mappings,
+    });
+  }
+
   return {
     state,
     activeMappingProposal,
@@ -572,6 +627,8 @@ export function useCatalogReviewState({
     createEpisodicMappingProposal,
     createMappingProposal,
     acceptAutomaticCatalogProposal,
+    previewRearchiveMappingProposal,
+    saveRearchiveMappingProposal,
     saveMediaItem,
     deleteMediaItem: (mediaItemId: string) =>
       void mutate({ action: "delete_media_item", mediaItemId }),

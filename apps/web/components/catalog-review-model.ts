@@ -5,6 +5,7 @@ import type {
   CatalogReviewActionAvailability,
   CatalogReviewOutcome,
   ArchiveIntegrity,
+  DvdTitleBadSectorCount,
   UnreadableSectorRange,
   DiscSelectionSourceIdentityInput,
   DiscSelectionKind,
@@ -165,25 +166,12 @@ export interface CatalogReviewDto {
   automaticCataloging?: {
     configured: boolean;
   };
-  archive: {
-    id: string;
-    detectedDiscId: string;
-    discLabel: string;
-    discKind: string;
-    archiveFormat: string;
-    boundaryEvidence: ArchiveBoundaryEvidence | null;
-    integrity: ArchiveIntegrity;
-    badSectorCount: number | null;
-    badAreaCount: number | null;
-    badSectorRanges: readonly UnreadableSectorRange[] | null;
-    archivedAt: string;
-    catalogReviewedAt: string | null;
-    catalogReviewOutcome: CatalogReviewOutcome;
-  };
+  archive: CatalogReviewArchiveEvidence;
   reviewOutcome: CatalogReviewOutcome;
   rawScan: { titles: DvdTitle[] };
   coverage: CatalogReviewCoverage;
   reviewActionAvailability: CatalogReviewActionAvailability;
+  rearchiveProposal?: CatalogReviewRearchiveProposal;
   mediaItems: CatalogReviewMediaItem[];
   correctionHistory: CatalogReviewDiscSelectionCorrection[];
   correctionEncodeHistory: CatalogReviewCorrectionEncodeHistory[];
@@ -215,6 +203,57 @@ export interface CatalogReviewDto {
     hasPrevious: boolean;
     hasNext: boolean;
   };
+}
+
+export interface CatalogReviewArchiveEvidence {
+  id: string;
+  detectedDiscId: string;
+  discLabel: string;
+  discKind: string;
+  archiveFormat: string;
+  boundaryEvidence: ArchiveBoundaryEvidence | null;
+  integrity: ArchiveIntegrity;
+  integrityPolicyVersion: string | null;
+  badSectorCount: number | null;
+  badAreaCount: number | null;
+  badSectorRanges: readonly UnreadableSectorRange[] | null;
+  badSectorCountsByTitle: readonly DvdTitleBadSectorCount[] | null;
+  archivedAt: string;
+  catalogReviewedAt: string | null;
+  catalogReviewOutcome: CatalogReviewOutcome;
+}
+
+export interface CatalogReviewRearchiveMapping {
+  state: "valid" | "incomplete" | "incompatible" | "stale";
+  reason: string | null;
+  sourceDiscSelectionId: string;
+  priorMapping: CatalogReviewRearchiveSelection | null;
+  proposedMapping: CatalogReviewRearchiveSelection;
+}
+
+export interface CatalogReviewRearchiveSelection {
+  mediaItemId: string;
+  sourceIdentity: DiscSelectionSourceIdentityInput;
+  label: string | null;
+}
+
+export interface SaveRearchiveMappingProposalMappingInput
+  extends CatalogReviewRearchiveSelection {
+  sourceDiscSelectionId: string;
+}
+
+export interface CatalogReviewRearchiveProposal {
+  state: "ready" | "incomplete" | "incompatible" | "stale";
+  persisted: boolean;
+  catalogRevision: string;
+  sourceCatalogRevision: string;
+  sourceArchive: CatalogReviewArchiveEvidence;
+  targetArchive: CatalogReviewArchiveEvidence;
+  mappings: CatalogReviewRearchiveMapping[];
+}
+
+export interface SaveRearchiveMappingProposalInput {
+  mappings: SaveRearchiveMappingProposalMappingInput[];
 }
 
 export type CatalogReviewLoadState =

@@ -35,6 +35,7 @@ import { runDiscSelection } from "./disc-selection.js";
 import { runMediaItem } from "./media-item.js";
 import { runMappingProposal } from "./mapping-proposal.js";
 import { runCatalogReviewCompletion } from "./catalog-review-completion.js";
+import { runRearchiveMappingProposal } from "./rearchive-mapping-proposal.js";
 
 export type CommandExitCode = 0 | 1 | 2 | 3;
 
@@ -173,16 +174,18 @@ const commandDefinitions = [
   },
   {
     name: "catalog-review",
-    description: "Inspect, preview, or complete a Catalog Review and apply Mapping Proposals.",
-    usage: "rip-dvd-operator catalog-review <show|suggest|apply-proposal|preview-completion|complete> <archive-id> [options]",
+    description: "Inspect, preview, or complete a Catalog Review and review Mapping Proposals.",
+    usage: "rip-dvd-operator catalog-review <show|suggest|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal> <archive-id> [options]",
     inputs: {
-      arguments: ["show|suggest|apply-proposal|preview-completion|complete", "archive-id"],
+      arguments: ["show|suggest|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal", "archive-id"],
       options: [
         "show: --selection-offset, --correction-offset, --correction-job-offset, --correction-output-offset, --replacement-offset, --replacement-profile-offset",
         "suggest: --tmdb-id <positive integer> --media-type <movie|tv_show> (together, optional)",
         "apply-proposal: --key <key> and exactly one of --json <object>, --stdin, --file <path>",
         "preview-completion: exactly one of --json <object>, --stdin, --file <path>",
         "complete: --key <key> --revision <revision> --preview-token <token> --acknowledge and structured input",
+        "preview-rearchive-proposal: exactly one of --json <object>, --stdin, --file <path>",
+        "save-rearchive-proposal: --key <key> and exactly one of --json <object>, --stdin, --file <path>",
       ],
     },
     example: "rip-dvd-operator catalog-review show <archive-id>",
@@ -1189,6 +1192,10 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
           ? runMappingProposal(rest.slice(1), io)
           : rest[0] === "preview-completion" || rest[0] === "complete"
             ? runCatalogReviewCompletion(rest, io)
+            : rest[0] === "preview-rearchive-proposal"
+              ? runRearchiveMappingProposal("preview", rest.slice(1), io)
+              : rest[0] === "save-rearchive-proposal"
+                ? runRearchiveMappingProposal("save", rest.slice(1), io)
             : await runCatalogReview(rest, io));
       return 0;
     }

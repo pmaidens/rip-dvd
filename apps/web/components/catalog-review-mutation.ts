@@ -129,7 +129,8 @@ export async function mutateCatalogReview(
 ): Promise<{ message: string | null; cancelled?: true }> {
   const identity = catalogReviewMutationIdentity(archiveId, command);
   const proposalIdentity = command.action === "create_mapping_proposal" ||
-      command.action === "create_episodic_mapping_proposal"
+      command.action === "create_episodic_mapping_proposal" ||
+      command.action === "save_rearchive_mapping_proposal"
     ? JSON.stringify({ archiveId, command }) : null;
   let proposalMutationKey: string | undefined;
   if (proposalIdentity !== null) {

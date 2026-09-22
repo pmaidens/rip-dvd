@@ -20,6 +20,14 @@ _Avoid_: Rip job, copy job
 An operator's durable intent to preserve a Detected Disc. It may wait for the matching disc, may produce more than one Archive Job attempt, and owns any resumable DVD rescue state shared by those attempts.
 _Avoid_: Queued Archive Job, approval
 
+**Re-archive Mapping Proposal**:
+An operator-reviewed draft that carries active Disc Selections from a prior Original Disc Archive to a fresh re-archive generation and validates them against the fresh Disc Inspection. It does not create Disc Selections or authorize encoding.
+_Avoid_: Adopted mappings, replacement selections
+
+**Re-archive Acceptance**:
+The later, explicit decision that adopts a reviewed Re-archive Mapping Proposal for the fresh archive and stops new encoding from the prior archive. Saving a proposal is not acceptance.
+_Avoid_: Catalog Review completion, proposal save
+
 **Archive Integrity**:
 The evidence-backed read quality recorded with an Original Disc Archive. Historical archives are `unknown`; a new Archive Job that observes a complete recovery with no unreadable sectors records `clean_read`; an archive accepted after automatic damage validation records `watchable_salvage`.
 _Avoid_: Bit-perfect, exact copy, Archive Job status

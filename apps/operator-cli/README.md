@@ -49,6 +49,51 @@ Both commands return `REVIEW_NOT_FOUND` for an unknown archive ID.
 read returns `CATALOG_REVIEW_UNAVAILABLE` without exposing database or
 provider details.
 
+For a newly published re-archive, `show` also returns `rearchiveProposal`.
+That object keeps prior and fresh archive integrity and boundary evidence
+beside each prior mapping and its editable proposed fresh source. Its state is
+`ready`, `incomplete`, `incompatible`, or `stale`. Reading or previewing it
+does not create a Disc Selection.
+
+## Review a Re-archive Mapping Proposal
+
+Use the proposal revisions returned by `catalog-review show`. Pass exactly one
+of `--json`, `--stdin`, or `--file`. Preview is read-only. Saving requires a
+preselected invocation key and persists only the reviewed proposal; Re-archive
+Acceptance is a separate operation and is the only workflow that may later
+adopt these mappings.
+
+```json
+{
+  "action": "preview_rearchive_mapping_proposal",
+  "catalogRevision": "2026-01-02T00:00:00.000Z",
+  "sourceCatalogRevision": "2026-01-01T00:00:00.000Z",
+  "mappings": [{
+    "sourceDiscSelectionId": "<prior-selection-id>",
+    "mediaItemId": "<media-item-id>",
+    "sourceIdentity": { "kind": "dvd_title", "titleNumber": 2 },
+    "label": "Feature"
+  }]
+}
+```
+
+```sh
+rip-dvd-operator catalog-review preview-rearchive-proposal <fresh-archive-id> \
+  --file <preview.json>
+rip-dvd-operator catalog-review save-rearchive-proposal <fresh-archive-id> \
+  --key <key> --file <save.json>
+```
+
+For save input, change `action` to `save_rearchive_mapping_proposal` without
+changing the reviewed fields. Every active prior Disc Selection must appear
+exactly once. Proposed Media Items must still exist, and DVD title or chapter
+coordinates must be valid in the fresh inspection. A
+changed prior or fresh Catalog Review revision returns
+`STALE_CATALOG_REVISION`; incomplete and incompatible proposals return
+`REARCHIVE_PROPOSAL_INCOMPLETE` and `REARCHIVE_PROPOSAL_INCOMPATIBLE`.
+Repeating the same key and input returns the first saved result; reusing the key
+for different input returns `MUTATION_KEY_CONFLICT`.
+
 ## Apply a complete Mapping Proposal
 
 `catalog-review apply-proposal` accepts one complete movie or episodic

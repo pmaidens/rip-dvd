@@ -5,13 +5,12 @@ import React, { useState } from "react";
 import { displayTerm } from "../lib/display-term";
 import { integerFormValue } from "./catalog-review-form";
 import { orderMediaItemHierarchy } from "./catalog-review-hierarchy";
-import { requestMediaItemSearch } from "./catalog-review-media-item-search";
+import { CatalogReviewMediaItemSearchPicker } from "./catalog-review-media-item-search-picker";
 import {
   mediaItemKinds,
   type CatalogReviewMediaItem,
   type CreateMappingProposalInput,
   type MappingProposal,
-  type MediaItemSearchDto,
   type MediaItemKind,
 } from "./catalog-review-model";
 
@@ -62,34 +61,10 @@ export function CatalogReviewMappingProposal({
       ? "use_existing"
       : "create_new",
   );
-  const [searchQuery, setSearchQuery] = useState(proposedTitle);
-  const [searchResult, setSearchResult] = useState<MediaItemSearchDto | null>(
-    null,
-  );
   const [selectedMediaItemId, setSelectedMediaItemId] = useState<string | null>(
     null,
   );
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [isSearching, setIsSearching] = useState(false);
-
-  async function searchMediaItems(offset = 0) {
-    const query = searchQuery.trim();
-    if (query.length === 0) {
-      setSearchError("Enter a Media Item title to search.");
-      return;
-    }
-    setIsSearching(true);
-    setSearchError(null);
-    setSelectedMediaItemId(null);
-    try {
-      setSearchResult(await requestMediaItemSearch(query, offset));
-    } catch {
-      setSearchResult(null);
-      setSearchError("Media Item search is unavailable.");
-    } finally {
-      setIsSearching(false);
-    }
-  }
 
   function createProposal(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -237,89 +212,19 @@ export function CatalogReviewMappingProposal({
         ) : (
           <fieldset key="use-existing-media-item">
             <legend>Use existing Media Item</legend>
-            <div className="catalog-media-item-search-controls">
-              <label>
-                Search by title
-                <input
-                  name="mediaItemSearch"
-                  maxLength={256}
-                  value={searchQuery}
-                  onChange={(event) => setSearchQuery(event.currentTarget.value)}
-                />
-              </label>
-              <button
-                type="button"
-                disabled={isSaving || isSearching}
-                onClick={() => void searchMediaItems()}
-              >
-                {isSearching ? "Searching…" : "Search full catalog"}
-              </button>
-            </div>
+            <CatalogReviewMediaItemSearchPicker
+              initialQuery={proposedTitle}
+              selectedMediaItemId={selectedMediaItemId}
+              isSaving={isSaving}
+              onSelect={(result) => {
+                setSearchError(null);
+                setSelectedMediaItemId(result.mediaItem.id);
+              }}
+            />
             {searchError ? (
               <p className="catalog-media-item-search-error" role="alert">
                 {searchError}
               </p>
-            ) : null}
-            {searchResult ? (
-              <>
-                {searchResult.results.length === 0 ? (
-                  <p className="catalog-empty">No Media Items matched.</p>
-                ) : (
-                  <ul className="catalog-media-item-search-results">
-                    {searchResult.results.map((result) => (
-                      <li key={result.mediaItem.id}>
-                        <label>
-                          <input
-                            type="radio"
-                            name="existingMediaItemId"
-                            value={result.mediaItem.id}
-                            checked={selectedMediaItemId === result.mediaItem.id}
-                            onChange={() =>
-                              setSelectedMediaItemId(result.mediaItem.id)}
-                          />
-                          <span>
-                            <strong>{[
-                              ...result.ancestors.map((item) => item.title),
-                              result.mediaItem.title,
-                            ].join(" › ")}</strong>
-                            <span>{displayTerm(result.mediaItem.kind)}</span>
-                            {result.suggestion ? (
-                              <span className="catalog-search-suggestion">
-                                {result.suggestion === "exact"
-                                  ? "Exact title suggestion"
-                                  : "Normalized title suggestion"}
-                              </span>
-                            ) : null}
-                          </span>
-                        </label>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <div className="catalog-media-item-search-pages">
-                  <button
-                    type="button"
-                    disabled={!searchResult.page.hasPrevious || isSearching}
-                    onClick={() =>
-                      void searchMediaItems(Math.max(
-                        0,
-                        searchResult.page.offset - searchResult.page.limit,
-                      ))}
-                  >
-                    Previous search results
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!searchResult.page.hasNext || isSearching}
-                    onClick={() =>
-                      void searchMediaItems(
-                        searchResult.page.offset + searchResult.page.limit,
-                      )}
-                  >
-                    Next search results
-                  </button>
-                </div>
-              </>
             ) : null}
           </fieldset>
         )}

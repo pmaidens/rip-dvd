@@ -863,6 +863,16 @@ a separate reviewed time; changing or removing a job-free Disc Selection
 reopens only that archive before any new encode can be enqueued. Reviewed
 history pages use immutable archive identity, so paging remains stable while an
 archive moves back to Needs review.
+For a fresh re-archive generation, Catalog Review presents the prior archive's
+active Disc Selections as a Re-archive Mapping Proposal beside both archives'
+integrity and boundary evidence. The operator can edit fresh DVD title or
+chapter coordinates, preview validation, and save the revision-bound proposal
+with an invocation key. Incomplete mappings, sources incompatible with the
+fresh inspection, and changes to either Catalog Review are reported explicitly.
+Saving the proposal creates no Disc Selections and does not move or rewrite any
+prior selection or Encode Job provenance. The ordinary mapping and completion
+workbench stays hidden for this review; a later, explicit Re-archive Acceptance
+adopts the reviewed mappings and changes old-source scheduling policy.
 Each archived title exposes Assisted Mapping actions for a movie, bonus
 feature, trailer, existing Media Item, chapter range, or other content. The
 existing-item action opens the Mapping Proposal directly in **Use existing

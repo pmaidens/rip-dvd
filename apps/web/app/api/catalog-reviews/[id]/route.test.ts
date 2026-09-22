@@ -18,6 +18,7 @@ import {
 import {
   createNormalDvdArchiveBoundaryEvidenceForTest,
 } from "@rip-dvd/data-access/test-support";
+import { seedRearchiveReviewFixtureForTest } from "@rip-dvd/data-access/rearchive-test-support";
 
 import type {
   CatalogReviewDiscSelectionActionAvailability,
@@ -62,6 +63,20 @@ function invokeDiscSelectionMutation(
   archiveId: string,
 ) {
   return (body: Record<string, unknown>) => postCatalogReview(access, archiveId, body);
+}
+
+function createRearchiveReviewFixture(
+  access: ReturnType<typeof dataAccessFixture.create>,
+) {
+  return seedRearchiveReviewFixtureForTest(access, {
+    fixtureId: "web-rearchive-review",
+    mutationKey: "00000000-0000-4000-8000-000000000648",
+    sourceArchivePath: "/media/originals/synthetic-web-rearchive-source.iso",
+    targetArchivePath: "/media/originals/synthetic-web-rearchive-target.iso",
+    volumeLabel: "SYNTHETIC_WEB_REARCHIVE",
+    mediaItemTitle: "Synthetic web re-archive",
+    integrityPolicyVersion: "test-clean-v1",
+  });
 }
 
 function keyedCatalogMutationBody(
@@ -137,6 +152,123 @@ describe("Catalog Review API", () => {
 
     expectTypeOf<LockedProvenance["relatedEncodeJob"]["status"]>()
       .toEqualTypeOf<EncodeJobStatus>();
+  });
+
+  it("previews and saves a Re-archive Mapping Proposal without adopting it", async () => {
+    const access = dataAccessFixture.create();
+    const { mediaItem, sourceArchive, sourceSelection, targetArchive } =
+      createRearchiveReviewFixture(access);
+    const getResponse = await createCatalogReviewRoute(
+      new Request(
+        `http://localhost:3000/api/catalog-reviews/${targetArchive.id}`,
+      ),
+      targetArchive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const review = await getResponse.json();
+    expect(review).toMatchObject({
+      rearchiveProposal: {
+        state: "ready",
+        persisted: false,
+        sourceArchive: { id: sourceArchive.id },
+        targetArchive: {
+          id: targetArchive.id,
+          integrityPolicyVersion: "test-clean-v1",
+          badSectorCountsByTitle: null,
+        },
+      },
+    });
+    expect(JSON.stringify(review.rearchiveProposal)).not.toMatch(
+      /archivePath|fingerprint/,
+    );
+    const proposal = {
+      catalogRevision: review.rearchiveProposal.catalogRevision,
+      sourceCatalogRevision: review.rearchiveProposal.sourceCatalogRevision,
+      mappings: [{
+        sourceDiscSelectionId: sourceSelection.id,
+        mediaItemId: mediaItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+        label: "Edited feature",
+      }],
+    };
+    const incompleteResponse = await postCatalogReview(
+      access,
+      targetArchive.id,
+      {
+        action: "save_rearchive_mapping_proposal",
+        mutationKey: "00000000-0000-4000-8000-000000000650",
+        ...proposal,
+        mappings: [],
+      },
+    );
+    expect(incompleteResponse.status).toBe(409);
+    await expect(incompleteResponse.json()).resolves.toMatchObject({
+      error: "Re-archive Mapping Proposal is incomplete",
+    });
+    const incompatibleResponse = await postCatalogReview(
+      access,
+      targetArchive.id,
+      {
+        action: "preview_rearchive_mapping_proposal",
+        ...proposal,
+        mappings: [{
+          ...proposal.mappings[0],
+          sourceIdentity: { kind: "dvd_title", titleNumber: 99 },
+        }],
+      },
+    );
+    expect(incompatibleResponse.status).toBe(200);
+    await expect(incompatibleResponse.json()).resolves.toMatchObject({
+      state: "incompatible",
+      persisted: false,
+      mappings: [{ state: "incompatible" }],
+    });
+    const previewResponse = await postCatalogReview(
+      access,
+      targetArchive.id,
+      { action: "preview_rearchive_mapping_proposal", ...proposal },
+    );
+    expect(previewResponse.status).toBe(200);
+    const preview = await previewResponse.json();
+    expect(preview).toMatchObject({
+      state: "ready",
+      persisted: false,
+      mappings: [{ state: "valid" }],
+    });
+    expect(JSON.stringify(preview)).not.toMatch(/archivePath|fingerprint/);
+
+    const mutation = {
+      action: "save_rearchive_mapping_proposal",
+      mutationKey: "00000000-0000-4000-8000-000000000649",
+      ...proposal,
+    };
+    const saveResponse = await postCatalogReview(
+      access,
+      targetArchive.id,
+      mutation,
+    );
+    expect(saveResponse.status).toBe(200);
+    const saved = await saveResponse.json();
+    expect(saved).toMatchObject({
+      message: "Re-archive Mapping Proposal saved",
+      proposal: { state: "ready", persisted: true },
+    });
+    expect(JSON.stringify(saved)).not.toMatch(/archivePath|fingerprint/);
+    const replayResponse = await postCatalogReview(
+      access,
+      targetArchive.id,
+      mutation,
+    );
+    await expect(replayResponse.json()).resolves.toEqual(saved);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: targetArchive.id,
+    })).toEqual([]);
+    expect(access.catalog.listDiscSelections({ ids: [sourceSelection.id] }))
+      .toEqual([expect.objectContaining({
+        id: sourceSelection.id,
+        originalDiscArchiveId: sourceArchive.id,
+      })]);
   });
 
   it("carries normal archive-boundary provenance without a capacity correction", async () => {
@@ -318,9 +450,11 @@ describe("Catalog Review API", () => {
         archiveFormat: "iso",
         boundaryEvidence: null,
         integrity: "unknown",
+        integrityPolicyVersion: null,
         badSectorCount: null,
         badAreaCount: null,
         badSectorRanges: null,
+        badSectorCountsByTitle: null,
         archivedAt: archive.archivedAt.toISOString(),
         catalogReviewedAt: null,
         catalogReviewOutcome: "needs_review",

@@ -14,9 +14,17 @@ import type {
   OriginalDiscArchiveId,
   EncodeQueueHistoryGroup,
   DiscSelectionId,
+  MediaItemId,
+  RearchiveMappingProposalInput,
+  RearchiveMappingProposalReview,
 } from "@rip-dvd/data-access";
 
-import { readCatalogReview, type CatalogReviewPageCoordinates } from "./catalog-review-read.js";
+import {
+  readCatalogReview,
+  serializeRearchiveMappingProposal,
+  type CatalogReviewPageCoordinates,
+} from "./catalog-review-read.js";
+import type { CatalogReviewRearchiveMappingInput } from "./catalog-review-command.js";
 import { suggestCatalogReview } from "./catalog-suggestion.js";
 import { generateMutationKey, InvalidMutationKeyError, parseMutationKey } from "./mutation-key.js";
 import {
@@ -46,6 +54,66 @@ export class InvalidProfileInputError extends Error {
     super(message);
     this.name = "InvalidProfileInputError";
   }
+}
+
+export interface RearchiveMappingProposalOperationInput {
+  originalDiscArchiveId: string;
+  catalogRevision: string;
+  sourceCatalogRevision: string;
+  mappings: readonly CatalogReviewRearchiveMappingInput[];
+}
+
+function rearchiveMappingProposalInput(
+  input: RearchiveMappingProposalOperationInput,
+): RearchiveMappingProposalInput {
+  const revision = (value: string, name: string) => {
+    const parsed = new Date(value);
+    if (!Number.isSafeInteger(parsed.getTime()) || parsed.toISOString() !== value) {
+      throw new RangeError(`${name} must be an ISO timestamp.`);
+    }
+    return parsed;
+  };
+  return {
+    originalDiscArchiveId:
+      requiredString(input.originalDiscArchiveId, "Original Disc Archive ID") as
+        OriginalDiscArchiveId,
+    catalogRevision: revision(input.catalogRevision, "Catalog revision"),
+    sourceCatalogRevision: revision(
+      input.sourceCatalogRevision,
+      "Source Catalog revision",
+    ),
+    mappings: input.mappings.map((mapping) => ({
+      sourceDiscSelectionId:
+        requiredString(
+          mapping.sourceDiscSelectionId,
+          "Prior Disc Selection ID",
+        ) as DiscSelectionId,
+      mediaItemId: requiredString(
+        mapping.mediaItemId,
+        "Media Item ID",
+      ) as MediaItemId,
+      sourceIdentity: mapping.sourceIdentity,
+      label: mapping.label,
+    })),
+  };
+}
+
+function presentRearchiveMappingProposal(
+  access: DataAccess,
+  proposal: RearchiveMappingProposalReview,
+) {
+  const discLabels = new Map(
+    access.catalog.listDetectedDiscs(undefined, {
+      ids: [
+        proposal.sourceArchive.detectedDiscId,
+        proposal.targetArchive.detectedDiscId,
+      ],
+    }).map((disc) => [disc.id, disc.volumeLabel]),
+  );
+  return serializeRearchiveMappingProposal(proposal, {
+    source: discLabels.get(proposal.sourceArchive.detectedDiscId) ?? null,
+    target: discLabels.get(proposal.targetArchive.detectedDiscId) ?? null,
+  });
 }
 
 function requiredString(value: unknown, name: string): string {
@@ -367,6 +435,26 @@ export function createApplicationOperations(
       coordinates: CatalogReviewPageCoordinates,
       automaticCatalogingConfigured: boolean,
     ) => readCatalogReview(access, id, coordinates, automaticCatalogingConfigured),
+    previewRearchiveMappingProposal: (
+      input: RearchiveMappingProposalOperationInput,
+    ) => presentRearchiveMappingProposal(
+      access,
+      access.catalog.previewRearchiveMappingProposal(
+        rearchiveMappingProposalInput(input),
+      ),
+    ),
+    saveRearchiveMappingProposal: (
+      input: RearchiveMappingProposalOperationInput & { mutationKey: unknown },
+    ) => {
+      const proposal = access.catalog.saveRearchiveMappingProposal({
+        ...rearchiveMappingProposalInput(input),
+        mutationKey: parseMutationKey(input.mutationKey),
+      });
+      return {
+        message: "Re-archive Mapping Proposal saved",
+        proposal: presentRearchiveMappingProposal(access, proposal),
+      };
+    },
     catalogSuggestion: (
       id: OriginalDiscArchiveId,
       lookup: CatalogMetadataLookup | null,

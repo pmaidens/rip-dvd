@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { createDataAccess } from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
+import { seedRearchiveReviewFixtureForTest } from "@rip-dvd/data-access/rearchive-test-support";
 import type { CatalogMetadataLookup } from "@rip-dvd/application";
 
 import { runCommand } from "./command.js";
@@ -147,6 +148,35 @@ export function seedCatalogReviewForReadFixture(
       runningClaim,
       partialCleanupClaim,
     };
+  } finally {
+    access.close();
+  }
+}
+
+export function seedRearchiveCatalogReviewFixture(
+  current: ReturnType<typeof createOperatorWorkflowFixture>,
+) {
+  const access = createLegacySidecarDataAccess({
+    databasePath: current.databasePath,
+    mediaLibraryPath: current.mediaLibraryPath,
+    originalsLibraryPath: current.originalsLibraryPath,
+  });
+  try {
+    return seedRearchiveReviewFixtureForTest(access, {
+      fixtureId: "operator-rearchive-review",
+      mutationKey: "00000000-0000-4000-8000-000000000548",
+      sourceArchivePath: join(
+        current.originalsLibraryPath,
+        "rearchive-cli-source.iso",
+      ),
+      targetArchivePath: join(
+        current.originalsLibraryPath,
+        "rearchive-cli-target.iso",
+      ),
+      volumeLabel: "SYNTHETIC_REARCHIVE_CLI",
+      mediaItemTitle: "Synthetic re-archive feature",
+      integrityPolicyVersion: "dvd-recovery-v1",
+    });
   } finally {
     access.close();
   }

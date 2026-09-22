@@ -20,6 +20,28 @@ function parseCommand(value: unknown) {
 }
 
 const validCommands = {
+  preview_rearchive_mapping_proposal: {
+    action: "preview_rearchive_mapping_proposal",
+    catalogRevision: "2026-08-11T06:00:00.000Z",
+    sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+    mappings: [{
+      sourceDiscSelectionId: "source-selection-1",
+      mediaItemId: "media-item-1",
+      sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+      label: null,
+    }],
+  },
+  save_rearchive_mapping_proposal: {
+    action: "save_rearchive_mapping_proposal",
+    catalogRevision: "2026-08-11T06:00:00.000Z",
+    sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+    mappings: [{
+      sourceDiscSelectionId: "source-selection-1",
+      mediaItemId: "media-item-1",
+      sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+      label: null,
+    }],
+  },
   create_episodic_mapping_proposal: {
     action: "create_episodic_mapping_proposal",
     catalogRevision: "2026-08-11T06:00:00.000Z",

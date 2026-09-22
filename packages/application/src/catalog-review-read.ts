@@ -9,6 +9,7 @@ import {
   type MediaItem,
   type MediaItemMaintenance,
   type OriginalDiscArchiveId,
+  type RearchiveMappingProposalReview,
 } from "@rip-dvd/data-access";
 import { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
 
@@ -63,6 +64,53 @@ export function serializeDiscSelection(selection: DiscSelection) {
     mediaItemId: selection.mediaItemId,
     sourceIdentity: selection.sourceIdentity,
     label: selection.label,
+  };
+}
+
+export function serializeArchiveEvidence(
+  archive: ReturnType<DataAccess["catalog"]["listOriginalDiscArchives"]>[number],
+  discLabel: string | null,
+) {
+  return {
+    id: archive.id,
+    detectedDiscId: archive.detectedDiscId,
+    discLabel: discLabel ?? "Unlabeled disc",
+    discKind: archive.discKind,
+    archiveFormat: archive.archiveFormat,
+    boundaryEvidence: archiveBoundaryEvidenceFromRecord(archive),
+    integrity: archive.integrity,
+    integrityPolicyVersion: archive.integrityPolicyVersion,
+    badSectorCount: archive.badSectorCount,
+    badAreaCount: archive.badAreaCount,
+    badSectorRanges: archive.badSectorRanges,
+    badSectorCountsByTitle: archive.badSectorCountsByTitle,
+    archivedAt: archive.archivedAt.toISOString(),
+    catalogReviewedAt: archive.catalogReviewedAt?.toISOString() ?? null,
+    catalogReviewOutcome: archive.catalogReviewOutcome,
+  };
+}
+
+export function serializeRearchiveMappingProposal(
+  proposal: RearchiveMappingProposalReview,
+  discLabels: {
+    source: string | null;
+    target: string | null;
+  },
+) {
+  return {
+    state: proposal.state,
+    persisted: proposal.persisted,
+    catalogRevision: proposal.catalogRevision,
+    sourceCatalogRevision: proposal.sourceCatalogRevision,
+    sourceArchive: serializeArchiveEvidence(
+      proposal.sourceArchive,
+      discLabels.source,
+    ),
+    targetArchive: serializeArchiveEvidence(
+      proposal.targetArchive,
+      discLabels.target,
+    ),
+    mappings: proposal.mappings,
   };
 }
 
@@ -126,6 +174,18 @@ export function readCatalogReview(
       );
     }
     const rawTitles = decodeArchivedDvdTitles(disc.scanData) ?? [];
+    const rearchiveProposal = snapshot.catalog
+      .readRearchiveMappingProposal(id);
+    const rearchiveSourceDisc = rearchiveProposal === null
+      ? undefined
+      : snapshot.catalog.listDetectedDiscs(undefined, {
+          ids: [rearchiveProposal.sourceArchive.detectedDiscId],
+        })[0];
+    if (rearchiveProposal !== null && rearchiveSourceDisc === undefined) {
+      throw new DomainInvariantError(
+        "Re-archive Mapping Proposal is missing source Detected Disc provenance",
+      );
+    }
     const coverage = snapshot.catalog.getCatalogReviewCoverage(id);
     const reviewActionAvailability = snapshot.catalog.getCatalogReviewActionAvailability(id);
     const discSelectionRows = snapshot.catalog.listDiscSelections({
@@ -230,6 +290,15 @@ export function readCatalogReview(
       snapshot.catalog,
       [...selectionsWithHistory.values()].map(
         (selection) => selection.mediaItemId,
+      ).concat(
+        rearchiveProposal?.mappings.map(
+          (mapping) => mapping.proposedMapping.mediaItemId,
+        ) ?? [],
+        rearchiveProposal?.mappings.flatMap(
+          (mapping) => mapping.priorMapping === null
+            ? []
+            : [mapping.priorMapping.mediaItemId],
+        ) ?? [],
       ),
     );
     const mediaItemMaintenance: MediaItemMaintenance[] = [];
@@ -291,27 +360,24 @@ export function readCatalogReview(
       automaticCataloging: {
         configured: automaticCatalogingConfigured,
       },
-      archive: {
-        id: archive.id,
-        detectedDiscId: archive.detectedDiscId,
-        discLabel: disc.volumeLabel ?? "Unlabeled disc",
-        discKind: archive.discKind,
-        archiveFormat: archive.archiveFormat,
-        boundaryEvidence: archiveBoundaryEvidenceFromRecord(archive),
-        integrity: archive.integrity,
-        badSectorCount: archive.badSectorCount,
-        badAreaCount: archive.badAreaCount,
-        badSectorRanges: archive.badSectorRanges,
-        archivedAt: archive.archivedAt.toISOString(),
-        catalogReviewedAt: archive.catalogReviewedAt?.toISOString() ?? null,
-        catalogReviewOutcome: archive.catalogReviewOutcome,
-      },
+      archive: serializeArchiveEvidence(archive, disc.volumeLabel),
       reviewOutcome: archive.catalogReviewOutcome,
       rawScan: {
         titles: rawTitles,
       },
       coverage,
       reviewActionAvailability,
+      ...(rearchiveProposal === null || rearchiveSourceDisc === undefined
+        ? {}
+        : {
+          rearchiveProposal: serializeRearchiveMappingProposal(
+            rearchiveProposal,
+            {
+              source: rearchiveSourceDisc.volumeLabel,
+              target: disc.volumeLabel,
+            },
+          ),
+        }),
       mediaItems: reviewMediaItems.map((item) =>
         serializeMediaItem(item, maintenanceByMediaItemId.get(item.id))
       ),
