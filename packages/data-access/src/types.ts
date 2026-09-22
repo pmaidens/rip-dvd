@@ -1024,6 +1024,7 @@ export interface CatalogAccess {
   listOriginalDiscArchives(options?: {
     cursor?: OriginalDiscArchiveListCursor;
     ids?: readonly OriginalDiscArchiveId[];
+    detectedDiscId?: DetectedDiscId;
     limit?: number;
     offset?: number;
     uncatalogedOnly?: boolean;
@@ -1165,6 +1166,9 @@ export interface EncodingProfileAccess {
 }
 
 export interface ArchiveJobAccess {
+  find(id: ArchiveJobId): ArchiveJob | null;
+  listForInspection(id: DiscInspectionId): ArchiveJob[];
+  listForArchive(id: OriginalDiscArchiveId): ArchiveJob[];
   startForInspection(
     inspectionId: DiscInspectionId,
     workerId: string,
@@ -1227,12 +1231,16 @@ export interface DiscInspectionAccess {
   list(options?: {
     currentOnly?: boolean;
     ids?: readonly DiscInspectionId[];
+    opticalDriveId?: OpticalDriveId;
+    detectedDiscId?: DetectedDiscId;
     limit?: number;
   }): DiscInspection[];
   listAttempts(id: DiscInspectionId): DiscInspectionAttempt[];
 }
 
 export interface ArchiveRequestAccess {
+  find(id: ArchiveRequestId): ArchiveRequest | null;
+  listForDetectedDisc(id: DetectedDiscId): ArchiveRequest[];
   create(input: {
     detectedDiscId: DetectedDiscId;
     priority?: number;
@@ -1256,6 +1264,8 @@ export interface ArchiveRequestAccess {
 }
 
 export interface EncodeJobAccess {
+  find(id: EncodeJobId): EncodeJob | null;
+  listForDiscSelection(id: DiscSelectionId): EncodeJob[];
   resolveQueueLogicalJobs(options: {
     discSelectionIds: readonly DiscSelectionId[];
     encodingProfileId: EncodingProfileId;
@@ -1412,6 +1422,7 @@ export interface FilesystemVerificationAccess {
 }
 
 export interface WorkerIncidentAccess {
+  find(id: WorkerIncidentId): WorkerIncident | null;
   record(input: RecordWorkerIncidentInput): WorkerIncident;
   resolve(input: WorkerIncidentIdentity): WorkerIncident[];
   list(options: {
@@ -1443,15 +1454,17 @@ export interface ConsistentReadAccess {
   readonly discInspections: Pick<DiscInspectionAccess, "list" | "listAttempts">;
   readonly archiveRequests: Pick<
     ArchiveRequestAccess,
-    "list" | "listRelevantForDetectedDiscs"
+    "find" | "list" | "listForDetectedDisc" | "listRelevantForDetectedDiscs"
   >;
   readonly archiveJobs: Pick<
     ArchiveJobAccess,
-    "list" | "listLatestForRequests"
+    "find" | "list" | "listForInspection" | "listForArchive" | "listLatestForRequests"
   >;
   readonly encodeJobs: Pick<
     EncodeJobAccess,
+    | "find"
     | "list"
+    | "listForDiscSelection"
     | "resolveQueueLogicalJobs"
     | "listQueueDiscSelections"
     | "listDiscSelectionCorrectionEncodeJobLinks"
@@ -1460,7 +1473,7 @@ export interface ConsistentReadAccess {
     | "listFailureReports"
     | "listRetainedOutputSummaries"
   >;
-  readonly workerIncidents: Pick<WorkerIncidentAccess, "list">;
+  readonly workerIncidents: Pick<WorkerIncidentAccess, "find" | "list">;
 }
 
 export interface DataAccess {

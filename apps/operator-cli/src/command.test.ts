@@ -3,6 +3,11 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, expect, it } from "vitest";
 import type { CatalogMetadataLookup } from "@rip-dvd/application";
+import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
+import {
+  beginSettledDiscInspectionForTest,
+  createNormalDvdArchiveBoundaryEvidenceForTest,
+} from "@rip-dvd/data-access/test-support";
 
 import { createApplicationOperations } from "@rip-dvd/application";
 
@@ -288,6 +293,13 @@ it("inspects full attempts and keeps request intent separate from job attempts",
   expect(requestDetail.result).toMatchObject({
     item: { id: request.id, status: "pending", archiveJobs: [] },
   });
+  expect(current.run(["inspect", "detected-discs", disc.id]).result).toMatchObject({
+    item: {
+      id: disc.id,
+      archiveRequests: [expect.objectContaining({ id: request.id })],
+      availableActions: [{ name: "request-archive", eligible: false }],
+    },
+  });
   const timedOut = await current.runAsync([
     "wait", "archive-requests", request.id, "--timeout-ms", "0",
   ]);
@@ -314,6 +326,79 @@ it("inspects full attempts and keeps request intent separate from job attempts",
   expect(retryPending.exitCode).toBe(3);
   expect(retryPending.result).toMatchObject({ outcome: "timeout", current: {
     status: "failed", manualRetryRequestedAt: expect.any(String),
+  } });
+});
+
+it("reports encode action eligibility and correction evidence through the public command", () => {
+  const current = fixture();
+  const access = current.openAccess();
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/synthetic-drive", isEnabled: true, isPresent: true,
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id, discKind: "dvd", fingerprint: "synthetic-encode-disc",
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  access.archiveRequests.create({ detectedDiscId: disc.id });
+  const started = beginSettledDiscInspectionForTest(access, {
+    opticalDriveId: drive.id, mediaGeneration: "synthetic-encode-generation",
+    mediaCapacityBytes: 2_048,
+  });
+  access.discInspections.record(started.claim, {
+    type: "metadata", volumeLabel: "SYNTHETIC_DISC", titleCount: 0, chapterCount: 0,
+    audioStreamCount: 0, subtitleStreamCount: 0, totalBytes: 2_048,
+  });
+  const inspection = access.discInspections.record(started.claim, {
+    type: "complete", detectedDiscId: disc.id,
+  });
+  started.restoreSystemTime();
+  const claim = access.archiveJobs.startForInspection(inspection.id, "synthetic-worker")!;
+  const completed = access.archiveJobs.publish(claim, {
+    archivePath: "/synthetic/original.iso", sizeBytes: 2_048,
+    boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(2_048),
+    integrityEvidence: createCleanReadArchiveIntegrityEvidence("dvd-recovery-v1"),
+  });
+  const archive = access.catalog.listOriginalDiscArchives({ ids: [completed.originalDiscArchiveId!] })[0]!;
+  const item = access.catalog.createMediaItem({ kind: "movie", title: "Synthetic Movie" });
+  const selection = access.catalog.createDiscSelection({
+    originalDiscArchiveId: archive.id, mediaItemId: item.id,
+    sourceIdentity: { kind: "main_feature" },
+  });
+  const revisedArchive = access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!;
+  access.catalog.completeCatalogReview(archive.id, revisedArchive.updatedAt, "reviewed_with_selections");
+  const profile = access.encodingProfiles.create({
+    key: "synthetic-encode", displayName: "Synthetic encode", mediaDomain: "dvd_video",
+    settings: { preset: "Fast 480p30" },
+  });
+  const job = access.encodeJobs.enqueue({
+    discSelectionId: selection.id, encodingProfileId: profile.id,
+    outputPath: "/synthetic/output.mkv",
+  });
+  access.close();
+
+  const result = current.run(["inspect", "encode-jobs", job.id]);
+  expect(result.exitCode).toBe(0);
+  expect(result.result).toMatchObject({ item: {
+    id: job.id,
+    history: [expect.objectContaining({ id: job.id })],
+    correctionLinks: [expect.objectContaining({ id: job.id })],
+    retainedOutputs: [],
+    availableActions: expect.arrayContaining([
+      expect.objectContaining({ name: "requeue", eligible: false }),
+      expect.objectContaining({ name: "verify-output", eligible: true }),
+    ]),
+  } });
+  expect(JSON.stringify(result.result)).not.toContain("/synthetic/output.mkv");
+
+  const writer = current.openAccess();
+  const claimed = writer.encodeJobs.claimNext("synthetic-encode-worker")!;
+  writer.encodeJobs.fail(claimed, "Synthetic encode failure");
+  writer.close();
+  expect(current.run(["inspect", "encode-jobs", job.id]).result).toMatchObject({ item: {
+    status: "failed",
+    availableActions: expect.arrayContaining([
+      expect.objectContaining({ name: "requeue", eligible: true, reason: null }),
+    ]),
   } });
 });
 

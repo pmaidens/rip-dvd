@@ -1,7 +1,9 @@
 import {
   WORKER_KINDS,
   type ArchiveJob,
+  type ArchiveJobId,
   type ArchiveRequest,
+  type ArchiveRequestId,
   type ConsistentReadAccess,
   type DataAccess,
   type DetectedDisc,
@@ -9,10 +11,12 @@ import {
   type DiscInspection,
   type DiscInspectionId,
   type EncodeJob,
+  type EncodeJobId,
   type OriginalDiscArchive,
   type OriginalDiscArchiveId,
   type OpticalDriveId,
   type WorkerIncident,
+  type WorkerIncidentId,
 } from "@rip-dvd/data-access";
 
 export const OPERATION_KINDS = [
@@ -34,6 +38,10 @@ export type WaitableKind = Extract<OperationKind,
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
+
+function boundedPolicy(limit: number) {
+  return { mode: "active-and-history" as const, activeLimit: limit, historyLimit: limit };
+}
 
 export function isOperationKind(value: string): value is OperationKind {
   return OPERATION_KINDS.some((kind) => kind === value);
@@ -145,12 +153,35 @@ function inspectionActions(inspection: DiscInspection) {
   }];
 }
 
-function encodeActions(job: EncodeJob) {
+function encodeActions(job: EncodeJob, requeueable: boolean) {
+  const terminal = ["completed", "failed", "cancelled"].includes(job.status);
   return [{
     name: "request-cancellation",
     eligible: ["queued", "running"].includes(job.status),
     reason: ["queued", "running"].includes(job.status) ? null :
       `Encode Job is ${job.status}.`,
+  }, {
+    name: "requeue",
+    eligible: terminal && requeueable,
+    reason: !terminal ? `Encode Job is ${job.status}.` : requeueable ? null :
+      "Requires an active Disc Selection with completed Catalog Review.",
+  }, {
+    name: "verify-output",
+    eligible: true,
+    reason: null,
+  }];
+}
+
+function detectedDiscActions(disc: DetectedDisc, requests: ArchiveRequest[]) {
+  const latest = requests.at(-1);
+  const eligible = disc.status === "scanned" ||
+    (disc.status === "approved" && latest?.status === "cancelled");
+  return [{
+    name: "request-archive",
+    eligible,
+    reason: eligible ? null : latest && latest.status !== "cancelled"
+      ? `Archive Request is ${latest.status}.`
+      : `Detected Disc is ${disc.status}.`,
   }];
 }
 
@@ -161,19 +192,19 @@ function activity(access: ConsistentReadAccess, limit: number) {
       occurredAt: item.updatedAt,
     })),
     ...access.archiveRequests.list(undefined, {
-      policy: { mode: "active-and-history", activeLimit: limit, historyLimit: limit },
+      policy: boundedPolicy(limit),
     }).map((item) => ({
       kind: "archive-requests", id: item.id, status: item.status,
       occurredAt: item.updatedAt,
     })),
     ...access.archiveJobs.list(undefined, {
-      policy: { mode: "active-and-history", activeLimit: limit, historyLimit: limit },
+      policy: boundedPolicy(limit),
     }).map((item) => ({
       kind: "archive-jobs", id: item.id, status: item.status,
       occurredAt: item.updatedAt,
     })),
     ...access.encodeJobs.list(undefined, {
-      policy: { mode: "active-and-history", activeLimit: limit, historyLimit: limit },
+      policy: boundedPolicy(limit),
     }).map((item) => ({
       kind: "encode-jobs", id: item.id, status: item.status,
       occurredAt: item.updatedAt,
@@ -196,23 +227,23 @@ function readList(access: ConsistentReadAccess, kind: OperationKind, limit: numb
       return access.catalog.listOpticalDrives({ limit }).map(visibleDrive);
     case "detected-discs":
       return recentWork(access.catalog.listDetectedDiscs(undefined, {
-        policy: { mode: "active-and-history", activeLimit: limit, historyLimit: limit },
+        policy: boundedPolicy(limit),
       }), ["detected", "scanned", "approved"], limit).map(visibleDisc);
     case "disc-inspections":
       return access.discInspections.list({ limit }).map(visibleInspection);
     case "archive-requests":
       return recentWork(access.archiveRequests.list(undefined, {
-        policy: { mode: "active-and-history", activeLimit: limit, historyLimit: limit },
+        policy: boundedPolicy(limit),
       }), ["pending", "running", "needs_attention", "cancellation_requested"], limit);
     case "archive-jobs":
       return recentWork(access.archiveJobs.list(undefined, {
-        policy: { mode: "active-and-history", activeLimit: limit, historyLimit: limit },
+        policy: boundedPolicy(limit),
       }), ["running"], limit).map(visibleArchiveJob);
     case "original-disc-archives":
       return access.catalog.listOriginalDiscArchives({ limit }).map(visibleArchive);
     case "encode-jobs":
       return recentWork(access.encodeJobs.list(undefined, {
-        policy: { mode: "active-and-history", activeLimit: limit, historyLimit: limit },
+        policy: boundedPolicy(limit),
       }), ["queued", "running", "cancellation_requested"], limit).map(visibleEncodeJob);
     case "worker-incidents":
       return incidents(access, limit).slice(0, limit).map(visibleIncident);
@@ -228,28 +259,25 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
       if (!drive) return null;
       return {
         ...visibleDrive(drive),
-        inspections: access.discInspections.list().filter((item) =>
-          item.opticalDriveId === id
-        ).map(visibleInspection),
+        inspections: access.discInspections.list({ opticalDriveId: drive.id })
+          .map(visibleInspection),
       };
     }
     case "detected-discs": {
       const disc = access.catalog.listDetectedDiscs(undefined, { ids: [id as DetectedDiscId] })[0];
       if (!disc) return null;
+      const requests = access.archiveRequests.listForDetectedDisc(disc.id);
       return {
         ...visibleDisc(disc), scanData: disc.scanData,
-        inspections: access.discInspections.list().filter((item) =>
-          item.detectedDiscId === id
-        ).map(visibleInspection),
-        archiveRequests: access.archiveRequests.list().filter((item) =>
-          item.detectedDiscId === id
-        ),
+        inspections: access.discInspections.list({ detectedDiscId: disc.id })
+          .map(visibleInspection),
+        archiveRequests: requests,
         archiveJobs: access.archiveJobs.list(undefined, {
           detectedDiscIds: [disc.id],
         }).map(visibleArchiveJob),
-        archives: access.catalog.listOriginalDiscArchives().filter((item) =>
-          item.detectedDiscId === id
-        ).map(visibleArchive),
+        archives: access.catalog.listOriginalDiscArchives({ detectedDiscId: disc.id })
+          .map(visibleArchive),
+        availableActions: detectedDiscActions(disc, requests),
       };
     }
     case "disc-inspections": {
@@ -263,14 +291,13 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
         detectedDisc: inspection.detectedDiscId === null ? null :
           access.catalog.listDetectedDiscs(undefined, { ids: [inspection.detectedDiscId] })
             .map(visibleDisc)[0] ?? null,
-        archiveJobs: access.archiveJobs.list().filter((item) =>
-          item.discInspectionId === id
-        ).map(visibleArchiveJob),
+        archiveJobs: access.archiveJobs.listForInspection(inspection.id)
+          .map(visibleArchiveJob),
         availableActions: inspectionActions(inspection),
       };
     }
     case "archive-requests": {
-      const request = access.archiveRequests.list().find((item) => item.id === id);
+      const request = access.archiveRequests.find(id as ArchiveRequestId);
       if (!request) return null;
       return {
         ...request,
@@ -284,13 +311,11 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
       };
     }
     case "archive-jobs": {
-      const job = access.archiveJobs.list().find((item) => item.id === id);
+      const job = access.archiveJobs.find(id as ArchiveJobId);
       if (!job) return null;
       return {
         ...visibleArchiveJob(job),
-        archiveRequest: access.archiveRequests.list().find((item) =>
-          item.id === job.archiveRequestId
-        ) ?? null,
+        archiveRequest: access.archiveRequests.find(job.archiveRequestId),
         discInspection: job.discInspectionId === null ? null :
           access.discInspections.list({ ids: [job.discInspectionId] })
             .map(visibleInspection)[0] ?? null,
@@ -307,15 +332,19 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
         detectedDisc: access.catalog.listDetectedDiscs(undefined, {
           ids: [archive.detectedDiscId],
         }).map(visibleDisc)[0] ?? null,
-        archiveJobs: access.archiveJobs.list().filter((item) =>
-          item.originalDiscArchiveId === id
-        ).map(visibleArchiveJob),
+        archiveJobs: access.archiveJobs.listForArchive(archive.id)
+          .map(visibleArchiveJob),
+        availableActions: [{ name: "verify-archive", eligible: true, reason: null }],
       };
     }
     case "encode-jobs": {
-      const job = access.encodeJobs.list().find((item) => item.id === id);
+      const job = access.encodeJobs.find(id as EncodeJobId);
       if (!job) return null;
       const selection = access.catalog.listDiscSelections({ ids: [job.discSelectionId] })[0];
+      const requeueable = access.catalog.listDiscSelections({
+        ids: [job.discSelectionId], encodeEligibleOnly: true,
+      }).length > 0;
+      const correctionLinks = access.encodeJobs.listCorrectionLinks([job.id]);
       return {
         ...visibleEncodeJob(job),
         failureReports: access.encodeJobs.listFailureReports([job.id]),
@@ -323,14 +352,15 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
         archive: selection ? access.catalog.listOriginalDiscArchives({
           ids: [selection.originalDiscArchiveId],
         }).map(visibleArchive)[0] ?? null : null,
-        history: access.encodeJobs.list().filter((item) =>
-          item.discSelectionId === job.discSelectionId
-        ).map(visibleEncodeJob),
-        availableActions: encodeActions(job),
+        history: access.encodeJobs.listForDiscSelection(job.discSelectionId)
+          .map(visibleEncodeJob),
+        correctionLinks: correctionLinks.map(visibleEncodeJob),
+        retainedOutputs: access.encodeJobs.listRetainedOutputSummaries([job.id]),
+        availableActions: encodeActions(job, requeueable),
       };
     }
     case "worker-incidents": {
-      const incident = incidents(access, 100).find((item: WorkerIncident) => item.id === id);
+      const incident = access.workerIncidents.find(id as WorkerIncidentId);
       return incident ? visibleIncident(incident) : null;
     }
   }
