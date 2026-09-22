@@ -62,6 +62,7 @@ export function CatalogReviewMediaItemSearchPicker({
             name="mediaItemSearch"
             maxLength={256}
             value={searchQuery}
+            disabled={isSaving}
             onChange={(event) => setSearchQuery(event.currentTarget.value)}
           />
         </label>
@@ -92,6 +93,7 @@ export function CatalogReviewMediaItemSearchPicker({
                       name={inputName}
                       value={result.mediaItem.id}
                       checked={selectedMediaItemId === result.mediaItem.id}
+                      disabled={isSaving}
                       onChange={() => onSelect(result)}
                     />
                     <span>
@@ -116,7 +118,9 @@ export function CatalogReviewMediaItemSearchPicker({
           <div className="catalog-media-item-search-pages">
             <button
               type="button"
-              disabled={!searchResult.page.hasPrevious || isSearching}
+              disabled={
+                isSaving || !searchResult.page.hasPrevious || isSearching
+              }
               onClick={() => void searchMediaItems(Math.max(
                 0,
                 searchResult.page.offset - searchResult.page.limit,
@@ -126,7 +130,7 @@ export function CatalogReviewMediaItemSearchPicker({
             </button>
             <button
               type="button"
-              disabled={!searchResult.page.hasNext || isSearching}
+              disabled={isSaving || !searchResult.page.hasNext || isSearching}
               onClick={() => void searchMediaItems(
                 searchResult.page.offset + searchResult.page.limit,
               )}
