@@ -478,6 +478,20 @@ static int is_recognized_dvd_out_of_range_error(
         sense->ascq == 0x00 && sense->has_information_lba;
 }
 
+static int has_current_check_condition_sense(
+    const struct rip_dvd_scsi_completion *completion,
+    const struct decoded_sense *sense)
+{
+    uint16_t driver_base_status = completion->driver_status & 0x0f;
+    return completion->captured && completion->command_completed &&
+        sense->recognized_format &&
+        (completion->scsi_status & 0xfe) == 0x02 &&
+        completion->host_status == 0 &&
+        (driver_base_status == 0x00 || driver_base_status == 0x08) &&
+        (sense->response_code == 0x70 || sense->response_code == 0x72) &&
+        sense->has_sense_key && sense->has_asc && sense->has_ascq;
+}
+
 static enum backend_read_status classify_read_failure(
     const struct rip_dvd_scsi_completion *completion,
     struct read_failure *failure)
@@ -496,13 +510,7 @@ static enum backend_read_status classify_read_failure(
         return BACKEND_READ_TERMINAL_FAILURE;
     }
     const struct decoded_sense *sense = &failure->sense;
-    uint16_t driver_base_status = completion->driver_status & 0x0f;
-    if (!sense->recognized_format ||
-        (completion->scsi_status & 0xfe) != 0x02 ||
-        completion->host_status != 0 ||
-        (driver_base_status != 0x00 && driver_base_status != 0x08) ||
-        (sense->response_code != 0x70 && sense->response_code != 0x72) ||
-        !sense->has_sense_key || !sense->has_asc || !sense->has_ascq) {
+    if (!has_current_check_condition_sense(completion, sense)) {
         return BACKEND_READ_TERMINAL_FAILURE;
     }
     if (sense->sense_key == 0x02) {
@@ -1182,7 +1190,38 @@ static int normalized_failure_evidence_matches(
         left->sense.sense_key == right->sense.sense_key &&
         left->sense.asc == right->sense.asc &&
         left->sense.ascq == right->sense.ascq &&
+        left->sense.has_information_lba == right->sense.has_information_lba &&
         left->sense.information_lba == right->sense.information_lba;
+}
+
+/* Only the normal endpoint has a known, independently selected address.
+ * Never use this fallback to locate a failed sector during copy or rescue. */
+static int is_normal_endpoint_out_of_range(
+    const struct backend_read_result *result, uint64_t first_excluded_lba)
+{
+    const struct read_failure *failure = &result->failure;
+    const struct rip_dvd_scsi_completion *completion = &failure->completion;
+    const struct decoded_sense *sense = &failure->sense;
+    if (completion->requested_lba != first_excluded_lba ||
+        completion->requested_block_count != 1) {
+        return 0;
+    }
+    if (result->status == BACKEND_READ_OUT_OF_RANGE_ERROR) {
+        return sense->has_information_lba &&
+            sense->information_lba == first_excluded_lba;
+    }
+    /* Fixed current sense with VALID clear has no information address.
+     * Require a complete standard record, no overflow or conflicting flags,
+     * and the same completion checks used by the general classifier.
+     * Descriptor-format omissions remain unsupported. */
+    return result->status == BACKEND_READ_TERMINAL_FAILURE &&
+        has_current_check_condition_sense(completion, sense) &&
+        completion->sense_length >= 18 &&
+        completion->sense[0] == 0x70 &&
+        completion->sense[2] == 0x05 &&
+        completion->sense[7] >= 10 &&
+        completion->sense_length >= 8U + completion->sense[7] &&
+        sense->asc == 0x21 && sense->ascq == 0x00;
 }
 
 static const char *endpoint_probe_failure_name(
@@ -1194,6 +1233,14 @@ static const char *endpoint_probe_failure_name(
     case BACKEND_READ_MEDIUM_ERROR:
         return "medium_error";
     case BACKEND_READ_TERMINAL_FAILURE:
+        if (result->failure.category == READ_FAILURE_UNKNOWN &&
+            result->failure.sense.has_asc &&
+            result->failure.sense.has_ascq &&
+            result->failure.sense.sense_key == 0x05 &&
+            result->failure.sense.asc == 0x21 &&
+            result->failure.sense.ascq == 0x00) {
+            return "invalid_out_of_range_evidence";
+        }
         return read_failure_category_name(result->failure.category);
     case BACKEND_READ_OUT_OF_RANGE_ERROR:
         return "conflicting_out_of_range";
@@ -1255,9 +1302,7 @@ static int prove_normal_endpoint(struct read_backend *backend,
                     first_excluded_lba);
             return 1;
         }
-        if (result.status != BACKEND_READ_OUT_OF_RANGE_ERROR ||
-            !result.failure.sense.has_information_lba ||
-            result.failure.sense.information_lba != first_excluded_lba) {
+        if (!is_normal_endpoint_out_of_range(&result, first_excluded_lba)) {
             fprintf(stderr,
                     "DVD endpoint probe rejected first excluded LBA %" PRIu64
                     ": %s\n",

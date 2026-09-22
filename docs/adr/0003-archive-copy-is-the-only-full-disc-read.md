@@ -15,6 +15,22 @@ hardware, protection, readiness, unit-attention, unclassified end-of-input,
 malformed, and conflicting responses all fail closed. The proof is persisted
 as versioned Archive Boundary Evidence independently of Archive Integrity.
 
+For a normal endpoint only, a complete current fixed-format response with
+`ILLEGAL REQUEST / 21h/00h` and VALID clear may use the known single-sector
+request address. Information bytes with VALID clear are ignored. Both responses
+must agree on whether valid address evidence is present; when present, that
+address must match the first excluded block. Truncated records, overflow flags,
+and descriptor-format responses without valid address evidence do not qualify
+for this fallback. The general read classifier and corrected-boundary recovery
+still require a valid information LBA inside the request, including for
+multi-sector failures.
+
+The existing `dvd-normal-endpoint-proof-v1` contract records the requested
+`firstExcludedLba` and normalized completion evidence, not an information LBA.
+Its schema and version remain unchanged because this rule preserves two
+matching out-of-range responses at the independently selected endpoint. The
+`scsi-read-classifier-v2` classification of copy and rescue failures is unchanged.
+
 A smaller file is complete only when versioned, structured
 logical-block-address-out-of-range evidence proves a sector-precise trailing
 boundary and a bounded ISO or UDF and DVD-Video extent proof establishes that
