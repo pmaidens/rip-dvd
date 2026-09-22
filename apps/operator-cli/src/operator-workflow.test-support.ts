@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createDataAccess } from "@rip-dvd/data-access";
+import type { CatalogMetadataLookup } from "@rip-dvd/application";
 
 import { runCommand } from "./command.js";
 
@@ -25,11 +26,12 @@ export function createOperatorWorkflowFixture() {
     mediaLibraryPath,
     originalsLibraryPath,
     openAccess,
-    run(args: readonly string[]) {
+    async run(args: readonly string[], lookup?: CatalogMetadataLookup | null) {
       const stdout: string[] = [];
       const stderr: string[] = [];
-      const exitCode = runCommand(args, {
+      const exitCode = await runCommand(args, {
         openAccess,
+        ...(lookup === undefined ? {} : { getLookup: () => lookup }),
         stdout: (text) => stdout.push(text),
         stderr: (text) => stderr.push(text),
       });

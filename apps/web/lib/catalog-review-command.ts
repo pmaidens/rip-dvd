@@ -12,6 +12,21 @@ import {
 } from "@rip-dvd/data-access/dvd-scan";
 import { createDiscSelectionSourceIdentity } from "@rip-dvd/data-access/disc-selection-source-identity";
 
+import type {
+  CatalogReviewMediaItemInput,
+  CatalogReviewProposedDiscSelectionInput,
+  CatalogReviewMappingTarget,
+  CatalogReviewEpisodicTvShowTarget,
+  CatalogReviewEpisodicSeasonTarget,
+} from "@rip-dvd/application";
+export type {
+  CatalogReviewMediaItemInput,
+  CatalogReviewProposedDiscSelectionInput,
+  CatalogReviewMappingTarget,
+  CatalogReviewEpisodicTvShowTarget,
+  CatalogReviewEpisodicSeasonTarget,
+} from "@rip-dvd/application";
+
 export const CATALOG_REVIEW_COMMAND_ACTIONS = [
   "create_episodic_mapping_proposal",
   "create_mapping_proposal",
@@ -29,16 +44,6 @@ export const MAX_CATALOG_REVIEW_REPLACEMENT_ENCODES = 100;
 
 export interface CatalogReviewCommandDomainValues {
   mediaItemKinds: readonly MediaItemKind[];
-}
-
-export interface CatalogReviewMediaItemInput {
-  parentId?: string | null;
-  kind: MediaItemKind;
-  title: string;
-  year?: number | null;
-  seasonNumber?: number | null;
-  episodeNumber?: number | null;
-  tmdbIdentity?: TmdbIdentity;
 }
 
 type AtLeastOne<T> = {
@@ -71,46 +76,6 @@ export type CatalogReviewDiscSelectionChanges =
     | { sourceIdentity: DiscSelectionSourceIdentityInput }
     | { label: string | null }
   );
-
-export interface CatalogReviewProposedDiscSelectionInput {
-  sourceIdentity: DiscSelectionSourceIdentityInput;
-  label?: string;
-}
-
-export type CatalogReviewMappingTarget =
-  | {
-    choice: "create_new";
-    mediaItem: CatalogReviewMediaItemInput;
-  }
-  | {
-    choice: "use_existing";
-    mediaItemId: string;
-    tmdbIdentity?: TmdbIdentity;
-  };
-
-export type CatalogReviewEpisodicTvShowTarget =
-  | {
-    choice: "create_new";
-    title: string;
-    year?: number | null;
-    tmdbIdentity?: TmdbIdentity;
-  }
-  | {
-    choice: "use_existing";
-    mediaItemId: string;
-    tmdbIdentity?: TmdbIdentity;
-  };
-
-export type CatalogReviewEpisodicSeasonTarget =
-  | {
-    choice: "create_new";
-    title: string;
-    seasonNumber: number;
-  }
-  | {
-    choice: "use_existing";
-    mediaItemId: string;
-  };
 
 export interface CatalogReviewEpisodicEpisodeInput {
   titleNumber: number;

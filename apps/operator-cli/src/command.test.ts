@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, expect, it } from "vitest";
+import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 
 import { createApplicationOperations } from "@rip-dvd/application";
 
@@ -22,8 +23,8 @@ afterEach(() => {
   }
 });
 
-it("reports database health as JSON through the public command runner", () => {
-  const result = fixture().run(["health"]);
+it("reports database health as JSON through the public command runner", async () => {
+  const result = await fixture().run(["health"]);
 
   expect(result.exitCode).toBe(0);
   expect(result.stderr).toBe("");
@@ -36,7 +37,7 @@ it("reports database health as JSON through the public command runner", () => {
   });
 });
 
-it("reports deployment readiness from persisted Optical Drive and Disc Inspection state", () => {
+it("reports deployment readiness from persisted Optical Drive and Disc Inspection state", async () => {
   const current = fixture();
   const seed = current.openAccess();
   const drive = seed.catalog.upsertOpticalDrive({
@@ -51,7 +52,7 @@ it("reports deployment readiness from persisted Optical Drive and Disc Inspectio
     mediaCapacityBytes: 2_048,
   }).inspection;
   seed.close();
-  const result = current.run(["readiness"]);
+  const result = await current.run(["readiness"]);
 
   expect(result.exitCode).toBe(0);
   expect(result.stderr).toBe("");
@@ -68,7 +69,98 @@ it("reports deployment readiness from persisted Optical Drive and Disc Inspectio
   });
 });
 
-it("discovers commands and rejects unsupported invocations without opening SQLite", () => {
+it("inspects a Catalog Review and exposes metadata candidates through read-only commands", async () => {
+  const current = fixture();
+  const seed = createLegacySidecarDataAccess({
+    databasePath: current.databasePath,
+    mediaLibraryPath: current.mediaLibraryPath,
+    originalsLibraryPath: current.originalsLibraryPath,
+  });
+  const drive = seed.catalog.upsertOpticalDrive({ devicePath: "/dev/synthetic-disc", isPresent: true });
+  const contentId = `sha256:${"a".repeat(64)}`;
+  const disc = seed.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint: contentId,
+    volumeLabel: "EXAMPLE_FILM_2020",
+    scanData: {
+      schemaVersion: 2,
+      contentId,
+      titles: [{ number: 1, durationSeconds: 5_400, chapters: 12, audioStreams: [], subtitles: [] }],
+    },
+  });
+  seed.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  seed.catalog.updateDetectedDiscStatus(disc.id, "approved");
+  const archive = seed.catalog.createOriginalDiscArchive({
+    detectedDiscId: disc.id,
+    discKind: "dvd",
+    archiveFormat: "iso",
+    archivePath: "/media/originals/example-film.iso",
+    fingerprint: contentId,
+  });
+  seed.close();
+
+  const detail = await current.run(["catalog-review", "show", archive.id]);
+  expect(detail.exitCode).toBe(0);
+  expect(detail.result).toMatchObject({
+    catalogRevision: archive.updatedAt.toISOString(),
+    archive: { id: archive.id, discLabel: "EXAMPLE_FILM_2020" },
+    correctionHistory: [],
+    discSelections: [],
+  });
+
+  const suggestion = await current.run(
+    ["catalog-review", "suggest", archive.id],
+    { search: async () => [{ id: 42, kind: "movie", title: "Example Film", year: 2020 }],
+      getTvDetails: async () => ({ seasons: [] }),
+      getTvSeason: async () => { throw new Error("Unexpected season request"); } },
+  );
+  expect(suggestion.exitCode).toBe(0);
+  expect(suggestion.result).toMatchObject({
+    status: "ready",
+    candidates: [{ id: 42, kind: "movie", title: "Example Film", year: 2020 }],
+    proposal: { kind: "movie", tmdbId: 42 },
+  });
+  const selected = await current.run(
+    ["catalog-review", "suggest", archive.id, "--tmdb-id", "42", "--media-type", "movie"],
+    { search: async () => [{ id: 42, kind: "movie", title: "Example Film", year: 2020 }],
+      getTvDetails: async () => ({ seasons: [] }),
+      getTvSeason: async () => { throw new Error("Unexpected season request"); } },
+  );
+  expect(selected.result).toMatchObject({ status: "ready", proposal: { tmdbId: 42 } });
+
+  const after = current.openAccess();
+  expect(after.catalog.listDiscSelections({ originalDiscArchiveId: archive.id })).toEqual([]);
+  after.close();
+
+  const invalidOffset = await current.run(["catalog-review", "show", archive.id, "--selection-offset", "-1"]);
+  expect(invalidOffset.exitCode).toBe(2);
+  expect(invalidOffset.result).toEqual({
+    error: { code: "INVALID_ARGUMENTS", message: "Invalid Catalog Review offset." },
+  });
+  const missing = await current.run(["catalog-review", "show", "missing-archive"]);
+  expect(missing.exitCode).toBe(2);
+  expect(missing.result).toEqual({
+    error: { code: "REVIEW_NOT_FOUND", message: "Original Disc Archive not found." },
+  });
+
+  const entry = fileURLToPath(new URL("../dist/entry.js", import.meta.url));
+  const processResult = spawnSync(process.execPath, [entry, "catalog-review", "show", archive.id], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      NODE_NO_WARNINGS: "1",
+      RIP_DVD_DATABASE_PATH: current.databasePath,
+      RIP_DVD_MEDIA_LIBRARY_PATH: current.mediaLibraryPath,
+      RIP_DVD_ORIGINALS_LIBRARY_PATH: current.originalsLibraryPath,
+    },
+  });
+  expect(processResult.status).toBe(0);
+  expect(processResult.stderr).toBe("");
+  expect(JSON.parse(processResult.stdout)).toEqual(detail.result);
+});
+
+it("discovers commands and rejects unsupported invocations without opening SQLite", async () => {
   const stdout: string[] = [];
   const io = {
     openAccess: () => { throw new Error("should not open SQLite"); },
@@ -76,7 +168,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
     stderr: () => {},
   };
 
-  expect(runCommand([], io)).toBe(0);
+  expect(await runCommand([], io)).toBe(0);
   expect(JSON.parse(stdout.pop()!)).toMatchObject({
     schemaVersion: 1,
     usage: "rip-dvd-operator <command>",
@@ -85,36 +177,37 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       expect.objectContaining({ name: "readiness", example: "rip-dvd-operator readiness" }),
     ]),
   });
-  expect(runCommand(["commands"], io)).toBe(0);
+  expect(await runCommand(["commands"], io)).toBe(0);
   expect(JSON.parse(stdout.pop()!)).toEqual({
     schemaVersion: 1,
     commands: [
       "generate-key",
       "submit-archive-request",
+      "catalog-review",
       "health",
       "readiness",
       "commands",
       "help",
     ],
   });
-  expect(runCommand(["health", "--help"], io)).toBe(0);
+  expect(await runCommand(["health", "--help"], io)).toBe(0);
   expect(JSON.parse(stdout.pop()!)).toMatchObject({
     command: { name: "health", usage: "rip-dvd-operator health" },
   });
-  expect(runCommand(["health", "--unexpected"], io)).toBe(2);
+  expect(await runCommand(["health", "--unexpected"], io)).toBe(2);
   expect(JSON.parse(stdout.pop()!)).toEqual({
     error: { code: "INVALID_ARGUMENTS", message: "health takes no arguments." },
   });
-  expect(runCommand(["retired-command"], io)).toBe(2);
+  expect(await runCommand(["retired-command"], io)).toBe(2);
   expect(JSON.parse(stdout.pop()!)).toEqual({
     error: { code: "UNKNOWN_COMMAND", message: "Unknown command." },
   });
 });
 
-it("returns a stable failure without exposing database errors", () => {
+it("returns a stable failure without exposing database errors", async () => {
   const stdout: string[] = [];
   const stderr: string[] = [];
-  const exitCode = runCommand(["health"], {
+  const exitCode = await runCommand(["health"], {
     openAccess: () => { throw new Error("private path and SQLite detail"); },
     stdout: (text) => stdout.push(text),
     stderr: (text) => stderr.push(text),

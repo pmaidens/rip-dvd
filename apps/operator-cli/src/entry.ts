@@ -4,7 +4,7 @@ import { loadConfig } from "@rip-dvd/config";
 
 import { CommandFailure, runCommand } from "./command.js";
 
-process.exitCode = runCommand(process.argv.slice(2), {
+process.exitCode = await runCommand(process.argv.slice(2), {
   openAccess: () => {
     let config;
     try {

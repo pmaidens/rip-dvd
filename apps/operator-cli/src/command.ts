@@ -1,14 +1,20 @@
 import {
   createApplicationOperations,
+  createTmdbCatalogLookup,
   generateMutationKey,
   InvalidMutationKeyError,
   parseMutationKey,
+  tmdbCredentialFromEnvironment,
+  type CatalogMetadataLookup,
+  type CatalogMetadataSelection,
+  type CatalogReviewPageCoordinates,
 } from "@rip-dvd/application";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
   MutationKeyConflictError,
   RecordNotFoundError,
+  type OriginalDiscArchiveId,
   type DataAccess,
 } from "@rip-dvd/data-access";
 
@@ -16,6 +22,7 @@ export type CommandExitCode = 0 | 1 | 2;
 
 interface CommandIO {
   openAccess(): DataAccess;
+  getLookup?(): CatalogMetadataLookup | null;
   stdout(text: string): void;
   stderr(text: string): void;
 }
@@ -34,6 +41,19 @@ const commandDefinitions = [
     usage: "rip-dvd-operator submit-archive-request --key <key> --detected-disc-id <id>",
     inputs: { arguments: [], options: ["--key", "--detected-disc-id"] },
     example: "rip-dvd-operator submit-archive-request --key 00000000-0000-4000-8000-000000000001 --detected-disc-id <id>",
+  },
+  {
+    name: "catalog-review",
+    description: "Inspect an archive's Catalog Review or discover metadata candidates.",
+    usage: "rip-dvd-operator catalog-review <show|suggest> <archive-id> [options]",
+    inputs: {
+      arguments: ["show|suggest", "archive-id"],
+      options: [
+        "show: --selection-offset, --correction-offset, --correction-job-offset, --correction-output-offset, --replacement-offset, --replacement-profile-offset",
+        "suggest: --tmdb-id <positive integer> --media-type <movie|tv_show> (together, optional)",
+      ],
+    },
+    example: "rip-dvd-operator catalog-review show <archive-id>",
   },
   {
     name: "health",
@@ -190,7 +210,117 @@ function submitArchiveRequest(
   }
 }
 
-export function runCommand(args: readonly string[], io: CommandIO): CommandExitCode {
+const reviewOffsets = {
+  "--selection-offset": "discSelectionOffset",
+  "--correction-offset": "correctionHistoryOffset",
+  "--correction-job-offset": "correctionEncodeHistoryOffset",
+  "--correction-output-offset": "correctionRetainedOutputHistoryOffset",
+  "--replacement-offset": "replacementOffset",
+  "--replacement-profile-offset": "replacementProfileOffset",
+} as const;
+
+function positiveInteger(value: string | undefined): number | null {
+  if (value === undefined || !/^[1-9]\d*$/.test(value)) return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) ? number : null;
+}
+
+function nonnegativeInteger(value: string | undefined): number | null {
+  if (value === undefined || !/^(0|[1-9]\d*)$/.test(value)) return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) ? number : null;
+}
+
+function reviewArguments(rest: readonly string[]):
+  | { action: "show"; id: OriginalDiscArchiveId; coordinates: CatalogReviewPageCoordinates }
+  | { action: "suggest"; id: OriginalDiscArchiveId; selection?: CatalogMetadataSelection } {
+  const [action, id, ...options] = rest;
+  if (action !== "show" && action !== "suggest") {
+    throw new CommandFailure("INVALID_ARGUMENTS", "Expected catalog-review show or suggest.", 2);
+  }
+  if (!id || id.trim().length === 0 || id.length > 256) {
+    throw new CommandFailure("INVALID_ARGUMENTS", "A valid archive ID is required.", 2);
+  }
+  if (options.length % 2 !== 0) {
+    throw new CommandFailure("INVALID_ARGUMENTS", "Catalog Review options require values.", 2);
+  }
+  const parsed = new Map<string, string>();
+  for (let index = 0; index < options.length; index += 2) {
+    const key = options[index]!;
+    if (parsed.has(key)) {
+      throw new CommandFailure("INVALID_ARGUMENTS", "Catalog Review options must be unique.", 2);
+    }
+    parsed.set(key, options[index + 1]!);
+  }
+  if (action === "show") {
+    const coordinates: CatalogReviewPageCoordinates = {
+      discSelectionOffset: 0,
+      correctionHistoryOffset: 0,
+      correctionEncodeHistoryOffset: 0,
+      correctionRetainedOutputHistoryOffset: 0,
+      replacementOffset: 0,
+      replacementProfileOffset: 0,
+    };
+    for (const [key, value] of parsed) {
+      const field = reviewOffsets[key as keyof typeof reviewOffsets];
+      const offset = nonnegativeInteger(value);
+      if (field === undefined || offset === null) {
+        throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Catalog Review offset.", 2);
+      }
+      coordinates[field] = offset;
+    }
+    return { action, id: id as OriginalDiscArchiveId, coordinates };
+  }
+  if ([...parsed.keys()].some((key) => key !== "--tmdb-id" && key !== "--media-type")) {
+    throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Catalog suggestion option.", 2);
+  }
+  const tmdbId = parsed.get("--tmdb-id");
+  const mediaType = parsed.get("--media-type");
+  if ((tmdbId === undefined) !== (mediaType === undefined)) {
+    throw new CommandFailure("INVALID_ARGUMENTS", "TMDB ID and media type must be supplied together.", 2);
+  }
+  let selection: CatalogMetadataSelection | undefined;
+  if (tmdbId !== undefined) {
+    const number = positiveInteger(tmdbId);
+    if (number === null || (mediaType !== "movie" && mediaType !== "tv_show")) {
+      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid TMDB selection.", 2);
+    }
+    selection = { id: number, kind: mediaType };
+  }
+  return { action, id: id as OriginalDiscArchiveId, selection };
+}
+
+async function runCatalogReview(rest: readonly string[], io: CommandIO) {
+  const input = reviewArguments(rest);
+  let access: DataAccess | undefined;
+  try {
+    access = io.openAccess();
+    const operations = createApplicationOperations(access);
+    const credential = tmdbCredentialFromEnvironment();
+    const result = input.action === "show"
+      ? operations.catalogReview(
+        input.id,
+        input.coordinates,
+        credential !== null,
+      )
+      : await operations.catalogSuggestion(
+        input.id,
+        io.getLookup ? io.getLookup() : credential === null ? null : createTmdbCatalogLookup(credential),
+        input.selection,
+      );
+    if (result === null) {
+      throw new CommandFailure("REVIEW_NOT_FOUND", "Original Disc Archive not found.", 2);
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    throw new CommandFailure("CATALOG_REVIEW_UNAVAILABLE", "Catalog Review is unavailable.", 1);
+  } finally {
+    access?.close();
+  }
+}
+
+export async function runCommand(args: readonly string[], io: CommandIO): Promise<CommandExitCode> {
   try {
     const [name, ...rest] = args;
     if (name === undefined || name === "help" || name === "--help" || name === "-h") {
@@ -223,6 +353,14 @@ export function runCommand(args: readonly string[], io: CommandIO): CommandExitC
         return 0;
       }
       emit(io.stdout, submitArchiveRequest(submissionInputs(rest), io.openAccess));
+      return 0;
+    }
+    if (name === "catalog-review") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+        return 0;
+      }
+      emit(io.stdout, await runCatalogReview(rest, io));
       return 0;
     }
     if (name !== "health" && name !== "readiness") {
