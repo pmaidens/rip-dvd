@@ -989,8 +989,9 @@ sudo install -d -o 1000 -g 1000 -m 0775 .local/media .local/originals
 
 Existing library directories should keep their intended ownership; grant UID
 1000 write access through their owner, group, or ACL rather than changing them
-blindly. The web runtime mounts both libraries read-only, while the archive
-worker writes originals and the encode worker writes media.
+blindly. The web runtime has no library mounts. The archive worker reads media
+and writes originals, the encode worker reads originals and writes media, and
+the operator CLI mounts both libraries read-only.
 
 After building the worker images, exercise their configured image commands and
 output mounts as the non-root user with fresh named-volume and bind-mount
