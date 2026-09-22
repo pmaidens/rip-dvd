@@ -136,7 +136,7 @@ it("rejects invalid sources and protects locked Encode Job provenance", async ()
   const selectionId = (created.result as { discSelection: { id: string } }).discSelection.id;
   const access = current.openAccess();
   const profile = access.encodingProfiles.create({ key: "synthetic-profile", displayName: "Synthetic profile",
-    mediaDomain: "dvd_video", settings: {} });
+    mediaDomain: "dvd_video", settings: { preset: "Fast 480p30" } });
   access.catalog.completeCatalogReview(archive.id,
     access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt, "reviewed_with_selections");
   access.encodeJobs.enqueue({ discSelectionId: selectionId as Parameters<typeof access.encodeJobs.enqueue>[0]["discSelectionId"],
