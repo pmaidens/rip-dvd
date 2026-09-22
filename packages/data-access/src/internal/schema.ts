@@ -232,6 +232,8 @@ export const discInspections = sqliteTable(
     uniqueIndex("disc_inspections_current_drive_unique")
       .on(table.opticalDriveId)
       .where(sql`${table.isCurrent} = 1`),
+    index("disc_inspections_drive_created_idx").on(table.opticalDriveId, table.createdAt),
+    index("disc_inspections_disc_created_idx").on(table.detectedDiscId, table.createdAt),
     index("disc_inspections_status_idx").on(table.status, table.updatedAt),
     check(
       "disc_inspections_status_check",
@@ -351,6 +353,7 @@ export const archiveRequests = sqliteTable(
     uniqueIndex("archive_requests_nonterminal_disc_unique")
       .on(table.detectedDiscId)
       .where(sql`${table.status} in ('pending', 'running', 'needs_attention', 'cancellation_requested')`),
+    index("archive_requests_disc_created_idx").on(table.detectedDiscId, table.createdAt),
     index("archive_requests_status_idx").on(
       table.status,
       table.priority,
@@ -793,6 +796,9 @@ export const archiveJobs = sqliteTable(
       table.archiveRequestId,
       table.attemptOrdinal,
     ),
+    index("archive_jobs_inspection_created_idx").on(table.discInspectionId, table.createdAt),
+    index("archive_jobs_archive_created_idx").on(table.originalDiscArchiveId, table.createdAt),
+    index("archive_jobs_disc_created_idx").on(table.detectedDiscId, table.createdAt),
     check(
       "archive_jobs_status_check",
       sql`${table.status} in (${sqliteStringLiterals(ARCHIVE_JOB_STATUSES)})`,
@@ -909,6 +915,7 @@ export const encodeJobs = sqliteTable(
     uniqueIndex("encode_jobs_initial_selection_profile_unique")
       .on(table.discSelectionId, table.encodingProfileId)
       .where(sql`${table.predecessorEncodeJobId} is null`),
+    index("encode_jobs_selection_created_idx").on(table.discSelectionId, table.createdAt),
     uniqueIndex("encode_jobs_output_path_unique")
       .on(table.outputPath)
       .where(sql`${table.reservesOutputPath} = 1`),

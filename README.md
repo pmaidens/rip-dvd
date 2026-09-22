@@ -426,8 +426,8 @@ Run the commands in the Compose deployment with:
 docker compose --profile maintenance run --rm operator-cli health
 docker compose --profile maintenance run --rm operator-cli readiness
 docker compose --profile maintenance run --rm operator-cli inspect disc-inspections
-docker compose --profile maintenance run --rm operator-cli inspect archive-requests <request-id>
-docker compose --profile maintenance run --rm operator-cli wait archive-requests <request-id> --timeout-ms 30000
+docker compose --profile maintenance run --rm operator-cli inspect archive-requests synthetic-request-id
+docker compose --profile maintenance run --rm operator-cli wait archive-requests synthetic-request-id --timeout-ms 30000
 docker compose --profile maintenance run --rm operator-cli help
 ```
 

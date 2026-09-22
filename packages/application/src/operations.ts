@@ -153,7 +153,7 @@ function inspectionActions(inspection: DiscInspection) {
   }];
 }
 
-function encodeActions(job: EncodeJob, requeueable: boolean) {
+function encodeActions(job: EncodeJob, requeueBlocker: string | null) {
   const terminal = ["completed", "failed", "cancelled"].includes(job.status);
   return [{
     name: "request-cancellation",
@@ -162,9 +162,8 @@ function encodeActions(job: EncodeJob, requeueable: boolean) {
       `Encode Job is ${job.status}.`,
   }, {
     name: "requeue",
-    eligible: terminal && requeueable,
-    reason: !terminal ? `Encode Job is ${job.status}.` : requeueable ? null :
-      "Requires an active Disc Selection with completed Catalog Review.",
+    eligible: terminal && requeueBlocker === null,
+    reason: !terminal ? `Encode Job is ${job.status}.` : requeueBlocker,
   }, {
     name: "verify-output",
     eligible: true,
@@ -341,9 +340,20 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
       const job = access.encodeJobs.find(id as EncodeJobId);
       if (!job) return null;
       const selection = access.catalog.listDiscSelections({ ids: [job.discSelectionId] })[0];
-      const requeueable = access.catalog.listDiscSelections({
+      const requeueSelectionEligible = access.catalog.listDiscSelections({
         ids: [job.discSelectionId], encodeEligibleOnly: true,
       }).length > 0;
+      const requeueBlocker = !requeueSelectionEligible
+        ? "Requires an active Disc Selection with completed Catalog Review."
+        : job.partialCleanupOutputPath !== null ||
+            job.partialCleanupClaimToken !== null ||
+            job.partialCleanupLeaseToken !== null
+          ? "Encode Job has pending output cleanup."
+          : job.publicationPending
+            ? "Encode Job has pending output publication."
+            : access.encodeJobs.hasReservedOutputPathConflict(job)
+              ? "Encode Job output is reserved by another job."
+              : null;
       const correctionLinks = access.encodeJobs.listCorrectionLinks([job.id]);
       return {
         ...visibleEncodeJob(job),
@@ -356,7 +366,7 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
           .map(visibleEncodeJob),
         correctionLinks: correctionLinks.map(visibleEncodeJob),
         retainedOutputs: access.encodeJobs.listRetainedOutputSummaries([job.id]),
-        availableActions: encodeActions(job, requeueable),
+        availableActions: encodeActions(job, requeueBlocker),
       };
     }
     case "worker-incidents": {

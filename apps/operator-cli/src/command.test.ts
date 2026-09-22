@@ -392,8 +392,21 @@ it("reports encode action eligibility and correction evidence through the public
 
   const writer = current.openAccess();
   const claimed = writer.encodeJobs.claimNext("synthetic-encode-worker")!;
+  const cleanup = writer.encodeJobs.registerPartialCleanup(claimed);
   writer.encodeJobs.fail(claimed, "Synthetic encode failure");
   writer.close();
+  expect(current.run(["inspect", "encode-jobs", job.id]).result).toMatchObject({ item: {
+    status: "failed",
+    availableActions: expect.arrayContaining([
+      expect.objectContaining({
+        name: "requeue", eligible: false,
+        reason: "Encode Job has pending output cleanup.",
+      }),
+    ]),
+  } });
+  const cleanupWriter = current.openAccess();
+  cleanupWriter.encodeJobs.completePartialCleanup(cleanup);
+  cleanupWriter.close();
   expect(current.run(["inspect", "encode-jobs", job.id]).result).toMatchObject({ item: {
     status: "failed",
     availableActions: expect.arrayContaining([

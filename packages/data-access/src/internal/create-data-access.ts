@@ -4178,7 +4178,7 @@ export function createDataAccessInternal(
           list: (options) => access.discInspections.list(options),
           listAttempts: (id) => access.discInspections.listAttempts(id),
         },
-      archiveRequests: {
+        archiveRequests: {
           find: (id) => access.archiveRequests.find(id),
           list: (statuses, options) =>
             access.archiveRequests.list(statuses, options),
@@ -4202,6 +4202,8 @@ export function createDataAccessInternal(
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
           listForDiscSelection: (id) =>
             access.encodeJobs.listForDiscSelection(id),
+          hasReservedOutputPathConflict: (job) =>
+            access.encodeJobs.hasReservedOutputPathConflict(job),
           resolveQueueLogicalJobs: (options) =>
             access.encodeJobs.resolveQueueLogicalJobs(options),
           listQueueDiscSelections: (options) =>
@@ -9331,6 +9333,14 @@ export function createDataAccessInternal(
           .where(eq(encodeJobs.discSelectionId, id))
           .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
           .all();
+      },
+      hasReservedOutputPathConflict(job) {
+        return database.select({ id: encodeJobs.id }).from(encodeJobs)
+          .where(and(
+            eq(encodeJobs.outputPath, job.outputPath),
+            eq(encodeJobs.reservesOutputPath, true),
+            ne(encodeJobs.id, job.id),
+          )).limit(1).get() !== undefined;
       },
       resolveQueueLogicalJobs(options) {
         if (
