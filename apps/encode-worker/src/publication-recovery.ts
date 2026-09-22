@@ -25,9 +25,9 @@ import { createRequire } from "node:module";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { isHandBrakePreset } from "@rip-dvd/config";
 import {
   decodeArchivedDvdTitles,
+  encodingProfileSettingsBlockingReasons,
   ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
   ENCODE_JOB_LEASE_DURATION_MS,
   type DataAccess,
@@ -1815,9 +1815,7 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
       !profile ||
       profile.mediaDomain !== "dvd_video" ||
       typeof preset !== "string" ||
-      !isHandBrakePreset(preset) ||
-      (profile.settings.container !== undefined &&
-        profile.settings.container !== "mkv")
+      encodingProfileSettingsBlockingReasons(profile.settings).length > 0
     ) {
       throw new ClassifiedEncodeFailureError(
         "Encode Job has invalid DVD video profile settings",

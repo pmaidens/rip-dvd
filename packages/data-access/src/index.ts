@@ -35,8 +35,14 @@ export type {
   NormalDvdArchiveBoundaryEvidence,
 } from "./archive-boundary.js";
 export { normalizeMediaItemSearchTitle } from "./media-item-title-search.js";
-export { encodingProfileQueueBlockingReasons } from "./encoding-profile-eligibility.js";
-export type { EncodingProfileQueueBlockingReason } from "./encoding-profile-eligibility.js";
+export {
+  encodingProfileQueueBlockingReasons,
+  encodingProfileSettingsBlockingReasons,
+} from "./encoding-profile-eligibility.js";
+export type {
+  EncodingProfileQueueBlockingReason,
+  EncodingProfileSettingsBlockingReason,
+} from "./encoding-profile-eligibility.js";
 export {
   ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH,
   validateEncodeQueueSearchQuery,
