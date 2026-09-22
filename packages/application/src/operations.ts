@@ -60,7 +60,8 @@ function incidents(access: ConsistentReadAccess, limit: number) {
   return WORKER_KINDS.flatMap((workerKind) =>
     access.workerIncidents.list({ workerKind, resolvedLimit: limit })
   ).sort((left, right) =>
-    right.lastObservedAt.getTime() - left.lastObservedAt.getTime() ||
+    (right.resolvedAt ?? right.lastObservedAt).getTime() -
+      (left.resolvedAt ?? left.lastObservedAt).getTime() ||
     right.id.localeCompare(left.id)
   );
 }
@@ -153,8 +154,34 @@ function inspectionActions(inspection: DiscInspection) {
   }];
 }
 
-function encodeActions(job: EncodeJob, requeueBlocker: string | null) {
-  const terminal = ["completed", "failed", "cancelled"].includes(job.status);
+export function encodeRequeueAvailability(
+  access: Pick<ConsistentReadAccess, "encodeJobs">,
+  job: EncodeJob,
+  selectionEligible: boolean,
+) {
+  if (!["completed", "failed", "cancelled"].includes(job.status)) {
+    return { eligible: false, reason: `Encode Job is ${job.status}.` };
+  }
+  if (!selectionEligible) {
+    return {
+      eligible: false,
+      reason: "Requires an active Disc Selection with completed Catalog Review.",
+    };
+  }
+  if (job.partialCleanupOutputPath !== null ||
+    job.partialCleanupClaimToken !== null || job.partialCleanupLeaseToken !== null) {
+    return { eligible: false, reason: "Encode Job has pending output cleanup." };
+  }
+  if (job.publicationPending) {
+    return { eligible: false, reason: "Encode Job has pending output publication." };
+  }
+  if (access.encodeJobs.hasReservedOutputPathConflict(job)) {
+    return { eligible: false, reason: "Encode Job output is reserved by another job." };
+  }
+  return { eligible: true, reason: null };
+}
+
+function encodeActions(job: EncodeJob, requeue: ReturnType<typeof encodeRequeueAvailability>) {
   return [{
     name: "request-cancellation",
     eligible: ["queued", "running"].includes(job.status),
@@ -162,8 +189,7 @@ function encodeActions(job: EncodeJob, requeueBlocker: string | null) {
       `Encode Job is ${job.status}.`,
   }, {
     name: "requeue",
-    eligible: terminal && requeueBlocker === null,
-    reason: !terminal ? `Encode Job is ${job.status}.` : requeueBlocker,
+    ...requeue,
   }, {
     name: "verify-output",
     eligible: true,
@@ -211,7 +237,7 @@ function activity(access: ConsistentReadAccess, limit: number) {
     ...incidents(access, limit).map((item) => ({
       kind: "worker-incidents", id: item.id,
       status: item.resolvedAt === null ? "active" : "recovered",
-      occurredAt: item.lastObservedAt,
+      occurredAt: item.resolvedAt ?? item.lastObservedAt,
     })),
   ];
   return entries.sort((left, right) =>
@@ -343,17 +369,7 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
       const requeueSelectionEligible = access.catalog.listDiscSelections({
         ids: [job.discSelectionId], encodeEligibleOnly: true,
       }).length > 0;
-      const requeueBlocker = !requeueSelectionEligible
-        ? "Requires an active Disc Selection with completed Catalog Review."
-        : job.partialCleanupOutputPath !== null ||
-            job.partialCleanupClaimToken !== null ||
-            job.partialCleanupLeaseToken !== null
-          ? "Encode Job has pending output cleanup."
-          : job.publicationPending
-            ? "Encode Job has pending output publication."
-            : access.encodeJobs.hasReservedOutputPathConflict(job)
-              ? "Encode Job output is reserved by another job."
-              : null;
+      const requeue = encodeRequeueAvailability(access, job, requeueSelectionEligible);
       const correctionLinks = access.encodeJobs.listCorrectionLinks([job.id]);
       return {
         ...visibleEncodeJob(job),
@@ -366,7 +382,7 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
           .map(visibleEncodeJob),
         correctionLinks: correctionLinks.map(visibleEncodeJob),
         retainedOutputs: access.encodeJobs.listRetainedOutputSummaries([job.id]),
-        availableActions: encodeActions(job, requeueBlocker),
+        availableActions: encodeActions(job, requeue),
       };
     }
     case "worker-incidents": {

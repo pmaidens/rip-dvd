@@ -1,3 +1,4 @@
+import { encodeRequeueAvailability } from "@rip-dvd/application";
 import type {
   ArchiveBoundaryEvidence,
   ArchiveFormat,
@@ -161,6 +162,7 @@ export interface DashboardEncodeJob {
     reason: string | null;
   };
   requeueable?: boolean;
+  requeueReason?: string | null;
   failureDetail?: string | null;
   investigations?: readonly DashboardInvestigation[];
   verificationStatus?: FilesystemVerificationStatus | null;
@@ -1874,9 +1876,10 @@ function readDashboardSnapshotRecords(
                     }
                   : undefined;
               const failureReports = failureReportsByJobId.get(job.id) ?? [];
-              const canRequeue = terminalRequeueSelectionIds.has(
-                job.discSelectionId,
+              const requeue = encodeRequeueAvailability(
+                access, job, terminalRequeueSelectionIds.has(job.discSelectionId),
               );
+              const canRequeue = requeue.eligible;
               const structuredInvestigations = failureReports.map((report) =>
                 encodeJobFailureReportInvestigation(job, report, canRequeue)
               );
@@ -1942,6 +1945,7 @@ function readDashboardSnapshotRecords(
                 ...(isTerminalEncodeJobStatus(job.status)
                   ? {
                       requeueable: canRequeue,
+                      requeueReason: requeue.reason,
                     }
                   : {}),
                 failureDetail: formatFailureDetail(job.errorMessage),

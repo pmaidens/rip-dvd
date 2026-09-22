@@ -1,7 +1,7 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "2c3431fb-d168-4430-8cd7-bd7a3c2fdd3e",
+  "id": "14b2e1cb-871b-4629-8584-b62fccd92a66",
   "prevIds": [
     "b5326e6f-25a1-414c-9af7-75022e6655d8"
   ],
@@ -3346,6 +3346,10 @@
         {
           "value": "created_at",
           "isExpression": false
+        },
+        {
+          "value": "id",
+          "isExpression": false
         }
       ],
       "isUnique": false,
@@ -3364,6 +3368,10 @@
         {
           "value": "created_at",
           "isExpression": false
+        },
+        {
+          "value": "id",
+          "isExpression": false
         }
       ],
       "isUnique": false,
@@ -3381,6 +3389,10 @@
         },
         {
           "value": "created_at",
+          "isExpression": false
+        },
+        {
+          "value": "id",
           "isExpression": false
         }
       ],
@@ -3413,6 +3425,10 @@
         },
         {
           "value": "created_at",
+          "isExpression": false
+        },
+        {
+          "value": "id",
           "isExpression": false
         }
       ],
@@ -3530,14 +3546,18 @@
           "isExpression": false
         },
         {
-          "value": "created_at",
+          "value": "updated_at",
+          "isExpression": false
+        },
+        {
+          "value": "id",
           "isExpression": false
         }
       ],
       "isUnique": false,
       "where": null,
       "origin": "manual",
-      "name": "disc_inspections_drive_created_idx",
+      "name": "disc_inspections_drive_updated_idx",
       "entityType": "indexes",
       "table": "disc_inspections"
     },
@@ -3548,14 +3568,18 @@
           "isExpression": false
         },
         {
-          "value": "created_at",
+          "value": "updated_at",
+          "isExpression": false
+        },
+        {
+          "value": "id",
           "isExpression": false
         }
       ],
       "isUnique": false,
       "where": null,
       "origin": "manual",
-      "name": "disc_inspections_disc_created_idx",
+      "name": "disc_inspections_disc_updated_idx",
       "entityType": "indexes",
       "table": "disc_inspections"
     },
@@ -3681,6 +3705,10 @@
         },
         {
           "value": "created_at",
+          "isExpression": false
+        },
+        {
+          "value": "id",
           "isExpression": false
         }
       ],

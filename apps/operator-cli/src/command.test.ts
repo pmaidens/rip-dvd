@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { CatalogMetadataLookup } from "@rip-dvd/application";
 import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
 import {
@@ -23,9 +23,39 @@ function fixture() {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const current of fixtures.splice(0)) {
     current.dispose();
   }
+});
+
+it("dates recovered Worker Incident activity by the recovery event", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-01T00:00:00.000Z"));
+  const current = fixture();
+  const access = current.openAccess();
+  const identity = {
+    workerKind: "archive", reasonCode: "claim_recovery_failure",
+    phase: "claim_recovery", retryability: "automatic", schemaVersion: 1,
+    evidence: { recoveryArea: "expired_archive_job_claim" },
+  } as const;
+  const incident = access.workerIncidents.record(identity);
+  vi.setSystemTime(new Date("2026-09-01T00:00:01.000Z"));
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/synthetic-drive", isEnabled: true, isPresent: true,
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id, discKind: "dvd", fingerprint: "synthetic-incident-disc",
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  access.archiveRequests.create({ detectedDiscId: disc.id });
+  vi.setSystemTime(new Date("2026-09-01T00:00:02.000Z"));
+  access.workerIncidents.resolve(identity);
+  access.close();
+
+  expect((await current.run(["inspect", "activity", "--limit", "1"])).result).toMatchObject({
+    items: [{ kind: "worker-incidents", id: incident.id, status: "recovered" }],
+  });
 });
 
 it("reports database health as JSON through the public command runner", async () => {

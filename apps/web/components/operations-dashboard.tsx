@@ -1495,8 +1495,8 @@ export function DashboardView({
                 {isTerminalEncodeJobStatus(job.status) &&
                     job.requeueable === false ? (
                   <p className="job-progress-detail">
-                    Requeue requires an active Disc Selection with completed
-                    Catalog Review.
+                    {job.requeueReason ??
+                      "Requeue requires an active Disc Selection with completed Catalog Review."}
                   </p>
                 ) : null}
                 <button

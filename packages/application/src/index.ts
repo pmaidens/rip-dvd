@@ -33,6 +33,7 @@ export function generateMutationKey(): string {
 }
 
 export {
+  encodeRequeueAvailability,
   inspectOperations,
   isOperationKind,
   isWaitableKind,
