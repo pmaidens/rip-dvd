@@ -130,10 +130,10 @@ const commandDefinitions = [
       arguments: ["action", "media-item-id for show, preview, update, and delete"],
       options: [
         "search: --query <text> [--offset <number>] [--archive-id <id>]",
-        "preview: <update|delete> <media-item-id>",
+        "preview: <update|delete> <media-item-id>; update also requires change flags or structured input",
         "create: --key <key> --kind <kind> --title <title> [--parent-id, --year, --season-number, --episode-number, --tmdb-id, --tmdb-type]",
         "create/update: --json <object or -> or --file <path> for structured input",
-        "update: <id> --key <key> --acknowledge <preview revision> plus change flags or structured input",
+        "update: <id> --key <key> plus change flags or structured input; use --acknowledge for affected changes",
         "delete: <id> --key <key> --acknowledge <preview revision>",
       ],
     },
@@ -786,42 +786,44 @@ async function runMediaItem(rest: readonly string[], io: CommandIO) {
     if (archiveId !== undefined && (archiveId.trim().length === 0 || archiveId.length > 256)) {
       throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Original Disc Archive ID.", 2);
     }
-    let access: DataAccess | undefined;
-    try {
-      access = io.openAccess();
-      return createApplicationOperations(access).searchMediaItems({
+    return withAccess(io.openAccess, (access) =>
+      createApplicationOperations(access).searchMediaItems({
         query,
         offset,
         ...(archiveId === undefined ? {} : { archiveId: archiveId as OriginalDiscArchiveId }),
-      });
-    } finally {
-      access?.close();
-    }
+      }));
   }
   if (action === "show") {
     if (argumentsAndOptions.length !== 1) {
       throw new CommandFailure("INVALID_ARGUMENTS", "Expected media-item show <id>.", 2);
     }
-    let access: DataAccess | undefined;
-    try {
-      access = io.openAccess();
-      return createApplicationOperations(access).showMediaItem(mediaItemId(argumentsAndOptions[0]));
-    } finally {
-      access?.close();
-    }
+    return withAccess(io.openAccess, (access) =>
+      createApplicationOperations(access).showMediaItem(mediaItemId(argumentsAndOptions[0])));
   }
   if (action === "preview") {
     const [kind, id, ...extra] = argumentsAndOptions;
-    if ((kind !== "update" && kind !== "delete") || extra.length > 0) {
+    if (kind !== "update" && kind !== "delete") {
       throw new CommandFailure("INVALID_ARGUMENTS", "Expected media-item preview <update|delete> <id>.", 2);
     }
-    let access: DataAccess | undefined;
-    try {
-      access = io.openAccess();
-      return createApplicationOperations(access).previewMediaItemChange(mediaItemId(id), kind);
-    } finally {
-      access?.close();
+    let changes: Extract<MediaItemCommand, { action: "update_media_item" }>["changes"] | undefined;
+    if (kind === "delete") {
+      if (extra.length > 0) throw new CommandFailure("INVALID_ARGUMENTS", "Delete preview takes no changes.", 2);
+    } else {
+      const options = mediaOptions(extra);
+      const allowed = ["--json", "--file", "--kind", "--title", "--parent-id", "--year", "--season-number", "--episode-number"];
+      if ([...options.keys()].some((key) => !allowed.includes(key))) {
+        throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Media Item preview option.", 2);
+      }
+      const document = await mediaItemDocument(options, io);
+      const parsed = parseCatalogReviewCommand({ action: "update_media_item", mediaItemId: id,
+        changes: document }, { mediaItemKinds: MEDIA_ITEM_KINDS });
+      if (!parsed.ok || parsed.command.action !== "update_media_item") {
+        throw new CommandFailure("INVALID_INPUT", parsed.ok ? "Invalid Media Item update." : parsed.error, 2);
+      }
+      changes = parsed.command.changes;
     }
+    return withAccess(io.openAccess, (access) =>
+      createApplicationOperations(access).previewMediaItemChange(mediaItemId(id), kind, changes));
   }
   if (action !== "create" && action !== "update" && action !== "delete") {
     throw new CommandFailure("INVALID_ARGUMENTS", "Unknown Media Item action.", 2);
@@ -862,17 +864,12 @@ async function runMediaItem(rest: readonly string[], io: CommandIO) {
     }
     command = parsed.command;
   }
-  let access: DataAccess | undefined;
-  try {
-    access = io.openAccess();
-    return createApplicationOperations(access).mutateMediaItem({
+  return withAccess(io.openAccess, (access) =>
+    createApplicationOperations(access).mutateMediaItem({
       mutationKey,
       command,
       ...(options.has("--acknowledge") ? { acknowledgedRevision: options.get("--acknowledge") } : {}),
-    });
-  } finally {
-    access?.close();
-  }
+    }));
 }
 
 

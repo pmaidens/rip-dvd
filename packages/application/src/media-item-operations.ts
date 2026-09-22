@@ -7,11 +7,12 @@ import {
   type MediaItem,
   type MediaItemId,
   type OriginalDiscArchiveId,
+  type SnapshotCatalogAccess,
 } from "@rip-dvd/data-access";
 
 import { parseMutationKey } from "./mutation-key.js";
 import { serializeMediaItem } from "./catalog-review-read.js";
-import type { CatalogReviewCommand, CatalogReviewMediaItemInput } from "./catalog-review-command.js";
+import type { CatalogReviewCommand, CatalogReviewMediaItemChanges, CatalogReviewMediaItemInput } from "./catalog-review-command.js";
 import { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
 
 export type MediaItemCommand = Extract<CatalogReviewCommand, {
@@ -92,40 +93,59 @@ export function previewMediaItemChange(
   access: DataAccess,
   id: MediaItemId,
   action: "update" | "delete",
+  changes?: CatalogReviewMediaItemChanges,
 ) {
+  if (action === "update" && changes === undefined) {
+    throw new DomainInvariantError("Proposed Media Item changes are required for update preview");
+  }
   return access.readConsistentSnapshot((snapshot) => {
-    const item = snapshot.catalog.listMediaItems({ ids: [id] })[0];
-    if (!item) throw new RecordNotFoundError("media item", id);
-    const maintenance = snapshot.catalog.listMediaItemMaintenance({ ids: [id] })[0];
-    if (!maintenance) throw new DomainInvariantError(`Media Item ${id} is missing maintenance state`);
+    const state = readMediaItemState(snapshot.catalog, id);
+    const proposedInput = changes === undefined ? null : updateInput(changes);
+    let proposedMediaItem = null;
+    let availability: { state: "available" | "unavailable"; reason: string | null } =
+      action === "delete" ? state.maintenance.deletionAvailability
+      : { state: "available", reason: null };
+    if (proposedInput !== null) {
+      try {
+        proposedMediaItem = serializeMediaItem(snapshot.catalog.previewMediaItemUpdate(id, proposedInput));
+      } catch (error) {
+        if (!(error instanceof DomainInvariantError || error instanceof RecordNotFoundError)) throw error;
+        availability = { state: "unavailable", reason: error.message };
+      }
+    }
+    const requiresAcknowledgement = action === "delete" ||
+      state.maintenance.referencedArchiveCount > 0 || state.maintenance.childCount > 0 ||
+      (proposedInput?.parentId !== undefined && proposedInput.parentId !== state.mediaItem.parentId) ||
+      (proposedInput?.kind !== undefined && proposedInput.kind !== state.mediaItem.kind);
     return {
       action,
-      mediaItem: serializeMediaItem(item),
-      tmdbIdentity: snapshot.catalog.findTmdbIdentityByMediaItemId(id),
-      revision: item.updatedAt.toISOString(),
-      maintenance,
+      ...state,
+      proposedMediaItem,
+      requiresAcknowledgement,
+      revision: JSON.stringify({ updatedAt: state.revision,
+        referencedArchiveCount: state.maintenance.referencedArchiveCount,
+        childCount: state.maintenance.childCount, changes: proposedInput }),
       consequence: action === "delete"
         ? "This Media Item and its metadata identity will be removed."
-        : "Changes to this Media Item affect every referencing Original Disc Archive.",
-      availability: action === "delete" ? maintenance.deletionAvailability
-        : { state: "available" as const, reason: null },
+        : `${Object.keys(proposedInput ?? {}).join(", ")} will change for this Media Item` +
+          (state.maintenance.referencedArchiveCount > 0
+            ? ` and ${state.maintenance.referencedArchiveCount} referencing archive(s)` : "") + ".",
+      availability,
     };
   });
 }
 
+function readMediaItemState(catalog: SnapshotCatalogAccess, id: MediaItemId) {
+  const item = catalog.listMediaItems({ ids: [id] })[0];
+  if (!item) throw new RecordNotFoundError("media item", id);
+  const maintenance = catalog.listMediaItemMaintenance({ ids: [id] })[0];
+  if (!maintenance) throw new DomainInvariantError(`Media Item ${id} is missing maintenance state`);
+  return { mediaItem: serializeMediaItem(item), tmdbIdentity: catalog.findTmdbIdentityByMediaItemId(id),
+    revision: item.updatedAt.toISOString(), maintenance };
+}
+
 export function showMediaItem(access: DataAccess, id: MediaItemId) {
-  return access.readConsistentSnapshot((snapshot) => {
-    const item = snapshot.catalog.listMediaItems({ ids: [id] })[0];
-    if (!item) throw new RecordNotFoundError("media item", id);
-    const maintenance = snapshot.catalog.listMediaItemMaintenance({ ids: [id] })[0];
-    if (!maintenance) throw new DomainInvariantError(`Media Item ${id} is missing maintenance state`);
-    return {
-      mediaItem: serializeMediaItem(item),
-      tmdbIdentity: snapshot.catalog.findTmdbIdentityByMediaItemId(id),
-      revision: item.updatedAt.toISOString(),
-      maintenance,
-    };
-  });
+  return access.readConsistentSnapshot((snapshot) => readMediaItemState(snapshot.catalog, id));
 }
 
 export function mutateMediaItem(
@@ -138,24 +158,43 @@ export function mutateMediaItem(
     const item = access.catalog.createMediaItem(createInput(command.mediaItem), { mutationKey });
     return { message: "Media Item created", mediaItem: serializeMediaItem(item) };
   }
-  const revision = typeof input.acknowledgedRevision === "string"
-    ? new Date(input.acknowledgedRevision) : null;
-  if (revision === null || !Number.isSafeInteger(revision.getTime()) ||
-      revision.toISOString() !== input.acknowledgedRevision) {
+  const proposedInput = command.action === "update_media_item" ? updateInput(command.changes) : null;
+  const acknowledged = parseAcknowledgedRevision(input.acknowledgedRevision, proposedInput);
+  if (command.action === "delete_media_item" && acknowledged === null) {
     throw new DomainInvariantError("Preview and acknowledge the current Media Item revision");
   }
-  const expectedUpdatedAt = revision;
+  const options = { mutationKey, requirePreviewIfAffected: true,
+    ...(acknowledged === null ? {} : { expectedUpdatedAt: new Date(acknowledged.updatedAt),
+      expectedReferencedArchiveCount: acknowledged.referencedArchiveCount,
+      expectedChildCount: acknowledged.childCount }) };
   if (command.action === "update_media_item") {
     const item = access.catalog.updateMediaItem(
       command.mediaItemId as MediaItemId,
-      updateInput(command.changes),
-      { mutationKey, expectedUpdatedAt },
+      proposedInput!, options,
     );
     return { message: "Metadata saved", mediaItem: serializeMediaItem(item) };
   }
-  const item = access.catalog.deleteMediaItem(command.mediaItemId as MediaItemId, {
-    mutationKey,
-    expectedUpdatedAt,
-  });
+  const item = access.catalog.deleteMediaItem(command.mediaItemId as MediaItemId, options);
   return { message: "Media Item deleted", mediaItem: serializeMediaItem(item) };
+}
+
+function parseAcknowledgedRevision(value: string | undefined, changes: object | null):
+  { updatedAt: string; referencedArchiveCount: number; childCount: number } | null {
+  if (value === undefined) return null;
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { parsed = null; }
+  if (!parsed || typeof parsed !== "object") {
+    throw new DomainInvariantError("Preview and acknowledge the current Media Item revision");
+  }
+  const state = parsed as Record<string, unknown>;
+  const updatedAt = state.updatedAt;
+  if (typeof updatedAt !== "string" || !Number.isFinite(new Date(updatedAt).getTime()) ||
+      new Date(updatedAt).toISOString() !== updatedAt ||
+      !Number.isSafeInteger(state.referencedArchiveCount) ||
+      !Number.isSafeInteger(state.childCount) ||
+      JSON.stringify(state.changes) !== JSON.stringify(changes)) {
+    throw new DomainInvariantError("Preview and acknowledge the proposed Media Item change");
+  }
+  return { updatedAt, referencedArchiveCount: state.referencedArchiveCount as number,
+    childCount: state.childCount as number };
 }

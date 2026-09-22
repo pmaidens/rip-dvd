@@ -99,10 +99,10 @@ rip-dvd-operator media-item search --query 'Example Film' --offset 0
 rip-dvd-operator media-item show <media-item-id>
 rip-dvd-operator media-item create --key <invocation-key> --kind movie --title 'Example Film' --year 2024
 rip-dvd-operator media-item create --key <invocation-key> --kind tv_show --title 'Example Show' --tmdb-type tv_show --tmdb-id 42
-rip-dvd-operator media-item preview update <media-item-id>
-rip-dvd-operator media-item update <media-item-id> --key <invocation-key> --acknowledge <preview-revision> --title 'Corrected Film'
+rip-dvd-operator media-item preview update <media-item-id> --title 'Corrected Film'
+rip-dvd-operator media-item update <media-item-id> --key <invocation-key> --acknowledge '<preview-revision>' --title 'Corrected Film'
 rip-dvd-operator media-item preview delete <media-item-id>
-rip-dvd-operator media-item delete <media-item-id> --key <invocation-key> --acknowledge <preview-revision>
+rip-dvd-operator media-item delete <media-item-id> --key <invocation-key> --acknowledge '<preview-revision>'
 ```
 
 Create and update also accept `--json '<object>'`, `--json -` for stdin, or
@@ -120,10 +120,13 @@ printf '%s\n' '{"kind":"episode","title":"Pilot","parentId":"<season-id>","episo
 Every mutation needs a key generated before submission with `generate-key`
 or another stable source. Repeating a key and the same inputs returns the
 original result, including after a process restart. A changed operation or
-input with the same key returns `MUTATION_KEY_CONFLICT`. Update and delete
-require a preview revision as `--acknowledge`; a stale revision returns
-`STALE_MEDIA_ITEM_REVISION`. A preview reports whether deletion is available
-and how many archive references or children would be affected. Catalog
+input with the same key returns `MUTATION_KEY_CONFLICT`. Ordinary updates
+to an unused Media Item run directly. Updates that affect a referenced item,
+its children, kind, or parent, and all deletes require a preview revision as
+`--acknowledge`. Preview an update with the same changes you intend to submit;
+quote the returned revision when passing it to the shell. A stale revision
+returns `STALE_MEDIA_ITEM_REVISION`. A preview shows the proposed result,
+eligibility, and the number of direct archive references or children affected. Catalog
 hierarchy, TMDB uniqueness, and reference rules remain enforced during the
 mutation. Validation and eligibility failures return JSON errors with stable
 codes and exit status 2.

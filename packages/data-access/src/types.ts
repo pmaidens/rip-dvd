@@ -556,6 +556,9 @@ export interface CreateMediaItemInput {
 export interface MediaItemMutationOptions {
   mutationKey?: string;
   expectedUpdatedAt?: Date;
+  expectedReferencedArchiveCount?: number;
+  expectedChildCount?: number;
+  requirePreviewIfAffected?: boolean;
 }
 
 interface CreateMappingProposalBaseInput {
@@ -1101,6 +1104,10 @@ export interface CatalogAccess {
     },
     options?: MediaItemMutationOptions,
   ): MediaItem;
+  previewMediaItemUpdate(
+    id: MediaItemId,
+    input: Parameters<CatalogAccess["updateMediaItem"]>[1],
+  ): MediaItem;
   deleteMediaItem(id: MediaItemId, options?: MediaItemMutationOptions): MediaItem;
   listMediaItemMaintenance(options: {
     ids: readonly MediaItemId[];
@@ -1526,6 +1533,7 @@ export type SnapshotCatalogAccess = Pick<
   | "listCatalogReviewArchives"
   | "listMediaItems"
   | "listMediaItemMaintenance"
+  | "previewMediaItemUpdate"
   | "findTmdbIdentityByMediaItemId"
   | "searchMediaItems"
   | "listDiscSelections"

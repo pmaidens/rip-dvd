@@ -250,7 +250,8 @@ export function createApplicationOperations(
     previewMediaItemChange: (
       id: Parameters<typeof previewMediaItemChange>[1],
       action: "update" | "delete",
-    ) => previewMediaItemChange(access, id, action),
+      changes?: Parameters<typeof previewMediaItemChange>[3],
+    ) => previewMediaItemChange(access, id, action, changes),
     mutateMediaItem: (input: {
       mutationKey: unknown;
       command: MediaItemCommand;

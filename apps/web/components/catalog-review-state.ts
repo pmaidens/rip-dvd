@@ -317,10 +317,12 @@ export function useCatalogReviewState({
           pendingMediaItemKeys.current.set(pendingKey, pending);
         }
         if (command.action !== "create_media_item" && pending.revision === undefined) {
+          const changes = command.action === "update_media_item"
+            ? `&changes=${encodeURIComponent(JSON.stringify(command.changes))}` : "";
           const preview = await fetch(
             `/api/media-items/${encodeURIComponent(command.mediaItemId)}?action=${
               command.action === "delete_media_item" ? "delete" : "update"
-            }`,
+            }${changes}`,
             { cache: "no-store" },
           );
           if (!preview.ok) throw new Error("Media Item preview failed");
@@ -329,14 +331,17 @@ export function useCatalogReviewState({
             consequence: string;
             maintenance: { referencedArchiveCount: number };
             availability: { state: string; reason: string | null };
+            requiresAcknowledgement: boolean;
           };
           if (details.availability.state !== "available") {
             throw new Error(details.availability.reason ?? "Media Item change is unavailable");
           }
-          if (!window.confirm(
-            `${details.consequence} Referenced by ${details.maintenance.referencedArchiveCount} archive(s). Continue?`,
-          )) return;
-          pending.revision = details.revision;
+          if (details.requiresAcknowledgement) {
+            if (!window.confirm(
+              `${details.consequence} Referenced by ${details.maintenance.referencedArchiveCount} archive(s). Continue?`,
+            )) return;
+            pending.revision = details.revision;
+          }
         }
         submittedCommand = {
           ...command,

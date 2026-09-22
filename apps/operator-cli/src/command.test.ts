@@ -269,8 +269,13 @@ it("maintains Media Items through keyed flags, structured input, previews, and r
   expect(search.result).toMatchObject({
     results: [{ mediaItem: { id: episodeId }, ancestors: [{ id: show.id }, { id: seasonId }] }],
   });
-  const preview = await current.run(["media-item", "preview", "update", episodeId]);
-  expect(preview.result).toMatchObject({ action: "update", maintenance: { childCount: 0 } });
+  const ordinary = await current.run(["media-item", "update", episodeId,
+    "--key", "media-ordinary-update", "--title", "Pilot Draft"]);
+  expect(ordinary.result).toMatchObject({ mediaItem: { title: "Pilot Draft" } });
+  const preview = await current.run(["media-item", "preview", "update", episodeId,
+    "--title", "Revised Pilot"]);
+  expect(preview.result).toMatchObject({ action: "update", maintenance: { childCount: 0 },
+    proposedMediaItem: { title: "Revised Pilot" }, requiresAcknowledgement: false });
   const revision = (preview.result as { revision: string }).revision;
   const changed = await current.run([
     "media-item", "update", episodeId, "--key", "media-update-001",
@@ -283,7 +288,7 @@ it("maintains Media Items through keyed flags, structured input, previews, and r
   ])).result).toEqual(changed.result);
   const stale = await current.run([
     "media-item", "update", episodeId, "--key", "media-update-002",
-    "--acknowledge", revision, "--title", "Stale Title",
+    "--acknowledge", revision, "--title", "Revised Pilot",
   ]);
   expect(stale.result).toMatchObject({ error: { code: "STALE_MEDIA_ITEM_REVISION" } });
   const after = current.openAccess();

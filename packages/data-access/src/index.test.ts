@@ -3323,6 +3323,7 @@ describe("data-access facade", () => {
       mediaItemId: item.id,
       sourceIdentity: { kind: "main_feature" },
     });
+
     const profile = access.encodingProfiles.create({
       key: "large-catalog",
       displayName: "Large catalog",
@@ -6581,6 +6582,16 @@ describe("data-access facade", () => {
       mediaItemId: item.id,
       sourceIdentity: { kind: "main_feature" },
     });
+
+    expect(() => access.catalog.updateMediaItem(item.id, { title: "Revised movie" }, {
+      expectedUpdatedAt: item.updatedAt,
+      expectedReferencedArchiveCount: 0,
+      expectedChildCount: 0,
+      requirePreviewIfAffected: true,
+    })).toThrow("Media Item changed; preview again before saving");
+    expect(() => access.catalog.updateMediaItem(item.id, { title: "Revised movie" }, {
+      requirePreviewIfAffected: true,
+    })).toThrow("Preview and acknowledge the current Media Item revision");
 
     expect(() => access.catalog.deleteMediaItem(item.id)).toThrow(
       "Media Item deletion is unavailable: 1 Disc Selection reference",

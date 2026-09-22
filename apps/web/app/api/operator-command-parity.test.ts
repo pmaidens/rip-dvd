@@ -440,12 +440,13 @@ it("shares Media Item search, revision previews, keyed mutations, and replay bet
     expect((await fixture.run(["media-item", "search", "--query", "Synthetic Extra"])).result)
       .toEqual(await search.json());
     const preview = await createMediaItemPreviewRoute(
-      new Request(`http://localhost:3000/api/media-items/${itemId}?action=update`),
+      new Request(`http://localhost:3000/api/media-items/${itemId}?action=update&changes=${encodeURIComponent(JSON.stringify({ title: "Synthetic Revised Film" }))}`),
       itemId,
       () => access,
     );
     const previewBody = await preview.json();
-    expect((await fixture.run(["media-item", "preview", "update", itemId])).result)
+    expect((await fixture.run(["media-item", "preview", "update", itemId,
+      "--title", "Synthetic Revised Film"])).result)
       .toEqual(previewBody);
     const missingKey = await route({
       action: "update_media_item", mediaItemId: itemId,
@@ -471,7 +472,7 @@ it("shares Media Item search, revision previews, keyed mutations, and replay bet
     const stale = await route({
       action: "update_media_item", mutationKey: "media-parity-stale",
       mediaItemId: itemId, acknowledgedRevision: previewBody.revision,
-      changes: { title: "Stale replacement" },
+      changes: { title: "Synthetic Revised Film" },
     });
     expect(stale.status).toBe(409);
     expect(access.catalog.listMediaItems({ ids: [itemId as MediaItemId] })[0]?.title)

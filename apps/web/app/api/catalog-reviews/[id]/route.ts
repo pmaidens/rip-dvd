@@ -281,16 +281,7 @@ export async function createCatalogReviewRoute(
         }), 201);
       }
 
-      case "update_media_item": {
-        const payload = typeof body === "object" && body !== null
-          ? body as Record<string, unknown> : {};
-        return response(createApplicationOperations(access).mutateMediaItem({
-          mutationKey: payload.mutationKey,
-          command,
-          acknowledgedRevision: payload.acknowledgedRevision as string | undefined,
-        }));
-      }
-
+      case "update_media_item":
       case "delete_media_item": {
         const payload = typeof body === "object" && body !== null
           ? body as Record<string, unknown> : {};

@@ -198,6 +198,7 @@ import type {
   MediaDomain,
   MediaItem,
   MediaItemMaintenance,
+  MediaItemMutationOptions,
   MediaItemId,
   MediaItemKind,
   OpticalDriveId,
@@ -2370,6 +2371,43 @@ export function createDataAccessInternal(
     }
   }
 
+  function requireMediaItemMaintenanceRevision(
+    maintenance: MediaItemMaintenance,
+    options: MediaItemMutationOptions | undefined,
+  ): void {
+    if ((options?.expectedReferencedArchiveCount !== undefined &&
+        maintenance.referencedArchiveCount !== options.expectedReferencedArchiveCount) ||
+        (options?.expectedChildCount !== undefined &&
+        maintenance.childCount !== options.expectedChildCount)) {
+      throw new DomainInvariantError("Media Item changed; preview again before saving");
+    }
+  }
+
+  function projectMediaItemUpdate(
+    transaction: CatalogTransaction | typeof database,
+    current: MediaItem,
+    input: Parameters<DataAccess["catalog"]["updateMediaItem"]>[1],
+  ): MediaItem {
+    const values = validateMediaItem({
+      ...current,
+      ...input,
+      id: current.id,
+      parentId: input.parentId === undefined ? current.parentId : input.parentId,
+      kind: input.kind === undefined ? current.kind : input.kind,
+      title: input.title === undefined ? current.title : input.title,
+      year: input.year === undefined ? current.year : input.year,
+      seasonNumber: input.seasonNumber === undefined ? current.seasonNumber : input.seasonNumber,
+      episodeNumber: input.episodeNumber === undefined ? current.episodeNumber : input.episodeNumber,
+    }, transaction, { titleNormalization: input.title === undefined ? "preserve" : "trim" });
+    const identity = transaction.select({ mediaType: mediaItemTmdbIdentities.mediaType })
+      .from(mediaItemTmdbIdentities)
+      .where(eq(mediaItemTmdbIdentities.mediaItemId, current.id)).get();
+    if (identity && identity.mediaType !== values.kind) {
+      throw new DomainInvariantError("Media Item kind must match its TMDB identity");
+    }
+    return { ...current, ...values };
+  }
+
   function finishCatalogReviewAfterMapping(
     transaction: CatalogTransaction,
     id: OriginalDiscArchiveId,
@@ -4496,6 +4534,8 @@ export function createDataAccessInternal(
           listMediaItems: (options) => access.catalog.listMediaItems(options),
           listMediaItemMaintenance: (options) =>
             access.catalog.listMediaItemMaintenance(options),
+          previewMediaItemUpdate: (id, input) =>
+            access.catalog.previewMediaItemUpdate(id, input),
           findTmdbIdentityByMediaItemId: (id) =>
             access.catalog.findTmdbIdentityByMediaItemId(id),
           searchMediaItems: (options) =>
@@ -5922,7 +5962,9 @@ export function createDataAccessInternal(
           transaction,
           options?.mutationKey,
           "media_item.update",
-          JSON.stringify({ id, input, expectedUpdatedAt: options?.expectedUpdatedAt?.toISOString() }),
+          JSON.stringify({ id, input, expectedUpdatedAt: options?.expectedUpdatedAt?.toISOString(),
+            expectedReferencedArchiveCount: options?.expectedReferencedArchiveCount,
+            expectedChildCount: options?.expectedChildCount }),
           () => {
           const current = requireRow(
             transaction
@@ -5934,48 +5976,21 @@ export function createDataAccessInternal(
             id,
           );
           requireMediaItemRevision(current, options?.expectedUpdatedAt);
-          const values = validateMediaItem(
-            {
-              ...current,
-              ...input,
-              id,
-              parentId:
-                input.parentId === undefined
-                  ? current.parentId
-                  : input.parentId,
-              kind: input.kind === undefined ? current.kind : input.kind,
-              title: input.title === undefined ? current.title : input.title,
-              year: input.year === undefined ? current.year : input.year,
-              seasonNumber:
-                input.seasonNumber === undefined
-                  ? current.seasonNumber
-                  : input.seasonNumber,
-              episodeNumber:
-                input.episodeNumber === undefined
-                  ? current.episodeNumber
-                  : input.episodeNumber,
-            },
-            transaction,
-            {
-              titleNormalization:
-                input.title === undefined ? "preserve" : "trim",
-            },
-          );
-          const tmdbIdentity = transaction
-            .select({ mediaType: mediaItemTmdbIdentities.mediaType })
-            .from(mediaItemTmdbIdentities)
-            .where(eq(mediaItemTmdbIdentities.mediaItemId, id))
-            .get();
-          if (tmdbIdentity && tmdbIdentity.mediaType !== values.kind) {
-            throw new DomainInvariantError(
-              "Media Item kind must match its TMDB identity",
-            );
+          const maintenance = readMediaItemMaintenance([id], undefined, transaction)[0]!;
+          requireMediaItemMaintenanceRevision(maintenance, options);
+          if (options?.requirePreviewIfAffected && options.expectedUpdatedAt === undefined &&
+              (maintenance.referencedArchiveCount > 0 || maintenance.childCount > 0 ||
+                (input.parentId !== undefined && input.parentId !== current.parentId) ||
+                (input.kind !== undefined && input.kind !== current.kind))) {
+            throw new DomainInvariantError("Preview and acknowledge the current Media Item revision");
           }
+          const { parentId, kind, title, year, seasonNumber, episodeNumber } =
+            projectMediaItemUpdate(transaction, current, input);
           return requireRow(
             transaction
               .update(mediaItems)
               .set({
-                ...values,
+                parentId, kind, title, year, seasonNumber, episodeNumber,
                 updatedAt: new Date(Math.max(now().getTime(), current.updatedAt.getTime() + 1)),
               })
               .where(eq(mediaItems.id, id))
@@ -5993,7 +6008,9 @@ export function createDataAccessInternal(
           transaction,
           options?.mutationKey,
           "media_item.delete",
-          JSON.stringify({ id, expectedUpdatedAt: options?.expectedUpdatedAt?.toISOString() }),
+          JSON.stringify({ id, expectedUpdatedAt: options?.expectedUpdatedAt?.toISOString(),
+            expectedReferencedArchiveCount: options?.expectedReferencedArchiveCount,
+            expectedChildCount: options?.expectedChildCount }),
           () => {
           const current = requireRow(
             transaction
@@ -6010,6 +6027,7 @@ export function createDataAccessInternal(
             undefined,
             transaction,
           )[0]!;
+          requireMediaItemMaintenanceRevision(maintenance, options);
           if (maintenance.deletionAvailability.state === "unavailable") {
             throw new DomainInvariantError(
               `Media Item deletion is unavailable: ${
@@ -6029,6 +6047,12 @@ export function createDataAccessInternal(
           return current;
           },
         ), { behavior: "immediate" });
+      },
+
+      previewMediaItemUpdate(id, input) {
+        const current = requireRow(database.select().from(mediaItems)
+          .where(eq(mediaItems.id, id)).get(), "media item", id);
+        return projectMediaItemUpdate(database, current, input);
       },
 
       listMediaItemMaintenance(options) {
