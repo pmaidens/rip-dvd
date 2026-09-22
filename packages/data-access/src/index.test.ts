@@ -10038,7 +10038,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
-  it("recognizes a legacy raw-hash archive by its metadata fingerprint without another read", () => {
+  it("re-archives a legacy raw-hash source rediscovered by metadata fingerprint", () => {
     const access = openTestDatabase();
     const firstDrive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
@@ -10046,11 +10046,12 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     });
     const secondDrive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr1",
+      isEnabled: true,
       isPresent: true,
     });
     const rawFingerprint = `sha256:${"a".repeat(64)}`;
     const volumeLabel = "LEGACY_ARCHIVE";
-    const sizeBytes = 4_700_000_000;
+    const sizeBytes = 4_699_998_208;
     const titles = [{
       number: 1,
       durationSeconds: 5_400,
@@ -10095,11 +10096,16 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       titles,
       volumeLabel,
     });
+    const request = access.archiveRequests.submitRearchive({
+      mutationKey: "00000000-0000-4000-8000-000000000346",
+      sourceArchiveId: archive.id,
+    });
 
-    const rediscovered = access.catalog.registerDetectedDisc({
+    const rediscovered = completeDiscInspection(access, {
       opticalDriveId: secondDrive.id,
-      discKind: "dvd",
+      mediaGeneration: "legacy-metadata-rediscovery",
       fingerprint: metadataFingerprint,
+      sizeBytes,
       volumeLabel,
       scanData: {
         schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
@@ -10108,16 +10114,42 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
     });
 
-    expect(rediscovered).toMatchObject({
+    expect(rediscovered.disc).toMatchObject({
       opticalDriveId: secondDrive.id,
       fingerprint: metadataFingerprint,
       status: "archived",
     });
     expect(() =>
-      access.archiveRequests.create({ detectedDiscId: rediscovered.id }),
+      access.archiveRequests.create({ detectedDiscId: rediscovered.disc.id }),
     ).toThrow(DomainInvariantError);
+    expect(
+      access.archiveRequests.hasPendingRequestForDetectedDiscFingerprint(
+        rediscovered.disc.id,
+      ),
+    ).toBe(true);
+    expect(access.archiveRequests.waitingStatus(request.id)).toEqual({
+      code: "ready_for_archive_worker",
+    });
+    const claim = access.archiveJobs.startForInspection(
+      rediscovered.inspection.id,
+      "legacy-rearchive-worker",
+    )!;
+    const completed = access.archiveJobs.publish(claim, {
+      archivePath: "/media/originals/Legacy Archive Fresh Copy.iso",
+      boundaryEvidence:
+        createNormalDvdArchiveBoundaryEvidenceForTest(sizeBytes),
+      sizeBytes,
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "dvd-recovery-v1",
+      ),
+    });
     expect(access.catalog.listOriginalDiscArchives()).toEqual([
       expect.objectContaining({ id: archive.id, fingerprint: rawFingerprint }),
+      expect.objectContaining({
+        id: completed.originalDiscArchiveId,
+        fingerprint: metadataFingerprint,
+        rearchiveSourceArchiveId: archive.id,
+      }),
     ]);
     access.close();
   });

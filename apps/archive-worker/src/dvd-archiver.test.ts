@@ -29,6 +29,7 @@ import {
   quarantinePublishedArchive,
   withCancelledDvdArchiveInactive,
   type DvdCopyRunner,
+  type DvdArchiveRequestContext,
   type PreserveDvdArchiveOptions,
 } from "./dvd-archiver.js";
 import {
@@ -116,10 +117,34 @@ const testEndpointProver: DvdEndpointProver = {
   },
 };
 
-function preserveDvdArchive(options: PreserveDvdArchiveOptions) {
+type TestArchiveRequestIdentity =
+  | { archiveRequestId?: undefined; isRearchive?: undefined }
+  | { archiveRequestId: string; isRearchive?: false }
+  | { archiveRequestId: string; isRearchive: true };
+
+type TestPreserveDvdArchiveOptions =
+  Omit<PreserveDvdArchiveOptions, "archiveRequest"> &
+  TestArchiveRequestIdentity;
+
+function preserveDvdArchive({
+  archiveRequestId,
+  isRearchive,
+  ...options
+}: TestPreserveDvdArchiveOptions) {
   return preserveDvdArchiveImplementation({
     geometryValidator: passingDvdGeometryValidator,
     ...options,
+    ...(archiveRequestId === undefined
+      ? {}
+      : {
+          archiveRequest: {
+            id: archiveRequestId as DvdArchiveRequestContext["id"],
+            rearchiveSourceArchiveId: isRearchive
+              ? ("synthetic-source-archive" as
+                DvdArchiveRequestContext["rearchiveSourceArchiveId"])
+              : null,
+          },
+        }),
     endpointProver: options.endpointProver ?? testEndpointProver,
   });
 }
@@ -576,7 +601,10 @@ describe("DVD archive publication", () => {
     writeFileSync(retentionMapPath, "interrupted rescue map\n");
     const mutation = vi.fn();
     const options = {
-      archiveRequestId,
+      archiveRequest: {
+        id: archiveRequestId as DvdArchiveRequestContext["id"],
+        rearchiveSourceArchiveId: null,
+      },
       devicePath: "/dev/sr0",
       fingerprint: `dvdmeta-sha256:${digest}`,
       mutation,

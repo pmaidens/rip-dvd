@@ -1441,7 +1441,6 @@ export interface ArchiveRequestWaitingStatus {
     | "matching_disc_required"
     | "matching_inspection_incomplete"
     | "ready_for_archive_worker";
-  message: string;
 }
 
 export interface EncodeJobAccess {

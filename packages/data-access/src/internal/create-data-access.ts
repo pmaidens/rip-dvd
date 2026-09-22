@@ -251,6 +251,7 @@ const MIGRATION_LOCK_STALE_MS = 300_000;
 const MIGRATION_LOCK_POLL_MS = 10;
 const JOB_RECOVERY_LIMIT = 100;
 const RELATED_ACTIVITY_ROOT_LIMIT = 256;
+const ACTIVE_ARCHIVE_REQUEST_IDENTITY_LIMIT = 256;
 const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
 const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const MAX_DISC_INSPECTION_SETTLING_RESET_COUNT = 10_000;
@@ -1609,6 +1610,21 @@ export function createDataAccessInternal(
     if (attemptedByteCounts.length > 0) {
       return uniqueDeclaredByteCount(attemptedByteCounts);
     }
+    const rearchiveSourceArchiveId = transaction
+      .select({ id: archiveRequests.rearchiveSourceArchiveId })
+      .from(archiveRequests)
+      .where(eq(archiveRequests.id, archiveRequestId))
+      .get()?.id;
+    if (
+      rearchiveSourceArchiveId !== null &&
+      rearchiveSourceArchiveId !== undefined
+    ) {
+      return transaction
+        .select({ sizeBytes: originalDiscArchives.sizeBytes })
+        .from(originalDiscArchives)
+        .where(eq(originalDiscArchives.id, rearchiveSourceArchiveId))
+        .get()?.sizeBytes ?? null;
+    }
     return uniqueDeclaredByteCount(
       transaction
         .select({ totalBytes: discInspections.totalBytes })
@@ -1651,6 +1667,7 @@ export function createDataAccessInternal(
     currentDeclaredByteCount: number | null,
     candidate: ArchiveRequestDvdContinuationCandidate,
     requestDeclaredByteCount: number | null,
+    querySource: Pick<typeof database, "select">,
   ): boolean {
     if (
       currentDisc.discKind !== "dvd" ||
@@ -1661,11 +1678,17 @@ export function createDataAccessInternal(
       return false;
     }
     const currentTitleMap = decodeDvdTitleMap(currentDisc.scanData);
-    const requestedTitleMap = decodeDvdTitleMap(
-      candidate.requestedDiscScanData,
-    );
+    const requestedIdentityMatches =
+      candidate.request.rearchiveSourceArchiveId === null
+        ? decodeDvdTitleMap(candidate.requestedDiscScanData)?.contentId ===
+          currentDisc.fingerprint
+        : originalArchiveMatchesFingerprintOrContentIdAlias(
+            candidate.request.rearchiveSourceArchiveId,
+            currentDisc.fingerprint,
+            querySource,
+          );
     return currentTitleMap?.contentId === currentDisc.fingerprint &&
-      requestedTitleMap?.contentId === currentDisc.fingerprint &&
+      requestedIdentityMatches &&
       requestDeclaredByteCount === currentDeclaredByteCount;
   }
 
@@ -3064,6 +3087,111 @@ export function createDataAccessInternal(
     return matches[0];
   }
 
+  function originalArchiveMatchesFingerprintOrContentIdAlias(
+    archiveId: OriginalDiscArchiveId,
+    fingerprintOrContentIdAlias: string,
+    querySource: Pick<typeof database, "select"> = database,
+  ): boolean {
+    const candidates = querySource
+      .select({
+        contentId: originalDiscArchiveContentIds.contentId,
+        fingerprint: originalDiscArchives.fingerprint,
+        scanData: detectedDiscs.scanData,
+        sizeBytes: originalDiscArchives.sizeBytes,
+        volumeLabel: detectedDiscs.volumeLabel,
+      })
+      .from(originalDiscArchives)
+      .innerJoin(
+        detectedDiscs,
+        eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+      )
+      .leftJoin(
+        originalDiscArchiveContentIds,
+        eq(
+          originalDiscArchiveContentIds.originalDiscArchiveId,
+          originalDiscArchives.id,
+        ),
+      )
+      .where(eq(originalDiscArchives.id, archiveId))
+      .limit(DVD_METADATA_FINGERPRINT_RECONCILIATION_LIMIT + 1)
+      .all();
+    if (candidates.length > DVD_METADATA_FINGERPRINT_RECONCILIATION_LIMIT) {
+      throw new DomainInvariantError(
+        "Original Disc Archive content identity aliases exceed the safety limit",
+      );
+    }
+    if (candidates.some((candidate) =>
+      candidate.fingerprint === fingerprintOrContentIdAlias ||
+      candidate.contentId === fingerprintOrContentIdAlias
+    )) {
+      return true;
+    }
+    const candidate = candidates[0];
+    if (
+      candidate === undefined ||
+      candidate.sizeBytes === null ||
+      !isDvdMetadataFingerprint(fingerprintOrContentIdAlias)
+    ) {
+      return false;
+    }
+    const scan = decodeDvdTitleMap(candidate.scanData);
+    return scan !== null && createDvdMetadataFingerprint({
+      sizeBytes: candidate.sizeBytes,
+      titles: scan.titles,
+      volumeLabel: candidate.volumeLabel ?? undefined,
+    }) === fingerprintOrContentIdAlias;
+  }
+
+  function hasPendingArchiveRequestForDisc(
+    disc: Pick<
+      typeof detectedDiscs.$inferSelect,
+      "discKind" | "fingerprint"
+    >,
+    querySource: Pick<typeof database, "select"> = database,
+  ): boolean {
+    const candidates = querySource
+      .select({
+        fingerprint: detectedDiscs.fingerprint,
+        rearchiveSourceArchiveId: archiveRequests.rearchiveSourceArchiveId,
+      })
+      .from(archiveRequests)
+      .innerJoin(
+        detectedDiscs,
+        eq(detectedDiscs.id, archiveRequests.detectedDiscId),
+      )
+      .where(
+        and(
+          eq(archiveRequests.status, "pending"),
+          eq(detectedDiscs.discKind, disc.discKind),
+          or(
+            eq(detectedDiscs.fingerprint, disc.fingerprint),
+            isNotNull(archiveRequests.rearchiveSourceArchiveId),
+          ),
+        ),
+      )
+      .orderBy(
+        desc(archiveRequests.priority),
+        asc(archiveRequests.createdAt),
+        asc(archiveRequests.id),
+      )
+      .limit(ACTIVE_ARCHIVE_REQUEST_IDENTITY_LIMIT + 1)
+      .all();
+    if (candidates.length > ACTIVE_ARCHIVE_REQUEST_IDENTITY_LIMIT) {
+      throw new DomainInvariantError(
+        "Pending Archive Request identity lookup exceeds the safety limit",
+      );
+    }
+    return candidates.some((candidate) =>
+      candidate.fingerprint === disc.fingerprint ||
+      (candidate.rearchiveSourceArchiveId !== null &&
+        originalArchiveMatchesFingerprintOrContentIdAlias(
+          candidate.rearchiveSourceArchiveId,
+          disc.fingerprint,
+          querySource,
+        ))
+    );
+  }
+
   function hasUnresolvedLegacyDvdArchiveIdentity(
     querySource: Pick<typeof database, "select"> = database,
   ): boolean {
@@ -4181,6 +4309,7 @@ export function createDataAccessInternal(
                 transaction,
                 candidate.request.id,
               ),
+              transaction,
             )
           );
         if (reusableRequests.length > 1) {
@@ -8759,22 +8888,19 @@ export function createDataAccessInternal(
           }
           const source = requireRow(
             transaction
-              .select({
-                archive: originalDiscArchives,
-                fingerprint: detectedDiscs.fingerprint,
-              })
+              .select({ archive: originalDiscArchives })
               .from(originalDiscArchives)
-              .innerJoin(
-                detectedDiscs,
-                eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
-              )
               .where(eq(originalDiscArchives.id, sourceArchiveId))
               .get(),
             "original disc archive",
             sourceArchiveId,
           );
-          const active = transaction
-            .select({ request: archiveRequests })
+          const activeCandidates = transaction
+            .select({
+              discKind: detectedDiscs.discKind,
+              fingerprint: detectedDiscs.fingerprint,
+              request: archiveRequests,
+            })
             .from(archiveRequests)
             .innerJoin(
               detectedDiscs,
@@ -8782,7 +8908,6 @@ export function createDataAccessInternal(
             )
             .where(
               and(
-                eq(detectedDiscs.fingerprint, source.fingerprint),
                 inArray(archiveRequests.status, [
                   "pending",
                   "running",
@@ -8792,7 +8917,30 @@ export function createDataAccessInternal(
               ),
             )
             .orderBy(asc(archiveRequests.createdAt), asc(archiveRequests.id))
-            .get()?.request;
+            .limit(ACTIVE_ARCHIVE_REQUEST_IDENTITY_LIMIT + 1)
+            .all();
+          if (
+            activeCandidates.length > ACTIVE_ARCHIVE_REQUEST_IDENTITY_LIMIT
+          ) {
+            throw new DomainInvariantError(
+              "Active Archive Request identity lookup exceeds the safety limit",
+            );
+          }
+          const matchingActiveRequests = activeCandidates.filter(
+            (candidate) =>
+              candidate.discKind === source.archive.discKind &&
+              originalArchiveMatchesFingerprintOrContentIdAlias(
+                sourceArchiveId,
+                candidate.fingerprint,
+                transaction,
+              ),
+          );
+          if (matchingActiveRequests.length > 1) {
+            throw new DomainInvariantError(
+              "Disc identity matches multiple active Archive Requests",
+            );
+          }
+          const active = matchingActiveRequests[0]?.request;
           if (
             active !== undefined &&
             active.rearchiveSourceArchiveId !== sourceArchiveId
@@ -8956,30 +9104,7 @@ export function createDataAccessInternal(
           if (disc === undefined) {
             return false;
           }
-          return database
-            .select({ id: archiveRequests.id })
-            .from(archiveRequests)
-            .innerJoin(
-              requestedDetectedDiscRecords,
-              eq(
-                requestedDetectedDiscRecords.id,
-                archiveRequests.detectedDiscId,
-              ),
-            )
-            .where(
-              and(
-                eq(archiveRequests.status, "pending"),
-                eq(requestedDetectedDiscRecords.discKind, disc.discKind),
-                eq(requestedDetectedDiscRecords.fingerprint, disc.fingerprint),
-              ),
-            )
-            .orderBy(
-              desc(archiveRequests.priority),
-              asc(archiveRequests.createdAt),
-              asc(archiveRequests.id),
-            )
-            .limit(1)
-            .get() !== undefined;
+          return hasPendingArchiveRequestForDisc(disc);
         },
 
         waitingStatus(id) {
@@ -9033,13 +9158,12 @@ export function createDataAccessInternal(
                 candidate.request.id,
                 candidate.requestedDiscId,
               ),
+              database,
             );
           });
           if (ready) {
             return {
               code: "ready_for_archive_worker",
-              message:
-                "A completed Disc Inspection matches this Archive Request and is ready for the Archive Worker.",
             };
           }
           if (currentInspections.some(({ inspection }) =>
@@ -9047,14 +9171,10 @@ export function createDataAccessInternal(
           )) {
             return {
               code: "matching_inspection_incomplete",
-              message:
-                "A current Disc Inspection must complete before the inserted disc can be matched.",
             };
           }
           return {
             code: "matching_disc_required",
-            message:
-              "Insert the disc matching the requested Original Disc Archive and wait for Disc Inspection to complete.",
           };
         },
       },
@@ -9089,26 +9209,6 @@ export function createDataAccessInternal(
             detectedDiscs,
             eq(detectedDiscs.id, discInspections.detectedDiscId),
           )
-          .innerJoin(
-            requestedDetectedDiscRecords,
-            and(
-              eq(
-                requestedDetectedDiscRecords.fingerprint,
-                detectedDiscs.fingerprint,
-              ),
-              eq(requestedDetectedDiscRecords.discKind, detectedDiscs.discKind),
-            ),
-          )
-          .innerJoin(
-            archiveRequests,
-            and(
-              eq(
-                archiveRequests.detectedDiscId,
-                requestedDetectedDiscRecords.id,
-              ),
-              eq(archiveRequests.status, "pending"),
-            ),
-          )
           .where(
             and(
               eq(discInspections.id, inspectionId),
@@ -9117,7 +9217,10 @@ export function createDataAccessInternal(
             ),
           )
           .get();
-        if (preflight === undefined) {
+        if (
+          preflight === undefined ||
+          !hasPendingArchiveRequestForDisc(preflight)
+        ) {
           return null;
         }
         if (preflight.discKind === "dvd") {
@@ -9188,7 +9291,13 @@ export function createDataAccessInternal(
               and(
                 eq(archiveRequests.status, "pending"),
                 eq(requestedDetectedDiscRecords.discKind, disc.discKind),
-                eq(requestedDetectedDiscRecords.fingerprint, disc.fingerprint),
+                or(
+                  eq(
+                    requestedDetectedDiscRecords.fingerprint,
+                    disc.fingerprint,
+                  ),
+                  isNotNull(archiveRequests.rearchiveSourceArchiveId),
+                ),
               ),
             )
             .orderBy(
@@ -9196,7 +9305,15 @@ export function createDataAccessInternal(
               asc(archiveRequests.createdAt),
               asc(archiveRequests.id),
             )
+            .limit(ACTIVE_ARCHIVE_REQUEST_IDENTITY_LIMIT + 1)
             .all();
+          if (
+            requestCandidates.length > ACTIVE_ARCHIVE_REQUEST_IDENTITY_LIMIT
+          ) {
+            throw new DomainInvariantError(
+              "Pending Archive Request identity lookup exceeds the safety limit",
+            );
+          }
           const exactRequest = requestCandidates.find(
             (candidate) => candidate.requestedDiscId === disc.id,
           );
@@ -9222,6 +9339,7 @@ export function createDataAccessInternal(
                 candidate.request.id,
                 candidate.requestedDiscId,
               ),
+              transaction,
             );
           });
           if (matchingRequests.length > 1) {
@@ -9950,7 +10068,11 @@ export function createDataAccessInternal(
                 );
           if (
             rearchiveSource !== null &&
-            rearchiveSource.fingerprint !== disc.fingerprint
+            !originalArchiveMatchesFingerprintOrContentIdAlias(
+              rearchiveSource.id,
+              disc.fingerprint,
+              transaction,
+            )
           ) {
             throw new DomainInvariantError(
               "Re-archive source does not match the Archive Job disc identity",

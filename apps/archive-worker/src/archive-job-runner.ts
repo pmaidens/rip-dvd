@@ -72,8 +72,6 @@ export async function runArchiveJob({
   if (request === null) {
     throw new Error("Archive Job has no Archive Request");
   }
-  const isRearchive = request.rearchiveSourceArchiveId !== null;
-
   const claimController = new AbortController();
   const archiveSignal = AbortSignal.any([signal, claimController.signal]);
   const heartbeat = setInterval(() => {
@@ -141,7 +139,7 @@ export async function runArchiveJob({
       task: async () => {
         authorizeClaim();
         const preserved = await preserveDvdArchive({
-          archiveRequestId: claim.archiveRequestId,
+          archiveRequest: request,
           authorizeCopy: async () => {
             authorizeClaim();
             await verifySource();
@@ -153,7 +151,6 @@ export async function runArchiveJob({
           expectedTitleMap: scanData,
           fingerprint: disc.fingerprint,
           geometryValidator,
-          isRearchive,
           originalsLibraryPath,
           runner: copyRunner,
           endpointProver,

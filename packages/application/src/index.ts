@@ -35,6 +35,7 @@ import {
   requeueEncodeJob,
   resolveQueueLogicalJobs,
 } from "./encode-jobs.js";
+import { describeArchiveRequestWaitingStatus } from "./archive-request-waiting-status.js";
 
 export class InvalidProfileInputError extends Error {
   constructor(message = "Invalid Encoding Profile input.") {
@@ -86,6 +87,10 @@ export function toEncodingProfileDto(profile: EncodingProfile) {
 }
 
 export { generateMutationKey, InvalidMutationKeyError, parseMutationKey };
+export {
+  describeArchiveRequestWaitingStatus,
+  type PresentedArchiveRequestWaitingStatus,
+} from "./archive-request-waiting-status.js";
 export { applyMappingProposal } from "./mapping-proposal-operations.js";
 export type { MappingProposalCommand } from "./mapping-proposal-operations.js";
 
@@ -277,7 +282,9 @@ export function createApplicationOperations(
           rearchiveSourceArchiveId: request.rearchiveSourceArchiveId,
           status: request.status,
           priority: request.priority,
-          waiting: access.archiveRequests.waitingStatus(request.id),
+          waiting: describeArchiveRequestWaitingStatus(
+            access.archiveRequests.waitingStatus(request.id),
+          ),
           createdAt: request.createdAt.toISOString(),
           updatedAt: request.updatedAt.toISOString(),
         },

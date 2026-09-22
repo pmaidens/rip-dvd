@@ -42,6 +42,7 @@ import {
 import {
   preserveDvdArchive as preserveDvdArchiveImplementation,
   type DvdCopyRunner,
+  type PreserveDvdArchiveOptions,
 } from "./dvd-archiver.js";
 import type { DvdCompletenessProver } from "./dvd-completeness-prover.js";
 import type {
@@ -304,7 +305,7 @@ function runArchiveWorker(options: RunArchiveWorkerOptions): Promise<void> {
 }
 
 function preserveDvdArchive(
-  options: Parameters<typeof preserveDvdArchiveImplementation>[0],
+  options: PreserveDvdArchiveOptions,
 ) {
   return preserveDvdArchiveImplementation({
     geometryValidator: passingDvdGeometryValidator,
@@ -6147,7 +6148,7 @@ describe("archive worker polling", () => {
       precedingSectorLba: firstExcludedLba - 1,
     };
     const crashedPublication = await preserveDvdArchive({
-      archiveRequestId: cancelledRequest.id,
+      archiveRequest: cancelledRequest,
       authorizeMutation: () => undefined,
       completenessProver: {
         async prove() {

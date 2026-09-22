@@ -24,6 +24,8 @@ import {
   type WorkerIncidentId,
 } from "@rip-dvd/data-access";
 
+import { describeArchiveRequestWaitingStatus } from "./archive-request-waiting-status.js";
+
 export const OPERATION_KINDS = [
   "optical-drives",
   "detected-discs",
@@ -452,7 +454,9 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
       if (!request) return null;
       return {
         ...request,
-        waiting: access.archiveRequests.waitingStatus(request.id),
+        waiting: describeArchiveRequestWaitingStatus(
+          access.archiveRequests.waitingStatus(request.id),
+        ),
         detectedDisc: access.catalog.listDetectedDiscs(undefined, {
           ids: [request.detectedDiscId],
         }).map(visibleDisc)[0] ?? null,

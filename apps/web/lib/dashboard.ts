@@ -1,4 +1,8 @@
-import { encodeRequeueAvailability } from "@rip-dvd/application";
+import {
+  describeArchiveRequestWaitingStatus,
+  encodeRequeueAvailability,
+} from "@rip-dvd/application";
+import type { PresentedArchiveRequestWaitingStatus } from "@rip-dvd/application";
 import type {
   ArchiveBoundaryEvidence,
   ArchiveFormat,
@@ -205,7 +209,7 @@ export interface DashboardCatalogReviewItem {
   verificationMessage?: string | null;
   verifiedAt?: string | null;
   rearchiveRequest?: (DashboardArchiveRequest & {
-    waiting: ReturnType<ConsistentReadAccess["archiveRequests"]["waitingStatus"]>;
+    waiting: PresentedArchiveRequestWaitingStatus | null;
   }) | null;
 }
 
@@ -2068,8 +2072,10 @@ function readDashboardSnapshotRecords(
                     attemptCount: latestRearchiveJob?.attemptOrdinal ?? 0,
                     latestFailureDetail:
                       archiveJobFailure(latestRearchiveJob),
-                    waiting: access.archiveRequests.waitingStatus(
-                      rearchiveRequest.id,
+                    waiting: describeArchiveRequestWaitingStatus(
+                      access.archiveRequests.waitingStatus(
+                        rearchiveRequest.id,
+                      ),
                     ),
                     createdAt: rearchiveRequest.createdAt.toISOString(),
                     updatedAt: rearchiveRequest.updatedAt.toISOString(),
