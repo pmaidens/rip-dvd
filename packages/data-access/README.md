@@ -402,8 +402,8 @@ requested path. Keyed operator invocations reject the different path so their
 result cannot imply that the path changed. Keyed requeue of a completed job or
 a failed replacement also requires acknowledgement and the exact `updatedAt`
 revision inspected by its preview. The immediate write transaction rechecks
-that revision before granting replacement authority. A failed job without retained
-replacement authority may move to a new path. The worker records the owned
+that revision before granting replacement authority. A failed job without
+retained replacement authority may move to a new path. The worker records the owned
 final's filesystem identity; failure retains authority only when the same
 identity is still present, while recovery retains the stored identity for the
 next attempt to recheck before HandBrake starts. The identity excludes

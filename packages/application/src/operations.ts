@@ -205,7 +205,19 @@ export function encodeRequeueAvailability(
         : null,
     };
   }
-  return { eligible: true, reason: null };
+  const replacesOutput = job.status === "completed" || job.replaceExistingOutput;
+  return replacesOutput
+    ? {
+      eligible: true,
+      reason: null,
+      requiredInputs: ["expectedRevision", "acknowledgeReplacement"],
+      preview: {
+        name: "preview-requeue",
+        requiredInputs: ["encodeJobId"],
+        provides: ["expectedRevision"],
+      },
+    }
+    : { eligible: true, reason: null };
 }
 
 function encodeActions(job: EncodeJob, requeue: ReturnType<typeof encodeRequeueAvailability>) {

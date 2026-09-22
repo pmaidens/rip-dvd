@@ -243,7 +243,7 @@ job. Queue and detail results expose this as an alternate action requiring
 rejected so the worker can apply its existing replacement checks. Requeueing a
 completed job or a failed replacement first requires `encode-requeue-preview`.
 Pass its `revision` with `--acknowledge`; a later job change returns
-`STALE_ENCODE_PREVIEW`. Running
-cancellation remains cooperative; the worker
+`STALE_ENCODE_PREVIEW`. Queue and detail actions list these required inputs and
+the preview action. Running cancellation remains cooperative; the worker
 settles it after observing the request. Malformed inputs return exit 2 with a
 JSON error. Database or configuration failures return exit 1.

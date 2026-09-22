@@ -551,8 +551,23 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
   expect(claimed?.id).toBe(jobId);
   finish.encodeJobs.complete(claimed!);
   finish.close();
+  expect((await current.run(requeueArgs)).result).toEqual(requeued.result);
   expect((await current.run(["wait", "encode-jobs", jobId, "--timeout-ms", "0"])).result)
     .toMatchObject({ outcome: "settled", current: { id: jobId, status: "completed" } });
+  expect((await current.run(["inspect", "encode-jobs", jobId])).result).toMatchObject({
+    item: {
+      availableActions: expect.arrayContaining([expect.objectContaining({
+        name: "requeue",
+        eligible: true,
+        requiredInputs: ["expectedRevision", "acknowledgeReplacement"],
+        preview: {
+          name: "preview-requeue",
+          requiredInputs: ["encodeJobId"],
+          provides: ["expectedRevision"],
+        },
+      })]),
+    },
+  });
   const stalePreview = await current.run([
     "encode-requeue-preview", "--encode-job-id", jobId,
   ]);
@@ -566,7 +581,7 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
   expect((await current.run([
     "encode-requeue", "--key", "synthetic-completed-missing-ack",
     "--encode-job-id", jobId,
-  ])).result).toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
+  ])).result).toMatchObject({ error: { code: "ENCODE_JOB_REJECTED" } });
   const refresh = current.openAccess();
   refresh.encodeJobs.requeue(jobId as EncodeJobId);
   const refreshedClaim = refresh.encodeJobs.claimNext("synthetic-preview-refresh-worker");
@@ -595,7 +610,17 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
   expect((await current.run(["encode-queue", "--history-group", "re_encode", "--encoding-profile-id", profile.id])).result)
     .toMatchObject({ selections: expect.arrayContaining([expect.objectContaining({
       id: correctedSelection.id,
-      queueAction: { name: "requeue", eligible: true, reason: null },
+      queueAction: {
+        name: "requeue",
+        eligible: true,
+        reason: null,
+        requiredInputs: ["expectedRevision", "acknowledgeReplacement"],
+        preview: {
+          name: "preview-requeue",
+          requiredInputs: ["encodeJobId"],
+          provides: ["expectedRevision"],
+        },
+      },
     })]) });
 
   const competingId = (competing.result as { job: { id: string } }).job.id;

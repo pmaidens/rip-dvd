@@ -111,21 +111,9 @@ export function requeueEncodeJob(
     (input.priority !== undefined && !Number.isSafeInteger(input.priority))) {
     throw new InvalidEncodeJobInputError("Invalid Encode Job output path or priority");
   }
-  const current = access.encodeJobs.find(encodeJobId);
-  if (current === null) {
-    throw new RecordNotFoundError("Encode Job", encodeJobId);
-  }
-  const replacesOutput = current.status === "completed" || current.replaceExistingOutput;
   const expectedRevision = typeof input.expectedRevision === "string"
     ? input.expectedRevision
     : undefined;
-  if (replacesOutput && (
-    input.acknowledgeReplacement !== true || expectedRevision === undefined
-  )) {
-    throw new InvalidEncodeJobInputError(
-      "Preview and acknowledge the current Encode Job replacement before requeueing",
-    );
-  }
   return access.encodeJobs.requeue(encodeJobId, {
     outputPath,
     priority: input.priority as number | undefined,

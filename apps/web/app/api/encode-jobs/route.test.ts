@@ -469,6 +469,17 @@ describe("Encode Jobs API", () => {
           status: "completed",
           outputPath: "/media/movies/Completed history.mkv",
         }),
+        queueAction: {
+          name: "requeue",
+          eligible: true,
+          reason: null,
+          requiredInputs: ["expectedRevision", "acknowledgeReplacement"],
+          preview: {
+            name: "preview-requeue",
+            requiredInputs: ["encodeJobId"],
+            provides: ["expectedRevision"],
+          },
+        },
       }),
     ]);
 
@@ -1507,7 +1518,7 @@ describe("Encode Jobs API", () => {
     });
     expect(access.encodeJobs.claimNext("late-completed-post-retry")).toBeNull();
 
-    expect((await retry()).status).toBe(400);
+    expect((await retry()).status).toBe(409);
     const previewResponse = await createEncodeJobsRoute(
       new Request("http://localhost:3000/api/encode-jobs", {
         method: "PATCH",
