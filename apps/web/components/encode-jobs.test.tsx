@@ -641,6 +641,90 @@ describe("EncodeJobsView", () => {
     }
   });
 
+  it("reuses Encode Job mutation bodies after a lost response", async () => {
+    const selectionId = "lost-response-selection" as DiscSelectionId;
+    const profileId = "lost-response-profile" as EncodingProfileId;
+    const jobId = "lost-response-job" as EncodeJobId;
+    const input = {
+      discSelectionId: selectionId,
+      encodingProfileId: profileId,
+      outputPath: "/media/movies/Lost response.mkv",
+    };
+    const enqueueBodies: string[] = [];
+    const enqueueFetcher = vi.fn(async (
+      _request: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      enqueueBodies.push(String(init?.body));
+      if (enqueueBodies.length === 1) {
+        throw new Error("Response connection closed");
+      }
+      return Response.json({
+        job: {
+          id: jobId,
+          encodingProfileId: profileId,
+          status: "queued",
+          outputPath: input.outputPath,
+        },
+      });
+    });
+
+    await expect(queueEncodeJob(input, enqueueFetcher)).rejects.toThrow(
+      "Response connection closed",
+    );
+    await expect(queueEncodeJob(input, enqueueFetcher)).resolves.toMatchObject({
+      id: jobId,
+      status: "queued",
+    });
+    expect(enqueueBodies[1]).toBe(enqueueBodies[0]);
+
+    const cancellationBodies: string[] = [];
+    const cancellationFetcher = vi.fn(async (
+      _request: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      cancellationBodies.push(String(init?.body));
+      if (cancellationBodies.length === 1) {
+        throw new Error("Response connection closed");
+      }
+      return Response.json({ job: { id: jobId, status: "cancelled" } });
+    });
+    await expect(cancelEncodeJob(jobId, cancellationFetcher)).rejects.toThrow(
+      "Response connection closed",
+    );
+    await expect(cancelEncodeJob(jobId, cancellationFetcher)).resolves.toBeUndefined();
+    expect(cancellationBodies[1]).toBe(cancellationBodies[0]);
+
+    const requeueBodies: string[] = [];
+    const requeueFetcher = vi.fn(async (
+      _request: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const body = String(init?.body);
+      requeueBodies.push(body);
+      const parsed = JSON.parse(body) as { action: string };
+      if (parsed.action === "preview_requeue") {
+        return Response.json({
+          preview: {
+            revision: "2026-09-22T12:00:00.000Z",
+            acknowledgementRequired: false,
+            outputPath: null,
+          },
+        });
+      }
+      if (requeueBodies.length === 2) {
+        throw new Error("Response connection closed");
+      }
+      return Response.json({ job: { id: jobId, status: "queued" } });
+    });
+    await expect(retryEncodeJob(jobId, requeueFetcher)).rejects.toThrow(
+      "Response connection closed",
+    );
+    await expect(retryEncodeJob(jobId, requeueFetcher)).resolves.toBeUndefined();
+    expect(requeueBodies).toHaveLength(3);
+    expect(requeueBodies[2]).toBe(requeueBodies[1]);
+  });
+
   it("requires explicit confirmation before a completed output is replaced", async () => {
     const jobId = "completed-job" as EncodeJobId;
     const confirm = vi.fn(() => false);

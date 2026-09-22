@@ -945,24 +945,47 @@ export async function requestQueueLogicalJobResolutions(
   return body.resolvedDiscSelections;
 }
 
+const pendingEncodeEnqueueKeys = new Map<string, string>();
+const pendingEncodeRequeueBodies = new Map<EncodeJobId, {
+  action: "requeue";
+  encodeJobId: EncodeJobId;
+  mutationKey: string;
+  expectedRevision: string;
+  acknowledgeReplacement: boolean;
+}>();
+const pendingEncodeCancellationKeys = new Map<EncodeJobId, string>();
+
+function isDefinitiveMutationRejection(response: Response): boolean {
+  return response.status === 400 || response.status === 404 ||
+    response.status === 409;
+}
+
 export async function queueEncodeJob(
   input: QueueEncodeJobInput,
   fetcher: EncodeJobsFetch = fetch,
 ): Promise<LogicalEncodeJob> {
+  const signature = JSON.stringify(input);
+  const mutationKey = pendingEncodeEnqueueKeys.get(signature) ??
+    crypto.randomUUID();
+  pendingEncodeEnqueueKeys.set(signature, mutationKey);
   const response = await fetcher("/api/encode-jobs", {
     method: "POST",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ ...input, mutationKey: crypto.randomUUID() }),
+    body: JSON.stringify({ ...input, mutationKey }),
   });
   if (!response.ok) {
+    if (isDefinitiveMutationRejection(response)) {
+      pendingEncodeEnqueueKeys.delete(signature);
+    }
     throw new Error(await errorMessage(response, "Encode Job queueing failed"));
   }
   const body = await response.json() as {
     job: Omit<LogicalEncodeJob, "queueAvailable">;
   };
+  pendingEncodeEnqueueKeys.delete(signature);
   return {
     ...body.job,
     queueAvailable: false,
@@ -973,28 +996,42 @@ async function requestEncodeJobRequeue(
   encodeJobId: EncodeJobId,
   fetcher: EncodeJobsFetch = fetch,
 ): Promise<Response> {
-  const previewResponse = await fetcher("/api/encode-jobs", {
-    method: "PATCH",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ action: "preview_requeue", encodeJobId }),
-  });
-  if (!previewResponse.ok) {
-    throw new Error(await errorMessage(previewResponse, "Encode Job retry preview failed"));
-  }
-  const { preview } = await previewResponse.json() as {
-    preview: {
-      revision: string;
-      acknowledgementRequired: boolean;
-      outputPath: string | null;
+  let mutationBody = pendingEncodeRequeueBodies.get(encodeJobId);
+  if (mutationBody === undefined) {
+    const previewResponse = await fetcher("/api/encode-jobs", {
+      method: "PATCH",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ action: "preview_requeue", encodeJobId }),
+    });
+    if (!previewResponse.ok) {
+      throw new Error(await errorMessage(
+        previewResponse,
+        "Encode Job retry preview failed",
+      ));
+    }
+    const { preview } = await previewResponse.json() as {
+      preview: {
+        revision: string;
+        acknowledgementRequired: boolean;
+        outputPath: string | null;
+      };
     };
-  };
-  if (preview.acknowledgementRequired && !window.confirm(
-    `Re-encode and replace the existing output at ${preview.outputPath}?`,
-  )) {
-    throw new Error("Encode Job replacement was not acknowledged");
+    if (preview.acknowledgementRequired && !window.confirm(
+      `Re-encode and replace the existing output at ${preview.outputPath}?`,
+    )) {
+      throw new Error("Encode Job replacement was not acknowledged");
+    }
+    mutationBody = {
+      action: "requeue",
+      encodeJobId,
+      mutationKey: crypto.randomUUID(),
+      expectedRevision: preview.revision,
+      acknowledgeReplacement: preview.acknowledgementRequired,
+    };
+    pendingEncodeRequeueBodies.set(encodeJobId, mutationBody);
   }
   const response = await fetcher("/api/encode-jobs", {
     method: "PATCH",
@@ -1002,15 +1039,12 @@ async function requestEncodeJobRequeue(
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      action: "requeue",
-      encodeJobId,
-      mutationKey: crypto.randomUUID(),
-      expectedRevision: preview.revision,
-      acknowledgeReplacement: preview.acknowledgementRequired,
-    }),
+    body: JSON.stringify(mutationBody),
   });
   if (!response.ok) {
+    if (isDefinitiveMutationRejection(response)) {
+      pendingEncodeRequeueBodies.delete(encodeJobId);
+    }
     throw new Error(await errorMessage(response, "Encode Job retry failed"));
   }
   return response;
@@ -1024,6 +1058,7 @@ async function requeueEncodeJob(
   const body = await response.json() as {
     job: Omit<LogicalEncodeJob, "queueAvailable">;
   };
+  pendingEncodeRequeueBodies.delete(encodeJobId);
   return { ...body.job, queueAvailable: false };
 }
 
@@ -1032,25 +1067,33 @@ export async function retryEncodeJob(
   fetcher: EncodeJobsFetch = fetch,
 ): Promise<void> {
   await requestEncodeJobRequeue(encodeJobId, fetcher);
+  pendingEncodeRequeueBodies.delete(encodeJobId);
 }
 
 export async function cancelEncodeJob(
   encodeJobId: EncodeJobId,
   fetcher: EncodeJobsFetch = fetch,
 ): Promise<void> {
+  const mutationKey = pendingEncodeCancellationKeys.get(encodeJobId) ??
+    crypto.randomUUID();
+  pendingEncodeCancellationKeys.set(encodeJobId, mutationKey);
   const response = await fetcher("/api/encode-jobs", {
     method: "PATCH",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ action: "cancel", encodeJobId, mutationKey: crypto.randomUUID() }),
+    body: JSON.stringify({ action: "cancel", encodeJobId, mutationKey }),
   });
   if (!response.ok) {
+    if (isDefinitiveMutationRejection(response)) {
+      pendingEncodeCancellationKeys.delete(encodeJobId);
+    }
     throw new Error(
       await errorMessage(response, "Encode Job cancellation failed"),
     );
   }
+  pendingEncodeCancellationKeys.delete(encodeJobId);
 }
 
 function useEncodeWorklist({
