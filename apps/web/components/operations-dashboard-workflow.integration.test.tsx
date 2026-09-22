@@ -126,6 +126,43 @@ function createMutationRequest(path: string, body: unknown): Request {
   });
 }
 
+let catalogSelectionMutationKeyIndex = 0;
+
+async function previewAndApplyCatalogSelection(
+  access: DataAccess,
+  archiveId: string,
+  command: Record<string, unknown>,
+) {
+  const previewResponse = await createCatalogReviewRoute(
+    createMutationRequest(`/api/catalog-reviews/${archiveId}`, { ...command, preview: true }),
+    archiveId,
+    () => access,
+    () => trustedOrigin,
+  );
+  const preview = await previewResponse.json() as {
+    state: string;
+    catalogRevision?: string;
+    previewToken?: string;
+  };
+  if (previewResponse.status !== 200 || preview.state !== "available" ||
+      !preview.catalogRevision || !preview.previewToken) {
+    throw new Error("Expected available Disc Selection preview");
+  }
+  catalogSelectionMutationKeyIndex += 1;
+  return createCatalogReviewRoute(
+    createMutationRequest(`/api/catalog-reviews/${archiveId}`, {
+      ...command,
+      mutationKey: `00000000-0000-4000-8000-${String(catalogSelectionMutationKeyIndex).padStart(12, "0")}`,
+      expectedCatalogRevision: preview.catalogRevision,
+      previewToken: preview.previewToken,
+      acknowledge: true,
+    }),
+    archiveId,
+    () => access,
+    () => trustedOrigin,
+  );
+}
+
 async function readDashboard(access: DataAccess): Promise<{
   html: string;
   snapshot: DashboardSnapshot;
@@ -1548,8 +1585,7 @@ describe("end-to-end operations dashboard workflow", () => {
       expect.objectContaining({ id: job.id, status: "running" }),
     ]);
 
-    const response = await createCatalogReviewRoute(
-      createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
+    const response = await previewAndApplyCatalogSelection(access, archive.id, {
         action: "correct_disc_selection",
         discSelectionId: selection.id,
         catalogRevision: access.catalog.listOriginalDiscArchives({
@@ -1560,11 +1596,7 @@ describe("end-to-end operations dashboard workflow", () => {
           mediaItemId: correctedItem.id,
           sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
         },
-      }),
-      archive.id,
-      () => access,
-      () => trustedOrigin,
-    );
+    });
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
@@ -2495,7 +2527,7 @@ describe("end-to-end operations dashboard workflow", () => {
       mediaItem: { id: string };
       discSelection: { id: string };
     };
-    const removeMistakenSelection = await catalogMutation({
+    const removeMistakenSelection = await previewAndApplyCatalogSelection(access, archive.id, {
       action: "delete_disc_selection",
       discSelectionId: mistakenProposal.discSelection.id,
     });
@@ -2860,7 +2892,7 @@ describe("end-to-end operations dashboard workflow", () => {
     });
     const correctedSourceItem = (await correctedSourceItemResponse.json())
       .mediaItem as { id: string };
-    const correctionResponse = await catalogMutation({
+    const correctionResponse = await previewAndApplyCatalogSelection(access, archive.id, {
       action: "correct_disc_selection",
       discSelectionId: selection.id,
       catalogRevision: access.catalog.listOriginalDiscArchives({

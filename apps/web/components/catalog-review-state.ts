@@ -116,6 +116,8 @@ export async function mutateCatalogReview(
   command: CatalogReviewCommand,
   fetcher: CatalogReviewFetch = fetch,
 ): Promise<{ message: string | null }> {
+  const identity = JSON.stringify([archiveId, command]);
+  let pending = pendingCatalogReviewMutations.get(identity);
   const isProposal = command.action === "create_mapping_proposal" ||
     command.action === "create_episodic_mapping_proposal";
   const proposalIdentity = isProposal ? JSON.stringify({ archiveId, command }) : null;
@@ -127,6 +129,44 @@ export async function mutateCatalogReview(
       pendingProposalKeys.set(proposalIdentity, mutationKey);
     }
   }
+  if (isConsequentialSelectionCommand(command)) {
+    pending ??= { mutationKey: crypto.randomUUID() };
+    pendingCatalogReviewMutations.set(identity, pending);
+    if (pending.preview === undefined) {
+      const previewResponse = await fetcher(
+        `/api/catalog-reviews/${encodeURIComponent(archiveId)}`,
+        {
+          method: "POST",
+          headers: { Accept: "application/json", "Content-Type": "application/json" },
+          body: JSON.stringify({ ...command, preview: true }),
+        },
+      );
+      if (!previewResponse.ok) {
+        pendingCatalogReviewMutations.delete(identity);
+        throw await catalogReviewMutationError(previewResponse);
+      }
+      const preview: unknown = await previewResponse.json();
+      if (typeof preview !== "object" || preview === null || !("state" in preview)) {
+        pendingCatalogReviewMutations.delete(identity);
+        throw new Error("Catalog review mutation failed");
+      }
+      if (preview.state === "blocked") {
+        pendingCatalogReviewMutations.delete(identity);
+        throw new Error("reason" in preview && typeof preview.reason === "string"
+          ? preview.reason.slice(0, 512) : "Disc Selection change is blocked");
+      }
+      if (preview.state !== "available" || !("catalogRevision" in preview) ||
+          typeof preview.catalogRevision !== "string" || !("previewToken" in preview) ||
+          typeof preview.previewToken !== "string") {
+        pendingCatalogReviewMutations.delete(identity);
+        throw new Error("Catalog review mutation failed");
+      }
+      pending.preview = {
+        catalogRevision: preview.catalogRevision,
+        previewToken: preview.previewToken,
+      };
+    }
+  }
   const response = await fetcher(
     `/api/catalog-reviews/${encodeURIComponent(archiveId)}`,
     {
@@ -135,28 +175,21 @@ export async function mutateCatalogReview(
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ ...command, ...(mutationKey ? { mutationKey } : {}) }),
+      body: JSON.stringify(pending?.preview ? {
+        ...command,
+        mutationKey: pending.mutationKey,
+        expectedCatalogRevision: pending.preview.catalogRevision,
+        previewToken: pending.preview.previewToken,
+        acknowledge: true,
+      } : { ...command, ...(mutationKey ? { mutationKey } : {}) }),
     },
   );
   if (!response.ok) {
-    let message = "Catalog review mutation failed";
-    try {
-      const body: unknown = await response.json();
-      if (
-        typeof body === "object" &&
-        body !== null &&
-        "error" in body &&
-        typeof body.error === "string" &&
-        body.error.trim() !== ""
-      ) {
-        message = body.error.trim().slice(0, 512);
-      }
-    } catch {
-      // Keep the bounded generic message for non-JSON error responses.
-    }
-    throw new Error(message);
+    pendingCatalogReviewMutations.delete(identity);
+    throw await catalogReviewMutationError(response);
   }
   if (proposalIdentity !== null) pendingProposalKeys.delete(proposalIdentity);
+  pendingCatalogReviewMutations.delete(identity);
   try {
     const body: unknown = await response.json();
     return {
@@ -169,6 +202,37 @@ export async function mutateCatalogReview(
   } catch {
     return { message: null };
   }
+}
+
+type ConsequentialSelectionCommand = Extract<CatalogReviewCommand, {
+  action: "repair_disc_selection" | "correct_disc_selection" | "delete_disc_selection";
+}>;
+
+function isConsequentialSelectionCommand(
+  command: CatalogReviewCommand,
+): command is ConsequentialSelectionCommand {
+  return command.action === "repair_disc_selection" ||
+    command.action === "correct_disc_selection" ||
+    command.action === "delete_disc_selection";
+}
+
+const pendingCatalogReviewMutations = new Map<string, {
+  mutationKey: string;
+  preview?: { catalogRevision: string; previewToken: string };
+}>();
+
+async function catalogReviewMutationError(response: Response): Promise<Error> {
+  let message = "Catalog review mutation failed";
+  try {
+    const body: unknown = await response.json();
+    if (typeof body === "object" && body !== null && "error" in body &&
+        typeof body.error === "string" && body.error.trim() !== "") {
+      message = body.error.trim().slice(0, 512);
+    }
+  } catch {
+    // Keep the bounded generic message for non-JSON error responses.
+  }
+  return new Error(message);
 }
 
 interface UseCatalogReviewStateOptions {

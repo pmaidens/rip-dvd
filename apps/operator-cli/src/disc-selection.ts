@@ -240,7 +240,8 @@ export function runDiscSelection(rest: readonly string[], io: SelectionIO): unkn
   }
   const expectedCatalogRevision = consequential ? revision(options.get("--revision")) : undefined;
   const previewToken = options.get("--preview-token");
-  if (consequential && (!previewToken || !/^[a-f0-9]{64}$/.test(previewToken))) {
+  if (consequential && (!previewToken || previewToken.length > 4_096 ||
+      !/^[A-Za-z0-9_-]+\.[a-f0-9]{64}$/.test(previewToken))) {
     invalid("A matching Disc Selection preview token is required.");
   }
   const command = parsedCommand(action, selectionId, input, expectedCatalogRevision?.toISOString(), options.get("--reason"));

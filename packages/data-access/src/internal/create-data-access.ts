@@ -4494,8 +4494,10 @@ export function createDataAccessInternal(
     if (activeDiscSelectionTransaction !== null) {
       throw new DomainInvariantError("Nested Disc Selection mutations are unavailable");
     }
-    const { mutation, originalDiscArchiveId, mutationKey, expectedCatalogRevision } = input;
-    const semanticInput = JSON.stringify({ originalDiscArchiveId, expectedCatalogRevision, mutation });
+    const { mutation, originalDiscArchiveId, mutationKey, expectedCatalogRevision,
+      expectedPreviewEvidenceHash } = input;
+    const semanticInput = JSON.stringify({ originalDiscArchiveId, expectedCatalogRevision,
+      expectedPreviewEvidenceHash, mutation });
     try {
       return database.transaction((transaction) => {
         if (mutationKey !== undefined) {
@@ -4549,6 +4551,25 @@ export function createDataAccessInternal(
           "disc selection", mutation.discSelectionId);
           if (current.originalDiscArchiveId !== originalDiscArchiveId) {
             throw new RecordNotFoundError("disc selection", mutation.discSelectionId);
+          }
+          if (expectedPreviewEvidenceHash !== undefined) {
+            const jobs = transaction.select({ id: encodeJobs.id, status: encodeJobs.status })
+              .from(encodeJobs)
+              .where(eq(encodeJobs.discSelectionId, mutation.discSelectionId))
+              .orderBy(asc(encodeJobs.id))
+              .all();
+            const affectedEncodeJobs = jobs.filter((job) =>
+              job.status === "queued" || job.status === "running" ||
+              job.status === "cancellation_requested");
+            const evidenceHash = createHash("sha256").update(JSON.stringify({
+              affectedEncodeJobs,
+              historicalEncodeJobCount: jobs.length,
+            })).digest("hex");
+            if (evidenceHash !== expectedPreviewEvidenceHash) {
+              throw new DomainInvariantError(
+                "Disc Selection preview is stale because Encode Job history changed",
+              );
+            }
           }
           if (mutation.action === "repair") {
             const source = requireRow(transaction.select({ scanData: detectedDiscs.scanData })
@@ -7133,7 +7154,8 @@ export function createDataAccessInternal(
             throw new RecordNotFoundError("disc selection", discSelectionId);
           }
           const jobs = transaction.select({ id: encodeJobs.id, status: encodeJobs.status })
-            .from(encodeJobs).where(eq(encodeJobs.discSelectionId, discSelectionId)).all();
+            .from(encodeJobs).where(eq(encodeJobs.discSelectionId, discSelectionId))
+            .orderBy(asc(encodeJobs.id)).all();
           return {
             catalogRevision: archive.updatedAt.toISOString(),
             discSelection: selection,

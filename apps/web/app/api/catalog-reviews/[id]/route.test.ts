@@ -30,6 +30,64 @@ import { startArchiveJob } from "../../../../test/archive-job-fixture";
 import { createCatalogReviewRoute } from "./route";
 
 const dataAccessFixture = useDataAccessFixture();
+let discSelectionMutationKeyIndex = 0;
+
+function postCatalogReview(
+  access: DataAccess,
+  archiveId: string,
+  body: Record<string, unknown>,
+) {
+  return createCatalogReviewRoute(
+    new Request(`http://localhost:3000/api/catalog-reviews/${archiveId}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Host: "localhost:3000",
+        Origin: "http://localhost:3000",
+      },
+      body: JSON.stringify(body),
+    }),
+    archiveId,
+    () => access,
+    () => "http://localhost:3000",
+  );
+}
+
+async function discSelectionApplication(
+  access: DataAccess,
+  archiveId: string,
+  command: Record<string, unknown>,
+) {
+  const previewResponse = await postCatalogReview(access, archiveId, {
+    ...command, preview: true,
+  });
+  const preview = await previewResponse.json() as {
+    state: string;
+    catalogRevision?: string;
+    previewToken?: string;
+  };
+  if (previewResponse.status !== 200 || preview.state !== "available" ||
+      !preview.catalogRevision || !preview.previewToken) {
+    throw new Error("Expected an available Disc Selection preview");
+  }
+  discSelectionMutationKeyIndex += 1;
+  return {
+    ...command,
+    mutationKey: `00000000-0000-4000-8000-${String(discSelectionMutationKeyIndex).padStart(12, "0")}`,
+    expectedCatalogRevision: preview.catalogRevision,
+    previewToken: preview.previewToken,
+    acknowledge: true,
+  };
+}
+
+async function previewAndApplyDiscSelection(
+  access: DataAccess,
+  archiveId: string,
+  command: Record<string, unknown>,
+) {
+  return postCatalogReview(access, archiveId,
+    await discSelectionApplication(access, archiveId, command));
+}
 
 function keyedMediaItemBody(body: unknown, access: DataAccess): unknown {
   if (typeof body !== "object" || body === null || !("action" in body) ||
@@ -1079,29 +1137,16 @@ describe("Catalog Review API", () => {
         `Disc Selection ${mistakenSelection.id} cannot be updated because Encode Job history must keep its provenance (job ${completed.id})`,
     });
 
-    const correctionResponse = await createCatalogReviewRoute(
-      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Host: "localhost:3000",
-          Origin: "http://localhost:3000",
-        },
-        body: JSON.stringify({
-          action: "correct_disc_selection",
-          discSelectionId: mistakenSelection.id,
-          catalogRevision,
-          correctionReason: "The wrong movie was mapped.",
-          selection: {
-            mediaItemId: correctedItem.id,
-            sourceIdentity: { kind: "main_feature" },
-          },
-        }),
-      }),
-      archive.id,
-      () => access,
-      () => "http://localhost:3000",
-    );
+    const correctionResponse = await previewAndApplyDiscSelection(access, archive.id, {
+      action: "correct_disc_selection",
+      discSelectionId: mistakenSelection.id,
+      catalogRevision,
+      correctionReason: "The wrong movie was mapped.",
+      selection: {
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "main_feature" },
+      },
+    });
 
     expect(correctionResponse.status).toBe(200);
     const correctionBody = await correctionResponse.json();
@@ -1264,31 +1309,18 @@ describe("Catalog Review API", () => {
     );
 
     completeCatalogReview(access, archive.id);
-    const secondCorrectionResponse = await createCatalogReviewRoute(
-      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Host: "localhost:3000",
-          Origin: "http://localhost:3000",
-        },
-        body: JSON.stringify({
-          action: "correct_disc_selection",
-          discSelectionId: correctionBody.discSelection.id,
-          catalogRevision: access.catalog.listOriginalDiscArchives({
-            ids: [archive.id],
-          })[0]!.updatedAt.toISOString(),
-          correctionReason: "The reviewed edition belongs to another movie.",
-          selection: {
-            mediaItemId: revisedItem.id,
-            sourceIdentity: { kind: "main_feature" },
-          },
-        }),
-      }),
-      archive.id,
-      () => access,
-      () => "http://localhost:3000",
-    );
+    const secondCorrectionResponse = await previewAndApplyDiscSelection(access, archive.id, {
+      action: "correct_disc_selection",
+      discSelectionId: correctionBody.discSelection.id,
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt.toISOString(),
+      correctionReason: "The reviewed edition belongs to another movie.",
+      selection: {
+        mediaItemId: revisedItem.id,
+        sourceIdentity: { kind: "main_feature" },
+      },
+    });
     expect(secondCorrectionResponse.status).toBe(200);
     const secondCorrection = await secondCorrectionResponse.json();
 
@@ -1342,23 +1374,10 @@ describe("Catalog Review API", () => {
       }),
     ]);
 
-    const deleteResponse = await createCatalogReviewRoute(
-      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Host: "localhost:3000",
-          Origin: "http://localhost:3000",
-        },
-        body: JSON.stringify({
-          action: "delete_disc_selection",
-          discSelectionId: secondCorrection.discSelection.id,
-        }),
-      }),
-      archive.id,
-      () => access,
-      () => "http://localhost:3000",
-    );
+    const deleteResponse = await previewAndApplyDiscSelection(access, archive.id, {
+      action: "delete_disc_selection",
+      discSelectionId: secondCorrection.discSelection.id,
+    });
     expect(deleteResponse.status).toBe(200);
     expect(access.catalog.listDiscSelections({
       originalDiscArchiveId: archive.id,
@@ -2015,29 +2034,27 @@ describe("Catalog Review API", () => {
         `Disc Selection ${selection.id} needs unsafe legacy repair, not ordinary update`,
     });
 
-    const repairResponse = await createCatalogReviewRoute(
-      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Host: "localhost:3000",
-          Origin: "http://localhost:3000",
-        },
-        body: JSON.stringify({
-          action: "repair_disc_selection",
-          discSelectionId: selection.id,
-          selection: {
-            mediaItemId: movie.id,
-            sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
-          },
-        }),
-      }),
-      archive.id,
-      () => access,
-      () => "http://localhost:3000",
-    );
+    const repairCommand = {
+      action: "repair_disc_selection",
+      discSelectionId: selection.id,
+      selection: {
+        mediaItemId: movie.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    };
+    const unacknowledgedRepair = await postCatalogReview(access, archive.id, repairCommand);
+    expect(unacknowledgedRepair.status).toBe(400);
+    expect(await unacknowledgedRepair.json()).toEqual({
+      error: "Invalid Disc Selection mutation key",
+    });
+    const repairApplication = await discSelectionApplication(access, archive.id, repairCommand);
+    const repairResponse = await postCatalogReview(access, archive.id, repairApplication);
     expect(repairResponse.status).toBe(200);
-    const repaired = (await repairResponse.json()).discSelection;
+    const repairOutcome = await repairResponse.json();
+    const repaired = repairOutcome.discSelection;
+    const replayedRepair = await postCatalogReview(access, archive.id, repairApplication);
+    expect(replayedRepair.status).toBe(200);
+    expect(await replayedRepair.json()).toEqual(repairOutcome);
     expect(repaired.id).not.toBe(selection.id);
     expect(access.catalog.listDiscSelections({ ids: [selection.id] }))
       .toEqual([expect.objectContaining({ id: selection.id })]);
@@ -2062,28 +2079,17 @@ describe("Catalog Review API", () => {
         }),
       }),
     ]));
-    const unsupportedRepair = await createCatalogReviewRoute(
-      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Host: "localhost:3000",
-          Origin: "http://localhost:3000",
-        },
-        body: JSON.stringify({
-          action: "repair_disc_selection",
-          discSelectionId: repaired.id,
-          selection: { mediaItemId: movie.id,
-            sourceIdentity: { kind: "dvd_title", titleNumber: 1 } },
-        }),
-      }),
-      archive.id,
-      () => access,
-      () => "http://localhost:3000",
-    );
-    expect(unsupportedRepair.status).toBe(409);
-    expect(await unsupportedRepair.json()).toEqual({
-      error: "Disc Selection does not need unsafe legacy repair",
+    const unsupportedRepair = await postCatalogReview(access, archive.id, {
+      action: "repair_disc_selection",
+      discSelectionId: repaired.id,
+      selection: { mediaItemId: movie.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 } },
+      preview: true,
+    });
+    expect(unsupportedRepair.status).toBe(200);
+    expect(await unsupportedRepair.json()).toMatchObject({
+      state: "blocked",
+      reason: "Repair is available only for an unsafe legacy Disc Selection",
     });
   });
 
@@ -2602,28 +2608,17 @@ describe("Catalog Review API", () => {
     }
     access.encodeJobs.complete(claim);
 
-    const response = await createCatalogReviewRoute(
-      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Host: "localhost:3000",
-          Origin: "http://localhost:3000",
-        },
-        body: JSON.stringify({
-          action: "delete_disc_selection",
-          discSelectionId: selection.id,
-        }),
-      }),
-      archive.id,
-      () => access,
-      () => "http://localhost:3000",
-    );
+    const response = await postCatalogReview(access, archive.id, {
+      action: "delete_disc_selection",
+      discSelectionId: selection.id,
+      preview: true,
+    });
 
-    expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toEqual({
-      error:
-        `Disc Selection ${selection.id} cannot be deleted because Encode Job history must be preserved (job ${job.id})`,
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      state: "blocked",
+      reason: expect.stringContaining(`Job ${job.id}`),
+      actionAvailability: { state: "locked_provenance", availableActions: ["correct"] },
     });
     expect(access.catalog.listDiscSelections({ ids: [selection.id] }))
       .toHaveLength(1);
@@ -2961,7 +2956,7 @@ describe("Catalog Review API", () => {
       () => access,
       () => "http://localhost:3000",
     );
-    const removeSelectionResponse = await mutate({
+    const removeSelectionResponse = await previewAndApplyDiscSelection(access, archive.id, {
       action: "delete_disc_selection",
       discSelectionId: selection.id,
     });
@@ -3335,7 +3330,7 @@ describe("Catalog Review API", () => {
       })[0]!.updatedAt.toISOString(),
       outcome: "reviewed_with_selections",
     })).status).toBe(200);
-    const deleteResponse = await mutate({
+    const deleteResponse = await previewAndApplyDiscSelection(access, archive.id, {
       action: "delete_disc_selection",
       discSelectionId: firstSelection.id,
     });

@@ -9,6 +9,7 @@ import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 const key = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
+const supportedDvdSettings = { preset: "Fast 480p30", container: "mkv" } as const;
 
 function fixture() {
   const current = createOperatorWorkflowFixture();
@@ -42,6 +43,18 @@ function fixture() {
   const second = access.catalog.createMediaItem({ kind: "movie", title: "Alternative Film" });
   access.close();
   return { current, archive, first, second };
+}
+
+function markUnsafeLegacySelections(databasePath: string, selectionIds: readonly string[]): void {
+  const sqlite = new DatabaseSync(databasePath);
+  try {
+    const markUnsafe = sqlite.prepare(
+      "update disc_selections set source_key = 'legacy:noncanonical' where id = ?",
+    );
+    for (const selectionId of selectionIds) markUnsafe.run(selectionId);
+  } finally {
+    sqlite.close();
+  }
 }
 
 afterEach(() => {
@@ -137,7 +150,7 @@ it("rejects invalid sources and protects locked Encode Job provenance", async ()
   const selectionId = (created.result as { discSelection: { id: string } }).discSelection.id;
   const access = current.openAccess();
   const profile = access.encodingProfiles.create({ key: "synthetic-profile", displayName: "Synthetic profile",
-    mediaDomain: "dvd_video", settings: { preset: "Fast 480p30" } });
+    mediaDomain: "dvd_video", settings: supportedDvdSettings });
   access.catalog.completeCatalogReview(archive.id,
     access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt, "reviewed_with_selections");
   access.encodeJobs.enqueue({ discSelectionId: selectionId as Parameters<typeof access.encodeJobs.enqueue>[0]["discSelectionId"],
@@ -166,7 +179,26 @@ it("rejects invalid sources and protects locked Encode Job provenance", async ()
   } });
   const afterPreview = await current.run(["disc-selection", "show", archive.id, selectionId]);
   expect(afterPreview.result).toMatchObject({ affectedEncodeJobs: [{ status: "queued" }] });
-  const decision = preview.result as { catalogRevision: string; previewToken: string };
+  const staleDecision = preview.result as { catalogRevision: string; previewToken: string };
+  const changedJobs = current.openAccess();
+  const additionalProfile = changedJobs.encodingProfiles.create({ key: "additional-synthetic-profile",
+    displayName: "Additional synthetic profile", mediaDomain: "dvd_video", settings: supportedDvdSettings });
+  const additionalJob = changedJobs.encodeJobs.enqueue({ discSelectionId: selectionId as Parameters<
+    typeof changedJobs.encodeJobs.enqueue>[0]["discSelectionId"], encodingProfileId: additionalProfile.id,
+    outputPath: join(current.mediaLibraryPath, "additional-synthetic-film.mkv") });
+  changedJobs.close();
+  const stale = await current.run(["disc-selection", "correct", archive.id, selectionId,
+    "--key", key(10), "--revision", staleDecision.catalogRevision,
+    "--preview-token", staleDecision.previewToken, "--acknowledge",
+    "--media-item-id", second.id, "--source-kind", "main_feature"]);
+  expect(stale.result).toMatchObject({ error: { code: "SELECTION_REJECTED",
+    message: "Disc Selection preview is stale because Encode Job history changed" } });
+  const currentPreview = await current.run(["disc-selection", "preview", "correct", archive.id, selectionId,
+    "--media-item-id", second.id, "--source-kind", "main_feature"]);
+  expect(currentPreview.result).toMatchObject({ consequences: {
+    requestsEncodeJobCancellation: expect.arrayContaining([additionalJob.id]),
+  } });
+  const decision = currentPreview.result as { catalogRevision: string; previewToken: string };
   const corrected = await current.run(["disc-selection", "correct", archive.id, selectionId,
     "--key", key(11), "--revision", decision.catalogRevision, "--preview-token", decision.previewToken,
     "--acknowledge",
@@ -181,7 +213,11 @@ it("rejects invalid sources and protects locked Encode Job provenance", async ()
   ] });
   const jobId = (detail.result as { affectedEncodeJobs: { id: string }[] }).affectedEncodeJobs[0]!.id;
   expect((await current.run(["inspect", "encode-jobs", jobId])).result).toMatchObject({
-    item: { id: jobId, history: [expect.objectContaining({ discSelectionId: selectionId })] },
+    item: { id: jobId, status: "cancelled",
+      history: expect.arrayContaining([expect.objectContaining({ discSelectionId: selectionId })]) },
+  });
+  expect((await current.run(["inspect", "encode-jobs", additionalJob.id])).result).toMatchObject({
+    item: { id: additionalJob.id, status: "cancelled" },
   });
 });
 
@@ -197,7 +233,7 @@ it("previews unsafe legacy repair and quarantine while preserving completed Enco
     sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
   });
   const profile = access.encodingProfiles.create({ key: "legacy-recovery", displayName: "Legacy recovery",
-    mediaDomain: "dvd_video", settings: {} });
+    mediaDomain: "dvd_video", settings: supportedDvdSettings });
   access.catalog.completeCatalogReview(archive.id,
     access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt, "reviewed_with_selections");
   const firstJob = access.encodeJobs.enqueue({ discSelectionId: selection.id,
@@ -209,10 +245,7 @@ it("previews unsafe legacy repair and quarantine while preserving completed Enco
   const secondClaim = access.encodeJobs.claimNext("synthetic-repair-worker")!;
   access.encodeJobs.fail(secondClaim, "Synthetic failed encode");
   access.close();
-  const sqlite = new DatabaseSync(current.databasePath);
-  sqlite.prepare("update disc_selections set source_key = 'legacy:noncanonical' where id in (?, ?)")
-    .run(selection.id, other.id);
-  sqlite.close();
+  markUnsafeLegacySelections(current.databasePath, [selection.id, other.id]);
 
   const show = await current.run(["disc-selection", "show", archive.id, selection.id]);
   expect(show.result).toMatchObject({ actionAvailability: { state: "needs_repair",
@@ -253,7 +286,8 @@ it("previews unsafe legacy repair and quarantine while preserving completed Enco
     "--preview-token", removalDecision.previewToken, "--acknowledge"]);
   expect(quarantined.result).toMatchObject({ deletionComplete: true });
   expect((await current.run(["inspect", "encode-jobs", secondJob.id])).result)
-    .toMatchObject({ item: { history: [expect.objectContaining({ discSelectionId: other.id })] } });
+    .toMatchObject({ item: { reservesOutputPath: false,
+      history: [expect.objectContaining({ discSelectionId: other.id })] } });
   expect((await current.run(["catalog-review", "show", archive.id])).result)
     .toMatchObject({ reviewOutcome: "needs_review",
       discSelections: [expect.objectContaining({ id: replacementId })] });
@@ -265,15 +299,13 @@ it("returns a structured blocked repair while an unsafe legacy selection has act
   const selection = access.catalog.createDiscSelection({ originalDiscArchiveId: archive.id,
     mediaItemId: first.id, sourceIdentity: { kind: "dvd_title", titleNumber: 1 } });
   const profile = access.encodingProfiles.create({ key: "active-repair", displayName: "Active repair",
-    mediaDomain: "dvd_video", settings: {} });
+    mediaDomain: "dvd_video", settings: supportedDvdSettings });
   access.catalog.completeCatalogReview(archive.id,
     access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt, "reviewed_with_selections");
   const job = access.encodeJobs.enqueue({ discSelectionId: selection.id, encodingProfileId: profile.id,
     outputPath: join(current.mediaLibraryPath, "active.mkv") });
   access.close();
-  const sqlite = new DatabaseSync(current.databasePath);
-  sqlite.prepare("update disc_selections set source_key = 'legacy:noncanonical' where id = ?").run(selection.id);
-  sqlite.close();
+  markUnsafeLegacySelections(current.databasePath, [selection.id]);
   const preview = await current.run(["disc-selection", "preview", "repair", archive.id, selection.id,
     "--media-item-id", first.id, "--source-kind", "dvd_title", "--title-number", "1"]);
   expect(preview.exitCode).toBe(0);

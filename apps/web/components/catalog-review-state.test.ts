@@ -104,4 +104,34 @@ describe("catalog review request state", () => {
       "Disc Selection selection-1 cannot be deleted because Encode Job history must be preserved",
     );
   });
+
+  it("reuses the acknowledged preview and mutation key after a lost apply response", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    let applyAttempts = 0;
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      bodies.push(body);
+      if (body.preview === true) {
+        return Response.json({ state: "available",
+          catalogRevision: "2026-08-11T06:00:00.000Z", previewToken: "preview-token" });
+      }
+      applyAttempts += 1;
+      if (applyAttempts === 1) throw new Error("Lost response");
+      return Response.json({ message: "Mapping changed; review required" });
+    };
+    const command = { action: "delete_disc_selection" as const, discSelectionId: "selection-2" };
+
+    await expect(mutateCatalogReview("archive-2", command, fetcher)).rejects.toThrow("Lost response");
+    await expect(mutateCatalogReview("archive-2", command, fetcher)).resolves.toEqual({
+      message: "Mapping changed; review required",
+    });
+
+    expect(bodies).toHaveLength(3);
+    expect(bodies[0]).toEqual({ ...command, preview: true });
+    expect(bodies[1]).toEqual(bodies[2]);
+    expect(bodies[1]).toMatchObject({ ...command,
+      mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      expectedCatalogRevision: "2026-08-11T06:00:00.000Z",
+      previewToken: "preview-token", acknowledge: true });
+  });
 });

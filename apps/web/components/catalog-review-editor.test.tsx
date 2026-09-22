@@ -742,7 +742,12 @@ describe("CatalogReviewEditor", () => {
       init?: RequestInit,
     ) => {
       if (init?.method === "POST") {
-        postedCommands.push(JSON.parse(String(init.body)) as unknown);
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        postedCommands.push(body);
+        if (body.preview === true) {
+          return Response.json({ state: "available", catalogRevision: review.catalogRevision,
+            previewToken: "preview-token" });
+        }
         return Response.json({});
       }
       return Response.json(review);
@@ -784,7 +789,7 @@ describe("CatalogReviewEditor", () => {
       }));
     });
 
-    expect(postedCommands).toEqual([{
+    const command = {
       action: "correct_disc_selection",
       discSelectionId: review.discSelections[0]!.id,
       catalogRevision: review.catalogRevision,
@@ -793,7 +798,13 @@ describe("CatalogReviewEditor", () => {
         mediaItemId: review.mediaItems[0]!.id,
         sourceIdentity: { kind: "main_feature" },
       },
-    }]);
+    };
+    expect(postedCommands).toEqual([
+      { ...command, preview: true },
+      { ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        expectedCatalogRevision: review.catalogRevision, previewToken: "preview-token",
+        acknowledge: true },
+    ]);
   });
 
   it("updates a job-free Disc Selection without resubmitting unchanged source or label values", async () => {
@@ -1961,7 +1972,12 @@ describe("CatalogReviewView", () => {
     } satisfies Record<CatalogReviewCommand["action"], CatalogReviewCommand>;
     const postedBodies: unknown[] = [];
     const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
-      postedBodies.push(JSON.parse(String(init?.body)) as unknown);
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      postedBodies.push(body);
+      if (body.preview === true) {
+        return Response.json({ state: "available",
+          catalogRevision: "2026-08-11T06:00:00.000Z", previewToken: "preview-token" });
+      }
       return Response.json({});
     };
 
@@ -1969,9 +1985,19 @@ describe("CatalogReviewView", () => {
       await mutateCatalogReview("archive-1", commands[action], fetcher);
     }
 
-    expect(withoutProposalKeys(postedBodies)).toEqual(CATALOG_REVIEW_COMMAND_ACTIONS.map(
-      (action) => commands[action],
-    ));
+    const consequential = new Set(["repair_disc_selection", "correct_disc_selection",
+      "delete_disc_selection"]);
+    expect(withoutProposalKeys(postedBodies)).toEqual(
+      CATALOG_REVIEW_COMMAND_ACTIONS.flatMap((action) => {
+        const command = commands[action];
+        return consequential.has(action) ? [
+          { ...command, preview: true },
+          { ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
+            expectedCatalogRevision: "2026-08-11T06:00:00.000Z",
+            previewToken: "preview-token", acknowledge: true },
+        ] : [command];
+      }),
+    );
   });
 
   it("shows archived DVD evidence separately from editable hierarchy and reviewed mappings", () => {

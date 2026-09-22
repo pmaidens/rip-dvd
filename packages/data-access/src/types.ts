@@ -585,6 +585,7 @@ export interface DiscSelectionMutationInput {
   mutationKey?: string;
   originalDiscArchiveId: OriginalDiscArchiveId;
   expectedCatalogRevision?: Date;
+  expectedPreviewEvidenceHash?: string;
   mutation: DiscSelectionMutation;
 }
 
