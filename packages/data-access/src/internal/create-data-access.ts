@@ -3671,37 +3671,62 @@ export function createDataAccessInternal(
     },
   });
 
+  type MutationTransaction = Parameters<Parameters<typeof database.transaction>[0]>[0];
+
+  function readMutationInvocation<T>(
+    transaction: MutationTransaction,
+    mutationKey: string,
+    operation: string,
+    semanticInput: string,
+    decode: (stored: string) => T,
+  ): T | undefined {
+    const previous = transaction.select().from(mutationInvocations)
+      .where(eq(mutationInvocations.key, mutationKey)).get();
+    if (!previous) return undefined;
+    if (previous.operation !== operation || previous.semanticInput !== semanticInput) {
+      throw new MutationKeyConflictError();
+    }
+    return decode(previous.outcome);
+  }
+
+  function recordMutationInvocation<T>(
+    transaction: MutationTransaction,
+    mutationKey: string,
+    operation: string,
+    semanticInput: string,
+    outcome: T,
+    timestamp: Date,
+  ): T {
+    transaction.insert(mutationInvocations).values({
+      key: mutationKey,
+      operation,
+      semanticInput,
+      outcome: JSON.stringify(outcome),
+      createdAt: timestamp,
+    }).run();
+    return outcome;
+  }
+
   function replayRecoveryMutation<T extends { id: string; status: string }>(
     mutationKey: string,
     operation: string,
     targetId: string,
-    mutate: (transaction: Parameters<Parameters<typeof database.transaction>[0]>[0]) => T,
+    mutate: (transaction: MutationTransaction) => T,
   ): T {
     const result = database.transaction((transaction): { id: string; status: string; phase?: string } => {
       const semanticInput = JSON.stringify({ targetId });
-      const previous = transaction.select().from(mutationInvocations)
-        .where(eq(mutationInvocations.key, mutationKey)).get();
-      if (previous) {
-        if (previous.operation !== operation || previous.semanticInput !== semanticInput) {
-          throw new MutationKeyConflictError();
-        }
-        return JSON.parse(previous.outcome) as T;
-      }
+      const previous = readMutationInvocation(transaction, mutationKey, operation,
+        semanticInput, (stored) => JSON.parse(stored) as T);
+      if (previous !== undefined) return previous;
       const outcome = mutate(transaction);
-      transaction.insert(mutationInvocations).values({
-        key: mutationKey,
-        operation,
-        semanticInput,
-        outcome: JSON.stringify(outcome),
-        createdAt: now(),
-      }).run();
-      return outcome;
+      return recordMutationInvocation(transaction, mutationKey, operation,
+        semanticInput, outcome, now());
     }, { behavior: "immediate" });
     return result as T;
   }
 
   function cancelArchiveRequest(
-    transaction: Parameters<Parameters<typeof database.transaction>[0]>[0],
+    transaction: MutationTransaction,
     id: ArchiveRequestId,
   ) {
     const timestamp = now();
@@ -3737,47 +3762,28 @@ export function createDataAccessInternal(
         detectedDiscId: input.detectedDiscId,
       });
       if (mutationKey !== undefined) {
-        const previous = transaction
-          .select()
-          .from(mutationInvocations)
-          .where(eq(mutationInvocations.key, mutationKey))
-          .get();
-        if (previous) {
-          if (
-            previous.operation !== "archive_request.submit" ||
-            previous.semanticInput !== semanticInput
-          ) {
-            throw new MutationKeyConflictError();
-          }
-          const outcome = JSON.parse(previous.outcome) as ArchiveRequest;
-          return {
-            ...outcome,
-            cancellationRequestedAt: outcome.cancellationRequestedAt === null
-              ? null : new Date(outcome.cancellationRequestedAt),
-            fulfilledAt: outcome.fulfilledAt === null
-              ? null : new Date(outcome.fulfilledAt),
-            cancelledAt: outcome.cancelledAt === null
-              ? null : new Date(outcome.cancelledAt),
-            createdAt: new Date(outcome.createdAt),
-            updatedAt: new Date(outcome.updatedAt),
-          };
-        }
+        const previous = readMutationInvocation(transaction, mutationKey,
+          "archive_request.submit", semanticInput, (stored) => {
+            const outcome = JSON.parse(stored) as ArchiveRequest;
+            return {
+              ...outcome,
+              cancellationRequestedAt: outcome.cancellationRequestedAt === null
+                ? null : new Date(outcome.cancellationRequestedAt),
+              fulfilledAt: outcome.fulfilledAt === null
+                ? null : new Date(outcome.fulfilledAt),
+              cancelledAt: outcome.cancelledAt === null
+                ? null : new Date(outcome.cancelledAt),
+              createdAt: new Date(outcome.createdAt),
+              updatedAt: new Date(outcome.updatedAt),
+            };
+          });
+        if (previous !== undefined) return previous;
       }
-      const saveOutcome = (outcome: ArchiveRequest): ArchiveRequest => {
-        if (mutationKey !== undefined) {
-          transaction
-            .insert(mutationInvocations)
-            .values({
-              key: mutationKey,
-              operation: "archive_request.submit",
-              semanticInput,
-              outcome: JSON.stringify(outcome),
-              createdAt: timestamp,
-            })
-            .run();
-        }
-        return outcome;
-      };
+      const saveOutcome = (outcome: ArchiveRequest): ArchiveRequest =>
+        mutationKey === undefined ? outcome : recordMutationInvocation(
+          transaction, mutationKey, "archive_request.submit", semanticInput,
+          outcome, timestamp,
+        );
       const disc = requireRow(
         transaction
           .select()
