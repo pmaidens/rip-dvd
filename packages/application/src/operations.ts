@@ -197,15 +197,14 @@ function encodeActions(job: EncodeJob, requeue: ReturnType<typeof encodeRequeueA
   }];
 }
 
-function detectedDiscActions(disc: DetectedDisc, requests: ArchiveRequest[]) {
-  const latest = requests.at(-1);
+function detectedDiscActions(disc: DetectedDisc, relevantRequest: ArchiveRequest | null) {
   const eligible = disc.status === "scanned" ||
-    (disc.status === "approved" && latest?.status === "cancelled");
+    (disc.status === "approved" && relevantRequest?.status === "cancelled");
   return [{
     name: "request-archive",
     eligible,
-    reason: eligible ? null : latest && latest.status !== "cancelled"
-      ? `Archive Request is ${latest.status}.`
+    reason: eligible ? null : relevantRequest && relevantRequest.status !== "cancelled"
+      ? `Archive Request is ${relevantRequest.status}.`
       : `Detected Disc is ${disc.status}.`,
   }];
 }
@@ -292,17 +291,20 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
       const disc = access.catalog.listDetectedDiscs(undefined, { ids: [id as DetectedDiscId] })[0];
       if (!disc) return null;
       const requests = access.archiveRequests.listForDetectedDisc(disc.id);
+      const relevantRequest = access.archiveRequests
+        .listRelevantForDetectedDiscs([disc.id])[0] ?? null;
       return {
         ...visibleDisc(disc), scanData: disc.scanData,
         inspections: access.discInspections.list({ detectedDiscId: disc.id })
           .map(visibleInspection),
         archiveRequests: requests,
+        currentArchiveRequest: relevantRequest,
         archiveJobs: access.archiveJobs.list(undefined, {
           detectedDiscIds: [disc.id],
         }).map(visibleArchiveJob),
         archives: access.catalog.listOriginalDiscArchives({ detectedDiscId: disc.id })
           .map(visibleArchive),
-        availableActions: detectedDiscActions(disc, requests),
+        availableActions: detectedDiscActions(disc, relevantRequest),
       };
     }
     case "disc-inspections": {

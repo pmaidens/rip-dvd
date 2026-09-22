@@ -327,6 +327,7 @@ it("inspects full attempts and keeps request intent separate from job attempts",
     item: {
       id: disc.id,
       archiveRequests: [expect.objectContaining({ id: request.id })],
+      currentArchiveRequest: { id: request.id, status: "pending" },
       availableActions: [{ name: "request-archive", eligible: false }],
     },
   });
@@ -473,6 +474,12 @@ it("observes a later transition during a bounded wait", async () => {
     expect(result.exitCode).toBe(0);
     expect(result.result).toMatchObject({
       outcome: "settled", current: { status: "cancelled" },
+    });
+    expect(current.run(["inspect", "detected-discs", disc.id]).result).toMatchObject({
+      item: {
+        currentArchiveRequest: { id: request.id, status: "cancelled" },
+        availableActions: [{ name: "request-archive", eligible: true }],
+      },
     });
   } finally {
     clearTimeout(transition);
