@@ -302,7 +302,7 @@ it("inspects full attempts and keeps request intent separate from job attempts",
   const request = access.archiveRequests.create({ detectedDiscId: disc.id });
   access.close();
 
-  const inspection = current.run(["inspect", "disc-inspections", started.inspection.id]);
+  const inspection = await current.run(["inspect", "disc-inspections", started.inspection.id]);
   expect(inspection.exitCode).toBe(0);
   expect(inspection.result).toMatchObject({
     schemaVersion: 1,
@@ -319,11 +319,11 @@ it("inspects full attempts and keeps request intent separate from job attempts",
   });
   expect(JSON.stringify(inspection.result)).not.toContain("claimToken");
 
-  const requestDetail = current.run(["inspect", "archive-requests", request.id]);
+  const requestDetail = await current.run(["inspect", "archive-requests", request.id]);
   expect(requestDetail.result).toMatchObject({
     item: { id: request.id, status: "pending", archiveJobs: [] },
   });
-  expect(current.run(["inspect", "detected-discs", disc.id]).result).toMatchObject({
+  expect((await current.run(["inspect", "detected-discs", disc.id])).result).toMatchObject({
     item: {
       id: disc.id,
       archiveRequests: [expect.objectContaining({ id: request.id })],
@@ -339,7 +339,7 @@ it("inspects full attempts and keeps request intent separate from job attempts",
   expect(timedOut.result).toMatchObject({
     outcome: "timeout", current: { id: request.id, status: "pending", archiveJobs: [] },
   });
-  expect(current.run(["inspect", "archive-requests", request.id]).result)
+  expect((await current.run(["inspect", "archive-requests", request.id])).result)
     .toMatchObject({ item: { status: "pending" } });
 
   const settled = await current.runAsync([
@@ -360,7 +360,7 @@ it("inspects full attempts and keeps request intent separate from job attempts",
   } });
 });
 
-it("reports encode action eligibility and correction evidence through the public command", () => {
+it("reports encode action eligibility and correction evidence through the public command", async () => {
   const current = fixture();
   const access = current.openAccess();
   const drive = access.catalog.upsertOpticalDrive({
@@ -407,7 +407,7 @@ it("reports encode action eligibility and correction evidence through the public
   });
   access.close();
 
-  const result = current.run(["inspect", "encode-jobs", job.id]);
+  const result = await current.run(["inspect", "encode-jobs", job.id]);
   expect(result.exitCode).toBe(0);
   expect(result.result).toMatchObject({ item: {
     id: job.id,
@@ -426,7 +426,7 @@ it("reports encode action eligibility and correction evidence through the public
   const cleanup = writer.encodeJobs.registerPartialCleanup(claimed);
   writer.encodeJobs.fail(claimed, "Synthetic encode failure");
   writer.close();
-  expect(current.run(["inspect", "encode-jobs", job.id]).result).toMatchObject({ item: {
+  expect((await current.run(["inspect", "encode-jobs", job.id])).result).toMatchObject({ item: {
     status: "failed",
     availableActions: expect.arrayContaining([
       expect.objectContaining({
@@ -438,7 +438,7 @@ it("reports encode action eligibility and correction evidence through the public
   const cleanupWriter = current.openAccess();
   cleanupWriter.encodeJobs.completePartialCleanup(cleanup);
   cleanupWriter.close();
-  expect(current.run(["inspect", "encode-jobs", job.id]).result).toMatchObject({ item: {
+  expect((await current.run(["inspect", "encode-jobs", job.id])).result).toMatchObject({ item: {
     status: "failed",
     availableActions: expect.arrayContaining([
       expect.objectContaining({ name: "requeue", eligible: true, reason: null }),
@@ -475,7 +475,7 @@ it("observes a later transition during a bounded wait", async () => {
     expect(result.result).toMatchObject({
       outcome: "settled", current: { status: "cancelled" },
     });
-    expect(current.run(["inspect", "detected-discs", disc.id]).result).toMatchObject({
+    expect((await current.run(["inspect", "detected-discs", disc.id])).result).toMatchObject({
       item: {
         currentArchiveRequest: { id: request.id, status: "cancelled" },
         availableActions: [{ name: "request-archive", eligible: true }],
@@ -488,9 +488,9 @@ it("observes a later transition during a bounded wait", async () => {
 
 it("validates inspection and wait arguments before opening the database", async () => {
   const current = fixture();
-  expect(current.run(["inspect", "disc-inspections", "--limit", "101"]).result)
+  expect((await current.run(["inspect", "disc-inspections", "--limit", "101"])).result)
     .toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
-  expect(current.run(["inspect", "disc-inspections", "missing-id"]).result)
+  expect((await current.run(["inspect", "disc-inspections", "missing-id"])).result)
     .toMatchObject({ error: { code: "NOT_FOUND" } });
   expect((await current.runAsync([
     "wait", "archive-jobs", "missing-id", "--timeout-ms", "0",

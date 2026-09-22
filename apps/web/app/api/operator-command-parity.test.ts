@@ -211,7 +211,7 @@ it("returns the same operational records and evidence through web and CLI", asyn
         new Request(`http://localhost/api/operations?kind=${kind}`));
       expect(response.status).toBe(200);
       expect(response.headers.get("Cache-Control")).toBe("no-store");
-      expect(fixture.run(["inspect", kind]).result).toEqual(await response.json());
+      expect((await fixture.run(["inspect", kind])).result).toEqual(await response.json());
     }
     for (const [kind, id] of [
       ["optical-drives", drive.id],
@@ -225,14 +225,14 @@ it("returns the same operational records and evidence through web and CLI", asyn
       const response = createOperationsResponse(access,
         new Request(`http://localhost/api/operations?kind=${kind}&id=${id}`));
       expect(response.status).toBe(200);
-      expect(fixture.run(["inspect", kind, id]).result).toEqual(await response.json());
+      expect((await fixture.run(["inspect", kind, id])).result).toEqual(await response.json());
     }
-    expect(fixture.run(["inspect", "disc-inspections", started.inspection.id]).result)
+    expect((await fixture.run(["inspect", "disc-inspections", started.inspection.id])).result)
       .toMatchObject({ item: {
         attempts: [expect.objectContaining({ reasonCode: "metadata_read_failed" })],
         availableActions: [expect.objectContaining({ eligible: true })],
       } });
-    expect(fixture.run(["inspect", "original-disc-archives", archiveId]).result)
+    expect((await fixture.run(["inspect", "original-disc-archives", archiveId])).result)
       .toMatchObject({ item: {
         boundaryReportedSizeBytes: 2_048,
         boundaryPublishedSizeBytes: 2_048,
