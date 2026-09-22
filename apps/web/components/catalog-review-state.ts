@@ -326,6 +326,21 @@ export function useCatalogReviewState({
         {
           confirmDiscSelectionPreview: (preview) =>
             window.confirm(discSelectionPreviewConfirmation(preview)),
+          confirmCatalogReviewCompletionPreview: (preview) =>
+            window.confirm(
+              `Complete this Catalog Review as ${
+                preview.outcome === "archive_only"
+                  ? "Archive only"
+                  : "reviewed with selections"
+              } and queue ${
+                preview.consequences.replacementEncodes.length
+              } corrected replacement encode(s), omitting ${
+                preview.consequences.omittedReplacementEncodeCount
+              } eligible replacement(s), and release ${
+                preview.consequences
+                  .failedOutputReservationReleaseEncodeJobIds.length
+              } failed output reservation(s)?`,
+            ),
         },
       );
       if (result.cancelled) return;

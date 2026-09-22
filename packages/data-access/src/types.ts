@@ -881,6 +881,7 @@ export interface CorrectedEncodeReplacementPlan {
   proposedOutputPath: string;
   predecessorStatus: EncodeJobStatus;
   predecessorReady: boolean;
+  releasesFailedOutputReservation: boolean;
 }
 
 export interface CorrectedEncodeReplacementInput {
@@ -893,6 +894,15 @@ export interface CorrectedEncodeReplacementInput {
 export interface CompletedCatalogReviewWithReplacements {
   archive: OriginalDiscArchive;
   replacementEncodeJobs: EncodeJob[];
+}
+
+export interface CatalogReviewCompletionPreviewDecisionInput {
+  previewToken: string;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  catalogRevision: Date;
+  outcome: CompletedCatalogReviewOutcome;
+  replacements: readonly CorrectedEncodeReplacementInput[];
+  expectedPreviewEvidence: string;
 }
 
 export type RunningArchiveJob = ArchiveJob & {
@@ -1167,7 +1177,11 @@ export interface CatalogAccess {
     catalogRevision: Date,
     outcome: CompletedCatalogReviewOutcome,
     replacements: readonly CorrectedEncodeReplacementInput[],
+    options?: { mutationKey?: string; previewToken?: string },
   ): CompletedCatalogReviewWithReplacements;
+  recordCatalogReviewCompletionPreviewDecision(
+    input: CatalogReviewCompletionPreviewDecisionInput,
+  ): void;
   createMediaItem(input: CreateMediaItemInput, options?: MediaItemMutationOptions): MediaItem;
   createMappingProposal(
     input: CreateMappingProposalInput,
@@ -1263,6 +1277,7 @@ export interface CatalogAccess {
     }): DiscSelectionSupersession[];
   listCorrectedEncodeReplacementPlans(options: {
     originalDiscArchiveId: OriginalDiscArchiveId;
+    predecessorEncodeJobId?: EncodeJobId;
     limit: number;
     offset?: number;
   }): CorrectedEncodeReplacementPlan[];

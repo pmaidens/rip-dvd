@@ -26,6 +26,13 @@ export class MutationKeyConflictError extends DomainInvariantError {
   }
 }
 
+export class StaleCatalogRevisionError extends DomainInvariantError {
+  constructor(message: string) {
+    super(message);
+    this.name = "StaleCatalogRevisionError";
+  }
+}
+
 export class StaleJobAttemptError extends Error {
   constructor(recordType: string, id: string) {
     super(`Stale ${recordType} attempt: ${id}`);

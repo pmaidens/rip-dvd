@@ -36,6 +36,10 @@ import {
   resolveQueueLogicalJobs,
 } from "./encode-jobs.js";
 import { describeArchiveRequestWaitingStatus } from "./archive-request-waiting-status.js";
+import {
+  completeCatalogReview,
+  previewCatalogReviewCompletion,
+} from "./catalog-review-completion.js";
 
 export class InvalidProfileInputError extends Error {
   constructor(message = "Invalid Encoding Profile input.") {
@@ -368,6 +372,21 @@ export function createApplicationOperations(
       lookup: CatalogMetadataLookup | null,
       selection?: CatalogMetadataSelection,
     ) => suggestCatalogReview(access, id, lookup, selection),
+    previewCatalogReviewCompletion: (
+      archiveId: Parameters<typeof previewCatalogReviewCompletion>[1],
+      command: Parameters<typeof previewCatalogReviewCompletion>[2],
+      mediaLibraryPath: string,
+    ) => previewCatalogReviewCompletion(
+      access,
+      archiveId,
+      command,
+      mediaLibraryPath,
+    ),
+    completeCatalogReview: (
+      archiveId: Parameters<typeof completeCatalogReview>[1],
+      command: Parameters<typeof completeCatalogReview>[2],
+      input: Parameters<typeof completeCatalogReview>[3],
+    ) => completeCatalogReview(access, archiveId, command, input),
     searchMediaItems: (input: Parameters<typeof searchMediaItems>[1]) =>
       searchMediaItems(access, input),
     showMediaItem: (id: Parameters<typeof showMediaItem>[1]) => showMediaItem(access, id),
@@ -390,6 +409,8 @@ export { readCatalogReview, serializeDiscSelection, serializeMediaItem } from ".
 export type { CatalogReviewPageCoordinates } from "./catalog-review-read.js";
 export * from "./catalog-review-types.js";
 export * from "./catalog-review-command.js";
+export * from "./catalog-review-completion.js";
+export * from "./catalog-review-completion-preview-token.js";
 export type { MediaItemCommand } from "./media-item-operations.js";
 export * from "./catalog-automation.js";
 export * from "./tmdb-catalog-adapter.js";

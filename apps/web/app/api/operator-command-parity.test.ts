@@ -18,6 +18,23 @@ import { createMediaItemSearchRoute } from "./media-items/route";
 import { createMediaItemPreviewRoute } from "./media-items/[id]/route";
 import { createEncodeJobsRoute } from "./encode-jobs/route";
 
+const trustedOrigin = "http://localhost:3000";
+
+function catalogReviewMutationRequest(
+  archiveId: string,
+  body: Record<string, unknown>,
+): Request {
+  return new Request(`${trustedOrigin}/api/catalog-reviews/${archiveId}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Host: "localhost:3000",
+      Origin: trustedOrigin,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
 it("shares Encode Job validation and keyed outcomes across web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
   const { archive, correctedSelection } = seedCatalogReviewForReadFixture(fixture);
@@ -87,6 +104,80 @@ it("shares Encode Job validation and keyed outcomes across web and CLI", async (
     expect(requeued.exitCode).toBe(0);
     expect(requeued.result).toMatchObject({ job: (await webRequeued.json()).job });
     expect(access.encodeJobs.list()).toHaveLength(2);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("shares Catalog Review completion preview and replay across web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive } = seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    const revision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt.toISOString();
+    const command = {
+      action: "complete_review",
+      catalogRevision: revision,
+      outcome: "reviewed_with_selections",
+      replacementEncodes: [],
+    } as const;
+    const webPreviewResponse = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, { ...command, preview: true }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+      () => fixture.mediaLibraryPath,
+    );
+    expect(webPreviewResponse.status).toBe(200);
+    const webPreview = await webPreviewResponse.json() as {
+      previewToken: string;
+      catalogRevision: string;
+      [key: string]: unknown;
+    };
+    const cliPreview = await fixture.run([
+      "catalog-review", "preview-completion", archive.id,
+      "--json", JSON.stringify(command),
+    ]);
+    expect(cliPreview.exitCode).toBe(0);
+    const cliPreviewResult = cliPreview.result as {
+      previewToken: string;
+      catalogRevision: string;
+      [key: string]: unknown;
+    };
+    expect({ ...cliPreviewResult, previewToken: "<opaque>" }).toEqual({
+      ...webPreview,
+      previewToken: "<opaque>",
+    });
+
+    const mutationKey = "synthetic-catalog-completion-parity-key";
+    const webCompletion = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        ...command,
+        mutationKey,
+        acknowledgedRevision: webPreview.catalogRevision,
+        previewToken: webPreview.previewToken,
+        acknowledge: true,
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+      () => fixture.mediaLibraryPath,
+    );
+    expect(webCompletion.status).toBe(200);
+    const webResult = await webCompletion.json();
+    const cliCompletion = await fixture.run([
+      "catalog-review", "complete", archive.id,
+      "--key", mutationKey,
+      "--revision", cliPreviewResult.catalogRevision,
+      "--preview-token", cliPreviewResult.previewToken,
+      "--acknowledge", "--json", JSON.stringify(command),
+    ]);
+    expect(cliCompletion.exitCode).toBe(0);
+    expect(cliCompletion.result).toEqual(webResult);
+    expect(access.encodeJobs.list()).toHaveLength(1);
   } finally {
     access.close();
     fixture.dispose();

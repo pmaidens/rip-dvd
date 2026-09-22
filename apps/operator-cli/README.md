@@ -123,6 +123,55 @@ Rejected members, stale revisions, and key conflicts exit 2 with
 `PROPOSAL_REJECTED`, `STALE_CATALOG_REVISION`, or `MUTATION_KEY_CONFLICT`.
 Database unavailability exits 1 with `PROPOSAL_UNAVAILABLE`.
 
+## Complete Catalog Review
+
+Review completion is a previewed, keyed operation. Start with `catalog-review
+show` and copy its current `catalogRevision`. The completion document chooses
+the final outcome and lists only the corrected replacement encodes that should
+be queued. An empty `replacementEncodes` array completes the review without
+queueing replacements.
+
+```json
+{
+  "action": "complete_review",
+  "catalogRevision": "2026-01-01T00:00:00.000Z",
+  "outcome": "reviewed_with_selections",
+  "replacementEncodes": [
+    {
+      "predecessorEncodeJobId": "<encode-job-id>",
+      "encodingProfileId": "<encoding-profile-id>",
+      "outputPath": "/media/movies/Example Film (2020)/Example Film (2020).mkv"
+    }
+  ]
+}
+```
+
+Use `outcome: "archive_only"` only when the review has no Disc Selections, and
+leave `replacementEncodes` empty for that outcome. Preview validates the whole
+plan, resolves output paths inside the configured media library, reports
+selected and omitted replacements plus the exact failed predecessor output
+reservations it will release, and returns an opaque `previewToken` bound to the
+exact plan and catalog revision.
+
+```sh
+rip-dvd-operator catalog-review preview-completion <archive-id> \
+  --file <completion.json>
+rip-dvd-operator catalog-review complete <archive-id> \
+  --key <key> \
+  --revision <catalog-revision-from-preview> \
+  --preview-token <preview-token> \
+  --acknowledge \
+  --file <completion.json>
+```
+
+Both commands accept exactly one of `--json`, `--stdin`, or `--file`. Applying
+the plan revalidates the review, profiles, corrected lineage, output
+reservations, and preview evidence in one transaction. Review completion and
+all selected Encode Jobs commit together. Repeating the same key and document
+returns the original result after a lost response; changing the document with
+that key returns `MUTATION_KEY_CONFLICT`. Stale revisions and rejected plans
+leave the review open and queue no replacement work.
+
 # Disc Selection commands
 
 Use an Original Disc Archive ID for every Disc Selection command. `show`

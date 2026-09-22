@@ -1,5 +1,9 @@
 "use client";
 
+import type { CatalogReviewCompletionPreview } from "@rip-dvd/application";
+import {
+  isCatalogReviewCompletionPreviewToken,
+} from "@rip-dvd/application/catalog-review-completion-preview-token";
 import { isDiscSelectionPreviewToken } from "@rip-dvd/application/disc-selection-preview-token";
 import { parseMutationKey } from "@rip-dvd/application/mutation-key";
 import { MEDIA_ITEM_KINDS } from "@rip-dvd/data-access/catalog-kinds";
@@ -83,6 +87,9 @@ interface CatalogReviewMutationOptions {
   confirmDiscSelectionPreview?: (
     preview: DiscSelectionChangePreview,
   ) => boolean | Promise<boolean>;
+  confirmCatalogReviewCompletionPreview?: (
+    preview: CatalogReviewCompletionPreview,
+  ) => boolean | Promise<boolean>;
   storage?: CatalogReviewMutationStorage | null;
 }
 
@@ -95,7 +102,24 @@ interface PendingCatalogReviewMutation {
   acknowledged?: boolean;
 }
 
+type CatalogReviewCompletionCommand = Extract<
+  CatalogReviewCommand,
+  { action: "complete_review" }
+>;
+
+interface PendingCatalogReviewCompletion {
+  archiveId: string;
+  command: CatalogReviewCompletionCommand;
+  identity: string;
+  mutationKey: string;
+  preview: CatalogReviewCompletionPreview;
+}
+
 const pendingProposalKeys = new Map<string, string>();
+const pendingCompletionInvocations = new Map<
+  string,
+  PendingCatalogReviewCompletion
+>();
 
 export async function mutateCatalogReview(
   archiveId: string,
@@ -141,21 +165,104 @@ export async function mutateCatalogReview(
       writePendingCatalogReviewMutation(archiveId, pending, storage);
     }
   }
+  let completionInvocation: PendingCatalogReviewCompletion | undefined;
+  if (command.action === "complete_review") {
+    completionInvocation = readPendingCatalogReviewCompletion(
+      archiveId,
+      storage,
+    );
+    if (completionInvocation?.identity !== identity) {
+      if (completionInvocation !== undefined) {
+        throw new Error(
+          "A pending Catalog Review completion must be recovered before another change",
+        );
+      }
+      deletePendingCatalogReviewCompletion(archiveId, storage);
+      completionInvocation = undefined;
+    }
+    if (completionInvocation === undefined) {
+      const previewResponse = await postCatalogReview(
+        archiveId,
+        { ...command, preview: true },
+        fetcher,
+      );
+      if (!previewResponse.ok) {
+        throw await catalogReviewMutationError(previewResponse);
+      }
+      const preview = availableCatalogReviewCompletionPreview(
+        await previewResponse.json(),
+      );
+      if (preview === null) {
+        throw new Error("Catalog Review completion preview failed");
+      }
+      const confirm = options.confirmCatalogReviewCompletionPreview;
+      if (confirm === undefined) {
+        throw new Error(
+          "Catalog Review completion preview acknowledgement is required",
+        );
+      }
+      if (!await confirm(preview)) {
+        return { message: null, cancelled: true };
+      }
+      completionInvocation = {
+        archiveId,
+        command,
+        identity,
+        mutationKey: crypto.randomUUID(),
+        preview,
+      };
+      writePendingCatalogReviewCompletion(
+        archiveId,
+        completionInvocation,
+        storage,
+      );
+    }
+  }
   const response = pending !== undefined
     ? await applyPendingCatalogReviewMutation(pending, fetcher)
+    : completionInvocation !== undefined
+      ? await postCatalogReview(archiveId, {
+        ...completionInvocation.command,
+        mutationKey: completionInvocation.mutationKey,
+        acknowledgedRevision: completionInvocation.preview.catalogRevision,
+        previewToken: completionInvocation.preview.previewToken,
+        acknowledge: true,
+      }, fetcher)
     : await postCatalogReview(archiveId, {
       ...command,
       ...(proposalMutationKey ? { mutationKey: proposalMutationKey } : {}),
     }, fetcher);
   if (!response.ok) {
+    if (completionInvocation !== undefined &&
+        !ambiguousMutationResponse(response.status)) {
+      deletePendingCatalogReviewCompletion(archiveId, storage);
+    }
     if (pending !== undefined && !ambiguousMutationResponse(response.status)) {
       deletePendingCatalogReviewMutation(archiveId, storage);
     }
     throw await catalogReviewMutationError(response);
   }
   if (proposalIdentity !== null) pendingProposalKeys.delete(proposalIdentity);
+  if (completionInvocation !== undefined) {
+    deletePendingCatalogReviewCompletion(archiveId, storage);
+  }
   if (pending !== undefined) deletePendingCatalogReviewMutation(archiveId, storage);
   return { message: await catalogReviewMutationMessage(response) };
+}
+
+function availableCatalogReviewCompletionPreview(
+  value: unknown,
+): CatalogReviewCompletionPreview | null {
+  if (typeof value !== "object" || value === null ||
+      !("state" in value) || value.state !== "available" ||
+      !("catalogRevision" in value) || typeof value.catalogRevision !== "string" ||
+      !("previewToken" in value) ||
+      !isCatalogReviewCompletionPreviewToken(value.previewToken) ||
+      !("consequences" in value) || typeof value.consequences !== "object" ||
+      value.consequences === null) {
+    return null;
+  }
+  return value as CatalogReviewCompletionPreview;
 }
 
 async function prepareDiscSelectionMutation(
@@ -204,16 +311,41 @@ export async function resumePendingCatalogReviewMutation(
   const storage = options.storage === undefined
     ? browserMutationStorage() : options.storage;
   const pending = readPendingCatalogReviewMutation(archiveId, storage);
-  if (pending === undefined || !pendingCatalogReviewMutationIsReady(pending)) return null;
-  const response = await applyPendingCatalogReviewMutation(pending, fetcher);
-  if (!response.ok) {
-    if (!ambiguousMutationResponse(response.status)) {
-      deletePendingCatalogReviewMutation(archiveId, storage);
+  if (pending !== undefined && pendingCatalogReviewMutationIsReady(pending)) {
+    const response = await applyPendingCatalogReviewMutation(pending, fetcher);
+    if (!response.ok) {
+      if (!ambiguousMutationResponse(response.status)) {
+        deletePendingCatalogReviewMutation(archiveId, storage);
+      }
+      throw await catalogReviewMutationError(response);
     }
-    throw await catalogReviewMutationError(response);
+    deletePendingCatalogReviewMutation(archiveId, storage);
+    return { message: await catalogReviewMutationMessage(response) };
   }
-  deletePendingCatalogReviewMutation(archiveId, storage);
-  return { message: await catalogReviewMutationMessage(response) };
+  const completion = readPendingCatalogReviewCompletion(archiveId, storage);
+  if (completion === undefined) return null;
+  const resolved = await applyPendingCatalogReviewCompletion(completion, fetcher);
+  if (!resolved.ok) {
+    if (!ambiguousMutationResponse(resolved.status)) {
+      deletePendingCatalogReviewCompletion(archiveId, storage);
+    }
+    throw await catalogReviewMutationError(resolved);
+  }
+  deletePendingCatalogReviewCompletion(archiveId, storage);
+  return { message: await catalogReviewMutationMessage(resolved) };
+}
+
+function applyPendingCatalogReviewCompletion(
+  pending: PendingCatalogReviewCompletion,
+  fetcher: CatalogReviewFetch,
+): Promise<Response> {
+  return postCatalogReview(pending.archiveId, {
+    ...pending.command,
+    mutationKey: pending.mutationKey,
+    acknowledgedRevision: pending.preview.catalogRevision,
+    previewToken: pending.preview.previewToken,
+    acknowledge: true,
+  }, fetcher);
 }
 
 function applyPendingCatalogReviewMutation(
@@ -266,6 +398,8 @@ async function requestDiscSelectionPreview(
 
 const pendingCatalogReviewMutations = new Map<string, PendingCatalogReviewMutation>();
 const PENDING_CATALOG_REVIEW_MUTATION_PREFIX = "rip-dvd.catalog-review-mutation.v2:";
+const PENDING_CATALOG_REVIEW_COMPLETION_PREFIX =
+  "rip-dvd.catalog-review-completion.v1:";
 
 function browserMutationStorage(): CatalogReviewMutationStorage | null {
   try {
@@ -277,6 +411,107 @@ function browserMutationStorage(): CatalogReviewMutationStorage | null {
 
 function pendingCatalogReviewMutationKey(archiveId: string): string {
   return `${PENDING_CATALOG_REVIEW_MUTATION_PREFIX}${encodeURIComponent(archiveId)}`;
+}
+
+function pendingCatalogReviewCompletionKey(archiveId: string): string {
+  return `${PENDING_CATALOG_REVIEW_COMPLETION_PREFIX}${encodeURIComponent(archiveId)}`;
+}
+
+function readPendingCatalogReviewCompletion(
+  archiveId: string,
+  storage: CatalogReviewMutationStorage | null,
+): PendingCatalogReviewCompletion | undefined {
+  if (storage === null) return pendingCompletionInvocations.get(archiveId);
+  let saved: string | null;
+  try {
+    saved = storage.getItem(pendingCatalogReviewCompletionKey(archiveId));
+  } catch {
+    return pendingCompletionInvocations.get(archiveId);
+  }
+  if (saved === null) return pendingCompletionInvocations.get(archiveId);
+  const discard = () => {
+    try {
+      storage.removeItem(pendingCatalogReviewCompletionKey(archiveId));
+    } catch {
+      // Keep any in-memory recovery command when storage cleanup fails.
+    }
+    return pendingCompletionInvocations.get(archiveId);
+  };
+  let value: unknown;
+  try {
+    value = JSON.parse(saved);
+  } catch {
+    return discard();
+  }
+  if (typeof value !== "object" || value === null ||
+      !("archiveId" in value) || value.archiveId !== archiveId ||
+      !("identity" in value) || typeof value.identity !== "string" ||
+      !("mutationKey" in value) || typeof value.mutationKey !== "string" ||
+      !("command" in value) || !("preview" in value)) {
+    return discard();
+  }
+  let mutationKey: string;
+  try {
+    mutationKey = parseMutationKey(value.mutationKey);
+  } catch {
+    return discard();
+  }
+  const parsed = parseCatalogReviewCommand(value.command, {
+    mediaItemKinds: MEDIA_ITEM_KINDS,
+  });
+  if (!parsed.ok || parsed.command.action !== "complete_review" ||
+      value.identity !== catalogReviewMutationIdentity(
+        archiveId,
+        parsed.command,
+      )) {
+    return discard();
+  }
+  const preview = availableCatalogReviewCompletionPreview(value.preview);
+  if (preview === null || preview.archiveId !== archiveId ||
+      preview.catalogRevision !== parsed.command.catalogRevision ||
+      preview.outcome !== parsed.command.outcome) {
+    return discard();
+  }
+  return {
+    archiveId,
+    command: parsed.command,
+    identity: value.identity,
+    mutationKey,
+    preview,
+  };
+}
+
+function writePendingCatalogReviewCompletion(
+  archiveId: string,
+  pending: PendingCatalogReviewCompletion,
+  storage: CatalogReviewMutationStorage | null,
+): void {
+  if (storage === null) {
+    pendingCompletionInvocations.set(archiveId, pending);
+    return;
+  }
+  try {
+    storage.setItem(
+      pendingCatalogReviewCompletionKey(archiveId),
+      JSON.stringify(pending),
+    );
+    pendingCompletionInvocations.delete(archiveId);
+  } catch {
+    pendingCompletionInvocations.set(archiveId, pending);
+  }
+}
+
+function deletePendingCatalogReviewCompletion(
+  archiveId: string,
+  storage: CatalogReviewMutationStorage | null,
+): void {
+  pendingCompletionInvocations.delete(archiveId);
+  if (storage === null) return;
+  try {
+    storage.removeItem(pendingCatalogReviewCompletionKey(archiveId));
+  } catch {
+    // A failed cleanup retains only the already committed replay command.
+  }
 }
 
 function readPendingCatalogReviewMutation(

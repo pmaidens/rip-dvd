@@ -54,6 +54,9 @@ export function createOperatorWorkflowFixture() {
 
 export function seedCatalogReviewForReadFixture(
   current: ReturnType<typeof createOperatorWorkflowFixture>,
+  options: {
+    predecessorOutcome?: "completed" | "running" | "failed_cleanup_pending";
+  } = {},
 ) {
   const access = createLegacySidecarDataAccess({
     databasePath: current.databasePath,
@@ -117,7 +120,18 @@ export function seedCatalogReviewForReadFixture(
     });
     const claim = access.encodeJobs.claimNext("synthetic-review-worker");
     if (!claim) throw new Error("Expected synthetic Encode Job claim");
-    const predecessor = access.encodeJobs.complete(claim);
+    const runningClaim = options.predecessorOutcome === "running"
+      ? claim
+      : undefined;
+    const partialCleanupClaim =
+      options.predecessorOutcome === "failed_cleanup_pending"
+        ? access.encodeJobs.registerPartialCleanup(claim)
+        : undefined;
+    const predecessor = options.predecessorOutcome === "running"
+      ? claim
+      : options.predecessorOutcome === "failed_cleanup_pending"
+        ? access.encodeJobs.fail(claim, "Synthetic predecessor failure")
+        : access.encodeJobs.complete(claim);
     const correction = access.catalog.correctDiscSelection(previousSelection.id, {
       originalDiscArchiveId: archive.id,
       catalogRevision: access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt,
@@ -125,7 +139,14 @@ export function seedCatalogReviewForReadFixture(
       sourceIdentity: { kind: "main_feature" },
       reason: "Correct the synthetic mapping.",
     });
-    return { archive, previousSelection, correctedSelection: correction.discSelection, predecessor };
+    return {
+      archive,
+      previousSelection,
+      correctedSelection: correction.discSelection,
+      predecessor,
+      runningClaim,
+      partialCleanupClaim,
+    };
   } finally {
     access.close();
   }

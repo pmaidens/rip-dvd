@@ -25,6 +25,10 @@
     "./disc-selection-preview-token": {
       "types": "./src/disc-selection-preview-token.ts",
       "default": "./dist/disc-selection-preview-token.js"
+    },
+    "./catalog-review-completion-preview-token": {
+      "types": "./src/catalog-review-completion-preview-token.ts",
+      "default": "./dist/catalog-review-completion-preview-token.js"
     }
   },
   "files": ["dist"],

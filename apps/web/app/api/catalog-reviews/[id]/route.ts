@@ -5,8 +5,6 @@ import {
   RecordNotFoundError,
   type DataAccess,
   type DiscSelectionId,
-  type EncodeJobId,
-  type EncodingProfileId,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import { loadConfig } from "@rip-dvd/config";
@@ -27,7 +25,6 @@ import { getDataAccess } from "../../../../lib/data-access";
 import {
   trustedMutationRequestProblem,
 } from "../../../../lib/server/trusted-mutation-request";
-import { mediaOutputPath } from "../../../../lib/server/media-output-path";
 import { tmdbCredentialFromEnvironment } from "../../../../lib/server/tmdb-catalog-adapter";
 
 export const dynamic = "force-dynamic";
@@ -259,7 +256,7 @@ export async function createCatalogReviewRoute(
       }
 
       case "complete_review": {
-        let mediaLibraryPath: string | null = null;
+        let mediaLibraryPath = "/";
         if (command.replacementEncodes.length > 0) {
           try {
             mediaLibraryPath = getMediaLibraryPath();
@@ -270,54 +267,25 @@ export async function createCatalogReviewRoute(
             );
           }
         }
-        const replacements = command.replacementEncodes.map((replacement) => {
-          const outputPath = mediaLibraryPath === null
-            ? replacement.outputPath
-            : mediaOutputPath(replacement.outputPath, mediaLibraryPath);
-          if (!outputPath) {
-            throw new DomainInvariantError(
-              "Corrected replacement output path is invalid",
-            );
-          }
-          return {
-            predecessorEncodeJobId:
-              replacement.predecessorEncodeJobId as EncodeJobId,
-            encodingProfileId:
-              replacement.encodingProfileId as EncodingProfileId,
-            outputPath,
-            ...(replacement.priority === undefined
-              ? {}
-              : { priority: replacement.priority }),
-          };
-        });
-        const completion = access.catalog
-          .completeCatalogReviewWithReplacements(
+        const operations = createApplicationOperations(access);
+        if (bodyRecord?.preview === true) {
+          return response(operations.previewCatalogReviewCompletion(
             archiveId,
-            new Date(command.catalogRevision),
-            command.outcome,
-            replacements,
-          );
-        return response({
-          archive: {
-            id: completion.archive.id,
-            catalogReviewedAt:
-              completion.archive.catalogReviewedAt?.toISOString() ?? null,
-            catalogReviewOutcome: completion.archive.catalogReviewOutcome,
+            command,
+            mediaLibraryPath,
+          ));
+        }
+        return response(operations.completeCatalogReview(
+          archiveId,
+          command,
+          {
+            mediaLibraryPath,
+            mutationKey: bodyRecord?.mutationKey,
+            acknowledgedRevision: bodyRecord?.acknowledgedRevision,
+            previewToken: bodyRecord?.previewToken,
+            acknowledge: bodyRecord?.acknowledge,
           },
-          ...(completion.replacementEncodeJobs.length === 0 ? {} : {
-            replacementEncodeJobs: completion.replacementEncodeJobs.map(
-              (job) => ({
-                id: job.id,
-                predecessorEncodeJobId: job.predecessorEncodeJobId,
-                discSelectionId: job.discSelectionId,
-                encodingProfileId: job.encodingProfileId,
-                outputPath: job.outputPath,
-                status: job.status,
-                priority: job.priority,
-                replaceExistingOutput: job.replaceExistingOutput,
-              })),
-          }),
-        });
+        ));
       }
 
       default:

@@ -352,7 +352,14 @@ export function readCatalogReview(
         ? {}
         : {
           replacementPlan: {
-            jobs: replacementJobPage,
+            jobs: replacementJobPage.map((job) => ({
+              predecessorEncodeJobId: job.predecessorEncodeJobId,
+              replacementDiscSelectionId: job.replacementDiscSelectionId,
+              proposedEncodingProfileId: job.proposedEncodingProfileId,
+              proposedOutputPath: job.proposedOutputPath,
+              predecessorStatus: job.predecessorStatus,
+              predecessorReady: job.predecessorReady,
+            })),
             encodingProfiles: [...replacementProfilesById.values()].map(
               (profile) => ({
                 id: profile.id,

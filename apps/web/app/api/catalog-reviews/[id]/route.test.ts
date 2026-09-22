@@ -13,6 +13,7 @@ import {
   type EncodeJobStatus,
   type MediaItem,
   type MediaItemId,
+  type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import {
   createNormalDvdArchiveBoundaryEvidenceForTest,
@@ -63,13 +64,52 @@ function invokeDiscSelectionMutation(
   return (body: Record<string, unknown>) => postCatalogReview(access, archiveId, body);
 }
 
-function keyedCatalogMutationBody(body: unknown, access: DataAccess): unknown {
+function keyedCatalogMutationBody(
+  body: unknown,
+  access: DataAccess,
+  archiveId: string,
+): unknown {
   if (typeof body !== "object" || body === null || !("action" in body)) return body;
   if ((body.action === "create_disc_selection" || body.action === "update_disc_selection" ||
       body.action === "repair_disc_selection" || body.action === "correct_disc_selection" ||
       body.action === "delete_disc_selection") && !("preview" in body) &&
       !("mutationKey" in body)) {
     return { ...body, mutationKey: crypto.randomUUID() };
+  }
+  if (body.action === "complete_review" && !("preview" in body)) {
+    const bodyRevision = "catalogRevision" in body &&
+        typeof body.catalogRevision === "string"
+      ? body.catalogRevision
+      : "invalid";
+    const command = {
+      ...body,
+      replacementEncodes: "replacementEncodes" in body
+        ? body.replacementEncodes
+        : [],
+    } as Parameters<
+      ReturnType<typeof createApplicationOperations>["previewCatalogReviewCompletion"]
+    >[1];
+    const archive = access.catalog.listOriginalDiscArchives({
+      ids: [archiveId as OriginalDiscArchiveId],
+    })[0]!;
+    let preview: { catalogRevision: string; previewToken: string };
+    try {
+      preview = createApplicationOperations(access)
+        .previewCatalogReviewCompletion(archive.id, command, "/");
+    } catch {
+      preview = {
+        catalogRevision: bodyRevision,
+        previewToken:
+          "catalog-review-completion-preview:00000000-0000-4000-8000-000000000000",
+      };
+    }
+    return {
+      ...body,
+      mutationKey: crypto.randomUUID(),
+      acknowledgedRevision: preview.catalogRevision,
+      previewToken: preview.previewToken,
+      acknowledge: true,
+    };
   }
   if (body.action !== "create_media_item" && body.action !== "update_media_item" &&
       body.action !== "delete_media_item") return body;
@@ -389,7 +429,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(keyedCatalogMutationBody(body, access)),
+        body: JSON.stringify(keyedCatalogMutationBody(body, access, archive.id)),
       }),
       archive.id,
       () => access,
@@ -614,7 +654,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(keyedCatalogMutationBody(body, access)),
+        body: JSON.stringify(keyedCatalogMutationBody(body, access, archive.id)),
       }),
       archive.id,
       () => access,
@@ -767,7 +807,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(keyedCatalogMutationBody(body, access)),
+        body: JSON.stringify(keyedCatalogMutationBody(body, access, archive.id)),
       }),
       archive.id,
       () => access,
@@ -1242,6 +1282,7 @@ describe("Catalog Review API", () => {
     const affectedJobs = Array.from({ length: 101 }, (_, index) => ({
       ...review.replacementPlan.jobs[0],
       predecessorEncodeJobId: `${completed.id}-${index}`,
+      releasesFailedOutputReservation: false,
     }));
     const activeProfiles = Array.from({ length: 101 }, (_, index) => ({
       ...profile,
@@ -1297,6 +1338,30 @@ describe("Catalog Review API", () => {
       offset: 100,
       hasPrevious: true,
       hasNext: false,
+    });
+    const completionPreview = await (await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          action: "complete_review",
+          catalogRevision: review.catalogRevision,
+          outcome: "reviewed_with_selections",
+          replacementEncodes: [],
+          preview: true,
+        }),
+      }),
+      archive.id,
+      () => pagedAccess,
+      () => "http://localhost:3000",
+    )).json();
+    expect(completionPreview.consequences).toMatchObject({
+      availableReplacementEncodeCount: 101,
+      omittedReplacementEncodeCount: 101,
     });
     expect(access.encodeJobs.list()).toEqual([
       expect.objectContaining({
@@ -1512,6 +1577,23 @@ describe("Catalog Review API", () => {
       ids: [archive.id],
     })[0]!.updatedAt.toISOString();
 
+    const completionCommand = {
+      action: "complete_review" as const,
+      catalogRevision,
+      outcome: "reviewed_with_selections" as const,
+      replacementEncodes: [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: profile.id,
+        outputPath: predecessor.outputPath,
+      }],
+    };
+    const preview = createApplicationOperations(access)
+      .previewCatalogReviewCompletion(
+        archive.id,
+        completionCommand,
+        mediaLibraryPath,
+      );
+
     const response = await createCatalogReviewRoute(
       new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
         method: "POST",
@@ -1521,14 +1603,11 @@ describe("Catalog Review API", () => {
           Origin: "http://localhost:3000",
         },
         body: JSON.stringify({
-          action: "complete_review",
-          catalogRevision,
-          outcome: "reviewed_with_selections",
-          replacementEncodes: [{
-            predecessorEncodeJobId: predecessor.id,
-            encodingProfileId: profile.id,
-            outputPath: predecessor.outputPath,
-          }],
+          ...completionCommand,
+          mutationKey: crypto.randomUUID(),
+          acknowledgedRevision: preview.catalogRevision,
+          previewToken: preview.previewToken,
+          acknowledge: true,
         }),
       }),
       archive.id,
@@ -2214,7 +2293,7 @@ describe("Catalog Review API", () => {
             Host: "localhost:3000",
             Origin: "http://localhost:3000",
           },
-          body: JSON.stringify(keyedCatalogMutationBody(body, client)),
+          body: JSON.stringify(keyedCatalogMutationBody(body, client, archive.id)),
         }),
         archive.id,
         () => client,
@@ -2673,7 +2752,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(keyedCatalogMutationBody(body, access)),
+        body: JSON.stringify(keyedCatalogMutationBody(body, access, archive.id)),
       }),
       archive.id,
       () => access,
@@ -2846,7 +2925,7 @@ describe("Catalog Review API", () => {
             Host: "localhost:3000",
             Origin: "http://localhost:3000",
           },
-          body: JSON.stringify(keyedCatalogMutationBody(body, access)),
+          body: JSON.stringify(keyedCatalogMutationBody(body, access, archives[0]!.id)),
         },
       ),
       archives[0]!.id,
@@ -2952,7 +3031,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(keyedCatalogMutationBody(body, access)),
+        body: JSON.stringify(keyedCatalogMutationBody(body, access, archive.id)),
       }),
       archive.id,
       () => access,
@@ -3026,7 +3105,7 @@ describe("Catalog Review API", () => {
           Host: "localhost:3000",
           Origin: "http://localhost:3000",
         },
-        body: JSON.stringify(keyedCatalogMutationBody(body, access)),
+        body: JSON.stringify(keyedCatalogMutationBody(body, access, archive.id)),
       }),
       archive.id,
       () => access,
@@ -3152,7 +3231,7 @@ describe("Catalog Review API", () => {
             Host: "localhost:3000",
             Origin: "http://localhost:3000",
           },
-          body: JSON.stringify(keyedCatalogMutationBody(body, access)),
+          body: JSON.stringify(keyedCatalogMutationBody(body, access, archive.id)),
         }),
         archive.id,
         () => access,
