@@ -514,6 +514,35 @@ export type UpdateDiscSelectionInput = {
   | { label: string | null }
 );
 
+export type DiscSelectionMutation =
+  | { action: "create"; selection: CreateDiscSelectionInput }
+  | { action: "update"; discSelectionId: DiscSelectionId; changes: UpdateDiscSelectionInput }
+  | { action: "repair"; discSelectionId: DiscSelectionId; selection: CreateDiscSelectionInput }
+  | { action: "correct"; discSelectionId: DiscSelectionId; selection: CorrectDiscSelectionInput }
+  | { action: "delete"; discSelectionId: DiscSelectionId };
+
+export interface DiscSelectionMutationInput {
+  mutationKey?: string;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  expectedCatalogRevision?: Date;
+  mutation: DiscSelectionMutation;
+}
+
+export interface DiscSelectionMutationResult {
+  discSelection: DiscSelection;
+  supersession?: DiscSelectionSupersession;
+  deletedEncodeJobs?: number;
+  deletionComplete?: boolean;
+}
+
+export interface DiscSelectionMutationPreview {
+  catalogRevision: string;
+  discSelection: DiscSelection;
+  actionAvailability: DiscSelectionActionAvailability;
+  affectedEncodeJobs: readonly { id: EncodeJobId; status: EncodeJobStatus }[];
+  historicalEncodeJobCount: number;
+}
+
 export interface CreateMediaItemInput {
   parentId?: MediaItemId;
   kind: MediaItemKind;
@@ -1098,6 +1127,11 @@ export interface CatalogAccess {
     input: CreateDiscSelectionInput,
   ): DiscSelection;
   deleteDiscSelection(id: DiscSelectionId): DeleteDiscSelectionResult;
+  mutateDiscSelection(input: DiscSelectionMutationInput): DiscSelectionMutationResult;
+  previewDiscSelectionMutation(
+    originalDiscArchiveId: OriginalDiscArchiveId,
+    discSelectionId: DiscSelectionId,
+  ): DiscSelectionMutationPreview;
   listDiscSelections(options?: {
     ids?: readonly DiscSelectionId[];
     originalDiscArchiveId?: OriginalDiscArchiveId;
