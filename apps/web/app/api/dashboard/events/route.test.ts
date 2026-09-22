@@ -1,8 +1,10 @@
 import {
   createCleanReadArchiveIntegrityEvidence,
-  createNormalDvdArchiveBoundaryEvidence,
   type DataAccess,
 } from "@rip-dvd/data-access";
+import {
+  createNormalDvdArchiveBoundaryEvidenceForTest,
+} from "@rip-dvd/data-access/test-support";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -498,11 +500,11 @@ describe("GET /api/dashboard/events", () => {
     )!;
     access.archiveJobs.publish(retryClaim, {
       archivePath: "/media/originals/lifecycle.iso",
-      boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(9),
+      boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(2_048),
       integrityEvidence: createCleanReadArchiveIntegrityEvidence(
         "test-clean-v1",
       ),
-      sizeBytes: 9,
+      sizeBytes: 2_048,
     });
     await vi.advanceTimersByTimeAsync(1_000);
     const completed = await parseSnapshot();

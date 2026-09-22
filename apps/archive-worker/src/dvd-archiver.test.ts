@@ -29,7 +29,12 @@ import {
   quarantinePublishedArchive,
   withCancelledDvdArchiveInactive,
   type DvdCopyRunner,
+  type PreserveDvdArchiveOptions,
 } from "./dvd-archiver.js";
+import {
+  DvdReadableEndpointError,
+  type DvdEndpointProver,
+} from "./dvd-endpoint-prover.js";
 import {
   createCleanDvdRecoveryResult,
   createDamagedDvdRecoveryResult,
@@ -57,15 +62,6 @@ const supportsLinuxWriterOwnership =
 const passingDvdGeometryValidator = {
   async validate() {},
 };
-
-function preserveDvdArchive(
-  options: Parameters<typeof preserveDvdArchiveImplementation>[0],
-) {
-  return preserveDvdArchiveImplementation({
-    geometryValidator: passingDvdGeometryValidator,
-    ...options,
-  });
-}
 
 function createIsoGeometryImage(
   totalSectorCount: number,
@@ -95,6 +91,37 @@ function createIsoGeometryImage(
   terminator.write("CD001", 1, "ascii");
   terminator[6] = 1;
   return image;
+}
+
+const testEndpointProver: DvdEndpointProver = {
+  async prove({ authorizeProbe, firstExcludedLba }) {
+    for (let fence = 0; fence < 4; fence += 1) {
+      await authorizeProbe();
+    }
+    return {
+      proofVersion: "dvd-normal-endpoint-proof-v1",
+      confirmationCount: 2,
+      firstExcludedLba,
+      outOfRangeEvidence: {
+        classifierVersion: "scsi-read-classifier-v2",
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseResponseCode: 0x72,
+        senseKey: 0x05,
+        asc: 0x21,
+        ascq: 0,
+      },
+    };
+  },
+};
+
+function preserveDvdArchive(options: PreserveDvdArchiveOptions) {
+  return preserveDvdArchiveImplementation({
+    geometryValidator: passingDvdGeometryValidator,
+    ...options,
+    endpointProver: options.endpointProver ?? testEndpointProver,
+  });
 }
 
 function emitCleanRecoveryProtocol(
@@ -773,7 +800,7 @@ describe("DVD archive publication", () => {
         `.${"f".repeat(64)}.33333333-3333-4333-8333-333333333333.iso.rip-dvd-partial`,
       );
       writeFileSync(otherFingerprintPartial, "other disc");
-      const content = Buffer.from("fresh");
+      const content = Buffer.alloc(2_048, 0x66);
       const runner: DvdCopyRunner = {
         copy: vi.fn(async ({ outputPath, sizeBytes }) => {
           writeFileSync(outputPath, content);
@@ -902,7 +929,7 @@ describe("DVD archive publication", () => {
     for (let index = 0; index < 4_097; index += 1) {
       writeFileSync(join(lockDirectory, `request-${index}.lock`), "");
     }
-    const content = Buffer.from("fresh archive");
+    const content = Buffer.alloc(2_048, 31);
     const runner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath, sizeBytes }) => {
         writeFileSync(outputPath, content);
@@ -2533,18 +2560,18 @@ describe("DVD archive publication", () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
     const originalsLibraryPath = createOriginalsLibrary();
-    const content = Buffer.from("dvd-image");
+    const content = Buffer.alloc(2_048, 41);
     const digest = "e5cbeaa2965a33da9559ec142f30f4046ff91d1788a8d2f6ba22490b095f1c61";
     const progress: ArchiveJobProgress[] = [];
     const runner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath, onBytesCopied, sizeBytes }) => {
         expect(basename(outputPath)).toMatch(/^\..+\.rip-dvd-partial$/);
         vi.setSystemTime(2_000);
-        onBytesCopied(2);
+        onBytesCopied(512);
         vi.setSystemTime(3_000);
-        onBytesCopied(4);
+        onBytesCopied(1_024);
         vi.setSystemTime(4_000);
-        onBytesCopied(6);
+        onBytesCopied(1_536);
         writeFileSync(outputPath, content);
         vi.setSystemTime(5_000);
         onBytesCopied(content.byteLength);
@@ -2580,6 +2607,27 @@ describe("DVD archive publication", () => {
         badAreaCount: 0,
         badSectorRanges: [],
       },
+      normalBoundaryEvidence: {
+        policyVersion: "dvd-archive-boundary-v2",
+        reportedSizeBytes: 2_048,
+        publishedSizeBytes: 2_048,
+        excludedSectorCount: 0,
+        endpointProof: {
+          proofVersion: "dvd-normal-endpoint-proof-v1",
+          confirmationCount: 2,
+          firstExcludedLba: 1,
+          outOfRangeEvidence: {
+            classifierVersion: "scsi-read-classifier-v2",
+            scsiStatus: 2,
+            hostStatus: 0,
+            driverStatus: 8,
+            senseResponseCode: 0x72,
+            senseKey: 0x05,
+            asc: 0x21,
+            ascq: 0,
+          },
+        },
+      },
       recovered: false,
       sizeBytes: content.byteLength,
     });
@@ -2590,19 +2638,19 @@ describe("DVD archive publication", () => {
     expect(progress).toEqual([
       { phase: "preparing", progressPercent: 0 },
       { phase: "copying", progressPercent: 0 },
-      { phase: "copying", progressPercent: 22, progressBytes: 2 },
-      { phase: "copying", progressPercent: 44, progressBytes: 4 },
+      { phase: "copying", progressPercent: 25, progressBytes: 512 },
+      { phase: "copying", progressPercent: 50, progressBytes: 1_024 },
       {
         phase: "copying",
-        progressPercent: 66,
-        progressBytes: 6,
-        etaSeconds: 2,
+        progressPercent: 75,
+        progressBytes: 1_536,
+        etaSeconds: 1,
       },
-      { phase: "copying", progressPercent: 99, progressBytes: 9 },
+      { phase: "copying", progressPercent: 99, progressBytes: 2_048 },
       { phase: "verifying", progressPercent: 99 },
       { phase: "finalizing", progressPercent: 99 },
     ]);
-    expect(verifySource).toHaveBeenCalledOnce();
+    expect(verifySource).toHaveBeenCalledTimes(5);
   });
 
   it("rejects a clean partial whose ISO geometry crosses EOF before sync or publication", async () => {
@@ -2653,7 +2701,7 @@ describe("DVD archive publication", () => {
 
   it("rejects malformed recovery evidence before publishing a complete image", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
-    const content = Buffer.from("dvd-image");
+    const content = Buffer.alloc(2_048, 71);
     const digest = "a".repeat(64);
     let partialPath: string | undefined;
     const runner: DvdCopyRunner = {
@@ -3516,6 +3564,181 @@ describe("DVD archive publication", () => {
     expect(existsSync(rescuePaths.mapPath)).toBe(false);
   });
 
+  it("quarantines damaged rescue state when its first excluded block is readable", async () => {
+    const fixture = await createInterruptedDamagedPublication(
+      "archive-request:readable-damaged-rescue-endpoint",
+      "7".repeat(64),
+    );
+    const endpointFailure = new DvdReadableEndpointError(2);
+    const noCopy = vi.fn();
+
+    await expect(preserveDvdArchive({
+      ...fixture.baseOptions,
+      endpointProver: {
+        prove: vi.fn().mockRejectedValue(endpointFailure),
+      },
+      runner: {
+        copy: noCopy,
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      salvageValidator: {
+        validate: vi.fn().mockResolvedValue({
+          badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+          outcome: "accepted",
+        }),
+      },
+      signal: new AbortController().signal,
+    })).rejects.toBe(endpointFailure);
+
+    expect(noCopy).not.toHaveBeenCalled();
+    expect(existsSync(fixture.rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(fixture.rescuePaths.mapPath)).toBe(false);
+    expect(existsSync(fixture.interrupted.archivePath)).toBe(false);
+    expect(readFileSync(`${fixture.interrupted.archivePath}.failed`)).toEqual(
+      fixture.rescuedImage,
+    );
+    expect(readdirSync(fixture.root).some((entry) =>
+      entry.startsWith(`${basename(fixture.rescuePaths.imagePath)}.invalid-`)
+    )).toBe(true);
+  });
+
+  it("quarantines clean rescue state when its first excluded block is readable", async () => {
+    const fixture = await createInterruptedDamagedPublication(
+      "archive-request:readable-clean-rescue-endpoint",
+      "8".repeat(64),
+    );
+    unlinkSync(fixture.interrupted.archivePath);
+    const rescueMap = JSON.parse(
+      readFileSync(fixture.rescuePaths.mapPath, "utf8"),
+    );
+    rescueMap.recoveryProtocol = {
+      protocolVersion: 1,
+      declaredByteCount: fixture.rescuedImage.byteLength,
+      recoveredByteCount: fixture.rescuedImage.byteLength,
+      recoveryPolicyVersion: "dvd-recovery-v1",
+      badSectorCount: 0,
+      badAreaCount: 0,
+      badSectorBitmapHex: "",
+    };
+    writeFileSync(
+      fixture.rescuePaths.mapPath,
+      `${JSON.stringify(rescueMap)}\n`,
+    );
+    const endpointFailure = new DvdReadableEndpointError(2);
+    const noCopy = vi.fn();
+
+    await expect(preserveDvdArchive({
+      ...fixture.baseOptions,
+      endpointProver: {
+        prove: vi.fn().mockRejectedValue(endpointFailure),
+      },
+      runner: {
+        copy: noCopy,
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      signal: new AbortController().signal,
+    })).rejects.toBe(endpointFailure);
+
+    expect(noCopy).not.toHaveBeenCalled();
+    expect(existsSync(fixture.rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(fixture.rescuePaths.mapPath)).toBe(false);
+    expect(existsSync(fixture.interrupted.archivePath)).toBe(false);
+    expect(existsSync(`${fixture.interrupted.archivePath}.failed`)).toBe(false);
+    expect(readdirSync(fixture.root).some((entry) =>
+      entry.startsWith(`${basename(fixture.rescuePaths.imagePath)}.invalid-`)
+    )).toBe(true);
+  });
+
+  it("quarantines newly accepted damaged rescue state at a readable endpoint", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const archiveRequestId = "archive-request:readable-new-salvage-endpoint";
+    const digest = "9".repeat(64);
+    const sizeBytes = 2 * 2_048;
+    const image = Buffer.alloc(sizeBytes, 6);
+    image.fill(0, 2_048);
+    const endpointFailure = new DvdReadableEndpointError(2);
+
+    await expect(preserveDvdArchive({
+      archiveRequestId,
+      devicePath: "/dev/sr0",
+      endpointProver: { prove: vi.fn().mockRejectedValue(endpointFailure) },
+      expectedTitleMap: {
+        schemaVersion: 2,
+        contentId: `dvdmeta-sha256:${digest}`,
+        titles: [],
+      },
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      originalsLibraryPath,
+      runner: {
+        copy: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, image);
+          return createDamagedDvdRecoveryResult(sizeBytes, [
+            { startLba: 1, sectorCount: 1 },
+          ]);
+        }),
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      salvageValidator: {
+        validate: vi.fn().mockResolvedValue({
+          badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+          outcome: "accepted",
+        }),
+      },
+      signal: new AbortController().signal,
+      sizeBytes,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    })).rejects.toBe(endpointFailure);
+
+    const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
+    expect(existsSync(rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(rescuePaths.mapPath)).toBe(false);
+    expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
+    expect(readdirSync(root).some((entry) =>
+      entry.startsWith(`${basename(rescuePaths.imagePath)}.invalid-`)
+    )).toBe(true);
+  });
+
+  it("quarantines resumed damaged rescue state at a readable endpoint", async () => {
+    const fixture = await createInterruptedDamagedPublication(
+      "archive-request:readable-resumed-rescue-endpoint",
+      "a".repeat(64),
+    );
+    unlinkSync(fixture.interrupted.archivePath);
+    const endpointFailure = new DvdReadableEndpointError(2);
+    const resumeCopy = vi.fn(async ({ outputPath, sizeBytes }) => {
+      writeFileSync(outputPath, Buffer.alloc(sizeBytes, 6));
+      return createCleanDvdRecoveryResult(sizeBytes);
+    });
+
+    await expect(preserveDvdArchive({
+      ...fixture.baseOptions,
+      endpointProver: { prove: vi.fn().mockRejectedValue(endpointFailure) },
+      runner: {
+        copy: resumeCopy,
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      signal: new AbortController().signal,
+    })).rejects.toBe(endpointFailure);
+
+    expect(resumeCopy).toHaveBeenCalledOnce();
+    expect(existsSync(fixture.rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(fixture.rescuePaths.mapPath)).toBe(false);
+    expect(existsSync(fixture.interrupted.archivePath)).toBe(false);
+    expect(readdirSync(fixture.root).some((entry) =>
+      entry.startsWith(`${basename(fixture.rescuePaths.imagePath)}.invalid-`)
+    )).toBe(true);
+  });
+
   it("rejects an orphan salvage result when validation reads a replacement image", async () => {
     const fixture = await createInterruptedDamagedPublication(
       "33333333-3333-4333-8333-333333333335",
@@ -3859,7 +4082,9 @@ describe("DVD archive publication", () => {
       runner: noCopyRunner,
       signal: new AbortController().signal,
       verifySource: async () => {
-        renameSync(replacementPath, rescueImagePath);
+        if (existsSync(replacementPath)) {
+          renameSync(replacementPath, rescueImagePath);
+        }
       },
     })).rejects.toThrow("Existing DVD archive conflicts with rescue state");
 
@@ -5875,7 +6100,7 @@ describe("DVD archive publication", () => {
     async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);
-    const content = Buffer.from("dvd-image");
+    const content = Buffer.alloc(2_048, 51);
     const digest =
       "e5cbeaa2965a33da9559ec142f30f4046ff91d1788a8d2f6ba22490b095f1c61";
     let partialPath: string | undefined;
@@ -5939,7 +6164,7 @@ describe("DVD archive publication", () => {
         "231552f40a93fbd25f6328825ddb49288b8076f1d42809b0852eaff66d9a4118";
       const partialPath = join(root, `.${digest}.iso.rip-dvd-partial`);
       writeFileSync(partialPath, "stale");
-      const content = Buffer.from("fresh");
+      const content = Buffer.alloc(2_048, 0x66);
       const runner: DvdCopyRunner = {
         copy: vi.fn(async ({ outputPath, sizeBytes }) => {
           expect(existsSync(outputPath)).toBe(false);
@@ -6051,7 +6276,7 @@ describe("DVD archive publication", () => {
     const digest =
       "e5cbeaa2965a33da9559ec142f30f4046ff91d1788a8d2f6ba22490b095f1c61";
     const archivePath = join(root, `${digest}.iso`);
-    const content = Buffer.from("dvd-image");
+    const content = Buffer.alloc(2_048, 61);
     let copiedPartialPath: string | undefined;
     const runner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath, sizeBytes }) => {
@@ -6086,7 +6311,7 @@ describe("DVD archive publication", () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);
     const digest = "e5cbeaa2965a33da9559ec142f30f4046ff91d1788a8d2f6ba22490b095f1c61";
-    const content = Buffer.from("dvd-image");
+    const content = Buffer.alloc(2_048, 71);
     const runner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath, sizeBytes }) => {
         writeFileSync(outputPath, content);

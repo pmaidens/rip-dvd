@@ -1,10 +1,34 @@
 import { vi } from "vitest";
 
+import { createNormalDvdArchiveBoundaryEvidence } from "./archive-boundary.js";
 import type { DataAccess } from "./types.js";
 
 const SETTLING_OBSERVATION_ELAPSED_MS = [0, 2_500, 5_000] as const;
 
 type DiscSettlingTestDataAccess = Pick<DataAccess, "discInspections">;
+
+export function createNormalDvdArchiveBoundaryEvidenceForTest(
+  reportedSizeBytes: number,
+) {
+  return createNormalDvdArchiveBoundaryEvidence({
+    reportedSizeBytes,
+    endpointProof: {
+      proofVersion: "dvd-normal-endpoint-proof-v1",
+      confirmationCount: 2,
+      firstExcludedLba: reportedSizeBytes / 2_048,
+      outOfRangeEvidence: {
+        classifierVersion: "scsi-read-classifier-v2",
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseResponseCode: 0x72,
+        senseKey: 0x05,
+        asc: 0x21,
+        ascq: 0,
+      },
+    },
+  });
+}
 
 function startDiscSettlingClockForTest() {
   const alreadyUsingFakeTimers = vi.isFakeTimers();

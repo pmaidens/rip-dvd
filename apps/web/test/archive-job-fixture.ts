@@ -1,10 +1,10 @@
 import {
   createCleanReadArchiveIntegrityEvidence,
-  createNormalDvdArchiveBoundaryEvidence,
 } from "@rip-dvd/data-access";
 import type { LegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import {
   beginSettledDiscInspectionForTest,
+  createNormalDvdArchiveBoundaryEvidenceForTest,
 } from "@rip-dvd/data-access/test-support";
 import { vi } from "vitest";
 
@@ -15,9 +15,32 @@ import {
 import {
   createInProcessDvdRescueWorkspaceLock,
 } from "../../archive-worker/src/dvd-rescue-workspace-lock.js";
+import type { DvdEndpointProver } from "../../archive-worker/src/dvd-endpoint-prover.js";
 
 const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
 const passingDvdGeometryValidator = { async validate() {} };
+const testEndpointProver: DvdEndpointProver = {
+  async prove({ authorizeProbe, firstExcludedLba }) {
+    for (let index = 0; index < 4; index += 1) {
+      await authorizeProbe();
+    }
+    return {
+      proofVersion: "dvd-normal-endpoint-proof-v1",
+      confirmationCount: 2,
+      firstExcludedLba,
+      outOfRangeEvidence: {
+        classifierVersion: "scsi-read-classifier-v2",
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseResponseCode: 0x70,
+        senseKey: 0x05,
+        asc: 0x21,
+        ascq: 0,
+      },
+    };
+  },
+};
 
 export async function pollArchiveWorkerForTest(
   options: PollArchiveWorkerOptions,
@@ -32,6 +55,7 @@ export async function pollArchiveWorkerForTest(
     await pollArchiveWorker({
       geometryValidator: passingDvdGeometryValidator,
       ...options,
+      endpointProver: options.endpointProver ?? testEndpointProver,
       rescueWorkspaceLock:
         options.rescueWorkspaceLock ?? testRescueWorkspaceLock,
       waitForNextSettlingObservation:
@@ -57,7 +81,7 @@ export function startArchiveJob(
   access: LegacySidecarDataAccess,
   disc: ReturnType<LegacySidecarDataAccess["catalog"]["registerDetectedDisc"]>,
   workerId: string,
-  totalBytes = 9,
+  totalBytes = 2_048,
 ) {
   access.archiveRequests.create({ detectedDiscId: disc.id });
   const completed = completeDiscInspection(
@@ -73,12 +97,12 @@ export function completeDiscInspection(
   access: LegacySidecarDataAccess,
   disc: ReturnType<LegacySidecarDataAccess["catalog"]["registerDetectedDisc"]>,
   mediaGeneration: string,
-  totalBytes = 9,
+  totalBytes = 2_048,
 ) {
   const started = beginSettledDiscInspectionForTest(access, {
     opticalDriveId: disc.opticalDriveId,
     mediaGeneration,
-    mediaCapacityBytes: 2_048,
+    mediaCapacityBytes: totalBytes,
   });
   access.discInspections.record(started.claim!, {
     type: "metadata",
@@ -144,11 +168,11 @@ export function seedFailedArchiveJobAndQueuedDuplicate(
       );
       return access.archiveJobs.publish(publishingJob, {
         archivePath: `/media/originals/${fingerprint}.iso`,
-        boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(9),
+        boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(2_048),
         integrityEvidence: createCleanReadArchiveIntegrityEvidence(
           "test-clean-v1",
         ),
-        sizeBytes: 9,
+        sizeBytes: 2_048,
       });
     },
   };

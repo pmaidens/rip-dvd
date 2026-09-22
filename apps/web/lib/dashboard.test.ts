@@ -2,10 +2,12 @@ import {
   createCleanReadArchiveIntegrityEvidence,
   createCorrectedDvdArchiveBoundaryEvidence,
   createDataAccess,
-  createNormalDvdArchiveBoundaryEvidence,
   type DataAccess,
   type EncodeOutputFilesystemIdentity,
 } from "@rip-dvd/data-access";
+import {
+  createNormalDvdArchiveBoundaryEvidenceForTest,
+} from "@rip-dvd/data-access/test-support";
 import {
   createLegacySidecarDataAccess,
   type LegacySidecarDataAccess,
@@ -1126,11 +1128,11 @@ describe("readDashboardSnapshot", () => {
     const job = access.archiveJobs.startForInspection(inspection.id, "worker-1")!;
     access.archiveJobs.publish(job, {
       archivePath: "/media/originals/completed-inspection.iso",
-      boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(9),
+      boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(2_048),
       integrityEvidence: createCleanReadArchiveIntegrityEvidence(
         "test-clean-v1",
       ),
-      sizeBytes: 9,
+      sizeBytes: 2_048,
     });
 
     const afterArchive = readDashboardSnapshot(access);
@@ -1150,10 +1152,25 @@ describe("readDashboardSnapshot", () => {
       items: [
         expect.objectContaining({
           boundaryEvidence: {
-            policyVersion: "dvd-archive-boundary-v1",
-            reportedSizeBytes: 9,
-            publishedSizeBytes: 9,
+            policyVersion: "dvd-archive-boundary-v2",
+            reportedSizeBytes: 2_048,
+            publishedSizeBytes: 2_048,
             excludedSectorCount: 0,
+            endpointProof: {
+              proofVersion: "dvd-normal-endpoint-proof-v1",
+              confirmationCount: 2,
+              firstExcludedLba: 1,
+              outOfRangeEvidence: {
+                classifierVersion: "scsi-read-classifier-v2",
+                scsiStatus: 2,
+                hostStatus: 0,
+                driverStatus: 8,
+                senseResponseCode: 0x72,
+                senseKey: 0x05,
+                asc: 0x21,
+                ascq: 0,
+              },
+            },
           },
         }),
       ],

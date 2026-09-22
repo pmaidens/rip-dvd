@@ -1785,7 +1785,7 @@ describe("end-to-end operations dashboard workflow", () => {
       scanDvd: vi.fn().mockResolvedValue({
         fingerprint,
         scanData,
-        sizeBytes: 9,
+        sizeBytes: 2_048,
         volumeLabel: "WORKFLOW_DISC",
       }),
     };
@@ -1827,10 +1827,10 @@ describe("end-to-end operations dashboard workflow", () => {
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
       async copy({ outputPath, onBytesCopied, sizeBytes }) {
-        onBytesCopied(4);
+        onBytesCopied(1_024);
         await archiveGate.wait();
-        writeFileSync(outputPath, "dvd-image", { flag: "wx" });
-        onBytesCopied(9);
+        writeFileSync(outputPath, Buffer.alloc(2_048), { flag: "wx" });
+        onBytesCopied(2_048);
         return createCleanDvdRecoveryResult(sizeBytes);
       },
     };
@@ -1848,10 +1848,10 @@ describe("end-to-end operations dashboard workflow", () => {
     const runningArchiveDashboard = await readDashboard(access);
     expect(archiveJob(runningArchiveDashboard.snapshot)).toMatchObject({
       status: "running",
-      progressPercent: 44,
+      progressPercent: 50,
     });
     expect(runningArchiveDashboard.html).toContain("Running");
-    expect(runningArchiveDashboard.html).toContain("44%");
+    expect(runningArchiveDashboard.html).toContain("50%");
     archiveGate.release();
     await archivePoll;
 

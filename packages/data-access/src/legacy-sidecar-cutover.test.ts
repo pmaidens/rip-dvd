@@ -26,11 +26,13 @@ import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
   createDataAccess,
   createCleanReadArchiveIntegrityEvidence,
-  createNormalDvdArchiveBoundaryEvidence,
   DomainInvariantError,
   ENCODE_JOB_LEASE_DURATION_MS,
   StaleJobAttemptError,
 } from "./index.js";
+import {
+  createNormalDvdArchiveBoundaryEvidenceForTest,
+} from "./disc-settling-fixture.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 import { createTemporaryDirectoryFixture } from "./legacy-sidecar.test-support.js";
 
@@ -890,16 +892,16 @@ try {
       service,
       service.catalog.listDetectedDiscs(undefined, { ids: [concurrentDisc.id] })[0]!,
       "concurrent-worker",
-      4_700_000_000,
+      4_700_000_256,
     );
     service.archiveJobs.publish(concurrentClaim, {
       archivePath: concurrentArchivePath,
       boundaryEvidence:
-        createNormalDvdArchiveBoundaryEvidence(4_700_000_000),
+        createNormalDvdArchiveBoundaryEvidenceForTest(4_700_000_256),
       integrityEvidence: createCleanReadArchiveIntegrityEvidence(
         "test-clean-v1",
       ),
-      sizeBytes: 4_700_000_000,
+      sizeBytes: 4_700_000_256,
     });
     const concurrentArchive = service.catalog
       .listOriginalDiscArchives()
@@ -1217,6 +1219,7 @@ try {
       "anchored-correction-a-repaired-fingerprint",
       "A repaired",
     );
+    truncateSync(join(originalsLibraryPath, "A-repaired.iso"), 2_048);
     writeArchiveOnlySidecar(
       join(originalsLibraryPath, "B.rip-dvd.json"),
       join(originalsLibraryPath, "B.iso"),
@@ -1275,7 +1278,7 @@ try {
     service.archiveJobs.publish(claim, {
       archivePath: repairedArchivePath,
       boundaryEvidence:
-        createNormalDvdArchiveBoundaryEvidence(repairedArchiveSizeBytes),
+        createNormalDvdArchiveBoundaryEvidenceForTest(repairedArchiveSizeBytes),
       integrityEvidence: createCleanReadArchiveIntegrityEvidence(
         "test-clean-v1",
       ),
@@ -3274,16 +3277,16 @@ try {
       service,
       service.catalog.listDetectedDiscs(undefined, { ids: [disc.id] })[0]!,
       "late-bootstrap-worker",
-      4_700_000_000,
+      4_700_000_256,
     );
     service.archiveJobs.publish(claim, {
       archivePath: publishedArchivePath,
       boundaryEvidence:
-        createNormalDvdArchiveBoundaryEvidence(4_700_000_000),
+        createNormalDvdArchiveBoundaryEvidenceForTest(4_700_000_256),
       integrityEvidence: createCleanReadArchiveIntegrityEvidence(
         "test-clean-v1",
       ),
-      sizeBytes: 4_700_000_000,
+      sizeBytes: 4_700_000_256,
     });
     const archive = service.catalog.listOriginalDiscArchives()[0]!;
     expect(archive).toMatchObject({

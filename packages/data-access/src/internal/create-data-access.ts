@@ -8714,28 +8714,45 @@ export function createDataAccessInternal(
           input.boundaryEvidence,
           sizeBytes,
         );
-        const boundaryCorrectionColumns =
-          "outOfRangeEvidence" in boundaryEvidence
+        const boundaryProof =
+          "endpointProof" in boundaryEvidence
             ? {
-                boundaryFirstExcludedLba: boundaryEvidence.firstExcludedLba,
+                firstExcludedLba:
+                  boundaryEvidence.endpointProof.firstExcludedLba,
+                maximumReferencedLba: null,
+                outOfRangeEvidence:
+                  boundaryEvidence.endpointProof.outOfRangeEvidence,
+              }
+            : "outOfRangeEvidence" in boundaryEvidence
+              ? {
+                  firstExcludedLba: boundaryEvidence.firstExcludedLba,
+                  maximumReferencedLba:
+                    boundaryEvidence.maximumReferencedLba,
+                  outOfRangeEvidence: boundaryEvidence.outOfRangeEvidence,
+                }
+              : null;
+        const boundaryProofColumns =
+          boundaryProof !== null
+            ? {
+                boundaryFirstExcludedLba: boundaryProof.firstExcludedLba,
                 boundaryMaximumReferencedLba:
-                  boundaryEvidence.maximumReferencedLba,
+                  boundaryProof.maximumReferencedLba,
                 boundaryReadFailureClassifierVersion:
-                  boundaryEvidence.outOfRangeEvidence.classifierVersion,
+                  boundaryProof.outOfRangeEvidence.classifierVersion,
                 boundaryReadFailureScsiStatus:
-                  boundaryEvidence.outOfRangeEvidence.scsiStatus,
+                  boundaryProof.outOfRangeEvidence.scsiStatus,
                 boundaryReadFailureHostStatus:
-                  boundaryEvidence.outOfRangeEvidence.hostStatus,
+                  boundaryProof.outOfRangeEvidence.hostStatus,
                 boundaryReadFailureDriverStatus:
-                  boundaryEvidence.outOfRangeEvidence.driverStatus,
+                  boundaryProof.outOfRangeEvidence.driverStatus,
                 boundaryReadFailureSenseResponseCode:
-                  boundaryEvidence.outOfRangeEvidence.senseResponseCode,
+                  boundaryProof.outOfRangeEvidence.senseResponseCode,
                 boundaryReadFailureSenseKey:
-                  boundaryEvidence.outOfRangeEvidence.senseKey,
+                  boundaryProof.outOfRangeEvidence.senseKey,
                 boundaryReadFailureAsc:
-                  boundaryEvidence.outOfRangeEvidence.asc,
+                  boundaryProof.outOfRangeEvidence.asc,
                 boundaryReadFailureAscq:
-                  boundaryEvidence.outOfRangeEvidence.ascq,
+                  boundaryProof.outOfRangeEvidence.ascq,
               }
             : {
                 boundaryFirstExcludedLba: null,
@@ -8917,7 +8934,7 @@ export function createDataAccessInternal(
                   boundaryEvidence.publishedSizeBytes,
                 boundaryExcludedSectorCount:
                   boundaryEvidence.excludedSectorCount,
-                ...boundaryCorrectionColumns,
+                ...boundaryProofColumns,
                 integrity: integrityEvidence.integrity,
                 integrityPolicyVersion,
                 badSectorCount: integrityEvidence.badSectorCount,

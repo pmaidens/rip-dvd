@@ -7,12 +7,14 @@ import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   createCleanReadArchiveIntegrityEvidence,
   createCorrectedDvdArchiveBoundaryEvidence,
-  createNormalDvdArchiveBoundaryEvidence,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
   type EncodeJobStatus,
   type MediaItem,
   type MediaItemId,
 } from "@rip-dvd/data-access";
+import {
+  createNormalDvdArchiveBoundaryEvidenceForTest,
+} from "@rip-dvd/data-access/test-support";
 
 import type {
   CatalogReviewDiscSelectionActionAvailability,
@@ -55,11 +57,11 @@ describe("Catalog Review API", () => {
     const claim = startArchiveJob(access, disc, "normal-boundary-worker");
     access.archiveJobs.publish(claim, {
       archivePath: "/media/originals/normal-boundary.iso",
-      boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(9),
+      boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(2_048),
       integrityEvidence: createCleanReadArchiveIntegrityEvidence(
         "test-clean-v1",
       ),
-      sizeBytes: 9,
+      sizeBytes: 2_048,
     });
     const archive = access.catalog.listOriginalDiscArchives()[0]!;
 
@@ -75,9 +77,9 @@ describe("Catalog Review API", () => {
 
     expect(review.archive).toMatchObject({
       boundaryEvidence: {
-        policyVersion: "dvd-archive-boundary-v1",
-        reportedSizeBytes: 9,
-        publishedSizeBytes: 9,
+        policyVersion: "dvd-archive-boundary-v2",
+        reportedSizeBytes: 2_048,
+        publishedSizeBytes: 2_048,
         excludedSectorCount: 0,
       },
     });
