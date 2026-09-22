@@ -12141,13 +12141,25 @@ export function createDataAccessInternal(
           .all().map(toFilesystemVerificationRun);
       },
       recoverExpiredClaims() {
-        return database.update(filesystemVerificationRuns).set({
-          status: "queued", progressPhase: "queued", claimToken: null, claimedAt: null,
-          updatedAt: now(),
-        }).where(and(
-          eq(filesystemVerificationRuns.status, "running"),
-          lt(filesystemVerificationRuns.claimedAt, new Date(now().getTime() - 60_000)),
-        )).returning({ id: filesystemVerificationRuns.id }).all().length;
+        const timestamp = now();
+        const expiredBefore = new Date(timestamp.getTime() - 60_000);
+        return database.transaction((transaction) => {
+          const expiredIds = transaction.select({ id: filesystemVerificationRuns.id })
+            .from(filesystemVerificationRuns)
+            .where(and(eq(filesystemVerificationRuns.status, "running"),
+              lt(filesystemVerificationRuns.claimedAt, expiredBefore)))
+            .orderBy(asc(filesystemVerificationRuns.claimedAt),
+              asc(filesystemVerificationRuns.id))
+            .limit(JOB_RECOVERY_LIMIT).all().map(({ id }) => id);
+          if (expiredIds.length === 0) return 0;
+          return transaction.update(filesystemVerificationRuns).set({
+            status: "queued", progressPhase: "queued", claimToken: null, claimedAt: null,
+            updatedAt: timestamp,
+          }).where(and(inArray(filesystemVerificationRuns.id, expiredIds),
+            eq(filesystemVerificationRuns.status, "running"),
+            lt(filesystemVerificationRuns.claimedAt, expiredBefore)))
+            .returning({ id: filesystemVerificationRuns.id }).all().length;
+        });
       },
       renewClaim(claim) {
         if (claim.claimToken === null) return false;

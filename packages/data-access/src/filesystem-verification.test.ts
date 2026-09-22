@@ -172,6 +172,30 @@ describe("explicit filesystem verification", () => {
       .toMatchObject({ verificationStatus: null });
     access.close();
   });
+
+  it("bounds expired claim recovery to one worker batch", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { access, archive } = createArchiveFixture();
+    for (let index = 0; index < 101; index += 1) {
+      access.filesystemVerification.submit({
+        mutationKey: `verification-batch-${index}`,
+        target: "original_disc_archive",
+        targetId: archive.id,
+      });
+      expect(access.filesystemVerification.claimNext()).not.toBeNull();
+    }
+    vi.setSystemTime(new Date("2026-01-01T00:01:01.000Z"));
+
+    expect(access.filesystemVerification.recoverExpiredClaims()).toBe(100);
+    expect(access.filesystemVerification.listActive()
+      .filter(({ status }) => status === "running")).toHaveLength(1);
+    expect(access.filesystemVerification.recoverExpiredClaims()).toBe(1);
+    expect(access.filesystemVerification.listActive()
+      .filter(({ status }) => status === "running")).toHaveLength(0);
+    access.close();
+  });
+
   it("does not touch the Media Library while constructing or reading the facade", () => {
     const directory = mkdtempSync(join(tmpdir(), "rip-dvd-verification-open-"));
     temporaryDirectories.push(directory);
