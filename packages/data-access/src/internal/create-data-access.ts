@@ -169,12 +169,15 @@ import type {
   ArchiveRequest,
   ArchiveRequestStatus,
   CatalogReviewActionAvailability,
+  CatalogReviewCompletionPreviewDecisionInput,
   CatalogReviewCoverage,
   ClaimedEncodeJob,
   ChronologicalListOptions,
   ConsistentReadAccess,
   CreateDiscSelectionInput,
   CompletedCatalogReviewOutcome,
+  CompletedCatalogReviewWithReplacements,
+  CorrectedEncodeReplacementInput,
   CorrectedEncodeReplacementPlan,
   DataAccess,
   DetectedDiscId,
@@ -3755,6 +3758,22 @@ export function createDataAccessInternal(
     }));
   }
 
+  function readAllCorrectedEncodeReplacementPlans(
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): CorrectedEncodeReplacementPlan[] {
+    const replacements: CorrectedEncodeReplacementPlan[] = [];
+    const limit = 100;
+    for (let offset = 0;; offset += limit) {
+      const page = readCorrectedEncodeReplacementPlans({
+        originalDiscArchiveId,
+        limit,
+        offset,
+      });
+      replacements.push(...page);
+      if (page.length < limit) return replacements;
+    }
+  }
+
   const encodeAttemptCondition = (
     claim: RunningEncodeJob,
     timestamp: Date,
@@ -4211,6 +4230,15 @@ export function createDataAccessInternal(
           typeof value === "string"
         ? new Date(value)
         : value) as T;
+  }
+
+  function decodeCatalogReviewCompletionOutcome(
+    stored: string,
+  ): CompletedCatalogReviewWithReplacements {
+    return JSON.parse(stored, (field, value: unknown) =>
+      field.endsWith("At") && typeof value === "string"
+        ? new Date(value)
+        : value) as CompletedCatalogReviewWithReplacements;
   }
 
   function replayRecoveryMutation<T extends { id: string; status: string }>(
@@ -4742,6 +4770,20 @@ export function createDataAccessInternal(
       originalDiscArchiveId: input.originalDiscArchiveId,
       expectedCatalogRevision: input.expectedCatalogRevision,
       mutation: input.mutation,
+    });
+  }
+
+  function catalogReviewCompletionSemanticInput(input: {
+    id: OriginalDiscArchiveId;
+    catalogRevision: Date;
+    outcome: CompletedCatalogReviewOutcome;
+    replacements: readonly CorrectedEncodeReplacementInput[];
+  }): string {
+    return JSON.stringify({
+      id: input.id,
+      catalogRevision: input.catalogRevision.toISOString(),
+      outcome: input.outcome,
+      replacements: input.replacements,
     });
   }
 
@@ -6092,6 +6134,7 @@ export function createDataAccessInternal(
         catalogRevision,
         outcome,
         replacements,
+        options,
       ) {
         if (
           !(catalogRevision instanceof Date) ||
@@ -6138,25 +6181,50 @@ export function createDataAccessInternal(
             throw new DomainInvariantError("priority must be a safe integer");
           }
         }
+        const semanticInput = catalogReviewCompletionSemanticInput({
+          id,
+          catalogRevision,
+          outcome,
+          replacements,
+        });
+        const operation = "catalog_review.complete";
+        if (options?.mutationKey !== undefined) {
+          const replay = database.transaction((transaction) =>
+            readMutationInvocation(
+              transaction,
+              options.mutationKey!,
+              operation,
+              semanticInput,
+              decodeCatalogReviewCompletionOutcome,
+            )
+          );
+          if (replay !== undefined) return replay;
+        }
         const timestamp = now();
         const validatedArchive = outcome === "reviewed_with_selections"
           ? validateDiscSelectionsOutsideWriter(id)
           : validateArchiveOnlyOutsideWriter(id);
         return database.transaction((transaction) => {
+          if (options?.mutationKey !== undefined) {
+            const replay = readMutationInvocation(
+              transaction,
+              options.mutationKey,
+              operation,
+              semanticInput,
+              decodeCatalogReviewCompletionOutcome,
+            );
+            if (replay !== undefined) return replay;
+          }
           const archive = requireCurrentCatalogValidation(
             validatedArchive,
             transaction,
           );
-          const completed = completeCatalogReviewTransition(
-            transaction,
-            archive,
-            catalogRevision,
-            outcome,
-            timestamp,
-          );
-
-          const replacementEncodeJobs: EncodeJob[] = [];
-          for (const input of replacements) {
+          if (archive.updatedAt.getTime() !== catalogRevision.getTime()) {
+            throw new DomainInvariantError(
+              "Catalog review changed; reload before completing review",
+            );
+          }
+          const candidates = replacements.map((input) => {
             const plan = requireRow(
               readCorrectedEncodeReplacementPlans({
                 originalDiscArchiveId: id,
@@ -6175,23 +6243,18 @@ export function createDataAccessInternal(
               "encode job",
               plan.predecessorEncodeJobId,
             );
-            const candidate = {
-              predecessor,
-              replacementDiscSelectionId:
-                plan.replacementDiscSelectionId,
-            };
             const existingReplacement = transaction
               .select({ id: replacementEncodeJobRecords.id })
               .from(replacementEncodeJobRecords)
               .where(eq(
                 replacementEncodeJobRecords.predecessorEncodeJobId,
-                candidate.predecessor.id,
+                predecessor.id,
               ))
               .limit(1)
               .get();
             if (existingReplacement) {
               throw new DomainInvariantError(
-                `Encode Job ${candidate.predecessor.id} already has a corrected replacement`,
+                `Encode Job ${predecessor.id} already has a corrected replacement`,
               );
             }
             const profile = requireRow(
@@ -6204,8 +6267,7 @@ export function createDataAccessInternal(
               input.encodingProfileId,
             );
             if (
-              input.encodingProfileId !==
-                candidate.predecessor.encodingProfileId &&
+              input.encodingProfileId !== predecessor.encodingProfileId &&
               (!profile.isActive || profile.mediaDomain !== "dvd_video")
             ) {
               throw new DomainInvariantError(
@@ -6219,7 +6281,7 @@ export function createDataAccessInternal(
               .where(and(
                 eq(encodeJobs.outputPath, outputPath),
                 eq(encodeJobs.reservesOutputPath, true),
-                ne(encodeJobs.id, candidate.predecessor.id),
+                ne(encodeJobs.id, predecessor.id),
               ))
               .limit(1)
               .get();
@@ -6228,14 +6290,76 @@ export function createDataAccessInternal(
                 `Encode Job output is already assigned: ${outputPath}`,
               );
             }
+            const replaceExistingOutput =
+              outputPath === predecessor.outputPath &&
+              (predecessor.status === "completed" ||
+                predecessor.replaceExistingOutput);
+            return {
+              input,
+              plan,
+              predecessor,
+              outputPath,
+              replaceExistingOutput,
+            };
+          });
+
+          if (options?.mutationKey !== undefined &&
+              options.previewToken === undefined) {
+            throw new DomainInvariantError(
+              "Catalog Review completion preview acknowledgement is required",
+            );
+          }
+          if (options?.previewToken !== undefined) {
+            const decision = transaction.select().from(mutationInvocations)
+              .where(eq(mutationInvocations.key, options.previewToken)).get();
+            if (decision?.operation !== "catalog_review.complete.preview" ||
+                decision.semanticInput !== semanticInput) {
+              throw new DomainInvariantError(
+                "Catalog Review completion preview does not match the accepted plan",
+              );
+            }
+            const saved = JSON.parse(decision.outcome) as {
+              expectedPreviewEvidence?: unknown;
+            };
+            const previewEvidence = JSON.stringify({
+              replacementConsequences: candidates.map((candidate) => ({
+                ...candidate.input,
+                replacementDiscSelectionId:
+                  candidate.plan.replacementDiscSelectionId,
+                predecessorStatus: candidate.plan.predecessorStatus,
+                predecessorReady: candidate.plan.predecessorReady,
+                replacesExistingOutput: candidate.replaceExistingOutput,
+              })),
+              availableReplacementPredecessorIds:
+                readAllCorrectedEncodeReplacementPlans(id).map(
+                  (replacement) => replacement.predecessorEncodeJobId,
+                ),
+            });
+            if (saved.expectedPreviewEvidence !== previewEvidence) {
+              throw new DomainInvariantError(
+                "Catalog Review completion preview is stale",
+              );
+            }
+          }
+          const completed = completeCatalogReviewTransition(
+            transaction,
+            archive,
+            catalogRevision,
+            outcome,
+            timestamp,
+          );
+
+          const replacementEncodeJobs: EncodeJob[] = [];
+          for (const candidate of candidates) {
+            const { input, outputPath, predecessor } = candidate;
             if (
-              outputPath === candidate.predecessor.outputPath &&
-              candidate.predecessor.reservesOutputPath
+              outputPath === predecessor.outputPath &&
+              predecessor.reservesOutputPath
             ) {
               transaction
                 .update(encodeJobs)
                 .set({ reservesOutputPath: false, updatedAt: timestamp })
-                .where(eq(encodeJobs.id, candidate.predecessor.id))
+                .where(eq(encodeJobs.id, predecessor.id))
                 .run();
             }
             const replacement = requireRow(
@@ -6243,22 +6367,19 @@ export function createDataAccessInternal(
                 .insert(encodeJobs)
                 .values({
                   id: newId<EncodeJobId>(),
-                  predecessorEncodeJobId: candidate.predecessor.id,
-                  discSelectionId: candidate.replacementDiscSelectionId,
+                  predecessorEncodeJobId: predecessor.id,
+                  discSelectionId: candidate.plan.replacementDiscSelectionId,
                   encodingProfileId: input.encodingProfileId,
                   outputPath,
-                  priority: input.priority ?? candidate.predecessor.priority,
-                  replaceExistingOutput:
-                    outputPath === candidate.predecessor.outputPath &&
-                    (candidate.predecessor.status === "completed" ||
-                      candidate.predecessor.replaceExistingOutput),
+                  priority: input.priority ?? predecessor.priority,
+                  replaceExistingOutput: candidate.replaceExistingOutput,
                   createdAt: timestamp,
                   updatedAt: timestamp,
                 })
                 .returning()
                 .get(),
               "corrected Encode replacement",
-              candidate.predecessor.id,
+              predecessor.id,
             );
             replacementEncodeJobs.push(replacement);
           }
@@ -6268,8 +6389,46 @@ export function createDataAccessInternal(
             timestamp.getTime(),
           );
 
-          return { archive: completed, replacementEncodeJobs };
+          if (options?.previewToken !== undefined) {
+            transaction.delete(mutationInvocations)
+              .where(eq(mutationInvocations.key, options.previewToken)).run();
+          }
+
+          const result = { archive: completed, replacementEncodeJobs };
+          return options?.mutationKey === undefined
+            ? result
+            : recordMutationInvocation(
+                transaction,
+                options.mutationKey,
+                operation,
+                semanticInput,
+                result,
+                timestamp,
+              );
         }, { behavior: "immediate" });
+      },
+
+      recordCatalogReviewCompletionPreviewDecision(input) {
+        if (!(input.catalogRevision instanceof Date) ||
+            !Number.isSafeInteger(input.catalogRevision.getTime())) {
+          throw new DomainInvariantError(
+            "Catalog review revision must be a valid timestamp",
+          );
+        }
+        database.insert(mutationInvocations).values({
+          key: requireNonEmpty(input.previewToken, "previewToken"),
+          operation: "catalog_review.complete.preview",
+          semanticInput: catalogReviewCompletionSemanticInput({
+            id: input.originalDiscArchiveId,
+            catalogRevision: input.catalogRevision,
+            outcome: input.outcome,
+            replacements: input.replacements,
+          }),
+          outcome: JSON.stringify({
+            expectedPreviewEvidence: input.expectedPreviewEvidence,
+          }),
+          createdAt: now(),
+        }).run();
       },
 
       createMediaItem(input, options) {

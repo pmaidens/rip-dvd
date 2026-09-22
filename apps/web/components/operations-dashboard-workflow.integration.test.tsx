@@ -139,6 +139,41 @@ function invokeCatalogSelectionMutation(
   );
 }
 
+async function previewAndApplyCatalogReviewCompletion(
+  access: DataAccess,
+  archiveId: string,
+  command: Record<string, unknown>,
+  mediaLibraryPath = "/",
+): Promise<Response> {
+  const previewResponse = await createCatalogReviewRoute(
+    createMutationRequest(`/api/catalog-reviews/${archiveId}`, {
+      ...command,
+      preview: true,
+    }),
+    archiveId,
+    () => access,
+    () => trustedOrigin,
+    () => mediaLibraryPath,
+  );
+  if (!previewResponse.ok) return previewResponse;
+  const preview = await previewResponse.json() as {
+    catalogRevision: string;
+    previewToken: string;
+  };
+  return createCatalogReviewRoute(
+    createMutationRequest(`/api/catalog-reviews/${archiveId}`, {
+      ...command,
+      acknowledgedRevision: preview.catalogRevision,
+      previewToken: preview.previewToken,
+      acknowledge: true,
+    }),
+    archiveId,
+    () => access,
+    () => trustedOrigin,
+    () => mediaLibraryPath,
+  );
+}
+
 async function readDashboard(access: DataAccess): Promise<{
   html: string;
   snapshot: DashboardSnapshot;
@@ -1641,8 +1676,10 @@ describe("end-to-end operations dashboard workflow", () => {
     await events.next((snapshot) =>
       encodeJobById(snapshot, job.id)?.status === "cancellation_requested"
     );
-    const completionResponse = await createCatalogReviewRoute(
-      createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
+    const completionResponse = await previewAndApplyCatalogReviewCompletion(
+      access,
+      archive.id,
+      {
         action: "complete_review",
         catalogRevision: review.catalogRevision,
         outcome: "reviewed_with_selections",
@@ -1651,11 +1688,8 @@ describe("end-to-end operations dashboard workflow", () => {
           encodingProfileId: profile.id,
           outputPath: job.outputPath,
         }],
-      }),
-      archive.id,
-      () => access,
-      () => trustedOrigin,
-      () => mediaLibraryPath,
+      },
+      mediaLibraryPath,
     );
     expect(completionResponse.status).toBe(200);
     const completion = await completionResponse.json() as {
@@ -2007,6 +2041,15 @@ describe("end-to-end operations dashboard workflow", () => {
     const catalogMutation = (body: unknown) => {
       let input = body;
       if (typeof body === "object" && body !== null && "action" in body &&
+          body.action === "complete_review") {
+        return previewAndApplyCatalogReviewCompletion(
+          access,
+          archive.id,
+          body as Record<string, unknown>,
+          mediaLibraryPath,
+        );
+      }
+      if (typeof body === "object" && body !== null && "action" in body &&
           (body.action === "create_media_item" || body.action === "update_media_item" ||
             body.action === "delete_media_item")) {
         const id = "mediaItemId" in body && typeof body.mediaItemId === "string"
@@ -2036,11 +2079,15 @@ describe("end-to-end operations dashboard workflow", () => {
         () => trustedOrigin,
       );
     };
-    const archiveOnlyCompletion = await catalogMutation({
-      action: "complete_review",
-      catalogRevision: catalogReview.catalogRevision,
-      outcome: "archive_only",
-    });
+    const archiveOnlyCompletion = await previewAndApplyCatalogReviewCompletion(
+      access,
+      archive.id,
+      {
+        action: "complete_review",
+        catalogRevision: catalogReview.catalogRevision,
+        outcome: "archive_only",
+      },
+    );
     expect(archiveOnlyCompletion.status).toBe(200);
     await expect(archiveOnlyCompletion.json()).resolves.toEqual({
       archive: {

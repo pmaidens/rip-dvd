@@ -34,6 +34,7 @@ import {
 import { runDiscSelection } from "./disc-selection.js";
 import { runMediaItem } from "./media-item.js";
 import { runMappingProposal } from "./mapping-proposal.js";
+import { runCatalogReviewCompletion } from "./catalog-review-completion.js";
 
 export type CommandExitCode = 0 | 1 | 2 | 3;
 
@@ -172,14 +173,16 @@ const commandDefinitions = [
   },
   {
     name: "catalog-review",
-    description: "Inspect a Catalog Review, discover candidates, or apply a complete Mapping Proposal.",
-    usage: "rip-dvd-operator catalog-review <show|suggest|apply-proposal> <archive-id> [options]",
+    description: "Inspect, preview, or complete a Catalog Review and apply Mapping Proposals.",
+    usage: "rip-dvd-operator catalog-review <show|suggest|apply-proposal|preview-completion|complete> <archive-id> [options]",
     inputs: {
-      arguments: ["show|suggest|apply-proposal", "archive-id"],
+      arguments: ["show|suggest|apply-proposal|preview-completion|complete", "archive-id"],
       options: [
         "show: --selection-offset, --correction-offset, --correction-job-offset, --correction-output-offset, --replacement-offset, --replacement-profile-offset",
         "suggest: --tmdb-id <positive integer> --media-type <movie|tv_show> (together, optional)",
         "apply-proposal: --key <key> and exactly one of --json <object>, --stdin, --file <path>",
+        "preview-completion: exactly one of --json <object>, --stdin, --file <path>",
+        "complete: --key <key> --revision <revision> --preview-token <token> --acknowledge and structured input",
       ],
     },
     example: "rip-dvd-operator catalog-review show <archive-id>",
@@ -1181,9 +1184,12 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         emit(io.stdout, help(name));
         return 0;
       }
-      emit(io.stdout, rest[0] === "apply-proposal"
-        ? runMappingProposal(rest.slice(1), io)
-        : await runCatalogReview(rest, io));
+      emit(io.stdout,
+        rest[0] === "apply-proposal"
+          ? runMappingProposal(rest.slice(1), io)
+          : rest[0] === "preview-completion" || rest[0] === "complete"
+            ? runCatalogReviewCompletion(rest, io)
+            : await runCatalogReview(rest, io));
       return 0;
     }
     if (["encode-queue", "encode-resolve", "encode-enqueue", "encode-requeue-preview", "encode-requeue", "encode-cancel"].includes(name)) {
