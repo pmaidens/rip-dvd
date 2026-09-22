@@ -120,23 +120,6 @@ const commandDefinitions = [
     example: "rip-dvd-operator disc-selection create <archive-id> --key <key> --media-item-id <id> --source-kind main_feature",
   },
   {
-    name: "media-item",
-    description: "Search and maintain Media Items with keyed changes.",
-    usage: "rip-dvd-operator media-item <search|show|preview|create|update|delete> [options]",
-    inputs: {
-      arguments: ["action", "media-item-id for show, preview, update, and delete"],
-      options: [
-        "search: --query <text> [--offset <number>] [--archive-id <id>]",
-        "preview: <update|delete> <media-item-id>; update also requires change flags or structured input",
-        "create: --key <key> --kind <kind> --title <title> [--parent-id, --year, --season-number, --episode-number, --tmdb-id, --tmdb-type]",
-        "create/update: --json <object or -> or --file <path> for structured input",
-        "update: <id> --key <key> plus change flags or structured input; use --acknowledge for affected changes",
-        "delete: <id> --key <key> --acknowledge <preview revision>",
-      ],
-    },
-    example: "rip-dvd-operator media-item create --key 00000000-0000-4000-8000-000000000001 --kind movie --title 'Example Film'",
-  },
-  {
     name: "list-encoding-profiles",
     category: "encoding_profile",
     description: "List DVD video Encoding Profile versions and eligibility.",
@@ -183,6 +166,23 @@ const commandDefinitions = [
     usage: "rip-dvd-operator deactivate-encoding-profile --key <key> --id <id> --revision <revision> --acknowledge",
     inputs: { arguments: [], options: ["--key", "--id", "--revision", "--acknowledge"] },
     example: "rip-dvd-operator deactivate-encoding-profile --key 00000000-0000-4000-8000-000000000004 --id <id> --revision <revision> --acknowledge",
+  },
+  {
+    name: "media-item",
+    description: "Search and maintain Media Items with keyed changes.",
+    usage: "rip-dvd-operator media-item <search|show|preview|create|update|delete> [options]",
+    inputs: {
+      arguments: ["action", "media-item-id for show, preview, update, and delete"],
+      options: [
+        "search: --query <text> [--offset <number>] [--archive-id <id>]",
+        "preview: <update|delete> <media-item-id>; update also requires change flags or structured input",
+        "create: --key <key> --kind <kind> --title <title> [--parent-id, --year, --season-number, --episode-number, --tmdb-id, --tmdb-type]",
+        "create/update: --json <object or -> or --file <path> for structured input",
+        "update: <id> --key <key> plus change flags or structured input; use --acknowledge for affected changes",
+        "delete: <id> --key <key> --acknowledge <preview revision>",
+      ],
+    },
+    example: "rip-dvd-operator media-item create --key 00000000-0000-4000-8000-000000000001 --kind movie --title 'Example Film'",
   },
   {
     name: "health",
