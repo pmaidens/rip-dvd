@@ -1128,6 +1128,7 @@ export interface CatalogAccess {
   ): DiscSelection;
   deleteDiscSelection(id: DiscSelectionId): DeleteDiscSelectionResult;
   mutateDiscSelection(input: DiscSelectionMutationInput): DiscSelectionMutationResult;
+  previewDiscSelectionChange(input: DiscSelectionMutationInput): DiscSelectionMutationResult;
   previewDiscSelectionMutation(
     originalDiscArchiveId: OriginalDiscArchiveId,
     discSelectionId: DiscSelectionId,

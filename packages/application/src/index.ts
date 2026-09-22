@@ -128,4 +128,4 @@ export * from "./catalog-review-types.js";
 export * from "./catalog-automation.js";
 export * from "./tmdb-catalog-adapter.js";
 export { suggestCatalogReview } from "./catalog-suggestion.js";
-export { executeDiscSelectionCommand, previewDiscSelection } from "./disc-selection-operations.js";
+export { executeDiscSelectionCommand, previewDiscSelection, previewDiscSelectionChange } from "./disc-selection-operations.js";

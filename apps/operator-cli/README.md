@@ -33,46 +33,51 @@ provider details.
 
 # Disc Selection commands
 
-Use an Original Disc Archive ID for every Disc Selection command. `show` and
-`preview` take a Disc Selection ID and need no key. `preview` returns the
-`catalogRevision`, the current selection, its available actions and blocking
-reason, and Encode Jobs tied to it. Inspect this result before a repair,
-correction, or deletion.
+Use an Original Disc Archive ID for every Disc Selection command. `show`
+returns the current selection, catalog revision, available actions and blocking
+reason, and associated Encode Jobs. `preview` takes a proposed action and the
+same selection input as that action. It validates the proposal without saving
+it and returns its effect, `catalogRevision`, and `previewToken`.
 
 ```sh
 rip-dvd-operator disc-selection show <archive-id> <selection-id>
-rip-dvd-operator disc-selection preview <archive-id> <selection-id>
 rip-dvd-operator disc-selection create <archive-id> --key <key> \
   --media-item-id <media-item-id> --source-kind dvd_title --title-number 1
 rip-dvd-operator disc-selection update <archive-id> <selection-id> --key <key> \
   --label "Main feature"
-rip-dvd-operator disc-selection correct <archive-id> <selection-id> --key <key> \
-  --revision <catalog-revision-from-preview> --acknowledge \
+rip-dvd-operator disc-selection preview correct <archive-id> <selection-id> \
   --media-item-id <media-item-id> --source-kind main_feature
+rip-dvd-operator disc-selection correct <archive-id> <selection-id> --key <key> \
+  --revision <catalog-revision-from-preview> --preview-token <token-from-preview> \
+  --acknowledge --media-item-id <media-item-id> --source-kind main_feature
+rip-dvd-operator disc-selection preview delete <archive-id> <selection-id>
 rip-dvd-operator disc-selection delete <archive-id> <selection-id> --key <key> \
-  --revision <catalog-revision-from-preview> --acknowledge
+  --revision <catalog-revision-from-preview> --preview-token <token-from-preview> \
+  --acknowledge
 ```
 
 `create`, `update`, `repair`, `correct`, and `delete` require a previously
 chosen mutation key. Repeating an identical invocation returns its original
-result. Reusing the key with different inputs fails. `update` with a new Media
-Item or source, `repair`, `correct`, and `delete` also require the revision
-returned by `preview` and the `--acknowledge` flag. A changed Catalog Review
-revision rejects the decision.
-The catalog enforces the same archive binding, source validation, and Encode
-Job provenance rules as the web editor.
+result. Reusing the key with different inputs fails. An `update` that changes
+the Media Item or source, plus every `repair`, `correct`, and `delete`, requires
+an action-specific preview. Pass the returned revision and token with
+`--acknowledge`. A changed Catalog Review revision or different proposal
+rejects the decision. Label-only updates execute directly. The catalog uses
+the same archive binding, source validation, and Encode Job provenance rules
+as the web editor.
 
 Use `--media-item-id`, `--source-kind`, `--title-number`, `--chapter-start`,
 `--chapter-end`, and `--label` for ordinary input. `update` also accepts
 `--clear-label`. Source kinds are `main_feature`, `dvd_title`, and
-`dvd_chapters`. A correction may include `--reason`.
+`dvd_chapters`. A correction may include `--reason`. Include the same reason
+in the preview and mutation.
 
 The same selection object can come from `--json '<object>'`, `--stdin`, or
 `--file <path>`. A file is optional. For create, repair, and correct, provide
 `mediaItemId` and `sourceIdentity`, with an optional `label`. For update,
 provide at least one of `mediaItemId`, `sourceIdentity`, or `label`; set
-`label` to `null` to clear it. The key, target IDs, preview revision, and
-acknowledgement stay as command options for every input form.
+`label` to `null` to clear it. The key, target IDs, preview revision, token,
+and acknowledgement stay as command options for every input form.
 
 ```sh
 rip-dvd-operator disc-selection create <archive-id> --key <key> \

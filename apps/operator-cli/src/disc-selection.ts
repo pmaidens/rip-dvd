@@ -1,9 +1,8 @@
-import { readFileSync } from "node:fs";
-
 import {
   executeDiscSelectionCommand,
   parseMutationKey,
   previewDiscSelection,
+  previewDiscSelectionChange,
   InvalidMutationKeyError,
 } from "@rip-dvd/application";
 import { parseCatalogReviewCommand } from "@rip-dvd/application/catalog-review-command";
@@ -18,11 +17,10 @@ import {
 } from "@rip-dvd/data-access";
 
 import { CommandFailure } from "./command.js";
+import { readStructuredObject, StructuredInputError, type StructuredInputIO } from "./structured-input.js";
 
-interface SelectionIO {
+interface SelectionIO extends StructuredInputIO {
   openAccess(): DataAccess;
-  readStdin?(): string;
-  readFile?(path: string): string;
 }
 
 const mutations = {
@@ -34,7 +32,7 @@ const mutations = {
 } as const;
 
 const selectionOptions = new Set([
-  "--key", "--revision", "--acknowledge", "--json", "--stdin", "--file",
+  "--key", "--revision", "--preview-token", "--acknowledge", "--json", "--stdin", "--file",
   "--media-item-id", "--source-kind", "--title-number", "--chapter-start",
   "--chapter-end", "--label", "--clear-label", "--reason",
 ]);
@@ -103,36 +101,25 @@ function sourceIdentity(options: Map<string, string>): Record<string, unknown> |
 }
 
 function payload(action: keyof typeof mutations, options: Map<string, string>, io: SelectionIO): unknown {
-  const forms = ["--json", "--stdin", "--file"].filter((name) => options.has(name));
   const fields = ["--media-item-id", "--source-kind", "--title-number", "--chapter-start",
     "--chapter-end", "--label", "--clear-label"];
-  if (forms.length > 1 || (forms.length && fields.some((name) => options.has(name)))) {
+  if (["--json", "--stdin", "--file"].some((name) => options.has(name)) &&
+      fields.some((name) => options.has(name))) {
     invalid("Choose one Disc Selection input form.");
   }
   if (options.has("--label") && options.has("--clear-label")) {
     invalid("Label options conflict.");
   }
-  if (forms.length) {
-    let text: string;
-    try {
-      text = options.get("--json") ?? (options.has("--stdin")
-        ? (io.readStdin ?? (() => readFileSync(0, "utf8")))()
-        : (io.readFile ?? ((path) => readFileSync(path, "utf8")))(options.get("--file")!));
-    } catch {
-      throw new CommandFailure("INVALID_INPUT", "Disc Selection input could not be read.", 2);
+  let structured: unknown;
+  try {
+    structured = readStructuredObject(options, io);
+  } catch (error) {
+    if (error instanceof StructuredInputError) {
+      throw new CommandFailure(error.code, error.message, 2);
     }
-    if (text.length > 1_000_000) invalid("Disc Selection input is too large.");
-    try {
-      const parsed: unknown = JSON.parse(text);
-      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        invalid("Disc Selection input must be a JSON object.");
-      }
-      return parsed;
-    } catch (error) {
-      if (error instanceof CommandFailure) throw error;
-      invalid("Disc Selection input is not valid JSON.");
-    }
+    throw error;
   }
+  if (structured !== undefined) return structured;
   if (action === "delete") return undefined;
   const source = sourceIdentity(options);
   return {
@@ -143,85 +130,36 @@ function payload(action: keyof typeof mutations, options: Map<string, string>, i
   };
 }
 
-export function runDiscSelection(rest: readonly string[], io: SelectionIO): unknown {
-  const [action, archiveArg, ...tail] = rest;
-  if (action !== "show" && action !== "preview" && !(action && action in mutations)) {
-    invalid("Expected disc-selection show, preview, create, update, repair, correct, or delete.");
-  }
-  const archiveId = requiredId(archiveArg, "archive ID") as OriginalDiscArchiveId;
-  const needsSelection = action !== "create";
-  const selectionId = needsSelection ? requiredId(tail.shift(), "Disc Selection ID") as DiscSelectionId : undefined;
-  const options = parseOptions(tail);
-  if (action === "show" || action === "preview") {
-    if (options.size !== 0) invalid("Read commands take no options.");
-    let access: DataAccess | undefined;
-    try {
-      access = io.openAccess();
-      return previewDiscSelection(access, archiveId, selectionId!);
-    } catch (error) {
-      if (error instanceof RecordNotFoundError) {
-        throw new CommandFailure("SELECTION_NOT_FOUND", "Disc Selection not found.", 2);
-      }
-      throw new CommandFailure("SELECTION_UNAVAILABLE", "Disc Selection is unavailable.", 1);
-    } finally {
-      access?.close();
-    }
-  }
-  const mutationAction = action as keyof typeof mutations;
-  if (mutationAction === "delete" && ["--json", "--stdin", "--file", "--reason",
-    "--media-item-id", "--source-kind", "--title-number", "--chapter-start",
-    "--chapter-end", "--label", "--clear-label"].some((name) => options.has(name))) {
-    invalid("Delete accepts no selection input.");
-  }
-  if (mutationAction !== "correct" && options.has("--reason")) {
-    invalid("A correction reason applies only to correction.");
-  }
-  let mutationKey: string;
-  try {
-    mutationKey = parseMutationKey(options.get("--key"));
-  } catch (error) {
-    if (error instanceof InvalidMutationKeyError) {
-      throw new CommandFailure("INVALID_MUTATION_KEY", error.message, 2);
-    }
-    throw error;
-  }
-  const input = payload(mutationAction, options, io);
-  const changes = input && typeof input === "object" && !Array.isArray(input)
-    ? input as Record<string, unknown>
-    : {};
-  const consequential = mutationAction === "repair" || mutationAction === "correct" ||
-    mutationAction === "delete" || (mutationAction === "update" &&
-      ("mediaItemId" in changes || "sourceIdentity" in changes));
-  if (consequential && !options.has("--acknowledge")) {
-    invalid("Acknowledgement of a Disc Selection preview is required.");
-  }
-  if (!consequential && (options.has("--acknowledge") || options.has("--revision"))) {
-    invalid("This Disc Selection change does not require a preview.");
-  }
-  const expectedCatalogRevision = consequential ? revision(options.get("--revision")) : undefined;
-  const commandBody = {
-    action: mutations[mutationAction],
+function parsedCommand(
+  action: keyof typeof mutations,
+  selectionId: DiscSelectionId | undefined,
+  input: unknown,
+  catalogRevision: string | undefined,
+  correctionReason: string | undefined,
+): Parameters<typeof executeDiscSelectionCommand>[2] {
+  const body = {
+    action: mutations[action],
     ...(selectionId ? { discSelectionId: selectionId } : {}),
-    ...(mutationAction === "update" ? { changes: input } : {}),
-    ...(mutationAction === "create" || mutationAction === "repair" || mutationAction === "correct"
+    ...(action === "update" ? { changes: input } : {}),
+    ...(action === "create" || action === "repair" || action === "correct"
       ? { selection: input } : {}),
-    ...(mutationAction === "correct" ? { catalogRevision: expectedCatalogRevision!.toISOString(),
-      ...(options.has("--reason") ? { correctionReason: options.get("--reason") } : {}) } : {}),
+    ...(action === "correct" ? { catalogRevision, ...(correctionReason ? { correctionReason } : {}) } : {}),
   };
-  const parsed = parseCatalogReviewCommand(commandBody, { mediaItemKinds: MEDIA_ITEM_KINDS });
+  const parsed = parseCatalogReviewCommand(body, { mediaItemKinds: MEDIA_ITEM_KINDS });
   if (!parsed.ok) {
     throw new CommandFailure("INVALID_SELECTION", parsed.error, 2);
   }
   if (!Object.values(mutations).includes(parsed.command.action as typeof mutations[keyof typeof mutations])) {
     invalid("Invalid Disc Selection action.");
   }
+  return parsed.command as Parameters<typeof executeDiscSelectionCommand>[2];
+}
+
+function withSelectionAccess<T>(io: SelectionIO, operation: (access: DataAccess) => T): T {
   let access: DataAccess | undefined;
   try {
     access = io.openAccess();
-    return executeDiscSelectionCommand(access, archiveId, parsed.command as Parameters<typeof executeDiscSelectionCommand>[2], {
-      mutationKey,
-      ...(expectedCatalogRevision ? { expectedCatalogRevision } : {}),
-    });
+    return operation(access);
   } catch (error) {
     if (error instanceof MutationKeyConflictError) {
       throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
@@ -235,8 +173,80 @@ export function runDiscSelection(rest: readonly string[], io: SelectionIO): unkn
         error.message, 2,
       );
     }
-    throw new CommandFailure("SELECTION_UNAVAILABLE", "Disc Selection mutation is unavailable.", 1);
+    throw new CommandFailure("SELECTION_UNAVAILABLE", "Disc Selection operation is unavailable.", 1);
   } finally {
     access?.close();
   }
+}
+
+export function runDiscSelection(rest: readonly string[], io: SelectionIO): unknown {
+  const [verb] = rest;
+  if (verb === "show") {
+    const archiveId = requiredId(rest[1], "archive ID") as OriginalDiscArchiveId;
+    const selectionId = requiredId(rest[2], "Disc Selection ID") as DiscSelectionId;
+    if (rest.length !== 3) invalid("Show takes no options.");
+    return withSelectionAccess(io, (access) => previewDiscSelection(access, archiveId, selectionId));
+  }
+  const isPreview = verb === "preview";
+  const action = (isPreview ? rest[1] : verb) as keyof typeof mutations | undefined;
+  if (!action || !(action in mutations) || (isPreview && action === "create")) {
+    invalid("Expected a Disc Selection action: create, update, repair, correct, or delete.");
+  }
+  const archiveId = requiredId(rest[isPreview ? 2 : 1], "archive ID") as OriginalDiscArchiveId;
+  const tail = rest.slice(isPreview ? 3 : 2);
+  const selectionId = action === "create" ? undefined
+    : requiredId(tail.shift(), "Disc Selection ID") as DiscSelectionId;
+  const options = parseOptions(tail);
+  if (action === "delete" && ["--json", "--stdin", "--file", "--reason",
+    "--media-item-id", "--source-kind", "--title-number", "--chapter-start",
+    "--chapter-end", "--label", "--clear-label"].some((name) => options.has(name))) {
+    invalid("Delete accepts no selection input.");
+  }
+  if (action !== "correct" && options.has("--reason")) {
+    invalid("A correction reason applies only to correction.");
+  }
+  let mutationKey: string | undefined;
+  if (isPreview) {
+    if (["--key", "--revision", "--preview-token", "--acknowledge"].some((name) => options.has(name))) {
+      invalid("Preview takes proposal input without a key or acknowledgement.");
+    }
+  } else {
+    try {
+      mutationKey = parseMutationKey(options.get("--key"));
+    } catch (error) {
+      if (error instanceof InvalidMutationKeyError) {
+        throw new CommandFailure("INVALID_MUTATION_KEY", error.message, 2);
+      }
+      throw error;
+    }
+  }
+  const input = payload(action, options, io);
+  if (isPreview) {
+    return withSelectionAccess(io, (access) => {
+      const current = previewDiscSelection(access, archiveId, selectionId!);
+      const command = parsedCommand(action, selectionId, input, current.catalogRevision, options.get("--reason"));
+      return previewDiscSelectionChange(access, archiveId, command);
+    });
+  }
+  const changes = input && typeof input === "object" && !Array.isArray(input)
+    ? input as Record<string, unknown> : {};
+  const consequential = action === "repair" || action === "correct" || action === "delete" ||
+    (action === "update" && ("mediaItemId" in changes || "sourceIdentity" in changes));
+  if (consequential && !options.has("--acknowledge")) {
+    invalid("Acknowledgement of a Disc Selection preview is required.");
+  }
+  if (!consequential && ["--acknowledge", "--revision", "--preview-token"].some((name) => options.has(name))) {
+    invalid("This Disc Selection change does not require a preview.");
+  }
+  const expectedCatalogRevision = consequential ? revision(options.get("--revision")) : undefined;
+  const previewToken = options.get("--preview-token");
+  if (consequential && (!previewToken || !/^[a-f0-9]{64}$/.test(previewToken))) {
+    invalid("A matching Disc Selection preview token is required.");
+  }
+  const command = parsedCommand(action, selectionId, input, expectedCatalogRevision?.toISOString(), options.get("--reason"));
+  return withSelectionAccess(io, (access) => executeDiscSelectionCommand(access, archiveId, command, {
+    mutationKey,
+    ...(expectedCatalogRevision ? { expectedCatalogRevision } : {}),
+    ...(previewToken ? { previewToken } : {}),
+  }));
 }

@@ -173,6 +173,8 @@ import type {
   DiscInspectionId,
   DiscInspectionReasonCode,
   DiscSelectionId,
+  DiscSelectionMutationInput,
+  DiscSelectionMutationResult,
   DiscSelectionActionAvailability,
   DiscSelectionCorrectionEncodeJobLink,
   DiscSelectionCorrectionRetainedOutputSummary,
@@ -4152,6 +4154,123 @@ export function createDataAccessInternal(
     | { id: ArchiveJobId; updatedAt: Date }
     | undefined;
 
+  class DiscSelectionPreviewRollback extends Error {
+    constructor(readonly result: DiscSelectionMutationResult) {
+      super("Disc Selection preview rolled back");
+    }
+  }
+
+  function performDiscSelectionMutation(
+    input: DiscSelectionMutationInput,
+    previewOnly: boolean,
+  ): DiscSelectionMutationResult {
+    if (activeDiscSelectionTransaction !== null) {
+      throw new DomainInvariantError("Nested Disc Selection mutations are unavailable");
+    }
+    const { mutation, originalDiscArchiveId, mutationKey, expectedCatalogRevision } = input;
+    const semanticInput = JSON.stringify({ originalDiscArchiveId, expectedCatalogRevision, mutation });
+    try {
+      return database.transaction((transaction) => {
+        if (mutationKey !== undefined) {
+          const previous = transaction.select().from(mutationInvocations)
+            .where(eq(mutationInvocations.key, mutationKey)).get();
+          if (previous) {
+            if (previous.operation !== `disc_selection.${mutation.action}` ||
+                previous.semanticInput !== semanticInput) {
+              throw new MutationKeyConflictError();
+            }
+            const saved = JSON.parse(previous.outcome) as {
+              discSelection: Record<string, unknown>;
+              supersession?: Record<string, unknown>;
+              deletedEncodeJobs?: number;
+              deletionComplete?: boolean;
+            };
+            return {
+              ...saved,
+              discSelection: {
+                ...saved.discSelection,
+                createdAt: new Date(saved.discSelection.createdAt as string),
+                updatedAt: new Date(saved.discSelection.updatedAt as string),
+              },
+              ...(saved.supersession ? { supersession: {
+                ...saved.supersession,
+                createdAt: new Date(saved.supersession.createdAt as string),
+              } } : {}),
+            } as ReturnType<typeof access.catalog.mutateDiscSelection>;
+          }
+        }
+        const archive = requireRow(transaction.select({ updatedAt: originalDiscArchives.updatedAt })
+          .from(originalDiscArchives)
+          .where(eq(originalDiscArchives.id, originalDiscArchiveId)).get(),
+        "original disc archive", originalDiscArchiveId);
+        if (expectedCatalogRevision !== undefined &&
+            archive.updatedAt.getTime() !== expectedCatalogRevision.getTime()) {
+          throw new DomainInvariantError("Catalog review revision is stale");
+        }
+        if (mutation.action === "create" || mutation.action === "repair" ||
+            mutation.action === "correct") {
+          if (mutation.selection.originalDiscArchiveId !== originalDiscArchiveId) {
+            throw new DomainInvariantError("Disc Selection cannot move between Original Disc Archives");
+          }
+        } else if (mutation.action === "update" &&
+            mutation.changes.originalDiscArchiveId !== originalDiscArchiveId) {
+          throw new DomainInvariantError("Disc Selection cannot move between Original Disc Archives");
+        }
+        if (mutation.action !== "create") {
+          const current = requireRow(transaction.select({ originalDiscArchiveId: discSelections.originalDiscArchiveId })
+            .from(discSelections).where(eq(discSelections.id, mutation.discSelectionId)).get(),
+          "disc selection", mutation.discSelectionId);
+          if (current.originalDiscArchiveId !== originalDiscArchiveId) {
+            throw new RecordNotFoundError("disc selection", mutation.discSelectionId);
+          }
+        }
+        const previousTransaction = activeDiscSelectionTransaction;
+        activeDiscSelectionTransaction = transaction;
+        try {
+          const result = (() => {
+            switch (mutation.action) {
+              case "create":
+                return { discSelection: access.catalog.createDiscSelection(mutation.selection) };
+              case "update":
+                return { discSelection: access.catalog.updateDiscSelection(mutation.discSelectionId, mutation.changes) };
+              case "repair":
+                return { discSelection: access.catalog.repairDiscSelection(mutation.discSelectionId, mutation.selection) };
+              case "correct": {
+                const correction = access.catalog.correctDiscSelection(mutation.discSelectionId, mutation.selection);
+                return { discSelection: correction.discSelection, supersession: correction.supersession };
+              }
+              case "delete": {
+                const deletion = access.catalog.deleteDiscSelection(mutation.discSelectionId);
+                return { discSelection: deletion, deletedEncodeJobs: deletion.deletedEncodeJobs,
+                  deletionComplete: deletion.deletionComplete };
+              }
+            }
+          })();
+          if (previewOnly) {
+            throw new DiscSelectionPreviewRollback(result);
+          }
+          if (mutationKey !== undefined) {
+            transaction.insert(mutationInvocations).values({
+              key: mutationKey,
+              operation: `disc_selection.${mutation.action}`,
+              semanticInput,
+              outcome: JSON.stringify(result),
+              createdAt: now(),
+            }).run();
+          }
+          return result;
+        } finally {
+          activeDiscSelectionTransaction = previousTransaction;
+        }
+      }, { behavior: "immediate" });
+    } catch (error) {
+      if (previewOnly && error instanceof DiscSelectionPreviewRollback) {
+        return error.result;
+      }
+      throw error;
+    }
+  }
+
   const access: LegacySidecarDataAccess = {
     readConsistentSnapshot(read) {
       const snapshotAccess: ConsistentReadAccess = {
@@ -6405,101 +6524,11 @@ export function createDataAccessInternal(
       },
 
       mutateDiscSelection(input) {
-        if (activeDiscSelectionTransaction !== null) {
-          throw new DomainInvariantError("Nested Disc Selection mutations are unavailable");
-        }
-        const { mutation, originalDiscArchiveId, mutationKey, expectedCatalogRevision } = input;
-        const semanticInput = JSON.stringify({ originalDiscArchiveId, expectedCatalogRevision, mutation });
-        return database.transaction((transaction) => {
-          if (mutationKey !== undefined) {
-            const previous = transaction.select().from(mutationInvocations)
-              .where(eq(mutationInvocations.key, mutationKey)).get();
-            if (previous) {
-              if (previous.operation !== `disc_selection.${mutation.action}` ||
-                  previous.semanticInput !== semanticInput) {
-                throw new MutationKeyConflictError();
-              }
-              const saved = JSON.parse(previous.outcome) as {
-                discSelection: Record<string, unknown>;
-                supersession?: Record<string, unknown>;
-                deletedEncodeJobs?: number;
-                deletionComplete?: boolean;
-              };
-              return {
-                ...saved,
-                discSelection: {
-                  ...saved.discSelection,
-                  createdAt: new Date(saved.discSelection.createdAt as string),
-                  updatedAt: new Date(saved.discSelection.updatedAt as string),
-                },
-                ...(saved.supersession ? { supersession: {
-                  ...saved.supersession,
-                  createdAt: new Date(saved.supersession.createdAt as string),
-                } } : {}),
-              } as ReturnType<typeof access.catalog.mutateDiscSelection>;
-            }
-          }
-          const archive = requireRow(transaction.select({ updatedAt: originalDiscArchives.updatedAt })
-            .from(originalDiscArchives)
-            .where(eq(originalDiscArchives.id, originalDiscArchiveId)).get(),
-          "original disc archive", originalDiscArchiveId);
-          if (expectedCatalogRevision !== undefined &&
-              archive.updatedAt.getTime() !== expectedCatalogRevision.getTime()) {
-            throw new DomainInvariantError("Catalog review revision is stale");
-          }
-          if (mutation.action === "create" || mutation.action === "repair" ||
-              mutation.action === "correct") {
-            if (mutation.selection.originalDiscArchiveId !== originalDiscArchiveId) {
-              throw new DomainInvariantError("Disc Selection cannot move between Original Disc Archives");
-            }
-          } else if (mutation.action === "update" &&
-              mutation.changes.originalDiscArchiveId !== originalDiscArchiveId) {
-            throw new DomainInvariantError("Disc Selection cannot move between Original Disc Archives");
-          }
-          if (mutation.action !== "create") {
-            const current = requireRow(transaction.select({ originalDiscArchiveId: discSelections.originalDiscArchiveId })
-              .from(discSelections).where(eq(discSelections.id, mutation.discSelectionId)).get(),
-            "disc selection", mutation.discSelectionId);
-            if (current.originalDiscArchiveId !== originalDiscArchiveId) {
-              throw new RecordNotFoundError("disc selection", mutation.discSelectionId);
-            }
-          }
-          const previousTransaction = activeDiscSelectionTransaction;
-          activeDiscSelectionTransaction = transaction;
-          try {
-            const result = (() => {
-              switch (mutation.action) {
-                case "create":
-                  return { discSelection: access.catalog.createDiscSelection(mutation.selection) };
-                case "update":
-                  return { discSelection: access.catalog.updateDiscSelection(mutation.discSelectionId, mutation.changes) };
-                case "repair":
-                  return { discSelection: access.catalog.repairDiscSelection(mutation.discSelectionId, mutation.selection) };
-                case "correct": {
-                  const correction = access.catalog.correctDiscSelection(mutation.discSelectionId, mutation.selection);
-                  return { discSelection: correction.discSelection, supersession: correction.supersession };
-                }
-                case "delete": {
-                  const deletion = access.catalog.deleteDiscSelection(mutation.discSelectionId);
-                  return { discSelection: deletion, deletedEncodeJobs: deletion.deletedEncodeJobs,
-                    deletionComplete: deletion.deletionComplete };
-                }
-              }
-            })();
-            if (mutationKey !== undefined) {
-              transaction.insert(mutationInvocations).values({
-                key: mutationKey,
-                operation: `disc_selection.${mutation.action}`,
-                semanticInput,
-                outcome: JSON.stringify(result),
-                createdAt: now(),
-              }).run();
-            }
-            return result;
-          } finally {
-            activeDiscSelectionTransaction = previousTransaction;
-          }
-        }, { behavior: "immediate" });
+        return performDiscSelectionMutation(input, false);
+      },
+
+      previewDiscSelectionChange(input) {
+        return performDiscSelectionMutation({ ...input, mutationKey: undefined }, true);
       },
 
       previewDiscSelectionMutation(originalDiscArchiveId, discSelectionId) {

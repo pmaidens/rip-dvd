@@ -85,29 +85,44 @@ it("previews consequential changes, rejects stale decisions, and applies eligibl
     "--key", key(4), "--media-item-id", first.id, "--source-kind", "main_feature"]);
   expect(created.exitCode).toBe(0);
   const selectionId = (created.result as { discSelection: { id: string } }).discSelection.id;
-  const preview = await current.run(["disc-selection", "preview", archive.id, selectionId]);
-  expect(preview.result).toMatchObject({ actionAvailability: { state: "editable" }, historicalEncodeJobCount: 0 });
-  const staleRevision = (preview.result as { catalogRevision: string }).catalogRevision;
+  const preview = await current.run(["disc-selection", "preview", "update", archive.id, selectionId,
+    "--media-item-id", second.id]);
+  expect(preview.result).toMatchObject({ actionAvailability: { state: "editable" },
+    historicalEncodeJobCount: 0, proposedDiscSelection: { mediaItemId: second.id } });
+  const unchanged = await current.run(["disc-selection", "show", archive.id, selectionId]);
+  expect(unchanged.result).toMatchObject({ discSelection: { mediaItemId: first.id } });
+  const replacementDecision = preview.result as { catalogRevision: string; previewToken: string };
   const unreviewedReplacement = await current.run(["disc-selection", "update", archive.id, selectionId,
     "--key", key(12), "--media-item-id", second.id]);
   expect(unreviewedReplacement.result).toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
   const replaced = await current.run(["disc-selection", "update", archive.id, selectionId,
     "--key", key(12), "--media-item-id", second.id,
-    "--revision", staleRevision, "--acknowledge"]);
+    "--revision", replacementDecision.catalogRevision, "--preview-token", replacementDecision.previewToken,
+    "--acknowledge"]);
   expect(replaced.result).toMatchObject({ discSelection: { mediaItemId: second.id } });
+  const mismatched = await current.run(["disc-selection", "update", archive.id, selectionId,
+    "--key", key(13), "--source-kind", "dvd_title", "--title-number", "1",
+    "--revision", replacementDecision.catalogRevision, "--preview-token", replacementDecision.previewToken,
+    "--acknowledge"]);
+  expect(mismatched.result).toMatchObject({ error: { code: "SELECTION_REJECTED" } });
+  const deletionPreview = await current.run(["disc-selection", "preview", "delete", archive.id, selectionId]);
+  const staleDecision = deletionPreview.result as { catalogRevision: string; previewToken: string };
   const updated = await current.run(["disc-selection", "update", archive.id, selectionId,
     "--key", key(5), "--label", "Main feature"]);
   expect(updated.result).toMatchObject({ discSelection: { label: "Main feature" } });
   const stale = await current.run(["disc-selection", "delete", archive.id, selectionId,
-    "--key", key(6), "--revision", staleRevision, "--acknowledge"]);
+    "--key", key(6), "--revision", staleDecision.catalogRevision,
+    "--preview-token", staleDecision.previewToken, "--acknowledge"]);
   expect(stale.result).toMatchObject({ error: { code: "STALE_CATALOG_REVISION" } });
-  const fresh = await current.run(["disc-selection", "preview", archive.id, selectionId]);
-  const currentRevision = (fresh.result as { catalogRevision: string }).catalogRevision;
+  const fresh = await current.run(["disc-selection", "preview", "delete", archive.id, selectionId]);
+  const currentDecision = fresh.result as { catalogRevision: string; previewToken: string };
   const deleted = await current.run(["disc-selection", "delete", archive.id, selectionId,
-    "--key", key(6), "--revision", currentRevision, "--acknowledge"]);
+    "--key", key(6), "--revision", currentDecision.catalogRevision,
+    "--preview-token", currentDecision.previewToken, "--acknowledge"]);
   expect(deleted.result).toMatchObject({ deletionComplete: true, discSelection: { id: selectionId } });
   const replay = await current.run(["disc-selection", "delete", archive.id, selectionId,
-    "--key", key(6), "--revision", currentRevision, "--acknowledge"]);
+    "--key", key(6), "--revision", currentDecision.catalogRevision,
+    "--preview-token", currentDecision.previewToken, "--acknowledge"]);
   expect(replay.result).toEqual(deleted.result);
 });
 
@@ -127,19 +142,26 @@ it("rejects invalid sources and protects locked Encode Job provenance", async ()
   access.encodeJobs.enqueue({ discSelectionId: selectionId as Parameters<typeof access.encodeJobs.enqueue>[0]["discSelectionId"],
     encodingProfileId: profile.id, outputPath: join(current.mediaLibraryPath, "synthetic-film.mkv") });
   access.close();
-  const preview = await current.run(["disc-selection", "preview", archive.id, selectionId]);
-  expect(preview.result).toMatchObject({ actionAvailability: { state: "locked_provenance",
+  const detail = await current.run(["disc-selection", "show", archive.id, selectionId]);
+  expect(detail.result).toMatchObject({ actionAvailability: { state: "locked_provenance",
     availableActions: ["correct"] }, affectedEncodeJobs: [{ status: "queued" }] });
-  const currentRevision = (preview.result as { catalogRevision: string }).catalogRevision;
-  const updated = await current.run(["disc-selection", "update", archive.id, selectionId,
-    "--key", key(9), "--media-item-id", second.id,
-    "--revision", currentRevision, "--acknowledge"]);
+  const updated = await current.run(["disc-selection", "preview", "update", archive.id, selectionId,
+    "--media-item-id", second.id]);
   expect(updated.result).toMatchObject({ error: { code: "SELECTION_REJECTED" } });
-  const deleted = await current.run(["disc-selection", "delete", archive.id, selectionId,
-    "--key", key(10), "--revision", currentRevision, "--acknowledge"]);
+  const deleted = await current.run(["disc-selection", "preview", "delete", archive.id, selectionId]);
   expect(deleted.result).toMatchObject({ error: { code: "SELECTION_REJECTED" } });
+  const invalidProposal = await current.run(["disc-selection", "preview", "correct", archive.id, selectionId,
+    "--media-item-id", second.id, "--source-kind", "dvd_title", "--title-number", "99"]);
+  expect(invalidProposal.result).toMatchObject({ error: { code: "SELECTION_REJECTED" } });
+  const preview = await current.run(["disc-selection", "preview", "correct", archive.id, selectionId,
+    "--media-item-id", second.id, "--source-kind", "main_feature"]);
+  expect(preview.result).toMatchObject({ proposedDiscSelection: { mediaItemId: second.id } });
+  const afterPreview = await current.run(["disc-selection", "show", archive.id, selectionId]);
+  expect(afterPreview.result).toMatchObject({ affectedEncodeJobs: [{ status: "queued" }] });
+  const decision = preview.result as { catalogRevision: string; previewToken: string };
   const corrected = await current.run(["disc-selection", "correct", archive.id, selectionId,
-    "--key", key(11), "--revision", currentRevision, "--acknowledge",
+    "--key", key(11), "--revision", decision.catalogRevision, "--preview-token", decision.previewToken,
+    "--acknowledge",
     "--media-item-id", second.id, "--source-kind", "main_feature"]);
   expect(corrected.result).toMatchObject({ discSelection: { mediaItemId: second.id },
     supersession: { supersededDiscSelectionId: selectionId } });

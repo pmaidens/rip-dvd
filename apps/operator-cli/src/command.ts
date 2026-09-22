@@ -67,10 +67,10 @@ const commandDefinitions = [
   {
     name: "disc-selection",
     description: "Inspect and change an eligible Disc Selection.",
-    usage: "rip-dvd-operator disc-selection <show|preview|create|update|repair|correct|delete> <archive-id> [selection-id] [options]",
+    usage: "rip-dvd-operator disc-selection <show|preview|create|update|repair|correct|delete> [action] <archive-id> [selection-id] [options]",
     inputs: {
-      arguments: ["action", "archive-id", "selection-id (except create)"],
-      options: ["mutations: --key <key>", "mapping updates, repair, correct, delete: --revision <catalog-revision> --acknowledge",
+      arguments: ["action (required after preview)", "archive-id", "selection-id (except create)"],
+      options: ["mutations: --key <key>", "mapping updates, repair, correct, delete: --revision <catalog-revision> --preview-token <token> --acknowledge",
         "selection input: flags or --json <object> or --stdin or --file <path>"],
     },
     example: "rip-dvd-operator disc-selection create <archive-id> --key <key> --media-item-id <id> --source-kind main_feature",
