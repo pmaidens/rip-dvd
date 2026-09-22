@@ -23,12 +23,15 @@ import {
   type OriginalDiscArchiveId,
   type DataAccess,
 } from "@rip-dvd/data-access";
+import { runDiscSelection } from "./disc-selection.js";
 
 export type CommandExitCode = 0 | 1 | 2 | 3;
 
 interface CommandIO {
   openAccess(): DataAccess;
   getLookup?(): CatalogMetadataLookup | null;
+  readStdin?(): string;
+  readFile?(path: string): string;
   stdout(text: string): void;
   stderr(text: string): void;
 }
@@ -60,6 +63,17 @@ const commandDefinitions = [
       ],
     },
     example: "rip-dvd-operator catalog-review show <archive-id>",
+  },
+  {
+    name: "disc-selection",
+    description: "Inspect and change an eligible Disc Selection.",
+    usage: "rip-dvd-operator disc-selection <show|preview|create|update|repair|correct|delete> [action] <archive-id> [selection-id] [options]",
+    inputs: {
+      arguments: ["action (required after preview)", "archive-id", "selection-id (except create)"],
+      options: ["mutations: --key <key>", "mapping updates, repair, correct, delete: --revision <catalog-revision> --preview-token <token> --acknowledge",
+        "selection input: flags or --json <object> or --stdin or --file <path>"],
+    },
+    example: "rip-dvd-operator disc-selection create <archive-id> --key <key> --media-item-id <id> --source-kind main_feature",
   },
   {
     name: "health",
@@ -486,6 +500,14 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
       } finally {
         access?.close();
       }
+    }
+    if (name === "disc-selection") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+        return 0;
+      }
+      emit(io.stdout, runDiscSelection(rest, io));
+      return 0;
     }
     if (name !== "health" && name !== "readiness") {
       throw new CommandFailure("UNKNOWN_COMMAND", "Unknown command.", 2);

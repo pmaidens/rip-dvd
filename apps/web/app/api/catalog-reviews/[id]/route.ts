@@ -3,18 +3,15 @@ import {
   MEDIA_ITEM_KINDS,
   RecordNotFoundError,
   type DataAccess,
-  type CreateDiscSelectionInput,
   type CreateMediaItemInput,
-  type DiscSelection,
   type DiscSelectionId,
   type EncodeJobId,
   type EncodingProfileId,
   type MediaItemId,
   type OriginalDiscArchiveId,
-  type UpdateDiscSelectionInput,
 } from "@rip-dvd/data-access";
 import { loadConfig } from "@rip-dvd/config";
-import { createApplicationOperations, serializeDiscSelection, serializeMediaItem } from "@rip-dvd/application";
+import { createApplicationOperations, executeDiscSelectionCommand, serializeDiscSelection, serializeMediaItem } from "@rip-dvd/application";
 
 import {
   parseCatalogReviewCommand,
@@ -329,101 +326,14 @@ export async function createCatalogReviewRoute(
       }
 
       case "create_disc_selection":
-      case "repair_disc_selection": {
-        const repairSelectionId = command.action === "repair_disc_selection"
-          ? command.discSelectionId as DiscSelectionId
-          : null;
-        const input = command.selection;
-        const common = {
-          originalDiscArchiveId: archiveId,
-          mediaItemId: input.mediaItemId as MediaItemId,
-          ...(input.label ? { label: input.label } : {}),
-        };
-        const saveSelection = (selectionInput: CreateDiscSelectionInput) =>
-          repairSelectionId === null
-            ? access.catalog.createDiscSelection(selectionInput)
-            : access.catalog.repairDiscSelection(
-                repairSelectionId,
-                selectionInput,
-              );
-        const selection: DiscSelection = saveSelection({
-          ...common,
-          sourceIdentity: input.sourceIdentity,
-        });
+      case "update_disc_selection":
+      case "repair_disc_selection":
+      case "correct_disc_selection":
+      case "delete_disc_selection":
         return response(
-          {
-            message: "Mapping changed; review required",
-            discSelection: serializeDiscSelection(selection),
-          },
-          repairSelectionId === null ? 201 : 200,
+          executeDiscSelectionCommand(access, archiveId, command),
+          command.action === "create_disc_selection" ? 201 : 200,
         );
-      }
-
-      case "update_disc_selection": {
-        const changes = command.changes;
-        const update = {
-          originalDiscArchiveId: archiveId,
-          ...("mediaItemId" in changes && changes.mediaItemId !== undefined
-            ? { mediaItemId: changes.mediaItemId as MediaItemId }
-            : {}),
-          ...("sourceIdentity" in changes &&
-              changes.sourceIdentity !== undefined
-            ? { sourceIdentity: changes.sourceIdentity }
-            : {}),
-          ...("label" in changes ? { label: changes.label } : {}),
-        } as UpdateDiscSelectionInput;
-        const selection = access.catalog.updateDiscSelection(
-          command.discSelectionId as DiscSelectionId,
-          update,
-        );
-        return response({
-          message: "Mapping changed; review required",
-          discSelection: serializeDiscSelection(selection),
-        });
-      }
-
-      case "correct_disc_selection": {
-        const input = command.selection;
-        const correction = access.catalog.correctDiscSelection(
-          command.discSelectionId as DiscSelectionId,
-          {
-            originalDiscArchiveId: archiveId,
-            catalogRevision: new Date(command.catalogRevision),
-            mediaItemId: input.mediaItemId as MediaItemId,
-            sourceIdentity: input.sourceIdentity,
-            ...(input.label ? { label: input.label } : {}),
-            ...(command.correctionReason
-              ? { reason: command.correctionReason }
-              : {}),
-          },
-        );
-        return response({
-          message: "Mapping changed; review required",
-          discSelection: serializeDiscSelection(correction.discSelection),
-          supersession: {
-            ...correction.supersession,
-            createdAt: correction.supersession.createdAt.toISOString(),
-          },
-        });
-      }
-
-      case "delete_disc_selection": {
-        const selectionId = command.discSelectionId as DiscSelectionId;
-        const selection = access.catalog.listDiscSelections({
-          ids: [selectionId],
-          originalDiscArchiveId: archiveId,
-        })[0];
-        if (!selection) {
-          return response({ error: "Disc Selection not found" }, 404);
-        }
-        const deletion = access.catalog.deleteDiscSelection(selectionId);
-        return response({
-          message: "Mapping changed; review required",
-          discSelection: serializeDiscSelection(selection),
-          deletedEncodeJobs: deletion.deletedEncodeJobs,
-          deletionComplete: deletion.deletionComplete,
-        });
-      }
 
       case "complete_review": {
         let mediaLibraryPath: string | null = null;

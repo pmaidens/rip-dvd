@@ -236,6 +236,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       "generate-key",
       "submit-archive-request",
       "catalog-review",
+      "disc-selection",
       "health",
       "readiness",
       "inspect",

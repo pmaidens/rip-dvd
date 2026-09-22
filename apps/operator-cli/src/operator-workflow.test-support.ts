@@ -27,12 +27,13 @@ export function createOperatorWorkflowFixture() {
     mediaLibraryPath,
     originalsLibraryPath,
     openAccess,
-    async run(args: readonly string[], lookup?: CatalogMetadataLookup | null) {
+    async run(args: readonly string[], lookup?: CatalogMetadataLookup | null, stdin?: string) {
       const stdout: string[] = [];
       const stderr: string[] = [];
       const exitCode = await runCommand(args, {
         openAccess,
         ...(lookup === undefined ? {} : { getLookup: () => lookup }),
+        ...(stdin === undefined ? {} : { readStdin: () => stdin }),
         stdout: (text) => stdout.push(text),
         stderr: (text) => stderr.push(text),
       });
