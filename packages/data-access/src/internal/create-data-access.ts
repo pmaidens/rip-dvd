@@ -107,6 +107,7 @@ import {
 } from "../disc-selection-source-identity.js";
 import { createDvdMetadataFingerprint } from "../dvd-metadata-fingerprint.js";
 import { createWatchableSalvageArchiveIntegrityEvidence } from "../archive-integrity.js";
+import { encodingProfileQueueBlockingReasons } from "../encoding-profile-eligibility.js";
 import { validateDvdArchiveBoundaryEvidence } from "../archive-boundary.js";
 import { isArchiveReadFailureEvidenceConsistent } from "../archive-read-failure.js";
 import {
@@ -9881,6 +9882,7 @@ export function createDataAccessInternal(
                   id: encodingProfiles.id,
                   isActive: encodingProfiles.isActive,
                   mediaDomain: encodingProfiles.mediaDomain,
+                  settings: encodingProfiles.settings,
                 })
                 .from(encodingProfiles)
                 .where(eq(encodingProfiles.id, input.encodingProfileId))
@@ -9888,9 +9890,10 @@ export function createDataAccessInternal(
               "encoding profile",
               input.encodingProfileId,
             );
-            if (!profile.isActive || profile.mediaDomain !== "dvd_video") {
+            const profileBlockingReasons = encodingProfileQueueBlockingReasons(profile);
+            if (profileBlockingReasons.length > 0) {
               throw new DomainInvariantError(
-                "Encode Jobs require an active DVD video Encoding Profile",
+                `Encode Jobs require an active DVD video Encoding Profile with supported settings: ${profileBlockingReasons.join(", ")}`,
               );
             }
             transaction

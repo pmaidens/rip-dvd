@@ -54,7 +54,7 @@ describe("Action overview API", () => {
         key: `action-overview-${index}`,
         displayName: `Action overview ${index}`,
         mediaDomain: "dvd_video",
-        settings: { index },
+        settings: { preset: "Fast 480p30", index },
       });
       jobs.push(
         access.encodeJobs.enqueue({

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isHandBrakePreset } from "@rip-dvd/config";
+import { encodingProfileQueueBlockingReasons } from "@rip-dvd/data-access";
 
 import type {
   ConsistentReadAccess,
@@ -42,13 +43,7 @@ export function toEncodingProfileDto(profile: EncodingProfile) {
   const preset = typeof profile.settings.preset === "string"
     ? profile.settings.preset : null;
   const container = profile.settings.container === "mkv" ? "mkv" as const : null;
-  const blockingReasons = [
-    ...(!profile.isActive ? ["inactive"] : []),
-    ...(profile.mediaDomain !== "dvd_video" ? ["wrong_media_domain"] : []),
-    ...(preset === null || !isHandBrakePreset(preset) ? ["unsupported_preset"] : []),
-    ...(profile.settings.container !== undefined && container === null
-      ? ["unsupported_container"] : []),
-  ];
+  const blockingReasons = encodingProfileQueueBlockingReasons(profile);
   return {
     id: String(profile.id),
     key: profile.key,

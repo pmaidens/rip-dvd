@@ -895,7 +895,7 @@ describe("Catalog Review API", () => {
       key: "locked-selections",
       displayName: "Locked selections",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     access.encodeJobs.enqueue({
       discSelectionId: selections[0]!.id,
@@ -1017,7 +1017,7 @@ describe("Catalog Review API", () => {
       key: "job-backed-route-correction",
       displayName: "Job-backed route correction",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -1431,7 +1431,7 @@ describe("Catalog Review API", () => {
       key: "atomic-route-replacement",
       displayName: "Atomic route replacement",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
@@ -1777,7 +1777,7 @@ describe("Catalog Review API", () => {
       key: "long-route-correction-history",
       displayName: "Long route correction history",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const initialJob = access.encodeJobs.enqueue({
       discSelectionId: currentSelection.id,
@@ -1908,7 +1908,7 @@ describe("Catalog Review API", () => {
       key: "legacy-recovery",
       displayName: "Legacy recovery",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     access.encodeJobs.enqueue({
       discSelectionId: selection.id,
@@ -2528,7 +2528,7 @@ describe("Catalog Review API", () => {
       key: "preserved-history",
       displayName: "Preserved history",
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset: "Fast 480p30" },
     });
     const job = access.encodeJobs.enqueue({
       discSelectionId: selection.id,

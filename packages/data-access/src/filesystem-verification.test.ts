@@ -91,7 +91,7 @@ function createEncodeJobFixture(
     key: "verification-profile",
     displayName: "Verification profile",
     mediaDomain: "dvd_video",
-    settings: {},
+    settings: { preset: "Fast 480p30" },
   });
   const outputPath = join(directory, "Verified Movie.mkv");
   if (createOutput) {
