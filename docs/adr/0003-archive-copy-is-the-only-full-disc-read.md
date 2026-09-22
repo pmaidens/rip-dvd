@@ -3,10 +3,19 @@
 DVD inspection establishes a Detected Disc identity from the normalized volume
 label, complete title and stream map, and declared disc size. It does not hash
 every raw sector. The subsequent archive copy is the workflow's only complete
-sequential read of the physical disc.
+sequential read of the physical disc. A normal-size copy is followed by a
+bounded endpoint check: the worker reads only the first logical block after the
+accepted size, twice. This check establishes the physical endpoint; it is not a
+second full-disc read.
 
-Archive publication normally requires a complete file of the size reported by
-Disc Inspection. A smaller file is complete only when versioned, structured
+Archive publication at the size reported by Disc Inspection requires two
+matching normalized logical-block-address-out-of-range responses for that first
+excluded block. A readable block rejects the accepted size. Medium, transport,
+hardware, protection, readiness, unit-attention, unclassified end-of-input,
+malformed, and conflicting responses all fail closed. The proof is persisted
+as versioned Archive Boundary Evidence independently of Archive Integrity.
+
+A smaller file is complete only when versioned, structured
 logical-block-address-out-of-range evidence proves a sector-precise trailing
 boundary and a bounded ISO or UDF and DVD-Video extent proof establishes that
 the excluded suffix is unaddressable and unreferenced. Every retained sector
@@ -30,7 +39,10 @@ proof described above.
 
 Both publication paths require stable Optical Drive identity and
 media-generation evidence, a current Archive Job claim, filesystem
-synchronization, and atomic no-overwrite publication. The worker no longer
+synchronization, and atomic no-overwrite publication. Every endpoint read is
+fenced immediately before and after by the current Optical Drive identity,
+media generation, Detected Disc source identity, Archive Request, active claim,
+and cancellation state. The worker no longer
 rereads the completed image to derive or compare a catalog raw-content hash.
 The narrow exception is an in-place retry of a damaged corrected rescue: the
 worker computes a local hash of only the previously successful retained sectors

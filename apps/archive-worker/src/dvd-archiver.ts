@@ -24,12 +24,14 @@ import { dirname, join } from "node:path";
 import {
   createCleanReadArchiveIntegrityEvidence,
   createCorrectedDvdArchiveBoundaryEvidence,
+  createNormalDvdArchiveBoundaryEvidence,
   createUnknownArchiveIntegrityEvidence,
   createWatchableSalvageArchiveIntegrityEvidence,
   type ArchiveIntegrityEvidence,
   type ArchiveJobProgress,
   type ArchiveReadFailureStage,
   type CorrectedDvdArchiveBoundaryEvidence,
+  type NormalDvdArchiveBoundaryEvidence,
 } from "@rip-dvd/data-access";
 import {
   isDvdFingerprint,
@@ -73,6 +75,11 @@ import type {
   DvdCompletenessProof,
   DvdCompletenessProver,
 } from "./dvd-completeness-prover.js";
+import {
+  DvdReadableEndpointError,
+  type DvdEndpointProver,
+  type DvdNormalEndpointProof,
+} from "./dvd-endpoint-prover.js";
 import {
   createNodeDvdGeometryValidator,
   DvdGeometryValidationError,
@@ -1389,6 +1396,7 @@ export interface PreserveDvdArchiveOptions {
   authorizeCopy?(): void | Promise<void>;
   authorizeMutation?(): void | Promise<void>;
   devicePath: string;
+  endpointProver?: DvdEndpointProver;
   completenessProver?: DvdCompletenessProver;
   fingerprint: string;
   expectedTitleMap?: DvdTitleMap;
@@ -1410,8 +1418,52 @@ export interface PreservedDvdArchive {
   correctedBoundaryEvidence?: CorrectedDvdArchiveBoundaryEvidence;
   finalizePublication?(): Promise<void>;
   integrityEvidence: ArchiveIntegrityEvidence;
+  normalBoundaryEvidence?: NormalDvdArchiveBoundaryEvidence;
   recovered: boolean;
   sizeBytes: number;
+}
+
+async function proveNormalDvdBoundary({
+  devicePath,
+  endpointProver,
+  revalidateReadFailure,
+  signal,
+  sizeBytes,
+  verifySource,
+}: {
+  devicePath: string;
+  endpointProver?: DvdEndpointProver;
+  revalidateReadFailure?: () => void | Promise<void>;
+  signal: AbortSignal;
+  sizeBytes: number;
+  verifySource(): Promise<void>;
+}): Promise<NormalDvdArchiveBoundaryEvidence> {
+  if (sizeBytes % DVD_SECTOR_SIZE_BYTES !== 0) {
+    throw new Error("DVD endpoint proof boundary is invalid");
+  }
+  if (endpointProver === undefined) {
+    throw new Error("DVD endpoint proof is unavailable");
+  }
+  const authorizeProbe = async () => {
+    signal.throwIfAborted();
+    if (revalidateReadFailure === undefined) {
+      await verifySource();
+    } else {
+      await revalidateReadFailure();
+    }
+    signal.throwIfAborted();
+  };
+  const endpointProof: DvdNormalEndpointProof = await endpointProver.prove({
+    authorizeProbe,
+    devicePath,
+    firstExcludedLba: sizeBytes / DVD_SECTOR_SIZE_BYTES,
+    signal,
+  });
+  signal.throwIfAborted();
+  return createNormalDvdArchiveBoundaryEvidence({
+    reportedSizeBytes: sizeBytes,
+    endpointProof,
+  });
 }
 
 async function syncPath(path: string): Promise<void> {
@@ -1502,6 +1554,37 @@ async function quarantineInvalidNormalDvdGeometry({
   rescueWorkspace: DvdRescueWorkspace;
   root: string;
 }): Promise<never> {
+  return await quarantineRejectedNormalDvdRescue({
+    archivePath,
+    authorizeMutation,
+    cleanupFailureMessage: "DVD volume geometry rejection quarantine failed",
+    error,
+    existingPublishedFilesystemIdentity,
+    rescueIdentity,
+    rescueWorkspace,
+    root,
+  });
+}
+
+async function quarantineRejectedNormalDvdRescue({
+  archivePath,
+  authorizeMutation,
+  cleanupFailureMessage,
+  error,
+  existingPublishedFilesystemIdentity,
+  rescueIdentity,
+  rescueWorkspace,
+  root,
+}: {
+  archivePath: string;
+  authorizeMutation?: () => void | Promise<void>;
+  cleanupFailureMessage: string;
+  error: unknown;
+  existingPublishedFilesystemIdentity?: string;
+  rescueIdentity: DvdRescueIdentity;
+  rescueWorkspace: DvdRescueWorkspace;
+  root: string;
+}): Promise<never> {
   const cleanupErrors: unknown[] = [];
   try {
     await quarantineDvdRescueWorkspace(
@@ -1527,10 +1610,49 @@ async function quarantineInvalidNormalDvdGeometry({
   if (cleanupErrors.length > 0) {
     throw new AggregateError(
       [error, ...cleanupErrors],
-      "DVD volume geometry rejection quarantine failed",
+      cleanupFailureMessage,
     );
   }
   throw error;
+}
+
+async function quarantineReadableNormalDvdEndpoint({
+  archivePath,
+  authorizeMutation,
+  error,
+  existingPublishedFilesystemIdentity,
+  rescueIdentity,
+  rescueWorkspace,
+  root,
+}: {
+  archivePath: string;
+  authorizeMutation?: () => void | Promise<void>;
+  error: unknown;
+  existingPublishedFilesystemIdentity?: string;
+  rescueIdentity: DvdRescueIdentity;
+  rescueWorkspace: DvdRescueWorkspace;
+  root: string;
+}): Promise<never> {
+  if (!(error instanceof DvdReadableEndpointError)) {
+    if (existingPublishedFilesystemIdentity !== undefined) {
+      await quarantinePublishedArchive(
+        archivePath,
+        existingPublishedFilesystemIdentity,
+        authorizeMutation,
+      );
+    }
+    throw error;
+  }
+  return await quarantineRejectedNormalDvdRescue({
+    archivePath,
+    authorizeMutation,
+    cleanupFailureMessage: "DVD readable endpoint quarantine failed",
+    error,
+    existingPublishedFilesystemIdentity,
+    rescueIdentity,
+    rescueWorkspace,
+    root,
+  });
 }
 
 export async function quarantinePublishedArchive(
@@ -2218,6 +2340,7 @@ export async function preserveDvdArchive({
   authorizeMutation,
   completenessProver,
   devicePath,
+  endpointProver,
   fingerprint,
   expectedTitleMap,
   geometryValidator = createNodeDvdGeometryValidator(),
@@ -2434,6 +2557,28 @@ export async function preserveDvdArchive({
       );
       throw salvageDecision.error;
     }
+    let normalBoundaryEvidence: NormalDvdArchiveBoundaryEvidence;
+    try {
+      normalBoundaryEvidence = await proveNormalDvdBoundary({
+        devicePath: safeDevicePath,
+        endpointProver,
+        revalidateReadFailure,
+        signal,
+        sizeBytes: safeSizeBytes,
+        verifySource,
+      });
+    } catch (error) {
+      return await quarantineReadableNormalDvdEndpoint({
+        archivePath,
+        authorizeMutation,
+        error,
+        existingPublishedFilesystemIdentity:
+          rescueWorkspace.imageFilesystemIdentity,
+        rescueIdentity: rescueIdentity!,
+        rescueWorkspace,
+        root,
+      });
+    }
     await verifySource();
     signal.throwIfAborted();
     await authorizeMutation?.();
@@ -2481,6 +2626,7 @@ export async function preserveDvdArchive({
       finalizePublication: () =>
         removeDvdRescueWorkspace(root, committedWorkspace),
       integrityEvidence: salvageDecision.integrityEvidence,
+      normalBoundaryEvidence,
       recovered: false,
       sizeBytes: safeSizeBytes,
     };
@@ -2530,6 +2676,27 @@ export async function preserveDvdArchive({
     }
     await verifySource();
     signal.throwIfAborted();
+    let normalBoundaryEvidence: NormalDvdArchiveBoundaryEvidence;
+    try {
+      normalBoundaryEvidence = await proveNormalDvdBoundary({
+        devicePath: safeDevicePath,
+        endpointProver,
+        revalidateReadFailure,
+        signal,
+        sizeBytes: safeSizeBytes,
+        verifySource,
+      });
+    } catch (error) {
+      return await quarantineReadableNormalDvdEndpoint({
+        archivePath,
+        authorizeMutation,
+        error,
+        existingPublishedFilesystemIdentity,
+        rescueIdentity: rescueIdentity!,
+        rescueWorkspace,
+        root,
+      });
+    }
     await authorizeMutation?.();
     signal.throwIfAborted();
     onProgress({ phase: "finalizing", progressPercent: 99 });
@@ -2573,6 +2740,7 @@ export async function preserveDvdArchive({
       finalizePublication: () =>
         removeDvdRescueWorkspace(root, committedWorkspace),
       integrityEvidence: validation.integrityEvidence,
+      normalBoundaryEvidence,
       recovered: false,
       sizeBytes: safeSizeBytes,
     };
@@ -2674,6 +2842,7 @@ export async function preserveDvdArchive({
   let publishedArchiveFilesystemIdentity: string | undefined;
   let retainedForValidation = false;
   let validation: DvdValidationResult | undefined;
+  let normalBoundaryEvidence: NormalDvdArchiveBoundaryEvidence | undefined;
   const copyContinuation = dvdCopyContinuationFromWorkspace(rescueWorkspace);
   const copyOperationSizeBytes = copyContinuation?.kind === "corrected"
     ? copyContinuation.recoveryResult.declaredByteCount
@@ -2890,6 +3059,14 @@ export async function preserveDvdArchive({
         throw salvageDecision.error;
       }
     }
+    normalBoundaryEvidence = await proveNormalDvdBoundary({
+      devicePath: safeDevicePath,
+      endpointProver,
+      revalidateReadFailure,
+      signal,
+      sizeBytes: safeSizeBytes,
+      verifySource,
+    });
     onProgress({ phase: "finalizing", progressPercent: 99 });
     await sync(partialPath);
     signal.throwIfAborted();
@@ -2926,7 +3103,8 @@ export async function preserveDvdArchive({
     // control until OS-level closure releases the copy tombstone.
     await runner.waitForInactive(safeDevicePath, partialPath);
     if (
-      error instanceof DvdGeometryValidationError &&
+      (error instanceof DvdGeometryValidationError ||
+        error instanceof DvdReadableEndpointError) &&
       !signal.aborted &&
       rescueWorkspace !== null &&
       rescueIdentity !== undefined
@@ -3101,6 +3279,7 @@ export async function preserveDvdArchive({
             removeDvdRescueWorkspace(root, rescueWorkspace!),
         }),
     integrityEvidence: validation.integrityEvidence,
+    normalBoundaryEvidence,
     recovered: false,
     sizeBytes: safeSizeBytes,
   };

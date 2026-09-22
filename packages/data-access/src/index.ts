@@ -26,6 +26,7 @@ export {
   createCorrectedDvdArchiveBoundaryEvidence,
   createNormalDvdArchiveBoundaryEvidence,
   DVD_ARCHIVE_BOUNDARY_POLICY_VERSION,
+  DVD_NORMAL_ENDPOINT_PROOF_VERSION,
 } from "./archive-boundary.js";
 export type {
   ArchiveBoundaryEvidence,

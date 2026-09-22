@@ -20,6 +20,7 @@ const recoveryResultPrefix = "rip-dvd-recovery-result ";
 const readFailureResultPrefix = "rip-dvd-read-failure ";
 const scsiSessionResultPrefix = "rip-dvd-scsi-session-result ";
 const scsiExitResultPrefix = "rip-dvd-scsi-exit-result ";
+const endpointProofPrefix = "rip-dvd-endpoint-proof ";
 const classificationVectors = JSON.parse(
   readFileSync(
     "/tmp/scsi-read-classification-v2-vectors.json",
@@ -392,6 +393,16 @@ function readFailureResult(stderr) {
   );
 }
 
+function endpointProof(stderr) {
+  const line = stderr.split("\n").find((entry) =>
+    entry.startsWith(endpointProofPrefix)
+  );
+  if (line === undefined) {
+    throw new Error(`missing endpoint proof: ${stderr}`);
+  }
+  return JSON.parse(line.slice(endpointProofPrefix.length));
+}
+
 function scsiSessionResult(stderr) {
   return prefixedResult(
     stderr,
@@ -460,6 +471,21 @@ function runTestCopyWithDeclaredSectors(name, faults, declaredSectorCount) {
     { encoding: "utf8" },
   );
   return { ...result, outputPath };
+}
+
+function runEndpointTest(firstExcludedLba, faults = "none") {
+  return spawnSync(
+    testExecutable,
+    [
+      "endpoint-test",
+      sourcePath,
+      String(firstExcludedLba * 2_048),
+      faults,
+      "0",
+      "valid",
+    ],
+    { encoding: "utf8" },
+  );
 }
 
 function runTestResume(outputPath, faults, bitmapHex) {
@@ -2175,6 +2201,109 @@ if (malformed.status !== 0 || !malformedRejected) {
   throw new Error(
     `libdvdcss malformed recovery result check failed: ${malformed.stderr}`,
   );
+}
+
+const confirmedEndpoint = runEndpointTest(
+  40,
+  rawCompletionFault(40, "always", descriptorOutOfRangeSense(40)),
+);
+const confirmedEndpointProof = endpointProof(confirmedEndpoint.stderr);
+if (
+  confirmedEndpoint.status !== 0 ||
+  JSON.stringify(confirmedEndpointProof) !== JSON.stringify({
+    protocolVersion: 1,
+    proofVersion: "dvd-normal-endpoint-proof-v1",
+    confirmationCount: 2,
+    firstExcludedLba: 40,
+    classifierVersion: "scsi-read-classifier-v2",
+    scsiStatus: 2,
+    hostStatus: 0,
+    driverStatus: 8,
+    senseResponseCode: 0x72,
+    senseKey: 0x05,
+    asc: 0x21,
+    ascq: 0,
+  })
+) {
+  throw new Error(
+    `libdvdcss confirmed endpoint proof failed: ${confirmedEndpoint.stderr}`,
+  );
+}
+
+const rejectedEndpointResponses = [
+  ["readable-data", 35, "none", "readable_data"],
+  ["unclassified-end", 40, "none", "unclassified_end"],
+  [
+    "medium-error",
+    40,
+    rawCompletionFault(40, "always", fixedMediumSense(40)),
+    "medium_error",
+  ],
+  [
+    "not-ready",
+    40,
+    rawCompletionFault(40, "always", fixedSense(40, 0x02, 0x04, 0x01)),
+    "not_ready",
+  ],
+  [
+    "unit-attention",
+    40,
+    rawCompletionFault(40, "always", fixedSense(40, 0x06, 0x28)),
+    "unit_attention",
+  ],
+  [
+    "hardware-error",
+    40,
+    rawCompletionFault(40, "always", fixedSense(40, 0x04, 0x44)),
+    "hardware_error",
+  ],
+  [
+    "transport-error",
+    40,
+    rawCompletionFault(40, "always", fixedMediumSense(40), { hostStatus: 7 }),
+    "transport_error",
+  ],
+  [
+    "protection-error",
+    40,
+    rawCompletionFault(40, "always", fixedSense(40, 0x05, 0x6f, 0x04)),
+    "protection_error",
+  ],
+  [
+    "unknown-error",
+    40,
+    rawCompletionFault(40, "always", fixedSense(40, 0x05, 0x20)),
+    "unknown",
+  ],
+  ["generic-failure", 40, "generic@40@always", "unknown"],
+  [
+    "wrong-information-lba",
+    40,
+    rawCompletionFault(40, "always", fixedOutOfRangeSense(39)),
+    "unknown",
+  ],
+  [
+    "conflicting-confirmations",
+    40,
+    [
+      rawCompletionFault(40, 1, fixedOutOfRangeSense(40)),
+      rawCompletionFault(40, "always", descriptorOutOfRangeSense(40)),
+    ].join(","),
+    "conflicting evidence",
+  ],
+];
+for (const [name, firstExcludedLba, faults, expectedDiagnostic] of
+  rejectedEndpointResponses) {
+  const rejected = runEndpointTest(firstExcludedLba, faults);
+  if (
+    rejected.status === 0 ||
+    rejected.stderr.includes(endpointProofPrefix) ||
+    !rejected.stderr.includes(expectedDiagnostic)
+  ) {
+    throw new Error(
+      `libdvdcss endpoint ${name} rejection failed: ${rejected.stderr}`,
+    );
+  }
 }
 
 const cancellationPath = prepareOutput(
