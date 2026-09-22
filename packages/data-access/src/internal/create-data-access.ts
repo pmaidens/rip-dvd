@@ -4544,11 +4544,23 @@ export function createDataAccessInternal(
           throw new DomainInvariantError("Disc Selection cannot move between Original Disc Archives");
         }
         if (mutation.action !== "create") {
-          const current = requireRow(transaction.select({ originalDiscArchiveId: discSelections.originalDiscArchiveId })
+          const current = requireRow(transaction.select()
             .from(discSelections).where(eq(discSelections.id, mutation.discSelectionId)).get(),
           "disc selection", mutation.discSelectionId);
           if (current.originalDiscArchiveId !== originalDiscArchiveId) {
             throw new RecordNotFoundError("disc selection", mutation.discSelectionId);
+          }
+          if (mutation.action === "repair") {
+            const source = requireRow(transaction.select({ scanData: detectedDiscs.scanData })
+              .from(originalDiscArchives)
+              .innerJoin(detectedDiscs, eq(detectedDiscs.id, originalDiscArchives.detectedDiscId))
+              .where(eq(originalDiscArchives.id, originalDiscArchiveId)).get(),
+            "original disc archive", originalDiscArchiveId);
+            if (!requiresLegacyDiscSelectionRepair(
+              current, createArchivedDvdSelectionValidator(source.scanData),
+            )) {
+              throw new DomainInvariantError("Disc Selection does not need unsafe legacy repair");
+            }
           }
         }
         const previousTransaction = activeDiscSelectionTransaction;

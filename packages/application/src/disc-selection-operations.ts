@@ -18,6 +18,22 @@ type SelectionCommand = Extract<CatalogReviewCommand, {
     "correct_disc_selection" | "delete_disc_selection";
 }>;
 
+function availableAction(command: SelectionCommand, actions: readonly string[]): boolean {
+  return actions.includes(command.action === "delete_disc_selection"
+    ? "remove" : command.action.replace("_disc_selection", ""));
+}
+
+function blockedReason(command: SelectionCommand, reason: string | null): string {
+  if (reason !== null) return reason;
+  if (command.action === "repair_disc_selection") {
+    return "Repair is available only for an unsafe legacy Disc Selection";
+  }
+  if (command.action === "correct_disc_selection") {
+    return "Correction requires preserved Encode Job or Disc Selection history";
+  }
+  return "This Disc Selection action is unavailable";
+}
+
 export function previewDiscSelection(
   access: DataAccess,
   archiveId: OriginalDiscArchiveId,
@@ -95,6 +111,15 @@ export function previewDiscSelectionChange(
     throw new DomainInvariantError("Disc Selection creation does not require a preview");
   }
   const current = previewDiscSelection(access, archiveId, command.discSelectionId as DiscSelectionId);
+  if (!availableAction(command, current.actionAvailability.availableActions)) {
+    return {
+      ...current,
+      action: command.action,
+      state: "blocked" as const,
+      reason: blockedReason(command, current.actionAvailability.reason),
+      relatedEncodeJob: current.actionAvailability.relatedEncodeJob,
+    };
+  }
   const mutation = discSelectionMutation(archiveId, command);
   const catalogRevision = new Date(current.catalogRevision);
   if (mutation.action === "correct" &&
@@ -109,6 +134,7 @@ export function previewDiscSelectionChange(
   return {
     ...current,
     action: command.action,
+    state: "available" as const,
     previewToken: previewToken(archiveId, current.catalogRevision, mutation),
     proposedDiscSelection: mutation.action === "delete" ? null : {
       mediaItemId: proposed.discSelection.mediaItemId,
@@ -116,6 +142,19 @@ export function previewDiscSelectionChange(
       label: proposed.discSelection.label,
     },
     ...(proposed.deletionComplete === undefined ? {} : { deletionComplete: proposed.deletionComplete }),
+    consequences: {
+      currentSelection: mutation.action === "correct" ? "superseded"
+        : mutation.action === "delete" ? proposed.discSelection.id === current.discSelection.id &&
+          current.historicalEncodeJobCount === 0 && current.actionAvailability.state !== "correction_lineage"
+          ? "deleted" : "deactivated"
+        : proposed.discSelection.id === current.discSelection.id ? "updated" : "deactivated",
+      createsReplacementSelection: mutation.action === "correct" ||
+        (mutation.action === "repair" && proposed.discSelection.id !== current.discSelection.id),
+      requestsEncodeJobCancellation: mutation.action === "correct"
+        ? current.affectedEncodeJobs.map((job) => job.id) : [],
+      preservesEncodeJobHistory: current.historicalEncodeJobCount > 0,
+      reopensCatalogReview: true,
+    },
   };
 }
 

@@ -112,6 +112,12 @@ returns the current selection, catalog revision, available actions and blocking
 reason, and associated Encode Jobs. `preview` takes a proposed action and the
 same selection input as that action. It validates the proposal without saving
 it and returns its effect, `catalogRevision`, and `previewToken`.
+An eligible preview has `state: "available"` and `consequences` describing
+whether the existing selection will be updated, superseded, deactivated, or
+deleted; whether a replacement selection will be created; which active Encode
+Jobs will receive cancellation requests; and whether job history remains.
+Unsupported actions have `state: "blocked"`, a reason and any related Encode
+Job. A blocked preview has no token and cannot be acknowledged.
 
 ```sh
 rip-dvd-operator disc-selection show <archive-id> <selection-id>
@@ -128,6 +134,11 @@ rip-dvd-operator disc-selection preview delete <archive-id> <selection-id>
 rip-dvd-operator disc-selection delete <archive-id> <selection-id> --key <key> \
   --revision <catalog-revision-from-preview> --preview-token <token-from-preview> \
   --acknowledge
+rip-dvd-operator disc-selection preview repair <archive-id> <selection-id> \
+  --media-item-id <media-item-id> --source-kind dvd_title --title-number 1
+rip-dvd-operator disc-selection repair <archive-id> <selection-id> --key <key> \
+  --revision <catalog-revision-from-preview> --preview-token <token-from-preview> \
+  --acknowledge --media-item-id <media-item-id> --source-kind dvd_title --title-number 1
 ```
 
 `create`, `update`, `repair`, `correct`, and `delete` require a previously
@@ -139,6 +150,10 @@ an action-specific preview. Pass the returned revision and token with
 rejects the decision. Label-only updates execute directly. The catalog uses
 the same archive binding, source validation, and Encode Job provenance rules
 as the web editor.
+For an unsafe legacy selection, `delete` quarantines the selection when its
+Encode Job history must remain. Inspect the affected job with
+`inspect encode-jobs <job-id>` and the current mappings and correction history
+with `catalog-review show <archive-id>` after a repair or correction.
 
 Use `--media-item-id`, `--source-kind`, `--title-number`, `--chapter-start`,
 `--chapter-end`, and `--label` for ordinary input. `update` also accepts

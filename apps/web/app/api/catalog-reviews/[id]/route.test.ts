@@ -2046,6 +2046,45 @@ describe("Catalog Review API", () => {
         id: completedJob.id,
         discSelectionId: selection.id,
       })]);
+    const repairedReview = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const repairedReviewBody = await repairedReview.json();
+    expect(repairedReviewBody.reviewOutcome).toBe("needs_review");
+    expect(repairedReviewBody.discSelections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: repaired.id,
+        actionAvailability: expect.objectContaining({
+          state: "editable", availableActions: ["update", "remove"],
+        }),
+      }),
+    ]));
+    const unsupportedRepair = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          action: "repair_disc_selection",
+          discSelectionId: repaired.id,
+          selection: { mediaItemId: movie.id,
+            sourceIdentity: { kind: "dvd_title", titleNumber: 1 } },
+        }),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(unsupportedRepair.status).toBe(409);
+    expect(await unsupportedRepair.json()).toEqual({
+      error: "Disc Selection does not need unsafe legacy repair",
+    });
   });
 
   it("returns bounded archived legacy title evidence for catalog review", async () => {
@@ -3250,10 +3289,10 @@ describe("Catalog Review API", () => {
     });
     expect(firstSelectionResponse.status).toBe(201);
     const firstSelection = (await firstSelectionResponse.json()).discSelection;
-    const repairSelectionResponse = await mutate({
-      action: "repair_disc_selection",
+    const updateSelectionResponse = await mutate({
+      action: "update_disc_selection",
       discSelectionId: firstSelection.id,
-      selection: {
+      changes: {
         mediaItemId: firstEpisode.id,
         sourceIdentity: {
           kind: "dvd_chapters",
@@ -3263,8 +3302,8 @@ describe("Catalog Review API", () => {
         },
       },
     });
-    expect(repairSelectionResponse.status).toBe(200);
-    await expect(repairSelectionResponse.json()).resolves.toEqual({
+    expect(updateSelectionResponse.status).toBe(200);
+    await expect(updateSelectionResponse.json()).resolves.toEqual({
       message: "Mapping changed; review required",
       discSelection: expect.objectContaining({
         id: firstSelection.id,
