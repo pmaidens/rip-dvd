@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@rip-dvd/application": "workspace:*",
     "@rip-dvd/config": "workspace:*",
     "@rip-dvd/data-access": "workspace:*",
     "next": "16.2.11",

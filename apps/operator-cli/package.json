@@ -1,0 +1,20 @@
+{
+  "name": "@rip-dvd/operator-cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "rip-dvd-operator": "dist/entry.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "pnpm --filter @rip-dvd/config --filter @rip-dvd/data-access --filter @rip-dvd/application build && pnpm build && vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@rip-dvd/application": "workspace:*",
+    "@rip-dvd/config": "workspace:*",
+    "@rip-dvd/data-access": "workspace:*"
+  }
+}

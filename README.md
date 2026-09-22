@@ -415,6 +415,36 @@ copied bytes. Set `RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS` to a positive millisecond
 value to change that cutoff. This watchdog is separate from the overall archive
 operation timeout.
 
+### Server-local JSON health commands
+
+The staged `rip-dvd-operator` command checks the TypeScript application's
+database health and deployment readiness without starting the web service.
+The existing `rip-dvd` executable keeps its legacy behavior during this stage.
+Run the commands in the Compose deployment with:
+
+```bash
+docker compose --profile maintenance run --rm operator-cli health
+docker compose --profile maintenance run --rm operator-cli readiness
+docker compose --profile maintenance run --rm operator-cli help
+```
+
+For a local checkout, build `@rip-dvd/operator-cli`, then run
+`node apps/operator-cli/dist/entry.js health` with
+`RIP_DVD_DATABASE_PATH`, `RIP_DVD_MEDIA_LIBRARY_PATH`, and
+`RIP_DVD_ORIGINALS_LIBRARY_PATH` set to the same paths the application uses.
+The command opens SQLite directly and closes it before exiting. The configured
+library directories must exist.
+
+Each invocation writes one JSON document to stdout. `health` returns the same
+database status as `/api/health`. `readiness` returns the same versioned active
+work and Optical Drive snapshot as `/api/deployment-readiness`; it describes
+deployment activity rather than promising that every drive can start work.
+`help`, `help health`, and `commands` describe the available commands and
+inputs. Exit code `0` means the command completed, `1` means a configuration
+or application operation failed, and `2` means the invocation is invalid.
+Failures return a stable JSON `error.code` without database paths or raw
+exceptions. Diagnostics, if emitted, go to stderr.
+
 ### TypeScript roadmap and implementation frontier
 
 [GitHub issue #5](https://github.com/pmaidens/rip-dvd/issues/5) is the umbrella

@@ -46,8 +46,23 @@ importers:
         specifier: workspace:*
         version: link:../../packages/worker-runtime
 
+  apps/operator-cli:
+    dependencies:
+      '@rip-dvd/application':
+        specifier: workspace:*
+        version: link:../../packages/application
+      '@rip-dvd/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@rip-dvd/data-access':
+        specifier: workspace:*
+        version: link:../../packages/data-access
+
   apps/web:
     dependencies:
+      '@rip-dvd/application':
+        specifier: workspace:*
+        version: link:../../packages/application
       '@rip-dvd/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -76,6 +91,12 @@ importers:
       happy-dom:
         specifier: 20.11.2
         version: 20.11.2
+
+  packages/application:
+    dependencies:
+      '@rip-dvd/data-access':
+        specifier: workspace:*
+        version: link:../data-access
 
   packages/config: {}
 
