@@ -54,6 +54,17 @@ it("reports a verification run as pending when the bounded web wait expires", as
   }
 });
 
+it("keeps a submitted verification run pending when its first status read fails", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = vi.fn().mockRejectedValue(new Error("disconnected"));
+  try {
+    await expect(waitForFilesystemVerificationRun("submitted-run"))
+      .resolves.toBe("pending");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 const sectionNames = [
   "Optical Drives",
   "Detected Discs",

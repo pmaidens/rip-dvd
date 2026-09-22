@@ -12071,22 +12071,24 @@ export function createDataAccessInternal(
         const targetId = requireNonEmpty(input.targetId.trim(), "Verification target ID");
         const semanticInput = JSON.stringify({ target: input.target, targetId });
         return database.transaction((transaction) => {
-          const previous = transaction.select().from(mutationInvocations)
-            .where(eq(mutationInvocations.key, input.mutationKey)).get();
-          if (previous) {
-            if (previous.operation !== "filesystem_verification.submit" ||
-              previous.semanticInput !== semanticInput) {
-              throw new MutationKeyConflictError();
-            }
-            const outcome = JSON.parse(previous.outcome) as {
-              id: string; createdAt: string; updatedAt: string;
-            };
-            return toFilesystemVerificationRun({
-              ...outcome,
-              createdAt: new Date(outcome.createdAt),
-              updatedAt: new Date(outcome.updatedAt),
-            } as FilesystemVerificationRow);
-          }
+          const operation = "filesystem_verification.submit";
+          const previous = readMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            (stored) => {
+              const outcome = JSON.parse(stored) as {
+                id: string; createdAt: string; updatedAt: string;
+              };
+              return toFilesystemVerificationRun({
+                ...outcome,
+                createdAt: new Date(outcome.createdAt),
+                updatedAt: new Date(outcome.updatedAt),
+              } as FilesystemVerificationRow);
+            },
+          );
+          if (previous !== undefined) return previous;
           if (input.target === "original_disc_archive") {
             requireRow(transaction.select({ id: originalDiscArchives.id })
               .from(originalDiscArchives)
@@ -12105,13 +12107,8 @@ export function createDataAccessInternal(
             status: "queued", progressPhase: "queued",
             createdAt: timestamp, updatedAt: timestamp,
           }).returning().get(), "verification run", id);
-          transaction.insert(mutationInvocations).values({
-            key: input.mutationKey,
-            operation: "filesystem_verification.submit",
-            semanticInput,
-            outcome: JSON.stringify(run),
-            createdAt: timestamp,
-          }).run();
+          recordMutationInvocation(transaction, input.mutationKey, operation,
+            semanticInput, run, timestamp);
           return toFilesystemVerificationRun(run);
         });
       },

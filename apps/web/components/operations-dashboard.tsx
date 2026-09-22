@@ -1785,11 +1785,21 @@ export async function requestFilesystemVerification(
 export async function waitForFilesystemVerificationRun(id: string): Promise<"completed" | "pending"> {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
-    const response = await fetch(`/api/operations?kind=filesystem-verifications&id=${encodeURIComponent(id)}`, {
-      cache: "no-store",
-    });
-    if (!response.ok) throw new Error("Verification run is unavailable");
-    const body = await response.json() as { item?: { status?: string } };
+    let response: Response;
+    try {
+      response = await fetch(`/api/operations?kind=filesystem-verifications&id=${encodeURIComponent(id)}`, {
+        cache: "no-store",
+      });
+    } catch {
+      return "pending";
+    }
+    if (!response.ok) return "pending";
+    let body: { item?: { status?: string } };
+    try {
+      body = await response.json() as { item?: { status?: string } };
+    } catch {
+      return "pending";
+    }
     if (body.item?.status === "completed") return "completed";
     if (body.item?.status === "failed") throw new Error("Verification run failed");
     await new Promise((resolve) => setTimeout(resolve, 500));
