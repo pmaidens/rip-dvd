@@ -1223,7 +1223,8 @@ describe("data-access facade", () => {
           name !== "20260828160945_fancy_chimera" &&
           name !== "20260828164042_married_lady_ursula" &&
           name !== "20260922161825_operation-detail-lookups" &&
-          name !== "20260922174811_rearchive-lineage",
+          name !== "20260922174811_rearchive-lineage" &&
+          name !== "20260922182659_rearchive-ordinary-uniqueness",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8137,6 +8138,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         name: "20260922185615_durable-archive-audits",
       },
       {
+        name: "20260922182659_rearchive-ordinary-uniqueness",
+      },
+      {
         name: "20260922174811_rearchive-lineage",
       },
       {
@@ -8159,9 +8163,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260901182617_parallel_cerebro",
-      },
-      {
-        name: "20260901175437_reflective_tattoo",
       },
     ]);
     expect(
