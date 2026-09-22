@@ -9,6 +9,7 @@ import type { CatalogReviewReplacementEncodeInput } from "../lib/catalog-review-
 import {
   discSelectionPreviewConfirmation,
   mutateCatalogReview,
+  resumePendingCatalogReviewMutation,
 } from "./catalog-review-mutation";
 import type {
   CatalogReviewDto,
@@ -23,7 +24,10 @@ import type {
   UpdateDiscSelectionInput,
 } from "./catalog-review-model";
 
-export { mutateCatalogReview } from "./catalog-review-mutation";
+export {
+  mutateCatalogReview,
+  resumePendingCatalogReviewMutation,
+} from "./catalog-review-mutation";
 
 type CatalogReviewFetch = (
   input: RequestInfo | URL,
@@ -172,6 +176,13 @@ export function useCatalogReviewState({
       return;
     }
     try {
+      const recovered = await resumePendingCatalogReviewMutation(archiveId);
+      if (!requestScope.current?.isCurrent(archiveId, request)) {
+        return;
+      }
+      if (recovered !== null) {
+        setMutationNotice(recovered.message);
+      }
       const review = await requestCatalogReview(
         archiveId,
         {

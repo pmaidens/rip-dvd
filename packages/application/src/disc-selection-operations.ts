@@ -58,6 +58,7 @@ function readDiscSelectionPreview(
       discSelection: serializeDiscSelection(preview.discSelection),
       actionAvailability: preview.actionAvailability,
       affectedEncodeJobs: preview.affectedEncodeJobs,
+      outputReservationReleaseJobs: preview.outputReservationReleaseJobs,
       historicalEncodeJobCount: preview.historicalEncodeJobCount,
     },
     evidenceHash: preview.evidenceHash,
@@ -200,7 +201,11 @@ export function previewDiscSelectionChange(
       createsReplacementSelection: mutation.action === "correct" ||
         (mutation.action === "repair" && proposed.discSelection.id !== current.discSelection.id),
       requestsEncodeJobCancellation: mutation.action === "correct"
-        ? current.affectedEncodeJobs.map((job) => job.id) : [],
+        ? current.affectedEncodeJobs
+          .filter((job) => job.status === "queued" || job.status === "running")
+          .map((job) => job.id) : [],
+      releasesOutputReservations: mutation.action === "repair" || mutation.action === "delete"
+        ? current.outputReservationReleaseJobs.map((job) => job.id) : [],
       preservesEncodeJobHistory: current.historicalEncodeJobCount > 0,
       reopensCatalogReview: true,
     },

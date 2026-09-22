@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   mutateCatalogReview,
   requestCatalogReview,
+  resumePendingCatalogReviewMutation,
 } from "./catalog-review-state";
 
 function availablePreview() {
@@ -11,10 +12,12 @@ function availablePreview() {
     catalogRevision: "2026-08-11T06:00:00.000Z",
     previewToken: "preview-token",
     affectedEncodeJobs: [{ id: "encode-job-1", status: "queued" }],
+    outputReservationReleaseJobs: [],
     consequences: {
       currentSelection: "deactivated",
       createsReplacementSelection: false,
       requestsEncodeJobCancellation: ["encode-job-1"],
+      releasesOutputReservations: [],
       preservesEncodeJobHistory: true,
       reopensCatalogReview: true,
     },
@@ -130,7 +133,7 @@ describe("catalog review request state", () => {
     );
   });
 
-  it("persists the inspected preview and mutation key across an ambiguous apply response", async () => {
+  it("resumes an acknowledged mutation after reload without reconstructing its command", async () => {
     const bodies: Record<string, unknown>[] = [];
     let applyAttempts = 0;
     let confirmations = 0;
@@ -158,7 +161,7 @@ describe("catalog review request state", () => {
 
     await expect(mutateCatalogReview("archive-2", command, fetcher, options))
       .rejects.toThrow("Upstream response unavailable");
-    await expect(mutateCatalogReview("archive-2", command, fetcher, options)).resolves.toEqual({
+    await expect(resumePendingCatalogReviewMutation("archive-2", fetcher, { storage })).resolves.toEqual({
       message: "Mapping changed; review required",
     });
 

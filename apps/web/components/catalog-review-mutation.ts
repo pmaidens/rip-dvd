@@ -12,10 +12,12 @@ export interface DiscSelectionChangePreview {
   catalogRevision: string;
   previewToken: string;
   affectedEncodeJobs: readonly { id: string; status: string }[];
+  outputReservationReleaseJobs: readonly { id: string; status: "failed" }[];
   consequences: {
     currentSelection: string;
     createsReplacementSelection: boolean;
     requestsEncodeJobCancellation: readonly string[];
+    releasesOutputReservations: readonly string[];
     preservesEncodeJobHistory: boolean;
     reopensCatalogReview: boolean;
   };
@@ -35,6 +37,9 @@ interface CatalogReviewMutationOptions {
 }
 
 interface PendingCatalogReviewMutation {
+  archiveId: string;
+  command: ConsequentialSelectionCommand;
+  identity: string;
   mutationKey: string;
   preview?: DiscSelectionChangePreview;
   acknowledged?: boolean;
@@ -59,59 +64,61 @@ export async function mutateCatalogReview(
   }
   const storage = options.storage === undefined
     ? browserMutationStorage() : options.storage;
-  let pending = readPendingCatalogReviewMutation(identity, storage);
+  let pending: PendingCatalogReviewMutation | undefined;
   if (isConsequentialSelectionCommand(command)) {
+    pending = readPendingCatalogReviewMutation(archiveId, storage);
+    if (pending?.identity !== identity) {
+      if (pending?.acknowledged === true) {
+        throw new Error(
+          "A previously acknowledged Disc Selection change must be recovered before another change",
+        );
+      }
+      deletePendingCatalogReviewMutation(archiveId, storage);
+      pending = undefined;
+    }
     pending = await prepareDiscSelectionMutation(
       archiveId, command, fetcher, options, identity, storage, pending,
     );
     if (pending === undefined) return { message: null, cancelled: true };
   }
-  const response = await fetcher(
-    `/api/catalog-reviews/${encodeURIComponent(archiveId)}`,
-    {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
+  const response = pending?.preview
+    ? await applyPendingCatalogReviewMutation(pending, fetcher)
+    : await fetcher(
+      `/api/catalog-reviews/${encodeURIComponent(archiveId)}`,
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ...command,
+          ...(proposalMutationKey ? { mutationKey: proposalMutationKey } : {}),
+        }),
       },
-      body: JSON.stringify(pending?.preview ? {
-        ...command,
-        mutationKey: pending.mutationKey,
-        expectedCatalogRevision: pending.preview.catalogRevision,
-        previewToken: pending.preview.previewToken,
-        acknowledge: true,
-      } : { ...command, ...(proposalMutationKey ? { mutationKey: proposalMutationKey } : {}) }),
-    },
-  );
+    );
   if (!response.ok) {
-    if (!ambiguousMutationResponse(response.status)) {
-      deletePendingCatalogReviewMutation(identity, storage);
+    if (pending !== undefined && !ambiguousMutationResponse(response.status)) {
+      deletePendingCatalogReviewMutation(archiveId, storage);
     }
     throw await catalogReviewMutationError(response);
   }
   if (proposalIdentity !== null) pendingProposalKeys.delete(proposalIdentity);
-  deletePendingCatalogReviewMutation(identity, storage);
-  try {
-    const body: unknown = await response.json();
-    return {
-      message:
-        typeof body === "object" && body !== null && "message" in body &&
-          typeof body.message === "string" && body.message.trim() !== ""
-          ? body.message.trim().slice(0, 512)
-          : null,
-    };
-  } catch {
-    return { message: null };
-  }
+  if (pending !== undefined) deletePendingCatalogReviewMutation(archiveId, storage);
+  return { message: await catalogReviewMutationMessage(response) };
 }
 
 type ConsequentialSelectionCommand = Extract<CatalogReviewCommand, {
-  action: "repair_disc_selection" | "correct_disc_selection" | "delete_disc_selection";
+  action: "update_disc_selection" | "repair_disc_selection" |
+    "correct_disc_selection" | "delete_disc_selection";
 }>;
 
 function isConsequentialSelectionCommand(
   command: CatalogReviewCommand,
 ): command is ConsequentialSelectionCommand {
+  if (command.action === "update_disc_selection") {
+    return "mediaItemId" in command.changes || "sourceIdentity" in command.changes;
+  }
   return command.action === "repair_disc_selection" ||
     command.action === "correct_disc_selection" ||
     command.action === "delete_disc_selection";
@@ -126,28 +133,77 @@ async function prepareDiscSelectionMutation(
   storage: CatalogReviewMutationStorage | null,
   saved: PendingCatalogReviewMutation | undefined,
 ): Promise<PendingCatalogReviewMutation | undefined> {
-  const pending = saved ?? { mutationKey: crypto.randomUUID() };
-  writePendingCatalogReviewMutation(identity, pending, storage);
+  const pending = saved ?? {
+    archiveId,
+    command,
+    identity,
+    mutationKey: crypto.randomUUID(),
+  };
+  writePendingCatalogReviewMutation(archiveId, pending, storage);
   if (pending.preview === undefined) {
     try {
       pending.preview = await requestDiscSelectionPreview(archiveId, command, fetcher);
     } catch (error) {
-      deletePendingCatalogReviewMutation(identity, storage);
+      deletePendingCatalogReviewMutation(archiveId, storage);
       throw error;
     }
-    writePendingCatalogReviewMutation(identity, pending, storage);
+    writePendingCatalogReviewMutation(archiveId, pending, storage);
   }
   if (pending.acknowledged === true) return pending;
   if (options.confirmDiscSelectionPreview === undefined) {
     throw new Error("Disc Selection preview acknowledgement is required");
   }
   if (!await options.confirmDiscSelectionPreview(pending.preview)) {
-    deletePendingCatalogReviewMutation(identity, storage);
+    deletePendingCatalogReviewMutation(archiveId, storage);
     return undefined;
   }
   pending.acknowledged = true;
-  writePendingCatalogReviewMutation(identity, pending, storage);
+  writePendingCatalogReviewMutation(archiveId, pending, storage);
   return pending;
+}
+
+export async function resumePendingCatalogReviewMutation(
+  archiveId: string,
+  fetcher: CatalogReviewFetch = fetch,
+  options: Pick<CatalogReviewMutationOptions, "storage"> = {},
+): Promise<{ message: string | null } | null> {
+  const storage = options.storage === undefined
+    ? browserMutationStorage() : options.storage;
+  const pending = readPendingCatalogReviewMutation(archiveId, storage);
+  if (pending?.acknowledged !== true || pending.preview === undefined) return null;
+  const response = await applyPendingCatalogReviewMutation(pending, fetcher);
+  if (!response.ok) {
+    if (!ambiguousMutationResponse(response.status)) {
+      deletePendingCatalogReviewMutation(archiveId, storage);
+    }
+    throw await catalogReviewMutationError(response);
+  }
+  deletePendingCatalogReviewMutation(archiveId, storage);
+  return { message: await catalogReviewMutationMessage(response) };
+}
+
+function applyPendingCatalogReviewMutation(
+  pending: PendingCatalogReviewMutation,
+  fetcher: CatalogReviewFetch,
+): Promise<Response> {
+  const preview = pending.preview;
+  if (preview === undefined) {
+    throw new Error("Disc Selection preview acknowledgement is required");
+  }
+  return fetcher(
+    `/api/catalog-reviews/${encodeURIComponent(pending.archiveId)}`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...pending.command,
+        mutationKey: pending.mutationKey,
+        expectedCatalogRevision: preview.catalogRevision,
+        previewToken: preview.previewToken,
+        acknowledge: true,
+      }),
+    },
+  );
 }
 
 async function requestDiscSelectionPreview(
@@ -176,7 +232,7 @@ async function requestDiscSelectionPreview(
 }
 
 const pendingCatalogReviewMutations = new Map<string, PendingCatalogReviewMutation>();
-const PENDING_CATALOG_REVIEW_MUTATION_PREFIX = "rip-dvd.catalog-review-mutation.v1:";
+const PENDING_CATALOG_REVIEW_MUTATION_PREFIX = "rip-dvd.catalog-review-mutation.v2:";
 
 function browserMutationStorage(): CatalogReviewMutationStorage | null {
   try {
@@ -186,61 +242,76 @@ function browserMutationStorage(): CatalogReviewMutationStorage | null {
   }
 }
 
-function pendingCatalogReviewMutationKey(identity: string): string {
-  return `${PENDING_CATALOG_REVIEW_MUTATION_PREFIX}${identity}`;
+function pendingCatalogReviewMutationKey(archiveId: string): string {
+  return `${PENDING_CATALOG_REVIEW_MUTATION_PREFIX}${encodeURIComponent(archiveId)}`;
 }
 
 function readPendingCatalogReviewMutation(
-  identity: string,
+  archiveId: string,
   storage: CatalogReviewMutationStorage | null,
 ): PendingCatalogReviewMutation | undefined {
-  if (storage === null) return pendingCatalogReviewMutations.get(identity);
+  if (storage === null) return pendingCatalogReviewMutations.get(archiveId);
   try {
-    const saved = storage.getItem(pendingCatalogReviewMutationKey(identity));
-    if (saved === null) return pendingCatalogReviewMutations.get(identity);
+    const saved = storage.getItem(pendingCatalogReviewMutationKey(archiveId));
+    if (saved === null) return pendingCatalogReviewMutations.get(archiveId);
     const parsed: unknown = JSON.parse(saved);
     if (typeof parsed !== "object" || parsed === null ||
-        !("mutationKey" in parsed) || typeof parsed.mutationKey !== "string") return undefined;
+        !("archiveId" in parsed) || parsed.archiveId !== archiveId ||
+        !("identity" in parsed) || typeof parsed.identity !== "string" ||
+        !("command" in parsed) || !("mutationKey" in parsed) ||
+        typeof parsed.mutationKey !== "string") return undefined;
+    const command = storedConsequentialSelectionCommand(parsed.command);
+    if (command === null || parsed.identity !== JSON.stringify([archiveId, command])) return undefined;
     const preview = "preview" in parsed && parsed.preview !== undefined
       ? availableDiscSelectionPreview(parsed.preview) : undefined;
     if ("preview" in parsed && parsed.preview !== undefined && preview === null) return undefined;
     return {
+      archiveId,
+      command,
+      identity: parsed.identity,
       mutationKey: parsed.mutationKey,
       ...(preview ? { preview } : {}),
       ...("acknowledged" in parsed && parsed.acknowledged === true
         ? { acknowledged: true } : {}),
     };
   } catch {
-    return pendingCatalogReviewMutations.get(identity);
+    return pendingCatalogReviewMutations.get(archiveId);
   }
 }
 
+function storedConsequentialSelectionCommand(value: unknown): ConsequentialSelectionCommand | null {
+  if (typeof value !== "object" || value === null || !("action" in value) ||
+      !("discSelectionId" in value) || typeof value.discSelectionId !== "string") return null;
+  const command = value as CatalogReviewCommand;
+  return isConsequentialSelectionCommand(command) ? command : null;
+}
+
 function writePendingCatalogReviewMutation(
-  identity: string,
+  archiveId: string,
   pending: PendingCatalogReviewMutation,
   storage: CatalogReviewMutationStorage | null,
 ): void {
   if (storage === null) {
-    pendingCatalogReviewMutations.set(identity, pending);
+    pendingCatalogReviewMutations.set(archiveId, pending);
     return;
   }
   try {
-    storage.setItem(pendingCatalogReviewMutationKey(identity), JSON.stringify(pending));
-    pendingCatalogReviewMutations.delete(identity);
+    storage.setItem(pendingCatalogReviewMutationKey(archiveId), JSON.stringify(pending));
+    pendingCatalogReviewMutations.delete(archiveId);
   } catch {
     // Keep the invocation in memory when browser storage is unavailable.
-    pendingCatalogReviewMutations.set(identity, pending);
+    pendingCatalogReviewMutations.set(archiveId, pending);
   }
 }
 
 function deletePendingCatalogReviewMutation(
-  identity: string,
+  archiveId: string,
   storage: CatalogReviewMutationStorage | null,
 ): void {
-  pendingCatalogReviewMutations.delete(identity);
+  pendingCatalogReviewMutations.delete(archiveId);
   if (storage === null) return;
   try {
-    storage.removeItem(pendingCatalogReviewMutationKey(identity));
+    storage.removeItem(pendingCatalogReviewMutationKey(archiveId));
   } catch {
     // A failed storage cleanup leaves the durable replay identity available.
   }
@@ -251,12 +322,18 @@ function availableDiscSelectionPreview(value: unknown): DiscSelectionChangePrevi
       value.state !== "available" || !("catalogRevision" in value) ||
       typeof value.catalogRevision !== "string" || !("previewToken" in value) ||
       typeof value.previewToken !== "string" || !("affectedEncodeJobs" in value) ||
-      !Array.isArray(value.affectedEncodeJobs) || !("consequences" in value) ||
+      !Array.isArray(value.affectedEncodeJobs) ||
+      !("outputReservationReleaseJobs" in value) ||
+      !Array.isArray(value.outputReservationReleaseJobs) || !("consequences" in value) ||
       typeof value.consequences !== "object" || value.consequences === null) return null;
   const affectedEncodeJobs = value.affectedEncodeJobs;
   if (!affectedEncodeJobs.every((job) => typeof job === "object" && job !== null &&
       "id" in job && typeof job.id === "string" && "status" in job &&
       typeof job.status === "string")) return null;
+  const outputReservationReleaseJobs = value.outputReservationReleaseJobs;
+  if (!outputReservationReleaseJobs.every((job) =>
+    typeof job === "object" && job !== null && "id" in job &&
+    typeof job.id === "string" && "status" in job && job.status === "failed")) return null;
   const consequences = value.consequences;
   if (!("currentSelection" in consequences) || typeof consequences.currentSelection !== "string" ||
       !("createsReplacementSelection" in consequences) ||
@@ -264,10 +341,15 @@ function availableDiscSelectionPreview(value: unknown): DiscSelectionChangePrevi
       !("requestsEncodeJobCancellation" in consequences) ||
       !Array.isArray(consequences.requestsEncodeJobCancellation) ||
       !consequences.requestsEncodeJobCancellation.every((id) => typeof id === "string") ||
+      !("releasesOutputReservations" in consequences) ||
+      !Array.isArray(consequences.releasesOutputReservations) ||
+      !consequences.releasesOutputReservations.every((id) => typeof id === "string") ||
       !("preservesEncodeJobHistory" in consequences) ||
       typeof consequences.preservesEncodeJobHistory !== "boolean" ||
       !("reopensCatalogReview" in consequences) ||
       typeof consequences.reopensCatalogReview !== "boolean") return null;
+  if (JSON.stringify(consequences.releasesOutputReservations) !==
+      JSON.stringify(outputReservationReleaseJobs.map((job) => job.id))) return null;
   return value as unknown as DiscSelectionChangePreview;
 }
 
@@ -285,6 +367,10 @@ export function discSelectionPreviewConfirmation(preview: DiscSelectionChangePre
     ? "No Encode Job cancellation will be requested."
     : `Cancellation will be requested for: ${
       preview.consequences.requestsEncodeJobCancellation.join(", ")}.`;
+  const reservationReleases = preview.consequences.releasesOutputReservations.length === 0
+    ? "No output reservations will be released."
+    : `Output reservations will be released for: ${
+      preview.consequences.releasesOutputReservations.join(", ")}.`;
   return [
     "Review this Disc Selection change before applying it.",
     `Current selection will be ${preview.consequences.currentSelection}.`,
@@ -293,6 +379,7 @@ export function discSelectionPreviewConfirmation(preview: DiscSelectionChangePre
       : "No replacement Disc Selection will be created.",
     affectedJobs,
     cancellations,
+    reservationReleases,
     preview.consequences.preservesEncodeJobHistory
       ? "Encode Job history will be preserved."
       : "There is no Encode Job history to preserve.",
@@ -315,4 +402,16 @@ async function catalogReviewMutationError(response: Response): Promise<Error> {
     // Keep the bounded generic message for non-JSON error responses.
   }
   return new Error(message);
+}
+
+async function catalogReviewMutationMessage(response: Response): Promise<string | null> {
+  try {
+    const body: unknown = await response.json();
+    return typeof body === "object" && body !== null && "message" in body &&
+        typeof body.message === "string" && body.message.trim() !== ""
+      ? body.message.trim().slice(0, 512)
+      : null;
+  } catch {
+    return null;
+  }
 }

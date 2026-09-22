@@ -93,10 +93,12 @@ function availableDiscSelectionPreview(
     catalogRevision,
     previewToken: "preview-token",
     affectedEncodeJobs,
+    outputReservationReleaseJobs: [],
     consequences: {
       currentSelection: "superseded",
       createsReplacementSelection: true,
       requestsEncodeJobCancellation: affectedEncodeJobs.map((job) => job.id),
+      releasesOutputReservations: [],
       preservesEncodeJobHistory: affectedEncodeJobs.length > 0,
       reopensCatalogReview: true,
     },
@@ -214,6 +216,43 @@ function renderCatalogReviewEditor(archiveId: string): void {
 }
 
 describe("CatalogReviewEditor", () => {
+  it("recovers an acknowledged Disc Selection mutation when the archive reloads", async () => {
+    const review = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "RECOVERY_DISC",
+    });
+    const command = {
+      action: "delete_disc_selection" as const,
+      discSelectionId: review.discSelections[0]!.id,
+    };
+    const firstAttemptBodies: Record<string, unknown>[] = [];
+    const firstAttempt = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      firstAttemptBodies.push(body);
+      return body.preview === true
+        ? Response.json(availableDiscSelectionPreview(review.catalogRevision))
+        : Response.json({ error: "Response unavailable" }, { status: 503 });
+    };
+    await expect(mutateCatalogReview("archive-a", command, firstAttempt, {
+      confirmDiscSelectionPreview: () => true,
+    })).rejects.toThrow("Response unavailable");
+
+    const recoveredBodies: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        recoveredBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return Response.json({ message: "Mapping changed; review required" });
+      }
+      return Response.json(review);
+    }));
+
+    await act(async () => renderCatalogReviewEditor("archive-a"));
+
+    expect(firstAttemptBodies).toHaveLength(2);
+    expect(recoveredBodies).toEqual([firstAttemptBodies[1]]);
+    expect(container.textContent).toContain("Mapping changed; review required");
+  });
+
   it("accepts an automatic movie proposal and completes review in one request", async () => {
     const review = catalogReview({
       archiveId: "archive-a",
@@ -864,7 +903,11 @@ describe("CatalogReviewEditor", () => {
       init?: RequestInit,
     ) => {
       if (init?.method === "POST") {
-        postedCommands.push(JSON.parse(String(init.body)) as unknown);
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        postedCommands.push(body);
+        if (body.preview === true) {
+          return Response.json(availableDiscSelectionPreview(review.catalogRevision));
+        }
         return Response.json({ message: "Mapping changed; review required" });
       }
       return Response.json(review);
@@ -894,11 +937,17 @@ describe("CatalogReviewEditor", () => {
       submit.click();
     });
 
-    expect(postedCommands).toEqual([{
+    const command = {
       action: "update_disc_selection",
       discSelectionId: review.discSelections[0]!.id,
       changes: { mediaItemId: "episode-2" },
-    }]);
+    };
+    expect(postedCommands).toEqual([
+      { ...command, preview: true },
+      { ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        expectedCatalogRevision: review.catalogRevision, previewToken: "preview-token",
+        acknowledge: true },
+    ]);
     expect(container.textContent).toContain(
       "Mapping changed; review required",
     );

@@ -1348,15 +1348,12 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
       .toMatchObject({ catalogReviewOutcome: "reviewed_with_selections" });
 
-    const updated = await createCatalogReviewRoute(
-      createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
+    const updated = await previewAndApplyDiscSelection(
+      invokeCatalogSelectionMutation(access, archive.id), {
         action: "update_disc_selection",
         discSelectionId: selection.id,
         changes: { mediaItemId: correctedItem.id },
-      }),
-      archive.id,
-      () => access,
-      () => trustedOrigin,
+      },
     );
     expect(updated.status).toBe(200);
     await expect(updated.json()).resolves.toEqual({
@@ -1434,15 +1431,12 @@ describe("end-to-end operations dashboard workflow", () => {
       [wholeEditable.id, wholeTarget.sourceIdentity],
       [rangeEditable.id, selection.sourceIdentity],
     ] as const) {
-      const overlapUpdate = await createCatalogReviewRoute(
-        createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
+      const overlapUpdate = await previewAndApplyDiscSelection(
+        invokeCatalogSelectionMutation(access, archive.id), {
           action: "update_disc_selection",
           discSelectionId,
           changes: { sourceIdentity },
-        }),
-        archive.id,
-        () => access,
-        () => trustedOrigin,
+        },
       );
       expect(overlapUpdate.status).toBe(200);
     }

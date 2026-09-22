@@ -601,6 +601,10 @@ export interface DiscSelectionMutationPreview {
   discSelection: DiscSelection;
   actionAvailability: DiscSelectionActionAvailability;
   affectedEncodeJobs: readonly { id: EncodeJobId; status: EncodeJobStatus }[];
+  outputReservationReleaseJobs: readonly {
+    id: EncodeJobId;
+    status: "failed";
+  }[];
   historicalEncodeJobCount: number;
   evidenceHash: string;
 }

@@ -263,17 +263,29 @@ const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
 const ENCODE_JOB_FAILURE_REPORT_JOB_LIMIT = 400;
 
 function discSelectionMutationEvidence(
-  jobs: readonly { id: EncodeJobId; status: EncodeJobStatus }[],
+  jobs: readonly {
+    id: EncodeJobId;
+    status: EncodeJobStatus;
+    reservesOutputPath: boolean;
+  }[],
 ) {
   const affectedEncodeJobs = jobs
     .filter((job) => job.status === "queued" || job.status === "running" ||
       job.status === "cancellation_requested")
+    .map(({ id, status }) => ({ id, status }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const outputReservationReleaseJobs = jobs
+    .filter((job): job is typeof job & { status: "failed" } =>
+      job.status === "failed" && job.reservesOutputPath)
+    .map(({ id, status }) => ({ id, status }))
     .sort((left, right) => left.id.localeCompare(right.id));
   return {
     affectedEncodeJobs,
+    outputReservationReleaseJobs,
     historicalEncodeJobCount: jobs.length,
     evidenceHash: createHash("sha256").update(JSON.stringify({
       affectedEncodeJobs,
+      outputReservationReleaseJobs,
       historicalEncodeJobCount: jobs.length,
     })).digest("hex"),
   };
@@ -4570,7 +4582,11 @@ export function createDataAccessInternal(
             throw new RecordNotFoundError("disc selection", mutation.discSelectionId);
           }
           if (expectedPreviewEvidenceHash !== undefined) {
-            const jobs = transaction.select({ id: encodeJobs.id, status: encodeJobs.status })
+            const jobs = transaction.select({
+              id: encodeJobs.id,
+              status: encodeJobs.status,
+              reservesOutputPath: encodeJobs.reservesOutputPath,
+            })
               .from(encodeJobs)
               .where(eq(encodeJobs.discSelectionId, mutation.discSelectionId))
               .all();
@@ -7163,7 +7179,11 @@ export function createDataAccessInternal(
           if (!availability) {
             throw new RecordNotFoundError("disc selection", discSelectionId);
           }
-          const jobs = transaction.select({ id: encodeJobs.id, status: encodeJobs.status })
+          const jobs = transaction.select({
+            id: encodeJobs.id,
+            status: encodeJobs.status,
+            reservesOutputPath: encodeJobs.reservesOutputPath,
+          })
             .from(encodeJobs).where(eq(encodeJobs.discSelectionId, discSelectionId))
             .all();
           const evidence = discSelectionMutationEvidence(jobs);

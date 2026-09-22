@@ -220,9 +220,18 @@ export async function createCatalogReviewRoute(
         }));
       }
 
+      case "update_disc_selection":
       case "repair_disc_selection":
       case "correct_disc_selection":
       case "delete_disc_selection": {
+        const consequential = command.action !== "update_disc_selection" ||
+          "mediaItemId" in command.changes || "sourceIdentity" in command.changes;
+        if (!consequential) {
+          if (bodyRecord?.preview === true) {
+            return response({ error: "This Disc Selection change does not require a preview" }, 400);
+          }
+          return response(executeDiscSelectionCommand(access, archiveId, command));
+        }
         if (bodyRecord?.preview === true) {
           return response(previewDiscSelectionChange(access, archiveId, command));
         }
@@ -246,10 +255,9 @@ export async function createCatalogReviewRoute(
       }
 
       case "create_disc_selection":
-      case "update_disc_selection":
         return response(
           executeDiscSelectionCommand(access, archiveId, command),
-          command.action === "create_disc_selection" ? 201 : 200,
+          201,
         );
 
       case "complete_review": {

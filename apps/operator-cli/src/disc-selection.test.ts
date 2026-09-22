@@ -181,6 +181,10 @@ it("rejects invalid sources and protects locked Encode Job provenance", async ()
   expect(afterPreview.result).toMatchObject({ affectedEncodeJobs: [{ status: "queued" }] });
   const staleDecision = preview.result as { catalogRevision: string; previewToken: string };
   const changedJobs = current.openAccess();
+  const jobId = (detail.result as { affectedEncodeJobs: { id: string }[] }).affectedEncodeJobs[0]!.id;
+  const running = changedJobs.encodeJobs.claimNext("synthetic-cancellation-worker");
+  if (!running || running.id !== jobId) throw new Error("Expected original synthetic Encode Job claim");
+  changedJobs.encodeJobs.requestCancellation(running.id);
   const additionalProfile = changedJobs.encodingProfiles.create({ key: "additional-synthetic-profile",
     displayName: "Additional synthetic profile", mediaDomain: "dvd_video", settings: supportedDvdSettings });
   const additionalJob = changedJobs.encodeJobs.enqueue({ discSelectionId: selectionId as Parameters<
@@ -196,7 +200,7 @@ it("rejects invalid sources and protects locked Encode Job provenance", async ()
   const currentPreview = await current.run(["disc-selection", "preview", "correct", archive.id, selectionId,
     "--media-item-id", second.id, "--source-kind", "main_feature"]);
   expect(currentPreview.result).toMatchObject({ consequences: {
-    requestsEncodeJobCancellation: expect.arrayContaining([additionalJob.id]),
+    requestsEncodeJobCancellation: [additionalJob.id],
   } });
   const decision = currentPreview.result as { catalogRevision: string; previewToken: string };
   const corrected = await current.run(["disc-selection", "correct", archive.id, selectionId,
@@ -211,9 +215,8 @@ it("rejects invalid sources and protects locked Encode Job provenance", async ()
     { supersededDiscSelection: { id: selectionId },
       replacementDiscSelection: { id: (corrected.result as { discSelection: { id: string } }).discSelection.id } },
   ] });
-  const jobId = (detail.result as { affectedEncodeJobs: { id: string }[] }).affectedEncodeJobs[0]!.id;
   expect((await current.run(["inspect", "encode-jobs", jobId])).result).toMatchObject({
-    item: { id: jobId, status: "cancelled",
+    item: { id: jobId, status: "cancellation_requested",
       history: expect.arrayContaining([expect.objectContaining({ discSelectionId: selectionId })]) },
   });
   expect((await current.run(["inspect", "encode-jobs", additionalJob.id])).result).toMatchObject({
@@ -261,7 +264,8 @@ it("previews unsafe legacy repair and quarantine while preserving completed Enco
     selection.id, ...proposal]);
   expect(repairPreview.result).toMatchObject({ state: "available", consequences: {
     currentSelection: "deactivated", createsReplacementSelection: true,
-    requestsEncodeJobCancellation: [], preservesEncodeJobHistory: true, reopensCatalogReview: true,
+    requestsEncodeJobCancellation: [], releasesOutputReservations: [],
+    preservesEncodeJobHistory: true, reopensCatalogReview: true,
   } });
   const repairDecision = repairPreview.result as { catalogRevision: string; previewToken: string };
   const repaired = await current.run(["disc-selection", "repair", archive.id, selection.id,
@@ -278,8 +282,11 @@ it("previews unsafe legacy repair and quarantine while preserving completed Enco
   const removal = await current.run(["disc-selection", "preview", "delete", archive.id, other.id]);
   expect(removal.result).toMatchObject({ state: "available", consequences: {
     currentSelection: "deactivated", createsReplacementSelection: false,
-    preservesEncodeJobHistory: true,
+    releasesOutputReservations: [secondJob.id], preservesEncodeJobHistory: true,
   } });
+  expect(removal.result).toMatchObject({
+    outputReservationReleaseJobs: [{ id: secondJob.id, status: "failed" }],
+  });
   const removalDecision = removal.result as { catalogRevision: string; previewToken: string };
   const quarantined = await current.run(["disc-selection", "delete", archive.id, other.id,
     "--key", key(21), "--revision", removalDecision.catalogRevision,

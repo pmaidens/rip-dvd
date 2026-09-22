@@ -767,11 +767,19 @@ describe("Catalog Review API", () => {
       () => access,
       () => "http://localhost:3000",
     );
-    const updateResponse = await mutate({
+    const updateCommand = {
       action: "update_disc_selection",
       discSelectionId: selection.id,
       changes: { mediaItemId: correctedMovie.id },
-    });
+    };
+    const unacknowledgedUpdate = await mutate(updateCommand);
+    expect(unacknowledgedUpdate.status).toBe(400);
+    expect(access.catalog.listDiscSelections({ ids: [selection.id] })[0])
+      .toMatchObject({ mediaItemId: movie.id });
+    const updateResponse = await previewAndApplyDiscSelection(
+      invokeDiscSelectionMutation(access, archive.id),
+      updateCommand,
+    );
     expect(updateResponse.status).toBe(200);
     await expect(updateResponse.json()).resolves.toEqual({
       message: "Mapping changed; review required",
@@ -838,7 +846,8 @@ describe("Catalog Review API", () => {
         chapterEnd: 6,
       },
     });
-    const wholeOverlapResponse = await mutate({
+    const wholeOverlapResponse = await previewAndApplyDiscSelection(
+      invokeDiscSelectionMutation(access, archive.id), {
       action: "update_disc_selection",
       discSelectionId: wholeEditable.id,
       changes: {
@@ -852,7 +861,8 @@ describe("Catalog Review API", () => {
         sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
       },
     });
-    const rangeOverlapResponse = await mutate({
+    const rangeOverlapResponse = await previewAndApplyDiscSelection(
+      invokeDiscSelectionMutation(access, archive.id), {
       action: "update_disc_selection",
       discSelectionId: rangeEditable.id,
       changes: { sourceIdentity: rangeTarget.sourceIdentity },
@@ -3258,7 +3268,7 @@ describe("Catalog Review API", () => {
     });
     expect(firstSelectionResponse.status).toBe(201);
     const firstSelection = (await firstSelectionResponse.json()).discSelection;
-    const updateSelectionResponse = await mutate({
+    const updateSelectionResponse = await previewAndApplyDiscSelection(mutate, {
       action: "update_disc_selection",
       discSelectionId: firstSelection.id,
       changes: {
