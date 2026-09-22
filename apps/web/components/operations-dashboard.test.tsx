@@ -25,6 +25,7 @@ import {
   requestArchiveApproval,
   requestArchiveRequestCancellation,
   requestFilesystemVerification,
+  waitForFilesystemVerificationRun,
   type DashboardLoadState,
 } from "./operations-dashboard";
 import {
@@ -37,6 +38,31 @@ vi.mock("../lib/dashboard-activity", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../lib/dashboard-activity")>();
   return { ...actual, watchDashboardActivity: vi.fn() };
+});
+
+it("reports a verification run as pending when the bounded web wait expires", async () => {
+  vi.useFakeTimers();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = vi.fn(async () => Response.json({ item: { status: "running" } }));
+  try {
+    const waiting = waitForFilesystemVerificationRun("synthetic-run");
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(await waiting).toBe("pending");
+  } finally {
+    globalThis.fetch = originalFetch;
+    vi.useRealTimers();
+  }
+});
+
+it("keeps a submitted verification run pending when its first status read fails", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = vi.fn().mockRejectedValue(new Error("disconnected"));
+  try {
+    await expect(waitForFilesystemVerificationRun("submitted-run"))
+      .resolves.toBe("pending");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 const sectionNames = [
@@ -1891,14 +1917,15 @@ describe("DashboardView", () => {
     ["original_disc_archive", "archive-1"],
     ["encode_job_output", "encode-job-1"],
   ] as const)("submits an explicit %s verification", async (target, id) => {
-    const fetcher = vi.fn(async () => new Response(null, { status: 200 }));
+    const fetcher = vi.fn(async () => Response.json({ verificationRun: { id: "synthetic-run" } }, { status: 201 }));
 
-    await requestFilesystemVerification(target, id, fetcher);
+    await expect(requestFilesystemVerification(target, id, fetcher, "synthetic-key-123"))
+      .resolves.toBe("synthetic-run");
 
     expect(fetcher).toHaveBeenCalledWith("/api/filesystem-verification", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target, id }),
+      body: JSON.stringify({ target, id, mutationKey: "synthetic-key-123" }),
     });
   });
 
@@ -1946,7 +1973,7 @@ describe("DashboardView", () => {
                 mappedMediaItemTitles: [],
                 verificationStatus: "inaccessible",
                 verificationMessage:
-                  "The web process cannot access the recorded path.",
+                  "The recorded path cannot be accessed.",
                 verifiedAt: "2026-08-06T20:05:00.000Z",
               },
             ],
@@ -1960,7 +1987,7 @@ describe("DashboardView", () => {
     expect(html).toContain("Verifying output…");
     expect(html).toContain("File is missing at the recorded path.");
     expect(html).toContain(
-      "The web process cannot access the recorded path.",
+      "The recorded path cannot be accessed.",
     );
     expect(html).not.toContain("/media/");
   });

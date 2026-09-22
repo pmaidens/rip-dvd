@@ -1080,6 +1080,7 @@ const WORKER_INCIDENT_RECOVERY_AREA_LABELS: Record<
   string
 > = {
   expired_archive_job_claim: "Expired Archive Job claim",
+  filesystem_verification: "Filesystem verification",
   active_publication: "Active publication",
   expired_publication_mutation: "Expired publication mutation",
   expired_encode_job_claim: "Expired Encode Job claim",
@@ -1113,15 +1114,20 @@ function workerIncidentPresentation(incident: WorkerIncident) {
     };
   }
   if (incident.reasonCode === "claim_recovery_failure") {
+    const filesystemVerification =
+      incident.evidence.recoveryArea === "filesystem_verification";
     return {
       worker,
       phaseLabel: WORKER_INCIDENT_PHASE_LABELS[incident.reasonCode],
-      explanation:
-        "The Archive Worker could not finish part of Archive Job claim recovery.",
-      activeAction:
-        "Check the Archive Worker stdout and database health. The worker will retry claim recovery automatically.",
-      recoveredAction:
-        "No action is needed. The Archive Worker completed a later claim-recovery pass.",
+      explanation: filesystemVerification
+        ? "The Archive Worker could not finish Filesystem Verification Run claim recovery."
+        : "The Archive Worker could not finish part of Archive Job claim recovery.",
+      activeAction: filesystemVerification
+        ? "Check the Archive Worker stdout and database health. The worker will retry Filesystem Verification Run claim recovery automatically."
+        : "Check the Archive Worker stdout and database health. The worker will retry claim recovery automatically.",
+      recoveredAction: filesystemVerification
+        ? "No action is needed. The Archive Worker completed a later Filesystem Verification Run claim-recovery pass."
+        : "No action is needed. The Archive Worker completed a later claim-recovery pass.",
     };
   }
   return {

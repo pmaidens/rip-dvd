@@ -191,5 +191,6 @@ export const ENCODE_WORKER_INCIDENT_RECOVERY_AREAS = [
 
 export const WORKER_INCIDENT_RECOVERY_AREAS = [
   "expired_archive_job_claim",
+  "filesystem_verification",
   ...ENCODE_WORKER_INCIDENT_RECOVERY_AREAS,
 ] as const;

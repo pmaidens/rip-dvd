@@ -65,6 +65,7 @@ import {
   encodeJobFailureReports,
   encodeJobs,
   encodingProfiles,
+  filesystemVerificationRuns,
   legacyCutoverStagedSidecars,
   mediaItemTmdbIdentities,
   mediaItems,
@@ -184,6 +185,9 @@ import type {
   EncodeJobClaimToken,
   EncodeJobCleanupClaimToken,
   EncodeJobId,
+  FilesystemVerificationRunId,
+  FilesystemVerificationClaimToken,
+  FilesystemVerificationRun,
   EncodeJob,
   EncodeJobFailureOptions,
   EncodeJobFailureReport,
@@ -901,6 +905,16 @@ function openMigratedDatabase(
     releaseMigrationLock();
     throw error;
   }
+}
+
+type FilesystemVerificationRow = typeof filesystemVerificationRuns.$inferSelect;
+
+function toFilesystemVerificationRun(
+  row: FilesystemVerificationRow,
+): FilesystemVerificationRun {
+  return row.target === "original_disc_archive"
+    ? { ...row, target: row.target, targetId: row.targetId as OriginalDiscArchiveId }
+    : { ...row, target: row.target, targetId: row.targetId as EncodeJobId };
 }
 
 export function createDataAccessInternal(
@@ -2625,7 +2639,7 @@ export function createDataAccessInternal(
         return {
           verificationStatus: "inaccessible",
           verificationMessage:
-            "The web process cannot access the recorded path.",
+            "The recorded path cannot be accessed.",
           verifiedAt: now(),
         };
       }
@@ -4652,6 +4666,11 @@ export function createDataAccessInternal(
         workerIncidents: {
           find: (id) => access.workerIncidents.find(id),
           list: (options) => access.workerIncidents.list(options),
+        },
+        filesystemVerification: {
+          find: (id) => access.filesystemVerification.find(id),
+          list: (options) => access.filesystemVerification.list(options),
+          listActive: () => access.filesystemVerification.listActive(),
         },
       };
       sqlite.exec("BEGIN");
@@ -12048,6 +12067,178 @@ export function createDataAccessInternal(
     },
 
     filesystemVerification: {
+      submit(input) {
+        const targetId = requireNonEmpty(input.targetId.trim(), "Verification target ID");
+        const semanticInput = JSON.stringify({ target: input.target, targetId });
+        return database.transaction((transaction) => {
+          const operation = "filesystem_verification.submit";
+          const previous = readMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            (stored) => {
+              const outcome = JSON.parse(stored) as {
+                id: string; createdAt: string; updatedAt: string;
+              };
+              return toFilesystemVerificationRun({
+                ...outcome,
+                createdAt: new Date(outcome.createdAt),
+                updatedAt: new Date(outcome.updatedAt),
+              } as FilesystemVerificationRow);
+            },
+          );
+          if (previous !== undefined) return previous;
+          if (input.target === "original_disc_archive") {
+            requireRow(transaction.select({ id: originalDiscArchives.id })
+              .from(originalDiscArchives)
+              .where(eq(originalDiscArchives.id, targetId as OriginalDiscArchiveId)).get(),
+              "original disc archive", targetId);
+          } else if (input.target === "encode_job_output") {
+            requireRow(transaction.select({ id: encodeJobs.id }).from(encodeJobs)
+              .where(eq(encodeJobs.id, targetId as EncodeJobId)).get(), "encode job", targetId);
+          } else {
+            throw new DomainInvariantError("Unknown verification target");
+          }
+          const id = newId<FilesystemVerificationRunId>();
+          const timestamp = now();
+          const run = requireRow(transaction.insert(filesystemVerificationRuns).values({
+            id, target: input.target, targetId: targetId as OriginalDiscArchiveId | EncodeJobId,
+            status: "queued", progressPhase: "queued",
+            createdAt: timestamp, updatedAt: timestamp,
+          }).returning().get(), "verification run", id);
+          recordMutationInvocation(transaction, input.mutationKey, operation,
+            semanticInput, run, timestamp);
+          return toFilesystemVerificationRun(run);
+        });
+      },
+      find(id) {
+        const row = database.select().from(filesystemVerificationRuns)
+          .where(eq(filesystemVerificationRuns.id, id)).get();
+        return row === undefined ? null : toFilesystemVerificationRun(row);
+      },
+      list(options) {
+        const limit = requireSafeIntegerInRange(options.limit, "limit", 1, 100);
+        const active = database.select().from(filesystemVerificationRuns)
+          .where(inArray(filesystemVerificationRuns.status, ["queued", "running"]))
+          .orderBy(desc(filesystemVerificationRuns.createdAt), desc(filesystemVerificationRuns.id))
+          .limit(limit).all();
+        const remaining = limit - active.length;
+        return (remaining === 0 ? active : [...active,
+          ...database.select().from(filesystemVerificationRuns)
+            .where(inArray(filesystemVerificationRuns.status, ["completed", "failed"]))
+            .orderBy(desc(filesystemVerificationRuns.createdAt), desc(filesystemVerificationRuns.id))
+            .limit(remaining).all(),
+        ]).map(toFilesystemVerificationRun);
+      },
+      listActive() {
+        return database.select().from(filesystemVerificationRuns)
+          .where(inArray(filesystemVerificationRuns.status, ["queued", "running"]))
+          .orderBy(desc(filesystemVerificationRuns.createdAt), desc(filesystemVerificationRuns.id))
+          .all().map(toFilesystemVerificationRun);
+      },
+      recoverExpiredClaims() {
+        const timestamp = now();
+        const expiredBefore = new Date(timestamp.getTime() - 60_000);
+        return database.transaction((transaction) => {
+          const expiredIds = transaction.select({ id: filesystemVerificationRuns.id })
+            .from(filesystemVerificationRuns)
+            .where(and(eq(filesystemVerificationRuns.status, "running"),
+              lt(filesystemVerificationRuns.claimedAt, expiredBefore)))
+            .orderBy(asc(filesystemVerificationRuns.claimedAt),
+              asc(filesystemVerificationRuns.id))
+            .limit(JOB_RECOVERY_LIMIT).all().map(({ id }) => id);
+          if (expiredIds.length === 0) return 0;
+          return transaction.update(filesystemVerificationRuns).set({
+            status: "queued", progressPhase: "queued", claimToken: null, claimedAt: null,
+            updatedAt: timestamp,
+          }).where(and(inArray(filesystemVerificationRuns.id, expiredIds),
+            eq(filesystemVerificationRuns.status, "running"),
+            lt(filesystemVerificationRuns.claimedAt, expiredBefore)))
+            .returning({ id: filesystemVerificationRuns.id }).all().length;
+        });
+      },
+      renewClaim(claim) {
+        if (claim.claimToken === null) return false;
+        return database.update(filesystemVerificationRuns).set({
+          claimedAt: now(), updatedAt: now(),
+        }).where(and(eq(filesystemVerificationRuns.id, claim.id),
+          eq(filesystemVerificationRuns.status, "running"),
+          eq(filesystemVerificationRuns.claimToken, claim.claimToken)))
+          .returning({ id: filesystemVerificationRuns.id }).get() !== undefined;
+      },
+      claimNext() {
+        return database.transaction((transaction) => {
+          const next = transaction.select().from(filesystemVerificationRuns)
+            .where(eq(filesystemVerificationRuns.status, "queued"))
+            .orderBy(asc(filesystemVerificationRuns.createdAt), asc(filesystemVerificationRuns.id))
+            .limit(1).get();
+          if (!next) return null;
+          const claimed = transaction.update(filesystemVerificationRuns).set({
+            status: "running", progressPhase: "checking",
+            claimToken: newId<FilesystemVerificationClaimToken>(), claimedAt: now(), updatedAt: now(),
+          }).where(and(eq(filesystemVerificationRuns.id, next.id),
+            eq(filesystemVerificationRuns.status, "queued"))).returning().get();
+          return claimed === undefined ? null : toFilesystemVerificationRun(claimed);
+        });
+      },
+      async execute(claim) {
+        if (claim.status !== "running" || claim.claimToken === null) {
+          throw new StaleJobAttemptError("verification run", claim.id);
+        }
+        const archive = claim.target === "original_disc_archive"
+          ? requireRow(database.select().from(originalDiscArchives)
+              .where(eq(originalDiscArchives.id, claim.targetId as OriginalDiscArchiveId)).get(),
+              "original disc archive", claim.targetId) : null;
+        const job = claim.target === "encode_job_output"
+          ? requireRow(database.select().from(encodeJobs)
+              .where(eq(encodeJobs.id, claim.targetId as EncodeJobId)).get(),
+              "encode job", claim.targetId) : null;
+        const path = archive?.archivePath ?? job!.outputPath;
+        const verification = await inspectFilesystemPath(
+          path,
+          claim.target === "original_disc_archive" ? originalsVerificationRoot : mediaVerificationRoot,
+          archive?.sizeBytes ?? undefined,
+        );
+        return database.transaction((transaction) => {
+          const current = transaction.select().from(filesystemVerificationRuns)
+            .where(eq(filesystemVerificationRuns.id, claim.id)).get();
+          if (current?.status !== "running" || current.claimToken !== claim.claimToken) {
+            throw new StaleJobAttemptError("verification run", claim.id);
+          }
+          const updatedTarget = claim.target === "original_disc_archive"
+            ? transaction.update(originalDiscArchives).set(verification)
+                .where(and(eq(originalDiscArchives.id, claim.targetId as OriginalDiscArchiveId),
+                  eq(originalDiscArchives.archivePath, path)))
+                .returning({ id: originalDiscArchives.id }).get()
+            : transaction.update(encodeJobs).set(verification)
+                .where(and(eq(encodeJobs.id, claim.targetId as EncodeJobId),
+                  eq(encodeJobs.outputPath, path)))
+                .returning({ id: encodeJobs.id }).get();
+          if (!updatedTarget) {
+            throw new DomainInvariantError("Verification target changed during checking");
+          }
+          return toFilesystemVerificationRun(requireRow(transaction.update(filesystemVerificationRuns).set({
+            status: "completed", progressPhase: "completed",
+            resultStatus: verification.verificationStatus,
+            resultMessage: verification.verificationMessage,
+            verifiedAt: verification.verifiedAt,
+            claimToken: null, claimedAt: null, updatedAt: now(),
+          }).where(eq(filesystemVerificationRuns.id, claim.id)).returning().get(),
+          "verification run", claim.id));
+        });
+      },
+      fail(claim) {
+        if (claim.claimToken === null) return null;
+        const failed = database.update(filesystemVerificationRuns).set({
+          status: "failed", progressPhase: "completed", failureCode: "VERIFICATION_UNAVAILABLE",
+          claimToken: null, claimedAt: null, updatedAt: now(),
+        }).where(and(eq(filesystemVerificationRuns.id, claim.id),
+          eq(filesystemVerificationRuns.status, "running"),
+          eq(filesystemVerificationRuns.claimToken, claim.claimToken)))
+          .returning().get();
+        return failed === undefined ? null : toFilesystemVerificationRun(failed);
+      },
       listOriginalDiscArchives(options) {
         return access.catalog.listOriginalDiscArchives(options);
       },
@@ -12062,67 +12253,6 @@ export function createDataAccessInternal(
           .offset(offset)
           .all()
           .reverse();
-      },
-      async verifyOriginalDiscArchive(id) {
-        const archive = requireRow(
-          database
-            .select()
-            .from(originalDiscArchives)
-            .where(eq(originalDiscArchives.id, id))
-            .get(),
-          "original disc archive",
-          id,
-        );
-        const verification = await inspectFilesystemPath(
-          archive.archivePath,
-          originalsVerificationRoot,
-          archive.sizeBytes ?? undefined,
-        );
-        return requireRow(
-          database
-            .update(originalDiscArchives)
-            .set(verification)
-            .where(
-              and(
-                eq(originalDiscArchives.id, id),
-                eq(originalDiscArchives.archivePath, archive.archivePath),
-              ),
-            )
-            .returning()
-            .get(),
-          "original disc archive",
-          id,
-        );
-      },
-      async verifyEncodeJobOutput(id) {
-        const job = requireRow(
-          database
-            .select()
-            .from(encodeJobs)
-            .where(eq(encodeJobs.id, id))
-            .get(),
-          "encode job",
-          id,
-        );
-        const verification = await inspectFilesystemPath(
-          job.outputPath,
-          mediaVerificationRoot,
-        );
-        return requireRow(
-          database
-            .update(encodeJobs)
-            .set(verification)
-            .where(
-              and(
-                eq(encodeJobs.id, id),
-                eq(encodeJobs.outputPath, job.outputPath),
-              ),
-            )
-            .returning()
-            .get(),
-          "encode job",
-          id,
-        );
       },
     },
 

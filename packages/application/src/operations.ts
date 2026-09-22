@@ -12,6 +12,8 @@ import {
   type DiscInspectionId,
   type EncodeJob,
   type EncodeJobId,
+  type FilesystemVerificationRun,
+  type FilesystemVerificationRunId,
   type OriginalDiscArchive,
   type OriginalDiscArchiveId,
   type OpticalDriveId,
@@ -27,13 +29,14 @@ export const OPERATION_KINDS = [
   "archive-jobs",
   "original-disc-archives",
   "encode-jobs",
+  "filesystem-verifications",
   "worker-incidents",
   "activity",
 ] as const;
 
 export type OperationKind = (typeof OPERATION_KINDS)[number];
 export type WaitableKind = Extract<OperationKind,
-  "disc-inspections" | "archive-requests" | "archive-jobs" | "encode-jobs"
+  "disc-inspections" | "archive-requests" | "archive-jobs" | "encode-jobs" | "filesystem-verifications"
 >;
 
 const DEFAULT_LIMIT = 50;
@@ -49,7 +52,8 @@ export function isOperationKind(value: string): value is OperationKind {
 
 export function isWaitableKind(value: string): value is WaitableKind {
   return value === "disc-inspections" || value === "archive-requests" ||
-    value === "archive-jobs" || value === "encode-jobs";
+    value === "archive-jobs" || value === "encode-jobs" ||
+    value === "filesystem-verifications";
 }
 
 export function validOperationLimit(value: number): boolean {
@@ -108,6 +112,14 @@ function visibleIncident(incident: WorkerIncident) {
     ...incident,
     status: incident.resolvedAt === null ? "active" : "recovered",
   };
+}
+
+function visibleVerificationRun({
+  claimToken: _claimToken,
+  claimedAt: _claimedAt,
+  ...run
+}: FilesystemVerificationRun) {
+  return run;
 }
 
 function recentWork<T extends { status: string; updatedAt: Date; id: string }>(
@@ -239,6 +251,10 @@ function activity(access: ConsistentReadAccess, limit: number) {
       kind: "encode-jobs", id: item.id, status: item.status,
       occurredAt: item.updatedAt,
     })),
+    ...access.filesystemVerification.list({ limit }).map((item) => ({
+      kind: "filesystem-verifications", id: item.id, status: item.status,
+      occurredAt: item.updatedAt,
+    })),
     ...incidents(access, limit).map((item) => ({
       kind: "worker-incidents", id: item.id,
       status: item.resolvedAt === null ? "active" : "recovered",
@@ -275,6 +291,8 @@ function readList(access: ConsistentReadAccess, kind: OperationKind, limit: numb
       return recentWork(access.encodeJobs.list(undefined, {
         policy: boundedPolicy(limit),
       }), ["queued", "running", "cancellation_requested"], limit).map(visibleEncodeJob);
+    case "filesystem-verifications":
+      return access.filesystemVerification.list({ limit }).map(visibleVerificationRun);
     case "worker-incidents":
       return incidents(access, limit).slice(0, limit).map(visibleIncident);
     case "activity":
@@ -397,6 +415,10 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
       const incident = access.workerIncidents.find(id as WorkerIncidentId);
       return incident ? visibleIncident(incident) : null;
     }
+    case "filesystem-verifications": {
+      const run = access.filesystemVerification.find(id as FilesystemVerificationRunId);
+      return run === null ? null : visibleVerificationRun(run);
+    }
   }
 }
 
@@ -421,6 +443,7 @@ const TERMINAL_STATUSES: Record<WaitableKind, readonly string[]> = {
   "archive-requests": ["fulfilled", "cancelled", "needs_attention"],
   "archive-jobs": ["completed", "failed", "cancelled", "aborted"],
   "encode-jobs": ["completed", "failed", "cancelled"],
+  "filesystem-verifications": ["completed", "failed"],
 };
 
 export async function waitForOperation(

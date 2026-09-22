@@ -8,6 +8,8 @@ import type {
   EncodingProfile,
   EncodingProfileId,
   DiscInspectionId,
+  FilesystemVerificationTarget,
+  EncodeJobId,
   OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 
@@ -101,6 +103,8 @@ function readDeploymentReadiness(access: ConsistentReadAccess) {
   const encodeJobs = access.encodeJobs
     .list(["queued", "running", "cancellation_requested"])
     .map(({ id, status }) => ({ kind: "encode_job", id, status }));
+  const verificationRuns = access.filesystemVerification.listActive()
+    .map(({ id, status }) => ({ kind: "filesystem_verification", id, status }));
   const opticalDrives = access.catalog.listOpticalDrives().map((drive) => ({
     id: drive.id,
     devicePath: drive.devicePath,
@@ -116,6 +120,7 @@ function readDeploymentReadiness(access: ConsistentReadAccess) {
       ...archiveRequests,
       ...archiveJobs,
       ...encodeJobs,
+      ...verificationRuns,
     ],
     opticalDrives,
   };
@@ -234,6 +239,34 @@ export function createApplicationOperations(
         mutationKey, id: input.discInspectionId as DiscInspectionId,
       });
       return { inspection };
+    },
+    submitFilesystemVerification: (input: {
+      mutationKey: unknown;
+      target: FilesystemVerificationTarget;
+      targetId: string;
+    }) => {
+      const mutationKey = parseMutationKey(input.mutationKey);
+      if (input.target !== "original_disc_archive" &&
+        input.target !== "encode_job_output") {
+        throw new RangeError("Unknown verification target.");
+      }
+      const targetId = input.targetId.trim();
+      if (targetId.length === 0 || targetId.length > 256) {
+        throw new RangeError("Invalid verification target ID.");
+      }
+      const targetReference = input.target === "original_disc_archive"
+        ? { target: input.target, targetId: targetId as OriginalDiscArchiveId }
+        : { target: input.target, targetId: targetId as EncodeJobId };
+      const run = access.filesystemVerification.submit({ mutationKey, ...targetReference });
+      return { verificationRun: {
+        id: run.id,
+        target: run.target,
+        targetId: run.targetId,
+        status: run.status,
+        progressPhase: run.progressPhase,
+        createdAt: run.createdAt.toISOString(),
+        updatedAt: run.updatedAt.toISOString(),
+      } };
     },
     catalogReview: (
       id: OriginalDiscArchiveId,

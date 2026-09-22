@@ -428,6 +428,10 @@ docker compose --profile maintenance run --rm operator-cli readiness
 docker compose --profile maintenance run --rm operator-cli inspect disc-inspections
 docker compose --profile maintenance run --rm operator-cli inspect archive-requests synthetic-request-id
 docker compose --profile maintenance run --rm operator-cli wait archive-requests synthetic-request-id --timeout-ms 30000
+docker compose --profile maintenance run --rm operator-cli generate-key
+docker compose --profile maintenance run --rm operator-cli submit-filesystem-verification --key 00000000-0000-4000-8000-000000000001 --target original_disc_archive --id synthetic-archive-id
+docker compose --profile maintenance run --rm operator-cli inspect filesystem-verifications
+docker compose --profile maintenance run --rm operator-cli wait filesystem-verifications synthetic-run-id --timeout-ms 30000
 docker compose --profile maintenance run --rm operator-cli help
 ```
 
@@ -447,7 +451,8 @@ deployment activity rather than promising that every drive can start work.
 known action eligibility where applicable. The supported kinds are
 `optical-drives`, `detected-discs`,
 `disc-inspections`, `archive-requests`, `archive-jobs`,
-`original-disc-archives`, `encode-jobs`, `worker-incidents`, and `activity`.
+`original-disc-archives`, `encode-jobs`, `filesystem-verifications`,
+`worker-incidents`, and `activity`.
 Disc Inspection detail includes every persisted attempt and its source
 continuity and settled-capacity evidence. Archive Request detail keeps intent
 separate from Archive Job attempts. Archive and job detail includes the
@@ -455,7 +460,7 @@ persisted integrity, boundary, progress, and failure evidence. The equivalent
 web read is `GET /api/operations?kind=<kind>&id=<id>`; omit `id` for a list.
 
 `wait <kind> <id> --timeout-ms <milliseconds>` polls existing Disc Inspection,
-Archive Request, Archive Job, or Encode Job state for up to one hour. It returns
+Archive Request, Archive Job, Encode Job, or filesystem verification state for up to one hour. It returns
 `outcome: settled` with the current record when work reaches a terminal or
 attention-needed state. Timeout returns `outcome: timeout` with current state
 and never cancels work. The optional `--poll-ms` range is 100..5000 and
@@ -495,11 +500,34 @@ with `MUTATION_KEY_CONFLICT`.
 Repeat the same command with the same key and target if the response is lost.
 The application returns the original submission result, including its original
 status and timestamps, even if the request has since progressed. Current work
-state comes from the dashboard until CLI status commands are added. A fresh key
+state comes from `inspect archive-requests <id>`. A fresh key
 does not override archive eligibility rules. The web Archive Request endpoint
 uses the same durable replay record; its POST body contains `detectedDiscId`
 and `mutationKey`, and the dashboard retains a pending key for a retry after a
 failed response.
+
+### Run filesystem verification
+
+Submit an archive or Encode Job output check with a key created before the
+request. The command returns a durable verification run ID as soon as the work
+is queued. Repeating the same key and target returns the original submission.
+
+```bash
+docker compose --profile maintenance run --rm operator-cli \
+  submit-filesystem-verification --key <key> --target original_disc_archive --id <archive-id>
+docker compose --profile maintenance run --rm operator-cli \
+  inspect filesystem-verifications <run-id>
+docker compose --profile maintenance run --rm operator-cli \
+  wait filesystem-verifications <run-id> --timeout-ms 30000
+```
+
+Use `--target encode_job_output --id <encode-job-id>` for an output. The Archive
+Worker executes queued checks. Run detail retains its queued, checking, or
+completed phase and the result after the CLI exits. `completed` means the
+accessibility check ran; `resultStatus` can still be `missing`, `inaccessible`,
+or `error`. `failed` records a worker failure and keeps the prior target result.
+Verification checks path accessibility and recorded archive size where known.
+It does not repair files or prove content integrity.
 
 ### TypeScript roadmap and implementation frontier
 
@@ -559,8 +587,8 @@ The runtime mount and hardware boundary is deliberately narrow:
 
 | Service | SQLite data | Media Library | Original Disc Archive | Optical device |
 | --- | --- | --- | --- | --- |
-| web | read/write | read-only verification | read-only verification | none |
-| archive worker | read/write | none | read/write | block device read-only; matching SCSI-generic device for CSS authentication |
+| web | read/write | none | none | none |
+| archive worker | read/write | read-only verification | read/write | block device read-only; matching SCSI-generic device for CSS authentication |
 | encode worker | read/write | read/write | read-only | none |
 | migration | read/write | none | none | none |
 | backup | read/write for WAL locking | none | none | none |
@@ -767,14 +795,15 @@ state from library files or process streams.
 Original Disc Archives and Encode Jobs have explicit **Verify archive file**
 and **Verify output file** actions. A separately paged Filesystem Verification
 inventory keeps every known output and archive reachable after it leaves the
-bounded operations history or completes catalog review. These actions inspect
-only the selected database-recorded path through the read-only library mounts,
-then store an accessible, missing, inaccessible, or unexpected-error result
-with a verification time in SQLite. The probe runs in a short-lived helper
-process with a three-second deadline and a two-helper admission ceiling, so a
-stalled mount cannot block the Next.js request event loop or create unbounded
-work. Media Library root canonicalization happens inside that bounded explicit
-helper; opening the shared data-access facade never touches the Media Library.
+bounded operations history or completes catalog review. These actions queue
+durable verification runs. The archive worker inspects only the selected
+database-recorded path through its library mounts, then stores an accessible,
+missing, inaccessible, or unexpected-error result with a verification time in
+SQLite. The probe runs in a short-lived helper process with a three-second
+deadline and a two-helper admission ceiling, so a stalled mount cannot block
+the archive worker or create unbounded work. Media Library root canonicalization
+happens inside that bounded explicit helper; opening the shared data-access
+facade never touches the Media Library.
 The dashboard and SSE snapshots show stored results and normalized, path-free
 worker failure reasons without exposing raw diagnostics or paths.
 Ordinary dashboard, catalog, and queue reads continue to trust SQLite and never
@@ -960,8 +989,9 @@ sudo install -d -o 1000 -g 1000 -m 0775 .local/media .local/originals
 
 Existing library directories should keep their intended ownership; grant UID
 1000 write access through their owner, group, or ACL rather than changing them
-blindly. The web runtime mounts both libraries read-only, while the archive
-worker writes originals and the encode worker writes media.
+blindly. The web runtime has no library mounts. The archive worker reads media
+and writes originals, the encode worker reads originals and writes media, and
+the operator CLI mounts both libraries read-only.
 
 After building the worker images, exercise their configured image commands and
 output mounts as the non-root user with fresh named-volume and bind-mount

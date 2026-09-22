@@ -11,11 +11,14 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { completeCatalogReview } from "./catalog.test-support.js";
+import { MutationKeyConflictError, StaleJobAttemptError } from "./errors.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
+import type { DataAccess, EncodeJobId, OriginalDiscArchiveId } from "./types.js";
 
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -105,7 +108,123 @@ function createEncodeJobFixture(
   return { job, outputPath };
 }
 
+let verificationInvocation = 0;
+
+async function verifyOriginalDiscArchive(
+  access: DataAccess,
+  id: OriginalDiscArchiveId,
+) {
+  const run = access.filesystemVerification.submit({
+    mutationKey: `verification-test-${verificationInvocation++}`,
+    target: "original_disc_archive",
+    targetId: id,
+  });
+  const claim = access.filesystemVerification.claimNext();
+  if (claim?.id !== run.id) throw new Error("Expected queued archive verification");
+  await access.filesystemVerification.execute(claim);
+  return access.catalog.listOriginalDiscArchives({ ids: [id] })[0]!;
+}
+
+async function verifyEncodeJobOutput(access: DataAccess, id: EncodeJobId) {
+  const run = access.filesystemVerification.submit({
+    mutationKey: `verification-test-${verificationInvocation++}`,
+    target: "encode_job_output",
+    targetId: id,
+  });
+  const claim = access.filesystemVerification.claimNext();
+  if (claim?.id !== run.id) throw new Error("Expected queued output verification");
+  await access.filesystemVerification.execute(claim);
+  return access.encodeJobs.find(id)!;
+}
+
 describe("explicit filesystem verification", () => {
+  it("replays one durable submission after reconnect and fences recovered claims", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { access, archive, directory } = createArchiveFixture();
+    const input = {
+      mutationKey: "verification-invocation-one",
+      target: "original_disc_archive" as const,
+      targetId: archive.id,
+    };
+    const submitted = access.filesystemVerification.submit(input);
+    expect(submitted).toMatchObject({ status: "queued", progressPhase: "queued" });
+    expect(access.filesystemVerification.submit(input)).toEqual(submitted);
+    expect(() => access.filesystemVerification.submit({
+      ...input, targetId: "different-archive" as OriginalDiscArchiveId,
+    })).toThrow(MutationKeyConflictError);
+    const stale = access.filesystemVerification.claimNext()!;
+    expect(stale).toMatchObject({ id: submitted.id, status: "running", progressPhase: "checking" });
+    access.close();
+
+    const reconnected = createLegacySidecarDataAccess({
+      databasePath: join(directory, "catalog.sqlite"),
+      mediaLibraryPath: directory,
+      originalsLibraryPath: directory,
+    });
+    expect(reconnected.filesystemVerification.submit(input)).toEqual(submitted);
+    expect(reconnected.filesystemVerification.find(submitted.id)?.status).toBe("running");
+    vi.setSystemTime(new Date("2026-01-01T00:00:16.000Z"));
+    expect(reconnected.filesystemVerification.renewClaim(stale)).toBe(true);
+    vi.setSystemTime(new Date("2026-01-01T00:01:01.000Z"));
+    expect(reconnected.filesystemVerification.recoverExpiredClaims()).toBe(0);
+    vi.setSystemTime(new Date("2026-01-01T00:01:17.000Z"));
+    expect(reconnected.filesystemVerification.recoverExpiredClaims()).toBe(1);
+    expect(reconnected.filesystemVerification.renewClaim(stale)).toBe(false);
+    const recovered = reconnected.filesystemVerification.claimNext()!;
+    expect(recovered.claimToken).not.toBe(stale.claimToken);
+    await expect(reconnected.filesystemVerification.execute(stale))
+      .rejects.toThrow(StaleJobAttemptError);
+    expect(reconnected.filesystemVerification.fail(stale)).toBeNull();
+    const completed = await reconnected.filesystemVerification.execute(recovered);
+    expect(completed).toMatchObject({
+      id: submitted.id, status: "completed", progressPhase: "completed",
+      resultStatus: "accessible", resultMessage: "File is accessible.",
+    });
+    expect(reconnected.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toMatchObject({ verificationStatus: "accessible" });
+    reconnected.close();
+  });
+
+  it("retains a failed run without overwriting the previous target result", () => {
+    const { access, archive } = createArchiveFixture();
+    const run = access.filesystemVerification.submit({
+      mutationKey: "verification-failure-one",
+      target: "original_disc_archive",
+      targetId: archive.id,
+    });
+    const claim = access.filesystemVerification.claimNext()!;
+    expect(access.filesystemVerification.fail(claim)).toMatchObject({
+      id: run.id, status: "failed", failureCode: "VERIFICATION_UNAVAILABLE",
+    });
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toMatchObject({ verificationStatus: null });
+    access.close();
+  });
+
+  it("bounds expired claim recovery to one worker batch", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { access, archive } = createArchiveFixture();
+    for (let index = 0; index < 101; index += 1) {
+      access.filesystemVerification.submit({
+        mutationKey: `verification-batch-${index}`,
+        target: "original_disc_archive",
+        targetId: archive.id,
+      });
+      expect(access.filesystemVerification.claimNext()).not.toBeNull();
+    }
+    vi.setSystemTime(new Date("2026-01-01T00:01:01.000Z"));
+
+    expect(access.filesystemVerification.recoverExpiredClaims()).toBe(100);
+    expect(access.filesystemVerification.listActive()
+      .filter(({ status }) => status === "running")).toHaveLength(1);
+    expect(access.filesystemVerification.recoverExpiredClaims()).toBe(1);
+    expect(access.filesystemVerification.listActive()
+      .filter(({ status }) => status === "running")).toHaveLength(0);
+    access.close();
+  });
+
   it("does not touch the Media Library while constructing or reading the facade", () => {
     const directory = mkdtempSync(join(tmpdir(), "rip-dvd-verification-open-"));
     temporaryDirectories.push(directory);
@@ -144,8 +263,8 @@ describe("explicit filesystem verification", () => {
     const { job } = createEncodeJobFixture(fixture);
 
     const [archiveVerification, outputVerification] = await Promise.all([
-      access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
-      access.filesystemVerification.verifyEncodeJobOutput(job.id),
+      verifyOriginalDiscArchive(access, archive.id),
+      verifyEncodeJobOutput(access, job.id),
     ]);
 
     expect([archiveVerification, outputVerification]).toEqual([
@@ -178,8 +297,8 @@ describe("explicit filesystem verification", () => {
 
     expect(inspect).not.toHaveBeenCalled();
 
-    await access.filesystemVerification.verifyOriginalDiscArchive(archive.id);
-    await access.filesystemVerification.verifyEncodeJobOutput(job.id);
+    await verifyOriginalDiscArchive(access, archive.id);
+    await verifyEncodeJobOutput(access, job.id);
 
     expect(inspect).toHaveBeenNthCalledWith(
       1,
@@ -209,14 +328,14 @@ describe("explicit filesystem verification", () => {
     const { job } = createEncodeJobFixture(fixture);
 
     expect(
-      await access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
+      await verifyOriginalDiscArchive(access, archive.id),
     ).toMatchObject({
       verificationStatus: "error",
       verificationMessage:
         "Recorded path is outside the configured library.",
     });
     expect(
-      await access.filesystemVerification.verifyEncodeJobOutput(job.id),
+      await verifyEncodeJobOutput(access, job.id),
     ).toMatchObject({
       verificationStatus: "error",
       verificationMessage:
@@ -238,7 +357,7 @@ describe("explicit filesystem verification", () => {
     symlinkSync(outsidePath, archive.archivePath);
 
     expect(
-      await access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
+      await verifyOriginalDiscArchive(access, archive.id),
     ).toMatchObject({
       verificationStatus: "error",
       verificationMessage: "Recorded path is not a regular file.",
@@ -258,7 +377,7 @@ describe("explicit filesystem verification", () => {
     });
 
     const verified =
-      await access.filesystemVerification.verifyOriginalDiscArchive(archive.id);
+      await verifyOriginalDiscArchive(access, archive.id);
 
     expect(verified).toMatchObject({
       id: archive.id,
@@ -278,7 +397,7 @@ describe("explicit filesystem verification", () => {
     });
 
     await expect(
-      access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
+      verifyOriginalDiscArchive(access, archive.id),
     ).resolves.toMatchObject({
       verificationStatus: "accessible",
       verificationMessage: "File is accessible.",
@@ -286,7 +405,7 @@ describe("explicit filesystem verification", () => {
 
     writeFileSync(archive.archivePath, "preserved disc with a suffix");
     await expect(
-      access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
+      verifyOriginalDiscArchive(access, archive.id),
     ).resolves.toMatchObject({
       verificationStatus: "error",
       verificationMessage:
@@ -308,7 +427,7 @@ describe("explicit filesystem verification", () => {
     });
 
     const verified =
-      await access.filesystemVerification.verifyEncodeJobOutput(job.id);
+      await verifyEncodeJobOutput(access, job.id);
 
     expect(verified).toMatchObject({
       id: job.id,
@@ -325,7 +444,7 @@ describe("explicit filesystem verification", () => {
     const fixture = createArchiveFixture();
     const { access, directory } = fixture;
     const { job } = createEncodeJobFixture(fixture);
-    await access.filesystemVerification.verifyEncodeJobOutput(job.id);
+    await verifyEncodeJobOutput(access, job.id);
     const claim = access.encodeJobs.claimNext("verification-worker");
     expect(claim).not.toBeNull();
     access.encodeJobs.fail(claim!, "retry elsewhere");
@@ -340,7 +459,7 @@ describe("explicit filesystem verification", () => {
       verifiedAt: null,
     });
     expect(
-      await access.filesystemVerification.verifyEncodeJobOutput(job.id),
+      await verifyEncodeJobOutput(access, job.id),
     ).toMatchObject({
       verificationStatus: "missing",
       verificationMessage: "File is missing at the recorded path.",
@@ -363,7 +482,7 @@ describe("explicit filesystem verification", () => {
     const { access, archive } = fixture;
 
     await expect(
-      access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
+      verifyOriginalDiscArchive(access, archive.id),
     ).resolves.toMatchObject({
       id: archive.id,
       verificationStatus: "error",
@@ -386,8 +505,8 @@ describe("explicit filesystem verification", () => {
 
     for (const verify of [
       () =>
-        access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
-      () => access.filesystemVerification.verifyEncodeJobOutput(job.id),
+        verifyOriginalDiscArchive(access, archive.id),
+      () => verifyEncodeJobOutput(access, job.id),
     ]) {
       try {
         results.push(await verify());
@@ -415,7 +534,7 @@ describe("explicit filesystem verification", () => {
     {
       code: "EACCES",
       expectedStatus: "inaccessible",
-      expectedMessage: "The web process cannot access the recorded path.",
+      expectedMessage: "The recorded path cannot be accessed.",
     },
     {
       code: "EIO",
@@ -441,8 +560,8 @@ describe("explicit filesystem verification", () => {
 
       for (const verify of [
         () =>
-          access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
-        () => access.filesystemVerification.verifyEncodeJobOutput(job.id),
+          verifyOriginalDiscArchive(access, archive.id),
+        () => verifyEncodeJobOutput(access, job.id),
       ]) {
         try {
           results.push(await verify());

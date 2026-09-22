@@ -9,6 +9,7 @@ import { createNodeDvdCompletenessProver } from "./dvd-completeness-prover.js";
 import { createNodeDvdGeometryValidator } from "./dvd-geometry-validator.js";
 import { createNodeDvdEndpointProver } from "./dvd-endpoint-prover.js";
 import { createLinuxOpticalDriveHardware } from "./optical-drive-hardware.js";
+import { runFilesystemVerificationWorker } from "./filesystem-verification-worker.js";
 import { createNodeDvdSalvageValidator } from "./dvd-salvage-validator.js";
 
 await runConfiguredAsyncWorker(
@@ -20,14 +21,27 @@ await runConfiguredAsyncWorker(
   async ({ config, log, signal }) => {
     const access = createDataAccess({
       databasePath: config.databasePath,
+      mediaLibraryPath: config.mediaLibraryPath,
       originalsLibraryPath: config.originalsLibraryPath,
     });
     const copyRunner = createNodeDvdCopyRunner({
       maxActiveCopies: config.archiveWorkerConcurrency,
       stallTimeoutMs: config.archiveCopyStallTimeoutMs,
     });
+    const workers = new AbortController();
+    const stopWorkers = () => workers.abort(signal.reason);
+    signal.addEventListener("abort", stopWorkers, { once: true });
+    if (signal.aborted) stopWorkers();
+    const stopOnFailure = async (work: Promise<void>): Promise<void> => {
+      try {
+        await work;
+      } catch (error) {
+        workers.abort(error);
+        throw error;
+      }
+    };
     try {
-      await runArchiveWorker({
+      const results = await Promise.allSettled([stopOnFailure(runArchiveWorker({
         access,
         concurrency: config.archiveWorkerConcurrency,
         configuredDevicePath: config.archiveDevicePath,
@@ -40,10 +54,19 @@ await runConfiguredAsyncWorker(
         originalsLibraryPath: config.originalsLibraryPath,
         salvageValidator: createNodeDvdSalvageValidator(),
         pollIntervalMs: config.workerPollIntervalMs,
-        signal,
+        signal: workers.signal,
         workerId: `archive-worker:${process.pid}:${randomUUID()}`,
-      });
+      })), stopOnFailure(runFilesystemVerificationWorker({
+        access,
+        intervalMs: config.workerPollIntervalMs,
+        log,
+        signal: workers.signal,
+      }))]);
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
     } finally {
+      workers.abort();
+      signal.removeEventListener("abort", stopWorkers);
       access.close();
     }
   },

@@ -22,6 +22,7 @@ import {
   MutationKeyConflictError,
   RecordNotFoundError,
   type OriginalDiscArchiveId,
+  type FilesystemVerificationTarget,
   type DataAccess,
 } from "@rip-dvd/data-access";
 import { runDiscSelection } from "./disc-selection.js";
@@ -96,6 +97,13 @@ const commandDefinitions = [
       inputs: { arguments: [], options: ["--key", command.targetFlag] },
       example: `rip-dvd-operator ${name} --key 00000000-0000-4000-8000-000000000001 ${command.targetFlag} <id>`,
     })),
+  {
+    name: "submit-filesystem-verification",
+    description: "Queue accessibility verification for an archive or Encode Job output.",
+    usage: "rip-dvd-operator submit-filesystem-verification --key <key> --target <original_disc_archive|encode_job_output> --id <id>",
+    inputs: { arguments: [], options: ["--key", "--target", "--id"] },
+    example: "rip-dvd-operator submit-filesystem-verification --key 00000000-0000-4000-8000-000000000001 --target original_disc_archive --id <id>",
+  },
   {
     name: "catalog-review",
     description: "Inspect a Catalog Review, discover candidates, or apply a complete Mapping Proposal.",
@@ -341,21 +349,22 @@ function runOperation(
   }
 }
 
-function submissionInputs(args: readonly string[]): {
-  mutationKey: string;
-  detectedDiscId: string;
-} {
+function mutationOptions(
+  args: readonly string[],
+  allowed: readonly string[],
+  invalidOptionsMessage: string,
+): { options: Map<string, string>; mutationKey: string } {
   const options = new Map<string, string>();
   for (let index = 0; index < args.length; index += 2) {
     const name = args[index];
     const value = args[index + 1];
     if (
-      (name !== "--key" && name !== "--detected-disc-id") ||
+      !allowed.includes(name) ||
       value === undefined ||
       value.startsWith("--") ||
       options.has(name)
     ) {
-      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Archive Request options.", 2);
+      throw new CommandFailure("INVALID_ARGUMENTS", invalidOptionsMessage, 2);
     }
     options.set(name, value);
   }
@@ -368,6 +377,16 @@ function submissionInputs(args: readonly string[]): {
     }
     throw error;
   }
+  return { options, mutationKey };
+}
+
+function submissionInputs(args: readonly string[]): {
+  mutationKey: string;
+  detectedDiscId: string;
+} {
+  const { options, mutationKey } = mutationOptions(
+    args, ["--key", "--detected-disc-id"], "Invalid Archive Request options.",
+  );
   const detectedDiscId = options.get("--detected-disc-id")?.trim();
   if (!detectedDiscId) {
     throw new CommandFailure("INVALID_ARGUMENTS", "Detected Disc ID is required.", 2);
@@ -406,6 +425,41 @@ function submitArchiveRequest(
       "Archive Request submission is unavailable.",
       1,
     );
+  } finally {
+    access?.close();
+  }
+}
+
+function verificationInputs(args: readonly string[]) {
+  const { options, mutationKey } = mutationOptions(
+    args, ["--key", "--target", "--id"], "Invalid verification options.",
+  );
+  const target = options.get("--target");
+  const targetId = options.get("--id")?.trim();
+  if ((target !== "original_disc_archive" && target !== "encode_job_output") ||
+    !targetId || targetId.length > 256) {
+    throw new CommandFailure("INVALID_ARGUMENTS", "Invalid verification target.", 2);
+  }
+  return { mutationKey, target: target as FilesystemVerificationTarget, targetId };
+}
+
+function submitFilesystemVerification(
+  input: ReturnType<typeof verificationInputs>,
+  openAccess: CommandIO["openAccess"],
+) {
+  let access: DataAccess | undefined;
+  try {
+    access = openAccess();
+    return createApplicationOperations(access).submitFilesystemVerification(input);
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    if (error instanceof MutationKeyConflictError) {
+      throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    if (error instanceof RecordNotFoundError) {
+      throw new CommandFailure("VERIFICATION_TARGET_NOT_FOUND", "Verification target not found.", 2);
+    }
+    throw new CommandFailure("VERIFICATION_UNAVAILABLE", "Verification submission is unavailable.", 1);
   } finally {
     access?.close();
   }
@@ -737,6 +791,14 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         return 0;
       }
       emit(io.stdout, runRecoveryCommand(name, recoveryInputs(name, rest), io));
+      return 0;
+    }
+    if (name === "submit-filesystem-verification") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+        return 0;
+      }
+      emit(io.stdout, submitFilesystemVerification(verificationInputs(rest), io.openAccess));
       return 0;
     }
     if (name === "catalog-review") {

@@ -80,6 +80,26 @@ export type ArchiveProgressPhase = ArchiveRunningProgressPhase;
 export type EncodeProgressPhase = (typeof ENCODE_PROGRESS_PHASES)[number];
 export type FilesystemVerificationStatus =
   (typeof FILESYSTEM_VERIFICATION_STATUSES)[number];
+export type FilesystemVerificationTarget = "original_disc_archive" | "encode_job_output";
+export type FilesystemVerificationRunStatus = "queued" | "running" | "completed" | "failed";
+export type FilesystemVerificationTargetReference =
+  | { target: "original_disc_archive"; targetId: OriginalDiscArchiveId }
+  | { target: "encode_job_output"; targetId: EncodeJobId };
+interface FilesystemVerificationRunBase {
+  id: FilesystemVerificationRunId;
+  status: FilesystemVerificationRunStatus;
+  progressPhase: "queued" | "checking" | "completed";
+  resultStatus: FilesystemVerificationStatus | null;
+  resultMessage: string | null;
+  verifiedAt: Date | null;
+  failureCode: string | null;
+  claimToken: FilesystemVerificationClaimToken | null;
+  claimedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+export type FilesystemVerificationRun = FilesystemVerificationRunBase &
+  FilesystemVerificationTargetReference;
 export type RetainedEncodeOutputState =
   (typeof RETAINED_ENCODE_OUTPUT_STATES)[number];
 export type WorkerKind = (typeof WORKER_KINDS)[number];
@@ -118,6 +138,8 @@ export type DiscInspectionClaimToken = DomainId<"DiscInspectionClaim">;
 export type EncodeJobClaimToken = DomainId<"EncodeJobClaim">;
 export type EncodeJobCleanupClaimToken = DomainId<"EncodeJobCleanupClaim">;
 export type WorkerIncidentId = DomainId<"WorkerIncident">;
+export type FilesystemVerificationRunId = DomainId<"FilesystemVerificationRun">;
+export type FilesystemVerificationClaimToken = DomainId<"FilesystemVerificationClaim">;
 
 declare const encodeOutputFilesystemIdentityBrand: unique symbol;
 export type EncodeOutputFilesystemIdentity = string & {
@@ -1511,15 +1533,21 @@ export interface EncodeJobAccess {
 }
 
 export interface FilesystemVerificationAccess {
+  submit(input: { mutationKey: string } & FilesystemVerificationTargetReference):
+    FilesystemVerificationRun;
+  find(id: FilesystemVerificationRunId): FilesystemVerificationRun | null;
+  list(options: { limit: number }): FilesystemVerificationRun[];
+  listActive(): FilesystemVerificationRun[];
+  claimNext(): FilesystemVerificationRun | null;
+  recoverExpiredClaims(): number;
+  renewClaim(claim: FilesystemVerificationRun): boolean;
+  execute(claim: FilesystemVerificationRun): Promise<FilesystemVerificationRun>;
+  fail(claim: FilesystemVerificationRun): FilesystemVerificationRun | null;
   listOriginalDiscArchives(options: {
     limit: number;
     offset?: number;
   }): OriginalDiscArchive[];
   listEncodeJobOutputs(options: { limit: number; offset?: number }): EncodeJob[];
-  verifyOriginalDiscArchive(
-    id: OriginalDiscArchiveId,
-  ): Promise<OriginalDiscArchive>;
-  verifyEncodeJobOutput(id: EncodeJobId): Promise<EncodeJob>;
 }
 
 export interface WorkerIncidentAccess {
@@ -1579,6 +1607,7 @@ export interface ConsistentReadAccess {
     | "listRetainedOutputSummaries"
   >;
   readonly workerIncidents: Pick<WorkerIncidentAccess, "find" | "list">;
+  readonly filesystemVerification: Pick<FilesystemVerificationAccess, "find" | "list" | "listActive">;
 }
 
 export interface DataAccess {

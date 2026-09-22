@@ -49,6 +49,7 @@ import type {
   DvdNormalEndpointProof,
 } from "./dvd-endpoint-prover.js";
 import { createNodeDvdGeometryValidator } from "./dvd-geometry-validator.js";
+import { pollFilesystemVerification } from "./filesystem-verification-worker.js";
 import {
   createCleanDvdRecoveryResult,
   createDamagedDvdRecoveryResult,
@@ -1919,8 +1920,14 @@ describe("archive worker polling", () => {
       firstExcludedLba,
       maximumReferencedLba: firstExcludedLba - 1,
     });
-    const verifiedArchive =
-      await access.filesystemVerification.verifyOriginalDiscArchive(archive.id);
+    const verificationRun = access.filesystemVerification.submit({
+      mutationKey: "corrected-boundary-verification",
+      target: "original_disc_archive",
+      targetId: archive.id,
+    });
+    expect(await pollFilesystemVerification(access)).toBe(true);
+    expect(access.filesystemVerification.find(verificationRun.id)?.status).toBe("completed");
+    const verifiedArchive = access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!;
     expect(verifiedArchive).toMatchObject({
       sizeBytes: retainedPrefix.byteLength,
       verificationStatus: "accessible",

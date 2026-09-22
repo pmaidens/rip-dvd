@@ -6,6 +6,7 @@ import {
 } from "../../../test/archive-job-fixture";
 import {
   completeCatalogReview,
+  executeFilesystemVerificationForTest,
   useDataAccessFixture,
 } from "../../../test/data-access-fixture";
 import { createActionOverviewRoute } from "./route";
@@ -71,8 +72,12 @@ describe("Action overview API", () => {
       }
       access.encodeJobs.fail(claim, "fixture failure");
     }
-    await access.filesystemVerification.verifyOriginalDiscArchive(archive.id);
-    await access.filesystemVerification.verifyEncodeJobOutput(jobs[0]!.id);
+    await executeFilesystemVerificationForTest(access, {
+      target: "original_disc_archive", targetId: archive.id,
+    });
+    await executeFilesystemVerificationForTest(access, {
+      target: "encode_job_output", targetId: jobs[0]!.id,
+    });
 
     const response = createActionOverviewRoute(() => access);
     const body = await response.json();

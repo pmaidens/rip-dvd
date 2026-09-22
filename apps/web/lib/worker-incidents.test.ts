@@ -10,6 +10,46 @@ afterEach(() => {
 });
 
 describe("Worker Incidents on the dashboard", () => {
+  it("describes active and recovered Filesystem Verification claim recovery", () => {
+    const access = dataAccessFixture.create();
+    const identity = {
+      workerKind: "archive",
+      reasonCode: "claim_recovery_failure",
+      phase: "claim_recovery",
+      retryability: "automatic",
+      schemaVersion: 1,
+      evidence: { recoveryArea: "filesystem_verification" },
+    } as const;
+    access.workerIncidents.record(identity);
+
+    const active = readDashboardSnapshot(access).workerIncidents;
+    expect(active).toMatchObject({
+      status: "loaded",
+      items: [{
+        status: "active",
+        investigation: {
+          explanation:
+            "The Archive Worker could not finish Filesystem Verification Run claim recovery.",
+          suggestedAction:
+            "Check the Archive Worker stdout and database health. The worker will retry Filesystem Verification Run claim recovery automatically.",
+        },
+      }],
+    });
+
+    access.workerIncidents.resolve(identity);
+    const recovered = readDashboardSnapshot(access).workerIncidents;
+    expect(recovered).toMatchObject({
+      status: "loaded",
+      items: [{
+        status: "recovered",
+        investigation: {
+          suggestedAction:
+            "No action is needed. The Archive Worker completed a later Filesystem Verification Run claim-recovery pass.",
+        },
+      }],
+    });
+  });
+
   it("shows every active incident before at most the activity history limit", () => {
     vi.useFakeTimers();
     vi.setSystemTime("2026-09-01T00:00:00.000Z");
