@@ -231,6 +231,20 @@ Ordinary job-free selections can still be removed normally. Selections that
 participate in correction lineage are retained inactive so their immutable
 links remain queryable.
 
+Fresh re-archive generations use `rearchive_mapping_proposals` and
+`rearchive_mapping_proposal_items` as draft review state. A proposal links the
+fresh archive to its prior archive, records both Catalog Review revisions, and
+stores one ordered proposed mapping for every currently active prior Disc
+Selection. Preview validates Media Item existence, fresh archived-scan source
+coordinates, complete prior-selection coverage, and non-overlap without a
+write. Save repeats that validation inside one immediate transaction, advances
+the fresh catalog revision, replaces the draft atomically, and records the full
+result under the caller's invocation key. The draft item identifiers are
+intentional snapshots rather than foreign keys to Disc Selections or Media
+Items, so later source edits or removals make the proposal stale instead of
+blocking existing catalog maintenance. Proposal persistence never inserts a
+Disc Selection; Re-archive Acceptance owns adoption in a later workflow.
+
 Catalog Review reads Disc Selection action availability through a dedicated
 facade query capped at 100 selection IDs. A job-free selection is editable and
 removable. Ordinary Encode Job history locks the selection as provenance;

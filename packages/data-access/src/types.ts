@@ -442,6 +442,52 @@ interface DiscSelectionBase {
 
 export type DiscSelection = DiscSelectionBase;
 
+export type RearchiveMappingProposalState =
+  | "ready"
+  | "incomplete"
+  | "incompatible"
+  | "stale";
+
+export interface RearchiveMappingProposalMapping {
+  state: "valid" | "incomplete" | "incompatible" | "stale";
+  reason: string | null;
+  sourceDiscSelectionId: DiscSelectionId;
+  priorMapping: {
+    mediaItemId: MediaItemId;
+    sourceIdentity: DiscSelectionSourceIdentityInput;
+    label: string | null;
+  } | null;
+  proposedMapping: {
+    mediaItemId: MediaItemId;
+    sourceIdentity: DiscSelectionSourceIdentityInput;
+    label: string | null;
+  };
+}
+
+export interface RearchiveMappingProposalReview {
+  state: RearchiveMappingProposalState;
+  persisted: boolean;
+  catalogRevision: string;
+  sourceCatalogRevision: string;
+  sourceArchive: OriginalDiscArchive;
+  targetArchive: OriginalDiscArchive;
+  mappings: RearchiveMappingProposalMapping[];
+}
+
+export interface RearchiveMappingProposalMappingInput {
+  sourceDiscSelectionId: DiscSelectionId;
+  mediaItemId: MediaItemId;
+  sourceIdentity: DiscSelectionSourceIdentityInput;
+  label: string | null;
+}
+
+export interface RearchiveMappingProposalInput {
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  catalogRevision: Date;
+  sourceCatalogRevision: Date;
+  mappings: readonly RearchiveMappingProposalMappingInput[];
+}
+
 export interface DiscSelectionSupersession {
   supersededDiscSelectionId: DiscSelectionId;
   replacementDiscSelectionId: DiscSelectionId;
@@ -1256,6 +1302,15 @@ export interface CatalogAccess {
     limit?: number;
     offset?: number;
   }): DiscSelection[];
+  readRearchiveMappingProposal(
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): RearchiveMappingProposalReview | null;
+  previewRearchiveMappingProposal(
+    input: RearchiveMappingProposalInput,
+  ): RearchiveMappingProposalReview;
+  saveRearchiveMappingProposal(
+    input: RearchiveMappingProposalInput & { mutationKey: string },
+  ): RearchiveMappingProposalReview;
   getCatalogReviewCoverage(
     originalDiscArchiveId: OriginalDiscArchiveId,
   ): CatalogReviewCoverage;
@@ -1696,6 +1751,7 @@ export type SnapshotCatalogAccess = Pick<
   | "findTmdbIdentityByMediaItemId"
   | "searchMediaItems"
   | "listDiscSelections"
+  | "readRearchiveMappingProposal"
   | "getCatalogReviewCoverage"
   | "getCatalogReviewActionAvailability"
   | "listDiscSelectionSupersessions"

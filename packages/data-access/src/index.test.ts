@@ -683,16 +683,22 @@ describe("data-access facade", () => {
         "encode_job_failure_reports",
         "filesystem_verification_runs",
         "mutation_invocations",
+        "rearchive_mapping_proposal_items",
+        "rearchive_mapping_proposals",
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(23);
+    expect(identifierTables).toHaveLength(25);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "legacy_cutover_staged_sidecars"
           ? sql.includes("PRIMARY KEY(`originals_library_path`, `sidecar_path`)")
           : name === "archive_audit_findings"
             ? sql.includes("PRIMARY KEY(`archive_audit_run_id`, `sequence`)")
+          : name === "rearchive_mapping_proposal_items"
+            ? sql.includes("PRIMARY KEY(`target_archive_id`, `source_disc_selection_id`)")
+          : name === "rearchive_mapping_proposals"
+            ? sql.includes("`target_archive_id` text PRIMARY KEY")
           : name === "mutation_invocations"
             ? sql.includes("mutation_invocations_key_not_null")
             : sql.includes(`${name}_id_not_null`),
@@ -8141,6 +8147,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260922212838_modern_khan",
+      },
+      {
         name: "20260922185615_durable-archive-audits",
       },
       {
@@ -8166,9 +8175,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260901183135_encode_preparation_validation_failures",
-      },
-      {
-        name: "20260901182617_parallel_cerebro",
       },
     ]);
     expect(

@@ -184,6 +184,7 @@ export interface CatalogReviewDto {
   rawScan: { titles: DvdTitle[] };
   coverage: CatalogReviewCoverage;
   reviewActionAvailability: CatalogReviewActionAvailability;
+  rearchiveProposal?: CatalogReviewRearchiveProposal;
   mediaItems: CatalogReviewMediaItem[];
   correctionHistory: CatalogReviewDiscSelectionCorrection[];
   correctionEncodeHistory: CatalogReviewCorrectionEncodeHistory[];
@@ -215,6 +216,57 @@ export interface CatalogReviewDto {
     hasPrevious: boolean;
     hasNext: boolean;
   };
+}
+
+export interface CatalogReviewArchiveEvidence {
+  id: string;
+  detectedDiscId: string;
+  discLabel: string;
+  discKind: string;
+  archiveFormat: string;
+  boundaryEvidence: ArchiveBoundaryEvidence | null;
+  integrity: ArchiveIntegrity;
+  badSectorCount: number | null;
+  badAreaCount: number | null;
+  badSectorRanges: readonly UnreadableSectorRange[] | null;
+  archivedAt: string;
+  catalogReviewedAt: string | null;
+  catalogReviewOutcome: CatalogReviewOutcome;
+}
+
+export interface CatalogReviewRearchiveMapping {
+  state: "valid" | "incomplete" | "incompatible" | "stale";
+  reason: string | null;
+  sourceDiscSelectionId: string;
+  priorMapping: {
+    mediaItemId: string;
+    sourceIdentity: DiscSelectionSourceIdentityInput;
+    label: string | null;
+  } | null;
+  proposedMapping: {
+    mediaItemId: string;
+    sourceIdentity: DiscSelectionSourceIdentityInput;
+    label: string | null;
+  };
+}
+
+export interface CatalogReviewRearchiveProposal {
+  state: "ready" | "incomplete" | "incompatible" | "stale";
+  persisted: boolean;
+  catalogRevision: string;
+  sourceCatalogRevision: string;
+  sourceArchive: CatalogReviewArchiveEvidence;
+  targetArchive: CatalogReviewArchiveEvidence;
+  mappings: CatalogReviewRearchiveMapping[];
+}
+
+export interface SaveRearchiveMappingProposalInput {
+  mappings: Array<{
+    sourceDiscSelectionId: string;
+    mediaItemId: string;
+    sourceIdentity: DiscSelectionSourceIdentityInput;
+    label: string | null;
+  }>;
 }
 
 export type CatalogReviewLoadState =

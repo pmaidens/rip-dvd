@@ -13,8 +13,10 @@ import { CatalogReviewAutomation } from "./catalog-review-automation";
 import { CatalogReviewDiscSelections } from "./catalog-review-disc-selections";
 import { CatalogReviewEvidence } from "./catalog-review-evidence";
 import { CatalogReviewMediaItems } from "./catalog-review-media-items";
+import { CatalogReviewRearchiveProposal } from "./catalog-review-rearchive-proposal";
 import type {
   CatalogReviewLoadState,
+  CatalogReviewRearchiveProposal as CatalogReviewRearchiveProposalDto,
   CreateDiscSelectionInput,
   CreateEpisodicMappingProposalInput,
   CreateMappingProposalInput,
@@ -22,6 +24,7 @@ import type {
   EpisodicMappingProposal,
   MappingProposal,
   SaveMediaItemInput,
+  SaveRearchiveMappingProposalInput,
   UpdateDiscSelectionInput,
 } from "./catalog-review-model";
 import type { CatalogReviewReplacementEncodeInput } from "../lib/catalog-review-command";
@@ -59,6 +62,10 @@ interface CatalogReviewViewProps {
     input: CreateEpisodicMappingProposalInput,
   ): void;
   onAcceptAutomaticCatalogProposal?(proposal: AutomaticCatalogProposal): void;
+  onPreviewRearchiveMappingProposal?(
+    input: SaveRearchiveMappingProposalInput,
+  ): Promise<CatalogReviewRearchiveProposalDto>;
+  onSaveRearchiveMappingProposal?(input: SaveRearchiveMappingProposalInput): void;
   onSaveMediaItem(input: SaveMediaItemInput): void;
   onDeleteMediaItem(id: string): void;
   onCreateDiscSelection(input: CreateDiscSelectionInput): void;
@@ -100,6 +107,10 @@ export function CatalogReviewView({
   onCancelEpisodicMappingProposal,
   onCreateEpisodicMappingProposal,
   onAcceptAutomaticCatalogProposal = () => undefined,
+  onPreviewRearchiveMappingProposal = async () => {
+    throw new Error("Re-archive Mapping Proposal preview is unavailable");
+  },
+  onSaveRearchiveMappingProposal = () => undefined,
   onSaveMediaItem,
   onDeleteMediaItem,
   onCreateDiscSelection,
@@ -172,14 +183,26 @@ export function CatalogReviewView({
         </div>
       ) : null}
 
-      <CatalogReviewAutomation
-        review={review}
-        isSaving={isSaving}
-        onAcceptProposal={onAcceptAutomaticCatalogProposal}
-        onCompleteReview={onCompleteReview}
-      />
+      {review.rearchiveProposal ? (
+        <CatalogReviewRearchiveProposal
+          proposal={review.rearchiveProposal}
+          mediaItems={review.mediaItems}
+          isSaving={isSaving}
+          onPreview={onPreviewRearchiveMappingProposal}
+          onSave={onSaveRearchiveMappingProposal}
+        />
+      ) : null}
 
-      <details
+      {review.rearchiveProposal ? null : (
+        <CatalogReviewAutomation
+          review={review}
+          isSaving={isSaving}
+          onAcceptProposal={onAcceptAutomaticCatalogProposal}
+          onCompleteReview={onCompleteReview}
+        />
+      )}
+
+      {review.rearchiveProposal ? null : <details
         className="catalog-manual-workbench"
         open={
           review.reviewOutcome !== "needs_review" ||
@@ -270,7 +293,7 @@ export function CatalogReviewView({
             />
           </section>
         </div>
-      </details>
+      </details>}
     </section>
   );
 }
@@ -327,6 +350,10 @@ export function CatalogReviewEditor({
       onCancelEpisodicMappingProposal={review.cancelEpisodicMappingProposal}
       onCreateEpisodicMappingProposal={review.createEpisodicMappingProposal}
       onAcceptAutomaticCatalogProposal={review.acceptAutomaticCatalogProposal}
+      onPreviewRearchiveMappingProposal={
+        review.previewRearchiveMappingProposal
+      }
+      onSaveRearchiveMappingProposal={review.saveRearchiveMappingProposal}
       onSaveMediaItem={review.saveMediaItem}
       onDeleteMediaItem={review.deleteMediaItem}
       onCreateDiscSelection={review.createDiscSelection}

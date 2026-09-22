@@ -66,6 +66,27 @@ export function serializeDiscSelection(selection: DiscSelection) {
   };
 }
 
+function serializeRearchiveEvidence(
+  archive: ReturnType<DataAccess["catalog"]["listOriginalDiscArchives"]>[number],
+  discLabel: string | null,
+) {
+  return {
+    id: archive.id,
+    detectedDiscId: archive.detectedDiscId,
+    discLabel: discLabel ?? "Unlabeled disc",
+    discKind: archive.discKind,
+    archiveFormat: archive.archiveFormat,
+    boundaryEvidence: archiveBoundaryEvidenceFromRecord(archive),
+    integrity: archive.integrity,
+    badSectorCount: archive.badSectorCount,
+    badAreaCount: archive.badAreaCount,
+    badSectorRanges: archive.badSectorRanges,
+    archivedAt: archive.archivedAt.toISOString(),
+    catalogReviewedAt: archive.catalogReviewedAt?.toISOString() ?? null,
+    catalogReviewOutcome: archive.catalogReviewOutcome,
+  };
+}
+
 function serializeReviewDiscSelection(
   selection: DiscSelection,
   availability: DiscSelectionActionAvailability,
@@ -126,6 +147,18 @@ export function readCatalogReview(
       );
     }
     const rawTitles = decodeArchivedDvdTitles(disc.scanData) ?? [];
+    const rearchiveProposal = snapshot.catalog
+      .readRearchiveMappingProposal(id);
+    const rearchiveSourceDisc = rearchiveProposal === null
+      ? undefined
+      : snapshot.catalog.listDetectedDiscs(undefined, {
+          ids: [rearchiveProposal.sourceArchive.detectedDiscId],
+        })[0];
+    if (rearchiveProposal !== null && rearchiveSourceDisc === undefined) {
+      throw new DomainInvariantError(
+        "Re-archive Mapping Proposal is missing source Detected Disc provenance",
+      );
+    }
     const coverage = snapshot.catalog.getCatalogReviewCoverage(id);
     const reviewActionAvailability = snapshot.catalog.getCatalogReviewActionAvailability(id);
     const discSelectionRows = snapshot.catalog.listDiscSelections({
@@ -230,6 +263,15 @@ export function readCatalogReview(
       snapshot.catalog,
       [...selectionsWithHistory.values()].map(
         (selection) => selection.mediaItemId,
+      ).concat(
+        rearchiveProposal?.mappings.map(
+          (mapping) => mapping.proposedMapping.mediaItemId,
+        ) ?? [],
+        rearchiveProposal?.mappings.flatMap(
+          (mapping) => mapping.priorMapping === null
+            ? []
+            : [mapping.priorMapping.mediaItemId],
+        ) ?? [],
       ),
     );
     const mediaItemMaintenance: MediaItemMaintenance[] = [];
@@ -312,6 +354,26 @@ export function readCatalogReview(
       },
       coverage,
       reviewActionAvailability,
+      ...(rearchiveProposal === null || rearchiveSourceDisc === undefined
+        ? {}
+        : {
+          rearchiveProposal: {
+            state: rearchiveProposal.state,
+            persisted: rearchiveProposal.persisted,
+            catalogRevision: rearchiveProposal.catalogRevision,
+            sourceCatalogRevision:
+              rearchiveProposal.sourceCatalogRevision,
+            sourceArchive: serializeRearchiveEvidence(
+              rearchiveProposal.sourceArchive,
+              rearchiveSourceDisc.volumeLabel,
+            ),
+            targetArchive: serializeRearchiveEvidence(
+              rearchiveProposal.targetArchive,
+              disc.volumeLabel,
+            ),
+            mappings: rearchiveProposal.mappings,
+          },
+        }),
       mediaItems: reviewMediaItems.map((item) =>
         serializeMediaItem(item, maintenanceByMediaItemId.get(item.id))
       ),

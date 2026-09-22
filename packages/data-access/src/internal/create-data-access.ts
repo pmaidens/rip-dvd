@@ -75,6 +75,8 @@ import {
   opticalDrives,
   originalDiscArchiveContentIds,
   originalDiscArchives,
+  rearchiveMappingProposalItems,
+  rearchiveMappingProposals,
   retainedEncodeOutputs,
   workerIncidents,
 } from "./schema.js";
@@ -103,6 +105,7 @@ import {
   type ValidatedMediaItem,
 } from "./media-item-validation.js";
 import {
+  createDiscSelectionSourceIdentity,
   deserializeDiscSelectionSourceIdentity,
   discSelectionSourceDescription,
   serializeDiscSelectionSourceIdentity,
@@ -223,6 +226,9 @@ import type {
   MediaItemKind,
   OpticalDriveId,
   OriginalDiscArchiveId,
+  RearchiveMappingProposalMapping,
+  RearchiveMappingProposalInput,
+  RearchiveMappingProposalReview,
   RetainedEncodeOutputId,
   RunningArchiveJob,
   RunningEncodeJob,
@@ -2274,6 +2280,8 @@ export function createDataAccessInternal(
       transaction
         .select({
           discKind: originalDiscArchives.discKind,
+          rearchiveSourceArchiveId:
+            originalDiscArchives.rearchiveSourceArchiveId,
           scanData: detectedDiscs.scanData,
         })
         .from(originalDiscArchives)
@@ -2298,6 +2306,11 @@ export function createDataAccessInternal(
     if (source.discKind !== "dvd") {
       throw new DomainInvariantError(
         "DVD Disc Selections require a DVD Original Disc Archive",
+      );
+    }
+    if (source.rearchiveSourceArchiveId !== null) {
+      throw new DomainInvariantError(
+        "Fresh re-archive mappings require Re-archive Acceptance",
       );
     }
     const sourceIdentity =
@@ -2899,6 +2912,11 @@ export function createDataAccessInternal(
         "Catalog review currently requires a DVD Original Disc Archive",
       );
     }
+    if (archive.rearchiveSourceArchiveId !== null) {
+      throw new DomainInvariantError(
+        "Fresh re-archive review is completed through Re-archive Acceptance",
+      );
+    }
     const scanData = requireRow(
       querySource
         .select({ scanData: detectedDiscs.scanData })
@@ -2981,6 +2999,11 @@ export function createDataAccessInternal(
     if (archive.discKind !== "dvd") {
       throw new DomainInvariantError(
         "Catalog review currently requires a DVD Original Disc Archive",
+      );
+    }
+    if (archive.rearchiveSourceArchiveId !== null) {
+      throw new DomainInvariantError(
+        "Fresh re-archive review is completed through Re-archive Acceptance",
       );
     }
     const activeSelection = querySource
@@ -4295,6 +4318,318 @@ export function createDataAccessInternal(
         : value) as CompletedCatalogReviewWithReplacements;
   }
 
+  function decodeRearchiveMappingProposalReview(
+    stored: string,
+  ): RearchiveMappingProposalReview {
+    return JSON.parse(stored, (field, value: unknown) =>
+      [
+        "archivedAt",
+        "catalogReviewedAt",
+        "verifiedAt",
+        "createdAt",
+        "updatedAt",
+      ].includes(field) && typeof value === "string"
+        ? new Date(value)
+        : value) as RearchiveMappingProposalReview;
+  }
+
+  type RearchiveProposalReader = CatalogTransaction | typeof database;
+
+  function evaluateRearchiveMappingProposal(
+    reader: RearchiveProposalReader,
+    input: RearchiveMappingProposalInput,
+    persisted: boolean,
+  ): RearchiveMappingProposalReview {
+    const targetArchive = requireRow(
+      reader
+        .select()
+        .from(originalDiscArchives)
+        .where(eq(
+          originalDiscArchives.id,
+          input.originalDiscArchiveId,
+        ))
+        .get(),
+      "original disc archive",
+      input.originalDiscArchiveId,
+    );
+    if (targetArchive.rearchiveSourceArchiveId === null) {
+      throw new DomainInvariantError(
+        "Re-archive Mapping Proposals require a fresh re-archive generation",
+      );
+    }
+    const sourceArchive = requireRow(
+      reader
+        .select()
+        .from(originalDiscArchives)
+        .where(eq(
+          originalDiscArchives.id,
+          targetArchive.rearchiveSourceArchiveId,
+        ))
+        .get(),
+      "re-archive source",
+      targetArchive.rearchiveSourceArchiveId,
+    );
+    const targetDisc = requireRow(
+      reader
+        .select({ scanData: detectedDiscs.scanData })
+        .from(detectedDiscs)
+        .where(eq(detectedDiscs.id, targetArchive.detectedDiscId))
+        .get(),
+      "detected disc",
+      targetArchive.detectedDiscId,
+    );
+    const validator = createArchivedDvdSelectionValidator(
+      targetDisc.scanData,
+    );
+    const sourceSelections = reader
+      .select()
+      .from(discSelections)
+      .where(and(
+        eq(
+          discSelections.originalDiscArchiveId,
+          sourceArchive.id,
+        ),
+        eq(discSelections.isCatalogActive, true),
+      ))
+      .orderBy(asc(discSelections.createdAt), asc(discSelections.id))
+      .all()
+      .map(toDiscSelection);
+    const currentSelectionsById = new Map(
+      sourceSelections.map((selection) => [selection.id, selection]),
+    );
+    const proposedMappingsById = new Map<
+      DiscSelectionId,
+      RearchiveMappingProposalInput["mappings"][number]
+    >();
+    for (const mapping of input.mappings) {
+      if (proposedMappingsById.has(mapping.sourceDiscSelectionId)) {
+        throw new DomainInvariantError(
+          "Re-archive Mapping Proposal cannot repeat a prior Disc Selection",
+        );
+      }
+      proposedMappingsById.set(mapping.sourceDiscSelectionId, mapping);
+    }
+
+    const revisionsAreStale =
+      !(input.catalogRevision instanceof Date) ||
+      !Number.isSafeInteger(input.catalogRevision.getTime()) ||
+      !(input.sourceCatalogRevision instanceof Date) ||
+      !Number.isSafeInteger(input.sourceCatalogRevision.getTime()) ||
+      input.catalogRevision.getTime() !== targetArchive.updatedAt.getTime() ||
+      input.sourceCatalogRevision.getTime() !==
+        sourceArchive.updatedAt.getTime();
+    let hasStaleMapping = revisionsAreStale;
+    let hasIncompleteMapping = sourceSelections.length === 0;
+    let hasIncompatibleMapping = false;
+    const sourceTracker = createDiscSelectionSourceOverlapTracker();
+    const mappings: RearchiveMappingProposalMapping[] = sourceSelections.map(
+      (sourceSelection) => {
+      const proposed = proposedMappingsById.get(sourceSelection.id);
+      if (proposed === undefined) {
+        hasIncompleteMapping = true;
+        return {
+          state: revisionsAreStale ? "stale" as const : "incomplete" as const,
+          reason: revisionsAreStale
+            ? "The source or target Catalog Review changed after this proposal was loaded"
+            : "The prior Disc Selection is missing from the proposal",
+          sourceDiscSelectionId: sourceSelection.id,
+          priorMapping: {
+            mediaItemId: sourceSelection.mediaItemId,
+            sourceIdentity: sourceSelection.sourceIdentity,
+            label: sourceSelection.label,
+          },
+          proposedMapping: {
+            mediaItemId: sourceSelection.mediaItemId,
+            sourceIdentity: sourceSelection.sourceIdentity,
+            label: sourceSelection.label,
+          },
+        };
+      }
+      proposedMappingsById.delete(sourceSelection.id);
+      if (revisionsAreStale) {
+        return {
+          state: "stale" as const,
+          reason:
+            "The source or target Catalog Review changed after this proposal was loaded",
+          sourceDiscSelectionId: sourceSelection.id,
+          priorMapping: {
+            mediaItemId: sourceSelection.mediaItemId,
+            sourceIdentity: sourceSelection.sourceIdentity,
+            label: sourceSelection.label,
+          },
+          proposedMapping: {
+            mediaItemId: proposed.mediaItemId,
+            sourceIdentity: proposed.sourceIdentity,
+            label: proposed.label,
+          },
+        };
+      }
+      let reason: string | null = null;
+      let sourceIdentity = proposed.sourceIdentity;
+      const mediaItemExists = reader
+        .select({ id: mediaItems.id })
+        .from(mediaItems)
+        .where(eq(mediaItems.id, proposed.mediaItemId))
+        .get() !== undefined;
+      if (!mediaItemExists) {
+        reason = "The proposed Media Item no longer exists";
+      } else if (
+        proposed.label !== null && proposed.label.trim().length === 0
+      ) {
+        reason = "The proposed label must not be empty";
+      } else {
+        try {
+          const validatedSourceIdentity = validator.validate(
+            proposed.sourceIdentity,
+          );
+          sourceIdentity = validatedSourceIdentity;
+          const persistedSource = serializeDiscSelectionSourceIdentity(
+            validatedSourceIdentity,
+          );
+          if (discSelectionSourceOverlapsTracker(
+            persistedSource,
+            sourceTracker,
+          )) {
+            reason = "The proposed DVD sources overlap";
+          } else {
+            addDiscSelectionSourceToOverlapTracker(
+              sourceTracker,
+              persistedSource,
+            );
+          }
+        } catch (error) {
+          reason = error instanceof Error
+            ? error.message
+            : "The proposed source is incompatible with the fresh inspection";
+        }
+      }
+      if (reason !== null) hasIncompatibleMapping = true;
+      return {
+        state: reason === null ? "valid" as const : "incompatible" as const,
+        reason,
+        sourceDiscSelectionId: sourceSelection.id,
+        priorMapping: {
+          mediaItemId: sourceSelection.mediaItemId,
+          sourceIdentity: sourceSelection.sourceIdentity,
+          label: sourceSelection.label,
+        },
+        proposedMapping: {
+          mediaItemId: proposed.mediaItemId,
+          sourceIdentity,
+          label: proposed.label,
+        },
+      };
+      },
+    );
+    for (const proposed of proposedMappingsById.values()) {
+      hasStaleMapping = true;
+      mappings.push({
+        state: "stale",
+        reason: "The prior Disc Selection is no longer active on the source archive",
+        sourceDiscSelectionId: proposed.sourceDiscSelectionId,
+        priorMapping: null,
+        proposedMapping: {
+          mediaItemId: proposed.mediaItemId,
+          sourceIdentity: proposed.sourceIdentity,
+          label: proposed.label,
+        },
+      });
+    }
+    return {
+      state: hasStaleMapping
+        ? "stale"
+        : hasIncompatibleMapping
+          ? "incompatible"
+          : hasIncompleteMapping
+            ? "incomplete"
+            : "ready",
+      persisted,
+      catalogRevision: targetArchive.updatedAt.toISOString(),
+      sourceCatalogRevision: sourceArchive.updatedAt.toISOString(),
+      sourceArchive,
+      targetArchive,
+      mappings,
+    };
+  }
+
+  function readRearchiveMappingProposal(
+    reader: RearchiveProposalReader,
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): RearchiveMappingProposalReview | null {
+    const targetArchive = reader
+      .select()
+      .from(originalDiscArchives)
+      .where(eq(originalDiscArchives.id, originalDiscArchiveId))
+      .get();
+    if (!targetArchive || targetArchive.rearchiveSourceArchiveId === null) {
+      return null;
+    }
+    const sourceArchive = requireRow(
+      reader
+        .select()
+        .from(originalDiscArchives)
+        .where(eq(
+          originalDiscArchives.id,
+          targetArchive.rearchiveSourceArchiveId,
+        ))
+        .get(),
+      "re-archive source",
+      targetArchive.rearchiveSourceArchiveId,
+    );
+    const saved = reader
+      .select()
+      .from(rearchiveMappingProposals)
+      .where(eq(
+        rearchiveMappingProposals.targetArchiveId,
+        originalDiscArchiveId,
+      ))
+      .get();
+    if (saved === undefined) {
+      const sourceSelections = reader
+        .select()
+        .from(discSelections)
+        .where(and(
+          eq(discSelections.originalDiscArchiveId, sourceArchive.id),
+          eq(discSelections.isCatalogActive, true),
+        ))
+        .orderBy(asc(discSelections.createdAt), asc(discSelections.id))
+        .all()
+        .map(toDiscSelection);
+      return evaluateRearchiveMappingProposal(reader, {
+        originalDiscArchiveId,
+        catalogRevision: targetArchive.updatedAt,
+        sourceCatalogRevision: sourceArchive.updatedAt,
+        mappings: sourceSelections.map((selection) => ({
+          sourceDiscSelectionId: selection.id,
+          mediaItemId: selection.mediaItemId,
+          sourceIdentity: selection.sourceIdentity,
+          label: selection.label,
+        })),
+      }, false);
+    }
+    const mappings = reader
+      .select()
+      .from(rearchiveMappingProposalItems)
+      .where(eq(
+        rearchiveMappingProposalItems.targetArchiveId,
+        originalDiscArchiveId,
+      ))
+      .orderBy(asc(rearchiveMappingProposalItems.ordinal))
+      .all()
+      .map((mapping) => ({
+        sourceDiscSelectionId: mapping.sourceDiscSelectionId,
+        mediaItemId: mapping.mediaItemId,
+        sourceIdentity: deserializeDiscSelectionSourceIdentity(mapping),
+        label: mapping.label,
+      }));
+    return evaluateRearchiveMappingProposal(reader, {
+      originalDiscArchiveId,
+      catalogRevision: saved.updatedAt,
+      sourceCatalogRevision: saved.sourceCatalogRevision,
+      mappings,
+    }, true);
+  }
+
   function replayRecoveryMutation<T extends { id: string; status: string }>(
     mutationKey: string,
     operation: string,
@@ -5215,6 +5550,10 @@ export function createDataAccessInternal(
             access.catalog.searchMediaItems(options),
           listDiscSelections: (options) =>
             access.catalog.listDiscSelections(options),
+          readRearchiveMappingProposal: (originalDiscArchiveId) =>
+            access.catalog.readRearchiveMappingProposal(
+              originalDiscArchiveId,
+            ),
           getCatalogReviewCoverage: (originalDiscArchiveId) =>
             access.catalog.getCatalogReviewCoverage(originalDiscArchiveId),
           getCatalogReviewActionAvailability: (originalDiscArchiveId) =>
@@ -7734,6 +8073,124 @@ export function createDataAccessInternal(
           "Disc Selection",
         );
         return rows.map(toDiscSelection);
+      },
+
+      readRearchiveMappingProposal(originalDiscArchiveId) {
+        return readRearchiveMappingProposal(
+          database,
+          originalDiscArchiveId,
+        );
+      },
+
+      previewRearchiveMappingProposal(input) {
+        return evaluateRearchiveMappingProposal(database, input, false);
+      },
+
+      saveRearchiveMappingProposal(input) {
+        const { mutationKey, ...semanticFields } = input;
+        const semanticInput = JSON.stringify(semanticFields);
+        return database.transaction((transaction) => {
+          const replay = readMutationInvocation(
+            transaction,
+            mutationKey,
+            "rearchive_mapping_proposal.save",
+            semanticInput,
+            decodeRearchiveMappingProposalReview,
+          );
+          if (replay !== undefined) return replay;
+          const preview = evaluateRearchiveMappingProposal(
+            transaction,
+            semanticFields,
+            false,
+          );
+          if (preview.state !== "ready") {
+            throw new DomainInvariantError(
+              `Re-archive Mapping Proposal is ${preview.state}`,
+            );
+          }
+          const timestamp = now();
+          const updatedArchive = transaction
+            .update(originalDiscArchives)
+            .set({ updatedAt: nextCatalogMutationTimestamp(timestamp) })
+            .where(and(
+              eq(
+                originalDiscArchives.id,
+                input.originalDiscArchiveId,
+              ),
+              eq(originalDiscArchives.updatedAt, input.catalogRevision),
+              eq(originalDiscArchives.catalogReviewOutcome, "needs_review"),
+              isNull(originalDiscArchives.catalogReviewedAt),
+            ))
+            .returning({
+              id: originalDiscArchives.id,
+              updatedAt: originalDiscArchives.updatedAt,
+            })
+            .get();
+          if (!updatedArchive) {
+            throw new DomainInvariantError(
+              "Re-archive Mapping Proposal is stale",
+            );
+          }
+          const existing = transaction
+            .select({ createdAt: rearchiveMappingProposals.createdAt })
+            .from(rearchiveMappingProposals)
+            .where(eq(
+              rearchiveMappingProposals.targetArchiveId,
+              input.originalDiscArchiveId,
+            ))
+            .get();
+          if (existing !== undefined) {
+            transaction
+              .delete(rearchiveMappingProposals)
+              .where(eq(
+                rearchiveMappingProposals.targetArchiveId,
+                input.originalDiscArchiveId,
+              ))
+              .run();
+          }
+          transaction.insert(rearchiveMappingProposals).values({
+            targetArchiveId: input.originalDiscArchiveId,
+            sourceArchiveId: preview.sourceArchive.id,
+            sourceCatalogRevision: preview.sourceArchive.updatedAt,
+            createdAt: existing?.createdAt ?? timestamp,
+            updatedAt: updatedArchive.updatedAt,
+          }).run();
+          if (preview.mappings.length > 0) {
+            transaction.insert(rearchiveMappingProposalItems).values(
+              preview.mappings.map((mapping, ordinal) => ({
+                targetArchiveId: input.originalDiscArchiveId,
+                sourceDiscSelectionId: mapping.sourceDiscSelectionId,
+                mediaItemId: mapping.proposedMapping.mediaItemId,
+                ordinal,
+                ...serializeDiscSelectionSourceIdentity(
+                  createDiscSelectionSourceIdentity(
+                    mapping.proposedMapping.sourceIdentity,
+                  ),
+                ),
+                label: mapping.proposedMapping.label,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })),
+            ).run();
+          }
+          const outcome = readRearchiveMappingProposal(
+            transaction,
+            input.originalDiscArchiveId,
+          );
+          if (outcome === null) {
+            throw new DomainInvariantError(
+              "Saved Re-archive Mapping Proposal could not be read",
+            );
+          }
+          return recordMutationInvocation(
+            transaction,
+            mutationKey,
+            "rearchive_mapping_proposal.save",
+            semanticInput,
+            outcome,
+            timestamp,
+          );
+        }, { behavior: "immediate" });
       },
 
       getCatalogReviewCoverage(originalDiscArchiveId) {

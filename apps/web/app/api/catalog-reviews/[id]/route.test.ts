@@ -16,6 +16,7 @@ import {
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import {
+  beginSettledDiscInspectionForTest,
   createNormalDvdArchiveBoundaryEvidenceForTest,
 } from "@rip-dvd/data-access/test-support";
 
@@ -62,6 +63,115 @@ function invokeDiscSelectionMutation(
   archiveId: string,
 ) {
   return (body: Record<string, unknown>) => postCatalogReview(access, archiveId, body);
+}
+
+function createRearchiveReviewFixture(
+  access: ReturnType<typeof dataAccessFixture.create>,
+) {
+  const fingerprint = `dvdmeta-sha256:${"7".repeat(64)}`;
+  const scanData = {
+    schemaVersion: 2 as const,
+    contentId: fingerprint,
+    titles: [1, 2].map((number) => ({
+      number,
+      durationSeconds: number === 1 ? 5_400 : 900,
+      chapters: number === 1 ? 12 : 3,
+      audioStreams: [],
+      subtitles: [],
+    })),
+  };
+  const sourceDrive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/synthetic-web-rearchive-source",
+    isEnabled: true,
+    isPresent: true,
+  });
+  const sourceDisc = access.catalog.registerDetectedDisc({
+    opticalDriveId: sourceDrive.id,
+    discKind: "dvd",
+    fingerprint,
+    scanData,
+    sizeBytes: 4_096,
+    volumeLabel: "SYNTHETIC_WEB_REARCHIVE",
+  });
+  access.catalog.updateDetectedDiscStatus(sourceDisc.id, "scanned");
+  access.catalog.updateDetectedDiscStatus(sourceDisc.id, "approved");
+  const sourceArchive = access.catalog.createOriginalDiscArchive({
+    detectedDiscId: sourceDisc.id,
+    discKind: "dvd",
+    archiveFormat: "iso",
+    archivePath: "/media/originals/synthetic-web-rearchive-source.iso",
+    fingerprint,
+    sizeBytes: 4_096,
+  });
+  const mediaItem = access.catalog.createMediaItem({
+    kind: "movie",
+    title: "Synthetic web re-archive",
+  });
+  const sourceSelection = access.catalog.createDiscSelection({
+    originalDiscArchiveId: sourceArchive.id,
+    mediaItemId: mediaItem.id,
+    sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    label: "Feature",
+  });
+  completeCatalogReview(access, sourceArchive.id);
+  access.archiveRequests.submitRearchive({
+    mutationKey: "00000000-0000-4000-8000-000000000648",
+    sourceArchiveId: sourceArchive.id,
+  });
+  const targetDrive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/synthetic-web-rearchive-target",
+    isEnabled: true,
+    isPresent: true,
+  });
+  const started = beginSettledDiscInspectionForTest(access, {
+    opticalDriveId: targetDrive.id,
+    mediaGeneration: "synthetic-web-rearchive-generation",
+    mediaCapacityBytes: 4_096,
+  });
+  access.discInspections.record(started.claim!, {
+    type: "metadata",
+    volumeLabel: "SYNTHETIC_WEB_REARCHIVE",
+    titleCount: 2,
+    chapterCount: 15,
+    audioStreamCount: 0,
+    subtitleStreamCount: 0,
+    totalBytes: 4_096,
+  });
+  const targetDisc = access.catalog.registerDetectedDisc({
+    opticalDriveId: targetDrive.id,
+    discKind: "dvd",
+    fingerprint,
+    scanData,
+    sizeBytes: 4_096,
+    volumeLabel: "SYNTHETIC_WEB_REARCHIVE",
+  });
+  const inspection = access.discInspections.record(started.claim!, {
+    type: "complete",
+    detectedDiscId: targetDisc.id,
+  });
+  started.restoreSystemTime();
+  const claim = access.archiveJobs.startForInspection(
+    inspection.id,
+    "synthetic-web-rearchive-worker",
+  );
+  if (!claim) throw new Error("Expected the Re-archive Request to start");
+  const completed = access.archiveJobs.publish(claim, {
+    archivePath: "/media/originals/synthetic-web-rearchive-target.iso",
+    boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(4_096),
+    sizeBytes: 4_096,
+    integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+      "test-clean-v1",
+    ),
+  });
+  const targetArchive = access.catalog.listOriginalDiscArchives({
+    ids: [completed.originalDiscArchiveId!],
+  })[0]!;
+  return {
+    mediaItem,
+    sourceArchive,
+    sourceSelection,
+    targetArchive,
+  };
 }
 
 function keyedCatalogMutationBody(
@@ -137,6 +247,113 @@ describe("Catalog Review API", () => {
 
     expectTypeOf<LockedProvenance["relatedEncodeJob"]["status"]>()
       .toEqualTypeOf<EncodeJobStatus>();
+  });
+
+  it("previews and saves a Re-archive Mapping Proposal without adopting it", async () => {
+    const access = dataAccessFixture.create();
+    const { mediaItem, sourceArchive, sourceSelection, targetArchive } =
+      createRearchiveReviewFixture(access);
+    const getResponse = await createCatalogReviewRoute(
+      new Request(
+        `http://localhost:3000/api/catalog-reviews/${targetArchive.id}`,
+      ),
+      targetArchive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const review = await getResponse.json();
+    expect(review).toMatchObject({
+      rearchiveProposal: {
+        state: "ready",
+        persisted: false,
+        sourceArchive: { id: sourceArchive.id },
+        targetArchive: { id: targetArchive.id },
+      },
+    });
+    const proposal = {
+      catalogRevision: review.rearchiveProposal.catalogRevision,
+      sourceCatalogRevision: review.rearchiveProposal.sourceCatalogRevision,
+      mappings: [{
+        sourceDiscSelectionId: sourceSelection.id,
+        mediaItemId: mediaItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+        label: "Edited feature",
+      }],
+    };
+    const incompleteResponse = await postCatalogReview(
+      access,
+      targetArchive.id,
+      {
+        action: "save_rearchive_mapping_proposal",
+        mutationKey: "00000000-0000-4000-8000-000000000650",
+        ...proposal,
+        mappings: [],
+      },
+    );
+    expect(incompleteResponse.status).toBe(409);
+    await expect(incompleteResponse.json()).resolves.toMatchObject({
+      error: "Re-archive Mapping Proposal is incomplete",
+    });
+    const incompatibleResponse = await postCatalogReview(
+      access,
+      targetArchive.id,
+      {
+        action: "preview_rearchive_mapping_proposal",
+        ...proposal,
+        mappings: [{
+          ...proposal.mappings[0],
+          sourceIdentity: { kind: "dvd_title", titleNumber: 99 },
+        }],
+      },
+    );
+    expect(incompatibleResponse.status).toBe(200);
+    await expect(incompatibleResponse.json()).resolves.toMatchObject({
+      state: "incompatible",
+      persisted: false,
+      mappings: [{ state: "incompatible" }],
+    });
+    const previewResponse = await postCatalogReview(
+      access,
+      targetArchive.id,
+      { action: "preview_rearchive_mapping_proposal", ...proposal },
+    );
+    expect(previewResponse.status).toBe(200);
+    await expect(previewResponse.json()).resolves.toMatchObject({
+      state: "ready",
+      persisted: false,
+      mappings: [{ state: "valid" }],
+    });
+
+    const mutation = {
+      action: "save_rearchive_mapping_proposal",
+      mutationKey: "00000000-0000-4000-8000-000000000649",
+      ...proposal,
+    };
+    const saveResponse = await postCatalogReview(
+      access,
+      targetArchive.id,
+      mutation,
+    );
+    expect(saveResponse.status).toBe(200);
+    const saved = await saveResponse.json();
+    expect(saved).toMatchObject({
+      message: "Re-archive Mapping Proposal saved",
+      proposal: { state: "ready", persisted: true },
+    });
+    const replayResponse = await postCatalogReview(
+      access,
+      targetArchive.id,
+      mutation,
+    );
+    await expect(replayResponse.json()).resolves.toEqual(saved);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: targetArchive.id,
+    })).toEqual([]);
+    expect(access.catalog.listDiscSelections({ ids: [sourceSelection.id] }))
+      .toEqual([expect.objectContaining({
+        id: sourceSelection.id,
+        originalDiscArchiveId: sourceArchive.id,
+      })]);
   });
 
   it("carries normal archive-boundary provenance without a capacity correction", async () => {

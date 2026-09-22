@@ -28,6 +28,8 @@ export type {
 } from "./catalog-review-types.js";
 
 export const CATALOG_REVIEW_COMMAND_ACTIONS = [
+  "preview_rearchive_mapping_proposal",
+  "save_rearchive_mapping_proposal",
   "create_episodic_mapping_proposal",
   "create_mapping_proposal",
   "create_media_item",
@@ -41,6 +43,7 @@ export const CATALOG_REVIEW_COMMAND_ACTIONS = [
   "complete_review",
 ] as const;
 export const MAX_CATALOG_REVIEW_REPLACEMENT_ENCODES = 100;
+export const MAX_REARCHIVE_MAPPING_PROPOSAL_ITEMS = 512;
 
 export interface CatalogReviewCommandDomainValues {
   mediaItemKinds: readonly MediaItemKind[];
@@ -93,6 +96,19 @@ export interface CatalogReviewReplacementEncodeInput {
 }
 
 export type CatalogReviewCommand =
+  | {
+      action:
+        | "preview_rearchive_mapping_proposal"
+        | "save_rearchive_mapping_proposal";
+      catalogRevision: string;
+      sourceCatalogRevision: string;
+      mappings: Array<{
+        sourceDiscSelectionId: string;
+        mediaItemId: string;
+        sourceIdentity: DiscSelectionSourceIdentityInput;
+        label: string | null;
+      }>;
+    }
   | {
       action: "create_episodic_mapping_proposal";
       catalogRevision: string;
@@ -197,6 +213,7 @@ export function discSelectionCommandRequiresPreview(
 export type CatalogReviewCommandValidationError =
   | "Invalid catalog review mutation"
   | "Unknown catalog review mutation"
+  | "Invalid Re-archive Mapping Proposal"
   | "Invalid Episodic Mapping Proposal"
   | "Invalid Mapping Proposal"
   | "Invalid Media Item"
@@ -763,6 +780,70 @@ function parseReplacementEncodes(
   return replacements;
 }
 
+function parseRearchiveMappingProposalItems(value: unknown): Extract<
+  CatalogReviewCommand,
+  {
+    action:
+      | "preview_rearchive_mapping_proposal"
+      | "save_rearchive_mapping_proposal";
+  }
+>["mappings"] | null {
+  if (!Array.isArray(value) || value.length > MAX_REARCHIVE_MAPPING_PROPOSAL_ITEMS) {
+    return null;
+  }
+  const sourceDiscSelectionIds = new Set<string>();
+  const mappings: Extract<
+    CatalogReviewCommand,
+    {
+      action:
+        | "preview_rearchive_mapping_proposal"
+        | "save_rearchive_mapping_proposal";
+    }
+  >["mappings"] = [];
+  for (const valueEntry of value) {
+    const entry = asRecord(valueEntry);
+    const sourceDiscSelectionId = boundedString(
+      entry?.sourceDiscSelectionId,
+    );
+    const mediaItemId = boundedString(entry?.mediaItemId);
+    const sourceIdentityRecord = asRecord(entry?.sourceIdentity);
+    let sourceIdentity: DiscSelectionSourceIdentityInput | null = null;
+    try {
+      sourceIdentity = sourceIdentityRecord === null
+        ? null
+        : createDiscSelectionSourceIdentity(
+            sourceIdentityRecord as unknown as DiscSelectionSourceIdentityInput,
+          );
+    } catch {
+      sourceIdentity = null;
+    }
+    const label = entry?.label === undefined || entry.label === null
+      ? null
+      : boundedString(entry.label);
+    if (
+      !entry || !sourceDiscSelectionId || !mediaItemId || !sourceIdentity ||
+      (entry.label !== undefined && entry.label !== null && !label) ||
+      sourceDiscSelectionIds.has(sourceDiscSelectionId) ||
+      !hasOnlyFields(entry, [
+        "sourceDiscSelectionId",
+        "mediaItemId",
+        "sourceIdentity",
+        "label",
+      ])
+    ) {
+      return null;
+    }
+    sourceDiscSelectionIds.add(sourceDiscSelectionId);
+    mappings.push({
+      sourceDiscSelectionId,
+      mediaItemId,
+      sourceIdentity,
+      label,
+    });
+  }
+  return mappings;
+}
+
 export function parseCatalogReviewCommand(
   value: unknown,
   domainValues: CatalogReviewCommandDomainValues,
@@ -774,6 +855,23 @@ export function parseCatalogReviewCommand(
   }
 
   switch (action) {
+    case "preview_rearchive_mapping_proposal":
+    case "save_rearchive_mapping_proposal": {
+      const revision = catalogRevision(body.catalogRevision);
+      const sourceRevision = catalogRevision(body.sourceCatalogRevision);
+      const mappings = parseRearchiveMappingProposalItems(body.mappings);
+      return revision && sourceRevision && mappings
+        ? {
+            ok: true,
+            command: {
+              action,
+              catalogRevision: revision,
+              sourceCatalogRevision: sourceRevision,
+              mappings,
+            },
+          }
+        : invalid("Invalid Re-archive Mapping Proposal");
+    }
     case "create_episodic_mapping_proposal": {
       const revision = catalogRevision(body.catalogRevision);
       const tvShow = parseEpisodicTvShowTarget(body.tvShow);

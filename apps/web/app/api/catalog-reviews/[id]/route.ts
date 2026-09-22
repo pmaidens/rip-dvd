@@ -191,6 +191,27 @@ export async function createCatalogReviewRoute(
     }
 
     switch (command.action) {
+      case "preview_rearchive_mapping_proposal":
+        return response(
+          createApplicationOperations(access).previewRearchiveMappingProposal({
+            originalDiscArchiveId: archiveId,
+            catalogRevision: command.catalogRevision,
+            sourceCatalogRevision: command.sourceCatalogRevision,
+            mappings: command.mappings,
+          }),
+        );
+
+      case "save_rearchive_mapping_proposal":
+        return response(
+          createApplicationOperations(access).saveRearchiveMappingProposal({
+            originalDiscArchiveId: archiveId,
+            mutationKey: bodyRecord?.mutationKey,
+            catalogRevision: command.catalogRevision,
+            sourceCatalogRevision: command.sourceCatalogRevision,
+            mappings: command.mappings,
+          }),
+        );
+
       case "create_episodic_mapping_proposal":
       case "create_mapping_proposal":
         return response(

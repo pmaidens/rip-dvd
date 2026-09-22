@@ -41,7 +41,8 @@ function withoutProposalKeys(commands: unknown[]): Record<string, unknown>[] {
     const record = value as Record<string, unknown>;
     const { mutationKey, ...command } = record;
     if (command.action === "create_mapping_proposal" ||
-        command.action === "create_episodic_mapping_proposal") {
+        command.action === "create_episodic_mapping_proposal" ||
+        command.action === "save_rearchive_mapping_proposal") {
       expect(mutationKey).toMatch(/^[0-9a-f-]{36}$/);
       return command;
     }
@@ -2062,6 +2063,28 @@ describe("CatalogReviewView", () => {
     expectTypeOf(mutateCatalogReview).parameter(1)
       .toEqualTypeOf<CatalogReviewCommand>();
     const commands = {
+      preview_rearchive_mapping_proposal: {
+        action: "preview_rearchive_mapping_proposal",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+        mappings: [{
+          sourceDiscSelectionId: "source-selection-1",
+          mediaItemId: "media-item-1",
+          sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+          label: null,
+        }],
+      },
+      save_rearchive_mapping_proposal: {
+        action: "save_rearchive_mapping_proposal",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+        mappings: [{
+          sourceDiscSelectionId: "source-selection-1",
+          mediaItemId: "media-item-1",
+          sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+          label: null,
+        }],
+      },
       create_episodic_mapping_proposal: {
         action: "create_episodic_mapping_proposal",
         catalogRevision: "2026-08-11T06:00:00.000Z",
@@ -2199,6 +2222,128 @@ describe("CatalogReviewView", () => {
           : [command];
       }),
     );
+  });
+
+  it("reviews and saves fresh re-archive mappings without exposing adoption tools", async () => {
+    const review = catalogReview({
+      archiveId: "fresh-archive",
+      discLabel: "FRESH_DISC",
+    });
+    review.rawScan.titles = [{
+      number: 2,
+      durationSeconds: 5_400,
+      chapters: 18,
+      audioStreams: [],
+      subtitles: [],
+    }];
+    review.discSelections = [];
+    review.rearchiveProposal = {
+      state: "ready",
+      persisted: false,
+      catalogRevision: review.catalogRevision,
+      sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+      sourceArchive: {
+        ...review.archive,
+        id: "prior-archive",
+        detectedDiscId: "prior-disc",
+        discLabel: "PRIOR_DISC",
+        archivedAt: "2026-08-10T06:00:00.000Z",
+        catalogReviewedAt: "2026-08-10T07:00:00.000Z",
+        catalogReviewOutcome: "reviewed_with_selections",
+      },
+      targetArchive: review.archive,
+      mappings: [{
+        state: "valid",
+        reason: null,
+        sourceDiscSelectionId: "source-selection-1",
+        priorMapping: {
+          mediaItemId: review.mediaItems[0]!.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+          label: "Feature",
+        },
+        proposedMapping: {
+          mediaItemId: review.mediaItems[0]!.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+          label: null,
+        },
+      }],
+    };
+    const postedBodies: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method !== "POST") return Response.json(review);
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      postedBodies.push(body);
+      if (body.action === "preview_rearchive_mapping_proposal") {
+        return Response.json({
+          ...review.rearchiveProposal,
+          mappings: [{
+            ...review.rearchiveProposal!.mappings[0],
+            proposedMapping: {
+              ...review.rearchiveProposal!.mappings[0]!.proposedMapping,
+              sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+            },
+          }],
+        });
+      }
+      return Response.json({ message: "Re-archive Mapping Proposal saved" });
+    }));
+
+    await act(async () => renderCatalogReviewEditor("fresh-archive"));
+
+    expect(container.textContent).toContain("Re-archive Mapping Proposal");
+    expect(container.textContent).toContain("Prior archive");
+    expect(container.textContent).toContain("Fresh archive");
+    expect(container.textContent).not.toContain("Manual catalog tools");
+    expect(container.textContent).not.toContain("Complete review");
+
+    const titleNumber = container.querySelector<HTMLInputElement>(
+      '.rearchive-mapping-proposal input[type="number"]',
+    );
+    if (!titleNumber) throw new Error("Expected a title number input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set?.call(titleNumber, "2");
+      titleNumber.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const save = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Save reviewed proposal",
+    );
+    if (!save) throw new Error("Expected a save proposal button");
+    expect(save.disabled).toBe(true);
+    const preview = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Preview proposal",
+    );
+    if (!preview) throw new Error("Expected a preview proposal button");
+    await act(async () => preview.click());
+    expect(save.disabled).toBe(false);
+    await act(async () => save.click());
+
+    expect(withoutProposalKeys(postedBodies)).toEqual([
+      {
+        action: "preview_rearchive_mapping_proposal",
+        catalogRevision: review.catalogRevision,
+        sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+        mappings: [{
+          sourceDiscSelectionId: "source-selection-1",
+          mediaItemId: review.mediaItems[0]!.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+          label: null,
+        }],
+      },
+      {
+        action: "save_rearchive_mapping_proposal",
+        catalogRevision: review.catalogRevision,
+        sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+        mappings: [{
+          sourceDiscSelectionId: "source-selection-1",
+          mediaItemId: review.mediaItems[0]!.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+          label: null,
+        }],
+      },
+    ]);
   });
 
   it("shows archived DVD evidence separately from editable hierarchy and reviewed mappings", () => {
