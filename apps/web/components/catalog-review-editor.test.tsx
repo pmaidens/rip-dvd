@@ -35,6 +35,17 @@ interface PendingRequest {
   resolve(response: Response): void;
 }
 
+function withoutProposalKeys(commands: unknown[]): Record<string, unknown>[] {
+  return commands.map((value) => {
+    const { mutationKey, ...command } = value as Record<string, unknown>;
+    if (command.action === "create_mapping_proposal" ||
+        command.action === "create_episodic_mapping_proposal") {
+      expect(mutationKey).toMatch(/^[0-9a-f-]{36}$/);
+    }
+    return command;
+  });
+}
+
 const withSelectionsActionAvailability = {
   completeWithSelections: { state: "available", reason: null },
   completeArchiveOnly: { state: "blocked", reason: "Archive-only Review cannot contain Disc Selections" },
@@ -267,7 +278,7 @@ describe("CatalogReviewEditor", () => {
     if (!accept) throw new Error("Expected automatic acceptance action");
     await act(async () => accept.click());
 
-    expect(commands).toEqual([{
+    expect(withoutProposalKeys(commands)).toEqual([{
       action: "create_mapping_proposal",
       catalogRevision: review.catalogRevision,
       ...proposal.input,
@@ -961,7 +972,7 @@ describe("CatalogReviewEditor", () => {
     expect(container.textContent).toContain(
       "Mapping changed; review required",
     );
-    expect(postedCommands).toEqual([
+    expect(withoutProposalKeys(postedCommands)).toEqual([
       {
         action: "create_mapping_proposal",
         catalogRevision: initialReview.catalogRevision,
@@ -1160,7 +1171,7 @@ describe("CatalogReviewEditor", () => {
       ".catalog-episodic-mapping-proposal",
     )).toBeNull();
     expect(container.textContent).toContain("0 selected titles");
-    expect(postedCommands).toEqual(Array(2).fill({
+    expect(withoutProposalKeys(postedCommands)).toEqual(Array(2).fill({
       action: "create_episodic_mapping_proposal",
       catalogRevision: initialReview.catalogRevision,
       tvShow: {
@@ -1337,7 +1348,7 @@ describe("CatalogReviewEditor", () => {
     }
     await act(async () => submit.click());
 
-    expect(postedCommands).toEqual([{
+    expect(withoutProposalKeys(postedCommands)).toEqual([{
       action: "create_episodic_mapping_proposal",
       catalogRevision: review.catalogRevision,
       tvShow: { choice: "use_existing", mediaItemId: "existing-show" },
@@ -1522,7 +1533,7 @@ describe("CatalogReviewEditor", () => {
     }
     await act(async () => submit.click());
 
-    expect(postedCommands).toEqual([{
+    expect(withoutProposalKeys(postedCommands)).toEqual([{
       action: "create_mapping_proposal",
       catalogRevision: review.catalogRevision,
       target: {
@@ -1958,7 +1969,7 @@ describe("CatalogReviewView", () => {
       await mutateCatalogReview("archive-1", commands[action], fetcher);
     }
 
-    expect(postedBodies).toEqual(CATALOG_REVIEW_COMMAND_ACTIONS.map(
+    expect(withoutProposalKeys(postedBodies)).toEqual(CATALOG_REVIEW_COMMAND_ACTIONS.map(
       (action) => commands[action],
     ));
   });

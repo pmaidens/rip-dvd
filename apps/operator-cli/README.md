@@ -31,6 +31,80 @@ Both commands return `REVIEW_NOT_FOUND` for an unknown archive ID.
 read returns `CATALOG_REVIEW_UNAVAILABLE` without exposing database or
 provider details.
 
+## Apply a complete Mapping Proposal
+
+`catalog-review apply-proposal` accepts one complete movie or episodic
+proposal. Get `catalogRevision` from `catalog-review show <archive-id>`. Choose
+an invocation key before submitting. The same key and proposal recover the
+original result after a lost response. A key reused for different input fails.
+Each proposal validates and commits as one catalog change. A stale revision or
+invalid member leaves the Media Items and Disc Selections unchanged.
+
+Pass exactly one of `--json '<object>'`, `--stdin`, or `--file <path>`. The JSON
+object has the same fields in every form. The key and archive ID remain command
+arguments. A file is optional.
+
+Movie proposal schema:
+
+```json
+{
+  "action": "create_mapping_proposal",
+  "catalogRevision": "2026-01-01T00:00:00.000Z",
+  "target": {
+    "choice": "create_new",
+    "mediaItem": { "kind": "movie", "title": "Example Film", "year": 2020 }
+  },
+  "discSelection": {
+    "sourceIdentity": { "kind": "dvd_title", "titleNumber": 1 }
+  },
+  "completeReview": true
+}
+```
+
+For an existing Media Item, use
+`"target":{"choice":"use_existing","mediaItemId":"<media-item-id>"}`.
+The optional `discSelection.label` names the selected source. Source kinds are
+`main_feature`, `dvd_title`, and `dvd_chapters`. A chapter source also needs
+`titleNumber`, `chapterStart`, and `chapterEnd`. Omit `completeReview` to leave
+Catalog Review open.
+
+Episodic proposal schema:
+
+```json
+{
+  "action": "create_episodic_mapping_proposal",
+  "catalogRevision": "2026-01-01T00:00:00.000Z",
+  "tvShow": { "choice": "create_new", "title": "Example Show" },
+  "season": { "choice": "create_new", "title": "Season One", "seasonNumber": 1 },
+  "episodes": [
+    { "titleNumber": 1, "title": "First Episode", "episodeNumber": 1 },
+    { "titleNumber": 2, "title": "Second Episode", "episodeNumber": 2 }
+  ],
+  "completeReview": true
+}
+```
+
+`tvShow` can instead use `{ "choice": "use_existing", "mediaItemId":
+"<tv-show-id>" }`; `season` can use the same form with a Season ID. Each episode
+can set `existingMediaItemId` and `label`. An existing Episode must belong to
+the chosen Season and match `episodeNumber`. Each `titleNumber` must name a
+distinct title in this archive's scan.
+
+```sh
+rip-dvd-operator catalog-review apply-proposal <archive-id> --key <key> \
+  --json '<proposal-json>'
+printf '%s\n' '<proposal-json>' | \
+  rip-dvd-operator catalog-review apply-proposal <archive-id> --key <key> --stdin
+rip-dvd-operator catalog-review apply-proposal <archive-id> --key <key> \
+  --file <proposal.json>
+```
+
+The command writes one JSON result and exits 0 on success. Invalid JSON or
+proposal shape exits 2 with `INVALID_ARGUMENTS` or `INVALID_PROPOSAL`.
+Rejected members, stale revisions, and key conflicts exit 2 with
+`PROPOSAL_REJECTED`, `STALE_CATALOG_REVISION`, or `MUTATION_KEY_CONFLICT`.
+Database unavailability exits 1 with `PROPOSAL_UNAVAILABLE`.
+
 # Disc Selection commands
 
 Use an Original Disc Archive ID for every Disc Selection command. `show`

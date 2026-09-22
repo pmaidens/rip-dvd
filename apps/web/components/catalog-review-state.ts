@@ -109,11 +109,24 @@ export async function requestCatalogReview(
   return response.json() as Promise<CatalogReviewDto>;
 }
 
+const pendingProposalKeys = new Map<string, string>();
+
 export async function mutateCatalogReview(
   archiveId: string,
   command: CatalogReviewCommand,
   fetcher: CatalogReviewFetch = fetch,
 ): Promise<{ message: string | null }> {
+  const isProposal = command.action === "create_mapping_proposal" ||
+    command.action === "create_episodic_mapping_proposal";
+  const proposalIdentity = isProposal ? JSON.stringify({ archiveId, command }) : null;
+  let mutationKey: string | undefined;
+  if (proposalIdentity !== null) {
+    mutationKey = pendingProposalKeys.get(proposalIdentity);
+    if (mutationKey === undefined) {
+      mutationKey = crypto.randomUUID();
+      pendingProposalKeys.set(proposalIdentity, mutationKey);
+    }
+  }
   const response = await fetcher(
     `/api/catalog-reviews/${encodeURIComponent(archiveId)}`,
     {
@@ -122,7 +135,7 @@ export async function mutateCatalogReview(
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(command),
+      body: JSON.stringify({ ...command, ...(mutationKey ? { mutationKey } : {}) }),
     },
   );
   if (!response.ok) {
@@ -143,6 +156,7 @@ export async function mutateCatalogReview(
     }
     throw new Error(message);
   }
+  if (proposalIdentity !== null) pendingProposalKeys.delete(proposalIdentity);
   try {
     const body: unknown = await response.json();
     return {

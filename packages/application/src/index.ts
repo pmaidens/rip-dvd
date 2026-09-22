@@ -1,6 +1,5 @@
 import { isHandBrakePreset } from "@rip-dvd/config";
 import { encodingProfileQueueBlockingReasons } from "@rip-dvd/data-access";
-
 import type {
   ConsistentReadAccess,
   DataAccess,
@@ -74,6 +73,8 @@ export function toEncodingProfileDto(profile: EncodingProfile) {
 }
 
 export { generateMutationKey, InvalidMutationKeyError, parseMutationKey };
+export { applyMappingProposal } from "./mapping-proposal-operations.js";
+export type { MappingProposalCommand } from "./mapping-proposal-operations.js";
 
 export {
   encodeRequeueAvailability,

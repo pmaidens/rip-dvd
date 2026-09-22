@@ -19,7 +19,9 @@ export type MediaItemCommand = Extract<CatalogReviewCommand, {
   action: "create_media_item" | "update_media_item" | "delete_media_item";
 }>;
 
-function createInput(input: CatalogReviewMediaItemInput): CreateMediaItemInput {
+export function catalogReviewMediaItemInput(
+  input: CatalogReviewMediaItemInput,
+): CreateMediaItemInput {
   return {
     ...(input.parentId ? { parentId: input.parentId as MediaItemId } : {}),
     kind: input.kind,
@@ -156,7 +158,10 @@ export function mutateMediaItem(
   const mutationKey = parseMutationKey(input.mutationKey);
   const command = input.command;
   if (command.action === "create_media_item") {
-    const item = access.catalog.createMediaItem(createInput(command.mediaItem), { mutationKey });
+    const item = access.catalog.createMediaItem(
+      catalogReviewMediaItemInput(command.mediaItem),
+      { mutationKey },
+    );
     return { message: "Media Item created", mediaItem: serializeMediaItem(item) };
   }
   const proposedInput = command.action === "update_media_item" ? updateInput(command.changes) : null;

@@ -26,6 +26,7 @@ import {
 } from "@rip-dvd/data-access";
 import { runDiscSelection } from "./disc-selection.js";
 import { runMediaItem } from "./media-item.js";
+import { runMappingProposal } from "./mapping-proposal.js";
 
 export type CommandExitCode = 0 | 1 | 2 | 3;
 
@@ -97,13 +98,14 @@ const commandDefinitions = [
     })),
   {
     name: "catalog-review",
-    description: "Inspect an archive's Catalog Review or discover metadata candidates.",
-    usage: "rip-dvd-operator catalog-review <show|suggest> <archive-id> [options]",
+    description: "Inspect a Catalog Review, discover candidates, or apply a complete Mapping Proposal.",
+    usage: "rip-dvd-operator catalog-review <show|suggest|apply-proposal> <archive-id> [options]",
     inputs: {
-      arguments: ["show|suggest", "archive-id"],
+      arguments: ["show|suggest|apply-proposal", "archive-id"],
       options: [
         "show: --selection-offset, --correction-offset, --correction-job-offset, --correction-output-offset, --replacement-offset, --replacement-profile-offset",
         "suggest: --tmdb-id <positive integer> --media-type <movie|tv_show> (together, optional)",
+        "apply-proposal: --key <key> and exactly one of --json <object>, --stdin, --file <path>",
       ],
     },
     example: "rip-dvd-operator catalog-review show <archive-id>",
@@ -742,7 +744,9 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         emit(io.stdout, help(name));
         return 0;
       }
-      emit(io.stdout, await runCatalogReview(rest, io));
+      emit(io.stdout, rest[0] === "apply-proposal"
+        ? runMappingProposal(rest.slice(1), io)
+        : await runCatalogReview(rest, io));
       return 0;
     }
     if (name === "inspect") {
