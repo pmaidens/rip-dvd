@@ -553,6 +553,15 @@ export interface CreateMediaItemInput {
   tmdbIdentity?: TmdbIdentity;
 }
 
+export interface MediaItemMutationOptions {
+  mutationKey?: string;
+  expectedUpdatedAt?: Date;
+  expectedReferencedArchiveCount?: number;
+  expectedChildCount?: number;
+  expectedImpactRevision?: string;
+  requirePreviewIfAffected?: boolean;
+}
+
 interface CreateMappingProposalBaseInput {
   originalDiscArchiveId: OriginalDiscArchiveId;
   catalogRevision: Date;
@@ -1077,7 +1086,7 @@ export interface CatalogAccess {
     outcome: CompletedCatalogReviewOutcome,
     replacements: readonly CorrectedEncodeReplacementInput[],
   ): CompletedCatalogReviewWithReplacements;
-  createMediaItem(input: CreateMediaItemInput): MediaItem;
+  createMediaItem(input: CreateMediaItemInput, options?: MediaItemMutationOptions): MediaItem;
   createMappingProposal(
     input: CreateMappingProposalInput,
   ): CreatedMappingProposal;
@@ -1094,8 +1103,17 @@ export interface CatalogAccess {
       seasonNumber?: number | null;
       episodeNumber?: number | null;
     },
+    options?: MediaItemMutationOptions,
   ): MediaItem;
-  deleteMediaItem(id: MediaItemId): MediaItem;
+  previewMediaItemUpdate(
+    id: MediaItemId,
+    input: Parameters<CatalogAccess["updateMediaItem"]>[1],
+  ): MediaItem;
+  inspectMediaItemImpact(id: MediaItemId): {
+    affectedArchiveCount: number;
+    revision: string;
+  };
+  deleteMediaItem(id: MediaItemId, options?: MediaItemMutationOptions): MediaItem;
   listMediaItemMaintenance(options: {
     ids: readonly MediaItemId[];
     currentArchiveId?: OriginalDiscArchiveId;
@@ -1520,6 +1538,9 @@ export type SnapshotCatalogAccess = Pick<
   | "listCatalogReviewArchives"
   | "listMediaItems"
   | "listMediaItemMaintenance"
+  | "previewMediaItemUpdate"
+  | "inspectMediaItemImpact"
+  | "findTmdbIdentityByMediaItemId"
   | "searchMediaItems"
   | "listDiscSelections"
   | "getCatalogReviewCoverage"

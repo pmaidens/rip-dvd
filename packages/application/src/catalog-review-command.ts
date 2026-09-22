@@ -293,6 +293,7 @@ function parseMediaItemInput(
   const tmdbIdentity = parseOptionalTmdbIdentity(input?.tmdbIdentity);
   if (
     !input ||
+    !hasOnlyFields(input, ["parentId", "kind", "title", "year", "seasonNumber", "episodeNumber", "tmdbIdentity"]) ||
     !kind ||
     !domainValues.mediaItemKinds.includes(kind as MediaItemKind) ||
     !title ||

@@ -88,3 +88,45 @@ printf '%s\n' '{"label":"Featurette"}' |
 
 Invalid selection input exits 2 with a JSON error. Database or storage
 unavailability exits 1. No command prompts for input.
+# Media Item commands
+
+Use `media-item search` to find Media Items throughout the catalog. `show`
+returns the selected item's TMDB identity, revision, and maintenance state.
+Search results include ancestors and the number of referencing archives.
+
+```sh
+rip-dvd-operator media-item search --query 'Example Film' --offset 0
+rip-dvd-operator media-item show <media-item-id>
+rip-dvd-operator media-item create --key <invocation-key> --kind movie --title 'Example Film' --year 2024
+rip-dvd-operator media-item create --key <invocation-key> --kind tv_show --title 'Example Show' --tmdb-type tv_show --tmdb-id 42
+rip-dvd-operator media-item preview update <media-item-id> --title 'Corrected Film'
+rip-dvd-operator media-item update <media-item-id> --key <invocation-key> --acknowledge '<preview-revision>' --title 'Corrected Film'
+rip-dvd-operator media-item preview delete <media-item-id>
+rip-dvd-operator media-item delete <media-item-id> --key <invocation-key> --acknowledge '<preview-revision>'
+```
+
+Create and update also accept `--json '<object>'`, `--json -` for stdin, or
+`--file <path>`. The object contains Media Item fields directly. Create
+requires `kind` and `title`; optional fields are `parentId`, `year`,
+`seasonNumber`, `episodeNumber`, and `tmdbIdentity` with `mediaType` and
+`tmdbId`. Update accepts the editable fields except `tmdbIdentity`. For
+example, an episode can be created with:
+
+```sh
+printf '%s\n' '{"kind":"episode","title":"Pilot","parentId":"<season-id>","episodeNumber":1}' |
+  rip-dvd-operator media-item create --key <invocation-key> --json -
+```
+
+Every mutation needs a key generated before submission with `generate-key`
+or another stable source. Repeating a key and the same inputs returns the
+original result, including after a process restart. A changed operation or
+input with the same key returns `MUTATION_KEY_CONFLICT`. Ordinary updates
+to an unused Media Item run directly. Updates that affect an archive through
+the item or its descendants, change the item's kind or parent, and all deletes require a preview revision as
+`--acknowledge`. Preview an update with the same changes you intend to submit;
+quote the returned revision when passing it to the shell. A stale revision
+returns `STALE_MEDIA_ITEM_REVISION`. A preview shows the proposed result,
+eligibility, and the number of affected archives, including those referencing descendants. Catalog
+hierarchy, TMDB uniqueness, and reference rules remain enforced during the
+mutation. Validation and eligibility failures return JSON errors with stable
+codes and exit status 2.

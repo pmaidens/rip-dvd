@@ -25,6 +25,7 @@ import {
   type DataAccess,
 } from "@rip-dvd/data-access";
 import { runDiscSelection } from "./disc-selection.js";
+import { runMediaItem } from "./media-item.js";
 
 export type CommandExitCode = 0 | 1 | 2 | 3;
 
@@ -165,6 +166,23 @@ const commandDefinitions = [
     usage: "rip-dvd-operator deactivate-encoding-profile --key <key> --id <id> --revision <revision> --acknowledge",
     inputs: { arguments: [], options: ["--key", "--id", "--revision", "--acknowledge"] },
     example: "rip-dvd-operator deactivate-encoding-profile --key 00000000-0000-4000-8000-000000000004 --id <id> --revision <revision> --acknowledge",
+  },
+  {
+    name: "media-item",
+    description: "Search and maintain Media Items with keyed changes.",
+    usage: "rip-dvd-operator media-item <search|show|preview|create|update|delete> [options]",
+    inputs: {
+      arguments: ["action", "media-item-id for show, preview, update, and delete"],
+      options: [
+        "search: --query <text> [--offset <number>] [--archive-id <id>]",
+        "preview: <update|delete> <media-item-id>; update also requires change flags or structured input",
+        "create: --key <key> --kind <kind> --title <title> [--parent-id, --year, --season-number, --episode-number, --tmdb-id, --tmdb-type]",
+        "create/update: --json <object or -> or --file <path> for structured input",
+        "update: <id> --key <key> plus change flags or structured input; use --acknowledge for affected changes",
+        "delete: <id> --key <key> --acknowledge <preview revision>",
+      ],
+    },
+    example: "rip-dvd-operator media-item create --key 00000000-0000-4000-8000-000000000001 --kind movie --title 'Example Film'",
   },
   {
     name: "health",
@@ -569,6 +587,8 @@ function waitArguments(rest: readonly string[]) {
   return { kind, id, timeoutMs, pollMs };
 }
 
+
+
 const profileCommands = commandDefinitions.filter(
   (definition) => "category" in definition && definition.category === "encoding_profile",
 );
@@ -673,6 +693,7 @@ function runProfileCommand(name: string, args: readonly string[], openAccess: Co
   }
 }
 
+
 export async function runCommand(args: readonly string[], io: CommandIO): Promise<CommandExitCode> {
   try {
     const [name, ...rest] = args;
@@ -760,6 +781,32 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         return 0;
       }
       emit(io.stdout, runDiscSelection(rest, io));
+      return 0;
+    }
+    if (name === "media-item") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+        return 0;
+      }
+      try {
+        emit(io.stdout, await runMediaItem(rest, io));
+      } catch (error) {
+        if (error instanceof CommandFailure) throw error;
+        if (error instanceof MutationKeyConflictError) {
+          throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+        }
+        if (error instanceof RecordNotFoundError) {
+          throw new CommandFailure("MEDIA_ITEM_NOT_FOUND", "Media Item not found.", 2);
+        }
+        if (error instanceof DomainInvariantError) {
+          throw new CommandFailure(
+            error.message.includes("changed; preview") ? "STALE_MEDIA_ITEM_REVISION" : "MEDIA_ITEM_ACTION_REJECTED",
+            error.message,
+            2,
+          );
+        }
+        throw new CommandFailure("MEDIA_ITEM_UNAVAILABLE", "Media Item operation is unavailable.", 1);
+      }
       return 0;
     }
     if (profileCommands.some((command) => command.name === name)) {

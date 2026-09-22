@@ -1,6 +1,7 @@
 import {
   DomainInvariantError,
   MEDIA_ITEM_KINDS,
+  MutationKeyConflictError,
   RecordNotFoundError,
   type DataAccess,
   type CreateMediaItemInput,
@@ -11,7 +12,7 @@ import {
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import { loadConfig } from "@rip-dvd/config";
-import { createApplicationOperations, executeDiscSelectionCommand, serializeDiscSelection, serializeMediaItem } from "@rip-dvd/application";
+import { createApplicationOperations, executeDiscSelectionCommand, InvalidMutationKeyError, serializeDiscSelection, serializeMediaItem } from "@rip-dvd/application";
 
 import {
   parseCatalogReviewCommand,
@@ -159,8 +160,9 @@ export async function createCatalogReviewRoute(
     ) {
       return response({ error: "Original Disc Archive not found" }, 404);
     }
+    const body = await request.json().catch(() => null);
     const parsedCommand = parseCatalogReviewCommand(
-      await request.json().catch(() => null),
+      body,
       {
         mediaItemKinds: MEDIA_ITEM_KINDS,
       },
@@ -271,58 +273,23 @@ export async function createCatalogReviewRoute(
       }
 
       case "create_media_item": {
-        const item = access.catalog.createMediaItem(
-          createMediaItemInput(command.mediaItem),
-        );
-        return response({
-          message: "Media Item created",
-          mediaItem: serializeMediaItem(item),
-        }, 201);
+        const mutationKey = typeof body === "object" && body !== null && "mutationKey" in body
+          ? body.mutationKey : undefined;
+        return response(createApplicationOperations(access).mutateMediaItem({
+          mutationKey,
+          command,
+        }), 201);
       }
 
-      case "update_media_item": {
-        const update: Parameters<
-          DataAccess["catalog"]["updateMediaItem"]
-        >[1] = {};
-        const { changes } = command;
-        if ("parentId" in changes) {
-          update.parentId = changes.parentId === null
-            ? null
-            : changes.parentId as MediaItemId;
-        }
-        if ("kind" in changes) {
-          update.kind = changes.kind;
-        }
-        if ("title" in changes) {
-          update.title = changes.title;
-        }
-        if ("year" in changes) {
-          update.year = changes.year;
-        }
-        if ("seasonNumber" in changes) {
-          update.seasonNumber = changes.seasonNumber;
-        }
-        if ("episodeNumber" in changes) {
-          update.episodeNumber = changes.episodeNumber;
-        }
-        const item = access.catalog.updateMediaItem(
-          command.mediaItemId as MediaItemId,
-          update,
-        );
-        return response({
-          message: "Metadata saved",
-          mediaItem: serializeMediaItem(item),
-        });
-      }
-
+      case "update_media_item":
       case "delete_media_item": {
-        const item = access.catalog.deleteMediaItem(
-          command.mediaItemId as MediaItemId,
-        );
-        return response({
-          message: "Media Item deleted",
-          mediaItem: serializeMediaItem(item),
-        });
+        const payload = typeof body === "object" && body !== null
+          ? body as Record<string, unknown> : {};
+        return response(createApplicationOperations(access).mutateMediaItem({
+          mutationKey: payload.mutationKey,
+          command,
+          acknowledgedRevision: payload.acknowledgedRevision as string | undefined,
+        }));
       }
 
       case "create_disc_selection":
@@ -402,6 +369,12 @@ export async function createCatalogReviewRoute(
         throw new Error("Unhandled catalog review command");
     }
   } catch (error) {
+    if (error instanceof InvalidMutationKeyError) {
+      return response({ error: error.message, code: "INVALID_MUTATION_KEY" }, 400);
+    }
+    if (error instanceof MutationKeyConflictError) {
+      return response({ error: error.message, code: "MUTATION_KEY_CONFLICT" }, 409);
+    }
     if (error instanceof RecordNotFoundError) {
       return response({ error: error.message }, 404);
     }

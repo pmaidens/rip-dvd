@@ -203,6 +203,10 @@ export function useCatalogReviewState({
   requestScope.current ??= createCatalogReviewRequestScope(archiveId);
   requestScope.current.activate(archiveId);
   const observedActivityRevision = useRef(activityRevision);
+  const pendingMediaItemKeys = useRef(new Map<string, {
+    key: string;
+    revision?: string;
+  }>());
 
   const load = useCallback(async () => {
     const request = requestScope.current?.begin(archiveId);
@@ -297,8 +301,57 @@ export function useCatalogReviewState({
     if (errorTarget === "mapping_proposal") {
       setMappingProposalError(null);
     }
+    let pendingKey: string | null = null;
     try {
-      const result = await mutateCatalogReview(archiveId, command);
+      let submittedCommand: CatalogReviewCommand & {
+        mutationKey?: string;
+        acknowledgedRevision?: string;
+      } = command;
+      if (command.action === "create_media_item" ||
+          command.action === "update_media_item" ||
+          command.action === "delete_media_item") {
+        pendingKey = `${archiveId}:${JSON.stringify(command)}`;
+        let pending = pendingMediaItemKeys.current.get(pendingKey);
+        if (!pending) {
+          pending = { key: crypto.randomUUID() };
+          pendingMediaItemKeys.current.set(pendingKey, pending);
+        }
+        if (command.action !== "create_media_item" && pending.revision === undefined) {
+          const changes = command.action === "update_media_item"
+            ? `&changes=${encodeURIComponent(JSON.stringify(command.changes))}` : "";
+          const preview = await fetch(
+            `/api/media-items/${encodeURIComponent(command.mediaItemId)}?action=${
+              command.action === "delete_media_item" ? "delete" : "update"
+            }${changes}`,
+            { cache: "no-store" },
+          );
+          if (!preview.ok) throw new Error("Media Item preview failed");
+          const details = await preview.json() as {
+            revision: string;
+            consequence: string;
+            maintenance: { referencedArchiveCount: number };
+            impact?: { affectedArchiveCount: number };
+            availability: { state: string; reason: string | null };
+            requiresAcknowledgement: boolean;
+          };
+          if (details.availability.state !== "available") {
+            throw new Error(details.availability.reason ?? "Media Item change is unavailable");
+          }
+          if (details.requiresAcknowledgement) {
+            if (!window.confirm(
+              `${details.consequence} Affects ${details.impact?.affectedArchiveCount ?? details.maintenance.referencedArchiveCount} archive(s). Continue?`,
+            )) return;
+            pending.revision = details.revision;
+          }
+        }
+        submittedCommand = {
+          ...command,
+          mutationKey: pending.key,
+          ...(pending.revision ? { acknowledgedRevision: pending.revision } : {}),
+        };
+      }
+      const result = await mutateCatalogReview(archiveId, submittedCommand);
+      if (pendingKey !== null) pendingMediaItemKeys.current.delete(pendingKey);
       setMutationNotice(result.message);
       setEditingMediaItemId(null);
       afterMutation?.();
@@ -311,6 +364,9 @@ export function useCatalogReviewState({
       const message = error instanceof Error
         ? error.message
         : "Catalog review mutation failed";
+      if (pendingKey !== null && message.includes("changed; preview")) {
+        pendingMediaItemKeys.current.delete(pendingKey);
+      }
       if (complete) {
         await load();
       }

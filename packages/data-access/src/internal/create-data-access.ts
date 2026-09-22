@@ -7,10 +7,10 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
-import { createHash } from "node:crypto";
 
 import {
   and,
@@ -196,7 +196,9 @@ import type {
   EncodingProfile,
   EncodingProfileId,
   MediaDomain,
+  MediaItem,
   MediaItemMaintenance,
+  MediaItemMutationOptions,
   MediaItemId,
   MediaItemKind,
   OpticalDriveId,
@@ -1994,6 +1996,39 @@ export function createDataAccessInternal(
     });
   }
 
+  function inspectMediaItemImpact(
+    id: MediaItemId,
+    querySource: Pick<typeof database, "select"> = database,
+  ): { affectedArchiveCount: number; revision: string } {
+    const directChildren = querySource.select({ id: mediaItems.id }).from(mediaItems)
+      .where(eq(mediaItems.parentId, id)).orderBy(asc(mediaItems.id)).all()
+      .map((row) => row.id);
+    const descendants: MediaItemId[] = [id];
+    let frontier = directChildren;
+    while (frontier.length > 0) {
+      descendants.push(...frontier);
+      const next: MediaItemId[] = [];
+      for (let offset = 0; offset < frontier.length; offset += 500) {
+        next.push(...querySource.select({ id: mediaItems.id }).from(mediaItems)
+          .where(inArray(mediaItems.parentId, frontier.slice(offset, offset + 500))).all()
+          .map((row) => row.id));
+      }
+      frontier = next;
+    }
+    const references: Array<{ id: DiscSelectionId; archiveId: OriginalDiscArchiveId; mediaItemId: MediaItemId }> = [];
+    for (let offset = 0; offset < descendants.length; offset += 500) {
+      references.push(...querySource.select({ id: discSelections.id,
+        archiveId: discSelections.originalDiscArchiveId,
+        mediaItemId: discSelections.mediaItemId }).from(discSelections)
+        .where(inArray(discSelections.mediaItemId, descendants.slice(offset, offset + 500))).all());
+    }
+    references.sort((left, right) => left.id.localeCompare(right.id));
+    return {
+      affectedArchiveCount: new Set(references.map((reference) => reference.archiveId)).size,
+      revision: createHash("sha256").update(JSON.stringify({ directChildren, references })).digest("hex"),
+    };
+  }
+
   function activeDiscSelectionSourceOverlapExists(
     transaction: CatalogTransaction,
     archiveId: OriginalDiscArchiveId,
@@ -2326,6 +2361,87 @@ export function createDataAccessInternal(
       tmdbId: identity.tmdbId,
       createdAt: timestamp,
     }).run();
+  }
+
+  function runMediaItemMutation(
+    transaction: CatalogTransaction,
+    mutationKey: string | undefined,
+    operation: string,
+    semanticInput: string,
+    mutate: () => MediaItem,
+  ): MediaItem {
+    if (mutationKey !== undefined) {
+      const previous = transaction.select().from(mutationInvocations)
+        .where(eq(mutationInvocations.key, mutationKey)).get();
+      if (previous) {
+        if (previous.operation !== operation || previous.semanticInput !== semanticInput) {
+          throw new MutationKeyConflictError();
+        }
+        const outcome = JSON.parse(previous.outcome) as MediaItem;
+        return {
+          ...outcome,
+          createdAt: new Date(outcome.createdAt),
+          updatedAt: new Date(outcome.updatedAt),
+        };
+      }
+    }
+    const outcome = mutate();
+    if (mutationKey !== undefined) {
+      transaction.insert(mutationInvocations).values({
+        key: mutationKey,
+        operation,
+        semanticInput,
+        outcome: JSON.stringify(outcome),
+        createdAt: now(),
+      }).run();
+    }
+    return outcome;
+  }
+
+  function requireMediaItemRevision(item: MediaItem, expected: Date | undefined): void {
+    if (expected !== undefined && item.updatedAt.getTime() !== expected.getTime()) {
+      throw new DomainInvariantError("Media Item changed; preview again before saving");
+    }
+  }
+
+  function requireMediaItemMaintenanceRevision(
+    maintenance: MediaItemMaintenance,
+    options: MediaItemMutationOptions | undefined,
+    impactRevision: string,
+  ): void {
+    if ((options?.expectedReferencedArchiveCount !== undefined &&
+        maintenance.referencedArchiveCount !== options.expectedReferencedArchiveCount) ||
+        (options?.expectedChildCount !== undefined &&
+        maintenance.childCount !== options.expectedChildCount) ||
+        (options?.expectedImpactRevision !== undefined &&
+        impactRevision !== options.expectedImpactRevision)) {
+      throw new DomainInvariantError("Media Item changed; preview again before saving");
+    }
+  }
+
+  function projectMediaItemUpdate(
+    transaction: CatalogTransaction | typeof database,
+    current: MediaItem,
+    input: Parameters<DataAccess["catalog"]["updateMediaItem"]>[1],
+  ): MediaItem {
+    const values = validateMediaItem({
+      ...current,
+      ...input,
+      id: current.id,
+      parentId: input.parentId === undefined ? current.parentId : input.parentId,
+      kind: input.kind === undefined ? current.kind : input.kind,
+      title: input.title === undefined ? current.title : input.title,
+      year: input.year === undefined ? current.year : input.year,
+      seasonNumber: input.seasonNumber === undefined ? current.seasonNumber : input.seasonNumber,
+      episodeNumber: input.episodeNumber === undefined ? current.episodeNumber : input.episodeNumber,
+    }, transaction, { titleNormalization: input.title === undefined ? "preserve" : "trim" });
+    const identity = transaction.select({ mediaType: mediaItemTmdbIdentities.mediaType })
+      .from(mediaItemTmdbIdentities)
+      .where(eq(mediaItemTmdbIdentities.mediaItemId, current.id)).get();
+    if (identity && identity.mediaType !== values.kind) {
+      throw new DomainInvariantError("Media Item kind must match its TMDB identity");
+    }
+    return { ...current, ...values };
   }
 
   function finishCatalogReviewAfterMapping(
@@ -4454,6 +4570,11 @@ export function createDataAccessInternal(
           listMediaItems: (options) => access.catalog.listMediaItems(options),
           listMediaItemMaintenance: (options) =>
             access.catalog.listMediaItemMaintenance(options),
+          previewMediaItemUpdate: (id, input) =>
+            access.catalog.previewMediaItemUpdate(id, input),
+          inspectMediaItemImpact: (id) => access.catalog.inspectMediaItemImpact(id),
+          findTmdbIdentityByMediaItemId: (id) =>
+            access.catalog.findTmdbIdentityByMediaItemId(id),
           searchMediaItems: (options) =>
             access.catalog.searchMediaItems(options),
           listDiscSelections: (options) =>
@@ -5589,10 +5710,15 @@ export function createDataAccessInternal(
         }, { behavior: "immediate" });
       },
 
-      createMediaItem(input) {
+      createMediaItem(input, options) {
         const timestamp = now();
         const id = newId<MediaItemId>();
-        return database.transaction((transaction) => {
+        return database.transaction((transaction) => runMediaItemMutation(
+          transaction,
+          options?.mutationKey,
+          "media_item.create",
+          JSON.stringify(input),
+          () => {
           const mediaItem = insertValidatedMediaItem(
             transaction,
             { ...input, id },
@@ -5605,7 +5731,8 @@ export function createDataAccessInternal(
             timestamp,
           );
           return mediaItem;
-        }, { behavior: "immediate" });
+          },
+        ), { behavior: "immediate" });
       },
 
       createMappingProposal(input) {
@@ -5867,8 +5994,16 @@ export function createDataAccessInternal(
         }, { behavior: "immediate" });
       },
 
-      updateMediaItem(id, input) {
-        return database.transaction((transaction) => {
+      updateMediaItem(id, input, options) {
+        return database.transaction((transaction) => runMediaItemMutation(
+          transaction,
+          options?.mutationKey,
+          "media_item.update",
+          JSON.stringify({ id, input, expectedUpdatedAt: options?.expectedUpdatedAt?.toISOString(),
+            expectedReferencedArchiveCount: options?.expectedReferencedArchiveCount,
+            expectedChildCount: options?.expectedChildCount,
+            expectedImpactRevision: options?.expectedImpactRevision }),
+          () => {
           const current = requireRow(
             transaction
               .select()
@@ -5878,49 +6013,24 @@ export function createDataAccessInternal(
             "media item",
             id,
           );
-          const values = validateMediaItem(
-            {
-              ...current,
-              ...input,
-              id,
-              parentId:
-                input.parentId === undefined
-                  ? current.parentId
-                  : input.parentId,
-              kind: input.kind === undefined ? current.kind : input.kind,
-              title: input.title === undefined ? current.title : input.title,
-              year: input.year === undefined ? current.year : input.year,
-              seasonNumber:
-                input.seasonNumber === undefined
-                  ? current.seasonNumber
-                  : input.seasonNumber,
-              episodeNumber:
-                input.episodeNumber === undefined
-                  ? current.episodeNumber
-                  : input.episodeNumber,
-            },
-            transaction,
-            {
-              titleNormalization:
-                input.title === undefined ? "preserve" : "trim",
-            },
-          );
-          const tmdbIdentity = transaction
-            .select({ mediaType: mediaItemTmdbIdentities.mediaType })
-            .from(mediaItemTmdbIdentities)
-            .where(eq(mediaItemTmdbIdentities.mediaItemId, id))
-            .get();
-          if (tmdbIdentity && tmdbIdentity.mediaType !== values.kind) {
-            throw new DomainInvariantError(
-              "Media Item kind must match its TMDB identity",
-            );
+          requireMediaItemRevision(current, options?.expectedUpdatedAt);
+          const maintenance = readMediaItemMaintenance([id], undefined, transaction)[0]!;
+          const impact = inspectMediaItemImpact(id, transaction);
+          requireMediaItemMaintenanceRevision(maintenance, options, impact.revision);
+          if (options?.requirePreviewIfAffected && options.expectedUpdatedAt === undefined &&
+              (impact.affectedArchiveCount > 0 ||
+                (input.parentId !== undefined && input.parentId !== current.parentId) ||
+                (input.kind !== undefined && input.kind !== current.kind))) {
+            throw new DomainInvariantError("Preview and acknowledge the current Media Item revision");
           }
+          const { parentId, kind, title, year, seasonNumber, episodeNumber } =
+            projectMediaItemUpdate(transaction, current, input);
           return requireRow(
             transaction
               .update(mediaItems)
               .set({
-                ...values,
-                updatedAt: now(),
+                parentId, kind, title, year, seasonNumber, episodeNumber,
+                updatedAt: new Date(Math.max(now().getTime(), current.updatedAt.getTime() + 1)),
               })
               .where(eq(mediaItems.id, id))
               .returning()
@@ -5928,11 +6038,20 @@ export function createDataAccessInternal(
             "media item",
             id,
           );
-        }, { behavior: "immediate" });
+          },
+        ), { behavior: "immediate" });
       },
 
-      deleteMediaItem(id) {
-        return database.transaction((transaction) => {
+      deleteMediaItem(id, options) {
+        return database.transaction((transaction) => runMediaItemMutation(
+          transaction,
+          options?.mutationKey,
+          "media_item.delete",
+          JSON.stringify({ id, expectedUpdatedAt: options?.expectedUpdatedAt?.toISOString(),
+            expectedReferencedArchiveCount: options?.expectedReferencedArchiveCount,
+            expectedChildCount: options?.expectedChildCount,
+            expectedImpactRevision: options?.expectedImpactRevision }),
+          () => {
           const current = requireRow(
             transaction
               .select()
@@ -5942,11 +6061,14 @@ export function createDataAccessInternal(
             "media item",
             id,
           );
+          requireMediaItemRevision(current, options?.expectedUpdatedAt);
           const maintenance = readMediaItemMaintenance(
             [id],
             undefined,
             transaction,
           )[0]!;
+          requireMediaItemMaintenanceRevision(maintenance, options,
+            inspectMediaItemImpact(id, transaction).revision);
           if (maintenance.deletionAvailability.state === "unavailable") {
             throw new DomainInvariantError(
               `Media Item deletion is unavailable: ${
@@ -5964,7 +6086,18 @@ export function createDataAccessInternal(
             id,
           );
           return current;
-        }, { behavior: "immediate" });
+          },
+        ), { behavior: "immediate" });
+      },
+
+      previewMediaItemUpdate(id, input) {
+        const current = requireRow(database.select().from(mediaItems)
+          .where(eq(mediaItems.id, id)).get(), "media item", id);
+        return projectMediaItemUpdate(database, current, input);
+      },
+
+      inspectMediaItemImpact(id) {
+        return inspectMediaItemImpact(id);
       },
 
       listMediaItemMaintenance(options) {

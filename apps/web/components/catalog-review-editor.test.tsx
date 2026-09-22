@@ -1689,6 +1689,7 @@ describe("CatalogReviewEditor", () => {
     review.mediaItems = [];
     review.discSelections = [];
     const postedCommands: unknown[] = [];
+    vi.stubGlobal("confirm", vi.fn(() => true));
     vi.stubGlobal("fetch", vi.fn(async (
       input: RequestInfo | URL,
       init?: RequestInit,
@@ -1722,6 +1723,16 @@ describe("CatalogReviewEditor", () => {
             hasPrevious: false,
             hasNext: false,
           },
+        });
+      }
+      if (url === "/api/media-items/unused-movie?action=delete") {
+        return Response.json({
+          revision: JSON.stringify({ updatedAt: "2026-08-03T18:00:00.000Z",
+            referencedArchiveCount: 0, childCount: 0, impactRevision: "0".repeat(64), changes: null }),
+          requiresAcknowledgement: true,
+          consequence: "This Media Item and its metadata identity will be removed.",
+          maintenance: { referencedArchiveCount: 0 },
+          availability: { state: "available", reason: null },
         });
       }
       if (init?.method === "POST") {
@@ -1761,10 +1772,13 @@ describe("CatalogReviewEditor", () => {
     }
     await act(async () => remove.click());
 
-    expect(postedCommands).toEqual([{
+    expect(postedCommands).toEqual([expect.objectContaining({
       action: "delete_media_item",
       mediaItemId: "unused-movie",
-    }]);
+      mutationKey: expect.any(String),
+      acknowledgedRevision: JSON.stringify({ updatedAt: "2026-08-03T18:00:00.000Z",
+        referencedArchiveCount: 0, childCount: 0, impactRevision: "0".repeat(64), changes: null }),
+    })]);
     expect(container.textContent).toContain("Media Item deleted");
   });
 });

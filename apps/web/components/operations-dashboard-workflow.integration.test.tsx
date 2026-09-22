@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { DatabaseSync } from "node:sqlite";
 
+import { createApplicationOperations } from "@rip-dvd/application";
 import type { DataAccess, MediaItemId } from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -1989,13 +1990,32 @@ describe("end-to-end operations dashboard workflow", () => {
     });
     expect(catalogReviewHtml).toContain("Archive only");
 
-    const catalogMutation = (body: unknown) =>
-      createCatalogReviewRoute(
-        createMutationRequest(`/api/catalog-reviews/${archive.id}`, body),
+    const catalogMutation = (body: unknown) => {
+      let input = body;
+      if (typeof body === "object" && body !== null && "action" in body &&
+          (body.action === "create_media_item" || body.action === "update_media_item" ||
+            body.action === "delete_media_item")) {
+        const id = "mediaItemId" in body && typeof body.mediaItemId === "string"
+          ? body.mediaItemId as MediaItemId : null;
+        const preview = id === null ? null : createApplicationOperations(access).previewMediaItemChange(
+          id, body.action === "delete_media_item" ? "delete" : "update",
+          body.action === "update_media_item" && "changes" in body
+            ? body.changes as Parameters<ReturnType<typeof createApplicationOperations>["previewMediaItemChange"]>[2]
+            : undefined,
+        );
+        input = {
+          ...body,
+          mutationKey: crypto.randomUUID(),
+          ...(preview ? { acknowledgedRevision: preview.revision } : {}),
+        };
+      }
+      return createCatalogReviewRoute(
+        createMutationRequest(`/api/catalog-reviews/${archive.id}`, input),
         archive.id,
         () => access,
         () => trustedOrigin,
       );
+    };
     const archiveOnlyCompletion = await catalogMutation({
       action: "complete_review",
       catalogRevision: catalogReview.catalogRevision,
