@@ -1891,14 +1891,15 @@ describe("DashboardView", () => {
     ["original_disc_archive", "archive-1"],
     ["encode_job_output", "encode-job-1"],
   ] as const)("submits an explicit %s verification", async (target, id) => {
-    const fetcher = vi.fn(async () => new Response(null, { status: 200 }));
+    const fetcher = vi.fn(async () => Response.json({ verificationRun: { id: "synthetic-run" } }, { status: 201 }));
 
-    await requestFilesystemVerification(target, id, fetcher);
+    await expect(requestFilesystemVerification(target, id, fetcher, "synthetic-key-123"))
+      .resolves.toBe("synthetic-run");
 
     expect(fetcher).toHaveBeenCalledWith("/api/filesystem-verification", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target, id }),
+      body: JSON.stringify({ target, id, mutationKey: "synthetic-key-123" }),
     });
   });
 
@@ -1946,7 +1947,7 @@ describe("DashboardView", () => {
                 mappedMediaItemTitles: [],
                 verificationStatus: "inaccessible",
                 verificationMessage:
-                  "The web process cannot access the recorded path.",
+                  "The recorded path cannot be accessed.",
                 verifiedAt: "2026-08-06T20:05:00.000Z",
               },
             ],
@@ -1960,7 +1961,7 @@ describe("DashboardView", () => {
     expect(html).toContain("Verifying output…");
     expect(html).toContain("File is missing at the recorded path.");
     expect(html).toContain(
-      "The web process cannot access the recorded path.",
+      "The recorded path cannot be accessed.",
     );
     expect(html).not.toContain("/media/");
   });

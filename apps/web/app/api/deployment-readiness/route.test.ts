@@ -5,6 +5,7 @@ const listInspections = vi.fn();
 const listArchiveRequests = vi.fn();
 const listArchiveJobs = vi.fn();
 const listEncodeJobs = vi.fn();
+const listVerificationRuns = vi.fn();
 const readConsistentSnapshot = vi.fn((read: (access: unknown) => unknown) =>
   read({
     catalog: { listOpticalDrives },
@@ -12,6 +13,7 @@ const readConsistentSnapshot = vi.fn((read: (access: unknown) => unknown) =>
     archiveRequests: { list: listArchiveRequests },
     archiveJobs: { list: listArchiveJobs },
     encodeJobs: { list: listEncodeJobs },
+    filesystemVerification: { listActive: listVerificationRuns },
   }),
 );
 
@@ -37,6 +39,7 @@ describe("GET /api/deployment-readiness", () => {
     listArchiveRequests.mockReturnValue([]);
     listArchiveJobs.mockReturnValue([]);
     listEncodeJobs.mockReturnValue([]);
+    listVerificationRuns.mockReturnValue([]);
   });
 
   it("returns global active work and authoritative optical-drive identities", async () => {

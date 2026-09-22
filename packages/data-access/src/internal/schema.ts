@@ -80,6 +80,9 @@ import type {
   UnreadableSectorRange,
   WorkerIncidentEvidence,
   WorkerIncidentId,
+  FilesystemVerificationTarget,
+  FilesystemVerificationRunStatus,
+  FilesystemVerificationStatus,
   WorkerIncidentSchemaVersion,
 } from "../types.js";
 
@@ -387,6 +390,53 @@ export const mutationInvocations = sqliteTable(
   },
   (table) => [
     check("mutation_invocations_key_not_null", sql`${table.key} is not null`),
+  ],
+);
+
+export const filesystemVerificationRuns = sqliteTable(
+  "filesystem_verification_runs",
+  {
+    id: text("id").notNull().primaryKey(),
+    target: text("target").$type<FilesystemVerificationTarget>().notNull(),
+    targetId: text("target_id").notNull(),
+    status: text("status").$type<FilesystemVerificationRunStatus>().notNull(),
+    progressPhase: text("progress_phase").$type<"queued" | "checking" | "completed">().notNull(),
+    resultStatus: text("result_status").$type<FilesystemVerificationStatus>(),
+    resultMessage: text("result_message"),
+    verifiedAt: integer("verified_at", { mode: "timestamp_ms" }),
+    failureCode: text("failure_code"),
+    claimToken: text("claim_token"),
+    claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    check("filesystem_verification_runs_id_not_null", sql`${table.id} is not null`),
+    index("filesystem_verification_runs_status_created_idx").on(
+      table.status, table.createdAt, table.id,
+    ),
+    check("filesystem_verification_runs_target_check",
+      sql`${table.target} in ('original_disc_archive', 'encode_job_output')`),
+    check("filesystem_verification_runs_status_check",
+      sql`${table.status} in ('queued', 'running', 'completed', 'failed')`),
+    check("filesystem_verification_runs_phase_check",
+      sql`${table.progressPhase} in ('queued', 'checking', 'completed')`),
+    check("filesystem_verification_runs_claim_check",
+      sql`(${table.claimToken} is null) = (${table.claimedAt} is null)`),
+    check("filesystem_verification_runs_result_check",
+      sql`(${table.resultStatus} is null) = (${table.resultMessage} is null) and
+          (${table.resultStatus} is null) = (${table.verifiedAt} is null)`),
+    check("filesystem_verification_runs_result_status_check",
+      sql`${table.resultStatus} is null or ${table.resultStatus} in (${sqliteStringLiterals(FILESYSTEM_VERIFICATION_STATUSES)})`),
+    check("filesystem_verification_runs_state_check",
+      sql`(${table.status} = 'queued' and ${table.progressPhase} = 'queued' and
+            ${table.claimToken} is null and ${table.resultStatus} is null and ${table.failureCode} is null) or
+          (${table.status} = 'running' and ${table.progressPhase} = 'checking' and
+            ${table.claimToken} is not null and ${table.resultStatus} is null and ${table.failureCode} is null) or
+          (${table.status} = 'completed' and ${table.progressPhase} = 'completed' and
+            ${table.claimToken} is null and ${table.resultStatus} is not null and ${table.failureCode} is null) or
+          (${table.status} = 'failed' and ${table.progressPhase} = 'completed' and
+            ${table.claimToken} is null and ${table.resultStatus} is null and ${table.failureCode} is not null)`),
   ],
 );
 

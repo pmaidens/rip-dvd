@@ -75,6 +75,63 @@ it("reports database health as JSON through the public command runner", async ()
   });
 });
 
+it("submits filesystem verification with replay, status, and bounded waiting", async () => {
+  const current = fixture();
+  const { archive } = seedCatalogReviewForReadFixture(current);
+  const args = [
+    "submit-filesystem-verification", "--key", "synthetic-verification-key",
+    "--target", "original_disc_archive", "--id", archive.id,
+  ];
+  expect((await current.run(args.slice(0, 1))).result).toMatchObject({
+    error: { code: "INVALID_MUTATION_KEY" },
+  });
+  const submitted = await current.run(args);
+  expect(submitted.exitCode).toBe(0);
+  expect(submitted.result).toMatchObject({ verificationRun: {
+    target: "original_disc_archive", targetId: archive.id, status: "queued",
+  } });
+  expect((await current.run(args)).result).toEqual(submitted.result);
+  const id = (submitted.result as { verificationRun: { id: string } }).verificationRun.id;
+  expect((await current.run(["inspect", "filesystem-verifications", id])).result)
+    .toMatchObject({ item: { id, status: "queued" } });
+  const timedOut = await current.run([
+    "wait", "filesystem-verifications", id, "--timeout-ms", "0",
+  ]);
+  expect(timedOut.exitCode).toBe(3);
+  expect(timedOut.result).toMatchObject({ outcome: "timeout", current: { id, status: "queued" } });
+
+  const worker = current.openAccess();
+  const claim = worker.filesystemVerification.claimNext()!;
+  await worker.filesystemVerification.execute(claim);
+  worker.close();
+  const settled = await current.run([
+    "wait", "filesystem-verifications", id, "--timeout-ms", "0",
+  ]);
+  expect(settled.exitCode).toBe(0);
+  expect(settled.result).toMatchObject({
+    outcome: "settled", current: { id, status: "completed", resultStatus: "missing" },
+  });
+  expect((await current.run(args)).result).toEqual(submitted.result);
+  expect((await current.run([
+    "submit-filesystem-verification", "--key", "synthetic-verification-key",
+    "--target", "encode_job_output", "--id", archive.id,
+  ])).result).toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
+
+  const failedSubmission = await current.run([
+    "submit-filesystem-verification", "--key", "synthetic-verification-failure",
+    "--target", "original_disc_archive", "--id", archive.id,
+  ]);
+  const failedId = (failedSubmission.result as { verificationRun: { id: string } }).verificationRun.id;
+  const failureWorker = current.openAccess();
+  failureWorker.filesystemVerification.fail(failureWorker.filesystemVerification.claimNext()!);
+  failureWorker.close();
+  expect((await current.run([
+    "wait", "filesystem-verifications", failedId, "--timeout-ms", "0",
+  ])).result).toMatchObject({
+    outcome: "settled", current: { status: "failed", failureCode: "VERIFICATION_UNAVAILABLE" },
+  });
+});
+
 it("reports deployment readiness from persisted Optical Drive and Disc Inspection state", async () => {
   const current = fixture();
   const seed = current.openAccess();
@@ -376,6 +433,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       "cancel-archive-request",
       "retry-archive-request",
       "retry-disc-inspection",
+      "submit-filesystem-verification",
       "catalog-review",
       "disc-selection",
       "list-encoding-profiles",

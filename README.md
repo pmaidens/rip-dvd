@@ -428,6 +428,10 @@ docker compose --profile maintenance run --rm operator-cli readiness
 docker compose --profile maintenance run --rm operator-cli inspect disc-inspections
 docker compose --profile maintenance run --rm operator-cli inspect archive-requests synthetic-request-id
 docker compose --profile maintenance run --rm operator-cli wait archive-requests synthetic-request-id --timeout-ms 30000
+docker compose --profile maintenance run --rm operator-cli generate-key
+docker compose --profile maintenance run --rm operator-cli submit-filesystem-verification --key 00000000-0000-4000-8000-000000000001 --target original_disc_archive --id synthetic-archive-id
+docker compose --profile maintenance run --rm operator-cli inspect filesystem-verifications
+docker compose --profile maintenance run --rm operator-cli wait filesystem-verifications synthetic-run-id --timeout-ms 30000
 docker compose --profile maintenance run --rm operator-cli help
 ```
 
@@ -447,7 +451,8 @@ deployment activity rather than promising that every drive can start work.
 known action eligibility where applicable. The supported kinds are
 `optical-drives`, `detected-discs`,
 `disc-inspections`, `archive-requests`, `archive-jobs`,
-`original-disc-archives`, `encode-jobs`, `worker-incidents`, and `activity`.
+`original-disc-archives`, `encode-jobs`, `filesystem-verifications`,
+`worker-incidents`, and `activity`.
 Disc Inspection detail includes every persisted attempt and its source
 continuity and settled-capacity evidence. Archive Request detail keeps intent
 separate from Archive Job attempts. Archive and job detail includes the
@@ -455,7 +460,7 @@ persisted integrity, boundary, progress, and failure evidence. The equivalent
 web read is `GET /api/operations?kind=<kind>&id=<id>`; omit `id` for a list.
 
 `wait <kind> <id> --timeout-ms <milliseconds>` polls existing Disc Inspection,
-Archive Request, Archive Job, or Encode Job state for up to one hour. It returns
+Archive Request, Archive Job, Encode Job, or filesystem verification state for up to one hour. It returns
 `outcome: settled` with the current record when work reaches a terminal or
 attention-needed state. Timeout returns `outcome: timeout` with current state
 and never cancels work. The optional `--poll-ms` range is 100..5000 and
@@ -495,11 +500,34 @@ with `MUTATION_KEY_CONFLICT`.
 Repeat the same command with the same key and target if the response is lost.
 The application returns the original submission result, including its original
 status and timestamps, even if the request has since progressed. Current work
-state comes from the dashboard until CLI status commands are added. A fresh key
+state comes from `inspect archive-requests <id>`. A fresh key
 does not override archive eligibility rules. The web Archive Request endpoint
 uses the same durable replay record; its POST body contains `detectedDiscId`
 and `mutationKey`, and the dashboard retains a pending key for a retry after a
 failed response.
+
+### Run filesystem verification
+
+Submit an archive or Encode Job output check with a key created before the
+request. The command returns a durable verification run ID as soon as the work
+is queued. Repeating the same key and target returns the original submission.
+
+```bash
+docker compose --profile maintenance run --rm operator-cli \
+  submit-filesystem-verification --key <key> --target original_disc_archive --id <archive-id>
+docker compose --profile maintenance run --rm operator-cli \
+  inspect filesystem-verifications <run-id>
+docker compose --profile maintenance run --rm operator-cli \
+  wait filesystem-verifications <run-id> --timeout-ms 30000
+```
+
+Use `--target encode_job_output --id <encode-job-id>` for an output. The Archive
+Worker executes queued checks. Run detail retains its queued, checking, or
+completed phase and the result after the CLI exits. `completed` means the
+accessibility check ran; `resultStatus` can still be `missing`, `inaccessible`,
+or `error`. `failed` records a worker failure and keeps the prior target result.
+Verification checks path accessibility and recorded archive size where known.
+It does not repair files or prove content integrity.
 
 ### TypeScript roadmap and implementation frontier
 

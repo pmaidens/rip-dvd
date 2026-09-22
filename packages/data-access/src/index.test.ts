@@ -679,11 +679,12 @@ describe("data-access facade", () => {
         "disc_inspections",
         "disc_selection_supersessions",
         "encode_job_failure_reports",
+        "filesystem_verification_runs",
         "mutation_invocations",
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(20);
+    expect(identifierTables).toHaveLength(21);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "legacy_cutover_staged_sidecars"
@@ -8128,6 +8129,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260922170551_durable-filesystem-verification",
+      },
+      {
         name: "20260922161825_operation-detail-lookups",
       },
       {
@@ -8153,9 +8157,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260828164042_married_lady_ursula",
-      },
-      {
-        name: "20260828160945_fancy_chimera",
       },
     ]);
     expect(

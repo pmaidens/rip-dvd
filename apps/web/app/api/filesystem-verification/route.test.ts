@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import { createApplicationOperations } from "@rip-dvd/application";
 
 import { readDashboardSnapshot } from "../../../lib/dashboard";
+import { createOperationsResponse } from "../operations/route";
 import {
   completeCatalogReview,
   useDataAccessFixture,
@@ -65,7 +67,7 @@ function verificationRequest(target: string, id: string) {
       Host: "localhost:3000",
       Origin: "http://localhost:3000",
     },
-    body: JSON.stringify({ target, id }),
+    body: JSON.stringify({ target, id, mutationKey: `verify-${target}-${id}` }),
   });
 }
 
@@ -218,7 +220,7 @@ describe("Filesystem Verification API", () => {
     expect(JSON.stringify(body)).not.toContain("/media/");
   });
 
-  it("explicitly verifies archive and Encode Job paths without exposing them", async () => {
+  it("queues archive and output checks, then exposes retained results without paths", async () => {
     const { access, archive, job } = createVerificationRecords();
 
     const archiveResponse = await createFilesystemVerificationRoute(
@@ -232,27 +234,33 @@ describe("Filesystem Verification API", () => {
       () => "http://localhost:3000",
     );
 
-    expect(archiveResponse.status).toBe(200);
-    expect(jobResponse.status).toBe(200);
+    expect(archiveResponse.status).toBe(201);
+    expect(jobResponse.status).toBe(201);
     const archiveBody = await archiveResponse.json();
     const jobBody = await jobResponse.json();
-    expect(archiveBody).toEqual({
-      verification: {
-        target: "original_disc_archive",
-        id: archive.id,
-        status: "missing",
-        message: "File is missing at the recorded path.",
-        verifiedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
-      },
+    expect(archiveBody.verificationRun).toMatchObject({
+      target: "original_disc_archive", targetId: archive.id, status: "queued",
     });
-    expect(jobBody).toEqual({
-      verification: {
-        target: "encode_job_output",
-        id: job.id,
-        status: "missing",
-        message: "File is missing at the recorded path.",
-        verifiedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
-      },
+    expect(jobBody.verificationRun).toMatchObject({
+      target: "encode_job_output", targetId: job.id, status: "queued",
+    });
+    expect(createApplicationOperations(access).submitFilesystemVerification({
+      mutationKey: `verify-original_disc_archive-${archive.id}`,
+      target: "original_disc_archive",
+      targetId: archive.id,
+    })).toEqual(archiveBody);
+    const archiveClaim = access.filesystemVerification.claimNext()!;
+    await access.filesystemVerification.execute(archiveClaim);
+    const jobClaim = access.filesystemVerification.claimNext()!;
+    await access.filesystemVerification.execute(jobClaim);
+    const result = createOperationsResponse(
+      access,
+      new Request(`http://localhost:3000/api/operations?kind=filesystem-verifications&id=${archiveBody.verificationRun.id}`),
+    );
+    expect(result.status).toBe(200);
+    expect((await result.json()).item).toMatchObject({
+      status: "completed", resultStatus: "missing",
+      resultMessage: "File is missing at the recorded path.",
     });
     expect(JSON.stringify([archiveBody, jobBody])).not.toContain("/media/");
   });

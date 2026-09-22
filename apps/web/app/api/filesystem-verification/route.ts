@@ -1,11 +1,10 @@
 import { loadConfig } from "@rip-dvd/config";
+import { createApplicationOperations, InvalidMutationKeyError, parseMutationKey } from "@rip-dvd/application";
 import {
   DomainInvariantError,
+  MutationKeyConflictError,
   RecordNotFoundError,
   type DataAccess,
-  type EncodeJobId,
-  type FilesystemVerificationStatus,
-  type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../lib/data-access";
@@ -176,33 +175,6 @@ export function createFilesystemVerificationInventoryRoute(
   }
 }
 
-function serializeVerification(
-  target: VerificationTarget,
-  record: {
-    id: string;
-    verificationStatus: FilesystemVerificationStatus | null;
-    verificationMessage: string | null;
-    verifiedAt: Date | null;
-  },
-) {
-  if (
-    record.verificationStatus === null ||
-    record.verificationMessage === null ||
-    record.verifiedAt === null
-  ) {
-    throw new Error("Filesystem verification result is incomplete");
-  }
-  return {
-    verification: {
-      target,
-      id: record.id,
-      status: record.verificationStatus,
-      message: record.verificationMessage,
-      verifiedAt: record.verifiedAt.toISOString(),
-    },
-  };
-}
-
 export async function createFilesystemVerificationRoute(
   request: Request,
   getAccess: () => DataAccess = getDataAccess,
@@ -226,23 +198,27 @@ export async function createFilesystemVerificationRoute(
     const body = asRecord(await request.json().catch(() => null));
     const target = verificationTarget(body?.target);
     const id = boundedString(body?.id);
+    try {
+      parseMutationKey(body?.mutationKey);
+    } catch (error) {
+      if (error instanceof InvalidMutationKeyError) {
+        return response({ error: "Invalid mutation key" }, 400);
+      }
+      throw error;
+    }
     if (!body || !target || !id) {
       return response({ error: "Invalid filesystem verification" }, 400);
     }
-    const access = getAccess();
-    const record = await (
-      target === "original_disc_archive"
-        ? access.filesystemVerification.verifyOriginalDiscArchive(
-            id as OriginalDiscArchiveId,
-          )
-        : access.filesystemVerification.verifyEncodeJobOutput(id as EncodeJobId)
-    );
-    return response(serializeVerification(target, record));
+    return response(createApplicationOperations(getAccess()).submitFilesystemVerification({
+      mutationKey: body.mutationKey,
+      target,
+      targetId: id,
+    }), 201);
   } catch (error) {
     if (error instanceof RecordNotFoundError) {
       return response({ error: "Verification target not found" }, 404);
     }
-    if (error instanceof DomainInvariantError) {
+    if (error instanceof DomainInvariantError || error instanceof MutationKeyConflictError) {
       return response({ error: error.message }, 409);
     }
     return response({ error: "Filesystem verification is unavailable" }, 503);

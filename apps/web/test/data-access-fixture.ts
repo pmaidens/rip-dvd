@@ -21,6 +21,7 @@ type SnapshotOverrides = {
   archiveJobs?: Partial<ConsistentReadAccess["archiveJobs"]>;
   encodeJobs?: Partial<ConsistentReadAccess["encodeJobs"]>;
   workerIncidents?: Partial<ConsistentReadAccess["workerIncidents"]>;
+  filesystemVerification?: Partial<ConsistentReadAccess["filesystemVerification"]>;
 };
 
 export function completeCatalogReview(
@@ -73,6 +74,10 @@ export function withSnapshotOverrides(
           workerIncidents: {
             ...snapshotAccess.workerIncidents,
             ...overrides.workerIncidents,
+          },
+          filesystemVerification: {
+            ...snapshotAccess.filesystemVerification,
+            ...overrides.filesystemVerification,
           },
         }),
       );

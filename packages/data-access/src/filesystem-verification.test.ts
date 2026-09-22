@@ -11,11 +11,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { completeCatalogReview } from "./catalog.test-support.js";
+import { MutationKeyConflictError, StaleJobAttemptError } from "./errors.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -106,6 +108,64 @@ function createEncodeJobFixture(
 }
 
 describe("explicit filesystem verification", () => {
+  it("replays one durable submission after reconnect and fences recovered claims", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { access, archive, directory } = createArchiveFixture();
+    const input = {
+      mutationKey: "verification-invocation-one",
+      target: "original_disc_archive" as const,
+      targetId: archive.id,
+    };
+    const submitted = access.filesystemVerification.submit(input);
+    expect(submitted).toMatchObject({ status: "queued", progressPhase: "queued" });
+    expect(access.filesystemVerification.submit(input)).toEqual(submitted);
+    expect(() => access.filesystemVerification.submit({
+      ...input, target: "encode_job_output",
+    })).toThrow(MutationKeyConflictError);
+    const stale = access.filesystemVerification.claimNext()!;
+    expect(stale).toMatchObject({ id: submitted.id, status: "running", progressPhase: "checking" });
+    access.close();
+
+    const reconnected = createLegacySidecarDataAccess({
+      databasePath: join(directory, "catalog.sqlite"),
+      mediaLibraryPath: directory,
+      originalsLibraryPath: directory,
+    });
+    expect(reconnected.filesystemVerification.submit(input)).toEqual(submitted);
+    expect(reconnected.filesystemVerification.find(submitted.id)?.status).toBe("running");
+    vi.setSystemTime(new Date("2026-01-01T00:00:16.000Z"));
+    expect(reconnected.filesystemVerification.recoverExpiredClaims()).toBe(1);
+    const recovered = reconnected.filesystemVerification.claimNext()!;
+    expect(recovered.claimToken).not.toBe(stale.claimToken);
+    await expect(reconnected.filesystemVerification.execute(stale))
+      .rejects.toThrow(StaleJobAttemptError);
+    expect(reconnected.filesystemVerification.fail(stale)).toBeNull();
+    const completed = await reconnected.filesystemVerification.execute(recovered);
+    expect(completed).toMatchObject({
+      id: submitted.id, status: "completed", progressPhase: "completed",
+      resultStatus: "accessible", resultMessage: "File is accessible.",
+    });
+    expect(reconnected.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toMatchObject({ verificationStatus: "accessible" });
+    reconnected.close();
+  });
+
+  it("retains a failed run without overwriting the previous target result", () => {
+    const { access, archive } = createArchiveFixture();
+    const run = access.filesystemVerification.submit({
+      mutationKey: "verification-failure-one",
+      target: "original_disc_archive",
+      targetId: archive.id,
+    });
+    const claim = access.filesystemVerification.claimNext()!;
+    expect(access.filesystemVerification.fail(claim)).toMatchObject({
+      id: run.id, status: "failed", failureCode: "VERIFICATION_UNAVAILABLE",
+    });
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toMatchObject({ verificationStatus: null });
+    access.close();
+  });
   it("does not touch the Media Library while constructing or reading the facade", () => {
     const directory = mkdtempSync(join(tmpdir(), "rip-dvd-verification-open-"));
     temporaryDirectories.push(directory);
@@ -415,7 +475,7 @@ describe("explicit filesystem verification", () => {
     {
       code: "EACCES",
       expectedStatus: "inaccessible",
-      expectedMessage: "The web process cannot access the recorded path.",
+      expectedMessage: "The recorded path cannot be accessed.",
     },
     {
       code: "EIO",

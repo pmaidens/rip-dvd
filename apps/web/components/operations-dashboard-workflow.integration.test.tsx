@@ -2911,6 +2911,7 @@ describe("end-to-end operations dashboard workflow", () => {
       createMutationRequest("/api/filesystem-verification", {
         target: "original_disc_archive",
         id: archive.id,
+        mutationKey: "synthetic-workflow-archive-verification",
       }),
       () => access,
       () => trustedOrigin,
@@ -2919,16 +2920,15 @@ describe("end-to-end operations dashboard workflow", () => {
       createMutationRequest("/api/filesystem-verification", {
         target: "encode_job_output",
         id: queuedEncodeJob.id,
+        mutationKey: "synthetic-workflow-output-verification",
       }),
       () => access,
       () => trustedOrigin,
     );
-    expect(await archiveVerification.json()).toMatchObject({
-      verification: { status: "accessible" },
-    });
-    expect(await outputVerification.json()).toMatchObject({
-      verification: { status: "accessible" },
-    });
+    expect((await archiveVerification.json()).verificationRun).toMatchObject({ status: "queued" });
+    expect((await outputVerification.json()).verificationRun).toMatchObject({ status: "queued" });
+    await access.filesystemVerification.execute(access.filesystemVerification.claimNext()!);
+    await access.filesystemVerification.execute(access.filesystemVerification.claimNext()!);
     expect(inspectPath).toHaveBeenNthCalledWith(
       1,
       archive.archivePath,

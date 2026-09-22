@@ -80,6 +80,23 @@ export type ArchiveProgressPhase = ArchiveRunningProgressPhase;
 export type EncodeProgressPhase = (typeof ENCODE_PROGRESS_PHASES)[number];
 export type FilesystemVerificationStatus =
   (typeof FILESYSTEM_VERIFICATION_STATUSES)[number];
+export type FilesystemVerificationTarget = "original_disc_archive" | "encode_job_output";
+export type FilesystemVerificationRunStatus = "queued" | "running" | "completed" | "failed";
+export interface FilesystemVerificationRun {
+  id: string;
+  target: FilesystemVerificationTarget;
+  targetId: string;
+  status: FilesystemVerificationRunStatus;
+  progressPhase: "queued" | "checking" | "completed";
+  resultStatus: FilesystemVerificationStatus | null;
+  resultMessage: string | null;
+  verifiedAt: Date | null;
+  failureCode: string | null;
+  claimToken: string | null;
+  claimedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
 export type RetainedEncodeOutputState =
   (typeof RETAINED_ENCODE_OUTPUT_STATES)[number];
 export type WorkerKind = (typeof WORKER_KINDS)[number];
@@ -1511,6 +1528,18 @@ export interface EncodeJobAccess {
 }
 
 export interface FilesystemVerificationAccess {
+  submit(input: {
+    mutationKey: string;
+    target: FilesystemVerificationTarget;
+    targetId: string;
+  }): FilesystemVerificationRun;
+  find(id: string): FilesystemVerificationRun | null;
+  list(options: { limit: number }): FilesystemVerificationRun[];
+  listActive(): FilesystemVerificationRun[];
+  claimNext(): FilesystemVerificationRun | null;
+  recoverExpiredClaims(): number;
+  execute(claim: FilesystemVerificationRun): Promise<FilesystemVerificationRun>;
+  fail(claim: FilesystemVerificationRun): FilesystemVerificationRun | null;
   listOriginalDiscArchives(options: {
     limit: number;
     offset?: number;
@@ -1579,6 +1608,7 @@ export interface ConsistentReadAccess {
     | "listRetainedOutputSummaries"
   >;
   readonly workerIncidents: Pick<WorkerIncidentAccess, "find" | "list">;
+  readonly filesystemVerification: Pick<FilesystemVerificationAccess, "find" | "list" | "listActive">;
 }
 
 export interface DataAccess {

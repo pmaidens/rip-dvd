@@ -9,6 +9,7 @@ import { createNodeDvdCompletenessProver } from "./dvd-completeness-prover.js";
 import { createNodeDvdGeometryValidator } from "./dvd-geometry-validator.js";
 import { createNodeDvdEndpointProver } from "./dvd-endpoint-prover.js";
 import { createLinuxOpticalDriveHardware } from "./optical-drive-hardware.js";
+import { runFilesystemVerificationWorker } from "./filesystem-verification-worker.js";
 import { createNodeDvdSalvageValidator } from "./dvd-salvage-validator.js";
 
 await runConfiguredAsyncWorker(
@@ -20,6 +21,7 @@ await runConfiguredAsyncWorker(
   async ({ config, log, signal }) => {
     const access = createDataAccess({
       databasePath: config.databasePath,
+      mediaLibraryPath: config.mediaLibraryPath,
       originalsLibraryPath: config.originalsLibraryPath,
     });
     const copyRunner = createNodeDvdCopyRunner({
@@ -27,7 +29,7 @@ await runConfiguredAsyncWorker(
       stallTimeoutMs: config.archiveCopyStallTimeoutMs,
     });
     try {
-      await runArchiveWorker({
+      await Promise.all([runArchiveWorker({
         access,
         concurrency: config.archiveWorkerConcurrency,
         configuredDevicePath: config.archiveDevicePath,
@@ -42,7 +44,12 @@ await runConfiguredAsyncWorker(
         pollIntervalMs: config.workerPollIntervalMs,
         signal,
         workerId: `archive-worker:${process.pid}:${randomUUID()}`,
-      });
+      }), runFilesystemVerificationWorker({
+        access,
+        intervalMs: config.workerPollIntervalMs,
+        log,
+        signal,
+      })]);
     } finally {
       access.close();
     }

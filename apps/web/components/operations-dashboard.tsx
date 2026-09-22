@@ -1765,14 +1765,34 @@ export async function requestFilesystemVerification(
   target: FilesystemVerificationTarget,
   id: string,
   fetcher: DashboardFetch = fetch,
-): Promise<void> {
+  mutationKey: string = crypto.randomUUID(),
+): Promise<string> {
   const response = await fetcher("/api/filesystem-verification", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ target, id }),
+    body: JSON.stringify({ target, id, mutationKey }),
   });
   if (!response.ok) {
     throw new Error("Filesystem verification request failed");
+  }
+  const body = await response.json() as { verificationRun?: { id?: string } };
+  if (typeof body.verificationRun?.id !== "string") {
+    throw new Error("Filesystem verification response is invalid");
+  }
+  return body.verificationRun.id;
+}
+
+async function waitForFilesystemVerificationRun(id: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const response = await fetch(`/api/operations?kind=filesystem-verifications&id=${encodeURIComponent(id)}`, {
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error("Verification run is unavailable");
+    const body = await response.json() as { item?: { status?: string } };
+    if (body.item?.status === "completed") return;
+    if (body.item?.status === "failed") throw new Error("Verification run failed");
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
 }
 
@@ -1982,6 +2002,7 @@ export function OperationsDashboard({
   >(null);
   const [filesystemVerificationFailed, setFilesystemVerificationFailed] =
     useState(false);
+  const verificationSubmissionKeys = React.useRef(new Map<string, string>());
   const [approveDetectedDisc] = useState(() =>
     createDashboardMutationRunner({
       request: requestArchiveApproval,
@@ -2154,10 +2175,15 @@ export function OperationsDashboard({
     if (verifyingFilesystemTarget !== null) {
       return;
     }
-    setVerifyingFilesystemTarget(`${target}:${id}`);
+    const targetKey = `${target}:${id}`;
+    setVerifyingFilesystemTarget(targetKey);
     setFilesystemVerificationFailed(false);
     try {
-      await requestFilesystemVerification(target, id);
+      const mutationKey = verificationSubmissionKeys.current.get(targetKey) ?? crypto.randomUUID();
+      verificationSubmissionKeys.current.set(targetKey, mutationKey);
+      const runId = await requestFilesystemVerification(target, id, fetch, mutationKey);
+      verificationSubmissionKeys.current.delete(targetKey);
+      await waitForFilesystemVerificationRun(runId);
       setRequestNumber((value) => value + 1);
     } catch {
       setFilesystemVerificationFailed(true);
