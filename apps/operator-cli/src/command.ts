@@ -512,5 +512,3 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
     return 1;
   }
 }
-
-export const runCommandAsync = runCommand;

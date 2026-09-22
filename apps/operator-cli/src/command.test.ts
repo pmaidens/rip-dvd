@@ -331,7 +331,7 @@ it("inspects full attempts and keeps request intent separate from job attempts",
       availableActions: [{ name: "request-archive", eligible: false }],
     },
   });
-  const timedOut = await current.runAsync([
+  const timedOut = await current.run([
     "wait", "archive-requests", request.id, "--timeout-ms", "0",
   ]);
   expect(timedOut.exitCode).toBe(3);
@@ -342,7 +342,7 @@ it("inspects full attempts and keeps request intent separate from job attempts",
   expect((await current.run(["inspect", "archive-requests", request.id])).result)
     .toMatchObject({ item: { status: "pending" } });
 
-  const settled = await current.runAsync([
+  const settled = await current.run([
     "wait", "disc-inspections", started.inspection.id, "--timeout-ms", "0",
   ]);
   expect(settled.exitCode).toBe(0);
@@ -351,7 +351,7 @@ it("inspects full attempts and keeps request intent separate from job attempts",
   const retryAccess = current.openAccess();
   retryAccess.discInspections.requestRetry(started.inspection.id);
   retryAccess.close();
-  const retryPending = await current.runAsync([
+  const retryPending = await current.run([
     "wait", "disc-inspections", started.inspection.id, "--timeout-ms", "0",
   ]);
   expect(retryPending.exitCode).toBe(3);
@@ -467,7 +467,7 @@ it("observes a later transition during a bounded wait", async () => {
     }
   }, 20);
   try {
-    const result = await current.runAsync([
+    const result = await current.run([
       "wait", "archive-requests", request.id,
       "--timeout-ms", "500", "--poll-ms", "100",
     ]);
@@ -492,10 +492,10 @@ it("validates inspection and wait arguments before opening the database", async 
     .toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
   expect((await current.run(["inspect", "disc-inspections", "missing-id"])).result)
     .toMatchObject({ error: { code: "NOT_FOUND" } });
-  expect((await current.runAsync([
+  expect((await current.run([
     "wait", "archive-jobs", "missing-id", "--timeout-ms", "0",
   ])).result).toMatchObject({ error: { code: "NOT_FOUND" } });
-  expect((await current.runAsync([
+  expect((await current.run([
     "wait", "archive-jobs", "missing-id", "--timeout-ms", "3600001",
   ])).result).toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
 });

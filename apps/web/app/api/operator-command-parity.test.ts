@@ -194,6 +194,31 @@ it("returns the same operational records and evidence through web and CLI", asyn
       integrityEvidence: createCleanReadArchiveIntegrityEvidence("dvd-recovery-v1"),
     });
     const archiveId = completedJob.originalDiscArchiveId!;
+    const mediaItem = access.catalog.createMediaItem({ kind: "movie", title: "Synthetic Film" });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archiveId,
+      mediaItemId: mediaItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const revisedArchive = access.catalog.listOriginalDiscArchives({ ids: [archiveId] })[0]!;
+    access.catalog.completeCatalogReview(
+      archiveId, revisedArchive.updatedAt, "reviewed_with_selections",
+    );
+    const profile = access.encodingProfiles.create({
+      key: "synthetic-parity", displayName: "Synthetic parity", mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    const encodeJob = access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath: join(fixture.mediaLibraryPath, "synthetic.mkv"),
+    });
+    const encodeClaim = access.encodeJobs.claimNext("synthetic-encode-worker")!;
+    access.encodeJobs.failWithReport(encodeClaim, {
+      schemaVersion: 1, reasonCode: "command_failed", phase: "encoding",
+      retryability: "appropriate", diagnostic: "Synthetic encode failure",
+      evidence: { kind: "exit_status", exitStatus: 17 },
+    });
     const incident = access.workerIncidents.record({
       schemaVersion: 1,
       workerKind: "archive",
@@ -220,6 +245,7 @@ it("returns the same operational records and evidence through web and CLI", asyn
       ["archive-requests", request.id],
       ["archive-jobs", completedJob.id],
       ["original-disc-archives", archiveId],
+      ["encode-jobs", encodeJob.id],
       ["worker-incidents", incident.id],
     ]) {
       const response = createOperationsResponse(access,
@@ -237,6 +263,16 @@ it("returns the same operational records and evidence through web and CLI", asyn
         boundaryReportedSizeBytes: 2_048,
         boundaryPublishedSizeBytes: 2_048,
         integrity: "clean_read",
+      } });
+    expect((await fixture.run(["inspect", "encode-jobs", encodeJob.id])).result)
+      .toMatchObject({ item: {
+        status: "failed",
+        history: [expect.objectContaining({ id: encodeJob.id })],
+        correctionLinks: [expect.objectContaining({ id: encodeJob.id })],
+        failureReports: [expect.objectContaining({ reasonCode: "command_failed" })],
+        availableActions: expect.arrayContaining([
+          expect.objectContaining({ name: "requeue", eligible: true }),
+        ]),
       } });
   } finally {
     access.close();
