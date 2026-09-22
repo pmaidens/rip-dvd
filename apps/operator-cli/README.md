@@ -235,7 +235,8 @@ An initial `encode-enqueue` is deduplicated by Disc Selection and Encoding
 Profile, including after completion. Use `encode-requeue` for a terminal job.
 If another job reserves its output path, supply `--output-path` with a safe
 path inside the configured media library when requeueing a failed or cancelled
-job. A completed job keeps its output path; a different `--output-path` is
+job. Queue and detail results expose this as an alternate action requiring
+`outputPath`. A completed job keeps its output path; a different `--output-path` is
 rejected so the worker can apply its existing replacement checks. Running
 cancellation remains cooperative; the worker
 settles it after observing the request. Malformed inputs return exit 2 with a

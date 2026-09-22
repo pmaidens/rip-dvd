@@ -507,6 +507,26 @@ it("manages Encode Jobs through keyed commands and retains replay and later hist
     "--output-path", outputPath,
   ]);
   expect(competing.exitCode).toBe(0);
+  const alternateAction = {
+    name: "requeue-with-output-path",
+    eligible: true,
+    requiredInputs: ["outputPath"],
+  };
+  expect((await current.run(["encode-queue", "--encoding-profile-id", profile.id])).result)
+    .toMatchObject({ selections: expect.arrayContaining([expect.objectContaining({
+      id: correctedSelection.id,
+      queueAction: expect.objectContaining({
+        name: "requeue", eligible: false,
+        alternate: expect.objectContaining(alternateAction),
+      }),
+    })]) });
+  expect((await current.run(["inspect", "encode-jobs", jobId])).result)
+    .toMatchObject({ item: { availableActions: expect.arrayContaining([
+      expect.objectContaining({
+        name: "requeue", eligible: false,
+        alternate: expect.objectContaining(alternateAction),
+      }),
+    ]) } });
   const blocked = await current.run([
     "encode-requeue", "--key", "synthetic-requeue-key-1", "--encode-job-id", jobId,
   ]);

@@ -396,8 +396,10 @@ use the completion transition.
 Requeue first grants replacement authority only when a completed Encode Job
 keeps its output path. Explicit terminal requeue retains that authoritative
 path for completed jobs and for failed replacements that still own their prior
-final, preserving both SQLite provenance and the existing path reservation even
-when the request supplies a different path. A failed job without retained
+final, preserving both SQLite provenance and the existing path reservation.
+Unkeyed internal callers retain the prior behavior of ignoring a different
+requested path. Keyed operator invocations reject the different path so their
+result cannot imply that the path changed. A failed job without retained
 replacement authority may move to a new path. The worker records the owned
 final's filesystem identity; failure retains authority only when the same
 identity is still present, while recovery retains the stored identity for the

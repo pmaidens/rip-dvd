@@ -191,7 +191,19 @@ export function encodeRequeueAvailability(
     return { eligible: false, reason: "Encode Job has pending output publication." };
   }
   if (access.encodeJobs.hasReservedOutputPathConflict(job)) {
-    return { eligible: false, reason: "Encode Job output is reserved by another job." };
+    return {
+      eligible: false,
+      reason: "Encode Job output is reserved by another job.",
+      alternate: (job.status === "failed" || job.status === "cancelled") &&
+        !job.replaceExistingOutput
+        ? {
+          name: "requeue-with-output-path",
+          eligible: true,
+          requiredInputs: ["outputPath"],
+          reason: "Choose an unreserved output path inside the media library.",
+        }
+        : null,
+    };
   }
   return { eligible: true, reason: null };
 }
