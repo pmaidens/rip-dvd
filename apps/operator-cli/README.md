@@ -13,6 +13,8 @@ rip-dvd-operator catalog-review suggest <archive-id> --tmdb-id 42 --media-type m
 `show` returns the current catalog revision, archive and scan provenance,
 coverage, Media Items, Disc Selections with structured action availability,
 correction history, and corrected Encode Job and retained-output history.
+`reviewActionAvailability` reports whether completion with selections or
+Archive-only completion is currently allowed, with a reason when blocked.
 Each paginated section includes its offset, limit, and next/previous flags.
 Use `--selection-offset`, `--correction-offset`, `--correction-job-offset`,
 `--correction-output-offset`, `--replacement-offset`, and

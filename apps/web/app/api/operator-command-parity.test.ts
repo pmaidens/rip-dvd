@@ -49,6 +49,13 @@ it("returns the same Catalog Review detail and candidates through web and CLI", 
     expect(detail.status).toBe(200);
     const detailResult = await detail.json();
     expect(detailResult).toMatchObject({
+      reviewActionAvailability: {
+        completeWithSelections: { state: "available", reason: null },
+        completeArchiveOnly: {
+          state: "blocked",
+          reason: "Archive-only Review cannot contain Disc Selections",
+        },
+      },
       discSelections: [{
         id: correctedSelection.id,
         actionAvailability: {

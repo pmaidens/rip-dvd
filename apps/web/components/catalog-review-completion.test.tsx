@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import type { CatalogReviewCoverage } from "@rip-dvd/data-access";
+import type { CatalogReviewActionAvailability, CatalogReviewCoverage } from "@rip-dvd/data-access";
 
 import { CatalogReviewCompletion } from "./catalog-review-completion";
 
@@ -35,6 +35,19 @@ const coverage = {
   ],
 } satisfies CatalogReviewCoverage;
 
+const withSelections = {
+  completeWithSelections: { state: "available", reason: null },
+  completeArchiveOnly: { state: "blocked", reason: "Archive-only Review cannot contain Disc Selections" },
+} satisfies CatalogReviewActionAvailability;
+const archiveOnly = {
+  completeWithSelections: { state: "blocked", reason: "Catalog review requires at least one Disc Selection" },
+  completeArchiveOnly: { state: "available", reason: null },
+} satisfies CatalogReviewActionAvailability;
+const completed = {
+  completeWithSelections: { state: "blocked", reason: "Catalog review is already complete" },
+  completeArchiveOnly: { state: "blocked", reason: "Catalog review is already complete" },
+} satisfies CatalogReviewActionAvailability;
+
 describe("CatalogReviewCompletion", () => {
   it.each([
     {
@@ -65,6 +78,9 @@ describe("CatalogReviewCompletion", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewCompletion
         {...props}
+        actionAvailability={props.reviewOutcome === "needs_review"
+          ? props.coverage.discSelectionCount > 0 ? withSelections : archiveOnly
+          : completed}
         onArchiveOnlyChange={() => undefined}
         onComplete={() => undefined}
       />,
@@ -79,6 +95,7 @@ describe("CatalogReviewCompletion", () => {
       <CatalogReviewCompletion
         isSaving={false}
         coverage={coverage}
+        actionAvailability={withSelections}
         reviewOutcome="needs_review"
         archiveOnlySelected={false}
         onArchiveOnlyChange={() => undefined}
@@ -120,6 +137,7 @@ describe("CatalogReviewCompletion", () => {
       <CatalogReviewCompletion
         isSaving={false}
         coverage={zeroSelectionCoverage}
+        actionAvailability={archiveOnly}
         reviewOutcome="needs_review"
         archiveOnlySelected
         onArchiveOnlyChange={() => undefined}
@@ -143,6 +161,7 @@ describe("CatalogReviewCompletion", () => {
       <CatalogReviewCompletion
         isSaving={false}
         coverage={coverage}
+        actionAvailability={withSelections}
         reviewOutcome="needs_review"
         archiveOnlySelected={false}
         replacementPlan={{

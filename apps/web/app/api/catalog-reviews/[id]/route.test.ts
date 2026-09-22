@@ -226,6 +226,13 @@ describe("Catalog Review API", () => {
         catalogReviewOutcome: "needs_review",
       },
       reviewOutcome: "needs_review",
+      reviewActionAvailability: {
+        completeWithSelections: {
+          state: "blocked",
+          reason: "Catalog review requires at least one Disc Selection",
+        },
+        completeArchiveOnly: { state: "available", reason: null },
+      },
       rawScan: {
         titles: [{
           number: 1,

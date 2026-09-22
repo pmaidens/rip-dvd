@@ -83,6 +83,13 @@ it("inspects a Catalog Review and exposes metadata candidates through read-only 
   expect(detail.result).toMatchObject({
     catalogRevision: revision,
     archive: { id: archive.id, discLabel: "EXAMPLE_FILM_2020" },
+    reviewActionAvailability: {
+      completeWithSelections: { state: "available", reason: null },
+      completeArchiveOnly: {
+        state: "blocked",
+        reason: "Archive-only Review cannot contain Disc Selections",
+      },
+    },
     rawScan: { titles: [{ number: 1, durationSeconds: 5_400 }] },
     correctionHistory: [{
       supersededDiscSelection: { id: previousSelection.id, sourceIdentity: { kind: "main_feature" } },
@@ -152,6 +159,22 @@ it("inspects a Catalog Review and exposes metadata candidates through read-only 
   expect(processResult.status).toBe(0);
   expect(processResult.stderr).toBe("");
   expect(JSON.parse(processResult.stdout)).toEqual(detail.result);
+
+  const finalize = current.openAccess();
+  finalize.catalog.completeCatalogReview(
+    archive.id,
+    finalize.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt,
+    "reviewed_with_selections",
+  );
+  finalize.close();
+  const completed = await current.run(["catalog-review", "show", archive.id]);
+  expect(completed.result).toMatchObject({
+    reviewOutcome: "reviewed_with_selections",
+    reviewActionAvailability: {
+      completeWithSelections: { state: "blocked", reason: "Catalog review is already complete" },
+      completeArchiveOnly: { state: "blocked", reason: "Archive-only Review cannot contain Disc Selections" },
+    },
+  });
 });
 
 it("discovers commands and rejects unsupported invocations without opening SQLite", async () => {

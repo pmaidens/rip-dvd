@@ -1,5 +1,6 @@
 import type {
   CatalogReviewCoverage,
+  CatalogReviewActionAvailability,
   CatalogReviewOutcome,
   CompletedCatalogReviewOutcome,
 } from "@rip-dvd/data-access";
@@ -15,6 +16,7 @@ import {
 interface CatalogReviewCompletionProps {
   isSaving: boolean;
   coverage: CatalogReviewCoverage;
+  actionAvailability: CatalogReviewActionAvailability;
   reviewOutcome: CatalogReviewOutcome;
   archiveOnlySelected: boolean;
   replacementPlan?: CatalogReviewReplacementPlan;
@@ -30,6 +32,7 @@ interface CatalogReviewCompletionProps {
 export function CatalogReviewCompletion({
   isSaving,
   coverage,
+  actionAvailability,
   reviewOutcome,
   archiveOnlySelected,
   replacementPlan,
@@ -40,6 +43,13 @@ export function CatalogReviewCompletion({
 }: CatalogReviewCompletionProps) {
   const hasSelections = coverage.discSelectionCount > 0;
   const isPending = reviewOutcome === "needs_review";
+  const canCompleteWithSelections =
+    actionAvailability.completeWithSelections.state === "available";
+  const canCompleteArchiveOnly =
+    actionAvailability.completeArchiveOnly.state === "available";
+  const completionAvailability = hasSelections
+    ? actionAvailability.completeWithSelections
+    : actionAvailability.completeArchiveOnly;
   const completionOutcome: CompletedCatalogReviewOutcome = hasSelections
     ? "reviewed_with_selections"
     : "archive_only";
@@ -203,7 +213,7 @@ export function CatalogReviewCompletion({
                         defaultChecked={selected !== undefined}
                         disabled={
                           isSaving ||
-                          !isPending ||
+                          !canCompleteWithSelections ||
                           (selected === undefined &&
                             selectedReplacementCount >=
                               MAX_CATALOG_REVIEW_REPLACEMENT_ENCODES)
@@ -228,7 +238,7 @@ export function CatalogReviewCompletion({
                             selected?.encodingProfileId ??
                             job.proposedEncodingProfileId
                           }
-                          disabled={isSaving || !isPending}
+                          disabled={isSaving || !canCompleteWithSelections}
                           required
                         >
                           {selected && !replacementPlan.encodingProfiles.some(
@@ -252,7 +262,7 @@ export function CatalogReviewCompletion({
                         <input
                           name={`${field}:output`}
                           defaultValue={selected?.outputPath ?? job.proposedOutputPath}
-                          disabled={isSaving || !isPending}
+                          disabled={isSaving || !canCompleteWithSelections}
                           maxLength={4_096}
                           required
                         />
@@ -328,7 +338,7 @@ export function CatalogReviewCompletion({
               type="checkbox"
               aria-describedby="catalog-archive-only-explanation"
               checked={!hasSelections && archiveOnlySelected}
-              disabled={isSaving || hasSelections || !isPending}
+              disabled={isSaving || !canCompleteArchiveOnly}
               onChange={(event) => onArchiveOnlyChange(event.target.checked)}
             />
             <span>
@@ -352,6 +362,8 @@ export function CatalogReviewCompletion({
             Completing review removes this archive from the dashboard queue.
             {!isPending
               ? " This Catalog Review is already complete."
+              : completionAvailability.state === "blocked"
+                ? ` ${completionAvailability.reason}`
               : !hasSelections && !archiveOnlySelected
                 ? " Select Archive only before completing a review with no Disc Selections."
                 : null}
@@ -361,7 +373,7 @@ export function CatalogReviewCompletion({
             aria-describedby="catalog-complete-explanation"
             disabled={
               isSaving ||
-              !isPending ||
+              completionAvailability.state === "blocked" ||
               (!hasSelections && !archiveOnlySelected)
             }
           >

@@ -127,6 +127,7 @@ export function readCatalogReview(
     }
     const rawTitles = decodeArchivedDvdTitles(disc.scanData) ?? [];
     const coverage = snapshot.catalog.getCatalogReviewCoverage(id);
+    const reviewActionAvailability = snapshot.catalog.getCatalogReviewActionAvailability(id);
     const discSelectionRows = snapshot.catalog.listDiscSelections({
       originalDiscArchiveId: id,
       limit: CATALOG_REVIEW_SELECTION_PAGE_SIZE + 1,
@@ -309,6 +310,7 @@ export function readCatalogReview(
         titles: rawTitles,
       },
       coverage,
+      reviewActionAvailability,
       mediaItems: reviewMediaItems.map((item) =>
         serializeMediaItem(item, maintenanceByMediaItemId.get(item.id))
       ),

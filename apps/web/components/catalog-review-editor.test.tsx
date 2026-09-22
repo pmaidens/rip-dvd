@@ -21,6 +21,7 @@ import {
 import {
   DISC_SELECTION_KINDS,
 } from "@rip-dvd/data-access/catalog-kinds";
+import type { CatalogReviewActionAvailability } from "@rip-dvd/data-access";
 
 import {
   CatalogReviewEditor,
@@ -33,6 +34,15 @@ interface PendingRequest {
   url: string;
   resolve(response: Response): void;
 }
+
+const withSelectionsActionAvailability = {
+  completeWithSelections: { state: "available", reason: null },
+  completeArchiveOnly: { state: "blocked", reason: "Archive-only Review cannot contain Disc Selections" },
+} satisfies CatalogReviewActionAvailability;
+const archiveOnlyActionAvailability = {
+  completeWithSelections: { state: "blocked", reason: "Catalog review requires at least one Disc Selection" },
+  completeArchiveOnly: { state: "available", reason: null },
+} satisfies CatalogReviewActionAvailability;
 
 let container: HTMLDivElement;
 let root: Root;
@@ -89,6 +99,7 @@ function catalogReview({
       catalogReviewOutcome: "needs_review",
     },
     reviewOutcome: "needs_review",
+    reviewActionAvailability: withSelectionsActionAvailability,
     rawScan: { titles: [] },
     coverage: {
       discSelectionCount: 1,
@@ -187,6 +198,7 @@ describe("CatalogReviewEditor", () => {
       mainFeatureSelections: 0,
       titles: [{ titleNumber: 1, status: "unmapped", hasOverlap: false }],
     };
+    review.reviewActionAvailability = archiveOnlyActionAvailability;
     const proposal = {
       kind: "movie" as const,
       title: "The Iron Giant",
@@ -1013,6 +1025,7 @@ describe("CatalogReviewEditor", () => {
         hasOverlap: false,
       })),
     };
+    initialReview.reviewActionAvailability = archiveOnlyActionAvailability;
     initialReview.mediaItems = [];
     initialReview.discSelections = [];
     const refreshedReview: CatalogReviewDto = {
@@ -1197,6 +1210,7 @@ describe("CatalogReviewEditor", () => {
         hasOverlap: false,
       }],
     };
+    review.reviewActionAvailability = archiveOnlyActionAvailability;
     review.mediaItems = [];
     review.discSelections = [];
     const postedCommands: unknown[] = [];
@@ -1534,6 +1548,7 @@ describe("CatalogReviewEditor", () => {
       mainFeatureSelections: 0,
       titles: [],
     };
+    review.reviewActionAvailability = archiveOnlyActionAvailability;
     review.discSelections = [];
     const postedCommands: unknown[] = [];
     vi.stubGlobal("fetch", vi.fn(async (
@@ -1596,6 +1611,7 @@ describe("CatalogReviewEditor", () => {
       mainFeatureSelections: 0,
       titles: [],
     };
+    initialReview.reviewActionAvailability = archiveOnlyActionAvailability;
     initialReview.discSelections = [];
     const refreshedReview = catalogReview({
       archiveId: "archive-a",
@@ -1954,6 +1970,7 @@ describe("CatalogReviewView", () => {
               catalogReviewOutcome: "needs_review",
             },
             reviewOutcome: "needs_review",
+            reviewActionAvailability: withSelectionsActionAvailability,
             rawScan: {
               titles: [{
                 number: 1,
@@ -2169,6 +2186,7 @@ describe("CatalogReviewView", () => {
               catalogReviewOutcome: "needs_review",
             },
             reviewOutcome: "needs_review",
+            reviewActionAvailability: withSelectionsActionAvailability,
             rawScan: { titles: [] },
             coverage: {
               discSelectionCount: 1,

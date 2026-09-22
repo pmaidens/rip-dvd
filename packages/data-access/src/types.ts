@@ -418,6 +418,15 @@ export interface CatalogReviewCoverage {
   titles: CatalogReviewTitleCoverage[];
 }
 
+export type CatalogReviewCompletionAvailability =
+  | { state: "available"; reason: null }
+  | { state: "blocked"; reason: string };
+
+export interface CatalogReviewActionAvailability {
+  completeWithSelections: CatalogReviewCompletionAvailability;
+  completeArchiveOnly: CatalogReviewCompletionAvailability;
+}
+
 export interface DiscSelectionCorrectionEncodeJobLink {
   replacementDiscSelectionId: DiscSelectionId;
   predecessorEncodeJob: {
@@ -1098,6 +1107,9 @@ export interface CatalogAccess {
   getCatalogReviewCoverage(
     originalDiscArchiveId: OriginalDiscArchiveId,
   ): CatalogReviewCoverage;
+  getCatalogReviewActionAvailability(
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): CatalogReviewActionAvailability;
   listDiscSelectionSupersessions(options:
     | {
       discSelectionIds: readonly DiscSelectionId[];
@@ -1419,6 +1431,7 @@ export type SnapshotCatalogAccess = Pick<
   | "searchMediaItems"
   | "listDiscSelections"
   | "getCatalogReviewCoverage"
+  | "getCatalogReviewActionAvailability"
   | "listDiscSelectionSupersessions"
   | "listCorrectedEncodeReplacementPlans"
   | "listDiscSelectionActionAvailability"
