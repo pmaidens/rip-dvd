@@ -1961,6 +1961,20 @@ describe("DashboardView", () => {
     });
   });
 
+  it("submits an Archive Request over HTTP without crypto.randomUUID", async () => {
+    const getRandomValues = crypto.getRandomValues.bind(crypto);
+    vi.stubGlobal("crypto", { getRandomValues });
+    const fetcher = vi.fn(async () => new Response(null, { status: 201 }));
+    try {
+      await requestArchiveApproval("http-disc", fetcher);
+      expect(fetcher).toHaveBeenCalledWith("/api/archive-requests", expect.objectContaining({
+        body: expect.stringMatching(/"mutationKey":"[0-9a-f-]{36}"/),
+      }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("reuses the web mutation key when a response is lost", async () => {
     const fetcher = vi.fn()
       .mockRejectedValueOnce(new Error("response lost"))

@@ -2,7 +2,9 @@ import { defineConfig } from "@playwright/test";
 import { resolve } from "node:path";
 
 const browserDataRoot = resolve("test-results/catalog-review-browser-data");
-const baseURL = "http://127.0.0.1:3100";
+// Loopback origins are secure contexts even over HTTP. Use a reserved test
+// hostname so Chromium exercises the same API restrictions as an HTTP host.
+const baseURL = "http://rip-dvd.test:3100";
 
 export default defineConfig({
   testDir: "./test/browser",
@@ -15,6 +17,9 @@ export default defineConfig({
   outputDir: "test-results/playwright",
   use: {
     baseURL,
+    launchOptions: {
+      args: ["--host-resolver-rules=MAP rip-dvd.test 127.0.0.1", "--no-proxy-server"],
+    },
     locale: "en-CA",
     timezoneId: "America/Edmonton",
     screenshot: "only-on-failure",
@@ -23,7 +28,7 @@ export default defineConfig({
   },
   webServer: {
     command: "pnpm test:browser:serve",
-    url: `${baseURL}/api/health`,
+    url: "http://127.0.0.1:3100/api/health",
     reuseExistingServer: false,
     timeout: 120_000,
     env: {

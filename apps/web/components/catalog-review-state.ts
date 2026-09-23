@@ -1,5 +1,7 @@
 "use client";
 
+import { createMutationKey } from "../lib/mutation-key";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CompletedCatalogReviewOutcome } from "@rip-dvd/data-access";
 
@@ -291,7 +293,7 @@ export function useCatalogReviewState({
         pendingKey = `${archiveId}:${JSON.stringify(command)}`;
         let pending = pendingMediaItemKeys.current.get(pendingKey);
         if (!pending) {
-          pending = { key: crypto.randomUUID() };
+          pending = { key: createMutationKey() };
           pendingMediaItemKeys.current.set(pendingKey, pending);
         }
         if (command.action !== "create_media_item" && pending.revision === undefined) {
