@@ -30,6 +30,7 @@ import {
   CatalogReviewView,
   mutateCatalogReview,
 } from "./catalog-review-editor";
+import { rearchiveAcceptancePreviewConfirmation } from "./catalog-review-mutation";
 
 interface PendingRequest {
   url: string;
@@ -270,6 +271,24 @@ function renderCatalogReviewEditor(archiveId: string): void {
 }
 
 describe("CatalogReviewEditor", () => {
+  it("lists each affected Encode Job in the Re-archive Acceptance acknowledgement", () => {
+    const message = rearchiveAcceptancePreviewConfirmation({
+      ...availableRearchiveAcceptancePreview({
+        action: "accept_rearchive",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        sourceCatalogRevision: "2026-08-11T05:00:00.000Z",
+        replacementEncodes: [],
+      }),
+      affectedEncodeJobs: [
+        { id: "queued-job", discSelectionId: "prior-1", status: "queued" },
+        { id: "running-job", discSelectionId: "prior-2", status: "running" },
+      ],
+    } as never);
+
+    expect(message).toContain("- queued-job (queued)");
+    expect(message).toContain("- running-job (running)");
+  });
+
   it("recovers an acknowledged Disc Selection mutation when the archive reloads", async () => {
     const review = catalogReview({
       archiveId: "archive-a",

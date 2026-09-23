@@ -9,6 +9,7 @@ import type { CatalogReviewReplacementEncodeInput } from "../lib/catalog-review-
 import {
   discSelectionPreviewConfirmation,
   mutateCatalogReview,
+  rearchiveAcceptancePreviewConfirmation,
   resumePendingCatalogReviewMutation,
 } from "./catalog-review-mutation";
 import type {
@@ -259,9 +260,15 @@ export function useCatalogReviewState({
 
   async function mutate(
     command: CatalogReviewCommand,
-    complete = false,
-    afterMutation?: () => void,
-    errorTarget: "editor" | "mapping_proposal" = "editor",
+    {
+      closeAfterMutation = false,
+      afterMutation,
+      errorTarget = "editor",
+    }: {
+      closeAfterMutation?: boolean;
+      afterMutation?: () => void;
+      errorTarget?: "editor" | "mapping_proposal";
+    } = {},
   ) {
     if (isSaving) {
       return;
@@ -345,7 +352,7 @@ export function useCatalogReviewState({
             ),
           confirmRearchiveAcceptancePreview: (preview) =>
             window.confirm(
-              `Adopt ${preview.consequences.adoptsMappingCount} reviewed mapping(s), stop new encoding from the prior archive, and request cancellation of ${preview.affectedEncodeJobs.length} queued or running Encode Job(s)? Both archives, completed outputs, history, and provenance will be retained.`,
+              rearchiveAcceptancePreviewConfirmation(preview),
             ),
         },
       );
@@ -354,7 +361,7 @@ export function useCatalogReviewState({
       setMutationNotice(result.message);
       setEditingMediaItemId(null);
       afterMutation?.();
-      if (complete) {
+      if (closeAfterMutation) {
         onCompleted();
       } else {
         await load();
@@ -366,7 +373,7 @@ export function useCatalogReviewState({
       if (pendingKey !== null && message.includes("changed; preview")) {
         pendingMediaItemKeys.current.delete(pendingKey);
       }
-      if (complete) {
+      if (closeAfterMutation) {
         await load();
       }
       if (errorTarget === "mapping_proposal") {
@@ -487,14 +494,20 @@ export function useCatalogReviewState({
     if (state.status !== "loaded") {
       return;
     }
-    void mutate({
-      action: "create_mapping_proposal",
-      catalogRevision: state.review.catalogRevision,
-      ...input,
-    }, false, () => {
-      setMappingProposalError(null);
-      setActiveMappingProposal(null);
-    }, "mapping_proposal");
+    void mutate(
+      {
+        action: "create_mapping_proposal",
+        catalogRevision: state.review.catalogRevision,
+        ...input,
+      },
+      {
+        afterMutation: () => {
+          setMappingProposalError(null);
+          setActiveMappingProposal(null);
+        },
+        errorTarget: "mapping_proposal",
+      },
+    );
   }
 
   function createEpisodicMappingProposal(
@@ -503,14 +516,20 @@ export function useCatalogReviewState({
     if (state.status !== "loaded") {
       return;
     }
-    void mutate({
-      action: "create_episodic_mapping_proposal",
-      catalogRevision: state.review.catalogRevision,
-      ...input,
-    }, false, () => {
-      setMappingProposalError(null);
-      setActiveEpisodicMappingProposal(null);
-    }, "mapping_proposal");
+    void mutate(
+      {
+        action: "create_episodic_mapping_proposal",
+        catalogRevision: state.review.catalogRevision,
+        ...input,
+      },
+      {
+        afterMutation: () => {
+          setMappingProposalError(null);
+          setActiveEpisodicMappingProposal(null);
+        },
+        errorTarget: "mapping_proposal",
+      },
+    );
   }
 
   function acceptAutomaticCatalogProposal(proposal: AutomaticCatalogProposal) {
@@ -528,7 +547,7 @@ export function useCatalogReviewState({
         ...proposal.input,
         completeReview: true,
       };
-    void mutate(command, true);
+    void mutate(command, { closeAfterMutation: true });
   }
 
   async function previewRearchiveMappingProposal(
@@ -592,12 +611,15 @@ export function useCatalogReviewState({
       return;
     }
     const current = state.review.rearchiveProposal;
-    void mutate({
-      action: "accept_rearchive",
-      catalogRevision: current.catalogRevision,
-      sourceCatalogRevision: current.sourceCatalogRevision,
-      replacementEncodes: [],
-    }, true);
+    void mutate(
+      {
+        action: "accept_rearchive",
+        catalogRevision: current.catalogRevision,
+        sourceCatalogRevision: current.sourceCatalogRevision,
+        replacementEncodes: [],
+      },
+      { closeAfterMutation: true },
+    );
   }
 
   return {
@@ -662,12 +684,15 @@ export function useCatalogReviewState({
       replacementEncodes: CatalogReviewReplacementEncodeInput[],
     ) => {
       if (state.status === "loaded") {
-        void mutate({
-          action: "complete_review",
-          catalogRevision: state.review.catalogRevision,
-          outcome,
-          replacementEncodes,
-        }, true);
+        void mutate(
+          {
+            action: "complete_review",
+            catalogRevision: state.review.catalogRevision,
+            outcome,
+            replacementEncodes,
+          },
+          { closeAfterMutation: true },
+        );
       }
     },
   };

@@ -121,25 +121,24 @@ type RearchiveAcceptanceCommand = Extract<
   { action: "accept_rearchive" }
 >;
 
-type PendingCatalogReviewCompletion = {
+type AcknowledgedCatalogMutationCommand =
+  | CatalogReviewCompletionCommand
+  | RearchiveAcceptanceCommand;
+
+type PendingAcknowledgedCatalogMutation = {
   archiveId: string;
   identity: string;
   mutationKey: string;
-} & (
-  | {
-      command: CatalogReviewCompletionCommand;
-      preview: CatalogReviewCompletionPreview;
-    }
-  | {
-      command: RearchiveAcceptanceCommand;
-      preview: RearchiveAcceptancePreview;
-    }
-);
+  command: AcknowledgedCatalogMutationCommand;
+  acknowledgedRevision: string;
+  acknowledgedSourceRevision?: string;
+  previewToken: string;
+};
 
 const pendingProposalKeys = new Map<string, string>();
-const pendingCompletionInvocations = new Map<
+const pendingAcknowledgedInvocations = new Map<
   string,
-  PendingCatalogReviewCompletion
+  PendingAcknowledgedCatalogMutation
 >();
 
 export async function mutateCatalogReview(
@@ -187,25 +186,25 @@ export async function mutateCatalogReview(
       writePendingCatalogReviewMutation(archiveId, pending, storage);
     }
   }
-  let completionInvocation: PendingCatalogReviewCompletion | undefined;
+  let acknowledgedInvocation: PendingAcknowledgedCatalogMutation | undefined;
   if (
     command.action === "complete_review" ||
     command.action === "accept_rearchive"
   ) {
-    completionInvocation = readPendingCatalogReviewCompletion(
+    acknowledgedInvocation = readPendingAcknowledgedCatalogMutation(
       archiveId,
       storage,
     );
-    if (completionInvocation?.identity !== identity) {
-      if (completionInvocation !== undefined) {
+    if (acknowledgedInvocation?.identity !== identity) {
+      if (acknowledgedInvocation !== undefined) {
         throw new Error(
-          "A pending Catalog Review completion must be recovered before another change",
+          "A pending acknowledged catalog mutation must be recovered before another change",
         );
       }
-      deletePendingCatalogReviewCompletion(archiveId, storage);
-      completionInvocation = undefined;
+      deletePendingAcknowledgedCatalogMutation(archiveId, storage);
+      acknowledgedInvocation = undefined;
     }
-    if (completionInvocation === undefined) {
+    if (acknowledgedInvocation === undefined) {
       const previewResponse = await postCatalogReview(
         archiveId,
         { ...command, preview: true },
@@ -215,51 +214,28 @@ export async function mutateCatalogReview(
         throw await catalogReviewMutationError(previewResponse);
       }
       const previewBody: unknown = await previewResponse.json();
-      const preview = command.action === "complete_review"
-        ? availableCatalogReviewCompletionPreview(previewBody)
-        : availableRearchiveAcceptancePreview(previewBody);
-      if (preview === null) {
-        throw new Error(command.action === "complete_review"
-          ? "Catalog Review completion preview failed"
-          : "Re-archive Acceptance preview failed");
-      }
-      const confirmed = command.action === "complete_review"
-        ? await confirmCatalogReviewCompletion(
-            preview as CatalogReviewCompletionPreview,
-            options,
-          )
-        : await confirmRearchiveAcceptance(
-            preview as RearchiveAcceptancePreview,
-            options,
-          );
-      if (!confirmed) return { message: null, cancelled: true };
-      completionInvocation = command.action === "complete_review"
-        ? {
-            archiveId,
-            command,
-            identity,
-            mutationKey: crypto.randomUUID(),
-            preview: preview as CatalogReviewCompletionPreview,
-          }
-        : {
-            archiveId,
-            command,
-            identity,
-            mutationKey: crypto.randomUUID(),
-            preview: preview as RearchiveAcceptancePreview,
-          };
-      writePendingCatalogReviewCompletion(
+      acknowledgedInvocation = await prepareAcknowledgedCatalogMutation(
         archiveId,
-        completionInvocation,
+        command,
+        identity,
+        previewBody,
+        options,
+      );
+      if (acknowledgedInvocation === undefined) {
+        return { message: null, cancelled: true };
+      }
+      writePendingAcknowledgedCatalogMutation(
+        archiveId,
+        acknowledgedInvocation,
         storage,
       );
     }
   }
   const response = pending !== undefined
     ? await applyPendingCatalogReviewMutation(pending, fetcher)
-    : completionInvocation !== undefined
-      ? await applyPendingCatalogReviewCompletion(
-          completionInvocation,
+    : acknowledgedInvocation !== undefined
+      ? await applyPendingAcknowledgedCatalogMutation(
+          acknowledgedInvocation,
           fetcher,
         )
     : await postCatalogReview(archiveId, {
@@ -267,9 +243,9 @@ export async function mutateCatalogReview(
       ...(proposalMutationKey ? { mutationKey: proposalMutationKey } : {}),
     }, fetcher);
   if (!response.ok) {
-    if (completionInvocation !== undefined &&
+    if (acknowledgedInvocation !== undefined &&
         !ambiguousMutationResponse(response.status)) {
-      deletePendingCatalogReviewCompletion(archiveId, storage);
+      deletePendingAcknowledgedCatalogMutation(archiveId, storage);
     }
     if (pending !== undefined && !ambiguousMutationResponse(response.status)) {
       deletePendingCatalogReviewMutation(archiveId, storage);
@@ -277,11 +253,57 @@ export async function mutateCatalogReview(
     throw await catalogReviewMutationError(response);
   }
   if (proposalIdentity !== null) pendingProposalKeys.delete(proposalIdentity);
-  if (completionInvocation !== undefined) {
-    deletePendingCatalogReviewCompletion(archiveId, storage);
+  if (acknowledgedInvocation !== undefined) {
+    deletePendingAcknowledgedCatalogMutation(archiveId, storage);
   }
   if (pending !== undefined) deletePendingCatalogReviewMutation(archiveId, storage);
   return { message: await catalogReviewMutationMessage(response) };
+}
+
+async function prepareAcknowledgedCatalogMutation(
+  archiveId: string,
+  command: AcknowledgedCatalogMutationCommand,
+  identity: string,
+  previewBody: unknown,
+  options: CatalogReviewMutationOptions,
+): Promise<PendingAcknowledgedCatalogMutation | undefined> {
+  switch (command.action) {
+    case "complete_review": {
+      const preview = availableCatalogReviewCompletionPreview(previewBody);
+      if (preview === null) {
+        throw new Error("Catalog Review completion preview failed");
+      }
+      if (!await confirmCatalogReviewCompletion(preview, options)) {
+        return undefined;
+      }
+      return {
+        archiveId,
+        command,
+        identity,
+        mutationKey: crypto.randomUUID(),
+        acknowledgedRevision: preview.catalogRevision,
+        previewToken: preview.previewToken,
+      };
+    }
+    case "accept_rearchive": {
+      const preview = availableRearchiveAcceptancePreview(previewBody);
+      if (preview === null) {
+        throw new Error("Re-archive Acceptance preview failed");
+      }
+      if (!await confirmRearchiveAcceptance(preview, options)) {
+        return undefined;
+      }
+      return {
+        archiveId,
+        command,
+        identity,
+        mutationKey: crypto.randomUUID(),
+        acknowledgedRevision: preview.catalogRevision,
+        acknowledgedSourceRevision: preview.sourceCatalogRevision,
+        previewToken: preview.previewToken,
+      };
+    }
+  }
 }
 
 async function confirmCatalogReviewCompletion(
@@ -414,39 +436,37 @@ export async function resumePendingCatalogReviewMutation(
     deletePendingCatalogReviewMutation(archiveId, storage);
     return { message: await catalogReviewMutationMessage(response) };
   }
-  const completion = readPendingCatalogReviewCompletion(archiveId, storage);
-  if (completion === undefined) return null;
-  const resolved = await applyPendingCatalogReviewCompletion(completion, fetcher);
+  const acknowledged = readPendingAcknowledgedCatalogMutation(
+    archiveId,
+    storage,
+  );
+  if (acknowledged === undefined) return null;
+  const resolved = await applyPendingAcknowledgedCatalogMutation(
+    acknowledged,
+    fetcher,
+  );
   if (!resolved.ok) {
     if (!ambiguousMutationResponse(resolved.status)) {
-      deletePendingCatalogReviewCompletion(archiveId, storage);
+      deletePendingAcknowledgedCatalogMutation(archiveId, storage);
     }
     throw await catalogReviewMutationError(resolved);
   }
-  deletePendingCatalogReviewCompletion(archiveId, storage);
+  deletePendingAcknowledgedCatalogMutation(archiveId, storage);
   return { message: await catalogReviewMutationMessage(resolved) };
 }
 
-function applyPendingCatalogReviewCompletion(
-  pending: PendingCatalogReviewCompletion,
+function applyPendingAcknowledgedCatalogMutation(
+  pending: PendingAcknowledgedCatalogMutation,
   fetcher: CatalogReviewFetch,
 ): Promise<Response> {
-  if (pending.command.action === "accept_rearchive") {
-    const preview = pending.preview as RearchiveAcceptancePreview;
-    return postCatalogReview(pending.archiveId, {
-      ...pending.command,
-      mutationKey: pending.mutationKey,
-      acknowledgedRevision: preview.catalogRevision,
-      acknowledgedSourceRevision: preview.sourceCatalogRevision,
-      previewToken: preview.previewToken,
-      acknowledge: true,
-    }, fetcher);
-  }
   return postCatalogReview(pending.archiveId, {
     ...pending.command,
     mutationKey: pending.mutationKey,
-    acknowledgedRevision: pending.preview.catalogRevision,
-    previewToken: pending.preview.previewToken,
+    acknowledgedRevision: pending.acknowledgedRevision,
+    ...(pending.acknowledgedSourceRevision === undefined
+      ? {}
+      : { acknowledgedSourceRevision: pending.acknowledgedSourceRevision }),
+    previewToken: pending.previewToken,
     acknowledge: true,
   }, fetcher);
 }
@@ -501,7 +521,9 @@ async function requestDiscSelectionPreview(
 
 const pendingCatalogReviewMutations = new Map<string, PendingCatalogReviewMutation>();
 const PENDING_CATALOG_REVIEW_MUTATION_PREFIX = "rip-dvd.catalog-review-mutation.v2:";
-const PENDING_CATALOG_REVIEW_COMPLETION_PREFIX =
+const PENDING_ACKNOWLEDGED_CATALOG_MUTATION_PREFIX =
+  "rip-dvd.catalog-review-acknowledged-mutation.v1:";
+const LEGACY_PENDING_CATALOG_REVIEW_COMPLETION_PREFIX =
   "rip-dvd.catalog-review-completion.v1:";
 
 function browserMutationStorage(): CatalogReviewMutationStorage | null {
@@ -516,29 +538,40 @@ function pendingCatalogReviewMutationKey(archiveId: string): string {
   return `${PENDING_CATALOG_REVIEW_MUTATION_PREFIX}${encodeURIComponent(archiveId)}`;
 }
 
-function pendingCatalogReviewCompletionKey(archiveId: string): string {
-  return `${PENDING_CATALOG_REVIEW_COMPLETION_PREFIX}${encodeURIComponent(archiveId)}`;
+function pendingAcknowledgedCatalogMutationKey(archiveId: string): string {
+  return `${PENDING_ACKNOWLEDGED_CATALOG_MUTATION_PREFIX}${encodeURIComponent(archiveId)}`;
 }
 
-function readPendingCatalogReviewCompletion(
+function legacyPendingCatalogReviewCompletionKey(archiveId: string): string {
+  return `${LEGACY_PENDING_CATALOG_REVIEW_COMPLETION_PREFIX}${encodeURIComponent(archiveId)}`;
+}
+
+function readPendingAcknowledgedCatalogMutation(
   archiveId: string,
   storage: CatalogReviewMutationStorage | null,
-): PendingCatalogReviewCompletion | undefined {
-  if (storage === null) return pendingCompletionInvocations.get(archiveId);
+): PendingAcknowledgedCatalogMutation | undefined {
+  if (storage === null) return pendingAcknowledgedInvocations.get(archiveId);
   let saved: string | null;
+  let legacy = false;
   try {
-    saved = storage.getItem(pendingCatalogReviewCompletionKey(archiveId));
+    saved = storage.getItem(pendingAcknowledgedCatalogMutationKey(archiveId));
+    if (saved === null) {
+      saved = storage.getItem(legacyPendingCatalogReviewCompletionKey(archiveId));
+      legacy = saved !== null;
+    }
   } catch {
-    return pendingCompletionInvocations.get(archiveId);
+    return pendingAcknowledgedInvocations.get(archiveId);
   }
-  if (saved === null) return pendingCompletionInvocations.get(archiveId);
+  if (saved === null) return pendingAcknowledgedInvocations.get(archiveId);
   const discard = () => {
     try {
-      storage.removeItem(pendingCatalogReviewCompletionKey(archiveId));
+      storage.removeItem(legacy
+        ? legacyPendingCatalogReviewCompletionKey(archiveId)
+        : pendingAcknowledgedCatalogMutationKey(archiveId));
     } catch {
       // Keep any in-memory recovery command when storage cleanup fails.
     }
-    return pendingCompletionInvocations.get(archiveId);
+    return pendingAcknowledgedInvocations.get(archiveId);
   };
   let value: unknown;
   try {
@@ -546,90 +579,147 @@ function readPendingCatalogReviewCompletion(
   } catch {
     return discard();
   }
+  const pending = legacy
+    ? decodeLegacyPendingCatalogReviewCompletion(value, archiveId)
+    : decodePendingAcknowledgedCatalogMutation(value, archiveId);
+  return pending ?? discard();
+}
+
+function acknowledgedCatalogMutationCommand(
+  value: unknown,
+): AcknowledgedCatalogMutationCommand | null {
+  const parsed = parseCatalogReviewCommand(value, {
+    mediaItemKinds: MEDIA_ITEM_KINDS,
+  });
+  return parsed.ok &&
+      (parsed.command.action === "complete_review" ||
+        parsed.command.action === "accept_rearchive")
+    ? parsed.command
+    : null;
+}
+
+function decodePendingAcknowledgedCatalogMutation(
+  value: unknown,
+  archiveId: string,
+): PendingAcknowledgedCatalogMutation | null {
   if (typeof value !== "object" || value === null ||
       !("archiveId" in value) || value.archiveId !== archiveId ||
       !("identity" in value) || typeof value.identity !== "string" ||
       !("mutationKey" in value) || typeof value.mutationKey !== "string" ||
-      !("command" in value) || !("preview" in value)) {
-    return discard();
+      !("command" in value) ||
+      !("acknowledgedRevision" in value) ||
+      typeof value.acknowledgedRevision !== "string" ||
+      !("previewToken" in value) || typeof value.previewToken !== "string") {
+    return null;
   }
   let mutationKey: string;
   try {
     mutationKey = parseMutationKey(value.mutationKey);
   } catch {
-    return discard();
+    return null;
+  }
+  const command = acknowledgedCatalogMutationCommand(value.command);
+  if (command === null ||
+      value.identity !== catalogReviewMutationIdentity(
+        archiveId,
+        command,
+      )) {
+    return null;
+  }
+  const acknowledgedSourceRevision = "acknowledgedSourceRevision" in value
+    ? value.acknowledgedSourceRevision
+    : undefined;
+  const completionMatches = command.action === "complete_review" &&
+    value.acknowledgedRevision === command.catalogRevision &&
+    acknowledgedSourceRevision === undefined &&
+    isCatalogReviewCompletionPreviewToken(value.previewToken);
+  const acceptanceMatches = command.action === "accept_rearchive" &&
+    value.acknowledgedRevision === command.catalogRevision &&
+    acknowledgedSourceRevision === command.sourceCatalogRevision &&
+    isRearchiveAcceptancePreviewToken(value.previewToken);
+  if (!completionMatches && !acceptanceMatches) return null;
+  return {
+    archiveId,
+    command,
+    identity: value.identity,
+    mutationKey,
+    acknowledgedRevision: value.acknowledgedRevision,
+    ...(typeof acknowledgedSourceRevision === "string"
+      ? { acknowledgedSourceRevision }
+      : {}),
+    previewToken: value.previewToken,
+  };
+}
+
+function decodeLegacyPendingCatalogReviewCompletion(
+  value: unknown,
+  archiveId: string,
+): PendingAcknowledgedCatalogMutation | null {
+  if (typeof value !== "object" || value === null ||
+      !("archiveId" in value) || value.archiveId !== archiveId ||
+      !("identity" in value) || typeof value.identity !== "string" ||
+      !("mutationKey" in value) || typeof value.mutationKey !== "string" ||
+      !("command" in value) || !("preview" in value)) {
+    return null;
+  }
+  let mutationKey: string;
+  try {
+    mutationKey = parseMutationKey(value.mutationKey);
+  } catch {
+    return null;
   }
   const parsed = parseCatalogReviewCommand(value.command, {
     mediaItemKinds: MEDIA_ITEM_KINDS,
   });
-  if (!parsed.ok ||
-      (parsed.command.action !== "complete_review" &&
-        parsed.command.action !== "accept_rearchive") ||
+  const preview = availableCatalogReviewCompletionPreview(value.preview);
+  if (!parsed.ok || parsed.command.action !== "complete_review" ||
       value.identity !== catalogReviewMutationIdentity(
         archiveId,
         parsed.command,
-      )) {
-    return discard();
-  }
-  if (parsed.command.action === "complete_review") {
-    const preview = availableCatalogReviewCompletionPreview(value.preview);
-    if (preview === null || preview.archiveId !== archiveId ||
-        preview.catalogRevision !== parsed.command.catalogRevision ||
-        preview.outcome !== parsed.command.outcome) {
-      return discard();
-    }
-    return {
-      archiveId,
-      command: parsed.command,
-      identity: value.identity,
-      mutationKey,
-      preview,
-    };
-  }
-  const preview = availableRearchiveAcceptancePreview(value.preview);
-  if (preview === null || preview.targetArchiveId !== archiveId ||
+      ) || preview === null || preview.archiveId !== archiveId ||
       preview.catalogRevision !== parsed.command.catalogRevision ||
-      preview.sourceCatalogRevision !==
-        parsed.command.sourceCatalogRevision) {
-    return discard();
+      preview.outcome !== parsed.command.outcome) {
+    return null;
   }
   return {
     archiveId,
     command: parsed.command,
     identity: value.identity,
     mutationKey,
-    preview,
+    acknowledgedRevision: preview.catalogRevision,
+    previewToken: preview.previewToken,
   };
 }
 
-function writePendingCatalogReviewCompletion(
+function writePendingAcknowledgedCatalogMutation(
   archiveId: string,
-  pending: PendingCatalogReviewCompletion,
+  pending: PendingAcknowledgedCatalogMutation,
   storage: CatalogReviewMutationStorage | null,
 ): void {
   if (storage === null) {
-    pendingCompletionInvocations.set(archiveId, pending);
+    pendingAcknowledgedInvocations.set(archiveId, pending);
     return;
   }
   try {
     storage.setItem(
-      pendingCatalogReviewCompletionKey(archiveId),
+      pendingAcknowledgedCatalogMutationKey(archiveId),
       JSON.stringify(pending),
     );
-    pendingCompletionInvocations.delete(archiveId);
+    pendingAcknowledgedInvocations.delete(archiveId);
   } catch {
-    pendingCompletionInvocations.set(archiveId, pending);
+    pendingAcknowledgedInvocations.set(archiveId, pending);
   }
 }
 
-function deletePendingCatalogReviewCompletion(
+function deletePendingAcknowledgedCatalogMutation(
   archiveId: string,
   storage: CatalogReviewMutationStorage | null,
 ): void {
-  pendingCompletionInvocations.delete(archiveId);
+  pendingAcknowledgedInvocations.delete(archiveId);
   if (storage === null) return;
   try {
-    storage.removeItem(pendingCatalogReviewCompletionKey(archiveId));
+    storage.removeItem(pendingAcknowledgedCatalogMutationKey(archiveId));
+    storage.removeItem(legacyPendingCatalogReviewCompletionKey(archiveId));
   } catch {
     // A failed cleanup retains only the already committed replay command.
   }
@@ -818,6 +908,27 @@ export function discSelectionPreviewConfirmation(preview: DiscSelectionChangePre
       ? "Catalog review will be reopened."
       : "Catalog review will remain unchanged.",
     "Apply this exact preview?",
+  ].join("\n");
+}
+
+export function rearchiveAcceptancePreviewConfirmation(
+  preview: RearchiveAcceptancePreview,
+): string {
+  const affectedJobs = preview.affectedEncodeJobs.length === 0
+    ? "No queued or running Encode Jobs are affected."
+    : [
+        "Affected queued or running Encode Jobs:",
+        ...preview.affectedEncodeJobs.map(
+          (job) => `- ${job.id} (${job.status})`,
+        ),
+      ].join("\n");
+  return [
+    `Adopt ${preview.consequences.adoptsMappingCount} reviewed mapping(s).`,
+    affectedJobs,
+    "Stop new encoding from the prior archive.",
+    `Request cancellation of ${preview.affectedEncodeJobs.length} affected Encode Job(s).`,
+    "Retain both archives, completed outputs, history, and provenance.",
+    "Accept this exact preview?",
   ].join("\n");
 }
 

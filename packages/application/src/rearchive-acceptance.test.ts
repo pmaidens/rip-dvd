@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { seedRearchiveReviewFixtureForTest } from "@rip-dvd/data-access/rearchive-test-support";
@@ -13,12 +14,13 @@ const temporaryDirectories: string[] = [];
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "rip-dvd-rearchive-accept-"));
   temporaryDirectories.push(directory);
+  const databasePath = join(directory, "catalog.sqlite");
   const mediaLibraryPath = join(directory, "media");
   const originalsLibraryPath = join(directory, "originals");
   mkdirSync(mediaLibraryPath);
   mkdirSync(originalsLibraryPath);
   const access = createLegacySidecarDataAccess({
-    databasePath: join(directory, "catalog.sqlite"),
+    databasePath,
     mediaLibraryPath,
     originalsLibraryPath,
   });
@@ -59,7 +61,16 @@ function fixture() {
     encodingProfileId: profile(suffix).id,
     outputPath: join(mediaLibraryPath, `${suffix}.mkv`),
   });
-  return { access, operations, saved, seeded, enqueue, profile, mediaLibraryPath };
+  return {
+    access,
+    operations,
+    saved,
+    seeded,
+    enqueue,
+    profile,
+    databasePath,
+    mediaLibraryPath,
+  };
 }
 
 afterEach(() => {
@@ -218,6 +229,139 @@ it("adopts a reviewed re-archive atomically and preserves worker ownership", () 
       claimToken: runningClaim.claimToken,
       claimedBy: runningClaim.claimedBy,
     });
+  } finally {
+    current.access.close();
+  }
+});
+
+it("rolls back adoption writes when a late persistence step fails", () => {
+  const current = fixture();
+  try {
+    const queued = current.enqueue("rollback");
+    const command = {
+      action: "accept_rearchive" as const,
+      catalogRevision: current.saved.catalogRevision,
+      sourceCatalogRevision: current.saved.sourceCatalogRevision,
+      replacementEncodes: [] as [],
+    };
+    const preview = current.operations.previewRearchiveAcceptance(
+      current.seeded.targetArchive.id,
+      command,
+    );
+    const acceptanceInput = {
+      mutationKey: "00000000-0000-4000-8000-000000000353",
+      acknowledgedRevision: preview.catalogRevision,
+      acknowledgedSourceRevision: preview.sourceCatalogRevision,
+      previewToken: preview.previewToken,
+      acknowledge: true,
+    };
+    const sqlite = new DatabaseSync(current.databasePath);
+    sqlite.exec(`
+      create trigger synthetic_rearchive_acceptance_failure
+      before update on original_disc_archives
+      begin
+        select raise(abort, 'synthetic Re-archive Acceptance failure');
+      end;
+    `);
+    sqlite.close();
+
+    expect(() => current.operations.acceptRearchive(
+      current.seeded.targetArchive.id,
+      command,
+      acceptanceInput,
+    )).toThrow("Failed query");
+    expect(current.access.catalog.listDiscSelections({
+      originalDiscArchiveId: current.seeded.targetArchive.id,
+    })).toEqual([]);
+    expect(current.access.catalog.listDiscSelections({
+      originalDiscArchiveId: current.seeded.sourceArchive.id,
+    })).toEqual([expect.objectContaining({
+      id: current.seeded.sourceSelection.id,
+    })]);
+    expect(current.access.catalog.listDiscSelectionSupersessions({
+      discSelectionIds: [current.seeded.sourceSelection.id],
+    })).toEqual([]);
+    expect(current.access.encodeJobs.find(queued.id)?.status).toBe("queued");
+    expect(current.access.catalog.listOriginalDiscArchives().find(
+      (archive) => archive.id === current.seeded.targetArchive.id,
+    )?.catalogReviewedAt).toBeNull();
+
+    const retrySqlite = new DatabaseSync(current.databasePath);
+    retrySqlite.exec("drop trigger synthetic_rearchive_acceptance_failure");
+    retrySqlite.close();
+    expect(current.operations.acceptRearchive(
+      current.seeded.targetArchive.id,
+      command,
+      acceptanceInput,
+    )).toMatchObject({ message: "Re-archive accepted" });
+  } finally {
+    current.access.close();
+  }
+});
+
+it("requires a fresh preview when publication wins the acceptance race", () => {
+  const current = fixture();
+  try {
+    const running = current.enqueue("publication-wins");
+    const claim = current.access.encodeJobs.claimNext("publication-worker");
+    if (!claim || claim.id !== running.id) {
+      throw new Error("Expected the publication Encode Job claim");
+    }
+    const cleanup = current.access.encodeJobs.registerPartialCleanup(claim, {
+      publicationPending: true,
+    });
+    const publication = current.access.encodeJobs.beginPublicationMutation(
+      claim,
+      cleanup,
+    );
+    const command = {
+      action: "accept_rearchive" as const,
+      catalogRevision: current.saved.catalogRevision,
+      sourceCatalogRevision: current.saved.sourceCatalogRevision,
+      replacementEncodes: [] as [],
+    };
+    const stalePreview = current.operations.previewRearchiveAcceptance(
+      current.seeded.targetArchive.id,
+      command,
+    );
+
+    expect(current.access.encodeJobs.completePublishedClaim(
+      claim,
+      publication,
+      () => true,
+    ).status).toBe("completed");
+    expect(() => current.operations.acceptRearchive(
+      current.seeded.targetArchive.id,
+      command,
+      {
+        mutationKey: "00000000-0000-4000-8000-000000000354",
+        acknowledgedRevision: stalePreview.catalogRevision,
+        acknowledgedSourceRevision: stalePreview.sourceCatalogRevision,
+        previewToken: stalePreview.previewToken,
+        acknowledge: true,
+      },
+    )).toThrow("Re-archive Acceptance preview is stale");
+
+    const freshPreview = current.operations.previewRearchiveAcceptance(
+      current.seeded.targetArchive.id,
+      command,
+    );
+    expect(freshPreview.affectedEncodeJobs).toEqual([]);
+    expect(current.operations.acceptRearchive(
+      current.seeded.targetArchive.id,
+      command,
+      {
+        mutationKey: "00000000-0000-4000-8000-000000000355",
+        acknowledgedRevision: freshPreview.catalogRevision,
+        acknowledgedSourceRevision: freshPreview.sourceCatalogRevision,
+        previewToken: freshPreview.previewToken,
+        acknowledge: true,
+      },
+    )).toMatchObject({
+      message: "Re-archive accepted",
+      affectedEncodeJobs: [],
+    });
+    expect(current.access.encodeJobs.find(running.id)?.status).toBe("completed");
   } finally {
     current.access.close();
   }
