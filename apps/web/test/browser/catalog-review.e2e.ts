@@ -132,11 +132,44 @@ test("keyboard-only mapping and job-free correction announce their results", asy
   await page.keyboard.press("Tab");
   const save = page.getByRole("button", { name: "Save Disc Selection" });
   await tabTo(page, save);
-  const correctionResponse = page.waitForResponse((response) =>
-    response.url().includes("/api/catalog-reviews/") &&
-    response.request().method() === "POST"
-  );
+  const correctionPreviewResponse = page.waitForResponse((response) => {
+    if (
+      !response.url().includes("/api/catalog-reviews/") ||
+      response.request().method() !== "POST"
+    ) {
+      return false;
+    }
+    const body = response.request().postDataJSON() as {
+      action?: unknown;
+      preview?: unknown;
+    };
+    return body.action === "update_disc_selection" && body.preview === true;
+  });
+  const correctionResponse = page.waitForResponse((response) => {
+    if (
+      !response.url().includes("/api/catalog-reviews/") ||
+      response.request().method() !== "POST"
+    ) {
+      return false;
+    }
+    const body = response.request().postDataJSON() as {
+      acknowledge?: unknown;
+      action?: unknown;
+    };
+    return body.action === "update_disc_selection" &&
+      body.acknowledge === true;
+  });
+  const confirmation = new Promise<string>((resolve, reject) => {
+    page.once("dialog", (dialog) => {
+      const message = dialog.message();
+      dialog.accept().then(() => resolve(message), reject);
+    });
+  });
   await page.keyboard.press("Enter");
+  expect((await correctionPreviewResponse).status()).toBe(200);
+  expect(await confirmation).toContain(
+    "Review this Disc Selection change before applying it.",
+  );
   expect((await correctionResponse).status()).toBe(200);
   await expect(page.getByRole("status").filter({
     hasText: "Mapping changed; review required",

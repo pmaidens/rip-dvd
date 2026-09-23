@@ -46,3 +46,11 @@ Use the default Matt Pocock triage label vocabulary for this repo. See `docs/age
 ### Domain docs
 
 This is a single-context repo: use root `CONTEXT.md` and `docs/adr/` when they exist. See `docs/agents/domain.md`.
+
+### Operator capability parity
+
+Web operator work is incomplete until the same behavior is available through
+the JSON CLI at the shared application-operation boundary. Read and update
+`docs/agents/operator-capability-parity.md` whenever an operator route, action,
+background work type, or CLI command changes. Add behavior coverage at the
+public CLI boundary and focused adapter parity coverage in the same change.

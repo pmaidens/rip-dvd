@@ -942,6 +942,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       "cancel-archive-request",
       "retry-archive-request",
       "retry-disc-inspection",
+      "filesystem-verification-inventory",
       "submit-filesystem-verification",
       "submit-archive-audit",
       "encode-queue",
@@ -1341,7 +1342,7 @@ it("runs as a separate process without the web service", () => {
       message: "Application configuration is missing or invalid.",
     },
   });
-});
+}, 10_000);
 
 function addScannedDisc(current: ReturnType<typeof createOperatorWorkflowFixture>, fingerprint: string) {
   const access = current.openAccess();

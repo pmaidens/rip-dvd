@@ -17,6 +17,9 @@ import { createOperationsResponse } from "./operations/route";
 import { createMediaItemSearchRoute } from "./media-items/route";
 import { createMediaItemPreviewRoute } from "./media-items/[id]/route";
 import { createEncodeJobsRoute } from "./encode-jobs/route";
+import {
+  createFilesystemVerificationInventoryRoute,
+} from "./filesystem-verification/route";
 
 const trustedOrigin = "http://localhost:3000";
 
@@ -423,6 +426,44 @@ it("returns the same operational records and evidence through web and CLI", asyn
       expect(response.status).toBe(200);
       expect((await fixture.run(["inspect", kind, id])).result).toEqual(await response.json());
     }
+    for (const [target, expectedId] of [
+      ["original_disc_archive", archiveId],
+      ["encode_job_output", encodeJob.id],
+    ] as const) {
+      const response = createFilesystemVerificationInventoryRoute(
+        new Request(
+          `http://localhost/api/filesystem-verification?target=${target}&offset=0`,
+        ),
+        () => access,
+      );
+      const cli = await fixture.run([
+        "filesystem-verification-inventory",
+        "--target",
+        target,
+        "--offset",
+        "0",
+      ]);
+      expect(cli.exitCode).toBe(0);
+      expect(cli.result).toEqual(await response.json());
+      expect(cli.result).toMatchObject({
+        inventory: {
+          target,
+          items: expect.arrayContaining([
+            expect.objectContaining({ id: expectedId, target }),
+          ]),
+        },
+      });
+    }
+    expect((await fixture.run([
+      "filesystem-verification-inventory",
+      "--target",
+      "unsupported",
+    ])).result).toEqual({
+      error: {
+        code: "INVALID_ARGUMENTS",
+        message: "A verification target and nonnegative offset are required.",
+      },
+    });
     expect((await fixture.run(["inspect", "disc-inspections", started.inspection.id])).result)
       .toMatchObject({ item: {
         attempts: [expect.objectContaining({ reasonCode: "metadata_read_failed" })],
