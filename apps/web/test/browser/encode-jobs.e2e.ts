@@ -167,14 +167,23 @@ test("queues a mixed worklist after resolving a new shared profile", async ({
     .toBeEnabled();
 
   await conflictOutput.fill(completedAuthoritativePath);
-  const mutations: Array<{ method: string; status: number }> = [];
+  const mutations: Array<{
+    action: string | null;
+    method: string;
+    status: number;
+  }> = [];
   page.on("response", (response) => {
     const method = response.request().method();
     if (
       response.url().endsWith("/api/encode-jobs") &&
       (method === "POST" || method === "PATCH")
     ) {
-      mutations.push({ method, status: response.status() });
+      const body = response.request().postDataJSON() as { action?: unknown };
+      mutations.push({
+        action: typeof body.action === "string" ? body.action : null,
+        method,
+        status: response.status(),
+      });
     }
   });
 
@@ -188,10 +197,11 @@ test("queues a mixed worklist after resolving a new shared profile", async ({
     "2 new jobs queued. 1 retry or re-encode queued. 1 row unavailable. 1 failed.",
   );
   expect(mutations).toEqual([
-    { method: "PATCH", status: 200 },
-    { method: "POST", status: 200 },
-    { method: "POST", status: 409 },
-    { method: "POST", status: 200 },
+    { action: "preview_requeue", method: "PATCH", status: 200 },
+    { action: "requeue", method: "PATCH", status: 200 },
+    { action: null, method: "POST", status: 200 },
+    { action: null, method: "POST", status: 409 },
+    { action: null, method: "POST", status: 200 },
   ]);
   await expect(newRow).toContainText("Queued");
   await expect(failedRow).toContainText("Queued");
@@ -213,7 +223,11 @@ test("queues a mixed worklist after resolving a new shared profile", async ({
   await expect(manager.getByRole("status")).toContainText(
     "1 new job queued. 0 retries or re-encodes queued. 1 row unavailable. 0 failed.",
   );
-  expect(mutations.at(-1)).toEqual({ method: "POST", status: 200 });
+  expect(mutations.at(-1)).toEqual({
+    action: null,
+    method: "POST",
+    status: 200,
+  });
   await expect(conflictRow).toContainText("Queued");
   await expect(laterRow).toContainText("Ready");
 
@@ -222,7 +236,7 @@ test("queues a mixed worklist after resolving a new shared profile", async ({
     "1 new job queued. 0 retries or re-encodes queued. 1 row unavailable. 0 failed.",
   );
   await expect(laterRow).toContainText("Queued");
-  expect(mutations).toHaveLength(6);
+  expect(mutations).toHaveLength(7);
   await expect(manager.getByRole("button", { name: "Queue 0 Encode Jobs" }))
     .toBeDisabled();
   await expectNoPageOverflow(page);
