@@ -312,12 +312,12 @@ rip-dvd join part1.mkv part2.mkv --output "Movie.mkv" --delete-parts
 ## Optional TMDB lookup
 
 Set a TMDB v3 API key to let the CLI and web Catalog identify movies and TV
-shows from disc volume labels. Docker Compose forwards the key to the web
-service.
+shows from disc volume labels. Docker Compose forwards the key to both the
+operator CLI and web services.
 
 ```bash
 export TMDB_API_KEY="your-api-key"
-rip-dvd rip
+rip-dvd catalog-review suggest synthetic-archive-id
 ```
 
 For the web Catalog, restart the web service after setting the value:
@@ -326,8 +326,8 @@ For the web Catalog, restart the web service after setting the value:
 docker compose up -d web
 ```
 
-The web Catalog also accepts a TMDB API read access token instead of a v3 API
-key:
+Both Catalog interfaces also accept a TMDB API read access token instead of a
+v3 API key:
 
 ```bash
 export TMDB_API_TOKEN="your-api-read-access-token"
