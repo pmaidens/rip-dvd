@@ -25,7 +25,7 @@ function revision(value: string, name: string): Date {
   return parsed;
 }
 
-function revisions(command: RearchiveAcceptanceCommand) {
+function validateAcceptanceCommand(command: RearchiveAcceptanceCommand) {
   const replacementEncodes = (command as unknown as {
     replacementEncodes?: unknown;
   }).replacementEncodes;
@@ -51,7 +51,7 @@ export function previewRearchiveAcceptance(
   targetArchiveId: OriginalDiscArchiveId,
   command: RearchiveAcceptanceCommand,
 ) {
-  const input = { targetArchiveId, ...revisions(command) };
+  const input = { targetArchiveId, ...validateAcceptanceCommand(command) };
   const plan = access.readConsistentSnapshot((snapshot) =>
     snapshot.catalog.planRearchiveAcceptance(input)
   );
@@ -102,7 +102,7 @@ export function acceptRearchive(
     acknowledge: unknown;
   },
 ) {
-  const parsedRevisions = revisions(command);
+  const parsedRevisions = validateAcceptanceCommand(command);
   if (
     input.acknowledge !== true ||
     input.acknowledgedRevision !== command.catalogRevision ||
