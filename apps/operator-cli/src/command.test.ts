@@ -942,6 +942,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       "cancel-archive-request",
       "retry-archive-request",
       "retry-disc-inspection",
+      "filesystem-verification-inventory",
       "submit-filesystem-verification",
       "submit-archive-audit",
       "encode-queue",

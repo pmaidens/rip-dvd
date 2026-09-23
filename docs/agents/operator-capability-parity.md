@@ -49,7 +49,8 @@ and compare both adapters with the same application rule.
 | Encoding Profile list, creation, and versioning | `apps/web/app/api/encoding-profiles/route.ts` | `rip-dvd list-encoding-profiles`, `rip-dvd create-encoding-profile`, `rip-dvd version-encoding-profile` | `apps/web/app/api/operator-command-parity.test.ts`, `apps/operator-cli/src/command.test.ts` |
 | Encoding Profile activation and deactivation previews | `apps/web/app/api/encoding-profiles/route.ts` | `rip-dvd preview-encoding-profile-state`, `rip-dvd activate-encoding-profile`, `rip-dvd deactivate-encoding-profile` | `apps/web/app/api/operator-command-parity.test.ts`, `apps/operator-cli/src/command.test.ts` |
 | Original Disc Archive inventory, lineage, references, storage observations, and re-archive eligibility | `apps/web/app/api/operations/route.ts`, `apps/web/app/api/action-overview/route.ts` | `rip-dvd inspect original-disc-archives [id]` | `apps/operator-cli/src/command.test.ts`, `apps/operator-cli/src/full-operator-parity.integration.test.ts` |
-| Filesystem Verification submission, retained result, status, and wait | `apps/web/app/api/filesystem-verification/route.ts`, `apps/web/app/api/operations/route.ts` | `rip-dvd submit-filesystem-verification`, `rip-dvd inspect filesystem-verifications [id]`, `rip-dvd wait filesystem-verifications` | `apps/web/app/api/operator-command-parity.test.ts`, `apps/operator-cli/src/command.test.ts` |
+| Archive and encoded-output verification inventory | `GET apps/web/app/api/filesystem-verification/route.ts` | `rip-dvd filesystem-verification-inventory --target <target> [--offset <n>]` | `apps/web/app/api/operator-command-parity.test.ts`, `apps/web/app/api/filesystem-verification/route.test.ts` |
+| Filesystem Verification submission, retained result, status, and wait | `POST apps/web/app/api/filesystem-verification/route.ts`, `GET apps/web/app/api/operations/route.ts` | `rip-dvd submit-filesystem-verification`, `rip-dvd inspect filesystem-verifications [id]`, `rip-dvd wait filesystem-verifications` | `apps/web/app/api/operator-command-parity.test.ts`, `apps/operator-cli/src/command.test.ts` |
 | Bounded Archive Audit submission, findings, truncation, status, and wait | No dedicated web screen; results remain available through operations APIs | `rip-dvd submit-archive-audit`, `rip-dvd inspect archive-audits [id]`, `rip-dvd wait archive-audits` | `apps/operator-cli/src/command.test.ts` |
 | Worker Incident activity, failure detail, and recovery | `apps/web/app/api/dashboard/events/route.ts`, `apps/web/app/api/operations/route.ts` | `rip-dvd inspect worker-incidents [id]`, `rip-dvd inspect activity` | `apps/web/app/api/operator-command-parity.test.ts`, `apps/operator-cli/src/command.test.ts` |
 | Fresh Re-archive Request with source identity and waiting reason | `apps/web/app/api/rearchive-requests/route.ts` | `rip-dvd request-rearchive`, `rip-dvd inspect archive-requests [id]` | `apps/web/app/api/workflow-mutations.test.ts`, `apps/operator-cli/src/command.test.ts`, `apps/operator-cli/src/full-operator-parity.integration.test.ts` |
@@ -62,6 +63,41 @@ and compare both adapters with the same application rule.
 | Durable background work, bounded waits, restart observation, and prior provenance | `apps/web/app/api/operations/route.ts` and the work-specific routes above | `rip-dvd inspect`, `rip-dvd wait` for Disc Inspections, Archive Requests, Archive Jobs, Encode Jobs, Archive Audits, and Filesystem Verifications | `apps/operator-cli/src/command.test.ts`, `apps/operator-cli/src/full-operator-parity.integration.test.ts`, `scripts/smoke-operator-cli.sh` |
 | Connected diagnosis, recovery, fresh preservation, review, acceptance, and replacement | The preservation, Catalog Review, and encoding routes above | Supported `rip-dvd` request, inspect, retry, review, acceptance, and encoding commands | `apps/operator-cli/src/full-operator-parity.integration.test.ts` |
 <!-- capability-inventory:end -->
+
+## Enforced web adapter boundaries
+
+The inventory guard treats every exported HTTP method as a separate boundary.
+Adding a method to an existing route therefore requires an explicit mapping,
+not merely an already-listed pathname. The entries below name each method's
+operator-facing responsibility; the capability rows above map those behaviors
+to commands and tests.
+
+- `GET apps/web/app/api/action-overview/route.ts`: action overview.
+- `POST apps/web/app/api/archive-jobs/route.ts`: Archive Job cancellation.
+- `POST apps/web/app/api/archive-requests/[id]/retry/route.ts`: Archive Request retry.
+- `DELETE apps/web/app/api/archive-requests/[id]/route.ts`: Archive Request cancellation.
+- `POST apps/web/app/api/archive-requests/route.ts`: Archive Request submission.
+- `GET apps/web/app/api/catalog-reviews/[id]/route.ts`: Catalog Review detail and proposals.
+- `POST apps/web/app/api/catalog-reviews/[id]/route.ts`: catalog, selection, review, and re-archive changes.
+- `GET apps/web/app/api/catalog-reviews/[id]/suggestion/route.ts`: metadata suggestions.
+- `GET apps/web/app/api/dashboard/discs/[id]/route.ts`: Detected Disc detail.
+- `GET apps/web/app/api/dashboard/events/route.ts`: activity events.
+- `GET apps/web/app/api/dashboard/route.ts`: operations dashboard.
+- `GET apps/web/app/api/deployment-readiness/route.ts`: deployment readiness.
+- `POST apps/web/app/api/disc-inspections/[id]/retry/route.ts`: Disc Inspection retry.
+- `GET apps/web/app/api/encode-jobs/route.ts`: encode queue and history.
+- `POST apps/web/app/api/encode-jobs/route.ts`: Encode Job enqueue.
+- `PATCH apps/web/app/api/encode-jobs/route.ts`: Encode Job preview, requeue, and cancellation.
+- `GET apps/web/app/api/encoding-profiles/route.ts`: Encoding Profile inventory and state preview.
+- `POST apps/web/app/api/encoding-profiles/route.ts`: Encoding Profile creation and versioning.
+- `PATCH apps/web/app/api/encoding-profiles/route.ts`: Encoding Profile activation and deactivation.
+- `GET apps/web/app/api/filesystem-verification/route.ts`: archive and encoded-output inventory.
+- `POST apps/web/app/api/filesystem-verification/route.ts`: Filesystem Verification submission.
+- `GET apps/web/app/api/health/route.ts`: application health.
+- `GET apps/web/app/api/media-items/route.ts`: Media Item search.
+- `GET apps/web/app/api/media-items/[id]/route.ts`: Media Item detail and change previews.
+- `GET apps/web/app/api/operations/route.ts`: operational list, detail, status, and results.
+- `POST apps/web/app/api/rearchive-requests/route.ts`: Re-archiving submission.
 
 `pnpm test:browser` builds every workspace package imported by the production
 Next build before starting Playwright. This is intentional. A browser pass that

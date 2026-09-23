@@ -131,6 +131,13 @@ const commandDefinitions = [
       example: `rip-dvd ${name} --key 00000000-0000-4000-8000-000000000001 ${command.targetFlag} <id>`,
     })),
   {
+    name: "filesystem-verification-inventory",
+    description: "List paged archive or Encode Job output verification targets.",
+    usage: "rip-dvd filesystem-verification-inventory --target <original_disc_archive|encode_job_output> [--offset <nonnegative integer>]",
+    inputs: { arguments: [], options: ["--target", "--offset"] },
+    example: "rip-dvd filesystem-verification-inventory --target original_disc_archive --offset 0",
+  },
+  {
     name: "submit-filesystem-verification",
     description: "Queue accessibility verification for an archive or Encode Job output.",
     usage: "rip-dvd submit-filesystem-verification --key <key> --target <original_disc_archive|encode_job_output> --id <id>",
@@ -532,6 +539,60 @@ function verificationInputs(args: readonly string[]) {
     throw new CommandFailure("INVALID_ARGUMENTS", "Invalid verification target.", 2);
   }
   return { mutationKey, target: target as FilesystemVerificationTarget, targetId };
+}
+
+function verificationInventoryInputs(args: readonly string[]) {
+  const options = new Map<string, string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const name = args[index];
+    const value = args[index + 1];
+    if (
+      (name !== "--target" && name !== "--offset") ||
+      value === undefined ||
+      value.startsWith("--") ||
+      options.has(name)
+    ) {
+      throw new CommandFailure(
+        "INVALID_ARGUMENTS",
+        "Invalid filesystem verification inventory options.",
+        2,
+      );
+    }
+    options.set(name, value);
+  }
+  const target = options.get("--target");
+  const offsetText = options.get("--offset");
+  const offset = offsetText === undefined ? 0 : nonnegativeInteger(offsetText);
+  if (
+    (target !== "original_disc_archive" && target !== "encode_job_output") ||
+    offset === null
+  ) {
+    throw new CommandFailure(
+      "INVALID_ARGUMENTS",
+      "A verification target and nonnegative offset are required.",
+      2,
+    );
+  }
+  return { target: target as FilesystemVerificationTarget, offset };
+}
+
+function filesystemVerificationInventory(
+  input: ReturnType<typeof verificationInventoryInputs>,
+  openAccess: CommandIO["openAccess"],
+) {
+  try {
+    return withAccess(openAccess, (access) =>
+      createApplicationOperations(access)
+        .filesystemVerificationInventory(input)
+    );
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    throw new CommandFailure(
+      "VERIFICATION_INVENTORY_UNAVAILABLE",
+      "Filesystem verification inventory is unavailable.",
+      1,
+    );
+  }
 }
 
 function submitFilesystemVerification(
@@ -1198,6 +1259,20 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         return 0;
       }
       emit(io.stdout, submitFilesystemVerification(verificationInputs(rest), io.openAccess));
+      return 0;
+    }
+    if (name === "filesystem-verification-inventory") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+        return 0;
+      }
+      emit(
+        io.stdout,
+        filesystemVerificationInventory(
+          verificationInventoryInputs(rest),
+          io.openAccess,
+        ),
+      );
       return 0;
     }
     if (name === "submit-archive-audit") {

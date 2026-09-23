@@ -53,6 +53,9 @@ import {
   acceptRearchive,
   previewRearchiveAcceptance,
 } from "./rearchive-acceptance.js";
+import {
+  readFilesystemVerificationInventory,
+} from "./filesystem-verification-inventory.js";
 
 export class InvalidProfileInputError extends Error {
   constructor(message = "Invalid Encoding Profile input.") {
@@ -415,6 +418,9 @@ export function createApplicationOperations(
         updatedAt: run.updatedAt.toISOString(),
       } };
     },
+    filesystemVerificationInventory: (
+      input: Parameters<typeof readFilesystemVerificationInventory>[1],
+    ) => readFilesystemVerificationInventory(access, input),
     submitArchiveAudit: (input: {
       mutationKey: unknown;
       bounds: ArchiveAuditBounds;
@@ -511,6 +517,13 @@ export function createApplicationOperations(
 }
 
 export { formatVolumeLabel } from "./catalog-label.js";
+export {
+  FILESYSTEM_VERIFICATION_INVENTORY_PAGE_LIMIT,
+  readFilesystemVerificationInventory,
+} from "./filesystem-verification-inventory.js";
+export type {
+  FilesystemVerificationInventoryInput,
+} from "./filesystem-verification-inventory.js";
 export { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
 export { readCatalogReview, serializeDiscSelection, serializeMediaItem } from "./catalog-review-read.js";
 export type { CatalogReviewPageCoordinates } from "./catalog-review-read.js";

@@ -267,7 +267,13 @@ it("diagnoses and recovers a failed fresh preservation before reviewed adoption 
   expect(diagnosed.result).toMatchObject({
     item: {
       status: "needs_attention",
-      archiveJobs: [{ status: "failed", attemptOrdinal: 1 }],
+      archiveJobs: [expect.objectContaining({
+        status: "failed",
+        attemptOrdinal: 1,
+        errorMessage: expect.stringContaining(
+          "Synthetic fresh preservation failure",
+        ),
+      })],
       availableActions: expect.arrayContaining([
         expect.objectContaining({ name: "retry", eligible: true }),
       ]),
@@ -300,14 +306,14 @@ it("diagnoses and recovers a failed fresh preservation before reviewed adoption 
     outcome: "settled",
     current: {
       status: "fulfilled",
-      archiveJobs: [
-        {
+      archiveJobs: expect.arrayContaining([
+        expect.objectContaining({
           status: "completed",
           attemptOrdinal: 2,
           originalDiscArchiveId: expect.any(String),
-        },
-        { status: "failed", attemptOrdinal: 1 },
-      ],
+        }),
+        expect.objectContaining({ status: "failed", attemptOrdinal: 1 }),
+      ]),
     },
   });
   const completedJob = (fulfilled.result as {

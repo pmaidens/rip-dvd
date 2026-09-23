@@ -54,11 +54,20 @@ test("every operator route and CLI command stays in the capability inventory", (
   const routeRoot = join(repositoryRoot, "apps/web/app/api");
   for (const routePath of filesNamed(routeRoot, "route.ts")) {
     const repositoryPath = relative(repositoryRoot, routePath);
-    assert.match(
-      inventory,
-      new RegExp(repositoryPath.replaceAll("[", "\\[").replaceAll("]", "\\]")),
-      `Operator route is missing from the capability inventory: ${repositoryPath}`,
-    );
+    const source = readFileSync(routePath, "utf8");
+    const methods = [
+      ...source.matchAll(
+        /^export (?:async )?function (GET|POST|PATCH|DELETE|PUT)\b/gm,
+      ),
+    ].map((match) => match[1]);
+    assert.ok(methods.length > 0, `Operator route exports no HTTP methods: ${repositoryPath}`);
+    for (const method of methods) {
+      const boundary = `${method} ${repositoryPath}`;
+      assert.ok(
+        inventory.includes(boundary),
+        `Operator route method is missing from the capability inventory: ${method} ${repositoryPath}`,
+      );
+    }
   }
 
   const commandSource = readFileSync(commandPath, "utf8");
