@@ -1,5 +1,7 @@
 "use client";
 
+import { createMutationKey } from "../lib/mutation-key";
+
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -966,7 +968,7 @@ export async function queueEncodeJob(
 ): Promise<LogicalEncodeJob> {
   const signature = JSON.stringify(input);
   const mutationKey = pendingEncodeEnqueueKeys.get(signature) ??
-    crypto.randomUUID();
+    createMutationKey();
   pendingEncodeEnqueueKeys.set(signature, mutationKey);
   const response = await fetcher("/api/encode-jobs", {
     method: "POST",
@@ -1027,7 +1029,7 @@ async function requestEncodeJobRequeue(
     mutationBody = {
       action: "requeue",
       encodeJobId,
-      mutationKey: crypto.randomUUID(),
+      mutationKey: createMutationKey(),
       expectedRevision: preview.revision,
       acknowledgeReplacement: preview.acknowledgementRequired,
     };
@@ -1075,7 +1077,7 @@ export async function cancelEncodeJob(
   fetcher: EncodeJobsFetch = fetch,
 ): Promise<void> {
   const mutationKey = pendingEncodeCancellationKeys.get(encodeJobId) ??
-    crypto.randomUUID();
+    createMutationKey();
   pendingEncodeCancellationKeys.set(encodeJobId, mutationKey);
   const response = await fetcher("/api/encode-jobs", {
     method: "PATCH",

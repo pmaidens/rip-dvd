@@ -1,5 +1,7 @@
 "use client";
 
+import { createMutationKey } from "../lib/mutation-key";
+
 import Link from "next/link";
 import React, { useEffect, useState } from "react";
 import type {
@@ -1756,7 +1758,7 @@ export async function requestArchiveApproval(
 ): Promise<void> {
   let mutationKey = pendingArchiveApprovalKeys.get(detectedDiscId);
   if (mutationKey === undefined) {
-    mutationKey = crypto.randomUUID();
+    mutationKey = createMutationKey();
     pendingArchiveApprovalKeys.set(detectedDiscId, mutationKey);
   }
   const response = await fetcher("/api/archive-requests", {
@@ -1780,7 +1782,7 @@ export async function submitRearchiveRequest(
 ): Promise<void> {
   let mutationKey = pendingRearchiveKeys.get(sourceArchiveId);
   if (mutationKey === undefined) {
-    mutationKey = crypto.randomUUID();
+    mutationKey = createMutationKey();
     pendingRearchiveKeys.set(sourceArchiveId, mutationKey);
   }
   const response = await fetcher("/api/rearchive-requests", {
@@ -1799,7 +1801,7 @@ async function requestWorkflowMutation(
   method: "POST" | "DELETE",
   fetcher: DashboardFetch = fetch,
 ): Promise<void> {
-  const mutationKey = pendingRecoveryKeys.get(path) ?? crypto.randomUUID();
+  const mutationKey = pendingRecoveryKeys.get(path) ?? createMutationKey();
   pendingRecoveryKeys.set(path, mutationKey);
   const response = await fetcher(path, {
     method,
@@ -1821,7 +1823,7 @@ export async function requestFilesystemVerification(
   target: FilesystemVerificationTarget,
   id: string,
   fetcher: DashboardFetch = fetch,
-  mutationKey: string = crypto.randomUUID(),
+  mutationKey: string = createMutationKey(),
 ): Promise<string> {
   const response = await fetcher("/api/filesystem-verification", {
     method: "POST",
@@ -2282,7 +2284,7 @@ export function OperationsDashboard({
     setVerifyingFilesystemTarget(targetKey);
     setFilesystemVerificationFailed(false);
     try {
-      const mutationKey = verificationSubmissionKeys.current.get(targetKey) ?? crypto.randomUUID();
+      const mutationKey = verificationSubmissionKeys.current.get(targetKey) ?? createMutationKey();
       verificationSubmissionKeys.current.set(targetKey, mutationKey);
       const runId = await requestFilesystemVerification(target, id, fetch, mutationKey);
       verificationSubmissionKeys.current.delete(targetKey);

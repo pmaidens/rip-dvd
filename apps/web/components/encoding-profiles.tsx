@@ -1,5 +1,7 @@
 "use client";
 
+import { createMutationKey } from "../lib/mutation-key";
+
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   HANDBRAKE_PRESET_GROUPS,
@@ -333,7 +335,7 @@ export function EncodingProfilesManager({
         };
       }
       const mutationKey = pendingMutation.current?.input === input
-        ? pendingMutation.current.key : crypto.randomUUID();
+        ? pendingMutation.current.key : createMutationKey();
       pendingMutation.current = { input, body: mutationBody, key: mutationKey };
       const response = await fetch("/api/encoding-profiles", {
         method,

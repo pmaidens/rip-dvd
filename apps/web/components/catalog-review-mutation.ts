@@ -1,5 +1,7 @@
 "use client";
 
+import { createMutationKey } from "../lib/mutation-key";
+
 import type {
   CatalogReviewCompletionPreview,
   RearchiveAcceptancePreview,
@@ -226,7 +228,7 @@ export async function mutateCatalogReview(
     ? JSON.stringify({ archiveId, command }) : null;
   let proposalMutationKey: string | undefined;
   if (proposalIdentity !== null) {
-    proposalMutationKey = pendingProposalKeys.get(proposalIdentity) ?? crypto.randomUUID();
+    proposalMutationKey = pendingProposalKeys.get(proposalIdentity) ?? createMutationKey();
     pendingProposalKeys.set(proposalIdentity, proposalMutationKey);
   }
   const storage = options.storage === undefined
@@ -253,7 +255,7 @@ export async function mutateCatalogReview(
         archiveId,
         command,
         identity,
-        mutationKey: crypto.randomUUID(),
+        mutationKey: createMutationKey(),
       };
       writePendingCatalogReviewMutation(archiveId, pending, storage);
     }
@@ -344,7 +346,7 @@ async function prepareAcknowledgedCatalogMutation(
         archiveId,
         command,
         identity,
-        mutationKey: crypto.randomUUID(),
+        mutationKey: createMutationKey(),
         ...fields,
       };
 }
@@ -435,7 +437,7 @@ async function prepareDiscSelectionMutation(
     archiveId,
     command,
     identity,
-    mutationKey: crypto.randomUUID(),
+    mutationKey: createMutationKey(),
   };
   writePendingCatalogReviewMutation(archiveId, pending, storage);
   if (pending.preview === undefined) {
