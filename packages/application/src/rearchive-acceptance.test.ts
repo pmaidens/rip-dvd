@@ -105,7 +105,6 @@ it("adopts a reviewed re-archive atomically and preserves worker ownership", () 
       action: "accept_rearchive" as const,
       catalogRevision: current.saved.catalogRevision,
       sourceCatalogRevision: current.saved.sourceCatalogRevision,
-      replacementEncodes: [] as [],
     };
 
     const stalePreview = current.operations.previewRearchiveAcceptance(
@@ -170,8 +169,8 @@ it("adopts a reviewed re-archive atomically and preserves worker ownership", () 
         id: current.seeded.targetArchive.id,
         catalogReviewOutcome: "reviewed_with_selections",
       },
-      adoptedMappings: [{
-        sourceDiscSelectionId: current.seeded.sourceSelection.id,
+      createdDiscSelections: [{
+        priorDiscSelectionId: current.seeded.sourceSelection.id,
         discSelection: {
           originalDiscArchiveId: current.seeded.targetArchive.id,
           mediaItemId: current.seeded.mediaItem.id,
@@ -242,7 +241,6 @@ it("rolls back adoption writes when a late persistence step fails", () => {
       action: "accept_rearchive" as const,
       catalogRevision: current.saved.catalogRevision,
       sourceCatalogRevision: current.saved.sourceCatalogRevision,
-      replacementEncodes: [] as [],
     };
     const preview = current.operations.previewRearchiveAcceptance(
       current.seeded.targetArchive.id,
@@ -318,7 +316,6 @@ it("requires a fresh preview when publication wins the acceptance race", () => {
       action: "accept_rearchive" as const,
       catalogRevision: current.saved.catalogRevision,
       sourceCatalogRevision: current.saved.sourceCatalogRevision,
-      replacementEncodes: [] as [],
     };
     const stalePreview = current.operations.previewRearchiveAcceptance(
       current.seeded.targetArchive.id,

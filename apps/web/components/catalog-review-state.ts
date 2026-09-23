@@ -616,7 +616,6 @@ export function useCatalogReviewState({
         action: "accept_rearchive",
         catalogRevision: current.catalogRevision,
         sourceCatalogRevision: current.sourceCatalogRevision,
-        replacementEncodes: [],
       },
       { closeAfterMutation: true },
     );

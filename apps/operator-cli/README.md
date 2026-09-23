@@ -103,8 +103,7 @@ proposal revisions and an empty replacement plan:
 {
   "action": "accept_rearchive",
   "catalogRevision": "2026-01-02T00:00:00.000Z",
-  "sourceCatalogRevision": "2026-01-01T00:00:00.000Z",
-  "replacementEncodes": []
+  "sourceCatalogRevision": "2026-01-01T00:00:00.000Z"
 }
 ```
 

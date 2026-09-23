@@ -311,7 +311,6 @@ describe("Catalog Review API", () => {
       action: "accept_rearchive",
       catalogRevision: saved.proposal.catalogRevision,
       sourceCatalogRevision: saved.proposal.sourceCatalogRevision,
-      replacementEncodes: [],
     };
     const previewResponse = await postCatalogReview(
       access,

@@ -26,7 +26,13 @@ function revision(value: string, name: string): Date {
 }
 
 function revisions(command: RearchiveAcceptanceCommand) {
-  if (command.replacementEncodes.length !== 0) {
+  const replacementEncodes = (command as unknown as {
+    replacementEncodes?: unknown;
+  }).replacementEncodes;
+  if (
+    replacementEncodes !== undefined &&
+    (!Array.isArray(replacementEncodes) || replacementEncodes.length !== 0)
+  ) {
     throw new DomainInvariantError(
       "Re-archive replacement encodes are not supported yet",
     );
@@ -125,14 +131,14 @@ export function acceptRearchive(
         result.targetArchive.catalogReviewedAt?.toISOString() ?? null,
       catalogReviewOutcome: result.targetArchive.catalogReviewOutcome,
     },
-    adoptedMappings: result.adoptedMappings.map((mapping) => ({
-      sourceDiscSelectionId: mapping.sourceDiscSelectionId,
+    createdDiscSelections: result.createdDiscSelections.map((created) => ({
+      priorDiscSelectionId: created.priorDiscSelectionId,
       discSelection: {
-        id: mapping.discSelection.id,
-        originalDiscArchiveId: mapping.discSelection.originalDiscArchiveId,
-        mediaItemId: mapping.discSelection.mediaItemId,
-        sourceIdentity: mapping.discSelection.sourceIdentity,
-        label: mapping.discSelection.label,
+        id: created.discSelection.id,
+        originalDiscArchiveId: created.discSelection.originalDiscArchiveId,
+        mediaItemId: created.discSelection.mediaItemId,
+        sourceIdentity: created.discSelection.sourceIdentity,
+        label: created.discSelection.label,
       },
     })),
     affectedEncodeJobs: result.affectedEncodeJobs.map((job) => ({

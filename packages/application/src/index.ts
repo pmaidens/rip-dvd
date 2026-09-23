@@ -16,6 +16,7 @@ import type {
   DiscSelectionId,
   MediaItemId,
   RearchiveMappingProposalInput,
+  RearchiveMappingProposalRevisions,
   RearchiveMappingProposalReview,
 } from "@rip-dvd/data-access";
 
@@ -60,10 +61,9 @@ export class InvalidProfileInputError extends Error {
   }
 }
 
-export interface RearchiveMappingProposalOperationInput {
+export interface RearchiveMappingProposalOperationInput
+  extends RearchiveMappingProposalRevisions<string> {
   originalDiscArchiveId: string;
-  catalogRevision: string;
-  sourceCatalogRevision: string;
   mappings: readonly CatalogReviewRearchiveMappingInput[];
 }
 

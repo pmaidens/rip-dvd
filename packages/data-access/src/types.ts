@@ -477,35 +477,41 @@ export interface RearchiveMappingProposalMappingInput
   sourceDiscSelectionId: DiscSelectionId;
 }
 
-export interface RearchiveMappingProposalInput {
+export interface RearchiveMappingProposalRevisions<TRevision> {
+  catalogRevision: TRevision;
+  sourceCatalogRevision: TRevision;
+}
+
+export interface RearchiveMappingProposalInput
+  extends RearchiveMappingProposalRevisions<Date> {
   originalDiscArchiveId: OriginalDiscArchiveId;
-  catalogRevision: Date;
-  sourceCatalogRevision: Date;
   mappings: readonly RearchiveMappingProposalMappingInput[];
 }
 
-export interface RearchiveAcceptancePlan {
+export interface RearchiveAcceptanceRevisionInput
+  extends RearchiveMappingProposalRevisions<Date> {
+  targetArchiveId: OriginalDiscArchiveId;
+}
+
+export interface RearchiveAcceptancePlan
+  extends RearchiveMappingProposalRevisions<string> {
   targetArchiveId: OriginalDiscArchiveId;
   sourceArchiveId: OriginalDiscArchiveId;
-  catalogRevision: string;
-  sourceCatalogRevision: string;
   mappings: RearchiveMappingProposalMappingInput[];
   affectedEncodeJobs: EncodeJob[];
 }
 
-export interface RearchiveAcceptancePreviewDecisionInput {
+export interface RearchiveAcceptancePreviewDecisionInput
+  extends RearchiveAcceptanceRevisionInput {
   previewToken: string;
-  targetArchiveId: OriginalDiscArchiveId;
-  catalogRevision: Date;
-  sourceCatalogRevision: Date;
   expectedPreviewEvidence: string;
 }
 
 export interface CompletedRearchiveAcceptance {
   sourceArchive: OriginalDiscArchive;
   targetArchive: OriginalDiscArchive;
-  adoptedMappings: Array<{
-    sourceDiscSelectionId: DiscSelectionId;
+  createdDiscSelections: Array<{
+    priorDiscSelectionId: DiscSelectionId;
     discSelection: DiscSelection;
   }>;
   affectedEncodeJobs: EncodeJob[];
@@ -1334,18 +1340,13 @@ export interface CatalogAccess {
   saveRearchiveMappingProposal(
     input: RearchiveMappingProposalInput & { mutationKey: string },
   ): RearchiveMappingProposalReview;
-  planRearchiveAcceptance(input: {
-    targetArchiveId: OriginalDiscArchiveId;
-    catalogRevision: Date;
-    sourceCatalogRevision: Date;
-  }): RearchiveAcceptancePlan;
+  planRearchiveAcceptance(
+    input: RearchiveAcceptanceRevisionInput,
+  ): RearchiveAcceptancePlan;
   recordRearchiveAcceptancePreviewDecision(
     input: RearchiveAcceptancePreviewDecisionInput,
   ): void;
-  acceptRearchive(input: {
-    targetArchiveId: OriginalDiscArchiveId;
-    catalogRevision: Date;
-    sourceCatalogRevision: Date;
+  acceptRearchive(input: RearchiveAcceptanceRevisionInput & {
     mutationKey: string;
     previewToken: string;
   }): CompletedRearchiveAcceptance;

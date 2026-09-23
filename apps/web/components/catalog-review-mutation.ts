@@ -135,6 +135,78 @@ type PendingAcknowledgedCatalogMutation = {
   previewToken: string;
 };
 
+type AcknowledgementFields = Pick<
+  PendingAcknowledgedCatalogMutation,
+  | "acknowledgedRevision"
+  | "acknowledgedSourceRevision"
+  | "previewToken"
+>;
+
+interface AcknowledgedCatalogMutationDefinition {
+  prepare(
+    previewBody: unknown,
+    options: CatalogReviewMutationOptions,
+  ): Promise<AcknowledgementFields | undefined>;
+  matches(
+    command: AcknowledgedCatalogMutationCommand,
+    fields: AcknowledgementFields,
+  ): boolean;
+}
+
+const acknowledgedCatalogMutationDefinitions = {
+  complete_review: {
+    async prepare(previewBody, options) {
+      const preview = availableCatalogReviewCompletionPreview(previewBody);
+      if (preview === null) {
+        throw new Error("Catalog Review completion preview failed");
+      }
+      if (!await confirmCatalogReviewCompletion(preview, options)) {
+        return undefined;
+      }
+      return {
+        acknowledgedRevision: preview.catalogRevision,
+        previewToken: preview.previewToken,
+      };
+    },
+    matches(command, fields) {
+      return fields.acknowledgedRevision === command.catalogRevision &&
+        fields.acknowledgedSourceRevision === undefined &&
+        isCatalogReviewCompletionPreviewToken(fields.previewToken);
+    },
+  },
+  accept_rearchive: {
+    async prepare(previewBody, options) {
+      const preview = availableRearchiveAcceptancePreview(previewBody);
+      if (preview === null) {
+        throw new Error("Re-archive Acceptance preview failed");
+      }
+      if (!await confirmRearchiveAcceptance(preview, options)) {
+        return undefined;
+      }
+      return {
+        acknowledgedRevision: preview.catalogRevision,
+        acknowledgedSourceRevision: preview.sourceCatalogRevision,
+        previewToken: preview.previewToken,
+      };
+    },
+    matches(command, fields) {
+      if (command.action !== "accept_rearchive") return false;
+      return fields.acknowledgedRevision === command.catalogRevision &&
+        fields.acknowledgedSourceRevision === command.sourceCatalogRevision &&
+        isRearchiveAcceptancePreviewToken(fields.previewToken);
+    },
+  },
+} satisfies Record<
+  AcknowledgedCatalogMutationCommand["action"],
+  AcknowledgedCatalogMutationDefinition
+>;
+
+function isAcknowledgedCatalogMutationCommand(
+  command: CatalogReviewCommand,
+): command is AcknowledgedCatalogMutationCommand {
+  return command.action in acknowledgedCatalogMutationDefinitions;
+}
+
 const pendingProposalKeys = new Map<string, string>();
 const pendingAcknowledgedInvocations = new Map<
   string,
@@ -187,10 +259,7 @@ export async function mutateCatalogReview(
     }
   }
   let acknowledgedInvocation: PendingAcknowledgedCatalogMutation | undefined;
-  if (
-    command.action === "complete_review" ||
-    command.action === "accept_rearchive"
-  ) {
+  if (isAcknowledgedCatalogMutationCommand(command)) {
     acknowledgedInvocation = readPendingAcknowledgedCatalogMutation(
       archiveId,
       storage,
@@ -267,43 +336,17 @@ async function prepareAcknowledgedCatalogMutation(
   previewBody: unknown,
   options: CatalogReviewMutationOptions,
 ): Promise<PendingAcknowledgedCatalogMutation | undefined> {
-  switch (command.action) {
-    case "complete_review": {
-      const preview = availableCatalogReviewCompletionPreview(previewBody);
-      if (preview === null) {
-        throw new Error("Catalog Review completion preview failed");
-      }
-      if (!await confirmCatalogReviewCompletion(preview, options)) {
-        return undefined;
-      }
-      return {
+  const fields = await acknowledgedCatalogMutationDefinitions[command.action]
+    .prepare(previewBody, options);
+  return fields === undefined
+    ? undefined
+    : {
         archiveId,
         command,
         identity,
         mutationKey: crypto.randomUUID(),
-        acknowledgedRevision: preview.catalogRevision,
-        previewToken: preview.previewToken,
+        ...fields,
       };
-    }
-    case "accept_rearchive": {
-      const preview = availableRearchiveAcceptancePreview(previewBody);
-      if (preview === null) {
-        throw new Error("Re-archive Acceptance preview failed");
-      }
-      if (!await confirmRearchiveAcceptance(preview, options)) {
-        return undefined;
-      }
-      return {
-        archiveId,
-        command,
-        identity,
-        mutationKey: crypto.randomUUID(),
-        acknowledgedRevision: preview.catalogRevision,
-        acknowledgedSourceRevision: preview.sourceCatalogRevision,
-        previewToken: preview.previewToken,
-      };
-    }
-  }
 }
 
 async function confirmCatalogReviewCompletion(
@@ -591,9 +634,7 @@ function acknowledgedCatalogMutationCommand(
   const parsed = parseCatalogReviewCommand(value, {
     mediaItemKinds: MEDIA_ITEM_KINDS,
   });
-  return parsed.ok &&
-      (parsed.command.action === "complete_review" ||
-        parsed.command.action === "accept_rearchive")
+  return parsed.ok && isAcknowledgedCatalogMutationCommand(parsed.command)
     ? parsed.command
     : null;
 }
@@ -629,25 +670,23 @@ function decodePendingAcknowledgedCatalogMutation(
   const acknowledgedSourceRevision = "acknowledgedSourceRevision" in value
     ? value.acknowledgedSourceRevision
     : undefined;
-  const completionMatches = command.action === "complete_review" &&
-    value.acknowledgedRevision === command.catalogRevision &&
-    acknowledgedSourceRevision === undefined &&
-    isCatalogReviewCompletionPreviewToken(value.previewToken);
-  const acceptanceMatches = command.action === "accept_rearchive" &&
-    value.acknowledgedRevision === command.catalogRevision &&
-    acknowledgedSourceRevision === command.sourceCatalogRevision &&
-    isRearchiveAcceptancePreviewToken(value.previewToken);
-  if (!completionMatches && !acceptanceMatches) return null;
-  return {
-    archiveId,
-    command,
-    identity: value.identity,
-    mutationKey,
+  const fields = {
     acknowledgedRevision: value.acknowledgedRevision,
     ...(typeof acknowledgedSourceRevision === "string"
       ? { acknowledgedSourceRevision }
       : {}),
     previewToken: value.previewToken,
+  };
+  if (!acknowledgedCatalogMutationDefinitions[command.action].matches(
+    command,
+    fields,
+  )) return null;
+  return {
+    archiveId,
+    command,
+    identity: value.identity,
+    mutationKey,
+    ...fields,
   };
 }
 

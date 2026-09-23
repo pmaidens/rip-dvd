@@ -4,6 +4,7 @@ import type {
   EncodeJobId,
   EncodingProfileId,
   MediaItemKind,
+  RearchiveMappingProposalRevisions,
   TmdbIdentity,
 } from "@rip-dvd/data-access";
 import {
@@ -104,20 +105,15 @@ export interface CatalogReviewRearchiveMappingInput {
 }
 
 export type CatalogReviewCommand =
-  | {
+  | ({
       action: "accept_rearchive";
-      catalogRevision: string;
-      sourceCatalogRevision: string;
-      replacementEncodes: [];
-    }
-  | {
+    } & RearchiveMappingProposalRevisions<string>)
+  | ({
       action:
         | "preview_rearchive_mapping_proposal"
         | "save_rearchive_mapping_proposal";
-      catalogRevision: string;
-      sourceCatalogRevision: string;
       mappings: CatalogReviewRearchiveMappingInput[];
-    }
+    } & RearchiveMappingProposalRevisions<string>)
   | {
       action: "create_episodic_mapping_proposal";
       catalogRevision: string;
@@ -887,7 +883,6 @@ export function parseCatalogReviewCommand(
               action,
               catalogRevision: revision,
               sourceCatalogRevision: sourceRevision,
-              replacementEncodes: [],
             },
           }
         : invalid("Invalid Re-archive Acceptance");

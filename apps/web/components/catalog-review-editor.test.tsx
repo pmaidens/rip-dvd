@@ -277,7 +277,6 @@ describe("CatalogReviewEditor", () => {
         action: "accept_rearchive",
         catalogRevision: "2026-08-11T06:00:00.000Z",
         sourceCatalogRevision: "2026-08-11T05:00:00.000Z",
-        replacementEncodes: [],
       }),
       affectedEncodeJobs: [
         { id: "queued-job", discSelectionId: "prior-1", status: "queued" },
@@ -376,7 +375,6 @@ describe("CatalogReviewEditor", () => {
       action: "accept_rearchive" as const,
       catalogRevision: review.catalogRevision,
       sourceCatalogRevision: "2026-08-11T05:00:00.000Z",
-      replacementEncodes: [] as [],
     };
     const firstAttemptBodies: Record<string, unknown>[] = [];
     const firstAttempt = async (
@@ -2159,7 +2157,6 @@ describe("CatalogReviewView", () => {
         action: "accept_rearchive",
         catalogRevision: "2026-08-11T06:00:00.000Z",
         sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
-        replacementEncodes: [],
       },
       preview_rearchive_mapping_proposal: {
         action: "preview_rearchive_mapping_proposal",

@@ -232,6 +232,7 @@ import type {
   RearchiveMappingProposalInput,
   RearchiveMappingProposalReview,
   RearchiveAcceptancePlan,
+  RearchiveAcceptanceRevisionInput,
   RetainedEncodeOutputId,
   RunningArchiveJob,
   RunningEncodeJob,
@@ -4635,11 +4636,7 @@ export function createDataAccessInternal(
 
   function planRearchiveAcceptance(
     reader: RearchiveProposalReader,
-    input: {
-      targetArchiveId: OriginalDiscArchiveId;
-      catalogRevision: Date;
-      sourceCatalogRevision: Date;
-    },
+    input: RearchiveAcceptanceRevisionInput,
   ): RearchiveAcceptancePlan {
     if (
       !(input.catalogRevision instanceof Date) ||
@@ -4657,7 +4654,7 @@ export function createDataAccessInternal(
     );
     if (proposal === null || !proposal.persisted) {
       throw new DomainInvariantError(
-        "Re-archive Acceptance requires a saved Mapping Proposal",
+        "Re-archive Acceptance requires a saved Re-archive Mapping Proposal",
       );
     }
     if (proposal.state !== "ready") {
@@ -5258,11 +5255,9 @@ export function createDataAccessInternal(
     });
   }
 
-  function rearchiveAcceptanceSemanticInput(input: {
-    targetArchiveId: OriginalDiscArchiveId;
-    catalogRevision: Date;
-    sourceCatalogRevision: Date;
-  }): string {
+  function rearchiveAcceptanceSemanticInput(
+    input: RearchiveAcceptanceRevisionInput,
+  ): string {
     return JSON.stringify({
       targetArchiveId: input.targetArchiveId,
       catalogRevision: input.catalogRevision.toISOString(),
@@ -8354,7 +8349,7 @@ export function createDataAccessInternal(
             "original disc archive",
             plan.targetArchiveId,
           );
-          const adoptedMappings = plan.mappings.map((mapping) => {
+          const createdDiscSelections = plan.mappings.map((mapping) => {
             const id = newId<DiscSelectionId>();
             const selection = insertDiscSelection(
               transaction,
@@ -8375,7 +8370,7 @@ export function createDataAccessInternal(
               createdAt: timestamp,
             }).run();
             return {
-              sourceDiscSelectionId: mapping.sourceDiscSelectionId,
+              priorDiscSelectionId: mapping.sourceDiscSelectionId,
               discSelection: selection,
             };
           });
@@ -8441,7 +8436,7 @@ export function createDataAccessInternal(
             {
               sourceArchive,
               targetArchive: completedTarget,
-              adoptedMappings,
+              createdDiscSelections,
               affectedEncodeJobs,
             },
             timestamp,

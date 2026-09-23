@@ -79,7 +79,6 @@ it("previews, accepts, and replays Re-archive Acceptance through JSON CLI", asyn
     action: "accept_rearchive",
     catalogRevision: saved.catalogRevision,
     sourceCatalogRevision: saved.sourceCatalogRevision,
-    replacementEncodes: [],
   };
   const preview = await current.run([
     "catalog-review",

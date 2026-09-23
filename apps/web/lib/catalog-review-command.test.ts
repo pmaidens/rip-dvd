@@ -24,7 +24,6 @@ const validCommands = {
     action: "accept_rearchive",
     catalogRevision: "2026-08-11T06:00:00.000Z",
     sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
-    replacementEncodes: [],
   },
   preview_rearchive_mapping_proposal: {
     action: "preview_rearchive_mapping_proposal",
@@ -304,7 +303,6 @@ describe("catalog review command contract", () => {
         action: "accept_rearchive",
         catalogRevision: "2026-08-11T06:00:00.000Z",
         sourceCatalogRevision: "invalid",
-        replacementEncodes: [],
       },
       "Invalid Re-archive Acceptance",
     ],
