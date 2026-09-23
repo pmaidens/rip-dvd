@@ -323,12 +323,30 @@ export function readCatalogReview(
         maintenance,
       ]),
     );
-    const replacementJobs = snapshot.catalog
-      .listCorrectedEncodeReplacementPlans({
+    const rearchiveAcceptancePlan =
+      rearchiveProposal?.persisted === true &&
+        rearchiveProposal.state === "ready"
+        ? snapshot.catalog.planRearchiveAcceptance({
+          targetArchiveId: id,
+          catalogRevision: new Date(rearchiveProposal.catalogRevision),
+          sourceCatalogRevision: new Date(
+            rearchiveProposal.sourceCatalogRevision,
+          ),
+          replacements: [],
+        })
+        : null;
+    const allRearchiveReplacementJobs =
+      rearchiveAcceptancePlan?.availableReplacementEncodes ?? null;
+    const replacementJobs = allRearchiveReplacementJobs === null
+      ? snapshot.catalog.listCorrectedEncodeReplacementPlans({
         originalDiscArchiveId: id,
         limit: CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT + 1,
         offset: replacementOffset,
-      });
+      })
+      : allRearchiveReplacementJobs.slice(
+        replacementOffset,
+        replacementOffset + CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT + 1,
+      );
     const hasNextReplacementJobs = replacementJobs.length >
       CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT;
     const replacementJobPage = replacementJobs.slice(
@@ -420,7 +438,12 @@ export function readCatalogReview(
           replacementPlan: {
             jobs: replacementJobPage.map((job) => ({
               predecessorEncodeJobId: job.predecessorEncodeJobId,
-              replacementDiscSelectionId: job.replacementDiscSelectionId,
+              ...("sourceDiscSelectionId" in job
+                ? { sourceDiscSelectionId: job.sourceDiscSelectionId }
+                : {
+                  replacementDiscSelectionId:
+                    job.replacementDiscSelectionId,
+                }),
               proposedEncodingProfileId: job.proposedEncodingProfileId,
               proposedOutputPath: job.proposedOutputPath,
               predecessorStatus: job.predecessorStatus,

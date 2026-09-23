@@ -27,10 +27,12 @@ import { fileURLToPath } from "node:url";
 import {
   createDataAccess,
   ENCODE_JOB_LEASE_DURATION_MS,
+  rearchiveAcceptancePreviewEvidence,
   type DataAccess,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
+import { seedRearchiveReviewFixtureForTest } from "@rip-dvd/data-access/rearchive-test-support";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -2409,6 +2411,131 @@ describe("encode worker polling", () => {
       ).sort(),
     ).toEqual(["corrected final", "incorrect final"]);
     fixture.access.close();
+  });
+
+  it("retains the prior final when Re-archive Acceptance replaces a completed encode", async () => {
+    const root = mkdtempSync(join(tmpdir(), "rip-dvd-rearchive-replacement-"));
+    temporaryDirectories.push(root);
+    const originalsLibraryPath = join(root, "originals");
+    const mediaLibraryPath = join(root, "media");
+    const databasePath = join(root, "catalog.sqlite");
+    const sourceArchivePath = join(originalsLibraryPath, "source.iso");
+    const targetArchivePath = join(originalsLibraryPath, "fresh.iso");
+    const outputPath = join(mediaLibraryPath, "Synthetic replacement.mkv");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(sourceArchivePath, "synthetic source archive");
+    writeFileSync(targetArchivePath, "synthetic fresh archive");
+    const access = createLegacySidecarDataAccess({ databasePath });
+    const seeded = seedRearchiveReviewFixtureForTest(access, {
+      fixtureId: "encode-worker-rearchive-replacement",
+      mutationKey: "00000000-0000-4000-8000-000000000601",
+      sourceArchivePath,
+      targetArchivePath,
+      volumeLabel: "SYNTHETIC_REARCHIVE_REPLACEMENT",
+      mediaItemTitle: "Synthetic re-archive replacement",
+      integrityPolicyVersion: "synthetic-clean-v1",
+    });
+    const profile = access.encodingProfiles.create({
+      key: "rearchive-replacement",
+      displayName: "Re-archive replacement",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: seeded.sourceSelection.id,
+      encodingProfileId: profile.id,
+      outputPath,
+    });
+    const workerOptions = {
+      access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...workerOptions,
+      runner: {
+        run: vi.fn(async ({ outputPath: partialPath }) => {
+          writeFileSync(partialPath, "prior completed output", { flag: "wx" });
+        }),
+      },
+    });
+
+    const initialProposal = access.catalog.readRearchiveMappingProposal(
+      seeded.targetArchive.id,
+    );
+    if (initialProposal === null) {
+      throw new Error("Expected a Re-archive Mapping Proposal");
+    }
+    const savedProposal = access.catalog.saveRearchiveMappingProposal({
+      originalDiscArchiveId: seeded.targetArchive.id,
+      mutationKey: "00000000-0000-4000-8000-000000000602",
+      catalogRevision: new Date(initialProposal.catalogRevision),
+      sourceCatalogRevision: new Date(initialProposal.sourceCatalogRevision),
+      mappings: initialProposal.mappings.map((mapping) => ({
+        sourceDiscSelectionId: mapping.sourceDiscSelectionId,
+        ...mapping.proposedMapping,
+      })),
+    });
+    const acceptanceInput = {
+      targetArchiveId: seeded.targetArchive.id,
+      catalogRevision: new Date(savedProposal.catalogRevision),
+      sourceCatalogRevision: new Date(savedProposal.sourceCatalogRevision),
+      replacements: [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: profile.id,
+        outputPath,
+      }],
+    };
+    const plan = access.catalog.planRearchiveAcceptance(acceptanceInput);
+    const previewToken =
+      "rearchive-acceptance-preview:00000000-0000-4000-8000-000000000603";
+    access.catalog.recordRearchiveAcceptancePreviewDecision({
+      ...acceptanceInput,
+      previewToken,
+      expectedPreviewEvidence: rearchiveAcceptancePreviewEvidence(plan),
+    });
+    const accepted = access.catalog.acceptRearchive({
+      ...acceptanceInput,
+      previewToken,
+      mutationKey: "00000000-0000-4000-8000-000000000604",
+    });
+    const replacement = accepted.replacementEncodeJobs[0];
+    if (!replacement) throw new Error("Expected a replacement Encode Job");
+
+    await pollEncodeWorker({
+      ...workerOptions,
+      runner: {
+        run: vi.fn(async ({ outputPath: partialPath }) => {
+          expect(readFileSync(outputPath, "utf8")).toBe(
+            "prior completed output",
+          );
+          writeFileSync(partialPath, "fresh replacement output", {
+            flag: "wx",
+          });
+        }),
+      },
+    });
+
+    expect(readFileSync(outputPath, "utf8")).toBe(
+      "fresh replacement output",
+    );
+    const retained = access.encodeJobs.listRetainedOutputs([
+      predecessor.id,
+      replacement.id,
+    ]);
+    expect(retained).toEqual([expect.objectContaining({
+      predecessorEncodeJobId: predecessor.id,
+      replacementEncodeJobId: replacement.id,
+      state: "retained",
+      cleanupEligible: true,
+    })]);
+    expect(readFileSync(retained[0]!.retainedOutputPath, "utf8")).toBe(
+      "prior completed output",
+    );
+    access.close();
   });
 
   it("leaves the prior final published when a corrected replacement fails", async () => {

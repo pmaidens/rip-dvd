@@ -231,8 +231,8 @@ import type {
   RearchiveMappingProposalMapping,
   RearchiveMappingProposalInput,
   RearchiveMappingProposalReview,
+  RearchiveAcceptanceInput,
   RearchiveAcceptancePlan,
-  RearchiveAcceptanceRevisionInput,
   RetainedEncodeOutputId,
   RunningArchiveJob,
   RunningEncodeJob,
@@ -4636,7 +4636,7 @@ export function createDataAccessInternal(
 
   function planRearchiveAcceptance(
     reader: RearchiveProposalReader,
-    input: RearchiveAcceptanceRevisionInput,
+    input: RearchiveAcceptanceInput,
   ): RearchiveAcceptancePlan {
     if (
       !(input.catalogRevision instanceof Date) ||
@@ -4646,6 +4646,14 @@ export function createDataAccessInternal(
     ) {
       throw new DomainInvariantError(
         "Re-archive Acceptance revisions must be valid timestamps",
+      );
+    }
+    if (
+      !Array.isArray(input.replacements) ||
+      input.replacements.length > CORRECTED_ENCODE_REPLACEMENT_LIMIT
+    ) {
+      throw new DomainInvariantError(
+        "Re-archive replacement plan is limited to 100 jobs",
       );
     }
     const proposal = readRearchiveMappingProposal(
@@ -4694,6 +4702,193 @@ export function createDataAccessInternal(
           ))
           .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
           .all();
+    const lineageSourceSelectionIds = new Map<DiscSelectionId, DiscSelectionId>(
+      sourceSelectionIds.map((id) => [id, id]),
+    );
+    let lineageFrontier = [...sourceSelectionIds];
+    while (lineageFrontier.length > 0) {
+      const nextFrontier: DiscSelectionId[] = [];
+      for (let offset = 0; offset < lineageFrontier.length; offset += 500) {
+        const rows = reader
+          .select({
+            supersededDiscSelectionId:
+              discSelectionSupersessions.supersededDiscSelectionId,
+            replacementDiscSelectionId:
+              discSelectionSupersessions.replacementDiscSelectionId,
+          })
+          .from(discSelectionSupersessions)
+          .where(inArray(
+            discSelectionSupersessions.replacementDiscSelectionId,
+            lineageFrontier.slice(offset, offset + 500),
+          ))
+          .orderBy(
+            asc(discSelectionSupersessions.createdAt),
+            asc(discSelectionSupersessions.supersededDiscSelectionId),
+          )
+          .all();
+        for (const row of rows) {
+          const sourceDiscSelectionId = lineageSourceSelectionIds.get(
+            row.replacementDiscSelectionId,
+          );
+          if (sourceDiscSelectionId === undefined) continue;
+          const existingSource = lineageSourceSelectionIds.get(
+            row.supersededDiscSelectionId,
+          );
+          if (
+            existingSource !== undefined &&
+            existingSource !== sourceDiscSelectionId
+          ) {
+            throw new DomainInvariantError(
+              "Re-archive replacement lineage reaches more than one reviewed mapping",
+            );
+          }
+          if (existingSource === undefined) {
+            lineageSourceSelectionIds.set(
+              row.supersededDiscSelectionId,
+              sourceDiscSelectionId,
+            );
+            nextFrontier.push(row.supersededDiscSelectionId);
+          }
+        }
+      }
+      lineageFrontier = nextFrontier;
+    }
+    const lineageIds = [...lineageSourceSelectionIds.keys()];
+    const predecessorJobs: Array<typeof encodeJobs.$inferSelect> = [];
+    for (let offset = 0; offset < lineageIds.length; offset += 500) {
+      predecessorJobs.push(...reader
+        .select()
+        .from(encodeJobs)
+        .where(inArray(
+          encodeJobs.discSelectionId,
+          lineageIds.slice(offset, offset + 500),
+        ))
+        .all());
+    }
+    predecessorJobs.sort((left, right) =>
+      left.createdAt.getTime() - right.createdAt.getTime() ||
+      left.id.localeCompare(right.id)
+    );
+    const existingReplacementPredecessorIds = new Set<EncodeJobId>();
+    const predecessorJobIds = predecessorJobs.map((job) => job.id);
+    for (let offset = 0; offset < predecessorJobIds.length; offset += 500) {
+      for (const row of reader
+        .select({ predecessorEncodeJobId: encodeJobs.predecessorEncodeJobId })
+        .from(encodeJobs)
+        .where(inArray(
+          encodeJobs.predecessorEncodeJobId,
+          predecessorJobIds.slice(offset, offset + 500),
+        ))
+        .all()) {
+        if (row.predecessorEncodeJobId !== null) {
+          existingReplacementPredecessorIds.add(
+            row.predecessorEncodeJobId,
+          );
+        }
+      }
+    }
+    const availableReplacementEncodes = predecessorJobs
+      .filter((job) => !existingReplacementPredecessorIds.has(job.id))
+      .map((job) => ({
+        predecessorEncodeJobId: job.id,
+        sourceDiscSelectionId: lineageSourceSelectionIds.get(
+          job.discSelectionId,
+        )!,
+        proposedEncodingProfileId: job.encodingProfileId,
+        proposedOutputPath: job.outputPath,
+        predecessorStatus: job.status,
+        predecessorReady: isEncodeJobSafelyTerminal(job),
+        releasesFailedOutputReservation:
+          job.status === "failed" && isEncodeJobSafelyTerminal(job) &&
+          job.reservesOutputPath && !job.replaceExistingOutput,
+      }));
+    const availableByPredecessorId = new Map(
+      availableReplacementEncodes.map((replacement) => [
+        replacement.predecessorEncodeJobId,
+        replacement,
+      ]),
+    );
+    const predecessorIds = new Set<EncodeJobId>();
+    const outputPaths = new Set<string>();
+    const replacementEncodes = input.replacements.map((replacement) => {
+      if (predecessorIds.has(replacement.predecessorEncodeJobId)) {
+        throw new DomainInvariantError(
+          "Re-archive replacement plan contains a duplicate predecessor",
+        );
+      }
+      predecessorIds.add(replacement.predecessorEncodeJobId);
+      const available = availableByPredecessorId.get(
+        replacement.predecessorEncodeJobId,
+      );
+      if (available === undefined) {
+        throw new DomainInvariantError(
+          `Encode Job ${replacement.predecessorEncodeJobId} is not available for re-archive replacement`,
+        );
+      }
+      const profile = requireRow(
+        reader
+          .select()
+          .from(encodingProfiles)
+          .where(eq(encodingProfiles.id, replacement.encodingProfileId))
+          .get(),
+        "encoding profile",
+        replacement.encodingProfileId,
+      );
+      if (
+        replacement.encodingProfileId !==
+            available.proposedEncodingProfileId &&
+        (!profile.isActive || profile.mediaDomain !== "dvd_video")
+      ) {
+        throw new DomainInvariantError(
+          "Re-archive replacements require the prior or an active DVD video Encoding Profile",
+        );
+      }
+      const outputPath = requireNonEmpty(replacement.outputPath, "outputPath");
+      if (outputPaths.has(outputPath)) {
+        throw new DomainInvariantError(
+          `Re-archive replacement output is selected more than once: ${outputPath}`,
+        );
+      }
+      outputPaths.add(outputPath);
+      const outputOwner = reader
+        .select({ id: encodeJobs.id })
+        .from(encodeJobs)
+        .where(and(
+          eq(encodeJobs.outputPath, outputPath),
+          eq(encodeJobs.reservesOutputPath, true),
+          ne(encodeJobs.id, replacement.predecessorEncodeJobId),
+        ))
+        .limit(1)
+        .get();
+      if (outputOwner !== undefined) {
+        throw new DomainInvariantError(
+          `Encode Job output is already assigned: ${outputPath}`,
+        );
+      }
+      if (
+        replacement.priority !== undefined &&
+        !Number.isSafeInteger(replacement.priority)
+      ) {
+        throw new DomainInvariantError("priority must be a safe integer");
+      }
+      const predecessor = requireRow(
+        predecessorJobs.find((job) =>
+          job.id === replacement.predecessorEncodeJobId
+        ),
+        "encode job",
+        replacement.predecessorEncodeJobId,
+      );
+      return {
+        ...replacement,
+        sourceDiscSelectionId: available.sourceDiscSelectionId,
+        predecessorStatus: available.predecessorStatus,
+        predecessorReady: available.predecessorReady,
+        replacesExistingOutput:
+          outputPath === predecessor.outputPath &&
+          (predecessor.status === "completed" ||
+            predecessor.replaceExistingOutput),
+      };
+    });
     return {
       targetArchiveId: proposal.targetArchive.id,
       sourceArchiveId: proposal.sourceArchive.id,
@@ -4706,6 +4901,8 @@ export function createDataAccessInternal(
         label: mapping.proposedMapping.label,
       })),
       affectedEncodeJobs,
+      replacementEncodes,
+      availableReplacementEncodes,
     };
   }
 
@@ -5256,12 +5453,13 @@ export function createDataAccessInternal(
   }
 
   function rearchiveAcceptanceSemanticInput(
-    input: RearchiveAcceptanceRevisionInput,
+    input: RearchiveAcceptanceInput,
   ): string {
     return JSON.stringify({
       targetArchiveId: input.targetArchiveId,
       catalogRevision: input.catalogRevision.toISOString(),
       sourceCatalogRevision: input.sourceCatalogRevision.toISOString(),
+      replacements: input.replacements,
     });
   }
 
@@ -8374,6 +8572,12 @@ export function createDataAccessInternal(
               discSelection: selection,
             };
           });
+          const replacementDiscSelectionIds = new Map(
+            createdDiscSelections.map((created) => [
+              created.priorDiscSelectionId,
+              created.discSelection.id,
+            ]),
+          );
 
           const sourceSelectionIds = plan.mappings.map(
             (mapping) => mapping.sourceDiscSelectionId,
@@ -8425,6 +8629,64 @@ export function createDataAccessInternal(
             },
           );
 
+          const replacementEncodeJobs: EncodeJob[] = [];
+          for (const replacement of plan.replacementEncodes) {
+            const predecessor = requireRow(
+              transaction
+                .select()
+                .from(encodeJobs)
+                .where(eq(
+                  encodeJobs.id,
+                  replacement.predecessorEncodeJobId,
+                ))
+                .get(),
+              "encode job",
+              replacement.predecessorEncodeJobId,
+            );
+            if (
+              replacement.outputPath === predecessor.outputPath &&
+              predecessor.reservesOutputPath
+            ) {
+              transaction
+                .update(encodeJobs)
+                .set({ reservesOutputPath: false, updatedAt: timestamp })
+                .where(eq(encodeJobs.id, predecessor.id))
+                .run();
+            }
+            const replacementDiscSelectionId = requireRow(
+              replacementDiscSelectionIds.get(
+                replacement.sourceDiscSelectionId,
+              ),
+              "accepted Re-archive Disc Selection",
+              replacement.sourceDiscSelectionId,
+            );
+            replacementEncodeJobs.push(requireRow(
+              transaction
+                .insert(encodeJobs)
+                .values({
+                  id: newId<EncodeJobId>(),
+                  predecessorEncodeJobId: predecessor.id,
+                  discSelectionId: replacementDiscSelectionId,
+                  encodingProfileId: replacement.encodingProfileId,
+                  outputPath: replacement.outputPath,
+                  priority: replacement.priority ?? predecessor.priority,
+                  replaceExistingOutput:
+                    replacement.replacesExistingOutput,
+                  createdAt: timestamp,
+                  updatedAt: timestamp,
+                })
+                .returning()
+                .get(),
+              "Re-archive replacement Encode Job",
+              predecessor.id,
+            ));
+          }
+
+          releaseCorrectedFailedReservationsStatement.run(
+            plan.targetArchiveId,
+            timestamp.getTime(),
+          );
+
           transaction.delete(mutationInvocations)
             .where(eq(mutationInvocations.key, input.previewToken))
             .run();
@@ -8438,6 +8700,7 @@ export function createDataAccessInternal(
               targetArchive: completedTarget,
               createdDiscSelections,
               affectedEncodeJobs,
+              replacementEncodeJobs,
             },
             timestamp,
           );

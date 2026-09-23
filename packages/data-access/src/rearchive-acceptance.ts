@@ -15,5 +15,7 @@ export function rearchiveAcceptancePreviewEvidence(
       status: job.status,
       updatedAt: job.updatedAt.toISOString(),
     })),
+    replacementEncodes: plan.replacementEncodes,
+    availableReplacementEncodes: plan.availableReplacementEncodes,
   });
 }

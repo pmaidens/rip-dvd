@@ -13,7 +13,8 @@ const temporaryDirectories: string[] = [];
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "rip-dvd-rearchive-review-"));
   temporaryDirectories.push(directory);
-  mkdirSync(join(directory, "media"));
+  const mediaLibraryPath = join(directory, "media");
+  mkdirSync(mediaLibraryPath);
   mkdirSync(join(directory, "originals"));
   const access = createLegacySidecarDataAccess({
     databasePath: join(directory, "catalog.sqlite"),
@@ -35,6 +36,7 @@ function fixture() {
     movie: seeded.mediaItem,
     sourceArchive: seeded.sourceArchive,
     sourceSelection: seeded.sourceSelection,
+    mediaLibraryPath,
   };
 }
 
@@ -272,6 +274,63 @@ it("persists an edited proposal with revision checks and replay", () => {
           sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
         },
       }],
+    });
+  } finally {
+    access.close();
+  }
+});
+
+it("shows prior-lineage Encode Jobs as optional Re-archive Acceptance replacements", () => {
+  const { access, freshArchive, sourceSelection, mediaLibraryPath } = fixture();
+  try {
+    const profile = access.encodingProfiles.create({
+      key: "rearchive-review-replacement",
+      displayName: "Re-archive review replacement",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: sourceSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: join(mediaLibraryPath, "Synthetic replacement.mkv"),
+    });
+    const operations = createApplicationOperations(access);
+    const initial = proposalFromReview(access, freshArchive.id);
+    operations.saveRearchiveMappingProposal({
+      originalDiscArchiveId: freshArchive.id,
+      mutationKey: "00000000-0000-4000-8000-000000000451",
+      catalogRevision: initial.catalogRevision,
+      sourceCatalogRevision: initial.sourceCatalogRevision,
+      mappings: initial.mappings.map((mapping) => ({
+        sourceDiscSelectionId: mapping.sourceDiscSelectionId,
+        ...mapping.proposedMapping,
+      })),
+    });
+
+    const review = operations.catalogReview(freshArchive.id, {
+      discSelectionOffset: 0,
+      correctionHistoryOffset: 0,
+      correctionEncodeHistoryOffset: 0,
+      correctionRetainedOutputHistoryOffset: 0,
+      replacementOffset: 0,
+      replacementProfileOffset: 0,
+    }, false);
+    expect(review).toMatchObject({
+      rearchiveProposal: { state: "ready", persisted: true },
+      replacementPlan: {
+        jobs: [{
+          predecessorEncodeJobId: predecessor.id,
+          sourceDiscSelectionId: sourceSelection.id,
+          predecessorStatus: "queued",
+          predecessorReady: false,
+          proposedEncodingProfileId: profile.id,
+          proposedOutputPath: predecessor.outputPath,
+        }],
+        encodingProfiles: [{
+          id: profile.id,
+          isActive: true,
+        }],
+      },
     });
   } finally {
     access.close();

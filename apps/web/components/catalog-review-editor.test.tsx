@@ -153,7 +153,11 @@ function availableRearchiveAcceptancePreview(
       preventsOldSourceEnqueue: true,
       preservesPriorArchive: true,
       preservesCompletedOutputs: true,
-      replacementEncodeCount: 0,
+      replacementEncodeCount: command.replacementEncodes.length,
+      replacementEncodes: command.replacementEncodes,
+      availableReplacementEncodeCount: command.replacementEncodes.length,
+      omittedReplacementEncodeCount: 0,
+      failedOutputReservationReleaseEncodeJobIds: [],
     },
   };
 }
@@ -277,6 +281,7 @@ describe("CatalogReviewEditor", () => {
         action: "accept_rearchive",
         catalogRevision: "2026-08-11T06:00:00.000Z",
         sourceCatalogRevision: "2026-08-11T05:00:00.000Z",
+        replacementEncodes: [],
       }),
       affectedEncodeJobs: [
         { id: "queued-job", discSelectionId: "prior-1", status: "queued" },
@@ -286,6 +291,7 @@ describe("CatalogReviewEditor", () => {
 
     expect(message).toContain("- queued-job (queued)");
     expect(message).toContain("- running-job (running)");
+    expect(message).toContain("No corrected replacement encodes are selected.");
   });
 
   it("recovers an acknowledged Disc Selection mutation when the archive reloads", async () => {
@@ -375,6 +381,7 @@ describe("CatalogReviewEditor", () => {
       action: "accept_rearchive" as const,
       catalogRevision: review.catalogRevision,
       sourceCatalogRevision: "2026-08-11T05:00:00.000Z",
+      replacementEncodes: [],
     };
     const firstAttemptBodies: Record<string, unknown>[] = [];
     const firstAttempt = async (
@@ -570,9 +577,16 @@ describe("CatalogReviewEditor", () => {
     if (!selected || !profile || !output || !submit) {
       throw new Error("Expected corrected replacement controls");
     }
-    selected.click();
-    profile.value = "profile-new";
-    output.value = "/media/operator-choice.mkv";
+    await act(async () => {
+      selected.click();
+      profile.value = "profile-new";
+      profile.dispatchEvent(new Event("change", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set?.call(output, "/media/operator-choice.mkv");
+      output.dispatchEvent(new Event("input", { bubbles: true }));
+    });
     await act(async () => submit.click());
 
     const command = {
@@ -872,7 +886,7 @@ describe("CatalogReviewEditor", () => {
     );
     expect(overflowChoice?.disabled).toBe(true);
     expect(container.textContent).toContain(
-      "100 replacements selected — deselect one before choosing another",
+      "100 replacements selected; deselect one before choosing another",
     );
   });
 
@@ -2157,6 +2171,7 @@ describe("CatalogReviewView", () => {
         action: "accept_rearchive",
         catalogRevision: "2026-08-11T06:00:00.000Z",
         sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+        replacementEncodes: [],
       },
       preview_rearchive_mapping_proposal: {
         action: "preview_rearchive_mapping_proposal",
@@ -2582,6 +2597,125 @@ describe("CatalogReviewView", () => {
         }],
       },
     ]);
+  });
+
+  it("accepts a re-archive with only the explicitly selected replacement", async () => {
+    const review = catalogReview({
+      archiveId: "fresh-archive",
+      discLabel: "FRESH_REPLACEMENT_DISC",
+    });
+    const sourceCatalogRevision = "2026-08-10T06:00:00.000Z";
+    const sourceDiscSelectionId = "source-selection-1";
+    review.discSelections = [];
+    review.rearchiveProposal = {
+      state: "ready",
+      persisted: true,
+      catalogRevision: review.catalogRevision,
+      sourceCatalogRevision,
+      sourceArchive: {
+        ...review.archive,
+        id: "prior-archive",
+        detectedDiscId: "prior-disc",
+        discLabel: "PRIOR_REPLACEMENT_DISC",
+        archivedAt: "2026-08-10T06:00:00.000Z",
+        catalogReviewedAt: "2026-08-10T07:00:00.000Z",
+        catalogReviewOutcome: "reviewed_with_selections",
+      },
+      targetArchive: review.archive,
+      mappings: [{
+        state: "valid",
+        reason: null,
+        sourceDiscSelectionId,
+        priorMapping: {
+          mediaItemId: review.mediaItems[0]!.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+          label: null,
+        },
+        proposedMapping: {
+          mediaItemId: review.mediaItems[0]!.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+          label: null,
+        },
+      }],
+    };
+    review.replacementPlan = {
+      jobs: [{
+        predecessorEncodeJobId: "predecessor-1",
+        predecessorStatus: "completed",
+        predecessorReady: true,
+        sourceDiscSelectionId,
+        proposedEncodingProfileId: "profile-1",
+        proposedOutputPath: "/media/replacement.mkv",
+      }],
+      encodingProfiles: [{
+        id: "profile-1",
+        displayName: "Synthetic DVD profile",
+        version: 1,
+        isActive: true,
+      }],
+      jobsPage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
+      encodingProfilesPage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
+    };
+    const postedBodies: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (init?.method !== "POST") return Response.json(review);
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      postedBodies.push(body);
+      return body.preview === true
+        ? Response.json(availableRearchiveAcceptancePreview(body as never))
+        : Response.json({ message: "Re-archive accepted" });
+    }));
+
+    await act(async () => renderCatalogReviewEditor("fresh-archive"));
+    const selected = container.querySelector<HTMLInputElement>(
+      'input[name="replacement:predecessor-1:selected"]',
+    );
+    const accept = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Accept re-archive",
+    );
+    if (!selected || !accept) {
+      throw new Error("Expected Re-archive Acceptance replacement controls");
+    }
+    await act(async () => selected.click());
+    await act(async () => accept.click());
+
+    const command = {
+      action: "accept_rearchive" as const,
+      catalogRevision: review.catalogRevision,
+      sourceCatalogRevision,
+      replacementEncodes: [{
+        predecessorEncodeJobId: "predecessor-1",
+        encodingProfileId: "profile-1",
+        outputPath: "/media/replacement.mkv",
+      }],
+    };
+    expect(postedBodies).toEqual([
+      { ...command, preview: true },
+      {
+        ...command,
+        mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        acknowledgedRevision: review.catalogRevision,
+        acknowledgedSourceRevision: sourceCatalogRevision,
+        previewToken: rearchiveAcceptancePreviewToken,
+        acknowledge: true,
+      },
+    ]);
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining(
+      "predecessor-1 -> /media/replacement.mkv",
+    ));
   });
 
   it("shows archived DVD evidence separately from editable hierarchy and reviewed mappings", () => {

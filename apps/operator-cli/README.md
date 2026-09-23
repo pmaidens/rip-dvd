@@ -96,14 +96,21 @@ for different input returns `MUTATION_KEY_CONFLICT`.
 
 ## Accept a reviewed re-archive
 
-Save a ready Re-archive Mapping Proposal first. Preview acceptance with the
-proposal revisions and an empty replacement plan:
+Save a ready Re-archive Mapping Proposal first. The acceptance document may
+list only the predecessor Encode Jobs that should be replaced. Omit
+`replacementEncodes`, or pass an empty array, to accept the mappings without
+queueing replacement encodes.
 
 ```json
 {
   "action": "accept_rearchive",
   "catalogRevision": "2026-01-02T00:00:00.000Z",
-  "sourceCatalogRevision": "2026-01-01T00:00:00.000Z"
+  "sourceCatalogRevision": "2026-01-01T00:00:00.000Z",
+  "replacementEncodes": [{
+    "predecessorEncodeJobId": "<encode-job-id>",
+    "encodingProfileId": "<encoding-profile-id>",
+    "outputPath": "/media/movies/Example Film (2020)/Example Film (2020).mkv"
+  }]
 }
 ```
 
@@ -116,12 +123,21 @@ rip-dvd-operator catalog-review accept-rearchive <fresh-archive-id> \
   --preview-token <preview-token> --acknowledge --file <acceptance.json>
 ```
 
-The preview lists queued and running jobs that use the prior archive. Acceptance
-adopts the saved mappings on the fresh archive, stops later enqueue from the
-prior selections, and cancels queued jobs or requests cooperative cancellation
-of running jobs. It keeps both archives, completed outputs, historical mappings,
-and job provenance. Replacement encodes are not supported by this operation;
-any non-empty replacement plan is rejected.
+The review and preview list replacement candidates from the prior selection
+lineage. A selected replacement may keep its prior Encoding Profile and output
+path or use an active DVD video profile and another unreserved path inside the
+configured media library. Preview validates the complete selection, reports
+selected and omitted candidates, and binds those choices to its token.
+
+Acceptance adopts the saved mappings on the fresh archive, stops later enqueue
+from the prior selections, cancels queued jobs or requests cooperative
+cancellation of running jobs, and queues each selected replacement against the
+new Disc Selection. Unselected jobs are not re-encoded. The transaction keeps
+both archives, completed outputs, historical mappings, and job provenance.
+Replacement publication uses the same retained-output safeguards as corrected
+Catalog Review replacements. Repeating the same key and document returns the
+original result without duplicate jobs; changing the document with the same key
+is rejected.
 
 ## Apply a complete Mapping Proposal
 

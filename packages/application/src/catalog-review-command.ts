@@ -107,6 +107,7 @@ export interface CatalogReviewRearchiveMappingInput {
 export type CatalogReviewCommand =
   | ({
       action: "accept_rearchive";
+      replacementEncodes: CatalogReviewReplacementEncodeInput[];
     } & RearchiveMappingProposalRevisions<string>)
   | ({
       action:
@@ -220,7 +221,6 @@ export type CatalogReviewCommandValidationError =
   | "Unknown catalog review mutation"
   | "Invalid Re-archive Mapping Proposal"
   | "Invalid Re-archive Acceptance"
-  | "Re-archive replacement encodes are not supported yet"
   | "Invalid Episodic Mapping Proposal"
   | "Invalid Mapping Proposal"
   | "Invalid Media Item"
@@ -865,24 +865,17 @@ export function parseCatalogReviewCommand(
     case "accept_rearchive": {
       const revision = catalogRevision(body.catalogRevision);
       const sourceRevision = catalogRevision(body.sourceCatalogRevision);
-      if (
-        Array.isArray(body.replacementEncodes) &&
-        body.replacementEncodes.length > 0
-      ) {
-        return invalid(
-          "Re-archive replacement encodes are not supported yet",
-        );
-      }
-      return revision && sourceRevision &&
-          (body.replacementEncodes === undefined ||
-            (Array.isArray(body.replacementEncodes) &&
-              body.replacementEncodes.length === 0))
+      const replacementEncodes = parseReplacementEncodes(
+        body.replacementEncodes,
+      );
+      return revision && sourceRevision && replacementEncodes
         ? {
             ok: true,
             command: {
               action,
               catalogRevision: revision,
               sourceCatalogRevision: sourceRevision,
+              replacementEncodes,
             },
           }
         : invalid("Invalid Re-archive Acceptance");

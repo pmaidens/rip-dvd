@@ -79,6 +79,11 @@ it("previews, accepts, and replays Re-archive Acceptance through JSON CLI", asyn
     action: "accept_rearchive",
     catalogRevision: saved.catalogRevision,
     sourceCatalogRevision: saved.sourceCatalogRevision,
+    replacementEncodes: [{
+      predecessorEncodeJobId: queued.id,
+      encodingProfileId: profile.id,
+      outputPath: queued.outputPath,
+    }],
   };
   const preview = await current.run([
     "catalog-review",
@@ -96,7 +101,12 @@ it("previews, accepts, and replays Re-archive Acceptance through JSON CLI", asyn
     consequences: {
       adoptsMappingCount: 1,
       requestsEncodeJobCancellation: [queued.id],
-      replacementEncodeCount: 0,
+      replacementEncodeCount: 1,
+      replacementEncodes: [{
+        predecessorEncodeJobId: queued.id,
+        encodingProfileId: profile.id,
+        outputPath: queued.outputPath,
+      }],
     },
   });
   const previewResult = preview.result as {
@@ -131,10 +141,16 @@ it("previews, accepts, and replays Re-archive Acceptance through JSON CLI", asyn
       catalogReviewOutcome: "reviewed_with_selections",
     },
     affectedEncodeJobs: [{ id: queued.id, status: "cancelled" }],
+    replacementEncodeJobs: [{
+      predecessorEncodeJobId: queued.id,
+      encodingProfileId: profile.id,
+      outputPath: queued.outputPath,
+      status: "queued",
+    }],
   });
 });
 
-it("rejects replacement encodes explicitly", async () => {
+it("rejects an incomplete replacement plan", async () => {
   const result = await current.run([
     "catalog-review",
     "preview-rearchive-acceptance",
@@ -151,7 +167,7 @@ it("rejects replacement encodes explicitly", async () => {
   expect(result.result).toEqual({
     error: {
       code: "INVALID_REARCHIVE_ACCEPTANCE",
-      message: "Re-archive replacement encodes are not supported yet",
+      message: "Invalid Re-archive Acceptance",
     },
   });
 });

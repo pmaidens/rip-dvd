@@ -46,7 +46,7 @@ interface PreviewAcknowledgedCatalogCommandWorkflow<
   invalidCommandCode: string;
   expectedCommandMessage: string;
   previewAcknowledgementMessage: string;
-  prepareContext(io: TIO): TContext;
+  prepareContext(io: TIO, command: CommandFor<TAction>): TContext;
   preview(input: {
     access: DataAccess;
     archiveId: OriginalDiscArchiveId;
@@ -170,7 +170,7 @@ export function runPreviewAcknowledgedCatalogCommand<
 
   let access: DataAccess | undefined;
   try {
-    const context = workflow.prepareContext(io);
+    const context = workflow.prepareContext(io, command);
     access = io.openAccess();
     const input = {
       access,
