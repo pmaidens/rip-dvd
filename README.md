@@ -331,10 +331,14 @@ v3 API key:
 
 ```bash
 export TMDB_API_TOKEN="your-api-read-access-token"
+rip-dvd catalog-review suggest synthetic-archive-id
 docker compose up -d web
 ```
 
-Manual `--name` and `--year` arguments always take priority.
+To choose a specific candidate returned by lookup, repeat `catalog-review
+suggest` with `--tmdb-id <id> --media-type <movie|tv_show>`. Create or update
+manual catalog records through `rip-dvd media-item`; run
+`rip-dvd help media-item` for its JSON inputs.
 
 ## Installing as a command
 
