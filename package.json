@@ -8,7 +8,7 @@
   "scripts": {
     "audit:archives": "pnpm --filter @rip-dvd/data-access build && pnpm --filter @rip-dvd/archive-worker build && pnpm --filter @rip-dvd/archive-worker audit:archives",
     "build": "pnpm -r --if-present build",
-    "check": "pnpm check:toolchain && pnpm typecheck && pnpm test",
+    "check": "pnpm check:toolchain && pnpm lint && pnpm typecheck && pnpm test",
     "check:toolchain": "node scripts/check-toolchain.mjs",
     "db:check": "pnpm --filter @rip-dvd/data-access db:check",
     "dev": "pnpm --filter @rip-dvd/web dev",
@@ -16,10 +16,13 @@
     "test": "node --test scripts/optical-drive-mapping.test.mjs scripts/deploy.test.mjs && pnpm --filter @rip-dvd/config --filter @rip-dvd/data-access --filter @rip-dvd/worker-runtime --filter @rip-dvd/archive-worker --filter @rip-dvd/encode-worker --filter @rip-dvd/application --filter @rip-dvd/operator-cli --filter @rip-dvd/web test",
     "test:browser": "pnpm --filter @rip-dvd/config --filter @rip-dvd/data-access build && pnpm --filter @rip-dvd/web test:browser",
     "test:compose-workers": "sh scripts/smoke-compose-workers.sh",
-    "typecheck": "pnpm -r --if-present typecheck"
+    "typecheck": "pnpm -r --if-present typecheck",
+    "lint": "pnpm --filter @rip-dvd/web lint"
   },
   "devDependencies": {
     "@types/node": "22.20.0",
+    "@typescript-eslint/parser": "8.70.1",
+    "eslint": "10.11.0",
     "typescript": "5.9.3",
     "vitest": "4.1.10"
   }

@@ -401,6 +401,30 @@ supported Node range therefore starts at 22.23.1. When that exact toolchain is
 not installed on the host, run the same frozen-install check, database migration
 check, tests, and build with `docker compose --profile validation build validation`.
 
+### HTTP browser compatibility
+
+The dashboard supports ordinary HTTP origins. Browser code must use
+`createMutationKey` from `apps/web/lib/mutation-key.ts` for mutation keys.
+`crypto.randomUUID()` requires a secure context and is unavailable on ordinary
+HTTP hosts, even though it works on localhost.
+
+`pnpm lint` enforces ESLint's `no-restricted-properties` rule against
+`randomUUID` property access in web components, shared web libraries, and pages.
+API routes, server-only libraries, and test fixtures are excluded. The rule
+covers direct access, literal bracket access, aliases, and destructuring; it
+is not a general detector for every secure-context API or dynamic property name.
+Lint runs as part of `pnpm check` and the web production build, including Docker
+web builds. Keep the regression tests for the shared helper and HTTP archive
+submission as well.
+
+The browser suite uses `http://rip-dvd.test:3100`, mapped to loopback inside
+Chromium. Unlike localhost, that hostname is not a secure context. The archive
+request test asserts this and verifies that clicking the button creates a
+request that survives a page reload. This catches failures in the built app
+that a property restriction alone cannot detect. The hostname mapping does not
+require DNS or hosts-file changes. Run `pnpm test:browser` when changing browser
+mutations or adding browser APIs.
+
 ### Catalog Review browser validation
 
 Install the Playwright Chromium browser once:

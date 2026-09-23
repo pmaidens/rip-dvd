@@ -1,6 +1,7 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { setTimeout } from "node:timers/promises";
 
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 
@@ -64,6 +65,38 @@ function createArchive({ key, label, fingerprintFill, titles }) {
     archivePath: join(originalsLibraryPath, `${key}.iso`),
     fingerprint,
   });
+}
+
+async function seedArchiveRequest(variant) {
+  const fingerprint = `sha256:${variant === "desktop" ? "12".repeat(32) : "34".repeat(32)}`;
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: `/dev/browser-intake-${variant}`,
+    displayName: `Browser intake ${variant}`,
+    isEnabled: true,
+    isPresent: true,
+  });
+  const observation = {
+    opticalDriveId: drive.id,
+    mediaGeneration: `browser-intake-${variant}`,
+    mediaCapacityBytes: 2_048,
+  };
+  const started = access.discInspections.beginOrResume(observation);
+  if (!started.claim) throw new Error("Expected an intake fixture inspection claim");
+  let claim = started.claim;
+  for (let index = 0; index < 2; index += 1) {
+    // Exercise the normal settling contract before completing the inspection.
+    await setTimeout(2_500);
+    claim = access.discInspections.recordSettlingObservation(claim, observation).claim;
+  }
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint,
+    volumeLabel: `HTTP archive fixture ${variant}`,
+    scanData: { schemaVersion: 2, contentId: fingerprint, titles: [detailedTitle(1, 5_400, 14)] },
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  access.discInspections.record(claim, { type: "complete", detectedDiscId: disc.id });
 }
 
 function completeReview(archiveId) {
@@ -380,6 +413,7 @@ function seedEncodeQueue(variant, fingerprintFills) {
 }
 
 try {
+  await Promise.all([seedArchiveRequest("desktop"), seedArchiveRequest("mobile")]);
   seedKeyboardJourney("desktop", "1");
   seedComplexLayout("desktop", "2");
   seedKeyboardJourney("mobile", "3");
