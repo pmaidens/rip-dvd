@@ -28,6 +28,7 @@ export type {
 } from "./catalog-review-types.js";
 
 export const CATALOG_REVIEW_COMMAND_ACTIONS = [
+  "accept_rearchive",
   "preview_rearchive_mapping_proposal",
   "save_rearchive_mapping_proposal",
   "create_episodic_mapping_proposal",
@@ -103,6 +104,12 @@ export interface CatalogReviewRearchiveMappingInput {
 }
 
 export type CatalogReviewCommand =
+  | {
+      action: "accept_rearchive";
+      catalogRevision: string;
+      sourceCatalogRevision: string;
+      replacementEncodes: [];
+    }
   | {
       action:
         | "preview_rearchive_mapping_proposal"
@@ -216,6 +223,8 @@ export type CatalogReviewCommandValidationError =
   | "Invalid catalog review mutation"
   | "Unknown catalog review mutation"
   | "Invalid Re-archive Mapping Proposal"
+  | "Invalid Re-archive Acceptance"
+  | "Re-archive replacement encodes are not supported yet"
   | "Invalid Episodic Mapping Proposal"
   | "Invalid Mapping Proposal"
   | "Invalid Media Item"
@@ -857,6 +866,32 @@ export function parseCatalogReviewCommand(
   }
 
   switch (action) {
+    case "accept_rearchive": {
+      const revision = catalogRevision(body.catalogRevision);
+      const sourceRevision = catalogRevision(body.sourceCatalogRevision);
+      if (
+        Array.isArray(body.replacementEncodes) &&
+        body.replacementEncodes.length > 0
+      ) {
+        return invalid(
+          "Re-archive replacement encodes are not supported yet",
+        );
+      }
+      return revision && sourceRevision &&
+          (body.replacementEncodes === undefined ||
+            (Array.isArray(body.replacementEncodes) &&
+              body.replacementEncodes.length === 0))
+        ? {
+            ok: true,
+            command: {
+              action,
+              catalogRevision: revision,
+              sourceCatalogRevision: sourceRevision,
+              replacementEncodes: [],
+            },
+          }
+        : invalid("Invalid Re-archive Acceptance");
+    }
     case "preview_rearchive_mapping_proposal":
     case "save_rearchive_mapping_proposal": {
       const revision = catalogRevision(body.catalogRevision);

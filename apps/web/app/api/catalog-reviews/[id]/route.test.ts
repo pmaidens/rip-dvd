@@ -271,6 +271,111 @@ describe("Catalog Review API", () => {
       })]);
   });
 
+  it("uses the shared preview and acceptance operation for a re-archive", async () => {
+    const access = dataAccessFixture.create();
+    const { sourceArchive, sourceSelection, targetArchive } =
+      createRearchiveReviewFixture(access);
+    const initial = access.catalog.readRearchiveMappingProposal(
+      targetArchive.id,
+    );
+    if (initial === null) throw new Error("Expected a proposal");
+    const saveResponse = await postCatalogReview(
+      access,
+      targetArchive.id,
+      {
+        action: "save_rearchive_mapping_proposal",
+        mutationKey: "00000000-0000-4000-8000-000000000651",
+        catalogRevision: initial.catalogRevision,
+        sourceCatalogRevision: initial.sourceCatalogRevision,
+        mappings: initial.mappings.map((mapping) => ({
+          sourceDiscSelectionId: mapping.sourceDiscSelectionId,
+          ...mapping.proposedMapping,
+        })),
+      },
+    );
+    const saved = await saveResponse.json() as {
+      proposal: { catalogRevision: string; sourceCatalogRevision: string };
+    };
+    const profile = access.encodingProfiles.create({
+      key: "web-rearchive-acceptance",
+      displayName: "Web Re-archive Acceptance",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    const queued = access.encodeJobs.enqueue({
+      discSelectionId: sourceSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/synthetic-web-rearchive.mkv",
+    });
+    const command = {
+      action: "accept_rearchive",
+      catalogRevision: saved.proposal.catalogRevision,
+      sourceCatalogRevision: saved.proposal.sourceCatalogRevision,
+      replacementEncodes: [],
+    };
+    const previewResponse = await postCatalogReview(
+      access,
+      targetArchive.id,
+      { ...command, preview: true },
+    );
+    expect(previewResponse.status).toBe(200);
+    const preview = await previewResponse.json() as {
+      catalogRevision: string;
+      sourceCatalogRevision: string;
+      previewToken: string;
+    };
+    expect(preview).toMatchObject({
+      sourceArchiveId: sourceArchive.id,
+      targetArchiveId: targetArchive.id,
+      affectedEncodeJobs: [{ id: queued.id, status: "queued" }],
+    });
+    const mutation = {
+      ...command,
+      mutationKey: "00000000-0000-4000-8000-000000000652",
+      acknowledgedRevision: preview.catalogRevision,
+      acknowledgedSourceRevision: preview.sourceCatalogRevision,
+      previewToken: preview.previewToken,
+      acknowledge: true,
+    };
+    const acceptedResponse = await postCatalogReview(
+      access,
+      targetArchive.id,
+      mutation,
+    );
+    expect(acceptedResponse.status).toBe(200);
+    const accepted = await acceptedResponse.json();
+    expect(accepted).toMatchObject({
+      message: "Re-archive accepted",
+      targetArchive: {
+        id: targetArchive.id,
+        catalogReviewOutcome: "reviewed_with_selections",
+      },
+      affectedEncodeJobs: [{ id: queued.id, status: "cancelled" }],
+    });
+    const replayResponse = await postCatalogReview(
+      access,
+      targetArchive.id,
+      mutation,
+    );
+    await expect(replayResponse.json()).resolves.toEqual(accepted);
+  });
+
+  it("rejects Re-archive Acceptance replacement plans before mutation", async () => {
+    const access = dataAccessFixture.create();
+    const { targetArchive } = createRearchiveReviewFixture(access);
+    const response = await postCatalogReview(access, targetArchive.id, {
+      action: "accept_rearchive",
+      catalogRevision: targetArchive.updatedAt.toISOString(),
+      sourceCatalogRevision: targetArchive.updatedAt.toISOString(),
+      replacementEncodes: [{ predecessorEncodeJobId: "unsupported" }],
+      preview: true,
+    });
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "Re-archive replacement encodes are not supported yet",
+    });
+  });
+
   it("carries normal archive-boundary provenance without a capacity correction", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({

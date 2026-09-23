@@ -94,6 +94,36 @@ changed prior or fresh Catalog Review revision returns
 Repeating the same key and input returns the first saved result; reusing the key
 for different input returns `MUTATION_KEY_CONFLICT`.
 
+## Accept a reviewed re-archive
+
+Save a ready Re-archive Mapping Proposal first. Preview acceptance with the
+proposal revisions and an empty replacement plan:
+
+```json
+{
+  "action": "accept_rearchive",
+  "catalogRevision": "2026-01-02T00:00:00.000Z",
+  "sourceCatalogRevision": "2026-01-01T00:00:00.000Z",
+  "replacementEncodes": []
+}
+```
+
+```sh
+rip-dvd-operator catalog-review preview-rearchive-acceptance <fresh-archive-id> \
+  --file <acceptance.json>
+rip-dvd-operator catalog-review accept-rearchive <fresh-archive-id> \
+  --key <key> --revision <catalog-revision> \
+  --source-revision <source-catalog-revision> \
+  --preview-token <preview-token> --acknowledge --file <acceptance.json>
+```
+
+The preview lists queued and running jobs that use the prior archive. Acceptance
+adopts the saved mappings on the fresh archive, stops later enqueue from the
+prior selections, and cancels queued jobs or requests cooperative cancellation
+of running jobs. It keeps both archives, completed outputs, historical mappings,
+and job provenance. Replacement encodes are not supported by this operation;
+any non-empty replacement plan is rejected.
+
 ## Apply a complete Mapping Proposal
 
 `catalog-review apply-proposal` accepts one complete movie or episodic

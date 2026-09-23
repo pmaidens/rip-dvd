@@ -484,6 +484,33 @@ export interface RearchiveMappingProposalInput {
   mappings: readonly RearchiveMappingProposalMappingInput[];
 }
 
+export interface RearchiveAcceptancePlan {
+  targetArchiveId: OriginalDiscArchiveId;
+  sourceArchiveId: OriginalDiscArchiveId;
+  catalogRevision: string;
+  sourceCatalogRevision: string;
+  mappings: RearchiveMappingProposalMappingInput[];
+  affectedEncodeJobs: EncodeJob[];
+}
+
+export interface RearchiveAcceptancePreviewDecisionInput {
+  previewToken: string;
+  targetArchiveId: OriginalDiscArchiveId;
+  catalogRevision: Date;
+  sourceCatalogRevision: Date;
+  expectedPreviewEvidence: string;
+}
+
+export interface CompletedRearchiveAcceptance {
+  sourceArchive: OriginalDiscArchive;
+  targetArchive: OriginalDiscArchive;
+  adoptedMappings: Array<{
+    sourceDiscSelectionId: DiscSelectionId;
+    discSelection: DiscSelection;
+  }>;
+  affectedEncodeJobs: EncodeJob[];
+}
+
 export interface DiscSelectionSupersession {
   supersededDiscSelectionId: DiscSelectionId;
   replacementDiscSelectionId: DiscSelectionId;
@@ -1307,6 +1334,21 @@ export interface CatalogAccess {
   saveRearchiveMappingProposal(
     input: RearchiveMappingProposalInput & { mutationKey: string },
   ): RearchiveMappingProposalReview;
+  planRearchiveAcceptance(input: {
+    targetArchiveId: OriginalDiscArchiveId;
+    catalogRevision: Date;
+    sourceCatalogRevision: Date;
+  }): RearchiveAcceptancePlan;
+  recordRearchiveAcceptancePreviewDecision(
+    input: RearchiveAcceptancePreviewDecisionInput,
+  ): void;
+  acceptRearchive(input: {
+    targetArchiveId: OriginalDiscArchiveId;
+    catalogRevision: Date;
+    sourceCatalogRevision: Date;
+    mutationKey: string;
+    previewToken: string;
+  }): CompletedRearchiveAcceptance;
   getCatalogReviewCoverage(
     originalDiscArchiveId: OriginalDiscArchiveId,
   ): CatalogReviewCoverage;
@@ -1748,6 +1790,7 @@ export type SnapshotCatalogAccess = Pick<
   | "searchMediaItems"
   | "listDiscSelections"
   | "readRearchiveMappingProposal"
+  | "planRearchiveAcceptance"
   | "getCatalogReviewCoverage"
   | "getCatalogReviewActionAvailability"
   | "listDiscSelectionSupersessions"

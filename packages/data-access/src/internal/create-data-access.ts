@@ -152,6 +152,7 @@ import {
 } from "../errors.js";
 import type { LegacySidecarDataAccess } from "../legacy-sidecar-types.js";
 import { normalizeMediaItemSearchTitle } from "../media-item-title-search.js";
+import { rearchiveAcceptancePreviewEvidence } from "../rearchive-acceptance.js";
 import {
   countArchiveAuditFindings,
   type ArchiveAuditFinding,
@@ -181,6 +182,7 @@ import type {
   CreateDiscSelectionInput,
   CompletedCatalogReviewOutcome,
   CompletedCatalogReviewWithReplacements,
+  CompletedRearchiveAcceptance,
   CorrectedEncodeReplacementInput,
   CorrectedEncodeReplacementPlan,
   DataAccess,
@@ -229,6 +231,7 @@ import type {
   RearchiveMappingProposalMapping,
   RearchiveMappingProposalInput,
   RearchiveMappingProposalReview,
+  RearchiveAcceptancePlan,
   RetainedEncodeOutputId,
   RunningArchiveJob,
   RunningEncodeJob,
@@ -2274,6 +2277,7 @@ export function createDataAccessInternal(
     options: {
       activeSourceTracker?: DiscSelectionSourceOverlapTracker;
       rejectSourceOverlap?: boolean;
+      allowRearchiveAcceptance?: boolean;
     } = {},
   ) {
     const source = requireRow(
@@ -2308,7 +2312,10 @@ export function createDataAccessInternal(
         "DVD Disc Selections require a DVD Original Disc Archive",
       );
     }
-    if (source.rearchiveSourceArchiveId !== null) {
+    if (
+      source.rearchiveSourceArchiveId !== null &&
+      options.allowRearchiveAcceptance !== true
+    ) {
       throw new DomainInvariantError(
         "Fresh re-archive mappings require Re-archive Acceptance",
       );
@@ -2912,7 +2919,10 @@ export function createDataAccessInternal(
         "Catalog review currently requires a DVD Original Disc Archive",
       );
     }
-    if (archive.rearchiveSourceArchiveId !== null) {
+    if (
+      archive.rearchiveSourceArchiveId !== null &&
+      archive.catalogReviewedAt === null
+    ) {
       throw new DomainInvariantError(
         "Fresh re-archive review is completed through Re-archive Acceptance",
       );
@@ -4329,6 +4339,15 @@ export function createDataAccessInternal(
         : value) as RearchiveMappingProposalReview;
   }
 
+  function decodeRearchiveAcceptance(
+    stored: string,
+  ): CompletedRearchiveAcceptance {
+    return JSON.parse(stored, (field, value: unknown) =>
+      field.endsWith("At") && typeof value === "string"
+        ? new Date(value)
+        : value) as CompletedRearchiveAcceptance;
+  }
+
   type RearchiveProposalReader = CatalogTransaction | typeof database;
 
   function listActiveRearchiveSourceSelections(
@@ -4548,7 +4567,10 @@ export function createDataAccessInternal(
       .from(originalDiscArchives)
       .where(eq(originalDiscArchives.id, originalDiscArchiveId))
       .get();
-    if (!targetArchive || targetArchive.rearchiveSourceArchiveId === null) {
+    if (
+      !targetArchive || targetArchive.rearchiveSourceArchiveId === null ||
+      targetArchive.catalogReviewedAt !== null
+    ) {
       return null;
     }
     const sourceArchive = requireRow(
@@ -4609,6 +4631,85 @@ export function createDataAccessInternal(
       sourceCatalogRevision: saved.sourceCatalogRevision,
       mappings,
     }, true);
+  }
+
+  function planRearchiveAcceptance(
+    reader: RearchiveProposalReader,
+    input: {
+      targetArchiveId: OriginalDiscArchiveId;
+      catalogRevision: Date;
+      sourceCatalogRevision: Date;
+    },
+  ): RearchiveAcceptancePlan {
+    if (
+      !(input.catalogRevision instanceof Date) ||
+      !Number.isSafeInteger(input.catalogRevision.getTime()) ||
+      !(input.sourceCatalogRevision instanceof Date) ||
+      !Number.isSafeInteger(input.sourceCatalogRevision.getTime())
+    ) {
+      throw new DomainInvariantError(
+        "Re-archive Acceptance revisions must be valid timestamps",
+      );
+    }
+    const proposal = readRearchiveMappingProposal(
+      reader,
+      input.targetArchiveId,
+    );
+    if (proposal === null || !proposal.persisted) {
+      throw new DomainInvariantError(
+        "Re-archive Acceptance requires a saved Mapping Proposal",
+      );
+    }
+    if (proposal.state !== "ready") {
+      throw new DomainInvariantError(
+        `Re-archive Mapping Proposal is ${proposal.state}`,
+      );
+    }
+    if (
+      proposal.sourceArchive.catalogReviewOutcome !==
+        "reviewed_with_selections" ||
+      proposal.sourceArchive.catalogReviewedAt === null
+    ) {
+      throw new DomainInvariantError(
+        "Re-archive Acceptance requires a reviewed source archive",
+      );
+    }
+    if (
+      proposal.catalogRevision !== input.catalogRevision.toISOString() ||
+      proposal.sourceCatalogRevision !==
+        input.sourceCatalogRevision.toISOString()
+    ) {
+      throw new StaleCatalogRevisionError(
+        "Re-archive Mapping Proposal changed; preview acceptance again",
+      );
+    }
+    const sourceSelectionIds = proposal.mappings.map(
+      (mapping) => mapping.sourceDiscSelectionId,
+    );
+    const affectedEncodeJobs = sourceSelectionIds.length === 0
+      ? []
+      : reader
+          .select()
+          .from(encodeJobs)
+          .where(and(
+            inArray(encodeJobs.discSelectionId, sourceSelectionIds),
+            inArray(encodeJobs.status, ["queued", "running"]),
+          ))
+          .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
+          .all();
+    return {
+      targetArchiveId: proposal.targetArchive.id,
+      sourceArchiveId: proposal.sourceArchive.id,
+      catalogRevision: proposal.catalogRevision,
+      sourceCatalogRevision: proposal.sourceCatalogRevision,
+      mappings: proposal.mappings.map((mapping) => ({
+        sourceDiscSelectionId: mapping.sourceDiscSelectionId,
+        mediaItemId: mapping.proposedMapping.mediaItemId,
+        sourceIdentity: mapping.proposedMapping.sourceIdentity,
+        label: mapping.proposedMapping.label,
+      })),
+      affectedEncodeJobs,
+    };
   }
 
   function replayRecoveryMutation<T extends { id: string; status: string }>(
@@ -5157,6 +5258,18 @@ export function createDataAccessInternal(
     });
   }
 
+  function rearchiveAcceptanceSemanticInput(input: {
+    targetArchiveId: OriginalDiscArchiveId;
+    catalogRevision: Date;
+    sourceCatalogRevision: Date;
+  }): string {
+    return JSON.stringify({
+      targetArchiveId: input.targetArchiveId,
+      catalogRevision: input.catalogRevision.toISOString(),
+      sourceCatalogRevision: input.sourceCatalogRevision.toISOString(),
+    });
+  }
+
   function performDiscSelectionMutation(
     input: DiscSelectionMutationInput,
     previewOnly: boolean,
@@ -5535,6 +5648,8 @@ export function createDataAccessInternal(
             access.catalog.readRearchiveMappingProposal(
               originalDiscArchiveId,
             ),
+          planRearchiveAcceptance: (input) =>
+            access.catalog.planRearchiveAcceptance(input),
           getCatalogReviewCoverage: (originalDiscArchiveId) =>
             access.catalog.getCatalogReviewCoverage(originalDiscArchiveId),
           getCatalogReviewActionAvailability: (originalDiscArchiveId) =>
@@ -8169,6 +8284,166 @@ export function createDataAccessInternal(
             "rearchive_mapping_proposal.save",
             semanticInput,
             outcome,
+            timestamp,
+          );
+        }, { behavior: "immediate" });
+      },
+
+      planRearchiveAcceptance(input) {
+        return planRearchiveAcceptance(database, input);
+      },
+
+      recordRearchiveAcceptancePreviewDecision(input) {
+        database.insert(mutationInvocations).values({
+          key: requireNonEmpty(input.previewToken, "previewToken"),
+          operation: "rearchive.accept.preview",
+          semanticInput: rearchiveAcceptanceSemanticInput(input),
+          outcome: JSON.stringify({
+            expectedPreviewEvidence: input.expectedPreviewEvidence,
+          }),
+          createdAt: now(),
+        }).run();
+      },
+
+      acceptRearchive(input) {
+        const semanticInput = rearchiveAcceptanceSemanticInput(input);
+        const operation = "rearchive.accept";
+        return database.transaction((transaction) => {
+          const replay = readMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            decodeRearchiveAcceptance,
+          );
+          if (replay !== undefined) return replay;
+
+          const plan = planRearchiveAcceptance(transaction, input);
+          const previewDecision = transaction
+            .select()
+            .from(mutationInvocations)
+            .where(eq(mutationInvocations.key, input.previewToken))
+            .get();
+          if (
+            previewDecision?.operation !== "rearchive.accept.preview" ||
+            previewDecision.semanticInput !== semanticInput
+          ) {
+            throw new DomainInvariantError(
+              "Re-archive Acceptance preview does not match the accepted plan",
+            );
+          }
+          const savedPreview = JSON.parse(previewDecision.outcome) as {
+            expectedPreviewEvidence?: unknown;
+          };
+          if (
+            savedPreview.expectedPreviewEvidence !==
+              rearchiveAcceptancePreviewEvidence(plan)
+          ) {
+            throw new DomainInvariantError(
+              "Re-archive Acceptance preview is stale",
+            );
+          }
+
+          const timestamp = now();
+          const targetArchive = requireRow(
+            transaction
+              .select()
+              .from(originalDiscArchives)
+              .where(eq(originalDiscArchives.id, plan.targetArchiveId))
+              .get(),
+            "original disc archive",
+            plan.targetArchiveId,
+          );
+          const adoptedMappings = plan.mappings.map((mapping) => {
+            const id = newId<DiscSelectionId>();
+            const selection = insertDiscSelection(
+              transaction,
+              {
+                originalDiscArchiveId: plan.targetArchiveId,
+                mediaItemId: mapping.mediaItemId,
+                sourceIdentity: mapping.sourceIdentity,
+                ...(mapping.label === null ? {} : { label: mapping.label }),
+              },
+              id,
+              timestamp,
+              { allowRearchiveAcceptance: true },
+            );
+            transaction.insert(discSelectionSupersessions).values({
+              supersededDiscSelectionId: mapping.sourceDiscSelectionId,
+              replacementDiscSelectionId: id,
+              reason: "Re-archive Acceptance",
+              createdAt: timestamp,
+            }).run();
+            return {
+              sourceDiscSelectionId: mapping.sourceDiscSelectionId,
+              discSelection: selection,
+            };
+          });
+
+          const sourceSelectionIds = plan.mappings.map(
+            (mapping) => mapping.sourceDiscSelectionId,
+          );
+          const retiredSelections = transaction
+            .update(discSelections)
+            .set({ isCatalogActive: false, updatedAt: timestamp })
+            .where(and(
+              inArray(discSelections.id, sourceSelectionIds),
+              eq(discSelections.originalDiscArchiveId, plan.sourceArchiveId),
+              eq(discSelections.isCatalogActive, true),
+            ))
+            .returning({ id: discSelections.id })
+            .all();
+          if (retiredSelections.length !== sourceSelectionIds.length) {
+            throw new DomainInvariantError(
+              "Re-archive Mapping Proposal changed during acceptance",
+            );
+          }
+
+          const affectedEncodeJobs = plan.affectedEncodeJobs.map((job) =>
+            requestEncodeJobCancellation(transaction, job.id, timestamp)
+          );
+          const sourceArchive = requireRow(
+            transaction
+              .update(originalDiscArchives)
+              .set({ updatedAt: nextCatalogMutationTimestamp(timestamp) })
+              .where(and(
+                eq(originalDiscArchives.id, plan.sourceArchiveId),
+                eq(
+                  originalDiscArchives.updatedAt,
+                  input.sourceCatalogRevision,
+                ),
+              ))
+              .returning()
+              .get(),
+            "re-archive source",
+            plan.sourceArchiveId,
+          );
+          const completedTarget = completeCatalogReviewTransition(
+            transaction,
+            targetArchive,
+            input.catalogRevision,
+            "reviewed_with_selections",
+            timestamp,
+            {
+              staleMessage:
+                "Re-archive Mapping Proposal changed; preview acceptance again",
+            },
+          );
+
+          transaction.delete(mutationInvocations)
+            .where(eq(mutationInvocations.key, input.previewToken))
+            .run();
+          return recordMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            {
+              sourceArchive,
+              targetArchive: completedTarget,
+              adoptedMappings,
+              affectedEncodeJobs,
+            },
             timestamp,
           );
         }, { behavior: "immediate" });

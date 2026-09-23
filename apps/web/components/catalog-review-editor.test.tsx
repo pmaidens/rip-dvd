@@ -64,6 +64,8 @@ let root: Root;
 const previewToken = "disc-selection-preview:00000000-0000-4000-8000-000000000001";
 const completionPreviewToken =
   "catalog-review-completion-preview:00000000-0000-4000-8000-000000000002";
+const rearchiveAcceptancePreviewToken =
+  "rearchive-acceptance-preview:00000000-0000-4000-8000-000000000003";
 
 beforeEach(() => {
   (globalThis as typeof globalThis & {
@@ -129,6 +131,28 @@ function availableCompletionPreview(
       availableReplacementEncodeCount: command.replacementEncodes.length,
       omittedReplacementEncodeCount: 0,
       failedOutputReservationReleaseEncodeJobIds: [],
+    },
+  };
+}
+
+function availableRearchiveAcceptancePreview(
+  command: Extract<CatalogReviewCommand, { action: "accept_rearchive" }>,
+) {
+  return {
+    state: "available",
+    targetArchiveId: "archive-1",
+    sourceArchiveId: "source-archive-1",
+    catalogRevision: command.catalogRevision,
+    sourceCatalogRevision: command.sourceCatalogRevision,
+    previewToken: rearchiveAcceptancePreviewToken,
+    affectedEncodeJobs: [],
+    consequences: {
+      adoptsMappingCount: 1,
+      requestsEncodeJobCancellation: [],
+      preventsOldSourceEnqueue: true,
+      preservesPriorArchive: true,
+      preservesCompletedOutputs: true,
+      replacementEncodeCount: 0,
     },
   };
 }
@@ -322,6 +346,53 @@ describe("CatalogReviewEditor", () => {
     expect(firstAttemptBodies).toHaveLength(2);
     expect(recoveredBodies).toEqual([firstAttemptBodies[1]]);
     expect(container.textContent).toContain("Catalog Review completed");
+  });
+
+  it("recovers an acknowledged Re-archive Acceptance after reload", async () => {
+    const review = catalogReview({
+      archiveId: "archive-1",
+      discLabel: "REARCHIVE_ACCEPTANCE_RECOVERY_DISC",
+    });
+    const command = {
+      action: "accept_rearchive" as const,
+      catalogRevision: review.catalogRevision,
+      sourceCatalogRevision: "2026-08-11T05:00:00.000Z",
+      replacementEncodes: [] as [],
+    };
+    const firstAttemptBodies: Record<string, unknown>[] = [];
+    const firstAttempt = async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      firstAttemptBodies.push(body);
+      return body.preview === true
+        ? Response.json(availableRearchiveAcceptancePreview(command))
+        : Response.json({ error: "Response unavailable" }, { status: 503 });
+    };
+    await expect(mutateCatalogReview("archive-1", command, firstAttempt, {
+      confirmRearchiveAcceptancePreview: () => true,
+    })).rejects.toThrow("Response unavailable");
+
+    const recoveredBodies: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (init?.method === "POST") {
+        recoveredBodies.push(
+          JSON.parse(String(init.body)) as Record<string, unknown>,
+        );
+        return Response.json({ message: "Re-archive accepted" });
+      }
+      return Response.json(review);
+    }));
+
+    await act(async () => renderCatalogReviewEditor("archive-1"));
+
+    expect(firstAttemptBodies).toHaveLength(2);
+    expect(recoveredBodies).toEqual([firstAttemptBodies[1]]);
+    expect(container.textContent).toContain("Re-archive accepted");
   });
 
   it("accepts an automatic movie proposal and completes review in one request", async () => {
@@ -2065,6 +2136,12 @@ describe("CatalogReviewView", () => {
     expectTypeOf(mutateCatalogReview).parameter(1)
       .toEqualTypeOf<CatalogReviewCommand>();
     const commands = {
+      accept_rearchive: {
+        action: "accept_rearchive",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+        replacementEncodes: [],
+      },
       preview_rearchive_mapping_proposal: {
         action: "preview_rearchive_mapping_proposal",
         catalogRevision: "2026-08-11T06:00:00.000Z",
@@ -2176,6 +2253,11 @@ describe("CatalogReviewView", () => {
         if (action === "complete_review") {
           return Response.json(availableCompletionPreview(body as never));
         }
+        if (action === "accept_rearchive") {
+          return Response.json(
+            availableRearchiveAcceptancePreview(body as never),
+          );
+        }
         if (action !== "repair_disc_selection" && action !== "correct_disc_selection" &&
             action !== "delete_disc_selection") {
           throw new Error("Expected a consequential Disc Selection command");
@@ -2191,6 +2273,7 @@ describe("CatalogReviewView", () => {
       await mutateCatalogReview("archive-1", commands[action], fetcher, {
         confirmDiscSelectionPreview: () => true,
         confirmCatalogReviewCompletionPreview: () => true,
+        confirmRearchiveAcceptancePreview: () => true,
       });
     }
 
@@ -2219,6 +2302,24 @@ describe("CatalogReviewView", () => {
               acknowledge: true,
             },
           ]
+          : action === "accept_rearchive"
+          ? [
+            { ...command, preview: true },
+            {
+              ...command,
+              mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
+              acknowledgedRevision: (command as Extract<
+                CatalogReviewCommand,
+                { action: "accept_rearchive" }
+              >).catalogRevision,
+              acknowledgedSourceRevision: (command as Extract<
+                CatalogReviewCommand,
+                { action: "accept_rearchive" }
+              >).sourceCatalogRevision,
+              previewToken: rearchiveAcceptancePreviewToken,
+              acknowledge: true,
+            },
+          ]
           : keyedDiscSelections.has(action)
           ? [{ ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/) }]
           : [command];
@@ -2226,7 +2327,7 @@ describe("CatalogReviewView", () => {
     );
   });
 
-  it("reviews and saves fresh re-archive mappings without exposing adoption tools", async () => {
+  it("reviews and saves fresh re-archive mappings before acceptance", async () => {
     const review = catalogReview({
       archiveId: "fresh-archive",
       discLabel: "FRESH_DISC",
@@ -2395,7 +2496,12 @@ describe("CatalogReviewView", () => {
       (button) => button.textContent === "Save proposal changes",
     );
     if (!save) throw new Error("Expected a save proposal button");
+    const accept = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Accept re-archive",
+    );
+    if (!accept) throw new Error("Expected a Re-archive Acceptance button");
     expect(save.disabled).toBe(true);
+    expect(accept.disabled).toBe(true);
     const preview = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "Preview proposal",
     );
@@ -2422,6 +2528,7 @@ describe("CatalogReviewView", () => {
       pending.resolve(pending.response);
     });
     expect(save.disabled).toBe(false);
+    expect(accept.disabled).toBe(true);
     await act(async () => save.click());
 
     expect(withoutProposalKeys(postedBodies)).toEqual([

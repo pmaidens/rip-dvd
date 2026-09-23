@@ -343,6 +343,10 @@ export function useCatalogReviewState({
                   .failedOutputReservationReleaseEncodeJobIds.length
               } failed output reservation(s)?`,
             ),
+          confirmRearchiveAcceptancePreview: (preview) =>
+            window.confirm(
+              `Adopt ${preview.consequences.adoptsMappingCount} reviewed mapping(s), stop new encoding from the prior archive, and request cancellation of ${preview.affectedEncodeJobs.length} queued or running Encode Job(s)? Both archives, completed outputs, history, and provenance will be retained.`,
+            ),
         },
       );
       if (result.cancelled) return;
@@ -580,6 +584,22 @@ export function useCatalogReviewState({
     });
   }
 
+  function acceptRearchive() {
+    if (
+      state.status !== "loaded" ||
+      state.review.rearchiveProposal === undefined
+    ) {
+      return;
+    }
+    const current = state.review.rearchiveProposal;
+    void mutate({
+      action: "accept_rearchive",
+      catalogRevision: current.catalogRevision,
+      sourceCatalogRevision: current.sourceCatalogRevision,
+      replacementEncodes: [],
+    }, true);
+  }
+
   return {
     state,
     activeMappingProposal,
@@ -629,6 +649,7 @@ export function useCatalogReviewState({
     acceptAutomaticCatalogProposal,
     previewRearchiveMappingProposal,
     saveRearchiveMappingProposal,
+    acceptRearchive,
     saveMediaItem,
     deleteMediaItem: (mediaItemId: string) =>
       void mutate({ action: "delete_media_item", mediaItemId }),

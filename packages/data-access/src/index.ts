@@ -53,6 +53,7 @@ export {
   ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH,
   validateEncodeQueueSearchQuery,
 } from "./encode-queue-search.js";
+export { rearchiveAcceptancePreviewEvidence } from "./rearchive-acceptance.js";
 export {
   ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
   ENCODE_JOB_FAILURE_PHASES,
