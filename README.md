@@ -171,6 +171,8 @@ disc; otherwise it stops without changing the backup or queue.
 
 A job is pending when its source ISO exists and its final output `.mkv` does not. A job is complete when the final output exists. Failed or interrupted partial files are moved aside with a `.failed` suffix before retrying. The ISO remains as the long-term original backup either way.
 
+## Maintenance workflows
+
 ### Audit Original Disc Archives
 
 The repository includes a read-only audit for DVD Original Disc Archives. It
@@ -297,17 +299,12 @@ the enforceable queue authority: legacy `interactive`, `rip`, `title`, `extras`,
 `queue`, and `encode` commands refuse that library, so use the SQLite catalog
 and workers instead.
 
-### Join Part Files
+## Retired join command
 
-```bash
-rip-dvd join part1.mkv part2.mkv --output "Movie.mkv"
-```
-
-The join command uses ffmpeg concat mode with stream copy, so it does not re-encode the files. It leaves the original parts in place unless you pass:
-
-```bash
-rip-dvd join part1.mkv part2.mkv --output "Movie.mkv" --delete-parts
-```
+The former `rip-dvd join` media-file utility is retained only as migration
+context. The installed command rejects it with `LEGACY_COMMAND_RETIRED`; it has
+no JSON CLI replacement. Use a separate media tool when concatenation is still
+required.
 
 ## Optional TMDB lookup
 
