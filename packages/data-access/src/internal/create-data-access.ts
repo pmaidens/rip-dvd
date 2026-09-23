@@ -4351,6 +4351,118 @@ export function createDataAccessInternal(
 
   type RearchiveProposalReader = CatalogTransaction | typeof database;
 
+  interface ValidatedCorrectedEncodeReplacement {
+    input: CorrectedEncodeReplacementInput;
+    predecessor: typeof encodeJobs.$inferSelect;
+    outputPath: string;
+    replacesExistingOutput: boolean;
+  }
+
+  function requireEncodeJob(
+    reader: RearchiveProposalReader,
+    id: EncodeJobId,
+  ): typeof encodeJobs.$inferSelect {
+    return requireRow(
+      reader
+        .select()
+        .from(encodeJobs)
+        .where(eq(encodeJobs.id, id))
+        .get(),
+      "encode job",
+      id,
+    );
+  }
+
+  function validateCorrectedEncodeReplacement(
+    reader: RearchiveProposalReader,
+    input: CorrectedEncodeReplacementInput,
+    predecessor: typeof encodeJobs.$inferSelect,
+  ): ValidatedCorrectedEncodeReplacement {
+    const profile = requireRow(
+      reader
+        .select()
+        .from(encodingProfiles)
+        .where(eq(encodingProfiles.id, input.encodingProfileId))
+        .get(),
+      "encoding profile",
+      input.encodingProfileId,
+    );
+    if (
+      input.encodingProfileId !== predecessor.encodingProfileId &&
+      (!profile.isActive || profile.mediaDomain !== "dvd_video")
+    ) {
+      throw new DomainInvariantError(
+        "Corrected replacement encodes require the prior or an active DVD video Encoding Profile",
+      );
+    }
+    const outputPath = requireNonEmpty(input.outputPath, "outputPath");
+    const outputOwner = reader
+      .select({ id: encodeJobs.id })
+      .from(encodeJobs)
+      .where(and(
+        eq(encodeJobs.outputPath, outputPath),
+        eq(encodeJobs.reservesOutputPath, true),
+        ne(encodeJobs.id, predecessor.id),
+      ))
+      .limit(1)
+      .get();
+    if (outputOwner !== undefined) {
+      throw new DomainInvariantError(
+        `Encode Job output is already assigned: ${outputPath}`,
+      );
+    }
+    if (input.priority !== undefined && !Number.isSafeInteger(input.priority)) {
+      throw new DomainInvariantError("priority must be a safe integer");
+    }
+    return {
+      input,
+      predecessor,
+      outputPath,
+      replacesExistingOutput:
+        outputPath === predecessor.outputPath &&
+        (predecessor.status === "completed" ||
+          predecessor.replaceExistingOutput),
+    };
+  }
+
+  function insertCorrectedEncodeReplacementJob(
+    transaction: CatalogTransaction,
+    candidate: ValidatedCorrectedEncodeReplacement,
+    discSelectionId: DiscSelectionId,
+    timestamp: Date,
+  ): EncodeJob {
+    if (
+      candidate.outputPath === candidate.predecessor.outputPath &&
+      candidate.predecessor.reservesOutputPath
+    ) {
+      transaction
+        .update(encodeJobs)
+        .set({ reservesOutputPath: false, updatedAt: timestamp })
+        .where(eq(encodeJobs.id, candidate.predecessor.id))
+        .run();
+    }
+    return requireRow(
+      transaction
+        .insert(encodeJobs)
+        .values({
+          id: newId<EncodeJobId>(),
+          predecessorEncodeJobId: candidate.predecessor.id,
+          discSelectionId,
+          encodingProfileId: candidate.input.encodingProfileId,
+          outputPath: candidate.outputPath,
+          priority:
+            candidate.input.priority ?? candidate.predecessor.priority,
+          replaceExistingOutput: candidate.replacesExistingOutput,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        })
+        .returning()
+        .get(),
+      "corrected Encode replacement",
+      candidate.predecessor.id,
+    );
+  }
+
   function listActiveRearchiveSourceSelections(
     reader: RearchiveProposalReader,
     originalDiscArchiveId: OriginalDiscArchiveId,
@@ -4825,52 +4937,6 @@ export function createDataAccessInternal(
           `Encode Job ${replacement.predecessorEncodeJobId} is not available for re-archive replacement`,
         );
       }
-      const profile = requireRow(
-        reader
-          .select()
-          .from(encodingProfiles)
-          .where(eq(encodingProfiles.id, replacement.encodingProfileId))
-          .get(),
-        "encoding profile",
-        replacement.encodingProfileId,
-      );
-      if (
-        replacement.encodingProfileId !==
-            available.proposedEncodingProfileId &&
-        (!profile.isActive || profile.mediaDomain !== "dvd_video")
-      ) {
-        throw new DomainInvariantError(
-          "Re-archive replacements require the prior or an active DVD video Encoding Profile",
-        );
-      }
-      const outputPath = requireNonEmpty(replacement.outputPath, "outputPath");
-      if (outputPaths.has(outputPath)) {
-        throw new DomainInvariantError(
-          `Re-archive replacement output is selected more than once: ${outputPath}`,
-        );
-      }
-      outputPaths.add(outputPath);
-      const outputOwner = reader
-        .select({ id: encodeJobs.id })
-        .from(encodeJobs)
-        .where(and(
-          eq(encodeJobs.outputPath, outputPath),
-          eq(encodeJobs.reservesOutputPath, true),
-          ne(encodeJobs.id, replacement.predecessorEncodeJobId),
-        ))
-        .limit(1)
-        .get();
-      if (outputOwner !== undefined) {
-        throw new DomainInvariantError(
-          `Encode Job output is already assigned: ${outputPath}`,
-        );
-      }
-      if (
-        replacement.priority !== undefined &&
-        !Number.isSafeInteger(replacement.priority)
-      ) {
-        throw new DomainInvariantError("priority must be a safe integer");
-      }
       const predecessor = requireRow(
         predecessorJobs.find((job) =>
           job.id === replacement.predecessorEncodeJobId
@@ -4878,15 +4944,23 @@ export function createDataAccessInternal(
         "encode job",
         replacement.predecessorEncodeJobId,
       );
+      const validated = validateCorrectedEncodeReplacement(
+        reader,
+        replacement,
+        predecessor,
+      );
+      if (outputPaths.has(validated.outputPath)) {
+        throw new DomainInvariantError(
+          `Re-archive replacement output is selected more than once: ${validated.outputPath}`,
+        );
+      }
+      outputPaths.add(validated.outputPath);
       return {
         ...replacement,
         sourceDiscSelectionId: available.sourceDiscSelectionId,
         predecessorStatus: available.predecessorStatus,
         predecessorReady: available.predecessorReady,
-        replacesExistingOutput:
-          outputPath === predecessor.outputPath &&
-          (predecessor.status === "completed" ||
-            predecessor.replaceExistingOutput),
+        replacesExistingOutput: validated.replacesExistingOutput,
       };
     });
     return {
@@ -6918,13 +6992,8 @@ export function createDataAccessInternal(
               "corrected Encode predecessor",
               input.predecessorEncodeJobId,
             );
-            const predecessor = requireRow(
-              transaction
-                .select()
-                .from(encodeJobs)
-                .where(eq(encodeJobs.id, plan.predecessorEncodeJobId))
-                .get(),
-              "encode job",
+            const predecessor = requireEncodeJob(
+              transaction,
               plan.predecessorEncodeJobId,
             );
             const existingReplacement = transaction
@@ -6941,49 +7010,14 @@ export function createDataAccessInternal(
                 `Encode Job ${predecessor.id} already has a corrected replacement`,
               );
             }
-            const profile = requireRow(
-              transaction
-                .select()
-                .from(encodingProfiles)
-                .where(eq(encodingProfiles.id, input.encodingProfileId))
-                .get(),
-              "encoding profile",
-              input.encodingProfileId,
-            );
-            if (
-              input.encodingProfileId !== predecessor.encodingProfileId &&
-              (!profile.isActive || profile.mediaDomain !== "dvd_video")
-            ) {
-              throw new DomainInvariantError(
-                "Corrected replacement encodes require the prior or an active DVD video Encoding Profile",
-              );
-            }
-            const outputPath = requireNonEmpty(input.outputPath, "outputPath");
-            const outputOwner = transaction
-              .select({ id: encodeJobs.id })
-              .from(encodeJobs)
-              .where(and(
-                eq(encodeJobs.outputPath, outputPath),
-                eq(encodeJobs.reservesOutputPath, true),
-                ne(encodeJobs.id, predecessor.id),
-              ))
-              .limit(1)
-              .get();
-            if (outputOwner) {
-              throw new DomainInvariantError(
-                `Encode Job output is already assigned: ${outputPath}`,
-              );
-            }
-            const replaceExistingOutput =
-              outputPath === predecessor.outputPath &&
-              (predecessor.status === "completed" ||
-                predecessor.replaceExistingOutput);
-            return {
+            const validated = validateCorrectedEncodeReplacement(
+              transaction,
               input,
-              plan,
               predecessor,
-              outputPath,
-              replaceExistingOutput,
+            );
+            return {
+              ...validated,
+              plan,
             };
           });
 
@@ -7014,7 +7048,7 @@ export function createDataAccessInternal(
                   candidate.plan.replacementDiscSelectionId,
                 predecessorStatus: candidate.plan.predecessorStatus,
                 predecessorReady: candidate.plan.predecessorReady,
-                replacesExistingOutput: candidate.replaceExistingOutput,
+                replacesExistingOutput: candidate.replacesExistingOutput,
               })),
               availableReplacementPredecessorIds: availableReplacements.map(
                 (replacement) => replacement.predecessorEncodeJobId,
@@ -7042,35 +7076,11 @@ export function createDataAccessInternal(
 
           const replacementEncodeJobs: EncodeJob[] = [];
           for (const candidate of candidates) {
-            const { input, outputPath, predecessor } = candidate;
-            if (
-              outputPath === predecessor.outputPath &&
-              predecessor.reservesOutputPath
-            ) {
-              transaction
-                .update(encodeJobs)
-                .set({ reservesOutputPath: false, updatedAt: timestamp })
-                .where(eq(encodeJobs.id, predecessor.id))
-                .run();
-            }
-            const replacement = requireRow(
-              transaction
-                .insert(encodeJobs)
-                .values({
-                  id: newId<EncodeJobId>(),
-                  predecessorEncodeJobId: predecessor.id,
-                  discSelectionId: candidate.plan.replacementDiscSelectionId,
-                  encodingProfileId: input.encodingProfileId,
-                  outputPath,
-                  priority: input.priority ?? predecessor.priority,
-                  replaceExistingOutput: candidate.replaceExistingOutput,
-                  createdAt: timestamp,
-                  updatedAt: timestamp,
-                })
-                .returning()
-                .get(),
-              "corrected Encode replacement",
-              predecessor.id,
+            const replacement = insertCorrectedEncodeReplacementJob(
+              transaction,
+              candidate,
+              candidate.plan.replacementDiscSelectionId,
+              timestamp,
             );
             replacementEncodeJobs.push(replacement);
           }
@@ -8631,28 +8641,10 @@ export function createDataAccessInternal(
 
           const replacementEncodeJobs: EncodeJob[] = [];
           for (const replacement of plan.replacementEncodes) {
-            const predecessor = requireRow(
-              transaction
-                .select()
-                .from(encodeJobs)
-                .where(eq(
-                  encodeJobs.id,
-                  replacement.predecessorEncodeJobId,
-                ))
-                .get(),
-              "encode job",
+            const predecessor = requireEncodeJob(
+              transaction,
               replacement.predecessorEncodeJobId,
             );
-            if (
-              replacement.outputPath === predecessor.outputPath &&
-              predecessor.reservesOutputPath
-            ) {
-              transaction
-                .update(encodeJobs)
-                .set({ reservesOutputPath: false, updatedAt: timestamp })
-                .where(eq(encodeJobs.id, predecessor.id))
-                .run();
-            }
             const replacementDiscSelectionId = requireRow(
               replacementDiscSelectionIds.get(
                 replacement.sourceDiscSelectionId,
@@ -8660,25 +8652,17 @@ export function createDataAccessInternal(
               "accepted Re-archive Disc Selection",
               replacement.sourceDiscSelectionId,
             );
-            replacementEncodeJobs.push(requireRow(
-              transaction
-                .insert(encodeJobs)
-                .values({
-                  id: newId<EncodeJobId>(),
-                  predecessorEncodeJobId: predecessor.id,
-                  discSelectionId: replacementDiscSelectionId,
-                  encodingProfileId: replacement.encodingProfileId,
-                  outputPath: replacement.outputPath,
-                  priority: replacement.priority ?? predecessor.priority,
-                  replaceExistingOutput:
-                    replacement.replacesExistingOutput,
-                  createdAt: timestamp,
-                  updatedAt: timestamp,
-                })
-                .returning()
-                .get(),
-              "Re-archive replacement Encode Job",
-              predecessor.id,
+            replacementEncodeJobs.push(insertCorrectedEncodeReplacementJob(
+              transaction,
+              {
+                input: replacement,
+                predecessor,
+                outputPath: replacement.outputPath,
+                replacesExistingOutput:
+                  replacement.replacesExistingOutput,
+              },
+              replacementDiscSelectionId,
+              timestamp,
             ));
           }
 

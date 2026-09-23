@@ -6,6 +6,7 @@ import {
   createOperatorWorkflowFixture,
   seedRearchiveCatalogReviewFixture,
 } from "./operator-workflow.test-support.js";
+import { runRearchiveAcceptance } from "./rearchive-acceptance.js";
 
 let current: ReturnType<typeof createOperatorWorkflowFixture>;
 
@@ -17,7 +18,7 @@ afterEach(() => {
   current.dispose();
 });
 
-it("previews, accepts, and replays Re-archive Acceptance through JSON CLI", async () => {
+async function saveReadyRearchiveProposal(mutationKey: string) {
   const seeded = seedRearchiveCatalogReviewFixture(current);
   const show = await current.run([
     "catalog-review",
@@ -52,7 +53,7 @@ it("previews, accepts, and replays Re-archive Acceptance through JSON CLI", asyn
     "save-rearchive-proposal",
     seeded.targetArchive.id,
     "--key",
-    "00000000-0000-4000-8000-000000000551",
+    mutationKey,
     "--json",
     JSON.stringify(proposal),
   ]);
@@ -60,6 +61,13 @@ it("previews, accepts, and replays Re-archive Acceptance through JSON CLI", asyn
   const saved = (save.result as {
     proposal: { catalogRevision: string; sourceCatalogRevision: string };
   }).proposal;
+  return { saved, seeded };
+}
+
+it("previews, accepts, and replays Re-archive Acceptance through JSON CLI", async () => {
+  const { saved, seeded } = await saveReadyRearchiveProposal(
+    "00000000-0000-4000-8000-000000000551",
+  );
 
   const access = current.openAccess();
   const profile = access.encodingProfiles.create({
@@ -148,6 +156,63 @@ it("previews, accepts, and replays Re-archive Acceptance through JSON CLI", asyn
       status: "queued",
     }],
   });
+});
+
+it("accepts an omitted replacement plan without media-library configuration", async () => {
+  const { saved, seeded } = await saveReadyRearchiveProposal(
+    "00000000-0000-4000-8000-000000000553",
+  );
+  const command = {
+    action: "accept_rearchive",
+    catalogRevision: saved.catalogRevision,
+    sourceCatalogRevision: saved.sourceCatalogRevision,
+  };
+  const configurationUnavailable = () => {
+    throw new Error("Media library configuration should not be read");
+  };
+  const io = {
+    openAccess: current.openAccess,
+    mediaLibraryPath: configurationUnavailable,
+  };
+  const preview = runRearchiveAcceptance([
+    "preview-rearchive-acceptance",
+    seeded.targetArchive.id,
+    "--json",
+    JSON.stringify(command),
+  ], io) as {
+    catalogRevision: string;
+    sourceCatalogRevision: string;
+    previewToken: string;
+    consequences: {
+      replacementEncodeCount: number;
+      omittedReplacementEncodeCount: number;
+    };
+  };
+  expect(preview.consequences).toMatchObject({
+    replacementEncodeCount: 0,
+    omittedReplacementEncodeCount: 0,
+  });
+
+  const accepted = runRearchiveAcceptance([
+    "accept-rearchive",
+    seeded.targetArchive.id,
+    "--key",
+    "00000000-0000-4000-8000-000000000554",
+    "--revision",
+    preview.catalogRevision,
+    "--source-revision",
+    preview.sourceCatalogRevision,
+    "--preview-token",
+    preview.previewToken,
+    "--acknowledge",
+    "--json",
+    JSON.stringify(command),
+  ], io) as { message: string; replacementEncodeJobs?: unknown[] };
+  expect(accepted).toMatchObject({ message: "Re-archive accepted" });
+  expect(accepted.replacementEncodeJobs).toBeUndefined();
+  const access = current.openAccess();
+  expect(access.encodeJobs.list()).toEqual([]);
+  access.close();
 });
 
 it("rejects an incomplete replacement plan", async () => {

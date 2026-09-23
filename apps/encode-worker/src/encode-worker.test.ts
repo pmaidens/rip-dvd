@@ -2413,7 +2413,7 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
-  it("retains the prior final when Re-archive Acceptance replaces a completed encode", async () => {
+  it("creates a Retained Encode Output when Re-archive Acceptance replaces a completed Encode Job", async () => {
     const root = mkdtempSync(join(tmpdir(), "rip-dvd-rearchive-replacement-"));
     temporaryDirectories.push(root);
     const originalsLibraryPath = join(root, "originals");
