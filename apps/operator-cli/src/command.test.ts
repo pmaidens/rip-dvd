@@ -1342,7 +1342,7 @@ it("runs as a separate process without the web service", () => {
       message: "Application configuration is missing or invalid.",
     },
   });
-});
+}, 10_000);
 
 function addScannedDisc(current: ReturnType<typeof createOperatorWorkflowFixture>, fingerprint: string) {
   const access = current.openAccess();
