@@ -5,7 +5,7 @@ usage() {
     cat <<'EOF'
 Usage: ./install.sh [--system] [--bin-dir DIR]
 
-Install a rip-dvd command wrapper for this checkout.
+Install the server-local rip-dvd JSON CLI for this Compose deployment.
 
 Options:
   --system       Install to /usr/local/bin instead of ~/.local/bin
@@ -54,25 +54,13 @@ if [ -z "$bin_dir" ]; then
     exit 1
 fi
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "install.sh: python3 was not found on PATH" >&2
+if ! command -v docker >/dev/null 2>&1; then
+    echo "install.sh: docker was not found on PATH" >&2
     exit 1
 fi
-
-missing_tools=""
-for tool in HandBrakeCLI lsdvd ffmpeg ffprobe; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        missing_tools="$missing_tools $tool"
-    fi
-done
-if ! command -v blkid >/dev/null 2>&1 && [ ! -x /sbin/blkid ] && [ ! -x /usr/sbin/blkid ]; then
-    missing_tools="$missing_tools blkid"
-fi
-
-if [ -n "$missing_tools" ]; then
-    echo "install.sh: warning: missing runtime tool(s):$missing_tools" >&2
-    echo "install.sh: install Debian/Raspberry Pi dependencies with:" >&2
-    echo "  sudo apt install handbrake-cli lsdvd util-linux ffmpeg" >&2
+if ! docker compose version >/dev/null 2>&1; then
+    echo "install.sh: the Docker Compose plugin is unavailable" >&2
+    exit 1
 fi
 
 if ! mkdir -p "$bin_dir" 2>/dev/null; then

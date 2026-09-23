@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -9,12 +10,32 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class InstallScriptTests(unittest.TestCase):
-    def test_install_script_creates_working_wrapper(self):
+    def test_install_script_creates_json_cli_wrapper(self):
         with tempfile.TemporaryDirectory() as temp:
-            bin_dir = Path(temp) / "bin"
+            temporary = Path(temp)
+            bin_dir = temporary / "bin"
+            command_log = temporary / "docker-command"
+            input_log = temporary / "docker-input"
+            docker = temporary / "docker"
+            docker.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$*\" = 'compose version' ]; then exit 0; fi\n"
+                "printf '%s\\n%s\\n' \"$PWD\" \"$*\" > \"$COMMAND_LOG\"\n"
+                "cat > \"$INPUT_LOG\"\n"
+                "printf '{\"schemaVersion\":1,\"usage\":\"rip-dvd <command>\"}\\n'\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            environment = {
+                **os.environ,
+                "COMMAND_LOG": str(command_log),
+                "INPUT_LOG": str(input_log),
+                "PATH": f"{temporary}:/usr/bin:/bin",
+            }
 
             install = subprocess.run(
                 [str(ROOT / "install.sh"), "--bin-dir", str(bin_dir)],
+                env=environment,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -29,7 +50,10 @@ class InstallScriptTests(unittest.TestCase):
             self.assertIn(str(wrapper), install.stdout)
 
             help_result = subprocess.run(
-                [str(wrapper), "--help"],
+                [str(wrapper)],
+                cwd=temporary,
+                env=environment,
+                input='{"example":"stdin passes through"}\n',
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -37,7 +61,21 @@ class InstallScriptTests(unittest.TestCase):
                 stderr=subprocess.PIPE,
                 check=True,
             )
-            self.assertIn("join", help_result.stdout)
+            self.assertEqual(
+                json.loads(help_result.stdout),
+                {"schemaVersion": 1, "usage": "rip-dvd <command>"},
+            )
+            self.assertEqual(
+                command_log.read_text(encoding="utf-8").splitlines(),
+                [
+                    str(ROOT),
+                    "compose --profile maintenance run --rm --no-deps --no-TTY operator-cli",
+                ],
+            )
+            self.assertEqual(
+                input_log.read_text(encoding="utf-8"),
+                '{"example":"stdin passes through"}\n',
+            )
 
 
 if __name__ == "__main__":

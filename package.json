@@ -13,9 +13,11 @@
     "db:check": "pnpm --filter @rip-dvd/data-access db:check",
     "dev": "pnpm --filter @rip-dvd/web dev",
     "import:legacy-sidecars": "pnpm --filter @rip-dvd/data-access build && node scripts/import-legacy-sidecars.mjs",
-    "test": "node --test scripts/optical-drive-mapping.test.mjs scripts/deploy.test.mjs && pnpm --filter @rip-dvd/config --filter @rip-dvd/data-access --filter @rip-dvd/worker-runtime --filter @rip-dvd/archive-worker --filter @rip-dvd/encode-worker --filter @rip-dvd/application --filter @rip-dvd/operator-cli --filter @rip-dvd/web test",
+    "test": "node --test scripts/optical-drive-mapping.test.mjs scripts/deploy.test.mjs && pnpm test:prepare && pnpm --parallel --filter @rip-dvd/config --filter @rip-dvd/data-access --filter @rip-dvd/worker-runtime --filter @rip-dvd/archive-worker --filter @rip-dvd/encode-worker --filter @rip-dvd/application --filter @rip-dvd/operator-cli --filter @rip-dvd/web exec vitest run",
+    "test:prepare": "pnpm --filter @rip-dvd/config --filter @rip-dvd/data-access --filter @rip-dvd/worker-runtime --filter @rip-dvd/application --filter @rip-dvd/operator-cli build && node apps/encode-worker/scripts/build-atomic-exchange.mjs",
     "test:browser": "pnpm --filter @rip-dvd/config --filter @rip-dvd/data-access build && pnpm --filter @rip-dvd/web test:browser",
     "test:compose-workers": "sh scripts/smoke-compose-workers.sh",
+    "test:operator-cli-deployment": "sh scripts/smoke-operator-cli.sh",
     "typecheck": "pnpm -r --if-present typecheck",
     "lint": "pnpm --filter @rip-dvd/web lint"
   },
