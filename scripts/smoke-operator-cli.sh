@@ -15,10 +15,12 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 cd "$repository_root"
+export COMPOSE_PROJECT_NAME="$project_name"
+./install.sh --bin-dir "$temporary_directory/bin" >/dev/null
+installed_cli="$temporary_directory/bin/rip-dvd"
 
 invoke() {
-  docker compose --project-name "$project_name" --profile maintenance \
-    run --rm --no-deps --no-TTY operator-cli "$@"
+  "$installed_cli" "$@"
 }
 
 assert_json_fields() {
@@ -60,6 +62,22 @@ set -e
 [ "$malformed_status" -eq 2 ]
 printf '%s\n' "$malformed_output" | assert_json_fields \
   'error.code=INVALID_ARGUMENTS'
+
+set +e
+retired_output="$(invoke scan 2>"$temporary_directory/retired.stderr")"
+retired_status=$?
+set -e
+[ "$retired_status" -eq 2 ]
+printf '%s\n' "$retired_output" | assert_json_fields \
+  'error.code=LEGACY_COMMAND_RETIRED'
+
+printf '%s\n' '{"kind":"movie","title":"Synthetic Smoke Film"}' \
+  >"$temporary_directory/media-item.json"
+file_input_output="$(invoke media-item create \
+  --key synthetic-smoke-file-key \
+  --file "$temporary_directory/media-item.json")"
+printf '%s\n' "$file_input_output" | assert_json_fields \
+  'mediaItem.kind=movie' 'mediaItem.title=Synthetic Smoke Film'
 
 audit_output="$(invoke submit-archive-audit \
   --key synthetic-smoke-archive-audit-key --limit 1)"

@@ -77,6 +77,37 @@ class InstallScriptTests(unittest.TestCase):
                 '{"example":"stdin passes through"}\n',
             )
 
+            input_file = temporary / "input.json"
+            input_file.write_text('{"kind":"movie","title":"Example Film"}\n')
+            subprocess.run(
+                [
+                    str(wrapper),
+                    "media-item",
+                    "create",
+                    "--key",
+                    "synthetic-key",
+                    "--file",
+                    input_file.name,
+                ],
+                cwd=temporary,
+                env=environment,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            self.assertEqual(
+                command_log.read_text(encoding="utf-8").splitlines(),
+                [
+                    str(ROOT),
+                    "compose --profile maintenance run --rm --no-deps --no-TTY "
+                    f"--volume {input_file.resolve()}:/app/{input_file.name}:ro operator-cli "
+                    "media-item create --key synthetic-key --file input.json",
+                ],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

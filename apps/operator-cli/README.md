@@ -29,6 +29,10 @@ printf '%s\n' '{"label":"Feature"}' | \
 rip-dvd catalog-review preview-completion <archive-id> --file <completion.json>
 ```
 
+The installed wrapper mounts the one `--file` input read-only into the CLI
+container. Relative paths resolve from the directory where `rip-dvd` is run;
+absolute paths are passed through at the same path.
+
 Generate and retain a key before every mutation:
 
 ```sh
