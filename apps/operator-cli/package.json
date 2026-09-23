@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "bin": {
-    "rip-dvd-operator": "dist/entry.js"
+    "rip-dvd": "dist/entry.js"
   },
   "files": ["dist"],
   "scripts": {

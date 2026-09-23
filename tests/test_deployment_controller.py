@@ -241,7 +241,7 @@ case "$*" in
   'compose up --detach --no-build web archive-worker encode-worker')
     rm -f "$RUNTIME_STOPPED_MARKER"
     ;;
-  'compose --progress plain --profile maintenance build migrate'|'compose --progress plain --profile maintenance build backup'|'compose --progress plain --profile maintenance build web'|'compose --progress plain --profile maintenance build archive-worker'|'compose --progress plain --profile maintenance build encode-worker')
+  'compose --progress plain --profile maintenance build migrate'|'compose --progress plain --profile maintenance build backup'|'compose --progress plain --profile maintenance build operator-cli'|'compose --progress plain --profile maintenance build web'|'compose --progress plain --profile maintenance build archive-worker'|'compose --progress plain --profile maintenance build encode-worker')
     exit 0
     ;;
   *) printf 'unexpected fake docker command: %s\n' "$*" >&2; exit 64 ;;

@@ -1,89 +1,76 @@
 # rip-dvd
 
-`rip-dvd` is a small command-line assistant for archiving DVDs and encoding DVD
-titles into a Jellyfin-style movie library. The legacy workflow saves a
-full-disc ISO, records encode jobs in a JSON sidecar, and processes them with
-`rip-dvd encode` until the library is migrated to the SQLite catalog and
-workers.
-
-The project is intentionally plain Python with no third-party Python package dependencies. The heavy work is done by system tools such as HandBrake and ffmpeg.
-
-The existing CLI remains available while a Dockerized TypeScript replacement is developed alongside it. The initial workspace contains a Next.js control plane and separate archive and encode worker runtimes.
+`rip-dvd` preserves DVDs as Original Disc Archives and schedules reviewed
+encodes for a media library. The supported deployment has a Next.js operator
+interface, separate Archive and Encode Workers, and a server-local JSON CLI.
+The CLI and web interface call the same application operations against the same
+SQLite catalog. The CLI does not call the web service.
 
 ## Requirements
 
-- Python 3.9 or newer
-- `HandBrakeCLI`
-- `lsdvd`
-- `blkid`
-- `ffmpeg`
-- `ffprobe`
-- `dd`
-- A DVD device, defaulting to `/dev/sr0`
-- A writable movie library, defaulting to `/srv/media/Movies`
-- A writable original-backup library, defaulting to `/srv/media/DVD Originals`
+- A native Linux Docker Engine with the Docker Compose plugin
+- Git for installation and reviewed updates
+- A supported optical block device and matching SCSI-generic device
+- Writable storage for the Media Library and Original Disc Archives
+- Node.js 22.23.1 for deployment administration scripts
 
-On Raspberry Pi OS or Debian-like systems, the system dependencies are typically installed with:
-
-```bash
-sudo apt update
-sudo apt install git handbrake-cli lsdvd util-linux ffmpeg
-```
-
-`git` is only needed to clone or update the checkout. `blkid` and `dd` are provided by `util-linux` / `coreutils` on typical Debian-like systems. If you use Jellyfin's bundled ffmpeg, the tool will prefer `/usr/lib/jellyfin-ffmpeg/ffmpeg` and `/usr/lib/jellyfin-ffmpeg/ffprobe` when those files exist.
+The production images contain the required HandBrake, ffmpeg, `lsdvd`, and
+optical-drive utilities. They do not depend on host installations of those
+tools.
 
 ## Quick Start
 
-Clone the repository into a stable install directory on the Raspberry Pi:
+Clone the repository into a stable server directory, configure the Compose
+deployment, build it, and start it:
 
 ```bash
-git clone https://github.com/pmaidens/rip-dvd.git ~/.local/share/rip-dvd
+git clone https://github.com/pmaidens/rip-dvd.git /opt/rip-dvd
+cd /opt/rip-dvd
+cp .env.example .env
+./scripts/compose-build.sh
+./scripts/compose-start.sh
 ```
 
-Install the `rip-dvd` command for your user:
+Install the server-local command for the current user:
 
 ```bash
-~/.local/share/rip-dvd/install.sh
+./install.sh
 ```
 
-If this is a shared system and you want the command in `/usr/local/bin`, install the wrapper system-wide:
+Use `--system` for `/usr/local/bin`:
 
 ```bash
-sudo ~/.local/share/rip-dvd/install.sh --system
+sudo ./install.sh --system
 ```
 
-Start the interactive assistant:
-
-```bash
-rip-dvd
-```
-
-The default paths are:
-
-- DVD device: `/dev/sr0`
-- Movie library: `/srv/media/Movies`
-- Original DVD backups: `/srv/media/DVD Originals`
-- HandBrake preset: `Fast 480p30`
-
-Override them when needed:
-
-```bash
-rip-dvd scan --device /dev/dvd
-rip-dvd rip --library /media/movies --preset "Fast 576p25"
-rip-dvd rip --originals-library /media/dvd-originals
-```
-
-## Commands
-
-### Interactive Mode
+Bare invocation returns JSON help. Commands are noninteractive and write one
+JSON document to stdout:
 
 ```bash
 rip-dvd
+rip-dvd health
+rip-dvd inspect detected-discs
+rip-dvd generate-key
 ```
 
-Scans the disc, shows likely main features and extras, then prompts for what to rip.
+See [the operator CLI guide](apps/operator-cli/README.md) for JSON contracts,
+exit codes, mutation replay, structured inputs, previews, and background work.
 
-The selected work is archived and queued. Encoding does not start automatically.
+## Retired legacy command reference
+
+The former interactive Python commands below are retained only as migration
+context. The installed `rip-dvd` command rejects each form with
+`LEGACY_COMMAND_RETIRED` and points to the corresponding JSON workflow.
+
+### Interactive mode
+
+```bash
+rip-dvd interactive
+```
+
+This former mode scanned the disc and prompted for selections. The replacement
+is noninteractive. Inspect Detected Discs and submit an Archive Request with an
+explicit mutation key.
 
 ### Scan Only
 
@@ -184,6 +171,8 @@ disc; otherwise it stops without changing the backup or queue.
 
 A job is pending when its source ISO exists and its final output `.mkv` does not. A job is complete when the final output exists. Failed or interrupted partial files are moved aside with a `.failed` suffix before retrying. The ISO remains as the long-term original backup either way.
 
+## Maintenance workflows
+
 ### Audit Original Disc Archives
 
 The repository includes a read-only audit for DVD Original Disc Archives. It
@@ -194,15 +183,15 @@ archive publication.
 Submit a tracked audit against the Compose deployment with a mutation key:
 
 ```bash
-docker compose --profile maintenance run --rm operator-cli \
+rip-dvd \
   submit-archive-audit --key <key> \
   --limit 100 \
   --concurrency 2 \
   --file-timeout-ms 5000 \
   --runtime-timeout-ms 120000
-docker compose --profile maintenance run --rm operator-cli \
+rip-dvd \
   inspect archive-audits <audit-run-id>
-docker compose --profile maintenance run --rm operator-cli \
+rip-dvd \
   wait archive-audits <audit-run-id> --timeout-ms 120000
 ```
 
@@ -310,27 +299,22 @@ the enforceable queue authority: legacy `interactive`, `rip`, `title`, `extras`,
 `queue`, and `encode` commands refuse that library, so use the SQLite catalog
 and workers instead.
 
-### Join Part Files
+## Retired join command
 
-```bash
-rip-dvd join part1.mkv part2.mkv --output "Movie.mkv"
-```
-
-The join command uses ffmpeg concat mode with stream copy, so it does not re-encode the files. It leaves the original parts in place unless you pass:
-
-```bash
-rip-dvd join part1.mkv part2.mkv --output "Movie.mkv" --delete-parts
-```
+The former `rip-dvd join` media-file utility is retained only as migration
+context. The installed command rejects it with `LEGACY_COMMAND_RETIRED`; it has
+no JSON CLI replacement. Use a separate media tool when concatenation is still
+required.
 
 ## Optional TMDB lookup
 
 Set a TMDB v3 API key to let the CLI and web Catalog identify movies and TV
-shows from disc volume labels. Docker Compose forwards the key to the web
-service.
+shows from disc volume labels. Docker Compose forwards the key to both the
+operator CLI and web services.
 
 ```bash
 export TMDB_API_KEY="your-api-key"
-rip-dvd rip
+rip-dvd catalog-review suggest synthetic-archive-id
 ```
 
 For the web Catalog, restart the web service after setting the value:
@@ -339,19 +323,25 @@ For the web Catalog, restart the web service after setting the value:
 docker compose up -d web
 ```
 
-The web Catalog also accepts a TMDB API read access token instead of a v3 API
-key:
+Both Catalog interfaces also accept a TMDB API read access token instead of a
+v3 API key:
 
 ```bash
 export TMDB_API_TOKEN="your-api-read-access-token"
+rip-dvd catalog-review suggest synthetic-archive-id
 docker compose up -d web
 ```
 
-Manual `--name` and `--year` arguments always take priority.
+To choose a specific candidate returned by lookup, repeat `catalog-review
+suggest` with `--tmdb-id <id> --media-type <movie|tv_show>`. Create or update
+manual catalog records through `rip-dvd media-item`; run
+`rip-dvd help media-item` for its JSON inputs.
 
-## Installing as a Command
+## Installing as a command
 
-Because `rip-dvd` imports the local `rip_dvd/` package, do not copy only the `rip-dvd` wrapper into `/usr/local/bin`.
+The installed wrapper runs the production `operator-cli` image from this
+checkout. Keep the checkout in place so the wrapper can load its Compose model
+and deployment configuration.
 
 Use the installer from the checked-out repository:
 
@@ -359,7 +349,8 @@ Use the installer from the checked-out repository:
 ./install.sh
 ```
 
-The default install creates `~/.local/bin/rip-dvd`. The wrapper points back to this checkout, so keep the repository directory in place. To install system-wide instead, run:
+The default install creates `~/.local/bin/rip-dvd`. To install system-wide,
+run:
 
 ```bash
 sudo ./install.sh --system
@@ -367,12 +358,9 @@ sudo ./install.sh --system
 
 ## Updating
 
-`rip-dvd` does not update itself. Update the checkout directly with Git, then keep using the same installed wrapper:
-
-```bash
-cd ~/.local/share/rip-dvd
-git pull --ff-only
-```
+The wrapper follows this checkout. Use the reviewed deployment controller
+documented below. It freezes one target commit, creates a database backup,
+builds every production image, migrates, starts the runtime, and verifies it.
 
 ## Testing
 
@@ -392,6 +380,7 @@ Install the workspace dependencies and validate the TypeScript skeleton with:
 pnpm install
 pnpm check
 pnpm build
+pnpm test:operator-cli-deployment
 ```
 
 The TypeScript runtimes use Node.js 22.23.1 and pnpm 11.15.1, matching the
@@ -400,6 +389,10 @@ running tools and both Docker stages match those exact project pins; the
 supported Node range therefore starts at 22.23.1. When that exact toolchain is
 not installed on the host, run the same frozen-install check, database migration
 check, tests, and build with `docker compose --profile validation build validation`.
+`pnpm test:operator-cli-deployment` builds the production CLI image in an
+isolated Compose project and runs real-process checks for JSON help, missing
+keys, malformed input, background submission and status, and independence from
+the web service.
 
 ### HTTP browser compatibility
 
@@ -458,26 +451,25 @@ copied bytes. Set `RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS` to a positive millisecond
 value to change that cutoff. This watchdog is separate from the overall archive
 operation timeout.
 
-### Server-local JSON inspection commands
+### Server-local JSON commands
 
-The staged `rip-dvd-operator` command checks health, readiness, and operational
-records without starting the web service.
-The existing `rip-dvd` executable keeps its legacy behavior during this stage.
-Run the commands in the Compose deployment with:
+The installed `rip-dvd` command runs the complete JSON CLI in the production
+`operator-cli` image. It uses the shared SQLite catalog and mounted libraries
+without starting or calling the web service. For example:
 
 ```bash
-docker compose --profile maintenance run --rm operator-cli health
-docker compose --profile maintenance run --rm operator-cli readiness
-docker compose --profile maintenance run --rm operator-cli inspect disc-inspections
-docker compose --profile maintenance run --rm operator-cli inspect archive-requests synthetic-request-id
-docker compose --profile maintenance run --rm operator-cli wait archive-requests synthetic-request-id --timeout-ms 30000
-docker compose --profile maintenance run --rm operator-cli generate-key
-docker compose --profile maintenance run --rm operator-cli submit-filesystem-verification --key 00000000-0000-4000-8000-000000000001 --target original_disc_archive --id synthetic-archive-id
-docker compose --profile maintenance run --rm operator-cli submit-archive-audit --key 00000000-0000-4000-8000-000000000002 --limit 100
-docker compose --profile maintenance run --rm operator-cli inspect filesystem-verifications
-docker compose --profile maintenance run --rm operator-cli inspect archive-audits
-docker compose --profile maintenance run --rm operator-cli wait filesystem-verifications synthetic-run-id --timeout-ms 30000
-docker compose --profile maintenance run --rm operator-cli help
+rip-dvd health
+rip-dvd readiness
+rip-dvd inspect disc-inspections
+rip-dvd inspect archive-requests synthetic-request-id
+rip-dvd wait archive-requests synthetic-request-id --timeout-ms 30000
+rip-dvd generate-key
+rip-dvd submit-filesystem-verification --key 00000000-0000-4000-8000-000000000001 --target original_disc_archive --id synthetic-archive-id
+rip-dvd submit-archive-audit --key 00000000-0000-4000-8000-000000000002 --limit 100
+rip-dvd inspect filesystem-verifications
+rip-dvd inspect archive-audits
+rip-dvd wait filesystem-verifications synthetic-run-id --timeout-ms 30000
+rip-dvd help
 ```
 
 For a local checkout, build `@rip-dvd/operator-cli`, then run
@@ -523,14 +515,14 @@ Generate a key before submitting. This command does not open the database or
 create work:
 
 ```bash
-docker compose --profile maintenance run --rm operator-cli generate-key
+rip-dvd generate-key
 ```
 
 It returns `{"mutationKey":"<key>"}`. Keep that key and submit an Archive
 Request for a Detected Disc ID from the application's current disc view:
 
 ```bash
-docker compose --profile maintenance run --rm operator-cli \
+rip-dvd \
   submit-archive-request --key <key> --detected-disc-id <detected-disc-id>
 ```
 
@@ -558,11 +550,11 @@ request. The command returns a durable verification run ID as soon as the work
 is queued. Repeating the same key and target returns the original submission.
 
 ```bash
-docker compose --profile maintenance run --rm operator-cli \
+rip-dvd \
   submit-filesystem-verification --key <key> --target original_disc_archive --id <archive-id>
-docker compose --profile maintenance run --rm operator-cli \
+rip-dvd \
   inspect filesystem-verifications <run-id>
-docker compose --profile maintenance run --rm operator-cli \
+rip-dvd \
   wait filesystem-verifications <run-id> --timeout-ms 30000
 ```
 
@@ -743,10 +735,10 @@ cd /opt/rip-dvd
 ./scripts/update.sh --target REVIEWED_FULL_SHA
 ```
 
-`scripts/compose-build.sh` builds the migration, backup, web, archive-worker,
-and encode-worker images one at a time in that order. `scripts/update.sh`
+`scripts/compose-build.sh` builds the migration, backup, operator CLI, web,
+archive-worker, and encode-worker images one at a time in that order. `scripts/update.sh`
 verifies the pre-migration backup file before changing `HEAD`, fast-forwards
-only to the named commit, and leaves the old runtime serving during all five
+only to the named commit, and leaves the old runtime serving during all six
 builds. `scripts/compose-migrate.sh`
 stops the web, archive, and encode runtimes before running versioned Drizzle
 migrations in a one-shot non-root container; if the bounded stop fails, no DDL
@@ -1397,16 +1389,16 @@ commands to an explicit media domain.
 The operator CLI covers these DVD video profile workflows:
 
 ```bash
-rip-dvd-operator list-encoding-profiles
-rip-dvd-operator create-encoding-profile --key <mutation-key> \
+rip-dvd list-encoding-profiles
+rip-dvd create-encoding-profile --key <mutation-key> \
   --profile-key dvd-example --display-name "DVD example" --preset "Fast 480p30"
-rip-dvd-operator version-encoding-profile --key <mutation-key> \
+rip-dvd version-encoding-profile --key <mutation-key> \
   --source-profile-id <profile-id> --preset "HQ 480p30 Surround"
-rip-dvd-operator preview-encoding-profile-state --id <profile-id> --active true
-rip-dvd-operator activate-encoding-profile --key <mutation-key> \
+rip-dvd preview-encoding-profile-state --id <profile-id> --active true
+rip-dvd activate-encoding-profile --key <mutation-key> \
   --id <profile-id> --revision <preview-revision> --acknowledge
-rip-dvd-operator preview-encoding-profile-state --id <profile-id> --active false
-rip-dvd-operator deactivate-encoding-profile --key <mutation-key> \
+rip-dvd preview-encoding-profile-state --id <profile-id> --active false
+rip-dvd deactivate-encoding-profile --key <mutation-key> \
   --id <profile-id> --revision <preview-revision> --acknowledge
 ```
 

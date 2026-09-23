@@ -1,3 +1,73 @@
+# Server-local JSON CLI
+
+The installed `rip-dvd` command starts the production `operator-cli` image as a
+short-lived Compose process. It mounts the same SQLite data and libraries as
+the application, but it uses `--no-deps`, so it neither starts nor calls the web
+service. Run `./install.sh` from the deployment checkout, then use `rip-dvd`
+from an SSH session on that server.
+
+Bare invocation returns command discovery as JSON. `rip-dvd help <command>`
+returns the selected command's arguments, options, and a synthetic example.
+Every invocation writes exactly one JSON document to stdout. Diagnostics go to
+stderr and never alter that document.
+
+Exit status has a stable meaning:
+
+- `0` means the command completed.
+- `1` means configuration or application execution failed.
+- `2` means the input, target, or requested transition was rejected.
+- `3` means a bounded wait expired without cancelling the work.
+
+Commands never prompt. Simple values use flags. Complex catalog input accepts
+exactly one of inline JSON, stdin, or a file:
+
+```sh
+rip-dvd media-item create --key <key> \
+  --json '{"kind":"movie","title":"Example Film","year":2020}'
+printf '%s\n' '{"label":"Feature"}' | \
+  rip-dvd disc-selection update <archive-id> <selection-id> --key <key> --stdin
+rip-dvd catalog-review preview-completion <archive-id> --file <completion.json>
+```
+
+The installed wrapper mounts the one `--file` input read-only into the CLI
+container. Relative paths resolve from the directory where `rip-dvd` is run;
+absolute paths are passed through at the same path.
+
+Generate and retain a key before every mutation:
+
+```sh
+rip-dvd generate-key
+rip-dvd submit-archive-request --key <key> --detected-disc-id <disc-id>
+```
+
+Repeating the same mutation with the same key and semantic input returns the
+original result. Using that key for another operation or changed input returns
+`MUTATION_KEY_CONFLICT`. Key generation does not open the database or submit
+work.
+
+Replacement and destructive changes require a read-only preview. Apply the
+same input with the returned revision and preview token plus `--acknowledge`.
+The command rejects a stale or changed preview without applying part of the
+plan.
+
+Background submissions return a durable work ID immediately. The worker owns
+execution after the CLI exits. Inspect it in another session or wait for a
+bounded interval:
+
+```sh
+rip-dvd submit-archive-audit --key <key> --limit 100
+rip-dvd inspect archive-audits <run-id>
+rip-dvd wait archive-audits <run-id> --timeout-ms 30000
+```
+
+Wait expiry and SSH disconnection do not cancel submitted work. The same
+status and wait pattern applies to Disc Inspections, Archive Requests, Archive
+Jobs, Encode Jobs, archive audits, and filesystem verification.
+
+The former `interactive`, `rip`, `scan`, `title`, `extras`, `queue`, `encode`,
+and `join` forms are retired. Each returns `LEGACY_COMMAND_RETIRED` with a
+migration direction instead of acquiring a new meaning.
+
 # Archive Request commands
 
 Every preservation mutation requires a key chosen before submission. A normal
@@ -5,8 +75,8 @@ Archive Request targets a Detected Disc. A Re-archive Request targets the exact
 Original Disc Archive that should remain as its predecessor.
 
 ```sh
-rip-dvd-operator submit-archive-request --key <key> --detected-disc-id <id>
-rip-dvd-operator request-rearchive --key <key> --source-archive-id <id>
+rip-dvd submit-archive-request --key <key> --detected-disc-id <id>
+rip-dvd request-rearchive --key <key> --source-archive-id <id>
 ```
 
 `request-rearchive` creates fresh request-owned copy state and returns the new
@@ -18,14 +88,14 @@ remain unchanged when the request succeeds, fails, or is cancelled.
 
 # Catalog Review read commands
 
-Run the server-local `rip-dvd-operator` executable with the same database and
+Run the server-local `rip-dvd` executable with the same database and
 library configuration as the application. Commands write one JSON result to
 stdout. Invalid input exits 2; an unavailable read exits 1.
 
 ```sh
-rip-dvd-operator catalog-review show <archive-id>
-rip-dvd-operator catalog-review suggest <archive-id>
-rip-dvd-operator catalog-review suggest <archive-id> --tmdb-id 42 --media-type movie
+rip-dvd catalog-review show <archive-id>
+rip-dvd catalog-review suggest <archive-id>
+rip-dvd catalog-review suggest <archive-id> --tmdb-id 42 --media-type movie
 ```
 
 `show` returns the current catalog revision, archive and scan provenance,
@@ -78,9 +148,9 @@ adopt these mappings.
 ```
 
 ```sh
-rip-dvd-operator catalog-review preview-rearchive-proposal <fresh-archive-id> \
+rip-dvd catalog-review preview-rearchive-proposal <fresh-archive-id> \
   --file <preview.json>
-rip-dvd-operator catalog-review save-rearchive-proposal <fresh-archive-id> \
+rip-dvd catalog-review save-rearchive-proposal <fresh-archive-id> \
   --key <key> --file <save.json>
 ```
 
@@ -115,9 +185,9 @@ queueing replacement encodes.
 ```
 
 ```sh
-rip-dvd-operator catalog-review preview-rearchive-acceptance <fresh-archive-id> \
+rip-dvd catalog-review preview-rearchive-acceptance <fresh-archive-id> \
   --file <acceptance.json>
-rip-dvd-operator catalog-review accept-rearchive <fresh-archive-id> \
+rip-dvd catalog-review accept-rearchive <fresh-archive-id> \
   --key <key> --revision <catalog-revision> \
   --source-revision <source-catalog-revision> \
   --preview-token <preview-token> --acknowledge --file <acceptance.json>
@@ -199,11 +269,11 @@ the chosen Season and match `episodeNumber`. Each `titleNumber` must name a
 distinct title in this archive's scan.
 
 ```sh
-rip-dvd-operator catalog-review apply-proposal <archive-id> --key <key> \
+rip-dvd catalog-review apply-proposal <archive-id> --key <key> \
   --json '<proposal-json>'
 printf '%s\n' '<proposal-json>' | \
-  rip-dvd-operator catalog-review apply-proposal <archive-id> --key <key> --stdin
-rip-dvd-operator catalog-review apply-proposal <archive-id> --key <key> \
+  rip-dvd catalog-review apply-proposal <archive-id> --key <key> --stdin
+rip-dvd catalog-review apply-proposal <archive-id> --key <key> \
   --file <proposal.json>
 ```
 
@@ -244,9 +314,9 @@ reservations it will release, and returns an opaque `previewToken` bound to the
 exact plan and catalog revision.
 
 ```sh
-rip-dvd-operator catalog-review preview-completion <archive-id> \
+rip-dvd catalog-review preview-completion <archive-id> \
   --file <completion.json>
-rip-dvd-operator catalog-review complete <archive-id> \
+rip-dvd catalog-review complete <archive-id> \
   --key <key> \
   --revision <catalog-revision-from-preview> \
   --preview-token <preview-token> \
@@ -277,23 +347,23 @@ Unsupported actions have `state: "blocked"`, a reason and any related Encode
 Job. A blocked preview has no token and cannot be acknowledged.
 
 ```sh
-rip-dvd-operator disc-selection show <archive-id> <selection-id>
-rip-dvd-operator disc-selection create <archive-id> --key <key> \
+rip-dvd disc-selection show <archive-id> <selection-id>
+rip-dvd disc-selection create <archive-id> --key <key> \
   --media-item-id <media-item-id> --source-kind dvd_title --title-number 1
-rip-dvd-operator disc-selection update <archive-id> <selection-id> --key <key> \
+rip-dvd disc-selection update <archive-id> <selection-id> --key <key> \
   --label "Main feature"
-rip-dvd-operator disc-selection preview correct <archive-id> <selection-id> \
+rip-dvd disc-selection preview correct <archive-id> <selection-id> \
   --media-item-id <media-item-id> --source-kind main_feature
-rip-dvd-operator disc-selection correct <archive-id> <selection-id> --key <key> \
+rip-dvd disc-selection correct <archive-id> <selection-id> --key <key> \
   --revision <catalog-revision-from-preview> --preview-token <token-from-preview> \
   --acknowledge --media-item-id <media-item-id> --source-kind main_feature
-rip-dvd-operator disc-selection preview delete <archive-id> <selection-id>
-rip-dvd-operator disc-selection delete <archive-id> <selection-id> --key <key> \
+rip-dvd disc-selection preview delete <archive-id> <selection-id>
+rip-dvd disc-selection delete <archive-id> <selection-id> --key <key> \
   --revision <catalog-revision-from-preview> --preview-token <token-from-preview> \
   --acknowledge
-rip-dvd-operator disc-selection preview repair <archive-id> <selection-id> \
+rip-dvd disc-selection preview repair <archive-id> <selection-id> \
   --media-item-id <media-item-id> --source-kind dvd_title --title-number 1
-rip-dvd-operator disc-selection repair <archive-id> <selection-id> --key <key> \
+rip-dvd disc-selection repair <archive-id> <selection-id> --key <key> \
   --revision <catalog-revision-from-preview> --preview-token <token-from-preview> \
   --acknowledge --media-item-id <media-item-id> --source-kind dvd_title --title-number 1
 ```
@@ -326,10 +396,10 @@ provide at least one of `mediaItemId`, `sourceIdentity`, or `label`; set
 and acknowledgement stay as command options for every input form.
 
 ```sh
-rip-dvd-operator disc-selection create <archive-id> --key <key> \
+rip-dvd disc-selection create <archive-id> --key <key> \
   --json '{"mediaItemId":"<media-item-id>","sourceIdentity":{"kind":"dvd_title","titleNumber":1}}'
 printf '%s\n' '{"label":"Featurette"}' |
-  rip-dvd-operator disc-selection update <archive-id> <selection-id> --key <key> --stdin
+  rip-dvd disc-selection update <archive-id> <selection-id> --key <key> --stdin
 ```
 
 Invalid selection input exits 2 with a JSON error. Database or storage
@@ -341,14 +411,14 @@ returns the selected item's TMDB identity, revision, and maintenance state.
 Search results include ancestors and the number of referencing archives.
 
 ```sh
-rip-dvd-operator media-item search --query 'Example Film' --offset 0
-rip-dvd-operator media-item show <media-item-id>
-rip-dvd-operator media-item create --key <invocation-key> --kind movie --title 'Example Film' --year 2024
-rip-dvd-operator media-item create --key <invocation-key> --kind tv_show --title 'Example Show' --tmdb-type tv_show --tmdb-id 42
-rip-dvd-operator media-item preview update <media-item-id> --title 'Corrected Film'
-rip-dvd-operator media-item update <media-item-id> --key <invocation-key> --acknowledge '<preview-revision>' --title 'Corrected Film'
-rip-dvd-operator media-item preview delete <media-item-id>
-rip-dvd-operator media-item delete <media-item-id> --key <invocation-key> --acknowledge '<preview-revision>'
+rip-dvd media-item search --query 'Example Film' --offset 0
+rip-dvd media-item show <media-item-id>
+rip-dvd media-item create --key <invocation-key> --kind movie --title 'Example Film' --year 2024
+rip-dvd media-item create --key <invocation-key> --kind tv_show --title 'Example Show' --tmdb-type tv_show --tmdb-id 42
+rip-dvd media-item preview update <media-item-id> --title 'Corrected Film'
+rip-dvd media-item update <media-item-id> --key <invocation-key> --acknowledge '<preview-revision>' --title 'Corrected Film'
+rip-dvd media-item preview delete <media-item-id>
+rip-dvd media-item delete <media-item-id> --key <invocation-key> --acknowledge '<preview-revision>'
 ```
 
 Create and update also accept `--json '<object>'`, `--json -` for stdin, or
@@ -360,7 +430,7 @@ example, an episode can be created with:
 
 ```sh
 printf '%s\n' '{"kind":"episode","title":"Pilot","parentId":"<season-id>","episodeNumber":1}' |
-  rip-dvd-operator media-item create --key <invocation-key> --json -
+  rip-dvd media-item create --key <invocation-key> --json -
 ```
 
 Every mutation needs a key generated before submission with `generate-key`
@@ -392,19 +462,19 @@ names that conflict and exposes an eligible `enqueue-with-output-path`
 alternate requiring `outputPath`.
 
 Every Encode Job mutation requires a key created before submission. Generate
-one with `rip-dvd-operator generate-key` and keep it for retries. The same key
+one with `rip-dvd generate-key` and keep it for retries. The same key
 and inputs return the original result after a lost response or later status
 change. A key reused with different inputs returns `MUTATION_KEY_CONFLICT`.
 Each successful mutation returns `job.id` and `work: { kind: "encode-jobs", id }`.
 
 ```sh
-rip-dvd-operator encode-queue --encoding-profile-id <profile-id>
-rip-dvd-operator encode-resolve --encoding-profile-id <profile-id> --disc-selection-id <selection-id>
-rip-dvd-operator encode-enqueue --key <key> --disc-selection-id <selection-id> --encoding-profile-id <profile-id> --output-path /media/movies/example.mkv
-rip-dvd-operator encode-cancel --key <key> --encode-job-id <job-id>
-rip-dvd-operator encode-requeue --key <new-key> --encode-job-id <job-id>
-rip-dvd-operator encode-requeue-preview --encode-job-id <completed-job-id>
-rip-dvd-operator encode-requeue --key <new-key> --encode-job-id <completed-job-id> --revision <preview-revision> --acknowledge
+rip-dvd encode-queue --encoding-profile-id <profile-id>
+rip-dvd encode-resolve --encoding-profile-id <profile-id> --disc-selection-id <selection-id>
+rip-dvd encode-enqueue --key <key> --disc-selection-id <selection-id> --encoding-profile-id <profile-id> --output-path /media/movies/example.mkv
+rip-dvd encode-cancel --key <key> --encode-job-id <job-id>
+rip-dvd encode-requeue --key <new-key> --encode-job-id <job-id>
+rip-dvd encode-requeue-preview --encode-job-id <completed-job-id>
+rip-dvd encode-requeue --key <new-key> --encode-job-id <completed-job-id> --revision <preview-revision> --acknowledge
 ```
 
 An initial `encode-enqueue` is deduplicated by Disc Selection and Encoding

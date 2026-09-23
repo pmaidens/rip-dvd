@@ -241,16 +241,16 @@ class ComposeDeploymentTests(unittest.TestCase):
 
         expected = {
             "web": {
-                "mounts": [
-                    ("/data", False),
-                    ("/media/movies", True),
-                    ("/media/originals", True),
-                ],
+                "mounts": [("/data", False)],
                 "devices": None,
                 "target": "web",
             },
             "archive-worker": {
-                "mounts": [("/data", False), ("/media/originals", False)],
+                "mounts": [
+                    ("/data", False),
+                    ("/media/movies", True),
+                    ("/media/originals", False),
+                ],
                 "devices": [
                     {
                         "source": "/dev/sr0",
@@ -326,11 +326,31 @@ class ComposeDeploymentTests(unittest.TestCase):
             [
                 f"{ROOT}||compose --progress plain --profile maintenance build migrate",
                 f"{ROOT}||compose --progress plain --profile maintenance build backup",
+                f"{ROOT}||compose --progress plain --profile maintenance build operator-cli",
                 f"{ROOT}||compose --progress plain --profile maintenance build web",
                 f"{ROOT}||compose --progress plain --profile maintenance build archive-worker",
                 f"{ROOT}||compose --progress plain --profile maintenance build encode-worker",
             ],
         )
+
+    def test_operator_cli_uses_the_production_image_without_web(self) -> None:
+        service = compose_config("maintenance")["services"]["operator-cli"]
+
+        self.assertEqual(service["build"]["target"], "operator-cli")
+        self.assertEqual(
+            [
+                (volume["target"], volume.get("read_only", False))
+                for volume in service["volumes"]
+            ],
+            [
+                ("/data", False),
+                ("/media/movies", True),
+                ("/media/originals", True),
+            ],
+        )
+        self.assertNotIn("depends_on", service)
+        self.assertIn("TMDB_API_KEY", service["environment"])
+        self.assertIn("TMDB_API_TOKEN", service["environment"])
 
     def test_web_builder_has_archive_worker_test_dependencies_only_at_build_time(
         self,
@@ -401,7 +421,7 @@ class ComposeDeploymentTests(unittest.TestCase):
         )
 
         self.assertLess(backup, merge)
-        self.assertEqual(len(builds), 5)
+        self.assertEqual(len(builds), 6)
         self.assertLess(merge, builds[0])
         self.assertLess(builds[-1], first_stop)
         self.assertLess(first_stop, migrate)
@@ -1002,7 +1022,7 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertIn("scripts/migrate-database.mjs", deployment_runtime)
         self.assertIn("scripts/backup-sqlite.sh", deployment_runtime)
         self.assertIn("USER node", deployment_runtime)
-        self.assertIn("lsdvd util-linux", archive_runtime)
+        self.assertIn("lsdvd sg3-utils util-linux", archive_runtime)
         self.assertIn("handbrake-cli", archive_runtime)
         self.assertIn("handbrake-cli ffmpeg util-linux", encode_runtime)
         self.assertNotIn("lsdvd", encode_runtime)

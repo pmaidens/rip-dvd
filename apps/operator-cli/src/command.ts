@@ -84,99 +84,115 @@ function isRecoveryCommand(name: string): name is RecoveryCommand {
   return Object.hasOwn(recoveryCommands, name);
 }
 
+const retiredCommandGuidance = {
+  interactive:
+    "Bare 'rip-dvd' now shows JSON help. Inspect Detected Discs, then use submit-archive-request.",
+  rip: "Use submit-archive-request for a Detected Disc, then inspect or wait for the Archive Request.",
+  scan: "Disc Inspection runs in the Archive Worker. Use inspect optical-drives, detected-discs, or disc-inspections.",
+  title: "Use Catalog Review and Disc Selection commands after preservation.",
+  extras: "Use Catalog Review and Disc Selection commands after preservation.",
+  queue: "Use inspect for Archive Requests and jobs, or encode-queue for encoding work.",
+  encode: "Use encode-queue, encode-enqueue, encode-requeue, and encode-cancel. The Encode Worker executes queued work.",
+  join: "This media-file utility has no JSON CLI replacement and is outside the supported operator workflows.",
+} as const;
+
+function isRetiredCommand(name: string): name is keyof typeof retiredCommandGuidance {
+  return Object.hasOwn(retiredCommandGuidance, name);
+}
+
 const commandDefinitions = [
   {
     name: "generate-key",
     description: "Generate a mutation key without submitting work.",
-    usage: "rip-dvd-operator generate-key",
+    usage: "rip-dvd generate-key",
     inputs: { arguments: [], options: [] },
-    example: "rip-dvd-operator generate-key",
+    example: "rip-dvd generate-key",
   },
   {
     name: "submit-archive-request",
     description: "Submit an Archive Request for a Detected Disc.",
-    usage: "rip-dvd-operator submit-archive-request --key <key> --detected-disc-id <id>",
+    usage: "rip-dvd submit-archive-request --key <key> --detected-disc-id <id>",
     inputs: { arguments: [], options: ["--key", "--detected-disc-id"] },
-    example: "rip-dvd-operator submit-archive-request --key 00000000-0000-4000-8000-000000000001 --detected-disc-id <id>",
+    example: "rip-dvd submit-archive-request --key 00000000-0000-4000-8000-000000000001 --detected-disc-id <id>",
   },
   {
     name: "request-rearchive",
     description: "Request a fresh archive while retaining a prior Original Disc Archive.",
-    usage: "rip-dvd-operator request-rearchive --key <key> --source-archive-id <id>",
+    usage: "rip-dvd request-rearchive --key <key> --source-archive-id <id>",
     inputs: { arguments: [], options: ["--key", "--source-archive-id"] },
-    example: "rip-dvd-operator request-rearchive --key 00000000-0000-4000-8000-000000000001 --source-archive-id <id>",
+    example: "rip-dvd request-rearchive --key 00000000-0000-4000-8000-000000000001 --source-archive-id <id>",
   },
   ...Object.entries(recoveryCommands)
     .map(([name, command]) => ({
       name,
       description: command.description,
-      usage: `rip-dvd-operator ${name} --key <key> ${command.targetFlag} <id>`,
+      usage: `rip-dvd ${name} --key <key> ${command.targetFlag} <id>`,
       inputs: { arguments: [], options: ["--key", command.targetFlag] },
-      example: `rip-dvd-operator ${name} --key 00000000-0000-4000-8000-000000000001 ${command.targetFlag} <id>`,
+      example: `rip-dvd ${name} --key 00000000-0000-4000-8000-000000000001 ${command.targetFlag} <id>`,
     })),
   {
     name: "submit-filesystem-verification",
     description: "Queue accessibility verification for an archive or Encode Job output.",
-    usage: "rip-dvd-operator submit-filesystem-verification --key <key> --target <original_disc_archive|encode_job_output> --id <id>",
+    usage: "rip-dvd submit-filesystem-verification --key <key> --target <original_disc_archive|encode_job_output> --id <id>",
     inputs: { arguments: [], options: ["--key", "--target", "--id"] },
-    example: "rip-dvd-operator submit-filesystem-verification --key 00000000-0000-4000-8000-000000000001 --target original_disc_archive --id <id>",
+    example: "rip-dvd submit-filesystem-verification --key 00000000-0000-4000-8000-000000000001 --target original_disc_archive --id <id>",
   },
   {
     name: "submit-archive-audit",
     description: "Queue a bounded, read-only Original Disc Archive audit.",
-    usage: "rip-dvd-operator submit-archive-audit --key <key> [--limit 1..1000] [--concurrency 1..8] [--file-timeout-ms 1..30000] [--runtime-timeout-ms 1..600000]",
+    usage: "rip-dvd submit-archive-audit --key <key> [--limit 1..1000] [--concurrency 1..8] [--file-timeout-ms 1..30000] [--runtime-timeout-ms 1..600000]",
     inputs: {
       arguments: [],
       options: ["--key", "--limit", "--concurrency", "--file-timeout-ms", "--runtime-timeout-ms"],
     },
-    example: "rip-dvd-operator submit-archive-audit --key 00000000-0000-4000-8000-000000000001 --limit 100",
+    example: "rip-dvd submit-archive-audit --key 00000000-0000-4000-8000-000000000001 --limit 100",
   },
   {
     name: "encode-queue",
     description: "Read Encode Job options and paged history.",
-    usage: "rip-dvd-operator encode-queue [--history-group not_encoded|re_encode] [--query <text>] [--encoding-profile-id <id>] [--selection-offset <n>] [--profile-offset <n>]",
+    usage: "rip-dvd encode-queue [--history-group not_encoded|re_encode] [--query <text>] [--encoding-profile-id <id>] [--selection-offset <n>] [--profile-offset <n>]",
     inputs: { arguments: [], options: ["--history-group", "--query", "--encoding-profile-id", "--selection-offset", "--profile-offset"] },
-    example: "rip-dvd-operator encode-queue --history-group re_encode",
+    example: "rip-dvd encode-queue --history-group re_encode",
   },
   {
     name: "encode-resolve",
     description: "Resolve selected Disc Selections against one Encoding Profile.",
-    usage: "rip-dvd-operator encode-resolve --encoding-profile-id <id> --disc-selection-id <id> [--disc-selection-id <id> ...]",
+    usage: "rip-dvd encode-resolve --encoding-profile-id <id> --disc-selection-id <id> [--disc-selection-id <id> ...]",
     inputs: { arguments: [], options: ["--encoding-profile-id", "--disc-selection-id (repeat up to 100)"] },
-    example: "rip-dvd-operator encode-resolve --encoding-profile-id <id> --disc-selection-id <id>",
+    example: "rip-dvd encode-resolve --encoding-profile-id <id> --disc-selection-id <id>",
   },
   {
     name: "encode-enqueue",
     description: "Enqueue an Encode Job, deduplicating the initial logical job.",
-    usage: "rip-dvd-operator encode-enqueue --key <key> --disc-selection-id <id> --encoding-profile-id <id> --output-path <absolute .mkv path> [--priority <integer>]",
+    usage: "rip-dvd encode-enqueue --key <key> --disc-selection-id <id> --encoding-profile-id <id> --output-path <absolute .mkv path> [--priority <integer>]",
     inputs: { arguments: [], options: ["--key", "--disc-selection-id", "--encoding-profile-id", "--output-path", "--priority"] },
-    example: "rip-dvd-operator encode-enqueue --key 00000000-0000-4000-8000-000000000001 --disc-selection-id <id> --encoding-profile-id <id> --output-path /media/movies/example.mkv",
+    example: "rip-dvd encode-enqueue --key 00000000-0000-4000-8000-000000000001 --disc-selection-id <id> --encoding-profile-id <id> --output-path /media/movies/example.mkv",
   },
   {
     name: "encode-requeue-preview",
     description: "Preview the current consequences of requeueing an Encode Job.",
-    usage: "rip-dvd-operator encode-requeue-preview --encode-job-id <id>",
+    usage: "rip-dvd encode-requeue-preview --encode-job-id <id>",
     inputs: { arguments: [], options: ["--encode-job-id"] },
-    example: "rip-dvd-operator encode-requeue-preview --encode-job-id <id>",
+    example: "rip-dvd encode-requeue-preview --encode-job-id <id>",
   },
   {
     name: "encode-requeue",
     description: "Explicitly requeue a terminal Encode Job, optionally resolving a failed output conflict.",
-    usage: "rip-dvd-operator encode-requeue --key <key> --encode-job-id <id> [--output-path <absolute .mkv path>] [--priority <integer>] [--revision <preview-revision> --acknowledge]",
+    usage: "rip-dvd encode-requeue --key <key> --encode-job-id <id> [--output-path <absolute .mkv path>] [--priority <integer>] [--revision <preview-revision> --acknowledge]",
     inputs: { arguments: [], options: ["--key", "--encode-job-id", "--output-path", "--priority", "--revision", "--acknowledge"] },
-    example: "rip-dvd-operator encode-requeue --key 00000000-0000-4000-8000-000000000001 --encode-job-id <id>",
+    example: "rip-dvd encode-requeue --key 00000000-0000-4000-8000-000000000001 --encode-job-id <id>",
   },
   {
     name: "encode-cancel",
     description: "Cancel queued work or request cooperative cancellation of running work.",
-    usage: "rip-dvd-operator encode-cancel --key <key> --encode-job-id <id>",
+    usage: "rip-dvd encode-cancel --key <key> --encode-job-id <id>",
     inputs: { arguments: [], options: ["--key", "--encode-job-id"] },
-    example: "rip-dvd-operator encode-cancel --key 00000000-0000-4000-8000-000000000001 --encode-job-id <id>",
+    example: "rip-dvd encode-cancel --key 00000000-0000-4000-8000-000000000001 --encode-job-id <id>",
   },
   {
     name: "catalog-review",
     description: "Inspect, preview, or complete a Catalog Review and review Mapping Proposals.",
-    usage: "rip-dvd-operator catalog-review <show|suggest|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive> <archive-id> [options]",
+    usage: "rip-dvd catalog-review <show|suggest|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive> <archive-id> [options]",
     inputs: {
       arguments: ["show|suggest|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive", "archive-id"],
       options: [
@@ -191,71 +207,71 @@ const commandDefinitions = [
         "accept-rearchive: --key <key> --revision <revision> --source-revision <revision> --preview-token <token> --acknowledge and structured input",
       ],
     },
-    example: "rip-dvd-operator catalog-review show <archive-id>",
+    example: "rip-dvd catalog-review show <archive-id>",
   },
   {
     name: "disc-selection",
     description: "Inspect and change an eligible Disc Selection.",
-    usage: "rip-dvd-operator disc-selection <show|preview|create|update|repair|correct|delete> [action] <archive-id> [selection-id] [options]",
+    usage: "rip-dvd disc-selection <show|preview|create|update|repair|correct|delete> [action] <archive-id> [selection-id] [options]",
     inputs: {
       arguments: ["action (required after preview)", "archive-id", "selection-id (except create)"],
       options: ["mutations: --key <key>", "mapping updates, repair, correct, delete: --revision <catalog-revision> --preview-token <token> --acknowledge",
         "selection input: flags or --json <object> or --stdin or --file <path>"],
     },
-    example: "rip-dvd-operator disc-selection create <archive-id> --key <key> --media-item-id <id> --source-kind main_feature",
+    example: "rip-dvd disc-selection create <archive-id> --key <key> --media-item-id <id> --source-kind main_feature",
   },
   {
     name: "list-encoding-profiles",
     category: "encoding_profile",
     description: "List DVD video Encoding Profile versions and eligibility.",
-    usage: "rip-dvd-operator list-encoding-profiles",
+    usage: "rip-dvd list-encoding-profiles",
     inputs: { arguments: [], options: [] },
-    example: "rip-dvd-operator list-encoding-profiles",
+    example: "rip-dvd list-encoding-profiles",
   },
   {
     name: "create-encoding-profile",
     category: "encoding_profile",
     description: "Create an active DVD video Encoding Profile.",
-    usage: "rip-dvd-operator create-encoding-profile --key <key> --profile-key <name> --display-name <name> --preset <HandBrake preset>",
+    usage: "rip-dvd create-encoding-profile --key <key> --profile-key <name> --display-name <name> --preset <HandBrake preset>",
     inputs: { arguments: [], options: ["--key", "--profile-key", "--display-name", "--preset"] },
-    example: "rip-dvd-operator create-encoding-profile --key 00000000-0000-4000-8000-000000000001 --profile-key dvd-example --display-name 'DVD example' --preset 'Fast 480p30'",
+    example: "rip-dvd create-encoding-profile --key 00000000-0000-4000-8000-000000000001 --profile-key dvd-example --display-name 'DVD example' --preset 'Fast 480p30'",
   },
   {
     name: "version-encoding-profile",
     category: "encoding_profile",
     description: "Create an inactive version of an Encoding Profile.",
-    usage: "rip-dvd-operator version-encoding-profile --key <key> --source-profile-id <id> --preset <HandBrake preset>",
+    usage: "rip-dvd version-encoding-profile --key <key> --source-profile-id <id> --preset <HandBrake preset>",
     inputs: { arguments: [], options: ["--key", "--source-profile-id", "--preset"] },
-    example: "rip-dvd-operator version-encoding-profile --key 00000000-0000-4000-8000-000000000002 --source-profile-id <id> --preset 'HQ 480p30 Surround'",
+    example: "rip-dvd version-encoding-profile --key 00000000-0000-4000-8000-000000000002 --source-profile-id <id> --preset 'HQ 480p30 Surround'",
   },
   {
     name: "preview-encoding-profile-state",
     category: "encoding_profile",
     description: "Preview activation or deactivation and obtain its revision.",
-    usage: "rip-dvd-operator preview-encoding-profile-state --id <id> --active <true|false>",
+    usage: "rip-dvd preview-encoding-profile-state --id <id> --active <true|false>",
     inputs: { arguments: [], options: ["--id", "--active"] },
-    example: "rip-dvd-operator preview-encoding-profile-state --id <id> --active true",
+    example: "rip-dvd preview-encoding-profile-state --id <id> --active true",
   },
   {
     name: "activate-encoding-profile",
     category: "encoding_profile",
     description: "Activate a version using an acknowledged preview revision.",
-    usage: "rip-dvd-operator activate-encoding-profile --key <key> --id <id> --revision <revision> --acknowledge",
+    usage: "rip-dvd activate-encoding-profile --key <key> --id <id> --revision <revision> --acknowledge",
     inputs: { arguments: [], options: ["--key", "--id", "--revision", "--acknowledge"] },
-    example: "rip-dvd-operator activate-encoding-profile --key 00000000-0000-4000-8000-000000000003 --id <id> --revision <revision> --acknowledge",
+    example: "rip-dvd activate-encoding-profile --key 00000000-0000-4000-8000-000000000003 --id <id> --revision <revision> --acknowledge",
   },
   {
     name: "deactivate-encoding-profile",
     category: "encoding_profile",
     description: "Deactivate a version using an acknowledged preview revision.",
-    usage: "rip-dvd-operator deactivate-encoding-profile --key <key> --id <id> --revision <revision> --acknowledge",
+    usage: "rip-dvd deactivate-encoding-profile --key <key> --id <id> --revision <revision> --acknowledge",
     inputs: { arguments: [], options: ["--key", "--id", "--revision", "--acknowledge"] },
-    example: "rip-dvd-operator deactivate-encoding-profile --key 00000000-0000-4000-8000-000000000004 --id <id> --revision <revision> --acknowledge",
+    example: "rip-dvd deactivate-encoding-profile --key 00000000-0000-4000-8000-000000000004 --id <id> --revision <revision> --acknowledge",
   },
   {
     name: "media-item",
     description: "Search and maintain Media Items with keyed changes.",
-    usage: "rip-dvd-operator media-item <search|show|preview|create|update|delete> [options]",
+    usage: "rip-dvd media-item <search|show|preview|create|update|delete> [options]",
     inputs: {
       arguments: ["action", "media-item-id for show, preview, update, and delete"],
       options: [
@@ -267,55 +283,55 @@ const commandDefinitions = [
         "delete: <id> --key <key> --acknowledge <preview revision>",
       ],
     },
-    example: "rip-dvd-operator media-item create --key 00000000-0000-4000-8000-000000000001 --kind movie --title 'Example Film'",
+    example: "rip-dvd media-item create --key 00000000-0000-4000-8000-000000000001 --kind movie --title 'Example Film'",
   },
   {
     name: "health",
     description: "Check application database health.",
-    usage: "rip-dvd-operator health",
+    usage: "rip-dvd health",
     inputs: { arguments: [], options: [] },
-    example: "rip-dvd-operator health",
+    example: "rip-dvd health",
   },
   {
     name: "readiness",
     description: "Inspect active work and Optical Drives for deployment readiness.",
-    usage: "rip-dvd-operator readiness",
+    usage: "rip-dvd readiness",
     inputs: { arguments: [], options: [] },
-    example: "rip-dvd-operator readiness",
+    example: "rip-dvd readiness",
   },
   {
     name: "inspect",
     description: "List operational records or inspect one record and its evidence.",
-    usage: "rip-dvd-operator inspect <kind> [id] [--limit 1..100]",
+    usage: "rip-dvd inspect <kind> [id] [--limit 1..100]",
     inputs: {
       arguments: [`kind: ${OPERATION_KINDS.join(", ")}`, "id (optional)"],
       options: ["--limit 1..100 (lists only; default 50)"],
     },
-    example: "rip-dvd-operator inspect disc-inspections synthetic-id",
+    example: "rip-dvd inspect disc-inspections synthetic-id",
   },
   {
     name: "wait",
     description: "Wait for existing background work without changing it.",
-    usage: "rip-dvd-operator wait <kind> <id> --timeout-ms <0..3600000> [--poll-ms 100..5000]",
+    usage: "rip-dvd wait <kind> <id> --timeout-ms <0..3600000> [--poll-ms 100..5000]",
     inputs: {
       arguments: ["kind", "id"],
       options: ["--timeout-ms 0..3600000 (required)", "--poll-ms 100..5000 (default 500)"],
     },
-    example: "rip-dvd-operator wait archive-requests synthetic-id --timeout-ms 30000",
+    example: "rip-dvd wait archive-requests synthetic-id --timeout-ms 30000",
   },
   {
     name: "commands",
     description: "List supported command names.",
-    usage: "rip-dvd-operator commands",
+    usage: "rip-dvd commands",
     inputs: { arguments: [], options: [] },
-    example: "rip-dvd-operator commands",
+    example: "rip-dvd commands",
   },
   {
     name: "help",
     description: "Show command usage and examples.",
-    usage: "rip-dvd-operator help [command]",
+    usage: "rip-dvd help [command]",
     inputs: { arguments: ["command (optional)"], options: [] },
-    example: "rip-dvd-operator help health",
+    example: "rip-dvd help health",
   },
 ] as const;
 
@@ -387,9 +403,9 @@ function help(command?: string) {
   if (command === undefined) {
     return {
       schemaVersion: 1,
-      usage: "rip-dvd-operator <command>",
+      usage: "rip-dvd <command>",
       commands: commandDefinitions,
-      help: "rip-dvd-operator help <command>",
+      help: "rip-dvd help <command>",
     };
   }
   const definition = commandDefinitions.find((item) => item.name === command);
@@ -1127,6 +1143,13 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
       }
       emit(io.stdout, help(rest[0]));
       return 0;
+    }
+    if (isRetiredCommand(name)) {
+      throw new CommandFailure(
+        "LEGACY_COMMAND_RETIRED",
+        `Legacy command '${name}' is retired. ${retiredCommandGuidance[name]}`,
+        2,
+      );
     }
     if (name === "commands") {
       if (rest.length > 0) {

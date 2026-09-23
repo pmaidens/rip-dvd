@@ -1,6 +1,36 @@
-#!/usr/bin/env python3
-from rip_dvd.cli import main
+#!/bin/sh
 
+set -eu
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+repository_root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+invocation_directory="$(pwd -P)"
+file_mount=""
+expects_file_path=false
+
+for argument in "$@"; do
+    if [ "$expects_file_path" = true ]; then
+        case "$argument" in
+            /*)
+                host_file="$argument"
+                container_file="$argument"
+                ;;
+            *)
+                host_file="$invocation_directory/$argument"
+                container_file="/app/$argument"
+                ;;
+        esac
+        file_mount="$host_file:$container_file:ro"
+        expects_file_path=false
+    elif [ "$argument" = "--file" ]; then
+        expects_file_path=true
+    fi
+done
+
+cd "$repository_root"
+
+if [ -n "$file_mount" ]; then
+    exec docker compose --profile maintenance run --rm --no-deps --no-TTY \
+        --volume "$file_mount" operator-cli "$@"
+fi
+
+exec docker compose --profile maintenance run --rm --no-deps --no-TTY operator-cli "$@"

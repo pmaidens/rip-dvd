@@ -926,10 +926,10 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
   expect(await runCommand([], io)).toBe(0);
   expect(JSON.parse(stdout.pop()!)).toMatchObject({
     schemaVersion: 1,
-    usage: "rip-dvd-operator <command>",
+    usage: "rip-dvd <command>",
     commands: expect.arrayContaining([
       expect.objectContaining({ name: "health", inputs: { arguments: [], options: [] } }),
-      expect.objectContaining({ name: "readiness", example: "rip-dvd-operator readiness" }),
+      expect.objectContaining({ name: "readiness", example: "rip-dvd readiness" }),
     ]),
   });
   expect(await runCommand(["commands"], io)).toBe(0);
@@ -969,7 +969,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
   });
   expect(await runCommand(["health", "--help"], io)).toBe(0);
   expect(JSON.parse(stdout.pop()!)).toMatchObject({
-    command: { name: "health", usage: "rip-dvd-operator health" },
+    command: { name: "health", usage: "rip-dvd health" },
   });
   expect(await runCommand(["health", "--unexpected"], io)).toBe(2);
   expect(JSON.parse(stdout.pop()!)).toEqual({
@@ -979,6 +979,16 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
   expect(JSON.parse(stdout.pop()!)).toEqual({
     error: { code: "UNKNOWN_COMMAND", message: "Unknown command." },
   });
+
+  for (const command of ["interactive", "rip", "scan", "title", "extras", "queue", "encode", "join"]) {
+    expect(await runCommand([command], io)).toBe(2);
+    expect(JSON.parse(stdout.pop()!)).toMatchObject({
+      error: {
+        code: "LEGACY_COMMAND_RETIRED",
+        message: expect.stringContaining(`Legacy command '${command}' is retired.`),
+      },
+    });
+  }
 });
 
 it("returns a stable failure without exposing database errors", async () => {
@@ -1287,6 +1297,34 @@ it("runs as a separate process without the web service", () => {
   expect(invalid.stderr).toBe("health takes no arguments.\n");
   expect(JSON.parse(invalid.stdout)).toEqual({
     error: { code: "INVALID_ARGUMENTS", message: "health takes no arguments." },
+  });
+
+  const missingKey = invoke("submit-archive-audit");
+  expect(missingKey.status).toBe(2);
+  expect(JSON.parse(missingKey.stdout)).toMatchObject({
+    error: { code: "INVALID_MUTATION_KEY" },
+  });
+
+  const malformedInput = invoke(
+    "media-item", "create", "--key", "synthetic-process-malformed-input-key", "--json", "{",
+  );
+  expect(malformedInput.status).toBe(2);
+  expect(JSON.parse(malformedInput.stdout)).toMatchObject({
+    error: { code: "INVALID_ARGUMENTS" },
+  });
+
+  const audit = invoke(
+    "submit-archive-audit", "--key", "synthetic-process-archive-audit-key",
+    "--limit", "1",
+  );
+  expect(audit.status).toBe(0);
+  const auditResult = JSON.parse(audit.stdout) as { archiveAuditRun: { id: string } };
+  const auditStatus = invoke(
+    "inspect", "archive-audits", auditResult.archiveAuditRun.id,
+  );
+  expect(auditStatus.status).toBe(0);
+  expect(JSON.parse(auditStatus.stdout)).toMatchObject({
+    item: { id: auditResult.archiveAuditRun.id, status: "queued" },
   });
 
   const noConfig = spawnSync(process.execPath, [entry, "health"], {
