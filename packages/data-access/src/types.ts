@@ -1369,6 +1369,11 @@ export interface CatalogAccess {
   planRearchiveAcceptance(
     input: RearchiveAcceptanceInput,
   ): RearchiveAcceptancePlan;
+  listRearchiveEncodeReplacementPlans(options: {
+    targetArchiveId: OriginalDiscArchiveId;
+    limit: number;
+    offset?: number;
+  }): RearchiveEncodeReplacementPlan[];
   recordRearchiveAcceptancePreviewDecision(
     input: RearchiveAcceptancePreviewDecisionInput,
   ): void;
@@ -1818,6 +1823,7 @@ export type SnapshotCatalogAccess = Pick<
   | "listDiscSelections"
   | "readRearchiveMappingProposal"
   | "planRearchiveAcceptance"
+  | "listRearchiveEncodeReplacementPlans"
   | "getCatalogReviewCoverage"
   | "getCatalogReviewActionAvailability"
   | "listDiscSelectionSupersessions"

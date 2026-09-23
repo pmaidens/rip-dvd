@@ -57,6 +57,10 @@ Nonterminal Archive Requests and Encode Job attempts remain bounded before
 recent terminal history is added.
 Pending catalog review pages use an archived-time and archive-ID keyset cursor,
 so completing a visible review does not shift or duplicate later pages.
+Saved Re-archive Mapping Proposals page replacement Encode Job candidates with
+the limit and offset applied inside the recursive lineage query; the shared
+Catalog Review read never materializes the complete replacement history merely
+to display one page.
 
 Catalog review is explicit rather than inferred from the first Disc Selection.
 New Original Disc Archives remain in the review queue while a user builds a

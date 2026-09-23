@@ -307,6 +307,12 @@ it("shows prior-lineage Encode Jobs as optional Re-archive Acceptance replacemen
       })),
     });
 
+    access.catalog.planRearchiveAcceptance = () => {
+      throw new Error(
+        "Catalog Review must use the bounded replacement candidate read",
+      );
+    };
+
     const review = operations.catalogReview(freshArchive.id, {
       discSelectionOffset: 0,
       correctionHistoryOffset: 0,

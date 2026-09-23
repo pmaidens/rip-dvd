@@ -233,6 +233,7 @@ import type {
   RearchiveMappingProposalReview,
   RearchiveAcceptanceInput,
   RearchiveAcceptancePlan,
+  RearchiveEncodeReplacementPlan,
   RetainedEncodeOutputId,
   RunningArchiveJob,
   RunningEncodeJob,
@@ -3750,6 +3751,52 @@ export function createDataAccessInternal(
     order by predecessor.created_at, predecessor.id
     limit ? offset ?
   `);
+  const prepareRearchiveEncodeReplacementPlanStatement = () => sqlite.prepare(`
+    with recursive rearchive_lineage(
+      source_disc_selection_id,
+      lineage_disc_selection_id
+    ) as (
+      select
+        proposal_item.source_disc_selection_id,
+        proposal_item.source_disc_selection_id
+      from rearchive_mapping_proposal_items as proposal_item
+      where proposal_item.target_archive_id = ?
+      union
+      select
+        rearchive_lineage.source_disc_selection_id,
+        supersession.superseded_disc_selection_id
+      from rearchive_lineage
+      inner join disc_selection_supersessions as supersession
+        on supersession.replacement_disc_selection_id =
+          rearchive_lineage.lineage_disc_selection_id
+    )
+    select
+      predecessor.id as predecessor_encode_job_id,
+      min(rearchive_lineage.source_disc_selection_id) as
+        source_disc_selection_id,
+      count(distinct rearchive_lineage.source_disc_selection_id) as
+        source_disc_selection_count,
+      predecessor.encoding_profile_id as proposed_encoding_profile_id,
+      predecessor.output_path as proposed_output_path,
+      predecessor.status as predecessor_status,
+      predecessor.partial_cleanup_output_path,
+      predecessor.partial_cleanup_claim_token,
+      predecessor.partial_cleanup_lease_token,
+      predecessor.publication_pending,
+      predecessor.publication_completion_pending,
+      predecessor.reserves_output_path,
+      predecessor.replace_existing_output
+    from rearchive_lineage
+    inner join encode_jobs as predecessor
+      on predecessor.disc_selection_id =
+        rearchive_lineage.lineage_disc_selection_id
+    left join encode_jobs as replacement
+      on replacement.predecessor_encode_job_id = predecessor.id
+    where replacement.id is null
+    group by predecessor.id
+    order by predecessor.created_at, predecessor.id
+    limit ? offset ?
+  `);
   const releaseCorrectedFailedReservationsStatement = sqlite.prepare(`
     with recursive correction_lineage(ancestor_disc_selection_id) as (
       select
@@ -3782,6 +3829,36 @@ export function createDataAccessInternal(
         from correction_lineage
       )
   `);
+
+  interface EncodeReplacementReadinessRow {
+    predecessor_status: EncodeJobStatus;
+    partial_cleanup_output_path: string | null;
+    partial_cleanup_claim_token: EncodeJobClaimToken | null;
+    partial_cleanup_lease_token: EncodeJobCleanupClaimToken | null;
+    publication_pending: number;
+    publication_completion_pending: number;
+    reserves_output_path: number;
+    replace_existing_output: number;
+  }
+
+  function replacementReadiness(row: EncodeReplacementReadinessRow) {
+    const predecessorReady = isEncodeJobSafelyTerminal({
+      status: row.predecessor_status,
+      partialCleanupOutputPath: row.partial_cleanup_output_path,
+      partialCleanupClaimToken: row.partial_cleanup_claim_token,
+      partialCleanupLeaseToken: row.partial_cleanup_lease_token,
+      publicationPending: row.publication_pending === 1,
+      publicationCompletionPending:
+        row.publication_completion_pending === 1,
+    });
+    return {
+      predecessorReady,
+      releasesFailedOutputReservation:
+        row.predecessor_status === "failed" && predecessorReady &&
+        row.reserves_output_path === 1 &&
+        row.replace_existing_output === 0,
+    };
+  }
 
   function readCorrectedEncodeReplacementPlans(input: {
     originalDiscArchiveId: OriginalDiscArchiveId;
@@ -3817,27 +3894,52 @@ export function createDataAccessInternal(
       reserves_output_path: number;
       replace_existing_output: number;
     }>;
+    return rows.map((row) => ({
+      predecessorEncodeJobId: row.predecessor_encode_job_id,
+      replacementDiscSelectionId: row.replacement_disc_selection_id,
+      proposedEncodingProfileId: row.proposed_encoding_profile_id,
+      proposedOutputPath: row.proposed_output_path,
+      predecessorStatus: row.predecessor_status,
+      ...replacementReadiness(row),
+    }));
+  }
+
+  function readRearchiveEncodeReplacementPlans(input: {
+    targetArchiveId: OriginalDiscArchiveId;
+    limit: number;
+    offset?: number;
+  }): RearchiveEncodeReplacementPlan[] {
+    const limit = requirePositiveSafeInteger(input.limit, "limit");
+    if (limit > MAX_CORRECTED_ENCODE_REPLACEMENT_PLAN_PAGE_SIZE) {
+      throw new DomainInvariantError(
+        `Re-archive replacement plan limit cannot exceed ${MAX_CORRECTED_ENCODE_REPLACEMENT_PLAN_PAGE_SIZE}`,
+      );
+    }
+    const offset = optionalSafeInteger(input.offset, "offset", 0) ?? 0;
+    const rows = prepareRearchiveEncodeReplacementPlanStatement().all(
+      input.targetArchiveId,
+      limit,
+      offset,
+    ) as unknown as Array<EncodeReplacementReadinessRow & {
+      predecessor_encode_job_id: EncodeJobId;
+      source_disc_selection_id: DiscSelectionId;
+      source_disc_selection_count: number;
+      proposed_encoding_profile_id: EncodingProfileId;
+      proposed_output_path: string;
+    }>;
     return rows.map((row) => {
-      const predecessorReady = isEncodeJobSafelyTerminal({
-        status: row.predecessor_status,
-        partialCleanupOutputPath: row.partial_cleanup_output_path,
-        partialCleanupClaimToken: row.partial_cleanup_claim_token,
-        partialCleanupLeaseToken: row.partial_cleanup_lease_token,
-        publicationPending: row.publication_pending === 1,
-        publicationCompletionPending:
-          row.publication_completion_pending === 1,
-      });
+      if (row.source_disc_selection_count !== 1) {
+        throw new DomainInvariantError(
+          "Re-archive replacement lineage reaches more than one reviewed mapping",
+        );
+      }
       return {
         predecessorEncodeJobId: row.predecessor_encode_job_id,
-        replacementDiscSelectionId: row.replacement_disc_selection_id,
+        sourceDiscSelectionId: row.source_disc_selection_id,
         proposedEncodingProfileId: row.proposed_encoding_profile_id,
         proposedOutputPath: row.proposed_output_path,
         predecessorStatus: row.predecessor_status,
-        predecessorReady,
-        releasesFailedOutputReservation:
-          row.predecessor_status === "failed" && predecessorReady &&
-          row.reserves_output_path === 1 &&
-          row.replace_existing_output === 0,
+        ...replacementReadiness(row),
       };
     });
   }
@@ -5917,6 +6019,8 @@ export function createDataAccessInternal(
             ),
           planRearchiveAcceptance: (input) =>
             access.catalog.planRearchiveAcceptance(input),
+          listRearchiveEncodeReplacementPlans: (options) =>
+            access.catalog.listRearchiveEncodeReplacementPlans(options),
           getCatalogReviewCoverage: (originalDiscArchiveId) =>
             access.catalog.getCatalogReviewCoverage(originalDiscArchiveId),
           getCatalogReviewActionAvailability: (originalDiscArchiveId) =>
@@ -8494,6 +8598,10 @@ export function createDataAccessInternal(
 
       planRearchiveAcceptance(input) {
         return planRearchiveAcceptance(database, input);
+      },
+
+      listRearchiveEncodeReplacementPlans(options) {
+        return readRearchiveEncodeReplacementPlans(options);
       },
 
       recordRearchiveAcceptancePreviewDecision(input) {

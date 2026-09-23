@@ -323,30 +323,19 @@ export function readCatalogReview(
         maintenance,
       ]),
     );
-    const rearchiveAcceptancePlan =
+    const replacementJobs =
       rearchiveProposal?.persisted === true &&
         rearchiveProposal.state === "ready"
-        ? snapshot.catalog.planRearchiveAcceptance({
+        ? snapshot.catalog.listRearchiveEncodeReplacementPlans({
           targetArchiveId: id,
-          catalogRevision: new Date(rearchiveProposal.catalogRevision),
-          sourceCatalogRevision: new Date(
-            rearchiveProposal.sourceCatalogRevision,
-          ),
-          replacements: [],
+          limit: CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT + 1,
+          offset: replacementOffset,
         })
-        : null;
-    const allRearchiveReplacementJobs =
-      rearchiveAcceptancePlan?.availableReplacementEncodes ?? null;
-    const replacementJobs = allRearchiveReplacementJobs === null
-      ? snapshot.catalog.listCorrectedEncodeReplacementPlans({
-        originalDiscArchiveId: id,
-        limit: CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT + 1,
-        offset: replacementOffset,
-      })
-      : allRearchiveReplacementJobs.slice(
-        replacementOffset,
-        replacementOffset + CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT + 1,
-      );
+        : snapshot.catalog.listCorrectedEncodeReplacementPlans({
+          originalDiscArchiveId: id,
+          limit: CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT + 1,
+          offset: replacementOffset,
+        });
     const hasNextReplacementJobs = replacementJobs.length >
       CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT;
     const replacementJobPage = replacementJobs.slice(

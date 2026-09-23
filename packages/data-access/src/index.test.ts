@@ -5542,6 +5542,10 @@ describe("data-access facade", () => {
       originalDiscArchiveId: archive.id,
       limit: 102,
     })).toThrow("Corrected Encode replacement plan limit cannot exceed 101");
+    expect(() => access.catalog.listRearchiveEncodeReplacementPlans({
+      targetArchiveId: archive.id,
+      limit: 102,
+    })).toThrow("Re-archive replacement plan limit cannot exceed 101");
     access.close();
   });
 
