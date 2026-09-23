@@ -963,9 +963,23 @@ export function rearchiveAcceptancePreviewConfirmation(
           (job) => `- ${job.id} (${job.status})`,
         ),
       ].join("\n");
+  const selectedReplacements =
+    preview.consequences.replacementEncodes.length === 0
+      ? "No corrected replacement encodes are selected."
+      : [
+          "Selected corrected replacement encodes:",
+          ...preview.consequences.replacementEncodes.map(
+            (replacement) =>
+              `- ${replacement.predecessorEncodeJobId} -> ${replacement.outputPath}`,
+          ),
+        ].join("\n");
+  const omittedReplacements =
+    `${preview.consequences.omittedReplacementEncodeCount} available replacement encode(s) will be omitted.`;
   return [
     `Adopt ${preview.consequences.adoptsMappingCount} reviewed mapping(s).`,
     affectedJobs,
+    selectedReplacements,
+    omittedReplacements,
     "Stop new encoding from the prior archive.",
     `Request cancellation of ${preview.affectedEncodeJobs.length} affected Encode Job(s).`,
     "Retain both archives, completed outputs, history, and provenance.",

@@ -462,7 +462,13 @@ export function createApplicationOperations(
     previewRearchiveAcceptance: (
       archiveId: Parameters<typeof previewRearchiveAcceptance>[1],
       command: Parameters<typeof previewRearchiveAcceptance>[2],
-    ) => previewRearchiveAcceptance(access, archiveId, command),
+      mediaLibraryPath: Parameters<typeof previewRearchiveAcceptance>[3],
+    ) => previewRearchiveAcceptance(
+      access,
+      archiveId,
+      command,
+      mediaLibraryPath,
+    ),
     acceptRearchive: (
       archiveId: Parameters<typeof acceptRearchive>[1],
       command: Parameters<typeof acceptRearchive>[2],

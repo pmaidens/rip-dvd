@@ -7,6 +7,15 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        find: "@rip-dvd/data-access/rearchive-test-support",
+        replacement: fileURLToPath(
+          new URL(
+            "../../packages/data-access/src/rearchive-review-fixture.ts",
+            import.meta.url,
+          ),
+        ),
+      },
+      {
         find: "@rip-dvd/data-access/legacy-sidecars",
         replacement: fileURLToPath(
           new URL(

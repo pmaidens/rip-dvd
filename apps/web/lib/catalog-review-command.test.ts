@@ -24,6 +24,7 @@ const validCommands = {
     action: "accept_rearchive",
     catalogRevision: "2026-08-11T06:00:00.000Z",
     sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+    replacementEncodes: [],
   },
   preview_rearchive_mapping_proposal: {
     action: "preview_rearchive_mapping_proposal",
@@ -279,6 +280,17 @@ describe("catalog review command contract", () => {
     });
   });
 
+  it("normalizes an omitted Re-archive Acceptance replacement plan", () => {
+    expect(parseCommand({
+      action: "accept_rearchive",
+      catalogRevision: "2026-08-11T06:00:00.000Z",
+      sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+    })).toEqual({
+      ok: true,
+      command: validCommands.accept_rearchive,
+    });
+  });
+
   it.each([
     [null, "Invalid catalog review mutation"],
     [[], "Invalid catalog review mutation"],
@@ -296,7 +308,7 @@ describe("catalog review command contract", () => {
         sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
         replacementEncodes: [{ predecessorEncodeJobId: "job-1" }],
       },
-      "Re-archive replacement encodes are not supported yet",
+      "Invalid Re-archive Acceptance",
     ],
     [
       {

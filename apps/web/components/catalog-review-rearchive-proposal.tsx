@@ -6,12 +6,15 @@ import type { DiscSelectionSourceIdentityInput } from "@rip-dvd/data-access";
 import type {
   CatalogReviewArchiveEvidence,
   CatalogReviewMediaItem,
+  CatalogReviewReplacementPlan,
   CatalogReviewRearchiveProposal,
   SaveRearchiveMappingProposalInput,
 } from "./catalog-review-model";
 import { ArchiveBoundaryDescription } from "./archive-boundary-description";
 import { ArchiveIntegrityDescription } from "./archive-integrity-description";
 import { CatalogReviewMediaItemSearchPicker } from "./catalog-review-media-item-search-picker";
+import { CatalogReviewReplacementEncodes } from "./catalog-review-replacement-encodes";
+import type { CatalogReviewReplacementEncodeInput } from "../lib/catalog-review-command";
 
 function sourceIdentityForKind(
   kind: DiscSelectionSourceIdentityInput["kind"],
@@ -81,19 +84,25 @@ function RearchiveArchiveEvidence({
 export function CatalogReviewRearchiveProposal({
   proposal,
   mediaItems,
+  replacementPlan,
   isSaving,
   onPreview,
   onSave,
   onAccept,
+  onReplacementJobsPage,
+  onReplacementProfilesPage,
 }: {
   proposal: CatalogReviewRearchiveProposal;
   mediaItems: CatalogReviewMediaItem[];
+  replacementPlan?: CatalogReviewReplacementPlan;
   isSaving: boolean;
   onPreview(input: SaveRearchiveMappingProposalInput): Promise<
     CatalogReviewRearchiveProposal
   >;
   onSave(input: SaveRearchiveMappingProposalInput): void;
-  onAccept(): void;
+  onAccept(replacements: CatalogReviewReplacementEncodeInput[]): void;
+  onReplacementJobsPage(offset: number): void;
+  onReplacementProfilesPage(offset: number): void;
 }) {
   const [mappings, setMappings] = useState<
     SaveRearchiveMappingProposalInput["mappings"]
@@ -109,6 +118,9 @@ export function CatalogReviewRearchiveProposal({
     CatalogReviewMediaItem[]
   >([]);
   const [searchMappingId, setSearchMappingId] = useState<string | null>(null);
+  const [selectedReplacements, setSelectedReplacements] = useState(
+    new Map<string, CatalogReviewReplacementEncodeInput>(),
+  );
   const previewRequestId = useRef(0);
 
   useEffect(() => {
@@ -124,6 +136,22 @@ export function CatalogReviewRearchiveProposal({
     setAdditionalMediaItems([]);
     setSearchMappingId(null);
   }, [proposal]);
+
+  useEffect(() => {
+    setSelectedReplacements(new Map());
+  }, [
+    proposal.targetArchive.id,
+    proposal.catalogRevision,
+    proposal.sourceCatalogRevision,
+  ]);
+
+  useEffect(() => {
+    if (replacementPlan === undefined) {
+      setSelectedReplacements((current) =>
+        current.size === 0 ? current : new Map()
+      );
+    }
+  }, [replacementPlan]);
 
   const updateMapping = (
     sourceDiscSelectionId: string,
@@ -405,6 +433,20 @@ export function CatalogReviewRearchiveProposal({
           {previewError}
         </div>
       ) : null}
+      {replacementPlan ? (
+        <CatalogReviewReplacementEncodes
+          isSaving={isSaving}
+          isAvailable={
+            proposal.persisted && isSavedCurrent && isPreviewCurrent &&
+            preview.state === "ready"
+          }
+          replacementPlan={replacementPlan}
+          selectedReplacements={selectedReplacements}
+          onSelectionChange={setSelectedReplacements}
+          onJobsPage={onReplacementJobsPage}
+          onProfilesPage={onReplacementProfilesPage}
+        />
+      ) : null}
       <div className="profile-actions">
         <button
           type="button"
@@ -440,7 +482,7 @@ export function CatalogReviewRearchiveProposal({
           type="button"
           disabled={isSaving || !proposal.persisted || !isSavedCurrent ||
             !isPreviewCurrent || preview.state !== "ready"}
-          onClick={onAccept}
+          onClick={() => onAccept([...selectedReplacements.values()])}
         >
           Accept re-archive
         </button>

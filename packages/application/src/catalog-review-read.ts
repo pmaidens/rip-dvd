@@ -323,12 +323,19 @@ export function readCatalogReview(
         maintenance,
       ]),
     );
-    const replacementJobs = snapshot.catalog
-      .listCorrectedEncodeReplacementPlans({
-        originalDiscArchiveId: id,
-        limit: CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT + 1,
-        offset: replacementOffset,
-      });
+    const replacementJobs =
+      rearchiveProposal?.persisted === true &&
+        rearchiveProposal.state === "ready"
+        ? snapshot.catalog.listRearchiveEncodeReplacementPlans({
+          targetArchiveId: id,
+          limit: CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT + 1,
+          offset: replacementOffset,
+        })
+        : snapshot.catalog.listCorrectedEncodeReplacementPlans({
+          originalDiscArchiveId: id,
+          limit: CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT + 1,
+          offset: replacementOffset,
+        });
     const hasNextReplacementJobs = replacementJobs.length >
       CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT;
     const replacementJobPage = replacementJobs.slice(
@@ -420,7 +427,12 @@ export function readCatalogReview(
           replacementPlan: {
             jobs: replacementJobPage.map((job) => ({
               predecessorEncodeJobId: job.predecessorEncodeJobId,
-              replacementDiscSelectionId: job.replacementDiscSelectionId,
+              ...("sourceDiscSelectionId" in job
+                ? { sourceDiscSelectionId: job.sourceDiscSelectionId }
+                : {
+                  replacementDiscSelectionId:
+                    job.replacementDiscSelectionId,
+                }),
               proposedEncodingProfileId: job.proposedEncodingProfileId,
               proposedOutputPath: job.proposedOutputPath,
               predecessorStatus: job.predecessorStatus,

@@ -493,16 +493,41 @@ export interface RearchiveAcceptanceRevisionInput
   targetArchiveId: OriginalDiscArchiveId;
 }
 
+export interface RearchiveAcceptanceInput
+  extends RearchiveAcceptanceRevisionInput {
+  replacements: readonly CorrectedEncodeReplacementInput[];
+}
+
+export interface RearchiveEncodeReplacementPlan {
+  predecessorEncodeJobId: EncodeJobId;
+  sourceDiscSelectionId: DiscSelectionId;
+  proposedEncodingProfileId: EncodingProfileId;
+  proposedOutputPath: string;
+  predecessorStatus: EncodeJobStatus;
+  predecessorReady: boolean;
+  releasesFailedOutputReservation: boolean;
+}
+
+export interface PlannedRearchiveEncodeReplacement
+  extends CorrectedEncodeReplacementInput {
+  sourceDiscSelectionId: DiscSelectionId;
+  predecessorStatus: EncodeJobStatus;
+  predecessorReady: boolean;
+  replacesExistingOutput: boolean;
+}
+
 export interface RearchiveAcceptancePlan
   extends RearchiveMappingProposalRevisions<string> {
   targetArchiveId: OriginalDiscArchiveId;
   sourceArchiveId: OriginalDiscArchiveId;
   mappings: RearchiveMappingProposalMappingInput[];
   affectedEncodeJobs: EncodeJob[];
+  replacementEncodes: PlannedRearchiveEncodeReplacement[];
+  availableReplacementEncodes: RearchiveEncodeReplacementPlan[];
 }
 
 export interface RearchiveAcceptancePreviewDecisionInput
-  extends RearchiveAcceptanceRevisionInput {
+  extends RearchiveAcceptanceInput {
   previewToken: string;
   expectedPreviewEvidence: string;
 }
@@ -515,6 +540,7 @@ export interface CompletedRearchiveAcceptance {
     discSelection: DiscSelection;
   }>;
   affectedEncodeJobs: EncodeJob[];
+  replacementEncodeJobs: EncodeJob[];
 }
 
 export interface DiscSelectionSupersession {
@@ -1341,12 +1367,17 @@ export interface CatalogAccess {
     input: RearchiveMappingProposalInput & { mutationKey: string },
   ): RearchiveMappingProposalReview;
   planRearchiveAcceptance(
-    input: RearchiveAcceptanceRevisionInput,
+    input: RearchiveAcceptanceInput,
   ): RearchiveAcceptancePlan;
+  listRearchiveEncodeReplacementPlans(options: {
+    targetArchiveId: OriginalDiscArchiveId;
+    limit: number;
+    offset?: number;
+  }): RearchiveEncodeReplacementPlan[];
   recordRearchiveAcceptancePreviewDecision(
     input: RearchiveAcceptancePreviewDecisionInput,
   ): void;
-  acceptRearchive(input: RearchiveAcceptanceRevisionInput & {
+  acceptRearchive(input: RearchiveAcceptanceInput & {
     mutationKey: string;
     previewToken: string;
   }): CompletedRearchiveAcceptance;
@@ -1792,6 +1823,7 @@ export type SnapshotCatalogAccess = Pick<
   | "listDiscSelections"
   | "readRearchiveMappingProposal"
   | "planRearchiveAcceptance"
+  | "listRearchiveEncodeReplacementPlans"
   | "getCatalogReviewCoverage"
   | "getCatalogReviewActionAvailability"
   | "listDiscSelectionSupersessions"

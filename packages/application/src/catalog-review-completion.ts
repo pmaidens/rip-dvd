@@ -3,7 +3,6 @@ import {
   RecordNotFoundError,
   StaleCatalogRevisionError,
   type ConsistentReadAccess,
-  type CorrectedEncodeReplacementInput,
   type CorrectedEncodeReplacementPlan,
   type DataAccess,
   type EncodeJobId,
@@ -11,7 +10,7 @@ import {
 } from "@rip-dvd/data-access";
 
 import type { CatalogReviewCommand } from "./catalog-review-command.js";
-import { mediaOutputPath } from "./media-output-path.js";
+import { normalizeCorrectedEncodeReplacements } from "./corrected-encode-replacement.js";
 import { parseMutationKey } from "./mutation-key.js";
 import {
   createCatalogReviewCompletionPreviewToken,
@@ -22,28 +21,6 @@ export type CatalogReviewCompletionCommand = Extract<
   CatalogReviewCommand,
   { action: "complete_review" }
 >;
-
-function normalizeReplacements(
-  replacements: CatalogReviewCompletionCommand["replacementEncodes"],
-  mediaLibraryPath: string,
-): CorrectedEncodeReplacementInput[] {
-  return replacements.map((requested) => {
-    const outputPath = mediaOutputPath(requested.outputPath, mediaLibraryPath);
-    if (outputPath === null) {
-      throw new DomainInvariantError(
-        "Corrected replacement output path is invalid",
-      );
-    }
-    return {
-      predecessorEncodeJobId: requested.predecessorEncodeJobId,
-      encodingProfileId: requested.encodingProfileId,
-      outputPath,
-      ...(requested.priority === undefined
-        ? {}
-        : { priority: requested.priority }),
-    };
-  });
-}
 
 function listAllCorrectedEncodeReplacementPlans(
   access: ConsistentReadAccess,
@@ -98,7 +75,7 @@ function planCatalogReviewCompletion(
 
   const predecessorIds = new Set<EncodeJobId>();
   const outputPaths = new Set<string>();
-  const normalizedReplacements = normalizeReplacements(
+  const normalizedReplacements = normalizeCorrectedEncodeReplacements(
     command.replacementEncodes,
     mediaLibraryPath,
   );
@@ -264,7 +241,7 @@ export function completeCatalogReview(
       "Catalog Review completion preview acknowledgement is required",
     );
   }
-  const normalizedReplacements = normalizeReplacements(
+  const normalizedReplacements = normalizeCorrectedEncodeReplacements(
     command.replacementEncodes,
     input.mediaLibraryPath,
   );

@@ -94,10 +94,18 @@ export interface CatalogReviewReplacementPlan {
     predecessorEncodeJobId: string;
     predecessorStatus: EncodeJobStatus;
     predecessorReady: boolean;
-    replacementDiscSelectionId: string;
     proposedEncodingProfileId: string;
     proposedOutputPath: string;
-  }>;
+  } & (
+    | {
+      replacementDiscSelectionId: string;
+      sourceDiscSelectionId?: never;
+    }
+    | {
+      replacementDiscSelectionId?: never;
+      sourceDiscSelectionId: string;
+    }
+  )>;
   encodingProfiles: Array<{
     id: string;
     displayName: string;

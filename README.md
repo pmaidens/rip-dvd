@@ -896,7 +896,12 @@ fresh inspection, and changes to either Catalog Review are reported explicitly.
 Saving the proposal creates no Disc Selections and does not move or rewrite any
 prior selection or Encode Job provenance. The ordinary mapping and completion
 workbench stays hidden for this review; a later, explicit Re-archive Acceptance
-adopts the reviewed mappings and changes old-source scheduling policy.
+adopts the reviewed mappings and changes old-source scheduling policy. That
+acceptance can also queue an explicitly reviewed subset of replacement encodes
+against the fresh selections. Its preview validates predecessor lineage,
+Encoding Profiles, output reservations, and selected versus omitted work.
+Unselected historical outputs remain untouched, and replacement publication
+retains the prior completed output with its provenance before cutover.
 Each archived title exposes Assisted Mapping actions for a movie, bonus
 feature, trailer, existing Media Item, chapter range, or other content. The
 existing-item action opens the Mapping Proposal directly in **Use existing

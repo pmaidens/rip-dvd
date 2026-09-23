@@ -66,7 +66,9 @@ interface CatalogReviewViewProps {
     input: SaveRearchiveMappingProposalInput,
   ): Promise<CatalogReviewRearchiveProposalDto>;
   onSaveRearchiveMappingProposal?(input: SaveRearchiveMappingProposalInput): void;
-  onAcceptRearchive?(): void;
+  onAcceptRearchive?(
+    replacements: CatalogReviewReplacementEncodeInput[],
+  ): void;
   onSaveMediaItem(input: SaveMediaItemInput): void;
   onDeleteMediaItem(id: string): void;
   onCreateDiscSelection(input: CreateDiscSelectionInput): void;
@@ -189,10 +191,15 @@ export function CatalogReviewView({
         <CatalogReviewRearchiveProposal
           proposal={review.rearchiveProposal}
           mediaItems={review.mediaItems}
+          replacementPlan={review.replacementPlan}
           isSaving={isSaving}
           onPreview={onPreviewRearchiveMappingProposal}
           onSave={onSaveRearchiveMappingProposal}
           onAccept={onAcceptRearchive}
+          onReplacementJobsPage={onReplacementJobsPage ?? (() => undefined)}
+          onReplacementProfilesPage={
+            onReplacementProfilesPage ?? (() => undefined)
+          }
         />
       ) : null}
 

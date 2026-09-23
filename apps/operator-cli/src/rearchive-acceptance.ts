@@ -1,4 +1,8 @@
-import { createApplicationOperations } from "@rip-dvd/application";
+import {
+  createApplicationOperations,
+  type CatalogReviewCommand,
+} from "@rip-dvd/application";
+import { loadConfig } from "@rip-dvd/config";
 import { DomainInvariantError } from "@rip-dvd/data-access";
 
 import { CommandFailure } from "./command.js";
@@ -18,9 +22,33 @@ const acceptanceOptions = [
   "--file",
 ] as const;
 
+interface RearchiveAcceptanceIO
+  extends PreviewAcknowledgedCatalogCommandIO {
+  mediaLibraryPath?(): string;
+}
+
+function mediaLibraryPath(
+  io: RearchiveAcceptanceIO,
+  command: Extract<
+    CatalogReviewCommand,
+    { action: "accept_rearchive" }
+  >,
+): string {
+  if (command.replacementEncodes.length === 0) return "/";
+  try {
+    return io.mediaLibraryPath?.() ?? loadConfig().mediaLibraryPath;
+  } catch {
+    throw new CommandFailure(
+      "CONFIGURATION_ERROR",
+      "Media library configuration is unavailable.",
+      1,
+    );
+  }
+}
+
 export function runRearchiveAcceptance(
   rest: readonly string[],
-  io: PreviewAcknowledgedCatalogCommandIO,
+  io: RearchiveAcceptanceIO,
 ): unknown {
   return runPreviewAcknowledgedCatalogCommand(rest, io, {
     action: "accept_rearchive",
@@ -40,17 +68,19 @@ export function runRearchiveAcceptance(
     expectedCommandMessage: "Expected an accept_rearchive command.",
     previewAcknowledgementMessage:
       "Acknowledgement of a Re-archive Acceptance preview is required.",
-    prepareContext: () => undefined,
-    preview: ({ access, archiveId, command }) =>
+    prepareContext: mediaLibraryPath,
+    preview: ({ access, archiveId, command, context }) =>
       createApplicationOperations(access).previewRearchiveAcceptance(
         archiveId,
         command,
+        context,
       ),
-    apply: ({ access, archiveId, command, options }) =>
+    apply: ({ access, archiveId, command, options, context }) =>
       createApplicationOperations(access).acceptRearchive(
         archiveId,
         command,
         {
+          mediaLibraryPath: context,
           mutationKey: options.get("--key"),
           acknowledgedRevision: options.get("--revision"),
           acknowledgedSourceRevision: options.get("--source-revision"),

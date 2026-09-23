@@ -6,6 +6,7 @@ import {
 } from "@rip-dvd/data-access";
 
 import type { CatalogReviewCommand } from "./catalog-review-command.js";
+import { normalizeCorrectedEncodeReplacements } from "./corrected-encode-replacement.js";
 import { parseMutationKey } from "./mutation-key.js";
 import {
   createRearchiveAcceptancePreviewToken,
@@ -25,23 +26,19 @@ function revision(value: string, name: string): Date {
   return parsed;
 }
 
-function validateAcceptanceCommand(command: RearchiveAcceptanceCommand) {
-  const replacementEncodes = (command as unknown as {
-    replacementEncodes?: unknown;
-  }).replacementEncodes;
-  if (
-    replacementEncodes !== undefined &&
-    (!Array.isArray(replacementEncodes) || replacementEncodes.length !== 0)
-  ) {
-    throw new DomainInvariantError(
-      "Re-archive replacement encodes are not supported yet",
-    );
-  }
+function validateAcceptanceCommand(
+  command: RearchiveAcceptanceCommand,
+  mediaLibraryPath: string,
+) {
   return {
     catalogRevision: revision(command.catalogRevision, "Catalog revision"),
     sourceCatalogRevision: revision(
       command.sourceCatalogRevision,
       "Source Catalog revision",
+    ),
+    replacements: normalizeCorrectedEncodeReplacements(
+      command.replacementEncodes,
+      mediaLibraryPath,
     ),
   };
 }
@@ -50,8 +47,12 @@ export function previewRearchiveAcceptance(
   access: DataAccess,
   targetArchiveId: OriginalDiscArchiveId,
   command: RearchiveAcceptanceCommand,
+  mediaLibraryPath: string,
 ) {
-  const input = { targetArchiveId, ...validateAcceptanceCommand(command) };
+  const input = {
+    targetArchiveId,
+    ...validateAcceptanceCommand(command, mediaLibraryPath),
+  };
   const plan = access.readConsistentSnapshot((snapshot) =>
     snapshot.catalog.planRearchiveAcceptance(input)
   );
@@ -81,7 +82,19 @@ export function previewRearchiveAcceptance(
       preventsOldSourceEnqueue: true,
       preservesPriorArchive: true,
       preservesCompletedOutputs: true,
-      replacementEncodeCount: 0,
+      replacementEncodeCount: plan.replacementEncodes.length,
+      replacementEncodes: plan.replacementEncodes,
+      availableReplacementEncodeCount:
+        plan.availableReplacementEncodes.length,
+      omittedReplacementEncodeCount:
+        plan.availableReplacementEncodes.length -
+        plan.replacementEncodes.length,
+      failedOutputReservationReleaseEncodeJobIds:
+        plan.availableReplacementEncodes
+          .filter((replacement) =>
+            replacement.releasesFailedOutputReservation
+          )
+          .map((replacement) => replacement.predecessorEncodeJobId),
     },
   };
 }
@@ -95,6 +108,7 @@ export function acceptRearchive(
   targetArchiveId: OriginalDiscArchiveId,
   command: RearchiveAcceptanceCommand,
   input: {
+    mediaLibraryPath: string;
     mutationKey: unknown;
     acknowledgedRevision: unknown;
     acknowledgedSourceRevision: unknown;
@@ -102,7 +116,10 @@ export function acceptRearchive(
     acknowledge: unknown;
   },
 ) {
-  const parsedRevisions = validateAcceptanceCommand(command);
+  const parsedCommand = validateAcceptanceCommand(
+    command,
+    input.mediaLibraryPath,
+  );
   if (
     input.acknowledge !== true ||
     input.acknowledgedRevision !== command.catalogRevision ||
@@ -115,7 +132,7 @@ export function acceptRearchive(
   }
   const result = access.catalog.acceptRearchive({
     targetArchiveId,
-    ...parsedRevisions,
+    ...parsedCommand,
     mutationKey: parseMutationKey(input.mutationKey),
     previewToken: input.previewToken,
   });
@@ -146,5 +163,19 @@ export function acceptRearchive(
       discSelectionId: job.discSelectionId,
       status: job.status,
     })),
+    ...(result.replacementEncodeJobs.length === 0
+      ? {}
+      : {
+        replacementEncodeJobs: result.replacementEncodeJobs.map((job) => ({
+          id: job.id,
+          predecessorEncodeJobId: job.predecessorEncodeJobId,
+          discSelectionId: job.discSelectionId,
+          encodingProfileId: job.encodingProfileId,
+          outputPath: job.outputPath,
+          status: job.status,
+          priority: job.priority,
+          replaceExistingOutput: job.replaceExistingOutput,
+        })),
+      }),
   };
 }

@@ -605,7 +605,9 @@ export function useCatalogReviewState({
     });
   }
 
-  function acceptRearchive() {
+  function acceptRearchive(
+    replacementEncodes: CatalogReviewReplacementEncodeInput[],
+  ) {
     if (
       state.status !== "loaded" ||
       state.review.rearchiveProposal === undefined
@@ -618,6 +620,7 @@ export function useCatalogReviewState({
         action: "accept_rearchive",
         catalogRevision: current.catalogRevision,
         sourceCatalogRevision: current.sourceCatalogRevision,
+        replacementEncodes,
       },
       { closeAfterMutation: true },
     );

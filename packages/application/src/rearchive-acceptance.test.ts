@@ -1,4 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -105,11 +111,13 @@ it("adopts a reviewed re-archive atomically and preserves worker ownership", () 
       action: "accept_rearchive" as const,
       catalogRevision: current.saved.catalogRevision,
       sourceCatalogRevision: current.saved.sourceCatalogRevision,
+      replacementEncodes: [],
     };
 
     const stalePreview = current.operations.previewRearchiveAcceptance(
       current.seeded.targetArchive.id,
       command,
+      current.mediaLibraryPath,
     );
     expect(stalePreview.affectedEncodeJobs).toEqual([
       expect.objectContaining({ id: running.id, status: "running" }),
@@ -120,6 +128,7 @@ it("adopts a reviewed re-archive atomically and preserves worker ownership", () 
       current.seeded.targetArchive.id,
       command,
       {
+        mediaLibraryPath: current.mediaLibraryPath,
         mutationKey: "00000000-0000-4000-8000-000000000351",
         acknowledgedRevision: stalePreview.catalogRevision,
         acknowledgedSourceRevision: stalePreview.sourceCatalogRevision,
@@ -136,6 +145,7 @@ it("adopts a reviewed re-archive atomically and preserves worker ownership", () 
     const preview = current.operations.previewRearchiveAcceptance(
       current.seeded.targetArchive.id,
       command,
+      current.mediaLibraryPath,
     );
     expect(preview.affectedEncodeJobs.map(({ id, status }) => ({ id, status })))
       .toEqual([
@@ -144,6 +154,7 @@ it("adopts a reviewed re-archive atomically and preserves worker ownership", () 
         { id: lateQueued.id, status: "queued" },
       ]);
     const acceptanceInput = {
+      mediaLibraryPath: current.mediaLibraryPath,
       mutationKey: "00000000-0000-4000-8000-000000000352",
       acknowledgedRevision: preview.catalogRevision,
       acknowledgedSourceRevision: preview.sourceCatalogRevision,
@@ -241,12 +252,15 @@ it("rolls back adoption writes when a late persistence step fails", () => {
       action: "accept_rearchive" as const,
       catalogRevision: current.saved.catalogRevision,
       sourceCatalogRevision: current.saved.sourceCatalogRevision,
+      replacementEncodes: [],
     };
     const preview = current.operations.previewRearchiveAcceptance(
       current.seeded.targetArchive.id,
       command,
+      current.mediaLibraryPath,
     );
     const acceptanceInput = {
+      mediaLibraryPath: current.mediaLibraryPath,
       mutationKey: "00000000-0000-4000-8000-000000000353",
       acknowledgedRevision: preview.catalogRevision,
       acknowledgedSourceRevision: preview.sourceCatalogRevision,
@@ -316,10 +330,12 @@ it("requires a fresh preview when publication wins the acceptance race", () => {
       action: "accept_rearchive" as const,
       catalogRevision: current.saved.catalogRevision,
       sourceCatalogRevision: current.saved.sourceCatalogRevision,
+      replacementEncodes: [],
     };
     const stalePreview = current.operations.previewRearchiveAcceptance(
       current.seeded.targetArchive.id,
       command,
+      current.mediaLibraryPath,
     );
 
     expect(current.access.encodeJobs.completePublishedClaim(
@@ -331,6 +347,7 @@ it("requires a fresh preview when publication wins the acceptance race", () => {
       current.seeded.targetArchive.id,
       command,
       {
+        mediaLibraryPath: current.mediaLibraryPath,
         mutationKey: "00000000-0000-4000-8000-000000000354",
         acknowledgedRevision: stalePreview.catalogRevision,
         acknowledgedSourceRevision: stalePreview.sourceCatalogRevision,
@@ -342,12 +359,14 @@ it("requires a fresh preview when publication wins the acceptance race", () => {
     const freshPreview = current.operations.previewRearchiveAcceptance(
       current.seeded.targetArchive.id,
       command,
+      current.mediaLibraryPath,
     );
     expect(freshPreview.affectedEncodeJobs).toEqual([]);
     expect(current.operations.acceptRearchive(
       current.seeded.targetArchive.id,
       command,
       {
+        mediaLibraryPath: current.mediaLibraryPath,
         mutationKey: "00000000-0000-4000-8000-000000000355",
         acknowledgedRevision: freshPreview.catalogRevision,
         acknowledgedSourceRevision: freshPreview.sourceCatalogRevision,
@@ -364,18 +383,181 @@ it("requires a fresh preview when publication wins the acceptance race", () => {
   }
 });
 
-it("rejects unsupported replacement plans before acceptance", () => {
+it("rejects a predecessor outside the reviewed replacement lineage", () => {
   const current = fixture();
   try {
+    const profile = current.profile("invalid-predecessor");
     expect(() => current.operations.previewRearchiveAcceptance(
       current.seeded.targetArchive.id,
       {
         action: "accept_rearchive",
         catalogRevision: current.saved.catalogRevision,
         sourceCatalogRevision: current.saved.sourceCatalogRevision,
-        replacementEncodes: [{ predecessorEncodeJobId: "unsupported" }],
-      } as never,
-    )).toThrow("Re-archive replacement encodes are not supported yet");
+        replacementEncodes: [{
+          predecessorEncodeJobId: "unsupported" as never,
+          encodingProfileId: profile.id,
+          outputPath: join(current.mediaLibraryPath, "invalid.mkv"),
+        }],
+      },
+      current.mediaLibraryPath,
+    )).toThrow("is not available for re-archive replacement");
+  } finally {
+    current.access.close();
+  }
+});
+
+it("queues one reviewed replacement and preserves its predecessor when replacement encoding fails", () => {
+  const current = fixture();
+  try {
+    const predecessor = current.enqueue("completed-replacement");
+    writeFileSync(predecessor.outputPath, "synthetic completed output");
+    const predecessorClaim = current.access.encodeJobs.claimNext(
+      "completed-predecessor-worker",
+    );
+    if (!predecessorClaim || predecessorClaim.id !== predecessor.id) {
+      throw new Error("Expected the predecessor Encode Job claim");
+    }
+    current.access.encodeJobs.complete(predecessorClaim);
+    const command = {
+      action: "accept_rearchive" as const,
+      catalogRevision: current.saved.catalogRevision,
+      sourceCatalogRevision: current.saved.sourceCatalogRevision,
+      replacementEncodes: [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: predecessor.encodingProfileId,
+        outputPath: predecessor.outputPath,
+      }],
+    };
+    const preview = current.operations.previewRearchiveAcceptance(
+      current.seeded.targetArchive.id,
+      command,
+      current.mediaLibraryPath,
+    );
+    expect(preview.consequences).toMatchObject({
+      replacementEncodeCount: 1,
+      availableReplacementEncodeCount: 1,
+      omittedReplacementEncodeCount: 0,
+      replacementEncodes: [{
+        predecessorEncodeJobId: predecessor.id,
+        sourceDiscSelectionId: current.seeded.sourceSelection.id,
+        predecessorStatus: "completed",
+        predecessorReady: true,
+        replacesExistingOutput: true,
+      }],
+    });
+    const acceptanceInput = {
+      mediaLibraryPath: current.mediaLibraryPath,
+      mutationKey: "00000000-0000-4000-8000-000000000356",
+      acknowledgedRevision: preview.catalogRevision,
+      acknowledgedSourceRevision: preview.sourceCatalogRevision,
+      previewToken: preview.previewToken,
+      acknowledge: true,
+    };
+    const accepted = current.operations.acceptRearchive(
+      current.seeded.targetArchive.id,
+      command,
+      acceptanceInput,
+    );
+    const replay = current.operations.acceptRearchive(
+      current.seeded.targetArchive.id,
+      command,
+      acceptanceInput,
+    );
+    expect(replay).toEqual(accepted);
+    expect(accepted.replacementEncodeJobs).toEqual([
+      expect.objectContaining({
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: predecessor.encodingProfileId,
+        outputPath: predecessor.outputPath,
+        status: "queued",
+        replaceExistingOutput: true,
+      }),
+    ]);
+    const replacement = accepted.replacementEncodeJobs?.[0];
+    if (!replacement) throw new Error("Expected a replacement Encode Job");
+    expect(current.access.encodeJobs.list().filter((job) =>
+      job.predecessorEncodeJobId === predecessor.id
+    )).toHaveLength(1);
+    expect(() => current.operations.acceptRearchive(
+      current.seeded.targetArchive.id,
+      { ...command, replacementEncodes: [] },
+      acceptanceInput,
+    )).toThrow("Mutation key has already been used");
+
+    const replacementClaim = current.access.encodeJobs.claimNext(
+      "replacement-worker",
+    );
+    if (!replacementClaim || replacementClaim.id !== replacement.id) {
+      throw new Error("Expected the replacement Encode Job claim");
+    }
+    expect(() => current.access.encodeJobs.complete(replacementClaim)).toThrow(
+      "Corrected replacement Encode Job completion requires publication provenance",
+    );
+    current.access.encodeJobs.fail(
+      replacementClaim,
+      "Synthetic replacement failure",
+    );
+    expect(current.access.encodeJobs.find(predecessor.id)).toMatchObject({
+      status: "completed",
+      discSelectionId: current.seeded.sourceSelection.id,
+    });
+    expect(current.access.encodeJobs.find(replacement.id)).toMatchObject({
+      status: "failed",
+      predecessorEncodeJobId: predecessor.id,
+    });
+    expect(readFileSync(predecessor.outputPath, "utf8")).toBe(
+      "synthetic completed output",
+    );
+  } finally {
+    current.access.close();
+  }
+});
+
+it("rejects invalid profiles and conflicting output reservations before acceptance", () => {
+  const current = fixture();
+  try {
+    const predecessor = current.enqueue("replacement-validation");
+    const audioProfile = current.access.encodingProfiles.create({
+      key: "rearchive-acceptance-audio",
+      displayName: "Synthetic audio",
+      mediaDomain: "audio",
+      settings: {},
+    });
+    const invalidProfileCommand = {
+      action: "accept_rearchive" as const,
+      catalogRevision: current.saved.catalogRevision,
+      sourceCatalogRevision: current.saved.sourceCatalogRevision,
+      replacementEncodes: [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: audioProfile.id,
+        outputPath: predecessor.outputPath,
+      }],
+    };
+    expect(() => current.operations.previewRearchiveAcceptance(
+      current.seeded.targetArchive.id,
+      invalidProfileCommand,
+      current.mediaLibraryPath,
+    )).toThrow("active DVD video Encoding Profile");
+
+    const outputOwner = current.enqueue("reserved-output");
+    expect(() => current.operations.previewRearchiveAcceptance(
+      current.seeded.targetArchive.id,
+      {
+        ...invalidProfileCommand,
+        replacementEncodes: [{
+          predecessorEncodeJobId: predecessor.id,
+          encodingProfileId: predecessor.encodingProfileId,
+          outputPath: outputOwner.outputPath,
+        }],
+      },
+      current.mediaLibraryPath,
+    )).toThrow("output is already assigned");
+    expect(current.access.catalog.listDiscSelections({
+      originalDiscArchiveId: current.seeded.targetArchive.id,
+    })).toEqual([]);
+    expect(current.access.encodeJobs.find(predecessor.id)?.status).toBe(
+      "queued",
+    );
   } finally {
     current.access.close();
   }

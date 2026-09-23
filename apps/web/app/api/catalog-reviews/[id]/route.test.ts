@@ -55,6 +55,7 @@ function postCatalogReview(
     archiveId,
     () => access,
     () => "http://localhost:3000",
+    () => "/media/movies",
   );
 }
 
@@ -311,6 +312,11 @@ describe("Catalog Review API", () => {
       action: "accept_rearchive",
       catalogRevision: saved.proposal.catalogRevision,
       sourceCatalogRevision: saved.proposal.sourceCatalogRevision,
+      replacementEncodes: [{
+        predecessorEncodeJobId: queued.id,
+        encodingProfileId: profile.id,
+        outputPath: queued.outputPath,
+      }],
     };
     const previewResponse = await postCatalogReview(
       access,
@@ -327,6 +333,14 @@ describe("Catalog Review API", () => {
       sourceArchiveId: sourceArchive.id,
       targetArchiveId: targetArchive.id,
       affectedEncodeJobs: [{ id: queued.id, status: "queued" }],
+      consequences: {
+        replacementEncodeCount: 1,
+        replacementEncodes: [{
+          predecessorEncodeJobId: queued.id,
+          encodingProfileId: profile.id,
+          outputPath: queued.outputPath,
+        }],
+      },
     });
     const mutation = {
       ...command,
@@ -350,6 +364,13 @@ describe("Catalog Review API", () => {
         catalogReviewOutcome: "reviewed_with_selections",
       },
       affectedEncodeJobs: [{ id: queued.id, status: "cancelled" }],
+      replacementEncodeJobs: [{
+        predecessorEncodeJobId: queued.id,
+        discSelectionId: expect.any(String),
+        encodingProfileId: profile.id,
+        outputPath: queued.outputPath,
+        status: "queued",
+      }],
     });
     const replayResponse = await postCatalogReview(
       access,
@@ -359,7 +380,7 @@ describe("Catalog Review API", () => {
     await expect(replayResponse.json()).resolves.toEqual(accepted);
   });
 
-  it("rejects Re-archive Acceptance replacement plans before mutation", async () => {
+  it("rejects incomplete Re-archive Acceptance replacement plans", async () => {
     const access = dataAccessFixture.create();
     const { targetArchive } = createRearchiveReviewFixture(access);
     const response = await postCatalogReview(access, targetArchive.id, {
@@ -371,7 +392,7 @@ describe("Catalog Review API", () => {
     });
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({
-      error: "Re-archive replacement encodes are not supported yet",
+      error: "Invalid Re-archive Acceptance",
     });
   });
 

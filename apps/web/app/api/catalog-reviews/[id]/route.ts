@@ -192,17 +192,30 @@ export async function createCatalogReviewRoute(
 
     switch (command.action) {
       case "accept_rearchive": {
+        let mediaLibraryPath = "/";
+        if (command.replacementEncodes.length > 0) {
+          try {
+            mediaLibraryPath = getMediaLibraryPath();
+          } catch {
+            return response(
+              { error: "Re-archive replacement queueing is unavailable" },
+              503,
+            );
+          }
+        }
         const operations = createApplicationOperations(access);
         if (bodyRecord?.preview === true) {
           return response(operations.previewRearchiveAcceptance(
             archiveId,
             command,
+            mediaLibraryPath,
           ));
         }
         return response(operations.acceptRearchive(
           archiveId,
           command,
           {
+            mediaLibraryPath,
             mutationKey: bodyRecord?.mutationKey,
             acknowledgedRevision: bodyRecord?.acknowledgedRevision,
             acknowledgedSourceRevision:
