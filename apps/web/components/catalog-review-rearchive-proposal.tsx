@@ -84,6 +84,7 @@ export function CatalogReviewRearchiveProposal({
   isSaving,
   onPreview,
   onSave,
+  onAccept,
 }: {
   proposal: CatalogReviewRearchiveProposal;
   mediaItems: CatalogReviewMediaItem[];
@@ -92,6 +93,7 @@ export function CatalogReviewRearchiveProposal({
     CatalogReviewRearchiveProposal
   >;
   onSave(input: SaveRearchiveMappingProposalInput): void;
+  onAccept(): void;
 }) {
   const [mappings, setMappings] = useState<
     SaveRearchiveMappingProposalInput["mappings"]
@@ -101,6 +103,7 @@ export function CatalogReviewRearchiveProposal({
   })));
   const [preview, setPreview] = useState(proposal);
   const [isPreviewCurrent, setIsPreviewCurrent] = useState(true);
+  const [isSavedCurrent, setIsSavedCurrent] = useState(true);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [additionalMediaItems, setAdditionalMediaItems] = useState<
     CatalogReviewMediaItem[]
@@ -116,6 +119,7 @@ export function CatalogReviewRearchiveProposal({
     })));
     setPreview(proposal);
     setIsPreviewCurrent(true);
+    setIsSavedCurrent(true);
     setPreviewError(null);
     setAdditionalMediaItems([]);
     setSearchMappingId(null);
@@ -129,6 +133,7 @@ export function CatalogReviewRearchiveProposal({
   ) => {
     previewRequestId.current += 1;
     setIsPreviewCurrent(false);
+    setIsSavedCurrent(false);
     setPreviewError(null);
     setMappings((current) => current.map((mapping) =>
       mapping.sourceDiscSelectionId === sourceDiscSelectionId
@@ -385,6 +390,7 @@ export function CatalogReviewRearchiveProposal({
                   ));
                   setSearchMappingId(null);
                   setIsPreviewCurrent(false);
+                  setIsSavedCurrent(false);
                   setPreviewError(null);
                 }}
               >
@@ -429,6 +435,14 @@ export function CatalogReviewRearchiveProposal({
           onClick={() => onSave({ mappings })}
         >
           {proposal.persisted ? "Save proposal changes" : "Save reviewed proposal"}
+        </button>
+        <button
+          type="button"
+          disabled={isSaving || !proposal.persisted || !isSavedCurrent ||
+            !isPreviewCurrent || preview.state !== "ready"}
+          onClick={onAccept}
+        >
+          Accept re-archive
         </button>
       </div>
     </section>

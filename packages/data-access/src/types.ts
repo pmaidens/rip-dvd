@@ -477,11 +477,44 @@ export interface RearchiveMappingProposalMappingInput
   sourceDiscSelectionId: DiscSelectionId;
 }
 
-export interface RearchiveMappingProposalInput {
+export interface RearchiveMappingProposalRevisions<TRevision> {
+  catalogRevision: TRevision;
+  sourceCatalogRevision: TRevision;
+}
+
+export interface RearchiveMappingProposalInput
+  extends RearchiveMappingProposalRevisions<Date> {
   originalDiscArchiveId: OriginalDiscArchiveId;
-  catalogRevision: Date;
-  sourceCatalogRevision: Date;
   mappings: readonly RearchiveMappingProposalMappingInput[];
+}
+
+export interface RearchiveAcceptanceRevisionInput
+  extends RearchiveMappingProposalRevisions<Date> {
+  targetArchiveId: OriginalDiscArchiveId;
+}
+
+export interface RearchiveAcceptancePlan
+  extends RearchiveMappingProposalRevisions<string> {
+  targetArchiveId: OriginalDiscArchiveId;
+  sourceArchiveId: OriginalDiscArchiveId;
+  mappings: RearchiveMappingProposalMappingInput[];
+  affectedEncodeJobs: EncodeJob[];
+}
+
+export interface RearchiveAcceptancePreviewDecisionInput
+  extends RearchiveAcceptanceRevisionInput {
+  previewToken: string;
+  expectedPreviewEvidence: string;
+}
+
+export interface CompletedRearchiveAcceptance {
+  sourceArchive: OriginalDiscArchive;
+  targetArchive: OriginalDiscArchive;
+  createdDiscSelections: Array<{
+    priorDiscSelectionId: DiscSelectionId;
+    discSelection: DiscSelection;
+  }>;
+  affectedEncodeJobs: EncodeJob[];
 }
 
 export interface DiscSelectionSupersession {
@@ -1307,6 +1340,16 @@ export interface CatalogAccess {
   saveRearchiveMappingProposal(
     input: RearchiveMappingProposalInput & { mutationKey: string },
   ): RearchiveMappingProposalReview;
+  planRearchiveAcceptance(
+    input: RearchiveAcceptanceRevisionInput,
+  ): RearchiveAcceptancePlan;
+  recordRearchiveAcceptancePreviewDecision(
+    input: RearchiveAcceptancePreviewDecisionInput,
+  ): void;
+  acceptRearchive(input: RearchiveAcceptanceRevisionInput & {
+    mutationKey: string;
+    previewToken: string;
+  }): CompletedRearchiveAcceptance;
   getCatalogReviewCoverage(
     originalDiscArchiveId: OriginalDiscArchiveId,
   ): CatalogReviewCoverage;
@@ -1748,6 +1791,7 @@ export type SnapshotCatalogAccess = Pick<
   | "searchMediaItems"
   | "listDiscSelections"
   | "readRearchiveMappingProposal"
+  | "planRearchiveAcceptance"
   | "getCatalogReviewCoverage"
   | "getCatalogReviewActionAvailability"
   | "listDiscSelectionSupersessions"

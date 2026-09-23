@@ -191,6 +191,28 @@ export async function createCatalogReviewRoute(
     }
 
     switch (command.action) {
+      case "accept_rearchive": {
+        const operations = createApplicationOperations(access);
+        if (bodyRecord?.preview === true) {
+          return response(operations.previewRearchiveAcceptance(
+            archiveId,
+            command,
+          ));
+        }
+        return response(operations.acceptRearchive(
+          archiveId,
+          command,
+          {
+            mutationKey: bodyRecord?.mutationKey,
+            acknowledgedRevision: bodyRecord?.acknowledgedRevision,
+            acknowledgedSourceRevision:
+              bodyRecord?.acknowledgedSourceRevision,
+            previewToken: bodyRecord?.previewToken,
+            acknowledge: bodyRecord?.acknowledge,
+          },
+        ));
+      }
+
       case "preview_rearchive_mapping_proposal":
         return response(
           createApplicationOperations(access).previewRearchiveMappingProposal({

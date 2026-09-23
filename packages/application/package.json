@@ -29,6 +29,10 @@
     "./catalog-review-completion-preview-token": {
       "types": "./src/catalog-review-completion-preview-token.ts",
       "default": "./dist/catalog-review-completion-preview-token.js"
+    },
+    "./rearchive-acceptance-preview-token": {
+      "types": "./src/rearchive-acceptance-preview-token.ts",
+      "default": "./dist/rearchive-acceptance-preview-token.js"
     }
   },
   "files": ["dist"],

@@ -66,6 +66,7 @@ interface CatalogReviewViewProps {
     input: SaveRearchiveMappingProposalInput,
   ): Promise<CatalogReviewRearchiveProposalDto>;
   onSaveRearchiveMappingProposal?(input: SaveRearchiveMappingProposalInput): void;
+  onAcceptRearchive?(): void;
   onSaveMediaItem(input: SaveMediaItemInput): void;
   onDeleteMediaItem(id: string): void;
   onCreateDiscSelection(input: CreateDiscSelectionInput): void;
@@ -111,6 +112,7 @@ export function CatalogReviewView({
     throw new Error("Re-archive Mapping Proposal preview is unavailable");
   },
   onSaveRearchiveMappingProposal = () => undefined,
+  onAcceptRearchive = () => undefined,
   onSaveMediaItem,
   onDeleteMediaItem,
   onCreateDiscSelection,
@@ -190,6 +192,7 @@ export function CatalogReviewView({
           isSaving={isSaving}
           onPreview={onPreviewRearchiveMappingProposal}
           onSave={onSaveRearchiveMappingProposal}
+          onAccept={onAcceptRearchive}
         />
       ) : null}
 
@@ -354,6 +357,7 @@ export function CatalogReviewEditor({
         review.previewRearchiveMappingProposal
       }
       onSaveRearchiveMappingProposal={review.saveRearchiveMappingProposal}
+      onAcceptRearchive={review.acceptRearchive}
       onSaveMediaItem={review.saveMediaItem}
       onDeleteMediaItem={review.deleteMediaItem}
       onCreateDiscSelection={review.createDiscSelection}

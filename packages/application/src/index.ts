@@ -16,6 +16,7 @@ import type {
   DiscSelectionId,
   MediaItemId,
   RearchiveMappingProposalInput,
+  RearchiveMappingProposalRevisions,
   RearchiveMappingProposalReview,
 } from "@rip-dvd/data-access";
 
@@ -48,6 +49,10 @@ import {
   completeCatalogReview,
   previewCatalogReviewCompletion,
 } from "./catalog-review-completion.js";
+import {
+  acceptRearchive,
+  previewRearchiveAcceptance,
+} from "./rearchive-acceptance.js";
 
 export class InvalidProfileInputError extends Error {
   constructor(message = "Invalid Encoding Profile input.") {
@@ -56,10 +61,9 @@ export class InvalidProfileInputError extends Error {
   }
 }
 
-export interface RearchiveMappingProposalOperationInput {
+export interface RearchiveMappingProposalOperationInput
+  extends RearchiveMappingProposalRevisions<string> {
   originalDiscArchiveId: string;
-  catalogRevision: string;
-  sourceCatalogRevision: string;
   mappings: readonly CatalogReviewRearchiveMappingInput[];
 }
 
@@ -455,6 +459,15 @@ export function createApplicationOperations(
         proposal: presentRearchiveMappingProposal(access, proposal),
       };
     },
+    previewRearchiveAcceptance: (
+      archiveId: Parameters<typeof previewRearchiveAcceptance>[1],
+      command: Parameters<typeof previewRearchiveAcceptance>[2],
+    ) => previewRearchiveAcceptance(access, archiveId, command),
+    acceptRearchive: (
+      archiveId: Parameters<typeof acceptRearchive>[1],
+      command: Parameters<typeof acceptRearchive>[2],
+      input: Parameters<typeof acceptRearchive>[3],
+    ) => acceptRearchive(access, archiveId, command, input),
     catalogSuggestion: (
       id: OriginalDiscArchiveId,
       lookup: CatalogMetadataLookup | null,
@@ -499,6 +512,8 @@ export * from "./catalog-review-types.js";
 export * from "./catalog-review-command.js";
 export * from "./catalog-review-completion.js";
 export * from "./catalog-review-completion-preview-token.js";
+export * from "./rearchive-acceptance.js";
+export * from "./rearchive-acceptance-preview-token.js";
 export type { MediaItemCommand } from "./media-item-operations.js";
 export * from "./catalog-automation.js";
 export * from "./tmdb-catalog-adapter.js";

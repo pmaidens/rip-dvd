@@ -20,6 +20,11 @@ function parseCommand(value: unknown) {
 }
 
 const validCommands = {
+  accept_rearchive: {
+    action: "accept_rearchive",
+    catalogRevision: "2026-08-11T06:00:00.000Z",
+    sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+  },
   preview_rearchive_mapping_proposal: {
     action: "preview_rearchive_mapping_proposal",
     catalogRevision: "2026-08-11T06:00:00.000Z",
@@ -283,6 +288,23 @@ describe("catalog review command contract", () => {
     [
       { action: "create_media_item", mediaItem: { kind: "movie" } },
       "Invalid Media Item",
+    ],
+    [
+      {
+        action: "accept_rearchive",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+        replacementEncodes: [{ predecessorEncodeJobId: "job-1" }],
+      },
+      "Re-archive replacement encodes are not supported yet",
+    ],
+    [
+      {
+        action: "accept_rearchive",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        sourceCatalogRevision: "invalid",
+      },
+      "Invalid Re-archive Acceptance",
     ],
     [
       {
