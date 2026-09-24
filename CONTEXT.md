@@ -32,6 +32,14 @@ _Avoid_: Catalog Review completion, proposal save
 The evidence-backed read quality recorded with an Original Disc Archive. Historical archives are `unknown`; a new Archive Job that observes a complete recovery with no unreadable sectors records `clean_read`; an archive accepted after automatic damage validation records `watchable_salvage`.
 _Avoid_: Bit-perfect, exact copy, Archive Job status
 
+**Skipped Region**:
+A range left unresolved during the initial archive copy after a read request fails. Its sectors have not necessarily been tested individually and must not all be called unreadable.
+_Avoid_: Bad sectors, proven damage
+
+**Individually Failed Sector**:
+A sector that failed a read attempted on that sector alone. This records the observed failure, not a claim that a later attempt cannot recover it.
+_Avoid_: Permanently unreadable sector
+
 **Archive Boundary Evidence**:
 The versioned provenance that identifies the Disc Inspection size accepted as an Original Disc Archive's complete publication boundary. Historical archives may have no Archive Boundary Evidence.
 _Avoid_: Boundary metadata, archive size note
