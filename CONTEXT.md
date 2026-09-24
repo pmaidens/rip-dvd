@@ -13,12 +13,24 @@ A fingerprinted disc observed in an Optical Drive.
 _Avoid_: Disk, medium
 
 **Archive Job**:
-One started attempt to fulfill an Archive Request by preserving its Detected Disc as an Original Disc Archive.
+One started attempt to fulfill an Archive Request by preserving its Detected Disc as an Original Disc Archive. Saving that archive completes the Archive Job; subsequent Archive Recovery has a separate lifecycle.
 _Avoid_: Rip job, copy job
 
 **Archive Request**:
 An operator's durable intent to preserve a Detected Disc. It may wait for the matching disc, may produce more than one Archive Job attempt, and owns any resumable DVD rescue state shared by those attempts.
 _Avoid_: Queued Archive Job, approval
+
+**Archive Recovery**:
+Further attempts to recover unresolved source regions in a saved Original Disc Archive. Cataloging may proceed during Archive Recovery, but encoding requires a stable archive after recovery stops or completes.
+_Avoid_: Re-archive, new Archive Request
+
+**Recovery Stop**:
+An operator's decision to stop Archive Recovery and keep the saved Original Disc Archive with its remaining damage evidence. Recovery stays stopped until explicitly resumed, and may resume only when no Encode Job is queued or running against that archive.
+_Avoid_: Archive Request cancellation, archive deletion
+
+**Operator Disc Confirmation**:
+An operator's explicit assertion that the currently inserted disc is the source of a saved Original Disc Archive, overriding automatic disc matching for recovery. It records the operator's decision without representing it as an automatically verified content match.
+_Avoid_: Verified fingerprint match, disc name match
 
 **Re-archive Mapping Proposal**:
 An operator-reviewed draft that carries active Disc Selections from a prior Original Disc Archive to a fresh re-archive generation and validates them against the fresh Disc Inspection. It does not create Disc Selections or authorize encoding.
