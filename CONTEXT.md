@@ -29,8 +29,8 @@ An operator's decision to stop Archive Recovery and keep the saved Original Disc
 _Avoid_: Archive Request cancellation, archive deletion
 
 **Operator Disc Confirmation**:
-An operator's explicit assertion that the currently inserted disc is the source of a saved Original Disc Archive, overriding automatic disc matching for recovery. It records the operator's decision without representing it as an automatically verified content match.
-_Avoid_: Verified fingerprint match, disc name match
+An operator's explicit assertion that the currently inserted disc is the source for one Archive Recovery attempt, recorded separately from automatic verification findings. It expires after a worker restart, reboot, disc removal, or detected source change.
+_Avoid_: Verified fingerprint match, disc name match, permanent disc approval
 
 **Re-archive Mapping Proposal**:
 An operator-reviewed draft that carries active Disc Selections from a prior Original Disc Archive to a fresh re-archive generation and validates them against the fresh Disc Inspection. It does not create Disc Selections or authorize encoding.
