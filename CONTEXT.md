@@ -56,6 +56,10 @@ _Avoid_: Watchability verdict, damage score
 The evidence-backed continuity of a title across archive revisions. A matching title number alone does not establish continuity for catalog selections, assessments, or operator acceptance.
 _Avoid_: Title number, title position
 
+**Title Damage Acceptance**:
+An operator's explicit acceptance of reported source damage or unknown impact for selected title content, tied to its archive revision, playback selection, and damage assessment. It is separate from catalog selection and from requesting an encode, and does not establish that an Encode Output is valid or watchable.
+_Avoid_: Encode request, catalog selection, watchability approval
+
 **Title Missing-Source Percentage**:
 The proportion of a title's unique source sectors that remain unrecovered for its selected playback path and angle, including multiplexed content and navigation sectors. A complete percentage requires trustworthy complete mapping; shared sectors count independently for each affected title.
 _Avoid_: Video damage percentage, playback lost percentage
