@@ -120,6 +120,18 @@ function descriptorMediumSense(lba, ascq = 0) {
   return descriptorSense(lba, 0x03, 0x11, ascq);
 }
 
+function fixedDeferredMediumSense(lba, ascq = 0) {
+  const sense = Buffer.from(fixedMediumSense(lba, ascq), "hex");
+  sense[0] = 0x71;
+  return sense.toString("hex");
+}
+
+function descriptorDeferredMediumSense(lba, ascq = 0) {
+  const sense = Buffer.from(descriptorMediumSense(lba, ascq), "hex");
+  sense[0] = 0x73;
+  return sense.toString("hex");
+}
+
 function fixedNoSeekCompleteSense(lba) {
   return fixedSense(lba, 0x03, 0x02);
 }
@@ -955,6 +967,57 @@ if (
   );
 }
 
+for (const [name, sense] of [
+  ["fixed", fixedDeferredMediumSense(5, 5)],
+  ["descriptor", descriptorDeferredMediumSense(5, 5)],
+]) {
+  const transientDeferredMedium = runTestCopy(
+    `transient-${name}-deferred-medium`,
+    rawCompletionFault(5, 1, sense),
+  );
+  if (
+    transientDeferredMedium.status !== 0 ||
+    !readFileSync(transientDeferredMedium.outputPath).equals(content) ||
+    recoveryResult(transientDeferredMedium.stderr).badSectorCount !== 0 ||
+    JSON.stringify(testReads(transientDeferredMedium.stderr)) !==
+      JSON.stringify([
+        { lba: 0, blocks: 31 },
+        { lba: 0, blocks: 31 },
+        { lba: 31, blocks: 9 },
+      ])
+  ) {
+    throw new Error(
+      `libdvdcss transient ${name} deferred medium retry check failed: ${transientDeferredMedium.stderr}`,
+    );
+  }
+}
+
+const deferredAfterProgress = runTestCopy(
+  "deferred-after-progress",
+  rawCompletionFault(35, 1, fixedDeferredMediumSense(35, 5)),
+);
+const deferredAfterProgressResult = readFailureResult(
+  deferredAfterProgress.stderr,
+);
+if (
+  deferredAfterProgress.status !== 3 ||
+  deferredAfterProgressResult.category !== "unknown" ||
+  deferredAfterProgressResult.senseResponseCode !== 0x71 ||
+  deferredAfterProgressResult.requestedLba !== 31 ||
+  deferredAfterProgressResult.requestedBlockCount !== 9 ||
+  deferredAfterProgressResult.retryOrdinal !== 0 ||
+  deferredAfterProgress.stderr.includes(recoveryResultPrefix) ||
+  !readFileSync(deferredAfterProgress.outputPath).equals(
+    content.subarray(0, 31 * 2_048),
+  ) ||
+  JSON.stringify(testReads(deferredAfterProgress.stderr)) !==
+    JSON.stringify([{ lba: 0, blocks: 31 }, { lba: 31, blocks: 9 }])
+) {
+  throw new Error(
+    `libdvdcss deferred after progress check failed: ${deferredAfterProgress.stderr}`,
+  );
+}
+
 const transientNoSeekComplete = runTestCopy(
   "transient-no-seek-complete",
   rawCompletionFault(5, 1, fixedNoSeekCompleteSense(5)),
@@ -1615,11 +1678,11 @@ const malformedUnknownFixtures = [
   ["unsupported", "raw@5@always@2@0@8@1@7f"],
   [
     "fixed-deferred-medium",
-    "raw@5@always@2@0@8@18@710003000000050a00000000110000000000",
+    rawCompletionFault(5, "always", fixedDeferredMediumSense(5)),
   ],
   [
     "descriptor-deferred-medium",
-    "raw@5@always@2@0@8@20@730311000000000c000a80000000000000000005",
+    rawCompletionFault(5, "always", descriptorDeferredMediumSense(5)),
   ],
   [
     "driver-media-status",
@@ -1645,13 +1708,15 @@ const malformedUnknownFixtures = [
 for (const [name, fault] of malformedUnknownFixtures) {
   const malformedUnknown = runTestCopy(`unknown-${name}`, fault);
   const result = readFailureResult(malformedUnknown.stderr);
+  const deferredMedium = name === "fixed-deferred-medium" ||
+    name === "descriptor-deferred-medium";
   if (
     malformedUnknown.status !== 3 ||
     result.category !== "unknown" ||
     result.classifierVersion !== "scsi-read-classifier-v2" ||
     result.requestedLba !== 0 ||
     result.requestedBlockCount !== 31 ||
-    result.retryOrdinal !== 0 ||
+    result.retryOrdinal !== (deferredMedium ? 1 : 0) ||
     (name === "missing" &&
       (result.scsiStatus !== null ||
         result.hostStatus !== null ||
@@ -1659,7 +1724,8 @@ for (const [name, fault] of malformedUnknownFixtures) {
     (name === "fixed-declared-length-excludes-asc" &&
       (result.asc !== null || result.ascq !== null)) ||
     malformedUnknown.stderr.includes(recoveryResultPrefix) ||
-    testReads(malformedUnknown.stderr).length !== 1
+    testReads(malformedUnknown.stderr).length !==
+      (deferredMedium ? 2 : 1)
   ) {
     throw new Error(
       `libdvdcss ${name} unknown evidence check failed: ${malformedUnknown.stderr}`,
@@ -1707,6 +1773,27 @@ if (
   !isolatedReads.some(({ lba, blocks }) => lba === 5 && blocks === 1)
 ) {
   throw new Error(`libdvdcss isolated recovery check failed: ${isolated.stderr}`);
+}
+
+const deferredThenCurrent = runTestCopy(
+  "deferred-then-current-medium",
+  [
+    rawCompletionFault(
+      5, 1, fixedDeferredMediumSense(5, 5),
+    ),
+    rawCompletionFault(5, "always", fixedMediumAtFive),
+  ].join(","),
+);
+if (
+  deferredThenCurrent.status !== 0 ||
+  recoveryResult(deferredThenCurrent.stderr).badSectorCount !== 1 ||
+  JSON.stringify(badSectorRanges(
+    recoveryResult(deferredThenCurrent.stderr), 40,
+  )) !== JSON.stringify([{ startLba: 5, sectorCount: 1 }])
+) {
+  throw new Error(
+    `libdvdcss deferred then current medium check failed: ${deferredThenCurrent.stderr}`,
+  );
 }
 
 const persistentResumePath = prepareOutput(
@@ -1837,6 +1924,31 @@ if (
 ) {
   throw new Error(
     `libdvdcss unknown resume check failed: ${unknownResume.stderr}`,
+  );
+}
+
+const deferredResumePath = prepareOutput(
+  "/tmp/rip-dvd-reader-deferred-resume.img",
+);
+writeFileSync(deferredResumePath, unknownResumeContent);
+const deferredResume = runTestResume(
+  deferredResumePath,
+  rawCompletionFault(5, 1, descriptorDeferredMediumSense(5, 5)),
+  isolatedResult.badSectorBitmapHex,
+);
+const deferredResumeResult = readFailureResult(deferredResume.stderr);
+if (
+  deferredResume.status !== 3 ||
+  !readFileSync(deferredResumePath).equals(unknownResumeContent) ||
+  deferredResumeResult.category !== "unknown" ||
+  deferredResumeResult.senseResponseCode !== 0x73 ||
+  deferredResumeResult.retryOrdinal !== 0 ||
+  deferredResume.stderr.includes(recoveryResultPrefix) ||
+  JSON.stringify(testReads(deferredResume.stderr)) !==
+    JSON.stringify([{ lba: 5, blocks: 1 }])
+) {
+  throw new Error(
+    `libdvdcss deferred resume fail-closed check failed: ${deferredResume.stderr}`,
   );
 }
 

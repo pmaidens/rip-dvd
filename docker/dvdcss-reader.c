@@ -478,7 +478,7 @@ static int is_recognized_dvd_out_of_range_error(
         sense->ascq == 0x00 && sense->has_information_lba;
 }
 
-static int has_current_check_condition_sense(
+static int has_check_condition_sense(
     const struct rip_dvd_scsi_completion *completion,
     const struct decoded_sense *sense)
 {
@@ -488,8 +488,24 @@ static int has_current_check_condition_sense(
         (completion->scsi_status & 0xfe) == 0x02 &&
         completion->host_status == 0 &&
         (driver_base_status == 0x00 || driver_base_status == 0x08) &&
-        (sense->response_code == 0x70 || sense->response_code == 0x72) &&
         sense->has_sense_key && sense->has_asc && sense->has_ascq;
+}
+
+static int has_current_check_condition_sense(
+    const struct rip_dvd_scsi_completion *completion,
+    const struct decoded_sense *sense)
+{
+    return has_check_condition_sense(completion, sense) &&
+        (sense->response_code == 0x70 || sense->response_code == 0x72);
+}
+
+static int has_deferred_medium_sense(
+    const struct read_failure *failure)
+{
+    const struct decoded_sense *sense = &failure->sense;
+    return has_check_condition_sense(&failure->completion, sense) &&
+        (sense->response_code == 0x71 || sense->response_code == 0x73) &&
+        sense->sense_key == 0x03;
 }
 
 static enum backend_read_status classify_read_failure(
@@ -1019,6 +1035,23 @@ static struct backend_read_result backend_read(
         .status = status,
         .failure = failure,
     };
+}
+
+/* A deferred error can implicate previously accepted content. Only the first
+ * read of a fresh image can be repeated without leaving that data unverified. */
+static struct backend_read_result read_initial_content_with_deferred_retry(
+    struct read_backend *backend, unsigned char *buffer, uint64_t lba,
+    int block_count, int absolute, uint32_t *retry_ordinal)
+{
+    struct backend_read_result result = backend_read(
+        backend, buffer, lba, block_count, absolute, *retry_ordinal);
+    if (result.status == BACKEND_READ_TERMINAL_FAILURE &&
+        has_deferred_medium_sense(&result.failure)) {
+        *retry_ordinal += 1;
+        result = backend_read(
+            backend, buffer, lba, block_count, 1, *retry_ordinal);
+    }
+    return result;
 }
 
 static int consume_blocks(struct operation_state *state,
@@ -1589,9 +1622,13 @@ static int read_disc(struct read_backend *backend, uint64_t size_bytes,
                             ? READ_BLOCKS
                             : (int)blocks_remaining;
         uint64_t start_lba = bytes_processed / DVDCSS_BLOCK_SIZE;
-        struct backend_read_result result =
-            backend_read(backend, buffer, start_lba, requested,
-                         require_absolute_read, 0);
+        uint32_t retry_ordinal = 0;
+        struct backend_read_result result = bytes_processed == 0
+            ? read_initial_content_with_deferred_retry(
+                backend, buffer, start_lba, requested,
+                require_absolute_read, &retry_ordinal)
+            : backend_read(backend, buffer, start_lba, requested,
+                           require_absolute_read, 0);
         require_absolute_read = 0;
         if (result.status == BACKEND_READ_FATAL) {
             status = 1;
@@ -1614,7 +1651,7 @@ static int read_disc(struct read_backend *backend, uint64_t size_bytes,
             int recovery_status = recover_range(
                 backend, state, recovery, &conflict_evidence, buffer,
                 start_lba, requested,
-                &bytes_processed, 1, size_bytes);
+                &bytes_processed, retry_ordinal + 1, size_bytes);
             if (recovery_status != 0) {
                 status = recovery_status;
                 break;
