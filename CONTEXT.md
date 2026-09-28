@@ -76,6 +76,10 @@ _Avoid_: Watchability guarantee, read completeness
 An optional sample clip around an estimated affected playback interval, with surrounding context and the intended encoding settings, tied to a consistent archive revision. It illustrates sample decoding and is distinct from playback of the corresponding interval in a finished Encode Output.
 _Avoid_: Final-output proof, exact damage prediction
 
+**Browser Viewing Rendition**:
+An authenticated, browser-compatible derivative of a Damage Preview or Encode Output for in-app playback. Its stream conversions and omitted or burned subtitles are recorded; it does not replace the canonical media.
+_Avoid_: Original preview, exact output
+
 **Skipped Region**:
 A range left unresolved during the initial archive copy after a read request fails. Its sectors have not necessarily been tested individually and must not all be called unreadable.
 _Avoid_: Bad sectors, proven damage
