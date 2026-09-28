@@ -55,6 +55,13 @@ Current SPC also uses the header's SDAT_OVFL bit to report omitted sense data. `
 
 Deferred responses `71h` and `73h` describe a previous command. They may be decoded for diagnostics, but they must not authorize recovery or zero substitution for the current requested range. Recovery should require current response `70h` or `72h`. This is one place where the existing conservative behavior is right.
 
+A completed READ(10) with CHECK CONDITION and deferred medium sense gets one
+absolute repeat of the same content read. A successful repeat supplies actual
+data; a current medium response enters the existing bounded recovery path.
+Another deferred response remains `unknown` and stops the operation without
+substituting zeros. This repeat does not apply to endpoint proof reads, which
+still require their own current, matching confirmations.
+
 ### Parser decision matrix
 
 | Evidence | Accept for core classification | Location effect | Core-invalidating condition |
@@ -115,7 +122,7 @@ Keep malformed buffers terminal, but move these currently rejected cases into ac
 - descriptor VALID clear, missing information descriptor, malformed information descriptor, and out-of-request information LBA, all classified as unlocated medium errors;
 - fixed and descriptor `03/02/00`, with transient recovery and persistent single-sector recovery cases;
 - every current `03h` sense with an unfamiliar or vendor ASC/ASCQ, proving that detail does not gate recovery;
-- deferred `71h` and `73h` medium sense, proving that no retry, split, zero write, or boundary proof occurs;
+- deferred `71h` and `73h` medium sense, proving that one repeat can obtain current data or sense, while repeated deferred sense cannot trigger splitting, zero substitution, or boundary proof;
 - CHECK CONDITION with legal vendor status bits set;
 - descriptor and fixed SDAT_OVFL;
 - `05/6F/06` through `05/6F/0A` as protection failures;

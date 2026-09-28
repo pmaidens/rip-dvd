@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DvdArchiveReadFailureError,
   preserveDvdArchive,
+  type DvdArchiveRequestContext,
   type DvdCopyRequest,
   type DvdCopyRunner,
 } from "./dvd-archiver.js";
@@ -256,7 +257,10 @@ function createFixture(archiveRequestId: string) {
       `dvdmeta-${digest}.iso`,
     ),
     baseOptions: {
-      archiveRequestId,
+      archiveRequest: {
+        id: archiveRequestId as DvdArchiveRequestContext["id"],
+        rearchiveSourceArchiveId: null,
+      },
       devicePath: "/dev/sr0",
       endpointProver: {
         async prove({
@@ -334,6 +338,64 @@ describe.runIf(nativeTestExecutable !== "")(
       });
       expect(readFileSync(preserved.archivePath)).toEqual(fixture.content);
       expect(salvageValidator.validate).not.toHaveBeenCalled();
+    });
+
+    it("publishes a clean archive after a transient deferred medium response", async () => {
+      const fixture = createFixture(
+        "12222222-2222-4222-8222-222222222222",
+      );
+      const runner = createSyntheticDvdCopyRunner({
+        faults: rawCompletionFault(
+          5,
+          1,
+          fixedSense(5, 0x03, 0x11, 0x05).replace(/^f0/, "71"),
+        ),
+        sourcePath: fixture.sourcePath,
+      });
+      const salvageValidator = { validate: vi.fn() };
+
+      const preserved = await preserveDvdArchive({
+        ...fixture.baseOptions,
+        runner,
+        salvageValidator,
+      });
+
+      expect(runner.results).toEqual([
+        createCleanDvdRecoveryResult(fixture.content.byteLength),
+      ]);
+      expect(preserved.integrityEvidence.integrity).toBe("clean_read");
+      expect(readFileSync(preserved.archivePath)).toEqual(fixture.content);
+      expect(salvageValidator.validate).not.toHaveBeenCalled();
+    });
+
+    it("keeps repeated deferred medium responses out of rescue and publication", async () => {
+      const fixture = createFixture(
+        "13333333-3333-4333-8333-333333333333",
+      );
+      const runner = createSyntheticDvdCopyRunner({
+        faults: rawCompletionFault(
+          5,
+          "always",
+          fixedSense(5, 0x03, 0x11, 0x05).replace(/^f0/, "71"),
+        ),
+        sourcePath: fixture.sourcePath,
+      });
+
+      await expect(preserveDvdArchive({
+        ...fixture.baseOptions,
+        runner,
+      })).rejects.toMatchObject({
+        stage: "initial_copy",
+        readFailure: { category: "unknown", senseResponseCode: 0x71 },
+      });
+
+      expect(runner.results).toEqual([]);
+      expect(existsSync(fixture.archivePath)).toBe(false);
+      expect(
+        readdirSync(realpathSync(fixture.originalsLibraryPath)).some((name) =>
+          name.endsWith(".rip-dvd-rescue.iso"),
+        ),
+      ).toBe(false);
     });
 
     it("rolls back same-attempt zero-fill before retaining a boundary prefix", async () => {
