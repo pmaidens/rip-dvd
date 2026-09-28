@@ -77,6 +77,12 @@ function fixedMediumSense(lba: number): string {
   return fixedSense(lba, 0x03, 0x11);
 }
 
+function fixedDeferredMediumSense(lba: number, ascq = 0): string {
+  const sense = Buffer.from(fixedSense(lba, 0x03, 0x11, ascq), "hex");
+  sense[0] = 0x71;
+  return sense.toString("hex");
+}
+
 function descriptorMediumSense(lba: number): string {
   return descriptorSense(lba, 0x03, 0x11);
 }
@@ -348,7 +354,7 @@ describe.runIf(nativeTestExecutable !== "")(
         faults: rawCompletionFault(
           5,
           1,
-          fixedSense(5, 0x03, 0x11, 0x05).replace(/^f0/, "71"),
+          fixedDeferredMediumSense(5, 0x05),
         ),
         sourcePath: fixture.sourcePath,
       });
@@ -376,7 +382,7 @@ describe.runIf(nativeTestExecutable !== "")(
         faults: rawCompletionFault(
           5,
           "always",
-          fixedSense(5, 0x03, 0x11, 0x05).replace(/^f0/, "71"),
+          fixedDeferredMediumSense(5, 0x05),
         ),
         sourcePath: fixture.sourcePath,
       });
@@ -387,6 +393,37 @@ describe.runIf(nativeTestExecutable !== "")(
       })).rejects.toMatchObject({
         stage: "initial_copy",
         readFailure: { category: "unknown", senseResponseCode: 0x71 },
+      });
+
+      expect(runner.results).toEqual([]);
+      expect(existsSync(fixture.archivePath)).toBe(false);
+      expect(
+        readdirSync(realpathSync(fixture.originalsLibraryPath)).some((name) =>
+          name.endsWith(".rip-dvd-rescue.iso"),
+        ),
+      ).toBe(false);
+    });
+
+    it("keeps a deferred response after accepted data out of publication", async () => {
+      const fixture = createFixture(
+        "14444444-4444-4444-8444-444444444444",
+      );
+      const runner = createSyntheticDvdCopyRunner({
+        faults: rawCompletionFault(35, 1, fixedDeferredMediumSense(35, 5)),
+        sourcePath: fixture.sourcePath,
+      });
+
+      await expect(preserveDvdArchive({
+        ...fixture.baseOptions,
+        runner,
+      })).rejects.toMatchObject({
+        stage: "initial_copy",
+        readFailure: {
+          category: "unknown",
+          senseResponseCode: 0x71,
+          requestedLba: 31,
+          retryOrdinal: 0,
+        },
       });
 
       expect(runner.results).toEqual([]);

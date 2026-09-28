@@ -1037,9 +1037,9 @@ static struct backend_read_result backend_read(
     };
 }
 
-/* Deferred sense describes an earlier command. Repeat the current content
- * read once, but never let deferred sense authorize sector substitution. */
-static struct backend_read_result content_read(
+/* A deferred error can implicate previously accepted content. Only the first
+ * read of a fresh image can be repeated without leaving that data unverified. */
+static struct backend_read_result read_initial_content_with_deferred_retry(
     struct read_backend *backend, unsigned char *buffer, uint64_t lba,
     int block_count, int absolute, uint32_t *retry_ordinal)
 {
@@ -1529,11 +1529,10 @@ static int recover_range(struct read_backend *backend,
                          uint32_t first_retry_ordinal,
                          uint64_t declared_byte_count)
 {
-    uint32_t retry_ordinal = first_retry_ordinal;
     for (int attempt = 0; attempt < RECOVERY_READ_ATTEMPTS; attempt++) {
         struct backend_read_result result =
-            content_read(backend, buffer, start_lba, block_count, 1,
-                         &retry_ordinal);
+            backend_read(backend, buffer, start_lba, block_count, 1,
+                         first_retry_ordinal + (uint32_t)attempt);
         if (result.status == BACKEND_READ_FATAL) {
             return 1;
         }
@@ -1544,7 +1543,6 @@ static int recover_range(struct read_backend *backend,
         }
         if (result.status == BACKEND_READ_MEDIUM_ERROR) {
             record_boundary_medium_error(conflict_evidence, &result.failure);
-            retry_ordinal += 1;
             continue;
         }
         if (backend_read_has_terminal_failure_result(result.status)) {
@@ -1626,9 +1624,12 @@ static int read_disc(struct read_backend *backend, uint64_t size_bytes,
                             : (int)blocks_remaining;
         uint64_t start_lba = bytes_processed / DVDCSS_BLOCK_SIZE;
         uint32_t retry_ordinal = 0;
-        struct backend_read_result result =
-            content_read(backend, buffer, start_lba, requested,
-                         require_absolute_read, &retry_ordinal);
+        struct backend_read_result result = bytes_processed == 0
+            ? read_initial_content_with_deferred_retry(
+                backend, buffer, start_lba, requested,
+                require_absolute_read, &retry_ordinal)
+            : backend_read(backend, buffer, start_lba, requested,
+                           require_absolute_read, 0);
         require_absolute_read = 0;
         if (result.status == BACKEND_READ_FATAL) {
             status = 1;
@@ -1965,11 +1966,10 @@ static int run_resume(struct read_backend *backend, const char *output_path,
         }
         int recovered = 0;
         struct boundary_conflict_evidence conflict_evidence = { 0 };
-        uint32_t retry_ordinal = 0;
         for (int attempt = 0; attempt < RECOVERY_READ_ATTEMPTS; attempt++) {
             struct backend_read_result result =
-                content_read(backend, buffer, lba, 1, 1,
-                             &retry_ordinal);
+                backend_read(backend, buffer, lba, 1, 1,
+                             (uint32_t)attempt);
             if (result.status == BACKEND_READ_FATAL) {
                 status = 1;
                 break;
@@ -1983,7 +1983,6 @@ static int run_resume(struct read_backend *backend, const char *output_path,
             if (result.status == BACKEND_READ_MEDIUM_ERROR) {
                 record_boundary_medium_error(
                     &conflict_evidence, &result.failure);
-                retry_ordinal += 1;
                 continue;
             }
             if (backend_read_has_terminal_failure_result(result.status)) {
