@@ -1779,7 +1779,7 @@ const deferredThenCurrent = runTestCopy(
   "deferred-then-current-medium",
   [
     rawCompletionFault(
-      5, 1, fixedMediumSense(5, 5).replace(/^f0/, "71"),
+      5, 1, fixedDeferredMediumSense(5, 5),
     ),
     rawCompletionFault(5, "always", fixedMediumAtFive),
   ].join(","),

@@ -1046,8 +1046,7 @@ static struct backend_read_result read_initial_content_with_deferred_retry(
     struct backend_read_result result = backend_read(
         backend, buffer, lba, block_count, absolute, *retry_ordinal);
     if (result.status == BACKEND_READ_TERMINAL_FAILURE &&
-        has_deferred_medium_sense(&result.failure) &&
-        *retry_ordinal < UINT32_MAX) {
+        has_deferred_medium_sense(&result.failure)) {
         *retry_ordinal += 1;
         result = backend_read(
             backend, buffer, lba, block_count, 1, *retry_ordinal);
