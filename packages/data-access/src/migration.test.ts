@@ -773,16 +773,17 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     FROM mutation_invocations
     WHERE key = '00000000-0000-4000-8000-000000000402'
   `).get()).toEqual({ count: 0 });
-  admissionCheck.exec(`
+  expect(() => admissionCheck.exec(`
     UPDATE original_disc_archives
     SET integrity = 'incomplete_read',
         integrity_policy_version = 'dvd-recovery-evidence-v1',
-        bad_sector_count = 2,
+        bad_sector_count = 1,
         bad_area_count = 1,
-        bad_sector_ranges = '[{"startLba":23,"sectorCount":2}]',
+        bad_sector_ranges = '[{"startLba":11,"sectorCount":1}]',
         bad_sector_counts_by_title = NULL
-    WHERE id = 'evidence-new-format-archive';
-
+    WHERE id = 'evidence-legacy-unknown-archive'
+  `)).toThrow(/requires a DVD evidence header/i);
+  admissionCheck.exec(`
     INSERT INTO archive_requests (
       id, detected_disc_id, evidence_format, status, priority, fulfilled_at,
       created_at, updated_at
@@ -812,11 +813,11 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     ids: ["evidence-new-format-archive" as OriginalDiscArchiveId],
   })).toEqual([
     expect.objectContaining({
-      integrity: "incomplete_read",
-      integrityPolicyVersion: DVD_RECOVERY_EVIDENCE_FORMAT,
-      badSectorCount: 2,
-      badAreaCount: 1,
-      badSectorRanges: [{ startLba: 23, sectorCount: 2 }],
+      integrity: "unknown",
+      integrityPolicyVersion: null,
+      badSectorCount: null,
+      badAreaCount: null,
+      badSectorRanges: null,
     }),
   ]);
   expect(projectionOnlyAccess.archiveJobs.find(
@@ -841,6 +842,15 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       'dvd-recovery-evidence-v1',
       1
     );
+
+    UPDATE original_disc_archives
+    SET integrity = 'incomplete_read',
+        integrity_policy_version = 'dvd-recovery-evidence-v1',
+        bad_sector_count = 2,
+        bad_area_count = 1,
+        bad_sector_ranges = '[{"startLba":23,"sectorCount":2}]',
+        bad_sector_counts_by_title = NULL
+    WHERE id = 'evidence-new-format-archive';
 
     INSERT INTO archive_recoveries (
       id, original_disc_archive_id, status, created_at, updated_at
@@ -873,6 +883,17 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     createdAt: new Date(1),
     updatedAt: new Date(1),
   });
+  expect(currentAccess.catalog.listOriginalDiscArchives({
+    ids: ["evidence-new-format-archive" as OriginalDiscArchiveId],
+  })).toEqual([
+    expect.objectContaining({
+      integrity: "incomplete_read",
+      integrityPolicyVersion: DVD_RECOVERY_EVIDENCE_FORMAT,
+      badSectorCount: 2,
+      badAreaCount: 1,
+      badSectorRanges: [{ startLba: 23, sectorCount: 2 }],
+    }),
+  ]);
   expect(
     new Set(
       currentAccess.catalog.listDiscSelections({ encodeEligibleOnly: true })
@@ -903,6 +924,21 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   expect(finalDatabase.prepare("PRAGMA quick_check").get()).toEqual({
     quick_check: "ok",
   });
+  expect(finalDatabase.prepare(`
+    SELECT name
+    FROM sqlite_schema
+    WHERE type = 'trigger' AND name LIKE 'dvd_evidence_%'
+    ORDER BY name
+  `).all()).toEqual([
+    { name: "dvd_evidence_archive_job_insert_match" },
+    { name: "dvd_evidence_archive_job_update_guard" },
+    { name: "dvd_evidence_archive_request_update_guard" },
+    { name: "dvd_evidence_header_delete_guard" },
+    { name: "dvd_evidence_header_insert_provenance" },
+    { name: "dvd_evidence_header_update_provenance" },
+    { name: "dvd_evidence_incomplete_archive_insert_guard" },
+    { name: "dvd_evidence_incomplete_archive_update_guard" },
+  ]);
   finalDatabase.close();
 });
 

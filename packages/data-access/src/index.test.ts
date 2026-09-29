@@ -46,6 +46,7 @@ import {
   createNormalDvdArchiveBoundaryEvidenceForTest,
 } from "./disc-settling-fixture.js";
 import type {
+  ArchiveJobId,
   DetectedDiscId,
   DiscKind,
   DiscInspectionId,
@@ -12889,14 +12890,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       fingerprint: "evidence-worker",
       sizeBytes: 2_048,
     });
-    access.archiveRequests.create({ detectedDiscId: running.disc.id });
-    const legacyClaim = access.archiveJobs.startForInspection(
-      running.inspection.id,
-      "legacy-evidence-worker",
-    );
-    if (legacyClaim === null) {
-      throw new Error("Expected a legacy Archive Job claim");
-    }
+    const runningRequest = access.archiveRequests.create({
+      detectedDiscId: running.disc.id,
+    });
     access.close();
 
     const sqlite = new DatabaseSync(databasePath);
@@ -12907,14 +12903,44 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     `).run(DVD_RECOVERY_EVIDENCE_FORMAT, scheduledRequest.id);
     sqlite.prepare(`
       UPDATE archive_requests
-      SET evidence_format = ?
+      SET evidence_format = ?, status = 'running'
       WHERE id = ?
-    `).run(DVD_RECOVERY_EVIDENCE_FORMAT, legacyClaim.archiveRequestId);
-    sqlite.prepare(`
+    `).run(DVD_RECOVERY_EVIDENCE_FORMAT, runningRequest.id);
+    const insertArchiveJob = sqlite.prepare(`
+      INSERT INTO archive_jobs (
+        id, archive_request_id, disc_inspection_id, detected_disc_id,
+        evidence_format, attempt_ordinal, status, priority, progress_phase,
+        progress_percent, progress_bytes, last_progress_at, claimed_by,
+        claim_token, claimed_at, started_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 1, 'running', 0, 'preparing', 0, 0, 1,
+        'legacy-evidence-worker', 'legacy-evidence-token', 1, 1, 1, 1)
+    `);
+    expect(() => insertArchiveJob.run(
+      "evidence-scheduling-old-worker-job",
+      scheduledRequest.id,
+      scheduled.inspection.id,
+      scheduled.disc.id,
+      null,
+    )).toThrow(/evidence format must match/i);
+
+    const markedJobId = "evidence-worker-marked-job";
+    insertArchiveJob.run(
+      markedJobId,
+      runningRequest.id,
+      running.inspection.id,
+      running.disc.id,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+    );
+    expect(() => sqlite.prepare(`
       UPDATE archive_jobs
-      SET evidence_format = ?
+      SET progress_percent = 50
       WHERE id = ?
-    `).run(DVD_RECOVERY_EVIDENCE_FORMAT, legacyClaim.id);
+    `).run(markedJobId)).toThrow(/admission is closed/i);
+    expect(() => sqlite.prepare(`
+      UPDATE archive_requests
+      SET priority = 1
+      WHERE id = ?
+    `).run(runningRequest.id)).toThrow(/admission is closed/i);
     sqlite.close();
 
     const gatedAccess = openTestDatabase(databasePath);
@@ -12925,7 +12951,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       "closed-evidence-worker",
     )).toBeNull();
 
-    const markedClaim = gatedAccess.archiveJobs.find(legacyClaim.id);
+    const markedClaim = gatedAccess.archiveJobs.find(
+      markedJobId as ArchiveJobId,
+    );
     if (markedClaim?.status !== "running") {
       throw new Error("Expected a marked running Archive Job");
     }

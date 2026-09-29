@@ -181,4 +181,128 @@ CREATE INDEX `original_disc_archives_fingerprint_idx` ON `original_disc_archives
 CREATE UNIQUE INDEX `original_disc_archives_fingerprint_unique` ON `original_disc_archives` (`fingerprint`) WHERE "original_disc_archives"."rearchive_source_archive_id" is null;--> statement-breakpoint
 CREATE INDEX `original_disc_archives_rearchive_source_idx` ON `original_disc_archives` (`rearchive_source_archive_id`,`archived_at`,`id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `archive_recoveries_archive_unique` ON `archive_recoveries` (`original_disc_archive_id`);--> statement-breakpoint
-CREATE UNIQUE INDEX `dvd_archive_evidence_headers_job_unique` ON `dvd_archive_evidence_headers` (`source_archive_job_id`);
+CREATE UNIQUE INDEX `dvd_archive_evidence_headers_job_unique` ON `dvd_archive_evidence_headers` (`source_archive_job_id`);--> statement-breakpoint
+CREATE TRIGGER `dvd_evidence_archive_job_insert_match`
+BEFORE INSERT ON `archive_jobs`
+WHEN NEW.`evidence_format` IS NOT (
+  SELECT `evidence_format`
+  FROM `archive_requests`
+  WHERE `id` = NEW.`archive_request_id`
+)
+BEGIN
+  SELECT RAISE(
+    ABORT,
+    'Archive Job evidence format must match its Archive Request'
+  );
+END;--> statement-breakpoint
+CREATE TRIGGER `dvd_evidence_archive_job_update_guard`
+BEFORE UPDATE ON `archive_jobs`
+BEGIN
+  SELECT CASE
+    WHEN OLD.`evidence_format` = 'dvd-recovery-evidence-v1'
+      OR NEW.`evidence_format` = 'dvd-recovery-evidence-v1'
+    THEN RAISE(
+      ABORT,
+      'New-format DVD Archive Job admission is closed until the recovery and encoding workflow is complete.'
+    )
+    WHEN NEW.`evidence_format` IS NOT (
+      SELECT `evidence_format`
+      FROM `archive_requests`
+      WHERE `id` = NEW.`archive_request_id`
+    )
+    THEN RAISE(
+      ABORT,
+      'Archive Job evidence format must match its Archive Request'
+    )
+  END;
+END;--> statement-breakpoint
+CREATE TRIGGER `dvd_evidence_archive_request_update_guard`
+BEFORE UPDATE ON `archive_requests`
+BEGIN
+  SELECT CASE
+    WHEN OLD.`evidence_format` = 'dvd-recovery-evidence-v1'
+    THEN RAISE(
+      ABORT,
+      'New-format DVD Archive Job admission is closed until the recovery and encoding workflow is complete.'
+    )
+    WHEN EXISTS (
+      SELECT 1
+      FROM `archive_jobs`
+      WHERE `archive_request_id` = OLD.`id`
+        AND `evidence_format` IS NOT NEW.`evidence_format`
+    )
+    THEN RAISE(
+      ABORT,
+      'Archive Job evidence format must match its Archive Request'
+    )
+  END;
+END;--> statement-breakpoint
+CREATE TRIGGER `dvd_evidence_header_insert_provenance`
+BEFORE INSERT ON `dvd_archive_evidence_headers`
+WHEN NOT EXISTS (
+  SELECT 1
+  FROM `archive_jobs`
+  WHERE `id` = NEW.`source_archive_job_id`
+    AND `original_disc_archive_id` = NEW.`original_disc_archive_id`
+    AND `evidence_format` = NEW.`evidence_format`
+    AND `status` = 'completed'
+)
+BEGIN
+  SELECT RAISE(
+    ABORT,
+    'DVD evidence header must reference its completed marked Archive Job'
+  );
+END;--> statement-breakpoint
+CREATE TRIGGER `dvd_evidence_header_update_provenance`
+BEFORE UPDATE ON `dvd_archive_evidence_headers`
+WHEN NOT EXISTS (
+  SELECT 1
+  FROM `archive_jobs`
+  WHERE `id` = NEW.`source_archive_job_id`
+    AND `original_disc_archive_id` = NEW.`original_disc_archive_id`
+    AND `evidence_format` = NEW.`evidence_format`
+    AND `status` = 'completed'
+)
+BEGIN
+  SELECT RAISE(
+    ABORT,
+    'DVD evidence header must reference its completed marked Archive Job'
+  );
+END;--> statement-breakpoint
+CREATE TRIGGER `dvd_evidence_incomplete_archive_insert_guard`
+BEFORE INSERT ON `original_disc_archives`
+WHEN NEW.`integrity` = 'incomplete_read'
+BEGIN
+  SELECT RAISE(
+    ABORT,
+    'Incomplete-read Archive Integrity requires a DVD evidence header'
+  );
+END;--> statement-breakpoint
+CREATE TRIGGER `dvd_evidence_incomplete_archive_update_guard`
+BEFORE UPDATE ON `original_disc_archives`
+WHEN NEW.`integrity` = 'incomplete_read'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM `dvd_archive_evidence_headers`
+    WHERE `original_disc_archive_id` = NEW.`id`
+  )
+BEGIN
+  SELECT RAISE(
+    ABORT,
+    'Incomplete-read Archive Integrity requires a DVD evidence header'
+  );
+END;--> statement-breakpoint
+CREATE TRIGGER `dvd_evidence_header_delete_guard`
+BEFORE DELETE ON `dvd_archive_evidence_headers`
+WHEN EXISTS (
+  SELECT 1
+  FROM `original_disc_archives`
+  WHERE `id` = OLD.`original_disc_archive_id`
+    AND `integrity` = 'incomplete_read'
+)
+BEGIN
+  SELECT RAISE(
+    ABORT,
+    'Incomplete-read Archive Integrity requires a DVD evidence header'
+  );
+END;

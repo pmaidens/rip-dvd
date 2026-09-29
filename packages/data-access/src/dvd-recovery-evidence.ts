@@ -1,3 +1,5 @@
+import type { DvdArchiveEvidenceFormat } from "./types.js";
+
 export const DVD_RECOVERY_EVIDENCE_FORMAT =
   "dvd-recovery-evidence-v1" as const;
 
@@ -22,7 +24,7 @@ export class DvdRecoveryEvidenceAdmissionClosedError extends Error {
 }
 
 export function assertDvdRecoveryEvidenceAdmissionAvailable(
-  evidenceFormat: string | null | undefined,
+  evidenceFormat: DvdArchiveEvidenceFormat | null | undefined,
 ): void {
   if (evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT) {
     throw new DvdRecoveryEvidenceAdmissionClosedError();

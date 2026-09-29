@@ -41,7 +41,7 @@ The later, explicit decision that adopts a reviewed Re-archive Mapping Proposal 
 _Avoid_: Catalog Review completion, proposal save
 
 **Archive Integrity**:
-The evidence-backed read completeness of an Original Disc Archive, distinct from structural validity and playback observations. Existing `unknown` records retain their lack of read-quality evidence, `clean_read` records a complete read without remaining unreadable sectors, and historical `watchable_salvage` records acceptance under the salvage policy used at the time; none guarantees an undamaged viewing experience.
+The evidence-backed read completeness of an Original Disc Archive, distinct from structural validity and playback observations. Existing `unknown` records retain their lack of read-quality evidence, `clean_read` records a complete read without remaining unreadable sectors, `incomplete_read` is limited to `dvd-recovery-evidence-v1` archives with remaining Unrecovered Source sectors inside the accepted extent, and historical `watchable_salvage` records acceptance under the salvage policy used at the time; none guarantees an undamaged viewing experience or permission to encode.
 _Avoid_: Bit-perfect, exact copy, Archive Job status
 
 **Unrecovered Source**:

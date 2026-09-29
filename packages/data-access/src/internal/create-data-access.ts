@@ -1127,30 +1127,31 @@ export function createDataAccessInternal(
     from sqlite_schema
     where type = 'table' and name = 'dvd_archive_evidence_headers'
   `).get() !== undefined;
-  const excludesDvdRecoveryEvidenceArchives = !hasDvdRecoveryEvidenceSchema
-    ? ""
-    : `and not exists (
-        select 1
-        from dvd_archive_evidence_headers as recovery_evidence
-        where recovery_evidence.original_disc_archive_id =
-          reviewed_archive.id
-      )`;
-  const excludesDvdRecoveryEvidenceArchive = (
-    querySource: Pick<typeof database, "select">,
-  ) => hasDvdRecoveryEvidenceSchema
-    ? notExists(
-      querySource
-        .select({
-          originalDiscArchiveId:
-            dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-        })
-        .from(dvdArchiveEvidenceHeaders)
-        .where(eq(
-          dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-          originalDiscArchives.id,
-        )),
-    )
-    : undefined;
+  const dvdRecoveryEvidenceEncodeExclusion = {
+    rawSql: !hasDvdRecoveryEvidenceSchema
+      ? ""
+      : `and not exists (
+          select 1
+          from dvd_archive_evidence_headers as recovery_evidence
+          where recovery_evidence.original_disc_archive_id =
+            reviewed_archive.id
+        )`,
+    forArchive: (querySource: Pick<typeof database, "select">) =>
+      hasDvdRecoveryEvidenceSchema
+        ? notExists(
+          querySource
+            .select({
+              originalDiscArchiveId:
+                dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+            })
+            .from(dvdArchiveEvidenceHeaders)
+            .where(eq(
+              dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+              originalDiscArchives.id,
+            )),
+        )
+        : undefined,
+  };
   const encodeQueueDiscSelectionPageStatement = sqlite.prepare(`
     with requested_selection as (
       select
@@ -1194,7 +1195,7 @@ export function createDataAccessInternal(
         and reviewed_archive.catalog_review_outcome =
           'reviewed_with_selections'
         and reviewed_archive.legacy_cutover_pending = 0
-        ${excludesDvdRecoveryEvidenceArchives}
+        ${dvdRecoveryEvidenceEncodeExclusion.rawSql}
     ),
     queue_counts as (
       select
@@ -2088,7 +2089,7 @@ export function createDataAccessInternal(
               "reviewed_with_selections",
             ),
             eq(originalDiscArchives.legacyCutoverPending, false),
-            excludesDvdRecoveryEvidenceArchive(database),
+            dvdRecoveryEvidenceEncodeExclusion.forArchive(database),
           )),
       ),
     );
@@ -4075,7 +4076,7 @@ export function createDataAccessInternal(
               eq(discSelections.id, encodeJobs.discSelectionId),
               eq(discSelections.isCatalogActive, true),
               eq(originalDiscArchives.legacyCutoverPending, false),
-              excludesDvdRecoveryEvidenceArchive(database),
+              dvdRecoveryEvidenceEncodeExclusion.forArchive(database),
             ),
           ),
       ),
@@ -4129,7 +4130,7 @@ export function createDataAccessInternal(
                 "reviewed_with_selections",
               ),
               eq(originalDiscArchives.legacyCutoverPending, false),
-              excludesDvdRecoveryEvidenceArchive(transaction),
+              dvdRecoveryEvidenceEncodeExclusion.forArchive(transaction),
               or(
                 isNull(encodeJobs.predecessorEncodeJobId),
                 correctedEncodePredecessorReadyCondition(
@@ -4206,7 +4207,9 @@ export function createDataAccessInternal(
                       "reviewed_with_selections",
                     ),
                     eq(originalDiscArchives.legacyCutoverPending, false),
-                    excludesDvdRecoveryEvidenceArchive(transaction),
+                    dvdRecoveryEvidenceEncodeExclusion.forArchive(
+                      transaction,
+                    ),
                   )),
               ),
             ),
@@ -4412,7 +4415,9 @@ export function createDataAccessInternal(
                         "reviewed_with_selections",
                       ),
                       eq(originalDiscArchives.legacyCutoverPending, false),
-                      excludesDvdRecoveryEvidenceArchive(transaction),
+                      dvdRecoveryEvidenceEncodeExclusion.forArchive(
+                        transaction,
+                      ),
                     ),
                   ),
               ),
