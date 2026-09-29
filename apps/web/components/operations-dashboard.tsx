@@ -145,6 +145,19 @@ type EncodeOutputInspectionState =
       inspection: EncodeOutputInspection;
     };
 
+type EncodeOutputArtifact = NonNullable<
+  DashboardEncodeJob["encodeOutputArtifacts"]
+>[number];
+
+type EncodeOutputHistoryState =
+  | null
+  | { jobId: DashboardEncodeJob["id"]; status: "loading" | "error" }
+  | {
+      jobId: DashboardEncodeJob["id"];
+      status: "loaded";
+      artifacts: readonly EncodeOutputArtifact[];
+    };
+
 export async function requestEncodeOutputInspection(
   artifactIdentity: string,
   fetcher: typeof fetch = fetch,
@@ -160,6 +173,38 @@ export async function requestEncodeOutputInspection(
     throw new Error("Encode Output inspection failed");
   }
   return await response.json() as EncodeOutputInspection;
+}
+
+export async function requestCompleteEncodeOutputHistory(
+  jobId: DashboardEncodeJob["id"],
+  fetcher: typeof fetch = fetch,
+): Promise<readonly EncodeOutputArtifact[]> {
+  const response = await fetcher(
+    `/api/operations?kind=encode-jobs&id=${encodeURIComponent(jobId)}`,
+    {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    },
+  );
+  if (!response.ok) {
+    throw new Error("Encode Output history lookup failed");
+  }
+  const payload = await response.json() as {
+    item?: { encodeOutputArtifacts?: unknown };
+  };
+  if (!Array.isArray(payload.item?.encodeOutputArtifacts) ||
+      !payload.item.encodeOutputArtifacts.every((artifact): artifact is {
+        identity: string;
+        state: "published" | "retained";
+      } =>
+        typeof artifact === "object" && artifact !== null &&
+        typeof (artifact as { identity?: unknown }).identity === "string" &&
+        ((artifact as { state?: unknown }).state === "published" ||
+          (artifact as { state?: unknown }).state === "retained")
+      )) {
+    throw new Error("Encode Output history response is invalid");
+  }
+  return payload.item.encodeOutputArtifacts;
 }
 
 function EncodeOutputInspectionDetails({
@@ -184,10 +229,45 @@ function EncodeOutputInspectionDetails({
           <dd>{displayTerm(artifact.state)}</dd>
         </div>
         <div>
-          <dt>Validation</dt>
+          <dt>Encode Job</dt>
           <dd>
-            Unknown. Validation identity and evidence were not recorded for
-            this output; media inspection is reported separately.
+            {artifact.encodeJob.id} · {displayTerm(artifact.encodeJob.status)}
+          </dd>
+        </div>
+        <div>
+          <dt>Encode completed</dt>
+          <dd>
+            {artifact.encodeJob.completedAt === null
+              ? "Not recorded"
+              : formatTimestamp(artifact.encodeJob.completedAt)}
+          </dd>
+        </div>
+        <div>
+          <dt>Validation result</dt>
+          <dd>{displayTerm(artifact.validation.result)}</dd>
+        </div>
+        <div>
+          <dt>Validation identity</dt>
+          <dd>{artifact.validation.identity ?? "Not recorded"}</dd>
+        </div>
+        <div>
+          <dt>Validation evidence</dt>
+          <dd>{displayTerm(artifact.validation.evidenceAvailability)}</dd>
+        </div>
+        <div>
+          <dt>Validation evidence detail</dt>
+          <dd>
+            {artifact.validation.evidence === null
+              ? "Not recorded"
+              : JSON.stringify(artifact.validation.evidence)}
+          </dd>
+        </div>
+        <div>
+          <dt>Validation applies to observed file</dt>
+          <dd>
+            {artifact.validation.appliesToObservedFile === null
+              ? "Not recorded"
+              : artifact.validation.appliesToObservedFile ? "Yes" : "No"}
           </dd>
         </div>
         <div>
@@ -210,11 +290,43 @@ function EncodeOutputInspectionDetails({
           <dd>{artifact.file.identity ?? "Unknown"}</dd>
         </div>
         <div>
-          <dt>Recorded provenance</dt>
+          <dt>File modified</dt>
           <dd>
-            Encode Job {artifact.provenance.encodeJobId} · Disc Selection{" "}
-            {artifact.provenance.discSelectionId} · Encoding Profile{" "}
-            {artifact.provenance.encodingProfileId}
+            {artifact.file.modifiedAt === null
+              ? "Unknown"
+              : formatTimestamp(artifact.file.modifiedAt)}
+          </dd>
+        </div>
+        <div>
+          <dt>Provenance Encode Job</dt>
+          <dd>{artifact.provenance.encodeJobId}</dd>
+        </div>
+        <div>
+          <dt>Provenance Disc Selection</dt>
+          <dd>{artifact.provenance.discSelectionId}</dd>
+        </div>
+        <div>
+          <dt>Provenance Original Disc Archive</dt>
+          <dd>{artifact.provenance.originalDiscArchiveId ?? "Not recorded"}</dd>
+        </div>
+        <div>
+          <dt>Provenance Encoding Profile</dt>
+          <dd>{artifact.provenance.encodingProfileId}</dd>
+        </div>
+        <div>
+          <dt>Retained output record</dt>
+          <dd>{artifact.provenance.retainedOutputId ?? "Not applicable"}</dd>
+        </div>
+        <div>
+          <dt>Source snapshot</dt>
+          <dd>{displayTerm(artifact.provenance.sourceSnapshotAvailability)}</dd>
+        </div>
+        <div>
+          <dt>Source snapshot detail</dt>
+          <dd>
+            {artifact.provenance.sourceSnapshot === null
+              ? "Not recorded"
+              : JSON.stringify(artifact.provenance.sourceSnapshot)}
           </dd>
         </div>
         <div>
@@ -222,7 +334,7 @@ function EncodeOutputInspectionDetails({
           <dd>
             {artifact.inspectability.status === "inspected"
               ? "Media metadata inspected"
-              : artifact.inspectability.reason}
+              : `${artifact.inspectability.reason} · ${artifact.inspectability.reasonCode}`}
           </dd>
         </div>
         <div>
@@ -232,6 +344,10 @@ function EncodeOutputInspectionDetails({
               ? "Unknown"
               : formatDuration(Math.round(artifact.media.durationSeconds))}
           </dd>
+        </div>
+        <div>
+          <dt>Playability</dt>
+          <dd>{displayTerm(artifact.media.playability)}</dd>
         </div>
         {artifact.availableActions.map((action) => (
           <div key={action.name}>
@@ -252,6 +368,8 @@ function EncodeOutputInspectionDetails({
                 {stream.codecName ?? "Unknown codec"}
                 {stream.language === null ? "" : ` · ${stream.language}`}
                 {stream.title === null ? "" : ` · ${stream.title}`}
+                {` · default ${stream.default === null ? "unknown" : stream.default ? "yes" : "no"}`}
+                {` · forced ${stream.forced === null ? "unknown" : stream.forced ? "yes" : "no"}`}
               </li>
             ))}
           </ul>
@@ -1230,6 +1348,8 @@ export function DashboardView({
 }) {
   const [encodeOutputInspection, setEncodeOutputInspection] =
     useState<EncodeOutputInspectionState>(null);
+  const [encodeOutputHistory, setEncodeOutputHistory] =
+    useState<EncodeOutputHistoryState>(null);
   const [activeInvestigation, setActiveInvestigation] = useState<
     | {
         kind: "archive-job" | "disc-inspection" | "worker-incident";
@@ -1637,81 +1757,151 @@ export function DashboardView({
                       "Requeue requires an active Disc Selection with completed Catalog Review."}
                   </p>
                 ) : null}
-                {(job.encodeOutputArtifacts ?? (
-                  job.encodeOutputArtifactIdentity === undefined
-                    ? []
-                    : [{
-                      identity: job.encodeOutputArtifactIdentity,
-                      state: "published" as const,
-                    }]
-                )).map((artifact, artifactIndex, artifacts) => (
-                  <React.Fragment key={artifact.identity}>
-                    <button
-                      type="button"
-                      disabled={
-                        encodeOutputInspection?.status === "loading" &&
-                        encodeOutputInspection.artifactIdentity ===
-                          artifact.identity
-                      }
-                      onClick={() => {
-                        const artifactIdentity = artifact.identity;
-                        setEncodeOutputInspection({
-                          artifactIdentity,
-                          status: "loading",
-                        });
-                        void requestEncodeOutputInspection(artifactIdentity)
-                          .then((inspection) =>
-                            setEncodeOutputInspection((current) =>
-                              current?.artifactIdentity === artifactIdentity &&
-                                current.status === "loading"
-                                ? {
-                                  artifactIdentity,
-                                  status: "loaded",
-                                  inspection,
-                                }
-                                : current
-                            )
-                          )
-                          .catch(() =>
-                            setEncodeOutputInspection((current) =>
-                              current?.artifactIdentity === artifactIdentity &&
-                                current.status === "loading"
-                                ? { artifactIdentity, status: "error" }
-                                : current
-                            )
-                          );
-                      }}
-                    >
-                      {encodeOutputInspection?.status === "loading" &&
-                          encodeOutputInspection.artifactIdentity ===
-                            artifact.identity
-                        ? "Inspecting output…"
-                        : artifacts.length === 1
-                          ? "Inspect output"
-                          : artifact.state === "published"
-                            ? "Inspect current output"
-                            : `Inspect retained output ${
-                              artifacts.slice(0, artifactIndex + 1).filter(
-                                ({ state }) => state === "retained",
-                              ).length
-                            }`}
-                    </button>
-                    {encodeOutputInspection?.artifactIdentity ===
-                          artifact.identity &&
-                        encodeOutputInspection.status === "error" ? (
-                      <p className="job-progress-detail" role="alert">
-                        Encode Output inspection is unavailable.
-                      </p>
-                    ) : null}
-                    {encodeOutputInspection?.artifactIdentity ===
-                          artifact.identity &&
-                        encodeOutputInspection.status === "loaded" ? (
-                      <EncodeOutputInspectionDetails
-                        inspection={encodeOutputInspection.inspection}
-                      />
-                    ) : null}
-                  </React.Fragment>
-                ))}
+                {(() => {
+                  const artifacts = encodeOutputHistory?.jobId === job.id &&
+                      encodeOutputHistory.status === "loaded"
+                    ? encodeOutputHistory.artifacts
+                    : job.encodeOutputArtifacts ?? (
+                        job.encodeOutputArtifactIdentity === undefined
+                          ? []
+                          : [{
+                            identity: job.encodeOutputArtifactIdentity,
+                            state: "published" as const,
+                          }]
+                      );
+                  return (
+                    <>
+                      {artifacts.map((artifact, artifactIndex) => (
+                        <React.Fragment key={artifact.identity}>
+                          <button
+                            type="button"
+                            disabled={
+                              encodeOutputInspection?.status === "loading" &&
+                              encodeOutputInspection.artifactIdentity ===
+                                artifact.identity
+                            }
+                            onClick={() => {
+                              const artifactIdentity = artifact.identity;
+                              setEncodeOutputInspection({
+                                artifactIdentity,
+                                status: "loading",
+                              });
+                              void requestEncodeOutputInspection(
+                                artifactIdentity,
+                              ).then((inspection) =>
+                                setEncodeOutputInspection((current) =>
+                                  current?.artifactIdentity ===
+                                      artifactIdentity &&
+                                      current.status === "loading"
+                                    ? {
+                                      artifactIdentity,
+                                      status: "loaded",
+                                      inspection,
+                                    }
+                                    : current
+                                )
+                              ).catch(() =>
+                                setEncodeOutputInspection((current) =>
+                                  current?.artifactIdentity ===
+                                      artifactIdentity &&
+                                      current.status === "loading"
+                                    ? {
+                                      artifactIdentity,
+                                      status: "error",
+                                    }
+                                    : current
+                                )
+                              );
+                            }}
+                          >
+                            {encodeOutputInspection?.status === "loading" &&
+                                encodeOutputInspection.artifactIdentity ===
+                                  artifact.identity
+                              ? "Inspecting output…"
+                              : artifacts.length === 1
+                                ? "Inspect output"
+                                : artifact.state === "published"
+                                  ? "Inspect current output"
+                                  : `Inspect retained output ${
+                                    artifacts
+                                      .slice(0, artifactIndex + 1)
+                                      .filter(
+                                        ({ state }) => state === "retained",
+                                      ).length
+                                  }`}
+                          </button>
+                          {encodeOutputInspection?.artifactIdentity ===
+                                artifact.identity &&
+                              encodeOutputInspection.status === "error" ? (
+                            <p className="job-progress-detail" role="alert">
+                              Encode Output inspection is unavailable.
+                            </p>
+                          ) : null}
+                          {encodeOutputInspection?.artifactIdentity ===
+                                artifact.identity &&
+                              encodeOutputInspection.status === "loaded" ? (
+                            <EncodeOutputInspectionDetails
+                              inspection={encodeOutputInspection.inspection}
+                            />
+                          ) : null}
+                        </React.Fragment>
+                      ))}
+                      {job.encodeOutputArtifactsTruncated &&
+                          !(encodeOutputHistory?.jobId === job.id &&
+                            encodeOutputHistory.status === "loaded") ? (
+                        <>
+                          <button
+                            type="button"
+                            disabled={
+                              encodeOutputHistory?.jobId === job.id &&
+                              encodeOutputHistory.status === "loading"
+                            }
+                            onClick={() => {
+                              setEncodeOutputHistory({
+                                jobId: job.id,
+                                status: "loading",
+                              });
+                              void requestCompleteEncodeOutputHistory(job.id)
+                                .then((completeArtifacts) =>
+                                  setEncodeOutputHistory((current) =>
+                                    current?.jobId === job.id &&
+                                        current.status === "loading"
+                                      ? {
+                                        jobId: job.id,
+                                        status: "loaded",
+                                        artifacts: completeArtifacts,
+                                      }
+                                      : current
+                                  )
+                                ).catch(() =>
+                                  setEncodeOutputHistory((current) =>
+                                    current?.jobId === job.id &&
+                                        current.status === "loading"
+                                      ? { jobId: job.id, status: "error" }
+                                      : current
+                                  )
+                                );
+                            }}
+                          >
+                            {encodeOutputHistory?.jobId === job.id &&
+                                encodeOutputHistory.status === "loading"
+                              ? "Loading output history…"
+                              : encodeOutputHistory?.jobId === job.id &&
+                                  encodeOutputHistory.status === "error"
+                                ? "Retry loading output history"
+                                : "Load all output generations"}
+                          </button>
+                          {encodeOutputHistory?.jobId === job.id &&
+                              encodeOutputHistory.status === "error" ? (
+                            <p className="job-progress-detail" role="alert">
+                              Complete Encode Output history is unavailable.
+                            </p>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </>
+                  );
+                })()}
                 <button
                   type="button"
                   disabled={verifyingFilesystemTarget !== null}

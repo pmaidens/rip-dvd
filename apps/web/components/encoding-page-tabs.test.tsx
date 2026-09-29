@@ -107,7 +107,15 @@ function inspectedOutputResponse(
       },
       media: {
         durationSeconds: 7_200,
-        streams: [],
+        streams: [{
+          index: 0,
+          kind: "video",
+          codecName: "h264",
+          language: "eng",
+          title: "Main picture",
+          default: true,
+          forced: false,
+        }],
         playability: "not_assessed",
       },
       availableActions: [{
@@ -181,11 +189,16 @@ describe("encoding page tabs", () => {
         expect.objectContaining({ cache: "no-store" }),
       );
       expect(container.textContent).toContain("Media metadata inspected");
+      expect(container.textContent).toContain("Validation resultUnknown");
+      expect(container.textContent).toContain("Validation identityNot recorded");
+      expect(container.textContent).toContain("Validation evidenceNot Recorded");
       expect(container.textContent).toContain(
-        "Unknown. Validation identity and evidence were not recorded",
+        "Provenance Original Disc Archivearchive-1",
       );
+      expect(container.textContent).toContain("Source snapshotNot Recorded");
       expect(container.textContent).toContain("2h 0s");
       expect(container.textContent).toContain("synthetic-file-identity");
+      expect(container.textContent).toContain("default yes · forced no");
       expect(container.textContent).toContain("Playability is not assessed");
       expect(container.textContent).toContain("ExportUnavailable");
     } finally {
@@ -254,6 +267,71 @@ describe("encoding page tabs", () => {
         expect.objectContaining({ cache: "no-store" }),
       );
       expect(container.textContent).toContain("synthetic-retained-identity");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("loads retained generations omitted from the bounded dashboard snapshot", async () => {
+    const completed = encodeJob("completed");
+    const publishedIdentity = completed.encodeOutputArtifactIdentity!;
+    const retainedIdentity =
+      `encode-output-v1.retained.${"f".repeat(8)}-${"e".repeat(4)}-${"d".repeat(4)}-${"c".repeat(4)}-${"b".repeat(12)}`;
+    const job = {
+      ...completed,
+      encodeOutputArtifacts: [{
+        identity: publishedIdentity,
+        state: "published" as const,
+      }],
+      encodeOutputArtifactsTruncated: true,
+    };
+    const state = {
+      opticalDrives: { status: "loaded" as const, items: [] },
+      detectedDiscs: { status: "loaded" as const, items: [] },
+      archiveJobs: { status: "loaded" as const, items: [] },
+      workerIncidents: { status: "loaded" as const, items: [] },
+      encodeJobs: { status: "loaded" as const, items: [job] },
+      catalogReview: { status: "loaded" as const, items: [] },
+    };
+    const fetcher = vi.fn(async () => Response.json({
+      schemaVersion: 1,
+      kind: "encode-jobs",
+      item: {
+        encodeOutputArtifacts: [
+          { identity: publishedIdentity, state: "published" },
+          { identity: retainedIdentity, state: "retained" },
+        ],
+      },
+    }));
+    vi.stubGlobal("fetch", fetcher);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<DashboardView state={state} section="encoding" />);
+      });
+      const loadButton = [...container.querySelectorAll("button")].find(
+        ({ textContent }) => textContent === "Load all output generations",
+      );
+      expect(loadButton).toBeDefined();
+      await act(async () => {
+        loadButton!.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(fetcher).toHaveBeenCalledWith(
+        `/api/operations?kind=encode-jobs&id=${encodeURIComponent(job.id)}`,
+        expect.objectContaining({ cache: "no-store" }),
+      );
+      expect([...container.querySelectorAll("button")].map(
+        ({ textContent }) => textContent,
+      )).toEqual(expect.arrayContaining([
+        "Inspect current output",
+        "Inspect retained output 1",
+      ]));
     } finally {
       await act(async () => root.unmount());
     }

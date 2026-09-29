@@ -233,6 +233,21 @@ function hasPublishedSuccessorOutput(job: EncodeJob): boolean {
   return job.status === "completed" || job.completedAt !== null;
 }
 
+function successorAffectsPublishedOutput(
+  predecessor: EncodeJob,
+  successor: EncodeJob,
+): boolean {
+  return successor.outputPath === predecessor.outputPath;
+}
+
+function successorReplacedPublishedOutput(
+  predecessor: EncodeJob,
+  successor: EncodeJob,
+): boolean {
+  return successorAffectsPublishedOutput(predecessor, successor) &&
+    hasPublishedSuccessorOutput(successor);
+}
+
 export function encodeOutputArtifactReferences(
   job: EncodeJob,
   correctionLinks: readonly EncodeJob[],
@@ -243,7 +258,7 @@ export function encodeOutputArtifactReferences(
   );
   const published = ownsPublishedOutput(job) &&
       (directSuccessor === undefined ||
-        !hasPublishedSuccessorOutput(directSuccessor))
+        !successorReplacedPublishedOutput(job, directSuccessor))
     ? [{
       identity: encodeOutputArtifactIdentity(job.id),
       state: "published" as const,
@@ -410,13 +425,15 @@ function resolvePublishedEncodeOutput(
     (candidate) => candidate.predecessorEncodeJobId === job.id,
   );
   const authorityUnavailableReason = job.publicationPending === true ||
-      successor?.publicationPending === true
+      (successor !== undefined &&
+        successorAffectsPublishedOutput(job, successor) &&
+        successor.publicationPending === true)
     ? "A corrected Encode Output publication is changing artifact authority."
     : null;
   if (
     authorityUnavailableReason === null &&
     successor !== undefined &&
-    hasPublishedSuccessorOutput(successor)
+    successorReplacedPublishedOutput(job, successor)
   ) {
     throw new RecordNotFoundError("Encode Output", artifactIdentity);
   }
@@ -432,6 +449,9 @@ function resolvePublishedEncodeOutput(
       job.publicationCompletionPending,
       successor?.id ?? null,
       successor?.status ?? null,
+      successor?.completedAt?.toISOString() ?? null,
+      successor?.outputPath ?? null,
+      successor?.replaceExistingOutput ?? null,
       successor?.publicationPending ?? null,
     ]),
     authorityUnavailableReason,

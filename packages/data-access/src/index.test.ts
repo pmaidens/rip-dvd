@@ -4350,12 +4350,63 @@ describe("data-access facade", () => {
       [replacement.id],
       { limit: 1 },
     ).map(({ id }) => id)).toEqual([retainedHistory[1]!.id]);
+    vi.setSystemTime(new Date("2026-08-26T07:06:00.000Z"));
+    access.encodeJobs.requeue(replacement.id);
+    const secondReencodeClaim = access.encodeJobs.claimNext(
+      "corrected-second-reencoder",
+    );
+    if (!secondReencodeClaim || secondReencodeClaim.id !== replacement.id) {
+      throw new Error("Expected second corrected re-encode claim");
+    }
+    const secondCorrectedIdentity =
+      "corrected-second-reencode-identity" as EncodeOutputFilesystemIdentity;
+    access.encodeJobs.recordReplacementOutputIdentity(
+      secondReencodeClaim,
+      secondCorrectedIdentity,
+    );
+    const secondPublication = access.encodeJobs.registerPartialCleanup(
+      secondReencodeClaim,
+      { publicationPending: true },
+    );
+    const secondCorrectedOutputPath = join(
+      realpathSync(canonicalOutputDirectory),
+      `${basename(replacement.outputPath)}.failed.${secondReencodeClaim.claimToken}`,
+    );
+    const secondFencedPublication = access.encodeJobs.beginPublicationMutation(
+      secondReencodeClaim,
+      secondPublication,
+      secondCorrectedOutputPath,
+    );
+    access.encodeJobs.completePublishedClaim(
+      secondReencodeClaim,
+      secondFencedPublication,
+      () => true,
+      {
+        retainedOutputPath: secondCorrectedOutputPath,
+        retainedOutputIdentity: secondCorrectedIdentity,
+      },
+    );
+    access.encodeJobs.completePartialCleanup(secondFencedPublication);
+    const sourcePage = access.encodeJobs.listRetainedOutputSummaryPageBySource(
+      [predecessor.id, replacement.id],
+      { limit: 1 },
+    );
+    expect(sourcePage.outputs).toHaveLength(2);
+    expect(sourcePage.outputs.map(({ sourceEncodeJobId }) =>
+      sourceEncodeJobId)).toEqual(expect.arrayContaining([
+        predecessor.id,
+        replacement.id,
+      ]));
+    expect(sourcePage.truncatedSourceEncodeJobIds).toEqual([
+      replacement.id,
+    ]);
     expect(access.encodeJobs
       .listDiscSelectionCorrectionRetainedOutputSummaries({
         originalDiscArchiveId: archive.id,
-        limit: 2,
+        limit: 3,
       }).map(({ retainedOutput }) => retainedOutput.id)).toEqual(
-        retainedHistory.map(({ id }) => id),
+        access.encodeJobs.listRetainedOutputs([replacement.id])
+          .map(({ id }) => id),
       );
     access.close();
   });

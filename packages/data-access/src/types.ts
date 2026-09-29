@@ -971,6 +971,11 @@ export type RetainedEncodeOutputSummary = Omit<
   "retainedOutputPath" | "filesystemIdentity"
 >;
 
+export interface RetainedEncodeOutputSummaryPage {
+  outputs: RetainedEncodeOutputSummary[];
+  truncatedSourceEncodeJobIds: EncodeJobId[];
+}
+
 export interface DiscSelectionCorrectionRetainedOutputSummary {
   replacementDiscSelectionId: DiscSelectionId;
   retainedOutput: RetainedEncodeOutputSummary;
@@ -1720,6 +1725,10 @@ export interface EncodeJobAccess {
     ids: readonly EncodeJobId[],
     options?: { limit: number },
   ): RetainedEncodeOutputSummary[];
+  listRetainedOutputSummaryPageBySource(
+    ids: readonly EncodeJobId[],
+    options: { limit: number },
+  ): RetainedEncodeOutputSummaryPage;
   updateProgress(
     claim: RunningEncodeJob,
     progress: number | EncodeJobProgress,
@@ -1865,6 +1874,7 @@ export interface ConsistentReadAccess {
     | "listCorrectionLinks"
     | "listFailureReports"
     | "listRetainedOutputSummaries"
+    | "listRetainedOutputSummaryPageBySource"
   >;
   readonly workerIncidents: Pick<WorkerIncidentAccess, "find" | "list">;
   readonly filesystemVerification: Pick<FilesystemVerificationAccess, "find" | "list" | "listActive">;

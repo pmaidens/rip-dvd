@@ -513,7 +513,7 @@ it("backfills retained Encode Output ownership from durable insertion order", ()
       id, predecessor_encode_job_id, replacement_encode_job_id,
       retained_output_path, filesystem_identity, state, cleanup_eligible,
       retained_at
-    ) VALUES (?, ?, ?, ?, ?, 'retained', 1, 1000)
+    ) VALUES (?, ?, ?, ?, ?, 'retained', 1, ?)
   `);
   insert.run(
     "z-first-retained-output",
@@ -521,6 +521,7 @@ it("backfills retained Encode Output ownership from durable insertion order", ()
     replacement.id,
     "/media/z-first-retained-output.mkv",
     "z-first-retained-identity",
+    2000,
   );
   insert.run(
     "a-second-retained-output",
@@ -528,6 +529,7 @@ it("backfills retained Encode Output ownership from durable insertion order", ()
     replacement.id,
     "/media/a-second-retained-output.mkv",
     "a-second-retained-identity",
+    1000,
   );
   historical.close();
 

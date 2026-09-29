@@ -123,12 +123,17 @@ test("inspects a completed canonical Encode Output", async ({
     name: /Encode Output encode-output-v1\./,
   });
   await expect(inspection).toContainText("Media metadata inspected");
+  await expect(inspection).toContainText("Validation resultUnknown");
+  await expect(inspection).toContainText("Validation identityNot recorded");
+  await expect(inspection).toContainText("Validation evidenceNot Recorded");
   await expect(inspection).toContainText(
-    "Unknown. Validation identity and evidence were not recorded",
+    "Provenance Original Disc Archivesynthetic-browser-archive",
   );
+  await expect(inspection).toContainText("Source snapshotNot Recorded");
   await expect(inspection).toContainText("1h 30m 0s");
   await expect(inspection).toContainText("synthetic-browser-file-identity");
   await expect(inspection).toContainText("Stream 0 · Video · h264");
+  await expect(inspection).toContainText("default yes · forced no");
   await expect(inspection).toContainText(
     "Playability is not assessed by this inspection.",
   );

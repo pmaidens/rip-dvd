@@ -400,6 +400,7 @@ const CATALOG_REVIEW_MAPPED_TITLE_SUMMARY_LIMIT = 3;
 const CORRECTED_ENCODE_REPLACEMENT_LIMIT = 100;
 const ENCODE_QUEUE_DISC_SELECTION_LIMIT = 100;
 const RETAINED_ENCODE_OUTPUT_LOOKUP_LIMIT = 400;
+const RETAINED_ENCODE_OUTPUT_PAGE_LIMIT = 100;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -6104,6 +6105,11 @@ export function createDataAccessInternal(
             access.encodeJobs.listFailureReports(ids),
           listRetainedOutputSummaries: (ids, options) =>
             access.encodeJobs.listRetainedOutputSummaries(ids, options),
+          listRetainedOutputSummaryPageBySource: (ids, options) =>
+            access.encodeJobs.listRetainedOutputSummaryPageBySource(
+              ids,
+              options,
+            ),
         },
         workerIncidents: {
           find: (id) => access.workerIncidents.find(id),
@@ -12621,6 +12627,70 @@ export function createDataAccessInternal(
             asc(retainedEncodeOutputs.id),
           )
           .all();
+      },
+      listRetainedOutputSummaryPageBySource(ids, options) {
+        if (ids.length === 0) {
+          return { outputs: [], truncatedSourceEncodeJobIds: [] };
+        }
+        const uniqueIds = retainedEncodeOutputLookupIds(ids);
+        const limit = requirePositiveSafeInteger(options.limit, "limit");
+        if (limit > RETAINED_ENCODE_OUTPUT_PAGE_LIMIT) {
+          throw new DomainInvariantError(
+            `Retained Encode output source page limit must be between 1 and ${RETAINED_ENCODE_OUTPUT_PAGE_LIMIT}`,
+          );
+        }
+        const rows = sqlite.prepare(`
+          with ranked_outputs as (
+            select
+              id,
+              predecessor_encode_job_id,
+              replacement_encode_job_id,
+              source_encode_job_id,
+              state,
+              cleanup_eligible,
+              retained_at,
+              row_number() over (
+                partition by source_encode_job_id
+                order by retained_at desc, rowid desc
+              ) as source_rank
+            from retained_encode_outputs
+            where source_encode_job_id in (
+              ${uniqueIds.map(() => "?").join(", ")}
+            )
+          )
+          select *
+          from ranked_outputs
+          where source_rank <= ?
+          order by retained_at asc, id asc
+        `).all(...uniqueIds, limit + 1) as unknown as Array<{
+          id: RetainedEncodeOutputId;
+          predecessor_encode_job_id: EncodeJobId;
+          replacement_encode_job_id: EncodeJobId;
+          source_encode_job_id: EncodeJobId;
+          state: "retained";
+          cleanup_eligible: number;
+          retained_at: number;
+          source_rank: number;
+        }>;
+        const truncatedSourceEncodeJobIds = [...new Set(
+          rows
+            .filter(({ source_rank }) => source_rank > limit)
+            .map(({ source_encode_job_id }) => source_encode_job_id),
+        )];
+        return {
+          outputs: rows
+            .filter(({ source_rank }) => source_rank <= limit)
+            .map((row) => ({
+              id: row.id,
+              predecessorEncodeJobId: row.predecessor_encode_job_id,
+              replacementEncodeJobId: row.replacement_encode_job_id,
+              sourceEncodeJobId: row.source_encode_job_id,
+              state: row.state,
+              cleanupEligible: row.cleanup_eligible === 1,
+              retainedAt: new Date(row.retained_at),
+            })),
+          truncatedSourceEncodeJobIds,
+        };
       },
       renewClaim(claim) {
         const timestamp = now();

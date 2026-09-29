@@ -399,6 +399,69 @@ it("addresses every retained Encode Output generation by its own artifact identi
   );
 });
 
+it("keeps a completed predecessor addressable when its correction publishes elsewhere", async () => {
+  const current = fixture();
+  const { archive, predecessor } = seedCatalogReviewForReadFixture(current);
+  const predecessorPath = join(current.mediaLibraryPath, "previous-film.mkv");
+  const replacementPath = join(current.mediaLibraryPath, "corrected-film.mkv");
+  writeFileSync(predecessorPath, "synthetic predecessor output");
+  const access = current.openAccess();
+  const replacement = access.catalog.completeCatalogReviewWithReplacements(
+    archive.id,
+    access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+      .updatedAt,
+    "reviewed_with_selections",
+    [{
+      predecessorEncodeJobId: predecessor.id,
+      encodingProfileId: predecessor.encodingProfileId,
+      outputPath: replacementPath,
+    }],
+  ).replacementEncodeJobs[0]!;
+  const claim = access.encodeJobs.claimNext("synthetic-new-path-publisher");
+  if (claim?.id !== replacement.id) {
+    throw new Error("Expected changed-path replacement Encode Job claim");
+  }
+  writeFileSync(replacementPath, "synthetic replacement output");
+  const cleanup = access.encodeJobs.registerPartialCleanup(claim, {
+    publicationPending: true,
+  });
+  const mutation = access.encodeJobs.beginPublicationMutation(
+    claim,
+    cleanup,
+  );
+  access.encodeJobs.completePublishedClaim(claim, mutation, () => true);
+  access.encodeJobs.completePartialCleanup(mutation);
+  access.close();
+
+  const mediaProbe = vi.fn(async () => ({
+    durationSeconds: 600,
+    streams: [],
+  }));
+  const predecessorInspection = await current.run(
+    ["encode-output", "inspect", encodeOutputArtifactIdentity(predecessor.id)],
+    undefined,
+    undefined,
+    { encodeOutputMediaProbe: mediaProbe },
+  );
+  const replacementInspection = await current.run(
+    ["encode-output", "inspect", encodeOutputArtifactIdentity(replacement.id)],
+    undefined,
+    undefined,
+    { encodeOutputMediaProbe: mediaProbe },
+  );
+
+  expect(predecessorInspection.result).toMatchObject({ artifact: {
+    identity: encodeOutputArtifactIdentity(predecessor.id),
+    inspectability: { status: "inspected" },
+  } });
+  expect(replacementInspection.result).toMatchObject({ artifact: {
+    identity: encodeOutputArtifactIdentity(replacement.id),
+    inspectability: { status: "inspected" },
+  } });
+  expect(mediaProbe).toHaveBeenCalledWith(predecessorPath);
+  expect(mediaProbe).toHaveBeenCalledWith(replacementPath);
+});
+
 it("withholds inspection when publication authority changes before file probing", async () => {
   const current = fixture();
   const { archive, predecessor } = seedCatalogReviewForReadFixture(current);
