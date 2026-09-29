@@ -2,11 +2,14 @@ import path from "node:path";
 
 import type { NextConfig } from "next";
 
+const scriptSources = process.env.NODE_ENV === "development"
+  ? "'self' 'unsafe-inline' 'unsafe-eval'"
+  : "'self' 'unsafe-inline'";
+
 const browserSecurityHeaders = [
   {
     key: "Content-Security-Policy",
-    value:
-      "default-src 'self'; base-uri 'self'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+    value: `default-src 'self'; base-uri 'self'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src ${scriptSources}; style-src 'self' 'unsafe-inline'`,
   },
   { key: "Permissions-Policy", value: "camera=(), geolocation=(), microphone=()" },
   { key: "Referrer-Policy", value: "no-referrer" },

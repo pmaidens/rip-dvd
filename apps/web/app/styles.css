@@ -56,8 +56,25 @@ body {
 .recovery-prototype-root .catalog-review-browse-controls .profile-actions { justify-content: flex-start; }
 .recovery-prototype-list { margin-bottom: 1rem; }
 .recovery-prototype-disc-grid { margin-bottom: 1rem; }
-.recovery-prototype-disc-recovery { margin-bottom: 1rem; }
-.recovery-prototype-disc-recovery .recovery-prototype-panel { border-bottom: 0; }
+.recovery-prototype-disc-grid > .dashboard-section { grid-column: span 3; }
+.recovery-prototype-disc-grid > .recovery-prototype-artifact-card { grid-column: 1 / -1; }
+.recovery-prototype-readiness {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.4rem;
+  border-bottom: 1px solid #29483f;
+  background: #172c23;
+}
+.recovery-prototype-readiness strong { color: #f5d99f; font-size: 0.9rem; }
+.recovery-prototype-readiness p { max-width: 52rem; margin: 0.3rem 0 0; color: #b8c8c3; font-size: 0.78rem; }
+.recovery-prototype-archive-stage { border-bottom: 1px solid #29483f; }
+.recovery-prototype-archive-stage .progress-row { max-width: 36rem; margin: 0.75rem 0; }
+.recovery-prototype-artifact-card .recovery-prototype-panel { border-bottom: 0; background: transparent; }
+.recovery-prototype-pending-stage { padding: 1.35rem 1.4rem; }
+.recovery-prototype-pending-stage h3 { margin: 0; font-size: 1rem; }
+.recovery-prototype-pending-stage > p:not(.section-eyebrow) { color: #b8c8c3; font-size: 0.78rem; }
 .recovery-prototype-encode-job { margin: 1rem 0; }
 .recovery-prototype-encode-job .progress-row { margin: 0.75rem 0; }
 .recovery-prototype-root .encoding-workspace > .recovery-prototype-panel { border: 1px solid #203b34; border-radius: 1rem; }
@@ -216,6 +233,7 @@ body {
   .recovery-prototype-split > div:first-child { border-right: 0; }
 }
 @media (max-width: 600px) {
+  .recovery-prototype-readiness { flex-wrap: wrap; }
   .recovery-prototype-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .recovery-prototype-media-grid { grid-template-columns: 1fr; }
   .recovery-prototype-heading { flex-wrap: wrap; }

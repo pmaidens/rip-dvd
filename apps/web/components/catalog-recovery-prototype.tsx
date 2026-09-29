@@ -91,7 +91,7 @@ export function CatalogRecoveryPrototype({ initialVariant, surface }: { initialV
       switch (action) {
         case "save":
           if (s.recovery !== "copying") return deny("The initial copy has already ended.");
-          s.recovery = "active"; s.revision = 1; s.note = "Archive Job succeeded. Recovery started separately; Catalog Review is now available."; return s;
+          s.recovery = "active"; s.revision = 1; s.note = "The initial Archive Job saved the image. Recovery is now continuing on that image; Catalog Review is available."; return s;
         case "recover":
           if (s.recovery !== "active") return deny("Only active recovery can write another batch.");
           s.revision++; s.assessmentRevision = null; s.acceptedRevision = null;
@@ -176,7 +176,7 @@ export function CatalogRecoveryPrototype({ initialVariant, surface }: { initialV
   const recoveryPanel = (
     <section className="recovery-prototype-panel" aria-label="Proposed recovery status">
       <div className="recovery-prototype-heading">
-        <div><p className="section-eyebrow">Proposed · archive recovery</p><h3>Saved archive and recovery are separate</h3></div>
+        <div><p className="section-eyebrow">{surface === "discs" ? "Step 2 · proposed further reads" : "Proposed · further reads on this image"}</p><h3>Archive Recovery</h3></div>
         <span className={`recovery-prototype-badge is-${state.recovery}`}>{phaseText}</span>
       </div>
       <div className="recovery-prototype-facts">
@@ -282,9 +282,23 @@ export function CatalogRecoveryPrototype({ initialVariant, surface }: { initialV
       <div className="dashboard-grid dashboard-grid-discs recovery-prototype-disc-grid">
         <section className="dashboard-section"><header className="section-header"><div><p className="section-eyebrow">Hardware</p><h2>Optical Drives</h2></div></header><article className="operation-item"><div className="item-heading"><div><h3>Example Optical Drive</h3><p>DVD source inserted</p></div><span className="status status-ready">Ready</span></div><p className="item-time">Disc Inspection complete</p></article></section>
         <section className="dashboard-section"><header className="section-header"><div><p className="section-eyebrow">Intake</p><h2>Detected Discs</h2></div></header><article className="operation-item"><div className="item-heading"><div><h3>Example DVD</h3><p>DVD · 3 identified titles</p></div><span className="status status-running">In drive</span></div><p className="item-time">Archive Request active</p></article></section>
-        <section className="dashboard-section"><header className="section-header"><div><p className="section-eyebrow">Preservation queue</p><h2>Archive Jobs</h2></div></header><article className="operation-item"><div className="item-heading"><div><h3>Example DVD</h3><p>Example Optical Drive</p></div><span className={`status status-${state.revision ? "completed" : "running"}`}>{state.revision ? "Completed" : "Running"}</span></div><div className="progress-row"><div className="progress"><span style={{ width: state.revision ? "100%" : "62%" }} /></div><strong>{state.revision ? "100%" : "62%"}</strong></div><p className="job-progress-detail">{state.revision ? "Initial image saved with damage evidence" : "Initial copy skips failed requests and continues"}</p></article></section>
+        <section className="dashboard-section recovery-prototype-artifact-card" aria-label="Example DVD archive work">
+          <header className="section-header"><div><p className="section-eyebrow">Preservation queue · Example DVD</p><h2>Archive work</h2></div></header>
+          <div className="recovery-prototype-readiness">
+            <div>
+              <strong>{state.recovery === "copying" ? "Archive not saved yet" : state.recovery === "stopped" ? "Damage review needed" : "Not ready for encoding"}</strong>
+              <p>{state.recovery === "copying" ? "The initial copy is still running. Recovery can begin after this image saves." : state.recovery === "stopped" ? "Recovery has stopped. Encoding still needs a current title assessment and explicit damage acceptance." : "The saved image has source gaps, and recovery may still change it. Catalog work can continue while encoding waits."}</p>
+            </div>
+            <span className={`recovery-prototype-badge is-${state.recovery}`}>{phaseText}</span>
+          </div>
+          <article className="operation-item recovery-prototype-archive-stage">
+            <div className="item-heading"><div><p className="section-eyebrow">Step 1 · initial image</p><h3>Initial Archive Job</h3><p>Example Optical Drive</p></div><span className={`status status-${state.revision ? "completed" : "running"}`}>{state.revision ? "Completed" : "Running"}</span></div>
+            <div className="progress-row"><div className="progress"><span style={{ width: state.revision ? "100%" : "62%" }} /></div><strong>{state.revision ? "100%" : "62%"}</strong></div>
+            <p className="job-progress-detail">{state.revision ? "Initial image saved with damage evidence" : "Initial copy skips failed requests and continues"}</p>
+          </article>
+          {state.revision ? recoveryPanel : <section className="recovery-prototype-pending-stage" aria-label="Archive Recovery pending"><p className="section-eyebrow">Step 2 · proposed</p><h3>Archive Recovery</h3><p>Recovery has not started. Save the initial archive first.</p><button type="button" onClick={() => act("save")}>Finish and save initial archive</button></section>}
+        </section>
       </div>
-      <section className="dashboard-section wide-section recovery-prototype-disc-recovery"><header className="section-header"><div><p className="section-eyebrow">Proposed · after initial save</p><h2>Archive Recovery</h2></div></header>{state.revision ? recoveryPanel : <div className="operation-item"><p>Recovery has not started. Save the initial archive first.</p><button type="button" onClick={() => act("save")}>Finish and save initial archive</button></div>}</section>
     </>
   );
   const encodingSurface = (
