@@ -536,12 +536,15 @@ export type {
   FilesystemVerificationInventoryInput,
 } from "./filesystem-verification-inventory.js";
 export {
+  encodeOutputArtifactReferences,
   encodeOutputArtifactIdentity,
   inspectEncodeOutput,
   InvalidEncodeOutputArtifactIdentityError,
   probeEncodeOutputMedia,
+  retainedEncodeOutputArtifactIdentity,
 } from "./encode-output-inspection.js";
 export type {
+  EncodeOutputArtifactReference,
   EncodeOutputInspection,
   EncodeOutputInspectionReasonCode,
   EncodeOutputMediaInspection,

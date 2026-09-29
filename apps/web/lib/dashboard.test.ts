@@ -12,6 +12,7 @@ import {
   createLegacySidecarDataAccess,
   type LegacySidecarDataAccess,
 } from "@rip-dvd/data-access/legacy-sidecars";
+import { retainedEncodeOutputArtifactIdentity } from "@rip-dvd/application";
 import {
   mkdirSync,
   mkdtempSync,
@@ -470,6 +471,9 @@ describe("readDashboardSnapshot", () => {
         retainedOutputIdentity: retainedIdentity,
       },
     );
+    const retainedOutput = access.encodeJobs.listRetainedOutputs([
+      successor.id,
+    ])[0]!;
 
     const snapshot = readDashboardSnapshot(access, { activityLimit: 1 });
     expect(snapshot.encodeJobs).toEqual({
@@ -477,6 +481,9 @@ describe("readDashboardSnapshot", () => {
       items: expect.arrayContaining([expect.objectContaining({
         id: successor.id,
         mediaTitle: correctedItem.title,
+        encodeOutputArtifacts: [
+          expect.objectContaining({ state: "published" }),
+        ],
         correctedReplacement: {
           predecessorId: predecessor.id,
           predecessorStatus: "completed",
@@ -488,6 +495,17 @@ describe("readDashboardSnapshot", () => {
         },
       })]),
     });
+    expect(readDashboardSnapshot(access, { activityLimit: 20 }).encodeJobs)
+      .toEqual({
+        status: "loaded",
+        items: expect.arrayContaining([expect.objectContaining({
+          id: predecessor.id,
+          encodeOutputArtifacts: [{
+            identity: retainedEncodeOutputArtifactIdentity(retainedOutput.id),
+            state: "retained",
+          }],
+        })]),
+      });
     expect(JSON.stringify(snapshot)).not.toContain("retained-prior-final.mkv");
     expect(correction.discSelection.id).toBe(successor.discSelectionId);
   });

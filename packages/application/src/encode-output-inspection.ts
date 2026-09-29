@@ -9,15 +9,18 @@ import {
   sameEncodeOutputMutationSnapshot,
 } from "@rip-dvd/data-access";
 import type {
+  ConsistentReadAccess,
   DataAccess,
   EncodeJob,
   EncodeJobId,
   EncodeOutputFilesystemIdentity,
+  RetainedEncodeOutput,
+  RetainedEncodeOutputId,
+  RetainedEncodeOutputSummary,
 } from "@rip-dvd/data-access";
 
-const ENCODE_OUTPUT_ARTIFACT_PREFIX = "encode-output-v1.";
 const ENCODE_OUTPUT_ARTIFACT_PATTERN =
-  /^encode-output-v1\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+  /^encode-output-v1\.(published|retained)\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 const MEDIA_PROBE_TIMEOUT_MS = 30_000;
 const MEDIA_PROBE_MAX_OUTPUT_BYTES = 1024 * 1024;
 
@@ -55,8 +58,8 @@ export type EncodeOutputInspectionReasonCode =
   | "OUTPUT_EMPTY"
   | "OUTPUT_IDENTITY_CHANGED"
   | "OUTPUT_CHANGED_DURING_INSPECTION"
-  | "OUTPUT_PROBE_FAILED"
-  | "OUTPUT_PROVENANCE_INCOMPLETE";
+  | "OUTPUT_AUTHORITY_CHANGED"
+  | "OUTPUT_PROBE_FAILED";
 
 export class InvalidEncodeOutputArtifactIdentityError extends Error {
   constructor() {
@@ -184,10 +187,22 @@ export const probeEncodeOutputMedia: EncodeOutputMediaProbe =
   };
 
 export function encodeOutputArtifactIdentity(jobId: EncodeJobId): string {
-  return `${ENCODE_OUTPUT_ARTIFACT_PREFIX}${jobId}`;
+  return `encode-output-v1.published.${jobId}`;
 }
 
-function encodeJobIdFromArtifactIdentity(identity: unknown): EncodeJobId {
+export function retainedEncodeOutputArtifactIdentity(
+  retainedOutputId: RetainedEncodeOutputId,
+): string {
+  return `encode-output-v1.retained.${retainedOutputId}`;
+}
+
+type ParsedEncodeOutputArtifactIdentity =
+  | { kind: "published"; jobId: EncodeJobId }
+  | { kind: "retained"; retainedOutputId: RetainedEncodeOutputId };
+
+function parseEncodeOutputArtifactIdentity(
+  identity: unknown,
+): ParsedEncodeOutputArtifactIdentity {
   if (typeof identity !== "string") {
     throw new InvalidEncodeOutputArtifactIdentityError();
   }
@@ -195,7 +210,54 @@ function encodeJobIdFromArtifactIdentity(identity: unknown): EncodeJobId {
   if (!match) {
     throw new InvalidEncodeOutputArtifactIdentityError();
   }
-  return match[1] as EncodeJobId;
+  return match[1] === "published"
+    ? { kind: "published", jobId: match[2] as EncodeJobId }
+    : {
+      kind: "retained",
+      retainedOutputId: match[2] as RetainedEncodeOutputId,
+    };
+}
+
+export interface EncodeOutputArtifactReference {
+  identity: string;
+  state: "published" | "retained";
+}
+
+function retainedOutputOwnerJobId(
+  output: RetainedEncodeOutputSummary,
+  retainedOutputs: readonly RetainedEncodeOutputSummary[],
+): EncodeJobId {
+  const sameReplacement = retainedOutputs.filter((candidate) =>
+    candidate.predecessorEncodeJobId === output.predecessorEncodeJobId &&
+    candidate.replacementEncodeJobId === output.replacementEncodeJobId
+  );
+  return sameReplacement[0]?.id === output.id
+    ? output.predecessorEncodeJobId
+    : output.replacementEncodeJobId;
+}
+
+export function encodeOutputArtifactReferences(
+  job: EncodeJob,
+  correctionLinks: readonly EncodeJob[],
+  retainedOutputs: readonly RetainedEncodeOutputSummary[],
+): EncodeOutputArtifactReference[] {
+  const directSuccessor = correctionLinks.find(
+    (candidate) => candidate.predecessorEncodeJobId === job.id,
+  );
+  const published = job.status === "completed" &&
+      directSuccessor?.status !== "completed"
+    ? [{
+      identity: encodeOutputArtifactIdentity(job.id),
+      state: "published" as const,
+    }]
+    : [];
+  const retained = retainedOutputs
+    .filter((output) => retainedOutputOwnerJobId(output, retainedOutputs) === job.id)
+    .map((output) => ({
+      identity: retainedEncodeOutputArtifactIdentity(output.id),
+      state: "retained" as const,
+    }));
+  return [...published, ...retained];
 }
 
 function unknownInspection(
@@ -219,8 +281,12 @@ function unknownInspection(
 interface ResolvedEncodeOutput {
   artifactIdentity: string;
   artifactState: "published" | "retained";
+  authorityKey: string;
+  authorityUnavailableReason: string | null;
   job: EncodeJob;
   originalDiscArchiveId: string | null;
+  outputPath: string;
+  recordedFilesystemIdentity: EncodeOutputFilesystemIdentity | null;
   retainedOutputId: string | null;
 }
 
@@ -328,6 +394,119 @@ function historicalProvenance(
   };
 }
 
+function originalDiscArchiveId(
+  access: ConsistentReadAccess,
+  job: EncodeJob,
+): string | null {
+  return access.catalog.listDiscSelections({ ids: [job.discSelectionId] })[0]
+    ?.originalDiscArchiveId ?? null;
+}
+
+function retainedOutputOwner(
+  access: ConsistentReadAccess,
+  output: RetainedEncodeOutput,
+): EncodeJob | null {
+  const lineage = access.encodeJobs.listRetainedOutputSummaries([
+    output.predecessorEncodeJobId,
+    output.replacementEncodeJobId,
+  ]).filter((candidate) =>
+    candidate.predecessorEncodeJobId === output.predecessorEncodeJobId &&
+    candidate.replacementEncodeJobId === output.replacementEncodeJobId
+  );
+  return access.encodeJobs.find(
+    retainedOutputOwnerJobId(output, lineage),
+  );
+}
+
+function resolvePublishedEncodeOutput(
+  access: ConsistentReadAccess,
+  jobId: EncodeJobId,
+): ResolvedEncodeOutput {
+  const artifactIdentity = encodeOutputArtifactIdentity(jobId);
+  const job = access.encodeJobs.find(jobId);
+  if (job?.status !== "completed") {
+    throw new RecordNotFoundError("Encode Output", artifactIdentity);
+  }
+  const successor = access.encodeJobs.listCorrectionLinks([job.id]).find(
+    (candidate) => candidate.predecessorEncodeJobId === job.id,
+  );
+  if (successor?.status === "completed") {
+    throw new RecordNotFoundError("Encode Output", artifactIdentity);
+  }
+  const authorityUnavailableReason = successor?.publicationPending === true
+    ? "A corrected Encode Output publication is changing artifact authority."
+    : null;
+  return {
+    artifactIdentity,
+    artifactState: "published",
+    authorityKey: JSON.stringify([
+      job.id,
+      job.status,
+      job.completedAt?.toISOString() ?? null,
+      job.outputPath,
+      successor?.id ?? null,
+      successor?.status ?? null,
+      successor?.publicationPending ?? null,
+    ]),
+    authorityUnavailableReason,
+    job,
+    originalDiscArchiveId: originalDiscArchiveId(access, job),
+    outputPath: job.outputPath,
+    recordedFilesystemIdentity: null,
+    retainedOutputId: null,
+  };
+}
+
+function resolveRetainedEncodeOutput(
+  access: ConsistentReadAccess,
+  retainedOutputId: RetainedEncodeOutputId,
+): ResolvedEncodeOutput {
+  const artifactIdentity = retainedEncodeOutputArtifactIdentity(
+    retainedOutputId,
+  );
+  const retainedOutput = access.encodeJobs.findRetainedOutput(retainedOutputId);
+  if (retainedOutput === null) {
+    throw new RecordNotFoundError("Encode Output", artifactIdentity);
+  }
+  const job = retainedOutputOwner(access, retainedOutput);
+  if (job === null) {
+    throw new RecordNotFoundError("Encode Output", artifactIdentity);
+  }
+  return {
+    artifactIdentity,
+    artifactState: "retained",
+    authorityKey: JSON.stringify([
+      retainedOutput.id,
+      retainedOutput.predecessorEncodeJobId,
+      retainedOutput.replacementEncodeJobId,
+      retainedOutput.retainedOutputPath,
+      retainedOutput.filesystemIdentity,
+      retainedOutput.state,
+      retainedOutput.retainedAt.toISOString(),
+      job.id,
+      job.status,
+      job.completedAt?.toISOString() ?? null,
+    ]),
+    authorityUnavailableReason: null,
+    job,
+    originalDiscArchiveId: originalDiscArchiveId(access, job),
+    outputPath: retainedOutput.retainedOutputPath,
+    recordedFilesystemIdentity: retainedOutput.filesystemIdentity,
+    retainedOutputId: retainedOutput.id,
+  };
+}
+
+function resolveEncodeOutputAuthority(
+  access: DataAccess,
+  identity: ParsedEncodeOutputArtifactIdentity,
+): ResolvedEncodeOutput {
+  return access.readConsistentSnapshot((snapshot) =>
+    identity.kind === "published"
+      ? resolvePublishedEncodeOutput(snapshot, identity.jobId)
+      : resolveRetainedEncodeOutput(snapshot, identity.retainedOutputId)
+  );
+}
+
 function filesystemFailure(error: unknown): {
   code: EncodeOutputInspectionReasonCode;
   reason: string;
@@ -363,43 +542,20 @@ export async function inspectEncodeOutput(
   artifactIdentityInput: unknown,
   mediaProbe: EncodeOutputMediaProbe = probeEncodeOutputMedia,
 ) {
-  const jobId = encodeJobIdFromArtifactIdentity(artifactIdentityInput);
-  const artifactIdentity = encodeOutputArtifactIdentity(jobId);
-  const job = access.encodeJobs.find(jobId);
-  if (job?.status !== "completed") {
-    throw new RecordNotFoundError("Encode Output", artifactIdentity);
-  }
-  const selection = access.catalog.listDiscSelections({
-    ids: [job.discSelectionId],
-  })[0];
-  const retainedOutputs = access.encodeJobs.listRetainedOutputs([job.id]);
-  const retainedOutput = retainedOutputs.find(
-    (output) => output.predecessorEncodeJobId === job.id,
+  const parsedIdentity = parseEncodeOutputArtifactIdentity(
+    artifactIdentityInput,
   );
-  const successor = access.encodeJobs.listCorrectionLinks([job.id]).find(
-    (candidate) => candidate.predecessorEncodeJobId === job.id,
-  );
-  const artifactState = retainedOutput === undefined
-    ? "published" as const
-    : "retained" as const;
-  const base = {
-    artifactIdentity,
-    artifactState,
-    job,
-    originalDiscArchiveId: selection?.originalDiscArchiveId ?? null,
-    retainedOutputId: retainedOutput?.id ?? null,
-  };
-  if (successor?.status === "completed" && retainedOutput === undefined) {
+  const base = resolveEncodeOutputAuthority(access, parsedIdentity);
+  if (base.authorityUnavailableReason !== null) {
     return fileUnavailable(
       base,
-      "OUTPUT_PROVENANCE_INCOMPLETE",
-      "The superseded Encode Output has no retained artifact provenance.",
+      "OUTPUT_AUTHORITY_CHANGED",
+      base.authorityUnavailableReason,
     );
   }
-  const outputPath = retainedOutput?.retainedOutputPath ?? job.outputPath;
   let before: Stats;
   try {
-    before = await lstat(outputPath);
+    before = await lstat(base.outputPath);
   } catch (error) {
     const failure = filesystemFailure(error);
     return fileUnavailable(base, failure.code, failure.reason);
@@ -409,9 +565,9 @@ export async function inspectEncodeOutput(
     return fileUnavailable(base, unsafeFile.code, unsafeFile.reason);
   }
   if (
-    retainedOutput !== undefined &&
+    base.recordedFilesystemIdentity !== null &&
     !matchesEncodeOutputFilesystemIdentity(
-      retainedOutput.filesystemIdentity,
+      base.recordedFilesystemIdentity,
       before,
     )
   ) {
@@ -423,19 +579,19 @@ export async function inspectEncodeOutput(
   }
 
   const identity = encodeOutputFilesystemIdentity(before);
-  const identityContinuity = retainedOutput === undefined
+  const identityContinuity = base.recordedFilesystemIdentity === null
     ? "not_recorded" as const
     : "verified" as const;
   let media: EncodeOutputMediaInspection | null = null;
   try {
-    media = await mediaProbe(outputPath);
+    media = await mediaProbe(base.outputPath);
   } catch {
     // The post-probe stat below still has to prove the file stayed stable.
   }
 
   let after: Stats;
   try {
-    after = await lstat(outputPath);
+    after = await lstat(base.outputPath);
   } catch {
     return fileUnavailable(
       base,
@@ -448,6 +604,23 @@ export async function inspectEncodeOutput(
       base,
       "OUTPUT_CHANGED_DURING_INSPECTION",
       "The Encode Output changed while it was being inspected.",
+    );
+  }
+  let currentAuthority: ResolvedEncodeOutput | null = null;
+  try {
+    currentAuthority = resolveEncodeOutputAuthority(access, parsedIdentity);
+  } catch (error) {
+    if (!(error instanceof RecordNotFoundError)) throw error;
+  }
+  if (
+    currentAuthority === null ||
+    currentAuthority.authorityUnavailableReason !== null ||
+    currentAuthority.authorityKey !== base.authorityKey
+  ) {
+    return fileUnavailable(
+      base,
+      "OUTPUT_AUTHORITY_CHANGED",
+      "Encode Output authority changed while the artifact was being inspected.",
     );
   }
 

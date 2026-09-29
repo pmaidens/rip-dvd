@@ -6085,6 +6085,8 @@ export function createDataAccessInternal(
             access.encodeJobs.listCorrectionLinks(ids),
           listFailureReports: (ids) =>
             access.encodeJobs.listFailureReports(ids),
+          findRetainedOutput: (id) =>
+            access.encodeJobs.findRetainedOutput(id),
           listRetainedOutputSummaries: (ids) =>
             access.encodeJobs.listRetainedOutputSummaries(ids),
         },
@@ -12525,6 +12527,13 @@ export function createDataAccessInternal(
           ))
           .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
           .all();
+      },
+      findRetainedOutput(id) {
+        return database
+          .select()
+          .from(retainedEncodeOutputs)
+          .where(eq(retainedEncodeOutputs.id, id))
+          .get() ?? null;
       },
       listRetainedOutputs(ids) {
         if (ids.length === 0) return [];

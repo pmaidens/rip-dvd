@@ -1,6 +1,6 @@
 import {
   describeArchiveRequestWaitingStatus,
-  encodeOutputArtifactIdentity,
+  encodeOutputArtifactReferences,
   encodeRequeueAvailability,
 } from "@rip-dvd/application";
 import type { PresentedArchiveRequestWaitingStatus } from "@rip-dvd/application";
@@ -143,6 +143,10 @@ export interface DashboardArchiveJob {
 export interface DashboardEncodeJob {
   id: EncodeJobId;
   encodeOutputArtifactIdentity?: string;
+  encodeOutputArtifacts?: readonly {
+    identity: string;
+    state: "published" | "retained";
+  }[];
   activityRevision?: string;
   mediaTitle: string;
   mediaYear: number | null;
@@ -1924,14 +1928,23 @@ function readDashboardSnapshotRecords(
                   ? [legacyEncodeJobInvestigation(job, canRequeue)]
                   : []),
               ];
+              const encodeOutputArtifacts = encodeOutputArtifactReferences(
+                job,
+                relationshipJobs,
+                retainedEncodeOutputSource.value,
+              );
+              const publishedEncodeOutput = encodeOutputArtifacts.find(
+                ({ state }) => state === "published",
+              );
               return {
                 id: job.id,
-                ...(job.status === "completed"
-                  ? {
-                      encodeOutputArtifactIdentity:
-                        encodeOutputArtifactIdentity(job.id),
-                    }
-                  : {}),
+                encodeOutputArtifacts,
+                ...(publishedEncodeOutput === undefined
+                  ? {}
+                  : {
+                    encodeOutputArtifactIdentity:
+                      publishedEncodeOutput.identity,
+                  }),
                 mediaTitle: mediaItem?.title ?? "Unknown Media Item",
                 mediaYear: mediaItem?.year ?? null,
                 encodingProfileName:

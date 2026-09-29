@@ -475,10 +475,13 @@ rip-dvd encode-cancel --key <key> --encode-job-id <job-id>
 rip-dvd encode-requeue --key <new-key> --encode-job-id <job-id>
 rip-dvd encode-requeue-preview --encode-job-id <completed-job-id>
 rip-dvd encode-requeue --key <new-key> --encode-job-id <completed-job-id> --revision <preview-revision> --acknowledge
-rip-dvd encode-output inspect encode-output-v1.<encode-job-id>
+rip-dvd encode-output inspect encode-output-v1.published.<encode-job-id>
 ```
 
-A completed Encode Job exposes a versioned Encode Output artifact identity.
+A completed Encode Job exposes its current and retained generations in
+`encodeOutputArtifacts`; retained-output summaries also include their artifact
+identity. Current identities use `encode-output-v1.published.<encode-job-id>`
+and retained identities use `encode-output-v1.retained.<retained-output-id>`.
 `encode-output inspect` reports the artifact state, recorded validation and
 provenance, file identity and completeness, and probed duration and streams.
 Historical outputs keep unavailable validation identities and source snapshots

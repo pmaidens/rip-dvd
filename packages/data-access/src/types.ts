@@ -1713,6 +1713,7 @@ export interface EncodeJobAccess {
     offset?: number;
   }): DiscSelectionCorrectionRetainedOutputSummary[];
   listCorrectionLinks(ids: readonly EncodeJobId[]): EncodeJobCorrectionLink[];
+  findRetainedOutput(id: RetainedEncodeOutputId): RetainedEncodeOutput | null;
   listRetainedOutputs(ids: readonly EncodeJobId[]): RetainedEncodeOutput[];
   listRetainedOutputSummaries(
     ids: readonly EncodeJobId[],
@@ -1861,6 +1862,7 @@ export interface ConsistentReadAccess {
     | "listDiscSelectionCorrectionRetainedOutputSummaries"
     | "listCorrectionLinks"
     | "listFailureReports"
+    | "findRetainedOutput"
     | "listRetainedOutputSummaries"
   >;
   readonly workerIncidents: Pick<WorkerIncidentAccess, "find" | "list">;

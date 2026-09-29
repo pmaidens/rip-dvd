@@ -165,7 +165,8 @@ const commandDefinitions = [
       arguments: ["action: inspect", "artifact-identity"],
       options: [],
     },
-    example: "rip-dvd encode-output inspect encode-output-v1.<encode-job-id>",
+    example:
+      "rip-dvd encode-output inspect encode-output-v1.published.<encode-job-id>",
   },
   {
     name: "encode-queue",

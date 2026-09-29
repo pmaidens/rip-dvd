@@ -25,7 +25,10 @@ import {
 } from "@rip-dvd/data-access";
 
 import { describeArchiveRequestWaitingStatus } from "./archive-request-waiting-status.js";
-import { encodeOutputArtifactIdentity } from "./encode-output-inspection.js";
+import {
+  encodeOutputArtifactReferences,
+  retainedEncodeOutputArtifactIdentity,
+} from "./encode-output-inspection.js";
 
 export const OPERATION_KINDS = [
   "optical-drives",
@@ -85,21 +88,33 @@ function visibleArchiveJob({ claimToken: _claimToken, claimedBy: _claimedBy, ...
   return job;
 }
 
-function visibleEncodeJob({
-  claimToken: _claimToken,
-  claimedBy: _claimedBy,
-  partialCleanupClaimToken: _partialCleanupClaimToken,
-  partialCleanupLeaseToken: _partialCleanupLeaseToken,
-  replacementOutputIdentity: _replacementOutputIdentity,
-  outputPath: _outputPath,
-  partialCleanupOutputPath: _partialCleanupOutputPath,
-  ...job
-}: EncodeJob) {
+function visibleEncodeJob(access: ConsistentReadAccess, job: EncodeJob) {
+  const correctionLinks = access.encodeJobs.listCorrectionLinks([job.id]);
+  const retainedOutputs = access.encodeJobs.listRetainedOutputSummaries(
+    correctionLinks.map((candidate) => candidate.id),
+  );
+  const artifacts = encodeOutputArtifactReferences(
+    job,
+    correctionLinks,
+    retainedOutputs,
+  );
+  const publishedArtifact = artifacts.find(({ state }) => state === "published");
+  const {
+    claimToken: _claimToken,
+    claimedBy: _claimedBy,
+    partialCleanupClaimToken: _partialCleanupClaimToken,
+    partialCleanupLeaseToken: _partialCleanupLeaseToken,
+    replacementOutputIdentity: _replacementOutputIdentity,
+    outputPath: _outputPath,
+    partialCleanupOutputPath: _partialCleanupOutputPath,
+    ...visibleJob
+  } = job;
   return {
-    ...job,
-    ...(job.status === "completed"
-      ? { encodeOutputArtifactIdentity: encodeOutputArtifactIdentity(job.id) }
-      : {}),
+    ...visibleJob,
+    encodeOutputArtifacts: artifacts,
+    ...(publishedArtifact === undefined
+      ? {}
+      : { encodeOutputArtifactIdentity: publishedArtifact.identity }),
   };
 }
 
@@ -406,7 +421,9 @@ function readList(access: ConsistentReadAccess, kind: OperationKind, limit: numb
     case "encode-jobs":
       return recentWork(access.encodeJobs.list(undefined, {
         policy: boundedPolicy(limit),
-      }), ["queued", "running", "cancellation_requested"], limit).map(visibleEncodeJob);
+      }), ["queued", "running", "cancellation_requested"], limit).map(
+        (job) => visibleEncodeJob(access, job),
+      );
     case "archive-audits":
       return access.archiveAudits.list({ limit }).map(visibleArchiveAuditSummary);
     case "filesystem-verifications":
@@ -545,7 +562,7 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
               ? "active"
               : "historical",
           })),
-          encodeJobs: encodeJobs.map(visibleEncodeJob),
+          encodeJobs: encodeJobs.map((job) => visibleEncodeJob(access, job)),
         },
         availableActions: [
           { name: "verify-archive", eligible: true, reason: null },
@@ -570,17 +587,25 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
       }).length > 0;
       const requeue = encodeRequeueAvailability(access, job, requeueSelectionEligible);
       const correctionLinks = access.encodeJobs.listCorrectionLinks([job.id]);
+      const retainedOutputs = access.encodeJobs.listRetainedOutputSummaries([
+        job.id,
+      ]);
       return {
-        ...visibleEncodeJob(job),
+        ...visibleEncodeJob(access, job),
         failureReports: access.encodeJobs.listFailureReports([job.id]),
         discSelection: selection ?? null,
         archive: selection ? access.catalog.listOriginalDiscArchives({
           ids: [selection.originalDiscArchiveId],
         }).map(visibleArchive)[0] ?? null : null,
         history: access.encodeJobs.listForDiscSelection(job.discSelectionId)
-          .map(visibleEncodeJob),
-        correctionLinks: correctionLinks.map(visibleEncodeJob),
-        retainedOutputs: access.encodeJobs.listRetainedOutputSummaries([job.id]),
+          .map((candidate) => visibleEncodeJob(access, candidate)),
+        correctionLinks: correctionLinks.map((candidate) =>
+          visibleEncodeJob(access, candidate)
+        ),
+        retainedOutputs: retainedOutputs.map((output) => ({
+          ...output,
+          artifactIdentity: retainedEncodeOutputArtifactIdentity(output.id),
+        })),
         availableActions: encodeActions(job, requeue),
       };
     }

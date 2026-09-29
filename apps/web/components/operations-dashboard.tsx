@@ -1639,20 +1639,24 @@ export function DashboardView({
                       "Requeue requires an active Disc Selection with completed Catalog Review."}
                   </p>
                 ) : null}
-                {job.status === "completed" &&
-                    job.encodeOutputArtifactIdentity !== undefined ? (
-                  <>
+                {(job.encodeOutputArtifacts ?? (
+                  job.encodeOutputArtifactIdentity === undefined
+                    ? []
+                    : [{
+                      identity: job.encodeOutputArtifactIdentity,
+                      state: "published" as const,
+                    }]
+                )).map((artifact, artifactIndex, artifacts) => (
+                  <React.Fragment key={artifact.identity}>
                     <button
                       type="button"
                       disabled={
                         encodeOutputInspection?.status === "loading" &&
                         encodeOutputInspection.artifactIdentity ===
-                          job.encodeOutputArtifactIdentity
+                          artifact.identity
                       }
                       onClick={() => {
-                        const artifactIdentity =
-                          job.encodeOutputArtifactIdentity;
-                        if (artifactIdentity === undefined) return;
+                        const artifactIdentity = artifact.identity;
                         setEncodeOutputInspection({
                           artifactIdentity,
                           status: "loading",
@@ -1682,26 +1686,34 @@ export function DashboardView({
                     >
                       {encodeOutputInspection?.status === "loading" &&
                           encodeOutputInspection.artifactIdentity ===
-                            job.encodeOutputArtifactIdentity
+                            artifact.identity
                         ? "Inspecting output…"
-                        : "Inspect output"}
+                        : artifacts.length === 1
+                          ? "Inspect output"
+                          : artifact.state === "published"
+                            ? "Inspect current output"
+                            : `Inspect retained output ${
+                              artifacts.slice(0, artifactIndex + 1).filter(
+                                ({ state }) => state === "retained",
+                              ).length
+                            }`}
                     </button>
                     {encodeOutputInspection?.artifactIdentity ===
-                          job.encodeOutputArtifactIdentity &&
+                          artifact.identity &&
                         encodeOutputInspection.status === "error" ? (
                       <p className="job-progress-detail" role="alert">
                         Encode Output inspection is unavailable.
                       </p>
                     ) : null}
                     {encodeOutputInspection?.artifactIdentity ===
-                          job.encodeOutputArtifactIdentity &&
+                          artifact.identity &&
                         encodeOutputInspection.status === "loaded" ? (
                       <EncodeOutputInspectionDetails
                         inspection={encodeOutputInspection.inspection}
                       />
                     ) : null}
-                  </>
-                ) : null}
+                  </React.Fragment>
+                ))}
                 <button
                   type="button"
                   disabled={verifyingFilesystemTarget !== null}

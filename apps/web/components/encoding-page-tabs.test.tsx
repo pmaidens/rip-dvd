@@ -41,7 +41,7 @@ function encodeJob(status: EncodeJobStatus): DashboardEncodeJob {
   return {
     id: `${status}-job` as EncodeJobId,
     ...(status === "completed"
-      ? { encodeOutputArtifactIdentity: `encode-output-v1.${"1".repeat(8)}-${"2".repeat(4)}-${"3".repeat(4)}-${"4".repeat(4)}-${"5".repeat(12)}` }
+      ? { encodeOutputArtifactIdentity: `encode-output-v1.published.${"1".repeat(8)}-${"2".repeat(4)}-${"3".repeat(4)}-${"4".repeat(4)}-${"5".repeat(12)}` }
       : {}),
     mediaTitle: `${status} title`,
     mediaYear: null,
@@ -62,13 +62,15 @@ afterEach(() => {
 function inspectedOutputResponse(
   job: DashboardEncodeJob,
   fileIdentity: string,
+  artifactIdentity = job.encodeOutputArtifactIdentity,
+  state: "published" | "retained" = "published",
 ): Response {
   return Response.json({
     schemaVersion: 1,
     artifact: {
-      identity: job.encodeOutputArtifactIdentity,
+      identity: artifactIdentity,
       type: "canonical_encode_output",
-      state: "published",
+      state,
       encodeJob: {
         id: job.id,
         status: "completed",
@@ -188,6 +190,72 @@ describe("encoding page tabs", () => {
     }
   });
 
+  it("offers each current and retained Encode Output generation", async () => {
+    const completed = encodeJob("completed");
+    const publishedIdentity = completed.encodeOutputArtifactIdentity!;
+    const retainedIdentity =
+      `encode-output-v1.retained.${"a".repeat(8)}-${"b".repeat(4)}-${"c".repeat(4)}-${"d".repeat(4)}-${"e".repeat(12)}`;
+    const job = {
+      ...completed,
+      encodeOutputArtifacts: [
+        { identity: publishedIdentity, state: "published" as const },
+        { identity: retainedIdentity, state: "retained" as const },
+      ],
+    };
+    const state = {
+      opticalDrives: { status: "loaded" as const, items: [] },
+      detectedDiscs: { status: "loaded" as const, items: [] },
+      archiveJobs: { status: "loaded" as const, items: [] },
+      workerIncidents: { status: "loaded" as const, items: [] },
+      encodeJobs: { status: "loaded" as const, items: [job] },
+      catalogReview: { status: "loaded" as const, items: [] },
+    };
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const identity = decodeURIComponent(String(input).split("/").at(-1)!);
+      return inspectedOutputResponse(
+        job,
+        identity === retainedIdentity
+          ? "synthetic-retained-identity"
+          : "synthetic-published-identity",
+        identity,
+        identity === retainedIdentity ? "retained" : "published",
+      );
+    });
+    vi.stubGlobal("fetch", fetcher);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<DashboardView state={state} section="encoding" />);
+      });
+      const buttons = [...container.querySelectorAll("button")];
+      expect(buttons.map(({ textContent }) => textContent)).toEqual(
+        expect.arrayContaining([
+          "Inspect current output",
+          "Inspect retained output 1",
+        ]),
+      );
+      const retainedButton = buttons.find(
+        ({ textContent }) => textContent === "Inspect retained output 1",
+      );
+      await act(async () => {
+        retainedButton!.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(fetcher).toHaveBeenCalledWith(
+        `/api/encode-outputs/${encodeURIComponent(retainedIdentity)}`,
+        expect.objectContaining({ cache: "no-store" }),
+      );
+      expect(container.textContent).toContain("synthetic-retained-identity");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
   it("ignores a stale inspection response after another output is selected", async () => {
     const first = encodeJob("completed");
     const second = {
@@ -195,7 +263,7 @@ describe("encoding page tabs", () => {
       id: "second-completed-job" as EncodeJobId,
       mediaTitle: "second completed title",
       encodeOutputArtifactIdentity:
-        `encode-output-v1.${"6".repeat(8)}-${"7".repeat(4)}-${"8".repeat(4)}-${"9".repeat(4)}-${"a".repeat(12)}`,
+        `encode-output-v1.published.${"6".repeat(8)}-${"7".repeat(4)}-${"8".repeat(4)}-${"9".repeat(4)}-${"a".repeat(12)}`,
     };
     const state = {
       opticalDrives: { status: "loaded" as const, items: [] },
