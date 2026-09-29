@@ -6,6 +6,7 @@ import {
   encodeOutputFilesystemIdentity,
   matchesEncodeOutputFilesystemIdentity,
   RecordNotFoundError,
+  sameEncodeOutputMutationSnapshot,
 } from "@rip-dvd/data-access";
 import type {
   DataAccess,
@@ -235,6 +236,7 @@ interface PresentedEncodeOutputFile {
 function inspectionResponse(
   input: ResolvedEncodeOutput,
   file: PresentedEncodeOutputFile,
+  validationResult: "passed" | "unknown",
   validationAppliesToObservedFile: boolean | null,
   inspection: ReturnType<typeof unknownInspection> | {
     inspectability: {
@@ -256,7 +258,10 @@ function inspectionResponse(
         status: input.job.status,
         completedAt: input.job.completedAt?.toISOString() ?? null,
       },
-      validation: historicalValidation(validationAppliesToObservedFile),
+      validation: presentedValidation(
+        validationResult,
+        validationAppliesToObservedFile,
+      ),
       provenance: historicalProvenance(
         input.job,
         input.originalDiscArchiveId,
@@ -264,6 +269,11 @@ function inspectionResponse(
       ),
       file,
       ...inspection,
+      availableActions: [{
+        name: "export" as const,
+        eligible: false,
+        reason: "Canonical Encode Output export is not available.",
+      }],
     },
   };
 }
@@ -283,14 +293,18 @@ function fileUnavailable(
       completeness: "unknown",
       identityContinuity: "unknown",
     },
-    false,
+    "unknown",
+    null,
     unknownInspection(code, reason),
   );
 }
 
-function historicalValidation(appliesToObservedFile: boolean | null) {
+function presentedValidation(
+  result: "passed" | "unknown",
+  appliesToObservedFile: boolean | null,
+) {
   return {
-    result: "passed" as const,
+    result,
     identity: null,
     evidence: null,
     evidenceAvailability: "not_recorded" as const,
@@ -342,12 +356,6 @@ function fileIsRegularAndNonempty(metadata: Stats): {
   return metadata.size === 0
     ? { code: "OUTPUT_EMPTY", reason: "The recorded Encode Output file is empty." }
     : null;
-}
-
-function sameObservedFile(first: Stats, second: Stats): boolean {
-  return first.dev === second.dev && first.ino === second.ino &&
-    first.size === second.size && first.mtimeMs === second.mtimeMs &&
-    first.ctimeMs === second.ctimeMs;
 }
 
 export async function inspectEncodeOutput(
@@ -435,7 +443,7 @@ export async function inspectEncodeOutput(
       "The Encode Output changed while it was being inspected.",
     );
   }
-  if (!sameObservedFile(before, after)) {
+  if (!sameEncodeOutputMutationSnapshot(before, after)) {
     return fileUnavailable(
       base,
       "OUTPUT_CHANGED_DURING_INSPECTION",
@@ -454,7 +462,8 @@ export async function inspectEncodeOutput(
         completeness: "complete",
         identityContinuity,
       },
-      identityContinuity === "verified" ? true : null,
+      "unknown",
+      null,
       unknownInspection(
         "OUTPUT_PROBE_FAILED",
         "The Encode Output media probe did not return usable metadata.",
@@ -472,6 +481,7 @@ export async function inspectEncodeOutput(
       completeness: "complete",
       identityContinuity,
     },
+    "passed",
     identityContinuity === "verified" ? true : null,
     {
       inspectability: {

@@ -145,6 +145,12 @@ ENV NODE_ENV="production"
 WORKDIR /app
 RUN mkdir --parents /data && chown node:node /data
 
+FROM runtime-base AS encode-output-inspection-runtime
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends ffmpeg \
+  && rm -rf /var/lib/apt/lists/* \
+  && ffprobe -version >/dev/null
+
 FROM runtime-base AS deployment-tools
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends sqlite3 \
@@ -154,7 +160,7 @@ COPY --chown=node:node scripts/migrate-database.mjs ./scripts/migrate-database.m
 COPY --chown=node:node docker/backup-sqlite.sh ./scripts/backup-sqlite.sh
 USER node
 
-FROM runtime-base AS web
+FROM encode-output-inspection-runtime AS web
 ENV HOSTNAME="0.0.0.0"
 ENV PORT="3000"
 COPY --from=web-builder --chown=node:node /app/apps/web/.next/standalone ./
@@ -171,7 +177,7 @@ USER node
 EXPOSE 3000
 CMD ["node", "apps/web/server.js"]
 
-FROM runtime-base AS operator-cli
+FROM encode-output-inspection-runtime AS operator-cli
 COPY --from=operator-cli-builder --chown=node:node /operator-cli ./apps/operator-cli
 USER node
 ENTRYPOINT ["node", "apps/operator-cli/dist/entry.js"]

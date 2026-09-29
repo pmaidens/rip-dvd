@@ -40,6 +40,8 @@ assert_json_fields() {
 }
 
 docker compose --project-name "$project_name" --profile maintenance build operator-cli
+docker compose --project-name "$project_name" --profile maintenance run --rm \
+  --entrypoint ffprobe operator-cli -version >/dev/null
 
 help_output="$(invoke)"
 printf '%s\n' "$help_output" | assert_json_fields \

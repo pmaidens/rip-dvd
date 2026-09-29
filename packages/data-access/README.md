@@ -215,8 +215,11 @@ Disc Selection mutation preserves distinct identity paths:
   immutable retention time and identity, and returns every retry as a separate
   path-free row. The resulting projections preserve job outcomes, links, and
   every Retained Encode output summary without exposing output paths. The
-  private retained path and filesystem identity remain available only on the
-  worker-facing provenance read, never the consistent web read facade.
+  private retained path and recorded filesystem identity remain available only
+  on the worker-facing provenance read and the shared canonical Encode Output
+  inspection operation, never the consistent web read facade. Inspection may
+  return the observed file identity for an explicitly named artifact, but it
+  never returns the file path.
 - **Unsafe legacy quarantine.** A caller-era mapping that fails canonical-key or
   archived-scan validation is the only historical exception.
   `repairDiscSelection()` or `deleteDiscSelection()` deactivates the old Disc

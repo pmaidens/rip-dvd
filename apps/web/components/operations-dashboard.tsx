@@ -186,8 +186,10 @@ function EncodeOutputInspectionDetails({
         <div>
           <dt>Validation</dt>
           <dd>
-            Passed for the completed Encode Job. Validation identity and
-            evidence were not recorded for this output.
+            {artifact.validation.result === "passed"
+              ? "Passed for the completed Encode Job. "
+              : "Unknown because the output could not be fully inspected. "}
+            Validation identity and evidence were not recorded for this output.
           </dd>
         </div>
         <div>
@@ -204,6 +206,10 @@ function EncodeOutputInspectionDetails({
         <div>
           <dt>File identity continuity</dt>
           <dd>{displayTerm(artifact.file.identityContinuity)}</dd>
+        </div>
+        <div>
+          <dt>File identity</dt>
+          <dd>{artifact.file.identity ?? "Unknown"}</dd>
         </div>
         <div>
           <dt>Recorded provenance</dt>
@@ -229,6 +235,14 @@ function EncodeOutputInspectionDetails({
               : formatDuration(Math.round(artifact.media.durationSeconds))}
           </dd>
         </div>
+        {artifact.availableActions.map((action) => (
+          <div key={action.name}>
+            <dt>{displayTerm(action.name)}</dt>
+            <dd>
+              {action.eligible ? "Available" : `Unavailable · ${action.reason}`}
+            </dd>
+          </div>
+        ))}
       </dl>
       {artifact.media.streams === null ? null : (
         <div>
@@ -1645,17 +1659,24 @@ export function DashboardView({
                         });
                         void requestEncodeOutputInspection(artifactIdentity)
                           .then((inspection) =>
-                            setEncodeOutputInspection({
-                              artifactIdentity,
-                              status: "loaded",
-                              inspection,
-                            })
+                            setEncodeOutputInspection((current) =>
+                              current?.artifactIdentity === artifactIdentity &&
+                                current.status === "loading"
+                                ? {
+                                  artifactIdentity,
+                                  status: "loaded",
+                                  inspection,
+                                }
+                                : current
+                            )
                           )
                           .catch(() =>
-                            setEncodeOutputInspection({
-                              artifactIdentity,
-                              status: "error",
-                            })
+                            setEncodeOutputInspection((current) =>
+                              current?.artifactIdentity === artifactIdentity &&
+                                current.status === "loading"
+                                ? { artifactIdentity, status: "error" }
+                                : current
+                            )
                           );
                       }}
                     >

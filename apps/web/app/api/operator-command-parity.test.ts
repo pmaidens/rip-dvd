@@ -76,6 +76,50 @@ it("shares canonical Encode Output inspection across web and CLI", async () => {
   }
 });
 
+it("shares unknown validation when canonical output probing is unavailable", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { predecessor } = seedCatalogReviewForReadFixture(fixture);
+  writeFileSync(
+    join(fixture.mediaLibraryPath, "previous-film.mkv"),
+    "synthetic parity output",
+  );
+  const artifactIdentity = encodeOutputArtifactIdentity(predecessor.id);
+  const mediaProbe: EncodeOutputMediaProbe = async () => {
+    throw new Error("Synthetic unavailable probe");
+  };
+  const access = fixture.openAccess();
+  try {
+    const web = await createEncodeOutputInspectionRoute(
+      new Request(
+        `${trustedOrigin}/api/encode-outputs/${encodeURIComponent(artifactIdentity)}`,
+      ),
+      artifactIdentity,
+      () => access,
+      mediaProbe,
+    );
+    const cli = await fixture.run(
+      ["encode-output", "inspect", artifactIdentity],
+      undefined,
+      undefined,
+      { encodeOutputMediaProbe: mediaProbe },
+    );
+
+    expect(web.status).toBe(200);
+    expect(cli.exitCode).toBe(0);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toMatchObject({ artifact: {
+      validation: { result: "unknown" },
+      inspectability: {
+        status: "unknown",
+        reasonCode: "OUTPUT_PROBE_FAILED",
+      },
+    } });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
 function catalogReviewMutationRequest(
   archiveId: string,
   body: Record<string, unknown>,

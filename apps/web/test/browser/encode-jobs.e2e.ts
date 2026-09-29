@@ -102,6 +102,11 @@ test("inspects a completed canonical Encode Output", async ({
             }],
             playability: "not_assessed",
           },
+          availableActions: [{
+            name: "export",
+            eligible: false,
+            reason: "Canonical Encode Output export is not available.",
+          }],
         },
       }),
     });
@@ -119,10 +124,12 @@ test("inspects a completed canonical Encode Output", async ({
   });
   await expect(inspection).toContainText("Media metadata inspected");
   await expect(inspection).toContainText("1h 30m 0s");
+  await expect(inspection).toContainText("synthetic-browser-file-identity");
   await expect(inspection).toContainText("Stream 0 · Video · h264");
   await expect(inspection).toContainText(
     "Playability is not assessed by this inspection.",
   );
+  await expect(inspection).toContainText("ExportUnavailable");
   await expectNoPageOverflow(page);
 });
 

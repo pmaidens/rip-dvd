@@ -166,6 +166,11 @@ it("inspects a persisted canonical Encode Output by artifact identity", async ()
         ],
         playability: "not_assessed",
       },
+      availableActions: [{
+        name: "export",
+        eligible: false,
+        reason: "Canonical Encode Output export is not available.",
+      }],
     },
   });
   expect(JSON.stringify(result.result)).not.toContain(outputPath);
@@ -196,6 +201,7 @@ it("reports unknown inspectability without turning probe failure into command fa
 
   expect(result.exitCode).toBe(0);
   expect(result.result).toMatchObject({ artifact: {
+    validation: { result: "unknown", appliesToObservedFile: null },
     file: { status: "available", completeness: "complete" },
     inspectability: {
       status: "unknown",
@@ -228,6 +234,7 @@ it("reports a missing canonical output without running the media probe", async (
 
   expect(result.exitCode).toBe(0);
   expect(result.result).toMatchObject({ artifact: {
+    validation: { result: "unknown", appliesToObservedFile: null },
     file: {
       status: "missing",
       identity: null,
