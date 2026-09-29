@@ -1,5 +1,6 @@
 import {
   describeArchiveRequestWaitingStatus,
+  encodeOutputArtifactIdentity,
   encodeRequeueAvailability,
 } from "@rip-dvd/application";
 import type { PresentedArchiveRequestWaitingStatus } from "@rip-dvd/application";
@@ -141,6 +142,7 @@ export interface DashboardArchiveJob {
 
 export interface DashboardEncodeJob {
   id: EncodeJobId;
+  encodeOutputArtifactIdentity?: string;
   activityRevision?: string;
   mediaTitle: string;
   mediaYear: number | null;
@@ -1924,6 +1926,12 @@ function readDashboardSnapshotRecords(
               ];
               return {
                 id: job.id,
+                ...(job.status === "completed"
+                  ? {
+                      encodeOutputArtifactIdentity:
+                        encodeOutputArtifactIdentity(job.id),
+                    }
+                  : {}),
                 mediaTitle: mediaItem?.title ?? "Unknown Media Item",
                 mediaYear: mediaItem?.year ?? null,
                 encodingProfileName:

@@ -56,6 +56,10 @@ import {
 import {
   readFilesystemVerificationInventory,
 } from "./filesystem-verification-inventory.js";
+import {
+  inspectEncodeOutput,
+  type EncodeOutputMediaProbe,
+} from "./encode-output-inspection.js";
 
 export class InvalidProfileInputError extends Error {
   constructor(message = "Invalid Encoding Profile input.") {
@@ -226,6 +230,7 @@ function readDeploymentReadiness(access: ConsistentReadAccess) {
 
 export function createApplicationOperations(
   access: DataAccess,
+  dependencies: { encodeOutputMediaProbe?: EncodeOutputMediaProbe } = {},
 ) {
   return {
     health: () => access.checkHealth(),
@@ -317,6 +322,12 @@ export function createApplicationOperations(
       previewEncodeRequeue(access, input),
     cancelEncodeJob: (input: Parameters<typeof cancelEncodeJob>[1]) =>
       cancelEncodeJob(access, input),
+    inspectEncodeOutput: (artifactIdentity: unknown) =>
+      inspectEncodeOutput(
+        access,
+        artifactIdentity,
+        dependencies.encodeOutputMediaProbe,
+      ),
     submitArchiveRequest: (input: {
       mutationKey: unknown;
       detectedDiscId: string;
@@ -524,6 +535,20 @@ export {
 export type {
   FilesystemVerificationInventoryInput,
 } from "./filesystem-verification-inventory.js";
+export {
+  encodeOutputArtifactIdentity,
+  inspectEncodeOutput,
+  InvalidEncodeOutputArtifactIdentityError,
+  probeEncodeOutputMedia,
+} from "./encode-output-inspection.js";
+export type {
+  EncodeOutputInspection,
+  EncodeOutputInspectionReasonCode,
+  EncodeOutputMediaInspection,
+  EncodeOutputMediaProbe,
+  EncodeOutputMediaStream,
+  EncodeOutputStreamKind,
+} from "./encode-output-inspection.js";
 export { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
 export { readCatalogReview, serializeDiscSelection, serializeMediaItem } from "./catalog-review-read.js";
 export type { CatalogReviewPageCoordinates } from "./catalog-review-read.js";

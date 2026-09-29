@@ -1,11 +1,16 @@
 import { expect, it } from "vitest";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
 import {
   beginSettledDiscInspectionForTest,
   createNormalDvdArchiveBoundaryEvidenceForTest,
 } from "@rip-dvd/data-access/test-support";
-import type { CatalogMetadataLookup } from "@rip-dvd/application";
+import {
+  encodeOutputArtifactIdentity,
+  type CatalogMetadataLookup,
+  type EncodeOutputMediaProbe,
+} from "@rip-dvd/application";
 import type { MediaItemId } from "@rip-dvd/data-access";
 
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../operator-cli/src/operator-workflow.test-support.js";
@@ -18,10 +23,58 @@ import { createMediaItemSearchRoute } from "./media-items/route";
 import { createMediaItemPreviewRoute } from "./media-items/[id]/route";
 import { createEncodeJobsRoute } from "./encode-jobs/route";
 import {
+  createEncodeOutputInspectionRoute,
+} from "./encode-outputs/[artifactIdentity]/route";
+import {
   createFilesystemVerificationInventoryRoute,
 } from "./filesystem-verification/route";
 
 const trustedOrigin = "http://localhost:3000";
+
+it("shares canonical Encode Output inspection across web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { predecessor } = seedCatalogReviewForReadFixture(fixture);
+  const outputPath = join(fixture.mediaLibraryPath, "previous-film.mkv");
+  writeFileSync(outputPath, "synthetic parity output");
+  const artifactIdentity = encodeOutputArtifactIdentity(predecessor.id);
+  const mediaProbe: EncodeOutputMediaProbe = async () => ({
+    durationSeconds: 3_600.5,
+    streams: [{
+      index: 0,
+      kind: "video",
+      codecName: "h264",
+      language: null,
+      title: null,
+      default: true,
+      forced: false,
+    }],
+  });
+  const access = fixture.openAccess();
+  try {
+    const web = await createEncodeOutputInspectionRoute(
+      new Request(
+        `${trustedOrigin}/api/encode-outputs/${encodeURIComponent(artifactIdentity)}`,
+      ),
+      artifactIdentity,
+      () => access,
+      mediaProbe,
+    );
+    const cli = await fixture.run(
+      ["encode-output", "inspect", artifactIdentity],
+      undefined,
+      undefined,
+      { encodeOutputMediaProbe: mediaProbe },
+    );
+
+    expect(web.status).toBe(200);
+    expect(web.headers.get("Cache-Control")).toBe("no-store");
+    expect(cli.exitCode).toBe(0);
+    expect(cli.result).toEqual(await web.json());
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
 
 function catalogReviewMutationRequest(
   archiveId: string,

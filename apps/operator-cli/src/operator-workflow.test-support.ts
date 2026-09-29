@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { createDataAccess } from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { seedRearchiveReviewFixtureForTest } from "@rip-dvd/data-access/rearchive-test-support";
-import type { CatalogMetadataLookup } from "@rip-dvd/application";
+import type {
+  CatalogMetadataLookup,
+  EncodeOutputMediaProbe,
+} from "@rip-dvd/application";
 
 import { runCommand } from "./command.js";
 
@@ -28,13 +31,19 @@ export function createOperatorWorkflowFixture() {
     mediaLibraryPath,
     originalsLibraryPath,
     openAccess,
-    async run(args: readonly string[], lookup?: CatalogMetadataLookup | null, stdin?: string) {
+    async run(
+      args: readonly string[],
+      lookup?: CatalogMetadataLookup | null,
+      stdin?: string,
+      options: { encodeOutputMediaProbe?: EncodeOutputMediaProbe } = {},
+    ) {
       const stdout: string[] = [];
       const stderr: string[] = [];
       const exitCode = await runCommand(args, {
         openAccess,
         readFile: (path) => readFileSync(path, "utf8"),
         mediaLibraryPath: () => mediaLibraryPath,
+        ...options,
         ...(lookup === undefined ? {} : { getLookup: () => lookup }),
         ...(stdin === undefined ? {} : { readStdin: () => stdin }),
         stdout: (text) => stdout.push(text),

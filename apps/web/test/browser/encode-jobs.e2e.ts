@@ -39,6 +39,93 @@ async function expectNoPageOverflow(page: Page): Promise<void> {
   expect(result.scrollWidth).toBeLessThanOrEqual(result.clientWidth);
 }
 
+test("inspects a completed canonical Encode Output", async ({
+  page,
+}, testInfo) => {
+  const variant = fixtureVariant(testInfo.project.name);
+  await page.route("**/api/encode-outputs/*", async (route) => {
+    const artifactIdentity = decodeURIComponent(
+      new URL(route.request().url()).pathname.split("/").at(-1) ?? "",
+    );
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        schemaVersion: 1,
+        artifact: {
+          identity: artifactIdentity,
+          type: "canonical_encode_output",
+          state: "published",
+          encodeJob: {
+            id: "synthetic-browser-encode-job",
+            status: "completed",
+            completedAt: "2026-09-01T12:00:00.000Z",
+          },
+          validation: {
+            result: "passed",
+            identity: null,
+            evidence: null,
+            evidenceAvailability: "not_recorded",
+            appliesToObservedFile: null,
+          },
+          provenance: {
+            encodeJobId: "synthetic-browser-encode-job",
+            discSelectionId: "synthetic-browser-selection",
+            originalDiscArchiveId: "synthetic-browser-archive",
+            encodingProfileId: "synthetic-browser-profile",
+            retainedOutputId: null,
+            sourceSnapshot: null,
+            sourceSnapshotAvailability: "not_recorded",
+          },
+          file: {
+            status: "available",
+            identity: "synthetic-browser-file-identity",
+            sizeBytes: 2_048,
+            modifiedAt: "2026-09-01T12:00:00.000Z",
+            completeness: "complete",
+            identityContinuity: "not_recorded",
+          },
+          inspectability: {
+            status: "inspected",
+            reasonCode: null,
+            reason: null,
+          },
+          media: {
+            durationSeconds: 5_400,
+            streams: [{
+              index: 0,
+              kind: "video",
+              codecName: "h264",
+              language: null,
+              title: null,
+              default: true,
+              forced: false,
+            }],
+            playability: "not_assessed",
+          },
+        },
+      }),
+    });
+  });
+
+  await page.goto("/encoding");
+  await page.getByRole("button", { name: /Completed \d+/ }).click();
+  const outputCard = page.getByRole("article").filter({
+    hasText: `Queue completed ${variant}`,
+  });
+  await outputCard.getByRole("button", { name: "Inspect output" }).click();
+
+  const inspection = outputCard.getByRole("region", {
+    name: /Encode Output encode-output-v1\./,
+  });
+  await expect(inspection).toContainText("Media metadata inspected");
+  await expect(inspection).toContainText("1h 30m 0s");
+  await expect(inspection).toContainText("Stream 0 · Video · h264");
+  await expect(inspection).toContainText(
+    "Playability is not assessed by this inspection.",
+  );
+  await expectNoPageOverflow(page);
+});
+
 test("queues a mixed worklist after resolving a new shared profile", async ({
   page,
 }, testInfo) => {

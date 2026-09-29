@@ -17,6 +17,7 @@ import type {
   DashboardSnapshot,
 } from "../lib/dashboard";
 import {
+  DashboardView,
   filterEncodeJobs,
   OperationsDashboard,
 } from "./operations-dashboard";
@@ -39,6 +40,9 @@ const encodeStatuses: EncodeJobStatus[] = [
 function encodeJob(status: EncodeJobStatus): DashboardEncodeJob {
   return {
     id: `${status}-job` as EncodeJobId,
+    ...(status === "completed"
+      ? { encodeOutputArtifactIdentity: `encode-output-v1.${"1".repeat(8)}-${"2".repeat(4)}-${"3".repeat(4)}-${"4".repeat(4)}-${"5".repeat(12)}` }
+      : {}),
     mediaTitle: `${status} title`,
     mediaYear: null,
     encodingProfileName: "DVD library · Version 1",
@@ -78,6 +82,102 @@ describe("encoding page tabs", () => {
       "cancelled",
     ]);
     expect(completed.items.map((job) => job.status)).toEqual(["completed"]);
+  });
+
+  it("inspects a completed Encode Output from the Encoding view", async () => {
+    const completed = encodeJob("completed");
+    const state = {
+      opticalDrives: { status: "loaded" as const, items: [] },
+      detectedDiscs: { status: "loaded" as const, items: [] },
+      archiveJobs: { status: "loaded" as const, items: [] },
+      workerIncidents: { status: "loaded" as const, items: [] },
+      encodeJobs: { status: "loaded" as const, items: [completed] },
+      catalogReview: { status: "loaded" as const, items: [] },
+    };
+    const fetcher = vi.fn(async () => Response.json({
+      schemaVersion: 1,
+      artifact: {
+        identity: completed.encodeOutputArtifactIdentity,
+        type: "canonical_encode_output",
+        state: "published",
+        encodeJob: {
+          id: completed.id,
+          status: "completed",
+          completedAt: "2026-09-01T12:00:00.000Z",
+        },
+        validation: {
+          result: "passed",
+          identity: null,
+          evidence: null,
+          evidenceAvailability: "not_recorded",
+          appliesToObservedFile: null,
+        },
+        provenance: {
+          encodeJobId: completed.id,
+          discSelectionId: "selection-1",
+          originalDiscArchiveId: "archive-1",
+          encodingProfileId: "profile-1",
+          retainedOutputId: null,
+          sourceSnapshot: null,
+          sourceSnapshotAvailability: "not_recorded",
+        },
+        file: {
+          status: "available",
+          identity: "synthetic-file-identity",
+          sizeBytes: 1_024,
+          modifiedAt: "2026-09-01T12:00:00.000Z",
+          completeness: "complete",
+          identityContinuity: "not_recorded",
+        },
+        inspectability: {
+          status: "inspected",
+          reasonCode: null,
+          reason: null,
+        },
+        media: {
+          durationSeconds: 7_200,
+          streams: [{
+            index: 0,
+            kind: "video",
+            codecName: "h264",
+            language: null,
+            title: null,
+            default: true,
+            forced: false,
+          }],
+          playability: "not_assessed",
+        },
+      },
+    }));
+    vi.stubGlobal("fetch", fetcher);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<DashboardView state={state} section="encoding" />);
+      });
+      const inspectButton = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "Inspect output",
+      );
+      expect(inspectButton).toBeDefined();
+      await act(async () => {
+        inspectButton!.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(fetcher).toHaveBeenCalledWith(
+        `/api/encode-outputs/${encodeURIComponent(completed.encodeOutputArtifactIdentity!)}`,
+        expect.objectContaining({ cache: "no-store" }),
+      );
+      expect(container.textContent).toContain("Media metadata inspected");
+      expect(container.textContent).toContain("2h 0s");
+      expect(container.textContent).toContain("Playability is not assessed");
+    } finally {
+      await act(async () => root.unmount());
+    }
   });
 
   it("keeps the in-memory worklist when moving between accessible tabs", async () => {

@@ -25,6 +25,7 @@ import {
 } from "@rip-dvd/data-access";
 
 import { describeArchiveRequestWaitingStatus } from "./archive-request-waiting-status.js";
+import { encodeOutputArtifactIdentity } from "./encode-output-inspection.js";
 
 export const OPERATION_KINDS = [
   "optical-drives",
@@ -94,7 +95,12 @@ function visibleEncodeJob({
   partialCleanupOutputPath: _partialCleanupOutputPath,
   ...job
 }: EncodeJob) {
-  return job;
+  return {
+    ...job,
+    ...(job.status === "completed"
+      ? { encodeOutputArtifactIdentity: encodeOutputArtifactIdentity(job.id) }
+      : {}),
+  };
 }
 
 function visibleArchive({ archivePath: _archivePath, ...archive }: OriginalDiscArchive) {

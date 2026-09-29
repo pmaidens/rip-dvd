@@ -46,6 +46,7 @@ and compare both adapters with the same application rule.
 | Encode queue options, search, history, resolution, and conflicts | `apps/web/app/api/encode-jobs/route.ts` | `rip-dvd encode-queue`, `rip-dvd encode-resolve` | `apps/web/app/api/operator-command-parity.test.ts`, `apps/operator-cli/src/command.test.ts`, `apps/web/test/browser/encode-jobs.e2e.ts` |
 | Encode Job submission | `apps/web/app/api/encode-jobs/route.ts` | `rip-dvd encode-enqueue` | `apps/web/app/api/operator-command-parity.test.ts`, `apps/operator-cli/src/command.test.ts`, `apps/web/test/browser/encode-jobs.e2e.ts` |
 | Encode Job previewed requeue, cancellation, detail, status, and wait | `apps/web/app/api/encode-jobs/route.ts`, `apps/web/app/api/operations/route.ts` | `rip-dvd encode-requeue-preview`, `rip-dvd encode-requeue`, `rip-dvd encode-cancel`, `rip-dvd inspect encode-jobs [id]`, `rip-dvd wait encode-jobs` | `apps/web/app/api/operator-command-parity.test.ts`, `apps/operator-cli/src/command.test.ts`, `apps/web/test/browser/encode-jobs.e2e.ts` |
+| Canonical Encode Output inspection by artifact identity | `GET apps/web/app/api/encode-outputs/[artifactIdentity]/route.ts` and the Encoding view | `rip-dvd encode-output inspect <artifact-identity>` | `apps/web/app/api/operator-command-parity.test.ts`, `apps/operator-cli/src/command.test.ts`, `apps/web/components/encoding-page-tabs.test.tsx` |
 | Encoding Profile list, creation, and versioning | `apps/web/app/api/encoding-profiles/route.ts` | `rip-dvd list-encoding-profiles`, `rip-dvd create-encoding-profile`, `rip-dvd version-encoding-profile` | `apps/web/app/api/operator-command-parity.test.ts`, `apps/operator-cli/src/command.test.ts` |
 | Encoding Profile activation and deactivation previews | `apps/web/app/api/encoding-profiles/route.ts` | `rip-dvd preview-encoding-profile-state`, `rip-dvd activate-encoding-profile`, `rip-dvd deactivate-encoding-profile` | `apps/web/app/api/operator-command-parity.test.ts`, `apps/operator-cli/src/command.test.ts` |
 | Original Disc Archive inventory, lineage, references, storage observations, and re-archive eligibility | `apps/web/app/api/operations/route.ts`, `apps/web/app/api/action-overview/route.ts` | `rip-dvd inspect original-disc-archives [id]` | `apps/operator-cli/src/command.test.ts`, `apps/operator-cli/src/full-operator-parity.integration.test.ts` |
@@ -88,6 +89,7 @@ to commands and tests.
 - `GET apps/web/app/api/encode-jobs/route.ts`: encode queue and history.
 - `POST apps/web/app/api/encode-jobs/route.ts`: Encode Job enqueue.
 - `PATCH apps/web/app/api/encode-jobs/route.ts`: Encode Job preview, requeue, and cancellation.
+- `GET apps/web/app/api/encode-outputs/[artifactIdentity]/route.ts`: canonical Encode Output inspection.
 - `GET apps/web/app/api/encoding-profiles/route.ts`: Encoding Profile inventory and state preview.
 - `POST apps/web/app/api/encoding-profiles/route.ts`: Encoding Profile creation and versioning.
 - `PATCH apps/web/app/api/encoding-profiles/route.ts`: Encoding Profile activation and deactivation.

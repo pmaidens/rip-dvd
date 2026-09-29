@@ -475,7 +475,15 @@ rip-dvd encode-cancel --key <key> --encode-job-id <job-id>
 rip-dvd encode-requeue --key <new-key> --encode-job-id <job-id>
 rip-dvd encode-requeue-preview --encode-job-id <completed-job-id>
 rip-dvd encode-requeue --key <new-key> --encode-job-id <completed-job-id> --revision <preview-revision> --acknowledge
+rip-dvd encode-output inspect encode-output-v1.<encode-job-id>
 ```
+
+A completed Encode Job exposes a versioned Encode Output artifact identity.
+`encode-output inspect` reports the artifact state, recorded validation and
+provenance, file identity and completeness, and probed duration and streams.
+Historical outputs keep unavailable validation identities and source snapshots
+explicit. Media probe failure reports unknown inspectability and does not claim
+that the file is playable.
 
 An initial `encode-enqueue` is deduplicated by Disc Selection and Encoding
 Profile, including after completion. Use `encode-requeue` for a terminal job.

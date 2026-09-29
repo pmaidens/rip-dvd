@@ -1,6 +1,7 @@
 import {
   createApplicationOperations,
   createTmdbCatalogLookup,
+  InvalidEncodeOutputArtifactIdentityError,
   generateMutationKey,
   InvalidMutationKeyError,
   InvalidProfileInputError,
@@ -15,6 +16,7 @@ import {
   type CatalogMetadataLookup,
   type CatalogMetadataSelection,
   type CatalogReviewPageCoordinates,
+  type EncodeOutputMediaProbe,
   InvalidEncodeJobInputError,
   serializeJob,
 } from "@rip-dvd/application";
@@ -42,6 +44,7 @@ export type CommandExitCode = 0 | 1 | 2 | 3;
 
 interface CommandIO {
   openAccess(): DataAccess;
+  encodeOutputMediaProbe?: EncodeOutputMediaProbe;
   mediaLibraryPath?(): string;
   getLookup?(): CatalogMetadataLookup | null;
   readStdin?(): string;
@@ -153,6 +156,16 @@ const commandDefinitions = [
       options: ["--key", "--limit", "--concurrency", "--file-timeout-ms", "--runtime-timeout-ms"],
     },
     example: "rip-dvd submit-archive-audit --key 00000000-0000-4000-8000-000000000001 --limit 100",
+  },
+  {
+    name: "encode-output",
+    description: "Inspect a canonical Encode Output by artifact identity.",
+    usage: "rip-dvd encode-output inspect <artifact-identity>",
+    inputs: {
+      arguments: ["action: inspect", "artifact-identity"],
+      options: [],
+    },
+    example: "rip-dvd encode-output inspect encode-output-v1.<encode-job-id>",
   },
   {
     name: "encode-queue",
@@ -886,6 +899,49 @@ function inspectCommand(rest: readonly string[], io: CommandIO) {
   }
 }
 
+async function inspectEncodeOutputCommand(
+  rest: readonly string[],
+  io: CommandIO,
+) {
+  const [action, artifactIdentity] = rest;
+  if (
+    action !== "inspect" ||
+    artifactIdentity === undefined ||
+    artifactIdentity.length > 256 ||
+    rest.length !== 2
+  ) {
+    throw new CommandFailure(
+      "INVALID_ARGUMENTS",
+      "Expected encode-output inspect <artifact-identity>.",
+      2,
+    );
+  }
+  let access: DataAccess | undefined;
+  try {
+    access = io.openAccess();
+    return await createApplicationOperations(access, {
+      ...(io.encodeOutputMediaProbe === undefined
+        ? {}
+        : { encodeOutputMediaProbe: io.encodeOutputMediaProbe }),
+    }).inspectEncodeOutput(artifactIdentity);
+  } catch (error) {
+    if (error instanceof InvalidEncodeOutputArtifactIdentityError) {
+      throw new CommandFailure("INVALID_ARGUMENTS", error.message, 2);
+    }
+    if (error instanceof RecordNotFoundError) {
+      throw new CommandFailure("ENCODE_OUTPUT_NOT_FOUND", "Encode Output not found.", 2);
+    }
+    if (error instanceof CommandFailure) throw error;
+    throw new CommandFailure(
+      "ENCODE_OUTPUT_INSPECTION_UNAVAILABLE",
+      "Encode Output inspection is unavailable.",
+      1,
+    );
+  } finally {
+    access?.close();
+  }
+}
+
 function waitArguments(rest: readonly string[]) {
   const [kind, id] = rest;
   const timeoutMs = numericOption(rest, "--timeout-ms");
@@ -1308,6 +1364,14 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         emit(io.stdout, help(name));
       } else {
         emit(io.stdout, runEncodeCommand(name, rest, io));
+      }
+      return 0;
+    }
+    if (name === "encode-output") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+      } else {
+        emit(io.stdout, await inspectEncodeOutputCommand(rest, io));
       }
       return 0;
     }

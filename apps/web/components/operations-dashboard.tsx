@@ -8,6 +8,7 @@ import type {
   CatalogReviewArchiveView,
   CompletedCatalogReviewOutcome,
 } from "@rip-dvd/data-access";
+import type { EncodeOutputInspection } from "@rip-dvd/application";
 
 import type {
   ActionOverviewCategory,
@@ -132,6 +133,123 @@ function formatDuration(totalSeconds: number): string {
 
 function countLabel(count: number, singular: string, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
+}
+
+type EncodeOutputInspectionState =
+  | null
+  | { artifactIdentity: string; status: "loading" }
+  | { artifactIdentity: string; status: "error" }
+  | {
+      artifactIdentity: string;
+      status: "loaded";
+      inspection: EncodeOutputInspection;
+    };
+
+export async function requestEncodeOutputInspection(
+  artifactIdentity: string,
+  fetcher: typeof fetch = fetch,
+): Promise<EncodeOutputInspection> {
+  const response = await fetcher(
+    `/api/encode-outputs/${encodeURIComponent(artifactIdentity)}`,
+    {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    },
+  );
+  if (!response.ok) {
+    throw new Error("Encode Output inspection failed");
+  }
+  return await response.json() as EncodeOutputInspection;
+}
+
+function EncodeOutputInspectionDetails({
+  inspection,
+}: {
+  inspection: EncodeOutputInspection;
+}) {
+  const artifact = inspection.artifact;
+  return (
+    <section
+      className="encode-output-inspection"
+      aria-label={`Encode Output ${artifact.identity}`}
+    >
+      <h4>Encode Output</h4>
+      <dl>
+        <div>
+          <dt>Artifact identity</dt>
+          <dd>{artifact.identity}</dd>
+        </div>
+        <div>
+          <dt>Artifact state</dt>
+          <dd>{displayTerm(artifact.state)}</dd>
+        </div>
+        <div>
+          <dt>Validation</dt>
+          <dd>
+            Passed for the completed Encode Job. Validation identity and
+            evidence were not recorded for this output.
+          </dd>
+        </div>
+        <div>
+          <dt>File</dt>
+          <dd>
+            {displayTerm(artifact.file.status)} · {displayTerm(
+              artifact.file.completeness,
+            )}
+            {artifact.file.sizeBytes === null
+              ? ""
+              : ` · ${formatBytes(artifact.file.sizeBytes)}`}
+          </dd>
+        </div>
+        <div>
+          <dt>File identity continuity</dt>
+          <dd>{displayTerm(artifact.file.identityContinuity)}</dd>
+        </div>
+        <div>
+          <dt>Recorded provenance</dt>
+          <dd>
+            Encode Job {artifact.provenance.encodeJobId} · Disc Selection{" "}
+            {artifact.provenance.discSelectionId} · Encoding Profile{" "}
+            {artifact.provenance.encodingProfileId}
+          </dd>
+        </div>
+        <div>
+          <dt>Inspectability</dt>
+          <dd>
+            {artifact.inspectability.status === "inspected"
+              ? "Media metadata inspected"
+              : artifact.inspectability.reason}
+          </dd>
+        </div>
+        <div>
+          <dt>Duration</dt>
+          <dd>
+            {artifact.media.durationSeconds === null
+              ? "Unknown"
+              : formatDuration(Math.round(artifact.media.durationSeconds))}
+          </dd>
+        </div>
+      </dl>
+      {artifact.media.streams === null ? null : (
+        <div>
+          <strong>{countLabel(artifact.media.streams.length, "stream")}</strong>
+          <ul>
+            {artifact.media.streams.map((stream) => (
+              <li key={stream.index}>
+                Stream {stream.index} · {displayTerm(stream.kind)} ·{" "}
+                {stream.codecName ?? "Unknown codec"}
+                {stream.language === null ? "" : ` · ${stream.language}`}
+                {stream.title === null ? "" : ` · ${stream.title}`}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <p>
+        Playability is not assessed by this inspection.
+      </p>
+    </section>
+  );
 }
 
 function formatStreamId(id: number): string {
@@ -1098,6 +1216,8 @@ export function DashboardView({
   onVerifyFilesystem?: (target: FilesystemVerificationTarget, id: string) => void;
   verifyingFilesystemTarget?: string | null;
 }) {
+  const [encodeOutputInspection, setEncodeOutputInspection] =
+    useState<EncodeOutputInspectionState>(null);
   const [activeInvestigation, setActiveInvestigation] = useState<
     | {
         kind: "archive-job" | "disc-inspection" | "worker-incident";
@@ -1504,6 +1624,62 @@ export function DashboardView({
                     {job.requeueReason ??
                       "Requeue requires an active Disc Selection with completed Catalog Review."}
                   </p>
+                ) : null}
+                {job.status === "completed" &&
+                    job.encodeOutputArtifactIdentity !== undefined ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={
+                        encodeOutputInspection?.status === "loading" &&
+                        encodeOutputInspection.artifactIdentity ===
+                          job.encodeOutputArtifactIdentity
+                      }
+                      onClick={() => {
+                        const artifactIdentity =
+                          job.encodeOutputArtifactIdentity;
+                        if (artifactIdentity === undefined) return;
+                        setEncodeOutputInspection({
+                          artifactIdentity,
+                          status: "loading",
+                        });
+                        void requestEncodeOutputInspection(artifactIdentity)
+                          .then((inspection) =>
+                            setEncodeOutputInspection({
+                              artifactIdentity,
+                              status: "loaded",
+                              inspection,
+                            })
+                          )
+                          .catch(() =>
+                            setEncodeOutputInspection({
+                              artifactIdentity,
+                              status: "error",
+                            })
+                          );
+                      }}
+                    >
+                      {encodeOutputInspection?.status === "loading" &&
+                          encodeOutputInspection.artifactIdentity ===
+                            job.encodeOutputArtifactIdentity
+                        ? "Inspecting output…"
+                        : "Inspect output"}
+                    </button>
+                    {encodeOutputInspection?.artifactIdentity ===
+                          job.encodeOutputArtifactIdentity &&
+                        encodeOutputInspection.status === "error" ? (
+                      <p className="job-progress-detail" role="alert">
+                        Encode Output inspection is unavailable.
+                      </p>
+                    ) : null}
+                    {encodeOutputInspection?.artifactIdentity ===
+                          job.encodeOutputArtifactIdentity &&
+                        encodeOutputInspection.status === "loaded" ? (
+                      <EncodeOutputInspectionDetails
+                        inspection={encodeOutputInspection.inspection}
+                      />
+                    ) : null}
+                  </>
                 ) : null}
                 <button
                   type="button"

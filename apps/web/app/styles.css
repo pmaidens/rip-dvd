@@ -1744,6 +1744,43 @@ h1 {
   font-size: 0.72rem;
 }
 
+.encode-output-inspection {
+  flex: 1 0 100%;
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.8rem;
+  border: 1px solid #365149;
+  border-radius: 0.55rem;
+  background: #10231e;
+  overflow-wrap: anywhere;
+}
+
+.encode-output-inspection h4,
+.encode-output-inspection p {
+  margin: 0;
+}
+
+.encode-output-inspection dl,
+.encode-output-inspection ul {
+  margin: 0;
+}
+
+.encode-output-inspection dl {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.encode-output-inspection dt,
+.encode-output-inspection strong {
+  color: #eef4f1;
+  font-weight: 700;
+}
+
+.encode-output-inspection dd {
+  margin: 0.1rem 0 0;
+  color: #b8c8c3;
+}
+
 .verification-result {
   display: grid;
   gap: 0.2rem;

@@ -14,7 +14,10 @@ import {
 } from "@rip-dvd/data-access/test-support";
 import type { MediaItemId } from "@rip-dvd/data-access";
 
-import { createApplicationOperations } from "@rip-dvd/application";
+import {
+  createApplicationOperations,
+  encodeOutputArtifactIdentity,
+} from "@rip-dvd/application";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 
 import { runCommand } from "./command.js";
@@ -76,6 +79,167 @@ it("reports database health as JSON through the public command runner", async ()
     journalMode: "wal",
     busyTimeoutMs: 5_000,
   });
+});
+
+it("inspects a persisted canonical Encode Output by artifact identity", async () => {
+  const current = fixture();
+  const { predecessor } = seedCatalogReviewForReadFixture(current);
+  const outputPath = join(current.mediaLibraryPath, "previous-film.mkv");
+  writeFileSync(outputPath, "synthetic encoded output");
+  const artifactIdentity = encodeOutputArtifactIdentity(predecessor.id);
+  const mediaProbe = vi.fn(async (path: string) => {
+    expect(path).toBe(outputPath);
+    return {
+      durationSeconds: 5_399.25,
+      streams: [
+        {
+          index: 0,
+          kind: "video" as const,
+          codecName: "h264",
+          language: null,
+          title: null,
+          default: true,
+          forced: false,
+        },
+        {
+          index: 1,
+          kind: "audio" as const,
+          codecName: "aac",
+          language: "eng",
+          title: "Main audio",
+          default: true,
+          forced: false,
+        },
+      ],
+    };
+  });
+
+  const result = await current.run(
+    ["encode-output", "inspect", artifactIdentity],
+    undefined,
+    undefined,
+    { encodeOutputMediaProbe: mediaProbe },
+  );
+
+  expect((await current.run(["inspect", "encode-jobs", predecessor.id])).result)
+    .toMatchObject({ item: { encodeOutputArtifactIdentity: artifactIdentity } });
+  expect(result.exitCode).toBe(0);
+  expect(result.stderr).toBe("");
+  expect(result.result).toMatchObject({
+    schemaVersion: 1,
+    artifact: {
+      identity: artifactIdentity,
+      type: "canonical_encode_output",
+      state: "published",
+      encodeJob: { id: predecessor.id, status: "completed" },
+      validation: {
+        result: "passed",
+        identity: null,
+        evidence: null,
+        evidenceAvailability: "not_recorded",
+        appliesToObservedFile: null,
+      },
+      provenance: {
+        encodeJobId: predecessor.id,
+        discSelectionId: predecessor.discSelectionId,
+        encodingProfileId: predecessor.encodingProfileId,
+        sourceSnapshot: null,
+        sourceSnapshotAvailability: "not_recorded",
+      },
+      file: {
+        status: "available",
+        identity: expect.any(String),
+        sizeBytes: Buffer.byteLength("synthetic encoded output"),
+        completeness: "complete",
+        identityContinuity: "not_recorded",
+      },
+      inspectability: {
+        status: "inspected",
+        reasonCode: null,
+        reason: null,
+      },
+      media: {
+        durationSeconds: 5_399.25,
+        streams: [
+          expect.objectContaining({ index: 0, kind: "video", codecName: "h264" }),
+          expect.objectContaining({ index: 1, kind: "audio", language: "eng" }),
+        ],
+        playability: "not_assessed",
+      },
+    },
+  });
+  expect(JSON.stringify(result.result)).not.toContain(outputPath);
+  expect(mediaProbe).toHaveBeenCalledOnce();
+});
+
+it("reports unknown inspectability without turning probe failure into command failure", async () => {
+  const current = fixture();
+  const { predecessor } = seedCatalogReviewForReadFixture(current);
+  writeFileSync(
+    join(current.mediaLibraryPath, "previous-film.mkv"),
+    "synthetic encoded output",
+  );
+  const result = await current.run(
+    [
+      "encode-output",
+      "inspect",
+      encodeOutputArtifactIdentity(predecessor.id),
+    ],
+    undefined,
+    undefined,
+    {
+      encodeOutputMediaProbe: async () => {
+        throw new Error("synthetic media probe failure");
+      },
+    },
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(result.result).toMatchObject({ artifact: {
+    file: { status: "available", completeness: "complete" },
+    inspectability: {
+      status: "unknown",
+      reasonCode: "OUTPUT_PROBE_FAILED",
+    },
+    media: {
+      durationSeconds: null,
+      streams: null,
+      playability: "not_assessed",
+    },
+  } });
+});
+
+it("reports a missing canonical output without running the media probe", async () => {
+  const current = fixture();
+  const { predecessor } = seedCatalogReviewForReadFixture(current);
+  const mediaProbe = vi.fn(async () => {
+    throw new Error("Media probe must not run for a missing file");
+  });
+  const result = await current.run(
+    [
+      "encode-output",
+      "inspect",
+      encodeOutputArtifactIdentity(predecessor.id),
+    ],
+    undefined,
+    undefined,
+    { encodeOutputMediaProbe: mediaProbe },
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(result.result).toMatchObject({ artifact: {
+    file: {
+      status: "missing",
+      identity: null,
+      completeness: "unknown",
+    },
+    inspectability: {
+      status: "unknown",
+      reasonCode: "OUTPUT_MISSING",
+    },
+    media: { durationSeconds: null, streams: null },
+  } });
+  expect(mediaProbe).not.toHaveBeenCalled();
 });
 
 it("submits filesystem verification with replay, status, and bounded waiting", async () => {
@@ -945,6 +1109,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       "filesystem-verification-inventory",
       "submit-filesystem-verification",
       "submit-archive-audit",
+      "encode-output",
       "encode-queue",
       "encode-resolve",
       "encode-enqueue",
