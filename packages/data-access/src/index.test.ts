@@ -4180,10 +4180,14 @@ describe("data-access facade", () => {
       "select count(*) as count from corrected_encode_publication_authorities",
     ).get()).toEqual({ count: 0 });
     sqlite.close();
-    expect(access.encodeJobs.listRetainedOutputs([replacement.id])).toEqual([{
+    const retainedOutput = access.encodeJobs.listRetainedOutputs([
+      replacement.id,
+    ])[0]!;
+    expect([retainedOutput]).toEqual([{
       id: expect.any(String),
       predecessorEncodeJobId: predecessor.id,
       replacementEncodeJobId: replacement.id,
+      sourceEncodeJobId: predecessor.id,
       retainedOutputPath,
       filesystemIdentity: priorOutputIdentity,
       state: "retained",
@@ -4192,12 +4196,14 @@ describe("data-access facade", () => {
     }]);
     access.readConsistentSnapshot((snapshot) => {
       expect(snapshot.encodeJobs).not.toHaveProperty("listRetainedOutputs");
+      expect(snapshot.encodeJobs).not.toHaveProperty("findRetainedOutput");
       expect(
         snapshot.encodeJobs.listRetainedOutputSummaries([replacement.id]),
       ).toEqual([{
         id: expect.any(String),
         predecessorEncodeJobId: predecessor.id,
         replacementEncodeJobId: replacement.id,
+        sourceEncodeJobId: predecessor.id,
         state: "retained",
         cleanupEligible: true,
         retainedAt: expect.any(Date),
@@ -4212,6 +4218,7 @@ describe("data-access facade", () => {
             id: expect.any(String),
             predecessorEncodeJobId: predecessor.id,
             replacementEncodeJobId: replacement.id,
+            sourceEncodeJobId: predecessor.id,
             state: "retained",
             cleanupEligible: true,
             retainedAt: expect.any(Date),
@@ -4231,6 +4238,15 @@ describe("data-access facade", () => {
           status: "completed",
         },
       }]);
+    });
+    access.readEncodeOutputInspectionSnapshot((snapshot) => {
+      expect(snapshot.encodeJobs.findRetainedOutput(
+        retainedOutput.id,
+      )).toMatchObject({
+        retainedOutputPath,
+        filesystemIdentity: priorOutputIdentity,
+        sourceEncodeJobId: predecessor.id,
+      });
     });
     expect(access.encodeJobs.listDiscSelectionCorrectionEncodeJobLinks({
       originalDiscArchiveId: archive.id,
@@ -4313,12 +4329,14 @@ describe("data-access facade", () => {
         expect.objectContaining({
           predecessorEncodeJobId: predecessor.id,
           replacementEncodeJobId: replacement.id,
+          sourceEncodeJobId: predecessor.id,
           retainedOutputPath,
           filesystemIdentity: priorOutputIdentity,
         }),
         expect.objectContaining({
           predecessorEncodeJobId: predecessor.id,
           replacementEncodeJobId: replacement.id,
+          sourceEncodeJobId: replacement.id,
           retainedOutputPath: correctedOutputPath,
           filesystemIdentity: correctedOutputIdentity,
         }),
@@ -4328,6 +4346,10 @@ describe("data-access facade", () => {
       replacement.id,
     ]);
     expect(retainedHistory).toHaveLength(2);
+    expect(access.encodeJobs.listRetainedOutputSummaries(
+      [replacement.id],
+      { limit: 1 },
+    ).map(({ id }) => id)).toEqual([retainedHistory[1]!.id]);
     expect(access.encodeJobs
       .listDiscSelectionCorrectionRetainedOutputSummaries({
         originalDiscArchiveId: archive.id,
@@ -4504,12 +4526,13 @@ describe("data-access facade", () => {
         id,
         predecessor_encode_job_id,
         replacement_encode_job_id,
+        source_encode_job_id,
         retained_output_path,
         filesystem_identity,
         state,
         cleanup_eligible,
         retained_at
-      ) values (?, ?, ?, ?, ?, 'retained', 1, ?)
+      ) values (?, ?, ?, ?, ?, ?, 'retained', 1, ?)
     `);
     const replacementIds: EncodeJobId[] = [];
     const retainedOutputIds: string[] = [];
@@ -4533,6 +4556,7 @@ describe("data-access facade", () => {
         retainedOutputId,
         predecessors[index]!.id,
         replacementId,
+        predecessors[index]!.id,
         `/media/movies/correction-history-retained-${suffix}.mkv`,
         `correction-history-identity-${suffix}`,
         2_000 + index,
@@ -4543,6 +4567,7 @@ describe("data-access facade", () => {
     insertRetainedOutput.run(
       repeatedRetainedOutputId,
       predecessors[0]!.id,
+      replacementIds[0]!,
       replacementIds[0]!,
       "/media/movies/correction-history-retained-repeat.mkv",
       "correction-history-identity-repeat",
@@ -4562,6 +4587,7 @@ describe("data-access facade", () => {
       "unrelated-boundary-retained",
       unrelatedPredecessor.id,
       unrelatedReplacementId,
+      unrelatedPredecessor.id,
       "/media/movies/unrelated-correction-history-retained.mkv",
       "unrelated-correction-history-identity",
       9_000,
@@ -8151,6 +8177,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260929225801_lonely_microchip",
+      },
+      {
         name: "20260922212838_modern_khan",
       },
       {
@@ -8176,9 +8205,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260901193553_encode_publication_recovery_failures",
-      },
-      {
-        name: "20260901183135_encode_preparation_validation_failures",
       },
     ]);
     expect(

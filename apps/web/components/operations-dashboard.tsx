@@ -186,10 +186,8 @@ function EncodeOutputInspectionDetails({
         <div>
           <dt>Validation</dt>
           <dd>
-            {artifact.validation.result === "passed"
-              ? "Passed for the completed Encode Job. "
-              : "Unknown because the output could not be fully inspected. "}
-            Validation identity and evidence were not recorded for this output.
+            Unknown. Validation identity and evidence were not recorded for
+            this output; media inspection is reported separately.
           </dd>
         </div>
         <div>

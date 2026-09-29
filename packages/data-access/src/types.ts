@@ -958,6 +958,7 @@ export interface RetainedEncodeOutput {
   id: RetainedEncodeOutputId;
   predecessorEncodeJobId: EncodeJobId;
   replacementEncodeJobId: EncodeJobId;
+  sourceEncodeJobId: EncodeJobId;
   retainedOutputPath: string;
   filesystemIdentity: EncodeOutputFilesystemIdentity;
   state: RetainedEncodeOutputState;
@@ -1717,6 +1718,7 @@ export interface EncodeJobAccess {
   listRetainedOutputs(ids: readonly EncodeJobId[]): RetainedEncodeOutput[];
   listRetainedOutputSummaries(
     ids: readonly EncodeJobId[],
+    options?: { limit: number },
   ): RetainedEncodeOutputSummary[];
   updateProgress(
     claim: RunningEncodeJob,
@@ -1862,12 +1864,17 @@ export interface ConsistentReadAccess {
     | "listDiscSelectionCorrectionRetainedOutputSummaries"
     | "listCorrectionLinks"
     | "listFailureReports"
-    | "findRetainedOutput"
     | "listRetainedOutputSummaries"
   >;
   readonly workerIncidents: Pick<WorkerIncidentAccess, "find" | "list">;
   readonly filesystemVerification: Pick<FilesystemVerificationAccess, "find" | "list" | "listActive">;
   readonly archiveAudits: Pick<ArchiveAuditAccess, "find" | "list" | "listActive">;
+}
+
+export interface EncodeOutputInspectionReadAccess
+  extends Omit<ConsistentReadAccess, "encodeJobs"> {
+  readonly encodeJobs: ConsistentReadAccess["encodeJobs"] &
+    Pick<EncodeJobAccess, "findRetainedOutput">;
 }
 
 export interface DataAccess {
@@ -1881,6 +1888,9 @@ export interface DataAccess {
   readonly filesystemVerification: FilesystemVerificationAccess;
   readonly archiveAudits: ArchiveAuditAccess;
   readConsistentSnapshot<T>(read: (access: ConsistentReadAccess) => T): T;
+  readEncodeOutputInspectionSnapshot<T>(
+    read: (access: EncodeOutputInspectionReadAccess) => T,
+  ): T;
   checkHealth(): ServiceHealth;
   close(): void;
 }

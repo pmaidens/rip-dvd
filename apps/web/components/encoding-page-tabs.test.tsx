@@ -77,7 +77,7 @@ function inspectedOutputResponse(
         completedAt: "2026-09-01T12:00:00.000Z",
       },
       validation: {
-        result: "passed",
+        result: "unknown",
         identity: null,
         evidence: null,
         evidenceAvailability: "not_recorded",
@@ -97,7 +97,7 @@ function inspectedOutputResponse(
         identity: fileIdentity,
         sizeBytes: 1_024,
         modifiedAt: "2026-09-01T12:00:00.000Z",
-        completeness: "complete",
+        completeness: "unknown",
         identityContinuity: "not_recorded",
       },
       inspectability: {
@@ -181,6 +181,9 @@ describe("encoding page tabs", () => {
         expect.objectContaining({ cache: "no-store" }),
       );
       expect(container.textContent).toContain("Media metadata inspected");
+      expect(container.textContent).toContain(
+        "Unknown. Validation identity and evidence were not recorded",
+      );
       expect(container.textContent).toContain("2h 0s");
       expect(container.textContent).toContain("synthetic-file-identity");
       expect(container.textContent).toContain("Playability is not assessed");

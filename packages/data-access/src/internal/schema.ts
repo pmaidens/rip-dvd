@@ -1330,6 +1330,10 @@ export const retainedEncodeOutputs = sqliteTable(
       .$type<EncodeJobId>()
       .notNull()
       .references(() => encodeJobs.id, { onDelete: "restrict" }),
+    sourceEncodeJobId: text("source_encode_job_id")
+      .$type<EncodeJobId>()
+      .notNull()
+      .references(() => encodeJobs.id, { onDelete: "restrict" }),
     retainedOutputPath: text("retained_output_path").notNull(),
     filesystemIdentity: text("filesystem_identity")
       .$type<EncodeOutputFilesystemIdentity>()
@@ -1353,6 +1357,10 @@ export const retainedEncodeOutputs = sqliteTable(
     check(
       "retained_encode_outputs_distinct_jobs_check",
       sql`${table.predecessorEncodeJobId} <> ${table.replacementEncodeJobId}`,
+    ),
+    check(
+      "retained_encode_outputs_source_job_check",
+      sql`${table.sourceEncodeJobId} in (${table.predecessorEncodeJobId}, ${table.replacementEncodeJobId})`,
     ),
     check(
       "retained_encode_outputs_state_check",

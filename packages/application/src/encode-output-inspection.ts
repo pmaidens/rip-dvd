@@ -14,6 +14,7 @@ import type {
   EncodeJob,
   EncodeJobId,
   EncodeOutputFilesystemIdentity,
+  EncodeOutputInspectionReadAccess,
   RetainedEncodeOutput,
   RetainedEncodeOutputId,
   RetainedEncodeOutputSummary,
@@ -223,17 +224,13 @@ export interface EncodeOutputArtifactReference {
   state: "published" | "retained";
 }
 
-function retainedOutputOwnerJobId(
-  output: RetainedEncodeOutputSummary,
-  retainedOutputs: readonly RetainedEncodeOutputSummary[],
-): EncodeJobId {
-  const sameReplacement = retainedOutputs.filter((candidate) =>
-    candidate.predecessorEncodeJobId === output.predecessorEncodeJobId &&
-    candidate.replacementEncodeJobId === output.replacementEncodeJobId
-  );
-  return sameReplacement[0]?.id === output.id
-    ? output.predecessorEncodeJobId
-    : output.replacementEncodeJobId;
+function ownsPublishedOutput(job: EncodeJob): boolean {
+  return job.status === "completed" ||
+    (job.replaceExistingOutput && job.completedAt !== null);
+}
+
+function hasPublishedSuccessorOutput(job: EncodeJob): boolean {
+  return job.status === "completed" || job.completedAt !== null;
 }
 
 export function encodeOutputArtifactReferences(
@@ -244,15 +241,16 @@ export function encodeOutputArtifactReferences(
   const directSuccessor = correctionLinks.find(
     (candidate) => candidate.predecessorEncodeJobId === job.id,
   );
-  const published = job.status === "completed" &&
-      directSuccessor?.status !== "completed"
+  const published = ownsPublishedOutput(job) &&
+      (directSuccessor === undefined ||
+        !hasPublishedSuccessorOutput(directSuccessor))
     ? [{
       identity: encodeOutputArtifactIdentity(job.id),
       state: "published" as const,
     }]
     : [];
   const retained = retainedOutputs
-    .filter((output) => retainedOutputOwnerJobId(output, retainedOutputs) === job.id)
+    .filter((output) => output.sourceEncodeJobId === job.id)
     .map((output) => ({
       identity: retainedEncodeOutputArtifactIdentity(output.id),
       state: "retained" as const,
@@ -302,8 +300,6 @@ interface PresentedEncodeOutputFile {
 function inspectionResponse(
   input: ResolvedEncodeOutput,
   file: PresentedEncodeOutputFile,
-  validationResult: "passed" | "unknown",
-  validationAppliesToObservedFile: boolean | null,
   inspection: ReturnType<typeof unknownInspection> | {
     inspectability: {
       status: "inspected";
@@ -324,10 +320,7 @@ function inspectionResponse(
         status: input.job.status,
         completedAt: input.job.completedAt?.toISOString() ?? null,
       },
-      validation: presentedValidation(
-        validationResult,
-        validationAppliesToObservedFile,
-      ),
+      validation: presentedValidation(),
       provenance: historicalProvenance(
         input.job,
         input.originalDiscArchiveId,
@@ -359,22 +352,17 @@ function fileUnavailable(
       completeness: "unknown",
       identityContinuity: "unknown",
     },
-    "unknown",
-    null,
     unknownInspection(code, reason),
   );
 }
 
-function presentedValidation(
-  result: "passed" | "unknown",
-  appliesToObservedFile: boolean | null,
-) {
+function presentedValidation() {
   return {
-    result,
+    result: "unknown" as const,
     identity: null,
     evidence: null,
     evidenceAvailability: "not_recorded" as const,
-    appliesToObservedFile,
+    appliesToObservedFile: null,
   };
 }
 
@@ -403,39 +391,35 @@ function originalDiscArchiveId(
 }
 
 function retainedOutputOwner(
-  access: ConsistentReadAccess,
+  access: EncodeOutputInspectionReadAccess,
   output: RetainedEncodeOutput,
 ): EncodeJob | null {
-  const lineage = access.encodeJobs.listRetainedOutputSummaries([
-    output.predecessorEncodeJobId,
-    output.replacementEncodeJobId,
-  ]).filter((candidate) =>
-    candidate.predecessorEncodeJobId === output.predecessorEncodeJobId &&
-    candidate.replacementEncodeJobId === output.replacementEncodeJobId
-  );
-  return access.encodeJobs.find(
-    retainedOutputOwnerJobId(output, lineage),
-  );
+  return access.encodeJobs.find(output.sourceEncodeJobId);
 }
 
 function resolvePublishedEncodeOutput(
-  access: ConsistentReadAccess,
+  access: EncodeOutputInspectionReadAccess,
   jobId: EncodeJobId,
 ): ResolvedEncodeOutput {
   const artifactIdentity = encodeOutputArtifactIdentity(jobId);
   const job = access.encodeJobs.find(jobId);
-  if (job?.status !== "completed") {
+  if (job === null || !ownsPublishedOutput(job)) {
     throw new RecordNotFoundError("Encode Output", artifactIdentity);
   }
   const successor = access.encodeJobs.listCorrectionLinks([job.id]).find(
     (candidate) => candidate.predecessorEncodeJobId === job.id,
   );
-  if (successor?.status === "completed") {
-    throw new RecordNotFoundError("Encode Output", artifactIdentity);
-  }
-  const authorityUnavailableReason = successor?.publicationPending === true
+  const authorityUnavailableReason = job.publicationPending === true ||
+      successor?.publicationPending === true
     ? "A corrected Encode Output publication is changing artifact authority."
     : null;
+  if (
+    authorityUnavailableReason === null &&
+    successor !== undefined &&
+    hasPublishedSuccessorOutput(successor)
+  ) {
+    throw new RecordNotFoundError("Encode Output", artifactIdentity);
+  }
   return {
     artifactIdentity,
     artifactState: "published",
@@ -444,6 +428,8 @@ function resolvePublishedEncodeOutput(
       job.status,
       job.completedAt?.toISOString() ?? null,
       job.outputPath,
+      job.publicationPending,
+      job.publicationCompletionPending,
       successor?.id ?? null,
       successor?.status ?? null,
       successor?.publicationPending ?? null,
@@ -458,7 +444,7 @@ function resolvePublishedEncodeOutput(
 }
 
 function resolveRetainedEncodeOutput(
-  access: ConsistentReadAccess,
+  access: EncodeOutputInspectionReadAccess,
   retainedOutputId: RetainedEncodeOutputId,
 ): ResolvedEncodeOutput {
   const artifactIdentity = retainedEncodeOutputArtifactIdentity(
@@ -479,6 +465,7 @@ function resolveRetainedEncodeOutput(
       retainedOutput.id,
       retainedOutput.predecessorEncodeJobId,
       retainedOutput.replacementEncodeJobId,
+      retainedOutput.sourceEncodeJobId,
       retainedOutput.retainedOutputPath,
       retainedOutput.filesystemIdentity,
       retainedOutput.state,
@@ -500,11 +487,33 @@ function resolveEncodeOutputAuthority(
   access: DataAccess,
   identity: ParsedEncodeOutputArtifactIdentity,
 ): ResolvedEncodeOutput {
-  return access.readConsistentSnapshot((snapshot) =>
+  return access.readEncodeOutputInspectionSnapshot((snapshot) =>
     identity.kind === "published"
       ? resolvePublishedEncodeOutput(snapshot, identity.jobId)
       : resolveRetainedEncodeOutput(snapshot, identity.retainedOutputId)
   );
+}
+
+function changedAuthorityResponse(
+  access: DataAccess,
+  parsedIdentity: ParsedEncodeOutputArtifactIdentity,
+  base: ResolvedEncodeOutput,
+) {
+  let currentAuthority: ResolvedEncodeOutput | null = null;
+  try {
+    currentAuthority = resolveEncodeOutputAuthority(access, parsedIdentity);
+  } catch (error) {
+    if (!(error instanceof RecordNotFoundError)) throw error;
+  }
+  return currentAuthority === null ||
+      currentAuthority.authorityUnavailableReason !== null ||
+      currentAuthority.authorityKey !== base.authorityKey
+    ? fileUnavailable(
+      base,
+      "OUTPUT_AUTHORITY_CHANGED",
+      "Encode Output authority changed while the artifact was being inspected.",
+    )
+    : null;
 }
 
 function filesystemFailure(error: unknown): {
@@ -557,11 +566,23 @@ export async function inspectEncodeOutput(
   try {
     before = await lstat(base.outputPath);
   } catch (error) {
+    const changedAuthority = changedAuthorityResponse(
+      access,
+      parsedIdentity,
+      base,
+    );
+    if (changedAuthority !== null) return changedAuthority;
     const failure = filesystemFailure(error);
     return fileUnavailable(base, failure.code, failure.reason);
   }
   const unsafeFile = fileIsRegularAndNonempty(before);
   if (unsafeFile !== null) {
+    const changedAuthority = changedAuthorityResponse(
+      access,
+      parsedIdentity,
+      base,
+    );
+    if (changedAuthority !== null) return changedAuthority;
     return fileUnavailable(base, unsafeFile.code, unsafeFile.reason);
   }
   if (
@@ -571,6 +592,12 @@ export async function inspectEncodeOutput(
       before,
     )
   ) {
+    const changedAuthority = changedAuthorityResponse(
+      access,
+      parsedIdentity,
+      base,
+    );
+    if (changedAuthority !== null) return changedAuthority;
     return fileUnavailable(
       base,
       "OUTPUT_IDENTITY_CHANGED",
@@ -593,6 +620,12 @@ export async function inspectEncodeOutput(
   try {
     after = await lstat(base.outputPath);
   } catch {
+    const changedAuthority = changedAuthorityResponse(
+      access,
+      parsedIdentity,
+      base,
+    );
+    if (changedAuthority !== null) return changedAuthority;
     return fileUnavailable(
       base,
       "OUTPUT_CHANGED_DURING_INSPECTION",
@@ -600,29 +633,24 @@ export async function inspectEncodeOutput(
     );
   }
   if (!sameEncodeOutputMutationSnapshot(before, after)) {
+    const changedAuthority = changedAuthorityResponse(
+      access,
+      parsedIdentity,
+      base,
+    );
+    if (changedAuthority !== null) return changedAuthority;
     return fileUnavailable(
       base,
       "OUTPUT_CHANGED_DURING_INSPECTION",
       "The Encode Output changed while it was being inspected.",
     );
   }
-  let currentAuthority: ResolvedEncodeOutput | null = null;
-  try {
-    currentAuthority = resolveEncodeOutputAuthority(access, parsedIdentity);
-  } catch (error) {
-    if (!(error instanceof RecordNotFoundError)) throw error;
-  }
-  if (
-    currentAuthority === null ||
-    currentAuthority.authorityUnavailableReason !== null ||
-    currentAuthority.authorityKey !== base.authorityKey
-  ) {
-    return fileUnavailable(
-      base,
-      "OUTPUT_AUTHORITY_CHANGED",
-      "Encode Output authority changed while the artifact was being inspected.",
-    );
-  }
+  const changedAuthority = changedAuthorityResponse(
+    access,
+    parsedIdentity,
+    base,
+  );
+  if (changedAuthority !== null) return changedAuthority;
 
   if (media === null) {
     return inspectionResponse(
@@ -632,11 +660,9 @@ export async function inspectEncodeOutput(
         identity,
         sizeBytes: before.size,
         modifiedAt: before.mtime.toISOString(),
-        completeness: "complete",
+        completeness: "unknown",
         identityContinuity,
       },
-      "unknown",
-      null,
       unknownInspection(
         "OUTPUT_PROBE_FAILED",
         "The Encode Output media probe did not return usable metadata.",
@@ -651,11 +677,9 @@ export async function inspectEncodeOutput(
       identity,
       sizeBytes: before.size,
       modifiedAt: before.mtime.toISOString(),
-      completeness: "complete",
+      completeness: "unknown",
       identityContinuity,
     },
-    "passed",
-    identityContinuity === "verified" ? true : null,
     {
       inspectability: {
         status: "inspected",

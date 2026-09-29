@@ -492,6 +492,68 @@ it("preserves archive history while adding nullable Re-archive lineage", () => {
   sqlite.close();
 });
 
+it("backfills retained Encode Output ownership from durable insertion order", () => {
+  const databasePath = createDatabasePath("rip-dvd-retained-owner-migration-");
+  const previousMigrations = createMigrationsThrough(
+    "20260922212838_modern_khan",
+  );
+  const previousAccess = createDataAccess({
+    databasePath,
+    migrationsFolder: previousMigrations,
+  });
+  previousAccess.close();
+  const predecessor = seedEncodeJob(databasePath, "retained-owner-predecessor");
+  const replacement = seedEncodeJob(databasePath, "retained-owner-replacement");
+  const historical = new DatabaseSync(databasePath);
+  historical.prepare(`
+    UPDATE encode_jobs SET predecessor_encode_job_id = ? WHERE id = ?
+  `).run(predecessor.id, replacement.id);
+  const insert = historical.prepare(`
+    INSERT INTO retained_encode_outputs (
+      id, predecessor_encode_job_id, replacement_encode_job_id,
+      retained_output_path, filesystem_identity, state, cleanup_eligible,
+      retained_at
+    ) VALUES (?, ?, ?, ?, ?, 'retained', 1, 1000)
+  `);
+  insert.run(
+    "z-first-retained-output",
+    predecessor.id,
+    replacement.id,
+    "/media/z-first-retained-output.mkv",
+    "z-first-retained-identity",
+  );
+  insert.run(
+    "a-second-retained-output",
+    predecessor.id,
+    replacement.id,
+    "/media/a-second-retained-output.mkv",
+    "a-second-retained-identity",
+  );
+  historical.close();
+
+  const migrated = createDataAccess({ databasePath });
+  expect(migrated.encodeJobs.listRetainedOutputs([replacement.id]).map(
+    ({ id, sourceEncodeJobId }) => ({ id, sourceEncodeJobId }),
+  )).toEqual(expect.arrayContaining([
+    {
+      id: "z-first-retained-output",
+      sourceEncodeJobId: predecessor.id,
+    },
+    {
+      id: "a-second-retained-output",
+      sourceEncodeJobId: replacement.id,
+    },
+  ]));
+  migrated.close();
+
+  const verified = new DatabaseSync(databasePath);
+  expect(verified.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  expect(verified.prepare("PRAGMA quick_check").get()).toEqual({
+    quick_check: "ok",
+  });
+  verified.close();
+});
+
 it("preserves historical Encode Jobs without inventing Failure Reports", () => {
   const databasePath = createDatabasePath("rip-dvd-encode-report-migration-");
   const previousMigrations = createMigrationsThrough(

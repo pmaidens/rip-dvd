@@ -1888,12 +1888,28 @@ export function createDataAccessInternal(
         "Retained Encode output requires corrected replacement provenance",
       );
     }
+    const priorRetainedOutput = transaction
+      .select({ id: retainedEncodeOutputs.id })
+      .from(retainedEncodeOutputs)
+      .where(and(
+        eq(
+          retainedEncodeOutputs.predecessorEncodeJobId,
+          job.predecessorEncodeJobId,
+        ),
+        eq(retainedEncodeOutputs.replacementEncodeJobId, job.id),
+      ))
+      .limit(1)
+      .get();
+    const sourceEncodeJobId = priorRetainedOutput === undefined
+      ? job.predecessorEncodeJobId
+      : job.id;
     transaction
       .insert(retainedEncodeOutputs)
       .values({
         id: newId<RetainedEncodeOutputId>(),
         predecessorEncodeJobId: job.predecessorEncodeJobId,
         replacementEncodeJobId: job.id,
+        sourceEncodeJobId,
         retainedOutputPath,
         filesystemIdentity: retainedOutputIdentity,
         state: "retained",
@@ -1912,6 +1928,7 @@ export function createDataAccessInternal(
     if (
       retained?.predecessorEncodeJobId !== job.predecessorEncodeJobId ||
       retained.replacementEncodeJobId !== job.id ||
+      retained.sourceEncodeJobId !== sourceEncodeJobId ||
       retained.retainedOutputPath !== retainedOutputPath ||
       retained.filesystemIdentity !== retainedOutputIdentity ||
       retained.state !== "retained" ||
@@ -6085,10 +6102,8 @@ export function createDataAccessInternal(
             access.encodeJobs.listCorrectionLinks(ids),
           listFailureReports: (ids) =>
             access.encodeJobs.listFailureReports(ids),
-          findRetainedOutput: (id) =>
-            access.encodeJobs.findRetainedOutput(id),
-          listRetainedOutputSummaries: (ids) =>
-            access.encodeJobs.listRetainedOutputSummaries(ids),
+          listRetainedOutputSummaries: (ids, options) =>
+            access.encodeJobs.listRetainedOutputSummaries(ids, options),
         },
         workerIncidents: {
           find: (id) => access.workerIncidents.find(id),
@@ -6119,6 +6134,19 @@ export function createDataAccessInternal(
         sqlite.exec("ROLLBACK");
         throw error;
       }
+    },
+
+    readEncodeOutputInspectionSnapshot(read) {
+      return access.readConsistentSnapshot((snapshot) =>
+        read({
+          ...snapshot,
+          encodeJobs: {
+            ...snapshot.encodeJobs,
+            findRetainedOutput: (id) =>
+              access.encodeJobs.findRetainedOutput(id),
+          },
+        })
+      );
     },
 
     checkHealth() {
@@ -12461,6 +12489,7 @@ export function createDataAccessInternal(
               retainedEncodeOutputs.predecessorEncodeJobId,
             replacementEncodeJobId:
               retainedEncodeOutputs.replacementEncodeJobId,
+            sourceEncodeJobId: retainedEncodeOutputs.sourceEncodeJobId,
             state: retainedEncodeOutputs.state,
             cleanupEligible: retainedEncodeOutputs.cleanupEligible,
             retainedAt: retainedEncodeOutputs.retainedAt,
@@ -12499,6 +12528,7 @@ export function createDataAccessInternal(
             id: row.id,
             predecessorEncodeJobId: row.predecessorEncodeJobId,
             replacementEncodeJobId: row.replacementEncodeJobId,
+            sourceEncodeJobId: row.sourceEncodeJobId,
             state: row.state,
             cleanupEligible: row.cleanupEligible,
             retainedAt: row.retainedAt,
@@ -12551,25 +12581,41 @@ export function createDataAccessInternal(
           )
           .all();
       },
-      listRetainedOutputSummaries(ids) {
+      listRetainedOutputSummaries(ids, options) {
         if (ids.length === 0) return [];
         const uniqueIds = retainedEncodeOutputLookupIds(ids);
+        const selection = {
+          id: retainedEncodeOutputs.id,
+          predecessorEncodeJobId:
+            retainedEncodeOutputs.predecessorEncodeJobId,
+          replacementEncodeJobId:
+            retainedEncodeOutputs.replacementEncodeJobId,
+          sourceEncodeJobId: retainedEncodeOutputs.sourceEncodeJobId,
+          state: retainedEncodeOutputs.state,
+          cleanupEligible: retainedEncodeOutputs.cleanupEligible,
+          retainedAt: retainedEncodeOutputs.retainedAt,
+        };
+        const condition = or(
+          inArray(retainedEncodeOutputs.predecessorEncodeJobId, uniqueIds),
+          inArray(retainedEncodeOutputs.replacementEncodeJobId, uniqueIds),
+        );
+        if (options !== undefined) {
+          return database
+            .select(selection)
+            .from(retainedEncodeOutputs)
+            .where(condition)
+            .orderBy(
+              desc(retainedEncodeOutputs.retainedAt),
+              desc(retainedEncodeOutputs.id),
+            )
+            .limit(requirePositiveSafeInteger(options.limit, "limit"))
+            .all()
+            .reverse();
+        }
         return database
-          .select({
-            id: retainedEncodeOutputs.id,
-            predecessorEncodeJobId:
-              retainedEncodeOutputs.predecessorEncodeJobId,
-            replacementEncodeJobId:
-              retainedEncodeOutputs.replacementEncodeJobId,
-            state: retainedEncodeOutputs.state,
-            cleanupEligible: retainedEncodeOutputs.cleanupEligible,
-            retainedAt: retainedEncodeOutputs.retainedAt,
-          })
+          .select(selection)
           .from(retainedEncodeOutputs)
-          .where(or(
-            inArray(retainedEncodeOutputs.predecessorEncodeJobId, uniqueIds),
-            inArray(retainedEncodeOutputs.replacementEncodeJobId, uniqueIds),
-          ))
+          .where(condition)
           .orderBy(
             asc(retainedEncodeOutputs.retainedAt),
             asc(retainedEncodeOutputs.id),

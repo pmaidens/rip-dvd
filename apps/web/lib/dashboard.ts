@@ -52,6 +52,7 @@ import {
   DASHBOARD_ACTIVE_DISC_LIMIT,
   DASHBOARD_ACTIVE_JOB_LIMIT,
   DASHBOARD_ACTIVITY_HISTORY_LIMIT,
+  DASHBOARD_ENCODE_OUTPUT_ARTIFACT_LIMIT,
 } from "./dashboard-bounds";
 import { isArchiveJobRetryable } from "./archive-job-retryability";
 import { isTerminalEncodeJobStatus } from "./encode-job-status";
@@ -1391,6 +1392,7 @@ function readDashboardSnapshotRecords(
       ? []
       : access.encodeJobs.listRetainedOutputSummaries(
           encodeJobLinkSource.value.map((job) => job.id),
+          { limit: DASHBOARD_ENCODE_OUTPUT_ARTIFACT_LIMIT },
         )
   );
   const archiveSource = readSource(() =>

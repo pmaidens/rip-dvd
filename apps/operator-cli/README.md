@@ -485,8 +485,9 @@ and retained identities use `encode-output-v1.retained.<retained-output-id>`.
 `encode-output inspect` reports the artifact state, recorded validation and
 provenance, file identity and completeness, and probed duration and streams.
 Historical outputs keep unavailable validation identities and source snapshots
-explicit. Media probe failure reports unknown inspectability and does not claim
-that the file is playable.
+explicit. A successful media probe does not manufacture validation evidence.
+Probe failure reports unknown inspectability and does not claim that the file
+is playable.
 
 An initial `encode-enqueue` is deduplicated by Disc Selection and Encoding
 Profile, including after completion. Use `encode-requeue` for a terminal job.

@@ -61,7 +61,7 @@ test("inspects a completed canonical Encode Output", async ({
             completedAt: "2026-09-01T12:00:00.000Z",
           },
           validation: {
-            result: "passed",
+            result: "unknown",
             identity: null,
             evidence: null,
             evidenceAvailability: "not_recorded",
@@ -81,7 +81,7 @@ test("inspects a completed canonical Encode Output", async ({
             identity: "synthetic-browser-file-identity",
             sizeBytes: 2_048,
             modifiedAt: "2026-09-01T12:00:00.000Z",
-            completeness: "complete",
+            completeness: "unknown",
             identityContinuity: "not_recorded",
           },
           inspectability: {
@@ -123,6 +123,9 @@ test("inspects a completed canonical Encode Output", async ({
     name: /Encode Output encode-output-v1\./,
   });
   await expect(inspection).toContainText("Media metadata inspected");
+  await expect(inspection).toContainText(
+    "Unknown. Validation identity and evidence were not recorded",
+  );
   await expect(inspection).toContainText("1h 30m 0s");
   await expect(inspection).toContainText("synthetic-browser-file-identity");
   await expect(inspection).toContainText("Stream 0 · Video · h264");

@@ -219,7 +219,9 @@ Disc Selection mutation preserves distinct identity paths:
   on the worker-facing provenance read and the shared canonical Encode Output
   inspection operation, never the consistent web read facade. Inspection may
   return the observed file identity for an explicitly named artifact, but it
-  never returns the file path.
+  never returns the file path. Each retained row records the Encode Job that
+  produced that generation, so equal retention timestamps cannot change
+  historical ownership.
 - **Unsafe legacy quarantine.** A caller-era mapping that fails canonical-key or
   archived-scan validation is the only historical exception.
   `repairDiscSelection()` or `deleteDiscSelection()` deactivates the old Disc
@@ -437,7 +439,10 @@ transferring ownership of an existing file at the destination.
 The facade deliberately has no general mutation `transaction(callback)` escape
 hatch. The `readConsistentSnapshot()` boundary supplies only synchronous read
 operations and keeps composed cross-table reads on one short SQLite snapshot;
-it rejects asynchronous callbacks. The few multi-statement catalog mutations
+it rejects asynchronous callbacks. The narrower
+`readEncodeOutputInspectionSnapshot()` adds the private retained-output lookup
+only for the shared inspection operation without widening ordinary web reads.
+The few multi-statement catalog mutations
 use short internal transactions. Archive attempt start and Encode Job claim
 return only after their atomic writes commit. Workers start external programs
 only after those operations return; process execution never belongs in a
