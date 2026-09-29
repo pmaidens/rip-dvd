@@ -1135,6 +1135,22 @@ export function createDataAccessInternal(
         where recovery_evidence.original_disc_archive_id =
           reviewed_archive.id
       )`;
+  const excludesDvdRecoveryEvidenceArchive = (
+    querySource: Pick<typeof database, "select">,
+  ) => hasDvdRecoveryEvidenceSchema
+    ? notExists(
+      querySource
+        .select({
+          originalDiscArchiveId:
+            dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+        })
+        .from(dvdArchiveEvidenceHeaders)
+        .where(eq(
+          dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+          originalDiscArchives.id,
+        )),
+    )
+    : undefined;
   const encodeQueueDiscSelectionPageStatement = sqlite.prepare(`
     with requested_selection as (
       select
@@ -2072,18 +2088,7 @@ export function createDataAccessInternal(
               "reviewed_with_selections",
             ),
             eq(originalDiscArchives.legacyCutoverPending, false),
-            hasDvdRecoveryEvidenceSchema ? notExists(
-              database
-                .select({
-                  originalDiscArchiveId:
-                    dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-                })
-                .from(dvdArchiveEvidenceHeaders)
-                .where(eq(
-                  dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-                  originalDiscArchives.id,
-                )),
-            ) : undefined,
+            excludesDvdRecoveryEvidenceArchive(database),
           )),
       ),
     );
@@ -4070,18 +4075,7 @@ export function createDataAccessInternal(
               eq(discSelections.id, encodeJobs.discSelectionId),
               eq(discSelections.isCatalogActive, true),
               eq(originalDiscArchives.legacyCutoverPending, false),
-              hasDvdRecoveryEvidenceSchema ? notExists(
-                database
-                  .select({
-                    originalDiscArchiveId:
-                      dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-                  })
-                  .from(dvdArchiveEvidenceHeaders)
-                  .where(eq(
-                    dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-                    originalDiscArchives.id,
-                  )),
-              ) : undefined,
+              excludesDvdRecoveryEvidenceArchive(database),
             ),
           ),
       ),
@@ -4135,18 +4129,7 @@ export function createDataAccessInternal(
                 "reviewed_with_selections",
               ),
               eq(originalDiscArchives.legacyCutoverPending, false),
-              hasDvdRecoveryEvidenceSchema ? notExists(
-                transaction
-                  .select({
-                    originalDiscArchiveId:
-                      dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-                  })
-                  .from(dvdArchiveEvidenceHeaders)
-                  .where(eq(
-                    dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-                    originalDiscArchives.id,
-                  )),
-              ) : undefined,
+              excludesDvdRecoveryEvidenceArchive(transaction),
               or(
                 isNull(encodeJobs.predecessorEncodeJobId),
                 correctedEncodePredecessorReadyCondition(
@@ -4223,18 +4206,7 @@ export function createDataAccessInternal(
                       "reviewed_with_selections",
                     ),
                     eq(originalDiscArchives.legacyCutoverPending, false),
-                    hasDvdRecoveryEvidenceSchema ? notExists(
-                      transaction
-                        .select({
-                          originalDiscArchiveId:
-                            dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-                        })
-                        .from(dvdArchiveEvidenceHeaders)
-                        .where(eq(
-                          dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-                          originalDiscArchives.id,
-                        )),
-                    ) : undefined,
+                    excludesDvdRecoveryEvidenceArchive(transaction),
                   )),
               ),
             ),
@@ -4440,18 +4412,7 @@ export function createDataAccessInternal(
                         "reviewed_with_selections",
                       ),
                       eq(originalDiscArchives.legacyCutoverPending, false),
-                      hasDvdRecoveryEvidenceSchema ? notExists(
-                        transaction
-                          .select({
-                            originalDiscArchiveId:
-                              dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-                          })
-                          .from(dvdArchiveEvidenceHeaders)
-                          .where(eq(
-                            dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-                            originalDiscArchives.id,
-                          )),
-                      ) : undefined,
+                      excludesDvdRecoveryEvidenceArchive(transaction),
                     ),
                   ),
               ),

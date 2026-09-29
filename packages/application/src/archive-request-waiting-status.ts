@@ -1,4 +1,7 @@
-import type { ArchiveRequestWaitingStatus } from "@rip-dvd/data-access";
+import {
+  DVD_RECOVERY_EVIDENCE_ADMISSION,
+  type ArchiveRequestWaitingStatus,
+} from "@rip-dvd/data-access";
 
 export interface PresentedArchiveRequestWaitingStatus
   extends ArchiveRequestWaitingStatus {
@@ -13,7 +16,7 @@ export function describeArchiveRequestWaitingStatus(
   }
   const message = {
     dvd_recovery_evidence_admission_closed:
-      "New-format DVD Archive Job admission is closed until the recovery and encoding workflow is complete.",
+      DVD_RECOVERY_EVIDENCE_ADMISSION.message,
     matching_disc_required:
       "Insert the disc matching the requested Original Disc Archive and wait for Disc Inspection to complete.",
     matching_inspection_incomplete:
