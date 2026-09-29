@@ -22,6 +22,20 @@ describe("Archive Integrity evidence", () => {
     });
   });
 
+  it("preserves adjacent half-open incomplete-read ranges", () => {
+    expect(createIncompleteReadArchiveIntegrityEvidence([
+      { startLba: 0, sectorCount: 1 },
+      { startLba: 1, sectorCount: 1 },
+    ])).toMatchObject({
+      badSectorCount: 2,
+      badAreaCount: 2,
+      badSectorRanges: [
+        { startLba: 0, sectorCount: 1 },
+        { startLba: 1, sectorCount: 1 },
+      ],
+    });
+  });
+
   it.each([
     { ranges: [] },
     { ranges: [{ startLba: -1, sectorCount: 1 }] },

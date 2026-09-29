@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   createCleanReadArchiveIntegrityEvidence,
+  DVD_RECOVERY_EVIDENCE_ADMISSION,
   DVD_RECOVERY_EVIDENCE_FORMAT,
 } from "@rip-dvd/data-access";
 import {
@@ -653,7 +654,56 @@ it("returns the same operational records and evidence through web and CLI", asyn
         id, original_disc_archive_id, status, created_at, updated_at
       ) VALUES ('synthetic-evidence-recovery', ?, 'eligible', 1, 1)
     `).run(archiveId);
+    projectionFixture.prepare(`
+      INSERT INTO archive_requests (
+        id, detected_disc_id, evidence_format, status, priority,
+        created_at, updated_at
+      ) VALUES (
+        'synthetic-evidence-pending-request', ?, ?, 'pending', 0, 1, 1
+      )
+    `).run(archivedDisc.id, DVD_RECOVERY_EVIDENCE_FORMAT);
     projectionFixture.close();
+    const markedRequestResponse = createOperationsResponse(
+      access,
+      new Request(
+        "http://localhost/api/operations?kind=archive-requests&id=synthetic-evidence-pending-request",
+      ),
+    );
+    const markedRequestCli = await fixture.run([
+      "inspect",
+      "archive-requests",
+      "synthetic-evidence-pending-request",
+    ]);
+    expect(markedRequestCli.result).toEqual(
+      await markedRequestResponse.json(),
+    );
+    expect(markedRequestCli.result).toMatchObject({
+      item: {
+        evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+        waiting: {
+          code: "dvd_recovery_evidence_admission_closed",
+          message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+        },
+        availableActions: [
+          expect.objectContaining({
+            name: "cancel",
+            eligible: false,
+            blockingReasons: [{
+              code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+              message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+            }],
+          }),
+          expect.objectContaining({
+            name: "retry",
+            eligible: false,
+            blockingReasons: [{
+              code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+              message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+            }],
+          }),
+        ],
+      },
+    });
     expect(access.catalog.listDiscSelections({ encodeEligibleOnly: true }))
       .not.toEqual(expect.arrayContaining([
         expect.objectContaining({ id: selection.id }),

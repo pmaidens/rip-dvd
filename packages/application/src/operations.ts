@@ -1,6 +1,8 @@
 import {
   createCleanReadArchiveIntegrityEvidence,
   createIncompleteReadArchiveIntegrityEvidence,
+  DVD_RECOVERY_EVIDENCE_ADMISSION,
+  DVD_RECOVERY_EVIDENCE_FORMAT,
   WORKER_KINDS,
   type ArchiveJob,
   type ArchiveJobId,
@@ -322,6 +324,24 @@ function recentWork<T extends { status: string; updatedAt: Date; id: string }>(
 }
 
 function requestActions(request: ArchiveRequest) {
+  if (request.evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT) {
+    return [
+      recoveryAction(
+        "cancel",
+        false,
+        DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+        "archiveRequestId",
+        DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+      ),
+      recoveryAction(
+        "retry",
+        false,
+        DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+        "archiveRequestId",
+        DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+      ),
+    ];
+  }
   const reason = `Archive Request is ${request.status}.`;
   return [
     recoveryAction("cancel", ["pending", "running", "needs_attention"].includes(request.status), reason, "archiveRequestId"),
@@ -344,13 +364,14 @@ function recoveryAction(
   eligible: boolean,
   reason: string,
   targetInput: "archiveRequestId" | "discInspectionId",
+  blockingCode = "INVALID_TRANSITION",
 ) {
   return {
     name,
     eligible,
     requiredInputs: ["mutationKey", targetInput],
     reason: eligible ? null : reason,
-    blockingReasons: eligible ? [] : [{ code: "INVALID_TRANSITION", message: reason }],
+    blockingReasons: eligible ? [] : [{ code: blockingCode, message: reason }],
   };
 }
 

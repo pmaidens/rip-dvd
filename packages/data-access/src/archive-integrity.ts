@@ -54,7 +54,7 @@ export function createIncompleteReadArchiveIntegrityEvidence(
       !Number.isSafeInteger(range.sectorCount) ||
       range.sectorCount <= 0 ||
       !Number.isSafeInteger(endLba) ||
-      range.startLba <= previousEndLba
+      range.startLba < previousEndLba
     ) {
       throw new DomainInvariantError(
         "Incomplete-read sector ranges must be normalized",

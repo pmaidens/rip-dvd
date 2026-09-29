@@ -70,7 +70,7 @@ BEGIN
       ON CAST(previous_range.`key` AS integer)
         = CAST(current_range.`key` AS integer) - 1
     WHERE json_extract(current_range.`value`, '$.startLba')
-      <= json_extract(previous_range.`value`, '$.startLba')
+      < json_extract(previous_range.`value`, '$.startLba')
         + json_extract(previous_range.`value`, '$.sectorCount')
   ) THEN RAISE(
     ABORT,
@@ -80,6 +80,10 @@ BEGIN
   SELECT CASE WHEN NOT EXISTS (
     SELECT 1
     FROM `archive_jobs` AS source_job
+    INNER JOIN `archive_requests` AS source_request
+      ON source_request.`id` = source_job.`archive_request_id`
+    INNER JOIN `disc_inspections` AS source_inspection
+      ON source_inspection.`id` = source_job.`disc_inspection_id`
     INNER JOIN `original_disc_archives` AS source_archive
       ON source_archive.`id` = NEW.`original_disc_archive_id`
     WHERE source_job.`id` = NEW.`source_archive_job_id`
@@ -87,6 +91,14 @@ BEGIN
         = NEW.`original_disc_archive_id`
       AND source_job.`evidence_format` = NEW.`evidence_format`
       AND source_job.`status` = 'completed'
+      AND source_job.`detected_disc_id` = source_archive.`detected_disc_id`
+      AND source_request.`detected_disc_id`
+        = source_archive.`detected_disc_id`
+      AND source_request.`evidence_format` = NEW.`evidence_format`
+      AND source_request.`status` = 'fulfilled'
+      AND source_inspection.`detected_disc_id`
+        = source_archive.`detected_disc_id`
+      AND source_inspection.`status` = 'completed'
       AND source_archive.`disc_kind` = 'dvd'
       AND source_archive.`boundary_policy_version` IS NOT NULL
       AND source_archive.`boundary_published_size_bytes`
@@ -155,6 +167,30 @@ WHEN EXISTS (
     SELECT 1
     FROM `dvd_archive_evidence_headers` AS evidence_header
     WHERE evidence_header.`original_disc_archive_id` = NEW.`id`
+      AND NEW.`disc_kind` = 'dvd'
+      AND NEW.`boundary_policy_version` IS NOT NULL
+      AND NEW.`boundary_published_size_bytes` = NEW.`size_bytes`
+      AND NEW.`size_bytes`
+        = evidence_header.`accepted_end_lba_exclusive` * 2048
+      AND EXISTS (
+        SELECT 1
+        FROM `archive_jobs` AS source_job
+        INNER JOIN `archive_requests` AS source_request
+          ON source_request.`id` = source_job.`archive_request_id`
+        INNER JOIN `disc_inspections` AS source_inspection
+          ON source_inspection.`id` = source_job.`disc_inspection_id`
+        WHERE source_job.`id` = evidence_header.`source_archive_job_id`
+          AND source_job.`original_disc_archive_id` = NEW.`id`
+          AND source_job.`evidence_format` = evidence_header.`evidence_format`
+          AND source_job.`status` = 'completed'
+          AND source_job.`detected_disc_id` = NEW.`detected_disc_id`
+          AND source_request.`detected_disc_id` = NEW.`detected_disc_id`
+          AND source_request.`evidence_format`
+            = evidence_header.`evidence_format`
+          AND source_request.`status` = 'fulfilled'
+          AND source_inspection.`detected_disc_id` = NEW.`detected_disc_id`
+          AND source_inspection.`status` = 'completed'
+      )
       AND (
         (
           json_array_length(evidence_header.`unrecovered_source_ranges`) = 0
