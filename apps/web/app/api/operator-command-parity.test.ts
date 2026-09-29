@@ -19,6 +19,7 @@ import { createCatalogSuggestionRoute } from "./catalog-reviews/[id]/suggestion/
 import { createDeploymentReadinessResponse } from "./deployment-readiness/route";
 import { createHealthResponse } from "./health/route";
 import { createOperationsResponse } from "./operations/route";
+import { createArchiveRequestsRoute } from "./archive-requests/route";
 import { createMediaItemSearchRoute } from "./media-items/route";
 import { createMediaItemPreviewRoute } from "./media-items/[id]/route";
 import { createEncodeJobsRoute } from "./encode-jobs/route";
@@ -126,6 +127,72 @@ it("shares unknown validation when canonical output probing is unavailable", asy
         reason: null,
       }],
     } });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("reports the same closed DVD evidence admission through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const access = fixture.openAccess();
+  try {
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/synthetic-closed-admission",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: `sha256:${"4".repeat(64)}`,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const mutationKey = "00000000-0000-4000-8000-000000000402";
+    const cli = await fixture.run([
+      "submit-archive-request",
+      "--key",
+      mutationKey,
+      "--detected-disc-id",
+      disc.id,
+      "--evidence-format",
+      "dvd-recovery-evidence-v1",
+    ]);
+    expect(cli.exitCode).toBe(2);
+
+    const web = await createArchiveRequestsRoute(
+      new Request(`${trustedOrigin}/api/archive-requests`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+          "Sec-Fetch-Site": "same-origin",
+        },
+        body: JSON.stringify({
+          mutationKey,
+          detectedDiscId: disc.id,
+          evidenceFormat: "dvd-recovery-evidence-v1",
+        }),
+      }),
+      () => access,
+      () => trustedOrigin,
+    );
+    expect(web.status).toBe(409);
+    expect(await web.json()).toEqual(cli.result);
+    expect(cli.result).toEqual({
+      error: {
+        code: "DVD_RECOVERY_EVIDENCE_ADMISSION_CLOSED",
+        message:
+          "New-format DVD Archive Job admission is closed until the recovery and encoding workflow is complete.",
+        blockingReasons: [{
+          code: "DVD_RECOVERY_EVIDENCE_ADMISSION_CLOSED",
+          message:
+            "New-format DVD Archive Job admission is closed until the recovery and encoding workflow is complete.",
+        }],
+      },
+    });
+    expect(access.archiveRequests.list()).toEqual([]);
   } finally {
     access.close();
     fixture.dispose();

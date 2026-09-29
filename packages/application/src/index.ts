@@ -1,5 +1,8 @@
 import { isHandBrakePreset } from "@rip-dvd/config";
-import { encodingProfileQueueBlockingReasons } from "@rip-dvd/data-access";
+import {
+  DVD_RECOVERY_EVIDENCE_FORMAT,
+  encodingProfileQueueBlockingReasons,
+} from "@rip-dvd/data-access";
 import type {
   ConsistentReadAccess,
   DataAccess,
@@ -336,15 +339,25 @@ export function createApplicationOperations(
     submitArchiveRequest: (input: {
       mutationKey: unknown;
       detectedDiscId: string;
+      evidenceFormat?: unknown;
     }) => {
       const mutationKey = parseMutationKey(input.mutationKey);
       const detectedDiscId = input.detectedDiscId.trim();
       if (detectedDiscId === "") {
         throw new Error("Detected Disc ID is required.");
       }
+      if (
+        input.evidenceFormat !== undefined &&
+        input.evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT
+      ) {
+        throw new Error("Archive evidence format is unsupported.");
+      }
       const request = access.archiveRequests.submit({
         mutationKey,
         detectedDiscId: detectedDiscId as DetectedDiscId,
+        ...(input.evidenceFormat === undefined
+          ? {}
+          : { evidenceFormat: input.evidenceFormat }),
       });
       return {
         archiveRequest: {

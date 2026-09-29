@@ -1,6 +1,7 @@
 import type { DataAccess } from "@rip-dvd/data-access";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
+  assertDvdRecoveryEvidenceAdmissionAvailable,
 } from "@rip-dvd/data-access";
 import { decodeDvdTitleMap } from "@rip-dvd/data-access/dvd-scan";
 
@@ -68,6 +69,7 @@ export async function runArchiveJob({
   if (!claim) {
     return;
   }
+  assertDvdRecoveryEvidenceAdmissionAvailable(claim.evidenceFormat);
   const request = access.archiveRequests.find(claim.archiveRequestId);
   if (request === null) {
     throw new Error("Archive Job has no Archive Request");

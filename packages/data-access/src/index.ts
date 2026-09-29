@@ -18,9 +18,16 @@ export type {
 } from "./archive-read-failure.js";
 export {
   createCleanReadArchiveIntegrityEvidence,
+  createIncompleteReadArchiveIntegrityEvidence,
   createUnknownArchiveIntegrityEvidence,
   createWatchableSalvageArchiveIntegrityEvidence,
 } from "./archive-integrity.js";
+export {
+  DVD_RECOVERY_EVIDENCE_ADMISSION,
+  DVD_RECOVERY_EVIDENCE_FORMAT,
+  DvdRecoveryEvidenceAdmissionClosedError,
+  assertDvdRecoveryEvidenceAdmissionAvailable,
+} from "./dvd-recovery-evidence.js";
 export {
   archiveBoundaryEvidenceFromRecord,
   createCorrectedDvdArchiveBoundaryEvidence,
@@ -85,10 +92,12 @@ export * from "./dvd-scan.js";
 export {
   ARCHIVE_FAILURE_DETAIL_VERSIONS,
   ARCHIVE_INTEGRITIES,
+  ARCHIVE_RECOVERY_STATUSES,
   ARCHIVE_READ_FAILURE_CATEGORIES,
   ARCHIVE_READ_FAILURE_STAGES,
   CATALOG_REVIEW_OUTCOMES,
   DISC_SELECTION_KINDS,
+  DVD_ARCHIVE_EVIDENCE_FORMATS,
   DVD_SALVAGE_REJECTION_DESCRIPTIONS,
   ENCODE_WORKER_INCIDENT_RECOVERY_AREAS,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,

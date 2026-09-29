@@ -1,5 +1,6 @@
 import {
   DomainInvariantError,
+  DvdRecoveryEvidenceAdmissionClosedError,
   InvalidStatusTransitionError,
   MutationKeyConflictError,
   RecordNotFoundError,
@@ -87,6 +88,13 @@ export async function runTrustedMutationRoute(
   try {
     return await mutate();
   } catch (error) {
+    if (error instanceof DvdRecoveryEvidenceAdmissionClosedError) {
+      return noStoreJsonResponse({ error: {
+        code: error.code,
+        message: error.message,
+        blockingReasons: error.blockingReasons,
+      } }, 409);
+    }
     if (error instanceof RecordNotFoundError) {
       return noStoreJsonResponse({ error: options.notFoundError }, 404);
     }

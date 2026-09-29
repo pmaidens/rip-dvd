@@ -25,6 +25,8 @@ import {
 import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
+  DVD_RECOVERY_EVIDENCE_FORMAT,
+  DvdRecoveryEvidenceAdmissionClosedError,
   InvalidStatusTransitionError,
   MutationKeyConflictError,
   RecordNotFoundError,
@@ -116,8 +118,8 @@ const commandDefinitions = [
   {
     name: "submit-archive-request",
     description: "Submit an Archive Request for a Detected Disc.",
-    usage: "rip-dvd submit-archive-request --key <key> --detected-disc-id <id>",
-    inputs: { arguments: [], options: ["--key", "--detected-disc-id"] },
+    usage: "rip-dvd submit-archive-request --key <key> --detected-disc-id <id> [--evidence-format dvd-recovery-evidence-v1]",
+    inputs: { arguments: [], options: ["--key", "--detected-disc-id", "--evidence-format"] },
     example: "rip-dvd submit-archive-request --key 00000000-0000-4000-8000-000000000001 --detected-disc-id <id>",
   },
   {
@@ -501,15 +503,31 @@ function mutationOptions(
 function submissionInputs(args: readonly string[]): {
   mutationKey: string;
   detectedDiscId: string;
+  evidenceFormat?: typeof DVD_RECOVERY_EVIDENCE_FORMAT;
 } {
   const { options, mutationKey } = mutationOptions(
-    args, ["--key", "--detected-disc-id"], "Invalid Archive Request options.",
+    args, ["--key", "--detected-disc-id", "--evidence-format"], "Invalid Archive Request options.",
   );
   const detectedDiscId = options.get("--detected-disc-id")?.trim();
   if (!detectedDiscId) {
     throw new CommandFailure("INVALID_ARGUMENTS", "Detected Disc ID is required.", 2);
   }
-  return { mutationKey, detectedDiscId };
+  const evidenceFormat = options.get("--evidence-format")?.trim();
+  if (
+    evidenceFormat !== undefined &&
+    evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT
+  ) {
+    throw new CommandFailure(
+      "INVALID_ARGUMENTS",
+      "Archive evidence format is unsupported.",
+      2,
+    );
+  }
+  return {
+    mutationKey,
+    detectedDiscId,
+    ...(evidenceFormat === undefined ? {} : { evidenceFormat }),
+  };
 }
 
 function submitArchiveRequest(
@@ -527,6 +545,14 @@ function submitArchiveRequest(
     }
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("DETECTED_DISC_NOT_FOUND", "Detected Disc not found.", 2);
+    }
+    if (error instanceof DvdRecoveryEvidenceAdmissionClosedError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+      );
     }
     if (
       error instanceof DomainInvariantError ||

@@ -80,3 +80,14 @@ post-copy raw-image hash verification for materially less optical-drive wear
 and shorter archive time.
 Explicit filesystem verification remains available for checking that an
 archive path still exists and is safely reachable.
+
+The separately versioned `dvd-recovery-evidence-v1` contract is identified
+only by an explicit Archive Job marker and, after publication, a one-to-one
+archive evidence header. Archive creation time, Archive Integrity, and legacy
+bad-sector fields do not identify that contract. Its admission remains closed
+until the recovery, assessment, damage-decision, and encoding gates are
+complete. Consequently, the publication paths above remain the only admitted
+DVD behavior, and a legacy Archive Worker must reject a marked job before it
+can mutate an image. The compatibility schema may read `incomplete_read`
+evidence, but that value alone establishes neither watchability nor encode
+eligibility and does not weaken either boundary proof.

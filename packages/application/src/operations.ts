@@ -194,9 +194,21 @@ function visibleEncodeJobs(
   ));
 }
 
-function visibleArchive({ archivePath: _archivePath, ...archive }: OriginalDiscArchive) {
+function visibleArchive(
+  access: Pick<ConsistentReadAccess, "catalog">,
+  { archivePath: _archivePath, ...archive }: OriginalDiscArchive,
+) {
+  const evidenceHeader = access.catalog.findDvdArchiveEvidenceHeader(
+    archive.id,
+  );
   return {
     ...archive,
+    dvdRecoveryEvidence: evidenceHeader === null
+      ? null
+      : {
+          header: evidenceHeader,
+          recovery: access.catalog.findArchiveRecovery(archive.id),
+        },
     storage: {
       recordedSizeBytes: archive.sizeBytes,
       verification: {
@@ -493,7 +505,8 @@ function readList(access: ConsistentReadAccess, kind: OperationKind, limit: numb
         policy: boundedPolicy(limit),
       }), ["running"], limit).map(visibleArchiveJob);
     case "original-disc-archives":
-      return access.catalog.listOriginalDiscArchives({ limit }).map(visibleArchive);
+      return access.catalog.listOriginalDiscArchives({ limit })
+        .map((archive) => visibleArchive(access, archive));
     case "encode-jobs":
       return visibleEncodeJobs(access, recentWork(access.encodeJobs.list(undefined, {
         policy: boundedPolicy(limit),
@@ -541,7 +554,7 @@ function readDetail(
           detectedDiscIds: [disc.id],
         }).map(visibleArchiveJob),
         archives: access.catalog.listOriginalDiscArchives({ detectedDiscId: disc.id })
-          .map(visibleArchive),
+          .map((archive) => visibleArchive(access, archive)),
         availableActions: detectedDiscActions(disc, relevantRequest),
       };
     }
@@ -589,7 +602,7 @@ function readDetail(
             .map(visibleInspection)[0] ?? null,
         archive: job.originalDiscArchiveId === null ? null :
           access.catalog.listOriginalDiscArchives({ ids: [job.originalDiscArchiveId] })
-            .map(visibleArchive)[0] ?? null,
+            .map((archive) => visibleArchive(access, archive))[0] ?? null,
       };
     }
     case "original-disc-archives": {
@@ -620,7 +633,7 @@ function readDetail(
         ? null
         : "Fresh re-archive requests are supported only for DVD archives";
       return {
-        ...visibleArchive(archive),
+        ...visibleArchive(access, archive),
         detectedDisc: access.catalog.listDetectedDiscs(undefined, {
           ids: [archive.detectedDiscId],
         }).map(visibleDisc)[0] ?? null,
@@ -629,8 +642,10 @@ function readDetail(
         lineage: {
           previousArchive: previousArchive === null
             ? null
-            : visibleArchive(previousArchive),
-          newArchives: newArchives.map(visibleArchive),
+            : visibleArchive(access, previousArchive),
+          newArchives: newArchives.map((newArchive) =>
+            visibleArchive(access, newArchive)
+          ),
           rearchiveRequests: access.archiveRequests
             .listForRearchiveSources([archive.id]),
         },
@@ -734,7 +749,7 @@ function readDetail(
         discSelection: selection ?? null,
         archive: selection ? access.catalog.listOriginalDiscArchives({
           ids: [selection.originalDiscArchiveId],
-        }).map(visibleArchive)[0] ?? null : null,
+        }).map((archive) => visibleArchive(access, archive))[0] ?? null : null,
         history: history.map((candidate) => visibleById.get(candidate.id)!),
         correctionLinks: directCorrectionLinks.map((candidate) =>
           visibleById.get(candidate.id)!

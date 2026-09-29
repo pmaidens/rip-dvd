@@ -20,6 +20,7 @@ import {
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
   ARCHIVE_INTEGRITIES,
+  ARCHIVE_RECOVERY_STATUSES,
   CATALOG_REVIEW_OUTCOMES,
   DETECTED_DISC_STATUSES,
   DISC_INSPECTION_ATTEMPT_OUTCOMES,
@@ -28,6 +29,7 @@ import {
   DISC_INSPECTION_STATUSES,
   DISC_KINDS,
   DISC_SELECTION_KINDS,
+  DVD_ARCHIVE_EVIDENCE_FORMATS,
   ENCODE_JOB_STATUSES,
   ENCODE_PROGRESS_PHASES,
   FILESYSTEM_VERIFICATION_STATUSES,
@@ -65,6 +67,8 @@ import type {
   ArchiveAuditIncompleteReason,
   ArchiveJobId,
   ArchiveJobClaimToken,
+  ArchiveRecoveryId,
+  ArchiveRecoveryStatus,
   ArchiveReadFailureCategory,
   ArchiveReadFailureStage,
   DetectedDiscId,
@@ -73,6 +77,7 @@ import type {
   DiscInspectionId,
   DiscSelectionId,
   DvdTitleBadSectorCount,
+  DvdArchiveEvidenceFormat,
   EncodeJobCleanupClaimToken,
   EncodeJobId,
   EncodeJobFailureReportId,
@@ -365,6 +370,9 @@ export const archiveRequests = sqliteTable(
       .references((): AnySQLiteColumn => originalDiscArchives.id, {
         onDelete: "restrict",
       }),
+    evidenceFormat: text("evidence_format", {
+      enum: DVD_ARCHIVE_EVIDENCE_FORMATS,
+    }).$type<DvdArchiveEvidenceFormat>(),
     status: text("status", { enum: ARCHIVE_REQUEST_STATUSES })
       .notNull()
       .default("pending"),
@@ -398,6 +406,10 @@ export const archiveRequests = sqliteTable(
     check(
       "archive_requests_status_check",
       sql`${table.status} in (${sqliteStringLiterals(ARCHIVE_REQUEST_STATUSES)})`,
+    ),
+    check(
+      "archive_requests_evidence_format_check",
+      sql`${table.evidenceFormat} is null or ${table.evidenceFormat} in (${sqliteStringLiterals(DVD_ARCHIVE_EVIDENCE_FORMATS)})`,
     ),
     check(
       "archive_requests_terminal_fields_check",
@@ -668,7 +680,7 @@ export const originalDiscArchives = sqliteTable(
     ),
     check(
       "original_disc_archives_integrity_evidence_check",
-      sql`(${table.integrity} = 'unknown' and ${table.integrityPolicyVersion} is null and ${table.badSectorCount} is null and ${table.badAreaCount} is null and ${table.badSectorRanges} is null and ${table.badSectorCountsByTitle} is null) or (${table.integrity} = 'clean_read' and ${table.integrityPolicyVersion} is not null and ${table.badSectorCount} is not null and ${table.badAreaCount} is not null and ${table.badSectorRanges} is not null and ${table.badSectorCountsByTitle} is null and length(${table.integrityPolicyVersion}) between 1 and 128 and ${table.badSectorCount} = 0 and ${table.badAreaCount} = 0 and json(${table.badSectorRanges}) = json('[]')) or (${table.integrity} = 'watchable_salvage' and ${table.integrityPolicyVersion} is not null and ${table.badSectorCount} is not null and ${table.badAreaCount} is not null and ${table.badSectorRanges} is not null and length(${table.integrityPolicyVersion}) between 1 and 128 and ${table.badSectorCount} > 0 and ${table.badAreaCount} > 0 and json_valid(${table.badSectorRanges}) and json_type(${table.badSectorRanges}) = 'array' and (${table.integrityPolicyVersion} = 'dvd-watchable-salvage-v1' or (${table.badSectorCountsByTitle} is not null and json_valid(${table.badSectorCountsByTitle}) and json_type(${table.badSectorCountsByTitle}) = 'array')))`,
+      sql`(${table.integrity} = 'unknown' and ${table.integrityPolicyVersion} is null and ${table.badSectorCount} is null and ${table.badAreaCount} is null and ${table.badSectorRanges} is null and ${table.badSectorCountsByTitle} is null) or (${table.integrity} = 'clean_read' and ${table.integrityPolicyVersion} is not null and ${table.badSectorCount} is not null and ${table.badAreaCount} is not null and ${table.badSectorRanges} is not null and ${table.badSectorCountsByTitle} is null and length(${table.integrityPolicyVersion}) between 1 and 128 and ${table.badSectorCount} = 0 and ${table.badAreaCount} = 0 and json(${table.badSectorRanges}) = json('[]')) or (${table.integrity} = 'incomplete_read' and ${table.integrityPolicyVersion} = 'dvd-recovery-evidence-v1' and typeof(${table.badSectorCount}) = 'integer' and ${table.badSectorCount} > 0 and typeof(${table.badAreaCount}) = 'integer' and ${table.badAreaCount} > 0 and ${table.badSectorRanges} is not null and json_valid(${table.badSectorRanges}) and json_type(${table.badSectorRanges}) = 'array' and ${table.badSectorCountsByTitle} is null) or (${table.integrity} = 'watchable_salvage' and ${table.integrityPolicyVersion} is not null and ${table.badSectorCount} is not null and ${table.badAreaCount} is not null and ${table.badSectorRanges} is not null and length(${table.integrityPolicyVersion}) between 1 and 128 and ${table.badSectorCount} > 0 and ${table.badAreaCount} > 0 and json_valid(${table.badSectorRanges}) and json_type(${table.badSectorRanges}) = 'array' and (${table.integrityPolicyVersion} = 'dvd-watchable-salvage-v1' or (${table.badSectorCountsByTitle} is not null and json_valid(${table.badSectorCountsByTitle}) and json_type(${table.badSectorCountsByTitle}) = 'array')))`,
     ),
     check(
       "original_disc_archives_catalog_review_outcome_check",
@@ -999,6 +1011,9 @@ export const archiveJobs = sqliteTable(
     originalDiscArchiveId: text("original_disc_archive_id")
       .$type<OriginalDiscArchiveId>()
       .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
+    evidenceFormat: text("evidence_format", {
+      enum: DVD_ARCHIVE_EVIDENCE_FORMATS,
+    }).$type<DvdArchiveEvidenceFormat>(),
     attemptOrdinal: integer("attempt_ordinal").notNull(),
     status: text("status", { enum: ARCHIVE_JOB_STATUSES })
       .notNull()
@@ -1071,6 +1086,10 @@ export const archiveJobs = sqliteTable(
       sql`${table.status} in (${sqliteStringLiterals(ARCHIVE_JOB_STATUSES)})`,
     ),
     check(
+      "archive_jobs_evidence_format_check",
+      sql`${table.evidenceFormat} is null or ${table.evidenceFormat} in (${sqliteStringLiterals(DVD_ARCHIVE_EVIDENCE_FORMATS)})`,
+    ),
+    check(
       "archive_jobs_progress_check",
       sql`${table.progressPercent} between 0 and 100`,
     ),
@@ -1105,6 +1124,64 @@ export const archiveJobs = sqliteTable(
     check(
       "archive_jobs_read_failure_category_evidence_check",
       sql`${table.readFailureCategory} is null or ${table.readFailureCategory} = 'unknown' or (${table.readFailureCategory} = 'not_ready' and ${table.readFailureScsiStatus} is not null and ${table.readFailureHostStatus} is not null and ${table.readFailureDriverStatus} is not null and ${table.readFailureSenseKey} is not null and (${table.readFailureScsiStatus} & 254) = 2 and ${table.readFailureHostStatus} = 0 and (${table.readFailureDriverStatus} & 15) in (0, 8) and ${table.readFailureSenseKey} = 2 and ${table.readFailureAsc} is not null and ${table.readFailureAscq} is not null) or (${table.readFailureCategory} = 'unit_attention' and ${table.readFailureScsiStatus} is not null and ${table.readFailureHostStatus} is not null and ${table.readFailureDriverStatus} is not null and ${table.readFailureSenseKey} is not null and (${table.readFailureScsiStatus} & 254) = 2 and ${table.readFailureHostStatus} = 0 and (${table.readFailureDriverStatus} & 15) in (0, 8) and ${table.readFailureSenseKey} = 6 and ${table.readFailureAsc} is not null and ${table.readFailureAscq} is not null) or (${table.readFailureCategory} = 'hardware_error' and ${table.readFailureScsiStatus} is not null and ${table.readFailureHostStatus} is not null and ${table.readFailureDriverStatus} is not null and ${table.readFailureSenseKey} is not null and (${table.readFailureScsiStatus} & 254) = 2 and ${table.readFailureHostStatus} = 0 and (${table.readFailureDriverStatus} & 15) in (0, 8) and ${table.readFailureSenseKey} = 4 and ${table.readFailureAsc} is not null and ${table.readFailureAscq} is not null) or (${table.readFailureCategory} = 'transport_error' and ${table.readFailureScsiStatus} is not null and ${table.readFailureHostStatus} is not null and ${table.readFailureDriverStatus} is not null and (${table.readFailureHostStatus} <> 0 or (${table.readFailureHostStatus} = 0 and (${table.readFailureDriverStatus} & 15) in (1, 2, 4, 6)))) or (${table.readFailureCategory} = 'protection_error' and ${table.readFailureScsiStatus} is not null and ${table.readFailureHostStatus} is not null and ${table.readFailureDriverStatus} is not null and ${table.readFailureSenseKey} is not null and (${table.readFailureScsiStatus} & 254) = 2 and ${table.readFailureHostStatus} = 0 and (${table.readFailureDriverStatus} & 15) in (0, 8) and ${table.readFailureAsc} is not null and ${table.readFailureAscq} is not null and (${table.readFailureSenseKey} = 7 or (${table.readFailureSenseKey} = 5 and ${table.readFailureAsc} = 111))) or (${table.readFailureCategory} = 'out_of_range' and ${table.readFailureScsiStatus} is not null and ${table.readFailureHostStatus} is not null and ${table.readFailureDriverStatus} is not null and ${table.readFailureSenseKey} is not null and (${table.readFailureScsiStatus} & 254) = 2 and ${table.readFailureHostStatus} = 0 and (${table.readFailureDriverStatus} & 15) in (0, 8) and ${table.readFailureSenseKey} = 5 and ${table.readFailureAsc} = 33 and ${table.readFailureAscq} = 0)`,
+    ),
+  ],
+);
+
+export const dvdArchiveEvidenceHeaders = sqliteTable(
+  "dvd_archive_evidence_headers",
+  {
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .primaryKey()
+      .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
+    sourceArchiveJobId: text("source_archive_job_id")
+      .$type<ArchiveJobId>()
+      .notNull()
+      .references(() => archiveJobs.id, { onDelete: "restrict" }),
+    evidenceFormat: text("evidence_format", {
+      enum: DVD_ARCHIVE_EVIDENCE_FORMATS,
+    }).$type<DvdArchiveEvidenceFormat>().notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check(
+      "dvd_archive_evidence_headers_archive_id_not_null",
+      sql`${table.originalDiscArchiveId} is not null`,
+    ),
+    uniqueIndex("dvd_archive_evidence_headers_job_unique")
+      .on(table.sourceArchiveJobId),
+    check(
+      "dvd_archive_evidence_headers_format_check",
+      sql`${table.evidenceFormat} in (${sqliteStringLiterals(DVD_ARCHIVE_EVIDENCE_FORMATS)})`,
+    ),
+  ],
+);
+
+export const archiveRecoveries = sqliteTable(
+  "archive_recoveries",
+  {
+    id: text("id").$type<ArchiveRecoveryId>().notNull().primaryKey(),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .references(() => dvdArchiveEvidenceHeaders.originalDiscArchiveId, {
+        onDelete: "restrict",
+      }),
+    status: text("status", { enum: ARCHIVE_RECOVERY_STATUSES })
+      .$type<ArchiveRecoveryStatus>()
+      .notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    check("archive_recoveries_id_not_null", sql`${table.id} is not null`),
+    uniqueIndex("archive_recoveries_archive_unique")
+      .on(table.originalDiscArchiveId),
+    check(
+      "archive_recoveries_status_check",
+      sql`${table.status} in (${sqliteStringLiterals(ARCHIVE_RECOVERY_STATUSES)})`,
     ),
   ],
 );

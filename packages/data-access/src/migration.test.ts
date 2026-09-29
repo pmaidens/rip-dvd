@@ -6,12 +6,21 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, expect, it } from "vitest";
 
-import { createDataAccess, type EncodeJobId } from "./index.js";
+import {
+  createDataAccess,
+  DVD_RECOVERY_EVIDENCE_FORMAT,
+  DvdRecoveryEvidenceAdmissionClosedError,
+  type ArchiveJobId,
+  type ArchiveRequestId,
+  type DetectedDiscId,
+  type EncodeJobId,
+  type OriginalDiscArchiveId,
+} from "./index.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 import {
   boundedSettlingMigration,
@@ -592,6 +601,309 @@ it("backfills retained Encode Output ownership from durable insertion order", ()
     quick_check: "ok",
   });
   verified.close();
+});
+
+it("migrates legacy archives and rehearses restoring the pre-write DVD evidence backup", () => {
+  const databasePath = createDatabasePath("rip-dvd-evidence-migration-");
+  const previousMigrations = createMigrationsThrough(
+    "20260922212838_modern_khan",
+  );
+  const previousAccess = createDataAccess({
+    databasePath,
+    migrationsFolder: previousMigrations,
+  });
+  previousAccess.close();
+
+  const legacyKeys = [
+    "evidence-legacy-unknown",
+    "evidence-legacy-clean",
+    "evidence-legacy-watchable",
+  ] as const;
+  for (const key of [...legacyKeys, "evidence-new-format"] as const) {
+    seedEncodeJob(databasePath, key);
+  }
+  const historical = new DatabaseSync(databasePath);
+  historical.exec(`
+    UPDATE original_disc_archives
+    SET integrity = 'clean_read',
+        integrity_policy_version = 'legacy-clean-v1',
+        bad_sector_count = 0,
+        bad_area_count = 0,
+        bad_sector_ranges = '[]',
+        bad_sector_counts_by_title = NULL
+    WHERE id = 'evidence-legacy-clean-archive';
+
+    UPDATE original_disc_archives
+    SET integrity = 'watchable_salvage',
+        integrity_policy_version = 'dvd-watchable-salvage-v1',
+        bad_sector_count = 1,
+        bad_area_count = 1,
+        bad_sector_ranges = '[{"startLba":17,"sectorCount":1}]',
+        bad_sector_counts_by_title = NULL
+    WHERE id = 'evidence-legacy-watchable-archive';
+
+    INSERT INTO archive_requests (
+      id, detected_disc_id, status, priority, fulfilled_at,
+      created_at, updated_at
+    ) VALUES (
+      'evidence-legacy-clean-request', 'evidence-legacy-clean-disc',
+      'fulfilled', 0, 1, 1, 1
+    );
+
+    INSERT INTO archive_jobs (
+      id, archive_request_id, detected_disc_id, original_disc_archive_id,
+      attempt_ordinal, status, priority, progress_phase, progress_percent,
+      progress_bytes, last_progress_at, started_at, completed_at,
+      created_at, updated_at
+    ) VALUES (
+      'evidence-legacy-clean-archive-job',
+      'evidence-legacy-clean-request',
+      'evidence-legacy-clean-disc',
+      'evidence-legacy-clean-archive',
+      1, 'completed', 0, 'finalizing', 100, 2048, 1, 1, 1, 1, 1
+    );
+  `);
+  expect(historical.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  historical.close();
+
+  const backupPath = join(dirname(databasePath), "pre-write-backup.sqlite");
+  const restoredPath = join(dirname(databasePath), "restored.sqlite");
+  copyFileSync(databasePath, backupPath);
+  copyFileSync(backupPath, restoredPath);
+
+  const readLegacySnapshot = (path: string) => {
+    const access = createDataAccess({ databasePath: path });
+    const snapshot = {
+      archives: access.catalog.listOriginalDiscArchives().map((archive) => ({
+        id: archive.id,
+        integrity: archive.integrity,
+        policyVersion: archive.integrityPolicyVersion,
+        badSectorCount: archive.badSectorCount,
+        badAreaCount: archive.badAreaCount,
+        badSectorRanges: archive.badSectorRanges,
+      })).sort((left, right) => left.id.localeCompare(right.id)),
+      archiveJob: access.archiveJobs.find(
+        "evidence-legacy-clean-archive-job" as ArchiveJobId,
+      ),
+      archiveRequest: access.archiveRequests.find(
+        "evidence-legacy-clean-request" as ArchiveRequestId,
+      ),
+      encodeJobs: access.encodeJobs.list().map(({ id, status }) => ({
+        id,
+        status,
+      })).sort((left, right) => left.id.localeCompare(right.id)),
+      evidenceReads: [...legacyKeys, "evidence-new-format"].map((key) => ({
+        header: access.catalog.findDvdArchiveEvidenceHeader(
+          `${key}-archive` as OriginalDiscArchiveId,
+        ),
+        recovery: access.catalog.findArchiveRecovery(
+          `${key}-archive` as OriginalDiscArchiveId,
+        ),
+      })),
+    };
+    access.close();
+    const sqlite = new DatabaseSync(path);
+    expect(sqlite.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(sqlite.prepare("PRAGMA quick_check").get()).toEqual({
+      quick_check: "ok",
+    });
+    sqlite.close();
+    return snapshot;
+  };
+
+  const migratedSnapshot = readLegacySnapshot(databasePath);
+  const restoredSnapshot = readLegacySnapshot(restoredPath);
+  expect(migratedSnapshot).toEqual(restoredSnapshot);
+  expect(migratedSnapshot.archives).toEqual([
+    expect.objectContaining({
+      id: "evidence-legacy-clean-archive",
+      integrity: "clean_read",
+      policyVersion: "legacy-clean-v1",
+      badSectorCount: 0,
+      badAreaCount: 0,
+      badSectorRanges: [],
+    }),
+    expect.objectContaining({
+      id: "evidence-legacy-unknown-archive",
+      integrity: "unknown",
+      policyVersion: null,
+    }),
+    expect.objectContaining({
+      id: "evidence-legacy-watchable-archive",
+      integrity: "watchable_salvage",
+      policyVersion: "dvd-watchable-salvage-v1",
+      badSectorCount: 1,
+      badAreaCount: 1,
+      badSectorRanges: [{ startLba: 17, sectorCount: 1 }],
+    }),
+    expect.objectContaining({
+      id: "evidence-new-format-archive",
+      integrity: "unknown",
+      policyVersion: null,
+    }),
+  ]);
+  expect(migratedSnapshot.archiveRequest).toMatchObject({
+    status: "fulfilled",
+    evidenceFormat: null,
+  });
+  expect(migratedSnapshot.archiveJob).toMatchObject({
+    status: "completed",
+    evidenceFormat: null,
+  });
+  expect(migratedSnapshot.encodeJobs).toHaveLength(4);
+  expect(migratedSnapshot.encodeJobs.every(({ status }) => status === "queued"))
+    .toBe(true);
+  expect(migratedSnapshot.evidenceReads).toEqual([
+    { header: null, recovery: null },
+    { header: null, recovery: null },
+    { header: null, recovery: null },
+    { header: null, recovery: null },
+  ]);
+
+  const closedAccess = createDataAccess({ databasePath });
+  expect(() => closedAccess.archiveRequests.submit({
+    mutationKey: "00000000-0000-4000-8000-000000000402",
+    detectedDiscId: "evidence-new-format-disc" as DetectedDiscId,
+    evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+  })).toThrow(DvdRecoveryEvidenceAdmissionClosedError);
+  closedAccess.close();
+  const admissionCheck = new DatabaseSync(databasePath);
+  expect(admissionCheck.prepare(`
+    SELECT count(*) AS count
+    FROM mutation_invocations
+    WHERE key = '00000000-0000-4000-8000-000000000402'
+  `).get()).toEqual({ count: 0 });
+  admissionCheck.exec(`
+    UPDATE original_disc_archives
+    SET integrity = 'incomplete_read',
+        integrity_policy_version = 'dvd-recovery-evidence-v1',
+        bad_sector_count = 2,
+        bad_area_count = 1,
+        bad_sector_ranges = '[{"startLba":23,"sectorCount":2}]',
+        bad_sector_counts_by_title = NULL
+    WHERE id = 'evidence-new-format-archive';
+
+    INSERT INTO archive_requests (
+      id, detected_disc_id, evidence_format, status, priority, fulfilled_at,
+      created_at, updated_at
+    ) VALUES (
+      'evidence-new-format-request', 'evidence-new-format-disc',
+      'dvd-recovery-evidence-v1', 'fulfilled', 0, 1, 1, 1
+    );
+
+    INSERT INTO archive_jobs (
+      id, archive_request_id, detected_disc_id, original_disc_archive_id,
+      evidence_format, attempt_ordinal, status, priority, progress_phase,
+      progress_percent, progress_bytes, last_progress_at, started_at,
+      completed_at, created_at, updated_at
+    ) VALUES (
+      'evidence-new-format-archive-job',
+      'evidence-new-format-request',
+      'evidence-new-format-disc',
+      'evidence-new-format-archive',
+      'dvd-recovery-evidence-v1',
+      1, 'completed', 0, 'finalizing', 100, 2048, 1, 1, 1, 1, 1
+    );
+  `);
+  admissionCheck.close();
+
+  const projectionOnlyAccess = createDataAccess({ databasePath });
+  expect(projectionOnlyAccess.catalog.listOriginalDiscArchives({
+    ids: ["evidence-new-format-archive" as OriginalDiscArchiveId],
+  })).toEqual([
+    expect.objectContaining({
+      integrity: "incomplete_read",
+      integrityPolicyVersion: DVD_RECOVERY_EVIDENCE_FORMAT,
+      badSectorCount: 2,
+      badAreaCount: 1,
+      badSectorRanges: [{ startLba: 23, sectorCount: 2 }],
+    }),
+  ]);
+  expect(projectionOnlyAccess.archiveJobs.find(
+    "evidence-new-format-archive-job" as ArchiveJobId,
+  )).toMatchObject({ evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT });
+  expect(projectionOnlyAccess.catalog.findDvdArchiveEvidenceHeader(
+    "evidence-new-format-archive" as OriginalDiscArchiveId,
+  )).toBeNull();
+  expect(projectionOnlyAccess.catalog.findArchiveRecovery(
+    "evidence-new-format-archive" as OriginalDiscArchiveId,
+  )).toBeNull();
+  projectionOnlyAccess.close();
+
+  const evidenceFixture = new DatabaseSync(databasePath);
+  evidenceFixture.exec(`
+    INSERT INTO dvd_archive_evidence_headers (
+      original_disc_archive_id, source_archive_job_id, evidence_format,
+      created_at
+    ) VALUES (
+      'evidence-new-format-archive',
+      'evidence-new-format-archive-job',
+      'dvd-recovery-evidence-v1',
+      1
+    );
+
+    INSERT INTO archive_recoveries (
+      id, original_disc_archive_id, status, created_at, updated_at
+    ) VALUES (
+      'evidence-new-format-recovery',
+      'evidence-new-format-archive',
+      'eligible',
+      1,
+      1
+    );
+  `);
+  expect(evidenceFixture.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  evidenceFixture.close();
+
+  const currentAccess = createDataAccess({ databasePath });
+  expect(currentAccess.catalog.findDvdArchiveEvidenceHeader(
+    "evidence-new-format-archive" as OriginalDiscArchiveId,
+  )).toEqual({
+    originalDiscArchiveId: "evidence-new-format-archive",
+    sourceArchiveJobId: "evidence-new-format-archive-job",
+    evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+    createdAt: new Date(1),
+  });
+  expect(currentAccess.catalog.findArchiveRecovery(
+    "evidence-new-format-archive" as OriginalDiscArchiveId,
+  )).toEqual({
+    id: "evidence-new-format-recovery",
+    originalDiscArchiveId: "evidence-new-format-archive",
+    status: "eligible",
+    createdAt: new Date(1),
+    updatedAt: new Date(1),
+  });
+  expect(
+    new Set(
+      currentAccess.catalog.listDiscSelections({ encodeEligibleOnly: true })
+        .map(({ id }) => id),
+    ),
+  ).toEqual(new Set(legacyKeys.map((key) => `${key}-selection`)));
+
+  const claimedEncodeJobs = new Set<string>();
+  for (;;) {
+    const claim = currentAccess.encodeJobs.claimNext("compatibility-worker");
+    if (claim === null) break;
+    claimedEncodeJobs.add(claim.id);
+    currentAccess.encodeJobs.fail(claim, "Synthetic compatibility failure");
+  }
+  expect(claimedEncodeJobs).toEqual(
+    new Set(legacyKeys.map((key) => `${key}-job`)),
+  );
+  expect(currentAccess.encodeJobs.list()).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      id: "evidence-new-format-job",
+      status: "queued",
+    }),
+  ]));
+  currentAccess.close();
+
+  const finalDatabase = new DatabaseSync(databasePath);
+  expect(finalDatabase.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  expect(finalDatabase.prepare("PRAGMA quick_check").get()).toEqual({
+    quick_check: "ok",
+  });
+  finalDatabase.close();
 });
 
 it("preserves historical Encode Jobs without inventing Failure Reports", () => {

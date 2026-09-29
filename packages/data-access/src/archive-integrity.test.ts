@@ -1,8 +1,40 @@
 import { describe, expect, it } from "vitest";
 
-import { createWatchableSalvageArchiveIntegrityEvidence } from "./archive-integrity.js";
+import {
+  createIncompleteReadArchiveIntegrityEvidence,
+  createWatchableSalvageArchiveIntegrityEvidence,
+} from "./archive-integrity.js";
 
 describe("Archive Integrity evidence", () => {
+  it("creates a compatible projection for versioned incomplete-read evidence", () => {
+    expect(createIncompleteReadArchiveIntegrityEvidence([
+      { startLba: 12, sectorCount: 4 },
+      { startLba: 20, sectorCount: 2 },
+    ])).toEqual({
+      integrity: "incomplete_read",
+      policyVersion: "dvd-recovery-evidence-v1",
+      badSectorCount: 6,
+      badAreaCount: 2,
+      badSectorRanges: [
+        { startLba: 12, sectorCount: 4 },
+        { startLba: 20, sectorCount: 2 },
+      ],
+    });
+  });
+
+  it.each([
+    { ranges: [] },
+    { ranges: [{ startLba: -1, sectorCount: 1 }] },
+    { ranges: [{ startLba: 1, sectorCount: 0 }] },
+    { ranges: [
+      { startLba: 2, sectorCount: 2 },
+      { startLba: 3, sectorCount: 1 },
+    ] },
+  ])("rejects invalid incomplete-read ranges", ({ ranges }) => {
+    expect(() => createIncompleteReadArchiveIntegrityEvidence(ranges))
+      .toThrow();
+  });
+
   it("normalizes bounded isolated-sector evidence for watchable salvage", () => {
     expect(createWatchableSalvageArchiveIntegrityEvidence(
       " dvd-watchable-salvage-v2 ",

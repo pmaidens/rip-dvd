@@ -56,6 +56,7 @@ import { assignDvdContentIdAlias } from "./dvd-content-id-alias.js";
 import {
   archiveRequests,
   archiveJobs,
+  archiveRecoveries,
   archiveAuditFindings,
   archiveAuditRuns,
   correctedEncodePublicationAuthorities,
@@ -64,6 +65,7 @@ import {
   discInspections,
   discSelectionSupersessions,
   discSelections,
+  dvdArchiveEvidenceHeaders,
   encodeJobFailureReports,
   encodeJobs,
   encodingProfiles,
@@ -113,6 +115,9 @@ import {
 } from "../disc-selection-source-identity.js";
 import { createDvdMetadataFingerprint } from "../dvd-metadata-fingerprint.js";
 import { createWatchableSalvageArchiveIntegrityEvidence } from "../archive-integrity.js";
+import {
+  assertDvdRecoveryEvidenceAdmissionAvailable,
+} from "../dvd-recovery-evidence.js";
 import { encodingProfileQueueBlockingReasons } from "../encoding-profile-eligibility.js";
 import { validateDvdArchiveBoundaryEvidence } from "../archive-boundary.js";
 import { isArchiveReadFailureEvidenceConsistent } from "../archive-read-failure.js";
@@ -203,6 +208,7 @@ import type {
   DiscSelectionCorrectionEncodeJobLink,
   DiscSelectionCorrectionRetainedOutputSummary,
   DiscSelectionSupersession,
+  DvdArchiveEvidenceFormat,
   EncodeJobClaimToken,
   EncodeJobCleanupClaimToken,
   EncodeJobId,
@@ -1116,6 +1122,19 @@ export function createDataAccessInternal(
     });
   }
 
+  const hasDvdRecoveryEvidenceSchema = sqlite.prepare(`
+    select 1
+    from sqlite_schema
+    where type = 'table' and name = 'dvd_archive_evidence_headers'
+  `).get() !== undefined;
+  const excludesDvdRecoveryEvidenceArchives = !hasDvdRecoveryEvidenceSchema
+    ? ""
+    : `and not exists (
+        select 1
+        from dvd_archive_evidence_headers as recovery_evidence
+        where recovery_evidence.original_disc_archive_id =
+          reviewed_archive.id
+      )`;
   const encodeQueueDiscSelectionPageStatement = sqlite.prepare(`
     with requested_selection as (
       select
@@ -1159,6 +1178,7 @@ export function createDataAccessInternal(
         and reviewed_archive.catalog_review_outcome =
           'reviewed_with_selections'
         and reviewed_archive.legacy_cutover_pending = 0
+        ${excludesDvdRecoveryEvidenceArchives}
     ),
     queue_counts as (
       select
@@ -2052,6 +2072,18 @@ export function createDataAccessInternal(
               "reviewed_with_selections",
             ),
             eq(originalDiscArchives.legacyCutoverPending, false),
+            hasDvdRecoveryEvidenceSchema ? notExists(
+              database
+                .select({
+                  originalDiscArchiveId:
+                    dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+                })
+                .from(dvdArchiveEvidenceHeaders)
+                .where(eq(
+                  dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+                  originalDiscArchives.id,
+                )),
+            ) : undefined,
           )),
       ),
     );
@@ -3371,10 +3403,11 @@ export function createDataAccessInternal(
       typeof detectedDiscs.$inferSelect,
       "discKind" | "fingerprint"
     >,
-    querySource: Pick<typeof database, "select"> = database,
+    options?: { admittedOnly?: boolean },
   ): boolean {
-    const candidates = querySource
+    const candidates = database
       .select({
+        evidenceFormat: archiveRequests.evidenceFormat,
         fingerprint: detectedDiscs.fingerprint,
         rearchiveSourceArchiveId: archiveRequests.rearchiveSourceArchiveId,
       })
@@ -3406,13 +3439,15 @@ export function createDataAccessInternal(
       );
     }
     return candidates.some((candidate) =>
-      candidate.fingerprint === disc.fingerprint ||
-      (candidate.rearchiveSourceArchiveId !== null &&
-        originalArchiveMatchesFingerprintOrContentIdAlias(
-          candidate.rearchiveSourceArchiveId,
-          disc.fingerprint,
-          querySource,
-        ))
+      (!options?.admittedOnly || candidate.evidenceFormat === null) &&
+      (
+        candidate.fingerprint === disc.fingerprint ||
+        (candidate.rearchiveSourceArchiveId !== null &&
+          originalArchiveMatchesFingerprintOrContentIdAlias(
+            candidate.rearchiveSourceArchiveId,
+            disc.fingerprint,
+          ))
+      )
     );
   }
 
@@ -4035,6 +4070,18 @@ export function createDataAccessInternal(
               eq(discSelections.id, encodeJobs.discSelectionId),
               eq(discSelections.isCatalogActive, true),
               eq(originalDiscArchives.legacyCutoverPending, false),
+              hasDvdRecoveryEvidenceSchema ? notExists(
+                database
+                  .select({
+                    originalDiscArchiveId:
+                      dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+                  })
+                  .from(dvdArchiveEvidenceHeaders)
+                  .where(eq(
+                    dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+                    originalDiscArchives.id,
+                  )),
+              ) : undefined,
             ),
           ),
       ),
@@ -4088,6 +4135,18 @@ export function createDataAccessInternal(
                 "reviewed_with_selections",
               ),
               eq(originalDiscArchives.legacyCutoverPending, false),
+              hasDvdRecoveryEvidenceSchema ? notExists(
+                transaction
+                  .select({
+                    originalDiscArchiveId:
+                      dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+                  })
+                  .from(dvdArchiveEvidenceHeaders)
+                  .where(eq(
+                    dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+                    originalDiscArchives.id,
+                  )),
+              ) : undefined,
               or(
                 isNull(encodeJobs.predecessorEncodeJobId),
                 correctedEncodePredecessorReadyCondition(
@@ -4145,6 +4204,39 @@ export function createDataAccessInternal(
               eq(encodeJobs.status, "queued"),
               eq(encodeJobs.id, nextReviewedJob.id),
               predecessorStillEligible,
+              exists(
+                transaction
+                  .select({ id: discSelections.id })
+                  .from(discSelections)
+                  .innerJoin(
+                    originalDiscArchives,
+                    eq(
+                      originalDiscArchives.id,
+                      discSelections.originalDiscArchiveId,
+                    ),
+                  )
+                  .where(and(
+                    eq(discSelections.id, encodeJobs.discSelectionId),
+                    eq(discSelections.isCatalogActive, true),
+                    eq(
+                      originalDiscArchives.catalogReviewOutcome,
+                      "reviewed_with_selections",
+                    ),
+                    eq(originalDiscArchives.legacyCutoverPending, false),
+                    hasDvdRecoveryEvidenceSchema ? notExists(
+                      transaction
+                        .select({
+                          originalDiscArchiveId:
+                            dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+                        })
+                        .from(dvdArchiveEvidenceHeaders)
+                        .where(eq(
+                          dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+                          originalDiscArchives.id,
+                        )),
+                    ) : undefined,
+                  )),
+              ),
             ),
           )
           .returning()
@@ -4348,6 +4440,18 @@ export function createDataAccessInternal(
                         "reviewed_with_selections",
                       ),
                       eq(originalDiscArchives.legacyCutoverPending, false),
+                      hasDvdRecoveryEvidenceSchema ? notExists(
+                        transaction
+                          .select({
+                            originalDiscArchiveId:
+                              dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+                          })
+                          .from(dvdArchiveEvidenceHeaders)
+                          .where(eq(
+                            dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+                            originalDiscArchives.id,
+                          )),
+                      ) : undefined,
                     ),
                   ),
               ),
@@ -5176,12 +5280,15 @@ export function createDataAccessInternal(
 
   function createArchiveRequest(input: {
     detectedDiscId: DetectedDiscId;
+    evidenceFormat?: DvdArchiveEvidenceFormat;
     priority?: number;
   }, mutationKey?: string) {
+    assertDvdRecoveryEvidenceAdmissionAvailable(input.evidenceFormat);
     const timestamp = now();
     return database.transaction((transaction) => {
       const semanticInput = JSON.stringify({
         detectedDiscId: input.detectedDiscId,
+        evidenceFormat: input.evidenceFormat ?? null,
       });
       if (mutationKey !== undefined) {
         const previous = readMutationInvocation(transaction, mutationKey,
@@ -5191,6 +5298,7 @@ export function createDataAccessInternal(
               ...outcome,
               rearchiveSourceArchiveId:
                 outcome.rearchiveSourceArchiveId ?? null,
+              evidenceFormat: outcome.evidenceFormat ?? null,
               cancellationRequestedAt: outcome.cancellationRequestedAt === null
                 ? null : new Date(outcome.cancellationRequestedAt),
               fulfilledAt: outcome.fulfilledAt === null
@@ -5380,6 +5488,7 @@ export function createDataAccessInternal(
             .values({
               id: newId<ArchiveRequestId>(),
               detectedDiscId: disc.id,
+              evidenceFormat: input.evidenceFormat ?? null,
               priority: input.priority ?? 0,
               createdAt: timestamp,
               updatedAt: timestamp,
@@ -5407,6 +5516,9 @@ export function createDataAccessInternal(
       persistedAt: number;
     }
   >();
+  const requireLegacyArchiveJobMutation = (claim: RunningArchiveJob) => {
+    assertDvdRecoveryEvidenceAdmissionAvailable(claim.evidenceFormat);
+  };
   const archiveProgressPatchForClaim = (
     archiveJobId: ArchiveJobId,
     claimToken: ArchiveJobClaimToken | null,
@@ -5544,6 +5656,7 @@ export function createDataAccessInternal(
     errorMessageInput: string,
     readFailure?: ArchiveReadFailureEvidence,
   ): ArchiveJob => {
+    requireLegacyArchiveJobMutation(claim);
     const timestamp = now();
     const errorMessage = requireNonEmpty(
       errorMessageInput,
@@ -6046,6 +6159,10 @@ export function createDataAccessInternal(
             access.catalog.listDetectedDiscs(statuses, options),
           listOriginalDiscArchives: (options) =>
             access.catalog.listOriginalDiscArchives(options),
+          findDvdArchiveEvidenceHeader: (id) =>
+            access.catalog.findDvdArchiveEvidenceHeader(id),
+          findArchiveRecovery: (id) =>
+            access.catalog.findArchiveRecovery(id),
           listCatalogReviewArchives: (options) =>
             access.catalog.listCatalogReviewArchives(options),
           listMediaItems: (options) => access.catalog.listMediaItems(options),
@@ -6869,6 +6986,24 @@ export function createDataAccessInternal(
           "Original Disc Archive",
         );
         return isBounded && !readsNewer ? rows.reverse() : rows;
+      },
+
+      findDvdArchiveEvidenceHeader(id) {
+        if (!hasDvdRecoveryEvidenceSchema) return null;
+        return database
+          .select()
+          .from(dvdArchiveEvidenceHeaders)
+          .where(eq(dvdArchiveEvidenceHeaders.originalDiscArchiveId, id))
+          .get() ?? null;
+      },
+
+      findArchiveRecovery(id) {
+        if (!hasDvdRecoveryEvidenceSchema) return null;
+        return database
+          .select()
+          .from(archiveRecoveries)
+          .where(eq(archiveRecoveries.originalDiscArchiveId, id))
+          .get() ?? null;
       },
 
       listCatalogReviewArchives(options) {
@@ -10418,8 +10553,11 @@ export function createDataAccessInternal(
         });
       },
       create: createArchiveRequest,
-      submit: ({ mutationKey, detectedDiscId }) =>
-        createArchiveRequest({ detectedDiscId }, mutationKey),
+      submit: ({ mutationKey, detectedDiscId, evidenceFormat }) =>
+        createArchiveRequest({
+          detectedDiscId,
+          ...(evidenceFormat === undefined ? {} : { evidenceFormat }),
+        }, mutationKey),
       submitRearchive({ mutationKey, sourceArchiveId }) {
         const timestamp = now();
         return database.transaction((transaction) => {
@@ -10433,6 +10571,7 @@ export function createDataAccessInternal(
               const outcome = JSON.parse(stored) as ArchiveRequest;
               return {
                 ...outcome,
+                evidenceFormat: outcome.evidenceFormat ?? null,
                 cancellationRequestedAt:
                   outcome.cancellationRequestedAt === null
                     ? null
@@ -10709,6 +10848,9 @@ export function createDataAccessInternal(
           if (candidate === undefined || candidate.request.status !== "pending") {
             return null;
           }
+          if (candidate.request.evidenceFormat !== null) {
+            return { code: "dvd_recovery_evidence_admission_closed" };
+          }
           const requestDeclaredByteCount =
             declaredByteCountForArchiveRequest(
               database,
@@ -10822,7 +10964,7 @@ export function createDataAccessInternal(
           .get();
         if (
           preflight === undefined ||
-          !hasPendingArchiveRequestForDisc(preflight)
+          !hasPendingArchiveRequestForDisc(preflight, { admittedOnly: true })
         ) {
           return null;
         }
@@ -10954,6 +11096,9 @@ export function createDataAccessInternal(
           if (request === undefined) {
             return null;
           }
+          if (request.evidenceFormat !== null) {
+            return null;
+          }
           if (
             request.rearchiveSourceArchiveId === null &&
             findOriginalArchiveByFingerprintOrContentIdAlias(
@@ -11027,6 +11172,7 @@ export function createDataAccessInternal(
                 archiveRequestId: request.id,
                 discInspectionId: inspectionId,
                 detectedDiscId: disc.id,
+                evidenceFormat: request.evidenceFormat,
                 attemptOrdinal: attempt + 1,
                 status: "running",
                 priority: request.priority,
@@ -11053,6 +11199,7 @@ export function createDataAccessInternal(
       },
 
       renewClaim(claim) {
+        requireLegacyArchiveJobMutation(claim);
         const timestamp = now();
         const renewed = database
           .update(archiveJobs)
@@ -11098,6 +11245,7 @@ export function createDataAccessInternal(
             .where(
               and(
                 eq(archiveJobs.status, "running"),
+                isNull(archiveJobs.evidenceFormat),
                 lte(archiveJobs.updatedAt, expiredBefore),
                 ne(archiveRequests.status, "cancellation_requested"),
               ),
@@ -11181,6 +11329,7 @@ export function createDataAccessInternal(
             .where(
               and(
                 eq(archiveJobs.status, "running"),
+                isNull(archiveJobs.evidenceFormat),
                 eq(archiveRequests.status, "cancellation_requested"),
                 lte(archiveJobs.updatedAt, expiredBefore),
                 cursor === undefined
@@ -11212,6 +11361,7 @@ export function createDataAccessInternal(
       },
 
       finalizeExpiredCancellation(claim) {
+        requireLegacyArchiveJobMutation(claim);
         const timestamp = now();
         const expiredBefore = new Date(
           timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
@@ -11333,6 +11483,7 @@ export function createDataAccessInternal(
       },
 
       updateProgress(claim, progressInput) {
+        requireLegacyArchiveJobMutation(claim);
         const timestamp = now();
         const progress: ArchiveJobProgress =
           typeof progressInput === "number"
@@ -11457,6 +11608,7 @@ export function createDataAccessInternal(
       },
 
       publish(claim, input) {
+        requireLegacyArchiveJobMutation(claim);
         const archivePath = requireNonEmpty(input.archivePath, "archivePath");
         const sizeBytes = requirePositiveSafeInteger(input.sizeBytes, "sizeBytes");
         const boundaryEvidence = validateDvdArchiveBoundaryEvidence(
@@ -11546,6 +11698,10 @@ export function createDataAccessInternal(
               "Clean-read Archive Integrity evidence is invalid",
             );
           }
+        } else if (integrityEvidence.integrity === "incomplete_read") {
+          throw new DomainInvariantError(
+            "Incomplete-read evidence requires an admitted dvd-recovery-evidence-v1 Archive Job",
+          );
         } else {
           integrityPolicyVersion = requireNonEmpty(
             integrityEvidence.policyVersion,
@@ -11830,6 +11986,7 @@ export function createDataAccessInternal(
       },
 
       abort(claim, errorMessageInput) {
+        requireLegacyArchiveJobMutation(claim);
         const timestamp = now();
         const errorMessage = requireNonEmpty(
           errorMessageInput,
@@ -12233,6 +12390,15 @@ export function createDataAccessInternal(
                 legacyCutoverPending:
                   originalDiscArchives.legacyCutoverPending,
                 originalDiscArchiveId: originalDiscArchives.id,
+                evidenceFormat: hasDvdRecoveryEvidenceSchema
+                  ? sql<DvdArchiveEvidenceFormat | null>`(
+                      select ${dvdArchiveEvidenceHeaders.evidenceFormat}
+                      from ${dvdArchiveEvidenceHeaders}
+                      where ${dvdArchiveEvidenceHeaders.originalDiscArchiveId} =
+                        ${originalDiscArchives.id}
+                      limit 1
+                    )`
+                  : sql<DvdArchiveEvidenceFormat | null>`null`,
               })
               .from(discSelections)
               .innerJoin(
@@ -12253,6 +12419,11 @@ export function createDataAccessInternal(
         const requireCompletedReview = (
           selectionReview: ReturnType<typeof selectReviewState>,
         ) => {
+          if (selectionReview.evidenceFormat !== null) {
+            throw new DomainInvariantError(
+              "Encode Jobs are unavailable for dvd-recovery-evidence-v1 archives until damage acceptance and stable-source gates are complete",
+            );
+          }
           if (
             selectionReview.catalogReviewOutcome !==
               "reviewed_with_selections" ||

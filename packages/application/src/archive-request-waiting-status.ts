@@ -12,6 +12,8 @@ export function describeArchiveRequestWaitingStatus(
     return null;
   }
   const message = {
+    dvd_recovery_evidence_admission_closed:
+      "New-format DVD Archive Job admission is closed until the recovery and encoding workflow is complete.",
     matching_disc_required:
       "Insert the disc matching the requested Original Disc Archive and wait for Disc Inspection to complete.",
     matching_inspection_incomplete:

@@ -7,6 +7,7 @@ import type {
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
   ARCHIVE_INTEGRITIES,
+  ARCHIVE_RECOVERY_STATUSES,
   CATALOG_REVIEW_OUTCOMES,
   DETECTED_DISC_STATUSES,
   DISC_KINDS,
@@ -15,6 +16,7 @@ import type {
   DISC_INSPECTION_REASON_CODES,
   DISC_INSPECTION_STATUSES,
   DISC_SELECTION_KINDS,
+  DVD_ARCHIVE_EVIDENCE_FORMATS,
   ENCODE_JOB_STATUSES,
   ENCODE_PROGRESS_PHASES,
   ENCODE_WORKER_INCIDENT_RECOVERY_AREAS,
@@ -50,6 +52,10 @@ import type {
 
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
 export type ArchiveIntegrity = (typeof ARCHIVE_INTEGRITIES)[number];
+export type DvdArchiveEvidenceFormat =
+  (typeof DVD_ARCHIVE_EVIDENCE_FORMATS)[number];
+export type ArchiveRecoveryStatus =
+  (typeof ARCHIVE_RECOVERY_STATUSES)[number];
 export type CatalogReviewOutcome = (typeof CATALOG_REVIEW_OUTCOMES)[number];
 export type CompletedCatalogReviewOutcome = Exclude<
   CatalogReviewOutcome,
@@ -162,6 +168,7 @@ export type DiscInspectionAttemptId = DomainId<"DiscInspectionAttempt">;
 export type DetectedDiscId = DomainId<"DetectedDisc">;
 export type ArchiveRequestId = DomainId<"ArchiveRequest">;
 export type OriginalDiscArchiveId = DomainId<"OriginalDiscArchive">;
+export type ArchiveRecoveryId = DomainId<"ArchiveRecovery">;
 export type MediaItemId = DomainId<"MediaItem">;
 export type DiscSelectionId = DomainId<"DiscSelection">;
 export type EncodingProfileId = DomainId<"EncodingProfile">;
@@ -311,6 +318,7 @@ export interface ArchiveRequest {
   id: ArchiveRequestId;
   detectedDiscId: DetectedDiscId;
   rearchiveSourceArchiveId: OriginalDiscArchiveId | null;
+  evidenceFormat: DvdArchiveEvidenceFormat | null;
   status: ArchiveRequestStatus;
   priority: number;
   cancellationRequestedAt: Date | null;
@@ -359,6 +367,21 @@ export interface OriginalDiscArchive {
   updatedAt: Date;
 }
 
+export interface DvdArchiveEvidenceHeader {
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  sourceArchiveJobId: ArchiveJobId;
+  evidenceFormat: DvdArchiveEvidenceFormat;
+  createdAt: Date;
+}
+
+export interface ArchiveRecovery {
+  id: ArchiveRecoveryId;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  status: ArchiveRecoveryStatus;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface UnreadableSectorRange {
   startLba: number;
   sectorCount: number;
@@ -375,6 +398,14 @@ export interface CleanReadArchiveIntegrityEvidence {
   badSectorCount: 0;
   badAreaCount: 0;
   badSectorRanges: readonly [];
+}
+
+export interface IncompleteReadArchiveIntegrityEvidence {
+  integrity: "incomplete_read";
+  policyVersion: "dvd-recovery-evidence-v1";
+  badSectorCount: number;
+  badAreaCount: number;
+  badSectorRanges: readonly UnreadableSectorRange[];
 }
 
 export interface UnknownArchiveIntegrityEvidence {
@@ -396,6 +427,7 @@ export interface WatchableSalvageArchiveIntegrityEvidence {
 
 export type ArchiveIntegrityEvidence =
   | CleanReadArchiveIntegrityEvidence
+  | IncompleteReadArchiveIntegrityEvidence
   | UnknownArchiveIntegrityEvidence
   | WatchableSalvageArchiveIntegrityEvidence;
 
@@ -837,6 +869,7 @@ export interface ArchiveJob {
   discInspectionId: DiscInspectionId | null;
   detectedDiscId: DetectedDiscId;
   originalDiscArchiveId: OriginalDiscArchiveId | null;
+  evidenceFormat: DvdArchiveEvidenceFormat | null;
   attemptOrdinal: number;
   status: ArchiveJobStatus;
   priority: number;
@@ -1287,6 +1320,10 @@ export interface CatalogAccess {
     uncatalogedOnly?: boolean;
     needsCatalogReviewOnly?: boolean;
   }): OriginalDiscArchive[];
+  findDvdArchiveEvidenceHeader(
+    id: OriginalDiscArchiveId,
+  ): DvdArchiveEvidenceHeader | null;
+  findArchiveRecovery(id: OriginalDiscArchiveId): ArchiveRecovery | null;
   listCatalogReviewArchives(options: {
     view: CatalogReviewArchiveView;
     cursor?: CatalogReviewArchiveListCursor;
@@ -1586,11 +1623,13 @@ export interface ArchiveRequestAccess {
   ): ArchiveRequest[];
   create(input: {
     detectedDiscId: DetectedDiscId;
+    evidenceFormat?: DvdArchiveEvidenceFormat;
     priority?: number;
   }): ArchiveRequest;
   submit(input: {
     mutationKey: string;
     detectedDiscId: DetectedDiscId;
+    evidenceFormat?: DvdArchiveEvidenceFormat;
   }): ArchiveRequest;
   submitRearchive(input: {
     mutationKey: string;
@@ -1621,6 +1660,7 @@ export interface ArchiveRequestAccess {
 
 export interface ArchiveRequestWaitingStatus {
   code:
+    | "dvd_recovery_evidence_admission_closed"
     | "matching_disc_required"
     | "matching_inspection_incomplete"
     | "source_continuity_unavailable"
@@ -1849,6 +1889,8 @@ export type SnapshotCatalogAccess = Pick<
   | "listOpticalDrives"
   | "listDetectedDiscs"
   | "listOriginalDiscArchives"
+  | "findDvdArchiveEvidenceHeader"
+  | "findArchiveRecovery"
   | "listCatalogReviewArchives"
   | "listMediaItems"
   | "listMediaItemMaintenance"
