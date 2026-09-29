@@ -1239,6 +1239,7 @@ describe("data-access facade", () => {
           name !== "20260922174811_rearchive-lineage" &&
           name !== "20260922182659_rearchive-ordinary-uniqueness" &&
           name !== "20260929222006_dvd-evidence-compatibility" &&
+          name !== "20260929231006_dvd-evidence-authority" &&
           name !== "20260930002622_wandering_micromax",
       )
       .sort();
@@ -8278,6 +8279,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           name: "20260930002622_wandering_micromax",
         },
         {
+          name: "20260929231006_dvd-evidence-authority",
+        },
+        {
           name: "20260929225801_lonely_microchip",
         },
         {
@@ -8300,9 +8304,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20260922161825_operation-detail-lookups",
-        },
-        {
-          name: "20260922160403_long_maximus",
         },
       ]);
     expect(

@@ -89,5 +89,7 @@ until the recovery, assessment, damage-decision, and encoding gates are
 complete. Consequently, the publication paths above remain the only admitted
 DVD behavior, and a legacy Archive Worker must reject a marked job before it
 can mutate an image. The compatibility schema may read `incomplete_read`
-evidence, but that value alone establishes neither watchability nor encode
-eligibility and does not weaken either boundary proof.
+as a projection of the header's accepted extent and normalized Unrecovered
+Source ranges; that versioned evidence remains authoritative. Read
+completeness alone establishes neither watchability nor encode eligibility
+and does not weaken either boundary proof.

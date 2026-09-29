@@ -1,4 +1,6 @@
 import {
+  createCleanReadArchiveIntegrityEvidence,
+  createIncompleteReadArchiveIntegrityEvidence,
   WORKER_KINDS,
   type ArchiveJob,
   type ArchiveJobId,
@@ -201,8 +203,25 @@ function visibleArchive(
   const evidenceHeader = access.catalog.findDvdArchiveEvidenceHeader(
     archive.id,
   );
+  const authoritativeIntegrity = evidenceHeader === null
+    ? null
+    : evidenceHeader.unrecoveredSourceRanges.length === 0
+      ? createCleanReadArchiveIntegrityEvidence(evidenceHeader.evidenceFormat)
+      : createIncompleteReadArchiveIntegrityEvidence(
+        evidenceHeader.unrecoveredSourceRanges,
+      );
   return {
     ...archive,
+    ...(authoritativeIntegrity === null
+      ? {}
+      : {
+          integrity: authoritativeIntegrity.integrity,
+          integrityPolicyVersion: authoritativeIntegrity.policyVersion,
+          badSectorCount: authoritativeIntegrity.badSectorCount,
+          badAreaCount: authoritativeIntegrity.badAreaCount,
+          badSectorRanges: authoritativeIntegrity.badSectorRanges,
+          badSectorCountsByTitle: null,
+        }),
     dvdRecoveryEvidence: evidenceHeader === null
       ? null
       : {

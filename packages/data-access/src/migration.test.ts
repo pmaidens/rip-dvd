@@ -91,10 +91,13 @@ function seedEncodeJob(
   sqlite.prepare(`
     INSERT INTO original_disc_archives (
       id, detected_disc_id, disc_kind, archive_format, archive_path,
-      fingerprint, archived_at, catalog_reviewed_at, catalog_review_outcome,
-      created_at, updated_at
+      fingerprint, size_bytes, boundary_policy_version,
+      boundary_reported_size_bytes, boundary_published_size_bytes,
+      boundary_excluded_sector_count, archived_at, catalog_reviewed_at,
+      catalog_review_outcome, created_at, updated_at
     ) VALUES (
-      ?, ?, 'dvd', 'iso', ?, ?, 1, 1, 'reviewed_with_selections', 1, 1
+      ?, ?, 'dvd', 'iso', ?, ?, 2048, 'dvd-archive-boundary-v1',
+      2048, 2048, 0, 1, 1, 'reviewed_with_selections', 1, 1
     )
   `).run(
     ids.archive,
@@ -782,7 +785,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
         bad_sector_ranges = '[{"startLba":11,"sectorCount":1}]',
         bad_sector_counts_by_title = NULL
     WHERE id = 'evidence-legacy-unknown-archive'
-  `)).toThrow(/requires a DVD evidence header/i);
+  `)).toThrow(/requires authoritative DVD evidence/i);
   admissionCheck.exec(`
     INSERT INTO archive_requests (
       id, detected_disc_id, evidence_format, status, priority, fulfilled_at,
@@ -804,6 +807,43 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       'evidence-new-format-archive',
       'dvd-recovery-evidence-v1',
       1, 'completed', 0, 'finalizing', 100, 2048, 1, 1, 1, 1, 1
+    );
+
+    INSERT INTO detected_discs (
+      id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+      created_at, updated_at
+    ) VALUES (
+      'evidence-nondvd-disc', 'evidence-legacy-unknown-drive', 'blu_ray',
+      'evidence-nondvd-fingerprint', 'archived', 1, 1, 1
+    );
+
+    INSERT INTO original_disc_archives (
+      id, detected_disc_id, disc_kind, archive_format, archive_path,
+      fingerprint, size_bytes, archived_at, created_at, updated_at
+    ) VALUES (
+      'evidence-nondvd-archive', 'evidence-nondvd-disc', 'blu_ray', 'iso',
+      '/originals/evidence-nondvd.iso', 'evidence-nondvd-fingerprint',
+      2048, 1, 1, 1
+    );
+
+    INSERT INTO archive_requests (
+      id, detected_disc_id, evidence_format, status, priority, fulfilled_at,
+      created_at, updated_at
+    ) VALUES (
+      'evidence-nondvd-request', 'evidence-nondvd-disc',
+      'dvd-recovery-evidence-v1', 'fulfilled', 0, 1, 1, 1
+    );
+
+    INSERT INTO archive_jobs (
+      id, archive_request_id, detected_disc_id, original_disc_archive_id,
+      evidence_format, attempt_ordinal, status, priority, progress_phase,
+      progress_percent, progress_bytes, last_progress_at, started_at,
+      completed_at, created_at, updated_at
+    ) VALUES (
+      'evidence-nondvd-archive-job', 'evidence-nondvd-request',
+      'evidence-nondvd-disc', 'evidence-nondvd-archive',
+      'dvd-recovery-evidence-v1', 1, 'completed', 0, 'finalizing', 100,
+      2048, 1, 1, 1, 1, 1
     );
   `);
   admissionCheck.close();
@@ -832,26 +872,85 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   projectionOnlyAccess.close();
 
   const evidenceFixture = new DatabaseSync(databasePath);
-  evidenceFixture.exec(`
+  const insertEvidenceHeader = evidenceFixture.prepare(`
     INSERT INTO dvd_archive_evidence_headers (
       original_disc_archive_id, source_archive_job_id, evidence_format,
-      created_at
+      accepted_end_lba_exclusive, unrecovered_source_ranges, created_at
     ) VALUES (
       'evidence-new-format-archive',
       'evidence-new-format-archive-job',
       'dvd-recovery-evidence-v1',
+      1,
+      ?,
       1
-    );
-
+    )
+  `);
+  for (const invalidRanges of [
+    [{ startLba: 0, sectorCount: 1 }],
+    [
+      { startLba: 0, sectorCount: 1, classification: "skipped_untested" },
+      { startLba: 0, sectorCount: 1, classification: "individually_failed" },
+    ],
+    [{
+      startLba: Number.MAX_SAFE_INTEGER + 1,
+      sectorCount: 1,
+      classification: "skipped_untested",
+    }],
+  ]) {
+    expect(() => insertEvidenceHeader.run(JSON.stringify(invalidRanges)))
+      .toThrow(/DVD evidence header/i);
+  }
+  expect(() => evidenceFixture.exec(`
+    INSERT INTO dvd_archive_evidence_headers (
+      original_disc_archive_id, source_archive_job_id, evidence_format,
+      accepted_end_lba_exclusive, unrecovered_source_ranges, created_at
+    ) VALUES (
+      'evidence-nondvd-archive',
+      'evidence-nondvd-archive-job',
+      'dvd-recovery-evidence-v1',
+      1,
+      '[]',
+      1
+    )
+  `)).toThrow(/proven DVD archive/i);
+  const authoritativeRanges = [{
+    startLba: 0,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }] as const;
+  insertEvidenceHeader.run(JSON.stringify(authoritativeRanges));
+  expect(() => evidenceFixture.exec(`
     UPDATE original_disc_archives
     SET integrity = 'incomplete_read',
         integrity_policy_version = 'dvd-recovery-evidence-v1',
         bad_sector_count = 2,
         bad_area_count = 1,
-        bad_sector_ranges = '[{"startLba":23,"sectorCount":2}]',
+        bad_sector_ranges = '[{"startLba":0,"sectorCount":1}]',
+        bad_sector_counts_by_title = NULL
+    WHERE id = 'evidence-new-format-archive'
+  `)).toThrow(/projection must match authoritative DVD evidence/i);
+  evidenceFixture.exec(`
+    UPDATE original_disc_archives
+    SET integrity = 'incomplete_read',
+        integrity_policy_version = 'dvd-recovery-evidence-v1',
+        bad_sector_count = 1,
+        bad_area_count = 1,
+        bad_sector_ranges = '[{"startLba":0,"sectorCount":1}]',
         bad_sector_counts_by_title = NULL
     WHERE id = 'evidence-new-format-archive';
-
+  `);
+  expect(() => evidenceFixture.exec(`
+    INSERT INTO archive_recoveries (
+      id, original_disc_archive_id, status, created_at, updated_at
+    ) VALUES (
+      'evidence-new-format-recovery',
+      'evidence-new-format-archive',
+      'completed',
+      1,
+      1
+    )
+  `)).toThrow(/status must match authoritative DVD evidence/i);
+  evidenceFixture.exec(`
     INSERT INTO archive_recoveries (
       id, original_disc_archive_id, status, created_at, updated_at
     ) VALUES (
@@ -860,7 +959,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       'eligible',
       1,
       1
-    );
+    )
   `);
   expect(evidenceFixture.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   evidenceFixture.close();
@@ -872,6 +971,12 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     originalDiscArchiveId: "evidence-new-format-archive",
     sourceArchiveJobId: "evidence-new-format-archive-job",
     evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+    acceptedEndLbaExclusive: 1,
+    unrecoveredSourceRanges: [{
+      startLba: 0,
+      sectorCount: 1,
+      classification: "skipped_untested",
+    }],
     createdAt: new Date(1),
   });
   expect(currentAccess.catalog.findArchiveRecovery(
@@ -889,9 +994,9 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     expect.objectContaining({
       integrity: "incomplete_read",
       integrityPolicyVersion: DVD_RECOVERY_EVIDENCE_FORMAT,
-      badSectorCount: 2,
+      badSectorCount: 1,
       badAreaCount: 1,
-      badSectorRanges: [{ startLba: 23, sectorCount: 2 }],
+      badSectorRanges: [{ startLba: 0, sectorCount: 1 }],
     }),
   ]);
   expect(
@@ -932,10 +1037,13 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   `).all()).toEqual([
     { name: "dvd_evidence_archive_job_insert_match" },
     { name: "dvd_evidence_archive_job_update_guard" },
+    { name: "dvd_evidence_archive_projection_update_guard" },
+    { name: "dvd_evidence_archive_recovery_insert_guard" },
+    { name: "dvd_evidence_archive_recovery_update_guard" },
     { name: "dvd_evidence_archive_request_update_guard" },
     { name: "dvd_evidence_header_delete_guard" },
-    { name: "dvd_evidence_header_insert_provenance" },
-    { name: "dvd_evidence_header_update_provenance" },
+    { name: "dvd_evidence_header_insert_guard" },
+    { name: "dvd_evidence_header_update_guard" },
     { name: "dvd_evidence_incomplete_archive_insert_guard" },
     { name: "dvd_evidence_incomplete_archive_update_guard" },
   ]);

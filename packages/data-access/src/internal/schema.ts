@@ -78,6 +78,7 @@ import type {
   DiscSelectionId,
   DvdTitleBadSectorCount,
   DvdArchiveEvidenceFormat,
+  DvdUnrecoveredSourceRange,
   EncodeJobCleanupClaimToken,
   EncodeJobId,
   EncodeJobFailureReportId,
@@ -1143,6 +1144,10 @@ export const dvdArchiveEvidenceHeaders = sqliteTable(
     evidenceFormat: text("evidence_format", {
       enum: DVD_ARCHIVE_EVIDENCE_FORMATS,
     }).$type<DvdArchiveEvidenceFormat>().notNull(),
+    acceptedEndLbaExclusive: integer("accepted_end_lba_exclusive").notNull(),
+    unrecoveredSourceRanges: text("unrecovered_source_ranges", {
+      mode: "json",
+    }).$type<readonly DvdUnrecoveredSourceRange[]>().notNull(),
     createdAt: createdAt(),
   },
   (table) => [
@@ -1155,6 +1160,14 @@ export const dvdArchiveEvidenceHeaders = sqliteTable(
     check(
       "dvd_archive_evidence_headers_format_check",
       sql`${table.evidenceFormat} in (${sqliteStringLiterals(DVD_ARCHIVE_EVIDENCE_FORMATS)})`,
+    ),
+    check(
+      "dvd_archive_evidence_headers_extent_check",
+      sql`typeof(${table.acceptedEndLbaExclusive}) = 'integer' and ${table.acceptedEndLbaExclusive} > 0`,
+    ),
+    check(
+      "dvd_archive_evidence_headers_source_ranges_check",
+      sql`json_valid(${table.unrecoveredSourceRanges}) and json_type(${table.unrecoveredSourceRanges}) = 'array'`,
     ),
   ],
 );

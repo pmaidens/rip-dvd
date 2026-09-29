@@ -1,7 +1,11 @@
 import { expect, it } from "vitest";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
+import { DatabaseSync } from "node:sqlite";
+import {
+  createCleanReadArchiveIntegrityEvidence,
+  DVD_RECOVERY_EVIDENCE_FORMAT,
+} from "@rip-dvd/data-access";
 import {
   beginSettledDiscInspectionForTest,
   createNormalDvdArchiveBoundaryEvidenceForTest,
@@ -568,6 +572,92 @@ it("returns the same operational records and evidence through web and CLI", asyn
       retryability: "appropriate", diagnostic: "Synthetic encode failure",
       evidence: { kind: "exit_status", exitStatus: 17 },
     });
+    const evidenceFixture = new DatabaseSync(fixture.databasePath);
+    evidenceFixture.prepare(`
+      INSERT INTO archive_requests (
+        id, detected_disc_id, evidence_format, status, priority,
+        fulfilled_at, created_at, updated_at
+      ) VALUES (?, ?, ?, 'fulfilled', 0, 1, 1, 1)
+    `).run(
+      "synthetic-evidence-request",
+      archivedDisc.id,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+    );
+    evidenceFixture.prepare(`
+      INSERT INTO archive_jobs (
+        id, archive_request_id, disc_inspection_id, detected_disc_id,
+        original_disc_archive_id, evidence_format, attempt_ordinal, status,
+        priority, progress_phase, progress_percent, progress_bytes,
+        last_progress_at, started_at, completed_at, created_at, updated_at
+      ) VALUES (?, 'synthetic-evidence-request', ?, ?, ?, ?, 1, 'completed',
+        0, 'finalizing', 100, 2048, 1, 1, 1, 1, 1)
+    `).run(
+      "synthetic-evidence-job",
+      completedInspection.id,
+      archivedDisc.id,
+      archiveId,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+    );
+    evidenceFixture.prepare(`
+      UPDATE original_disc_archives
+      SET integrity = 'unknown',
+          integrity_policy_version = NULL,
+          bad_sector_count = NULL,
+          bad_area_count = NULL,
+          bad_sector_ranges = NULL,
+          bad_sector_counts_by_title = NULL
+      WHERE id = ?
+    `).run(archiveId);
+    evidenceFixture.prepare(`
+      INSERT INTO dvd_archive_evidence_headers (
+        original_disc_archive_id, source_archive_job_id, evidence_format,
+        accepted_end_lba_exclusive, unrecovered_source_ranges, created_at
+      ) VALUES (?, 'synthetic-evidence-job', ?, 1, ?, 1)
+    `).run(
+      archiveId,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      JSON.stringify([{
+        startLba: 0,
+        sectorCount: 1,
+        classification: "skipped_untested",
+      }]),
+    );
+    evidenceFixture.close();
+    const laggingProjectionResponse = createOperationsResponse(
+      access,
+      new Request(
+        `http://localhost/api/operations?kind=original-disc-archives&id=${archiveId}`,
+      ),
+    );
+    expect(await laggingProjectionResponse.json()).toMatchObject({
+      item: {
+        integrity: "incomplete_read",
+        badSectorCount: 1,
+        badAreaCount: 1,
+        badSectorRanges: [{ startLba: 0, sectorCount: 1 }],
+      },
+    });
+    const projectionFixture = new DatabaseSync(fixture.databasePath);
+    projectionFixture.prepare(`
+      UPDATE original_disc_archives
+      SET integrity = 'incomplete_read',
+          integrity_policy_version = ?,
+          bad_sector_count = 1,
+          bad_area_count = 1,
+          bad_sector_ranges = '[{"startLba":0,"sectorCount":1}]',
+          bad_sector_counts_by_title = NULL
+      WHERE id = ?
+    `).run(DVD_RECOVERY_EVIDENCE_FORMAT, archiveId);
+    projectionFixture.prepare(`
+      INSERT INTO archive_recoveries (
+        id, original_disc_archive_id, status, created_at, updated_at
+      ) VALUES ('synthetic-evidence-recovery', ?, 'eligible', 1, 1)
+    `).run(archiveId);
+    projectionFixture.close();
+    expect(access.catalog.listDiscSelections({ encodeEligibleOnly: true }))
+      .not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: selection.id }),
+      ]));
     const incident = access.workerIncidents.record({
       schemaVersion: 1,
       workerKind: "archive",
@@ -665,7 +755,22 @@ it("returns the same operational records and evidence through web and CLI", asyn
       .toMatchObject({ item: {
         boundaryReportedSizeBytes: 2_048,
         boundaryPublishedSizeBytes: 2_048,
-        integrity: "clean_read",
+        integrity: "incomplete_read",
+        dvdRecoveryEvidence: {
+          header: {
+            evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+            acceptedEndLbaExclusive: 1,
+            unrecoveredSourceRanges: [{
+              startLba: 0,
+              sectorCount: 1,
+              classification: "skipped_untested",
+            }],
+          },
+          recovery: {
+            id: "synthetic-evidence-recovery",
+            status: "eligible",
+          },
+        },
       } });
     expect((await fixture.run(["inspect", "encode-jobs", encodeJob.id])).result)
       .toMatchObject({ item: {
@@ -674,7 +779,15 @@ it("returns the same operational records and evidence through web and CLI", asyn
         correctionLinks: [expect.objectContaining({ id: encodeJob.id })],
         failureReports: [expect.objectContaining({ reasonCode: "command_failed" })],
         availableActions: expect.arrayContaining([
-          expect.objectContaining({ name: "requeue", eligible: true }),
+          expect.objectContaining({
+            name: "requeue",
+            eligible: false,
+            blockingReasons: [expect.objectContaining({
+              code: "INVALID_TRANSITION",
+              message:
+                "Requires an active Disc Selection with completed Catalog Review.",
+            })],
+          }),
         ]),
       } });
   } finally {

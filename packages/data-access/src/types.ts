@@ -17,6 +17,7 @@ import type {
   DISC_INSPECTION_STATUSES,
   DISC_SELECTION_KINDS,
   DVD_ARCHIVE_EVIDENCE_FORMATS,
+  DVD_UNRECOVERED_SOURCE_CLASSIFICATIONS,
   ENCODE_JOB_STATUSES,
   ENCODE_PROGRESS_PHASES,
   ENCODE_WORKER_INCIDENT_RECOVERY_AREAS,
@@ -54,6 +55,8 @@ export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
 export type ArchiveIntegrity = (typeof ARCHIVE_INTEGRITIES)[number];
 export type DvdArchiveEvidenceFormat =
   (typeof DVD_ARCHIVE_EVIDENCE_FORMATS)[number];
+export type DvdUnrecoveredSourceClassification =
+  (typeof DVD_UNRECOVERED_SOURCE_CLASSIFICATIONS)[number];
 export type ArchiveRecoveryStatus =
   (typeof ARCHIVE_RECOVERY_STATUSES)[number];
 export type CatalogReviewOutcome = (typeof CATALOG_REVIEW_OUTCOMES)[number];
@@ -371,7 +374,13 @@ export interface DvdArchiveEvidenceHeader {
   originalDiscArchiveId: OriginalDiscArchiveId;
   sourceArchiveJobId: ArchiveJobId;
   evidenceFormat: DvdArchiveEvidenceFormat;
+  acceptedEndLbaExclusive: number;
+  unrecoveredSourceRanges: readonly DvdUnrecoveredSourceRange[];
   createdAt: Date;
+}
+
+export interface DvdUnrecoveredSourceRange extends UnreadableSectorRange {
+  classification: DvdUnrecoveredSourceClassification;
 }
 
 export interface ArchiveRecovery {

@@ -18,6 +18,11 @@ export const DVD_ARCHIVE_EVIDENCE_FORMATS = [
   "dvd-recovery-evidence-v1",
 ] as const;
 
+export const DVD_UNRECOVERED_SOURCE_CLASSIFICATIONS = [
+  "skipped_untested",
+  "individually_failed",
+] as const;
+
 export const ARCHIVE_RECOVERY_STATUSES = [
   "eligible",
   "completed",
