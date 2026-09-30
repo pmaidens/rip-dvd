@@ -462,6 +462,51 @@ it("blocks Catalog Review replacement previews consistently through web and CLI"
   }
 });
 
+it("blocks Encode queue resolution consistently through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const seeded = seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    markArchiveWithDvdRecoveryEvidence(
+      fixture.databasePath,
+      seeded.archive.id,
+      "encode-resolution-parity",
+    );
+    const url = new URL(`${trustedOrigin}/api/encode-jobs`);
+    url.searchParams.set(
+      "encodingProfileId",
+      seeded.predecessor.encodingProfileId,
+    );
+    url.searchParams.set(
+      "resolveDiscSelectionId",
+      seeded.correctedSelection.id,
+    );
+    const web = await createEncodeJobsRoute(
+      new Request(url),
+      () => access,
+      () => ({
+        mediaLibraryPath: fixture.mediaLibraryPath,
+        webTrustedOrigin: trustedOrigin,
+      }),
+    );
+    const cli = await fixture.run([
+      "encode-resolve",
+      "--encoding-profile-id",
+      seeded.predecessor.encodingProfileId,
+      "--disc-selection-id",
+      seeded.correctedSelection.id,
+    ]);
+
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toEqual(dvdEvidenceEncodingUnavailableError);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
 it("blocks Re-archive replacement previews consistently through web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
   const seeded = seedRearchiveCatalogReviewFixture(fixture);

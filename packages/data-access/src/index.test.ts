@@ -13519,6 +13519,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(() => access.encodeJobs.requeue(enqueued.id, {
       mutationKey: blockedRequeueKey,
     })).toThrow(DvdRecoveryEvidenceEncodingUnavailableError);
+    expect(() => access.encodeJobs.resolveQueueLogicalJobs({
+      discSelectionIds: [selection.id],
+      encodingProfileId: profile.id,
+    })).toThrow(DvdRecoveryEvidenceEncodingUnavailableError);
     access.close();
 
     const replayCheck = new DatabaseSync(databasePath);

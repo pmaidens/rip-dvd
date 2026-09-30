@@ -1288,6 +1288,28 @@ export function createDataAccessInternal(
       throw new DvdRecoveryEvidenceEncodingUnavailableError();
     }
   };
+  const requireDvdRecoveryEvidenceEncodingAvailableForDiscSelections = (
+    querySource: Pick<typeof database, "select">,
+    discSelectionIds: readonly DiscSelectionId[],
+  ): void => {
+    if (!hasDvdRecoveryEvidenceSchema || discSelectionIds.length === 0) return;
+    const evidenceArchive = querySource
+      .select({ id: dvdArchiveEvidenceHeaders.originalDiscArchiveId })
+      .from(discSelections)
+      .innerJoin(
+        dvdArchiveEvidenceHeaders,
+        eq(
+          dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+          discSelections.originalDiscArchiveId,
+        ),
+      )
+      .where(inArray(discSelections.id, discSelectionIds))
+      .limit(1)
+      .get();
+    if (evidenceArchive !== undefined) {
+      throw new DvdRecoveryEvidenceEncodingUnavailableError();
+    }
+  };
   const encodeQueueDiscSelectionPageStatement = sqlite.prepare(`
     with requested_selection as (
       select
@@ -13138,6 +13160,10 @@ export function createDataAccessInternal(
           );
         }
         const discSelectionIds = [...new Set(options.discSelectionIds)];
+        requireDvdRecoveryEvidenceEncodingAvailableForDiscSelections(
+          database,
+          discSelectionIds,
+        );
         const jobs = discSelectionIds.length === 0
           ? []
           : database
