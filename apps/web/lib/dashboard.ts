@@ -43,6 +43,7 @@ import {
   archiveBoundaryEvidenceFromRecord,
   DVD_RECOVERY_EVIDENCE_ENCODING,
   isEncodeJobSafelyTerminal,
+  withAuthoritativeDvdArchiveIntegrity,
   WORKER_KINDS,
 } from "@rip-dvd/data-access";
 import {
@@ -1424,7 +1425,7 @@ function readDashboardSnapshotRecords(
         : { outcome: catalogReviewOutcome }),
     }),
   );
-  const catalogReviewArchives =
+  const persistedCatalogReviewArchives =
     archiveSource.status === "loaded" && activityLimit !== undefined
       ? catalogReviewCursor?.direction === "newer"
         ? archiveSource.value.slice(0, activityLimit)
@@ -1432,6 +1433,12 @@ function readDashboardSnapshotRecords(
       : archiveSource.status === "loaded"
         ? archiveSource.value
         : [];
+  const catalogReviewArchives = persistedCatalogReviewArchives.map(
+    (archive) => withAuthoritativeDvdArchiveIntegrity(
+      archive,
+      access.catalog.findDvdArchiveEvidenceHeader(archive.id),
+    ),
+  );
   const previousCatalogReviewBoundary =
     catalogReviewArchives.at(-1) ??
     (catalogReviewCursor?.direction === "older"

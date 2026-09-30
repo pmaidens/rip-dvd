@@ -21,6 +21,7 @@ export {
   createIncompleteReadArchiveIntegrityEvidence,
   createUnknownArchiveIntegrityEvidence,
   createWatchableSalvageArchiveIntegrityEvidence,
+  withAuthoritativeDvdArchiveIntegrity,
 } from "./archive-integrity.js";
 export {
   DVD_RECOVERY_EVIDENCE_ADMISSION,

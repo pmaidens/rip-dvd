@@ -3,6 +3,7 @@ import {
   DVD_RECOVERY_EVIDENCE_ENCODING,
   DVD_RECOVERY_EVIDENCE_FORMAT,
   WORKER_KINDS,
+  withAuthoritativeDvdArchiveIntegrity,
   type ArchiveJob,
   type ArchiveJobId,
   type ArchiveAuditRun,
@@ -199,13 +200,17 @@ function visibleEncodeJobs(
 
 function visibleArchive(
   access: Pick<ConsistentReadAccess, "catalog">,
-  { archivePath: _archivePath, ...archive }: OriginalDiscArchive,
+  archive: OriginalDiscArchive,
 ) {
   const evidenceHeader = access.catalog.findDvdArchiveEvidenceHeader(
     archive.id,
   );
+  const {
+    archivePath: _archivePath,
+    ...authoritativeArchive
+  } = withAuthoritativeDvdArchiveIntegrity(archive, evidenceHeader);
   return {
-    ...archive,
+    ...authoritativeArchive,
     dvdRecoveryEvidence: evidenceHeader === null
       ? null
       : {

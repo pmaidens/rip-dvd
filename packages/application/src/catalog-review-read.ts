@@ -2,6 +2,7 @@ import {
   archiveBoundaryEvidenceFromRecord,
   decodeArchivedDvdTitles,
   DomainInvariantError,
+  withAuthoritativeDvdArchiveIntegrity,
   type DataAccess,
   type DiscSelection,
   type DiscSelectionActionAvailability,
@@ -161,10 +162,15 @@ export function readCatalogReview(
     replacementProfileOffset,
   } = coordinates;
   return access.readConsistentSnapshot((snapshot) => {
-    const archive = snapshot.catalog.listOriginalDiscArchives({ ids: [id] })[0];
-    if (!archive) {
+    const persistedArchive = snapshot.catalog
+      .listOriginalDiscArchives({ ids: [id] })[0];
+    if (!persistedArchive) {
       return null;
     }
+    const archive = withAuthoritativeDvdArchiveIntegrity(
+      persistedArchive,
+      snapshot.catalog.findDvdArchiveEvidenceHeader(id),
+    );
     const disc = snapshot.catalog.listDetectedDiscs(undefined, {
       ids: [archive.detectedDiscId],
     })[0];
@@ -174,8 +180,25 @@ export function readCatalogReview(
       );
     }
     const rawTitles = decodeArchivedDvdTitles(disc.scanData) ?? [];
-    const rearchiveProposal = snapshot.catalog
+    const persistedRearchiveProposal = snapshot.catalog
       .readRearchiveMappingProposal(id);
+    const rearchiveProposal = persistedRearchiveProposal === null
+      ? null
+      : {
+        ...persistedRearchiveProposal,
+        sourceArchive: withAuthoritativeDvdArchiveIntegrity(
+          persistedRearchiveProposal.sourceArchive,
+          snapshot.catalog.findDvdArchiveEvidenceHeader(
+            persistedRearchiveProposal.sourceArchive.id,
+          ),
+        ),
+        targetArchive: withAuthoritativeDvdArchiveIntegrity(
+          persistedRearchiveProposal.targetArchive,
+          snapshot.catalog.findDvdArchiveEvidenceHeader(
+            persistedRearchiveProposal.targetArchive.id,
+          ),
+        ),
+      };
     const rearchiveSourceDisc = rearchiveProposal === null
       ? undefined
       : snapshot.catalog.listDetectedDiscs(undefined, {

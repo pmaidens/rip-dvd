@@ -2,6 +2,7 @@ import { isHandBrakePreset } from "@rip-dvd/config";
 import {
   DVD_RECOVERY_EVIDENCE_FORMAT,
   encodingProfileQueueBlockingReasons,
+  withAuthoritativeDvdArchiveIntegrity,
 } from "@rip-dvd/data-access";
 import type {
   ConsistentReadAccess,
@@ -117,17 +118,32 @@ function presentRearchiveMappingProposal(
   access: DataAccess,
   proposal: RearchiveMappingProposalReview,
 ) {
+  const authoritativeProposal = {
+    ...proposal,
+    sourceArchive: withAuthoritativeDvdArchiveIntegrity(
+      proposal.sourceArchive,
+      access.catalog.findDvdArchiveEvidenceHeader(proposal.sourceArchive.id),
+    ),
+    targetArchive: withAuthoritativeDvdArchiveIntegrity(
+      proposal.targetArchive,
+      access.catalog.findDvdArchiveEvidenceHeader(proposal.targetArchive.id),
+    ),
+  };
   const discLabels = new Map(
     access.catalog.listDetectedDiscs(undefined, {
       ids: [
-        proposal.sourceArchive.detectedDiscId,
-        proposal.targetArchive.detectedDiscId,
+        authoritativeProposal.sourceArchive.detectedDiscId,
+        authoritativeProposal.targetArchive.detectedDiscId,
       ],
     }).map((disc) => [disc.id, disc.volumeLabel]),
   );
-  return serializeRearchiveMappingProposal(proposal, {
-    source: discLabels.get(proposal.sourceArchive.detectedDiscId) ?? null,
-    target: discLabels.get(proposal.targetArchive.detectedDiscId) ?? null,
+  return serializeRearchiveMappingProposal(authoritativeProposal, {
+    source: discLabels.get(
+      authoritativeProposal.sourceArchive.detectedDiscId,
+    ) ?? null,
+    target: discLabels.get(
+      authoritativeProposal.targetArchive.detectedDiscId,
+    ) ?? null,
   });
 }
 

@@ -2,15 +2,40 @@ import { DomainInvariantError } from "./errors.js";
 import { MAX_DVD_TITLES } from "./dvd-scan.js";
 import type {
   CleanReadArchiveIntegrityEvidence,
+  DvdArchiveEvidenceHeader,
   DvdTitleBadSectorCount,
   IncompleteReadArchiveIntegrityEvidence,
   UnreadableSectorRange,
+  OriginalDiscArchive,
   UnknownArchiveIntegrityEvidence,
   WatchableSalvageArchiveIntegrityEvidence,
 } from "./types.js";
 import { DVD_RECOVERY_EVIDENCE_FORMAT } from "./dvd-recovery-evidence.js";
 
 const MAX_WATCHABLE_SALVAGE_BAD_SECTORS = 32;
+
+export function withAuthoritativeDvdArchiveIntegrity<
+  TArchive extends OriginalDiscArchive,
+>(
+  archive: TArchive,
+  header: DvdArchiveEvidenceHeader | null,
+): TArchive {
+  if (header === null) return archive;
+  const integrity = header.unrecoveredSourceRanges.length === 0
+    ? createCleanReadArchiveIntegrityEvidence(header.evidenceFormat)
+    : createIncompleteReadArchiveIntegrityEvidence(
+      header.unrecoveredSourceRanges,
+    );
+  return {
+    ...archive,
+    integrity: integrity.integrity,
+    integrityPolicyVersion: integrity.policyVersion,
+    badSectorCount: integrity.badSectorCount,
+    badAreaCount: integrity.badAreaCount,
+    badSectorRanges: integrity.badSectorRanges,
+    badSectorCountsByTitle: null,
+  };
+}
 
 function normalizePolicyVersion(policyVersion: string): string {
   const normalizedPolicyVersion = policyVersion.trim();
