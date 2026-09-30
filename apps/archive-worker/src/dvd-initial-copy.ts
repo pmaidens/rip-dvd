@@ -112,9 +112,10 @@ function isIntegerInRange(
 function parseDiagnostic(
   value: unknown,
   totalSectorCount: number,
+  invalidResultMessage = "DVD initial-copy helper result is malformed",
 ): DvdInitialCopyDiagnostic {
   if (!isRecord(value) || !hasExactKeys(value, INITIAL_COPY_DIAGNOSTIC_KEYS)) {
-    throw new Error("DVD initial-copy helper result is malformed");
+    throw new Error(invalidResultMessage);
   }
   const requestEndLba = Number(value.requestedLba) +
     Number(value.requestedBlockCount);
@@ -143,7 +144,7 @@ function parseDiagnostic(
         requestEndLba - 1,
       ))
   ) {
-    throw new Error("DVD initial-copy helper result is malformed");
+    throw new Error(invalidResultMessage);
   }
   return value as unknown as DvdInitialCopyDiagnostic;
 }
@@ -191,38 +192,6 @@ function skippedSectorCount(bitmap: Buffer): number {
     }
   }
   return count;
-}
-
-function validateDiagnosticCoverage(
-  bitmap: Buffer,
-  diagnostics: readonly DvdInitialCopyDiagnostic[],
-  diagnosticsTruncated: boolean,
-  skippedRequestCount: number,
-): void {
-  let previousEndLba = 0;
-  let coveredSectorCount = 0;
-  for (const diagnostic of diagnostics) {
-    if (diagnostic.requestedLba < previousEndLba) {
-      throw new Error("DVD initial-copy helper result is malformed");
-    }
-    const endLba = diagnostic.requestedLba + diagnostic.requestedBlockCount;
-    for (let lba = diagnostic.requestedLba; lba < endLba; lba += 1) {
-      if (!bitmapHasSector(bitmap, lba)) {
-        throw new Error("DVD initial-copy helper result is malformed");
-      }
-    }
-    coveredSectorCount += diagnostic.requestedBlockCount;
-    previousEndLba = endLba;
-  }
-  if (
-    diagnostics.length > DVD_INITIAL_COPY_DIAGNOSTIC_LIMIT ||
-    (diagnosticsTruncated
-      ? skippedRequestCount <= diagnostics.length
-      : skippedRequestCount !== diagnostics.length) ||
-    (!diagnosticsTruncated && coveredSectorCount !== skippedSectorCount(bitmap))
-  ) {
-    throw new Error("DVD initial-copy helper result is malformed");
-  }
 }
 
 export function parseDvdInitialCopyResultProtocol(
@@ -287,45 +256,52 @@ export function parseDvdInitialCopyResultProtocol(
   ) {
     throw new Error("DVD initial-copy helper result is malformed");
   }
-  const diagnostics = parsed.diagnostics.map((diagnostic) =>
-    parseDiagnostic(diagnostic, totalSectorCount)
-  );
-  validateDiagnosticCoverage(
-    bitmap,
-    diagnostics,
-    parsed.diagnosticsTruncated,
-    skippedRequestCount,
-  );
-  return {
+  const result: DvdInitialCopyResult = {
     copyPolicyVersion: DVD_INITIAL_COPY_POLICY_VERSION,
     declaredByteCount: expectedByteCount,
     recoveredByteCount: parsed.recoveredByteCount,
     skippedRequestCount,
     diagnosticsTruncated: parsed.diagnosticsTruncated,
-    diagnostics,
+    diagnostics: parsed.diagnostics.map((diagnostic) =>
+      parseDiagnostic(diagnostic, totalSectorCount)
+    ),
     unrecoveredSourceRanges: ranges,
   };
+  validateDvdInitialCopyResult(
+    result,
+    expectedByteCount,
+    "DVD initial-copy helper result is malformed",
+  );
+  return result;
 }
 
-function validateInjectedResult(
+function validateDvdInitialCopyResult(
   result: DvdInitialCopyResult,
   expectedByteCount: number,
+  invalidResultMessage: string,
 ): void {
   const totalSectorCount = expectedByteCount / DVD_SECTOR_SIZE_BYTES;
   let skippedSectorCount = 0;
   let previousEndLba = 0;
-  for (const range of result.unrecoveredSourceRanges) {
+  if (
+    !Array.isArray(result.unrecoveredSourceRanges) ||
+    !Array.isArray(result.diagnostics)
+  ) {
+    throw new Error(invalidResultMessage);
+  }
+  for (const [index, range] of result.unrecoveredSourceRanges.entries()) {
     const endLba = range.startLba + range.sectorCount;
     if (
       range.classification !== "skipped_untested" ||
       !Number.isSafeInteger(range.startLba) ||
-      range.startLba < previousEndLba ||
+      range.startLba < 0 ||
+      (index > 0 && range.startLba <= previousEndLba) ||
       !Number.isSafeInteger(range.sectorCount) ||
       range.sectorCount <= 0 ||
       !Number.isSafeInteger(endLba) ||
       endLba > totalSectorCount
     ) {
-      throw new Error("DVD initial-copy result is invalid");
+      throw new Error(invalidResultMessage);
     }
     skippedSectorCount += range.sectorCount;
     previousEndLba = endLba;
@@ -336,12 +312,53 @@ function validateInjectedResult(
     result.recoveredByteCount !==
       expectedByteCount - skippedSectorCount * DVD_SECTOR_SIZE_BYTES ||
     !Number.isSafeInteger(result.skippedRequestCount) ||
+    result.skippedRequestCount < 0 ||
     result.skippedRequestCount < result.unrecoveredSourceRanges.length ||
+    result.skippedRequestCount > skippedSectorCount ||
+    (skippedSectorCount === 0) !== (result.skippedRequestCount === 0) ||
+    typeof result.diagnosticsTruncated !== "boolean" ||
     result.diagnostics.length > DVD_INITIAL_COPY_DIAGNOSTIC_LIMIT ||
-    (!result.diagnosticsTruncated &&
-      result.diagnostics.length !== result.skippedRequestCount)
+    (result.diagnosticsTruncated
+      ? result.skippedRequestCount <= result.diagnostics.length
+      : result.diagnostics.length !== result.skippedRequestCount)
   ) {
-    throw new Error("DVD initial-copy result is invalid");
+    throw new Error(invalidResultMessage);
+  }
+  let previousDiagnosticEndLba = 0;
+  let coveredSectorCount = 0;
+  let rangeIndex = 0;
+  for (const value of result.diagnostics) {
+    const diagnostic = parseDiagnostic(
+      value,
+      totalSectorCount,
+      invalidResultMessage,
+    );
+    const diagnosticEndLba =
+      diagnostic.requestedLba + diagnostic.requestedBlockCount;
+    if (diagnostic.requestedLba < previousDiagnosticEndLba) {
+      throw new Error(invalidResultMessage);
+    }
+    while (
+      rangeIndex < result.unrecoveredSourceRanges.length &&
+      result.unrecoveredSourceRanges[rangeIndex]!.startLba +
+          result.unrecoveredSourceRanges[rangeIndex]!.sectorCount <=
+        diagnostic.requestedLba
+    ) {
+      rangeIndex += 1;
+    }
+    const range = result.unrecoveredSourceRanges[rangeIndex];
+    if (
+      range === undefined ||
+      diagnostic.requestedLba < range.startLba ||
+      diagnosticEndLba > range.startLba + range.sectorCount
+    ) {
+      throw new Error(invalidResultMessage);
+    }
+    coveredSectorCount += diagnostic.requestedBlockCount;
+    previousDiagnosticEndLba = diagnosticEndLba;
+  }
+  if (!result.diagnosticsTruncated && coveredSectorCount !== skippedSectorCount) {
+    throw new Error(invalidResultMessage);
   }
 }
 
@@ -397,7 +414,11 @@ export async function runDvdInitialCopyForArchiveJob({
     throw error;
   }
   signal.throwIfAborted();
-  validateInjectedResult(result, sizeBytes);
+  validateDvdInitialCopyResult(
+    result,
+    sizeBytes,
+    "DVD initial-copy result is invalid",
+  );
   const image = await lstat(outputPath);
   if (
     !image.isFile() ||

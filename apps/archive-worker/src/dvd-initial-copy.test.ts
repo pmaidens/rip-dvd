@@ -252,6 +252,68 @@ describe("Archive Job DVD initial-copy boundary", () => {
     });
   });
 
+  it("rejects adjacent unnormalized ranges at the workflow boundary", async () => {
+    const directory = temporaryDirectory();
+    const outputPath = join(directory, "adjacent-ranges.iso.partial");
+    const image = Buffer.alloc(4 * SECTOR_SIZE_BYTES);
+    const runner = createRunner({
+      copyPolicyVersion: DVD_INITIAL_COPY_POLICY_VERSION,
+      declaredByteCount: image.byteLength,
+      recoveredByteCount: 2 * SECTOR_SIZE_BYTES,
+      skippedRequestCount: 2,
+      diagnosticsTruncated: false,
+      diagnostics: [
+        mediumErrorDiagnostic(1, 1),
+        mediumErrorDiagnostic(2, 1),
+      ],
+      unrecoveredSourceRanges: [
+        {
+          startLba: 1,
+          sectorCount: 1,
+          classification: "skipped_untested",
+        },
+        {
+          startLba: 2,
+          sectorCount: 1,
+          classification: "skipped_untested",
+        },
+      ],
+    }, image);
+
+    await expect(runDvdInitialCopyForArchiveJob({
+      devicePath: "/dev/dvd",
+      onProgress: vi.fn(),
+      outputPath,
+      runner,
+      signal: new AbortController().signal,
+      sizeBytes: image.byteLength,
+    })).rejects.toThrow("DVD initial-copy result is invalid");
+  });
+
+  it("rejects skipped requests without unresolved source", async () => {
+    const directory = temporaryDirectory();
+    const outputPath = join(directory, "missing-ranges.iso.partial");
+    const image = Buffer.alloc(4 * SECTOR_SIZE_BYTES);
+    const runner = createRunner({
+      copyPolicyVersion: DVD_INITIAL_COPY_POLICY_VERSION,
+      declaredByteCount: image.byteLength,
+      recoveredByteCount: image.byteLength,
+      skippedRequestCount: 1,
+      diagnosticsTruncated: true,
+      diagnostics: [],
+      unrecoveredSourceRanges: [],
+    }, image);
+
+    await expect(runDvdInitialCopyForArchiveJob({
+      devicePath: "/dev/dvd",
+      onProgress: vi.fn(),
+      outputPath,
+      runner,
+      signal: new AbortController().signal,
+      sizeBytes: image.byteLength,
+    })).rejects.toThrow("DVD initial-copy result is invalid");
+  });
+
   it("parses an injected native-reader result through the workflow boundary", async () => {
     const directory = temporaryDirectory();
     const outputPath = join(directory, "native-initial.iso.partial");
