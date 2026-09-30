@@ -238,7 +238,8 @@ export function parseDvdInitialCopyResultProtocol(
   if (
     (parsed.skippedSectorCount === 0 && parsed.skippedSectorBitmapHex !== "") ||
     (parsed.skippedSectorCount > 0 &&
-      bitmap.length !== expectedBitmapByteCount) ||
+      (parsed.skippedSectorBitmapHex.length !== expectedBitmapByteCount * 2 ||
+        bitmap.length !== expectedBitmapByteCount)) ||
     (totalSectorCount % 8 !== 0 &&
       (bitmap.at(-1)! >>> (totalSectorCount % 8)) !== 0)
   ) {

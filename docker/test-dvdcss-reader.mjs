@@ -271,7 +271,7 @@ for (const vector of classificationVectors) {
     if (
       recovered.status !== 0 ||
       result.badSectorCount !== 1 ||
-      JSON.stringify(badSectorRanges(result, 40)) !==
+      JSON.stringify(rangesFromSectorBitmap(result.badSectorBitmapHex, 40)) !==
         JSON.stringify([{ startLba: lba, sectorCount: 1 }])
     ) {
       throw new Error(
@@ -432,18 +432,16 @@ function scsiSessionResult(stderr) {
   );
 }
 
-function badSectorRanges(result, totalSectorCount) {
-  const bitmap = Buffer.from(
-    result.badSectorBitmapHex ?? result.skippedSectorBitmapHex,
-    "hex",
-  );
+function rangesFromSectorBitmap(bitmapHex, totalSectorCount) {
+  const bitmap = Buffer.from(bitmapHex, "hex");
   const ranges = [];
   let startLba;
   for (let lba = 0; lba < totalSectorCount; lba += 1) {
-    const bad = (bitmap[Math.floor(lba / 8)] & (1 << (lba % 8))) !== 0;
-    if (bad && startLba === undefined) {
+    const unrecovered =
+      (bitmap[Math.floor(lba / 8)] & (1 << (lba % 8))) !== 0;
+    if (unrecovered && startLba === undefined) {
       startLba = lba;
-    } else if (!bad && startLba !== undefined) {
+    } else if (!unrecovered && startLba !== undefined) {
       ranges.push({ startLba, sectorCount: lba - startLba });
       startLba = undefined;
     }
@@ -752,7 +750,10 @@ if (
   skippedInitialRequestResult.skippedSectorCount !== 31 ||
   skippedInitialRequestResult.skippedRegionCount !== 1 ||
   skippedInitialRequestResult.skippedRequestCount !== 1 ||
-  JSON.stringify(badSectorRanges(skippedInitialRequestResult, 40)) !==
+  JSON.stringify(rangesFromSectorBitmap(
+    skippedInitialRequestResult.skippedSectorBitmapHex,
+    40,
+  )) !==
     JSON.stringify([{ startLba: 0, sectorCount: 31 }]) ||
   skippedInitialRequestResult.diagnosticsTruncated !== false ||
   JSON.stringify(skippedInitialRequestResult.diagnostics) !== JSON.stringify([{
@@ -796,7 +797,10 @@ if (
   !readFileSync(skippedOneSectorRequest.outputPath).equals(
     skippedOneSectorImage,
   ) ||
-  JSON.stringify(badSectorRanges(skippedOneSectorResult, 32)) !==
+  JSON.stringify(rangesFromSectorBitmap(
+    skippedOneSectorResult.skippedSectorBitmapHex,
+    32,
+  )) !==
     JSON.stringify([{ startLba: 31, sectorCount: 1 }]) ||
   skippedOneSectorResult.diagnostics[0]?.requestedBlockCount !== 1 ||
   JSON.stringify(testReads(skippedOneSectorRequest.stderr)) !==
@@ -827,7 +831,10 @@ if (
   adjacentSkippedResult.skippedRegionCount !== 1 ||
   adjacentSkippedResult.skippedRequestCount !== 2 ||
   adjacentSkippedResult.diagnostics.length !== 2 ||
-  JSON.stringify(badSectorRanges(adjacentSkippedResult, 40)) !==
+  JSON.stringify(rangesFromSectorBitmap(
+    adjacentSkippedResult.skippedSectorBitmapHex,
+    40,
+  )) !==
     JSON.stringify([{ startLba: 0, sectorCount: 40 }]) ||
   JSON.stringify(testReads(adjacentSkippedRequests.stderr)) !==
     JSON.stringify([
@@ -1083,7 +1090,10 @@ for (const [name, sense] of [
   if (
     exactMedium.status !== 0 ||
     exactMediumResult.badSectorCount !== 1 ||
-    JSON.stringify(badSectorRanges(exactMediumResult, 40)) !==
+    JSON.stringify(rangesFromSectorBitmap(
+      exactMediumResult.badSectorBitmapHex,
+      40,
+    )) !==
       JSON.stringify([{ startLba: 5, sectorCount: 1 }])
   ) {
     throw new Error(
@@ -1852,7 +1862,7 @@ for (const [name, fault] of optionalMediumSenseFixtures) {
   if (
     recovered.status !== 0 ||
     result.badSectorCount !== 1 ||
-    JSON.stringify(badSectorRanges(result, 40)) !==
+    JSON.stringify(rangesFromSectorBitmap(result.badSectorBitmapHex, 40)) !==
       JSON.stringify([{ startLba: 5, sectorCount: 1 }])
   ) {
     throw new Error(
@@ -1942,7 +1952,7 @@ for (const [name, sense] of [
   if (
     unlocatedMedium.status !== 0 ||
     result.badSectorCount !== 1 ||
-    JSON.stringify(badSectorRanges(result, 40)) !==
+    JSON.stringify(rangesFromSectorBitmap(result.badSectorBitmapHex, 40)) !==
       JSON.stringify([{ startLba: 35, sectorCount: 1 }])
   ) {
     throw new Error(
@@ -1965,7 +1975,10 @@ if (
   !isolatedContent.subarray(6 * 2_048).equals(content.subarray(6 * 2_048)) ||
   isolatedResult.badSectorCount !== 1 ||
   isolatedResult.badAreaCount !== 1 ||
-  JSON.stringify(badSectorRanges(isolatedResult, 40)) !==
+  JSON.stringify(rangesFromSectorBitmap(
+    isolatedResult.badSectorBitmapHex,
+    40,
+  )) !==
     JSON.stringify([{ startLba: 5, sectorCount: 1 }]) ||
   !isolatedReads.some(({ lba, blocks }) => lba === 5 && blocks === 1)
 ) {
@@ -1984,8 +1997,9 @@ const deferredThenCurrent = runTestCopy(
 if (
   deferredThenCurrent.status !== 0 ||
   recoveryResult(deferredThenCurrent.stderr).badSectorCount !== 1 ||
-  JSON.stringify(badSectorRanges(
-    recoveryResult(deferredThenCurrent.stderr), 40,
+  JSON.stringify(rangesFromSectorBitmap(
+    recoveryResult(deferredThenCurrent.stderr).badSectorBitmapHex,
+    40,
   )) !== JSON.stringify([{ startLba: 5, sectorCount: 1 }])
 ) {
   throw new Error(
@@ -2033,7 +2047,10 @@ const driveAResult = recoveryResult(driveA.stderr);
 const sharedRescueIdentity = statSync(driveA.outputPath);
 if (
   driveA.status !== 0 ||
-  JSON.stringify(badSectorRanges(driveAResult, 40)) !==
+  JSON.stringify(rangesFromSectorBitmap(
+    driveAResult.badSectorBitmapHex,
+    40,
+  )) !==
     JSON.stringify([
       { startLba: 5, sectorCount: 1 },
       { startLba: 9, sectorCount: 1 },
@@ -2058,7 +2075,10 @@ const driveBResult = recoveryResult(driveB.stderr);
 const driveBImage = readFileSync(driveA.outputPath);
 if (
   driveB.status !== 0 ||
-  JSON.stringify(badSectorRanges(driveBResult, 40)) !==
+  JSON.stringify(rangesFromSectorBitmap(
+    driveBResult.badSectorBitmapHex,
+    40,
+  )) !==
     JSON.stringify([{ startLba: 9, sectorCount: 1 }]) ||
   JSON.stringify(testReads(driveB.stderr)) !==
     JSON.stringify([
@@ -2491,7 +2511,10 @@ if (
     .equals(Buffer.alloc(2 * 2_048)) ||
   contiguousResult.badSectorCount !== 2 ||
   contiguousResult.badAreaCount !== 1 ||
-  JSON.stringify(badSectorRanges(contiguousResult, 40)) !==
+  JSON.stringify(rangesFromSectorBitmap(
+    contiguousResult.badSectorBitmapHex,
+    40,
+  )) !==
     JSON.stringify([{ startLba: 5, sectorCount: 2 }])
 ) {
   throw new Error(

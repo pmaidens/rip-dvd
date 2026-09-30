@@ -170,6 +170,7 @@ describe("DVD initial-copy protocol", () => {
     ["wrong recovered count", { recoveredByteCount: 5 * SECTOR_SIZE_BYTES }],
     ["wrong skipped count", { skippedSectorCount: 3 }],
     ["wrong region count", { skippedRegionCount: 1 }],
+    ["odd-length bitmap", { skippedSectorBitmapHex: "c3f" }],
     ["missing diagnostics", { diagnostics: [], diagnosticsTruncated: false }],
     ["out-of-range diagnostic", {
       diagnostics: [mediumErrorDiagnostic(7, 2)],
