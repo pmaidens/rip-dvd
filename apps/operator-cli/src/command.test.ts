@@ -1,5 +1,14 @@
 import { spawn, spawnSync } from "node:child_process";
-import { lstatSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it, vi } from "vitest";
@@ -172,12 +181,269 @@ it("inspects a persisted canonical Encode Output by artifact identity", async ()
       availableActions: [{
         name: "export",
         eligible: false,
-        reason: "Canonical Encode Output export is not available.",
+        reason: "The Encode Output has no recorded file identity.",
       }],
     },
   });
   expect(JSON.stringify(result.result)).not.toContain(outputPath);
   expect(mediaProbe).toHaveBeenCalledOnce();
+});
+
+it("exports canonical Encode Output bytes to a path on the CLI host", async () => {
+  const current = fixture();
+  const contents = "synthetic canonical output bytes\n";
+  const { predecessor } = seedCatalogReviewForReadFixture(current, {
+    validatedOutputContents: contents,
+  });
+  const artifactIdentity = encodeOutputArtifactIdentity(predecessor.id);
+  const destination = join(current.operatorHostPath, "exported-output.mkv");
+
+  const result = await current.run([
+    "encode-output",
+    "export",
+    artifactIdentity,
+    "--destination",
+    destination,
+  ]);
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stderr).toBe("");
+  expect(readFileSync(destination, "utf8")).toBe(contents);
+  expect(result.result).toEqual({
+    schemaVersion: 1,
+    artifact: {
+      identity: artifactIdentity,
+      type: "canonical_encode_output",
+      state: "published",
+    },
+    byteSize: Buffer.byteLength(contents),
+    destination,
+    sourceIdentity: predecessor.outputValidationFilesystemIdentity,
+    provenance: {
+      encodeJobId: predecessor.id,
+      discSelectionId: predecessor.discSelectionId,
+      originalDiscArchiveId: expect.any(String),
+      encodingProfileId: predecessor.encodingProfileId,
+      retainedOutputId: null,
+      sourceSnapshot: null,
+      sourceSnapshotAvailability: "not_recorded",
+    },
+  });
+  expect(result.stdout.trim().split("\n")).toHaveLength(1);
+  expect(result.stdout).not.toContain(contents.trim());
+});
+
+it("rejects a changed canonical Encode Output with its current identity", async () => {
+  const current = fixture();
+  const { predecessor } = seedCatalogReviewForReadFixture(current, {
+    validatedOutputContents: "synthetic validated output",
+  });
+  const artifactIdentity = encodeOutputArtifactIdentity(predecessor.id);
+  const sourcePath = join(current.mediaLibraryPath, "previous-film.mkv");
+  const destination = join(current.operatorHostPath, "changed-output.mkv");
+  writeFileSync(sourcePath, "synthetic changed output with different bytes");
+  const currentIdentity = encodeOutputFilesystemIdentity(lstatSync(sourcePath));
+
+  const result = await current.run([
+    "encode-output",
+    "export",
+    artifactIdentity,
+    "--destination",
+    destination,
+  ]);
+
+  expect(result.exitCode).toBe(2);
+  expect(result.result).toEqual({
+    error: {
+      code: "OUTPUT_IDENTITY_CHANGED",
+      message: "The Encode Output no longer matches its recorded file identity.",
+      artifactIdentity,
+      currentIdentity,
+    },
+  });
+  expect(result.stderr).toBe(
+    "The Encode Output no longer matches its recorded file identity.\n",
+  );
+  expect(existsSync(destination)).toBe(false);
+});
+
+it("rejects a missing canonical Encode Output with a stable JSON reason", async () => {
+  const current = fixture();
+  const { predecessor } = seedCatalogReviewForReadFixture(current, {
+    validatedOutputContents: "synthetic validated output",
+  });
+  const artifactIdentity = encodeOutputArtifactIdentity(predecessor.id);
+  const destination = join(current.operatorHostPath, "missing-output.mkv");
+  unlinkSync(join(current.mediaLibraryPath, "previous-film.mkv"));
+
+  const result = await current.run([
+    "encode-output",
+    "export",
+    artifactIdentity,
+    "--destination",
+    destination,
+  ]);
+
+  expect(result.exitCode).toBe(2);
+  expect(result.result).toEqual({
+    error: {
+      code: "OUTPUT_MISSING",
+      message: "The recorded Encode Output file is missing.",
+      artifactIdentity,
+      currentIdentity: null,
+    },
+  });
+  expect(existsSync(destination)).toBe(false);
+});
+
+it("does not follow an unsafe substitute for the canonical Encode Output", async () => {
+  const current = fixture();
+  const { predecessor } = seedCatalogReviewForReadFixture(current, {
+    validatedOutputContents: "synthetic validated output",
+  });
+  const artifactIdentity = encodeOutputArtifactIdentity(predecessor.id);
+  const sourcePath = join(current.mediaLibraryPath, "previous-film.mkv");
+  const substitutePath = join(current.mediaLibraryPath, "browser-rendition.mkv");
+  const destination = join(current.operatorHostPath, "unsafe-output.mkv");
+  writeFileSync(substitutePath, "synthetic derived rendition");
+  unlinkSync(sourcePath);
+  symlinkSync(substitutePath, sourcePath);
+  const currentIdentity = encodeOutputFilesystemIdentity(lstatSync(sourcePath));
+
+  const result = await current.run([
+    "encode-output",
+    "export",
+    artifactIdentity,
+    "--destination",
+    destination,
+  ]);
+
+  expect(result.exitCode).toBe(2);
+  expect(result.result).toEqual({
+    error: {
+      code: "OUTPUT_NOT_REGULAR",
+      message: "The recorded Encode Output is not a regular file.",
+      artifactIdentity,
+      currentIdentity,
+    },
+  });
+  expect(existsSync(destination)).toBe(false);
+});
+
+it("does not overwrite an existing CLI-host destination", async () => {
+  const current = fixture();
+  const { predecessor } = seedCatalogReviewForReadFixture(current, {
+    validatedOutputContents: "synthetic validated output",
+  });
+  const artifactIdentity = encodeOutputArtifactIdentity(predecessor.id);
+  const destination = join(current.operatorHostPath, "existing-output.mkv");
+  writeFileSync(destination, "keep these existing bytes");
+
+  const result = await current.run([
+    "encode-output",
+    "export",
+    artifactIdentity,
+    "--destination",
+    destination,
+  ]);
+
+  expect(result.exitCode).toBe(2);
+  expect(result.result).toEqual({
+    error: {
+      code: "EXPORT_DESTINATION_EXISTS",
+      message: "The Encode Output export destination already exists.",
+      artifactIdentity,
+      currentIdentity: predecessor.outputValidationFilesystemIdentity,
+    },
+  });
+  expect(readFileSync(destination, "utf8")).toBe("keep these existing bytes");
+});
+
+it("rejects an Encode Output without recorded identity evidence", async () => {
+  const current = fixture();
+  const { predecessor } = seedCatalogReviewForReadFixture(current);
+  const artifactIdentity = encodeOutputArtifactIdentity(predecessor.id);
+  const sourcePath = join(current.mediaLibraryPath, "previous-film.mkv");
+  const destination = join(current.operatorHostPath, "historical-output.mkv");
+  writeFileSync(sourcePath, "synthetic historical output");
+  const currentIdentity = encodeOutputFilesystemIdentity(lstatSync(sourcePath));
+
+  const result = await current.run([
+    "encode-output",
+    "export",
+    artifactIdentity,
+    "--destination",
+    destination,
+  ]);
+
+  expect(result.exitCode).toBe(2);
+  expect(result.result).toEqual({
+    error: {
+      code: "OUTPUT_IDENTITY_NOT_RECORDED",
+      message: "The Encode Output has no recorded file identity.",
+      artifactIdentity,
+      currentIdentity,
+    },
+  });
+  expect(existsSync(destination)).toBe(false);
+});
+
+it("removes the export when canonical artifact authority changes during copy", async () => {
+  const current = fixture();
+  const { predecessor } = seedCatalogReviewForReadFixture(current, {
+    validatedOutputContents: "synthetic authority-bound output",
+  });
+  const artifactIdentity = encodeOutputArtifactIdentity(predecessor.id);
+  const destination = join(current.operatorHostPath, "raced-output.mkv");
+  const access = current.openAccess();
+  let authorityReads = 0;
+  const racingAccess: DataAccess = {
+    ...access,
+    readEncodeOutputInspectionSnapshot(read) {
+      authorityReads += 1;
+      return access.readEncodeOutputInspectionSnapshot((snapshot) =>
+        read(authorityReads === 2
+          ? {
+              ...snapshot,
+              encodeJobs: {
+                ...snapshot.encodeJobs,
+                find(id) {
+                  const job = snapshot.encodeJobs.find(id);
+                  return job === null ? null : { ...job, status: "queued" };
+                },
+              },
+            }
+          : snapshot)
+      );
+    },
+  };
+
+  const result = await current.run(
+    [
+      "encode-output",
+      "export",
+      artifactIdentity,
+      "--destination",
+      destination,
+    ],
+    undefined,
+    undefined,
+    { openAccess: () => racingAccess },
+  );
+
+  expect(result).toMatchObject({
+    exitCode: 2,
+    result: {
+      error: {
+        code: "OUTPUT_AUTHORITY_CHANGED",
+        message:
+          "Encode Output authority changed while the artifact was being exported.",
+        artifactIdentity,
+        currentIdentity: predecessor.outputValidationFilesystemIdentity,
+      },
+    },
+  });
+  expect(existsSync(destination)).toBe(false);
 });
 
 it("reports unknown inspectability without turning probe failure into command failure", async () => {

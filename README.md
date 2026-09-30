@@ -501,7 +501,12 @@ Use matching `limit` and `offset` query parameters for Encode Job output
 history. `encode-output inspect <artifact-identity>` reports the persisted
 validation evidence only when it applies to the observed file and the media
 probe succeeds; otherwise validation, completeness, and media fields remain
-explicitly unknown.
+explicitly unknown. When inspection reports export as available,
+`encode-output export <artifact-identity> --destination <path>` copies the
+identity-bound canonical file to a new path on the CLI host. It returns JSON
+metadata and provenance on stdout, never media bytes. The command rejects an
+existing destination and reports stable JSON reasons for missing, changed, or
+unsafe source files.
 
 `wait <kind> <id> --timeout-ms <milliseconds>` polls existing Disc Inspection,
 Archive Request, Archive Job, Encode Job, archive audit, or filesystem verification state for up to one hour. It returns

@@ -57,6 +57,7 @@ import {
   readFilesystemVerificationInventory,
 } from "./filesystem-verification-inventory.js";
 import {
+  exportEncodeOutput,
   inspectEncodeOutput,
   type EncodeOutputMediaProbe,
 } from "./encode-output-inspection.js";
@@ -328,6 +329,10 @@ export function createApplicationOperations(
         artifactIdentity,
         dependencies.encodeOutputMediaProbe,
       ),
+    exportEncodeOutput: (input: {
+      artifactIdentity: unknown;
+      destination: unknown;
+    }) => exportEncodeOutput(access, input),
     submitArchiveRequest: (input: {
       mutationKey: unknown;
       detectedDiscId: string;
@@ -538,13 +543,17 @@ export type {
 export {
   encodeOutputArtifactReferences,
   encodeOutputArtifactIdentity,
+  EncodeOutputExportRejectedError,
+  exportEncodeOutput,
   inspectEncodeOutput,
   InvalidEncodeOutputArtifactIdentityError,
+  InvalidEncodeOutputExportInputError,
   probeEncodeOutputMedia,
   retainedEncodeOutputArtifactIdentity,
 } from "./encode-output-inspection.js";
 export type {
   EncodeOutputArtifactReference,
+  EncodeOutputExportReasonCode,
   EncodeOutputInspection,
   EncodeOutputInspectionReasonCode,
   EncodeOutputMediaInspection,
