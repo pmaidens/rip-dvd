@@ -307,13 +307,15 @@ function recentWork<T extends { status: string; updatedAt: Date; id: string }>(
 
 function requestActions(request: ArchiveRequest) {
   if (request.evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT) {
+    const cancelEligible = ["pending", "running", "needs_attention"].includes(
+      request.status,
+    );
     return [
       recoveryAction(
         "cancel",
-        false,
-        DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+        cancelEligible,
+        `Archive Request is ${request.status}.`,
         "archiveRequestId",
-        DVD_RECOVERY_EVIDENCE_ADMISSION.code,
       ),
       recoveryAction(
         "retry",

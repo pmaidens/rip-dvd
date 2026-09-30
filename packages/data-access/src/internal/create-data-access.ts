@@ -4646,12 +4646,36 @@ export function createDataAccessInternal(
     };
   }
 
+  function requireDvdEvidenceReplacementEncodingAvailable(
+    reader: RearchiveProposalReader,
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): void {
+    if (!hasDvdRecoveryEvidenceSchema) return;
+    const evidenceHeader = reader
+      .select({ id: dvdArchiveEvidenceHeaders.originalDiscArchiveId })
+      .from(dvdArchiveEvidenceHeaders)
+      .where(eq(
+        dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+        originalDiscArchiveId,
+      ))
+      .limit(1)
+      .get();
+    if (evidenceHeader !== undefined) {
+      throw new DvdRecoveryEvidenceEncodingUnavailableError();
+    }
+  }
+
   function insertCorrectedEncodeReplacementJob(
     transaction: CatalogTransaction,
     candidate: ValidatedCorrectedEncodeReplacement,
+    originalDiscArchiveId: OriginalDiscArchiveId,
     discSelectionId: DiscSelectionId,
     timestamp: Date,
   ): EncodeJob {
+    requireDvdEvidenceReplacementEncodingAvailable(
+      transaction,
+      originalDiscArchiveId,
+    );
     if (
       candidate.outputPath === candidate.predecessor.outputPath &&
       candidate.predecessor.reservesOutputPath
@@ -5229,7 +5253,6 @@ export function createDataAccessInternal(
         .where(eq(archiveRequests.id, id)).get(),
       "archive request", id,
     );
-    assertDvdRecoveryEvidenceAdmissionAvailable(current.evidenceFormat);
     if (["cancelled", "fulfilled", "cancellation_requested"].includes(current.status)) {
       return current;
     }
@@ -7278,6 +7301,9 @@ export function createDataAccessInternal(
             transaction,
             true,
           );
+          if (replacements.length > 0) {
+            requireDvdEvidenceReplacementEncodingAvailable(transaction, id);
+          }
           if (archive.updatedAt.getTime() !== catalogRevision.getTime()) {
             throw new StaleCatalogRevisionError(
               "Catalog review changed; reload before completing review",
@@ -7380,6 +7406,7 @@ export function createDataAccessInternal(
             const replacement = insertCorrectedEncodeReplacementJob(
               transaction,
               candidate,
+              id,
               candidate.plan.replacementDiscSelectionId,
               timestamp,
             );
@@ -8826,6 +8853,13 @@ export function createDataAccessInternal(
           );
           if (replay !== undefined) return replay;
 
+          if (input.replacements.length > 0) {
+            requireDvdEvidenceReplacementEncodingAvailable(
+              transaction,
+              input.targetArchiveId,
+            );
+          }
+
           const plan = planRearchiveAcceptance(transaction, input);
           const previewDecision = transaction
             .select()
@@ -8966,6 +9000,7 @@ export function createDataAccessInternal(
                 replacesExistingOutput:
                   replacement.replacesExistingOutput,
               },
+              plan.targetArchiveId,
               replacementDiscSelectionId,
               timestamp,
             ));
@@ -10739,11 +10774,6 @@ export function createDataAccessInternal(
         return replayRecoveryMutation(mutationKey, "archive_request.cancel", id, (transaction) => {
           const current = transaction.select().from(archiveRequests)
             .where(eq(archiveRequests.id, id)).get();
-          if (current) {
-            assertDvdRecoveryEvidenceAdmissionAvailable(
-              current.evidenceFormat,
-            );
-          }
           if (current && !["pending", "running", "needs_attention"].includes(current.status)) {
             throw new InvalidStatusTransitionError(
               "archive request", current.status, "cancelled",

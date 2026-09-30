@@ -21,11 +21,11 @@ import {
   type EncodeOutputMediaProbe,
   InvalidEncodeJobInputError,
   serializeJob,
+  UnsupportedArchiveEvidenceFormatError,
 } from "@rip-dvd/application";
 import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
-  DVD_RECOVERY_EVIDENCE_FORMAT,
   DvdRecoveryEvidenceAdmissionClosedError,
   DvdRecoveryEvidenceEncodingUnavailableError,
   InvalidStatusTransitionError,
@@ -512,7 +512,7 @@ function mutationOptions(
 function submissionInputs(args: readonly string[]): {
   mutationKey: string;
   detectedDiscId: string;
-  evidenceFormat?: typeof DVD_RECOVERY_EVIDENCE_FORMAT;
+  evidenceFormat?: string;
 } {
   const { options, mutationKey } = mutationOptions(
     args, ["--key", "--detected-disc-id", "--evidence-format"], "Invalid Archive Request options.",
@@ -522,16 +522,6 @@ function submissionInputs(args: readonly string[]): {
     throw new CommandFailure("INVALID_ARGUMENTS", "Detected Disc ID is required.", 2);
   }
   const evidenceFormat = options.get("--evidence-format")?.trim();
-  if (
-    evidenceFormat !== undefined &&
-    evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT
-  ) {
-    throw new CommandFailure(
-      "INVALID_ARGUMENTS",
-      "Archive evidence format is unsupported.",
-      2,
-    );
-  }
   return {
     mutationKey,
     detectedDiscId,
@@ -562,6 +552,9 @@ function submitArchiveRequest(
         2,
         error.blockingReasons,
       );
+    }
+    if (error instanceof UnsupportedArchiveEvidenceFormatError) {
+      throw new CommandFailure(error.code, error.message, 2);
     }
     if (
       error instanceof DomainInvariantError ||

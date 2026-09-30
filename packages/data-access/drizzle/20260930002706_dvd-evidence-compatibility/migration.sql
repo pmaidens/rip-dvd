@@ -221,6 +221,37 @@ BEFORE UPDATE ON `archive_requests`
 BEGIN
   SELECT CASE
     WHEN OLD.`evidence_format` = 'dvd-recovery-evidence-v1'
+      AND NOT (
+        NEW.`id` = OLD.`id`
+        AND NEW.`detected_disc_id` = OLD.`detected_disc_id`
+        AND NEW.`rearchive_source_archive_id` IS OLD.`rearchive_source_archive_id`
+        AND NEW.`evidence_format` = OLD.`evidence_format`
+        AND NEW.`priority` = OLD.`priority`
+        AND NEW.`fulfilled_at` IS OLD.`fulfilled_at`
+        AND NEW.`created_at` = OLD.`created_at`
+        AND NEW.`updated_at` >= OLD.`updated_at`
+        AND (
+          (
+            OLD.`status` IN ('pending', 'needs_attention')
+            AND NEW.`status` = 'cancelled'
+            AND OLD.`cancellation_requested_at` IS NULL
+            AND OLD.`cancelled_at` IS NULL
+            AND NEW.`cancellation_requested_at` IS NOT NULL
+            AND NEW.`cancelled_at` IS NOT NULL
+            AND NEW.`cancellation_requested_at` = NEW.`updated_at`
+            AND NEW.`cancelled_at` = NEW.`updated_at`
+          )
+          OR (
+            OLD.`status` = 'running'
+            AND NEW.`status` = 'cancellation_requested'
+            AND OLD.`cancellation_requested_at` IS NULL
+            AND OLD.`cancelled_at` IS NULL
+            AND NEW.`cancellation_requested_at` IS NOT NULL
+            AND NEW.`cancelled_at` IS NULL
+            AND NEW.`cancellation_requested_at` = NEW.`updated_at`
+          )
+        )
+      )
     THEN RAISE(
       ABORT,
       'New-format DVD Archive Job admission is closed until the recovery and encoding workflow is complete.'

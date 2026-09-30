@@ -608,8 +608,13 @@ it("backfills retained Encode Output ownership from durable insertion order", ()
 
 it("migrates legacy archives and rehearses restoring the pre-write DVD evidence backup", () => {
   const databasePath = createDatabasePath("rip-dvd-evidence-migration-");
+  const evidenceMigrations = [
+    "20260930002706_dvd-evidence-compatibility",
+    "20260930003106_dvd-evidence-authority",
+    "20260930003626_dvd-evidence-checkpoints",
+  ] as const;
   const previousMigrations = createMigrationsThrough(
-    "20260922212838_modern_khan",
+    "20260930002622_wandering_micromax",
   );
   const previousAccess = createDataAccess({
     databasePath,
@@ -632,6 +637,13 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
         boundary_reported_size_bytes = 4096,
         boundary_published_size_bytes = 4096
     WHERE id = 'evidence-new-format-archive';
+
+    UPDATE encode_jobs
+    SET output_validation_result = 'passed',
+        output_validation_filesystem_identity = 'synthetic-main-output',
+        output_validated_at = 2,
+        output_completeness = 'complete'
+    WHERE id = 'evidence-legacy-clean-job';
 
     UPDATE original_disc_archives
     SET integrity = 'clean_read',
@@ -697,9 +709,13 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       archiveRequest: access.archiveRequests.find(
         "evidence-legacy-clean-request" as ArchiveRequestId,
       ),
-      encodeJobs: access.encodeJobs.list().map(({ id, status }) => ({
-        id,
-        status,
+      encodeJobs: access.encodeJobs.list().map((job) => ({
+        id: job.id,
+        status: job.status,
+        validationResult: job.outputValidationResult,
+        validationFilesystemIdentity: job.outputValidationFilesystemIdentity,
+        validatedAt: job.outputValidatedAt,
+        completeness: job.outputCompleteness,
       })).sort((left, right) => left.id.localeCompare(right.id)),
       evidenceReads: [...legacyKeys, "evidence-new-format"].map((key) => ({
         header: access.catalog.findDvdArchiveEvidenceHeader(
@@ -716,8 +732,30 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     expect(sqlite.prepare("PRAGMA quick_check").get()).toEqual({
       quick_check: "ok",
     });
+    const appliedEvidenceMigrations = sqlite.prepare(`
+      SELECT name
+      FROM __drizzle_migrations
+      WHERE name IN (?, ?, ?)
+      ORDER BY created_at, name
+    `).all(...evidenceMigrations);
+    const retainedOutputColumns = sqlite.prepare(`
+      SELECT name
+      FROM pragma_table_info('retained_encode_outputs')
+      WHERE name IN (
+        'source_encode_job_id',
+        'validation_result',
+        'validation_filesystem_identity',
+        'validated_at',
+        'completeness'
+      )
+      ORDER BY name
+    `).all();
     sqlite.close();
-    return snapshot;
+    return {
+      ...snapshot,
+      appliedEvidenceMigrations,
+      retainedOutputColumns,
+    };
   };
 
   const migratedSnapshot = readLegacySnapshot(databasePath);
@@ -762,6 +800,23 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   expect(migratedSnapshot.encodeJobs).toHaveLength(4);
   expect(migratedSnapshot.encodeJobs.every(({ status }) => status === "queued"))
     .toBe(true);
+  expect(migratedSnapshot.encodeJobs).toContainEqual(expect.objectContaining({
+    id: "evidence-legacy-clean-job",
+    validationResult: "passed",
+    validationFilesystemIdentity: "synthetic-main-output",
+    validatedAt: new Date(2),
+    completeness: "complete",
+  }));
+  expect(migratedSnapshot.appliedEvidenceMigrations).toEqual(
+    evidenceMigrations.map((name) => ({ name })),
+  );
+  expect(migratedSnapshot.retainedOutputColumns).toEqual([
+    { name: "completeness" },
+    { name: "source_encode_job_id" },
+    { name: "validated_at" },
+    { name: "validation_filesystem_identity" },
+    { name: "validation_result" },
+  ]);
   expect(migratedSnapshot.evidenceReads).toEqual([
     { header: null, recovery: null },
     { header: null, recovery: null },
@@ -782,6 +837,70 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     FROM mutation_invocations
     WHERE key = '00000000-0000-4000-8000-000000000402'
   `).get()).toEqual({ count: 0 });
+  admissionCheck.exec(`
+    INSERT INTO detected_discs (
+      id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+      created_at, updated_at
+    ) VALUES
+      (
+        'evidence-cancel-pending-disc', 'evidence-new-format-drive', 'dvd',
+        'evidence-cancel-pending-fingerprint', 'approved', 1, 1, 1
+      ),
+      (
+        'evidence-cancel-running-disc', 'evidence-new-format-drive', 'dvd',
+        'evidence-cancel-running-fingerprint', 'approved', 1, 1, 1
+      );
+
+    INSERT INTO archive_requests (
+      id, detected_disc_id, evidence_format, status, priority,
+      created_at, updated_at
+    ) VALUES
+      (
+        'evidence-cancel-pending-request', 'evidence-cancel-pending-disc',
+        'dvd-recovery-evidence-v1', 'pending', 0, 1, 1
+      ),
+      (
+        'evidence-cancel-running-request', 'evidence-cancel-running-disc',
+        'dvd-recovery-evidence-v1', 'running', 0, 1, 1
+      );
+
+    UPDATE archive_requests
+    SET status = 'cancelled', cancellation_requested_at = 2,
+        cancelled_at = 2, updated_at = 2
+    WHERE id = 'evidence-cancel-pending-request';
+
+    UPDATE archive_requests
+    SET status = 'cancellation_requested', cancellation_requested_at = 2,
+        updated_at = 2
+    WHERE id = 'evidence-cancel-running-request';
+  `);
+  expect(admissionCheck.prepare(`
+    SELECT id, status, cancellation_requested_at, cancelled_at
+    FROM archive_requests
+    WHERE id IN (
+      'evidence-cancel-pending-request',
+      'evidence-cancel-running-request'
+    )
+    ORDER BY id
+  `).all()).toEqual([
+    {
+      id: "evidence-cancel-pending-request",
+      status: "cancelled",
+      cancellation_requested_at: 2,
+      cancelled_at: 2,
+    },
+    {
+      id: "evidence-cancel-running-request",
+      status: "cancellation_requested",
+      cancellation_requested_at: 2,
+      cancelled_at: null,
+    },
+  ]);
+  expect(() => admissionCheck.exec(`
+    UPDATE archive_requests
+    SET priority = 1, updated_at = 3
+    WHERE id = 'evidence-cancel-pending-request'
+  `)).toThrow(/admission is closed/i);
   expect(() => admissionCheck.exec(`
     UPDATE original_disc_archives
     SET integrity_evidence_revision = 1
@@ -1519,7 +1638,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
 it("fails closed instead of inventing checkpoint identities for interstitial evidence", () => {
   const databasePath = createDatabasePath("rip-dvd-evidence-checkpoint-guard-");
   const previousMigrations = createMigrationsThrough(
-    "20260929231006_dvd-evidence-authority",
+    "20260930003106_dvd-evidence-authority",
   );
   const previousAccess = createLegacySidecarDataAccess({
     databasePath,

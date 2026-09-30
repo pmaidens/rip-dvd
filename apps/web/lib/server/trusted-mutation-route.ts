@@ -5,7 +5,11 @@ import {
   MutationKeyConflictError,
   RecordNotFoundError,
 } from "@rip-dvd/data-access";
-import { InvalidMutationKeyError, parseMutationKey } from "@rip-dvd/application";
+import {
+  InvalidMutationKeyError,
+  parseMutationKey,
+  UnsupportedArchiveEvidenceFormatError,
+} from "@rip-dvd/application";
 
 import { trustedMutationRequestProblem } from "./trusted-mutation-request";
 
@@ -88,6 +92,12 @@ export async function runTrustedMutationRoute(
   try {
     return await mutate();
   } catch (error) {
+    if (error instanceof UnsupportedArchiveEvidenceFormatError) {
+      return noStoreJsonResponse({ error: {
+        code: error.code,
+        message: error.message,
+      } }, 400);
+    }
     if (error instanceof DvdRecoveryEvidenceAdmissionClosedError) {
       return noStoreJsonResponse({ error: {
         code: error.code,

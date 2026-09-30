@@ -5,7 +5,6 @@ import {
 } from "@rip-dvd/application";
 import { loadConfig } from "@rip-dvd/config";
 import type { DataAccess } from "@rip-dvd/data-access";
-import { DVD_RECOVERY_EVIDENCE_FORMAT } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../lib/data-access";
 import {
@@ -56,12 +55,6 @@ export async function createArchiveRequestsRoute(
         typeof body === "object" && body !== null && !Array.isArray(body)
           ? (body as Record<string, unknown>).evidenceFormat
           : undefined;
-      if (
-        evidenceFormatValue !== undefined &&
-        evidenceFormatValue !== DVD_RECOVERY_EVIDENCE_FORMAT
-      ) {
-        return noStoreJsonResponse({ error: "Invalid Archive Request" }, 400);
-      }
       const evidenceFormat = evidenceFormatValue;
       return noStoreJsonResponse(
         createApplicationOperations(getAccess()).submitArchiveRequest({

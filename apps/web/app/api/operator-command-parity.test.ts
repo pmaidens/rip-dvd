@@ -19,7 +19,12 @@ import {
 } from "@rip-dvd/application";
 import type { ArchiveRequestId, MediaItemId } from "@rip-dvd/data-access";
 
-import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../operator-cli/src/operator-workflow.test-support.js";
+import {
+  createOperatorWorkflowFixture,
+  markArchiveWithDvdRecoveryEvidence,
+  seedCatalogReviewForReadFixture,
+  seedRearchiveCatalogReviewFixture,
+} from "../../../operator-cli/src/operator-workflow.test-support.js";
 import { createCatalogReviewRoute } from "./catalog-reviews/[id]/route";
 import { createCatalogSuggestionRoute } from "./catalog-reviews/[id]/suggestion/route";
 import { createDeploymentReadinessResponse } from "./deployment-readiness/route";
@@ -212,6 +217,55 @@ it("reports the same closed DVD evidence admission through web and CLI", async (
   }
 });
 
+it("reports unsupported Archive evidence formats consistently through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const access = fixture.openAccess();
+  try {
+    const mutationKey = "00000000-0000-4000-8000-000000000405";
+    const cli = await fixture.run([
+      "submit-archive-request",
+      "--key",
+      mutationKey,
+      "--detected-disc-id",
+      "synthetic-disc",
+      "--evidence-format",
+      "unsupported-evidence-v2",
+    ]);
+    const web = await createArchiveRequestsRoute(
+      new Request(`${trustedOrigin}/api/archive-requests`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+          "Sec-Fetch-Site": "same-origin",
+        },
+        body: JSON.stringify({
+          mutationKey,
+          detectedDiscId: "synthetic-disc",
+          evidenceFormat: "unsupported-evidence-v2",
+        }),
+      }),
+      () => access,
+      () => trustedOrigin,
+    );
+
+    expect(web.status).toBe(400);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toEqual({
+      error: {
+        code: "UNSUPPORTED_ARCHIVE_EVIDENCE_FORMAT",
+        message: "Archive evidence format is unsupported.",
+      },
+    });
+    expect(access.archiveRequests.list()).toEqual([]);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
 function catalogReviewMutationRequest(
   archiveId: string,
   body: Record<string, unknown>,
@@ -226,6 +280,261 @@ function catalogReviewMutationRequest(
     body: JSON.stringify(body),
   });
 }
+
+const dvdEvidenceEncodingUnavailableError = {
+  error: {
+    code: DVD_RECOVERY_EVIDENCE_ENCODING.code,
+    message: DVD_RECOVERY_EVIDENCE_ENCODING.message,
+    blockingReasons: [{
+      code: DVD_RECOVERY_EVIDENCE_ENCODING.code,
+      message: DVD_RECOVERY_EVIDENCE_ENCODING.message,
+    }],
+  },
+};
+
+it("blocks Catalog Review replacement queueing consistently through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const seeded = seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    const review = await fixture.run([
+      "catalog-review",
+      "show",
+      seeded.archive.id,
+    ]);
+    const catalogRevision = (review.result as { catalogRevision: string })
+      .catalogRevision;
+    const command = {
+      action: "complete_review" as const,
+      catalogRevision,
+      outcome: "reviewed_with_selections" as const,
+      replacementEncodes: [{
+        predecessorEncodeJobId: seeded.predecessor.id,
+        encodingProfileId: seeded.predecessor.encodingProfileId,
+        outputPath: seeded.predecessor.outputPath,
+      }],
+    };
+    const preview = await fixture.run([
+      "catalog-review",
+      "preview-completion",
+      seeded.archive.id,
+      "--json",
+      JSON.stringify(command),
+    ]);
+    const previewResult = preview.result as {
+      catalogRevision: string;
+      previewToken: string;
+    };
+    markArchiveWithDvdRecoveryEvidence(
+      fixture.databasePath,
+      seeded.archive.id,
+      "catalog-review-parity",
+    );
+    const mutationKey = "00000000-0000-4000-8000-000000000409";
+    const web = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(seeded.archive.id, {
+        ...command,
+        mutationKey,
+        acknowledgedRevision: previewResult.catalogRevision,
+        previewToken: previewResult.previewToken,
+        acknowledge: true,
+      }),
+      seeded.archive.id,
+      () => access,
+      () => trustedOrigin,
+      () => fixture.mediaLibraryPath,
+    );
+    const cli = await fixture.run([
+      "catalog-review",
+      "complete",
+      seeded.archive.id,
+      "--key",
+      mutationKey,
+      "--revision",
+      previewResult.catalogRevision,
+      "--preview-token",
+      previewResult.previewToken,
+      "--acknowledge",
+      "--json",
+      JSON.stringify(command),
+    ]);
+
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toEqual(dvdEvidenceEncodingUnavailableError);
+    expect(access.catalog.listOriginalDiscArchives({
+      ids: [seeded.archive.id],
+    })[0]).toMatchObject({
+      catalogReviewOutcome: "needs_review",
+      catalogReviewedAt: null,
+    });
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: seeded.predecessor.id,
+        predecessorEncodeJobId: null,
+        reservesOutputPath: true,
+      }),
+    ]);
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    expect(sqlite.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE key = ?
+    `).get(mutationKey)).toEqual({ count: 0 });
+    sqlite.close();
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("blocks Re-archive replacement queueing consistently through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const seeded = seedRearchiveCatalogReviewFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    const review = await fixture.run([
+      "catalog-review",
+      "show",
+      seeded.targetArchive.id,
+    ]);
+    const initial = (review.result as {
+      rearchiveProposal: {
+        catalogRevision: string;
+        sourceCatalogRevision: string;
+        mappings: Array<{
+          sourceDiscSelectionId: string;
+          proposedMapping: {
+            mediaItemId: string;
+            sourceIdentity: { kind: "dvd_title"; titleNumber: number };
+            label: string | null;
+          };
+        }>;
+      };
+    }).rearchiveProposal;
+    const save = await fixture.run([
+      "catalog-review",
+      "save-rearchive-proposal",
+      seeded.targetArchive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000410",
+      "--json",
+      JSON.stringify({
+        action: "save_rearchive_mapping_proposal",
+        catalogRevision: initial.catalogRevision,
+        sourceCatalogRevision: initial.sourceCatalogRevision,
+        mappings: initial.mappings.map((mapping) => ({
+          sourceDiscSelectionId: mapping.sourceDiscSelectionId,
+          ...mapping.proposedMapping,
+        })),
+      }),
+    ]);
+    const saved = (save.result as {
+      proposal: { catalogRevision: string; sourceCatalogRevision: string };
+    }).proposal;
+    const profile = access.encodingProfiles.create({
+      key: "rearchive-evidence-parity",
+      displayName: "Re-archive evidence parity",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: seeded.sourceSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: join(fixture.mediaLibraryPath, "rearchive-evidence.mkv"),
+    });
+    const command = {
+      action: "accept_rearchive" as const,
+      catalogRevision: saved.catalogRevision,
+      sourceCatalogRevision: saved.sourceCatalogRevision,
+      replacementEncodes: [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: profile.id,
+        outputPath: predecessor.outputPath,
+      }],
+    };
+    const preview = await fixture.run([
+      "catalog-review",
+      "preview-rearchive-acceptance",
+      seeded.targetArchive.id,
+      "--json",
+      JSON.stringify(command),
+    ]);
+    const previewResult = preview.result as {
+      catalogRevision: string;
+      sourceCatalogRevision: string;
+      previewToken: string;
+    };
+    markArchiveWithDvdRecoveryEvidence(
+      fixture.databasePath,
+      seeded.targetArchive.id,
+      "rearchive-acceptance-parity",
+    );
+    const mutationKey = "00000000-0000-4000-8000-000000000411";
+    const web = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(seeded.targetArchive.id, {
+        ...command,
+        mutationKey,
+        acknowledgedRevision: previewResult.catalogRevision,
+        acknowledgedSourceRevision: previewResult.sourceCatalogRevision,
+        previewToken: previewResult.previewToken,
+        acknowledge: true,
+      }),
+      seeded.targetArchive.id,
+      () => access,
+      () => trustedOrigin,
+      () => fixture.mediaLibraryPath,
+    );
+    const cli = await fixture.run([
+      "catalog-review",
+      "accept-rearchive",
+      seeded.targetArchive.id,
+      "--key",
+      mutationKey,
+      "--revision",
+      previewResult.catalogRevision,
+      "--source-revision",
+      previewResult.sourceCatalogRevision,
+      "--preview-token",
+      previewResult.previewToken,
+      "--acknowledge",
+      "--json",
+      JSON.stringify(command),
+    ]);
+
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toEqual(dvdEvidenceEncodingUnavailableError);
+    expect(access.catalog.listDiscSelections({
+      ids: [seeded.sourceSelection.id],
+    })).toEqual([expect.objectContaining({
+      id: seeded.sourceSelection.id,
+    })]);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: seeded.targetArchive.id,
+    })).toEqual([]);
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: predecessor.id,
+        status: "queued",
+        reservesOutputPath: true,
+        predecessorEncodeJobId: null,
+      }),
+    ]);
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    expect(sqlite.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE key = ?
+    `).get(mutationKey)).toEqual({ count: 0 });
+    sqlite.close();
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
 
 it("shares Encode Job validation and keyed outcomes across web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
@@ -770,11 +1079,8 @@ it("returns the same operational records and evidence through web and CLI", asyn
         availableActions: [
           expect.objectContaining({
             name: "cancel",
-            eligible: false,
-            blockingReasons: [{
-              code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
-              message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
-            }],
+            eligible: true,
+            blockingReasons: [],
           }),
           expect.objectContaining({
             name: "retry",
@@ -787,63 +1093,89 @@ it("returns the same operational records and evidence through web and CLI", asyn
         ],
       },
     });
-    for (const mutation of [
+    const cancelKey = "00000000-0000-4000-8000-000000000403";
+    const cancelRequest = () => new Request(
+      "http://localhost/api/archive-requests/synthetic-evidence-pending-request",
       {
-        command: "cancel-archive-request",
-        key: "00000000-0000-4000-8000-000000000403",
         method: "DELETE",
-        route: createArchiveRequestCancellationRoute,
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost",
+          Origin: "http://localhost",
+        },
+        body: JSON.stringify({ mutationKey: cancelKey }),
       },
+    );
+    const webCancellation = await createArchiveRequestCancellationRoute(
+      cancelRequest(),
+      "synthetic-evidence-pending-request",
+      () => access,
+      () => "http://localhost",
+    );
+    const cliCancellation = await fixture.run([
+      "cancel-archive-request",
+      "--key",
+      cancelKey,
+      "--archive-request-id",
+      "synthetic-evidence-pending-request",
+    ]);
+    expect(webCancellation.status).toBe(200);
+    expect(cliCancellation.exitCode).toBe(0);
+    expect(cliCancellation.result).toEqual(await webCancellation.json());
+    expect(cliCancellation.result).toMatchObject({
+      archiveRequest: { status: "cancelled" },
+    });
+    const replayedCancellation = await createArchiveRequestCancellationRoute(
+      cancelRequest(),
+      "synthetic-evidence-pending-request",
+      () => access,
+      () => "http://localhost",
+    );
+    expect(replayedCancellation.status).toBe(200);
+    expect(await replayedCancellation.json()).toEqual(cliCancellation.result);
+
+    const retryKey = "00000000-0000-4000-8000-000000000404";
+    const retryRequest = new Request(
+      "http://localhost/api/archive-requests/synthetic-evidence-pending-request/retry",
       {
-        command: "retry-archive-request",
-        key: "00000000-0000-4000-8000-000000000404",
         method: "POST",
-        route: createArchiveRequestRetryRoute,
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost",
+          Origin: "http://localhost",
+        },
+        body: JSON.stringify({ mutationKey: retryKey }),
       },
-    ] as const) {
-      const web = await mutation.route(
-        new Request(
-          `http://localhost/api/archive-requests/synthetic-evidence-pending-request${
-            mutation.method === "POST" ? "/retry" : ""
-          }`,
-          {
-            method: mutation.method,
-            headers: {
-              "Content-Type": "application/json",
-              Host: "localhost",
-              Origin: "http://localhost",
-            },
-            body: JSON.stringify({ mutationKey: mutation.key }),
-          },
-        ),
-        "synthetic-evidence-pending-request",
-        () => access,
-        () => "http://localhost",
-      );
-      const cli = await fixture.run([
-        mutation.command,
-        "--key",
-        mutation.key,
-        "--archive-request-id",
-        "synthetic-evidence-pending-request",
-      ]);
-      expect(web.status).toBe(409);
-      expect(cli.exitCode).toBe(2);
-      expect(cli.result).toEqual(await web.json());
-      expect(cli.result).toEqual({
-        error: {
+    );
+    const webRetry = await createArchiveRequestRetryRoute(
+      retryRequest,
+      "synthetic-evidence-pending-request",
+      () => access,
+      () => "http://localhost",
+    );
+    const cliRetry = await fixture.run([
+      "retry-archive-request",
+      "--key",
+      retryKey,
+      "--archive-request-id",
+      "synthetic-evidence-pending-request",
+    ]);
+    expect(webRetry.status).toBe(409);
+    expect(cliRetry.exitCode).toBe(2);
+    expect(cliRetry.result).toEqual(await webRetry.json());
+    expect(cliRetry.result).toEqual({
+      error: {
+        code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+        message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+        blockingReasons: [{
           code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
           message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
-          blockingReasons: [{
-            code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
-            message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
-          }],
-        },
-      });
-    }
+        }],
+      },
+    });
     expect(access.archiveRequests.find(
       "synthetic-evidence-pending-request" as ArchiveRequestId,
-    )).toMatchObject({ status: "pending" });
+    )).toMatchObject({ status: "cancelled" });
     const replayFixture = new DatabaseSync(fixture.databasePath);
     expect(replayFixture.prepare(`
       SELECT count(*) AS count
@@ -852,7 +1184,7 @@ it("returns the same operational records and evidence through web and CLI", asyn
     `).get(
       "00000000-0000-4000-8000-000000000403",
       "00000000-0000-4000-8000-000000000404",
-    )).toEqual({ count: 0 });
+    )).toEqual({ count: 1 });
     replayFixture.close();
     expect(access.catalog.listDiscSelections({ encodeEligibleOnly: true }))
       .not.toEqual(expect.arrayContaining([

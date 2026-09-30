@@ -8,9 +8,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import {
   createDataAccess,
+  DVD_RECOVERY_EVIDENCE_FORMAT,
   encodeOutputFilesystemIdentity,
 } from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
@@ -76,6 +78,156 @@ export function createOperatorWorkflowFixture() {
       rmSync(directory, { recursive: true, force: true });
     },
   };
+}
+
+export function markArchiveWithDvdRecoveryEvidence(
+  databasePath: string,
+  originalDiscArchiveId: string,
+  fixtureId: string,
+): void {
+  const sqlite = new DatabaseSync(databasePath);
+  try {
+    sqlite.prepare(`
+      UPDATE original_disc_archives
+      SET size_bytes = COALESCE(size_bytes, 2048),
+          boundary_policy_version = COALESCE(
+            boundary_policy_version,
+            'dvd-archive-boundary-v1'
+          ),
+          boundary_reported_size_bytes = COALESCE(
+            boundary_reported_size_bytes,
+            size_bytes,
+            2048
+          ),
+          boundary_published_size_bytes = COALESCE(
+            boundary_published_size_bytes,
+            size_bytes,
+            2048
+          ),
+          boundary_excluded_sector_count = COALESCE(
+            boundary_excluded_sector_count,
+            0
+          ),
+          integrity = 'unknown',
+          integrity_evidence_revision = NULL,
+          integrity_policy_version = NULL,
+          bad_sector_count = NULL,
+          bad_area_count = NULL,
+          bad_sector_ranges = NULL,
+          bad_sector_counts_by_title = NULL
+      WHERE id = ?
+    `).run(originalDiscArchiveId);
+    const archive = sqlite.prepare(`
+      SELECT detected_disc_id, fingerprint, size_bytes,
+             boundary_policy_version, boundary_reported_size_bytes,
+             boundary_published_size_bytes
+      FROM original_disc_archives
+      WHERE id = ?
+    `).get(originalDiscArchiveId) as {
+      detected_disc_id: string;
+      fingerprint: string;
+      size_bytes: number;
+      boundary_policy_version: string;
+      boundary_reported_size_bytes: number;
+      boundary_published_size_bytes: number;
+    } | undefined;
+    if (archive === undefined) throw new Error("Expected evidence archive");
+    const requestId = `${fixtureId}-evidence-request`;
+    const jobId = `${fixtureId}-evidence-job`;
+    const manifestId = `${fixtureId}-evidence-manifest`;
+    const inspectionId = `${fixtureId}-evidence-inspection`;
+    const boundaryDigest = "a".repeat(64);
+    const sourceRangesDigest = "b".repeat(64);
+    const manifestDigest = "c".repeat(64);
+    sqlite.prepare(`
+      INSERT INTO disc_inspections (
+        id, optical_drive_id, detected_disc_id, media_generation, is_current,
+        status, phase, total_bytes, phase_started_at, attempt_started_at,
+        started_at, completed_at, created_at, updated_at
+      )
+      SELECT ?, optical_drive_id, id, ?, 0, 'completed', 'confirming_media', ?,
+        1, 1, 1, 1, 1, 1
+      FROM detected_discs
+      WHERE id = ?
+    `).run(
+      inspectionId,
+      `${fixtureId}-evidence-generation`,
+      archive.boundary_reported_size_bytes,
+      archive.detected_disc_id,
+    );
+    sqlite.prepare(`
+      INSERT INTO archive_requests (
+        id, detected_disc_id, evidence_format, status, priority,
+        fulfilled_at, created_at, updated_at
+      ) VALUES (?, ?, ?, 'fulfilled', 0, 1, 1, 1)
+    `).run(
+      requestId,
+      archive.detected_disc_id,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+    );
+    sqlite.prepare(`
+      INSERT INTO archive_jobs (
+        id, archive_request_id, disc_inspection_id, detected_disc_id,
+        original_disc_archive_id, evidence_format, attempt_ordinal, status,
+        priority, progress_phase, progress_percent, progress_bytes,
+        last_progress_at, started_at, completed_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 1, 'completed', 0, 'finalizing', 100, ?,
+        1, 1, 1, 1, 1)
+    `).run(
+      jobId,
+      requestId,
+      inspectionId,
+      archive.detected_disc_id,
+      originalDiscArchiveId,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      archive.boundary_published_size_bytes,
+    );
+    sqlite.prepare(`
+      INSERT INTO dvd_archive_evidence_manifests (
+        id, original_disc_archive_id, revision, evidence_format,
+        image_fingerprint, sector_size_bytes, accepted_end_lba_exclusive,
+        boundary_policy_version, boundary_reported_size_bytes,
+        boundary_published_size_bytes, boundary_evidence_digest,
+        unrecovered_source_ranges, unrecovered_source_ranges_digest,
+        manifest_digest, created_at
+      ) VALUES (?, ?, 1, ?, ?, 2048, ?, ?, ?, ?, ?, '[]', ?, ?, 1)
+    `).run(
+      manifestId,
+      originalDiscArchiveId,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      archive.fingerprint,
+      archive.size_bytes / 2048,
+      archive.boundary_policy_version,
+      archive.boundary_reported_size_bytes,
+      archive.boundary_published_size_bytes,
+      boundaryDigest,
+      sourceRangesDigest,
+      manifestDigest,
+    );
+    sqlite.prepare(`
+      INSERT INTO dvd_archive_evidence_headers (
+        original_disc_archive_id, source_archive_job_id, evidence_format,
+        boundary_policy_version, boundary_reported_size_bytes,
+        boundary_published_size_bytes, boundary_evidence_digest,
+        sector_size_bytes, accepted_end_lba_exclusive, current_manifest_id,
+        current_manifest_revision, current_manifest_digest, created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 2048, ?, ?, 1, ?, 1, 1)
+    `).run(
+      originalDiscArchiveId,
+      jobId,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      archive.boundary_policy_version,
+      archive.boundary_reported_size_bytes,
+      archive.boundary_published_size_bytes,
+      boundaryDigest,
+      archive.size_bytes / 2048,
+      manifestId,
+      manifestDigest,
+    );
+  } finally {
+    sqlite.close();
+  }
 }
 
 export function seedCatalogReviewForReadFixture(

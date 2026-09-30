@@ -60,6 +60,7 @@ import {
 import {
   readFilesystemVerificationInventory,
 } from "./filesystem-verification-inventory.js";
+import { UnsupportedArchiveEvidenceFormatError } from "./archive-request-input.js";
 import {
   exportEncodeOutput,
   inspectEncodeOutput,
@@ -366,7 +367,7 @@ export function createApplicationOperations(
         input.evidenceFormat !== undefined &&
         input.evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT
       ) {
-        throw new Error("Archive evidence format is unsupported.");
+        throw new UnsupportedArchiveEvidenceFormatError();
       }
       const request = access.archiveRequests.submit({
         mutationKey,
@@ -599,6 +600,7 @@ export * from "./catalog-review-completion.js";
 export * from "./catalog-review-completion-preview-token.js";
 export * from "./rearchive-acceptance.js";
 export * from "./rearchive-acceptance-preview-token.js";
+export * from "./archive-request-input.js";
 export type { MediaItemCommand } from "./media-item-operations.js";
 export * from "./catalog-automation.js";
 export * from "./tmdb-catalog-adapter.js";

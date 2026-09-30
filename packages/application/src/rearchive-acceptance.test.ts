@@ -11,6 +11,10 @@ import { DatabaseSync } from "node:sqlite";
 
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { seedRearchiveReviewFixtureForTest } from "@rip-dvd/data-access/rearchive-test-support";
+import {
+  DVD_RECOVERY_EVIDENCE_FORMAT,
+  DvdRecoveryEvidenceEncodingUnavailableError,
+} from "@rip-dvd/data-access";
 import { afterEach, expect, it } from "vitest";
 
 import { createApplicationOperations } from "./index.js";
@@ -77,6 +81,134 @@ function fixture() {
     databasePath,
     mediaLibraryPath,
   };
+}
+
+function markTargetArchiveWithDvdRecoveryEvidence(
+  databasePath: string,
+  originalDiscArchiveId: string,
+): void {
+  const sqlite = new DatabaseSync(databasePath);
+  try {
+    sqlite.prepare(`
+      UPDATE original_disc_archives
+      SET integrity = 'unknown',
+          integrity_evidence_revision = NULL,
+          integrity_policy_version = NULL,
+          bad_sector_count = NULL,
+          bad_area_count = NULL,
+          bad_sector_ranges = NULL,
+          bad_sector_counts_by_title = NULL
+      WHERE id = ?
+    `).run(originalDiscArchiveId);
+    const archive = sqlite.prepare(`
+      SELECT detected_disc_id, fingerprint, size_bytes,
+             boundary_policy_version, boundary_reported_size_bytes,
+             boundary_published_size_bytes
+      FROM original_disc_archives
+      WHERE id = ?
+    `).get(originalDiscArchiveId) as {
+      detected_disc_id: string;
+      fingerprint: string;
+      size_bytes: number;
+      boundary_policy_version: string;
+      boundary_reported_size_bytes: number;
+      boundary_published_size_bytes: number;
+    } | undefined;
+    if (archive === undefined) throw new Error("Expected target archive");
+    const boundaryDigest = "a".repeat(64);
+    const sourceRangesDigest = "b".repeat(64);
+    const manifestDigest = "c".repeat(64);
+    sqlite.prepare(`
+      INSERT INTO disc_inspections (
+        id, optical_drive_id, detected_disc_id, media_generation, is_current,
+        status, phase, total_bytes, phase_started_at, attempt_started_at,
+        started_at, completed_at, created_at, updated_at
+      )
+      SELECT 'rearchive-acceptance-evidence-inspection', optical_drive_id, id,
+        'rearchive-acceptance-evidence-generation', 0, 'completed',
+        'confirming_media', ?, 1, 1, 1, 1, 1, 1
+      FROM detected_discs
+      WHERE id = ?
+    `).run(
+      archive.boundary_reported_size_bytes,
+      archive.detected_disc_id,
+    );
+    sqlite.prepare(`
+      INSERT INTO archive_requests (
+        id, detected_disc_id, evidence_format, status, priority,
+        fulfilled_at, created_at, updated_at
+      ) VALUES (
+        'rearchive-acceptance-evidence-request', ?, ?, 'fulfilled', 0,
+        1, 1, 1
+      )
+    `).run(archive.detected_disc_id, DVD_RECOVERY_EVIDENCE_FORMAT);
+    sqlite.prepare(`
+      INSERT INTO archive_jobs (
+        id, archive_request_id, disc_inspection_id, detected_disc_id,
+        original_disc_archive_id, evidence_format, attempt_ordinal, status,
+        priority, progress_phase, progress_percent, progress_bytes,
+        last_progress_at, started_at, completed_at, created_at, updated_at
+      ) VALUES (
+        'rearchive-acceptance-evidence-job',
+        'rearchive-acceptance-evidence-request',
+        'rearchive-acceptance-evidence-inspection', ?, ?, ?, 1, 'completed', 0,
+        'finalizing', 100, ?, 1, 1, 1, 1, 1
+      )
+    `).run(
+      archive.detected_disc_id,
+      originalDiscArchiveId,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      archive.boundary_published_size_bytes,
+    );
+    sqlite.prepare(`
+      INSERT INTO dvd_archive_evidence_manifests (
+        id, original_disc_archive_id, revision, evidence_format,
+        image_fingerprint, sector_size_bytes, accepted_end_lba_exclusive,
+        boundary_policy_version, boundary_reported_size_bytes,
+        boundary_published_size_bytes, boundary_evidence_digest,
+        unrecovered_source_ranges, unrecovered_source_ranges_digest,
+        manifest_digest, created_at
+      ) VALUES (
+        'rearchive-acceptance-evidence-manifest', ?, 1, ?, ?, 2048, ?, ?,
+        ?, ?, ?, '[]', ?, ?, 1
+      )
+    `).run(
+      originalDiscArchiveId,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      archive.fingerprint,
+      archive.size_bytes / 2048,
+      archive.boundary_policy_version,
+      archive.boundary_reported_size_bytes,
+      archive.boundary_published_size_bytes,
+      boundaryDigest,
+      sourceRangesDigest,
+      manifestDigest,
+    );
+    sqlite.prepare(`
+      INSERT INTO dvd_archive_evidence_headers (
+        original_disc_archive_id, source_archive_job_id, evidence_format,
+        boundary_policy_version, boundary_reported_size_bytes,
+        boundary_published_size_bytes, boundary_evidence_digest,
+        sector_size_bytes, accepted_end_lba_exclusive, current_manifest_id,
+        current_manifest_revision, current_manifest_digest, created_at,
+        updated_at
+      ) VALUES (
+        ?, 'rearchive-acceptance-evidence-job', ?, ?, ?, ?, ?, 2048, ?,
+        'rearchive-acceptance-evidence-manifest', 1, ?, 1, 1
+      )
+    `).run(
+      originalDiscArchiveId,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      archive.boundary_policy_version,
+      archive.boundary_reported_size_bytes,
+      archive.boundary_published_size_bytes,
+      boundaryDigest,
+      archive.size_bytes / 2048,
+      manifestDigest,
+    );
+  } finally {
+    sqlite.close();
+  }
 }
 
 afterEach(() => {
@@ -558,6 +690,77 @@ it("rejects invalid profiles and conflicting output reservations before acceptan
     expect(current.access.encodeJobs.find(predecessor.id)?.status).toBe(
       "queued",
     );
+  } finally {
+    current.access.close();
+  }
+});
+
+it("blocks a replacement for a DVD evidence target before Re-archive Acceptance changes state", () => {
+  const current = fixture();
+  try {
+    const predecessor = current.enqueue("evidence-fenced-replacement");
+    const command = {
+      action: "accept_rearchive" as const,
+      catalogRevision: current.saved.catalogRevision,
+      sourceCatalogRevision: current.saved.sourceCatalogRevision,
+      replacementEncodes: [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: predecessor.encodingProfileId,
+        outputPath: predecessor.outputPath,
+      }],
+    };
+    const preview = current.operations.previewRearchiveAcceptance(
+      current.seeded.targetArchive.id,
+      command,
+      current.mediaLibraryPath,
+    );
+    markTargetArchiveWithDvdRecoveryEvidence(
+      current.databasePath,
+      current.seeded.targetArchive.id,
+    );
+    const mutationKey = "00000000-0000-4000-8000-000000000408";
+
+    expect(() => current.operations.acceptRearchive(
+      current.seeded.targetArchive.id,
+      command,
+      {
+        mediaLibraryPath: current.mediaLibraryPath,
+        mutationKey,
+        acknowledgedRevision: preview.catalogRevision,
+        acknowledgedSourceRevision: preview.sourceCatalogRevision,
+        previewToken: preview.previewToken,
+        acknowledge: true,
+      },
+    )).toThrow(DvdRecoveryEvidenceEncodingUnavailableError);
+    expect(current.access.catalog.listDiscSelections({
+      ids: [current.seeded.sourceSelection.id],
+    })).toEqual([expect.objectContaining({
+      id: current.seeded.sourceSelection.id,
+    })]);
+    expect(current.access.catalog.listDiscSelections({
+      originalDiscArchiveId: current.seeded.targetArchive.id,
+    })).toEqual([]);
+    expect(current.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: predecessor.id,
+        status: "queued",
+        reservesOutputPath: true,
+        predecessorEncodeJobId: null,
+      }),
+    ]);
+    expect(current.access.catalog.listOriginalDiscArchives({
+      ids: [current.seeded.targetArchive.id],
+    })[0]).toMatchObject({
+      catalogReviewOutcome: "needs_review",
+      catalogReviewedAt: null,
+    });
+    const sqlite = new DatabaseSync(current.databasePath);
+    expect(sqlite.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE key = ?
+    `).get(mutationKey)).toEqual({ count: 0 });
+    sqlite.close();
   } finally {
     current.access.close();
   }
