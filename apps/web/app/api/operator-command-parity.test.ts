@@ -523,6 +523,22 @@ it("returns the same operational records and evidence through web and CLI", asyn
       expect(response.status).toBe(200);
       expect((await fixture.run(["inspect", kind, id])).result).toEqual(await response.json());
     }
+    const encodeHistoryResponse = createOperationsResponse(
+      access,
+      new Request(
+        `http://localhost/api/operations?kind=encode-jobs&id=${encodeJob.id}&limit=1&offset=0`,
+      ),
+    );
+    expect(encodeHistoryResponse.status).toBe(200);
+    expect((await fixture.run([
+      "inspect",
+      "encode-jobs",
+      encodeJob.id,
+      "--limit",
+      "1",
+      "--offset",
+      "0",
+    ])).result).toEqual(await encodeHistoryResponse.json());
     for (const [target, expectedId] of [
       ["original_disc_archive", archiveId],
       ["encode_job_output", encodeJob.id],

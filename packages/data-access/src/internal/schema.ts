@@ -1165,6 +1165,18 @@ export const encodeJobs = sqliteTable(
     claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
     startedAt: integer("started_at", { mode: "timestamp_ms" }),
     completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+    outputValidationResult: text("output_validation_result", {
+      enum: ["passed"],
+    }),
+    outputValidationFilesystemIdentity: text(
+      "output_validation_filesystem_identity",
+    ).$type<EncodeOutputFilesystemIdentity>(),
+    outputValidatedAt: integer("output_validated_at", {
+      mode: "timestamp_ms",
+    }),
+    outputCompleteness: text("output_completeness", {
+      enum: ["complete"],
+    }),
     errorMessage: text("error_message"),
     verificationStatus: text("verification_status", {
       enum: FILESYSTEM_VERIFICATION_STATUSES,
@@ -1236,6 +1248,10 @@ export const encodeJobs = sqliteTable(
     check(
       "encode_jobs_verification_check",
       sql`(${table.verificationStatus} is null) = (${table.verificationMessage} is null) and (${table.verificationStatus} is null) = (${table.verifiedAt} is null) and (${table.verificationStatus} is null or ${table.verificationStatus} in (${sqliteStringLiterals(FILESYSTEM_VERIFICATION_STATUSES)}))`,
+    ),
+    check(
+      "encode_jobs_output_validation_shape_check",
+      sql`(${table.outputValidationResult} is null and ${table.outputValidationFilesystemIdentity} is null and ${table.outputValidatedAt} is null and ${table.outputCompleteness} is null) or (${table.outputValidationResult} = 'passed' and typeof(${table.outputValidationFilesystemIdentity}) = 'text' and length(${table.outputValidationFilesystemIdentity}) > 0 and ${table.outputValidatedAt} is not null and ${table.outputCompleteness} = 'complete')`,
     ),
   ],
 );
@@ -1345,6 +1361,11 @@ export const retainedEncodeOutputs = sqliteTable(
       .notNull()
       .default(true),
     retainedAt: integer("retained_at", { mode: "timestamp_ms" }).notNull(),
+    validationResult: text("validation_result", { enum: ["passed"] }),
+    validationFilesystemIdentity: text("validation_filesystem_identity")
+      .$type<EncodeOutputFilesystemIdentity>(),
+    validatedAt: integer("validated_at", { mode: "timestamp_ms" }),
+    completeness: text("completeness", { enum: ["complete"] }),
   },
   (table) => [
     check("retained_encode_outputs_id_not_null", sql`${table.id} is not null`),
@@ -1354,6 +1375,8 @@ export const retainedEncodeOutputs = sqliteTable(
       .on(table.retainedOutputPath),
     index("retained_encode_outputs_predecessor_idx")
       .on(table.predecessorEncodeJobId),
+    index("retained_encode_outputs_source_retained_at_idx")
+      .on(table.sourceEncodeJobId, table.retainedAt),
     check(
       "retained_encode_outputs_distinct_jobs_check",
       sql`${table.predecessorEncodeJobId} <> ${table.replacementEncodeJobId}`,
@@ -1369,6 +1392,10 @@ export const retainedEncodeOutputs = sqliteTable(
     check(
       "retained_encode_outputs_cleanup_eligible_check",
       sql`${table.cleanupEligible} = 1`,
+    ),
+    check(
+      "retained_encode_outputs_validation_shape_check",
+      sql`(${table.validationResult} is null and ${table.validationFilesystemIdentity} is null and ${table.validatedAt} is null and ${table.completeness} is null) or (${table.validationResult} = 'passed' and typeof(${table.validationFilesystemIdentity}) = 'text' and length(${table.validationFilesystemIdentity}) > 0 and ${table.validatedAt} is not null and ${table.completeness} = 'complete')`,
     ),
   ],
 );

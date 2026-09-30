@@ -151,12 +151,21 @@ type EncodeOutputArtifact = NonNullable<
 
 type EncodeOutputHistoryState =
   | null
-  | { jobId: DashboardEncodeJob["id"]; status: "loading" | "error" }
   | {
       jobId: DashboardEncodeJob["id"];
-      status: "loaded";
+      signature: string;
+      status: "loading" | "loaded" | "error";
       artifacts: readonly EncodeOutputArtifact[];
+      nextOffset: number | null;
     };
+
+function encodeOutputHistorySignature(job: DashboardEncodeJob): string {
+  return JSON.stringify([
+    job.encodeOutputArtifacts ?? [],
+    job.encodeOutputArtifactsTruncated ?? false,
+    job.activityRevision,
+  ]);
+}
 
 export async function requestEncodeOutputInspection(
   artifactIdentity: string,
@@ -175,12 +184,16 @@ export async function requestEncodeOutputInspection(
   return await response.json() as EncodeOutputInspection;
 }
 
-export async function requestCompleteEncodeOutputHistory(
+export async function requestEncodeOutputHistoryPage(
   jobId: DashboardEncodeJob["id"],
+  offset: number,
   fetcher: typeof fetch = fetch,
-): Promise<readonly EncodeOutputArtifact[]> {
+): Promise<{
+  artifacts: readonly EncodeOutputArtifact[];
+  nextOffset: number | null;
+}> {
   const response = await fetcher(
-    `/api/operations?kind=encode-jobs&id=${encodeURIComponent(jobId)}`,
+    `/api/operations?kind=encode-jobs&id=${encodeURIComponent(jobId)}&limit=25&offset=${offset}`,
     {
       cache: "no-store",
       headers: { Accept: "application/json" },
@@ -190,8 +203,12 @@ export async function requestCompleteEncodeOutputHistory(
     throw new Error("Encode Output history lookup failed");
   }
   const payload = await response.json() as {
-    item?: { encodeOutputArtifacts?: unknown };
+    item?: {
+      encodeOutputArtifacts?: unknown;
+      encodeOutputArtifactPage?: unknown;
+    };
   };
+  const page = payload.item?.encodeOutputArtifactPage;
   if (!Array.isArray(payload.item?.encodeOutputArtifacts) ||
       !payload.item.encodeOutputArtifacts.every((artifact): artifact is {
         identity: string;
@@ -201,10 +218,19 @@ export async function requestCompleteEncodeOutputHistory(
         typeof (artifact as { identity?: unknown }).identity === "string" &&
         ((artifact as { state?: unknown }).state === "published" ||
           (artifact as { state?: unknown }).state === "retained")
+      ) || typeof page !== "object" || page === null ||
+      (page as { offset?: unknown }).offset !== offset ||
+      !(
+        (page as { nextOffset?: unknown }).nextOffset === null ||
+        (Number.isSafeInteger((page as { nextOffset?: unknown }).nextOffset) &&
+          ((page as { nextOffset: number }).nextOffset > offset))
       )) {
     throw new Error("Encode Output history response is invalid");
   }
-  return payload.item.encodeOutputArtifacts;
+  return {
+    artifacts: payload.item.encodeOutputArtifacts,
+    nextOffset: (page as { nextOffset: number | null }).nextOffset,
+  };
 }
 
 function EncodeOutputInspectionDetails({
@@ -332,9 +358,10 @@ function EncodeOutputInspectionDetails({
         <div>
           <dt>Inspectability</dt>
           <dd>
+            {displayTerm(artifact.inspectability.status)}
             {artifact.inspectability.status === "inspected"
-              ? "Media metadata inspected"
-              : `${artifact.inspectability.reason} · ${artifact.inspectability.reasonCode}`}
+              ? " · Media metadata inspected"
+              : ` · ${artifact.inspectability.reason} · ${artifact.inspectability.reasonCode}`}
           </dd>
         </div>
         <div>
@@ -358,7 +385,12 @@ function EncodeOutputInspectionDetails({
           </div>
         ))}
       </dl>
-      {artifact.media.streams === null ? null : (
+      {artifact.media.streams === null ? (
+        <div>
+          <strong>Streams</strong>
+          <p>Unknown</p>
+        </div>
+      ) : (
         <div>
           <strong>{countLabel(artifact.media.streams.length, "stream")}</strong>
           <ul>
@@ -1758,9 +1790,14 @@ export function DashboardView({
                   </p>
                 ) : null}
                 {(() => {
-                  const artifacts = encodeOutputHistory?.jobId === job.id &&
-                      encodeOutputHistory.status === "loaded"
-                    ? encodeOutputHistory.artifacts
+                  const historySignature = encodeOutputHistorySignature(job);
+                  const currentHistory = encodeOutputHistory?.jobId === job.id &&
+                      encodeOutputHistory.signature === historySignature
+                    ? encodeOutputHistory
+                    : null;
+                  const artifacts = currentHistory !== null &&
+                      currentHistory.artifacts.length > 0
+                    ? currentHistory.artifacts
                     : job.encodeOutputArtifacts ?? (
                         job.encodeOutputArtifactIdentity === undefined
                           ? []
@@ -1846,55 +1883,68 @@ export function DashboardView({
                           ) : null}
                         </React.Fragment>
                       ))}
-                      {job.encodeOutputArtifactsTruncated &&
-                          !(encodeOutputHistory?.jobId === job.id &&
-                            encodeOutputHistory.status === "loaded") ? (
+                      {(currentHistory?.nextOffset !== null &&
+                            currentHistory?.nextOffset !== undefined) ||
+                          (currentHistory === null &&
+                            job.encodeOutputArtifactsTruncated) ? (
                         <>
                           <button
                             type="button"
                             disabled={
-                              encodeOutputHistory?.jobId === job.id &&
-                              encodeOutputHistory.status === "loading"
+                              currentHistory?.status === "loading"
                             }
                             onClick={() => {
+                              const offset = currentHistory?.nextOffset ?? 0;
                               setEncodeOutputHistory({
                                 jobId: job.id,
+                                signature: historySignature,
                                 status: "loading",
+                                artifacts: currentHistory?.artifacts ?? [],
+                                nextOffset: offset,
                               });
-                              void requestCompleteEncodeOutputHistory(job.id)
-                                .then((completeArtifacts) =>
+                              void requestEncodeOutputHistoryPage(job.id, offset)
+                                .then((page) =>
                                   setEncodeOutputHistory((current) =>
                                     current?.jobId === job.id &&
+                                        current.signature === historySignature &&
                                         current.status === "loading"
                                       ? {
                                         jobId: job.id,
+                                        signature: historySignature,
                                         status: "loaded",
-                                        artifacts: completeArtifacts,
+                                        artifacts: [...new Map([
+                                          ...current.artifacts,
+                                          ...page.artifacts,
+                                        ].map((artifact) => [
+                                          artifact.identity,
+                                          artifact,
+                                        ])).values()],
+                                        nextOffset: page.nextOffset,
                                       }
                                       : current
                                   )
                                 ).catch(() =>
                                   setEncodeOutputHistory((current) =>
                                     current?.jobId === job.id &&
+                                        current.signature === historySignature &&
                                         current.status === "loading"
-                                      ? { jobId: job.id, status: "error" }
+                                      ? { ...current, status: "error" }
                                       : current
                                   )
                                 );
                             }}
                           >
-                            {encodeOutputHistory?.jobId === job.id &&
-                                encodeOutputHistory.status === "loading"
+                            {currentHistory?.status === "loading"
                               ? "Loading output history…"
-                              : encodeOutputHistory?.jobId === job.id &&
-                                  encodeOutputHistory.status === "error"
+                              : currentHistory?.status === "error"
                                 ? "Retry loading output history"
-                                : "Load all output generations"}
+                                : currentHistory === null
+                                  ? "Load output generations"
+                                  : "Load more output generations"}
                           </button>
-                          {encodeOutputHistory?.jobId === job.id &&
-                              encodeOutputHistory.status === "error" ? (
+                          {currentHistory?.status === "error" ? (
                             <p className="job-progress-detail" role="alert">
-                              Complete Encode Output history is unavailable.
+                              Encode Output history is unavailable.
                             </p>
                           ) : null}
                         </>

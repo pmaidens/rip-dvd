@@ -735,6 +735,14 @@ function retainedOutputProvenance(path: string, metadata: Stats | null) {
   };
 }
 
+function publishedOutputValidation(metadata: Stats) {
+  return {
+    result: "passed" as const,
+    filesystemIdentity: encodeOutputFilesystemIdentity(metadata),
+    completeness: "complete" as const,
+  };
+}
+
 function correctedRetainedOutputProvenance(
   access: DataAccess,
   jobId: RunningEncodeJob["id"],
@@ -1685,12 +1693,16 @@ async function reconcileActivePublicationMutations(
       options.access.encodeJobs.completePublishedMutation(
         mutation,
         () => publicationMatches(finalPath, partialPath),
-        correctedRetainedOutputProvenance(
-          options.access,
-          mutation.jobId,
-          priorFinalPath,
-          priorFinalMetadata,
-        ),
+        {
+          ...correctedRetainedOutputProvenance(
+            options.access,
+            mutation.jobId,
+            priorFinalPath,
+            priorFinalMetadata,
+          ),
+          publishedOutputValidation:
+            publishedOutputValidation(finalMetadata),
+        },
       );
       await unlink(partialPath);
       await syncPath(dirname(finalPath));
@@ -2137,14 +2149,18 @@ export async function executeEncodeClaim(
           publicationChangedBeforeCompletion = !matches;
           return matches;
         },
-        claim.predecessorEncodeJobId === null ||
-            priorFinalFailedPath === null ||
-            replaceableFinal === undefined
-          ? undefined
-          : retainedOutputProvenance(
-              priorFinalFailedPath,
-              replaceableFinal,
-            ),
+        {
+          ...(claim.predecessorEncodeJobId === null ||
+              priorFinalFailedPath === null ||
+              replaceableFinal === undefined
+            ? {}
+            : retainedOutputProvenance(
+                priorFinalFailedPath,
+                replaceableFinal,
+              )),
+          publishedOutputValidation:
+            publishedOutputValidation(validatedPartialMetadata),
+        },
       );
     } catch (error) {
       if (publicationChangedBeforeCompletion) {

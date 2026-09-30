@@ -64,6 +64,7 @@ function inspectedOutputResponse(
   fileIdentity: string,
   artifactIdentity = job.encodeOutputArtifactIdentity,
   state: "published" | "retained" = "published",
+  probeFailed = false,
 ): Response {
   return Response.json({
     schemaVersion: 1,
@@ -101,13 +102,13 @@ function inspectedOutputResponse(
         identityContinuity: "not_recorded",
       },
       inspectability: {
-        status: "inspected",
-        reasonCode: null,
-        reason: null,
+        status: probeFailed ? "unknown" : "inspected",
+        reasonCode: probeFailed ? "OUTPUT_PROBE_FAILED" : null,
+        reason: probeFailed ? "Synthetic probe failure." : null,
       },
       media: {
-        durationSeconds: 7_200,
-        streams: [{
+        durationSeconds: probeFailed ? null : 7_200,
+        streams: probeFailed ? null : [{
           index: 0,
           kind: "video",
           codecName: "h264",
@@ -206,6 +207,52 @@ describe("encoding page tabs", () => {
     }
   });
 
+  it("renders unknown probe fields explicitly", async () => {
+    const completed = encodeJob("completed");
+    const state = {
+      opticalDrives: { status: "loaded" as const, items: [] },
+      detectedDiscs: { status: "loaded" as const, items: [] },
+      archiveJobs: { status: "loaded" as const, items: [] },
+      workerIncidents: { status: "loaded" as const, items: [] },
+      encodeJobs: { status: "loaded" as const, items: [completed] },
+      catalogReview: { status: "loaded" as const, items: [] },
+    };
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      inspectedOutputResponse(
+        completed,
+        "synthetic-file-identity",
+        completed.encodeOutputArtifactIdentity,
+        "published",
+        true,
+      )
+    ));
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<DashboardView state={state} section="encoding" />);
+      });
+      const inspectButton = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "Inspect output",
+      );
+      await act(async () => {
+        inspectButton!.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(container.textContent).toContain(
+        "InspectabilityUnknown · Synthetic probe failure. · OUTPUT_PROBE_FAILED",
+      );
+      expect(container.textContent).toContain("DurationUnknown");
+      expect(container.textContent).toContain("StreamsUnknown");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
   it("offers each current and retained Encode Output generation", async () => {
     const completed = encodeJob("completed");
     const publishedIdentity = completed.encodeOutputArtifactIdentity!;
@@ -277,6 +324,8 @@ describe("encoding page tabs", () => {
     const publishedIdentity = completed.encodeOutputArtifactIdentity!;
     const retainedIdentity =
       `encode-output-v1.retained.${"f".repeat(8)}-${"e".repeat(4)}-${"d".repeat(4)}-${"c".repeat(4)}-${"b".repeat(12)}`;
+    const secondRetainedIdentity =
+      `encode-output-v1.retained.${"a".repeat(8)}-${"b".repeat(4)}-${"c".repeat(4)}-${"d".repeat(4)}-${"e".repeat(12)}`;
     const job = {
       ...completed,
       encodeOutputArtifacts: [{
@@ -293,16 +342,27 @@ describe("encoding page tabs", () => {
       encodeJobs: { status: "loaded" as const, items: [job] },
       catalogReview: { status: "loaded" as const, items: [] },
     };
-    const fetcher = vi.fn(async () => Response.json({
-      schemaVersion: 1,
-      kind: "encode-jobs",
-      item: {
-        encodeOutputArtifacts: [
-          { identity: publishedIdentity, state: "published" },
-          { identity: retainedIdentity, state: "retained" },
-        ],
-      },
-    }));
+    const fetcher = vi.fn(async (request: RequestInfo | URL) => {
+      const offset = new URL(String(request), "http://localhost").searchParams
+        .get("offset");
+      return Response.json({
+        schemaVersion: 1,
+        kind: "encode-jobs",
+        item: {
+          encodeOutputArtifacts: offset === "0"
+            ? [
+              { identity: publishedIdentity, state: "published" },
+              { identity: retainedIdentity, state: "retained" },
+            ]
+            : [{ identity: secondRetainedIdentity, state: "retained" }],
+          encodeOutputArtifactPage: {
+            offset: Number(offset),
+            limit: 25,
+            nextOffset: offset === "0" ? 1 : null,
+          },
+        },
+      });
+    });
     vi.stubGlobal("fetch", fetcher);
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const container = document.createElement("div");
@@ -314,7 +374,7 @@ describe("encoding page tabs", () => {
         root.render(<DashboardView state={state} section="encoding" />);
       });
       const loadButton = [...container.querySelectorAll("button")].find(
-        ({ textContent }) => textContent === "Load all output generations",
+        ({ textContent }) => textContent === "Load output generations",
       );
       expect(loadButton).toBeDefined();
       await act(async () => {
@@ -323,7 +383,7 @@ describe("encoding page tabs", () => {
       });
 
       expect(fetcher).toHaveBeenCalledWith(
-        `/api/operations?kind=encode-jobs&id=${encodeURIComponent(job.id)}`,
+        `/api/operations?kind=encode-jobs&id=${encodeURIComponent(job.id)}&limit=25&offset=0`,
         expect.objectContaining({ cache: "no-store" }),
       );
       expect([...container.querySelectorAll("button")].map(
@@ -331,7 +391,37 @@ describe("encoding page tabs", () => {
       )).toEqual(expect.arrayContaining([
         "Inspect current output",
         "Inspect retained output 1",
+        "Load more output generations",
       ]));
+      const loadMoreButton = [...container.querySelectorAll("button")].find(
+        ({ textContent }) => textContent === "Load more output generations",
+      );
+      await act(async () => {
+        loadMoreButton!.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect([...container.querySelectorAll("button")].map(
+        ({ textContent }) => textContent,
+      )).toEqual(expect.arrayContaining([
+        "Inspect retained output 1",
+        "Inspect retained output 2",
+      ]));
+      await act(async () => {
+        root.render(<DashboardView
+          state={{
+            ...state,
+            encodeJobs: {
+              status: "loaded",
+              items: [{ ...job, activityRevision: "new-revision" }],
+            },
+          }}
+          section="encoding"
+        />);
+      });
+      expect([...container.querySelectorAll("button")].map(
+        ({ textContent }) => textContent,
+      )).toContain("Load output generations");
+      expect(container.textContent).not.toContain("Inspect retained output");
     } finally {
       await act(async () => root.unmount());
     }

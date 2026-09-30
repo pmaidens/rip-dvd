@@ -1230,7 +1230,8 @@ describe("data-access facade", () => {
           name !== "20260828164042_married_lady_ursula" &&
           name !== "20260922161825_operation-detail-lookups" &&
           name !== "20260922174811_rearchive-lineage" &&
-          name !== "20260922182659_rearchive-ordinary-uniqueness",
+          name !== "20260922182659_rearchive-ordinary-uniqueness" &&
+          name !== "20260930002622_wandering_micromax",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -4190,6 +4191,10 @@ describe("data-access facade", () => {
       sourceEncodeJobId: predecessor.id,
       retainedOutputPath,
       filesystemIdentity: priorOutputIdentity,
+      validationResult: null,
+      validationFilesystemIdentity: null,
+      validatedAt: null,
+      completeness: null,
       state: "retained",
       cleanupEligible: true,
       retainedAt: expect.any(Date),
@@ -4204,6 +4209,9 @@ describe("data-access facade", () => {
         predecessorEncodeJobId: predecessor.id,
         replacementEncodeJobId: replacement.id,
         sourceEncodeJobId: predecessor.id,
+        validationResult: null,
+        validatedAt: null,
+        completeness: null,
         state: "retained",
         cleanupEligible: true,
         retainedAt: expect.any(Date),
@@ -4219,6 +4227,9 @@ describe("data-access facade", () => {
             predecessorEncodeJobId: predecessor.id,
             replacementEncodeJobId: replacement.id,
             sourceEncodeJobId: predecessor.id,
+            validationResult: null,
+            validatedAt: null,
+            completeness: null,
             state: "retained",
             cleanupEligible: true,
             retainedAt: expect.any(Date),
@@ -8228,6 +8239,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260930002622_wandering_micromax",
+      },
+      {
         name: "20260929225801_lonely_microchip",
       },
       {
@@ -8253,9 +8267,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260912212844_normal-dvd-endpoint-proof",
-      },
-      {
-        name: "20260901193553_encode_publication_recovery_failures",
       },
     ]);
     expect(

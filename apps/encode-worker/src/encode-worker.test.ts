@@ -1333,6 +1333,12 @@ describe("encode worker polling", () => {
         id: fixture.job.id,
         status: "completed",
         progressPercent: 100,
+        outputValidationResult: "passed",
+        outputValidationFilesystemIdentity: encodeOutputFilesystemIdentity(
+          lstatSync(fixture.outputPath),
+        ),
+        outputValidatedAt: expect.any(Date),
+        outputCompleteness: "complete",
       }),
     ]);
     expect(readFileSync(fixture.outputPath, "utf8")).toBe("complete encode");

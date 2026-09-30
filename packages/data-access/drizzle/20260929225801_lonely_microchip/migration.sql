@@ -19,10 +19,11 @@ CREATE TABLE `__new_retained_encode_outputs` (
 	CONSTRAINT "retained_encode_outputs_cleanup_eligible_check" CHECK("cleanup_eligible" = 1)
 );
 --> statement-breakpoint
-INSERT INTO `__new_retained_encode_outputs`(`id`, `predecessor_encode_job_id`, `replacement_encode_job_id`, `source_encode_job_id`, `retained_output_path`, `filesystem_identity`, `state`, `cleanup_eligible`, `retained_at`) SELECT `id`, `predecessor_encode_job_id`, `replacement_encode_job_id`, CASE WHEN row_number() OVER (PARTITION BY `predecessor_encode_job_id`, `replacement_encode_job_id` ORDER BY rowid) = 1 THEN `predecessor_encode_job_id` ELSE `replacement_encode_job_id` END, `retained_output_path`, `filesystem_identity`, `state`, `cleanup_eligible`, `retained_at` FROM `retained_encode_outputs`;--> statement-breakpoint
+INSERT INTO `__new_retained_encode_outputs`(`id`, `predecessor_encode_job_id`, `replacement_encode_job_id`, `source_encode_job_id`, `retained_output_path`, `filesystem_identity`, `state`, `cleanup_eligible`, `retained_at`) SELECT retained.`id`, retained.`predecessor_encode_job_id`, retained.`replacement_encode_job_id`, CASE WHEN row_number() OVER (PARTITION BY retained.`predecessor_encode_job_id`, retained.`replacement_encode_job_id` ORDER BY retained.rowid) = 1 AND predecessor.`output_path` = replacement.`output_path` AND predecessor.`completed_at` IS NOT NULL THEN retained.`predecessor_encode_job_id` ELSE retained.`replacement_encode_job_id` END, retained.`retained_output_path`, retained.`filesystem_identity`, retained.`state`, retained.`cleanup_eligible`, retained.`retained_at` FROM `retained_encode_outputs` retained INNER JOIN `encode_jobs` predecessor ON predecessor.`id` = retained.`predecessor_encode_job_id` INNER JOIN `encode_jobs` replacement ON replacement.`id` = retained.`replacement_encode_job_id`;--> statement-breakpoint
 DROP TABLE `retained_encode_outputs`;--> statement-breakpoint
 ALTER TABLE `__new_retained_encode_outputs` RENAME TO `retained_encode_outputs`;--> statement-breakpoint
 PRAGMA foreign_keys=ON;--> statement-breakpoint
 CREATE INDEX `retained_encode_outputs_replacement_idx` ON `retained_encode_outputs` (`replacement_encode_job_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `retained_encode_outputs_path_unique` ON `retained_encode_outputs` (`retained_output_path`);--> statement-breakpoint
-CREATE INDEX `retained_encode_outputs_predecessor_idx` ON `retained_encode_outputs` (`predecessor_encode_job_id`);
+CREATE INDEX `retained_encode_outputs_predecessor_idx` ON `retained_encode_outputs` (`predecessor_encode_job_id`);--> statement-breakpoint
+CREATE INDEX `retained_encode_outputs_source_retained_at_idx` ON `retained_encode_outputs` (`source_encode_job_id`,`retained_at`);

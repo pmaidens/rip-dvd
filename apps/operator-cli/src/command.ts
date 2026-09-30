@@ -323,10 +323,13 @@ const commandDefinitions = [
   {
     name: "inspect",
     description: "List operational records or inspect one record and its evidence.",
-    usage: "rip-dvd inspect <kind> [id] [--limit 1..100]",
+    usage: "rip-dvd inspect <kind> [id] [--limit 1..100] [--offset 0..]",
     inputs: {
       arguments: [`kind: ${OPERATION_KINDS.join(", ")}`, "id (optional)"],
-      options: ["--limit 1..100 (lists only; default 50)"],
+      options: [
+        "--limit 1..100 (lists and Encode Job output history; default 50)",
+        "--offset 0.. (Encode Job output history only)",
+      ],
     },
     example: "rip-dvd inspect disc-inspections synthetic-id",
   },
@@ -873,15 +876,29 @@ function numericOption(rest: readonly string[], flag: string): number | undefine
 }
 
 function inspectCommand(rest: readonly string[], io: CommandIO) {
-  const [kind, id] = rest;
+  const optionIndexes = new Set<number>();
+  for (const flag of ["--limit", "--offset"] as const) {
+    const index = rest.indexOf(flag);
+    if (index !== -1) {
+      optionIndexes.add(index);
+      optionIndexes.add(index + 1);
+    }
+  }
+  const positional = rest.filter((_, index) => !optionIndexes.has(index));
+  const [kind, id] = positional;
   if (kind === undefined || !isOperationKind(kind)) {
     throw new CommandFailure("INVALID_ARGUMENTS", "Unknown operation kind.", 2);
   }
-  const optionIndex = rest.indexOf("--limit");
-  const positional = optionIndex === -1 ? rest : rest.slice(0, optionIndex);
   const limit = numericOption(rest, "--limit");
-  if (positional.length > 2 || (optionIndex !== -1 && optionIndex !== rest.length - 2) ||
-    (limit !== undefined && (!validOperationLimit(limit) || positional.length === 2)) ||
+  const offset = numericOption(rest, "--offset");
+  if (positional.length > 2 ||
+    positional.some((argument) => argument.startsWith("--")) ||
+    optionIndexes.size !== rest.length - positional.length ||
+    (limit !== undefined && !validOperationLimit(limit)) ||
+    ((limit !== undefined || offset !== undefined) && positional.length === 2 &&
+      kind !== "encode-jobs") ||
+    (offset !== undefined && (kind !== "encode-jobs" ||
+      positional.length !== 2 || !Number.isSafeInteger(offset))) ||
     (kind === "activity" && positional.length === 2) ||
     (positional.length === 2 && (id === undefined || id.length === 0 ||
       id.length > 256 || id.startsWith("--")))) {
@@ -889,7 +906,11 @@ function inspectCommand(rest: readonly string[], io: CommandIO) {
   }
   try {
     const result = withAccess(io.openAccess, (access) =>
-      inspectOperations(access, kind, { ...(positional.length === 2 ? { id } : {}), limit }));
+      inspectOperations(access, kind, {
+        ...(positional.length === 2 ? { id } : {}),
+        limit,
+        offset,
+      }));
     if ("item" in result && result.item === null) {
       throw new CommandFailure("NOT_FOUND", "Operational record was not found.", 2);
     }

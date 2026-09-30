@@ -906,6 +906,10 @@ export interface EncodeJob {
   claimedAt: Date | null;
   startedAt: Date | null;
   completedAt: Date | null;
+  outputValidationResult: "passed" | null;
+  outputValidationFilesystemIdentity: EncodeOutputFilesystemIdentity | null;
+  outputValidatedAt: Date | null;
+  outputCompleteness: "complete" | null;
   errorMessage: string | null;
   verificationStatus: FilesystemVerificationStatus | null;
   verificationMessage: string | null;
@@ -961,6 +965,10 @@ export interface RetainedEncodeOutput {
   sourceEncodeJobId: EncodeJobId;
   retainedOutputPath: string;
   filesystemIdentity: EncodeOutputFilesystemIdentity;
+  validationResult: "passed" | null;
+  validationFilesystemIdentity: EncodeOutputFilesystemIdentity | null;
+  validatedAt: Date | null;
+  completeness: "complete" | null;
   state: RetainedEncodeOutputState;
   cleanupEligible: boolean;
   retainedAt: Date;
@@ -968,12 +976,19 @@ export interface RetainedEncodeOutput {
 
 export type RetainedEncodeOutputSummary = Omit<
   RetainedEncodeOutput,
-  "retainedOutputPath" | "filesystemIdentity"
+  | "retainedOutputPath"
+  | "filesystemIdentity"
+  | "validationFilesystemIdentity"
 >;
 
 export interface RetainedEncodeOutputSummaryPage {
   outputs: RetainedEncodeOutputSummary[];
   truncatedSourceEncodeJobIds: EncodeJobId[];
+}
+
+export interface RetainedEncodeOutputHistoryPage {
+  outputs: RetainedEncodeOutputSummary[];
+  nextOffset: number | null;
 }
 
 export interface DiscSelectionCorrectionRetainedOutputSummary {
@@ -1110,6 +1125,11 @@ export interface EncodeJobPartialCleanupOptions {
 export interface EncodeJobPublicationProvenance {
   retainedOutputPath?: string;
   retainedOutputIdentity?: EncodeOutputFilesystemIdentity;
+  publishedOutputValidation?: {
+    result: "passed";
+    filesystemIdentity: EncodeOutputFilesystemIdentity;
+    completeness: "complete";
+  };
 }
 
 export interface EncodeJobFailureOptions {
@@ -1729,6 +1749,10 @@ export interface EncodeJobAccess {
     ids: readonly EncodeJobId[],
     options: { limit: number },
   ): RetainedEncodeOutputSummaryPage;
+  listRetainedOutputHistoryPage(
+    sourceEncodeJobId: EncodeJobId,
+    options: { limit: number; offset?: number },
+  ): RetainedEncodeOutputHistoryPage;
   updateProgress(
     claim: RunningEncodeJob,
     progress: number | EncodeJobProgress,
@@ -1875,6 +1899,7 @@ export interface ConsistentReadAccess {
     | "listFailureReports"
     | "listRetainedOutputSummaries"
     | "listRetainedOutputSummaryPageBySource"
+    | "listRetainedOutputHistoryPage"
   >;
   readonly workerIncidents: Pick<WorkerIncidentAccess, "find" | "list">;
   readonly filesystemVerification: Pick<FilesystemVerificationAccess, "find" | "list" | "listActive">;

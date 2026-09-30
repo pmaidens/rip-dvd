@@ -504,10 +504,32 @@ it("backfills retained Encode Output ownership from durable insertion order", ()
   previousAccess.close();
   const predecessor = seedEncodeJob(databasePath, "retained-owner-predecessor");
   const replacement = seedEncodeJob(databasePath, "retained-owner-replacement");
+  const changedPathPredecessor = seedEncodeJob(
+    databasePath,
+    "changed-path-owner-predecessor",
+  );
+  const changedPathReplacement = seedEncodeJob(
+    databasePath,
+    "changed-path-owner-replacement",
+  );
   const historical = new DatabaseSync(databasePath);
   historical.prepare(`
+    UPDATE encode_jobs
+    SET predecessor_encode_job_id = ?, output_path = ?
+    WHERE id = ?
+  `).run(predecessor.id, "/media/shared-retained-owner.mkv", replacement.id);
+  historical.prepare(`
+    UPDATE encode_jobs
+    SET output_path = ?, status = 'completed', completed_at = 2,
+      reserves_output_path = 0
+    WHERE id = ?
+  `).run("/media/shared-retained-owner.mkv", predecessor.id);
+  historical.prepare(`
     UPDATE encode_jobs SET predecessor_encode_job_id = ? WHERE id = ?
-  `).run(predecessor.id, replacement.id);
+  `).run(changedPathPredecessor.id, changedPathReplacement.id);
+  historical.prepare(`
+    UPDATE encode_jobs SET status = 'completed', completed_at = 2 WHERE id = ?
+  `).run(changedPathPredecessor.id);
   const insert = historical.prepare(`
     INSERT INTO retained_encode_outputs (
       id, predecessor_encode_job_id, replacement_encode_job_id,
@@ -531,6 +553,14 @@ it("backfills retained Encode Output ownership from durable insertion order", ()
     "a-second-retained-identity",
     1000,
   );
+  insert.run(
+    "changed-path-first-retained-output",
+    changedPathPredecessor.id,
+    changedPathReplacement.id,
+    "/media/changed-path-first-retained-output.mkv",
+    "changed-path-first-retained-identity",
+    500,
+  );
   historical.close();
 
   const migrated = createDataAccess({ databasePath });
@@ -546,6 +576,14 @@ it("backfills retained Encode Output ownership from durable insertion order", ()
       sourceEncodeJobId: replacement.id,
     },
   ]));
+  expect(migrated.encodeJobs.listRetainedOutputs([
+    changedPathReplacement.id,
+  ])).toEqual([
+    expect.objectContaining({
+      id: "changed-path-first-retained-output",
+      sourceEncodeJobId: changedPathReplacement.id,
+    }),
+  ]);
   migrated.close();
 
   const verified = new DatabaseSync(databasePath);
@@ -565,16 +603,14 @@ it("preserves historical Encode Jobs without inventing Failure Reports", () => {
     databasePath,
     migrationsFolder: previousMigrations,
   });
-  const job = seedEncodeJob(databasePath, "historical-encode");
-  const claim = previousAccess.encodeJobs.claimNext("historical-worker");
-  if (claim === null) {
-    throw new Error("Expected historical Encode Job claim");
-  }
-  previousAccess.encodeJobs.fail(
-    claim,
-    "HandBrake failed with status 9 and /private/legacy-path",
-  );
   previousAccess.close();
+  const job = seedEncodeJob(databasePath, "historical-encode");
+  const historical = new DatabaseSync(databasePath);
+  historical.prepare(`
+    UPDATE encode_jobs SET status = 'failed', reserves_output_path = 0,
+      error_message = ? WHERE id = ?
+  `).run("HandBrake failed with status 9 and /private/legacy-path", job.id);
+  historical.close();
 
   const migratedAccess = createDataAccess({ databasePath });
   expect(migratedAccess.encodeJobs.list()).toEqual([
@@ -604,12 +640,13 @@ it("migrates command reports and accepts every new Encode failure category", () 
     databasePath,
     migrationsFolder: commandReportMigrations,
   });
-  const job = seedEncodeJob(databasePath, "expanded-encode");
-  const commandClaim = previousAccess.encodeJobs.claimNext("command-worker");
-  if (!commandClaim) throw new Error("Expected command report claim");
-  previousAccess.encodeJobs.fail(commandClaim, "HandBrake command failed");
   previousAccess.close();
+  const job = seedEncodeJob(databasePath, "expanded-encode");
   const historicalSqlite = new DatabaseSync(databasePath);
+  historicalSqlite.prepare(`
+    UPDATE encode_jobs SET status = 'failed', reserves_output_path = 0,
+      error_message = 'HandBrake command failed' WHERE id = ?
+  `).run(job.id);
   historicalSqlite.prepare(`
     INSERT INTO encode_job_failure_reports (
       id, encode_job_id, schema_version, worker_kind, reason_code, phase,
@@ -710,15 +747,14 @@ it("preserves every previously accepted command Failure Report", () => {
     databasePath,
     migrationsFolder: previousMigrations,
   });
-  const job = seedEncodeJob(databasePath, "previous-command-report");
-  const claim = previousAccess.encodeJobs.claimNext("previous-report-worker");
-  if (claim === null) {
-    throw new Error("Expected previous Encode Job claim");
-  }
-  previousAccess.encodeJobs.fail(claim, "HandBrake command failed");
   previousAccess.close();
+  const job = seedEncodeJob(databasePath, "previous-command-report");
 
   const previousSqlite = new DatabaseSync(databasePath);
+  previousSqlite.prepare(`
+    UPDATE encode_jobs SET status = 'failed', reserves_output_path = 0,
+      error_message = 'HandBrake command failed' WHERE id = ?
+  `).run(job.id);
   const occurredAt = Date.parse("2026-09-01T17:30:00.000Z");
   previousSqlite.prepare(`
     INSERT INTO encode_job_failure_reports(

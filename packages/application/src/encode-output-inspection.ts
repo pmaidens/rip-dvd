@@ -258,7 +258,9 @@ export function encodeOutputArtifactReferences(
   );
   const published = ownsPublishedOutput(job) &&
       (directSuccessor === undefined ||
-        !successorReplacedPublishedOutput(job, directSuccessor))
+        !successorAffectsPublishedOutput(job, directSuccessor) ||
+        (directSuccessor.replaceExistingOutput &&
+          !hasPublishedSuccessorOutput(directSuccessor)))
     ? [{
       identity: encodeOutputArtifactIdentity(job.id),
       state: "published" as const,
@@ -300,6 +302,12 @@ interface ResolvedEncodeOutput {
   originalDiscArchiveId: string | null;
   outputPath: string;
   recordedFilesystemIdentity: EncodeOutputFilesystemIdentity | null;
+  recordedValidationResult: "passed" | null;
+  recordedValidationFilesystemIdentity:
+    | EncodeOutputFilesystemIdentity
+    | null;
+  recordedValidatedAt: Date | null;
+  recordedCompleteness: "complete" | null;
   retainedOutputId: string | null;
 }
 
@@ -324,6 +332,14 @@ function inspectionResponse(
     media: EncodeOutputMediaInspection & { playability: "not_assessed" };
   },
 ) {
+  const validation = presentedValidation(input, file, inspection);
+  const presentedFile = {
+    ...file,
+    completeness: validation.result === "passed" &&
+        input.recordedCompleteness === "complete"
+      ? "complete" as const
+      : "unknown" as const,
+  };
   return {
     schemaVersion: 1 as const,
     artifact: {
@@ -335,13 +351,13 @@ function inspectionResponse(
         status: input.job.status,
         completedAt: input.job.completedAt?.toISOString() ?? null,
       },
-      validation: presentedValidation(),
+      validation,
       provenance: historicalProvenance(
         input.job,
         input.originalDiscArchiveId,
         input.retainedOutputId,
       ),
-      file,
+      file: presentedFile,
       ...inspection,
       availableActions: [{
         name: "export" as const,
@@ -371,13 +387,36 @@ function fileUnavailable(
   );
 }
 
-function presentedValidation() {
+function presentedValidation(
+  input: ResolvedEncodeOutput,
+  file: PresentedEncodeOutputFile,
+  inspection: Parameters<typeof inspectionResponse>[2],
+) {
+  const hasEvidence = input.recordedValidationResult === "passed" &&
+    input.recordedValidationFilesystemIdentity !== null &&
+    input.recordedValidatedAt !== null &&
+    input.recordedCompleteness === "complete";
+  const appliesToObservedFile = !hasEvidence || file.identity === null
+    ? null
+    : file.identity === input.recordedValidationFilesystemIdentity;
+  const result = hasEvidence && appliesToObservedFile === true &&
+      inspection.inspectability.status === "inspected"
+    ? "passed" as const
+    : "unknown" as const;
   return {
-    result: "unknown" as const,
-    identity: null,
-    evidence: null,
-    evidenceAvailability: "not_recorded" as const,
-    appliesToObservedFile: null,
+    result,
+    identity: input.recordedValidationFilesystemIdentity,
+    evidence: hasEvidence
+      ? {
+        kind: "encode_worker_validation" as const,
+        schemaVersion: 1 as const,
+        validatedAt: input.recordedValidatedAt!.toISOString(),
+      }
+      : null,
+    evidenceAvailability: hasEvidence
+      ? "recorded" as const
+      : "not_recorded" as const,
+    appliesToObservedFile,
   };
 }
 
@@ -424,16 +463,22 @@ function resolvePublishedEncodeOutput(
   const successor = access.encodeJobs.listCorrectionLinks([job.id]).find(
     (candidate) => candidate.predecessorEncodeJobId === job.id,
   );
+  const affectingSuccessor = successor !== undefined &&
+      successorAffectsPublishedOutput(job, successor)
+    ? successor
+    : undefined;
   const authorityUnavailableReason = job.publicationPending === true ||
-      (successor !== undefined &&
-        successorAffectsPublishedOutput(job, successor) &&
-        successor.publicationPending === true)
+      affectingSuccessor?.publicationPending === true
     ? "A corrected Encode Output publication is changing artifact authority."
+    : affectingSuccessor !== undefined &&
+        !hasPublishedSuccessorOutput(affectingSuccessor) &&
+        !affectingSuccessor.replaceExistingOutput
+      ? "The published Encode Output no longer has recorded artifact authority."
     : null;
   if (
     authorityUnavailableReason === null &&
-    successor !== undefined &&
-    successorReplacedPublishedOutput(job, successor)
+    affectingSuccessor !== undefined &&
+    successorReplacedPublishedOutput(job, affectingSuccessor)
   ) {
     throw new RecordNotFoundError("Encode Output", artifactIdentity);
   }
@@ -447,18 +492,27 @@ function resolvePublishedEncodeOutput(
       job.outputPath,
       job.publicationPending,
       job.publicationCompletionPending,
-      successor?.id ?? null,
-      successor?.status ?? null,
-      successor?.completedAt?.toISOString() ?? null,
-      successor?.outputPath ?? null,
-      successor?.replaceExistingOutput ?? null,
-      successor?.publicationPending ?? null,
+      job.outputValidationResult,
+      job.outputValidationFilesystemIdentity,
+      job.outputValidatedAt?.toISOString() ?? null,
+      job.outputCompleteness,
+      affectingSuccessor?.id ?? null,
+      affectingSuccessor?.status ?? null,
+      affectingSuccessor?.completedAt?.toISOString() ?? null,
+      affectingSuccessor?.outputPath ?? null,
+      affectingSuccessor?.replaceExistingOutput ?? null,
+      affectingSuccessor?.publicationPending ?? null,
     ]),
     authorityUnavailableReason,
     job,
     originalDiscArchiveId: originalDiscArchiveId(access, job),
     outputPath: job.outputPath,
-    recordedFilesystemIdentity: null,
+    recordedFilesystemIdentity: job.outputValidationFilesystemIdentity,
+    recordedValidationResult: job.outputValidationResult,
+    recordedValidationFilesystemIdentity:
+      job.outputValidationFilesystemIdentity,
+    recordedValidatedAt: job.outputValidatedAt,
+    recordedCompleteness: job.outputCompleteness,
     retainedOutputId: null,
   };
 }
@@ -488,6 +542,10 @@ function resolveRetainedEncodeOutput(
       retainedOutput.sourceEncodeJobId,
       retainedOutput.retainedOutputPath,
       retainedOutput.filesystemIdentity,
+      retainedOutput.validationResult,
+      retainedOutput.validationFilesystemIdentity,
+      retainedOutput.validatedAt?.toISOString() ?? null,
+      retainedOutput.completeness,
       retainedOutput.state,
       retainedOutput.retainedAt.toISOString(),
       job.id,
@@ -499,6 +557,11 @@ function resolveRetainedEncodeOutput(
     originalDiscArchiveId: originalDiscArchiveId(access, job),
     outputPath: retainedOutput.retainedOutputPath,
     recordedFilesystemIdentity: retainedOutput.filesystemIdentity,
+    recordedValidationResult: retainedOutput.validationResult,
+    recordedValidationFilesystemIdentity:
+      retainedOutput.validationFilesystemIdentity,
+    recordedValidatedAt: retainedOutput.validatedAt,
+    recordedCompleteness: retainedOutput.completeness,
     retainedOutputId: retainedOutput.id,
   };
 }
@@ -621,7 +684,7 @@ export async function inspectEncodeOutput(
     return fileUnavailable(
       base,
       "OUTPUT_IDENTITY_CHANGED",
-      "The retained Encode Output no longer matches its recorded file identity.",
+      "The Encode Output no longer matches its recorded file identity.",
     );
   }
 

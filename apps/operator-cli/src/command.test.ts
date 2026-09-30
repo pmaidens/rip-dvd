@@ -303,6 +303,13 @@ it("addresses every retained Encode Output generation by its own artifact identi
         retainedOutputIdentity: encodeOutputFilesystemIdentity(
           lstatSync(retainedPath),
         ),
+        publishedOutputValidation: {
+          result: "passed",
+          filesystemIdentity: encodeOutputFilesystemIdentity(
+            lstatSync(outputPath),
+          ),
+          completeness: "complete",
+        },
       },
     );
     access.encodeJobs.completePartialCleanup(mutation);
@@ -343,10 +350,16 @@ it("addresses every retained Encode Output generation by its own artifact identi
     "synthetic-reencode-worker",
     "synthetic current output",
   );
+  access.encodeJobs.requeue(replacement.id);
+  publishReplacement(
+    "synthetic-second-reencode-worker",
+    "synthetic newest output",
+  );
   const retained = access.encodeJobs.listRetainedOutputs([replacement.id]);
-  expect(retained).toHaveLength(2);
+  expect(retained).toHaveLength(3);
   expect(retained.map(({ sourceEncodeJobId }) => sourceEncodeJobId)).toEqual([
     predecessor.id,
+    replacement.id,
     replacement.id,
   ]);
   access.close();
@@ -369,6 +382,37 @@ it("addresses every retained Encode Output generation by its own artifact identi
       })),
     },
   });
+  const firstPage = await current.run([
+    "inspect",
+    "encode-jobs",
+    replacement.id,
+    "--limit",
+    "1",
+    "--offset",
+    "0",
+  ]);
+  const secondPage = await current.run([
+    "inspect",
+    "encode-jobs",
+    replacement.id,
+    "--limit",
+    "1",
+    "--offset",
+    "1",
+  ]);
+  expect(firstPage.result).toMatchObject({ item: {
+    encodeOutputArtifactPage: { offset: 0, limit: 1, nextOffset: 1 },
+    encodeOutputArtifacts: [
+      { state: "published" },
+      { identity: retainedEncodeOutputArtifactIdentity(retained[1]!.id) },
+    ],
+  } });
+  expect(secondPage.result).toMatchObject({ item: {
+    encodeOutputArtifactPage: { offset: 1, limit: 1, nextOffset: null },
+    encodeOutputArtifacts: [
+      { identity: retainedEncodeOutputArtifactIdentity(retained[2]!.id) },
+    ],
+  } });
 
   const first = await current.run(
     ["encode-output", "inspect", retainedEncodeOutputArtifactIdentity(retained[0]!.id)],
@@ -378,6 +422,12 @@ it("addresses every retained Encode Output generation by its own artifact identi
   );
   const second = await current.run(
     ["encode-output", "inspect", retainedEncodeOutputArtifactIdentity(retained[1]!.id)],
+    undefined,
+    undefined,
+    { encodeOutputMediaProbe: mediaProbe },
+  );
+  const third = await current.run(
+    ["encode-output", "inspect", retainedEncodeOutputArtifactIdentity(retained[2]!.id)],
     undefined,
     undefined,
     { encodeOutputMediaProbe: mediaProbe },
@@ -392,7 +442,23 @@ it("addresses every retained Encode Output generation by its own artifact identi
     state: "retained",
     encodeJob: { id: replacement.id },
     provenance: { retainedOutputId: retained[1]!.id },
-    file: { identityContinuity: "verified" },
+    validation: {
+      result: "passed",
+      evidenceAvailability: "recorded",
+      appliesToObservedFile: true,
+    },
+    file: { identityContinuity: "verified", completeness: "complete" },
+  } });
+  expect(third.result).toMatchObject({ artifact: {
+    state: "retained",
+    encodeJob: { id: replacement.id },
+    provenance: { retainedOutputId: retained[2]!.id },
+    validation: {
+      result: "passed",
+      evidenceAvailability: "recorded",
+      appliesToObservedFile: true,
+    },
+    file: { identityContinuity: "verified", completeness: "complete" },
   } });
   expect(mediaProbe.mock.calls.map(([path]) => path)).toEqual(
     retained.map(({ retainedOutputPath }) => retainedOutputPath),
@@ -431,6 +497,52 @@ it("keeps a completed predecessor addressable when its correction publishes else
   );
   access.encodeJobs.completePublishedClaim(claim, mutation, () => true);
   access.encodeJobs.completePartialCleanup(mutation);
+  access.encodeJobs.requeue(replacement.id);
+  const reencodeClaim = access.encodeJobs.claimNext(
+    "synthetic-new-path-reencoder",
+  );
+  if (reencodeClaim?.id !== replacement.id) {
+    throw new Error("Expected changed-path re-encode claim");
+  }
+  access.encodeJobs.recordReplacementOutputIdentity(
+    reencodeClaim,
+    encodeOutputFilesystemIdentity(lstatSync(replacementPath)),
+  );
+  const reencodeCleanup = access.encodeJobs.registerPartialCleanup(
+    reencodeClaim,
+    { publicationPending: true },
+  );
+  const retainedReplacementPath = join(
+    realpathSync(dirname(replacementPath)),
+    `${basename(replacementPath)}.failed.${reencodeClaim.claimToken}`,
+  );
+  const reencodeMutation = access.encodeJobs.beginPublicationMutation(
+    reencodeClaim,
+    reencodeCleanup,
+    retainedReplacementPath,
+  );
+  renameSync(replacementPath, retainedReplacementPath);
+  writeFileSync(replacementPath, "synthetic re-encoded replacement output");
+  access.encodeJobs.completePublishedClaim(
+    reencodeClaim,
+    reencodeMutation,
+    () => true,
+    {
+      retainedOutputPath: retainedReplacementPath,
+      retainedOutputIdentity: encodeOutputFilesystemIdentity(
+        lstatSync(retainedReplacementPath),
+      ),
+    },
+  );
+  access.encodeJobs.completePartialCleanup(reencodeMutation);
+  const retainedReplacement = access.encodeJobs.listRetainedOutputs([
+    replacement.id,
+  ]);
+  expect(retainedReplacement).toHaveLength(1);
+  expect(retainedReplacement[0]).toMatchObject({
+    sourceEncodeJobId: replacement.id,
+    replacementEncodeJobId: replacement.id,
+  });
   access.close();
 
   const mediaProbe = vi.fn(async () => ({
@@ -460,6 +572,102 @@ it("keeps a completed predecessor addressable when its correction publishes else
   } });
   expect(mediaProbe).toHaveBeenCalledWith(predecessorPath);
   expect(mediaProbe).toHaveBeenCalledWith(replacementPath);
+});
+
+it("withholds a same-path predecessor after successor authority is revoked", async () => {
+  const current = fixture();
+  const { archive, predecessor } = seedCatalogReviewForReadFixture(current);
+  const outputPath = join(current.mediaLibraryPath, "previous-film.mkv");
+  writeFileSync(outputPath, "synthetic predecessor output");
+  const access = current.openAccess();
+  const replacement = access.catalog.completeCatalogReviewWithReplacements(
+    archive.id,
+    access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+      .updatedAt,
+    "reviewed_with_selections",
+    [{
+      predecessorEncodeJobId: predecessor.id,
+      encodingProfileId: predecessor.encodingProfileId,
+      outputPath,
+    }],
+  ).replacementEncodeJobs[0]!;
+  const claim = access.encodeJobs.claimNext("synthetic-revoked-authority");
+  if (claim?.id !== replacement.id) {
+    throw new Error("Expected same-path replacement claim");
+  }
+  access.encodeJobs.recordReplacementOutputIdentity(
+    claim,
+    encodeOutputFilesystemIdentity(lstatSync(outputPath)),
+  );
+  access.encodeJobs.fail(claim, "synthetic failure");
+  access.close();
+  const mediaProbe = vi.fn(async () => ({ durationSeconds: 600, streams: [] }));
+
+  const inspection = await current.run(
+    ["encode-output", "inspect", encodeOutputArtifactIdentity(predecessor.id)],
+    undefined,
+    undefined,
+    { encodeOutputMediaProbe: mediaProbe },
+  );
+
+  expect(inspection.result).toMatchObject({ artifact: {
+    inspectability: {
+      status: "unknown",
+      reasonCode: "OUTPUT_AUTHORITY_CHANGED",
+    },
+    validation: { result: "unknown" },
+  } });
+  expect(mediaProbe).not.toHaveBeenCalled();
+  expect((await current.run(["inspect", "encode-jobs", predecessor.id])).result)
+    .toMatchObject({ item: { encodeOutputArtifacts: [] } });
+});
+
+it("ignores unrelated changed-path successor activity during inspection", async () => {
+  const current = fixture();
+  const { archive, predecessor } = seedCatalogReviewForReadFixture(current);
+  const predecessorPath = join(current.mediaLibraryPath, "previous-film.mkv");
+  const replacementPath = join(current.mediaLibraryPath, "corrected-film.mkv");
+  writeFileSync(predecessorPath, "synthetic predecessor output");
+  const access = current.openAccess();
+  const replacement = access.catalog.completeCatalogReviewWithReplacements(
+    archive.id,
+    access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+      .updatedAt,
+    "reviewed_with_selections",
+    [{
+      predecessorEncodeJobId: predecessor.id,
+      encodingProfileId: predecessor.encodingProfileId,
+      outputPath: replacementPath,
+    }],
+  ).replacementEncodeJobs[0]!;
+  let successorChanged = false;
+  const racingAccess: DataAccess = {
+    ...access,
+    readEncodeOutputInspectionSnapshot(read) {
+      const snapshot = access.readEncodeOutputInspectionSnapshot(read);
+      if (!successorChanged) {
+        successorChanged = true;
+        const claim = access.encodeJobs.claimNext("synthetic-unrelated-race");
+        if (claim?.id !== replacement.id) {
+          throw new Error("Expected changed-path replacement claim");
+        }
+        access.encodeJobs.fail(claim, "synthetic unrelated failure");
+      }
+      return snapshot;
+    },
+  };
+  const mediaProbe = vi.fn(async () => ({ durationSeconds: 600, streams: [] }));
+
+  const inspection = await createApplicationOperations(racingAccess, {
+    encodeOutputMediaProbe: mediaProbe,
+  }).inspectEncodeOutput(encodeOutputArtifactIdentity(predecessor.id));
+
+  expect(inspection).toMatchObject({ artifact: {
+    inspectability: { status: "inspected" },
+    media: { durationSeconds: 600 },
+  } });
+  expect(mediaProbe).toHaveBeenCalledWith(predecessorPath);
+  access.close();
 });
 
 it("withholds inspection when publication authority changes before file probing", async () => {

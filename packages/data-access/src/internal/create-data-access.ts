@@ -1889,21 +1889,18 @@ export function createDataAccessInternal(
         "Retained Encode output requires corrected replacement provenance",
       );
     }
-    const priorRetainedOutput = transaction
-      .select({ id: retainedEncodeOutputs.id })
-      .from(retainedEncodeOutputs)
-      .where(and(
-        eq(
-          retainedEncodeOutputs.predecessorEncodeJobId,
-          job.predecessorEncodeJobId,
-        ),
-        eq(retainedEncodeOutputs.replacementEncodeJobId, job.id),
-      ))
-      .limit(1)
-      .get();
-    const sourceEncodeJobId = priorRetainedOutput === undefined
+    const sourceEncodeJobId = job.completedAt === null
       ? job.predecessorEncodeJobId
       : job.id;
+    const sourceJob = requireRow(
+      transaction
+        .select()
+        .from(encodeJobs)
+        .where(eq(encodeJobs.id, sourceEncodeJobId))
+        .get(),
+      "retained Encode output source job",
+      sourceEncodeJobId,
+    );
     transaction
       .insert(retainedEncodeOutputs)
       .values({
@@ -1913,6 +1910,11 @@ export function createDataAccessInternal(
         sourceEncodeJobId,
         retainedOutputPath,
         filesystemIdentity: retainedOutputIdentity,
+        validationResult: sourceJob.outputValidationResult,
+        validationFilesystemIdentity:
+          sourceJob.outputValidationFilesystemIdentity,
+        validatedAt: sourceJob.outputValidatedAt,
+        completeness: sourceJob.outputCompleteness,
         state: "retained",
         cleanupEligible: true,
         retainedAt: timestamp,
@@ -1932,6 +1934,12 @@ export function createDataAccessInternal(
       retained.sourceEncodeJobId !== sourceEncodeJobId ||
       retained.retainedOutputPath !== retainedOutputPath ||
       retained.filesystemIdentity !== retainedOutputIdentity ||
+      retained.validationResult !== sourceJob.outputValidationResult ||
+      retained.validationFilesystemIdentity !==
+        sourceJob.outputValidationFilesystemIdentity ||
+      retained.validatedAt?.getTime() !==
+        sourceJob.outputValidatedAt?.getTime() ||
+      retained.completeness !== sourceJob.outputCompleteness ||
       retained.state !== "retained" ||
       !retained.cleanupEligible
     ) {
@@ -1958,6 +1966,7 @@ export function createDataAccessInternal(
       throw new StaleJobAttemptError(operation, jobId);
     }
     const finalizedAt = now();
+    const publishedValidation = provenance?.publishedOutputValidation;
     retainCorrectedEncodeOutput(
       transaction,
       current,
@@ -1970,6 +1979,13 @@ export function createDataAccessInternal(
         completedAt: replayedCompletion === undefined
           ? finalizedAt
           : replayedCompletion.completedAt,
+        outputValidationResult: publishedValidation?.result ?? null,
+        outputValidationFilesystemIdentity:
+          publishedValidation?.filesystemIdentity ?? null,
+        outputValidatedAt: publishedValidation === undefined
+          ? null
+          : finalizedAt,
+        outputCompleteness: publishedValidation?.completeness ?? null,
         replaceExistingOutput: false,
         replacementOutputIdentity: null,
         publicationCompletionPending: false,
@@ -6110,6 +6126,8 @@ export function createDataAccessInternal(
               ids,
               options,
             ),
+          listRetainedOutputHistoryPage: (id, options) =>
+            access.encodeJobs.listRetainedOutputHistoryPage(id, options),
         },
         workerIncidents: {
           find: (id) => access.workerIncidents.find(id),
@@ -12499,6 +12517,9 @@ export function createDataAccessInternal(
             state: retainedEncodeOutputs.state,
             cleanupEligible: retainedEncodeOutputs.cleanupEligible,
             retainedAt: retainedEncodeOutputs.retainedAt,
+            validationResult: retainedEncodeOutputs.validationResult,
+            validatedAt: retainedEncodeOutputs.validatedAt,
+            completeness: retainedEncodeOutputs.completeness,
           })
           .from(retainedEncodeOutputs)
           .innerJoin(
@@ -12538,6 +12559,9 @@ export function createDataAccessInternal(
             state: row.state,
             cleanupEligible: row.cleanupEligible,
             retainedAt: row.retainedAt,
+            validationResult: row.validationResult,
+            validatedAt: row.validatedAt,
+            completeness: row.completeness,
           },
         }));
       },
@@ -12600,6 +12624,9 @@ export function createDataAccessInternal(
           state: retainedEncodeOutputs.state,
           cleanupEligible: retainedEncodeOutputs.cleanupEligible,
           retainedAt: retainedEncodeOutputs.retainedAt,
+          validationResult: retainedEncodeOutputs.validationResult,
+          validatedAt: retainedEncodeOutputs.validatedAt,
+          completeness: retainedEncodeOutputs.completeness,
         };
         const condition = or(
           inArray(retainedEncodeOutputs.predecessorEncodeJobId, uniqueIds),
@@ -12649,6 +12676,9 @@ export function createDataAccessInternal(
               state,
               cleanup_eligible,
               retained_at,
+              validation_result,
+              validated_at,
+              completeness,
               row_number() over (
                 partition by source_encode_job_id
                 order by retained_at desc, rowid desc
@@ -12670,6 +12700,9 @@ export function createDataAccessInternal(
           state: "retained";
           cleanup_eligible: number;
           retained_at: number;
+          validation_result: "passed" | null;
+          validated_at: number | null;
+          completeness: "complete" | null;
           source_rank: number;
         }>;
         const truncatedSourceEncodeJobIds = [...new Set(
@@ -12688,8 +12721,58 @@ export function createDataAccessInternal(
               state: row.state,
               cleanupEligible: row.cleanup_eligible === 1,
               retainedAt: new Date(row.retained_at),
+              validationResult: row.validation_result,
+              validatedAt: row.validated_at === null
+                ? null
+                : new Date(row.validated_at),
+              completeness: row.completeness,
             })),
           truncatedSourceEncodeJobIds,
+        };
+      },
+      listRetainedOutputHistoryPage(sourceEncodeJobId, options) {
+        const limit = requirePositiveSafeInteger(options.limit, "limit");
+        if (limit > RETAINED_ENCODE_OUTPUT_PAGE_LIMIT) {
+          throw new DomainInvariantError(
+            `Retained Encode output history page limit must be between 1 and ${RETAINED_ENCODE_OUTPUT_PAGE_LIMIT}`,
+          );
+        }
+        const offset = options.offset ?? 0;
+        if (!Number.isSafeInteger(offset) || offset < 0) {
+          throw new DomainInvariantError(
+            "Retained Encode output history offset must be a non-negative safe integer",
+          );
+        }
+        const rows = database
+          .select({
+            id: retainedEncodeOutputs.id,
+            predecessorEncodeJobId:
+              retainedEncodeOutputs.predecessorEncodeJobId,
+            replacementEncodeJobId:
+              retainedEncodeOutputs.replacementEncodeJobId,
+            sourceEncodeJobId: retainedEncodeOutputs.sourceEncodeJobId,
+            state: retainedEncodeOutputs.state,
+            cleanupEligible: retainedEncodeOutputs.cleanupEligible,
+            retainedAt: retainedEncodeOutputs.retainedAt,
+            validationResult: retainedEncodeOutputs.validationResult,
+            validatedAt: retainedEncodeOutputs.validatedAt,
+            completeness: retainedEncodeOutputs.completeness,
+          })
+          .from(retainedEncodeOutputs)
+          .where(eq(
+            retainedEncodeOutputs.sourceEncodeJobId,
+            sourceEncodeJobId,
+          ))
+          .orderBy(
+            asc(retainedEncodeOutputs.retainedAt),
+            asc(retainedEncodeOutputs.id),
+          )
+          .limit(limit + 1)
+          .offset(offset)
+          .all();
+        return {
+          outputs: rows.slice(0, limit),
+          nextOffset: rows.length > limit ? offset + limit : null,
         };
       },
       renewClaim(claim) {
