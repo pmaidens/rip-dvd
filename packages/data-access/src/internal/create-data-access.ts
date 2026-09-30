@@ -1955,7 +1955,14 @@ export function createDataAccessInternal(
     provenance: EncodeJobPublicationProvenance | undefined,
     operation: string,
     jobId: EncodeJobId,
-    replayedCompletion?: { completedAt: Date | null },
+    replayedCompletion?: Pick<
+      EncodeJob,
+      | "completedAt"
+      | "outputValidationResult"
+      | "outputValidationFilesystemIdentity"
+      | "outputValidatedAt"
+      | "outputCompleteness"
+    >,
   ): EncodeJob | undefined {
     const current = transaction
       .select()
@@ -1979,13 +1986,19 @@ export function createDataAccessInternal(
         completedAt: replayedCompletion === undefined
           ? finalizedAt
           : replayedCompletion.completedAt,
-        outputValidationResult: publishedValidation?.result ?? null,
+        outputValidationResult: replayedCompletion === undefined
+          ? publishedValidation?.result ?? null
+          : replayedCompletion.outputValidationResult,
         outputValidationFilesystemIdentity:
-          publishedValidation?.filesystemIdentity ?? null,
-        outputValidatedAt: publishedValidation === undefined
-          ? null
-          : finalizedAt,
-        outputCompleteness: publishedValidation?.completeness ?? null,
+          replayedCompletion === undefined
+            ? publishedValidation?.filesystemIdentity ?? null
+            : replayedCompletion.outputValidationFilesystemIdentity,
+        outputValidatedAt: replayedCompletion === undefined
+          ? publishedValidation === undefined ? null : finalizedAt
+          : replayedCompletion.outputValidatedAt,
+        outputCompleteness: replayedCompletion === undefined
+          ? publishedValidation?.completeness ?? null
+          : replayedCompletion.outputCompleteness,
         replaceExistingOutput: false,
         replacementOutputIdentity: null,
         publicationCompletionPending: false,
@@ -13778,7 +13791,14 @@ export function createDataAccessInternal(
         const replayedCompletion =
           owned.status === "completed" &&
             !owned.publicationCompletionPending
-            ? { completedAt: owned.completedAt }
+            ? {
+              completedAt: owned.completedAt,
+              outputValidationResult: owned.outputValidationResult,
+              outputValidationFilesystemIdentity:
+                owned.outputValidationFilesystemIdentity,
+              outputValidatedAt: owned.outputValidatedAt,
+              outputCompleteness: owned.outputCompleteness,
+            }
             : undefined;
         const restoreOwnedPublication = () => {
           const restored = database

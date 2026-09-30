@@ -4734,6 +4734,7 @@ describe("encode worker polling", () => {
         outputCompleteness: "complete",
       }),
     ]);
+    const completedBeforeRecovery = fixture.access.encodeJobs.list()[0]!;
     expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id])[0])
       .toMatchObject({
         reasonCode: "publication_failed",
@@ -4762,6 +4763,13 @@ describe("encode worker polling", () => {
         outputCompleteness: "complete",
       }),
     ]);
+    const completedAfterRecovery = fixture.access.encodeJobs.list()[0]!;
+    expect(completedAfterRecovery.outputValidationFilesystemIdentity).toBe(
+      completedBeforeRecovery.outputValidationFilesystemIdentity,
+    );
+    expect(completedAfterRecovery.outputValidatedAt).toEqual(
+      completedBeforeRecovery.outputValidatedAt,
+    );
     expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id]))
       .toHaveLength(1);
     fixture.access.close();

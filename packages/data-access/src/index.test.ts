@@ -4079,6 +4079,8 @@ describe("data-access facade", () => {
     );
     const priorOutputIdentity =
       "1048576:2048:4096:1710000000000" as EncodeOutputFilesystemIdentity;
+    const publishedOutputIdentity =
+      "1048576:2048:8192:1710000000000" as EncodeOutputFilesystemIdentity;
     const logicalRetainedOutputPath =
       `${replacement.outputPath}.failed.${replacementClaim.claimToken}`;
     access.encodeJobs.recordReplacementOutputIdentity(
@@ -4152,11 +4154,23 @@ describe("data-access facade", () => {
     const finalizedReplacement = access.encodeJobs.completePublishedPartial(
       fencedPublication,
       () => true,
-      { retainedOutputPath, retainedOutputIdentity: priorOutputIdentity },
+      {
+        retainedOutputPath,
+        retainedOutputIdentity: priorOutputIdentity,
+        publishedOutputValidation: {
+          result: "passed",
+          filesystemIdentity: publishedOutputIdentity,
+          completeness: "complete",
+        },
+      },
     );
     expect(finalizedReplacement.job).toMatchObject({
       completedAt: firstCompletionAt,
       id: replacement.id,
+      outputValidationResult: "passed",
+      outputValidationFilesystemIdentity: publishedOutputIdentity,
+      outputValidatedAt: firstCompletionAt,
+      outputCompleteness: "complete",
       replacementOutputIdentity: null,
       status: "completed",
     });
@@ -4170,10 +4184,24 @@ describe("data-access facade", () => {
     const replayedPublication = access.encodeJobs.completePublishedPartial(
       fencedPublication,
       () => true,
-      { retainedOutputPath, retainedOutputIdentity: priorOutputIdentity },
+      {
+        retainedOutputPath,
+        retainedOutputIdentity: priorOutputIdentity,
+        publishedOutputValidation: {
+          result: "passed",
+          filesystemIdentity: publishedOutputIdentity,
+          completeness: "complete",
+        },
+      },
     );
     expect(replayedPublication).toMatchObject({
-      job: expect.objectContaining({ completedAt: firstCompletionAt }),
+      job: expect.objectContaining({
+        completedAt: firstCompletionAt,
+        outputValidationResult: "passed",
+        outputValidationFilesystemIdentity: publishedOutputIdentity,
+        outputValidatedAt: firstCompletionAt,
+        outputCompleteness: "complete",
+      }),
     });
     access.encodeJobs.completePartialCleanup(fencedPublication);
     const sqlite = new DatabaseSync(databasePath);
