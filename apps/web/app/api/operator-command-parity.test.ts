@@ -3,7 +3,10 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
+  archiveBoundaryEvidenceFromRecord,
   createCleanReadArchiveIntegrityEvidence,
+  createDvdArchiveBoundaryEvidenceDigest,
+  createDvdArchiveEvidenceManifestDigests,
   DVD_RECOVERY_EVIDENCE_ADMISSION,
   DVD_RECOVERY_EVIDENCE_ENCODING,
   DVD_RECOVERY_EVIDENCE_FORMAT,
@@ -1107,15 +1110,42 @@ it("returns the same operational records and evidence through web and CLI", asyn
           bad_sector_counts_by_title = NULL
       WHERE id = ?
     `).run(archiveId);
-    const unrecoveredSourceRanges = JSON.stringify([{
+    const unrecoveredSourceRangeRecords = [{
       startLba: 0,
       sectorCount: 1,
       classification: "skipped_untested",
-    }]);
-    const boundaryEvidenceDigest = "a".repeat(64);
-    const sourceRangesDigest = "b".repeat(64);
-    const manifestDigest = "c".repeat(64);
+    }] as const;
+    const unrecoveredSourceRanges = JSON.stringify(
+      unrecoveredSourceRangeRecords,
+    );
+    const boundaryEvidence = archiveBoundaryEvidenceFromRecord(revisedArchive);
+    if (boundaryEvidence === null) {
+      throw new Error("Expected Archive Boundary Evidence");
+    }
+    const boundaryEvidenceDigest =
+      createDvdArchiveBoundaryEvidenceDigest(boundaryEvidence);
     const manifestId = "synthetic-evidence-manifest";
+    const {
+      unrecoveredSourceRangesDigest: sourceRangesDigest,
+      manifestDigest,
+    } = createDvdArchiveEvidenceManifestDigests({
+      originalDiscArchiveId: archiveId,
+      revision: 1,
+      previousManifestId: null,
+      previousManifestDigest: null,
+      recoveryReadId: null,
+      recoveryReadEvidenceDigest: null,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+      imageFingerprint: revisedArchive.fingerprint,
+      sectorSizeBytes: 2_048,
+      acceptedEndLbaExclusive: 1,
+      boundaryPolicyVersion: revisedArchive.boundaryPolicyVersion!,
+      boundaryReportedSizeBytes: revisedArchive.boundaryReportedSizeBytes!,
+      boundaryPublishedSizeBytes:
+        revisedArchive.boundaryPublishedSizeBytes!,
+      boundaryEvidenceDigest,
+      unrecoveredSourceRanges: unrecoveredSourceRangeRecords,
+    });
     evidenceFixture.prepare(`
       INSERT INTO dvd_archive_evidence_manifests (
         id, original_disc_archive_id, revision, evidence_format,

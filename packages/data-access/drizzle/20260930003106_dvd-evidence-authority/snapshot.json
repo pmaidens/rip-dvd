@@ -2070,6 +2070,46 @@
       "autoincrement": false,
       "default": null,
       "generated": null,
+      "name": "output_validation_result",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "output_validation_filesystem_identity",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "output_validated_at",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "output_completeness",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
       "name": "error_message",
       "entityType": "columns",
       "table": "encode_jobs"
@@ -3280,6 +3320,16 @@
       "autoincrement": false,
       "default": null,
       "generated": null,
+      "name": "source_encode_job_id",
+      "entityType": "columns",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
       "name": "retained_output_path",
       "entityType": "columns",
       "table": "retained_encode_outputs"
@@ -3321,6 +3371,46 @@
       "default": null,
       "generated": null,
       "name": "retained_at",
+      "entityType": "columns",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "validation_result",
+      "entityType": "columns",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "validation_filesystem_identity",
+      "entityType": "columns",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "validated_at",
+      "entityType": "columns",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "completeness",
       "entityType": "columns",
       "table": "retained_encode_outputs"
     },
@@ -3926,6 +4016,21 @@
       "onDelete": "RESTRICT",
       "nameExplicit": false,
       "name": "fk_retained_encode_outputs_replacement_encode_job_id_encode_jobs_id_fk",
+      "entityType": "fks",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "columns": [
+        "source_encode_job_id"
+      ],
+      "tableTo": "encode_jobs",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_retained_encode_outputs_source_encode_job_id_encode_jobs_id_fk",
       "entityType": "fks",
       "table": "retained_encode_outputs"
     },
@@ -5042,6 +5147,24 @@
     {
       "columns": [
         {
+          "value": "source_encode_job_id",
+          "isExpression": false
+        },
+        {
+          "value": "retained_at",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "retained_encode_outputs_source_retained_at_idx",
+      "entityType": "indexes",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "columns": [
+        {
           "value": "worker_kind",
           "isExpression": false
         },
@@ -5586,6 +5709,12 @@
       "table": "encode_jobs"
     },
     {
+      "value": "(\"output_validation_result\" is null and \"output_validation_filesystem_identity\" is null and \"output_validated_at\" is null and \"output_completeness\" is null) or (\"output_validation_result\" = 'passed' and typeof(\"output_validation_filesystem_identity\") = 'text' and length(\"output_validation_filesystem_identity\") > 0 and \"output_validated_at\" is not null and \"output_completeness\" = 'complete')",
+      "name": "encode_jobs_output_validation_shape_check",
+      "entityType": "checks",
+      "table": "encode_jobs"
+    },
+    {
       "value": "\"id\" is not null",
       "name": "encoding_profiles_id_not_null",
       "entityType": "checks",
@@ -5820,6 +5949,12 @@
       "table": "retained_encode_outputs"
     },
     {
+      "value": "\"source_encode_job_id\" in (\"predecessor_encode_job_id\", \"replacement_encode_job_id\")",
+      "name": "retained_encode_outputs_source_job_check",
+      "entityType": "checks",
+      "table": "retained_encode_outputs"
+    },
+    {
       "value": "\"state\" in ('retained')",
       "name": "retained_encode_outputs_state_check",
       "entityType": "checks",
@@ -5828,6 +5963,12 @@
     {
       "value": "\"cleanup_eligible\" = 1",
       "name": "retained_encode_outputs_cleanup_eligible_check",
+      "entityType": "checks",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "value": "(\"validation_result\" is null and \"validation_filesystem_identity\" is null and \"validated_at\" is null and \"completeness\" is null) or (\"validation_result\" = 'passed' and typeof(\"validation_filesystem_identity\") = 'text' and length(\"validation_filesystem_identity\") > 0 and \"validated_at\" is not null and \"completeness\" = 'complete')",
+      "name": "retained_encode_outputs_validation_shape_check",
       "entityType": "checks",
       "table": "retained_encode_outputs"
     },

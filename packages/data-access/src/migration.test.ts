@@ -13,6 +13,9 @@ import { afterEach, expect, it } from "vitest";
 
 import {
   createDataAccess,
+  createDvdArchiveBoundaryEvidenceDigest,
+  createDvdArchiveEvidenceManifestDigests,
+  createDvdArchiveRecoveryReadEvidenceDigest,
   DVD_RECOVERY_EVIDENCE_FORMAT,
   DvdRecoveryEvidenceAdmissionClosedError,
   type ArchiveJobId,
@@ -1089,15 +1092,104 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   projectionOnlyAccess.close();
 
   const evidenceFixture = new DatabaseSync(databasePath);
-  const boundaryDigest = "a".repeat(64);
-  const initialRangesDigest = "b".repeat(64);
-  const initialManifestDigest = "c".repeat(64);
-  const failedRangesDigest = "d".repeat(64);
-  const failedManifestDigest = "e".repeat(64);
-  const recoveryReadDigest = "f".repeat(64);
-  const cleanBoundaryDigest = "6".repeat(64);
-  const cleanRangesDigest = "7".repeat(64);
-  const cleanManifestDigest = "8".repeat(64);
+  const initialRanges = [{
+    startLba: 0,
+    sectorCount: 2,
+    classification: "skipped_untested",
+  }] as const;
+  const authoritativeRanges = [
+    { startLba: 0, sectorCount: 1, classification: "skipped_untested" },
+    { startLba: 1, sectorCount: 1, classification: "individually_failed" },
+  ] as const;
+  const boundaryDigest = createDvdArchiveBoundaryEvidenceDigest({
+    policyVersion: "dvd-archive-boundary-v1",
+    reportedSizeBytes: 4_096,
+    publishedSizeBytes: 4_096,
+    excludedSectorCount: 0,
+  });
+  const initialManifest = createDvdArchiveEvidenceManifestDigests({
+    originalDiscArchiveId: "evidence-new-format-archive",
+    revision: 1,
+    previousManifestId: null,
+    previousManifestDigest: null,
+    recoveryReadId: null,
+    recoveryReadEvidenceDigest: null,
+    evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+    imageFingerprint: "evidence-new-format-fingerprint",
+    sectorSizeBytes: 2_048,
+    acceptedEndLbaExclusive: 2,
+    boundaryPolicyVersion: "dvd-archive-boundary-v1",
+    boundaryReportedSizeBytes: 4_096,
+    boundaryPublishedSizeBytes: 4_096,
+    boundaryEvidenceDigest: boundaryDigest,
+    unrecoveredSourceRanges: initialRanges,
+  });
+  const initialRangesDigest = initialManifest.unrecoveredSourceRangesDigest;
+  const initialManifestDigest = initialManifest.manifestDigest;
+  const recoveryReadDigest = createDvdArchiveRecoveryReadEvidenceDigest({
+    originalDiscArchiveId: "evidence-new-format-archive",
+    fromManifestId: "evidence-new-format-manifest-1",
+    fromManifestRevision: 1,
+    startLba: 1,
+    sectorCount: 1,
+    outcome: "failed",
+  });
+  const failedManifest = createDvdArchiveEvidenceManifestDigests({
+    originalDiscArchiveId: "evidence-new-format-archive",
+    revision: 2,
+    previousManifestId: "evidence-new-format-manifest-1",
+    previousManifestDigest: initialManifestDigest,
+    recoveryReadId: "evidence-new-format-read-1",
+    recoveryReadEvidenceDigest: recoveryReadDigest,
+    evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+    imageFingerprint: "evidence-new-format-fingerprint",
+    sectorSizeBytes: 2_048,
+    acceptedEndLbaExclusive: 2,
+    boundaryPolicyVersion: "dvd-archive-boundary-v1",
+    boundaryReportedSizeBytes: 4_096,
+    boundaryPublishedSizeBytes: 4_096,
+    boundaryEvidenceDigest: boundaryDigest,
+    unrecoveredSourceRanges: authoritativeRanges,
+  });
+  const failedRangesDigest = failedManifest.unrecoveredSourceRangesDigest;
+  const failedManifestDigest = failedManifest.manifestDigest;
+  const cleanBoundaryDigest = createDvdArchiveBoundaryEvidenceDigest({
+    policyVersion: "dvd-archive-boundary-v1",
+    reportedSizeBytes: 6_144,
+    publishedSizeBytes: 4_096,
+    excludedSectorCount: 1,
+    firstExcludedLba: 2,
+    maximumReferencedLba: 0,
+    outOfRangeEvidence: {
+      classifierVersion: "scsi-read-classifier-v2",
+      scsiStatus: 2,
+      hostStatus: 0,
+      driverStatus: 0,
+      senseResponseCode: 112,
+      senseKey: 5,
+      asc: 33,
+      ascq: 0,
+    },
+  });
+  const cleanManifest = createDvdArchiveEvidenceManifestDigests({
+    originalDiscArchiveId: "evidence-clean-archive",
+    revision: 1,
+    previousManifestId: null,
+    previousManifestDigest: null,
+    recoveryReadId: null,
+    recoveryReadEvidenceDigest: null,
+    evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+    imageFingerprint: "evidence-clean-fingerprint",
+    sectorSizeBytes: 2_048,
+    acceptedEndLbaExclusive: 2,
+    boundaryPolicyVersion: "dvd-archive-boundary-v1",
+    boundaryReportedSizeBytes: 6_144,
+    boundaryPublishedSizeBytes: 4_096,
+    boundaryEvidenceDigest: cleanBoundaryDigest,
+    unrecoveredSourceRanges: [],
+  });
+  const cleanRangesDigest = cleanManifest.unrecoveredSourceRangesDigest;
+  const cleanManifestDigest = cleanManifest.manifestDigest;
   evidenceFixture.exec(`
     INSERT INTO optical_drives (
       id, device_path, is_present, last_seen_at, created_at, updated_at
@@ -1249,11 +1341,6 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     expect(() => insertInitialManifest.run(JSON.stringify(invalidRanges)))
       .toThrow(/DVD evidence manifest/i);
   }
-  const initialRanges = [{
-    startLba: 0,
-    sectorCount: 2,
-    classification: "skipped_untested",
-  }] as const;
   insertInitialManifest.run(JSON.stringify(initialRanges));
   expect(() => evidenceFixture.exec(`
     UPDATE disc_inspections
@@ -1327,6 +1414,33 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
         bad_sector_counts_by_title = NULL
     WHERE id = 'evidence-new-format-archive'
   `)).toThrow(/projection must match a committed DVD evidence manifest/i);
+  const repeatedRecoveryReadDigest =
+    createDvdArchiveRecoveryReadEvidenceDigest({
+      originalDiscArchiveId: "evidence-new-format-archive",
+      fromManifestId: "evidence-new-format-manifest-2",
+      fromManifestRevision: 2,
+      startLba: 1,
+      sectorCount: 1,
+      outcome: "failed",
+    });
+  const rejectedRepeatedManifest =
+    createDvdArchiveEvidenceManifestDigests({
+      originalDiscArchiveId: "evidence-new-format-archive",
+      revision: 3,
+      previousManifestId: "evidence-new-format-manifest-2",
+      previousManifestDigest: failedManifestDigest,
+      recoveryReadId: "evidence-new-format-read-repeat",
+      recoveryReadEvidenceDigest: repeatedRecoveryReadDigest,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+      imageFingerprint: "evidence-new-format-fingerprint",
+      sectorSizeBytes: 2_048,
+      acceptedEndLbaExclusive: 2,
+      boundaryPolicyVersion: "dvd-archive-boundary-v1",
+      boundaryReportedSizeBytes: 4_096,
+      boundaryPublishedSizeBytes: 4_096,
+      boundaryEvidenceDigest: boundaryDigest,
+      unrecoveredSourceRanges: authoritativeRanges,
+    });
   evidenceFixture.exec(`
     UPDATE disc_inspections
     SET total_bytes = 2048
@@ -1378,10 +1492,6 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       1
     )
   `);
-  const authoritativeRanges = [
-    { startLba: 0, sectorCount: 1, classification: "skipped_untested" },
-    { startLba: 1, sectorCount: 1, classification: "individually_failed" },
-  ] as const;
   evidenceFixture.exec(`
     INSERT INTO dvd_archive_recovery_reads (
       id, original_disc_archive_id, from_manifest_id,
@@ -1463,7 +1573,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     ) VALUES (
       'evidence-new-format-read-repeat', 'evidence-new-format-archive',
       'evidence-new-format-manifest-2', 2, 1, 1, 'failed',
-      '${"6".repeat(64)}', 3
+      '${repeatedRecoveryReadDigest}', 3
     )
   `);
   expect(evidenceFixture.prepare(`
@@ -1486,13 +1596,37 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       'evidence-new-format-manifest-2', 'evidence-new-format-read-repeat',
       'dvd-recovery-evidence-v1', 'evidence-new-format-fingerprint', 2048, 2,
       'dvd-archive-boundary-v1', 4096, 4096, '${boundaryDigest}', ?,
-      '${"7".repeat(64)}', '${"8".repeat(64)}', 3
+      '${rejectedRepeatedManifest.unrecoveredSourceRangesDigest}',
+      '${rejectedRepeatedManifest.manifestDigest}', 3
     )
   `).run(JSON.stringify(authoritativeRanges))).toThrow(
     /manifest transition requires its one-sector recovery read/i,
   );
   expect(evidenceFixture.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   evidenceFixture.close();
+
+  const tamperedRecoveryPath = join(
+    dirname(databasePath),
+    "tampered-recovery-evidence.sqlite",
+  );
+  copyFileSync(databasePath, tamperedRecoveryPath);
+  const tamperedRecovery = new DatabaseSync(tamperedRecoveryPath);
+  tamperedRecovery.exec(`
+    DROP TRIGGER dvd_evidence_recovery_read_update_guard;
+    UPDATE dvd_archive_recovery_reads
+    SET evidence_digest = '${"0".repeat(64)}'
+    WHERE id = 'evidence-new-format-read-1'
+  `);
+  tamperedRecovery.close();
+  const tamperedRecoveryAccess = createDataAccess({
+    databasePath: tamperedRecoveryPath,
+  });
+  expect(() => tamperedRecoveryAccess.catalog.findDvdArchiveEvidenceHeader(
+    "evidence-new-format-archive" as OriginalDiscArchiveId,
+  )).toThrow(
+    "Persisted DVD Archive Recovery evidence digest does not match its contents",
+  );
+  tamperedRecoveryAccess.close();
 
   const currentAccess = createDataAccess({ databasePath });
   expect(currentAccess.catalog.findDvdArchiveEvidenceHeader(
@@ -1571,6 +1705,65 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   ]));
   currentAccess.close();
 
+  const recoveredFirstSectorRanges = [{
+    startLba: 1,
+    sectorCount: 1,
+    classification: "individually_failed",
+  }] as const;
+  const recoveredFirstSectorReadDigest =
+    createDvdArchiveRecoveryReadEvidenceDigest({
+      originalDiscArchiveId: "evidence-new-format-archive",
+      fromManifestId: "evidence-new-format-manifest-2",
+      fromManifestRevision: 2,
+      startLba: 0,
+      sectorCount: 1,
+      outcome: "recovered",
+    });
+  const recoveredFirstSectorManifest =
+    createDvdArchiveEvidenceManifestDigests({
+      originalDiscArchiveId: "evidence-new-format-archive",
+      revision: 3,
+      previousManifestId: "evidence-new-format-manifest-2",
+      previousManifestDigest: failedManifestDigest,
+      recoveryReadId: "evidence-new-format-read-2",
+      recoveryReadEvidenceDigest: recoveredFirstSectorReadDigest,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+      imageFingerprint: "evidence-new-format-fingerprint",
+      sectorSizeBytes: 2_048,
+      acceptedEndLbaExclusive: 2,
+      boundaryPolicyVersion: "dvd-archive-boundary-v1",
+      boundaryReportedSizeBytes: 4_096,
+      boundaryPublishedSizeBytes: 4_096,
+      boundaryEvidenceDigest: boundaryDigest,
+      unrecoveredSourceRanges: recoveredFirstSectorRanges,
+    });
+  const recoveredLastSectorReadDigest =
+    createDvdArchiveRecoveryReadEvidenceDigest({
+      originalDiscArchiveId: "evidence-new-format-archive",
+      fromManifestId: "evidence-new-format-manifest-3",
+      fromManifestRevision: 3,
+      startLba: 1,
+      sectorCount: 1,
+      outcome: "recovered",
+    });
+  const recoveredLastSectorManifest =
+    createDvdArchiveEvidenceManifestDigests({
+      originalDiscArchiveId: "evidence-new-format-archive",
+      revision: 4,
+      previousManifestId: "evidence-new-format-manifest-3",
+      previousManifestDigest: recoveredFirstSectorManifest.manifestDigest,
+      recoveryReadId: "evidence-new-format-read-3",
+      recoveryReadEvidenceDigest: recoveredLastSectorReadDigest,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+      imageFingerprint: "evidence-new-format-fingerprint",
+      sectorSizeBytes: 2_048,
+      acceptedEndLbaExclusive: 2,
+      boundaryPolicyVersion: "dvd-archive-boundary-v1",
+      boundaryReportedSizeBytes: 4_096,
+      boundaryPublishedSizeBytes: 4_096,
+      boundaryEvidenceDigest: boundaryDigest,
+      unrecoveredSourceRanges: [],
+    });
   const finalDatabase = new DatabaseSync(databasePath);
   for (const mutation of [
     "UPDATE archive_recoveries SET id = 'renamed-recovery' WHERE id = 'evidence-new-format-recovery'",
@@ -1590,7 +1783,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     ) VALUES (
       'evidence-new-format-read-2', 'evidence-new-format-archive',
       'evidence-new-format-manifest-2', 2, 0, 1, 'recovered',
-      '${"0".repeat(64)}', 3
+      '${recoveredFirstSectorReadDigest}', 3
     );
     INSERT INTO dvd_archive_evidence_manifests (
       id, original_disc_archive_id, revision, previous_manifest_id,
@@ -1606,12 +1799,13 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       'dvd-recovery-evidence-v1', 'evidence-new-format-fingerprint', 2048, 2,
       'dvd-archive-boundary-v1', 4096, 4096, '${boundaryDigest}',
       '[{"startLba":1,"sectorCount":1,"classification":"individually_failed"}]',
-      '${"1".repeat(64)}', '${"2".repeat(64)}', 3
+      '${recoveredFirstSectorManifest.unrecoveredSourceRangesDigest}',
+      '${recoveredFirstSectorManifest.manifestDigest}', 3
     );
     UPDATE dvd_archive_evidence_headers
     SET current_manifest_id = 'evidence-new-format-manifest-3',
         current_manifest_revision = 3,
-        current_manifest_digest = '${"2".repeat(64)}',
+        current_manifest_digest = '${recoveredFirstSectorManifest.manifestDigest}',
         updated_at = 3
     WHERE original_disc_archive_id = 'evidence-new-format-archive';
 
@@ -1622,7 +1816,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     ) VALUES (
       'evidence-new-format-read-3', 'evidence-new-format-archive',
       'evidence-new-format-manifest-3', 3, 1, 1, 'recovered',
-      '${"3".repeat(64)}', 4
+      '${recoveredLastSectorReadDigest}', 4
     );
     INSERT INTO dvd_archive_evidence_manifests (
       id, original_disc_archive_id, revision, previous_manifest_id,
@@ -1637,12 +1831,13 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       'evidence-new-format-manifest-3', 'evidence-new-format-read-3',
       'dvd-recovery-evidence-v1', 'evidence-new-format-fingerprint', 2048, 2,
       'dvd-archive-boundary-v1', 4096, 4096, '${boundaryDigest}', '[]',
-      '${"4".repeat(64)}', '${"5".repeat(64)}', 4
+      '${recoveredLastSectorManifest.unrecoveredSourceRangesDigest}',
+      '${recoveredLastSectorManifest.manifestDigest}', 4
     );
     UPDATE dvd_archive_evidence_headers
     SET current_manifest_id = 'evidence-new-format-manifest-4',
         current_manifest_revision = 4,
-        current_manifest_digest = '${"5".repeat(64)}',
+        current_manifest_digest = '${recoveredLastSectorManifest.manifestDigest}',
         updated_at = 4
     WHERE original_disc_archive_id = 'evidence-new-format-archive';
     UPDATE original_disc_archives

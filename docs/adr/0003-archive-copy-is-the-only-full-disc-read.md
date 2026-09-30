@@ -93,3 +93,17 @@ as a projection of the header's accepted extent and normalized Unrecovered
 Source ranges; that versioned evidence remains authoritative. Read
 completeness alone establishes neither watchability nor encode eligibility
 and does not weaken either boundary proof.
+
+Every `dvd-recovery-evidence-v1` digest is a lowercase SHA-256 hash over a
+domain-prefixed UTF-8 encoding. The encoding is a fixed-order JSON tuple rather
+than caller-provided JSON object text. Archive Boundary Evidence includes the
+complete normalized boundary proof. Unrecovered Source evidence is the ordered
+list of normalized `(start LBA, sector count, classification)` tuples. A
+one-sector recovery digest binds the archive, source manifest and revision,
+sector, and outcome. A manifest digest binds its archive and revision, exact
+predecessor digest, exact recovery-read digest when present, image and extent,
+boundary digest, and normalized source-map digest. Data-access constructors
+compute these values before a future writer persists them, and authoritative
+reads reject a stored digest that no longer matches its content. This digest
+contract does not publish range paging or install filesystem checkpoints;
+those remain separate workflow capabilities.

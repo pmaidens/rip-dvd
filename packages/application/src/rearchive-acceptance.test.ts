@@ -12,6 +12,9 @@ import { DatabaseSync } from "node:sqlite";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { seedRearchiveReviewFixtureForTest } from "@rip-dvd/data-access/rearchive-test-support";
 import {
+  archiveBoundaryEvidenceFromRecord,
+  createDvdArchiveBoundaryEvidenceDigest,
+  createDvdArchiveEvidenceManifestDigests,
   DVD_RECOVERY_EVIDENCE_FORMAT,
   DvdRecoveryEvidenceEncodingUnavailableError,
 } from "@rip-dvd/data-access";
@@ -122,7 +125,15 @@ function markArchiveWithDvdRecoveryEvidence(
     const archive = sqlite.prepare(`
       SELECT detected_disc_id, fingerprint, size_bytes,
              boundary_policy_version, boundary_reported_size_bytes,
-             boundary_published_size_bytes
+             boundary_published_size_bytes, boundary_excluded_sector_count,
+             boundary_first_excluded_lba, boundary_maximum_referenced_lba,
+             boundary_read_failure_classifier_version,
+             boundary_read_failure_scsi_status,
+             boundary_read_failure_host_status,
+             boundary_read_failure_driver_status,
+             boundary_read_failure_sense_response_code,
+             boundary_read_failure_sense_key, boundary_read_failure_asc,
+             boundary_read_failure_ascq
       FROM original_disc_archives
       WHERE id = ?
     `).get(originalDiscArchiveId) as {
@@ -132,11 +143,65 @@ function markArchiveWithDvdRecoveryEvidence(
       boundary_policy_version: string;
       boundary_reported_size_bytes: number;
       boundary_published_size_bytes: number;
+      boundary_excluded_sector_count: number;
+      boundary_first_excluded_lba: number | null;
+      boundary_maximum_referenced_lba: number | null;
+      boundary_read_failure_classifier_version: string | null;
+      boundary_read_failure_scsi_status: number | null;
+      boundary_read_failure_host_status: number | null;
+      boundary_read_failure_driver_status: number | null;
+      boundary_read_failure_sense_response_code: number | null;
+      boundary_read_failure_sense_key: number | null;
+      boundary_read_failure_asc: number | null;
+      boundary_read_failure_ascq: number | null;
     } | undefined;
     if (archive === undefined) throw new Error("Expected target archive");
-    const boundaryDigest = "a".repeat(64);
-    const sourceRangesDigest = "b".repeat(64);
-    const manifestDigest = "c".repeat(64);
+    const boundaryEvidence = archiveBoundaryEvidenceFromRecord({
+      boundaryPolicyVersion: archive.boundary_policy_version,
+      boundaryReportedSizeBytes: archive.boundary_reported_size_bytes,
+      boundaryPublishedSizeBytes: archive.boundary_published_size_bytes,
+      boundaryExcludedSectorCount: archive.boundary_excluded_sector_count,
+      boundaryFirstExcludedLba: archive.boundary_first_excluded_lba,
+      boundaryMaximumReferencedLba: archive.boundary_maximum_referenced_lba,
+      boundaryReadFailureClassifierVersion:
+        archive.boundary_read_failure_classifier_version,
+      boundaryReadFailureScsiStatus:
+        archive.boundary_read_failure_scsi_status,
+      boundaryReadFailureHostStatus:
+        archive.boundary_read_failure_host_status,
+      boundaryReadFailureDriverStatus:
+        archive.boundary_read_failure_driver_status,
+      boundaryReadFailureSenseResponseCode:
+        archive.boundary_read_failure_sense_response_code,
+      boundaryReadFailureSenseKey: archive.boundary_read_failure_sense_key,
+      boundaryReadFailureAsc: archive.boundary_read_failure_asc,
+      boundaryReadFailureAscq: archive.boundary_read_failure_ascq,
+    });
+    if (boundaryEvidence === null) {
+      throw new Error("Expected Archive Boundary Evidence");
+    }
+    const boundaryDigest =
+      createDvdArchiveBoundaryEvidenceDigest(boundaryEvidence);
+    const {
+      unrecoveredSourceRangesDigest: sourceRangesDigest,
+      manifestDigest,
+    } = createDvdArchiveEvidenceManifestDigests({
+      originalDiscArchiveId,
+      revision: 1,
+      previousManifestId: null,
+      previousManifestDigest: null,
+      recoveryReadId: null,
+      recoveryReadEvidenceDigest: null,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+      imageFingerprint: archive.fingerprint,
+      sectorSizeBytes: 2_048,
+      acceptedEndLbaExclusive: archive.size_bytes / 2_048,
+      boundaryPolicyVersion: archive.boundary_policy_version,
+      boundaryReportedSizeBytes: archive.boundary_reported_size_bytes,
+      boundaryPublishedSizeBytes: archive.boundary_published_size_bytes,
+      boundaryEvidenceDigest: boundaryDigest,
+      unrecoveredSourceRanges: [],
+    });
     sqlite.prepare(`
       INSERT INTO disc_inspections (
         id, optical_drive_id, detected_disc_id, media_generation, is_current,

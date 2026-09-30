@@ -67,6 +67,7 @@ import {
   discSelections,
   dvdArchiveEvidenceHeaders,
   dvdArchiveEvidenceManifests,
+  dvdArchiveRecoveryReads,
   encodeJobFailureReports,
   encodeJobs,
   encodingProfiles,
@@ -123,7 +124,15 @@ import {
   DvdRecoveryEvidenceEncodingUnavailableError,
 } from "../dvd-recovery-evidence.js";
 import { encodingProfileQueueBlockingReasons } from "../encoding-profile-eligibility.js";
-import { validateDvdArchiveBoundaryEvidence } from "../archive-boundary.js";
+import {
+  archiveBoundaryEvidenceFromRecord,
+  validateDvdArchiveBoundaryEvidence,
+} from "../archive-boundary.js";
+import {
+  assertDvdArchiveBoundaryEvidenceDigest,
+  assertDvdArchiveEvidenceManifestDigests,
+  assertDvdArchiveRecoveryReadEvidenceDigest,
+} from "../dvd-archive-evidence-digests.js";
 import { isArchiveReadFailureEvidenceConsistent } from "../archive-read-failure.js";
 import {
   decodeArchivedDvdTitles,
@@ -584,6 +593,10 @@ const claimPredecessorEncodeJobRecords = alias(
 const requestedDetectedDiscRecords = alias(
   detectedDiscs,
   "requested_detected_discs",
+);
+const previousDvdArchiveEvidenceManifests = alias(
+  dvdArchiveEvidenceManifests,
+  "previous_dvd_archive_evidence_manifests",
 );
 
 const COMPLETED_ENCODE_HISTORY_SQL = `(
@@ -7014,7 +7027,7 @@ export function createDataAccessInternal(
 
       findDvdArchiveEvidenceHeader(id) {
         if (!hasDvdRecoveryEvidenceSchema) return null;
-        return database
+        const row = database
           .select({
             originalDiscArchiveId:
               dvdArchiveEvidenceHeaders.originalDiscArchiveId,
@@ -7030,8 +7043,86 @@ export function createDataAccessInternal(
               dvdArchiveEvidenceHeaders.currentManifestRevision,
             currentManifestDigest:
               dvdArchiveEvidenceHeaders.currentManifestDigest,
+            headerBoundaryPolicyVersion:
+              dvdArchiveEvidenceHeaders.boundaryPolicyVersion,
+            headerBoundaryReportedSizeBytes:
+              dvdArchiveEvidenceHeaders.boundaryReportedSizeBytes,
+            headerBoundaryPublishedSizeBytes:
+              dvdArchiveEvidenceHeaders.boundaryPublishedSizeBytes,
             unrecoveredSourceRanges:
               dvdArchiveEvidenceManifests.unrecoveredSourceRanges,
+            manifestOriginalDiscArchiveId:
+              dvdArchiveEvidenceManifests.originalDiscArchiveId,
+            manifestRevision: dvdArchiveEvidenceManifests.revision,
+            previousManifestId:
+              dvdArchiveEvidenceManifests.previousManifestId,
+            previousManifestDigest:
+              previousDvdArchiveEvidenceManifests.manifestDigest,
+            previousManifestOriginalDiscArchiveId:
+              previousDvdArchiveEvidenceManifests.originalDiscArchiveId,
+            previousManifestRevision:
+              previousDvdArchiveEvidenceManifests.revision,
+            recoveryReadId: dvdArchiveEvidenceManifests.recoveryReadId,
+            manifestEvidenceFormat:
+              dvdArchiveEvidenceManifests.evidenceFormat,
+            manifestImageFingerprint:
+              dvdArchiveEvidenceManifests.imageFingerprint,
+            manifestSectorSizeBytes:
+              dvdArchiveEvidenceManifests.sectorSizeBytes,
+            manifestAcceptedEndLbaExclusive:
+              dvdArchiveEvidenceManifests.acceptedEndLbaExclusive,
+            manifestBoundaryPolicyVersion:
+              dvdArchiveEvidenceManifests.boundaryPolicyVersion,
+            manifestBoundaryReportedSizeBytes:
+              dvdArchiveEvidenceManifests.boundaryReportedSizeBytes,
+            manifestBoundaryPublishedSizeBytes:
+              dvdArchiveEvidenceManifests.boundaryPublishedSizeBytes,
+            manifestBoundaryEvidenceDigest:
+              dvdArchiveEvidenceManifests.boundaryEvidenceDigest,
+            unrecoveredSourceRangesDigest:
+              dvdArchiveEvidenceManifests.unrecoveredSourceRangesDigest,
+            manifestDigest: dvdArchiveEvidenceManifests.manifestDigest,
+            recoveryReadOriginalDiscArchiveId:
+              dvdArchiveRecoveryReads.originalDiscArchiveId,
+            recoveryReadFromManifestId:
+              dvdArchiveRecoveryReads.fromManifestId,
+            recoveryReadFromManifestRevision:
+              dvdArchiveRecoveryReads.fromManifestRevision,
+            recoveryReadStartLba: dvdArchiveRecoveryReads.startLba,
+            recoveryReadSectorCount: dvdArchiveRecoveryReads.sectorCount,
+            recoveryReadOutcome: dvdArchiveRecoveryReads.outcome,
+            recoveryReadEvidenceDigest:
+              dvdArchiveRecoveryReads.evidenceDigest,
+            archiveFingerprint: originalDiscArchives.fingerprint,
+            archiveSizeBytes: originalDiscArchives.sizeBytes,
+            boundaryPolicyVersion:
+              originalDiscArchives.boundaryPolicyVersion,
+            boundaryReportedSizeBytes:
+              originalDiscArchives.boundaryReportedSizeBytes,
+            boundaryPublishedSizeBytes:
+              originalDiscArchives.boundaryPublishedSizeBytes,
+            boundaryExcludedSectorCount:
+              originalDiscArchives.boundaryExcludedSectorCount,
+            boundaryFirstExcludedLba:
+              originalDiscArchives.boundaryFirstExcludedLba,
+            boundaryMaximumReferencedLba:
+              originalDiscArchives.boundaryMaximumReferencedLba,
+            boundaryReadFailureClassifierVersion:
+              originalDiscArchives.boundaryReadFailureClassifierVersion,
+            boundaryReadFailureScsiStatus:
+              originalDiscArchives.boundaryReadFailureScsiStatus,
+            boundaryReadFailureHostStatus:
+              originalDiscArchives.boundaryReadFailureHostStatus,
+            boundaryReadFailureDriverStatus:
+              originalDiscArchives.boundaryReadFailureDriverStatus,
+            boundaryReadFailureSenseResponseCode:
+              originalDiscArchives.boundaryReadFailureSenseResponseCode,
+            boundaryReadFailureSenseKey:
+              originalDiscArchives.boundaryReadFailureSenseKey,
+            boundaryReadFailureAsc:
+              originalDiscArchives.boundaryReadFailureAsc,
+            boundaryReadFailureAscq:
+              originalDiscArchives.boundaryReadFailureAscq,
             createdAt: dvdArchiveEvidenceHeaders.createdAt,
             updatedAt: dvdArchiveEvidenceHeaders.updatedAt,
           })
@@ -7043,8 +7134,151 @@ export function createDataAccessInternal(
               dvdArchiveEvidenceHeaders.currentManifestId,
             ),
           )
+          .innerJoin(
+            originalDiscArchives,
+            eq(
+              originalDiscArchives.id,
+              dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+            ),
+          )
+          .leftJoin(
+            previousDvdArchiveEvidenceManifests,
+            eq(
+              previousDvdArchiveEvidenceManifests.id,
+              dvdArchiveEvidenceManifests.previousManifestId,
+            ),
+          )
+          .leftJoin(
+            dvdArchiveRecoveryReads,
+            eq(
+              dvdArchiveRecoveryReads.id,
+              dvdArchiveEvidenceManifests.recoveryReadId,
+            ),
+          )
           .where(eq(dvdArchiveEvidenceHeaders.originalDiscArchiveId, id))
-          .get() ?? null;
+          .get();
+        if (row === undefined) return null;
+
+        const boundaryEvidence = archiveBoundaryEvidenceFromRecord(row);
+        if (boundaryEvidence === null) {
+          throw new DomainInvariantError(
+            "Persisted DVD Archive Evidence has no Archive Boundary Evidence",
+          );
+        }
+        assertDvdArchiveBoundaryEvidenceDigest(
+          boundaryEvidence,
+          row.boundaryEvidenceDigest,
+        );
+        assertDvdArchiveBoundaryEvidenceDigest(
+          boundaryEvidence,
+          row.manifestBoundaryEvidenceDigest,
+        );
+
+        let recoveryReadEvidenceDigest: string | null = null;
+        if (row.recoveryReadId !== null) {
+          if (
+            row.recoveryReadOriginalDiscArchiveId === null ||
+            row.recoveryReadFromManifestId === null ||
+            row.recoveryReadFromManifestRevision === null ||
+            row.recoveryReadStartLba === null ||
+            row.recoveryReadSectorCount === null ||
+            row.recoveryReadOutcome === null ||
+            row.recoveryReadEvidenceDigest === null
+          ) {
+            throw new DomainInvariantError(
+              "Persisted DVD Archive Evidence recovery read is incomplete",
+            );
+          }
+          const recoveryReadEvidence = {
+            originalDiscArchiveId: row.recoveryReadOriginalDiscArchiveId,
+            fromManifestId: row.recoveryReadFromManifestId,
+            fromManifestRevision: row.recoveryReadFromManifestRevision,
+            startLba: row.recoveryReadStartLba,
+            sectorCount: row.recoveryReadSectorCount,
+            outcome: row.recoveryReadOutcome,
+          };
+          assertDvdArchiveRecoveryReadEvidenceDigest(
+            recoveryReadEvidence,
+            row.recoveryReadEvidenceDigest,
+          );
+          recoveryReadEvidenceDigest = row.recoveryReadEvidenceDigest;
+        }
+
+        if (
+          row.manifestOriginalDiscArchiveId !== row.originalDiscArchiveId ||
+          row.manifestRevision !== row.currentManifestRevision ||
+          row.manifestDigest !== row.currentManifestDigest ||
+          row.manifestEvidenceFormat !== row.evidenceFormat ||
+          row.manifestImageFingerprint !== row.archiveFingerprint ||
+          row.manifestSectorSizeBytes !== row.sectorSizeBytes ||
+          row.manifestAcceptedEndLbaExclusive !==
+            row.acceptedEndLbaExclusive ||
+          row.manifestBoundaryPolicyVersion !==
+            row.headerBoundaryPolicyVersion ||
+          row.manifestBoundaryReportedSizeBytes !==
+            row.headerBoundaryReportedSizeBytes ||
+          row.manifestBoundaryPublishedSizeBytes !==
+            row.headerBoundaryPublishedSizeBytes ||
+          row.archiveSizeBytes !== row.headerBoundaryPublishedSizeBytes ||
+          row.boundaryPolicyVersion !== row.headerBoundaryPolicyVersion ||
+          row.boundaryReportedSizeBytes !==
+            row.headerBoundaryReportedSizeBytes ||
+          row.boundaryPublishedSizeBytes !==
+            row.headerBoundaryPublishedSizeBytes ||
+          (row.manifestRevision === 1 &&
+            (row.previousManifestOriginalDiscArchiveId !== null ||
+              row.previousManifestRevision !== null ||
+              row.recoveryReadOriginalDiscArchiveId !== null)) ||
+          (row.manifestRevision > 1 &&
+            (row.previousManifestOriginalDiscArchiveId !==
+                row.originalDiscArchiveId ||
+              row.previousManifestRevision !== row.manifestRevision - 1 ||
+              row.recoveryReadOriginalDiscArchiveId !==
+                row.originalDiscArchiveId ||
+              row.recoveryReadFromManifestId !== row.previousManifestId ||
+              row.recoveryReadFromManifestRevision !==
+                row.previousManifestRevision))
+        ) {
+          throw new DomainInvariantError(
+            "Persisted DVD Archive Evidence header does not match its current manifest and archive",
+          );
+        }
+        assertDvdArchiveEvidenceManifestDigests({
+          originalDiscArchiveId: row.manifestOriginalDiscArchiveId,
+          revision: row.manifestRevision,
+          previousManifestId: row.previousManifestId,
+          previousManifestDigest: row.previousManifestDigest,
+          recoveryReadId: row.recoveryReadId,
+          recoveryReadEvidenceDigest,
+          evidenceFormat: row.manifestEvidenceFormat,
+          imageFingerprint: row.manifestImageFingerprint,
+          sectorSizeBytes: row.manifestSectorSizeBytes,
+          acceptedEndLbaExclusive: row.manifestAcceptedEndLbaExclusive,
+          boundaryPolicyVersion: row.manifestBoundaryPolicyVersion,
+          boundaryReportedSizeBytes:
+            row.manifestBoundaryReportedSizeBytes,
+          boundaryPublishedSizeBytes:
+            row.manifestBoundaryPublishedSizeBytes,
+          boundaryEvidenceDigest: row.manifestBoundaryEvidenceDigest,
+          unrecoveredSourceRanges: row.unrecoveredSourceRanges,
+          unrecoveredSourceRangesDigest: row.unrecoveredSourceRangesDigest,
+          manifestDigest: row.manifestDigest,
+        });
+
+        return {
+          originalDiscArchiveId: row.originalDiscArchiveId,
+          sourceArchiveJobId: row.sourceArchiveJobId,
+          evidenceFormat: row.evidenceFormat,
+          boundaryEvidenceDigest: row.boundaryEvidenceDigest,
+          sectorSizeBytes: row.sectorSizeBytes,
+          acceptedEndLbaExclusive: row.acceptedEndLbaExclusive,
+          currentManifestId: row.currentManifestId,
+          currentManifestRevision: row.currentManifestRevision,
+          currentManifestDigest: row.currentManifestDigest,
+          unrecoveredSourceRanges: row.unrecoveredSourceRanges,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+        };
       },
 
       findArchiveRecovery(id) {

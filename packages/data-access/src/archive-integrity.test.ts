@@ -5,6 +5,11 @@ import {
   createWatchableSalvageArchiveIntegrityEvidence,
   withAuthoritativeDvdArchiveIntegrity,
 } from "./archive-integrity.js";
+import {
+  createDvdArchiveBoundaryEvidenceDigest,
+  createDvdArchiveEvidenceManifestDigests,
+  createDvdArchiveRecoveryReadEvidenceDigest,
+} from "./dvd-archive-evidence-digests.js";
 import type {
   DvdArchiveEvidenceHeader,
   OriginalDiscArchive,
@@ -51,22 +56,76 @@ describe("Archive Integrity evidence", () => {
       createdAt: new Date(1),
       updatedAt: new Date(1),
     };
+    const boundaryEvidenceDigest = createDvdArchiveBoundaryEvidenceDigest({
+      policyVersion: "dvd-archive-boundary-v1",
+      reportedSizeBytes: 4_096,
+      publishedSizeBytes: 4_096,
+      excludedSectorCount: 0,
+    });
+    const initialManifest = createDvdArchiveEvidenceManifestDigests({
+      originalDiscArchiveId: archive.id,
+      revision: 1,
+      previousManifestId: null,
+      previousManifestDigest: null,
+      recoveryReadId: null,
+      recoveryReadEvidenceDigest: null,
+      evidenceFormat: "dvd-recovery-evidence-v1",
+      imageFingerprint: archive.fingerprint,
+      sectorSizeBytes: 2_048,
+      acceptedEndLbaExclusive: 2,
+      boundaryPolicyVersion: "dvd-archive-boundary-v1",
+      boundaryReportedSizeBytes: 4_096,
+      boundaryPublishedSizeBytes: 4_096,
+      boundaryEvidenceDigest,
+      unrecoveredSourceRanges: [{
+        startLba: 0,
+        sectorCount: 2,
+        classification: "skipped_untested",
+      }],
+    });
+    const recoveryReadEvidenceDigest =
+      createDvdArchiveRecoveryReadEvidenceDigest({
+        originalDiscArchiveId: archive.id,
+        fromManifestId: "manifest-1",
+        fromManifestRevision: 1,
+        startLba: 1,
+        sectorCount: 1,
+        outcome: "failed",
+      });
+    const unrecoveredSourceRanges = [
+      { startLba: 0, sectorCount: 1, classification: "skipped_untested" },
+      { startLba: 1, sectorCount: 1, classification: "individually_failed" },
+    ] as const;
+    const currentManifest = createDvdArchiveEvidenceManifestDigests({
+      originalDiscArchiveId: archive.id,
+      revision: 2,
+      previousManifestId: "manifest-1",
+      previousManifestDigest: initialManifest.manifestDigest,
+      recoveryReadId: "read-1",
+      recoveryReadEvidenceDigest,
+      evidenceFormat: "dvd-recovery-evidence-v1",
+      imageFingerprint: archive.fingerprint,
+      sectorSizeBytes: 2_048,
+      acceptedEndLbaExclusive: 2,
+      boundaryPolicyVersion: "dvd-archive-boundary-v1",
+      boundaryReportedSizeBytes: 4_096,
+      boundaryPublishedSizeBytes: 4_096,
+      boundaryEvidenceDigest,
+      unrecoveredSourceRanges,
+    });
     const header: DvdArchiveEvidenceHeader = {
       originalDiscArchiveId: archive.id,
       sourceArchiveJobId: "job-1" as DvdArchiveEvidenceHeader[
         "sourceArchiveJobId"
       ],
       evidenceFormat: "dvd-recovery-evidence-v1",
-      boundaryEvidenceDigest: "a".repeat(64),
+      boundaryEvidenceDigest,
       sectorSizeBytes: 2048,
       acceptedEndLbaExclusive: 2,
       currentManifestId: "manifest-2",
       currentManifestRevision: 2,
-      currentManifestDigest: "b".repeat(64),
-      unrecoveredSourceRanges: [
-        { startLba: 0, sectorCount: 1, classification: "skipped_untested" },
-        { startLba: 1, sectorCount: 1, classification: "individually_failed" },
-      ],
+      currentManifestDigest: currentManifest.manifestDigest,
+      unrecoveredSourceRanges,
       createdAt: new Date(1),
       updatedAt: new Date(2),
     };

@@ -32,6 +32,21 @@ export {
   assertDvdRecoveryEvidenceAdmissionAvailable,
 } from "./dvd-recovery-evidence.js";
 export {
+  assertDvdArchiveBoundaryEvidenceDigest,
+  assertDvdArchiveEvidenceManifestDigests,
+  assertDvdArchiveRecoveryReadEvidenceDigest,
+  assertDvdUnrecoveredSourceRangesDigest,
+  createDvdArchiveBoundaryEvidenceDigest,
+  createDvdArchiveEvidenceManifestDigests,
+  createDvdArchiveRecoveryReadEvidenceDigest,
+  createDvdUnrecoveredSourceRangesDigest,
+} from "./dvd-archive-evidence-digests.js";
+export type {
+  DvdArchiveEvidenceManifestDigestInput,
+  DvdArchiveEvidenceManifestDigests,
+  DvdArchiveRecoveryReadEvidenceDigestInput,
+} from "./dvd-archive-evidence-digests.js";
+export {
   archiveBoundaryEvidenceFromRecord,
   createCorrectedDvdArchiveBoundaryEvidence,
   createNormalDvdArchiveBoundaryEvidence,
