@@ -1944,6 +1944,7 @@ function readDashboardSnapshotRecords(
               );
               return {
                 id: job.id,
+                activityRevision: job.updatedAt.toISOString(),
                 encodeOutputArtifacts,
                 ...(truncatedEncodeOutputJobIds.has(job.id)
                   ? { encodeOutputArtifactsTruncated: true }

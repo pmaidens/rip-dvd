@@ -483,8 +483,9 @@ A completed Encode Job exposes its current and retained generations in
 identity. Current identities use `encode-output-v1.published.<encode-job-id>`
 and retained identities use `encode-output-v1.retained.<retained-output-id>`.
 Bounded lists set `encodeOutputArtifactsTruncated` when older generations are
-omitted; `inspect encode-jobs <encode-job-id>` returns the complete artifact
-history for that job.
+omitted. Page the complete history with
+`inspect encode-jobs <encode-job-id> --limit 1..100 --offset <n>`; each result
+returns `encodeOutputArtifactPage.nextOffset` when older generations remain.
 `encode-output inspect` reports the artifact state, recorded validation and
 provenance, file identity and completeness, and probed duration and streams.
 Historical outputs keep unavailable validation identities and source snapshots
