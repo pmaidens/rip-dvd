@@ -1467,12 +1467,16 @@ async function reconcilePendingPublications(
             options.access.encodeJobs.completePublishedPartial(
               cleanup,
               () => publicationMatches(finalPath, partialPath),
-              correctedRetainedOutputProvenance(
-                options.access,
-                cleanup.jobId,
-                priorFinalPath,
-                priorFinalMetadata,
-              ),
+              {
+                ...correctedRetainedOutputProvenance(
+                  options.access,
+                  cleanup.jobId,
+                  priorFinalPath,
+                  priorFinalMetadata,
+                ),
+                publishedOutputValidation:
+                  publishedOutputValidation(reconciledFinalMetadata!),
+              },
             );
           authorizedCleanup = completion.cleanup;
           reportingCleanup = authorizedCleanup;

@@ -2772,7 +2772,13 @@ describe("encode worker polling", () => {
       "corrected after crash",
     );
     expect(fixture.access.encodeJobs.list()).toContainEqual(
-      expect.objectContaining({ id: replacement.id, status: "completed" }),
+      expect.objectContaining({
+        id: replacement.id,
+        status: "completed",
+        outputValidationResult: "passed",
+        outputValidationFilesystemIdentity: expect.any(String),
+        outputCompleteness: "complete",
+      }),
     );
     const retained = fixture.access.encodeJobs.listRetainedOutputs([
       replacement.id,
@@ -4681,8 +4687,18 @@ describe("encode worker polling", () => {
       ...fixture.access,
       encodeJobs: {
         ...fixture.access.encodeJobs,
-        completePublishedClaim(claim, cleanup, publicationMatches) {
-          completePublishedClaim(claim, cleanup, publicationMatches);
+        completePublishedClaim(
+          claim,
+          cleanup,
+          publicationMatches,
+          provenance,
+        ) {
+          completePublishedClaim(
+            claim,
+            cleanup,
+            publicationMatches,
+            provenance,
+          );
           throw new Error("publication completion acknowledgement failed");
         },
       },
@@ -4713,6 +4729,9 @@ describe("encode worker polling", () => {
         partialCleanupClaimToken: expect.any(String),
         publicationPending: true,
         status: "completed",
+        outputValidationResult: "passed",
+        outputValidationFilesystemIdentity: expect.any(String),
+        outputCompleteness: "complete",
       }),
     ]);
     expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id])[0])
@@ -4738,6 +4757,9 @@ describe("encode worker polling", () => {
         partialCleanupClaimToken: null,
         publicationPending: false,
         status: "completed",
+        outputValidationResult: "passed",
+        outputValidationFilesystemIdentity: expect.any(String),
+        outputCompleteness: "complete",
       }),
     ]);
     expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id]))
