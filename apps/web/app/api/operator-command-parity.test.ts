@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   createCleanReadArchiveIntegrityEvidence,
   DVD_RECOVERY_EVIDENCE_ADMISSION,
+  DVD_RECOVERY_EVIDENCE_ENCODING,
   DVD_RECOVERY_EVIDENCE_FORMAT,
 } from "@rip-dvd/data-access";
 import {
@@ -16,7 +17,7 @@ import {
   type CatalogMetadataLookup,
   type EncodeOutputMediaProbe,
 } from "@rip-dvd/application";
-import type { MediaItemId } from "@rip-dvd/data-access";
+import type { ArchiveRequestId, MediaItemId } from "@rip-dvd/data-access";
 
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../operator-cli/src/operator-workflow.test-support.js";
 import { createCatalogReviewRoute } from "./catalog-reviews/[id]/route";
@@ -25,6 +26,12 @@ import { createDeploymentReadinessResponse } from "./deployment-readiness/route"
 import { createHealthResponse } from "./health/route";
 import { createOperationsResponse } from "./operations/route";
 import { createArchiveRequestsRoute } from "./archive-requests/route";
+import {
+  createArchiveRequestCancellationRoute,
+} from "./archive-requests/[id]/route";
+import {
+  createArchiveRequestRetryRoute,
+} from "./archive-requests/[id]/retry/route";
 import { createMediaItemSearchRoute } from "./media-items/route";
 import { createMediaItemPreviewRoute } from "./media-items/[id]/route";
 import { createEncodeJobsRoute } from "./encode-jobs/route";
@@ -34,6 +41,7 @@ import {
 import {
   createFilesystemVerificationInventoryRoute,
 } from "./filesystem-verification/route";
+import { readDashboardSnapshot } from "../../lib/dashboard";
 
 const trustedOrigin = "http://localhost:3000";
 
@@ -638,6 +646,41 @@ it("returns the same operational records and evidence through web and CLI", asyn
         badSectorRanges: [{ startLba: 0, sectorCount: 1 }],
       },
     });
+    const catalogReviewResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost/api/catalog-reviews/${archiveId}`),
+      archiveId,
+      () => access,
+    );
+    const catalogReviewCli = await fixture.run([
+      "catalog-review",
+      "show",
+      archiveId,
+    ]);
+    expect(catalogReviewCli.result).toEqual(
+      await catalogReviewResponse.json(),
+    );
+    expect(catalogReviewCli.result).toMatchObject({
+      archive: {
+        integrity: "incomplete_read",
+        badSectorCount: 1,
+        badAreaCount: 1,
+        badSectorRanges: [{ startLba: 0, sectorCount: 1 }],
+      },
+    });
+    expect(readDashboardSnapshot(access, {
+      catalogReviewView: "reviewed",
+    }).catalogReview).toMatchObject({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          id: archiveId,
+          integrity: "incomplete_read",
+          badSectorCount: 1,
+          badAreaCount: 1,
+          badSectorRanges: [{ startLba: 0, sectorCount: 1 }],
+        }),
+      ]),
+    });
     const projectionFixture = new DatabaseSync(fixture.databasePath);
     projectionFixture.prepare(`
       UPDATE original_disc_archives
@@ -704,6 +747,73 @@ it("returns the same operational records and evidence through web and CLI", asyn
         ],
       },
     });
+    for (const mutation of [
+      {
+        command: "cancel-archive-request",
+        key: "00000000-0000-4000-8000-000000000403",
+        method: "DELETE",
+        route: createArchiveRequestCancellationRoute,
+      },
+      {
+        command: "retry-archive-request",
+        key: "00000000-0000-4000-8000-000000000404",
+        method: "POST",
+        route: createArchiveRequestRetryRoute,
+      },
+    ] as const) {
+      const web = await mutation.route(
+        new Request(
+          `http://localhost/api/archive-requests/synthetic-evidence-pending-request${
+            mutation.method === "POST" ? "/retry" : ""
+          }`,
+          {
+            method: mutation.method,
+            headers: {
+              "Content-Type": "application/json",
+              Host: "localhost",
+              Origin: "http://localhost",
+            },
+            body: JSON.stringify({ mutationKey: mutation.key }),
+          },
+        ),
+        "synthetic-evidence-pending-request",
+        () => access,
+        () => "http://localhost",
+      );
+      const cli = await fixture.run([
+        mutation.command,
+        "--key",
+        mutation.key,
+        "--archive-request-id",
+        "synthetic-evidence-pending-request",
+      ]);
+      expect(web.status).toBe(409);
+      expect(cli.exitCode).toBe(2);
+      expect(cli.result).toEqual(await web.json());
+      expect(cli.result).toEqual({
+        error: {
+          code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+          message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+          blockingReasons: [{
+            code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+            message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+          }],
+        },
+      });
+    }
+    expect(access.archiveRequests.find(
+      "synthetic-evidence-pending-request" as ArchiveRequestId,
+    )).toMatchObject({ status: "pending" });
+    const replayFixture = new DatabaseSync(fixture.databasePath);
+    expect(replayFixture.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE key IN (?, ?)
+    `).get(
+      "00000000-0000-4000-8000-000000000403",
+      "00000000-0000-4000-8000-000000000404",
+    )).toEqual({ count: 0 });
+    replayFixture.close();
     expect(access.catalog.listDiscSelections({ encodeEligibleOnly: true }))
       .not.toEqual(expect.arrayContaining([
         expect.objectContaining({ id: selection.id }),
@@ -833,9 +943,8 @@ it("returns the same operational records and evidence through web and CLI", asyn
             name: "requeue",
             eligible: false,
             blockingReasons: [expect.objectContaining({
-              code: "INVALID_TRANSITION",
-              message:
-                "Requires an active Disc Selection with completed Catalog Review.",
+              code: DVD_RECOVERY_EVIDENCE_ENCODING.code,
+              message: DVD_RECOVERY_EVIDENCE_ENCODING.message,
             })],
           }),
         ]),

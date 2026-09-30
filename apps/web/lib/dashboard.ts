@@ -41,6 +41,7 @@ import type {
 } from "@rip-dvd/data-access";
 import {
   archiveBoundaryEvidenceFromRecord,
+  DVD_RECOVERY_EVIDENCE_ENCODING,
   isEncodeJobSafelyTerminal,
   WORKER_KINDS,
 } from "@rip-dvd/data-access";
@@ -1927,7 +1928,15 @@ function readDashboardSnapshotRecords(
                   : undefined;
               const failureReports = failureReportsByJobId.get(job.id) ?? [];
               const requeue = encodeRequeueAvailability(
-                access, job, terminalRequeueSelectionIds.has(job.discSelectionId),
+                access,
+                job,
+                terminalRequeueSelectionIds.has(job.discSelectionId),
+                selection !== undefined &&
+                    access.catalog.findDvdArchiveEvidenceHeader(
+                      selection.originalDiscArchiveId,
+                    ) !== null
+                  ? DVD_RECOVERY_EVIDENCE_ENCODING
+                  : undefined,
               );
               const canRequeue = requeue.eligible;
               const structuredInvestigations = failureReports.map((report) =>

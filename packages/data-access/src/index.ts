@@ -24,6 +24,7 @@ export {
 } from "./archive-integrity.js";
 export {
   DVD_RECOVERY_EVIDENCE_ADMISSION,
+  DVD_RECOVERY_EVIDENCE_ENCODING,
   DVD_RECOVERY_EVIDENCE_FORMAT,
   DvdRecoveryEvidenceAdmissionClosedError,
   assertDvdRecoveryEvidenceAdmissionAvailable,

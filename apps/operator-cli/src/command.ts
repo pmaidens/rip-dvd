@@ -416,6 +416,14 @@ function runRecoveryCommand(name: RecoveryCommand, input: ReturnType<typeof reco
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("NOT_FOUND", "Recovery target was not found.", 2);
     }
+    if (error instanceof DvdRecoveryEvidenceAdmissionClosedError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+      );
+    }
     if (error instanceof InvalidStatusTransitionError || error instanceof DomainInvariantError) {
       throw new CommandFailure("ACTION_BLOCKED", error.message, 2,
         [{ code: "INVALID_TRANSITION", message: error.message }]);

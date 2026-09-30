@@ -1,7 +1,6 @@
 import {
-  createCleanReadArchiveIntegrityEvidence,
-  createIncompleteReadArchiveIntegrityEvidence,
   DVD_RECOVERY_EVIDENCE_ADMISSION,
+  DVD_RECOVERY_EVIDENCE_ENCODING,
   DVD_RECOVERY_EVIDENCE_FORMAT,
   WORKER_KINDS,
   type ArchiveJob,
@@ -205,25 +204,8 @@ function visibleArchive(
   const evidenceHeader = access.catalog.findDvdArchiveEvidenceHeader(
     archive.id,
   );
-  const authoritativeIntegrity = evidenceHeader === null
-    ? null
-    : evidenceHeader.unrecoveredSourceRanges.length === 0
-      ? createCleanReadArchiveIntegrityEvidence(evidenceHeader.evidenceFormat)
-      : createIncompleteReadArchiveIntegrityEvidence(
-        evidenceHeader.unrecoveredSourceRanges,
-      );
   return {
     ...archive,
-    ...(authoritativeIntegrity === null
-      ? {}
-      : {
-          integrity: authoritativeIntegrity.integrity,
-          integrityPolicyVersion: authoritativeIntegrity.policyVersion,
-          badSectorCount: authoritativeIntegrity.badSectorCount,
-          badAreaCount: authoritativeIntegrity.badAreaCount,
-          badSectorRanges: authoritativeIntegrity.badSectorRanges,
-          badSectorCountsByTitle: null,
-        }),
     dvdRecoveryEvidence: evidenceHeader === null
       ? null
       : {
@@ -379,6 +361,13 @@ export function encodeRequeueAvailability(
   access: Pick<ConsistentReadAccess, "encodeJobs">,
   job: EncodeJob,
   selectionEligible: boolean,
+  selectionBlockingReason: {
+    code: string;
+    message: string;
+  } = {
+    code: "INVALID_TRANSITION",
+    message: "Requires an active Disc Selection with completed Catalog Review.",
+  },
 ) {
   const replacesOutput = job.status === "completed" || job.replaceExistingOutput;
   const requiredInputs = replacesOutput
@@ -387,18 +376,19 @@ export function encodeRequeueAvailability(
       "acknowledgeReplacement",
     ]
     : ["mutationKey", "encodeJobId"];
-  const blocked = (reason: string) => ({
+  const blocked = (reason: string, code = "INVALID_TRANSITION") => ({
     eligible: false,
     requiredInputs,
     reason,
-    blockingReasons: [{ code: "INVALID_TRANSITION", message: reason }],
+    blockingReasons: [{ code, message: reason }],
   });
   if (!["completed", "failed", "cancelled"].includes(job.status)) {
     return blocked(`Encode Job is ${job.status}.`);
   }
   if (!selectionEligible) {
     return blocked(
-      "Requires an active Disc Selection with completed Catalog Review.",
+      selectionBlockingReason.message,
+      selectionBlockingReason.code,
     );
   }
   if (job.partialCleanupOutputPath !== null ||
@@ -719,7 +709,18 @@ function readDetail(
       const requeueSelectionEligible = access.catalog.listDiscSelections({
         ids: [job.discSelectionId], encodeEligibleOnly: true,
       }).length > 0;
-      const requeue = encodeRequeueAvailability(access, job, requeueSelectionEligible);
+      const evidenceBlocked = selection !== undefined &&
+        access.catalog.findDvdArchiveEvidenceHeader(
+          selection.originalDiscArchiveId,
+        ) !== null;
+      const requeue = encodeRequeueAvailability(
+        access,
+        job,
+        requeueSelectionEligible,
+        evidenceBlocked
+          ? DVD_RECOVERY_EVIDENCE_ENCODING
+          : undefined,
+      );
       const history = access.encodeJobs.listForDiscSelection(
         job.discSelectionId,
       );
