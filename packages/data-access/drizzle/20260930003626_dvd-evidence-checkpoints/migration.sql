@@ -434,10 +434,14 @@ WHEN NOT EXISTS (
 BEGIN SELECT RAISE(ABORT, 'Archive Recovery status must match authoritative DVD evidence'); END;--> statement-breakpoint
 CREATE TRIGGER `dvd_evidence_archive_recovery_update_guard`
 BEFORE UPDATE ON `archive_recoveries`
-WHEN NOT EXISTS (
+WHEN OLD.`id` IS NOT NEW.`id`
+  OR OLD.`original_disc_archive_id` IS NOT NEW.`original_disc_archive_id`
+  OR OLD.`created_at` IS NOT NEW.`created_at`
+  OR NEW.`updated_at` < OLD.`updated_at`
+  OR NOT EXISTS (
   SELECT 1 FROM `dvd_archive_evidence_headers` AS evidence_header
   INNER JOIN `dvd_archive_evidence_manifests` AS current_manifest ON current_manifest.`id` = evidence_header.`current_manifest_id`
   WHERE evidence_header.`original_disc_archive_id` = NEW.`original_disc_archive_id`
     AND ((json_array_length(current_manifest.`unrecovered_source_ranges`) = 0 AND NEW.`status` = 'completed') OR (json_array_length(current_manifest.`unrecovered_source_ranges`) > 0 AND NEW.`status` = 'eligible'))
 )
-BEGIN SELECT RAISE(ABORT, 'Archive Recovery status must match authoritative DVD evidence'); END;
+BEGIN SELECT RAISE(ABORT, 'Archive Recovery identity is immutable and status must match authoritative DVD evidence'); END;

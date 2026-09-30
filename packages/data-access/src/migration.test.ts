@@ -1382,6 +1382,15 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   currentAccess.close();
 
   const finalDatabase = new DatabaseSync(databasePath);
+  for (const mutation of [
+    "UPDATE archive_recoveries SET id = 'renamed-recovery' WHERE id = 'evidence-new-format-recovery'",
+    "UPDATE archive_recoveries SET original_disc_archive_id = 'evidence-legacy-clean-archive' WHERE id = 'evidence-new-format-recovery'",
+    "UPDATE archive_recoveries SET created_at = 2 WHERE id = 'evidence-new-format-recovery'",
+  ]) {
+    expect(() => finalDatabase.exec(mutation)).toThrow(
+      /Archive Recovery identity is immutable/i,
+    );
+  }
   finalDatabase.exec(`
     INSERT INTO dvd_archive_recovery_reads (
       id, original_disc_archive_id, from_manifest_id,
