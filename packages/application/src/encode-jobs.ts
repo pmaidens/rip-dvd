@@ -88,7 +88,6 @@ export function enqueueEncodeJob(
   },
 ): EncodeJob {
   const parsed = parseEncodeEnqueueInput(mediaLibraryPath, input);
-  requireEvidenceEncodingAvailable(access, parsed.discSelectionId);
   return access.encodeJobs.enqueue(parsed);
 }
 
@@ -138,10 +137,6 @@ export function requeueEncodeJob(
   const expectedRevision = typeof input.expectedRevision === "string"
     ? input.expectedRevision
     : undefined;
-  const current = access.encodeJobs.find(encodeJobId);
-  if (current !== null) {
-    requireEvidenceEncodingAvailable(access, current.discSelectionId);
-  }
   return access.encodeJobs.requeue(encodeJobId, {
     outputPath,
     priority: input.priority as number | undefined,

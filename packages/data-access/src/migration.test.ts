@@ -1118,19 +1118,27 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     ) VALUES (
       'evidence-clean-inspection', 'evidence-clean-drive',
       'evidence-clean-disc', 'evidence-clean-generation', 1,
-      'completed', 'confirming_media', 2048, 1, 1, 1, 1, 1, 1
+      'completed', 'confirming_media', 6144, 1, 1, 1, 1, 1, 1
     );
     INSERT INTO original_disc_archives (
       id, detected_disc_id, disc_kind, archive_format, archive_path,
       fingerprint, size_bytes, boundary_policy_version,
       boundary_reported_size_bytes, boundary_published_size_bytes,
-      boundary_excluded_sector_count, integrity, integrity_policy_version,
-      bad_sector_count, bad_area_count, bad_sector_ranges, archived_at,
-      created_at, updated_at
+      boundary_excluded_sector_count, boundary_first_excluded_lba,
+      boundary_maximum_referenced_lba,
+      boundary_read_failure_classifier_version,
+      boundary_read_failure_scsi_status, boundary_read_failure_host_status,
+      boundary_read_failure_driver_status,
+      boundary_read_failure_sense_response_code,
+      boundary_read_failure_sense_key, boundary_read_failure_asc,
+      boundary_read_failure_ascq, integrity, integrity_policy_version,
+      bad_sector_count, bad_area_count, bad_sector_ranges,
+      archived_at, created_at, updated_at
     ) VALUES (
       'evidence-clean-archive', 'evidence-clean-disc', 'dvd', 'iso',
-      '/originals/evidence-clean.iso', 'evidence-clean-fingerprint', 2048,
-      'dvd-archive-boundary-v1', 2048, 2048, 0, 'clean_read',
+      '/originals/evidence-clean.iso', 'evidence-clean-fingerprint', 4096,
+      'dvd-archive-boundary-v1', 6144, 4096, 1, 2, 0,
+      'scsi-read-classifier-v2', 2, 0, 0, 112, 5, 33, 0, 'clean_read',
       'dvd-recovery-evidence-v1', 0, 0, '[]', 1, 1, 1
     );
     INSERT INTO archive_requests (
@@ -1149,7 +1157,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       'evidence-clean-job', 'evidence-clean-request',
       'evidence-clean-inspection', 'evidence-clean-disc',
       'evidence-clean-archive', 'dvd-recovery-evidence-v1', 1, 'completed', 0,
-      'finalizing', 100, 2048, 1, 1, 1, 1, 1
+      'finalizing', 100, 4096, 1, 1, 1, 1, 1
     );
     INSERT INTO dvd_archive_evidence_manifests (
       id, original_disc_archive_id, revision, evidence_format,
@@ -1160,8 +1168,8 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       manifest_digest, created_at
     ) VALUES (
       'evidence-clean-manifest-1', 'evidence-clean-archive', 1,
-      'dvd-recovery-evidence-v1', 'evidence-clean-fingerprint', 2048, 1,
-      'dvd-archive-boundary-v1', 2048, 2048, '${cleanBoundaryDigest}', '[]',
+      'dvd-recovery-evidence-v1', 'evidence-clean-fingerprint', 2048, 2,
+      'dvd-archive-boundary-v1', 6144, 4096, '${cleanBoundaryDigest}', '[]',
       '${cleanRangesDigest}', '${cleanManifestDigest}', 1
     )
   `);
@@ -1174,8 +1182,8 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       current_manifest_revision, current_manifest_digest, created_at, updated_at
     ) VALUES (
       'evidence-clean-archive', 'evidence-clean-job',
-      'dvd-recovery-evidence-v1', 'dvd-archive-boundary-v1', 2048, 2048,
-      '${cleanBoundaryDigest}', 2048, 1, 'evidence-clean-manifest-1', 1,
+      'dvd-recovery-evidence-v1', 'dvd-archive-boundary-v1', 6144, 4096,
+      '${cleanBoundaryDigest}', 2048, 2, 'evidence-clean-manifest-1', 1,
       '${cleanManifestDigest}', 1, 1
     )
   `);
@@ -1186,6 +1194,19 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     WHERE id = 'evidence-clean-archive'
   `);
   insertCleanHeader();
+  expect(() => evidenceFixture.exec(`
+    UPDATE original_disc_archives
+    SET boundary_maximum_referenced_lba = 1
+    WHERE id = 'evidence-clean-archive'
+  `)).toThrow(/Archive Boundary Evidence is immutable/i);
+  expect(() => evidenceFixture.exec(`
+    UPDATE original_disc_archives
+    SET boundary_read_failure_classifier_version = 'scsi-read-classifier-v3',
+        boundary_read_failure_scsi_status = 3,
+        boundary_read_failure_driver_status = 8,
+        boundary_read_failure_sense_response_code = 114
+    WHERE id = 'evidence-clean-archive'
+  `)).toThrow(/Archive Boundary Evidence is immutable/i);
   const insertInitialManifest = evidenceFixture.prepare(`
     INSERT INTO dvd_archive_evidence_manifests (
       id, original_disc_archive_id, revision, evidence_format,
@@ -1663,6 +1684,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     WHERE type = 'trigger' AND name LIKE 'dvd_evidence_%'
     ORDER BY name
   `).all()).toEqual([
+    { name: "dvd_evidence_archive_boundary_update_guard" },
     { name: "dvd_evidence_archive_job_insert_match" },
     { name: "dvd_evidence_archive_job_update_guard" },
     { name: "dvd_evidence_archive_projection_update_guard" },

@@ -3,6 +3,7 @@ DROP TRIGGER IF EXISTS `dvd_evidence_header_update_guard`;--> statement-breakpoi
 DROP TRIGGER IF EXISTS `dvd_evidence_header_delete_guard`;--> statement-breakpoint
 DROP TRIGGER IF EXISTS `dvd_evidence_incomplete_archive_insert_guard`;--> statement-breakpoint
 DROP TRIGGER IF EXISTS `dvd_evidence_incomplete_archive_update_guard`;--> statement-breakpoint
+DROP TRIGGER IF EXISTS `dvd_evidence_archive_boundary_update_guard`;--> statement-breakpoint
 DROP TRIGGER IF EXISTS `dvd_evidence_archive_projection_update_guard`;--> statement-breakpoint
 DROP TRIGGER IF EXISTS `dvd_evidence_archive_recovery_insert_guard`;--> statement-breakpoint
 DROP TRIGGER IF EXISTS `dvd_evidence_archive_recovery_update_guard`;--> statement-breakpoint
@@ -343,6 +344,26 @@ WHEN NEW.`integrity` = 'incomplete_read'
   AND NOT EXISTS (SELECT 1 FROM `dvd_archive_evidence_headers` WHERE `original_disc_archive_id` = NEW.`id`)
 BEGIN SELECT RAISE(ABORT, 'Incomplete-read Archive Integrity requires authoritative DVD evidence'); END;
 --> statement-breakpoint
+CREATE TRIGGER `dvd_evidence_archive_boundary_update_guard`
+BEFORE UPDATE ON `original_disc_archives`
+WHEN EXISTS (SELECT 1 FROM `dvd_archive_evidence_headers` WHERE `original_disc_archive_id` = NEW.`id`)
+  AND (
+    OLD.`boundary_policy_version` IS NOT NEW.`boundary_policy_version`
+    OR OLD.`boundary_reported_size_bytes` IS NOT NEW.`boundary_reported_size_bytes`
+    OR OLD.`boundary_published_size_bytes` IS NOT NEW.`boundary_published_size_bytes`
+    OR OLD.`boundary_excluded_sector_count` IS NOT NEW.`boundary_excluded_sector_count`
+    OR OLD.`boundary_first_excluded_lba` IS NOT NEW.`boundary_first_excluded_lba`
+    OR OLD.`boundary_maximum_referenced_lba` IS NOT NEW.`boundary_maximum_referenced_lba`
+    OR OLD.`boundary_read_failure_classifier_version` IS NOT NEW.`boundary_read_failure_classifier_version`
+    OR OLD.`boundary_read_failure_scsi_status` IS NOT NEW.`boundary_read_failure_scsi_status`
+    OR OLD.`boundary_read_failure_host_status` IS NOT NEW.`boundary_read_failure_host_status`
+    OR OLD.`boundary_read_failure_driver_status` IS NOT NEW.`boundary_read_failure_driver_status`
+    OR OLD.`boundary_read_failure_sense_response_code` IS NOT NEW.`boundary_read_failure_sense_response_code`
+    OR OLD.`boundary_read_failure_sense_key` IS NOT NEW.`boundary_read_failure_sense_key`
+    OR OLD.`boundary_read_failure_asc` IS NOT NEW.`boundary_read_failure_asc`
+    OR OLD.`boundary_read_failure_ascq` IS NOT NEW.`boundary_read_failure_ascq`
+  )
+BEGIN SELECT RAISE(ABORT, 'Archive Boundary Evidence is immutable once authoritative DVD evidence exists'); END;--> statement-breakpoint
 CREATE TRIGGER `dvd_evidence_archive_projection_update_guard`
 BEFORE UPDATE ON `original_disc_archives`
 WHEN EXISTS (SELECT 1 FROM `dvd_archive_evidence_headers` WHERE `original_disc_archive_id` = NEW.`id`)
@@ -351,9 +372,6 @@ WHEN EXISTS (SELECT 1 FROM `dvd_archive_evidence_headers` WHERE `original_disc_a
     OR OLD.`disc_kind` IS NOT NEW.`disc_kind`
     OR OLD.`fingerprint` IS NOT NEW.`fingerprint`
     OR OLD.`size_bytes` IS NOT NEW.`size_bytes`
-    OR OLD.`boundary_policy_version` IS NOT NEW.`boundary_policy_version`
-    OR OLD.`boundary_reported_size_bytes` IS NOT NEW.`boundary_reported_size_bytes`
-    OR OLD.`boundary_published_size_bytes` IS NOT NEW.`boundary_published_size_bytes`
     OR OLD.`integrity` IS NOT NEW.`integrity`
     OR OLD.`integrity_evidence_revision` IS NOT NEW.`integrity_evidence_revision`
     OR OLD.`integrity_policy_version` IS NOT NEW.`integrity_policy_version`

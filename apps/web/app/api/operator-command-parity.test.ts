@@ -563,6 +563,235 @@ it("shares Encode Job validation and keyed outcomes across web and CLI", async (
   }
 });
 
+it("replays persisted Encode enqueue outcomes before DVD evidence blocking", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive, correctedSelection } = seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    access.catalog.completeCatalogReview(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+    );
+    const profile = access.encodingProfiles.list({
+      mediaDomain: "dvd_video",
+      activeOnly: true,
+    })[0]!;
+    const outputPath = join(
+      fixture.mediaLibraryPath,
+      "evidence-enqueue-replay.mkv",
+    );
+    const mutationKey = "synthetic-evidence-enqueue-replay";
+    const blockedMutationKey = "synthetic-evidence-enqueue-blocked";
+    const config = () => ({
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      webTrustedOrigin: trustedOrigin,
+    });
+    const request = (key: string, path = outputPath) => new Request(
+      `${trustedOrigin}/api/encode-jobs`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+        },
+        body: JSON.stringify({
+          mutationKey: key,
+          discSelectionId: correctedSelection.id,
+          encodingProfileId: profile.id,
+          outputPath: path,
+        }),
+      },
+    );
+    const command = (key: string, path = outputPath) => [
+      "encode-enqueue", "--key", key,
+      "--disc-selection-id", correctedSelection.id,
+      "--encoding-profile-id", profile.id,
+      "--output-path", path,
+    ];
+
+    const committed = await createEncodeJobsRoute(
+      request(mutationKey),
+      () => access,
+      config,
+    );
+    expect(committed.status).toBe(200);
+    const committedResult = await committed.json() as { job: object };
+    markArchiveWithDvdRecoveryEvidence(
+      fixture.databasePath,
+      archive.id,
+      "encode-enqueue-replay-parity",
+    );
+
+    const webReplay = await createEncodeJobsRoute(
+      request(mutationKey),
+      () => access,
+      config,
+    );
+    const cliReplay = await fixture.run(command(mutationKey));
+    expect(webReplay.status).toBe(200);
+    expect(cliReplay.exitCode).toBe(0);
+    expect(await webReplay.json()).toEqual(committedResult);
+    expect(cliReplay.result).toMatchObject(committedResult);
+
+    const changedPath = join(
+      fixture.mediaLibraryPath,
+      "evidence-enqueue-replay-changed.mkv",
+    );
+    const webConflict = await createEncodeJobsRoute(
+      request(mutationKey, changedPath),
+      () => access,
+      config,
+    );
+    const cliConflict = await fixture.run(command(mutationKey, changedPath));
+    expect(webConflict.status).toBe(409);
+    expect(cliConflict.exitCode).toBe(2);
+    expect(cliConflict.result).toEqual(await webConflict.json());
+    expect(cliConflict.result).toMatchObject({
+      error: { code: "MUTATION_KEY_CONFLICT" },
+    });
+
+    const webBlocked = await createEncodeJobsRoute(
+      request(blockedMutationKey),
+      () => access,
+      config,
+    );
+    const cliBlocked = await fixture.run(command(blockedMutationKey));
+    expect(webBlocked.status).toBe(409);
+    expect(cliBlocked.exitCode).toBe(2);
+    expect(cliBlocked.result).toEqual(await webBlocked.json());
+    expect(cliBlocked.result).toEqual(dvdEvidenceEncodingUnavailableError);
+
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    expect(sqlite.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE key = ?
+    `).get(blockedMutationKey)).toEqual({ count: 0 });
+    sqlite.close();
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("replays persisted Encode requeue outcomes before DVD evidence blocking", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive, correctedSelection } = seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    access.catalog.completeCatalogReview(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+    );
+    const profile = access.encodingProfiles.list({
+      mediaDomain: "dvd_video",
+      activeOnly: true,
+    })[0]!;
+    const original = access.encodeJobs.enqueue({
+      discSelectionId: correctedSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: join(
+        fixture.mediaLibraryPath,
+        "evidence-requeue-replay.mkv",
+      ),
+    });
+    access.encodeJobs.requestCancellation(original.id);
+    const mutationKey = "synthetic-evidence-requeue-replay";
+    const blockedMutationKey = "synthetic-evidence-requeue-blocked";
+    const config = () => ({
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      webTrustedOrigin: trustedOrigin,
+    });
+    const request = (key: string, priority?: number) => new Request(
+      `${trustedOrigin}/api/encode-jobs`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+        },
+        body: JSON.stringify({
+          action: "requeue",
+          mutationKey: key,
+          encodeJobId: original.id,
+          priority,
+        }),
+      },
+    );
+    const command = (key: string, priority?: number) => [
+      "encode-requeue", "--key", key,
+      "--encode-job-id", original.id,
+      ...(priority === undefined ? [] : ["--priority", String(priority)]),
+    ];
+
+    const committed = await createEncodeJobsRoute(
+      request(mutationKey),
+      () => access,
+      config,
+    );
+    expect(committed.status).toBe(200);
+    const committedResult = await committed.json() as { job: object };
+    access.encodeJobs.requestCancellation(original.id);
+    markArchiveWithDvdRecoveryEvidence(
+      fixture.databasePath,
+      archive.id,
+      "encode-requeue-replay-parity",
+    );
+
+    const webReplay = await createEncodeJobsRoute(
+      request(mutationKey),
+      () => access,
+      config,
+    );
+    const cliReplay = await fixture.run(command(mutationKey));
+    expect(webReplay.status).toBe(200);
+    expect(cliReplay.exitCode).toBe(0);
+    expect(await webReplay.json()).toEqual(committedResult);
+    expect(cliReplay.result).toMatchObject(committedResult);
+
+    const webConflict = await createEncodeJobsRoute(
+      request(mutationKey, 7),
+      () => access,
+      config,
+    );
+    const cliConflict = await fixture.run(command(mutationKey, 7));
+    expect(webConflict.status).toBe(409);
+    expect(cliConflict.exitCode).toBe(2);
+    expect(cliConflict.result).toEqual(await webConflict.json());
+    expect(cliConflict.result).toMatchObject({
+      error: { code: "MUTATION_KEY_CONFLICT" },
+    });
+
+    const webBlocked = await createEncodeJobsRoute(
+      request(blockedMutationKey),
+      () => access,
+      config,
+    );
+    const cliBlocked = await fixture.run(command(blockedMutationKey));
+    expect(webBlocked.status).toBe(409);
+    expect(cliBlocked.exitCode).toBe(2);
+    expect(cliBlocked.result).toEqual(await webBlocked.json());
+    expect(cliBlocked.result).toEqual(dvdEvidenceEncodingUnavailableError);
+
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    expect(sqlite.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE key = ?
+    `).get(blockedMutationKey)).toEqual({ count: 0 });
+    sqlite.close();
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
 it("shares Catalog Review completion preview and replay across web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
   const { archive } = seedCatalogReviewForReadFixture(fixture);

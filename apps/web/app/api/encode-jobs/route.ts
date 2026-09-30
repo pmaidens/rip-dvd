@@ -269,7 +269,10 @@ export async function createEncodeJobsRoute(
       return response({ error: "Invalid Encode Job" }, 400);
     }
     if (error instanceof MutationKeyConflictError) {
-      return response({ error: error.message }, 409);
+      return response({ error: {
+        code: "MUTATION_KEY_CONFLICT",
+        message: error.message,
+      } }, 409);
     }
     if (error instanceof RecordNotFoundError) {
       return response({ error: error.message }, 404);
