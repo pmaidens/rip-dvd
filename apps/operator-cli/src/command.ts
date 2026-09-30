@@ -754,6 +754,14 @@ function requestRearchive(
         2,
       );
     }
+    if (error instanceof DvdRecoveryEvidenceAdmissionClosedError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+      );
+    }
     if (
       error instanceof DomainInvariantError ||
       error instanceof InvalidStatusTransitionError

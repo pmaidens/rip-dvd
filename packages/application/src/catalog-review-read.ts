@@ -167,9 +167,19 @@ export function readCatalogReview(
     if (!persistedArchive) {
       return null;
     }
+    const evidenceArchiveIds = [...new Set([
+      id,
+      ...(persistedArchive.rearchiveSourceArchiveId === null ||
+          persistedArchive.catalogReviewedAt !== null
+        ? []
+        : [persistedArchive.rearchiveSourceArchiveId]),
+    ])];
+    const evidenceHeaders = snapshot.catalog.findDvdArchiveEvidenceHeaders(
+      evidenceArchiveIds,
+    );
     const archive = withAuthoritativeDvdArchiveIntegrity(
       persistedArchive,
-      snapshot.catalog.findDvdArchiveEvidenceHeader(id),
+      evidenceHeaders.get(id) ?? null,
     );
     const disc = snapshot.catalog.listDetectedDiscs(undefined, {
       ids: [archive.detectedDiscId],
@@ -188,15 +198,13 @@ export function readCatalogReview(
         ...persistedRearchiveProposal,
         sourceArchive: withAuthoritativeDvdArchiveIntegrity(
           persistedRearchiveProposal.sourceArchive,
-          snapshot.catalog.findDvdArchiveEvidenceHeader(
-            persistedRearchiveProposal.sourceArchive.id,
-          ),
+          evidenceHeaders.get(persistedRearchiveProposal.sourceArchive.id) ??
+            null,
         ),
         targetArchive: withAuthoritativeDvdArchiveIntegrity(
           persistedRearchiveProposal.targetArchive,
-          snapshot.catalog.findDvdArchiveEvidenceHeader(
-            persistedRearchiveProposal.targetArchive.id,
-          ),
+          evidenceHeaders.get(persistedRearchiveProposal.targetArchive.id) ??
+            null,
         ),
       };
     const rearchiveSourceDisc = rearchiveProposal === null

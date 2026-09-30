@@ -1343,6 +1343,9 @@ export interface CatalogAccess {
   findDvdArchiveEvidenceHeaders(
     ids: readonly OriginalDiscArchiveId[],
   ): ReadonlyMap<OriginalDiscArchiveId, DvdArchiveEvidenceHeader>;
+  auditDvdArchiveEvidenceChains(
+    ids: readonly OriginalDiscArchiveId[],
+  ): void;
   findArchiveRecovery(id: OriginalDiscArchiveId): ArchiveRecovery | null;
   listCatalogReviewArchives(options: {
     view: CatalogReviewArchiveView;

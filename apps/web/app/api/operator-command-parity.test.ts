@@ -16,6 +16,7 @@ import {
   createNormalDvdArchiveBoundaryEvidenceForTest,
 } from "@rip-dvd/data-access/test-support";
 import {
+  createApplicationOperations,
   encodeOutputArtifactIdentity,
   type CatalogMetadataLookup,
   type EncodeOutputMediaProbe,
@@ -34,6 +35,7 @@ import { createDeploymentReadinessResponse } from "./deployment-readiness/route"
 import { createHealthResponse } from "./health/route";
 import { createOperationsResponse } from "./operations/route";
 import { createArchiveRequestsRoute } from "./archive-requests/route";
+import { createRearchiveRequestsRoute } from "./rearchive-requests/route";
 import {
   createArchiveRequestCancellationRoute,
 } from "./archive-requests/[id]/route";
@@ -214,6 +216,96 @@ it("reports the same closed DVD evidence admission through web and CLI", async (
       },
     });
     expect(access.archiveRequests.list()).toEqual([]);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("preserves re-archive replay but blocks fresh reuse of a marked request", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive: source } = seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    const replayKey = "00000000-0000-4000-8000-000000000417";
+    const initial = createApplicationOperations(access).submitRearchiveRequest({
+      mutationKey: replayKey,
+      sourceArchiveId: source.id,
+    });
+    const requestId = initial.archiveRequest.id;
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    sqlite.prepare(`
+      UPDATE archive_requests
+      SET evidence_format = ?
+      WHERE id = ?
+    `).run(DVD_RECOVERY_EVIDENCE_FORMAT, requestId);
+    sqlite.close();
+
+    const request = (mutationKey: string) => new Request(
+      `${trustedOrigin}/api/rearchive-requests`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+          "Sec-Fetch-Site": "same-origin",
+        },
+        body: JSON.stringify({ mutationKey, sourceArchiveId: source.id }),
+      },
+    );
+    const replayedWeb = await createRearchiveRequestsRoute(
+      request(replayKey),
+      () => access,
+      () => trustedOrigin,
+    );
+    const replayedCli = await fixture.run([
+      "request-rearchive",
+      "--key",
+      replayKey,
+      "--source-archive-id",
+      source.id,
+    ]);
+    expect(replayedWeb.status).toBe(201);
+    expect(replayedCli.exitCode).toBe(0);
+    expect(replayedCli.result).toEqual(await replayedWeb.json());
+    expect(replayedCli.result).toMatchObject({
+      archiveRequest: {
+        id: requestId,
+        status: "pending",
+      },
+    });
+
+    const freshKey = "00000000-0000-4000-8000-000000000418";
+    const blockedWeb = await createRearchiveRequestsRoute(
+      request(freshKey),
+      () => access,
+      () => trustedOrigin,
+    );
+    const blockedCli = await fixture.run([
+      "request-rearchive",
+      "--key",
+      freshKey,
+      "--source-archive-id",
+      source.id,
+    ]);
+    expect(blockedWeb.status).toBe(409);
+    expect(blockedCli.exitCode).toBe(2);
+    expect(blockedCli.result).toEqual(await blockedWeb.json());
+    expect(blockedCli.result).toEqual({
+      error: {
+        code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+        message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+        blockingReasons: [{
+          code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+          message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+        }],
+      },
+    });
+    expect(access.archiveRequests.find(requestId)).toMatchObject({
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+      status: "pending",
+    });
   } finally {
     access.close();
     fixture.dispose();

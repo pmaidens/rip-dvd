@@ -119,15 +119,22 @@ function presentRearchiveMappingProposal(
   access: DataAccess,
   proposal: RearchiveMappingProposalReview,
 ) {
+  const evidenceArchiveIds = [...new Set([
+    proposal.sourceArchive.id,
+    proposal.targetArchive.id,
+  ])];
+  const evidenceHeaders = access.catalog.findDvdArchiveEvidenceHeaders(
+    evidenceArchiveIds,
+  );
   const authoritativeProposal = {
     ...proposal,
     sourceArchive: withAuthoritativeDvdArchiveIntegrity(
       proposal.sourceArchive,
-      access.catalog.findDvdArchiveEvidenceHeader(proposal.sourceArchive.id),
+      evidenceHeaders.get(proposal.sourceArchive.id) ?? null,
     ),
     targetArchive: withAuthoritativeDvdArchiveIntegrity(
       proposal.targetArchive,
-      access.catalog.findDvdArchiveEvidenceHeader(proposal.targetArchive.id),
+      evidenceHeaders.get(proposal.targetArchive.id) ?? null,
     ),
   };
   const discLabels = new Map(

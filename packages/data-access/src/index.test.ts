@@ -53,6 +53,7 @@ import {
 } from "./disc-settling-fixture.js";
 import type {
   ArchiveJobId,
+  ArchiveRequestId,
   DetectedDiscId,
   DiscKind,
   DiscInspectionId,
@@ -13249,7 +13250,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
 
     const mutationKey = "00000000-0000-4000-8000-000000000408";
     const blockedMutationKey = "00000000-0000-4000-8000-000000000409";
+    const reuseMutationKey = "00000000-0000-4000-8000-000000000415";
+    const reactivationMutationKey =
+      "00000000-0000-4000-8000-000000000416";
     const requestId = "evidence-request-replay-request";
+    const reactivationRequestId = "evidence-request-reactivation-request";
     const createdAt = new Date(1).toISOString();
     const semanticInput = JSON.stringify({
       detectedDiscId: first.disc.id,
@@ -13275,6 +13280,16 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         created_at, updated_at
       ) VALUES (?, ?, ?, 'pending', 0, 1, 1)
     `).run(requestId, first.disc.id, DVD_RECOVERY_EVIDENCE_FORMAT);
+    sqlite.prepare(`
+      INSERT INTO archive_requests (
+        id, detected_disc_id, evidence_format, status, priority,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, 'needs_attention', 0, 1, 1)
+    `).run(
+      reactivationRequestId,
+      second.disc.id,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+    );
     sqlite.prepare(`
       INSERT INTO mutation_invocations (
         key, operation, semantic_input, outcome, created_at
@@ -13302,15 +13317,33 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       detectedDiscId: first.disc.id,
       evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
     })).toThrow(DvdRecoveryEvidenceAdmissionClosedError);
+    expect(() => gatedAccess.archiveRequests.submit({
+      mutationKey: reuseMutationKey,
+      detectedDiscId: first.disc.id,
+    })).toThrow(DvdRecoveryEvidenceAdmissionClosedError);
+    expect(() => gatedAccess.archiveRequests.submit({
+      mutationKey: reactivationMutationKey,
+      detectedDiscId: second.disc.id,
+    })).toThrow(DvdRecoveryEvidenceAdmissionClosedError);
+    expect(gatedAccess.archiveRequests.find(reactivationRequestId as ArchiveRequestId))
+      .toMatchObject({
+        evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+        status: "needs_attention",
+      });
     gatedAccess.close();
 
     const replayCheck = new DatabaseSync(databasePath);
     expect(replayCheck.prepare(`
       SELECT key
       FROM mutation_invocations
-      WHERE key IN (?, ?)
+      WHERE key IN (?, ?, ?, ?)
       ORDER BY key
-    `).all(mutationKey, blockedMutationKey)).toEqual([{ key: mutationKey }]);
+    `).all(
+      mutationKey,
+      blockedMutationKey,
+      reuseMutationKey,
+      reactivationMutationKey,
+    )).toEqual([{ key: mutationKey }]);
     replayCheck.close();
   });
 

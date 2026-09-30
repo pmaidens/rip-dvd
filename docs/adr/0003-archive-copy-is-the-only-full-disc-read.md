@@ -104,6 +104,10 @@ sector, and outcome. A manifest digest binds its archive and revision, exact
 predecessor digest, exact recovery-read digest when present, image and extent,
 boundary digest, and normalized source-map digest. Data-access constructors
 compute these values before a future writer persists them, and authoritative
-reads reject a stored digest that no longer matches its content. This digest
-contract does not publish range paging or install filesystem checkpoints;
-those remain separate workflow capabilities.
+reads validate the current manifest, its immediate transition, and the marked
+source-job provenance without loading the complete recovery history. The
+current digest is the authenticated checkpoint for that bounded projection;
+a separately bounded evidence-chain audit validates every predecessor,
+recovery read, transition, and stored digest. This digest contract does not
+publish range paging or install filesystem checkpoints; those remain separate
+workflow capabilities.

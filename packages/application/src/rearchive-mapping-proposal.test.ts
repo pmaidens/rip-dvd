@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { seedRearchiveReviewFixtureForTest } from "@rip-dvd/data-access/rearchive-test-support";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 
 import { createApplicationOperations } from "./index.js";
 
@@ -126,6 +126,42 @@ it("offers prior mappings for review without adopting them", () => {
     )).toThrow(
       "Fresh re-archive review is completed through Re-archive Acceptance",
     );
+  } finally {
+    access.close();
+  }
+});
+
+it("reads Catalog Review evidence once without revalidating the target chain", () => {
+  const { access, freshArchive, sourceArchive } = fixture();
+  try {
+    const findEvidenceHeaders = vi.spyOn(
+      access.catalog,
+      "findDvdArchiveEvidenceHeaders",
+    );
+    const findEvidenceHeader = vi.spyOn(
+      access.catalog,
+      "findDvdArchiveEvidenceHeader",
+    );
+
+    createApplicationOperations(access).catalogReview(
+      freshArchive.id,
+      {
+        discSelectionOffset: 0,
+        correctionHistoryOffset: 0,
+        correctionEncodeHistoryOffset: 0,
+        correctionRetainedOutputHistoryOffset: 0,
+        replacementOffset: 0,
+        replacementProfileOffset: 0,
+      },
+      false,
+    );
+
+    expect(findEvidenceHeaders).toHaveBeenCalledTimes(1);
+    expect(findEvidenceHeaders).toHaveBeenCalledWith([
+      freshArchive.id,
+      sourceArchive.id,
+    ]);
+    expect(findEvidenceHeader).not.toHaveBeenCalled();
   } finally {
     access.close();
   }
@@ -275,6 +311,43 @@ it("persists an edited proposal with revision checks and replay", () => {
         },
       }],
     });
+  } finally {
+    access.close();
+  }
+});
+
+it("presents a Re-archive Mapping Proposal with one evidence batch", () => {
+  const { access, freshArchive, movie, sourceArchive, sourceSelection } =
+    fixture();
+  try {
+    const initial = proposalFromReview(access, freshArchive.id);
+    const findEvidenceHeaders = vi.spyOn(
+      access.catalog,
+      "findDvdArchiveEvidenceHeaders",
+    );
+    const findEvidenceHeader = vi.spyOn(
+      access.catalog,
+      "findDvdArchiveEvidenceHeader",
+    );
+
+    createApplicationOperations(access).previewRearchiveMappingProposal({
+      originalDiscArchiveId: freshArchive.id,
+      catalogRevision: initial.catalogRevision,
+      sourceCatalogRevision: initial.sourceCatalogRevision,
+      mappings: [{
+        sourceDiscSelectionId: sourceSelection.id,
+        mediaItemId: movie.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        label: "Feature",
+      }],
+    });
+
+    expect(findEvidenceHeaders).toHaveBeenCalledTimes(1);
+    expect(findEvidenceHeaders).toHaveBeenCalledWith([
+      sourceArchive.id,
+      freshArchive.id,
+    ]);
+    expect(findEvidenceHeader).not.toHaveBeenCalled();
   } finally {
     access.close();
   }

@@ -1936,11 +1936,38 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     tamperedDatabase.close();
 
     const tamperedAccess = createDataAccess({ databasePath: tamperedPath });
-    expect(() => tamperedAccess.catalog.findDvdArchiveEvidenceHeader(
+    expect(tamperedAccess.catalog.findDvdArchiveEvidenceHeader(
       "evidence-new-format-archive" as OriginalDiscArchiveId,
-    )).toThrow(tamper.expected);
+    )).toMatchObject({ currentManifestRevision: 4 });
+    expect(() => tamperedAccess.catalog.auditDvdArchiveEvidenceChains([
+      "evidence-new-format-archive" as OriginalDiscArchiveId,
+    ])).toThrow(tamper.expected);
     tamperedAccess.close();
   }
+
+  const provenanceTamperedPath = join(
+    dirname(databasePath),
+    "tampered-source-job-provenance.sqlite",
+  );
+  copyFileSync(databasePath, provenanceTamperedPath);
+  const provenanceTamperedDatabase = new DatabaseSync(provenanceTamperedPath);
+  provenanceTamperedDatabase.exec(`
+    DROP TRIGGER dvd_evidence_header_update_guard;
+    UPDATE dvd_archive_evidence_headers
+    SET source_archive_job_id = 'evidence-mismatched-archive-job'
+    WHERE original_disc_archive_id = 'evidence-new-format-archive';
+  `);
+  provenanceTamperedDatabase.close();
+
+  const provenanceTamperedAccess = createDataAccess({
+    databasePath: provenanceTamperedPath,
+  });
+  expect(() => provenanceTamperedAccess.catalog.findDvdArchiveEvidenceHeader(
+    "evidence-new-format-archive" as OriginalDiscArchiveId,
+  )).toThrow(
+    "Persisted DVD Archive Evidence source job provenance is invalid",
+  );
+  provenanceTamperedAccess.close();
 });
 
 it("fails closed instead of inventing checkpoint identities for interstitial evidence", () => {
