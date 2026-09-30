@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { createNormalDvdArchiveBoundaryEvidence } from "./archive-boundary.js";
 import {
   createIncompleteReadArchiveIntegrityEvidence,
   createWatchableSalvageArchiveIntegrityEvidence,
@@ -17,6 +18,24 @@ import type {
 
 describe("Archive Integrity evidence", () => {
   it("pairs the authoritative integrity projection with its manifest revision", () => {
+    const boundaryEvidence = createNormalDvdArchiveBoundaryEvidence({
+      reportedSizeBytes: 4_096,
+      endpointProof: {
+        proofVersion: "dvd-normal-endpoint-proof-v1",
+        confirmationCount: 2,
+        firstExcludedLba: 2,
+        outOfRangeEvidence: {
+          classifierVersion: "scsi-read-classifier-v2",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 0x72,
+          senseKey: 0x05,
+          asc: 0x21,
+          ascq: 0,
+        },
+      },
+    });
     const archive: OriginalDiscArchive = {
       id: "archive-1" as OriginalDiscArchive["id"],
       detectedDiscId: "disc-1" as OriginalDiscArchive["detectedDiscId"],
@@ -26,20 +45,28 @@ describe("Archive Integrity evidence", () => {
       archivePath: "/synthetic/archive.iso",
       fingerprint: "synthetic-fingerprint",
       sizeBytes: 4096,
-      boundaryPolicyVersion: "dvd-archive-boundary-v1",
+      boundaryPolicyVersion: boundaryEvidence.policyVersion,
       boundaryReportedSizeBytes: 4096,
       boundaryPublishedSizeBytes: 4096,
       boundaryExcludedSectorCount: 0,
-      boundaryFirstExcludedLba: null,
+      boundaryFirstExcludedLba: boundaryEvidence.endpointProof.firstExcludedLba,
       boundaryMaximumReferencedLba: null,
-      boundaryReadFailureClassifierVersion: null,
-      boundaryReadFailureScsiStatus: null,
-      boundaryReadFailureHostStatus: null,
-      boundaryReadFailureDriverStatus: null,
-      boundaryReadFailureSenseResponseCode: null,
-      boundaryReadFailureSenseKey: null,
-      boundaryReadFailureAsc: null,
-      boundaryReadFailureAscq: null,
+      boundaryReadFailureClassifierVersion:
+        boundaryEvidence.endpointProof.outOfRangeEvidence.classifierVersion,
+      boundaryReadFailureScsiStatus:
+        boundaryEvidence.endpointProof.outOfRangeEvidence.scsiStatus,
+      boundaryReadFailureHostStatus:
+        boundaryEvidence.endpointProof.outOfRangeEvidence.hostStatus,
+      boundaryReadFailureDriverStatus:
+        boundaryEvidence.endpointProof.outOfRangeEvidence.driverStatus,
+      boundaryReadFailureSenseResponseCode:
+        boundaryEvidence.endpointProof.outOfRangeEvidence.senseResponseCode,
+      boundaryReadFailureSenseKey:
+        boundaryEvidence.endpointProof.outOfRangeEvidence.senseKey,
+      boundaryReadFailureAsc:
+        boundaryEvidence.endpointProof.outOfRangeEvidence.asc,
+      boundaryReadFailureAscq:
+        boundaryEvidence.endpointProof.outOfRangeEvidence.ascq,
       integrity: "incomplete_read",
       integrityEvidenceRevision: 1,
       integrityPolicyVersion: "dvd-recovery-evidence-v1",
@@ -56,12 +83,8 @@ describe("Archive Integrity evidence", () => {
       createdAt: new Date(1),
       updatedAt: new Date(1),
     };
-    const boundaryEvidenceDigest = createDvdArchiveBoundaryEvidenceDigest({
-      policyVersion: "dvd-archive-boundary-v1",
-      reportedSizeBytes: 4_096,
-      publishedSizeBytes: 4_096,
-      excludedSectorCount: 0,
-    });
+    const boundaryEvidenceDigest =
+      createDvdArchiveBoundaryEvidenceDigest(boundaryEvidence);
     const initialManifest = createDvdArchiveEvidenceManifestDigests({
       originalDiscArchiveId: archive.id,
       revision: 1,
@@ -73,7 +96,7 @@ describe("Archive Integrity evidence", () => {
       imageFingerprint: archive.fingerprint,
       sectorSizeBytes: 2_048,
       acceptedEndLbaExclusive: 2,
-      boundaryPolicyVersion: "dvd-archive-boundary-v1",
+      boundaryPolicyVersion: boundaryEvidence.policyVersion,
       boundaryReportedSizeBytes: 4_096,
       boundaryPublishedSizeBytes: 4_096,
       boundaryEvidenceDigest,
@@ -107,7 +130,7 @@ describe("Archive Integrity evidence", () => {
       imageFingerprint: archive.fingerprint,
       sectorSizeBytes: 2_048,
       acceptedEndLbaExclusive: 2,
-      boundaryPolicyVersion: "dvd-archive-boundary-v1",
+      boundaryPolicyVersion: boundaryEvidence.policyVersion,
       boundaryReportedSizeBytes: 4_096,
       boundaryPublishedSizeBytes: 4_096,
       boundaryEvidenceDigest,

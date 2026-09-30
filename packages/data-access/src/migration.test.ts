@@ -11,6 +11,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, expect, it } from "vitest";
 
+import { createNormalDvdArchiveBoundaryEvidence } from "./archive-boundary.js";
 import {
   createDataAccess,
   createDvdArchiveBoundaryEvidenceDigest,
@@ -659,8 +660,20 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   historical.exec(`
     UPDATE original_disc_archives
     SET size_bytes = 4096,
+        boundary_policy_version = 'dvd-archive-boundary-v2',
         boundary_reported_size_bytes = 4096,
-        boundary_published_size_bytes = 4096
+        boundary_published_size_bytes = 4096,
+        boundary_excluded_sector_count = 0,
+        boundary_first_excluded_lba = 2,
+        boundary_maximum_referenced_lba = NULL,
+        boundary_read_failure_classifier_version = 'scsi-read-classifier-v2',
+        boundary_read_failure_scsi_status = 2,
+        boundary_read_failure_host_status = 0,
+        boundary_read_failure_driver_status = 8,
+        boundary_read_failure_sense_response_code = 114,
+        boundary_read_failure_sense_key = 5,
+        boundary_read_failure_asc = 33,
+        boundary_read_failure_ascq = 0
     WHERE id = 'evidence-new-format-archive';
 
     UPDATE encode_jobs
@@ -1136,12 +1149,26 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     { startLba: 0, sectorCount: 1, classification: "skipped_untested" },
     { startLba: 1, sectorCount: 1, classification: "individually_failed" },
   ] as const;
-  const boundaryDigest = createDvdArchiveBoundaryEvidenceDigest({
-    policyVersion: "dvd-archive-boundary-v1",
-    reportedSizeBytes: 4_096,
-    publishedSizeBytes: 4_096,
-    excludedSectorCount: 0,
-  });
+  const boundaryDigest = createDvdArchiveBoundaryEvidenceDigest(
+    createNormalDvdArchiveBoundaryEvidence({
+      reportedSizeBytes: 4_096,
+      endpointProof: {
+        proofVersion: "dvd-normal-endpoint-proof-v1",
+        confirmationCount: 2,
+        firstExcludedLba: 2,
+        outOfRangeEvidence: {
+          classifierVersion: "scsi-read-classifier-v2",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 0x72,
+          senseKey: 0x05,
+          asc: 0x21,
+          ascq: 0,
+        },
+      },
+    }),
+  );
   const initialManifest = createDvdArchiveEvidenceManifestDigests({
     originalDiscArchiveId: "evidence-new-format-archive",
     revision: 1,
@@ -1153,7 +1180,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     imageFingerprint: continuationFingerprint,
     sectorSizeBytes: 2_048,
     acceptedEndLbaExclusive: 2,
-    boundaryPolicyVersion: "dvd-archive-boundary-v1",
+    boundaryPolicyVersion: "dvd-archive-boundary-v2",
     boundaryReportedSizeBytes: 4_096,
     boundaryPublishedSizeBytes: 4_096,
     boundaryEvidenceDigest: boundaryDigest,
@@ -1180,7 +1207,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     imageFingerprint: continuationFingerprint,
     sectorSizeBytes: 2_048,
     acceptedEndLbaExclusive: 2,
-    boundaryPolicyVersion: "dvd-archive-boundary-v1",
+    boundaryPolicyVersion: "dvd-archive-boundary-v2",
     boundaryReportedSizeBytes: 4_096,
     boundaryPublishedSizeBytes: 4_096,
     boundaryEvidenceDigest: boundaryDigest,
@@ -1371,7 +1398,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       '${continuationFingerprint}',
       2048,
       2,
-      'dvd-archive-boundary-v1',
+      'dvd-archive-boundary-v2',
       4096,
       4096,
       '${boundaryDigest}',
@@ -1410,7 +1437,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       current_manifest_revision, current_manifest_digest, created_at, updated_at
     ) VALUES (
       'evidence-new-format-archive', 'evidence-new-format-archive-job',
-      'dvd-recovery-evidence-v1', 'dvd-archive-boundary-v1', 4096, 4096,
+      'dvd-recovery-evidence-v1', 'dvd-archive-boundary-v2', 4096, 4096,
       '${boundaryDigest}', 2048, 2, 'evidence-new-format-manifest-1', 1,
       '${initialManifestDigest}', 1, 1
     )
@@ -1429,7 +1456,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       current_manifest_revision, current_manifest_digest, created_at, updated_at
     ) VALUES (
       'evidence-new-format-archive', 'evidence-mismatched-archive-job',
-      'dvd-recovery-evidence-v1', 'dvd-archive-boundary-v1', 4096, 4096,
+      'dvd-recovery-evidence-v1', 'dvd-archive-boundary-v2', 4096, 4096,
       '${boundaryDigest}', 2048, 2, 'evidence-new-format-manifest-1', 1,
       '${initialManifestDigest}', 1, 1
     )
@@ -1443,7 +1470,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       current_manifest_revision, current_manifest_digest, created_at, updated_at
     ) VALUES (
       'evidence-new-format-archive', 'evidence-new-format-archive-job',
-      'dvd-recovery-evidence-v1', 'dvd-archive-boundary-v1', 4096, 4096,
+      'dvd-recovery-evidence-v1', 'dvd-archive-boundary-v2', 4096, 4096,
       '${boundaryDigest}', 2048, 2, 'evidence-new-format-manifest-1', 1,
       '${initialManifestDigest}', 1, 1
     );
@@ -1491,7 +1518,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       imageFingerprint: continuationFingerprint,
       sectorSizeBytes: 2_048,
       acceptedEndLbaExclusive: 2,
-      boundaryPolicyVersion: "dvd-archive-boundary-v1",
+      boundaryPolicyVersion: "dvd-archive-boundary-v2",
       boundaryReportedSizeBytes: 4_096,
       boundaryPublishedSizeBytes: 4_096,
       boundaryEvidenceDigest: boundaryDigest,
@@ -1572,7 +1599,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       'evidence-new-format-manifest-2', 'evidence-new-format-archive', 2,
       'evidence-new-format-manifest-1', 'evidence-new-format-read-1',
       'dvd-recovery-evidence-v1', '${continuationFingerprint}', 2048, 2,
-      'dvd-archive-boundary-v1', 4096, 4096, '${boundaryDigest}', ?,
+      'dvd-archive-boundary-v2', 4096, 4096, '${boundaryDigest}', ?,
       '${failedRangesDigest}', '${failedManifestDigest}', 2
     )
   `).run(JSON.stringify(authoritativeRanges));
@@ -1651,7 +1678,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       'evidence-new-format-archive', 3,
       'evidence-new-format-manifest-2', 'evidence-new-format-read-repeat',
       'dvd-recovery-evidence-v1', '${continuationFingerprint}', 2048, 2,
-      'dvd-archive-boundary-v1', 4096, 4096, '${boundaryDigest}', ?,
+      'dvd-archive-boundary-v2', 4096, 4096, '${boundaryDigest}', ?,
       '${rejectedRepeatedManifest.unrecoveredSourceRangesDigest}',
       '${rejectedRepeatedManifest.manifestDigest}', 3
     )
@@ -1806,7 +1833,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       imageFingerprint: continuationFingerprint,
       sectorSizeBytes: 2_048,
       acceptedEndLbaExclusive: 2,
-      boundaryPolicyVersion: "dvd-archive-boundary-v1",
+      boundaryPolicyVersion: "dvd-archive-boundary-v2",
       boundaryReportedSizeBytes: 4_096,
       boundaryPublishedSizeBytes: 4_096,
       boundaryEvidenceDigest: boundaryDigest,
@@ -1833,7 +1860,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       imageFingerprint: continuationFingerprint,
       sectorSizeBytes: 2_048,
       acceptedEndLbaExclusive: 2,
-      boundaryPolicyVersion: "dvd-archive-boundary-v1",
+      boundaryPolicyVersion: "dvd-archive-boundary-v2",
       boundaryReportedSizeBytes: 4_096,
       boundaryPublishedSizeBytes: 4_096,
       boundaryEvidenceDigest: boundaryDigest,
@@ -1872,7 +1899,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       'evidence-new-format-manifest-3', 'evidence-new-format-archive', 3,
       'evidence-new-format-manifest-2', 'evidence-new-format-read-2',
       'dvd-recovery-evidence-v1', '${continuationFingerprint}', 2048, 2,
-      'dvd-archive-boundary-v1', 4096, 4096, '${boundaryDigest}',
+      'dvd-archive-boundary-v2', 4096, 4096, '${boundaryDigest}',
       '[{"startLba":1,"sectorCount":1,"classification":"individually_failed"}]',
       '${recoveredFirstSectorManifest.unrecoveredSourceRangesDigest}',
       '${recoveredFirstSectorManifest.manifestDigest}', 3
@@ -1905,7 +1932,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       'evidence-new-format-manifest-4', 'evidence-new-format-archive', 4,
       'evidence-new-format-manifest-3', 'evidence-new-format-read-3',
       'dvd-recovery-evidence-v1', '${continuationFingerprint}', 2048, 2,
-      'dvd-archive-boundary-v1', 4096, 4096, '${boundaryDigest}', '[]',
+      'dvd-archive-boundary-v2', 4096, 4096, '${boundaryDigest}', '[]',
       '${recoveredLastSectorManifest.unrecoveredSourceRangesDigest}',
       '${recoveredLastSectorManifest.manifestDigest}', 4
     );

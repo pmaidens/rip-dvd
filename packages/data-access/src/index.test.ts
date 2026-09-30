@@ -358,6 +358,23 @@ function markArchiveWithDvdRecoveryEvidence(
           bad_sector_counts_by_title = NULL
       WHERE id = ?
     `).run(originalDiscArchiveId);
+    sqlite.prepare(`
+      UPDATE original_disc_archives
+      SET boundary_policy_version = 'dvd-archive-boundary-v2',
+          boundary_first_excluded_lba = size_bytes / 2048,
+          boundary_maximum_referenced_lba = NULL,
+          boundary_read_failure_classifier_version = 'scsi-read-classifier-v2',
+          boundary_read_failure_scsi_status = 2,
+          boundary_read_failure_host_status = 0,
+          boundary_read_failure_driver_status = 8,
+          boundary_read_failure_sense_response_code = 114,
+          boundary_read_failure_sense_key = 5,
+          boundary_read_failure_asc = 33,
+          boundary_read_failure_ascq = 0
+      WHERE id = ?
+        AND boundary_policy_version = 'dvd-archive-boundary-v1'
+        AND boundary_excluded_sector_count = 0
+    `).run(originalDiscArchiveId);
     const archive = sqlite.prepare(`
       SELECT detected_disc_id, fingerprint, size_bytes,
              boundary_policy_version, boundary_reported_size_bytes,

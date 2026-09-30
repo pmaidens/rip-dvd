@@ -89,13 +89,9 @@ function requireSha256Digest(value: string, description: string): void {
 function canonicalBoundaryPayload(evidence: ArchiveBoundaryEvidence): unknown {
   if (evidence.excludedSectorCount === 0) {
     if (evidence.policyVersion === "dvd-archive-boundary-v1") {
-      return [
-        evidence.policyVersion,
-        evidence.reportedSizeBytes,
-        evidence.publishedSizeBytes,
-        evidence.excludedSectorCount,
-        null,
-      ];
+      throw new DomainInvariantError(
+        "DVD Archive Evidence requires complete Archive Boundary Evidence",
+      );
     }
     return [
       evidence.policyVersion,

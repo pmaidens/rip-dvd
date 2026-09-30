@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { validateDvdArchiveBoundaryEvidence } from "./archive-boundary.js";
 import {
   assertDvdArchiveBoundaryEvidenceDigest,
   assertDvdArchiveEvidenceManifestDigests,
@@ -12,6 +13,42 @@ import {
 } from "./dvd-archive-evidence-digests.js";
 
 describe("DVD Archive Evidence digests", () => {
+  const completeNormalBoundaryEvidence = {
+    policyVersion: "dvd-archive-boundary-v2" as const,
+    reportedSizeBytes: 8_192,
+    publishedSizeBytes: 8_192,
+    excludedSectorCount: 0 as const,
+    endpointProof: {
+      proofVersion: "dvd-normal-endpoint-proof-v1" as const,
+      confirmationCount: 2 as const,
+      firstExcludedLba: 4,
+      outOfRangeEvidence: {
+        classifierVersion: "scsi-read-classifier-v2",
+        scsiStatus: 2,
+        hostStatus: 0 as const,
+        driverStatus: 8,
+        senseResponseCode: 0x70 as const,
+        senseKey: 0x05 as const,
+        asc: 0x21 as const,
+        ascq: 0 as const,
+      },
+    },
+  };
+
+  it("keeps proofless legacy normal boundaries readable but not digestible", () => {
+    const legacyEvidence = {
+      policyVersion: "dvd-archive-boundary-v1" as const,
+      reportedSizeBytes: 8_192,
+      publishedSizeBytes: 8_192,
+      excludedSectorCount: 0 as const,
+    };
+
+    expect(validateDvdArchiveBoundaryEvidence(legacyEvidence, 8_192))
+      .toEqual(legacyEvidence);
+    expect(() => createDvdArchiveBoundaryEvidenceDigest(legacyEvidence))
+      .toThrow("requires complete Archive Boundary Evidence");
+  });
+
   it("rejects legacy normal-boundary evidence with unequal sizes", () => {
     expect(() => createDvdArchiveBoundaryEvidenceDigest({
       policyVersion: "dvd-archive-boundary-v1",
@@ -31,36 +68,15 @@ describe("DVD Archive Evidence digests", () => {
   });
 
   it("accepts valid v2 normal-boundary evidence with endpoint proof", () => {
-    expect(() => createDvdArchiveBoundaryEvidenceDigest({
-      policyVersion: "dvd-archive-boundary-v2",
-      reportedSizeBytes: 8_192,
-      publishedSizeBytes: 8_192,
-      excludedSectorCount: 0,
-      endpointProof: {
-        proofVersion: "dvd-normal-endpoint-proof-v1",
-        confirmationCount: 2,
-        firstExcludedLba: 4,
-        outOfRangeEvidence: {
-          classifierVersion: "scsi-read-classifier-v2",
-          scsiStatus: 2,
-          hostStatus: 0,
-          driverStatus: 8,
-          senseResponseCode: 0x70,
-          senseKey: 0x05,
-          asc: 0x21,
-          ascq: 0,
-        },
-      },
-    })).not.toThrow();
+    expect(() => createDvdArchiveBoundaryEvidenceDigest(
+      completeNormalBoundaryEvidence,
+    )).not.toThrow();
   });
 
   it("uses stable domain-separated canonical encodings", () => {
-    const boundaryEvidenceDigest = createDvdArchiveBoundaryEvidenceDigest({
-      policyVersion: "dvd-archive-boundary-v1",
-      reportedSizeBytes: 8_192,
-      publishedSizeBytes: 8_192,
-      excludedSectorCount: 0,
-    });
+    const boundaryEvidenceDigest = createDvdArchiveBoundaryEvidenceDigest(
+      completeNormalBoundaryEvidence,
+    );
     const unrecoveredSourceRanges = [
       { startLba: 1, sectorCount: 2, classification: "skipped_untested" },
       { startLba: 3, sectorCount: 1, classification: "individually_failed" },
@@ -85,7 +101,7 @@ describe("DVD Archive Evidence digests", () => {
       imageFingerprint: "dvdmeta-sha256:image",
       sectorSizeBytes: 2_048,
       acceptedEndLbaExclusive: 4,
-      boundaryPolicyVersion: "dvd-archive-boundary-v1",
+      boundaryPolicyVersion: "dvd-archive-boundary-v2",
       boundaryReportedSizeBytes: 8_192,
       boundaryPublishedSizeBytes: 8_192,
       boundaryEvidenceDigest,
@@ -106,7 +122,7 @@ describe("DVD Archive Evidence digests", () => {
       imageFingerprint: "dvdmeta-sha256:image",
       sectorSizeBytes: 2_048,
       acceptedEndLbaExclusive: 4,
-      boundaryPolicyVersion: "dvd-archive-boundary-v1",
+      boundaryPolicyVersion: "dvd-archive-boundary-v2",
       boundaryReportedSizeBytes: 8_192,
       boundaryPublishedSizeBytes: 8_192,
       boundaryEvidenceDigest,
@@ -114,7 +130,7 @@ describe("DVD Archive Evidence digests", () => {
     });
 
     expect(boundaryEvidenceDigest).toBe(
-      "6f995d225efe15ffa7555b68fc63ce70b7da3002914f7020c51af38f80ad705b",
+      "dccc2d82e5b8adb52b3b1621a05f4d40fbdd4a23b55d12a24e9b1458edc3290b",
     );
     expect(createDvdUnrecoveredSourceRangesDigest(unrecoveredSourceRanges))
       .toBe(
@@ -127,7 +143,7 @@ describe("DVD Archive Evidence digests", () => {
       unrecoveredSourceRangesDigest:
         "01a02bed29db84c80c4f9e6ab63414b777464ab22ad23bbf234d40caf2de347c",
       manifestDigest:
-        "17d746d786d1aea2ac1d376b92280331d66f97978f3d895cb91b32d72687fdb1",
+        "f5849ec4415df73a1748c53aa1de6a621403c7f83aa9bcbfc398051719ff018c",
     });
   });
 
@@ -143,6 +159,9 @@ describe("DVD Archive Evidence digests", () => {
   });
 
   it("rejects a supplied digest that does not match manifest contents", () => {
+    const boundaryEvidenceDigest = createDvdArchiveBoundaryEvidenceDigest(
+      completeNormalBoundaryEvidence,
+    );
     const input = {
       originalDiscArchiveId: "archive-1",
       revision: 1,
@@ -154,11 +173,10 @@ describe("DVD Archive Evidence digests", () => {
       imageFingerprint: "dvdmeta-sha256:image",
       sectorSizeBytes: 2_048,
       acceptedEndLbaExclusive: 4,
-      boundaryPolicyVersion: "dvd-archive-boundary-v1",
+      boundaryPolicyVersion: "dvd-archive-boundary-v2",
       boundaryReportedSizeBytes: 8_192,
       boundaryPublishedSizeBytes: 8_192,
-      boundaryEvidenceDigest:
-        "6f995d225efe15ffa7555b68fc63ce70b7da3002914f7020c51af38f80ad705b",
+      boundaryEvidenceDigest,
       unrecoveredSourceRanges: [] as const,
     };
     const digests = createDvdArchiveEvidenceManifestDigests(input);
@@ -176,10 +194,7 @@ describe("DVD Archive Evidence digests", () => {
         "0000000000000000000000000000000000000000000000000000000000000000",
     })).toThrow("does not match its contents");
     expect(() => assertDvdArchiveBoundaryEvidenceDigest({
-      policyVersion: "dvd-archive-boundary-v1",
-      reportedSizeBytes: 8_192,
-      publishedSizeBytes: 8_192,
-      excludedSectorCount: 0,
+      ...completeNormalBoundaryEvidence,
     }, "0".repeat(64))).toThrow("does not match its contents");
     expect(() => assertDvdUnrecoveredSourceRangesDigest(
       input.unrecoveredSourceRanges,
