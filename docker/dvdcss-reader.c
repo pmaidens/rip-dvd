@@ -27,6 +27,9 @@
 #define PROGRESS_INTERVAL_NS INT64_C(1000000000)
 #define RECOVERY_POLICY_VERSION "dvd-recovery-v1"
 #define RECOVERY_RESULT_PREFIX "rip-dvd-recovery-result "
+#define INITIAL_COPY_POLICY_VERSION "dvd-initial-copy-v1"
+#define INITIAL_COPY_RESULT_PREFIX "rip-dvd-initial-copy-result "
+#define INITIAL_COPY_DIAGNOSTIC_LIMIT 64
 #define READ_FAILURE_CLASSIFIER_VERSION "scsi-read-classifier-v2"
 #define READ_FAILURE_RESULT_PREFIX "rip-dvd-read-failure "
 #define READ_FAILURE_EXIT_STATUS 3
@@ -105,6 +108,17 @@ struct read_failure {
     enum backend_read_status status;
     struct rip_dvd_scsi_completion completion;
     struct decoded_sense sense;
+};
+
+struct initial_copy_state {
+    unsigned char *skipped_sector_bitmap;
+    size_t bitmap_byte_count;
+    uint64_t skipped_sector_count;
+    uint64_t skipped_region_count;
+    uint64_t skipped_request_count;
+    size_t diagnostic_count;
+    struct read_failure diagnostics[INITIAL_COPY_DIAGNOSTIC_LIMIT];
+    int emit_malformed_result;
 };
 
 struct backend_read_result {
@@ -1083,6 +1097,53 @@ static void mark_bad_sector(struct recovery_state *recovery, uint64_t lba)
     }
 }
 
+static int initial_copy_sector_is_skipped(
+    const struct initial_copy_state *initial_copy, uint64_t lba)
+{
+    size_t byte_index = (size_t)(lba / 8);
+    unsigned int bit_index = (unsigned int)(lba % 8);
+    return (initial_copy->skipped_sector_bitmap[byte_index] &
+            (unsigned char)(1U << bit_index)) != 0;
+}
+
+static void record_initial_copy_skip(
+    struct initial_copy_state *initial_copy,
+    const struct read_failure *failure, uint64_t start_lba,
+    int block_count)
+{
+    if (start_lba == 0 ||
+        !initial_copy_sector_is_skipped(initial_copy, start_lba - 1)) {
+        initial_copy->skipped_region_count += 1;
+    }
+    for (int offset = 0; offset < block_count; offset++) {
+        uint64_t lba = start_lba + (uint64_t)offset;
+        size_t byte_index = (size_t)(lba / 8);
+        unsigned int bit_index = (unsigned int)(lba % 8);
+        initial_copy->skipped_sector_bitmap[byte_index] |=
+            (unsigned char)(1U << bit_index);
+        initial_copy->skipped_sector_count += 1;
+    }
+    initial_copy->skipped_request_count += 1;
+    if (initial_copy->diagnostic_count < INITIAL_COPY_DIAGNOSTIC_LIMIT) {
+        initial_copy->diagnostics[initial_copy->diagnostic_count] = *failure;
+        initial_copy->diagnostic_count += 1;
+    }
+}
+
+static int skip_initial_copy_request(
+    struct operation_state *state, struct initial_copy_state *initial_copy,
+    const struct read_failure *failure, unsigned char *buffer,
+    uint64_t start_lba, int block_count, uint64_t *bytes_processed)
+{
+    memset(buffer, 0, (size_t)block_count * DVDCSS_BLOCK_SIZE);
+    if (consume_blocks(state, buffer, block_count, bytes_processed) != 0) {
+        return 1;
+    }
+    record_initial_copy_skip(
+        initial_copy, failure, start_lba, block_count);
+    return 0;
+}
+
 static uint64_t boundary_retained_image_byte_count(
     const struct recovery_state *recovery, uint64_t bytes_processed)
 {
@@ -1603,6 +1664,7 @@ static int recover_range(struct read_backend *backend,
 static int read_disc(struct read_backend *backend, uint64_t size_bytes,
                      struct operation_state *state,
                      struct recovery_state *recovery,
+                     struct initial_copy_state *initial_copy,
                      uint64_t initial_byte_count)
 {
     void *allocation = NULL;
@@ -1641,6 +1703,17 @@ static int read_disc(struct read_backend *backend, uint64_t size_bytes,
             break;
         }
         if (result.status == BACKEND_READ_MEDIUM_ERROR) {
+            if (initial_copy != NULL) {
+                status = skip_initial_copy_request(
+                    state, initial_copy, &result.failure, buffer,
+                    start_lba, requested, &bytes_processed);
+                if (status != 0) {
+                    break;
+                }
+                blocks_remaining -= (uint64_t)requested;
+                require_absolute_read = blocks_remaining > 0;
+                continue;
+            }
             if (recovery == NULL) {
                 status = fail_dvdcss_read(backend->dvdcss, bytes_processed);
                 break;
@@ -1712,7 +1785,7 @@ static int run_hash(struct read_backend *backend, uint64_t size_bytes)
         EVP_MD_CTX_free(hash);
         return fail_errno("DVD hash progress clock failed");
     }
-    int status = read_disc(backend, size_bytes, &state, NULL, 0);
+    int status = read_disc(backend, size_bytes, &state, NULL, NULL, 0);
     if (status == 0 && state.last_progress_bytes != size_bytes) {
         status = emit_hash_progress(&state, size_bytes, 1);
     }
@@ -1764,6 +1837,78 @@ static int emit_recovery_result(uint64_t size_bytes,
         fail_errno("DVD recovery result output failed");
 }
 
+static int emit_initial_copy_result(
+    uint64_t size_bytes, const struct initial_copy_state *initial_copy)
+{
+    if (initial_copy->emit_malformed_result) {
+        fprintf(stderr, INITIAL_COPY_RESULT_PREFIX "{malformed}\n");
+        return ferror(stderr) == 0 ? 0 :
+            fail_errno("DVD initial-copy result output failed");
+    }
+    uint64_t recovered_byte_count = size_bytes -
+        initial_copy->skipped_sector_count * DVDCSS_BLOCK_SIZE;
+    fprintf(stderr,
+            INITIAL_COPY_RESULT_PREFIX
+            "{\"protocolVersion\":1,\"copyPolicyVersion\":\""
+            INITIAL_COPY_POLICY_VERSION "\""
+            ",\"declaredByteCount\":%" PRIu64
+            ",\"recoveredByteCount\":%" PRIu64
+            ",\"skippedSectorCount\":%" PRIu64
+            ",\"skippedRegionCount\":%" PRIu64
+            ",\"skippedSectorBitmapHex\":\"",
+            size_bytes, recovered_byte_count,
+            initial_copy->skipped_sector_count,
+            initial_copy->skipped_region_count);
+    if (initial_copy->skipped_sector_count > 0) {
+        for (size_t index = 0;
+             index < initial_copy->bitmap_byte_count; index++) {
+            fprintf(stderr, "%02x",
+                    initial_copy->skipped_sector_bitmap[index]);
+        }
+    }
+    fprintf(stderr,
+            "\",\"skippedRequestCount\":%" PRIu64
+            ",\"diagnosticsTruncated\":%s,\"diagnostics\":[",
+            initial_copy->skipped_request_count,
+            initial_copy->skipped_request_count >
+                    initial_copy->diagnostic_count
+                ? "true" : "false");
+    for (size_t index = 0;
+         index < initial_copy->diagnostic_count; index++) {
+        const struct read_failure *failure =
+            &initial_copy->diagnostics[index];
+        const struct rip_dvd_scsi_completion *completion =
+            &failure->completion;
+        const struct decoded_sense *sense = &failure->sense;
+        char information_lba[32];
+        format_optional_u64(information_lba, sense->has_information_lba,
+                            sense->information_lba);
+        fprintf(stderr,
+                "%s{\"classification\":\"tolerable_medium_error\""
+                ",\"classifierVersion\":\""
+                READ_FAILURE_CLASSIFIER_VERSION "\""
+                ",\"requestedLba\":%" PRIu64
+                ",\"requestedBlockCount\":%" PRIu32
+                ",\"retryOrdinal\":%" PRIu32
+                ",\"scsiStatus\":%" PRIu8
+                ",\"hostStatus\":%" PRIu16
+                ",\"driverStatus\":%" PRIu16
+                ",\"senseResponseCode\":%" PRIu8
+                ",\"senseKey\":%" PRIu8
+                ",\"asc\":%" PRIu8 ",\"ascq\":%" PRIu8
+                ",\"informationLba\":%s}",
+                index == 0 ? "" : ",", completion->requested_lba,
+                completion->requested_block_count,
+                completion->retry_ordinal, completion->scsi_status,
+                completion->host_status, completion->driver_status,
+                sense->response_code, sense->sense_key,
+                sense->asc, sense->ascq, information_lba);
+    }
+    fprintf(stderr, "]}\n");
+    return ferror(stderr) == 0 ? 0 :
+        fail_errno("DVD initial-copy result output failed");
+}
+
 static int run_copy(struct read_backend *backend, const char *output_path,
                     uint64_t size_bytes,
                     enum test_result_mode test_result_mode)
@@ -1798,7 +1943,8 @@ static int run_copy(struct read_backend *backend, const char *output_path,
         .hash = NULL,
         .output_fd = output_fd,
     };
-    int status = read_disc(backend, size_bytes, &state, &recovery, 0);
+    int status = read_disc(
+        backend, size_bytes, &state, &recovery, NULL, 0);
     rollback_boundary_image(output_fd, &recovery);
     if (status == 0 && fsync(output_fd) != 0) {
         status = fail_errno("DVD archive sync failed");
@@ -1810,6 +1956,50 @@ static int run_copy(struct read_backend *backend, const char *output_path,
         status = emit_recovery_result(size_bytes, &recovery);
     }
     free(bad_sector_bitmap);
+    return status;
+}
+
+static int run_initial_copy(struct read_backend *backend,
+                            const char *output_path, uint64_t size_bytes,
+                            enum test_result_mode test_result_mode)
+{
+    int output_fd = open(output_path,
+                         O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                         S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    if (output_fd < 0) {
+        return fail_errno("DVD initial-copy output open failed");
+    }
+    uint64_t total_sector_count = size_bytes / DVDCSS_BLOCK_SIZE;
+    size_t bitmap_byte_count = (size_t)((total_sector_count + 7) / 8);
+    unsigned char *skipped_sector_bitmap = calloc(bitmap_byte_count, 1);
+    if (skipped_sector_bitmap == NULL) {
+        close(output_fd);
+        fprintf(stderr, "DVD initial-copy map allocation failed\n");
+        return 1;
+    }
+    struct initial_copy_state initial_copy = {
+        .skipped_sector_bitmap = skipped_sector_bitmap,
+        .bitmap_byte_count = bitmap_byte_count,
+        .emit_malformed_result =
+            test_result_mode == TEST_RESULT_MALFORMED_RECOVERY,
+    };
+    struct operation_state state = {
+        .operation = OPERATION_COPY,
+        .hash = NULL,
+        .output_fd = output_fd,
+    };
+    int status = read_disc(
+        backend, size_bytes, &state, NULL, &initial_copy, 0);
+    if (status == 0 && fsync(output_fd) != 0) {
+        status = fail_errno("DVD initial-copy sync failed");
+    }
+    if (close(output_fd) != 0 && status == 0) {
+        status = fail_errno("DVD initial-copy close failed");
+    }
+    if (status == 0) {
+        status = emit_initial_copy_result(size_bytes, &initial_copy);
+    }
+    free(skipped_sector_bitmap);
     return status;
 }
 
@@ -2117,7 +2307,7 @@ static int run_boundary_resume(
         .last_progress_bytes = image_byte_count,
     };
     int status = read_disc(
-        backend, size_bytes, &state, &recovery, image_byte_count);
+        backend, size_bytes, &state, &recovery, NULL, image_byte_count);
     rollback_boundary_image(output_fd, &recovery);
     if (status == 0 && fsync(output_fd) != 0) {
         status = fail_errno("DVD boundary rescue image sync failed");
@@ -2828,6 +3018,28 @@ static int run_test_copy(int argc, char **argv)
     return close_test_backend(&backend, status);
 }
 
+static int run_test_initial_copy(int argc, char **argv)
+{
+    if (argc != 8) {
+        fprintf(stderr,
+                "usage: %s initial-copy-test SOURCE OUTPUT SIZE FAULTS DELAY MODE\n",
+                argv[0]);
+        return 2;
+    }
+    uint64_t size_bytes = 0;
+    enum test_result_mode test_result_mode;
+    struct read_backend backend;
+    int setup_status = initialize_test_backend(
+        argv[2], argv[4], argv[5], argv[6], argv[7], 0, &size_bytes,
+        &test_result_mode, &backend);
+    if (setup_status != 0) {
+        return setup_status;
+    }
+    int status = run_initial_copy(
+        &backend, argv[3], size_bytes, test_result_mode);
+    return close_test_backend(&backend, status);
+}
+
 static int run_test_resume(int argc, char **argv)
 {
     if (argc != 10) {
@@ -2926,6 +3138,9 @@ int main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "copy-test") == 0) {
         return run_test_copy(argc, argv);
     }
+    if (argc > 1 && strcmp(argv[1], "initial-copy-test") == 0) {
+        return run_test_initial_copy(argc, argv);
+    }
     if (argc > 1 && strcmp(argv[1], "resume-test") == 0) {
         return run_test_resume(argc, argv);
     }
@@ -2962,15 +3177,19 @@ int main(int argc, char **argv)
     }
     int authorized_copy = argc > 1 &&
         strcmp(argv[1], "copy-authorized") == 0;
+    int authorized_initial_copy = argc > 1 &&
+        strcmp(argv[1], "initial-copy-authorized") == 0;
     int authorized_resume = argc > 1 &&
         strcmp(argv[1], "resume-authorized") == 0;
     int authorized_boundary_resume = argc > 1 &&
         strcmp(argv[1], "resume-boundary-authorized") == 0;
     if (argc < 4 || (strcmp(argv[1], "hash") != 0 &&
                      strcmp(argv[1], "copy") != 0 && !authorized_copy &&
+                     !authorized_initial_copy &&
                      !authorized_resume && !authorized_boundary_resume)) {
         fprintf(stderr,
-                "usage: %s hash DEVICE SIZE | copy DEVICE OUTPUT SIZE\n",
+                "usage: %s hash DEVICE SIZE | "
+                "copy|initial-copy-authorized DEVICE OUTPUT SIZE\n",
                 argv[0]);
         return 2;
     }
@@ -2997,7 +3216,8 @@ int main(int argc, char **argv)
             : authorized_boundary_resume
                 ? AUTHORIZED_RESUME_BOUNDARY
                 : AUTHORIZED_RESUME_NONE;
-    if ((authorized_copy || authorized_resume || authorized_boundary_resume) &&
+    if ((authorized_copy || authorized_initial_copy || authorized_resume ||
+         authorized_boundary_resume) &&
         await_copy_authorization(size_bytes, resume_mode, &resume_bitmap,
                                  &resume_bad_sector_count,
                                  &boundary_image_byte_count) != 0) {
@@ -3013,6 +3233,9 @@ int main(int argc, char **argv)
     int status;
     if (operation == OPERATION_HASH) {
         status = run_hash(&backend, size_bytes);
+    } else if (authorized_initial_copy) {
+        status = run_initial_copy(
+            &backend, argv[3], size_bytes, TEST_RESULT_VALID);
     } else if (authorized_resume) {
         status = run_resume(&backend, argv[3], size_bytes, resume_bitmap,
                             resume_bad_sector_count, argv[5],

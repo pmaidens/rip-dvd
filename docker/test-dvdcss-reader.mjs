@@ -17,6 +17,7 @@ const testExecutable = "/tmp/rip-dvd-dvdcss-reader-test";
 const sourcePath = "/tmp/rip-dvd-reader-source.img";
 const replacementSourcePath = "/tmp/rip-dvd-reader-replacement-source.img";
 const recoveryResultPrefix = "rip-dvd-recovery-result ";
+const initialCopyResultPrefix = "rip-dvd-initial-copy-result ";
 const readFailureResultPrefix = "rip-dvd-read-failure ";
 const scsiSessionResultPrefix = "rip-dvd-scsi-session-result ";
 const scsiExitResultPrefix = "rip-dvd-scsi-exit-result ";
@@ -397,6 +398,14 @@ function recoveryResult(stderr) {
   return prefixedResult(stderr, recoveryResultPrefix, "recovery result");
 }
 
+function initialCopyResult(stderr) {
+  return prefixedResult(
+    stderr,
+    initialCopyResultPrefix,
+    "initial-copy result",
+  );
+}
+
 function readFailureResult(stderr) {
   return prefixedResult(
     stderr,
@@ -424,7 +433,10 @@ function scsiSessionResult(stderr) {
 }
 
 function badSectorRanges(result, totalSectorCount) {
-  const bitmap = Buffer.from(result.badSectorBitmapHex, "hex");
+  const bitmap = Buffer.from(
+    result.badSectorBitmapHex ?? result.skippedSectorBitmapHex,
+    "hex",
+  );
   const ranges = [];
   let startLba;
   for (let lba = 0; lba < totalSectorCount; lba += 1) {
@@ -458,6 +470,29 @@ function runTestCopy(name, faults, mode = "valid") {
       sourcePath,
       outputPath,
       String(content.byteLength),
+      faults,
+      "0",
+      mode,
+    ],
+    { encoding: "utf8" },
+  );
+  return { ...result, outputPath };
+}
+
+function runTestInitialCopy(
+  name,
+  faults,
+  declaredSectorCount = content.byteLength / 2_048,
+  mode = "valid",
+) {
+  const outputPath = prepareOutput(`/tmp/rip-dvd-reader-${name}.img`);
+  const result = spawnSync(
+    testExecutable,
+    [
+      "initial-copy-test",
+      sourcePath,
+      outputPath,
+      String(declaredSectorCount * 2_048),
       faults,
       "0",
       mode,
@@ -673,6 +708,168 @@ if (
   throw new Error(
     `libdvdcss clean SCSI session check failed: ${cleanSession.stderr}`,
   );
+}
+
+const cleanInitialCopy = runTestInitialCopy("clean-initial-copy", "none");
+const cleanInitialCopyResult = initialCopyResult(cleanInitialCopy.stderr);
+if (
+  cleanInitialCopy.status !== 0 ||
+  !readFileSync(cleanInitialCopy.outputPath).equals(content) ||
+  cleanInitialCopyResult.copyPolicyVersion !== "dvd-initial-copy-v1" ||
+  cleanInitialCopyResult.recoveredByteCount !== content.byteLength ||
+  cleanInitialCopyResult.skippedSectorCount !== 0 ||
+  cleanInitialCopyResult.skippedRegionCount !== 0 ||
+  cleanInitialCopyResult.skippedRequestCount !== 0 ||
+  cleanInitialCopyResult.skippedSectorBitmapHex !== "" ||
+  cleanInitialCopyResult.diagnosticsTruncated !== false ||
+  cleanInitialCopyResult.diagnostics.length !== 0 ||
+  JSON.stringify(testReads(cleanInitialCopy.stderr)) !==
+    JSON.stringify([
+      { lba: 0, blocks: 31 },
+      { lba: 31, blocks: 9 },
+    ])
+) {
+  throw new Error(
+    `libdvdcss clean initial-copy check failed: ${cleanInitialCopy.stderr}`,
+  );
+}
+
+const skippedInitialRequest = runTestInitialCopy(
+  "skipped-initial-request",
+  rawCompletionFault(5, "always", fixedMediumAtFive),
+);
+const skippedInitialRequestResult = initialCopyResult(
+  skippedInitialRequest.stderr,
+);
+const skippedInitialRequestImage = Buffer.from(content);
+skippedInitialRequestImage.fill(0, 0, 31 * 2_048);
+if (
+  skippedInitialRequest.status !== 0 ||
+  !readFileSync(skippedInitialRequest.outputPath).equals(
+    skippedInitialRequestImage,
+  ) ||
+  skippedInitialRequestResult.recoveredByteCount !== 9 * 2_048 ||
+  skippedInitialRequestResult.skippedSectorCount !== 31 ||
+  skippedInitialRequestResult.skippedRegionCount !== 1 ||
+  skippedInitialRequestResult.skippedRequestCount !== 1 ||
+  JSON.stringify(badSectorRanges(skippedInitialRequestResult, 40)) !==
+    JSON.stringify([{ startLba: 0, sectorCount: 31 }]) ||
+  skippedInitialRequestResult.diagnosticsTruncated !== false ||
+  JSON.stringify(skippedInitialRequestResult.diagnostics) !== JSON.stringify([{
+    classification: "tolerable_medium_error",
+    classifierVersion: "scsi-read-classifier-v2",
+    requestedLba: 0,
+    requestedBlockCount: 31,
+    retryOrdinal: 0,
+    scsiStatus: 2,
+    hostStatus: 0,
+    driverStatus: 8,
+    senseResponseCode: 0x70,
+    senseKey: 0x03,
+    asc: 0x11,
+    ascq: 0,
+    informationLba: 5,
+  }]) ||
+  JSON.stringify(testReads(skippedInitialRequest.stderr)) !==
+    JSON.stringify([
+      { lba: 0, blocks: 31 },
+      { lba: 31, blocks: 9 },
+    ])
+) {
+  throw new Error(
+    `libdvdcss skipped initial request check failed: ${skippedInitialRequest.stderr}`,
+  );
+}
+
+const skippedOneSectorRequest = runTestInitialCopy(
+  "skipped-one-sector-request",
+  rawCompletionFault(31, "always", fixedMediumSense(31)),
+  32,
+);
+const skippedOneSectorResult = initialCopyResult(
+  skippedOneSectorRequest.stderr,
+);
+const skippedOneSectorImage = Buffer.from(content.subarray(0, 32 * 2_048));
+skippedOneSectorImage.fill(0, 31 * 2_048);
+if (
+  skippedOneSectorRequest.status !== 0 ||
+  !readFileSync(skippedOneSectorRequest.outputPath).equals(
+    skippedOneSectorImage,
+  ) ||
+  JSON.stringify(badSectorRanges(skippedOneSectorResult, 32)) !==
+    JSON.stringify([{ startLba: 31, sectorCount: 1 }]) ||
+  skippedOneSectorResult.diagnostics[0]?.requestedBlockCount !== 1 ||
+  JSON.stringify(testReads(skippedOneSectorRequest.stderr)) !==
+    JSON.stringify([
+      { lba: 0, blocks: 31 },
+      { lba: 31, blocks: 1 },
+    ])
+) {
+  throw new Error(
+    `libdvdcss one-sector initial skip check failed: ${skippedOneSectorRequest.stderr}`,
+  );
+}
+
+const adjacentSkippedRequests = runTestInitialCopy(
+  "adjacent-skipped-requests",
+  [
+    rawCompletionFault(5, "always", fixedMediumAtFive),
+    rawCompletionFault(31, "always", fixedMediumSense(31)),
+  ].join(","),
+);
+const adjacentSkippedResult = initialCopyResult(
+  adjacentSkippedRequests.stderr,
+);
+if (
+  adjacentSkippedRequests.status !== 0 ||
+  adjacentSkippedResult.recoveredByteCount !== 0 ||
+  adjacentSkippedResult.skippedSectorCount !== 40 ||
+  adjacentSkippedResult.skippedRegionCount !== 1 ||
+  adjacentSkippedResult.skippedRequestCount !== 2 ||
+  adjacentSkippedResult.diagnostics.length !== 2 ||
+  JSON.stringify(badSectorRanges(adjacentSkippedResult, 40)) !==
+    JSON.stringify([{ startLba: 0, sectorCount: 40 }]) ||
+  JSON.stringify(testReads(adjacentSkippedRequests.stderr)) !==
+    JSON.stringify([
+      { lba: 0, blocks: 31 },
+      { lba: 31, blocks: 9 },
+    ])
+) {
+  throw new Error(
+    `libdvdcss adjacent initial skips check failed: ${adjacentSkippedRequests.stderr}`,
+  );
+}
+
+for (const [name, fault, expectedCategory] of [
+  [
+    "transport",
+    rawCompletionFault(5, "always", fixedMediumAtFive, { hostStatus: 7 }),
+    "transport_error",
+  ],
+  [
+    "protection",
+    rawCompletionFault(5, "always", fixedSense(5, 0x05, 0x6f, 0x04)),
+    "protection_error",
+  ],
+  [
+    "source-change",
+    rawCompletionFault(5, "always", fixedSense(5, 0x06, 0x28)),
+    "unit_attention",
+  ],
+  ["ambiguous", "generic@5@always", "unknown"],
+]) {
+  const failure = runTestInitialCopy(`initial-copy-${name}`, fault);
+  const result = readFailureResult(failure.stderr);
+  if (
+    failure.status !== 3 ||
+    result.category !== expectedCategory ||
+    failure.stderr.includes(initialCopyResultPrefix) ||
+    testReads(failure.stderr).length !== 1
+  ) {
+    throw new Error(
+      `libdvdcss initial-copy ${name} separation check failed: ${failure.stderr}`,
+    );
+  }
 }
 
 const wrappedAutosense = runTestCopy(
