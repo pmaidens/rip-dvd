@@ -1386,6 +1386,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     "UPDATE archive_recoveries SET id = 'renamed-recovery' WHERE id = 'evidence-new-format-recovery'",
     "UPDATE archive_recoveries SET original_disc_archive_id = 'evidence-legacy-clean-archive' WHERE id = 'evidence-new-format-recovery'",
     "UPDATE archive_recoveries SET created_at = 2 WHERE id = 'evidence-new-format-recovery'",
+    "DELETE FROM archive_recoveries WHERE id = 'evidence-new-format-recovery'",
   ]) {
     expect(() => finalDatabase.exec(mutation)).toThrow(
       /Archive Recovery identity is immutable/i,
@@ -1496,6 +1497,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     { name: "dvd_evidence_archive_job_insert_match" },
     { name: "dvd_evidence_archive_job_update_guard" },
     { name: "dvd_evidence_archive_projection_update_guard" },
+    { name: "dvd_evidence_archive_recovery_delete_guard" },
     { name: "dvd_evidence_archive_recovery_insert_guard" },
     { name: "dvd_evidence_archive_recovery_update_guard" },
     { name: "dvd_evidence_archive_request_update_guard" },

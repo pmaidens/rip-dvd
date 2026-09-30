@@ -445,3 +445,7 @@ WHEN OLD.`id` IS NOT NEW.`id`
     AND ((json_array_length(current_manifest.`unrecovered_source_ranges`) = 0 AND NEW.`status` = 'completed') OR (json_array_length(current_manifest.`unrecovered_source_ranges`) > 0 AND NEW.`status` = 'eligible'))
 )
 BEGIN SELECT RAISE(ABORT, 'Archive Recovery identity is immutable and status must match authoritative DVD evidence'); END;
+--> statement-breakpoint
+CREATE TRIGGER `dvd_evidence_archive_recovery_delete_guard`
+BEFORE DELETE ON `archive_recoveries`
+BEGIN SELECT RAISE(ABORT, 'Archive Recovery identity is immutable'); END;
