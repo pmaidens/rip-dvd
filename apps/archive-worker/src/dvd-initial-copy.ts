@@ -318,10 +318,12 @@ function validateDvdInitialCopyResult(
     result.skippedRequestCount > skippedSectorCount ||
     (skippedSectorCount === 0) !== (result.skippedRequestCount === 0) ||
     typeof result.diagnosticsTruncated !== "boolean" ||
-    result.diagnostics.length > DVD_INITIAL_COPY_DIAGNOSTIC_LIMIT ||
-    (result.diagnosticsTruncated
-      ? result.skippedRequestCount <= result.diagnostics.length
-      : result.diagnostics.length !== result.skippedRequestCount)
+    result.diagnostics.length !== Math.min(
+      result.skippedRequestCount,
+      DVD_INITIAL_COPY_DIAGNOSTIC_LIMIT,
+    ) ||
+    result.diagnosticsTruncated !==
+      (result.skippedRequestCount > DVD_INITIAL_COPY_DIAGNOSTIC_LIMIT)
   ) {
     throw new Error(invalidResultMessage);
   }

@@ -165,12 +165,44 @@ describe("DVD initial-copy protocol", () => {
     }]);
   });
 
+  it("retains exactly the bounded diagnostics before marking truncation", () => {
+    const totalSectorCount = 65;
+    const result = parseDvdInitialCopyResultProtocol(JSON.stringify({
+      protocolVersion: 1,
+      copyPolicyVersion: DVD_INITIAL_COPY_POLICY_VERSION,
+      declaredByteCount: totalSectorCount * SECTOR_SIZE_BYTES,
+      recoveredByteCount: 0,
+      skippedSectorCount: totalSectorCount,
+      skippedRegionCount: 1,
+      skippedSectorBitmapHex: "ffffffffffffffff01",
+      skippedRequestCount: totalSectorCount,
+      diagnosticsTruncated: true,
+      diagnostics: Array.from(
+        { length: 64 },
+        (_, lba) => mediumErrorDiagnostic(lba, 1),
+      ),
+    }), totalSectorCount * SECTOR_SIZE_BYTES);
+
+    expect(result.diagnostics).toHaveLength(64);
+    expect(result.diagnosticsTruncated).toBe(true);
+    expect(result.unrecoveredSourceRanges).toEqual([{
+      startLba: 0,
+      sectorCount: totalSectorCount,
+      classification: "skipped_untested",
+    }]);
+  });
+
   it.each([
     ["wrong extent", { declaredByteCount: 7 * SECTOR_SIZE_BYTES }],
     ["wrong recovered count", { recoveredByteCount: 5 * SECTOR_SIZE_BYTES }],
     ["wrong skipped count", { skippedSectorCount: 3 }],
     ["wrong region count", { skippedRegionCount: 1 }],
     ["odd-length bitmap", { skippedSectorBitmapHex: "c3f" }],
+    ["false truncation flag", { diagnosticsTruncated: true }],
+    ["prematurely truncated diagnostics", {
+      diagnosticsTruncated: true,
+      diagnostics: [mediumErrorDiagnostic(0, 2)],
+    }],
     ["missing diagnostics", { diagnostics: [], diagnosticsTruncated: false }],
     ["out-of-range diagnostic", {
       diagnostics: [mediumErrorDiagnostic(7, 2)],
