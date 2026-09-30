@@ -11,6 +11,9 @@ import {
 
 import type { CatalogReviewCommand } from "./catalog-review-command.js";
 import { normalizeCorrectedEncodeReplacements } from "./corrected-encode-replacement.js";
+import {
+  requireDvdRecoveryEvidenceEncodingAvailableForArchive,
+} from "./dvd-recovery-evidence-encoding.js";
 import { parseMutationKey } from "./mutation-key.js";
 import {
   createCatalogReviewCompletionPreviewToken,
@@ -199,14 +202,20 @@ export function previewCatalogReviewCompletion(
   command: CatalogReviewCompletionCommand,
   mediaLibraryPath: string,
 ) {
-  const plan = access.readConsistentSnapshot((snapshot) =>
-    planCatalogReviewCompletion(
+  const plan = access.readConsistentSnapshot((snapshot) => {
+    if (command.replacementEncodes.length > 0) {
+      requireDvdRecoveryEvidenceEncodingAvailableForArchive(
+        snapshot,
+        archiveId,
+      );
+    }
+    return planCatalogReviewCompletion(
       snapshot,
       archiveId,
       command,
       mediaLibraryPath,
-    )
-  );
+    );
+  });
   const previewToken = createCatalogReviewCompletionPreviewToken();
   access.catalog.recordCatalogReviewCompletionPreviewDecision({
     previewToken,

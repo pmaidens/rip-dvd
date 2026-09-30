@@ -83,7 +83,7 @@ function fixture() {
   };
 }
 
-function markTargetArchiveWithDvdRecoveryEvidence(
+function markArchiveWithDvdRecoveryEvidence(
   databasePath: string,
   originalDiscArchiveId: string,
 ): void {
@@ -91,7 +91,26 @@ function markTargetArchiveWithDvdRecoveryEvidence(
   try {
     sqlite.prepare(`
       UPDATE original_disc_archives
-      SET integrity = 'unknown',
+      SET size_bytes = COALESCE(size_bytes, 2048),
+          boundary_policy_version = COALESCE(
+            boundary_policy_version,
+            'dvd-archive-boundary-v1'
+          ),
+          boundary_reported_size_bytes = COALESCE(
+            boundary_reported_size_bytes,
+            size_bytes,
+            2048
+          ),
+          boundary_published_size_bytes = COALESCE(
+            boundary_published_size_bytes,
+            size_bytes,
+            2048
+          ),
+          boundary_excluded_sector_count = COALESCE(
+            boundary_excluded_sector_count,
+            0
+          ),
+          integrity = 'unknown',
           integrity_evidence_revision = NULL,
           integrity_policy_version = NULL,
           bad_sector_count = NULL,
@@ -695,7 +714,7 @@ it("rejects invalid profiles and conflicting output reservations before acceptan
   }
 });
 
-it("blocks a replacement for a DVD evidence target before Re-archive Acceptance changes state", () => {
+it("blocks a DVD evidence replacement before Re-archive Acceptance preview persistence", () => {
   const current = fixture();
   try {
     const predecessor = current.enqueue("evidence-fenced-replacement");
@@ -709,28 +728,14 @@ it("blocks a replacement for a DVD evidence target before Re-archive Acceptance 
         outputPath: predecessor.outputPath,
       }],
     };
-    const preview = current.operations.previewRearchiveAcceptance(
-      current.seeded.targetArchive.id,
-      command,
-      current.mediaLibraryPath,
-    );
-    markTargetArchiveWithDvdRecoveryEvidence(
+    markArchiveWithDvdRecoveryEvidence(
       current.databasePath,
       current.seeded.targetArchive.id,
     );
-    const mutationKey = "00000000-0000-4000-8000-000000000408";
-
-    expect(() => current.operations.acceptRearchive(
+    expect(() => current.operations.previewRearchiveAcceptance(
       current.seeded.targetArchive.id,
       command,
-      {
-        mediaLibraryPath: current.mediaLibraryPath,
-        mutationKey,
-        acknowledgedRevision: preview.catalogRevision,
-        acknowledgedSourceRevision: preview.sourceCatalogRevision,
-        previewToken: preview.previewToken,
-        acknowledge: true,
-      },
+      current.mediaLibraryPath,
     )).toThrow(DvdRecoveryEvidenceEncodingUnavailableError);
     expect(current.access.catalog.listDiscSelections({
       ids: [current.seeded.sourceSelection.id],
@@ -758,8 +763,87 @@ it("blocks a replacement for a DVD evidence target before Re-archive Acceptance 
     expect(sqlite.prepare(`
       SELECT count(*) AS count
       FROM mutation_invocations
-      WHERE key = ?
-    `).get(mutationKey)).toEqual({ count: 0 });
+      WHERE operation = 'rearchive.accept.preview'
+    `).get()).toEqual({ count: 0 });
+    sqlite.close();
+  } finally {
+    current.access.close();
+  }
+});
+
+it("blocks a DVD evidence replacement before Catalog Review preview persistence", () => {
+  const current = fixture();
+  try {
+    const predecessor = current.enqueue("catalog-evidence-fenced-replacement");
+    const claim = current.access.encodeJobs.claimNext(
+      "catalog-evidence-fenced-worker",
+    );
+    if (!claim || claim.id !== predecessor.id) {
+      throw new Error("Expected the predecessor Encode Job claim");
+    }
+    current.access.encodeJobs.complete(claim);
+    const sourceArchiveBeforeCorrection = current.access.catalog
+      .listOriginalDiscArchives({
+        ids: [current.seeded.sourceArchive.id],
+      })[0]!;
+    const correction = current.access.catalog.correctDiscSelection(
+      current.seeded.sourceSelection.id,
+      {
+        originalDiscArchiveId: current.seeded.sourceArchive.id,
+        catalogRevision: sourceArchiveBeforeCorrection.updatedAt,
+        mediaItemId: current.seeded.mediaItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+        reason: "Synthetic corrected title.",
+      },
+    );
+    const sourceArchive = current.access.catalog.listOriginalDiscArchives({
+      ids: [current.seeded.sourceArchive.id],
+    })[0]!;
+    const command = {
+      action: "complete_review" as const,
+      catalogRevision: sourceArchive.updatedAt.toISOString(),
+      outcome: "reviewed_with_selections" as const,
+      replacementEncodes: [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: predecessor.encodingProfileId,
+        outputPath: predecessor.outputPath,
+      }],
+    };
+    markArchiveWithDvdRecoveryEvidence(
+      current.databasePath,
+      current.seeded.sourceArchive.id,
+    );
+
+    expect(() => current.operations.previewCatalogReviewCompletion(
+      current.seeded.sourceArchive.id,
+      command,
+      current.mediaLibraryPath,
+    )).toThrow(DvdRecoveryEvidenceEncodingUnavailableError);
+    expect(current.access.catalog.listDiscSelections({
+      ids: [correction.discSelection.id],
+    })).toEqual([expect.objectContaining({
+      id: correction.discSelection.id,
+    })]);
+    expect(current.access.catalog.listOriginalDiscArchives({
+      ids: [current.seeded.sourceArchive.id],
+    })[0]).toMatchObject({
+      catalogReviewOutcome: "needs_review",
+      catalogReviewedAt: null,
+    });
+    expect(current.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: predecessor.id,
+        status: "completed",
+        reservesOutputPath: true,
+        predecessorEncodeJobId: null,
+      }),
+    ]);
+    const sqlite = new DatabaseSync(current.databasePath);
+    expect(sqlite.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE operation = 'catalog_review.complete.preview'
+    `).get()).toEqual({ count: 0 });
     sqlite.close();
   } finally {
     current.access.close();

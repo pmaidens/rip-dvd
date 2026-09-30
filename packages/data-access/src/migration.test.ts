@@ -896,6 +896,56 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       cancelled_at: null,
     },
   ]);
+  admissionCheck.exec(`
+    INSERT INTO archive_jobs (
+      id, archive_request_id, detected_disc_id, evidence_format,
+      attempt_ordinal, status, priority, progress_phase, progress_percent,
+      progress_bytes, last_progress_at, claimed_by, claim_token, claimed_at,
+      started_at, created_at, updated_at
+    ) VALUES (
+      'evidence-cancel-running-job', 'evidence-cancel-running-request',
+      'evidence-cancel-running-disc', 'dvd-recovery-evidence-v1',
+      1, 'running', 0, 'preparing', 0, 0, 1,
+      'synthetic-cancellation-worker', 'synthetic-cancellation-token',
+      1, 1, 1, 1
+    )
+  `);
+  expect(() => admissionCheck.exec(`
+    UPDATE archive_jobs
+    SET progress_percent = 1, updated_at = 3
+    WHERE id = 'evidence-cancel-running-job'
+  `)).toThrow(/admission is closed/i);
+  expect(() => admissionCheck.exec(`
+    UPDATE archive_jobs
+    SET original_disc_archive_id = 'evidence-new-format-archive',
+        updated_at = 3
+    WHERE id = 'evidence-cancel-running-job'
+  `)).toThrow(/admission is closed/i);
+  admissionCheck.exec(`
+    UPDATE archive_jobs
+    SET status = 'aborted', completed_at = 3,
+        error_message = 'Archive cancellation completed', updated_at = 3
+    WHERE id = 'evidence-cancel-running-job';
+
+    UPDATE archive_requests
+    SET status = 'cancelled', cancelled_at = 3, updated_at = 3
+    WHERE id = 'evidence-cancel-running-request';
+  `);
+  expect(admissionCheck.prepare(`
+    SELECT job.status AS jobStatus,
+           job.progress_percent AS progressPercent,
+           job.original_disc_archive_id AS originalDiscArchiveId,
+           request.status AS requestStatus
+    FROM archive_jobs AS job
+    INNER JOIN archive_requests AS request
+      ON request.id = job.archive_request_id
+    WHERE job.id = 'evidence-cancel-running-job'
+  `).get()).toEqual({
+    jobStatus: "aborted",
+    progressPercent: 0,
+    originalDiscArchiveId: null,
+    requestStatus: "cancelled",
+  });
   expect(() => admissionCheck.exec(`
     UPDATE archive_requests
     SET priority = 1, updated_at = 3

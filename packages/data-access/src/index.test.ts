@@ -40,6 +40,7 @@ import {
   InvalidStatusTransitionError,
   MAX_DVD_TITLES,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
+  MutationKeyConflictError,
   RecordNotFoundError,
   StaleJobAttemptError,
 } from "./index.js";
@@ -13092,6 +13093,193 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
+  it("resolves Archive Request replay before closed DVD evidence admission", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/evidence-request-replay",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const first = completeDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: "evidence-request-replay-first",
+      fingerprint: "evidence-request-replay-first",
+      sizeBytes: 2_048,
+    });
+    const second = completeDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: "evidence-request-replay-second",
+      fingerprint: "evidence-request-replay-second",
+      sizeBytes: 2_048,
+    });
+    access.close();
+
+    const mutationKey = "00000000-0000-4000-8000-000000000408";
+    const blockedMutationKey = "00000000-0000-4000-8000-000000000409";
+    const requestId = "evidence-request-replay-request";
+    const createdAt = new Date(1).toISOString();
+    const semanticInput = JSON.stringify({
+      detectedDiscId: first.disc.id,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+    });
+    const outcome = {
+      id: requestId,
+      detectedDiscId: first.disc.id,
+      rearchiveSourceArchiveId: null,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+      status: "pending",
+      priority: 0,
+      cancellationRequestedAt: null,
+      fulfilledAt: null,
+      cancelledAt: null,
+      createdAt,
+      updatedAt: createdAt,
+    };
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.prepare(`
+      INSERT INTO archive_requests (
+        id, detected_disc_id, evidence_format, status, priority,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, 'pending', 0, 1, 1)
+    `).run(requestId, first.disc.id, DVD_RECOVERY_EVIDENCE_FORMAT);
+    sqlite.prepare(`
+      INSERT INTO mutation_invocations (
+        key, operation, semantic_input, outcome, created_at
+      ) VALUES (?, 'archive_request.submit', ?, ?, 1)
+    `).run(mutationKey, semanticInput, JSON.stringify(outcome));
+    sqlite.close();
+
+    const gatedAccess = openTestDatabase(databasePath);
+    expect(gatedAccess.archiveRequests.submit({
+      mutationKey,
+      detectedDiscId: first.disc.id,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+    })).toMatchObject({
+      id: requestId,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+      createdAt: new Date(1),
+    });
+    expect(() => gatedAccess.archiveRequests.submit({
+      mutationKey,
+      detectedDiscId: second.disc.id,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+    })).toThrow(MutationKeyConflictError);
+    expect(() => gatedAccess.archiveRequests.submit({
+      mutationKey: blockedMutationKey,
+      detectedDiscId: first.disc.id,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+    })).toThrow(DvdRecoveryEvidenceAdmissionClosedError);
+    gatedAccess.close();
+
+    const replayCheck = new DatabaseSync(databasePath);
+    expect(replayCheck.prepare(`
+      SELECT key
+      FROM mutation_invocations
+      WHERE key IN (?, ?)
+      ORDER BY key
+    `).all(mutationKey, blockedMutationKey)).toEqual([{ key: mutationKey }]);
+    replayCheck.close();
+  });
+
+  it("resolves Encode Job mutation replay before current DVD evidence gates", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/evidence-encode-replay",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "evidence-encode-replay",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Evidence Encode Replay.iso",
+      fingerprint: "evidence-encode-replay",
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Evidence Encode Replay",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const profile = access.encodingProfiles.create({
+      key: "evidence-encode-replay",
+      displayName: "Evidence encode replay",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    completeCatalogReview(access, archive.id);
+    const enqueueMutationKey = "00000000-0000-4000-8000-000000000410";
+    const requeueMutationKey = "00000000-0000-4000-8000-000000000411";
+    const blockedEnqueueKey = "00000000-0000-4000-8000-000000000412";
+    const blockedRequeueKey = "00000000-0000-4000-8000-000000000413";
+    const enqueueInput = {
+      mutationKey: enqueueMutationKey,
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Evidence Encode Replay.mkv",
+    };
+    const enqueued = access.encodeJobs.enqueue(enqueueInput);
+    access.encodeJobs.requestCancellation(enqueued.id);
+    const requeued = access.encodeJobs.requeue(enqueued.id, {
+      mutationKey: requeueMutationKey,
+    });
+    access.encodeJobs.requestCancellation(enqueued.id);
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      archive.id,
+      "evidence-encode-replay",
+    );
+
+    expect(access.encodeJobs.enqueue(enqueueInput)).toEqual(enqueued);
+    expect(() => access.encodeJobs.enqueue({
+      ...enqueueInput,
+      outputPath: "/media/movies/Evidence Encode Replay changed.mkv",
+    })).toThrow(MutationKeyConflictError);
+    expect(access.encodeJobs.requeue(enqueued.id, {
+      mutationKey: requeueMutationKey,
+    })).toEqual(requeued);
+    expect(() => access.encodeJobs.requeue(enqueued.id, {
+      mutationKey: requeueMutationKey,
+      priority: 1,
+    })).toThrow(MutationKeyConflictError);
+    expect(() => access.encodeJobs.enqueue({
+      ...enqueueInput,
+      mutationKey: blockedEnqueueKey,
+    })).toThrow(DvdRecoveryEvidenceEncodingUnavailableError);
+    expect(() => access.encodeJobs.requeue(enqueued.id, {
+      mutationKey: blockedRequeueKey,
+    })).toThrow(DvdRecoveryEvidenceEncodingUnavailableError);
+    access.close();
+
+    const replayCheck = new DatabaseSync(databasePath);
+    expect(replayCheck.prepare(`
+      SELECT key
+      FROM mutation_invocations
+      WHERE key IN (?, ?, ?, ?)
+      ORDER BY key
+    `).all(
+      enqueueMutationKey,
+      requeueMutationKey,
+      blockedEnqueueKey,
+      blockedRequeueKey,
+    )).toEqual([
+      { key: enqueueMutationKey },
+      { key: requeueMutationKey },
+    ]);
+    replayCheck.close();
+  });
+
   it("keeps marked DVD evidence work closed at scheduling and worker mutation boundaries", () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);
@@ -13143,15 +13331,21 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         evidence_format, attempt_ordinal, status, priority, progress_phase,
         progress_percent, progress_bytes, last_progress_at, claimed_by,
         claim_token, claimed_at, started_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 1, 'running', 0, 'preparing', 0, 0, 1,
-        'legacy-evidence-worker', 'legacy-evidence-token', 1, 1, 1, 1)
+      ) VALUES (?, ?, ?, ?, ?, 1, 'running', 0, 'preparing', 0, 0, ?,
+        'legacy-evidence-worker', 'legacy-evidence-token', ?, ?, ?, ?)
     `);
+    const activeTimestamp = Date.now();
     expect(() => insertArchiveJob.run(
       "evidence-scheduling-old-worker-job",
       scheduledRequest.id,
       scheduled.inspection.id,
       scheduled.disc.id,
       null,
+      activeTimestamp,
+      activeTimestamp,
+      activeTimestamp,
+      activeTimestamp,
+      activeTimestamp,
     )).toThrow(/evidence format must match/i);
 
     const markedJobId = "evidence-worker-marked-job";
@@ -13161,6 +13355,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       running.inspection.id,
       running.disc.id,
       DVD_RECOVERY_EVIDENCE_FORMAT,
+      activeTimestamp,
+      activeTimestamp,
+      activeTimestamp,
+      activeTimestamp,
+      activeTimestamp,
     );
     expect(() => sqlite.prepare(`
       UPDATE archive_jobs
@@ -13193,6 +13392,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       () => gatedAccess.archiveJobs.renewClaim(runningMarkedClaim),
       () => gatedAccess.archiveJobs.updateProgress(runningMarkedClaim, 50),
       () => gatedAccess.archiveJobs.fail(runningMarkedClaim, "must remain closed"),
+      () => gatedAccess.archiveJobs.abort(
+        runningMarkedClaim,
+        "must remain closed before cancellation",
+      ),
     ]) {
       expect(mutate).toThrow(DvdRecoveryEvidenceAdmissionClosedError);
     }
@@ -13218,7 +13421,75 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       status: "running",
       progressPercent: 0,
     });
+    expect(gatedAccess.archiveJobs.abort(
+      runningMarkedClaim,
+      "Archive cancelled after evidence admission closed",
+    )).toMatchObject({
+      id: markedClaim.id,
+      status: "aborted",
+      progressPercent: 0,
+      originalDiscArchiveId: null,
+    });
+    expect(gatedAccess.archiveRequests.find(runningRequest.id)).toMatchObject({
+      status: "cancelled",
+    });
+    const futureRequest = gatedAccess.archiveRequests.create({
+      detectedDiscId: running.disc.id,
+    });
+    expect(futureRequest).toMatchObject({
+      detectedDiscId: running.disc.id,
+      evidenceFormat: null,
+      status: "pending",
+    });
     gatedAccess.close();
+
+    const expiredJobId = "evidence-worker-expired-cancellation-job";
+    const expiredAt = Date.now() - ARCHIVE_JOB_LEASE_DURATION_MS - 1;
+    const recoveryFixture = new DatabaseSync(databasePath);
+    recoveryFixture.prepare(`
+      UPDATE archive_requests
+      SET evidence_format = ?, status = 'running', updated_at = ?
+      WHERE id = ?
+    `).run(DVD_RECOVERY_EVIDENCE_FORMAT, expiredAt, futureRequest.id);
+    recoveryFixture.prepare(`
+      INSERT INTO archive_jobs (
+        id, archive_request_id, disc_inspection_id, detected_disc_id,
+        evidence_format, attempt_ordinal, status, priority, progress_phase,
+        progress_percent, progress_bytes, last_progress_at, claimed_by,
+        claim_token, claimed_at, started_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 1, 'running', 0, 'preparing', 0, 0, ?,
+        'expired-evidence-worker', 'expired-evidence-token', ?, ?, ?, ?)
+    `).run(
+      expiredJobId,
+      futureRequest.id,
+      running.inspection.id,
+      running.disc.id,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      expiredAt,
+      expiredAt,
+      expiredAt,
+      expiredAt,
+      expiredAt,
+    );
+    recoveryFixture.close();
+
+    const recoveryAccess = openTestDatabase(databasePath);
+    recoveryAccess.archiveRequests.cancelWithReplay({
+      mutationKey: "00000000-0000-4000-8000-000000000414",
+      id: futureRequest.id,
+    });
+    const expiredCancellation = recoveryAccess.archiveJobs
+      .listExpiredCancellations()
+      .find(({ id }) => id === expiredJobId);
+    if (expiredCancellation === undefined) {
+      throw new Error("Expected marked expired cancellation");
+    }
+    expect(recoveryAccess.archiveJobs.finalizeExpiredCancellation(
+      expiredCancellation,
+    )).toMatchObject({ id: expiredJobId, status: "aborted" });
+    expect(recoveryAccess.archiveRequests.find(futureRequest.id))
+      .toMatchObject({ status: "cancelled" });
+    recoveryAccess.close();
   });
 
   it("publishes a corrected DVD at its actual size with separate clean-read evidence", () => {

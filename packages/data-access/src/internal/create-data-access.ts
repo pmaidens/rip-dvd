@@ -118,6 +118,8 @@ import { createDvdMetadataFingerprint } from "../dvd-metadata-fingerprint.js";
 import { createWatchableSalvageArchiveIntegrityEvidence } from "../archive-integrity.js";
 import {
   assertDvdRecoveryEvidenceAdmissionAvailable,
+  DVD_RECOVERY_EVIDENCE_FORMAT,
+  DvdRecoveryEvidenceAdmissionClosedError,
   DvdRecoveryEvidenceEncodingUnavailableError,
 } from "../dvd-recovery-evidence.js";
 import { encodingProfileQueueBlockingReasons } from "../encoding-profile-eligibility.js";
@@ -1153,6 +1155,32 @@ export function createDataAccessInternal(
             )),
         )
         : undefined,
+  };
+  const requireDvdRecoveryEvidenceEncodingAvailableForEncodeJob = (
+    querySource: Pick<typeof database, "select">,
+    id: EncodeJobId,
+  ): void => {
+    if (!hasDvdRecoveryEvidenceSchema) return;
+    const evidenceArchive = querySource
+      .select({ id: dvdArchiveEvidenceHeaders.originalDiscArchiveId })
+      .from(encodeJobs)
+      .innerJoin(
+        discSelections,
+        eq(discSelections.id, encodeJobs.discSelectionId),
+      )
+      .innerJoin(
+        dvdArchiveEvidenceHeaders,
+        eq(
+          dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+          discSelections.originalDiscArchiveId,
+        ),
+      )
+      .where(eq(encodeJobs.id, id))
+      .limit(1)
+      .get();
+    if (evidenceArchive !== undefined) {
+      throw new DvdRecoveryEvidenceEncodingUnavailableError();
+    }
   };
   const encodeQueueDiscSelectionPageStatement = sqlite.prepare(`
     with requested_selection as (
@@ -4327,6 +4355,10 @@ export function createDataAccessInternal(
           options?.mutationKey, "encode_job.requeue", semanticInput,
         );
         if (replay) return replay;
+        requireDvdRecoveryEvidenceEncodingAvailableForEncodeJob(
+          transaction,
+          id,
+        );
         if (
           options?.mutationKey !== undefined &&
           (expectedStatus === "completed" || current.replaceExistingOutput)
@@ -5275,7 +5307,6 @@ export function createDataAccessInternal(
     evidenceFormat?: DvdArchiveEvidenceFormat;
     priority?: number;
   }, mutationKey?: string) {
-    assertDvdRecoveryEvidenceAdmissionAvailable(input.evidenceFormat);
     const timestamp = now();
     return database.transaction((transaction) => {
       const semanticInput = JSON.stringify({
@@ -5303,6 +5334,7 @@ export function createDataAccessInternal(
           });
         if (previous !== undefined) return previous;
       }
+      assertDvdRecoveryEvidenceAdmissionAvailable(input.evidenceFormat);
       const saveOutcome = (outcome: ArchiveRequest): ArchiveRequest =>
         mutationKey === undefined ? outcome : recordMutationInvocation(
           transaction, mutationKey, "archive_request.submit", semanticInput,
@@ -11361,7 +11393,6 @@ export function createDataAccessInternal(
             .where(
               and(
                 eq(archiveJobs.status, "running"),
-                isNull(archiveJobs.evidenceFormat),
                 eq(archiveRequests.status, "cancellation_requested"),
                 lte(archiveJobs.updatedAt, expiredBefore),
                 cursor === undefined
@@ -11393,7 +11424,8 @@ export function createDataAccessInternal(
       },
 
       finalizeExpiredCancellation(claim) {
-        requireLegacyArchiveJobMutation(claim);
+        const isClosedEvidenceCancellation =
+          claim.evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT;
         const timestamp = now();
         const expiredBefore = new Date(
           timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
@@ -11403,10 +11435,12 @@ export function createDataAccessInternal(
             .update(archiveJobs)
             .set({
               status: "aborted",
-              ...archiveTerminalProgressPatchForClaim(
-                claim.id,
-                claim.claimToken,
-              ),
+              ...(isClosedEvidenceCancellation
+                ? {}
+                : archiveTerminalProgressPatchForClaim(
+                  claim.id,
+                  claim.claimToken,
+                )),
               completedAt: timestamp,
               errorMessage: "Archive cancelled after worker recovery",
               updatedAt: timestamp,
@@ -11418,6 +11452,12 @@ export function createDataAccessInternal(
                 eq(archiveJobs.detectedDiscId, claim.detectedDiscId),
                 eq(archiveJobs.status, "running"),
                 eq(archiveJobs.claimToken, claim.claimToken),
+                isClosedEvidenceCancellation
+                  ? eq(
+                    archiveJobs.evidenceFormat,
+                    DVD_RECOVERY_EVIDENCE_FORMAT,
+                  )
+                  : undefined,
                 lte(archiveJobs.updatedAt, expiredBefore),
                 exists(
                   transaction
@@ -12018,21 +12058,49 @@ export function createDataAccessInternal(
       },
 
       abort(claim, errorMessageInput) {
-        requireLegacyArchiveJobMutation(claim);
+        const isClosedEvidenceCancellation =
+          claim.evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT;
         const timestamp = now();
         const errorMessage = requireNonEmpty(
           errorMessageInput,
           "errorMessage",
         ).slice(0, 500);
         const aborted = database.transaction((transaction) => {
+          if (isClosedEvidenceCancellation) {
+            const cancellation = transaction
+              .select({ status: archiveRequests.status })
+              .from(archiveJobs)
+              .innerJoin(
+                archiveRequests,
+                eq(archiveRequests.id, archiveJobs.archiveRequestId),
+              )
+              .where(and(
+                eq(archiveJobs.id, claim.id),
+                eq(archiveJobs.status, "running"),
+                eq(archiveJobs.claimToken, claim.claimToken),
+                eq(
+                  archiveJobs.evidenceFormat,
+                  DVD_RECOVERY_EVIDENCE_FORMAT,
+                ),
+              ))
+              .get();
+            if (cancellation === undefined) {
+              throw new StaleJobAttemptError("archive job", claim.id);
+            }
+            if (cancellation.status !== "cancellation_requested") {
+              throw new DvdRecoveryEvidenceAdmissionClosedError();
+            }
+          }
           const job = transaction
             .update(archiveJobs)
             .set({
               status: "aborted",
-              ...archiveTerminalProgressPatchForClaim(
-                claim.id,
-                claim.claimToken,
-              ),
+              ...(isClosedEvidenceCancellation
+                ? {}
+                : archiveTerminalProgressPatchForClaim(
+                  claim.id,
+                  claim.claimToken,
+                )),
               completedAt: timestamp,
               errorMessage,
               updatedAt: timestamp,
@@ -12042,6 +12110,12 @@ export function createDataAccessInternal(
                 eq(archiveJobs.id, claim.id),
                 eq(archiveJobs.status, "running"),
                 eq(archiveJobs.claimToken, claim.claimToken),
+                isClosedEvidenceCancellation
+                  ? eq(
+                    archiveJobs.evidenceFormat,
+                    DVD_RECOVERY_EVIDENCE_FORMAT,
+                  )
+                  : undefined,
                 gt(
                   archiveJobs.updatedAt,
                   new Date(
@@ -12060,17 +12134,24 @@ export function createDataAccessInternal(
               .update(archiveRequests)
               .set({
                 status: "cancelled",
-                cancellationRequestedAt: timestamp,
+                ...(isClosedEvidenceCancellation
+                  ? {}
+                  : { cancellationRequestedAt: timestamp }),
                 cancelledAt: timestamp,
                 updatedAt: timestamp,
               })
               .where(
                 and(
                   eq(archiveRequests.id, job.archiveRequestId),
-                  inArray(archiveRequests.status, [
-                    "running",
-                    "cancellation_requested",
-                  ]),
+                  isClosedEvidenceCancellation
+                    ? eq(
+                      archiveRequests.status,
+                      "cancellation_requested",
+                    )
+                    : inArray(archiveRequests.status, [
+                      "running",
+                      "cancellation_requested",
+                    ]),
                 ),
               )
               .returning({ id: archiveRequests.id })
@@ -12451,9 +12532,6 @@ export function createDataAccessInternal(
         const requireCompletedReview = (
           selectionReview: ReturnType<typeof selectReviewState>,
         ) => {
-          if (selectionReview.evidenceFormat !== null) {
-            throw new DvdRecoveryEvidenceEncodingUnavailableError();
-          }
           if (
             selectionReview.catalogReviewOutcome !==
               "reviewed_with_selections" ||
@@ -12484,9 +12562,11 @@ export function createDataAccessInternal(
               input.mutationKey, "encode_job.enqueue", semanticInput,
             );
             if (replay) return replay;
-            const selectionReview = requireCompletedReview(
-              selectReviewState(transaction),
-            );
+            const selectionReview = selectReviewState(transaction);
+            if (selectionReview.evidenceFormat !== null) {
+              throw new DvdRecoveryEvidenceEncodingUnavailableError();
+            }
+            requireCompletedReview(selectionReview);
             if (
               selectionReview.originalDiscArchiveId !== validatedArchive.id
             ) {
@@ -14473,28 +14553,6 @@ export function createDataAccessInternal(
         );
       },
       requeue(id, options) {
-        if (hasDvdRecoveryEvidenceSchema) {
-          const evidenceArchive = database
-            .select({ id: dvdArchiveEvidenceHeaders.originalDiscArchiveId })
-            .from(encodeJobs)
-            .innerJoin(
-              discSelections,
-              eq(discSelections.id, encodeJobs.discSelectionId),
-            )
-            .innerJoin(
-              dvdArchiveEvidenceHeaders,
-              eq(
-                dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-                discSelections.originalDiscArchiveId,
-              ),
-            )
-            .where(eq(encodeJobs.id, id))
-            .limit(1)
-            .get();
-          if (evidenceArchive !== undefined) {
-            throw new DvdRecoveryEvidenceEncodingUnavailableError();
-          }
-        }
         const outputPath = options?.outputPath === undefined
           ? undefined
           : requireNonEmpty(options.outputPath, "outputPath");

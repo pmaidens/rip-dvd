@@ -292,7 +292,7 @@ const dvdEvidenceEncodingUnavailableError = {
   },
 };
 
-it("blocks Catalog Review replacement queueing consistently through web and CLI", async () => {
+it("blocks Catalog Review replacement previews consistently through web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
   const seeded = seedCatalogReviewForReadFixture(fixture);
   const access = fixture.openAccess();
@@ -314,30 +314,15 @@ it("blocks Catalog Review replacement queueing consistently through web and CLI"
         outputPath: seeded.predecessor.outputPath,
       }],
     };
-    const preview = await fixture.run([
-      "catalog-review",
-      "preview-completion",
-      seeded.archive.id,
-      "--json",
-      JSON.stringify(command),
-    ]);
-    const previewResult = preview.result as {
-      catalogRevision: string;
-      previewToken: string;
-    };
     markArchiveWithDvdRecoveryEvidence(
       fixture.databasePath,
       seeded.archive.id,
       "catalog-review-parity",
     );
-    const mutationKey = "00000000-0000-4000-8000-000000000409";
     const web = await createCatalogReviewRoute(
       catalogReviewMutationRequest(seeded.archive.id, {
         ...command,
-        mutationKey,
-        acknowledgedRevision: previewResult.catalogRevision,
-        previewToken: previewResult.previewToken,
-        acknowledge: true,
+        preview: true,
       }),
       seeded.archive.id,
       () => access,
@@ -346,15 +331,8 @@ it("blocks Catalog Review replacement queueing consistently through web and CLI"
     );
     const cli = await fixture.run([
       "catalog-review",
-      "complete",
+      "preview-completion",
       seeded.archive.id,
-      "--key",
-      mutationKey,
-      "--revision",
-      previewResult.catalogRevision,
-      "--preview-token",
-      previewResult.previewToken,
-      "--acknowledge",
       "--json",
       JSON.stringify(command),
     ]);
@@ -380,8 +358,8 @@ it("blocks Catalog Review replacement queueing consistently through web and CLI"
     expect(sqlite.prepare(`
       SELECT count(*) AS count
       FROM mutation_invocations
-      WHERE key = ?
-    `).get(mutationKey)).toEqual({ count: 0 });
+      WHERE operation = 'catalog_review.complete.preview'
+    `).get()).toEqual({ count: 0 });
     sqlite.close();
   } finally {
     access.close();
@@ -389,7 +367,7 @@ it("blocks Catalog Review replacement queueing consistently through web and CLI"
   }
 });
 
-it("blocks Re-archive replacement queueing consistently through web and CLI", async () => {
+it("blocks Re-archive replacement previews consistently through web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
   const seeded = seedRearchiveCatalogReviewFixture(fixture);
   const access = fixture.openAccess();
@@ -454,32 +432,15 @@ it("blocks Re-archive replacement queueing consistently through web and CLI", as
         outputPath: predecessor.outputPath,
       }],
     };
-    const preview = await fixture.run([
-      "catalog-review",
-      "preview-rearchive-acceptance",
-      seeded.targetArchive.id,
-      "--json",
-      JSON.stringify(command),
-    ]);
-    const previewResult = preview.result as {
-      catalogRevision: string;
-      sourceCatalogRevision: string;
-      previewToken: string;
-    };
     markArchiveWithDvdRecoveryEvidence(
       fixture.databasePath,
       seeded.targetArchive.id,
       "rearchive-acceptance-parity",
     );
-    const mutationKey = "00000000-0000-4000-8000-000000000411";
     const web = await createCatalogReviewRoute(
       catalogReviewMutationRequest(seeded.targetArchive.id, {
         ...command,
-        mutationKey,
-        acknowledgedRevision: previewResult.catalogRevision,
-        acknowledgedSourceRevision: previewResult.sourceCatalogRevision,
-        previewToken: previewResult.previewToken,
-        acknowledge: true,
+        preview: true,
       }),
       seeded.targetArchive.id,
       () => access,
@@ -488,17 +449,8 @@ it("blocks Re-archive replacement queueing consistently through web and CLI", as
     );
     const cli = await fixture.run([
       "catalog-review",
-      "accept-rearchive",
+      "preview-rearchive-acceptance",
       seeded.targetArchive.id,
-      "--key",
-      mutationKey,
-      "--revision",
-      previewResult.catalogRevision,
-      "--source-revision",
-      previewResult.sourceCatalogRevision,
-      "--preview-token",
-      previewResult.previewToken,
-      "--acknowledge",
       "--json",
       JSON.stringify(command),
     ]);
@@ -527,8 +479,8 @@ it("blocks Re-archive replacement queueing consistently through web and CLI", as
     expect(sqlite.prepare(`
       SELECT count(*) AS count
       FROM mutation_invocations
-      WHERE key = ?
-    `).get(mutationKey)).toEqual({ count: 0 });
+      WHERE operation = 'rearchive.accept.preview'
+    `).get()).toEqual({ count: 0 });
     sqlite.close();
   } finally {
     access.close();
