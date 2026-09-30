@@ -784,7 +784,13 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   `).get()).toEqual({ count: 0 });
   expect(() => admissionCheck.exec(`
     UPDATE original_disc_archives
-    SET integrity = 'incomplete_read',
+    SET integrity_evidence_revision = 1
+    WHERE id = 'evidence-legacy-clean-archive'
+  `)).toThrow(/integrity_evidence_revision/i);
+  expect(() => admissionCheck.exec(`
+    UPDATE original_disc_archives
+    SET integrity_evidence_revision = 1,
+        integrity = 'incomplete_read',
         integrity_policy_version = 'dvd-recovery-evidence-v1',
         bad_sector_count = 1,
         bad_area_count = 1,
@@ -895,6 +901,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   })).toEqual([
     expect.objectContaining({
       integrity: "unknown",
+      integrityEvidenceRevision: null,
       integrityPolicyVersion: null,
       badSectorCount: null,
       badAreaCount: null,
@@ -919,6 +926,97 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   const failedRangesDigest = "d".repeat(64);
   const failedManifestDigest = "e".repeat(64);
   const recoveryReadDigest = "f".repeat(64);
+  const cleanBoundaryDigest = "6".repeat(64);
+  const cleanRangesDigest = "7".repeat(64);
+  const cleanManifestDigest = "8".repeat(64);
+  evidenceFixture.exec(`
+    INSERT INTO optical_drives (
+      id, device_path, is_present, last_seen_at, created_at, updated_at
+    ) VALUES (
+      'evidence-clean-drive', '/dev/evidence-clean', 1, 1, 1, 1
+    );
+    INSERT INTO detected_discs (
+      id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+      created_at, updated_at
+    ) VALUES (
+      'evidence-clean-disc', 'evidence-clean-drive', 'dvd',
+      'evidence-clean-fingerprint', 'archived', 1, 1, 1
+    );
+    INSERT INTO disc_inspections (
+      id, optical_drive_id, detected_disc_id, media_generation, is_current,
+      status, phase, total_bytes, phase_started_at, attempt_started_at,
+      started_at, completed_at, created_at, updated_at
+    ) VALUES (
+      'evidence-clean-inspection', 'evidence-clean-drive',
+      'evidence-clean-disc', 'evidence-clean-generation', 1,
+      'completed', 'confirming_media', 2048, 1, 1, 1, 1, 1, 1
+    );
+    INSERT INTO original_disc_archives (
+      id, detected_disc_id, disc_kind, archive_format, archive_path,
+      fingerprint, size_bytes, boundary_policy_version,
+      boundary_reported_size_bytes, boundary_published_size_bytes,
+      boundary_excluded_sector_count, integrity, integrity_policy_version,
+      bad_sector_count, bad_area_count, bad_sector_ranges, archived_at,
+      created_at, updated_at
+    ) VALUES (
+      'evidence-clean-archive', 'evidence-clean-disc', 'dvd', 'iso',
+      '/originals/evidence-clean.iso', 'evidence-clean-fingerprint', 2048,
+      'dvd-archive-boundary-v1', 2048, 2048, 0, 'clean_read',
+      'dvd-recovery-evidence-v1', 0, 0, '[]', 1, 1, 1
+    );
+    INSERT INTO archive_requests (
+      id, detected_disc_id, evidence_format, status, priority, fulfilled_at,
+      created_at, updated_at
+    ) VALUES (
+      'evidence-clean-request', 'evidence-clean-disc',
+      'dvd-recovery-evidence-v1', 'fulfilled', 0, 1, 1, 1
+    );
+    INSERT INTO archive_jobs (
+      id, archive_request_id, disc_inspection_id, detected_disc_id,
+      original_disc_archive_id, evidence_format, attempt_ordinal, status,
+      priority, progress_phase, progress_percent, progress_bytes,
+      last_progress_at, started_at, completed_at, created_at, updated_at
+    ) VALUES (
+      'evidence-clean-job', 'evidence-clean-request',
+      'evidence-clean-inspection', 'evidence-clean-disc',
+      'evidence-clean-archive', 'dvd-recovery-evidence-v1', 1, 'completed', 0,
+      'finalizing', 100, 2048, 1, 1, 1, 1, 1
+    );
+    INSERT INTO dvd_archive_evidence_manifests (
+      id, original_disc_archive_id, revision, evidence_format,
+      image_fingerprint, sector_size_bytes, accepted_end_lba_exclusive,
+      boundary_policy_version, boundary_reported_size_bytes,
+      boundary_published_size_bytes, boundary_evidence_digest,
+      unrecovered_source_ranges, unrecovered_source_ranges_digest,
+      manifest_digest, created_at
+    ) VALUES (
+      'evidence-clean-manifest-1', 'evidence-clean-archive', 1,
+      'dvd-recovery-evidence-v1', 'evidence-clean-fingerprint', 2048, 1,
+      'dvd-archive-boundary-v1', 2048, 2048, '${cleanBoundaryDigest}', '[]',
+      '${cleanRangesDigest}', '${cleanManifestDigest}', 1
+    )
+  `);
+  const insertCleanHeader = () => evidenceFixture.exec(`
+    INSERT INTO dvd_archive_evidence_headers (
+      original_disc_archive_id, source_archive_job_id, evidence_format,
+      boundary_policy_version, boundary_reported_size_bytes,
+      boundary_published_size_bytes, boundary_evidence_digest,
+      sector_size_bytes, accepted_end_lba_exclusive, current_manifest_id,
+      current_manifest_revision, current_manifest_digest, created_at, updated_at
+    ) VALUES (
+      'evidence-clean-archive', 'evidence-clean-job',
+      'dvd-recovery-evidence-v1', 'dvd-archive-boundary-v1', 2048, 2048,
+      '${cleanBoundaryDigest}', 2048, 1, 'evidence-clean-manifest-1', 1,
+      '${cleanManifestDigest}', 1, 1
+    )
+  `);
+  expect(insertCleanHeader).toThrow(/proven initial manifest/i);
+  evidenceFixture.exec(`
+    UPDATE original_disc_archives
+    SET integrity_evidence_revision = 1
+    WHERE id = 'evidence-clean-archive'
+  `);
+  insertCleanHeader();
   const insertInitialManifest = evidenceFixture.prepare(`
     INSERT INTO dvd_archive_evidence_manifests (
       id, original_disc_archive_id, revision, evidence_format,
@@ -1059,7 +1157,8 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     SET total_bytes = 4096
     WHERE id = 'evidence-new-format-inspection';
     UPDATE original_disc_archives
-    SET integrity = 'incomplete_read',
+    SET integrity_evidence_revision = 1,
+        integrity = 'incomplete_read',
         integrity_policy_version = 'dvd-recovery-evidence-v1',
         bad_sector_count = 2,
         bad_area_count = 1,
@@ -1131,8 +1230,27 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     UPDATE original_disc_archives
     SET verification_message = 'Synthetic verification after checkpoint'
     WHERE id = 'evidence-new-format-archive';
+  `);
+  expect(evidenceFixture.prepare(`
+    SELECT integrity_evidence_revision AS integrityEvidenceRevision,
+           bad_area_count AS badAreaCount
+    FROM original_disc_archives
+    WHERE id = 'evidence-new-format-archive'
+  `).get()).toEqual({ integrityEvidenceRevision: 1, badAreaCount: 1 });
+  expect(() => evidenceFixture.exec(`
     UPDATE original_disc_archives
-    SET integrity = 'incomplete_read',
+    SET integrity_evidence_revision = 0
+    WHERE id = 'evidence-new-format-archive'
+  `)).toThrow(/projection must match a committed DVD evidence manifest/i);
+  expect(() => evidenceFixture.exec(`
+    UPDATE original_disc_archives
+    SET integrity_evidence_revision = 3
+    WHERE id = 'evidence-new-format-archive'
+  `)).toThrow(/projection must match a committed DVD evidence manifest/i);
+  evidenceFixture.exec(`
+    UPDATE original_disc_archives
+    SET integrity_evidence_revision = 2,
+        integrity = 'incomplete_read',
         integrity_policy_version = 'dvd-recovery-evidence-v1',
         bad_sector_count = 2,
         bad_area_count = 2,
@@ -1140,6 +1258,49 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
         bad_sector_counts_by_title = NULL
     WHERE id = 'evidence-new-format-archive';
   `);
+  expect(() => evidenceFixture.exec(`
+    UPDATE original_disc_archives
+    SET integrity_evidence_revision = 1,
+        bad_area_count = 1,
+        bad_sector_ranges = '[{"startLba":0,"sectorCount":2}]'
+    WHERE id = 'evidence-new-format-archive'
+  `)).toThrow(/projection must match a committed DVD evidence manifest/i);
+  evidenceFixture.exec(`
+    INSERT INTO dvd_archive_recovery_reads (
+      id, original_disc_archive_id, from_manifest_id,
+      from_manifest_revision, start_lba, sector_count, outcome,
+      evidence_digest, created_at
+    ) VALUES (
+      'evidence-new-format-read-repeat', 'evidence-new-format-archive',
+      'evidence-new-format-manifest-2', 2, 1, 1, 'failed',
+      '${"6".repeat(64)}', 3
+    )
+  `);
+  expect(evidenceFixture.prepare(`
+    SELECT current_manifest_revision AS revision
+    FROM dvd_archive_evidence_headers
+    WHERE original_disc_archive_id = 'evidence-new-format-archive'
+  `).get()).toEqual({ revision: 2 });
+  expect(() => evidenceFixture.prepare(`
+    INSERT INTO dvd_archive_evidence_manifests (
+      id, original_disc_archive_id, revision, previous_manifest_id,
+      recovery_read_id, evidence_format, image_fingerprint,
+      sector_size_bytes, accepted_end_lba_exclusive,
+      boundary_policy_version, boundary_reported_size_bytes,
+      boundary_published_size_bytes, boundary_evidence_digest,
+      unrecovered_source_ranges, unrecovered_source_ranges_digest,
+      manifest_digest, created_at
+    ) VALUES (
+      'evidence-new-format-manifest-repeat',
+      'evidence-new-format-archive', 3,
+      'evidence-new-format-manifest-2', 'evidence-new-format-read-repeat',
+      'dvd-recovery-evidence-v1', 'evidence-new-format-fingerprint', 2048, 2,
+      'dvd-archive-boundary-v1', 4096, 4096, '${boundaryDigest}', ?,
+      '${"7".repeat(64)}', '${"8".repeat(64)}', 3
+    )
+  `).run(JSON.stringify(authoritativeRanges))).toThrow(
+    /manifest transition requires its one-sector recovery read/i,
+  );
   expect(evidenceFixture.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   evidenceFixture.close();
 
@@ -1185,6 +1346,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   })).toEqual([
     expect.objectContaining({
       integrity: "incomplete_read",
+      integrityEvidenceRevision: 2,
       integrityPolicyVersion: DVD_RECOVERY_EVIDENCE_FORMAT,
       badSectorCount: 2,
       badAreaCount: 2,
@@ -1284,7 +1446,8 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
         updated_at = 4
     WHERE original_disc_archive_id = 'evidence-new-format-archive';
     UPDATE original_disc_archives
-    SET integrity = 'clean_read',
+    SET integrity_evidence_revision = 4,
+        integrity = 'clean_read',
         integrity_policy_version = 'dvd-recovery-evidence-v1',
         bad_sector_count = 0,
         bad_area_count = 0,
@@ -1301,10 +1464,16 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     WHERE original_disc_archive_id = 'evidence-new-format-archive'
   `).get()).toEqual({ revision: 4 });
   expect(finalDatabase.prepare(`
-    SELECT integrity, bad_sector_count AS badSectorCount
+    SELECT integrity,
+           integrity_evidence_revision AS integrityEvidenceRevision,
+           bad_sector_count AS badSectorCount
     FROM original_disc_archives
     WHERE id = 'evidence-new-format-archive'
-  `).get()).toEqual({ integrity: "clean_read", badSectorCount: 0 });
+  `).get()).toEqual({
+    integrity: "clean_read",
+    integrityEvidenceRevision: 4,
+    badSectorCount: 0,
+  });
   expect(finalDatabase.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   expect(finalDatabase.prepare("PRAGMA quick_check").get()).toEqual({
     quick_check: "ok",

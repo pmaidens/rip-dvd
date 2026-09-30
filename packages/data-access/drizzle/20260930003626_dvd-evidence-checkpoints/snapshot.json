@@ -3293,6 +3293,16 @@
       "table": "original_disc_archives"
     },
     {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "integrity_evidence_revision",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
       "type": "text",
       "notNull": false,
       "autoincrement": false,
@@ -6328,6 +6338,12 @@
     {
       "value": "\"integrity\" in ('unknown', 'clean_read', 'incomplete_read', 'watchable_salvage')",
       "name": "original_disc_archives_integrity_check",
+      "entityType": "checks",
+      "table": "original_disc_archives"
+    },
+    {
+      "value": "\"integrity_evidence_revision\" is null or (typeof(\"integrity_evidence_revision\") = 'integer' and \"integrity_evidence_revision\" > 0 and \"integrity\" in ('clean_read', 'incomplete_read') and \"integrity_policy_version\" = 'dvd-recovery-evidence-v1')",
+      "name": "original_disc_archives_integrity_evidence_revision_check",
       "entityType": "checks",
       "table": "original_disc_archives"
     },

@@ -29,6 +29,7 @@ export function withAuthoritativeDvdArchiveIntegrity<
   return {
     ...archive,
     integrity: integrity.integrity,
+    integrityEvidenceRevision: header.currentManifestRevision,
     integrityPolicyVersion: integrity.policyVersion,
     badSectorCount: integrity.badSectorCount,
     badAreaCount: integrity.badAreaCount,

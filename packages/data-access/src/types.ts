@@ -355,6 +355,7 @@ export interface OriginalDiscArchive {
   boundaryReadFailureAsc: number | null;
   boundaryReadFailureAscq: number | null;
   integrity: ArchiveIntegrity;
+  integrityEvidenceRevision: number | null;
   integrityPolicyVersion: string | null;
   badSectorCount: number | null;
   badAreaCount: number | null;

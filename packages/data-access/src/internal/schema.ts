@@ -604,6 +604,7 @@ export const originalDiscArchives = sqliteTable(
     integrity: text("integrity", { enum: ARCHIVE_INTEGRITIES })
       .notNull()
       .default("unknown"),
+    integrityEvidenceRevision: integer("integrity_evidence_revision"),
     integrityPolicyVersion: text("integrity_policy_version"),
     badSectorCount: integer("bad_sector_count"),
     badAreaCount: integer("bad_area_count"),
@@ -678,6 +679,10 @@ export const originalDiscArchives = sqliteTable(
     check(
       "original_disc_archives_integrity_check",
       sql`${table.integrity} in (${sqliteStringLiterals(ARCHIVE_INTEGRITIES)})`,
+    ),
+    check(
+      "original_disc_archives_integrity_evidence_revision_check",
+      sql`${table.integrityEvidenceRevision} is null or (typeof(${table.integrityEvidenceRevision}) = 'integer' and ${table.integrityEvidenceRevision} > 0 and ${table.integrity} in ('clean_read', 'incomplete_read') and ${table.integrityPolicyVersion} = 'dvd-recovery-evidence-v1')`,
     ),
     check(
       "original_disc_archives_integrity_evidence_check",

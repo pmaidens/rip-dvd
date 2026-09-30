@@ -13,6 +13,7 @@ CREATE TEMP TABLE `__dvd_evidence_checkpoint_migration_guard` (
 INSERT INTO `__dvd_evidence_checkpoint_migration_guard` (`interstitial_header_count`)
 SELECT count(*) FROM `dvd_archive_evidence_headers`;--> statement-breakpoint
 DROP TABLE `__dvd_evidence_checkpoint_migration_guard`;--> statement-breakpoint
+ALTER TABLE `original_disc_archives` ADD `integrity_evidence_revision` integer CHECK(`integrity_evidence_revision` is null or (typeof(`integrity_evidence_revision`) = 'integer' and `integrity_evidence_revision` > 0 and `integrity` in ('clean_read', 'incomplete_read') and `integrity_policy_version` = 'dvd-recovery-evidence-v1'));--> statement-breakpoint
 CREATE TABLE `dvd_archive_evidence_manifests` (
 	`id` text PRIMARY KEY,
 	`original_disc_archive_id` text NOT NULL,
@@ -243,7 +244,6 @@ WHEN NOT EXISTS (
     AND evidence_header.`current_manifest_revision` = NEW.`from_manifest_revision`
     AND NEW.`start_lba` >= json_extract(source_range.`value`, '$.startLba')
     AND NEW.`start_lba` < json_extract(source_range.`value`, '$.startLba') + json_extract(source_range.`value`, '$.sectorCount')
-    AND (NEW.`outcome` = 'recovered' OR json_extract(source_range.`value`, '$.classification') = 'skipped_untested')
 )
 BEGIN SELECT RAISE(ABORT, 'DVD recovery read must be a one-sector read of the current unrecovered manifest'); END;--> statement-breakpoint
 CREATE TRIGGER `dvd_evidence_recovery_read_update_guard`
@@ -294,9 +294,11 @@ BEGIN
       AND source_inspection.`detected_disc_id` = source_archive.`detected_disc_id`
       AND source_inspection.`status` = 'completed'
       AND source_inspection.`total_bytes` = NEW.`boundary_reported_size_bytes`
-      AND (source_archive.`integrity` = 'unknown' OR (
+      AND ((source_archive.`integrity` = 'unknown'
+        AND source_archive.`integrity_evidence_revision` IS NULL) OR (
         json_array_length(current_manifest.`unrecovered_source_ranges`) = 0
         AND source_archive.`integrity` = 'clean_read'
+        AND source_archive.`integrity_evidence_revision` = 1
         AND source_archive.`integrity_policy_version` = NEW.`evidence_format`
         AND source_archive.`bad_sector_count` = 0
         AND source_archive.`bad_area_count` = 0
@@ -353,22 +355,28 @@ WHEN EXISTS (SELECT 1 FROM `dvd_archive_evidence_headers` WHERE `original_disc_a
     OR OLD.`boundary_reported_size_bytes` IS NOT NEW.`boundary_reported_size_bytes`
     OR OLD.`boundary_published_size_bytes` IS NOT NEW.`boundary_published_size_bytes`
     OR OLD.`integrity` IS NOT NEW.`integrity`
+    OR OLD.`integrity_evidence_revision` IS NOT NEW.`integrity_evidence_revision`
     OR OLD.`integrity_policy_version` IS NOT NEW.`integrity_policy_version`
     OR OLD.`bad_sector_count` IS NOT NEW.`bad_sector_count`
     OR OLD.`bad_area_count` IS NOT NEW.`bad_area_count`
     OR OLD.`bad_sector_ranges` IS NOT NEW.`bad_sector_ranges`
     OR OLD.`bad_sector_counts_by_title` IS NOT NEW.`bad_sector_counts_by_title`
   )
-  AND NOT EXISTS (
-    SELECT 1
-    FROM `dvd_archive_evidence_headers` AS evidence_header
-    INNER JOIN `archive_jobs` AS source_job ON source_job.`id` = evidence_header.`source_archive_job_id`
-    INNER JOIN `archive_requests` AS source_request ON source_request.`id` = source_job.`archive_request_id`
-    INNER JOIN `disc_inspections` AS source_inspection ON source_inspection.`id` = source_job.`disc_inspection_id`
-    INNER JOIN `dvd_archive_evidence_manifests` AS committed_manifest
-      ON committed_manifest.`original_disc_archive_id` = evidence_header.`original_disc_archive_id`
-      AND committed_manifest.`revision` <= evidence_header.`current_manifest_revision`
-    WHERE evidence_header.`original_disc_archive_id` = NEW.`id`
+  AND (
+    NEW.`integrity_evidence_revision` IS NULL
+    OR (OLD.`integrity_evidence_revision` IS NOT NULL
+      AND NEW.`integrity_evidence_revision` < OLD.`integrity_evidence_revision`)
+    OR NOT EXISTS (
+      SELECT 1
+      FROM `dvd_archive_evidence_headers` AS evidence_header
+      INNER JOIN `archive_jobs` AS source_job ON source_job.`id` = evidence_header.`source_archive_job_id`
+      INNER JOIN `archive_requests` AS source_request ON source_request.`id` = source_job.`archive_request_id`
+      INNER JOIN `disc_inspections` AS source_inspection ON source_inspection.`id` = source_job.`disc_inspection_id`
+      INNER JOIN `dvd_archive_evidence_manifests` AS committed_manifest
+        ON committed_manifest.`original_disc_archive_id` = evidence_header.`original_disc_archive_id`
+        AND committed_manifest.`revision` = NEW.`integrity_evidence_revision`
+        AND NEW.`integrity_evidence_revision` <= evidence_header.`current_manifest_revision`
+      WHERE evidence_header.`original_disc_archive_id` = NEW.`id`
       AND NEW.`disc_kind` = 'dvd'
       AND NEW.`fingerprint` = committed_manifest.`image_fingerprint`
       AND NEW.`boundary_policy_version` = evidence_header.`boundary_policy_version`
@@ -412,6 +420,7 @@ WHEN EXISTS (SELECT 1 FROM `dvd_archive_evidence_headers` WHERE `original_disc_a
           )
           AND NEW.`bad_sector_counts_by_title` IS NULL)
       )
+    )
   )
 BEGIN SELECT RAISE(ABORT, 'Archive Integrity projection must match a committed DVD evidence manifest'); END;--> statement-breakpoint
 CREATE TRIGGER `dvd_evidence_archive_recovery_insert_guard`
