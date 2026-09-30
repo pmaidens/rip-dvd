@@ -12,6 +12,48 @@ import {
 } from "./dvd-archive-evidence-digests.js";
 
 describe("DVD Archive Evidence digests", () => {
+  it("rejects legacy normal-boundary evidence with unequal sizes", () => {
+    expect(() => createDvdArchiveBoundaryEvidenceDigest({
+      policyVersion: "dvd-archive-boundary-v1",
+      reportedSizeBytes: 4_096,
+      publishedSizeBytes: 2_048,
+      excludedSectorCount: 0,
+    })).toThrow("Normal DVD archive-boundary evidence is invalid");
+  });
+
+  it("rejects legacy normal-boundary evidence above the DVD size ceiling", () => {
+    expect(() => createDvdArchiveBoundaryEvidenceDigest({
+      policyVersion: "dvd-archive-boundary-v1",
+      reportedSizeBytes: 9_000_001_536,
+      publishedSizeBytes: 9_000_001_536,
+      excludedSectorCount: 0,
+    })).toThrow("Normal DVD archive-boundary evidence is invalid");
+  });
+
+  it("accepts valid v2 normal-boundary evidence with endpoint proof", () => {
+    expect(() => createDvdArchiveBoundaryEvidenceDigest({
+      policyVersion: "dvd-archive-boundary-v2",
+      reportedSizeBytes: 8_192,
+      publishedSizeBytes: 8_192,
+      excludedSectorCount: 0,
+      endpointProof: {
+        proofVersion: "dvd-normal-endpoint-proof-v1",
+        confirmationCount: 2,
+        firstExcludedLba: 4,
+        outOfRangeEvidence: {
+          classifierVersion: "scsi-read-classifier-v2",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 0x70,
+          senseKey: 0x05,
+          asc: 0x21,
+          ascq: 0,
+        },
+      },
+    })).not.toThrow();
+  });
+
   it("uses stable domain-separated canonical encodings", () => {
     const boundaryEvidenceDigest = createDvdArchiveBoundaryEvidenceDigest({
       policyVersion: "dvd-archive-boundary-v1",

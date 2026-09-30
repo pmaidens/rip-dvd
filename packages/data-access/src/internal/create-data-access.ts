@@ -684,6 +684,10 @@ const requestedDetectedDiscRecords = alias(
   detectedDiscs,
   "requested_detected_discs",
 );
+const evidenceArchiveDetectedDiscRecords = alias(
+  detectedDiscs,
+  "evidence_archive_detected_discs",
+);
 const previousDvdArchiveEvidenceManifests = alias(
   dvdArchiveEvidenceManifests,
   "previous_dvd_archive_evidence_manifests",
@@ -4713,6 +4717,10 @@ export function createDataAccessInternal(
     replacesExistingOutput: boolean;
   }
 
+  interface DvdEvidenceReplacementEncodingCapability {
+    originalDiscArchiveId: OriginalDiscArchiveId;
+  }
+
   function requireEncodeJob(
     reader: RearchiveProposalReader,
     id: EncodeJobId,
@@ -4783,33 +4791,40 @@ export function createDataAccessInternal(
   function requireDvdEvidenceReplacementEncodingAvailable(
     reader: RearchiveProposalReader,
     originalDiscArchiveId: OriginalDiscArchiveId,
-  ): void {
-    if (!hasDvdRecoveryEvidenceSchema) return;
-    const evidenceHeader = reader
-      .select({ id: dvdArchiveEvidenceHeaders.originalDiscArchiveId })
-      .from(dvdArchiveEvidenceHeaders)
-      .where(eq(
-        dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-        originalDiscArchiveId,
-      ))
-      .limit(1)
-      .get();
-    if (evidenceHeader !== undefined) {
-      throw new DvdRecoveryEvidenceEncodingUnavailableError();
+  ): DvdEvidenceReplacementEncodingCapability {
+    if (hasDvdRecoveryEvidenceSchema) {
+      const evidenceHeader = reader
+        .select({ id: dvdArchiveEvidenceHeaders.originalDiscArchiveId })
+        .from(dvdArchiveEvidenceHeaders)
+        .where(eq(
+          dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+          originalDiscArchiveId,
+        ))
+        .limit(1)
+        .get();
+      if (evidenceHeader !== undefined) {
+        throw new DvdRecoveryEvidenceEncodingUnavailableError();
+      }
     }
+    return { originalDiscArchiveId };
   }
 
   function insertCorrectedEncodeReplacementJob(
     transaction: CatalogTransaction,
     candidate: ValidatedCorrectedEncodeReplacement,
     originalDiscArchiveId: OriginalDiscArchiveId,
+    evidenceEncodingCapability: DvdEvidenceReplacementEncodingCapability,
     discSelectionId: DiscSelectionId,
     timestamp: Date,
   ): EncodeJob {
-    requireDvdEvidenceReplacementEncodingAvailable(
-      transaction,
-      originalDiscArchiveId,
-    );
+    if (
+      evidenceEncodingCapability.originalDiscArchiveId !==
+        originalDiscArchiveId
+    ) {
+      throw new DomainInvariantError(
+        "Corrected Encode replacement evidence capability does not match the target archive",
+      );
+    }
     if (
       candidate.outputPath === candidate.predecessor.outputPath &&
       candidate.predecessor.reservesOutputPath
@@ -7147,6 +7162,7 @@ export function createDataAccessInternal(
               dvdArchiveEvidenceHeaders.currentManifestRevision,
             currentManifestDigest:
               dvdArchiveEvidenceHeaders.currentManifestDigest,
+            resolvedCurrentManifestId: dvdArchiveEvidenceManifests.id,
             headerBoundaryPolicyVersion:
               dvdArchiveEvidenceHeaders.boundaryPolicyVersion,
             headerBoundaryReportedSizeBytes:
@@ -7200,6 +7216,9 @@ export function createDataAccessInternal(
             recoveryReadEvidenceDigest:
               dvdArchiveRecoveryReads.evidenceDigest,
             archiveDetectedDiscId: originalDiscArchives.detectedDiscId,
+            resolvedOriginalDiscArchiveId: originalDiscArchives.id,
+            archiveRearchiveSourceArchiveId:
+              originalDiscArchives.rearchiveSourceArchiveId,
             archiveDiscKind: originalDiscArchives.discKind,
             archiveFingerprint: originalDiscArchives.fingerprint,
             archiveSizeBytes: originalDiscArchives.sizeBytes,
@@ -7232,42 +7251,76 @@ export function createDataAccessInternal(
             boundaryReadFailureAscq:
               originalDiscArchives.boundaryReadFailureAscq,
             sourceJobOriginalDiscArchiveId: archiveJobs.originalDiscArchiveId,
+            resolvedSourceJobId: archiveJobs.id,
             sourceJobDetectedDiscId: archiveJobs.detectedDiscId,
             sourceJobEvidenceFormat: archiveJobs.evidenceFormat,
             sourceJobStatus: archiveJobs.status,
             sourceRequestDetectedDiscId: archiveRequests.detectedDiscId,
+            sourceRequestId: archiveRequests.id,
+            sourceRequestRearchiveSourceArchiveId:
+              archiveRequests.rearchiveSourceArchiveId,
             sourceRequestEvidenceFormat: archiveRequests.evidenceFormat,
             sourceRequestStatus: archiveRequests.status,
+            requestedDiscKind: requestedDetectedDiscRecords.discKind,
+            requestedDiscFingerprint:
+              requestedDetectedDiscRecords.fingerprint,
+            requestedDiscScanData: requestedDetectedDiscRecords.scanData,
+            requestedDiscStatus: requestedDetectedDiscRecords.status,
+            archiveDiscFingerprint:
+              evidenceArchiveDetectedDiscRecords.fingerprint,
+            archiveDiscScanData: evidenceArchiveDetectedDiscRecords.scanData,
+            requestDeclaredByteCountMatches: sql<boolean>`not exists (
+              select 1
+              from archive_jobs as provenance_attempt
+              inner join disc_inspections as provenance_inspection
+                on provenance_inspection.id = provenance_attempt.disc_inspection_id
+              where provenance_attempt.archive_request_id = ${archiveRequests.id}
+                and provenance_inspection.total_bytes is not null
+                and provenance_inspection.total_bytes <>
+                  ${dvdArchiveEvidenceHeaders.boundaryReportedSizeBytes}
+            )`,
             sourceInspectionDetectedDiscId: discInspections.detectedDiscId,
+            sourceInspectionId: discInspections.id,
             sourceInspectionStatus: discInspections.status,
             sourceInspectionTotalBytes: discInspections.totalBytes,
             createdAt: dvdArchiveEvidenceHeaders.createdAt,
             updatedAt: dvdArchiveEvidenceHeaders.updatedAt,
           })
           .from(dvdArchiveEvidenceHeaders)
-          .innerJoin(
+          .leftJoin(
             dvdArchiveEvidenceManifests,
             eq(
               dvdArchiveEvidenceManifests.id,
               dvdArchiveEvidenceHeaders.currentManifestId,
             ),
           )
-          .innerJoin(
+          .leftJoin(
             originalDiscArchives,
             eq(
               originalDiscArchives.id,
               dvdArchiveEvidenceHeaders.originalDiscArchiveId,
             ),
           )
-          .innerJoin(
+          .leftJoin(
             archiveJobs,
             eq(archiveJobs.id, dvdArchiveEvidenceHeaders.sourceArchiveJobId),
           )
-          .innerJoin(
+          .leftJoin(
             archiveRequests,
             eq(archiveRequests.id, archiveJobs.archiveRequestId),
           )
-          .innerJoin(
+          .leftJoin(
+            evidenceArchiveDetectedDiscRecords,
+            eq(
+              evidenceArchiveDetectedDiscRecords.id,
+              originalDiscArchives.detectedDiscId,
+            ),
+          )
+          .leftJoin(
+            requestedDetectedDiscRecords,
+            eq(requestedDetectedDiscRecords.id, archiveRequests.detectedDiscId),
+          )
+          .leftJoin(
             discInspections,
             eq(discInspections.id, archiveJobs.discInspectionId),
           )
@@ -7293,6 +7346,34 @@ export function createDataAccessInternal(
         >();
 
         for (const row of rows) {
+          if (
+            row.resolvedCurrentManifestId === null ||
+            row.resolvedOriginalDiscArchiveId === null ||
+            row.resolvedSourceJobId === null ||
+            row.sourceRequestId === null ||
+            row.sourceInspectionId === null ||
+            row.archiveDiscFingerprint === null ||
+            row.requestedDiscKind === null ||
+            row.requestedDiscFingerprint === null ||
+            row.requestedDiscStatus === null ||
+            row.manifestOriginalDiscArchiveId === null ||
+            row.manifestRevision === null ||
+            row.manifestEvidenceFormat === null ||
+            row.manifestImageFingerprint === null ||
+            row.manifestSectorSizeBytes === null ||
+            row.manifestAcceptedEndLbaExclusive === null ||
+            row.manifestBoundaryPolicyVersion === null ||
+            row.manifestBoundaryReportedSizeBytes === null ||
+            row.manifestBoundaryPublishedSizeBytes === null ||
+            row.manifestBoundaryEvidenceDigest === null ||
+            row.unrecoveredSourceRanges === null ||
+            row.unrecoveredSourceRangesDigest === null ||
+            row.manifestDigest === null
+          ) {
+            throw new DomainInvariantError(
+              "Persisted DVD Archive Evidence authoritative links are incomplete",
+            );
+          }
           const boundaryEvidence = archiveBoundaryEvidenceFromRecord(row);
           if (boundaryEvidence === null) {
             throw new DomainInvariantError(
@@ -7308,14 +7389,43 @@ export function createDataAccessInternal(
             row.manifestBoundaryEvidenceDigest,
           );
 
+          const archiveTitleMap = decodeDvdTitleMap(
+            row.archiveDiscScanData,
+          );
+          const requestedTitleMap = decodeDvdTitleMap(
+            row.requestedDiscScanData,
+          );
+          const requestMatchesPublishedDisc =
+            row.sourceRequestDetectedDiscId === row.archiveDetectedDiscId ||
+            (
+              row.requestDeclaredByteCountMatches &&
+              row.requestedDiscKind === "dvd" &&
+              row.requestedDiscStatus === requiredArchiveRequestDiscStatus({
+                rearchiveSourceArchiveId:
+                  row.sourceRequestRearchiveSourceArchiveId,
+              }) &&
+              (
+                row.sourceRequestRearchiveSourceArchiveId === null
+                  ? row.archiveDiscFingerprint === row.archiveFingerprint &&
+                    row.requestedDiscFingerprint ===
+                      row.archiveDiscFingerprint &&
+                    archiveTitleMap?.contentId ===
+                      row.archiveDiscFingerprint &&
+                    requestedTitleMap?.contentId ===
+                      row.archiveDiscFingerprint
+                  : row.archiveRearchiveSourceArchiveId ===
+                    row.sourceRequestRearchiveSourceArchiveId
+              )
+            );
           if (
             row.archiveDiscKind !== "dvd" ||
+            row.archiveDiscFingerprint !== row.archiveFingerprint ||
             row.sourceJobOriginalDiscArchiveId !==
               row.originalDiscArchiveId ||
             row.sourceJobDetectedDiscId !== row.archiveDetectedDiscId ||
             row.sourceJobEvidenceFormat !== row.evidenceFormat ||
             row.sourceJobStatus !== "completed" ||
-            row.sourceRequestDetectedDiscId !== row.archiveDetectedDiscId ||
+            !requestMatchesPublishedDisc ||
             row.sourceRequestEvidenceFormat !== row.evidenceFormat ||
             row.sourceRequestStatus !== "fulfilled" ||
             row.sourceInspectionDetectedDiscId !==
@@ -8093,9 +8203,9 @@ export function createDataAccessInternal(
             transaction,
             true,
           );
-          if (replacements.length > 0) {
-            requireDvdEvidenceReplacementEncodingAvailable(transaction, id);
-          }
+          const evidenceEncodingCapability = replacements.length === 0
+            ? null
+            : requireDvdEvidenceReplacementEncodingAvailable(transaction, id);
           if (archive.updatedAt.getTime() !== catalogRevision.getTime()) {
             throw new StaleCatalogRevisionError(
               "Catalog review changed; reload before completing review",
@@ -8194,15 +8304,18 @@ export function createDataAccessInternal(
           );
 
           const replacementEncodeJobs: EncodeJob[] = [];
-          for (const candidate of candidates) {
-            const replacement = insertCorrectedEncodeReplacementJob(
-              transaction,
-              candidate,
-              id,
-              candidate.plan.replacementDiscSelectionId,
-              timestamp,
-            );
-            replacementEncodeJobs.push(replacement);
+          if (evidenceEncodingCapability !== null) {
+            for (const candidate of candidates) {
+              const replacement = insertCorrectedEncodeReplacementJob(
+                transaction,
+                candidate,
+                id,
+                evidenceEncodingCapability,
+                candidate.plan.replacementDiscSelectionId,
+                timestamp,
+              );
+              replacementEncodeJobs.push(replacement);
+            }
           }
 
           releaseCorrectedFailedReservationsStatement.run(
@@ -9645,12 +9758,12 @@ export function createDataAccessInternal(
           );
           if (replay !== undefined) return replay;
 
-          if (input.replacements.length > 0) {
-            requireDvdEvidenceReplacementEncodingAvailable(
+          const evidenceEncodingCapability = input.replacements.length === 0
+            ? null
+            : requireDvdEvidenceReplacementEncodingAvailable(
               transaction,
               input.targetArchiveId,
             );
-          }
 
           const plan = planRearchiveAcceptance(transaction, input);
           const previewDecision = transaction
@@ -9771,31 +9884,34 @@ export function createDataAccessInternal(
           );
 
           const replacementEncodeJobs: EncodeJob[] = [];
-          for (const replacement of plan.replacementEncodes) {
-            const predecessor = requireEncodeJob(
-              transaction,
-              replacement.predecessorEncodeJobId,
-            );
-            const replacementDiscSelectionId = requireRow(
-              replacementDiscSelectionIds.get(
+          if (evidenceEncodingCapability !== null) {
+            for (const replacement of plan.replacementEncodes) {
+              const predecessor = requireEncodeJob(
+                transaction,
+                replacement.predecessorEncodeJobId,
+              );
+              const replacementDiscSelectionId = requireRow(
+                replacementDiscSelectionIds.get(
+                  replacement.sourceDiscSelectionId,
+                ),
+                "accepted Re-archive Disc Selection",
                 replacement.sourceDiscSelectionId,
-              ),
-              "accepted Re-archive Disc Selection",
-              replacement.sourceDiscSelectionId,
-            );
-            replacementEncodeJobs.push(insertCorrectedEncodeReplacementJob(
-              transaction,
-              {
-                input: replacement,
-                predecessor,
-                outputPath: replacement.outputPath,
-                replacesExistingOutput:
-                  replacement.replacesExistingOutput,
-              },
-              plan.targetArchiveId,
-              replacementDiscSelectionId,
-              timestamp,
-            ));
+              );
+              replacementEncodeJobs.push(insertCorrectedEncodeReplacementJob(
+                transaction,
+                {
+                  input: replacement,
+                  predecessor,
+                  outputPath: replacement.outputPath,
+                  replacesExistingOutput:
+                    replacement.replacesExistingOutput,
+                },
+                plan.targetArchiveId,
+                evidenceEncodingCapability,
+                replacementDiscSelectionId,
+                timestamp,
+              ));
+            }
           }
 
           releaseCorrectedFailedReservationsStatement.run(

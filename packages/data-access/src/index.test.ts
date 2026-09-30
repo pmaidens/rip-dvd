@@ -6023,6 +6023,83 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("queues many corrected replacements after validating the target once", () => {
+    const {
+      access,
+      archive,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "replacement-plan-many-jobs",
+    });
+    if (!correctedItem) {
+      throw new Error("Expected correction target");
+    }
+    const profiles = Array.from({ length: 20 }, (_, index) =>
+      access.encodingProfiles.create({
+        key: `replacement-plan-many-jobs-${index + 1}`,
+        displayName: `Replacement plan many jobs ${index + 1}`,
+        mediaDomain: "dvd_video",
+        settings: { preset: "Fast 480p30" },
+      })
+    );
+    const predecessors = profiles.map((profile, index) => {
+      const predecessor = access.encodeJobs.enqueue({
+        discSelectionId: mistakenSelection.id,
+        encodingProfileId: profile.id,
+        outputPath: `/media/movies/Synthetic replacement ${index + 1}.mkv`,
+      });
+      const claim = access.encodeJobs.claimNext(
+        `replacement-many-jobs-${index + 1}`,
+      );
+      if (!claim || claim.id !== predecessor.id) {
+        throw new Error("Expected synthetic replacement predecessor claim");
+      }
+      access.encodeJobs.complete(claim);
+      return predecessor;
+    });
+    const correction = access.catalog.correctDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    );
+    const plans = access.catalog.listCorrectedEncodeReplacementPlans({
+      originalDiscArchiveId: archive.id,
+      limit: 100,
+    });
+
+    const replacements = access.catalog.completeCatalogReviewWithReplacements(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+      plans.map((plan) => ({
+        predecessorEncodeJobId: plan.predecessorEncodeJobId,
+        encodingProfileId: plan.proposedEncodingProfileId,
+        outputPath: plan.proposedOutputPath,
+      })),
+    ).replacementEncodeJobs;
+
+    expect(plans).toHaveLength(predecessors.length);
+    expect(replacements).toHaveLength(predecessors.length);
+    expect(new Set(replacements.map((replacement) => replacement.id)).size)
+      .toBe(predecessors.length);
+    expect(replacements).toEqual(expect.arrayContaining(
+      predecessors.map((predecessor) => expect.objectContaining({
+        predecessorEncodeJobId: predecessor.id,
+        discSelectionId: correction.discSelection.id,
+        encodingProfileId: predecessor.encodingProfileId,
+      })),
+    ));
+    access.close();
+  });
+
   it("bounds corrected replacement plan pages at the public facade", () => {
     const { access, archive } = createDiscSelectionCorrectionFixture({
       key: "replacement-plan-limit",

@@ -149,25 +149,10 @@ function canonicalBoundaryPayload(evidence: ArchiveBoundaryEvidence): unknown {
 export function createDvdArchiveBoundaryEvidenceDigest(
   evidence: ArchiveBoundaryEvidence,
 ): string {
-  const normalized =
-    evidence.policyVersion === "dvd-archive-boundary-v1" &&
-      evidence.excludedSectorCount === 0
-      ? evidence
-      : validateDvdArchiveBoundaryEvidence(
-        evidence,
-        evidence.publishedSizeBytes,
-      );
-  if (
-    !Number.isSafeInteger(normalized.reportedSizeBytes) ||
-    normalized.reportedSizeBytes <= 0 ||
-    !Number.isSafeInteger(normalized.publishedSizeBytes) ||
-    normalized.publishedSizeBytes <= 0 ||
-    normalized.publishedSizeBytes > normalized.reportedSizeBytes ||
-    normalized.reportedSizeBytes % 2_048 !== 0 ||
-    normalized.publishedSizeBytes % 2_048 !== 0
-  ) {
-    throw new DomainInvariantError("Archive Boundary Evidence is invalid");
-  }
+  const normalized = validateDvdArchiveBoundaryEvidence(
+    evidence,
+    evidence.publishedSizeBytes,
+  );
   return digest(BOUNDARY_EVIDENCE_DOMAIN, canonicalBoundaryPayload(normalized));
 }
 

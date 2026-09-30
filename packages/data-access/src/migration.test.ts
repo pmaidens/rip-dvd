@@ -611,6 +611,18 @@ it("backfills retained Encode Output ownership from durable insertion order", ()
 
 it("migrates legacy archives and rehearses restoring the pre-write DVD evidence backup", () => {
   const databasePath = createDatabasePath("rip-dvd-evidence-migration-");
+  const continuationFingerprint = `dvdmeta-sha256:${"4".repeat(64)}`;
+  const continuationScanData = JSON.stringify({
+    schemaVersion: 2,
+    contentId: continuationFingerprint,
+    titles: [{
+      number: 1,
+      durationSeconds: 3_600,
+      chapters: 10,
+      audioStreams: [],
+      subtitles: [],
+    }],
+  });
   const evidenceMigrations = [
     "20260930002706_dvd-evidence-compatibility",
     "20260930003106_dvd-evidence-authority",
@@ -634,6 +646,16 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     seedEncodeJob(databasePath, key);
   }
   const historical = new DatabaseSync(databasePath);
+  historical.prepare(`
+    UPDATE detected_discs
+    SET fingerprint = ?, scan_data = ?
+    WHERE id = 'evidence-new-format-disc'
+  `).run(continuationFingerprint, continuationScanData);
+  historical.prepare(`
+    UPDATE original_disc_archives
+    SET fingerprint = ?
+    WHERE id = 'evidence-new-format-archive'
+  `).run(continuationFingerprint);
   historical.exec(`
     UPDATE original_disc_archives
     SET size_bytes = 4096,
@@ -971,6 +993,19 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     WHERE id = 'evidence-legacy-unknown-archive'
   `)).toThrow(/requires authoritative DVD evidence/i);
   admissionCheck.exec(`
+    INSERT INTO optical_drives (
+      id, device_path, is_present, last_seen_at, created_at, updated_at
+    ) VALUES (
+      'evidence-request-drive', '/dev/evidence-request', 0, 1, 1, 1
+    );
+    INSERT INTO detected_discs (
+      id, optical_drive_id, disc_kind, fingerprint, status, scan_data,
+      detected_at, created_at, updated_at
+    ) VALUES (
+      'evidence-request-disc', 'evidence-request-drive', 'dvd',
+      '${continuationFingerprint}', 'approved', '${continuationScanData}',
+      1, 1, 1
+    );
     INSERT INTO disc_inspections (
       id, optical_drive_id, detected_disc_id, media_generation, is_current,
       status, phase, total_bytes, phase_started_at, attempt_started_at, started_at,
@@ -985,7 +1020,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       id, detected_disc_id, evidence_format, status, priority, fulfilled_at,
       created_at, updated_at
     ) VALUES (
-      'evidence-new-format-request', 'evidence-new-format-disc',
+      'evidence-new-format-request', 'evidence-request-disc',
       'dvd-recovery-evidence-v1', 'fulfilled', 0, 1, 1, 1
     );
 
@@ -1115,7 +1150,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     recoveryReadId: null,
     recoveryReadEvidenceDigest: null,
     evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
-    imageFingerprint: "evidence-new-format-fingerprint",
+    imageFingerprint: continuationFingerprint,
     sectorSizeBytes: 2_048,
     acceptedEndLbaExclusive: 2,
     boundaryPolicyVersion: "dvd-archive-boundary-v1",
@@ -1142,7 +1177,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     recoveryReadId: "evidence-new-format-read-1",
     recoveryReadEvidenceDigest: recoveryReadDigest,
     evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
-    imageFingerprint: "evidence-new-format-fingerprint",
+    imageFingerprint: continuationFingerprint,
     sectorSizeBytes: 2_048,
     acceptedEndLbaExclusive: 2,
     boundaryPolicyVersion: "dvd-archive-boundary-v1",
@@ -1193,16 +1228,21 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   evidenceFixture.exec(`
     INSERT INTO optical_drives (
       id, device_path, is_present, last_seen_at, created_at, updated_at
-    ) VALUES (
-      'evidence-clean-drive', '/dev/evidence-clean', 1, 1, 1, 1
-    );
+    ) VALUES
+      ('evidence-clean-drive', '/dev/evidence-clean', 1, 1, 1, 1),
+      ('evidence-clean-source-drive', '/dev/evidence-clean-source', 0, 1, 1, 1);
     INSERT INTO detected_discs (
       id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
       created_at, updated_at
-    ) VALUES (
-      'evidence-clean-disc', 'evidence-clean-drive', 'dvd',
-      'evidence-clean-fingerprint', 'archived', 1, 1, 1
-    );
+    ) VALUES
+      (
+        'evidence-clean-disc', 'evidence-clean-drive', 'dvd',
+        'evidence-clean-fingerprint', 'archived', 1, 1, 1
+      ),
+      (
+        'evidence-clean-source-disc', 'evidence-clean-source-drive', 'dvd',
+        'evidence-clean-fingerprint', 'archived', 1, 1, 1
+      );
     INSERT INTO disc_inspections (
       id, optical_drive_id, detected_disc_id, media_generation, is_current,
       status, phase, total_bytes, phase_started_at, attempt_started_at,
@@ -1214,6 +1254,15 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     );
     INSERT INTO original_disc_archives (
       id, detected_disc_id, disc_kind, archive_format, archive_path,
+      fingerprint, size_bytes, integrity, archived_at, created_at, updated_at
+    ) VALUES (
+      'evidence-clean-source-archive', 'evidence-clean-source-disc', 'dvd',
+      'iso', '/originals/evidence-clean-source.iso',
+      'evidence-clean-fingerprint', 6144, 'unknown', 0, 0, 0
+    );
+    INSERT INTO original_disc_archives (
+      id, detected_disc_id, rearchive_source_archive_id, disc_kind,
+      archive_format, archive_path,
       fingerprint, size_bytes, boundary_policy_version,
       boundary_reported_size_bytes, boundary_published_size_bytes,
       boundary_excluded_sector_count, boundary_first_excluded_lba,
@@ -1227,17 +1276,19 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       bad_sector_count, bad_area_count, bad_sector_ranges,
       archived_at, created_at, updated_at
     ) VALUES (
-      'evidence-clean-archive', 'evidence-clean-disc', 'dvd', 'iso',
+      'evidence-clean-archive', 'evidence-clean-disc',
+      'evidence-clean-source-archive', 'dvd', 'iso',
       '/originals/evidence-clean.iso', 'evidence-clean-fingerprint', 4096,
       'dvd-archive-boundary-v1', 6144, 4096, 1, 2, 0,
       'scsi-read-classifier-v2', 2, 0, 0, 112, 5, 33, 0, 'clean_read',
       'dvd-recovery-evidence-v1', 0, 0, '[]', 1, 1, 1
     );
     INSERT INTO archive_requests (
-      id, detected_disc_id, evidence_format, status, priority, fulfilled_at,
-      created_at, updated_at
+      id, detected_disc_id, rearchive_source_archive_id, evidence_format,
+      status, priority, fulfilled_at, created_at, updated_at
     ) VALUES (
-      'evidence-clean-request', 'evidence-clean-disc',
+      'evidence-clean-request', 'evidence-clean-source-disc',
+      'evidence-clean-source-archive',
       'dvd-recovery-evidence-v1', 'fulfilled', 0, 1, 1, 1
     );
     INSERT INTO archive_jobs (
@@ -1286,6 +1337,11 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     WHERE id = 'evidence-clean-archive'
   `);
   insertCleanHeader();
+  evidenceFixture.exec(`
+    UPDATE original_disc_archives
+    SET bad_sector_ranges = '[ ]'
+    WHERE id = 'evidence-clean-archive'
+  `);
   expect(() => evidenceFixture.exec(`
     UPDATE original_disc_archives
     SET boundary_maximum_referenced_lba = 1
@@ -1312,7 +1368,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       'evidence-new-format-archive',
       1,
       'dvd-recovery-evidence-v1',
-      'evidence-new-format-fingerprint',
+      '${continuationFingerprint}',
       2048,
       2,
       'dvd-archive-boundary-v1',
@@ -1432,7 +1488,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       recoveryReadId: "evidence-new-format-read-repeat",
       recoveryReadEvidenceDigest: repeatedRecoveryReadDigest,
       evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
-      imageFingerprint: "evidence-new-format-fingerprint",
+      imageFingerprint: continuationFingerprint,
       sectorSizeBytes: 2_048,
       acceptedEndLbaExclusive: 2,
       boundaryPolicyVersion: "dvd-archive-boundary-v1",
@@ -1515,7 +1571,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     ) VALUES (
       'evidence-new-format-manifest-2', 'evidence-new-format-archive', 2,
       'evidence-new-format-manifest-1', 'evidence-new-format-read-1',
-      'dvd-recovery-evidence-v1', 'evidence-new-format-fingerprint', 2048, 2,
+      'dvd-recovery-evidence-v1', '${continuationFingerprint}', 2048, 2,
       'dvd-archive-boundary-v1', 4096, 4096, '${boundaryDigest}', ?,
       '${failedRangesDigest}', '${failedManifestDigest}', 2
     )
@@ -1594,7 +1650,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       'evidence-new-format-manifest-repeat',
       'evidence-new-format-archive', 3,
       'evidence-new-format-manifest-2', 'evidence-new-format-read-repeat',
-      'dvd-recovery-evidence-v1', 'evidence-new-format-fingerprint', 2048, 2,
+      'dvd-recovery-evidence-v1', '${continuationFingerprint}', 2048, 2,
       'dvd-archive-boundary-v1', 4096, 4096, '${boundaryDigest}', ?,
       '${rejectedRepeatedManifest.unrecoveredSourceRangesDigest}',
       '${rejectedRepeatedManifest.manifestDigest}', 3
@@ -1629,6 +1685,18 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   tamperedRecoveryAccess.close();
 
   const currentAccess = createDataAccess({ databasePath });
+  expect(currentAccess.archiveRequests.find(
+    "evidence-new-format-request" as ArchiveRequestId,
+  )).toMatchObject({ detectedDiscId: "evidence-request-disc" });
+  expect(currentAccess.archiveJobs.find(
+    "evidence-new-format-archive-job" as ArchiveJobId,
+  )).toMatchObject({ detectedDiscId: "evidence-new-format-disc" });
+  expect(currentAccess.archiveRequests.find(
+    "evidence-clean-request" as ArchiveRequestId,
+  )).toMatchObject({ detectedDiscId: "evidence-clean-source-disc" });
+  expect(currentAccess.archiveJobs.find(
+    "evidence-clean-job" as ArchiveJobId,
+  )).toMatchObject({ detectedDiscId: "evidence-clean-disc" });
   expect(currentAccess.catalog.findDvdArchiveEvidenceHeader(
     "evidence-new-format-archive" as OriginalDiscArchiveId,
   )).toEqual({
@@ -1655,6 +1723,13 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     ],
     createdAt: new Date(1),
     updatedAt: new Date(2),
+  });
+  expect(currentAccess.catalog.findDvdArchiveEvidenceHeader(
+    "evidence-clean-archive" as OriginalDiscArchiveId,
+  )).toMatchObject({
+    originalDiscArchiveId: "evidence-clean-archive",
+    sourceArchiveJobId: "evidence-clean-job",
+    currentManifestRevision: 1,
   });
   expect(currentAccess.catalog.findArchiveRecovery(
     "evidence-new-format-archive" as OriginalDiscArchiveId,
@@ -1728,7 +1803,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       recoveryReadId: "evidence-new-format-read-2",
       recoveryReadEvidenceDigest: recoveredFirstSectorReadDigest,
       evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
-      imageFingerprint: "evidence-new-format-fingerprint",
+      imageFingerprint: continuationFingerprint,
       sectorSizeBytes: 2_048,
       acceptedEndLbaExclusive: 2,
       boundaryPolicyVersion: "dvd-archive-boundary-v1",
@@ -1755,7 +1830,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       recoveryReadId: "evidence-new-format-read-3",
       recoveryReadEvidenceDigest: recoveredLastSectorReadDigest,
       evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
-      imageFingerprint: "evidence-new-format-fingerprint",
+      imageFingerprint: continuationFingerprint,
       sectorSizeBytes: 2_048,
       acceptedEndLbaExclusive: 2,
       boundaryPolicyVersion: "dvd-archive-boundary-v1",
@@ -1796,7 +1871,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     ) VALUES (
       'evidence-new-format-manifest-3', 'evidence-new-format-archive', 3,
       'evidence-new-format-manifest-2', 'evidence-new-format-read-2',
-      'dvd-recovery-evidence-v1', 'evidence-new-format-fingerprint', 2048, 2,
+      'dvd-recovery-evidence-v1', '${continuationFingerprint}', 2048, 2,
       'dvd-archive-boundary-v1', 4096, 4096, '${boundaryDigest}',
       '[{"startLba":1,"sectorCount":1,"classification":"individually_failed"}]',
       '${recoveredFirstSectorManifest.unrecoveredSourceRangesDigest}',
@@ -1829,7 +1904,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     ) VALUES (
       'evidence-new-format-manifest-4', 'evidence-new-format-archive', 4,
       'evidence-new-format-manifest-3', 'evidence-new-format-read-3',
-      'dvd-recovery-evidence-v1', 'evidence-new-format-fingerprint', 2048, 2,
+      'dvd-recovery-evidence-v1', '${continuationFingerprint}', 2048, 2,
       'dvd-archive-boundary-v1', 4096, 4096, '${boundaryDigest}', '[]',
       '${recoveredLastSectorManifest.unrecoveredSourceRangesDigest}',
       '${recoveredLastSectorManifest.manifestDigest}', 4
@@ -1968,6 +2043,83 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     "Persisted DVD Archive Evidence source job provenance is invalid",
   );
   provenanceTamperedAccess.close();
+
+  const missingManifestPath = join(
+    dirname(databasePath),
+    "tampered-missing-current-manifest.sqlite",
+  );
+  copyFileSync(databasePath, missingManifestPath);
+  const missingManifestAccess = createDataAccess({
+    databasePath: missingManifestPath,
+  });
+  const missingManifestDatabase = new DatabaseSync(missingManifestPath);
+  missingManifestDatabase.exec(`
+    PRAGMA foreign_keys = OFF;
+    DROP TRIGGER dvd_evidence_header_update_guard;
+    UPDATE dvd_archive_evidence_headers
+    SET current_manifest_id = 'missing-current-manifest'
+    WHERE original_disc_archive_id = 'evidence-new-format-archive';
+  `);
+  missingManifestDatabase.close();
+
+  expect(() => missingManifestAccess.catalog.findDvdArchiveEvidenceHeader(
+    "evidence-new-format-archive" as OriginalDiscArchiveId,
+  )).toThrow(/authoritative links are incomplete/i);
+  expect(() => missingManifestAccess.catalog.auditDvdArchiveEvidenceChains([
+    "evidence-new-format-archive" as OriginalDiscArchiveId,
+  ])).toThrow(/authoritative links are incomplete/i);
+  missingManifestAccess.close();
+
+  for (const brokenLink of [
+    {
+      suffix: "source-job",
+      mutation: `
+        DROP TRIGGER dvd_evidence_header_update_guard;
+        UPDATE dvd_archive_evidence_headers
+        SET source_archive_job_id = 'missing-source-job'
+        WHERE original_disc_archive_id = 'evidence-new-format-archive';
+      `,
+    },
+    {
+      suffix: "source-request",
+      mutation: `
+        DROP TRIGGER dvd_evidence_archive_job_update_guard;
+        UPDATE archive_jobs
+        SET archive_request_id = 'missing-source-request'
+        WHERE id = 'evidence-new-format-archive-job';
+      `,
+    },
+    {
+      suffix: "source-inspection",
+      mutation: `
+        DROP TRIGGER dvd_evidence_archive_job_update_guard;
+        UPDATE archive_jobs
+        SET disc_inspection_id = NULL
+        WHERE id = 'evidence-new-format-archive-job';
+      `,
+    },
+  ]) {
+    const brokenLinkPath = join(
+      dirname(databasePath),
+      `tampered-missing-${brokenLink.suffix}.sqlite`,
+    );
+    copyFileSync(databasePath, brokenLinkPath);
+    const brokenLinkAccess = createDataAccess({ databasePath: brokenLinkPath });
+    const brokenLinkDatabase = new DatabaseSync(brokenLinkPath);
+    brokenLinkDatabase.exec(`
+      PRAGMA foreign_keys = OFF;
+      ${brokenLink.mutation}
+    `);
+    brokenLinkDatabase.close();
+
+    expect(() => brokenLinkAccess.catalog.findDvdArchiveEvidenceHeader(
+      "evidence-new-format-archive" as OriginalDiscArchiveId,
+    )).toThrow(/authoritative links are incomplete/i);
+    expect(() => brokenLinkAccess.catalog.auditDvdArchiveEvidenceChains([
+      "evidence-new-format-archive" as OriginalDiscArchiveId,
+    ])).toThrow(/authoritative links are incomplete/i);
+    brokenLinkAccess.close();
+  }
 });
 
 it("fails closed instead of inventing checkpoint identities for interstitial evidence", () => {

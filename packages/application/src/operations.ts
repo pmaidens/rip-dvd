@@ -1,4 +1,5 @@
 import {
+  DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
   DVD_RECOVERY_EVIDENCE_ADMISSION,
   DVD_RECOVERY_EVIDENCE_ENCODING,
   type DvdArchiveEvidenceHeader,
@@ -229,9 +230,27 @@ function evidenceHeadersForArchives(
   access: Pick<ConsistentReadAccess, "catalog">,
   archives: readonly OriginalDiscArchive[],
 ) {
-  return access.catalog.findDvdArchiveEvidenceHeaders(
-    [...new Set(archives.map((archive) => archive.id))],
-  );
+  const evidenceHeaders = new Map<
+    OriginalDiscArchiveId,
+    DvdArchiveEvidenceHeader
+  >();
+  const archiveIds = [...new Set(archives.map((archive) => archive.id))];
+  for (
+    let offset = 0;
+    offset < archiveIds.length;
+    offset += DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT
+  ) {
+    const batch = access.catalog.findDvdArchiveEvidenceHeaders(
+      archiveIds.slice(
+        offset,
+        offset + DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
+      ),
+    );
+    for (const [archiveId, evidenceHeader] of batch) {
+      evidenceHeaders.set(archiveId, evidenceHeader);
+    }
+  }
+  return evidenceHeaders;
 }
 
 function visibleDrive({ devicePath: _devicePath, serialNumber: _serialNumber, ...drive }:

@@ -261,10 +261,14 @@ BEGIN
     FROM `dvd_archive_evidence_manifests` AS current_manifest
     INNER JOIN `original_disc_archives` AS source_archive
       ON source_archive.`id` = NEW.`original_disc_archive_id`
+    INNER JOIN `detected_discs` AS source_detected_disc
+      ON source_detected_disc.`id` = source_archive.`detected_disc_id`
     INNER JOIN `archive_jobs` AS source_job
       ON source_job.`id` = NEW.`source_archive_job_id`
     INNER JOIN `archive_requests` AS source_request
       ON source_request.`id` = source_job.`archive_request_id`
+    INNER JOIN `detected_discs` AS requested_detected_disc
+      ON requested_detected_disc.`id` = source_request.`detected_disc_id`
     INNER JOIN `disc_inspections` AS source_inspection
       ON source_inspection.`id` = source_job.`disc_inspection_id`
     WHERE NEW.`current_manifest_revision` = 1
@@ -281,6 +285,8 @@ BEGIN
       AND current_manifest.`boundary_published_size_bytes` = NEW.`boundary_published_size_bytes`
       AND current_manifest.`boundary_evidence_digest` = NEW.`boundary_evidence_digest`
       AND source_archive.`disc_kind` = 'dvd'
+      AND source_detected_disc.`disc_kind` = source_archive.`disc_kind`
+      AND source_detected_disc.`fingerprint` = source_archive.`fingerprint`
       AND source_archive.`boundary_policy_version` = NEW.`boundary_policy_version`
       AND source_archive.`boundary_reported_size_bytes` = NEW.`boundary_reported_size_bytes`
       AND source_archive.`boundary_published_size_bytes` = NEW.`boundary_published_size_bytes`
@@ -289,7 +295,42 @@ BEGIN
       AND source_job.`detected_disc_id` = source_archive.`detected_disc_id`
       AND source_job.`evidence_format` = NEW.`evidence_format`
       AND source_job.`status` = 'completed'
-      AND source_request.`detected_disc_id` = source_archive.`detected_disc_id`
+      AND (
+        source_request.`detected_disc_id` = source_archive.`detected_disc_id`
+        OR (
+          requested_detected_disc.`disc_kind` = 'dvd'
+          AND requested_detected_disc.`status` = CASE
+            WHEN source_request.`rearchive_source_archive_id` IS NULL
+              THEN 'approved'
+            ELSE 'archived'
+          END
+          AND NOT EXISTS (
+            SELECT 1
+            FROM `archive_jobs` AS request_attempt
+            INNER JOIN `disc_inspections` AS request_attempt_inspection
+              ON request_attempt_inspection.`id` = request_attempt.`disc_inspection_id`
+            WHERE request_attempt.`archive_request_id` = source_request.`id`
+              AND request_attempt_inspection.`total_bytes` IS NOT NULL
+              AND request_attempt_inspection.`total_bytes` <> NEW.`boundary_reported_size_bytes`
+          )
+          AND (
+            (
+              source_request.`rearchive_source_archive_id` IS NULL
+              AND json_valid(source_detected_disc.`scan_data`)
+              AND json_extract(source_detected_disc.`scan_data`, '$.schemaVersion') = 2
+              AND json_extract(source_detected_disc.`scan_data`, '$.contentId') = source_detected_disc.`fingerprint`
+              AND requested_detected_disc.`fingerprint` = source_detected_disc.`fingerprint`
+              AND json_valid(requested_detected_disc.`scan_data`)
+              AND json_extract(requested_detected_disc.`scan_data`, '$.schemaVersion') = 2
+              AND json_extract(requested_detected_disc.`scan_data`, '$.contentId') = source_detected_disc.`fingerprint`
+            )
+            OR (
+              source_request.`rearchive_source_archive_id` IS NOT NULL
+              AND source_archive.`rearchive_source_archive_id` = source_request.`rearchive_source_archive_id`
+            )
+          )
+        )
+      )
       AND source_request.`evidence_format` = NEW.`evidence_format`
       AND source_request.`status` = 'fulfilled'
       AND source_inspection.`detected_disc_id` = source_archive.`detected_disc_id`
@@ -389,6 +430,8 @@ WHEN EXISTS (SELECT 1 FROM `dvd_archive_evidence_headers` WHERE `original_disc_a
       FROM `dvd_archive_evidence_headers` AS evidence_header
       INNER JOIN `archive_jobs` AS source_job ON source_job.`id` = evidence_header.`source_archive_job_id`
       INNER JOIN `archive_requests` AS source_request ON source_request.`id` = source_job.`archive_request_id`
+      INNER JOIN `detected_discs` AS source_detected_disc ON source_detected_disc.`id` = NEW.`detected_disc_id`
+      INNER JOIN `detected_discs` AS requested_detected_disc ON requested_detected_disc.`id` = source_request.`detected_disc_id`
       INNER JOIN `disc_inspections` AS source_inspection ON source_inspection.`id` = source_job.`disc_inspection_id`
       INNER JOIN `dvd_archive_evidence_manifests` AS committed_manifest
         ON committed_manifest.`original_disc_archive_id` = evidence_header.`original_disc_archive_id`
@@ -396,6 +439,8 @@ WHEN EXISTS (SELECT 1 FROM `dvd_archive_evidence_headers` WHERE `original_disc_a
         AND NEW.`integrity_evidence_revision` <= evidence_header.`current_manifest_revision`
       WHERE evidence_header.`original_disc_archive_id` = NEW.`id`
       AND NEW.`disc_kind` = 'dvd'
+      AND source_detected_disc.`disc_kind` = NEW.`disc_kind`
+      AND source_detected_disc.`fingerprint` = NEW.`fingerprint`
       AND NEW.`fingerprint` = committed_manifest.`image_fingerprint`
       AND NEW.`boundary_policy_version` = evidence_header.`boundary_policy_version`
       AND NEW.`boundary_reported_size_bytes` = evidence_header.`boundary_reported_size_bytes`
@@ -405,7 +450,42 @@ WHEN EXISTS (SELECT 1 FROM `dvd_archive_evidence_headers` WHERE `original_disc_a
       AND source_job.`detected_disc_id` = NEW.`detected_disc_id`
       AND source_job.`evidence_format` = evidence_header.`evidence_format`
       AND source_job.`status` = 'completed'
-      AND source_request.`detected_disc_id` = NEW.`detected_disc_id`
+      AND (
+        source_request.`detected_disc_id` = NEW.`detected_disc_id`
+        OR (
+          requested_detected_disc.`disc_kind` = 'dvd'
+          AND requested_detected_disc.`status` = CASE
+            WHEN source_request.`rearchive_source_archive_id` IS NULL
+              THEN 'approved'
+            ELSE 'archived'
+          END
+          AND NOT EXISTS (
+            SELECT 1
+            FROM `archive_jobs` AS request_attempt
+            INNER JOIN `disc_inspections` AS request_attempt_inspection
+              ON request_attempt_inspection.`id` = request_attempt.`disc_inspection_id`
+            WHERE request_attempt.`archive_request_id` = source_request.`id`
+              AND request_attempt_inspection.`total_bytes` IS NOT NULL
+              AND request_attempt_inspection.`total_bytes` <> evidence_header.`boundary_reported_size_bytes`
+          )
+          AND (
+            (
+              source_request.`rearchive_source_archive_id` IS NULL
+              AND json_valid(source_detected_disc.`scan_data`)
+              AND json_extract(source_detected_disc.`scan_data`, '$.schemaVersion') = 2
+              AND json_extract(source_detected_disc.`scan_data`, '$.contentId') = source_detected_disc.`fingerprint`
+              AND requested_detected_disc.`fingerprint` = source_detected_disc.`fingerprint`
+              AND json_valid(requested_detected_disc.`scan_data`)
+              AND json_extract(requested_detected_disc.`scan_data`, '$.schemaVersion') = 2
+              AND json_extract(requested_detected_disc.`scan_data`, '$.contentId') = source_detected_disc.`fingerprint`
+            )
+            OR (
+              source_request.`rearchive_source_archive_id` IS NOT NULL
+              AND NEW.`rearchive_source_archive_id` = source_request.`rearchive_source_archive_id`
+            )
+          )
+        )
+      )
       AND source_request.`evidence_format` = evidence_header.`evidence_format`
       AND source_request.`status` = 'fulfilled'
       AND source_inspection.`detected_disc_id` = NEW.`detected_disc_id`
