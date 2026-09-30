@@ -33,9 +33,9 @@ const trustedOrigin = "http://localhost:3000";
 
 it("shares canonical Encode Output inspection across web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
-  const { predecessor } = seedCatalogReviewForReadFixture(fixture);
-  const outputPath = join(fixture.mediaLibraryPath, "previous-film.mkv");
-  writeFileSync(outputPath, "synthetic parity output");
+  const { predecessor } = seedCatalogReviewForReadFixture(fixture, {
+    validatedOutputContents: "synthetic parity output",
+  });
   const artifactIdentity = encodeOutputArtifactIdentity(predecessor.id);
   const mediaProbe: EncodeOutputMediaProbe = async () => ({
     durationSeconds: 3_600.5,
@@ -70,6 +70,14 @@ it("shares canonical Encode Output inspection across web and CLI", async () => {
     expect(web.headers.get("Cache-Control")).toBe("no-store");
     expect(cli.exitCode).toBe(0);
     expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toMatchObject({ artifact: {
+      availableActions: [{
+        name: "export",
+        eligible: true,
+        reasonCode: null,
+        reason: null,
+      }],
+    } });
   } finally {
     access.close();
     fixture.dispose();
@@ -78,11 +86,9 @@ it("shares canonical Encode Output inspection across web and CLI", async () => {
 
 it("shares unknown validation when canonical output probing is unavailable", async () => {
   const fixture = createOperatorWorkflowFixture();
-  const { predecessor } = seedCatalogReviewForReadFixture(fixture);
-  writeFileSync(
-    join(fixture.mediaLibraryPath, "previous-film.mkv"),
-    "synthetic parity output",
-  );
+  const { predecessor } = seedCatalogReviewForReadFixture(fixture, {
+    validatedOutputContents: "synthetic parity output",
+  });
   const artifactIdentity = encodeOutputArtifactIdentity(predecessor.id);
   const mediaProbe: EncodeOutputMediaProbe = async () => {
     throw new Error("Synthetic unavailable probe");
@@ -113,6 +119,12 @@ it("shares unknown validation when canonical output probing is unavailable", asy
         status: "unknown",
         reasonCode: "OUTPUT_PROBE_FAILED",
       },
+      availableActions: [{
+        name: "export",
+        eligible: true,
+        reasonCode: null,
+        reason: null,
+      }],
     } });
   } finally {
     access.close();

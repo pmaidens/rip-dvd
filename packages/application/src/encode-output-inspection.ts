@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
-import type { Stats } from "node:fs";
-import { lstat } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { lstat, open, unlink } from "node:fs/promises";
 
 import {
   encodeOutputFilesystemIdentity,
   matchesEncodeOutputFilesystemIdentity,
   RecordNotFoundError,
+  sameEncodeOutputInode,
   sameEncodeOutputMutationSnapshot,
 } from "@rip-dvd/data-access";
 import type {
@@ -66,6 +67,37 @@ export class InvalidEncodeOutputArtifactIdentityError extends Error {
   constructor() {
     super("Invalid Encode Output artifact identity.");
     this.name = "InvalidEncodeOutputArtifactIdentityError";
+  }
+}
+
+export class InvalidEncodeOutputExportInputError extends Error {
+  constructor(message = "Invalid Encode Output export input.") {
+    super(message);
+    this.name = "InvalidEncodeOutputExportInputError";
+  }
+}
+
+export type EncodeOutputExportReasonCode =
+  | "OUTPUT_AUTHORITY_CHANGED"
+  | "OUTPUT_IDENTITY_NOT_RECORDED"
+  | "OUTPUT_IDENTITY_CHANGED"
+  | "OUTPUT_MISSING"
+  | "OUTPUT_FILE_UNAVAILABLE"
+  | "OUTPUT_NOT_REGULAR"
+  | "OUTPUT_EMPTY"
+  | "OUTPUT_CHANGED_DURING_EXPORT"
+  | "EXPORT_DESTINATION_EXISTS"
+  | "EXPORT_DESTINATION_UNAVAILABLE";
+
+export class EncodeOutputExportRejectedError extends Error {
+  constructor(
+    readonly reasonCode: EncodeOutputExportReasonCode,
+    message: string,
+    readonly artifactIdentity: string,
+    readonly currentIdentity: EncodeOutputFilesystemIdentity | null,
+  ) {
+    super(message);
+    this.name = "EncodeOutputExportRejectedError";
   }
 }
 
@@ -359,12 +391,48 @@ function inspectionResponse(
       ),
       file: presentedFile,
       ...inspection,
-      availableActions: [{
-        name: "export" as const,
-        eligible: false,
-        reason: "Canonical Encode Output export is not available.",
-      }],
+      availableActions: [encodeOutputExportAction(
+        input,
+        presentedFile,
+        inspection,
+      )],
     },
+  };
+}
+
+function encodeOutputExportAction(
+  input: ResolvedEncodeOutput,
+  file: PresentedEncodeOutputFile,
+  inspection: Parameters<typeof inspectionResponse>[2],
+) {
+  const base = {
+    name: "export" as const,
+    requiredInputs: ["destination"] as const,
+  };
+  if (input.recordedFilesystemIdentity === null) {
+    return {
+      ...base,
+      eligible: false as const,
+      reasonCode: "OUTPUT_IDENTITY_NOT_RECORDED" as const,
+      reason: "The Encode Output has no recorded file identity.",
+    };
+  }
+  if (
+    file.status === "available" &&
+    file.identityContinuity === "verified"
+  ) {
+    return {
+      ...base,
+      eligible: true as const,
+      reasonCode: null,
+      reason: null,
+    };
+  }
+  return {
+    ...base,
+    eligible: false as const,
+    reasonCode: inspection.inspectability.reasonCode,
+    reason: inspection.inspectability.reason,
   };
 }
 
@@ -579,15 +647,7 @@ function changedAuthorityResponse(
   parsedIdentity: ParsedEncodeOutputArtifactIdentity,
   base: ResolvedEncodeOutput,
 ) {
-  let currentAuthority: ResolvedEncodeOutput | null = null;
-  try {
-    currentAuthority = resolveEncodeOutputAuthority(access, parsedIdentity);
-  } catch (error) {
-    if (!(error instanceof RecordNotFoundError)) throw error;
-  }
-  return currentAuthority === null ||
-      currentAuthority.authorityUnavailableReason !== null ||
-      currentAuthority.authorityKey !== base.authorityKey
+  return encodeOutputAuthorityChanged(access, parsedIdentity, base)
     ? fileUnavailable(
       base,
       "OUTPUT_AUTHORITY_CHANGED",
@@ -596,8 +656,24 @@ function changedAuthorityResponse(
     : null;
 }
 
+function encodeOutputAuthorityChanged(
+  access: DataAccess,
+  parsedIdentity: ParsedEncodeOutputArtifactIdentity,
+  base: ResolvedEncodeOutput,
+): boolean {
+  let currentAuthority: ResolvedEncodeOutput | null = null;
+  try {
+    currentAuthority = resolveEncodeOutputAuthority(access, parsedIdentity);
+  } catch (error) {
+    if (!(error instanceof RecordNotFoundError)) throw error;
+  }
+  return currentAuthority === null ||
+      currentAuthority.authorityUnavailableReason !== null ||
+      currentAuthority.authorityKey !== base.authorityKey;
+}
+
 function filesystemFailure(error: unknown): {
-  code: EncodeOutputInspectionReasonCode;
+  code: "OUTPUT_MISSING" | "OUTPUT_FILE_UNAVAILABLE";
   reason: string;
 } {
   const code = typeof error === "object" && error !== null && "code" in error
@@ -612,7 +688,7 @@ function filesystemFailure(error: unknown): {
 }
 
 function fileIsRegularAndNonempty(metadata: Stats): {
-  code: EncodeOutputInspectionReasonCode;
+  code: "OUTPUT_NOT_REGULAR" | "OUTPUT_EMPTY";
   reason: string;
 } | null {
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
@@ -773,6 +849,336 @@ export async function inspectEncodeOutput(
       },
     },
   );
+}
+
+const EXPORT_BUFFER_SIZE_BYTES = 1024 * 1024;
+
+class EncodeOutputExportCopyError extends Error {
+  constructor(readonly area: "source" | "destination") {
+    super(`Encode Output export ${area} failed.`);
+  }
+}
+
+async function currentEncodeOutputIdentity(
+  outputPath: string,
+): Promise<EncodeOutputFilesystemIdentity | null> {
+  try {
+    return encodeOutputFilesystemIdentity(await lstat(outputPath));
+  } catch {
+    return null;
+  }
+}
+
+async function rejectedSourceOpen(
+  base: ResolvedEncodeOutput,
+  error: unknown,
+): Promise<EncodeOutputExportRejectedError> {
+  try {
+    const metadata = await lstat(base.outputPath);
+    const currentIdentity = encodeOutputFilesystemIdentity(metadata);
+    const unsafeFile = fileIsRegularAndNonempty(metadata);
+    if (unsafeFile !== null) {
+      return new EncodeOutputExportRejectedError(
+        unsafeFile.code,
+        unsafeFile.reason,
+        base.artifactIdentity,
+        currentIdentity,
+      );
+    }
+    return new EncodeOutputExportRejectedError(
+      "OUTPUT_FILE_UNAVAILABLE",
+      "The recorded Encode Output file could not be inspected.",
+      base.artifactIdentity,
+      currentIdentity,
+    );
+  } catch {
+    const failure = filesystemFailure(error);
+    return new EncodeOutputExportRejectedError(
+      failure.code,
+      failure.reason,
+      base.artifactIdentity,
+      null,
+    );
+  }
+}
+
+function exportSourceRejection(
+  base: ResolvedEncodeOutput,
+  metadata: Stats,
+): EncodeOutputExportRejectedError | null {
+  const currentIdentity = encodeOutputFilesystemIdentity(metadata);
+  const unsafeFile = fileIsRegularAndNonempty(metadata);
+  if (unsafeFile !== null) {
+    return new EncodeOutputExportRejectedError(
+      unsafeFile.code,
+      unsafeFile.reason,
+      base.artifactIdentity,
+      currentIdentity,
+    );
+  }
+  if (base.recordedFilesystemIdentity === null) {
+    return new EncodeOutputExportRejectedError(
+      "OUTPUT_IDENTITY_NOT_RECORDED",
+      "The Encode Output has no recorded file identity.",
+      base.artifactIdentity,
+      currentIdentity,
+    );
+  }
+  return matchesEncodeOutputFilesystemIdentity(
+    base.recordedFilesystemIdentity,
+    metadata,
+  )
+    ? null
+    : new EncodeOutputExportRejectedError(
+      "OUTPUT_IDENTITY_CHANGED",
+      "The Encode Output no longer matches its recorded file identity.",
+      base.artifactIdentity,
+      currentIdentity,
+    );
+}
+
+async function removeCreatedExportDestination(
+  destinationPath: string,
+  openedMetadata: Stats,
+): Promise<void> {
+  try {
+    const currentMetadata = await lstat(destinationPath);
+    if (sameEncodeOutputInode(openedMetadata, currentMetadata)) {
+      await unlink(destinationPath);
+    }
+  } catch {
+    // The path is already absent or no longer safe for this operation to remove.
+  }
+}
+
+async function copyOpenFile(
+  source: Awaited<ReturnType<typeof open>>,
+  destination: Awaited<ReturnType<typeof open>>,
+): Promise<number> {
+  const buffer = Buffer.allocUnsafe(EXPORT_BUFFER_SIZE_BYTES);
+  let position = 0;
+  while (true) {
+    let bytesRead: number;
+    try {
+      ({ bytesRead } = await source.read(
+        buffer,
+        0,
+        buffer.length,
+        position,
+      ));
+    } catch {
+      throw new EncodeOutputExportCopyError("source");
+    }
+    if (bytesRead === 0) return position;
+    let written = 0;
+    while (written < bytesRead) {
+      let result: { bytesWritten: number };
+      try {
+        result = await destination.write(
+          buffer,
+          written,
+          bytesRead - written,
+          position + written,
+        );
+      } catch {
+        throw new EncodeOutputExportCopyError("destination");
+      }
+      if (result.bytesWritten === 0) {
+        throw new EncodeOutputExportCopyError("destination");
+      }
+      written += result.bytesWritten;
+    }
+    position += bytesRead;
+  }
+}
+
+export async function exportEncodeOutput(
+  access: DataAccess,
+  input: { artifactIdentity: unknown; destination: unknown },
+) {
+  if (
+    typeof input.destination !== "string" ||
+    input.destination.trim() === "" ||
+    input.destination.length > 4_096
+  ) {
+    throw new InvalidEncodeOutputExportInputError(
+      "Encode Output export destination is required.",
+    );
+  }
+  const parsedIdentity = parseEncodeOutputArtifactIdentity(
+    input.artifactIdentity,
+  );
+  const initialAuthority = resolveEncodeOutputAuthority(access, parsedIdentity);
+  if (initialAuthority.authorityUnavailableReason !== null) {
+    throw new EncodeOutputExportRejectedError(
+      "OUTPUT_AUTHORITY_CHANGED",
+      initialAuthority.authorityUnavailableReason,
+      initialAuthority.artifactIdentity,
+      await currentEncodeOutputIdentity(initialAuthority.outputPath),
+    );
+  }
+  let source: Awaited<ReturnType<typeof open>> | undefined;
+  let destination: Awaited<ReturnType<typeof open>> | undefined;
+  let openedDestinationMetadata: Stats | undefined;
+  let exportCompleted = false;
+  try {
+    let pathBeforeOpen: Stats;
+    try {
+      pathBeforeOpen = await lstat(initialAuthority.outputPath);
+    } catch (error) {
+      throw await rejectedSourceOpen(initialAuthority, error);
+    }
+    const pathRejection = exportSourceRejection(
+      initialAuthority,
+      pathBeforeOpen,
+    );
+    if (pathRejection !== null) throw pathRejection;
+    try {
+      source = await open(
+        initialAuthority.outputPath,
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      );
+    } catch (error) {
+      throw await rejectedSourceOpen(initialAuthority, error);
+    }
+    const before = await source.stat();
+    const sourceRejection = exportSourceRejection(initialAuthority, before);
+    if (sourceRejection !== null) throw sourceRejection;
+    const sourceIdentity = encodeOutputFilesystemIdentity(before);
+    try {
+      destination = await open(input.destination, "wx", 0o600);
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+      throw new EncodeOutputExportRejectedError(
+        code === "EEXIST"
+          ? "EXPORT_DESTINATION_EXISTS"
+          : "EXPORT_DESTINATION_UNAVAILABLE",
+        code === "EEXIST"
+          ? "The Encode Output export destination already exists."
+          : "The Encode Output export destination is unavailable.",
+        initialAuthority.artifactIdentity,
+        sourceIdentity,
+      );
+    }
+    openedDestinationMetadata = await destination.stat();
+    let byteSize: number;
+    try {
+      byteSize = await copyOpenFile(source, destination);
+    } catch (error) {
+      if (!(error instanceof EncodeOutputExportCopyError)) throw error;
+      throw new EncodeOutputExportRejectedError(
+        error.area === "source"
+          ? "OUTPUT_FILE_UNAVAILABLE"
+          : "EXPORT_DESTINATION_UNAVAILABLE",
+        error.area === "source"
+          ? "The recorded Encode Output file could not be read."
+          : "The Encode Output export destination could not be written.",
+        initialAuthority.artifactIdentity,
+        await currentEncodeOutputIdentity(initialAuthority.outputPath),
+      );
+    }
+    try {
+      await destination.sync();
+    } catch {
+      throw new EncodeOutputExportRejectedError(
+        "EXPORT_DESTINATION_UNAVAILABLE",
+        "The Encode Output export destination could not be synchronized.",
+        initialAuthority.artifactIdentity,
+        await currentEncodeOutputIdentity(initialAuthority.outputPath),
+      );
+    }
+    try {
+      const destinationAfter = await destination.stat();
+      const destinationPathAfter = await lstat(input.destination);
+      if (
+        destinationAfter.size !== byteSize ||
+        !sameEncodeOutputMutationSnapshot(
+          destinationAfter,
+          destinationPathAfter,
+        )
+      ) {
+        throw new Error("destination changed");
+      }
+    } catch {
+      throw new EncodeOutputExportRejectedError(
+        "EXPORT_DESTINATION_UNAVAILABLE",
+        "The Encode Output export destination changed during export.",
+        initialAuthority.artifactIdentity,
+        await currentEncodeOutputIdentity(initialAuthority.outputPath),
+      );
+    }
+    let after: Stats;
+    try {
+      after = await source.stat();
+    } catch {
+      throw new EncodeOutputExportRejectedError(
+        "OUTPUT_FILE_UNAVAILABLE",
+        "The recorded Encode Output file could not be inspected after export.",
+        initialAuthority.artifactIdentity,
+        await currentEncodeOutputIdentity(initialAuthority.outputPath),
+      );
+    }
+    let currentPath: Stats;
+    try {
+      currentPath = await lstat(initialAuthority.outputPath);
+    } catch {
+      throw new EncodeOutputExportRejectedError(
+        "OUTPUT_CHANGED_DURING_EXPORT",
+        "The Encode Output changed while it was being exported.",
+        initialAuthority.artifactIdentity,
+        null,
+      );
+    }
+    if (
+      !sameEncodeOutputMutationSnapshot(before, after) ||
+      !sameEncodeOutputMutationSnapshot(before, currentPath)
+    ) {
+      throw new EncodeOutputExportRejectedError(
+        "OUTPUT_CHANGED_DURING_EXPORT",
+        "The Encode Output changed while it was being exported.",
+        initialAuthority.artifactIdentity,
+        encodeOutputFilesystemIdentity(currentPath),
+      );
+    }
+    if (
+      encodeOutputAuthorityChanged(access, parsedIdentity, initialAuthority)
+    ) {
+      throw new EncodeOutputExportRejectedError(
+        "OUTPUT_AUTHORITY_CHANGED",
+        "Encode Output authority changed while the artifact was being exported.",
+        initialAuthority.artifactIdentity,
+        encodeOutputFilesystemIdentity(currentPath),
+      );
+    }
+    exportCompleted = true;
+    return {
+      schemaVersion: 1 as const,
+      artifact: {
+        identity: initialAuthority.artifactIdentity,
+        type: "canonical_encode_output" as const,
+        state: initialAuthority.artifactState,
+      },
+      byteSize,
+      destination: input.destination,
+      sourceIdentity,
+      provenance: historicalProvenance(
+        initialAuthority.job,
+        initialAuthority.originalDiscArchiveId,
+        initialAuthority.retainedOutputId,
+      ),
+    };
+  } finally {
+    await destination?.close().catch(() => {});
+    await source?.close().catch(() => {});
+    if (openedDestinationMetadata !== undefined && !exportCompleted) {
+      await removeCreatedExportDestination(
+        input.destination,
+        openedDestinationMetadata,
+      );
+    }
+  }
 }
 
 export type EncodeOutputInspection = Awaited<

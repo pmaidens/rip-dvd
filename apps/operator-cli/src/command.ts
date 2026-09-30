@@ -1,7 +1,9 @@
 import {
   createApplicationOperations,
   createTmdbCatalogLookup,
+  EncodeOutputExportRejectedError,
   InvalidEncodeOutputArtifactIdentityError,
+  InvalidEncodeOutputExportInputError,
   generateMutationKey,
   InvalidMutationKeyError,
   InvalidProfileInputError,
@@ -159,11 +161,11 @@ const commandDefinitions = [
   },
   {
     name: "encode-output",
-    description: "Inspect a canonical Encode Output by artifact identity.",
-    usage: "rip-dvd encode-output inspect <artifact-identity>",
+    description: "Inspect or export a canonical Encode Output by artifact identity.",
+    usage: "rip-dvd encode-output <inspect|export> <artifact-identity> [--destination <path>]",
     inputs: {
-      arguments: ["action: inspect", "artifact-identity"],
-      options: [],
+      arguments: ["action: inspect|export", "artifact-identity"],
+      options: ["--destination <path> (export only)"],
     },
     example:
       "rip-dvd encode-output inspect encode-output-v1.published.<encode-job-id>",
@@ -365,6 +367,7 @@ export class CommandFailure extends Error {
     message: string,
     readonly exitCode: CommandExitCode,
     readonly blockingReasons?: readonly { code: string; message: string }[],
+    readonly details?: Readonly<Record<string, unknown>>,
   ) {
     super(message);
   }
@@ -921,42 +924,69 @@ function inspectCommand(rest: readonly string[], io: CommandIO) {
   }
 }
 
-async function inspectEncodeOutputCommand(
+async function encodeOutputCommand(
   rest: readonly string[],
   io: CommandIO,
 ) {
   const [action, artifactIdentity] = rest;
   if (
-    action !== "inspect" ||
+    (action !== "inspect" && action !== "export") ||
     artifactIdentity === undefined ||
     artifactIdentity.length > 256 ||
-    rest.length !== 2
+    (action === "inspect" && rest.length !== 2) ||
+    (action === "export" &&
+      (rest.length !== 4 || rest[2] !== "--destination" || !rest[3]))
   ) {
     throw new CommandFailure(
       "INVALID_ARGUMENTS",
-      "Expected encode-output inspect <artifact-identity>.",
+      "Expected encode-output inspect <artifact-identity> or encode-output export <artifact-identity> --destination <path>.",
       2,
     );
   }
   let access: DataAccess | undefined;
   try {
     access = io.openAccess();
-    return await createApplicationOperations(access, {
+    const operations = createApplicationOperations(access, {
       ...(io.encodeOutputMediaProbe === undefined
         ? {}
         : { encodeOutputMediaProbe: io.encodeOutputMediaProbe }),
-    }).inspectEncodeOutput(artifactIdentity);
+    });
+    return action === "inspect"
+      ? await operations.inspectEncodeOutput(artifactIdentity)
+      : await operations.exportEncodeOutput({
+        artifactIdentity,
+        destination: rest[3],
+      });
   } catch (error) {
-    if (error instanceof InvalidEncodeOutputArtifactIdentityError) {
+    if (
+      error instanceof InvalidEncodeOutputArtifactIdentityError ||
+      error instanceof InvalidEncodeOutputExportInputError
+    ) {
       throw new CommandFailure("INVALID_ARGUMENTS", error.message, 2);
     }
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("ENCODE_OUTPUT_NOT_FOUND", "Encode Output not found.", 2);
     }
+    if (error instanceof EncodeOutputExportRejectedError) {
+      throw new CommandFailure(
+        error.reasonCode,
+        error.message,
+        2,
+        undefined,
+        {
+          artifactIdentity: error.artifactIdentity,
+          currentIdentity: error.currentIdentity,
+        },
+      );
+    }
     if (error instanceof CommandFailure) throw error;
     throw new CommandFailure(
-      "ENCODE_OUTPUT_INSPECTION_UNAVAILABLE",
-      "Encode Output inspection is unavailable.",
+      action === "export"
+        ? "ENCODE_OUTPUT_EXPORT_UNAVAILABLE"
+        : "ENCODE_OUTPUT_INSPECTION_UNAVAILABLE",
+      action === "export"
+        ? "Encode Output export is unavailable."
+        : "Encode Output inspection is unavailable.",
       1,
     );
   } finally {
@@ -1393,7 +1423,7 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
       if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
         emit(io.stdout, help(name));
       } else {
-        emit(io.stdout, await inspectEncodeOutputCommand(rest, io));
+        emit(io.stdout, await encodeOutputCommand(rest, io));
       }
       return 0;
     }
@@ -1484,6 +1514,7 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
   } catch (error) {
     if (error instanceof CommandFailure) {
       emit(io.stdout, { error: { code: error.code, message: error.message,
+        ...(error.details ?? {}),
         ...(error.blockingReasons ? { blockingReasons: error.blockingReasons } : {}) } });
       io.stderr(`${error.message}\n`);
       return error.exitCode;

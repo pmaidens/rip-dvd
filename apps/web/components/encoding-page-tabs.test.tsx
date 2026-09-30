@@ -65,6 +65,7 @@ function inspectedOutputResponse(
   artifactIdentity = job.encodeOutputArtifactIdentity,
   state: "published" | "retained" = "published",
   probeFailed = false,
+  exportEligible = false,
 ): Response {
   return Response.json({
     schemaVersion: 1,
@@ -78,11 +79,17 @@ function inspectedOutputResponse(
         completedAt: "2026-09-01T12:00:00.000Z",
       },
       validation: {
-        result: "unknown",
-        identity: null,
-        evidence: null,
-        evidenceAvailability: "not_recorded",
-        appliesToObservedFile: null,
+        result: exportEligible ? "passed" : "unknown",
+        identity: exportEligible ? fileIdentity : null,
+        evidence: exportEligible
+          ? {
+              kind: "encode_worker_validation",
+              schemaVersion: 1,
+              validatedAt: "2026-09-01T12:00:00.000Z",
+            }
+          : null,
+        evidenceAvailability: exportEligible ? "recorded" : "not_recorded",
+        appliesToObservedFile: exportEligible ? true : null,
       },
       provenance: {
         encodeJobId: job.id,
@@ -98,8 +105,8 @@ function inspectedOutputResponse(
         identity: fileIdentity,
         sizeBytes: 1_024,
         modifiedAt: "2026-09-01T12:00:00.000Z",
-        completeness: "unknown",
-        identityContinuity: "not_recorded",
+        completeness: exportEligible ? "complete" : "unknown",
+        identityContinuity: exportEligible ? "verified" : "not_recorded",
       },
       inspectability: {
         status: probeFailed ? "unknown" : "inspected",
@@ -121,8 +128,12 @@ function inspectedOutputResponse(
       },
       availableActions: [{
         name: "export",
-        eligible: false,
-        reason: "Canonical Encode Output export is not available.",
+        eligible: exportEligible,
+        reasonCode: exportEligible ? null : "OUTPUT_IDENTITY_NOT_RECORDED",
+        reason: exportEligible
+          ? null
+          : "The Encode Output has no recorded file identity.",
+        requiredInputs: ["destination"],
       }],
     },
   });
@@ -164,7 +175,14 @@ describe("encoding page tabs", () => {
       catalogReview: { status: "loaded" as const, items: [] },
     };
     const fetcher = vi.fn(async () =>
-      inspectedOutputResponse(completed, "synthetic-file-identity")
+      inspectedOutputResponse(
+        completed,
+        "synthetic-file-identity",
+        completed.encodeOutputArtifactIdentity,
+        "published",
+        false,
+        true,
+      )
     );
     vi.stubGlobal("fetch", fetcher);
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -190,9 +208,11 @@ describe("encoding page tabs", () => {
         expect.objectContaining({ cache: "no-store" }),
       );
       expect(container.textContent).toContain("Media metadata inspected");
-      expect(container.textContent).toContain("Validation resultUnknown");
-      expect(container.textContent).toContain("Validation identityNot recorded");
-      expect(container.textContent).toContain("Validation evidenceNot Recorded");
+      expect(container.textContent).toContain("Validation resultPassed");
+      expect(container.textContent).toContain(
+        "Validation identitysynthetic-file-identity",
+      );
+      expect(container.textContent).toContain("Validation evidenceRecorded");
       expect(container.textContent).toContain(
         "Provenance Original Disc Archivearchive-1",
       );
@@ -201,7 +221,7 @@ describe("encoding page tabs", () => {
       expect(container.textContent).toContain("synthetic-file-identity");
       expect(container.textContent).toContain("default yes · forced no");
       expect(container.textContent).toContain("Playability is not assessed");
-      expect(container.textContent).toContain("ExportUnavailable");
+      expect(container.textContent).toContain("ExportAvailable");
     } finally {
       await act(async () => root.unmount());
     }

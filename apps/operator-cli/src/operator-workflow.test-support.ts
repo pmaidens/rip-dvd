@@ -1,8 +1,18 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createDataAccess } from "@rip-dvd/data-access";
+import {
+  createDataAccess,
+  encodeOutputFilesystemIdentity,
+} from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { seedRearchiveReviewFixtureForTest } from "@rip-dvd/data-access/rearchive-test-support";
 import type {
@@ -17,8 +27,10 @@ export function createOperatorWorkflowFixture() {
   const databasePath = join(directory, "catalog.sqlite");
   const mediaLibraryPath = join(directory, "movies");
   const originalsLibraryPath = join(directory, "originals");
+  const operatorHostPath = join(directory, "operator-host");
   mkdirSync(mediaLibraryPath);
   mkdirSync(originalsLibraryPath);
+  mkdirSync(operatorHostPath);
 
   const openAccess = () => createDataAccess({
     databasePath,
@@ -30,12 +42,16 @@ export function createOperatorWorkflowFixture() {
     databasePath,
     mediaLibraryPath,
     originalsLibraryPath,
+    operatorHostPath,
     openAccess,
     async run(
       args: readonly string[],
       lookup?: CatalogMetadataLookup | null,
       stdin?: string,
-      options: { encodeOutputMediaProbe?: EncodeOutputMediaProbe } = {},
+      options: {
+        encodeOutputMediaProbe?: EncodeOutputMediaProbe;
+        openAccess?: () => ReturnType<typeof openAccess>;
+      } = {},
     ) {
       const stdout: string[] = [];
       const stderr: string[] = [];
@@ -66,6 +82,7 @@ export function seedCatalogReviewForReadFixture(
   current: ReturnType<typeof createOperatorWorkflowFixture>,
   options: {
     predecessorOutcome?: "completed" | "running" | "failed_cleanup_pending";
+    validatedOutputContents?: string;
   } = {},
 ) {
   const access = createLegacySidecarDataAccess({
@@ -137,11 +154,38 @@ export function seedCatalogReviewForReadFixture(
       options.predecessorOutcome === "failed_cleanup_pending"
         ? access.encodeJobs.registerPartialCleanup(claim)
         : undefined;
-    const predecessor = options.predecessorOutcome === "running"
-      ? claim
-      : options.predecessorOutcome === "failed_cleanup_pending"
-        ? access.encodeJobs.fail(claim, "Synthetic predecessor failure")
-        : access.encodeJobs.complete(claim);
+    let predecessor;
+    if (options.predecessorOutcome === "running") {
+      predecessor = claim;
+    } else if (options.predecessorOutcome === "failed_cleanup_pending") {
+      predecessor = access.encodeJobs.fail(claim, "Synthetic predecessor failure");
+    } else if (options.validatedOutputContents === undefined) {
+      predecessor = access.encodeJobs.complete(claim);
+    } else {
+      writeFileSync(claim.outputPath, options.validatedOutputContents);
+      const cleanup = access.encodeJobs.registerPartialCleanup(claim, {
+        publicationPending: true,
+      });
+      const publication = access.encodeJobs.beginPublicationMutation(
+        claim,
+        cleanup,
+      );
+      predecessor = access.encodeJobs.completePublishedClaim(
+        claim,
+        publication,
+        () => true,
+        {
+          publishedOutputValidation: {
+            result: "passed",
+            filesystemIdentity: encodeOutputFilesystemIdentity(
+              lstatSync(claim.outputPath),
+            ),
+            completeness: "complete",
+          },
+        },
+      );
+      access.encodeJobs.completePartialCleanup(publication);
+    }
     const correction = access.catalog.correctDiscSelection(previousSelection.id, {
       originalDiscArchiveId: archive.id,
       catalogRevision: access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt,

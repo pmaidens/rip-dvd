@@ -476,6 +476,7 @@ rip-dvd encode-requeue --key <new-key> --encode-job-id <job-id>
 rip-dvd encode-requeue-preview --encode-job-id <completed-job-id>
 rip-dvd encode-requeue --key <new-key> --encode-job-id <completed-job-id> --revision <preview-revision> --acknowledge
 rip-dvd encode-output inspect encode-output-v1.published.<encode-job-id>
+rip-dvd encode-output export encode-output-v1.published.<encode-job-id> --destination /exports/example-output.mkv
 ```
 
 A completed Encode Job exposes its current and retained generations in
@@ -491,7 +492,16 @@ provenance, file identity and completeness, and probed duration and streams.
 Historical outputs keep unavailable validation identities and source snapshots
 explicit. A successful media probe does not manufacture validation evidence.
 Probe failure reports unknown inspectability and does not claim that the file
-is playable.
+is playable. Inspection reports export as available only when the observed
+regular, nonempty file matches its recorded identity.
+
+`encode-output export` copies that identity-bound canonical file to the path
+on the machine running the CLI. The destination must not already exist. Success
+returns one JSON document with the artifact identity and type, byte size,
+destination, source identity, and provenance. Media bytes never go to stdout.
+Missing, substituted, changed, or otherwise unsafe source files return a
+nonzero status and a stable JSON reason with the current observed identity.
+Export never substitutes a browser rendition or Damage Preview.
 
 An initial `encode-enqueue` is deduplicated by Disc Selection and Encoding
 Profile, including after completion. Use `encode-requeue` for a terminal job.
