@@ -207,6 +207,7 @@ function visibleArchive(
   );
   const {
     archivePath: _archivePath,
+    integrityEvidenceRevision: _integrityEvidenceRevision,
     ...authoritativeArchive
   } = withAuthoritativeDvdArchiveIntegrity(archive, evidenceHeader);
   return {

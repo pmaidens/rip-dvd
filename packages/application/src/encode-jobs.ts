@@ -160,6 +160,7 @@ export function previewEncodeRequeue(
   if (job === null) {
     throw new RecordNotFoundError("Encode Job", encodeJobId);
   }
+  requireEvidenceEncodingAvailable(access, job.discSelectionId);
   const replacesOutput = job.status === "completed" || job.replaceExistingOutput;
   return {
     encodeJobId: job.id,

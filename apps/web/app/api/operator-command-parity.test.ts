@@ -723,7 +723,8 @@ it("returns the same operational records and evidence through web and CLI", asyn
     const projectionFixture = new DatabaseSync(fixture.databasePath);
     projectionFixture.prepare(`
       UPDATE original_disc_archives
-      SET integrity = 'incomplete_read',
+      SET integrity_evidence_revision = 1,
+          integrity = 'incomplete_read',
           integrity_policy_version = ?,
           bad_sector_count = 1,
           bad_area_count = 1,
@@ -872,6 +873,16 @@ it("returns the same operational records and evidence through web and CLI", asyn
       },
     };
     for (const blockedMutation of [
+      {
+        command: [
+          "encode-requeue-preview", "--encode-job-id", encodeJob.id,
+        ],
+        method: "PATCH",
+        body: {
+          action: "preview_requeue",
+          encodeJobId: encodeJob.id,
+        },
+      },
       {
         command: [
           "encode-enqueue", "--key", "synthetic-evidence-encode-enqueue",
@@ -1037,6 +1048,11 @@ it("returns the same operational records and evidence through web and CLI", asyn
         item: object;
       }).item,
     ).not.toHaveProperty("dvdRecoveryEvidence");
+    expect(
+      (archiveInspection.result as {
+        item: object;
+      }).item,
+    ).not.toHaveProperty("integrityEvidenceRevision");
     expect((await fixture.run(["inspect", "encode-jobs", encodeJob.id])).result)
       .toMatchObject({ item: {
         status: "failed",
