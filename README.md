@@ -485,7 +485,9 @@ work and Optical Drive snapshot as `/api/deployment-readiness`; it describes
 deployment activity rather than promising that every drive can start work.
 `inspect <kind>` lists at most 50 records by default, with `--limit 1..100`.
 `inspect <kind> <id>` returns one record with its relationships, evidence, and
-known action eligibility where applicable. The supported kinds are
+known action eligibility where applicable. Encode Job detail pages retained
+output generations with `--limit 1..100 --offset <n>` and returns the next
+offset when more generations exist. The supported kinds are
 `optical-drives`, `detected-discs`,
 `disc-inspections`, `archive-requests`, `archive-jobs`,
 `original-disc-archives`, `encode-jobs`, `archive-audits`, `filesystem-verifications`,
@@ -495,6 +497,11 @@ continuity and settled-capacity evidence. Archive Request detail keeps intent
 separate from Archive Job attempts. Archive and job detail includes the
 persisted integrity, boundary, progress, and failure evidence. The equivalent
 web read is `GET /api/operations?kind=<kind>&id=<id>`; omit `id` for a list.
+Use matching `limit` and `offset` query parameters for Encode Job output
+history. `encode-output inspect <artifact-identity>` reports the persisted
+validation evidence only when it applies to the observed file and the media
+probe succeeds; otherwise validation, completeness, and media fields remain
+explicitly unknown.
 
 `wait <kind> <id> --timeout-ms <milliseconds>` polls existing Disc Inspection,
 Archive Request, Archive Job, Encode Job, archive audit, or filesystem verification state for up to one hour. It returns

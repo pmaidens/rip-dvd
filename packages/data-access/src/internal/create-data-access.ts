@@ -400,6 +400,7 @@ const CATALOG_REVIEW_MAPPED_TITLE_SUMMARY_LIMIT = 3;
 const CORRECTED_ENCODE_REPLACEMENT_LIMIT = 100;
 const ENCODE_QUEUE_DISC_SELECTION_LIMIT = 100;
 const RETAINED_ENCODE_OUTPUT_LOOKUP_LIMIT = 400;
+const RETAINED_ENCODE_OUTPUT_PAGE_LIMIT = 100;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -1888,14 +1889,32 @@ export function createDataAccessInternal(
         "Retained Encode output requires corrected replacement provenance",
       );
     }
+    const sourceEncodeJobId = job.completedAt === null
+      ? job.predecessorEncodeJobId
+      : job.id;
+    const sourceJob = requireRow(
+      transaction
+        .select()
+        .from(encodeJobs)
+        .where(eq(encodeJobs.id, sourceEncodeJobId))
+        .get(),
+      "retained Encode output source job",
+      sourceEncodeJobId,
+    );
     transaction
       .insert(retainedEncodeOutputs)
       .values({
         id: newId<RetainedEncodeOutputId>(),
         predecessorEncodeJobId: job.predecessorEncodeJobId,
         replacementEncodeJobId: job.id,
+        sourceEncodeJobId,
         retainedOutputPath,
         filesystemIdentity: retainedOutputIdentity,
+        validationResult: sourceJob.outputValidationResult,
+        validationFilesystemIdentity:
+          sourceJob.outputValidationFilesystemIdentity,
+        validatedAt: sourceJob.outputValidatedAt,
+        completeness: sourceJob.outputCompleteness,
         state: "retained",
         cleanupEligible: true,
         retainedAt: timestamp,
@@ -1912,8 +1931,15 @@ export function createDataAccessInternal(
     if (
       retained?.predecessorEncodeJobId !== job.predecessorEncodeJobId ||
       retained.replacementEncodeJobId !== job.id ||
+      retained.sourceEncodeJobId !== sourceEncodeJobId ||
       retained.retainedOutputPath !== retainedOutputPath ||
       retained.filesystemIdentity !== retainedOutputIdentity ||
+      retained.validationResult !== sourceJob.outputValidationResult ||
+      retained.validationFilesystemIdentity !==
+        sourceJob.outputValidationFilesystemIdentity ||
+      retained.validatedAt?.getTime() !==
+        sourceJob.outputValidatedAt?.getTime() ||
+      retained.completeness !== sourceJob.outputCompleteness ||
       retained.state !== "retained" ||
       !retained.cleanupEligible
     ) {
@@ -1929,7 +1955,14 @@ export function createDataAccessInternal(
     provenance: EncodeJobPublicationProvenance | undefined,
     operation: string,
     jobId: EncodeJobId,
-    replayedCompletion?: { completedAt: Date | null },
+    replayedCompletion?: Pick<
+      EncodeJob,
+      | "completedAt"
+      | "outputValidationResult"
+      | "outputValidationFilesystemIdentity"
+      | "outputValidatedAt"
+      | "outputCompleteness"
+    >,
   ): EncodeJob | undefined {
     const current = transaction
       .select()
@@ -1940,6 +1973,7 @@ export function createDataAccessInternal(
       throw new StaleJobAttemptError(operation, jobId);
     }
     const finalizedAt = now();
+    const publishedValidation = provenance?.publishedOutputValidation;
     retainCorrectedEncodeOutput(
       transaction,
       current,
@@ -1952,6 +1986,19 @@ export function createDataAccessInternal(
         completedAt: replayedCompletion === undefined
           ? finalizedAt
           : replayedCompletion.completedAt,
+        outputValidationResult: replayedCompletion === undefined
+          ? publishedValidation?.result ?? null
+          : replayedCompletion.outputValidationResult,
+        outputValidationFilesystemIdentity:
+          replayedCompletion === undefined
+            ? publishedValidation?.filesystemIdentity ?? null
+            : replayedCompletion.outputValidationFilesystemIdentity,
+        outputValidatedAt: replayedCompletion === undefined
+          ? publishedValidation === undefined ? null : finalizedAt
+          : replayedCompletion.outputValidatedAt,
+        outputCompleteness: replayedCompletion === undefined
+          ? publishedValidation?.completeness ?? null
+          : replayedCompletion.outputCompleteness,
         replaceExistingOutput: false,
         replacementOutputIdentity: null,
         publicationCompletionPending: false,
@@ -6085,8 +6132,15 @@ export function createDataAccessInternal(
             access.encodeJobs.listCorrectionLinks(ids),
           listFailureReports: (ids) =>
             access.encodeJobs.listFailureReports(ids),
-          listRetainedOutputSummaries: (ids) =>
-            access.encodeJobs.listRetainedOutputSummaries(ids),
+          listRetainedOutputSummaries: (ids, options) =>
+            access.encodeJobs.listRetainedOutputSummaries(ids, options),
+          listRetainedOutputSummaryPageBySource: (ids, options) =>
+            access.encodeJobs.listRetainedOutputSummaryPageBySource(
+              ids,
+              options,
+            ),
+          listRetainedOutputHistoryPage: (id, options) =>
+            access.encodeJobs.listRetainedOutputHistoryPage(id, options),
         },
         workerIncidents: {
           find: (id) => access.workerIncidents.find(id),
@@ -6117,6 +6171,19 @@ export function createDataAccessInternal(
         sqlite.exec("ROLLBACK");
         throw error;
       }
+    },
+
+    readEncodeOutputInspectionSnapshot(read) {
+      return access.readConsistentSnapshot((snapshot) =>
+        read({
+          ...snapshot,
+          encodeJobs: {
+            ...snapshot.encodeJobs,
+            findRetainedOutput: (id) =>
+              access.encodeJobs.findRetainedOutput(id),
+          },
+        })
+      );
     },
 
     checkHealth() {
@@ -12459,9 +12526,13 @@ export function createDataAccessInternal(
               retainedEncodeOutputs.predecessorEncodeJobId,
             replacementEncodeJobId:
               retainedEncodeOutputs.replacementEncodeJobId,
+            sourceEncodeJobId: retainedEncodeOutputs.sourceEncodeJobId,
             state: retainedEncodeOutputs.state,
             cleanupEligible: retainedEncodeOutputs.cleanupEligible,
             retainedAt: retainedEncodeOutputs.retainedAt,
+            validationResult: retainedEncodeOutputs.validationResult,
+            validatedAt: retainedEncodeOutputs.validatedAt,
+            completeness: retainedEncodeOutputs.completeness,
           })
           .from(retainedEncodeOutputs)
           .innerJoin(
@@ -12497,9 +12568,13 @@ export function createDataAccessInternal(
             id: row.id,
             predecessorEncodeJobId: row.predecessorEncodeJobId,
             replacementEncodeJobId: row.replacementEncodeJobId,
+            sourceEncodeJobId: row.sourceEncodeJobId,
             state: row.state,
             cleanupEligible: row.cleanupEligible,
             retainedAt: row.retainedAt,
+            validationResult: row.validationResult,
+            validatedAt: row.validatedAt,
+            completeness: row.completeness,
           },
         }));
       },
@@ -12526,6 +12601,13 @@ export function createDataAccessInternal(
           .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
           .all();
       },
+      findRetainedOutput(id) {
+        return database
+          .select()
+          .from(retainedEncodeOutputs)
+          .where(eq(retainedEncodeOutputs.id, id))
+          .get() ?? null;
+      },
       listRetainedOutputs(ids) {
         if (ids.length === 0) return [];
         const uniqueIds = retainedEncodeOutputLookupIds(ids);
@@ -12542,30 +12624,169 @@ export function createDataAccessInternal(
           )
           .all();
       },
-      listRetainedOutputSummaries(ids) {
+      listRetainedOutputSummaries(ids, options) {
         if (ids.length === 0) return [];
         const uniqueIds = retainedEncodeOutputLookupIds(ids);
+        const selection = {
+          id: retainedEncodeOutputs.id,
+          predecessorEncodeJobId:
+            retainedEncodeOutputs.predecessorEncodeJobId,
+          replacementEncodeJobId:
+            retainedEncodeOutputs.replacementEncodeJobId,
+          sourceEncodeJobId: retainedEncodeOutputs.sourceEncodeJobId,
+          state: retainedEncodeOutputs.state,
+          cleanupEligible: retainedEncodeOutputs.cleanupEligible,
+          retainedAt: retainedEncodeOutputs.retainedAt,
+          validationResult: retainedEncodeOutputs.validationResult,
+          validatedAt: retainedEncodeOutputs.validatedAt,
+          completeness: retainedEncodeOutputs.completeness,
+        };
+        const condition = or(
+          inArray(retainedEncodeOutputs.predecessorEncodeJobId, uniqueIds),
+          inArray(retainedEncodeOutputs.replacementEncodeJobId, uniqueIds),
+        );
+        if (options !== undefined) {
+          return database
+            .select(selection)
+            .from(retainedEncodeOutputs)
+            .where(condition)
+            .orderBy(
+              desc(retainedEncodeOutputs.retainedAt),
+              desc(retainedEncodeOutputs.id),
+            )
+            .limit(requirePositiveSafeInteger(options.limit, "limit"))
+            .all()
+            .reverse();
+        }
         return database
+          .select(selection)
+          .from(retainedEncodeOutputs)
+          .where(condition)
+          .orderBy(
+            asc(retainedEncodeOutputs.retainedAt),
+            asc(retainedEncodeOutputs.id),
+          )
+          .all();
+      },
+      listRetainedOutputSummaryPageBySource(ids, options) {
+        if (ids.length === 0) {
+          return { outputs: [], truncatedSourceEncodeJobIds: [] };
+        }
+        const uniqueIds = retainedEncodeOutputLookupIds(ids);
+        const limit = requirePositiveSafeInteger(options.limit, "limit");
+        if (limit > RETAINED_ENCODE_OUTPUT_PAGE_LIMIT) {
+          throw new DomainInvariantError(
+            `Retained Encode output source page limit must be between 1 and ${RETAINED_ENCODE_OUTPUT_PAGE_LIMIT}`,
+          );
+        }
+        const rows = sqlite.prepare(`
+          with ranked_outputs as (
+            select
+              id,
+              predecessor_encode_job_id,
+              replacement_encode_job_id,
+              source_encode_job_id,
+              state,
+              cleanup_eligible,
+              retained_at,
+              validation_result,
+              validated_at,
+              completeness,
+              row_number() over (
+                partition by source_encode_job_id
+                order by retained_at desc, rowid desc
+              ) as source_rank
+            from retained_encode_outputs
+            where source_encode_job_id in (
+              ${uniqueIds.map(() => "?").join(", ")}
+            )
+          )
+          select *
+          from ranked_outputs
+          where source_rank <= ?
+          order by retained_at asc, id asc
+        `).all(...uniqueIds, limit + 1) as unknown as Array<{
+          id: RetainedEncodeOutputId;
+          predecessor_encode_job_id: EncodeJobId;
+          replacement_encode_job_id: EncodeJobId;
+          source_encode_job_id: EncodeJobId;
+          state: "retained";
+          cleanup_eligible: number;
+          retained_at: number;
+          validation_result: "passed" | null;
+          validated_at: number | null;
+          completeness: "complete" | null;
+          source_rank: number;
+        }>;
+        const truncatedSourceEncodeJobIds = [...new Set(
+          rows
+            .filter(({ source_rank }) => source_rank > limit)
+            .map(({ source_encode_job_id }) => source_encode_job_id),
+        )];
+        return {
+          outputs: rows
+            .filter(({ source_rank }) => source_rank <= limit)
+            .map((row) => ({
+              id: row.id,
+              predecessorEncodeJobId: row.predecessor_encode_job_id,
+              replacementEncodeJobId: row.replacement_encode_job_id,
+              sourceEncodeJobId: row.source_encode_job_id,
+              state: row.state,
+              cleanupEligible: row.cleanup_eligible === 1,
+              retainedAt: new Date(row.retained_at),
+              validationResult: row.validation_result,
+              validatedAt: row.validated_at === null
+                ? null
+                : new Date(row.validated_at),
+              completeness: row.completeness,
+            })),
+          truncatedSourceEncodeJobIds,
+        };
+      },
+      listRetainedOutputHistoryPage(sourceEncodeJobId, options) {
+        const limit = requirePositiveSafeInteger(options.limit, "limit");
+        if (limit > RETAINED_ENCODE_OUTPUT_PAGE_LIMIT) {
+          throw new DomainInvariantError(
+            `Retained Encode output history page limit must be between 1 and ${RETAINED_ENCODE_OUTPUT_PAGE_LIMIT}`,
+          );
+        }
+        const offset = options.offset ?? 0;
+        if (!Number.isSafeInteger(offset) || offset < 0) {
+          throw new DomainInvariantError(
+            "Retained Encode output history offset must be a non-negative safe integer",
+          );
+        }
+        const rows = database
           .select({
             id: retainedEncodeOutputs.id,
             predecessorEncodeJobId:
               retainedEncodeOutputs.predecessorEncodeJobId,
             replacementEncodeJobId:
               retainedEncodeOutputs.replacementEncodeJobId,
+            sourceEncodeJobId: retainedEncodeOutputs.sourceEncodeJobId,
             state: retainedEncodeOutputs.state,
             cleanupEligible: retainedEncodeOutputs.cleanupEligible,
             retainedAt: retainedEncodeOutputs.retainedAt,
+            validationResult: retainedEncodeOutputs.validationResult,
+            validatedAt: retainedEncodeOutputs.validatedAt,
+            completeness: retainedEncodeOutputs.completeness,
           })
           .from(retainedEncodeOutputs)
-          .where(or(
-            inArray(retainedEncodeOutputs.predecessorEncodeJobId, uniqueIds),
-            inArray(retainedEncodeOutputs.replacementEncodeJobId, uniqueIds),
+          .where(eq(
+            retainedEncodeOutputs.sourceEncodeJobId,
+            sourceEncodeJobId,
           ))
           .orderBy(
             asc(retainedEncodeOutputs.retainedAt),
             asc(retainedEncodeOutputs.id),
           )
+          .limit(limit + 1)
+          .offset(offset)
           .all();
+        return {
+          outputs: rows.slice(0, limit),
+          nextOffset: rows.length > limit ? offset + limit : null,
+        };
       },
       renewClaim(claim) {
         const timestamp = now();
@@ -13570,7 +13791,14 @@ export function createDataAccessInternal(
         const replayedCompletion =
           owned.status === "completed" &&
             !owned.publicationCompletionPending
-            ? { completedAt: owned.completedAt }
+            ? {
+              completedAt: owned.completedAt,
+              outputValidationResult: owned.outputValidationResult,
+              outputValidationFilesystemIdentity:
+                owned.outputValidationFilesystemIdentity,
+              outputValidatedAt: owned.outputValidatedAt,
+              outputCompleteness: owned.outputCompleteness,
+            }
             : undefined;
         const restoreOwnedPublication = () => {
           const restored = database

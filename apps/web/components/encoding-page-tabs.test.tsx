@@ -17,6 +17,7 @@ import type {
   DashboardSnapshot,
 } from "../lib/dashboard";
 import {
+  DashboardView,
   filterEncodeJobs,
   OperationsDashboard,
 } from "./operations-dashboard";
@@ -39,6 +40,9 @@ const encodeStatuses: EncodeJobStatus[] = [
 function encodeJob(status: EncodeJobStatus): DashboardEncodeJob {
   return {
     id: `${status}-job` as EncodeJobId,
+    ...(status === "completed"
+      ? { encodeOutputArtifactIdentity: `encode-output-v1.published.${"1".repeat(8)}-${"2".repeat(4)}-${"3".repeat(4)}-${"4".repeat(4)}-${"5".repeat(12)}` }
+      : {}),
     mediaTitle: `${status} title`,
     mediaYear: null,
     encodingProfileName: "DVD library · Version 1",
@@ -54,6 +58,75 @@ afterEach(() => {
   vi.unstubAllGlobals();
   document.body.replaceChildren();
 });
+
+function inspectedOutputResponse(
+  job: DashboardEncodeJob,
+  fileIdentity: string,
+  artifactIdentity = job.encodeOutputArtifactIdentity,
+  state: "published" | "retained" = "published",
+  probeFailed = false,
+): Response {
+  return Response.json({
+    schemaVersion: 1,
+    artifact: {
+      identity: artifactIdentity,
+      type: "canonical_encode_output",
+      state,
+      encodeJob: {
+        id: job.id,
+        status: "completed",
+        completedAt: "2026-09-01T12:00:00.000Z",
+      },
+      validation: {
+        result: "unknown",
+        identity: null,
+        evidence: null,
+        evidenceAvailability: "not_recorded",
+        appliesToObservedFile: null,
+      },
+      provenance: {
+        encodeJobId: job.id,
+        discSelectionId: "selection-1",
+        originalDiscArchiveId: "archive-1",
+        encodingProfileId: "profile-1",
+        retainedOutputId: null,
+        sourceSnapshot: null,
+        sourceSnapshotAvailability: "not_recorded",
+      },
+      file: {
+        status: "available",
+        identity: fileIdentity,
+        sizeBytes: 1_024,
+        modifiedAt: "2026-09-01T12:00:00.000Z",
+        completeness: "unknown",
+        identityContinuity: "not_recorded",
+      },
+      inspectability: {
+        status: probeFailed ? "unknown" : "inspected",
+        reasonCode: probeFailed ? "OUTPUT_PROBE_FAILED" : null,
+        reason: probeFailed ? "Synthetic probe failure." : null,
+      },
+      media: {
+        durationSeconds: probeFailed ? null : 7_200,
+        streams: probeFailed ? null : [{
+          index: 0,
+          kind: "video",
+          codecName: "h264",
+          language: "eng",
+          title: "Main picture",
+          default: true,
+          forced: false,
+        }],
+        playability: "not_assessed",
+      },
+      availableActions: [{
+        name: "export",
+        eligible: false,
+        reason: "Canonical Encode Output export is not available.",
+      }],
+    },
+  });
+}
 
 describe("encoding page tabs", () => {
   it("puts only completed jobs in Completed", () => {
@@ -79,6 +152,451 @@ describe("encoding page tabs", () => {
     ]);
     expect(completed.items.map((job) => job.status)).toEqual(["completed"]);
   });
+
+  it("inspects a completed Encode Output from the Encoding view", async () => {
+    const completed = encodeJob("completed");
+    const state = {
+      opticalDrives: { status: "loaded" as const, items: [] },
+      detectedDiscs: { status: "loaded" as const, items: [] },
+      archiveJobs: { status: "loaded" as const, items: [] },
+      workerIncidents: { status: "loaded" as const, items: [] },
+      encodeJobs: { status: "loaded" as const, items: [completed] },
+      catalogReview: { status: "loaded" as const, items: [] },
+    };
+    const fetcher = vi.fn(async () =>
+      inspectedOutputResponse(completed, "synthetic-file-identity")
+    );
+    vi.stubGlobal("fetch", fetcher);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<DashboardView state={state} section="encoding" />);
+      });
+      const inspectButton = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "Inspect output",
+      );
+      expect(inspectButton).toBeDefined();
+      await act(async () => {
+        inspectButton!.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(fetcher).toHaveBeenCalledWith(
+        `/api/encode-outputs/${encodeURIComponent(completed.encodeOutputArtifactIdentity!)}`,
+        expect.objectContaining({ cache: "no-store" }),
+      );
+      expect(container.textContent).toContain("Media metadata inspected");
+      expect(container.textContent).toContain("Validation resultUnknown");
+      expect(container.textContent).toContain("Validation identityNot recorded");
+      expect(container.textContent).toContain("Validation evidenceNot Recorded");
+      expect(container.textContent).toContain(
+        "Provenance Original Disc Archivearchive-1",
+      );
+      expect(container.textContent).toContain("Source snapshotNot Recorded");
+      expect(container.textContent).toContain("2h 0s");
+      expect(container.textContent).toContain("synthetic-file-identity");
+      expect(container.textContent).toContain("default yes · forced no");
+      expect(container.textContent).toContain("Playability is not assessed");
+      expect(container.textContent).toContain("ExportUnavailable");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("renders unknown probe fields explicitly", async () => {
+    const completed = encodeJob("completed");
+    const state = {
+      opticalDrives: { status: "loaded" as const, items: [] },
+      detectedDiscs: { status: "loaded" as const, items: [] },
+      archiveJobs: { status: "loaded" as const, items: [] },
+      workerIncidents: { status: "loaded" as const, items: [] },
+      encodeJobs: { status: "loaded" as const, items: [completed] },
+      catalogReview: { status: "loaded" as const, items: [] },
+    };
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      inspectedOutputResponse(
+        completed,
+        "synthetic-file-identity",
+        completed.encodeOutputArtifactIdentity,
+        "published",
+        true,
+      )
+    ));
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<DashboardView state={state} section="encoding" />);
+      });
+      const inspectButton = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "Inspect output",
+      );
+      await act(async () => {
+        inspectButton!.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(container.textContent).toContain(
+        "InspectabilityUnknown · Synthetic probe failure. · OUTPUT_PROBE_FAILED",
+      );
+      expect(container.textContent).toContain("DurationUnknown");
+      expect(container.textContent).toContain("StreamsUnknown");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("offers each current and retained Encode Output generation", async () => {
+    const completed = encodeJob("completed");
+    const publishedIdentity = completed.encodeOutputArtifactIdentity!;
+    const retainedIdentity =
+      `encode-output-v1.retained.${"a".repeat(8)}-${"b".repeat(4)}-${"c".repeat(4)}-${"d".repeat(4)}-${"e".repeat(12)}`;
+    const job = {
+      ...completed,
+      encodeOutputArtifacts: [
+        { identity: publishedIdentity, state: "published" as const },
+        { identity: retainedIdentity, state: "retained" as const },
+      ],
+    };
+    const state = {
+      opticalDrives: { status: "loaded" as const, items: [] },
+      detectedDiscs: { status: "loaded" as const, items: [] },
+      archiveJobs: { status: "loaded" as const, items: [] },
+      workerIncidents: { status: "loaded" as const, items: [] },
+      encodeJobs: { status: "loaded" as const, items: [job] },
+      catalogReview: { status: "loaded" as const, items: [] },
+    };
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const identity = decodeURIComponent(String(input).split("/").at(-1)!);
+      return inspectedOutputResponse(
+        job,
+        identity === retainedIdentity
+          ? "synthetic-retained-identity"
+          : "synthetic-published-identity",
+        identity,
+        identity === retainedIdentity ? "retained" : "published",
+      );
+    });
+    vi.stubGlobal("fetch", fetcher);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<DashboardView state={state} section="encoding" />);
+      });
+      const buttons = [...container.querySelectorAll("button")];
+      expect(buttons.map(({ textContent }) => textContent)).toEqual(
+        expect.arrayContaining([
+          "Inspect current output",
+          "Inspect retained output 1",
+        ]),
+      );
+      const retainedButton = buttons.find(
+        ({ textContent }) => textContent === "Inspect retained output 1",
+      );
+      await act(async () => {
+        retainedButton!.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(fetcher).toHaveBeenCalledWith(
+        `/api/encode-outputs/${encodeURIComponent(retainedIdentity)}`,
+        expect.objectContaining({ cache: "no-store" }),
+      );
+      expect(container.textContent).toContain("synthetic-retained-identity");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("loads retained generations omitted from the bounded dashboard snapshot", async () => {
+    const completed = encodeJob("completed");
+    const publishedIdentity = completed.encodeOutputArtifactIdentity!;
+    const retainedIdentity =
+      `encode-output-v1.retained.${"f".repeat(8)}-${"e".repeat(4)}-${"d".repeat(4)}-${"c".repeat(4)}-${"b".repeat(12)}`;
+    const secondRetainedIdentity =
+      `encode-output-v1.retained.${"a".repeat(8)}-${"b".repeat(4)}-${"c".repeat(4)}-${"d".repeat(4)}-${"e".repeat(12)}`;
+    const job = {
+      ...completed,
+      encodeOutputArtifacts: [{
+        identity: publishedIdentity,
+        state: "published" as const,
+      }],
+      encodeOutputArtifactsTruncated: true,
+    };
+    const state = {
+      opticalDrives: { status: "loaded" as const, items: [] },
+      detectedDiscs: { status: "loaded" as const, items: [] },
+      archiveJobs: { status: "loaded" as const, items: [] },
+      workerIncidents: { status: "loaded" as const, items: [] },
+      encodeJobs: { status: "loaded" as const, items: [job] },
+      catalogReview: { status: "loaded" as const, items: [] },
+    };
+    const fetcher = vi.fn(async (request: RequestInfo | URL) => {
+      const offset = new URL(String(request), "http://localhost").searchParams
+        .get("offset");
+      return Response.json({
+        schemaVersion: 1,
+        kind: "encode-jobs",
+        item: {
+          encodeOutputArtifacts: offset === "0"
+            ? [
+              { identity: publishedIdentity, state: "published" },
+              { identity: retainedIdentity, state: "retained" },
+            ]
+            : [{ identity: secondRetainedIdentity, state: "retained" }],
+          encodeOutputArtifactPage: {
+            offset: Number(offset),
+            limit: 25,
+            nextOffset: offset === "0" ? 1 : null,
+          },
+        },
+      });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<DashboardView state={state} section="encoding" />);
+      });
+      const loadButton = [...container.querySelectorAll("button")].find(
+        ({ textContent }) => textContent === "Load output generations",
+      );
+      expect(loadButton).toBeDefined();
+      await act(async () => {
+        loadButton!.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(fetcher).toHaveBeenCalledWith(
+        `/api/operations?kind=encode-jobs&id=${encodeURIComponent(job.id)}&limit=25&offset=0`,
+        expect.objectContaining({ cache: "no-store" }),
+      );
+      expect([...container.querySelectorAll("button")].map(
+        ({ textContent }) => textContent,
+      )).toEqual(expect.arrayContaining([
+        "Inspect current output",
+        "Inspect retained output 1",
+        "Load more output generations",
+      ]));
+      const loadMoreButton = [...container.querySelectorAll("button")].find(
+        ({ textContent }) => textContent === "Load more output generations",
+      );
+      await act(async () => {
+        loadMoreButton!.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect([...container.querySelectorAll("button")].map(
+        ({ textContent }) => textContent,
+      )).toEqual(expect.arrayContaining([
+        "Inspect retained output 1",
+        "Inspect retained output 2",
+      ]));
+      await act(async () => {
+        root.render(<DashboardView
+          state={{
+            ...state,
+            encodeJobs: {
+              status: "loaded",
+              items: [{ ...job, activityRevision: "new-revision" }],
+            },
+          }}
+          section="encoding"
+        />);
+      });
+      expect([...container.querySelectorAll("button")].map(
+        ({ textContent }) => textContent,
+      )).toContain("Load output generations");
+      expect(container.textContent).not.toContain("Inspect retained output");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("ignores a stale inspection response after another output is selected", async () => {
+    const first = encodeJob("completed");
+    const second = {
+      ...encodeJob("completed"),
+      id: "second-completed-job" as EncodeJobId,
+      mediaTitle: "second completed title",
+      encodeOutputArtifactIdentity:
+        `encode-output-v1.published.${"6".repeat(8)}-${"7".repeat(4)}-${"8".repeat(4)}-${"9".repeat(4)}-${"a".repeat(12)}`,
+    };
+    const state = {
+      opticalDrives: { status: "loaded" as const, items: [] },
+      detectedDiscs: { status: "loaded" as const, items: [] },
+      archiveJobs: { status: "loaded" as const, items: [] },
+      workerIncidents: { status: "loaded" as const, items: [] },
+      encodeJobs: { status: "loaded" as const, items: [first, second] },
+      catalogReview: { status: "loaded" as const, items: [] },
+    };
+    const pending = new Map<string, (response: Response) => void>();
+    const fetcher = vi.fn((input: RequestInfo | URL) =>
+      new Promise<Response>((resolve) => pending.set(String(input), resolve))
+    );
+    vi.stubGlobal("fetch", fetcher);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    const inspectionUrl = (job: DashboardEncodeJob) =>
+      `/api/encode-outputs/${encodeURIComponent(job.encodeOutputArtifactIdentity!)}`;
+    try {
+      await act(async () => {
+        root.render(<DashboardView state={state} section="encoding" />);
+      });
+      const inspectButtons = [...container.querySelectorAll("button")].filter(
+        (button) => button.textContent === "Inspect output",
+      );
+      expect(inspectButtons).toHaveLength(2);
+      await act(async () => inspectButtons[0]!.click());
+      await act(async () => inspectButtons[1]!.click());
+
+      await act(async () => {
+        pending.get(inspectionUrl(second))!(
+          inspectedOutputResponse(second, "second-file-identity"),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(container.textContent).toContain("second-file-identity");
+
+      await act(async () => {
+        pending.get(inspectionUrl(first))!(
+          inspectedOutputResponse(first, "first-file-identity"),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(container.textContent).toContain("second-file-identity");
+      expect(container.textContent).not.toContain("first-file-identity");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it.each(["published", "retained"] as const)(
+    "discards a %s inspection when the Encode Job authority changes",
+    async (artifactState) => {
+      const artifactIdentity = artifactState === "published"
+        ? encodeJob("completed").encodeOutputArtifactIdentity!
+        : `encode-output-v1.retained.${"a".repeat(8)}-${"b".repeat(4)}-${"c".repeat(4)}-${"d".repeat(4)}-${"e".repeat(12)}`;
+      const completed = {
+        ...encodeJob("completed"),
+        encodeOutputArtifacts: [{
+          identity: artifactIdentity,
+          state: artifactState,
+        }],
+        encodeOutputInspectionRevisions: {
+          published: "published-revision-1",
+          retained: "retained-revision-1",
+        },
+        activityRevision: "revision-1",
+      };
+      const state = {
+        opticalDrives: { status: "loaded" as const, items: [] },
+        detectedDiscs: { status: "loaded" as const, items: [] },
+        archiveJobs: { status: "loaded" as const, items: [] },
+        workerIncidents: { status: "loaded" as const, items: [] },
+        encodeJobs: { status: "loaded" as const, items: [completed] },
+        catalogReview: { status: "loaded" as const, items: [] },
+      };
+      const fetcher = vi.fn()
+        .mockResolvedValueOnce(inspectedOutputResponse(
+          completed,
+          "first-file-identity",
+          artifactIdentity,
+          artifactState,
+        ))
+        .mockResolvedValueOnce(inspectedOutputResponse(
+          completed,
+          "replacement-file-identity",
+          artifactIdentity,
+          artifactState,
+        ));
+      vi.stubGlobal("fetch", fetcher);
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+
+      try {
+        await act(async () => {
+          root.render(<DashboardView state={state} section="encoding" />);
+        });
+        await act(async () => {
+          [...container.querySelectorAll("button")]
+            .find((button) => button.textContent === "Inspect output")!
+            .click();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        expect(container.textContent).toContain("first-file-identity");
+
+        await act(async () => {
+          root.render(
+            <DashboardView
+              state={{
+                ...state,
+                encodeJobs: {
+                  status: "loaded",
+                  items: [{ ...completed, activityRevision: "revision-2" }],
+                },
+              }}
+              section="encoding"
+            />,
+          );
+        });
+        expect(container.textContent).toContain("first-file-identity");
+
+        await act(async () => {
+          root.render(
+            <DashboardView
+              state={{
+                ...state,
+                encodeJobs: {
+                  status: "loaded",
+                  items: [{
+                    ...completed,
+                    activityRevision: "revision-2",
+                    encodeOutputInspectionRevisions: {
+                      ...completed.encodeOutputInspectionRevisions,
+                      [artifactState]: `${artifactState}-revision-2`,
+                    },
+                  }],
+                },
+              }}
+              section="encoding"
+            />,
+          );
+        });
+        expect(container.textContent).not.toContain("first-file-identity");
+
+        await act(async () => {
+          [...container.querySelectorAll("button")]
+            .find((button) => button.textContent === "Inspect output")!
+            .click();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        expect(container.textContent).toContain("replacement-file-identity");
+        expect(fetcher).toHaveBeenCalledTimes(2);
+      } finally {
+        await act(async () => root.unmount());
+      }
+    }
+  );
 
   it("keeps the in-memory worklist when moving between accessible tabs", async () => {
     const selectionId = "selection-1" as DiscSelectionId;

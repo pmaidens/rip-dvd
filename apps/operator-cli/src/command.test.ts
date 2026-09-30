@@ -1,11 +1,13 @@
 import { spawn, spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { lstatSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it, vi } from "vitest";
 import type { CatalogMetadataLookup } from "@rip-dvd/application";
 import {
   createCleanReadArchiveIntegrityEvidence,
+  type DataAccess,
+  encodeOutputFilesystemIdentity,
   type EncodeJobId,
 } from "@rip-dvd/data-access";
 import {
@@ -14,7 +16,11 @@ import {
 } from "@rip-dvd/data-access/test-support";
 import type { MediaItemId } from "@rip-dvd/data-access";
 
-import { createApplicationOperations } from "@rip-dvd/application";
+import {
+  createApplicationOperations,
+  encodeOutputArtifactIdentity,
+  retainedEncodeOutputArtifactIdentity,
+} from "@rip-dvd/application";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 
 import { runCommand } from "./command.js";
@@ -76,6 +82,772 @@ it("reports database health as JSON through the public command runner", async ()
     journalMode: "wal",
     busyTimeoutMs: 5_000,
   });
+});
+
+it("inspects a persisted canonical Encode Output by artifact identity", async () => {
+  const current = fixture();
+  const { predecessor } = seedCatalogReviewForReadFixture(current);
+  const outputPath = join(current.mediaLibraryPath, "previous-film.mkv");
+  writeFileSync(outputPath, "synthetic encoded output");
+  const artifactIdentity = encodeOutputArtifactIdentity(predecessor.id);
+  const mediaProbe = vi.fn(async (path: string) => {
+    expect(path).toBe(outputPath);
+    return {
+      durationSeconds: 5_399.25,
+      streams: [
+        {
+          index: 0,
+          kind: "video" as const,
+          codecName: "h264",
+          language: null,
+          title: null,
+          default: true,
+          forced: false,
+        },
+        {
+          index: 1,
+          kind: "audio" as const,
+          codecName: "aac",
+          language: "eng",
+          title: "Main audio",
+          default: true,
+          forced: false,
+        },
+      ],
+    };
+  });
+
+  const result = await current.run(
+    ["encode-output", "inspect", artifactIdentity],
+    undefined,
+    undefined,
+    { encodeOutputMediaProbe: mediaProbe },
+  );
+
+  expect((await current.run(["inspect", "encode-jobs", predecessor.id])).result)
+    .toMatchObject({ item: { encodeOutputArtifactIdentity: artifactIdentity } });
+  expect(result.exitCode).toBe(0);
+  expect(result.stderr).toBe("");
+  expect(result.result).toMatchObject({
+    schemaVersion: 1,
+    artifact: {
+      identity: artifactIdentity,
+      type: "canonical_encode_output",
+      state: "published",
+      encodeJob: { id: predecessor.id, status: "completed" },
+      validation: {
+        result: "unknown",
+        identity: null,
+        evidence: null,
+        evidenceAvailability: "not_recorded",
+        appliesToObservedFile: null,
+      },
+      provenance: {
+        encodeJobId: predecessor.id,
+        discSelectionId: predecessor.discSelectionId,
+        encodingProfileId: predecessor.encodingProfileId,
+        sourceSnapshot: null,
+        sourceSnapshotAvailability: "not_recorded",
+      },
+      file: {
+        status: "available",
+        identity: expect.any(String),
+        sizeBytes: Buffer.byteLength("synthetic encoded output"),
+        completeness: "unknown",
+        identityContinuity: "not_recorded",
+      },
+      inspectability: {
+        status: "inspected",
+        reasonCode: null,
+        reason: null,
+      },
+      media: {
+        durationSeconds: 5_399.25,
+        streams: [
+          expect.objectContaining({ index: 0, kind: "video", codecName: "h264" }),
+          expect.objectContaining({ index: 1, kind: "audio", language: "eng" }),
+        ],
+        playability: "not_assessed",
+      },
+      availableActions: [{
+        name: "export",
+        eligible: false,
+        reason: "Canonical Encode Output export is not available.",
+      }],
+    },
+  });
+  expect(JSON.stringify(result.result)).not.toContain(outputPath);
+  expect(mediaProbe).toHaveBeenCalledOnce();
+});
+
+it("reports unknown inspectability without turning probe failure into command failure", async () => {
+  const current = fixture();
+  const { predecessor } = seedCatalogReviewForReadFixture(current);
+  writeFileSync(
+    join(current.mediaLibraryPath, "previous-film.mkv"),
+    "synthetic encoded output",
+  );
+  const result = await current.run(
+    [
+      "encode-output",
+      "inspect",
+      encodeOutputArtifactIdentity(predecessor.id),
+    ],
+    undefined,
+    undefined,
+    {
+      encodeOutputMediaProbe: async () => {
+        throw new Error("synthetic media probe failure");
+      },
+    },
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(result.result).toMatchObject({ artifact: {
+    validation: { result: "unknown", appliesToObservedFile: null },
+    file: { status: "available", completeness: "unknown" },
+    inspectability: {
+      status: "unknown",
+      reasonCode: "OUTPUT_PROBE_FAILED",
+    },
+    media: {
+      durationSeconds: null,
+      streams: null,
+      playability: "not_assessed",
+    },
+  } });
+});
+
+it("reports a missing canonical output without running the media probe", async () => {
+  const current = fixture();
+  const { predecessor } = seedCatalogReviewForReadFixture(current);
+  const mediaProbe = vi.fn(async () => {
+    throw new Error("Media probe must not run for a missing file");
+  });
+  const result = await current.run(
+    [
+      "encode-output",
+      "inspect",
+      encodeOutputArtifactIdentity(predecessor.id),
+    ],
+    undefined,
+    undefined,
+    { encodeOutputMediaProbe: mediaProbe },
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(result.result).toMatchObject({ artifact: {
+    validation: { result: "unknown", appliesToObservedFile: null },
+    file: {
+      status: "missing",
+      identity: null,
+      completeness: "unknown",
+    },
+    inspectability: {
+      status: "unknown",
+      reasonCode: "OUTPUT_MISSING",
+    },
+    media: { durationSeconds: null, streams: null },
+  } });
+  expect(mediaProbe).not.toHaveBeenCalled();
+});
+
+it("addresses every retained Encode Output generation by its own artifact identity", async () => {
+  const current = fixture();
+  const { archive, predecessor } = seedCatalogReviewForReadFixture(current);
+  const outputPath = join(current.mediaLibraryPath, "previous-film.mkv");
+  writeFileSync(outputPath, "synthetic predecessor output");
+  const access = current.openAccess();
+  const replacement = access.catalog.completeCatalogReviewWithReplacements(
+    archive.id,
+    access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+      .updatedAt,
+    "reviewed_with_selections",
+    [{
+      predecessorEncodeJobId: predecessor.id,
+      encodingProfileId: predecessor.encodingProfileId,
+      outputPath,
+    }],
+  ).replacementEncodeJobs[0]!;
+
+  const publishReplacement = (
+    workerId: string,
+    replacementContents: string,
+  ) => {
+    const claim = access.encodeJobs.claimNext(workerId);
+    if (claim === null) throw new Error("Expected replacement Encode Job claim");
+    access.encodeJobs.recordReplacementOutputIdentity(
+      claim,
+      encodeOutputFilesystemIdentity(lstatSync(outputPath)),
+    );
+    const cleanup = access.encodeJobs.registerPartialCleanup(claim, {
+      publicationPending: true,
+    });
+    const retainedPath = join(
+      realpathSync(dirname(outputPath)),
+      `${basename(outputPath)}.failed.${claim.claimToken}`,
+    );
+    const mutation = access.encodeJobs.beginPublicationMutation(
+      claim,
+      cleanup,
+      retainedPath,
+    );
+    renameSync(outputPath, retainedPath);
+    writeFileSync(outputPath, replacementContents);
+    access.encodeJobs.completePublishedClaim(
+      claim,
+      mutation,
+      () => true,
+      {
+        retainedOutputPath: retainedPath,
+        retainedOutputIdentity: encodeOutputFilesystemIdentity(
+          lstatSync(retainedPath),
+        ),
+        publishedOutputValidation: {
+          result: "passed",
+          filesystemIdentity: encodeOutputFilesystemIdentity(
+            lstatSync(outputPath),
+          ),
+          completeness: "complete",
+        },
+      },
+    );
+    access.encodeJobs.completePartialCleanup(mutation);
+  };
+
+  publishReplacement(
+    "synthetic-correction-worker",
+    "synthetic replacement output",
+  );
+  const mediaProbe = vi.fn(async (_path: string) => ({
+    durationSeconds: 900,
+    streams: [],
+  }));
+  const requeued = access.encodeJobs.requeue(replacement.id);
+  const queuedInspection = await current.run(
+    ["encode-output", "inspect", encodeOutputArtifactIdentity(replacement.id)],
+    undefined,
+    undefined,
+    { encodeOutputMediaProbe: mediaProbe },
+  );
+  expect(queuedInspection.result).toMatchObject({ artifact: {
+    encodeJob: { id: replacement.id, status: requeued.status },
+    provenance: { encodeJobId: replacement.id },
+  } });
+  expect((await current.run([
+    "inspect",
+    "encode-jobs",
+    replacement.id,
+  ])).result).toMatchObject({ item: {
+    encodeOutputArtifactIdentity: encodeOutputArtifactIdentity(replacement.id),
+  } });
+  expect((await current.run([
+    "encode-output",
+    "inspect",
+    encodeOutputArtifactIdentity(predecessor.id),
+  ])).result).toMatchObject({ error: { code: "ENCODE_OUTPUT_NOT_FOUND" } });
+  publishReplacement(
+    "synthetic-reencode-worker",
+    "synthetic current output",
+  );
+  access.encodeJobs.requeue(replacement.id);
+  publishReplacement(
+    "synthetic-second-reencode-worker",
+    "synthetic newest output",
+  );
+  const retained = access.encodeJobs.listRetainedOutputs([replacement.id]);
+  expect(retained).toHaveLength(3);
+  expect(retained.map(({ sourceEncodeJobId }) => sourceEncodeJobId)).toEqual([
+    predecessor.id,
+    replacement.id,
+    replacement.id,
+  ]);
+  let ownerRequeued = false;
+  const racingAccess: DataAccess = {
+    ...access,
+    readEncodeOutputInspectionSnapshot(read) {
+      const snapshot = access.readEncodeOutputInspectionSnapshot(read);
+      if (!ownerRequeued) {
+        ownerRequeued = true;
+        access.encodeJobs.requeue(replacement.id);
+      }
+      return snapshot;
+    },
+  };
+  const retainedRaceInspection = await createApplicationOperations(
+    racingAccess,
+    {
+      encodeOutputMediaProbe: async () => ({
+        durationSeconds: 900,
+        streams: [],
+      }),
+    },
+  ).inspectEncodeOutput(
+    retainedEncodeOutputArtifactIdentity(retained[1]!.id),
+  );
+  expect(retainedRaceInspection).toMatchObject({ artifact: {
+    state: "retained",
+    inspectability: { status: "inspected" },
+    media: { durationSeconds: 900 },
+  } });
+  expect(access.encodeJobs.find(replacement.id)).toMatchObject({
+    status: "queued",
+  });
+  access.close();
+  mediaProbe.mockClear();
+
+  const inspectedJob = await current.run([
+    "inspect",
+    "encode-jobs",
+    replacement.id,
+  ]);
+  expect(inspectedJob.result).toMatchObject({
+    item: {
+      encodeOutputArtifacts: expect.arrayContaining([
+        expect.objectContaining({ state: "published" }),
+        expect.objectContaining({ state: "retained" }),
+      ]),
+      retainedOutputs: retained.map((output) => ({
+        id: output.id,
+        artifactIdentity: retainedEncodeOutputArtifactIdentity(output.id),
+      })),
+    },
+  });
+  const firstPage = await current.run([
+    "inspect",
+    "encode-jobs",
+    replacement.id,
+    "--limit",
+    "1",
+    "--offset",
+    "0",
+  ]);
+  const secondPage = await current.run([
+    "inspect",
+    "encode-jobs",
+    replacement.id,
+    "--limit",
+    "1",
+    "--offset",
+    "1",
+  ]);
+  expect(firstPage.result).toMatchObject({ item: {
+    encodeOutputArtifactPage: { offset: 0, limit: 1, nextOffset: 1 },
+    encodeOutputArtifacts: [
+      { state: "published" },
+      { identity: retainedEncodeOutputArtifactIdentity(retained[1]!.id) },
+    ],
+  } });
+  expect(secondPage.result).toMatchObject({ item: {
+    encodeOutputArtifactPage: { offset: 1, limit: 1, nextOffset: null },
+    encodeOutputArtifacts: [
+      { identity: retainedEncodeOutputArtifactIdentity(retained[2]!.id) },
+    ],
+  } });
+
+  const first = await current.run(
+    ["encode-output", "inspect", retainedEncodeOutputArtifactIdentity(retained[0]!.id)],
+    undefined,
+    undefined,
+    { encodeOutputMediaProbe: mediaProbe },
+  );
+  const second = await current.run(
+    ["encode-output", "inspect", retainedEncodeOutputArtifactIdentity(retained[1]!.id)],
+    undefined,
+    undefined,
+    { encodeOutputMediaProbe: mediaProbe },
+  );
+  const third = await current.run(
+    ["encode-output", "inspect", retainedEncodeOutputArtifactIdentity(retained[2]!.id)],
+    undefined,
+    undefined,
+    { encodeOutputMediaProbe: mediaProbe },
+  );
+  expect(first.result).toMatchObject({ artifact: {
+    state: "retained",
+    encodeJob: { id: predecessor.id },
+    provenance: { retainedOutputId: retained[0]!.id },
+    file: { identityContinuity: "verified" },
+  } });
+  expect(second.result).toMatchObject({ artifact: {
+    state: "retained",
+    encodeJob: { id: replacement.id },
+    provenance: { retainedOutputId: retained[1]!.id },
+    validation: {
+      result: "passed",
+      evidenceAvailability: "recorded",
+      appliesToObservedFile: true,
+    },
+    file: { identityContinuity: "verified", completeness: "complete" },
+  } });
+  expect(third.result).toMatchObject({ artifact: {
+    state: "retained",
+    encodeJob: { id: replacement.id },
+    provenance: { retainedOutputId: retained[2]!.id },
+    validation: {
+      result: "passed",
+      evidenceAvailability: "recorded",
+      appliesToObservedFile: true,
+    },
+    file: { identityContinuity: "verified", completeness: "complete" },
+  } });
+  expect(mediaProbe.mock.calls.map(([path]) => path)).toEqual(
+    retained.map(({ retainedOutputPath }) => retainedOutputPath),
+  );
+});
+
+it("keeps a completed predecessor addressable when its correction publishes elsewhere", async () => {
+  const current = fixture();
+  const { archive, predecessor } = seedCatalogReviewForReadFixture(current);
+  const predecessorPath = join(current.mediaLibraryPath, "previous-film.mkv");
+  const replacementPath = join(current.mediaLibraryPath, "corrected-film.mkv");
+  writeFileSync(predecessorPath, "synthetic predecessor output");
+  const access = current.openAccess();
+  const replacement = access.catalog.completeCatalogReviewWithReplacements(
+    archive.id,
+    access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+      .updatedAt,
+    "reviewed_with_selections",
+    [{
+      predecessorEncodeJobId: predecessor.id,
+      encodingProfileId: predecessor.encodingProfileId,
+      outputPath: replacementPath,
+    }],
+  ).replacementEncodeJobs[0]!;
+  const claim = access.encodeJobs.claimNext("synthetic-new-path-publisher");
+  if (claim?.id !== replacement.id) {
+    throw new Error("Expected changed-path replacement Encode Job claim");
+  }
+  writeFileSync(replacementPath, "synthetic replacement output");
+  const cleanup = access.encodeJobs.registerPartialCleanup(claim, {
+    publicationPending: true,
+  });
+  const mutation = access.encodeJobs.beginPublicationMutation(
+    claim,
+    cleanup,
+  );
+  access.encodeJobs.completePublishedClaim(claim, mutation, () => true);
+  access.encodeJobs.completePartialCleanup(mutation);
+  access.encodeJobs.requeue(replacement.id);
+  const reencodeClaim = access.encodeJobs.claimNext(
+    "synthetic-new-path-reencoder",
+  );
+  if (reencodeClaim?.id !== replacement.id) {
+    throw new Error("Expected changed-path re-encode claim");
+  }
+  access.encodeJobs.recordReplacementOutputIdentity(
+    reencodeClaim,
+    encodeOutputFilesystemIdentity(lstatSync(replacementPath)),
+  );
+  const reencodeCleanup = access.encodeJobs.registerPartialCleanup(
+    reencodeClaim,
+    { publicationPending: true },
+  );
+  const retainedReplacementPath = join(
+    realpathSync(dirname(replacementPath)),
+    `${basename(replacementPath)}.failed.${reencodeClaim.claimToken}`,
+  );
+  const reencodeMutation = access.encodeJobs.beginPublicationMutation(
+    reencodeClaim,
+    reencodeCleanup,
+    retainedReplacementPath,
+  );
+  renameSync(replacementPath, retainedReplacementPath);
+  writeFileSync(replacementPath, "synthetic re-encoded replacement output");
+  access.encodeJobs.completePublishedClaim(
+    reencodeClaim,
+    reencodeMutation,
+    () => true,
+    {
+      retainedOutputPath: retainedReplacementPath,
+      retainedOutputIdentity: encodeOutputFilesystemIdentity(
+        lstatSync(retainedReplacementPath),
+      ),
+    },
+  );
+  access.encodeJobs.completePartialCleanup(reencodeMutation);
+  const retainedReplacement = access.encodeJobs.listRetainedOutputs([
+    replacement.id,
+  ]);
+  expect(retainedReplacement).toHaveLength(1);
+  expect(retainedReplacement[0]).toMatchObject({
+    sourceEncodeJobId: replacement.id,
+    replacementEncodeJobId: replacement.id,
+  });
+  access.close();
+
+  const mediaProbe = vi.fn(async () => ({
+    durationSeconds: 600,
+    streams: [],
+  }));
+  const predecessorInspection = await current.run(
+    ["encode-output", "inspect", encodeOutputArtifactIdentity(predecessor.id)],
+    undefined,
+    undefined,
+    { encodeOutputMediaProbe: mediaProbe },
+  );
+  const replacementInspection = await current.run(
+    ["encode-output", "inspect", encodeOutputArtifactIdentity(replacement.id)],
+    undefined,
+    undefined,
+    { encodeOutputMediaProbe: mediaProbe },
+  );
+
+  expect(predecessorInspection.result).toMatchObject({ artifact: {
+    identity: encodeOutputArtifactIdentity(predecessor.id),
+    inspectability: { status: "inspected" },
+  } });
+  expect(replacementInspection.result).toMatchObject({ artifact: {
+    identity: encodeOutputArtifactIdentity(replacement.id),
+    inspectability: { status: "inspected" },
+  } });
+  expect(mediaProbe).toHaveBeenCalledWith(predecessorPath);
+  expect(mediaProbe).toHaveBeenCalledWith(replacementPath);
+});
+
+it("withholds a same-path predecessor after successor authority is revoked", async () => {
+  const current = fixture();
+  const { archive, predecessor } = seedCatalogReviewForReadFixture(current);
+  const outputPath = join(current.mediaLibraryPath, "previous-film.mkv");
+  writeFileSync(outputPath, "synthetic predecessor output");
+  const access = current.openAccess();
+  const replacement = access.catalog.completeCatalogReviewWithReplacements(
+    archive.id,
+    access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+      .updatedAt,
+    "reviewed_with_selections",
+    [{
+      predecessorEncodeJobId: predecessor.id,
+      encodingProfileId: predecessor.encodingProfileId,
+      outputPath,
+    }],
+  ).replacementEncodeJobs[0]!;
+  const claim = access.encodeJobs.claimNext("synthetic-revoked-authority");
+  if (claim?.id !== replacement.id) {
+    throw new Error("Expected same-path replacement claim");
+  }
+  access.encodeJobs.recordReplacementOutputIdentity(
+    claim,
+    encodeOutputFilesystemIdentity(lstatSync(outputPath)),
+  );
+  access.encodeJobs.fail(claim, "synthetic failure");
+  access.close();
+  const mediaProbe = vi.fn(async () => ({ durationSeconds: 600, streams: [] }));
+
+  const inspection = await current.run(
+    ["encode-output", "inspect", encodeOutputArtifactIdentity(predecessor.id)],
+    undefined,
+    undefined,
+    { encodeOutputMediaProbe: mediaProbe },
+  );
+
+  expect(inspection.result).toMatchObject({ artifact: {
+    inspectability: {
+      status: "unknown",
+      reasonCode: "OUTPUT_AUTHORITY_CHANGED",
+    },
+    validation: { result: "unknown" },
+  } });
+  expect(mediaProbe).not.toHaveBeenCalled();
+  expect((await current.run(["inspect", "encode-jobs", predecessor.id])).result)
+    .toMatchObject({ item: { encodeOutputArtifacts: [] } });
+});
+
+it("ignores unrelated changed-path successor activity during inspection", async () => {
+  const current = fixture();
+  const { archive, predecessor } = seedCatalogReviewForReadFixture(current);
+  const predecessorPath = join(current.mediaLibraryPath, "previous-film.mkv");
+  const replacementPath = join(current.mediaLibraryPath, "corrected-film.mkv");
+  writeFileSync(predecessorPath, "synthetic predecessor output");
+  const access = current.openAccess();
+  const replacement = access.catalog.completeCatalogReviewWithReplacements(
+    archive.id,
+    access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+      .updatedAt,
+    "reviewed_with_selections",
+    [{
+      predecessorEncodeJobId: predecessor.id,
+      encodingProfileId: predecessor.encodingProfileId,
+      outputPath: replacementPath,
+    }],
+  ).replacementEncodeJobs[0]!;
+  let successorChanged = false;
+  const racingAccess: DataAccess = {
+    ...access,
+    readEncodeOutputInspectionSnapshot(read) {
+      const snapshot = access.readEncodeOutputInspectionSnapshot(read);
+      if (!successorChanged) {
+        successorChanged = true;
+        const claim = access.encodeJobs.claimNext("synthetic-unrelated-race");
+        if (claim?.id !== replacement.id) {
+          throw new Error("Expected changed-path replacement claim");
+        }
+        access.encodeJobs.fail(claim, "synthetic unrelated failure");
+      }
+      return snapshot;
+    },
+  };
+  const mediaProbe = vi.fn(async () => ({ durationSeconds: 600, streams: [] }));
+
+  const inspection = await createApplicationOperations(racingAccess, {
+    encodeOutputMediaProbe: mediaProbe,
+  }).inspectEncodeOutput(encodeOutputArtifactIdentity(predecessor.id));
+
+  expect(inspection).toMatchObject({ artifact: {
+    inspectability: { status: "inspected" },
+    media: { durationSeconds: 600 },
+  } });
+  expect(mediaProbe).toHaveBeenCalledWith(predecessorPath);
+  access.close();
+});
+
+it("withholds inspection when publication authority changes before file probing", async () => {
+  const current = fixture();
+  const { archive, predecessor } = seedCatalogReviewForReadFixture(current);
+  const outputPath = join(current.mediaLibraryPath, "previous-film.mkv");
+  writeFileSync(outputPath, "synthetic predecessor output");
+  const access = current.openAccess();
+  const replacement = access.catalog.completeCatalogReviewWithReplacements(
+    archive.id,
+    access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+      .updatedAt,
+    "reviewed_with_selections",
+    [{
+      predecessorEncodeJobId: predecessor.id,
+      encodingProfileId: predecessor.encodingProfileId,
+      outputPath,
+    }],
+  ).replacementEncodeJobs[0]!;
+  let publicationCompleted = false;
+  const racingAccess: DataAccess = {
+    ...access,
+    readEncodeOutputInspectionSnapshot(read) {
+      const snapshot = access.readEncodeOutputInspectionSnapshot(read);
+      if (!publicationCompleted) {
+        publicationCompleted = true;
+        const claim = access.encodeJobs.claimNext("synthetic-racing-publisher");
+        if (claim?.id !== replacement.id) {
+          throw new Error("Expected racing replacement Encode Job claim");
+        }
+        access.encodeJobs.recordReplacementOutputIdentity(
+          claim,
+          encodeOutputFilesystemIdentity(lstatSync(outputPath)),
+        );
+        const cleanup = access.encodeJobs.registerPartialCleanup(claim, {
+          publicationPending: true,
+        });
+        const retainedPath = join(
+          realpathSync(dirname(outputPath)),
+          `${basename(outputPath)}.failed.${claim.claimToken}`,
+        );
+        const mutation = access.encodeJobs.beginPublicationMutation(
+          claim,
+          cleanup,
+          retainedPath,
+        );
+        renameSync(outputPath, retainedPath);
+        writeFileSync(outputPath, "synthetic successor output");
+        access.encodeJobs.completePublishedClaim(
+          claim,
+          mutation,
+          () => true,
+          {
+            retainedOutputPath: retainedPath,
+            retainedOutputIdentity: encodeOutputFilesystemIdentity(
+              lstatSync(retainedPath),
+            ),
+          },
+        );
+        access.encodeJobs.completePartialCleanup(mutation);
+      }
+      return snapshot;
+    },
+  };
+  const mediaProbe = vi.fn(async () => ({
+    durationSeconds: 600,
+    streams: [],
+  }));
+
+  const inspection = await createApplicationOperations(racingAccess, {
+    encodeOutputMediaProbe: mediaProbe,
+  }).inspectEncodeOutput(encodeOutputArtifactIdentity(predecessor.id));
+
+  expect(inspection).toMatchObject({ artifact: {
+    validation: { result: "unknown" },
+    inspectability: {
+      status: "unknown",
+      reasonCode: "OUTPUT_AUTHORITY_CHANGED",
+    },
+    media: { durationSeconds: null, streams: null },
+  } });
+  expect(mediaProbe).toHaveBeenCalledWith(outputPath);
+  access.close();
+});
+
+it("reports an authority change when publication removes the file before stat", async () => {
+  const current = fixture();
+  const { archive, predecessor } = seedCatalogReviewForReadFixture(current);
+  const outputPath = join(current.mediaLibraryPath, "previous-film.mkv");
+  writeFileSync(outputPath, "synthetic predecessor output");
+  const access = current.openAccess();
+  const replacement = access.catalog.completeCatalogReviewWithReplacements(
+    archive.id,
+    access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+      .updatedAt,
+    "reviewed_with_selections",
+    [{
+      predecessorEncodeJobId: predecessor.id,
+      encodingProfileId: predecessor.encodingProfileId,
+      outputPath,
+    }],
+  ).replacementEncodeJobs[0]!;
+  let publicationStarted = false;
+  const racingAccess: DataAccess = {
+    ...access,
+    readEncodeOutputInspectionSnapshot(read) {
+      const snapshot = access.readEncodeOutputInspectionSnapshot(read);
+      if (!publicationStarted) {
+        publicationStarted = true;
+        const claim = access.encodeJobs.claimNext("synthetic-stat-race");
+        if (claim?.id !== replacement.id) {
+          throw new Error("Expected stat-racing replacement Encode Job claim");
+        }
+        access.encodeJobs.recordReplacementOutputIdentity(
+          claim,
+          encodeOutputFilesystemIdentity(lstatSync(outputPath)),
+        );
+        const cleanup = access.encodeJobs.registerPartialCleanup(claim, {
+          publicationPending: true,
+        });
+        const retainedPath = join(
+          realpathSync(dirname(outputPath)),
+          `${basename(outputPath)}.failed.${claim.claimToken}`,
+        );
+        access.encodeJobs.beginPublicationMutation(claim, cleanup, retainedPath);
+        renameSync(outputPath, retainedPath);
+      }
+      return snapshot;
+    },
+  };
+  const mediaProbe = vi.fn(async (_path: string) => ({
+    durationSeconds: 600,
+    streams: [],
+  }));
+
+  const inspection = await createApplicationOperations(racingAccess, {
+    encodeOutputMediaProbe: mediaProbe,
+  }).inspectEncodeOutput(encodeOutputArtifactIdentity(predecessor.id));
+
+  expect(inspection).toMatchObject({ artifact: {
+    validation: { result: "unknown" },
+    inspectability: {
+      status: "unknown",
+      reasonCode: "OUTPUT_AUTHORITY_CHANGED",
+    },
+    file: { status: "unknown" },
+  } });
+  expect(mediaProbe).not.toHaveBeenCalled();
+  access.close();
 });
 
 it("submits filesystem verification with replay, status, and bounded waiting", async () => {
@@ -945,6 +1717,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       "filesystem-verification-inventory",
       "submit-filesystem-verification",
       "submit-archive-audit",
+      "encode-output",
       "encode-queue",
       "encode-resolve",
       "encode-enqueue",
@@ -1157,7 +1930,9 @@ it("reports encode action eligibility and correction evidence through the public
       }),
     ]),
   } });
-  expect(JSON.stringify(result.result)).not.toContain("/synthetic/output.mkv");
+  const serializedResult = JSON.stringify(result.result);
+  expect(serializedResult).not.toContain("/synthetic/output.mkv");
+  expect(serializedResult).not.toContain("outputValidationFilesystemIdentity");
 
   const writer = current.openAccess();
   const claimed = writer.encodeJobs.claimNext("synthetic-encode-worker")!;

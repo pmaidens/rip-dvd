@@ -64,6 +64,17 @@ export {
   ENCODE_JOB_FAILURE_SIGNALS,
   ENCODE_JOB_FAILURE_VALIDATION_CHECKS,
 } from "./encode-job-failure-report.js";
+export {
+  decodeOutputFilesystemIdentity,
+  encodeOutputFilesystemIdentity,
+  matchesEncodeOutputFilesystemIdentity,
+  sameEncodeOutputAuthoritySnapshot,
+  sameEncodeOutputInode,
+  sameEncodeOutputMutationSnapshot,
+} from "./encode-output-filesystem-identity.js";
+export type {
+  EncodeOutputFilesystemAuthoritySnapshot,
+} from "./encode-output-filesystem-identity.js";
 export type { EncodeQueueSearchQueryValidation } from "./encode-queue-search.js";
 export {
   isCorrectedEncodePredecessorReady,

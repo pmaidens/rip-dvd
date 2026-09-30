@@ -1230,7 +1230,8 @@ describe("data-access facade", () => {
           name !== "20260828164042_married_lady_ursula" &&
           name !== "20260922161825_operation-detail-lookups" &&
           name !== "20260922174811_rearchive-lineage" &&
-          name !== "20260922182659_rearchive-ordinary-uniqueness",
+          name !== "20260922182659_rearchive-ordinary-uniqueness" &&
+          name !== "20260930002622_wandering_micromax",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -4078,6 +4079,8 @@ describe("data-access facade", () => {
     );
     const priorOutputIdentity =
       "1048576:2048:4096:1710000000000" as EncodeOutputFilesystemIdentity;
+    const publishedOutputIdentity =
+      "1048576:2048:8192:1710000000000" as EncodeOutputFilesystemIdentity;
     const logicalRetainedOutputPath =
       `${replacement.outputPath}.failed.${replacementClaim.claimToken}`;
     access.encodeJobs.recordReplacementOutputIdentity(
@@ -4151,11 +4154,23 @@ describe("data-access facade", () => {
     const finalizedReplacement = access.encodeJobs.completePublishedPartial(
       fencedPublication,
       () => true,
-      { retainedOutputPath, retainedOutputIdentity: priorOutputIdentity },
+      {
+        retainedOutputPath,
+        retainedOutputIdentity: priorOutputIdentity,
+        publishedOutputValidation: {
+          result: "passed",
+          filesystemIdentity: publishedOutputIdentity,
+          completeness: "complete",
+        },
+      },
     );
     expect(finalizedReplacement.job).toMatchObject({
       completedAt: firstCompletionAt,
       id: replacement.id,
+      outputValidationResult: "passed",
+      outputValidationFilesystemIdentity: publishedOutputIdentity,
+      outputValidatedAt: firstCompletionAt,
+      outputCompleteness: "complete",
       replacementOutputIdentity: null,
       status: "completed",
     });
@@ -4169,10 +4184,24 @@ describe("data-access facade", () => {
     const replayedPublication = access.encodeJobs.completePublishedPartial(
       fencedPublication,
       () => true,
-      { retainedOutputPath, retainedOutputIdentity: priorOutputIdentity },
+      {
+        retainedOutputPath,
+        retainedOutputIdentity: priorOutputIdentity,
+        publishedOutputValidation: {
+          result: "passed",
+          filesystemIdentity: publishedOutputIdentity,
+          completeness: "complete",
+        },
+      },
     );
     expect(replayedPublication).toMatchObject({
-      job: expect.objectContaining({ completedAt: firstCompletionAt }),
+      job: expect.objectContaining({
+        completedAt: firstCompletionAt,
+        outputValidationResult: "passed",
+        outputValidationFilesystemIdentity: publishedOutputIdentity,
+        outputValidatedAt: firstCompletionAt,
+        outputCompleteness: "complete",
+      }),
     });
     access.encodeJobs.completePartialCleanup(fencedPublication);
     const sqlite = new DatabaseSync(databasePath);
@@ -4180,24 +4209,37 @@ describe("data-access facade", () => {
       "select count(*) as count from corrected_encode_publication_authorities",
     ).get()).toEqual({ count: 0 });
     sqlite.close();
-    expect(access.encodeJobs.listRetainedOutputs([replacement.id])).toEqual([{
+    const retainedOutput = access.encodeJobs.listRetainedOutputs([
+      replacement.id,
+    ])[0]!;
+    expect([retainedOutput]).toEqual([{
       id: expect.any(String),
       predecessorEncodeJobId: predecessor.id,
       replacementEncodeJobId: replacement.id,
+      sourceEncodeJobId: predecessor.id,
       retainedOutputPath,
       filesystemIdentity: priorOutputIdentity,
+      validationResult: null,
+      validationFilesystemIdentity: null,
+      validatedAt: null,
+      completeness: null,
       state: "retained",
       cleanupEligible: true,
       retainedAt: expect.any(Date),
     }]);
     access.readConsistentSnapshot((snapshot) => {
       expect(snapshot.encodeJobs).not.toHaveProperty("listRetainedOutputs");
+      expect(snapshot.encodeJobs).not.toHaveProperty("findRetainedOutput");
       expect(
         snapshot.encodeJobs.listRetainedOutputSummaries([replacement.id]),
       ).toEqual([{
         id: expect.any(String),
         predecessorEncodeJobId: predecessor.id,
         replacementEncodeJobId: replacement.id,
+        sourceEncodeJobId: predecessor.id,
+        validationResult: null,
+        validatedAt: null,
+        completeness: null,
         state: "retained",
         cleanupEligible: true,
         retainedAt: expect.any(Date),
@@ -4212,6 +4254,10 @@ describe("data-access facade", () => {
             id: expect.any(String),
             predecessorEncodeJobId: predecessor.id,
             replacementEncodeJobId: replacement.id,
+            sourceEncodeJobId: predecessor.id,
+            validationResult: null,
+            validatedAt: null,
+            completeness: null,
             state: "retained",
             cleanupEligible: true,
             retainedAt: expect.any(Date),
@@ -4231,6 +4277,15 @@ describe("data-access facade", () => {
           status: "completed",
         },
       }]);
+    });
+    access.readEncodeOutputInspectionSnapshot((snapshot) => {
+      expect(snapshot.encodeJobs.findRetainedOutput(
+        retainedOutput.id,
+      )).toMatchObject({
+        retainedOutputPath,
+        filesystemIdentity: priorOutputIdentity,
+        sourceEncodeJobId: predecessor.id,
+      });
     });
     expect(access.encodeJobs.listDiscSelectionCorrectionEncodeJobLinks({
       originalDiscArchiveId: archive.id,
@@ -4313,12 +4368,14 @@ describe("data-access facade", () => {
         expect.objectContaining({
           predecessorEncodeJobId: predecessor.id,
           replacementEncodeJobId: replacement.id,
+          sourceEncodeJobId: predecessor.id,
           retainedOutputPath,
           filesystemIdentity: priorOutputIdentity,
         }),
         expect.objectContaining({
           predecessorEncodeJobId: predecessor.id,
           replacementEncodeJobId: replacement.id,
+          sourceEncodeJobId: replacement.id,
           retainedOutputPath: correctedOutputPath,
           filesystemIdentity: correctedOutputIdentity,
         }),
@@ -4328,12 +4385,67 @@ describe("data-access facade", () => {
       replacement.id,
     ]);
     expect(retainedHistory).toHaveLength(2);
+    expect(access.encodeJobs.listRetainedOutputSummaries(
+      [replacement.id],
+      { limit: 1 },
+    ).map(({ id }) => id)).toEqual([retainedHistory[1]!.id]);
+    vi.setSystemTime(new Date("2026-08-26T07:06:00.000Z"));
+    access.encodeJobs.requeue(replacement.id);
+    const secondReencodeClaim = access.encodeJobs.claimNext(
+      "corrected-second-reencoder",
+    );
+    if (!secondReencodeClaim || secondReencodeClaim.id !== replacement.id) {
+      throw new Error("Expected second corrected re-encode claim");
+    }
+    const secondCorrectedIdentity =
+      "corrected-second-reencode-identity" as EncodeOutputFilesystemIdentity;
+    access.encodeJobs.recordReplacementOutputIdentity(
+      secondReencodeClaim,
+      secondCorrectedIdentity,
+    );
+    const secondPublication = access.encodeJobs.registerPartialCleanup(
+      secondReencodeClaim,
+      { publicationPending: true },
+    );
+    const secondCorrectedOutputPath = join(
+      realpathSync(canonicalOutputDirectory),
+      `${basename(replacement.outputPath)}.failed.${secondReencodeClaim.claimToken}`,
+    );
+    const secondFencedPublication = access.encodeJobs.beginPublicationMutation(
+      secondReencodeClaim,
+      secondPublication,
+      secondCorrectedOutputPath,
+    );
+    access.encodeJobs.completePublishedClaim(
+      secondReencodeClaim,
+      secondFencedPublication,
+      () => true,
+      {
+        retainedOutputPath: secondCorrectedOutputPath,
+        retainedOutputIdentity: secondCorrectedIdentity,
+      },
+    );
+    access.encodeJobs.completePartialCleanup(secondFencedPublication);
+    const sourcePage = access.encodeJobs.listRetainedOutputSummaryPageBySource(
+      [predecessor.id, replacement.id],
+      { limit: 1 },
+    );
+    expect(sourcePage.outputs).toHaveLength(2);
+    expect(sourcePage.outputs.map(({ sourceEncodeJobId }) =>
+      sourceEncodeJobId)).toEqual(expect.arrayContaining([
+        predecessor.id,
+        replacement.id,
+      ]));
+    expect(sourcePage.truncatedSourceEncodeJobIds).toEqual([
+      replacement.id,
+    ]);
     expect(access.encodeJobs
       .listDiscSelectionCorrectionRetainedOutputSummaries({
         originalDiscArchiveId: archive.id,
-        limit: 2,
+        limit: 3,
       }).map(({ retainedOutput }) => retainedOutput.id)).toEqual(
-        retainedHistory.map(({ id }) => id),
+        access.encodeJobs.listRetainedOutputs([replacement.id])
+          .map(({ id }) => id),
       );
     access.close();
   });
@@ -4504,12 +4616,13 @@ describe("data-access facade", () => {
         id,
         predecessor_encode_job_id,
         replacement_encode_job_id,
+        source_encode_job_id,
         retained_output_path,
         filesystem_identity,
         state,
         cleanup_eligible,
         retained_at
-      ) values (?, ?, ?, ?, ?, 'retained', 1, ?)
+      ) values (?, ?, ?, ?, ?, ?, 'retained', 1, ?)
     `);
     const replacementIds: EncodeJobId[] = [];
     const retainedOutputIds: string[] = [];
@@ -4533,6 +4646,7 @@ describe("data-access facade", () => {
         retainedOutputId,
         predecessors[index]!.id,
         replacementId,
+        predecessors[index]!.id,
         `/media/movies/correction-history-retained-${suffix}.mkv`,
         `correction-history-identity-${suffix}`,
         2_000 + index,
@@ -4543,6 +4657,7 @@ describe("data-access facade", () => {
     insertRetainedOutput.run(
       repeatedRetainedOutputId,
       predecessors[0]!.id,
+      replacementIds[0]!,
       replacementIds[0]!,
       "/media/movies/correction-history-retained-repeat.mkv",
       "correction-history-identity-repeat",
@@ -4562,6 +4677,7 @@ describe("data-access facade", () => {
       "unrelated-boundary-retained",
       unrelatedPredecessor.id,
       unrelatedReplacementId,
+      unrelatedPredecessor.id,
       "/media/movies/unrelated-correction-history-retained.mkv",
       "unrelated-correction-history-identity",
       9_000,
@@ -8151,6 +8267,12 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260930002622_wandering_micromax",
+      },
+      {
+        name: "20260929225801_lonely_microchip",
+      },
+      {
         name: "20260922212838_modern_khan",
       },
       {
@@ -8173,12 +8295,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260912212844_normal-dvd-endpoint-proof",
-      },
-      {
-        name: "20260901193553_encode_publication_recovery_failures",
-      },
-      {
-        name: "20260901183135_encode_preparation_validation_failures",
       },
     ]);
     expect(

@@ -1,7 +1,9 @@
 import {
   describeArchiveRequestWaitingStatus,
+  encodeOutputArtifactReferences,
   encodeRequeueAvailability,
 } from "@rip-dvd/application";
+import { createHash } from "node:crypto";
 import type { PresentedArchiveRequestWaitingStatus } from "@rip-dvd/application";
 import type {
   ArchiveBoundaryEvidence,
@@ -51,6 +53,7 @@ import {
   DASHBOARD_ACTIVE_DISC_LIMIT,
   DASHBOARD_ACTIVE_JOB_LIMIT,
   DASHBOARD_ACTIVITY_HISTORY_LIMIT,
+  DASHBOARD_ENCODE_OUTPUT_ARTIFACT_LIMIT,
 } from "./dashboard-bounds";
 import { isArchiveJobRetryable } from "./archive-job-retryability";
 import { isTerminalEncodeJobStatus } from "./encode-job-status";
@@ -141,6 +144,16 @@ export interface DashboardArchiveJob {
 
 export interface DashboardEncodeJob {
   id: EncodeJobId;
+  encodeOutputArtifactIdentity?: string;
+  encodeOutputArtifacts?: readonly {
+    identity: string;
+    state: "published" | "retained";
+  }[];
+  encodeOutputArtifactsTruncated?: boolean;
+  encodeOutputInspectionRevisions?: {
+    published: string;
+    retained: string;
+  };
   activityRevision?: string;
   mediaTitle: string;
   mediaYear: number | null;
@@ -172,6 +185,13 @@ export interface DashboardEncodeJob {
   verificationStatus?: FilesystemVerificationStatus | null;
   verificationMessage?: string | null;
   verifiedAt?: string | null;
+}
+
+function encodeOutputInspectionRevision(values: readonly unknown[]): string {
+  return createHash("sha256")
+    .update(JSON.stringify(values))
+    .digest("base64url")
+    .slice(0, 22);
 }
 
 export interface DashboardWorkerIncident {
@@ -1382,9 +1402,10 @@ function readDashboardSnapshotRecords(
   );
   const retainedEncodeOutputSource = readSource(() =>
     encodeJobLinkSource.status === "error"
-      ? []
-      : access.encodeJobs.listRetainedOutputSummaries(
+      ? { outputs: [], truncatedSourceEncodeJobIds: [] }
+      : access.encodeJobs.listRetainedOutputSummaryPageBySource(
           encodeJobLinkSource.value.map((job) => job.id),
+          { limit: DASHBOARD_ENCODE_OUTPUT_ARTIFACT_LIMIT },
         )
   );
   const archiveSource = readSource(() =>
@@ -1849,10 +1870,13 @@ function readDashboardSnapshotRecords(
             ),
           );
           const retainedOutputByReplacementId = new Map(
-            retainedEncodeOutputSource.value.map((output) => [
+            retainedEncodeOutputSource.value.outputs.map((output) => [
               output.replacementEncodeJobId,
               output,
             ]),
+          );
+          const truncatedEncodeOutputJobIds = new Set(
+            retainedEncodeOutputSource.value.truncatedSourceEncodeJobIds,
           );
           const failureReportsByJobId = encodeJobFailureReportSource.value
             .reduce((reportsByJobId, report) => {
@@ -1922,8 +1946,59 @@ function readDashboardSnapshotRecords(
                   ? [legacyEncodeJobInvestigation(job, canRequeue)]
                   : []),
               ];
+              const encodeOutputArtifacts = encodeOutputArtifactReferences(
+                job,
+                relationshipJobs,
+                retainedEncodeOutputSource.value.outputs,
+              );
+              const publishedEncodeOutput = encodeOutputArtifacts.find(
+                ({ state }) => state === "published",
+              );
+              const affectingSuccessor = successor?.outputPath === job.outputPath
+                ? successor
+                : undefined;
               return {
                 id: job.id,
+                activityRevision: job.updatedAt.toISOString(),
+                ...(encodeOutputArtifacts.length === 0
+                  ? {}
+                  : {
+                      encodeOutputInspectionRevisions: {
+                        published: encodeOutputInspectionRevision([
+                          job.id,
+                          job.status,
+                          job.completedAt?.toISOString() ?? null,
+                          job.outputPath,
+                          job.publicationPending,
+                          job.publicationCompletionPending,
+                          job.outputValidationResult,
+                          job.outputValidationFilesystemIdentity,
+                          job.outputValidatedAt?.toISOString() ?? null,
+                          job.outputCompleteness,
+                          affectingSuccessor?.id ?? null,
+                          affectingSuccessor?.status ?? null,
+                          affectingSuccessor?.completedAt?.toISOString() ?? null,
+                          affectingSuccessor?.outputPath ?? null,
+                          affectingSuccessor?.replaceExistingOutput ?? null,
+                          affectingSuccessor?.publicationPending ?? null,
+                        ]),
+                        retained: encodeOutputInspectionRevision([
+                          job.id,
+                          job.status,
+                          job.completedAt?.toISOString() ?? null,
+                        ]),
+                      },
+                    }),
+                encodeOutputArtifacts,
+                ...(truncatedEncodeOutputJobIds.has(job.id)
+                  ? { encodeOutputArtifactsTruncated: true }
+                  : {}),
+                ...(publishedEncodeOutput === undefined
+                  ? {}
+                  : {
+                    encodeOutputArtifactIdentity:
+                      publishedEncodeOutput.identity,
+                  }),
                 mediaTitle: mediaItem?.title ?? "Unknown Media Item",
                 mediaYear: mediaItem?.year ?? null,
                 encodingProfileName:

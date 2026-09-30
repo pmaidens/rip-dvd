@@ -12,6 +12,7 @@ import {
   createLegacySidecarDataAccess,
   type LegacySidecarDataAccess,
 } from "@rip-dvd/data-access/legacy-sidecars";
+import { retainedEncodeOutputArtifactIdentity } from "@rip-dvd/application";
 import {
   mkdirSync,
   mkdtempSync,
@@ -397,6 +398,8 @@ describe("readDashboardSnapshot", () => {
   });
 
   it("loads a displayed replacement's predecessor outside the history window", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
     const access = dataAccessFixture.create();
     const { archive, job: predecessor, selection } = seedEncodeJob(
       access,
@@ -442,8 +445,32 @@ describe("readDashboardSnapshot", () => {
         outputPath: predecessor.outputPath,
       }],
     ).replacementEncodeJobs[0]!;
+    const predecessorSnapshotBeforeClaim = readDashboardSnapshot(access, {
+      activityLimit: 20,
+    }).encodeJobs;
+    const predecessorBeforeClaim = predecessorSnapshotBeforeClaim.status === "loaded"
+      ? predecessorSnapshotBeforeClaim.items.find(({ id }) => id === predecessor.id)
+      : undefined;
+    vi.advanceTimersByTime(1_000);
     const successorClaim = access.encodeJobs.claimNext("retained-successor");
     if (!successorClaim) throw new Error("Expected retained successor claim");
+    const predecessorSnapshotAfterClaim = readDashboardSnapshot(access, {
+      activityLimit: 20,
+    }).encodeJobs;
+    const predecessorAfterClaim = predecessorSnapshotAfterClaim.status === "loaded"
+      ? predecessorSnapshotAfterClaim.items.find(({ id }) => id === predecessor.id)
+      : undefined;
+    expect(predecessorAfterClaim?.activityRevision).toBe(
+      predecessorBeforeClaim?.activityRevision,
+    );
+    expect(predecessorAfterClaim?.encodeOutputInspectionRevisions?.published)
+      .not.toBe(
+        predecessorBeforeClaim?.encodeOutputInspectionRevisions?.published,
+      );
+    expect(predecessorAfterClaim?.encodeOutputInspectionRevisions?.retained)
+      .toBe(
+        predecessorBeforeClaim?.encodeOutputInspectionRevisions?.retained,
+      );
     const retainedIdentity =
       "retained-dashboard-identity" as EncodeOutputFilesystemIdentity;
     const retainedOutputPath =
@@ -470,6 +497,9 @@ describe("readDashboardSnapshot", () => {
         retainedOutputIdentity: retainedIdentity,
       },
     );
+    const retainedOutput = access.encodeJobs.listRetainedOutputs([
+      successor.id,
+    ])[0]!;
 
     const snapshot = readDashboardSnapshot(access, { activityLimit: 1 });
     expect(snapshot.encodeJobs).toEqual({
@@ -477,6 +507,9 @@ describe("readDashboardSnapshot", () => {
       items: expect.arrayContaining([expect.objectContaining({
         id: successor.id,
         mediaTitle: correctedItem.title,
+        encodeOutputArtifacts: [
+          expect.objectContaining({ state: "published" }),
+        ],
         correctedReplacement: {
           predecessorId: predecessor.id,
           predecessorStatus: "completed",
@@ -488,6 +521,17 @@ describe("readDashboardSnapshot", () => {
         },
       })]),
     });
+    expect(readDashboardSnapshot(access, { activityLimit: 20 }).encodeJobs)
+      .toEqual({
+        status: "loaded",
+        items: expect.arrayContaining([expect.objectContaining({
+          id: predecessor.id,
+          encodeOutputArtifacts: [{
+            identity: retainedEncodeOutputArtifactIdentity(retainedOutput.id),
+            state: "retained",
+          }],
+        })]),
+      });
     expect(JSON.stringify(snapshot)).not.toContain("retained-prior-final.mkv");
     expect(correction.discSelection.id).toBe(successor.discSelectionId);
   });
@@ -637,6 +681,7 @@ describe("readDashboardSnapshot", () => {
         status: "loaded",
         items: [
           expect.objectContaining({
+            activityRevision: expect.any(String),
             mediaTitle: "Queued Movie",
             mediaYear: 2004,
             encodingProfileName: "Fast 480p30 · Version 1",

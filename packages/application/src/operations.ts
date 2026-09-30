@@ -25,6 +25,10 @@ import {
 } from "@rip-dvd/data-access";
 
 import { describeArchiveRequestWaitingStatus } from "./archive-request-waiting-status.js";
+import {
+  encodeOutputArtifactReferences,
+  retainedEncodeOutputArtifactIdentity,
+} from "./encode-output-inspection.js";
 
 export const OPERATION_KINDS = [
   "optical-drives",
@@ -84,17 +88,110 @@ function visibleArchiveJob({ claimToken: _claimToken, claimedBy: _claimedBy, ...
   return job;
 }
 
-function visibleEncodeJob({
-  claimToken: _claimToken,
-  claimedBy: _claimedBy,
-  partialCleanupClaimToken: _partialCleanupClaimToken,
-  partialCleanupLeaseToken: _partialCleanupLeaseToken,
-  replacementOutputIdentity: _replacementOutputIdentity,
-  outputPath: _outputPath,
-  partialCleanupOutputPath: _partialCleanupOutputPath,
-  ...job
-}: EncodeJob) {
-  return job;
+function presentEncodeJob(
+  job: EncodeJob,
+  correctionLinks: readonly EncodeJob[],
+  retainedOutputs: Parameters<typeof encodeOutputArtifactReferences>[2],
+  retainedHistoryTruncated: boolean,
+) {
+  const artifacts = encodeOutputArtifactReferences(
+    job,
+    correctionLinks,
+    retainedOutputs,
+  );
+  const publishedArtifact = artifacts.find(({ state }) => state === "published");
+  const {
+    claimToken: _claimToken,
+    claimedBy: _claimedBy,
+    partialCleanupClaimToken: _partialCleanupClaimToken,
+    partialCleanupLeaseToken: _partialCleanupLeaseToken,
+    replacementOutputIdentity: _replacementOutputIdentity,
+    outputValidationFilesystemIdentity: _outputValidationFilesystemIdentity,
+    outputPath: _outputPath,
+    partialCleanupOutputPath: _partialCleanupOutputPath,
+    ...visibleJob
+  } = job;
+  return {
+    ...visibleJob,
+    encodeOutputArtifacts: artifacts,
+    ...(retainedHistoryTruncated
+      ? { encodeOutputArtifactsTruncated: true }
+      : {}),
+    ...(publishedArtifact === undefined
+      ? {}
+      : { encodeOutputArtifactIdentity: publishedArtifact.identity }),
+  };
+}
+
+function inBatches<T, R>(
+  values: readonly T[],
+  read: (batch: readonly T[]) => readonly R[],
+): R[] {
+  const results: R[] = [];
+  for (let index = 0; index < values.length; index += 400) {
+    results.push(...read(values.slice(index, index + 400)));
+  }
+  return results;
+}
+
+function correctionLinksForJobs(
+  access: ConsistentReadAccess,
+  ids: readonly EncodeJobId[],
+) {
+  return [...new Map(inBatches(
+    [...new Set(ids)],
+    (batch) => access.encodeJobs.listCorrectionLinks(batch),
+  ).map((job) => [job.id, job])).values()];
+}
+
+function retainedOutputPageForJobs(
+  access: ConsistentReadAccess,
+  ids: readonly EncodeJobId[],
+) {
+  const pages = inBatches(
+    [...new Set(ids)],
+    (batch) => [access.encodeJobs.listRetainedOutputSummaryPageBySource(
+      batch,
+      { limit: 100 },
+    )],
+  );
+  return {
+    outputs: [...new Map(pages.flatMap(({ outputs }) => outputs)
+      .map((output) => [output.id, output])).values()],
+    truncatedSourceEncodeJobIds: [...new Set(pages.flatMap(
+      ({ truncatedSourceEncodeJobIds }) => truncatedSourceEncodeJobIds,
+    ))],
+  };
+}
+
+function visibleEncodeJobs(
+  access: ConsistentReadAccess,
+  jobs: readonly EncodeJob[],
+  options: {
+    correctionLinks?: readonly EncodeJob[];
+    retainedOutputs?: Parameters<typeof encodeOutputArtifactReferences>[2];
+    truncatedSourceEncodeJobIds?: readonly EncodeJobId[];
+  } = {},
+) {
+  if (jobs.length === 0) return [];
+  const correctionLinks = options.correctionLinks ??
+    correctionLinksForJobs(access, jobs.map(({ id }) => id));
+  const relatedJobIds = correctionLinks.map(({ id }) => id);
+  const retainedPage = options.retainedOutputs === undefined
+    ? retainedOutputPageForJobs(access, relatedJobIds)
+    : null;
+  const retainedOutputs = options.retainedOutputs ??
+    (retainedPage?.outputs ?? []);
+  const truncatedJobIds = new Set(
+    options.truncatedSourceEncodeJobIds ??
+      retainedPage?.truncatedSourceEncodeJobIds ?? [],
+  );
+  return jobs.map((job) => presentEncodeJob(
+    job,
+    correctionLinks,
+    retainedOutputs,
+    truncatedJobIds.has(job.id),
+  ));
 }
 
 function visibleArchive({ archivePath: _archivePath, ...archive }: OriginalDiscArchive) {
@@ -398,9 +495,9 @@ function readList(access: ConsistentReadAccess, kind: OperationKind, limit: numb
     case "original-disc-archives":
       return access.catalog.listOriginalDiscArchives({ limit }).map(visibleArchive);
     case "encode-jobs":
-      return recentWork(access.encodeJobs.list(undefined, {
+      return visibleEncodeJobs(access, recentWork(access.encodeJobs.list(undefined, {
         policy: boundedPolicy(limit),
-      }), ["queued", "running", "cancellation_requested"], limit).map(visibleEncodeJob);
+      }), ["queued", "running", "cancellation_requested"], limit));
     case "archive-audits":
       return access.archiveAudits.list({ limit }).map(visibleArchiveAuditSummary);
     case "filesystem-verifications":
@@ -412,7 +509,12 @@ function readList(access: ConsistentReadAccess, kind: OperationKind, limit: numb
   }
 }
 
-function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "activity">, id: string) {
+function readDetail(
+  access: ConsistentReadAccess,
+  kind: Exclude<OperationKind, "activity">,
+  id: string,
+  options: { limit: number; offset: number },
+) {
   switch (kind) {
     case "optical-drives": {
       const drive = access.catalog.listOpticalDrives({ ids: [id as OpticalDriveId] })[0];
@@ -539,7 +641,7 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
               ? "active"
               : "historical",
           })),
-          encodeJobs: encodeJobs.map(visibleEncodeJob),
+          encodeJobs: visibleEncodeJobs(access, encodeJobs),
         },
         availableActions: [
           { name: "verify-archive", eligible: true, reason: null },
@@ -563,18 +665,84 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
         ids: [job.discSelectionId], encodeEligibleOnly: true,
       }).length > 0;
       const requeue = encodeRequeueAvailability(access, job, requeueSelectionEligible);
-      const correctionLinks = access.encodeJobs.listCorrectionLinks([job.id]);
+      const history = access.encodeJobs.listForDiscSelection(
+        job.discSelectionId,
+      );
+      const correctionLinks = correctionLinksForJobs(
+        access,
+        [...new Set([job.id, ...history.map(({ id }) => id)])],
+      );
+      const relatedRetainedPage = retainedOutputPageForJobs(
+        access,
+        correctionLinks.map(({ id }) => id),
+      );
+      const outputPage = access.encodeJobs.listRetainedOutputHistoryPage(
+        job.id,
+        options,
+      );
+      const retainedOutputs = [
+        ...relatedRetainedPage.outputs.filter(
+          ({ sourceEncodeJobId }) => sourceEncodeJobId !== job.id,
+        ),
+        ...outputPage.outputs,
+      ];
+      const directCorrectionJobIds = new Set([
+        job.id,
+        ...(job.predecessorEncodeJobId === null
+          ? []
+          : [job.predecessorEncodeJobId]),
+        ...correctionLinks.flatMap((candidate) =>
+          candidate.predecessorEncodeJobId === job.id
+            ? [candidate.id]
+            : []
+        ),
+      ]);
+      const directCorrectionLinks = correctionLinks.filter(({ id }) =>
+        directCorrectionJobIds.has(id)
+      );
+      const directRetainedOutputs = retainedOutputs.filter((output) =>
+        output.predecessorEncodeJobId === job.id ||
+        output.replacementEncodeJobId === job.id
+      );
+      const relatedJobs = [...new Map(
+        [job, ...history, ...correctionLinks].map((candidate) => [
+          candidate.id,
+          candidate,
+        ]),
+      ).values()];
+      const visibleById = new Map(visibleEncodeJobs(access, relatedJobs, {
+        correctionLinks,
+        retainedOutputs,
+        truncatedSourceEncodeJobIds: [
+          ...relatedRetainedPage.truncatedSourceEncodeJobIds,
+          ...(outputPage.nextOffset === null ? [] : [job.id]),
+        ],
+      }).map((candidate) => [candidate.id, candidate]));
+      const visibleJob = visibleById.get(job.id)!;
+      const pageArtifacts = visibleJob.encodeOutputArtifacts.filter(
+        ({ state }) => state === "retained" || options.offset === 0,
+      );
       return {
-        ...visibleEncodeJob(job),
+        ...visibleJob,
+        encodeOutputArtifacts: pageArtifacts,
+        encodeOutputArtifactPage: {
+          offset: options.offset,
+          limit: options.limit,
+          nextOffset: outputPage.nextOffset,
+        },
         failureReports: access.encodeJobs.listFailureReports([job.id]),
         discSelection: selection ?? null,
         archive: selection ? access.catalog.listOriginalDiscArchives({
           ids: [selection.originalDiscArchiveId],
         }).map(visibleArchive)[0] ?? null : null,
-        history: access.encodeJobs.listForDiscSelection(job.discSelectionId)
-          .map(visibleEncodeJob),
-        correctionLinks: correctionLinks.map(visibleEncodeJob),
-        retainedOutputs: access.encodeJobs.listRetainedOutputSummaries([job.id]),
+        history: history.map((candidate) => visibleById.get(candidate.id)!),
+        correctionLinks: directCorrectionLinks.map((candidate) =>
+          visibleById.get(candidate.id)!
+        ),
+        retainedOutputs: directRetainedOutputs.map((output) => ({
+          ...output,
+          artifactIdentity: retainedEncodeOutputArtifactIdentity(output.id),
+        })),
         availableActions: encodeActions(job, requeue),
       };
     }
@@ -596,16 +764,29 @@ function readDetail(access: ConsistentReadAccess, kind: Exclude<OperationKind, "
 export function inspectOperations(
   access: Pick<DataAccess, "readConsistentSnapshot">,
   kind: OperationKind,
-  options: { id?: string; limit?: number } = {},
+  options: { id?: string; limit?: number; offset?: number } = {},
 ) {
   const limit = options.limit ?? DEFAULT_LIMIT;
-  if (!validOperationLimit(limit) || (kind === "activity" && options.id !== undefined)) {
+  const offset = options.offset ?? 0;
+  if (!validOperationLimit(limit) || !Number.isSafeInteger(offset) || offset < 0 ||
+    (options.offset !== undefined &&
+      (kind !== "encode-jobs" || options.id === undefined)) ||
+    (kind === "activity" && options.id !== undefined)) {
     throw new RangeError("Invalid operation query.");
   }
   return access.readConsistentSnapshot((snapshot) =>
     options.id === undefined
       ? { schemaVersion: 1, kind, items: readList(snapshot, kind, limit) }
-      : { schemaVersion: 1, kind, item: readDetail(snapshot, kind as Exclude<OperationKind, "activity">, options.id!) }
+      : {
+        schemaVersion: 1,
+        kind,
+        item: readDetail(
+          snapshot,
+          kind as Exclude<OperationKind, "activity">,
+          options.id!,
+          { limit, offset },
+        ),
+      }
   );
 }
 
