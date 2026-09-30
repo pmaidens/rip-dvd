@@ -172,9 +172,13 @@ function encodeOutputAuthorityRevision(
   job: DashboardEncodeJob,
   artifact: EncodeOutputArtifact,
 ): string {
-  return artifact.state === "published"
-    ? job.activityRevision ?? "revision-unavailable"
-    : artifact.identity;
+  const inspectionRevision = artifact.state === "published"
+    ? job.encodeOutputInspectionRevisions?.published
+    : job.encodeOutputInspectionRevisions?.retained;
+  return JSON.stringify([
+    artifact.identity,
+    inspectionRevision ?? job.activityRevision ?? "revision-unavailable",
+  ]);
 }
 
 export async function requestEncodeOutputInspection(

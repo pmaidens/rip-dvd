@@ -362,6 +362,37 @@ it("addresses every retained Encode Output generation by its own artifact identi
     replacement.id,
     replacement.id,
   ]);
+  let ownerRequeued = false;
+  const racingAccess: DataAccess = {
+    ...access,
+    readEncodeOutputInspectionSnapshot(read) {
+      const snapshot = access.readEncodeOutputInspectionSnapshot(read);
+      if (!ownerRequeued) {
+        ownerRequeued = true;
+        access.encodeJobs.requeue(replacement.id);
+      }
+      return snapshot;
+    },
+  };
+  const retainedRaceInspection = await createApplicationOperations(
+    racingAccess,
+    {
+      encodeOutputMediaProbe: async () => ({
+        durationSeconds: 900,
+        streams: [],
+      }),
+    },
+  ).inspectEncodeOutput(
+    retainedEncodeOutputArtifactIdentity(retained[1]!.id),
+  );
+  expect(retainedRaceInspection).toMatchObject({ artifact: {
+    state: "retained",
+    inspectability: { status: "inspected" },
+    media: { durationSeconds: 900 },
+  } });
+  expect(access.encodeJobs.find(replacement.id)).toMatchObject({
+    status: "queued",
+  });
   access.close();
   mediaProbe.mockClear();
 
@@ -1899,7 +1930,9 @@ it("reports encode action eligibility and correction evidence through the public
       }),
     ]),
   } });
-  expect(JSON.stringify(result.result)).not.toContain("/synthetic/output.mkv");
+  const serializedResult = JSON.stringify(result.result);
+  expect(serializedResult).not.toContain("/synthetic/output.mkv");
+  expect(serializedResult).not.toContain("outputValidationFilesystemIdentity");
 
   const writer = current.openAccess();
   const claimed = writer.encodeJobs.claimNext("synthetic-encode-worker")!;

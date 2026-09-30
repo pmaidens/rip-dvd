@@ -398,6 +398,8 @@ describe("readDashboardSnapshot", () => {
   });
 
   it("loads a displayed replacement's predecessor outside the history window", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
     const access = dataAccessFixture.create();
     const { archive, job: predecessor, selection } = seedEncodeJob(
       access,
@@ -443,8 +445,32 @@ describe("readDashboardSnapshot", () => {
         outputPath: predecessor.outputPath,
       }],
     ).replacementEncodeJobs[0]!;
+    const predecessorSnapshotBeforeClaim = readDashboardSnapshot(access, {
+      activityLimit: 20,
+    }).encodeJobs;
+    const predecessorBeforeClaim = predecessorSnapshotBeforeClaim.status === "loaded"
+      ? predecessorSnapshotBeforeClaim.items.find(({ id }) => id === predecessor.id)
+      : undefined;
+    vi.advanceTimersByTime(1_000);
     const successorClaim = access.encodeJobs.claimNext("retained-successor");
     if (!successorClaim) throw new Error("Expected retained successor claim");
+    const predecessorSnapshotAfterClaim = readDashboardSnapshot(access, {
+      activityLimit: 20,
+    }).encodeJobs;
+    const predecessorAfterClaim = predecessorSnapshotAfterClaim.status === "loaded"
+      ? predecessorSnapshotAfterClaim.items.find(({ id }) => id === predecessor.id)
+      : undefined;
+    expect(predecessorAfterClaim?.activityRevision).toBe(
+      predecessorBeforeClaim?.activityRevision,
+    );
+    expect(predecessorAfterClaim?.encodeOutputInspectionRevisions?.published)
+      .not.toBe(
+        predecessorBeforeClaim?.encodeOutputInspectionRevisions?.published,
+      );
+    expect(predecessorAfterClaim?.encodeOutputInspectionRevisions?.retained)
+      .toBe(
+        predecessorBeforeClaim?.encodeOutputInspectionRevisions?.retained,
+      );
     const retainedIdentity =
       "retained-dashboard-identity" as EncodeOutputFilesystemIdentity;
     const retainedOutputPath =

@@ -106,6 +106,7 @@ function presentEncodeJob(
     partialCleanupClaimToken: _partialCleanupClaimToken,
     partialCleanupLeaseToken: _partialCleanupLeaseToken,
     replacementOutputIdentity: _replacementOutputIdentity,
+    outputValidationFilesystemIdentity: _outputValidationFilesystemIdentity,
     outputPath: _outputPath,
     partialCleanupOutputPath: _partialCleanupOutputPath,
     ...visibleJob

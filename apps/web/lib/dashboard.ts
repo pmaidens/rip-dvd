@@ -3,6 +3,7 @@ import {
   encodeOutputArtifactReferences,
   encodeRequeueAvailability,
 } from "@rip-dvd/application";
+import { createHash } from "node:crypto";
 import type { PresentedArchiveRequestWaitingStatus } from "@rip-dvd/application";
 import type {
   ArchiveBoundaryEvidence,
@@ -149,6 +150,10 @@ export interface DashboardEncodeJob {
     state: "published" | "retained";
   }[];
   encodeOutputArtifactsTruncated?: boolean;
+  encodeOutputInspectionRevisions?: {
+    published: string;
+    retained: string;
+  };
   activityRevision?: string;
   mediaTitle: string;
   mediaYear: number | null;
@@ -180,6 +185,13 @@ export interface DashboardEncodeJob {
   verificationStatus?: FilesystemVerificationStatus | null;
   verificationMessage?: string | null;
   verifiedAt?: string | null;
+}
+
+function encodeOutputInspectionRevision(values: readonly unknown[]): string {
+  return createHash("sha256")
+    .update(JSON.stringify(values))
+    .digest("base64url")
+    .slice(0, 22);
 }
 
 export interface DashboardWorkerIncident {
@@ -1942,9 +1954,41 @@ function readDashboardSnapshotRecords(
               const publishedEncodeOutput = encodeOutputArtifacts.find(
                 ({ state }) => state === "published",
               );
+              const affectingSuccessor = successor?.outputPath === job.outputPath
+                ? successor
+                : undefined;
               return {
                 id: job.id,
                 activityRevision: job.updatedAt.toISOString(),
+                ...(encodeOutputArtifacts.length === 0
+                  ? {}
+                  : {
+                      encodeOutputInspectionRevisions: {
+                        published: encodeOutputInspectionRevision([
+                          job.id,
+                          job.status,
+                          job.completedAt?.toISOString() ?? null,
+                          job.outputPath,
+                          job.publicationPending,
+                          job.publicationCompletionPending,
+                          job.outputValidationResult,
+                          job.outputValidationFilesystemIdentity,
+                          job.outputValidatedAt?.toISOString() ?? null,
+                          job.outputCompleteness,
+                          affectingSuccessor?.id ?? null,
+                          affectingSuccessor?.status ?? null,
+                          affectingSuccessor?.completedAt?.toISOString() ?? null,
+                          affectingSuccessor?.outputPath ?? null,
+                          affectingSuccessor?.replaceExistingOutput ?? null,
+                          affectingSuccessor?.publicationPending ?? null,
+                        ]),
+                        retained: encodeOutputInspectionRevision([
+                          job.id,
+                          job.status,
+                          job.completedAt?.toISOString() ?? null,
+                        ]),
+                      },
+                    }),
                 encodeOutputArtifacts,
                 ...(truncatedEncodeOutputJobIds.has(job.id)
                   ? { encodeOutputArtifactsTruncated: true }

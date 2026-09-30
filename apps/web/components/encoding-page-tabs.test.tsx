@@ -488,74 +488,115 @@ describe("encoding page tabs", () => {
     }
   });
 
-  it("discards a published inspection when the Encode Job authority changes", async () => {
-    const completed = {
-      ...encodeJob("completed"),
-      activityRevision: "revision-1",
-    };
-    const state = {
-      opticalDrives: { status: "loaded" as const, items: [] },
-      detectedDiscs: { status: "loaded" as const, items: [] },
-      archiveJobs: { status: "loaded" as const, items: [] },
-      workerIncidents: { status: "loaded" as const, items: [] },
-      encodeJobs: { status: "loaded" as const, items: [completed] },
-      catalogReview: { status: "loaded" as const, items: [] },
-    };
-    const fetcher = vi.fn()
-      .mockResolvedValueOnce(inspectedOutputResponse(
-        completed,
-        "first-file-identity",
-      ))
-      .mockResolvedValueOnce(inspectedOutputResponse(
-        completed,
-        "replacement-file-identity",
-      ));
-    vi.stubGlobal("fetch", fetcher);
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
+  it.each(["published", "retained"] as const)(
+    "discards a %s inspection when the Encode Job authority changes",
+    async (artifactState) => {
+      const artifactIdentity = artifactState === "published"
+        ? encodeJob("completed").encodeOutputArtifactIdentity!
+        : `encode-output-v1.retained.${"a".repeat(8)}-${"b".repeat(4)}-${"c".repeat(4)}-${"d".repeat(4)}-${"e".repeat(12)}`;
+      const completed = {
+        ...encodeJob("completed"),
+        encodeOutputArtifacts: [{
+          identity: artifactIdentity,
+          state: artifactState,
+        }],
+        encodeOutputInspectionRevisions: {
+          published: "published-revision-1",
+          retained: "retained-revision-1",
+        },
+        activityRevision: "revision-1",
+      };
+      const state = {
+        opticalDrives: { status: "loaded" as const, items: [] },
+        detectedDiscs: { status: "loaded" as const, items: [] },
+        archiveJobs: { status: "loaded" as const, items: [] },
+        workerIncidents: { status: "loaded" as const, items: [] },
+        encodeJobs: { status: "loaded" as const, items: [completed] },
+        catalogReview: { status: "loaded" as const, items: [] },
+      };
+      const fetcher = vi.fn()
+        .mockResolvedValueOnce(inspectedOutputResponse(
+          completed,
+          "first-file-identity",
+          artifactIdentity,
+          artifactState,
+        ))
+        .mockResolvedValueOnce(inspectedOutputResponse(
+          completed,
+          "replacement-file-identity",
+          artifactIdentity,
+          artifactState,
+        ));
+      vi.stubGlobal("fetch", fetcher);
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
 
-    try {
-      await act(async () => {
-        root.render(<DashboardView state={state} section="encoding" />);
-      });
-      await act(async () => {
-        [...container.querySelectorAll("button")]
-          .find((button) => button.textContent === "Inspect output")!
-          .click();
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-      expect(container.textContent).toContain("first-file-identity");
+      try {
+        await act(async () => {
+          root.render(<DashboardView state={state} section="encoding" />);
+        });
+        await act(async () => {
+          [...container.querySelectorAll("button")]
+            .find((button) => button.textContent === "Inspect output")!
+            .click();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        expect(container.textContent).toContain("first-file-identity");
 
-      await act(async () => {
-        root.render(
-          <DashboardView
-            state={{
-              ...state,
-              encodeJobs: {
-                status: "loaded",
-                items: [{ ...completed, activityRevision: "revision-2" }],
-              },
-            }}
-            section="encoding"
-          />,
-        );
-      });
-      expect(container.textContent).not.toContain("first-file-identity");
+        await act(async () => {
+          root.render(
+            <DashboardView
+              state={{
+                ...state,
+                encodeJobs: {
+                  status: "loaded",
+                  items: [{ ...completed, activityRevision: "revision-2" }],
+                },
+              }}
+              section="encoding"
+            />,
+          );
+        });
+        expect(container.textContent).toContain("first-file-identity");
 
-      await act(async () => {
-        [...container.querySelectorAll("button")]
-          .find((button) => button.textContent === "Inspect output")!
-          .click();
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-      expect(container.textContent).toContain("replacement-file-identity");
-      expect(fetcher).toHaveBeenCalledTimes(2);
-    } finally {
-      await act(async () => root.unmount());
+        await act(async () => {
+          root.render(
+            <DashboardView
+              state={{
+                ...state,
+                encodeJobs: {
+                  status: "loaded",
+                  items: [{
+                    ...completed,
+                    activityRevision: "revision-2",
+                    encodeOutputInspectionRevisions: {
+                      ...completed.encodeOutputInspectionRevisions,
+                      [artifactState]: `${artifactState}-revision-2`,
+                    },
+                  }],
+                },
+              }}
+              section="encoding"
+            />,
+          );
+        });
+        expect(container.textContent).not.toContain("first-file-identity");
+
+        await act(async () => {
+          [...container.querySelectorAll("button")]
+            .find((button) => button.textContent === "Inspect output")!
+            .click();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        expect(container.textContent).toContain("replacement-file-identity");
+        expect(fetcher).toHaveBeenCalledTimes(2);
+      } finally {
+        await act(async () => root.unmount());
+      }
     }
-  });
+  );
 
   it("keeps the in-memory worklist when moving between accessible tabs", async () => {
     const selectionId = "selection-1" as DiscSelectionId;
