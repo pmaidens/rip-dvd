@@ -10,7 +10,22 @@ export const ARCHIVE_FORMATS = ["iso"] as const;
 export const ARCHIVE_INTEGRITIES = [
   "unknown",
   "clean_read",
+  "incomplete_read",
   "watchable_salvage",
+] as const;
+
+export const DVD_ARCHIVE_EVIDENCE_FORMATS = [
+  "dvd-recovery-evidence-v1",
+] as const;
+
+export const DVD_UNRECOVERED_SOURCE_CLASSIFICATIONS = [
+  "skipped_untested",
+  "individually_failed",
+] as const;
+
+export const ARCHIVE_RECOVERY_STATUSES = [
+  "eligible",
+  "completed",
 ] as const;
 
 export const DVD_SALVAGE_REJECTION_DESCRIPTIONS = {

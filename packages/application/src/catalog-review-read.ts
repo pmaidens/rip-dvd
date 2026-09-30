@@ -2,6 +2,7 @@ import {
   archiveBoundaryEvidenceFromRecord,
   decodeArchivedDvdTitles,
   DomainInvariantError,
+  withAuthoritativeDvdArchiveIntegrity,
   type DataAccess,
   type DiscSelection,
   type DiscSelectionActionAvailability,
@@ -161,10 +162,25 @@ export function readCatalogReview(
     replacementProfileOffset,
   } = coordinates;
   return access.readConsistentSnapshot((snapshot) => {
-    const archive = snapshot.catalog.listOriginalDiscArchives({ ids: [id] })[0];
-    if (!archive) {
+    const persistedArchive = snapshot.catalog
+      .listOriginalDiscArchives({ ids: [id] })[0];
+    if (!persistedArchive) {
       return null;
     }
+    const evidenceArchiveIds = [...new Set([
+      id,
+      ...(persistedArchive.rearchiveSourceArchiveId === null ||
+          persistedArchive.catalogReviewedAt !== null
+        ? []
+        : [persistedArchive.rearchiveSourceArchiveId]),
+    ])];
+    const evidenceHeaders = snapshot.catalog.findDvdArchiveEvidenceHeaders(
+      evidenceArchiveIds,
+    );
+    const archive = withAuthoritativeDvdArchiveIntegrity(
+      persistedArchive,
+      evidenceHeaders.get(id) ?? null,
+    );
     const disc = snapshot.catalog.listDetectedDiscs(undefined, {
       ids: [archive.detectedDiscId],
     })[0];
@@ -174,8 +190,23 @@ export function readCatalogReview(
       );
     }
     const rawTitles = decodeArchivedDvdTitles(disc.scanData) ?? [];
-    const rearchiveProposal = snapshot.catalog
+    const persistedRearchiveProposal = snapshot.catalog
       .readRearchiveMappingProposal(id);
+    const rearchiveProposal = persistedRearchiveProposal === null
+      ? null
+      : {
+        ...persistedRearchiveProposal,
+        sourceArchive: withAuthoritativeDvdArchiveIntegrity(
+          persistedRearchiveProposal.sourceArchive,
+          evidenceHeaders.get(persistedRearchiveProposal.sourceArchive.id) ??
+            null,
+        ),
+        targetArchive: withAuthoritativeDvdArchiveIntegrity(
+          persistedRearchiveProposal.targetArchive,
+          evidenceHeaders.get(persistedRearchiveProposal.targetArchive.id) ??
+            null,
+        ),
+      };
     const rearchiveSourceDisc = rearchiveProposal === null
       ? undefined
       : snapshot.catalog.listDetectedDiscs(undefined, {

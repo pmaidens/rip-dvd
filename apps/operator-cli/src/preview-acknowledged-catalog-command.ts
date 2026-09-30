@@ -5,6 +5,7 @@ import {
 } from "@rip-dvd/application";
 import {
   DomainInvariantError,
+  DvdRecoveryEvidenceEncodingUnavailableError,
   MEDIA_ITEM_KINDS,
   MutationKeyConflictError,
   RecordNotFoundError,
@@ -184,6 +185,14 @@ export function runPreviewAcknowledgedCatalogCommand<
       : workflow.apply(input);
   } catch (error) {
     if (error instanceof CommandFailure) throw error;
+    if (error instanceof DvdRecoveryEvidenceEncodingUnavailableError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+      );
+    }
     if (error instanceof InvalidMutationKeyError) {
       throw new CommandFailure("INVALID_MUTATION_KEY", error.message, 2);
     }

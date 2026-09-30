@@ -51,10 +51,16 @@ export async function createArchiveRequestsRoute(
       if (detectedDiscId === "") {
         return noStoreJsonResponse({ error: "Invalid Archive Request" }, 400);
       }
+      const evidenceFormatValue =
+        typeof body === "object" && body !== null && !Array.isArray(body)
+          ? (body as Record<string, unknown>).evidenceFormat
+          : undefined;
+      const evidenceFormat = evidenceFormatValue;
       return noStoreJsonResponse(
         createApplicationOperations(getAccess()).submitArchiveRequest({
           mutationKey,
           detectedDiscId,
+          ...(evidenceFormat === undefined ? {} : { evidenceFormat }),
         }),
         201,
       );

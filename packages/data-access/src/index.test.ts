@@ -24,19 +24,27 @@ import { createDvdMetadataFingerprint } from "./dvd-metadata-fingerprint.js";
 import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
+  archiveBoundaryEvidenceFromRecord,
   DISC_INSPECTION_LEASE_DURATION_MS,
   createCorrectedDvdArchiveBoundaryEvidence,
   createDataAccess,
+  createDvdArchiveBoundaryEvidenceDigest,
+  createDvdArchiveEvidenceManifestDigests,
   createCleanReadArchiveIntegrityEvidence,
   createDiscSelectionSourceIdentity,
   createUnknownArchiveIntegrityEvidence,
   createWatchableSalvageArchiveIntegrityEvidence,
+  DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
+  DVD_RECOVERY_EVIDENCE_FORMAT,
   DVD_TITLE_MAP_SCHEMA_VERSION,
   DomainInvariantError,
+  DvdRecoveryEvidenceAdmissionClosedError,
+  DvdRecoveryEvidenceEncodingUnavailableError,
   ENCODE_JOB_LEASE_DURATION_MS,
   InvalidStatusTransitionError,
   MAX_DVD_TITLES,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
+  MutationKeyConflictError,
   RecordNotFoundError,
   StaleJobAttemptError,
 } from "./index.js";
@@ -44,6 +52,8 @@ import {
   createNormalDvdArchiveBoundaryEvidenceForTest,
 } from "./disc-settling-fixture.js";
 import type {
+  ArchiveJobId,
+  ArchiveRequestId,
   DetectedDiscId,
   DiscKind,
   DiscInspectionId,
@@ -306,6 +316,242 @@ function openTestDatabase(databasePath = createTestDatabasePath()) {
   return createLegacySidecarDataAccess({ databasePath });
 }
 
+function markArchiveWithDvdRecoveryEvidence(
+  databasePath: string,
+  originalDiscArchiveId: string,
+  fixtureId: string,
+  digestOverrides: {
+    boundaryEvidenceDigest?: string;
+    manifestDigest?: string;
+    unrecoveredSourceRangesDigest?: string;
+  } = {},
+): void {
+  const sqlite = new DatabaseSync(databasePath);
+  try {
+    sqlite.prepare(`
+      UPDATE original_disc_archives
+      SET size_bytes = COALESCE(size_bytes, 2048),
+          boundary_policy_version = COALESCE(
+            boundary_policy_version,
+            'dvd-archive-boundary-v1'
+          ),
+          boundary_reported_size_bytes = COALESCE(
+            boundary_reported_size_bytes,
+            size_bytes,
+            2048
+          ),
+          boundary_published_size_bytes = COALESCE(
+            boundary_published_size_bytes,
+            size_bytes,
+            2048
+          ),
+          boundary_excluded_sector_count = COALESCE(
+            boundary_excluded_sector_count,
+            0
+          ),
+          integrity = 'unknown',
+          integrity_evidence_revision = NULL,
+          integrity_policy_version = NULL,
+          bad_sector_count = NULL,
+          bad_area_count = NULL,
+          bad_sector_ranges = NULL,
+          bad_sector_counts_by_title = NULL
+      WHERE id = ?
+    `).run(originalDiscArchiveId);
+    sqlite.prepare(`
+      UPDATE original_disc_archives
+      SET boundary_policy_version = 'dvd-archive-boundary-v2',
+          boundary_first_excluded_lba = size_bytes / 2048,
+          boundary_maximum_referenced_lba = NULL,
+          boundary_read_failure_classifier_version = 'scsi-read-classifier-v2',
+          boundary_read_failure_scsi_status = 2,
+          boundary_read_failure_host_status = 0,
+          boundary_read_failure_driver_status = 8,
+          boundary_read_failure_sense_response_code = 114,
+          boundary_read_failure_sense_key = 5,
+          boundary_read_failure_asc = 33,
+          boundary_read_failure_ascq = 0
+      WHERE id = ?
+        AND boundary_policy_version = 'dvd-archive-boundary-v1'
+        AND boundary_excluded_sector_count = 0
+    `).run(originalDiscArchiveId);
+    const archive = sqlite.prepare(`
+      SELECT detected_disc_id, fingerprint, size_bytes,
+             boundary_policy_version, boundary_reported_size_bytes,
+             boundary_published_size_bytes, boundary_excluded_sector_count,
+             boundary_first_excluded_lba, boundary_maximum_referenced_lba,
+             boundary_read_failure_classifier_version,
+             boundary_read_failure_scsi_status,
+             boundary_read_failure_host_status,
+             boundary_read_failure_driver_status,
+             boundary_read_failure_sense_response_code,
+             boundary_read_failure_sense_key, boundary_read_failure_asc,
+             boundary_read_failure_ascq
+      FROM original_disc_archives
+      WHERE id = ?
+    `).get(originalDiscArchiveId) as {
+      detected_disc_id: string;
+      fingerprint: string;
+      size_bytes: number;
+      boundary_policy_version: string;
+      boundary_reported_size_bytes: number;
+      boundary_published_size_bytes: number;
+      boundary_excluded_sector_count: number;
+      boundary_first_excluded_lba: number | null;
+      boundary_maximum_referenced_lba: number | null;
+      boundary_read_failure_classifier_version: string | null;
+      boundary_read_failure_scsi_status: number | null;
+      boundary_read_failure_host_status: number | null;
+      boundary_read_failure_driver_status: number | null;
+      boundary_read_failure_sense_response_code: number | null;
+      boundary_read_failure_sense_key: number | null;
+      boundary_read_failure_asc: number | null;
+      boundary_read_failure_ascq: number | null;
+    } | undefined;
+    if (archive === undefined) throw new Error("Expected evidence archive");
+    const requestId = `${fixtureId}-evidence-request`;
+    const jobId = `${fixtureId}-evidence-job`;
+    const manifestId = `${fixtureId}-evidence-manifest`;
+    const inspectionId = `${fixtureId}-evidence-inspection`;
+    const boundaryEvidence = archiveBoundaryEvidenceFromRecord({
+      boundaryPolicyVersion: archive.boundary_policy_version,
+      boundaryReportedSizeBytes: archive.boundary_reported_size_bytes,
+      boundaryPublishedSizeBytes: archive.boundary_published_size_bytes,
+      boundaryExcludedSectorCount: archive.boundary_excluded_sector_count,
+      boundaryFirstExcludedLba: archive.boundary_first_excluded_lba,
+      boundaryMaximumReferencedLba: archive.boundary_maximum_referenced_lba,
+      boundaryReadFailureClassifierVersion:
+        archive.boundary_read_failure_classifier_version,
+      boundaryReadFailureScsiStatus:
+        archive.boundary_read_failure_scsi_status,
+      boundaryReadFailureHostStatus:
+        archive.boundary_read_failure_host_status,
+      boundaryReadFailureDriverStatus:
+        archive.boundary_read_failure_driver_status,
+      boundaryReadFailureSenseResponseCode:
+        archive.boundary_read_failure_sense_response_code,
+      boundaryReadFailureSenseKey: archive.boundary_read_failure_sense_key,
+      boundaryReadFailureAsc: archive.boundary_read_failure_asc,
+      boundaryReadFailureAscq: archive.boundary_read_failure_ascq,
+    });
+    if (boundaryEvidence === null) {
+      throw new Error("Expected Archive Boundary Evidence");
+    }
+    const calculatedBoundaryDigest =
+      createDvdArchiveBoundaryEvidenceDigest(boundaryEvidence);
+    const boundaryDigest =
+      digestOverrides.boundaryEvidenceDigest ?? calculatedBoundaryDigest;
+    const {
+      unrecoveredSourceRangesDigest: sourceRangesDigest,
+      manifestDigest,
+    } = createDvdArchiveEvidenceManifestDigests({
+      originalDiscArchiveId,
+      revision: 1,
+      previousManifestId: null,
+      previousManifestDigest: null,
+      recoveryReadId: null,
+      recoveryReadEvidenceDigest: null,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+      imageFingerprint: archive.fingerprint,
+      sectorSizeBytes: 2_048,
+      acceptedEndLbaExclusive: archive.size_bytes / 2_048,
+      boundaryPolicyVersion: archive.boundary_policy_version,
+      boundaryReportedSizeBytes: archive.boundary_reported_size_bytes,
+      boundaryPublishedSizeBytes: archive.boundary_published_size_bytes,
+      boundaryEvidenceDigest: boundaryDigest,
+      unrecoveredSourceRanges: [],
+    });
+    sqlite.prepare(`
+      INSERT INTO disc_inspections (
+        id, optical_drive_id, detected_disc_id, media_generation, is_current,
+        status, phase, total_bytes, phase_started_at, attempt_started_at,
+        started_at, completed_at, created_at, updated_at
+      )
+      SELECT ?, optical_drive_id, id, ?, 0, 'completed', 'confirming_media', ?,
+        1, 1, 1, 1, 1, 1
+      FROM detected_discs
+      WHERE id = ?
+    `).run(
+      inspectionId,
+      `${fixtureId}-evidence-generation`,
+      archive.boundary_reported_size_bytes,
+      archive.detected_disc_id,
+    );
+    sqlite.prepare(`
+      INSERT INTO archive_requests (
+        id, detected_disc_id, evidence_format, status, priority,
+        fulfilled_at, created_at, updated_at
+      ) VALUES (?, ?, ?, 'fulfilled', 0, 1, 1, 1)
+    `).run(
+      requestId,
+      archive.detected_disc_id,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+    );
+    sqlite.prepare(`
+      INSERT INTO archive_jobs (
+        id, archive_request_id, disc_inspection_id, detected_disc_id,
+        original_disc_archive_id, evidence_format, attempt_ordinal, status,
+        priority, progress_phase, progress_percent, progress_bytes,
+        last_progress_at, started_at, completed_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 1, 'completed', 0, 'finalizing', 100, ?,
+        1, 1, 1, 1, 1)
+    `).run(
+      jobId,
+      requestId,
+      inspectionId,
+      archive.detected_disc_id,
+      originalDiscArchiveId,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      archive.boundary_published_size_bytes,
+    );
+    sqlite.prepare(`
+      INSERT INTO dvd_archive_evidence_manifests (
+        id, original_disc_archive_id, revision, evidence_format,
+        image_fingerprint, sector_size_bytes, accepted_end_lba_exclusive,
+        boundary_policy_version, boundary_reported_size_bytes,
+        boundary_published_size_bytes, boundary_evidence_digest,
+        unrecovered_source_ranges, unrecovered_source_ranges_digest,
+        manifest_digest, created_at
+      ) VALUES (?, ?, 1, ?, ?, 2048, ?, ?, ?, ?, ?, '[]', ?, ?, 1)
+    `).run(
+      manifestId,
+      originalDiscArchiveId,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      archive.fingerprint,
+      archive.size_bytes / 2048,
+      archive.boundary_policy_version,
+      archive.boundary_reported_size_bytes,
+      archive.boundary_published_size_bytes,
+      boundaryDigest,
+      digestOverrides.unrecoveredSourceRangesDigest ?? sourceRangesDigest,
+      digestOverrides.manifestDigest ?? manifestDigest,
+    );
+    sqlite.prepare(`
+      INSERT INTO dvd_archive_evidence_headers (
+        original_disc_archive_id, source_archive_job_id, evidence_format,
+        boundary_policy_version, boundary_reported_size_bytes,
+        boundary_published_size_bytes, boundary_evidence_digest,
+        sector_size_bytes, accepted_end_lba_exclusive, current_manifest_id,
+        current_manifest_revision, current_manifest_digest, created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 2048, ?, ?, 1, ?, 1, 1)
+    `).run(
+      originalDiscArchiveId,
+      jobId,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      archive.boundary_policy_version,
+      archive.boundary_reported_size_bytes,
+      archive.boundary_published_size_bytes,
+      boundaryDigest,
+      archive.size_bytes / 2048,
+      manifestId,
+      digestOverrides.manifestDigest ?? manifestDigest,
+    );
+  } finally {
+    sqlite.close();
+  }
+}
+
 function completeDiscInspection(
   access: ReturnType<typeof openTestDatabase>,
   input: {
@@ -461,6 +707,28 @@ afterEach(() => {
 });
 
 describe("data-access facade", () => {
+  it("bounds set-based DVD evidence-header reads", () => {
+    const access = openTestDatabase();
+    const ids = Array.from(
+      { length: DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT + 1 },
+      (_, index) => `synthetic-archive-${index}` as OriginalDiscArchiveId,
+    );
+    const batchRead = vi.spyOn(
+      access.catalog,
+      "findDvdArchiveEvidenceHeaders",
+    );
+
+    expect(access.catalog.findDvdArchiveEvidenceHeaders([])).toEqual(new Map());
+    expect(access.catalog.findDvdArchiveEvidenceHeaders(ids.slice(0, 100)))
+      .toEqual(new Map());
+    expect(access.catalog.findDvdArchiveEvidenceHeader(ids[0]!)).toBeNull();
+    expect(batchRead).toHaveBeenLastCalledWith([ids[0]]);
+    expect(() => access.catalog.findDvdArchiveEvidenceHeaders(ids)).toThrow(
+      `limited to ${DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT} archives`,
+    );
+    access.close();
+  });
+
   it("keeps every attached drive lane while bounding all missing-drive history", () => {
     const access = openTestDatabase();
     for (let index = 0; index < 32; index += 1) {
@@ -676,10 +944,14 @@ describe("data-access facade", () => {
       expect.arrayContaining([
         "archive_audit_findings",
         "archive_audit_runs",
+        "archive_recoveries",
         "archive_requests",
         "disc_inspection_attempts",
         "disc_inspections",
         "disc_selection_supersessions",
+        "dvd_archive_evidence_headers",
+        "dvd_archive_evidence_manifests",
+        "dvd_archive_recovery_reads",
         "encode_job_failure_reports",
         "filesystem_verification_runs",
         "mutation_invocations",
@@ -688,20 +960,22 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(25);
+    expect(identifierTables).toHaveLength(29);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "legacy_cutover_staged_sidecars"
           ? sql.includes("PRIMARY KEY(`originals_library_path`, `sidecar_path`)")
-          : name === "archive_audit_findings"
-            ? sql.includes("PRIMARY KEY(`archive_audit_run_id`, `sequence`)")
-          : name === "rearchive_mapping_proposal_items"
-            ? sql.includes("PRIMARY KEY(`target_archive_id`, `source_disc_selection_id`)")
-          : name === "rearchive_mapping_proposals"
-            ? sql.includes("`target_archive_id` text PRIMARY KEY")
-          : name === "mutation_invocations"
-            ? sql.includes("mutation_invocations_key_not_null")
-            : sql.includes(`${name}_id_not_null`),
+          : name === "dvd_archive_evidence_headers"
+            ? sql.includes("dvd_archive_evidence_headers_archive_id_not_null")
+            : name === "archive_audit_findings"
+              ? sql.includes("PRIMARY KEY(`archive_audit_run_id`, `sequence`)")
+              : name === "rearchive_mapping_proposal_items"
+                ? sql.includes("PRIMARY KEY(`target_archive_id`, `source_disc_selection_id`)")
+                : name === "rearchive_mapping_proposals"
+                  ? sql.includes("`target_archive_id` text PRIMARY KEY")
+                  : name === "mutation_invocations"
+                    ? sql.includes("mutation_invocations_key_not_null")
+                    : sql.includes(`${name}_id_not_null`),
       ),
     ).toBe(true);
     expect(() =>
@@ -1231,7 +1505,10 @@ describe("data-access facade", () => {
           name !== "20260922161825_operation-detail-lookups" &&
           name !== "20260922174811_rearchive-lineage" &&
           name !== "20260922182659_rearchive-ordinary-uniqueness" &&
-          name !== "20260930002622_wandering_micromax",
+          name !== "20260930002706_dvd-evidence-compatibility" &&
+          name !== "20260930003106_dvd-evidence-authority" &&
+          name !== "20260930002622_wandering_micromax" &&
+          name !== "20260930003626_dvd-evidence-checkpoints",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -4450,6 +4727,119 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("blocks corrected replacement insertion for a DVD evidence archive before changing review state", () => {
+    const databasePath = createTestDatabasePath();
+    const {
+      access,
+      archive,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      databasePath,
+      key: "replacement-plan-evidence-fence",
+    });
+    if (!correctedItem) throw new Error("Expected correction target");
+    const profile = access.encodingProfiles.create({
+      key: "replacement-plan-evidence-fence",
+      displayName: "Replacement evidence fence",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement evidence fence.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("replacement-evidence-fence");
+    if (!claim) throw new Error("Expected predecessor claim");
+    access.encodeJobs.complete(claim);
+    const correction = access.catalog.correctDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "main_feature" },
+      },
+    );
+    const catalogRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      archive.id,
+      "replacement-plan-evidence-fence",
+    );
+
+    expect(() => access.catalog.completeCatalogReviewWithReplacements(
+      archive.id,
+      catalogRevision,
+      "reviewed_with_selections",
+      [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: profile.id,
+        outputPath: predecessor.outputPath,
+      }],
+    )).toThrow(DvdRecoveryEvidenceEncodingUnavailableError);
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toMatchObject({
+        catalogReviewOutcome: "needs_review",
+        catalogReviewedAt: null,
+      });
+    expect(access.catalog.listDiscSelections({
+      ids: [correction.discSelection.id],
+    })).toEqual([expect.objectContaining({
+      id: correction.discSelection.id,
+    })]);
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: predecessor.id,
+        predecessorEncodeJobId: null,
+        reservesOutputPath: true,
+      }),
+    ]);
+    access.close();
+  });
+
+  it.each([
+    {
+      description: "Archive Boundary Evidence",
+      suffix: "boundary",
+      digestOverrides: { boundaryEvidenceDigest: "0".repeat(64) },
+    },
+    {
+      description: "manifest",
+      suffix: "manifest",
+      digestOverrides: { manifestDigest: "0".repeat(64) },
+    },
+    {
+      description: "Unrecovered Source map",
+      suffix: "source-map",
+      digestOverrides: { unrecoveredSourceRangesDigest: "0".repeat(64) },
+    },
+  ])(
+    "rejects a persisted DVD evidence $description digest mismatch at the authoritative read boundary",
+    ({ suffix, digestOverrides }) => {
+      const databasePath = createTestDatabasePath();
+      const { access, archive } = createDiscSelectionCorrectionFixture({
+        databasePath,
+        key: `evidence-digest-mismatch-${suffix}`,
+      });
+      markArchiveWithDvdRecoveryEvidence(
+        databasePath,
+        archive.id,
+        `evidence-digest-mismatch-${suffix}`,
+        digestOverrides,
+      );
+
+      expect(() => access.catalog.findDvdArchiveEvidenceHeader(archive.id))
+        .toThrow("digest does not match its contents");
+      access.close();
+    },
+  );
+
   it("stably traverses persisted correction jobs and retained outputs beyond multiple page boundaries", () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);
@@ -5647,6 +6037,83 @@ describe("data-access facade", () => {
       outputPath: "/media/movies/Replacement lineage ordinary.mkv",
     });
     expect(replacements.map(({ id }) => id)).not.toContain(ordinary.id);
+    access.close();
+  });
+
+  it("queues many corrected replacements after validating the target once", () => {
+    const {
+      access,
+      archive,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "replacement-plan-many-jobs",
+    });
+    if (!correctedItem) {
+      throw new Error("Expected correction target");
+    }
+    const profiles = Array.from({ length: 20 }, (_, index) =>
+      access.encodingProfiles.create({
+        key: `replacement-plan-many-jobs-${index + 1}`,
+        displayName: `Replacement plan many jobs ${index + 1}`,
+        mediaDomain: "dvd_video",
+        settings: { preset: "Fast 480p30" },
+      })
+    );
+    const predecessors = profiles.map((profile, index) => {
+      const predecessor = access.encodeJobs.enqueue({
+        discSelectionId: mistakenSelection.id,
+        encodingProfileId: profile.id,
+        outputPath: `/media/movies/Synthetic replacement ${index + 1}.mkv`,
+      });
+      const claim = access.encodeJobs.claimNext(
+        `replacement-many-jobs-${index + 1}`,
+      );
+      if (!claim || claim.id !== predecessor.id) {
+        throw new Error("Expected synthetic replacement predecessor claim");
+      }
+      access.encodeJobs.complete(claim);
+      return predecessor;
+    });
+    const correction = access.catalog.correctDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    );
+    const plans = access.catalog.listCorrectedEncodeReplacementPlans({
+      originalDiscArchiveId: archive.id,
+      limit: 100,
+    });
+
+    const replacements = access.catalog.completeCatalogReviewWithReplacements(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+      plans.map((plan) => ({
+        predecessorEncodeJobId: plan.predecessorEncodeJobId,
+        encodingProfileId: plan.proposedEncodingProfileId,
+        outputPath: plan.proposedOutputPath,
+      })),
+    ).replacementEncodeJobs;
+
+    expect(plans).toHaveLength(predecessors.length);
+    expect(replacements).toHaveLength(predecessors.length);
+    expect(new Set(replacements.map((replacement) => replacement.id)).size)
+      .toBe(predecessors.length);
+    expect(replacements).toEqual(expect.arrayContaining(
+      predecessors.map((predecessor) => expect.objectContaining({
+        predecessorEncodeJobId: predecessor.id,
+        discSelectionId: correction.discSelection.id,
+        encodingProfileId: predecessor.encodingProfileId,
+      })),
+    ));
     access.close();
   });
 
@@ -8265,38 +8732,38 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           "select name from __drizzle_migrations order by id desc limit 10",
         )
         .all(),
-    ).toEqual([
-      {
-        name: "20260930002622_wandering_micromax",
-      },
-      {
-        name: "20260929225801_lonely_microchip",
-      },
-      {
-        name: "20260922212838_modern_khan",
-      },
-      {
-        name: "20260922185615_durable-archive-audits",
-      },
-      {
-        name: "20260922182659_rearchive-ordinary-uniqueness",
-      },
-      {
-        name: "20260922174811_rearchive-lineage",
-      },
-      {
-        name: "20260922170551_durable-filesystem-verification",
-      },
-      {
-        name: "20260922161825_operation-detail-lookups",
-      },
-      {
-        name: "20260922160403_long_maximus",
-      },
-      {
-        name: "20260912212844_normal-dvd-endpoint-proof",
-      },
-    ]);
+      ).toEqual([
+        {
+          name: "20260930003626_dvd-evidence-checkpoints",
+        },
+        {
+          name: "20260930003106_dvd-evidence-authority",
+        },
+        {
+          name: "20260930002706_dvd-evidence-compatibility",
+        },
+        {
+          name: "20260930002622_wandering_micromax",
+        },
+        {
+          name: "20260929225801_lonely_microchip",
+        },
+        {
+          name: "20260922212838_modern_khan",
+        },
+        {
+          name: "20260922185615_durable-archive-audits",
+        },
+        {
+          name: "20260922182659_rearchive-ordinary-uniqueness",
+        },
+        {
+          name: "20260922174811_rearchive-lineage",
+        },
+        {
+          name: "20260922170551_durable-filesystem-verification",
+        },
+      ]);
     expect(
       sqlite
         .prepare(
@@ -12851,6 +13318,441 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(access.archiveRequests.find(sourceRequest.id)?.status)
       .toBe("fulfilled");
     access.close();
+  });
+
+  it("resolves Archive Request replay before closed DVD evidence admission", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/evidence-request-replay",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const first = completeDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: "evidence-request-replay-first",
+      fingerprint: "evidence-request-replay-first",
+      sizeBytes: 2_048,
+    });
+    const second = completeDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: "evidence-request-replay-second",
+      fingerprint: "evidence-request-replay-second",
+      sizeBytes: 2_048,
+    });
+    access.close();
+
+    const mutationKey = "00000000-0000-4000-8000-000000000408";
+    const blockedMutationKey = "00000000-0000-4000-8000-000000000409";
+    const reuseMutationKey = "00000000-0000-4000-8000-000000000415";
+    const reactivationMutationKey =
+      "00000000-0000-4000-8000-000000000416";
+    const requestId = "evidence-request-replay-request";
+    const reactivationRequestId = "evidence-request-reactivation-request";
+    const createdAt = new Date(1).toISOString();
+    const semanticInput = JSON.stringify({
+      detectedDiscId: first.disc.id,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+    });
+    const outcome = {
+      id: requestId,
+      detectedDiscId: first.disc.id,
+      rearchiveSourceArchiveId: null,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+      status: "pending",
+      priority: 0,
+      cancellationRequestedAt: null,
+      fulfilledAt: null,
+      cancelledAt: null,
+      createdAt,
+      updatedAt: createdAt,
+    };
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.prepare(`
+      INSERT INTO archive_requests (
+        id, detected_disc_id, evidence_format, status, priority,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, 'pending', 0, 1, 1)
+    `).run(requestId, first.disc.id, DVD_RECOVERY_EVIDENCE_FORMAT);
+    sqlite.prepare(`
+      INSERT INTO archive_requests (
+        id, detected_disc_id, evidence_format, status, priority,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, 'needs_attention', 0, 1, 1)
+    `).run(
+      reactivationRequestId,
+      second.disc.id,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+    );
+    sqlite.prepare(`
+      INSERT INTO mutation_invocations (
+        key, operation, semantic_input, outcome, created_at
+      ) VALUES (?, 'archive_request.submit', ?, ?, 1)
+    `).run(mutationKey, semanticInput, JSON.stringify(outcome));
+    sqlite.close();
+
+    const gatedAccess = openTestDatabase(databasePath);
+    expect(gatedAccess.archiveRequests.submit({
+      mutationKey,
+      detectedDiscId: first.disc.id,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+    })).toMatchObject({
+      id: requestId,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+      createdAt: new Date(1),
+    });
+    expect(() => gatedAccess.archiveRequests.submit({
+      mutationKey,
+      detectedDiscId: second.disc.id,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+    })).toThrow(MutationKeyConflictError);
+    expect(() => gatedAccess.archiveRequests.submit({
+      mutationKey: blockedMutationKey,
+      detectedDiscId: first.disc.id,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+    })).toThrow(DvdRecoveryEvidenceAdmissionClosedError);
+    expect(() => gatedAccess.archiveRequests.submit({
+      mutationKey: reuseMutationKey,
+      detectedDiscId: first.disc.id,
+    })).toThrow(DvdRecoveryEvidenceAdmissionClosedError);
+    expect(() => gatedAccess.archiveRequests.submit({
+      mutationKey: reactivationMutationKey,
+      detectedDiscId: second.disc.id,
+    })).toThrow(DvdRecoveryEvidenceAdmissionClosedError);
+    expect(gatedAccess.archiveRequests.find(reactivationRequestId as ArchiveRequestId))
+      .toMatchObject({
+        evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+        status: "needs_attention",
+      });
+    gatedAccess.close();
+
+    const replayCheck = new DatabaseSync(databasePath);
+    expect(replayCheck.prepare(`
+      SELECT key
+      FROM mutation_invocations
+      WHERE key IN (?, ?, ?, ?)
+      ORDER BY key
+    `).all(
+      mutationKey,
+      blockedMutationKey,
+      reuseMutationKey,
+      reactivationMutationKey,
+    )).toEqual([{ key: mutationKey }]);
+    replayCheck.close();
+  });
+
+  it("resolves Encode Job mutation replay before current DVD evidence gates", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/evidence-encode-replay",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "evidence-encode-replay",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Evidence Encode Replay.iso",
+      fingerprint: "evidence-encode-replay",
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Evidence Encode Replay",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const profile = access.encodingProfiles.create({
+      key: "evidence-encode-replay",
+      displayName: "Evidence encode replay",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    completeCatalogReview(access, archive.id);
+    const enqueueMutationKey = "00000000-0000-4000-8000-000000000410";
+    const requeueMutationKey = "00000000-0000-4000-8000-000000000411";
+    const blockedEnqueueKey = "00000000-0000-4000-8000-000000000412";
+    const blockedRequeueKey = "00000000-0000-4000-8000-000000000413";
+    const enqueueInput = {
+      mutationKey: enqueueMutationKey,
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Evidence Encode Replay.mkv",
+    };
+    const enqueued = access.encodeJobs.enqueue(enqueueInput);
+    access.encodeJobs.requestCancellation(enqueued.id);
+    const requeued = access.encodeJobs.requeue(enqueued.id, {
+      mutationKey: requeueMutationKey,
+    });
+    access.encodeJobs.requestCancellation(enqueued.id);
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      archive.id,
+      "evidence-encode-replay",
+    );
+
+    expect(access.encodeJobs.enqueue(enqueueInput)).toEqual(enqueued);
+    expect(() => access.encodeJobs.enqueue({
+      ...enqueueInput,
+      outputPath: "/media/movies/Evidence Encode Replay changed.mkv",
+    })).toThrow(MutationKeyConflictError);
+    expect(access.encodeJobs.requeue(enqueued.id, {
+      mutationKey: requeueMutationKey,
+    })).toEqual(requeued);
+    expect(() => access.encodeJobs.requeue(enqueued.id, {
+      mutationKey: requeueMutationKey,
+      priority: 1,
+    })).toThrow(MutationKeyConflictError);
+    expect(() => access.encodeJobs.enqueue({
+      ...enqueueInput,
+      mutationKey: blockedEnqueueKey,
+    })).toThrow(DvdRecoveryEvidenceEncodingUnavailableError);
+    expect(() => access.encodeJobs.requeue(enqueued.id, {
+      mutationKey: blockedRequeueKey,
+    })).toThrow(DvdRecoveryEvidenceEncodingUnavailableError);
+    expect(() => access.encodeJobs.resolveQueueLogicalJobs({
+      discSelectionIds: [selection.id],
+      encodingProfileId: profile.id,
+    })).toThrow(DvdRecoveryEvidenceEncodingUnavailableError);
+    access.close();
+
+    const replayCheck = new DatabaseSync(databasePath);
+    expect(replayCheck.prepare(`
+      SELECT key
+      FROM mutation_invocations
+      WHERE key IN (?, ?, ?, ?)
+      ORDER BY key
+    `).all(
+      enqueueMutationKey,
+      requeueMutationKey,
+      blockedEnqueueKey,
+      blockedRequeueKey,
+    )).toEqual([
+      { key: enqueueMutationKey },
+      { key: requeueMutationKey },
+    ]);
+    replayCheck.close();
+  });
+
+  it("keeps marked DVD evidence work closed at scheduling and worker mutation boundaries", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const scheduledDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/evidence-scheduling",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const scheduled = completeDiscInspection(access, {
+      opticalDriveId: scheduledDrive.id,
+      mediaGeneration: "evidence-scheduling",
+      fingerprint: "evidence-scheduling",
+      sizeBytes: 2_048,
+    });
+    const scheduledRequest = access.archiveRequests.create({
+      detectedDiscId: scheduled.disc.id,
+    });
+
+    const runningDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/evidence-worker",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const running = completeDiscInspection(access, {
+      opticalDriveId: runningDrive.id,
+      mediaGeneration: "evidence-worker",
+      fingerprint: "evidence-worker",
+      sizeBytes: 2_048,
+    });
+    const runningRequest = access.archiveRequests.create({
+      detectedDiscId: running.disc.id,
+    });
+    access.close();
+
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.prepare(`
+      UPDATE archive_requests
+      SET evidence_format = ?
+      WHERE id = ?
+    `).run(DVD_RECOVERY_EVIDENCE_FORMAT, scheduledRequest.id);
+    sqlite.prepare(`
+      UPDATE archive_requests
+      SET evidence_format = ?, status = 'running'
+      WHERE id = ?
+    `).run(DVD_RECOVERY_EVIDENCE_FORMAT, runningRequest.id);
+    const insertArchiveJob = sqlite.prepare(`
+      INSERT INTO archive_jobs (
+        id, archive_request_id, disc_inspection_id, detected_disc_id,
+        evidence_format, attempt_ordinal, status, priority, progress_phase,
+        progress_percent, progress_bytes, last_progress_at, claimed_by,
+        claim_token, claimed_at, started_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 1, 'running', 0, 'preparing', 0, 0, ?,
+        'legacy-evidence-worker', 'legacy-evidence-token', ?, ?, ?, ?)
+    `);
+    const activeTimestamp = Date.now();
+    expect(() => insertArchiveJob.run(
+      "evidence-scheduling-old-worker-job",
+      scheduledRequest.id,
+      scheduled.inspection.id,
+      scheduled.disc.id,
+      null,
+      activeTimestamp,
+      activeTimestamp,
+      activeTimestamp,
+      activeTimestamp,
+      activeTimestamp,
+    )).toThrow(/evidence format must match/i);
+
+    const markedJobId = "evidence-worker-marked-job";
+    insertArchiveJob.run(
+      markedJobId,
+      runningRequest.id,
+      running.inspection.id,
+      running.disc.id,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      activeTimestamp,
+      activeTimestamp,
+      activeTimestamp,
+      activeTimestamp,
+      activeTimestamp,
+    );
+    expect(() => sqlite.prepare(`
+      UPDATE archive_jobs
+      SET progress_percent = 50
+      WHERE id = ?
+    `).run(markedJobId)).toThrow(/admission is closed/i);
+    expect(() => sqlite.prepare(`
+      UPDATE archive_requests
+      SET priority = 1
+      WHERE id = ?
+    `).run(runningRequest.id)).toThrow(/admission is closed/i);
+    sqlite.close();
+
+    const gatedAccess = openTestDatabase(databasePath);
+    expect(gatedAccess.archiveRequests.waitingStatus(scheduledRequest.id))
+      .toEqual({ code: "dvd_recovery_evidence_admission_closed" });
+    expect(gatedAccess.archiveJobs.startForInspection(
+      scheduled.inspection.id,
+      "closed-evidence-worker",
+    )).toBeNull();
+
+    const markedClaim = gatedAccess.archiveJobs.find(
+      markedJobId as ArchiveJobId,
+    );
+    if (markedClaim?.status !== "running") {
+      throw new Error("Expected a marked running Archive Job");
+    }
+    const runningMarkedClaim = markedClaim as RunningArchiveJob;
+    for (const mutate of [
+      () => gatedAccess.archiveJobs.renewClaim(runningMarkedClaim),
+      () => gatedAccess.archiveJobs.updateProgress(runningMarkedClaim, 50),
+      () => gatedAccess.archiveJobs.fail(runningMarkedClaim, "must remain closed"),
+      () => gatedAccess.archiveJobs.abort(
+        runningMarkedClaim,
+        "must remain closed before cancellation",
+      ),
+    ]) {
+      expect(mutate).toThrow(DvdRecoveryEvidenceAdmissionClosedError);
+    }
+    expect(gatedAccess.archiveJobs.find(markedClaim.id)).toMatchObject({
+      status: "running",
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+      progressPercent: 0,
+    });
+    const cancellationInput = {
+      mutationKey: "00000000-0000-4000-8000-000000000407",
+      id: runningRequest.id,
+    };
+    const cancellation = gatedAccess.archiveRequests.cancelWithReplay(
+      cancellationInput,
+    );
+    expect(cancellation).toEqual({
+      id: runningRequest.id,
+      status: "cancellation_requested",
+    });
+    expect(gatedAccess.archiveRequests.cancelWithReplay(cancellationInput))
+      .toEqual(cancellation);
+    expect(gatedAccess.archiveJobs.find(markedClaim.id)).toMatchObject({
+      status: "running",
+      progressPercent: 0,
+    });
+    expect(gatedAccess.archiveJobs.abort(
+      runningMarkedClaim,
+      "Archive cancelled after evidence admission closed",
+    )).toMatchObject({
+      id: markedClaim.id,
+      status: "aborted",
+      progressPercent: 0,
+      originalDiscArchiveId: null,
+    });
+    expect(gatedAccess.archiveRequests.find(runningRequest.id)).toMatchObject({
+      status: "cancelled",
+    });
+    const futureRequest = gatedAccess.archiveRequests.create({
+      detectedDiscId: running.disc.id,
+    });
+    expect(futureRequest).toMatchObject({
+      detectedDiscId: running.disc.id,
+      evidenceFormat: null,
+      status: "pending",
+    });
+    gatedAccess.close();
+
+    const expiredJobId = "evidence-worker-expired-cancellation-job";
+    const expiredAt = Date.now() - ARCHIVE_JOB_LEASE_DURATION_MS - 1;
+    const recoveryFixture = new DatabaseSync(databasePath);
+    recoveryFixture.prepare(`
+      UPDATE archive_requests
+      SET evidence_format = ?, status = 'running', updated_at = ?
+      WHERE id = ?
+    `).run(DVD_RECOVERY_EVIDENCE_FORMAT, expiredAt, futureRequest.id);
+    recoveryFixture.prepare(`
+      INSERT INTO archive_jobs (
+        id, archive_request_id, disc_inspection_id, detected_disc_id,
+        evidence_format, attempt_ordinal, status, priority, progress_phase,
+        progress_percent, progress_bytes, last_progress_at, claimed_by,
+        claim_token, claimed_at, started_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 1, 'running', 0, 'preparing', 0, 0, ?,
+        'expired-evidence-worker', 'expired-evidence-token', ?, ?, ?, ?)
+    `).run(
+      expiredJobId,
+      futureRequest.id,
+      running.inspection.id,
+      running.disc.id,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      expiredAt,
+      expiredAt,
+      expiredAt,
+      expiredAt,
+      expiredAt,
+    );
+    recoveryFixture.close();
+
+    const recoveryAccess = openTestDatabase(databasePath);
+    recoveryAccess.archiveRequests.cancelWithReplay({
+      mutationKey: "00000000-0000-4000-8000-000000000414",
+      id: futureRequest.id,
+    });
+    const expiredCancellation = recoveryAccess.archiveJobs
+      .listExpiredCancellations()
+      .find(({ id }) => id === expiredJobId);
+    if (expiredCancellation === undefined) {
+      throw new Error("Expected marked expired cancellation");
+    }
+    expect(recoveryAccess.archiveJobs.finalizeExpiredCancellation(
+      expiredCancellation,
+    )).toMatchObject({ id: expiredJobId, status: "aborted" });
+    expect(recoveryAccess.archiveRequests.find(futureRequest.id))
+      .toMatchObject({ status: "cancelled" });
+    recoveryAccess.close();
   });
 
   it("publishes a corrected DVD at its actual size with separate clean-read evidence", () => {

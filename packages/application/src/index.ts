@@ -1,5 +1,9 @@
 import { isHandBrakePreset } from "@rip-dvd/config";
-import { encodingProfileQueueBlockingReasons } from "@rip-dvd/data-access";
+import {
+  DVD_RECOVERY_EVIDENCE_FORMAT,
+  encodingProfileQueueBlockingReasons,
+  withAuthoritativeDvdArchiveIntegrity,
+} from "@rip-dvd/data-access";
 import type {
   ConsistentReadAccess,
   DataAccess,
@@ -56,6 +60,7 @@ import {
 import {
   readFilesystemVerificationInventory,
 } from "./filesystem-verification-inventory.js";
+import { UnsupportedArchiveEvidenceFormatError } from "./archive-request-input.js";
 import {
   exportEncodeOutput,
   inspectEncodeOutput,
@@ -114,17 +119,39 @@ function presentRearchiveMappingProposal(
   access: DataAccess,
   proposal: RearchiveMappingProposalReview,
 ) {
+  const evidenceArchiveIds = [...new Set([
+    proposal.sourceArchive.id,
+    proposal.targetArchive.id,
+  ])];
+  const evidenceHeaders = access.catalog.findDvdArchiveEvidenceHeaders(
+    evidenceArchiveIds,
+  );
+  const authoritativeProposal = {
+    ...proposal,
+    sourceArchive: withAuthoritativeDvdArchiveIntegrity(
+      proposal.sourceArchive,
+      evidenceHeaders.get(proposal.sourceArchive.id) ?? null,
+    ),
+    targetArchive: withAuthoritativeDvdArchiveIntegrity(
+      proposal.targetArchive,
+      evidenceHeaders.get(proposal.targetArchive.id) ?? null,
+    ),
+  };
   const discLabels = new Map(
     access.catalog.listDetectedDiscs(undefined, {
       ids: [
-        proposal.sourceArchive.detectedDiscId,
-        proposal.targetArchive.detectedDiscId,
+        authoritativeProposal.sourceArchive.detectedDiscId,
+        authoritativeProposal.targetArchive.detectedDiscId,
       ],
     }).map((disc) => [disc.id, disc.volumeLabel]),
   );
-  return serializeRearchiveMappingProposal(proposal, {
-    source: discLabels.get(proposal.sourceArchive.detectedDiscId) ?? null,
-    target: discLabels.get(proposal.targetArchive.detectedDiscId) ?? null,
+  return serializeRearchiveMappingProposal(authoritativeProposal, {
+    source: discLabels.get(
+      authoritativeProposal.sourceArchive.detectedDiscId,
+    ) ?? null,
+    target: discLabels.get(
+      authoritativeProposal.targetArchive.detectedDiscId,
+    ) ?? null,
   });
 }
 
@@ -336,15 +363,25 @@ export function createApplicationOperations(
     submitArchiveRequest: (input: {
       mutationKey: unknown;
       detectedDiscId: string;
+      evidenceFormat?: unknown;
     }) => {
       const mutationKey = parseMutationKey(input.mutationKey);
       const detectedDiscId = input.detectedDiscId.trim();
       if (detectedDiscId === "") {
         throw new Error("Detected Disc ID is required.");
       }
+      if (
+        input.evidenceFormat !== undefined &&
+        input.evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT
+      ) {
+        throw new UnsupportedArchiveEvidenceFormatError();
+      }
       const request = access.archiveRequests.submit({
         mutationKey,
         detectedDiscId: detectedDiscId as DetectedDiscId,
+        ...(input.evidenceFormat === undefined
+          ? {}
+          : { evidenceFormat: input.evidenceFormat }),
       });
       return {
         archiveRequest: {
@@ -570,6 +607,7 @@ export * from "./catalog-review-completion.js";
 export * from "./catalog-review-completion-preview-token.js";
 export * from "./rearchive-acceptance.js";
 export * from "./rearchive-acceptance-preview-token.js";
+export * from "./archive-request-input.js";
 export type { MediaItemCommand } from "./media-item-operations.js";
 export * from "./catalog-automation.js";
 export * from "./tmdb-catalog-adapter.js";

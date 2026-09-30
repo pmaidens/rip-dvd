@@ -7,6 +7,9 @@ import {
 
 import type { CatalogReviewCommand } from "./catalog-review-command.js";
 import { normalizeCorrectedEncodeReplacements } from "./corrected-encode-replacement.js";
+import {
+  requireDvdRecoveryEvidenceEncodingAvailableForArchive,
+} from "./dvd-recovery-evidence-encoding.js";
 import { parseMutationKey } from "./mutation-key.js";
 import {
   createRearchiveAcceptancePreviewToken,
@@ -53,9 +56,15 @@ export function previewRearchiveAcceptance(
     targetArchiveId,
     ...validateAcceptanceCommand(command, mediaLibraryPath),
   };
-  const plan = access.readConsistentSnapshot((snapshot) =>
-    snapshot.catalog.planRearchiveAcceptance(input)
-  );
+  const plan = access.readConsistentSnapshot((snapshot) => {
+    if (input.replacements.length > 0) {
+      requireDvdRecoveryEvidenceEncodingAvailableForArchive(
+        snapshot,
+        targetArchiveId,
+      );
+    }
+    return snapshot.catalog.planRearchiveAcceptance(input);
+  });
   const previewToken = createRearchiveAcceptancePreviewToken();
   access.catalog.recordRearchiveAcceptancePreviewDecision({
     previewToken,

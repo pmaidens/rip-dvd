@@ -323,6 +323,15 @@ export function validateDvdArchiveBoundaryEvidence(
     throw correctedEvidenceError();
   }
   if (value.excludedSectorCount === 0) {
+    if (
+      "policyVersion" in value &&
+      value.policyVersion === LEGACY_DVD_ARCHIVE_BOUNDARY_POLICY_VERSION
+    ) {
+      return validateLegacyNormalDvdArchiveBoundaryEvidence(
+        value,
+        publishedArchiveSizeBytes,
+      );
+    }
     return validateNormalDvdArchiveBoundaryEvidence(
       value,
       publishedArchiveSizeBytes,

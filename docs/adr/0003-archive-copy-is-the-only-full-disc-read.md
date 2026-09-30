@@ -80,3 +80,34 @@ post-copy raw-image hash verification for materially less optical-drive wear
 and shorter archive time.
 Explicit filesystem verification remains available for checking that an
 archive path still exists and is safely reachable.
+
+The separately versioned `dvd-recovery-evidence-v1` contract is identified
+only by an explicit Archive Job marker and, after publication, a one-to-one
+archive evidence header. Archive creation time, Archive Integrity, and legacy
+bad-sector fields do not identify that contract. Its admission remains closed
+until the recovery, assessment, damage-decision, and encoding gates are
+complete. Consequently, the publication paths above remain the only admitted
+DVD behavior, and a legacy Archive Worker must reject a marked job before it
+can mutate an image. The compatibility schema may read `incomplete_read`
+as a projection of the header's accepted extent and normalized Unrecovered
+Source ranges; that versioned evidence remains authoritative. Read
+completeness alone establishes neither watchability nor encode eligibility
+and does not weaken either boundary proof.
+
+Every `dvd-recovery-evidence-v1` digest is a lowercase SHA-256 hash over a
+domain-prefixed UTF-8 encoding. The encoding is a fixed-order JSON tuple rather
+than caller-provided JSON object text. Archive Boundary Evidence includes the
+complete normalized boundary proof. Unrecovered Source evidence is the ordered
+list of normalized `(start LBA, sector count, classification)` tuples. A
+one-sector recovery digest binds the archive, source manifest and revision,
+sector, and outcome. A manifest digest binds its archive and revision, exact
+predecessor digest, exact recovery-read digest when present, image and extent,
+boundary digest, and normalized source-map digest. Data-access constructors
+compute these values before a future writer persists them, and authoritative
+reads validate the current manifest, its immediate transition, and the marked
+source-job provenance without loading the complete recovery history. The
+current digest is the authenticated checkpoint for that bounded projection;
+a separately bounded evidence-chain audit validates every predecessor,
+recovery read, transition, and stored digest. This digest contract does not
+publish range paging or install filesystem checkpoints; those remain separate
+workflow capabilities.

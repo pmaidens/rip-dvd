@@ -1975,6 +1975,44 @@ describe("readDashboardSnapshot", () => {
     expect(dashboard.encodeJobs).toEqual({ status: "error" });
   });
 
+  it("reuses one evidence-header batch for repeated Encode Jobs", () => {
+    const access = dataAccessFixture.create();
+    const { archive, job, selection } = seedEncodeJob(access);
+    for (let index = 1; index < 100; index += 1) {
+      access.encodeJobs.enqueue({
+        discSelectionId: selection.id,
+        encodingProfileId: job.encodingProfileId,
+        outputPath: `/media/movies/evidence-batch-${index}.mkv`,
+      });
+    }
+    const findDvdArchiveEvidenceHeaders = vi.fn((ids) =>
+      access.catalog.findDvdArchiveEvidenceHeaders(ids)
+    );
+    const findDvdArchiveEvidenceHeader = vi.fn(() => {
+      throw new Error("single evidence read should not be used");
+    });
+
+    const dashboard = readDashboardSnapshot(
+      withSnapshotOverrides(access, {
+        catalog: {
+          findDvdArchiveEvidenceHeader,
+          findDvdArchiveEvidenceHeaders,
+        },
+      }),
+      { activityLimit: 100 },
+    );
+
+    expect(dashboard.encodeJobs).toEqual(expect.objectContaining({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({ id: job.id }),
+      ]),
+    }));
+    expect(findDvdArchiveEvidenceHeaders).toHaveBeenCalledTimes(1);
+    expect(findDvdArchiveEvidenceHeaders).toHaveBeenCalledWith([archive.id]);
+    expect(findDvdArchiveEvidenceHeader).not.toHaveBeenCalled();
+  });
+
   it("keeps activity media reads bounded when Disc Selections fail", () => {
     const access = dataAccessFixture.create();
     seedEncodeJob(access);

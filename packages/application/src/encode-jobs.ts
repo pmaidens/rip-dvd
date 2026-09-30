@@ -1,6 +1,7 @@
 import {
   discSelectionSourceDescription,
   encodingProfileQueueBlockingReasons,
+  DvdRecoveryEvidenceEncodingUnavailableError,
   type ConsistentReadAccess,
   type DataAccess,
   type DiscSelection,
@@ -20,6 +21,26 @@ import { encodeRequeueAvailability } from "./operations.js";
 
 const ENCODE_SELECTION_PAGE_SIZE = 100;
 const ENCODE_PROFILE_PAGE_SIZE = 100;
+
+function requireEvidenceEncodingAvailable(
+  access: DataAccess,
+  discSelectionId: DiscSelectionId,
+): void {
+  access.readConsistentSnapshot((snapshot) => {
+    const selection = snapshot.catalog.listDiscSelections({
+      ids: [discSelectionId],
+      includeHistorical: true,
+    })[0];
+    if (
+      selection !== undefined &&
+      snapshot.catalog.findDvdArchiveEvidenceHeader(
+        selection.originalDiscArchiveId,
+      ) !== null
+    ) {
+      throw new DvdRecoveryEvidenceEncodingUnavailableError();
+    }
+  });
+}
 
 function isQueueEligibleProfile(profile: EncodingProfile): boolean {
   return encodingProfileQueueBlockingReasons(profile).length === 0;
@@ -66,7 +87,8 @@ export function enqueueEncodeJob(
     mutationKey: unknown;
   },
 ): EncodeJob {
-  return access.encodeJobs.enqueue(parseEncodeEnqueueInput(mediaLibraryPath, input));
+  const parsed = parseEncodeEnqueueInput(mediaLibraryPath, input);
+  return access.encodeJobs.enqueue(parsed);
 }
 
 export function parseEncodeEnqueueInput(
@@ -133,6 +155,7 @@ export function previewEncodeRequeue(
   if (job === null) {
     throw new RecordNotFoundError("Encode Job", encodeJobId);
   }
+  requireEvidenceEncodingAvailable(access, job.discSelectionId);
   const replacesOutput = job.status === "completed" || job.replaceExistingOutput;
   return {
     encodeJobId: job.id,

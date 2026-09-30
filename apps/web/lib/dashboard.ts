@@ -41,7 +41,9 @@ import type {
 } from "@rip-dvd/data-access";
 import {
   archiveBoundaryEvidenceFromRecord,
+  DVD_RECOVERY_EVIDENCE_ENCODING,
   isEncodeJobSafelyTerminal,
+  withAuthoritativeDvdArchiveIntegrity,
   WORKER_KINDS,
 } from "@rip-dvd/data-access";
 import {
@@ -1423,7 +1425,7 @@ function readDashboardSnapshotRecords(
         : { outcome: catalogReviewOutcome }),
     }),
   );
-  const catalogReviewArchives =
+  const persistedCatalogReviewArchives =
     archiveSource.status === "loaded" && activityLimit !== undefined
       ? catalogReviewCursor?.direction === "newer"
         ? archiveSource.value.slice(0, activityLimit)
@@ -1431,6 +1433,30 @@ function readDashboardSnapshotRecords(
       : archiveSource.status === "loaded"
         ? archiveSource.value
         : [];
+  const relevantSelectionIds = encodeJobSource.status === "error"
+    ? []
+    : encodeJobSource.value.map((job) => job.discSelectionId);
+  const selectionSource = readSource(() =>
+    access.catalog.listDiscSelections({
+      ids: [...new Set(relevantSelectionIds)],
+    }),
+  );
+  const evidenceArchiveIds = [...new Set([
+    ...persistedCatalogReviewArchives.map((archive) => archive.id),
+    ...(selectionSource.status === "loaded"
+      ? selectionSource.value.map((selection) =>
+          selection.originalDiscArchiveId
+        )
+      : []),
+  ])];
+  const evidenceHeadersByArchiveId =
+    access.catalog.findDvdArchiveEvidenceHeaders(evidenceArchiveIds);
+  const catalogReviewArchives = persistedCatalogReviewArchives.map(
+    (archive) => withAuthoritativeDvdArchiveIntegrity(
+      archive,
+      evidenceHeadersByArchiveId.get(archive.id) ?? null,
+    ),
+  );
   const previousCatalogReviewBoundary =
     catalogReviewArchives.at(-1) ??
     (catalogReviewCursor?.direction === "older"
@@ -1492,14 +1518,6 @@ function readDashboardSnapshotRecords(
             ids: [...new Set(relevantOpticalDriveIds ?? [])],
           }),
         );
-  const relevantSelectionIds = encodeJobSource.status === "error"
-    ? []
-    : encodeJobSource.value.map((job) => job.discSelectionId);
-  const selectionSource = readSource(() =>
-    access.catalog.listDiscSelections({
-      ids: [...new Set(relevantSelectionIds)],
-    }),
-  );
   const selectionSupersessionSource = readSource(() => {
     const selectionIds = [...new Set(relevantSelectionIds)];
     return Array.from(
@@ -1927,7 +1945,15 @@ function readDashboardSnapshotRecords(
                   : undefined;
               const failureReports = failureReportsByJobId.get(job.id) ?? [];
               const requeue = encodeRequeueAvailability(
-                access, job, terminalRequeueSelectionIds.has(job.discSelectionId),
+                access,
+                job,
+                terminalRequeueSelectionIds.has(job.discSelectionId),
+                selection !== undefined &&
+                    evidenceHeadersByArchiveId.has(
+                      selection.originalDiscArchiveId,
+                    )
+                  ? DVD_RECOVERY_EVIDENCE_ENCODING
+                  : undefined,
               );
               const canRequeue = requeue.eligible;
               const structuredInvestigations = failureReports.map((report) =>

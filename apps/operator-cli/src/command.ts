@@ -21,10 +21,13 @@ import {
   type EncodeOutputMediaProbe,
   InvalidEncodeJobInputError,
   serializeJob,
+  UnsupportedArchiveEvidenceFormatError,
 } from "@rip-dvd/application";
 import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
+  DvdRecoveryEvidenceAdmissionClosedError,
+  DvdRecoveryEvidenceEncodingUnavailableError,
   InvalidStatusTransitionError,
   MutationKeyConflictError,
   RecordNotFoundError,
@@ -116,8 +119,8 @@ const commandDefinitions = [
   {
     name: "submit-archive-request",
     description: "Submit an Archive Request for a Detected Disc.",
-    usage: "rip-dvd submit-archive-request --key <key> --detected-disc-id <id>",
-    inputs: { arguments: [], options: ["--key", "--detected-disc-id"] },
+    usage: "rip-dvd submit-archive-request --key <key> --detected-disc-id <id> [--evidence-format dvd-recovery-evidence-v1]",
+    inputs: { arguments: [], options: ["--key", "--detected-disc-id", "--evidence-format"] },
     example: "rip-dvd submit-archive-request --key 00000000-0000-4000-8000-000000000001 --detected-disc-id <id>",
   },
   {
@@ -414,6 +417,14 @@ function runRecoveryCommand(name: RecoveryCommand, input: ReturnType<typeof reco
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("NOT_FOUND", "Recovery target was not found.", 2);
     }
+    if (error instanceof DvdRecoveryEvidenceAdmissionClosedError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+      );
+    }
     if (error instanceof InvalidStatusTransitionError || error instanceof DomainInvariantError) {
       throw new CommandFailure("ACTION_BLOCKED", error.message, 2,
         [{ code: "INVALID_TRANSITION", message: error.message }]);
@@ -501,15 +512,21 @@ function mutationOptions(
 function submissionInputs(args: readonly string[]): {
   mutationKey: string;
   detectedDiscId: string;
+  evidenceFormat?: string;
 } {
   const { options, mutationKey } = mutationOptions(
-    args, ["--key", "--detected-disc-id"], "Invalid Archive Request options.",
+    args, ["--key", "--detected-disc-id", "--evidence-format"], "Invalid Archive Request options.",
   );
   const detectedDiscId = options.get("--detected-disc-id")?.trim();
   if (!detectedDiscId) {
     throw new CommandFailure("INVALID_ARGUMENTS", "Detected Disc ID is required.", 2);
   }
-  return { mutationKey, detectedDiscId };
+  const evidenceFormat = options.get("--evidence-format")?.trim();
+  return {
+    mutationKey,
+    detectedDiscId,
+    ...(evidenceFormat === undefined ? {} : { evidenceFormat }),
+  };
 }
 
 function submitArchiveRequest(
@@ -527,6 +544,17 @@ function submitArchiveRequest(
     }
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("DETECTED_DISC_NOT_FOUND", "Detected Disc not found.", 2);
+    }
+    if (error instanceof DvdRecoveryEvidenceAdmissionClosedError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+      );
+    }
+    if (error instanceof UnsupportedArchiveEvidenceFormatError) {
+      throw new CommandFailure(error.code, error.message, 2);
     }
     if (
       error instanceof DomainInvariantError ||
@@ -724,6 +752,14 @@ function requestRearchive(
         "ORIGINAL_DISC_ARCHIVE_NOT_FOUND",
         "Original Disc Archive not found.",
         2,
+      );
+    }
+    if (error instanceof DvdRecoveryEvidenceAdmissionClosedError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
       );
     }
     if (
@@ -1284,6 +1320,14 @@ function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) 
     });
   } catch (error) {
     if (error instanceof CommandFailure) throw error;
+    if (error instanceof DvdRecoveryEvidenceEncodingUnavailableError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+      );
+    }
     if (error instanceof MutationKeyConflictError) {
       throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
     }

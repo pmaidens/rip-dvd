@@ -1,5 +1,6 @@
 import {
   DomainInvariantError,
+  DvdRecoveryEvidenceEncodingUnavailableError,
   MEDIA_ITEM_KINDS,
   MutationKeyConflictError,
   RecordNotFoundError,
@@ -349,6 +350,13 @@ export async function createCatalogReviewRoute(
         throw new Error("Unhandled catalog review command");
     }
   } catch (error) {
+    if (error instanceof DvdRecoveryEvidenceEncodingUnavailableError) {
+      return response({ error: {
+        code: error.code,
+        message: error.message,
+        blockingReasons: error.blockingReasons,
+      } }, 409);
+    }
     if (error instanceof InvalidMutationKeyError) {
       return response({ error: error.message, code: "INVALID_MUTATION_KEY" }, 400);
     }

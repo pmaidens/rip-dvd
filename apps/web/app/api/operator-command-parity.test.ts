@@ -1,24 +1,47 @@
 import { expect, it } from "vitest";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
+import { DatabaseSync } from "node:sqlite";
+import {
+  archiveBoundaryEvidenceFromRecord,
+  createCleanReadArchiveIntegrityEvidence,
+  createDvdArchiveBoundaryEvidenceDigest,
+  createDvdArchiveEvidenceManifestDigests,
+  DVD_RECOVERY_EVIDENCE_ADMISSION,
+  DVD_RECOVERY_EVIDENCE_ENCODING,
+  DVD_RECOVERY_EVIDENCE_FORMAT,
+} from "@rip-dvd/data-access";
 import {
   beginSettledDiscInspectionForTest,
   createNormalDvdArchiveBoundaryEvidenceForTest,
 } from "@rip-dvd/data-access/test-support";
 import {
+  createApplicationOperations,
   encodeOutputArtifactIdentity,
   type CatalogMetadataLookup,
   type EncodeOutputMediaProbe,
 } from "@rip-dvd/application";
-import type { MediaItemId } from "@rip-dvd/data-access";
+import type { ArchiveRequestId, MediaItemId } from "@rip-dvd/data-access";
 
-import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../operator-cli/src/operator-workflow.test-support.js";
+import {
+  createOperatorWorkflowFixture,
+  markArchiveWithDvdRecoveryEvidence,
+  seedCatalogReviewForReadFixture,
+  seedRearchiveCatalogReviewFixture,
+} from "../../../operator-cli/src/operator-workflow.test-support.js";
 import { createCatalogReviewRoute } from "./catalog-reviews/[id]/route";
 import { createCatalogSuggestionRoute } from "./catalog-reviews/[id]/suggestion/route";
 import { createDeploymentReadinessResponse } from "./deployment-readiness/route";
 import { createHealthResponse } from "./health/route";
 import { createOperationsResponse } from "./operations/route";
+import { createArchiveRequestsRoute } from "./archive-requests/route";
+import { createRearchiveRequestsRoute } from "./rearchive-requests/route";
+import {
+  createArchiveRequestCancellationRoute,
+} from "./archive-requests/[id]/route";
+import {
+  createArchiveRequestRetryRoute,
+} from "./archive-requests/[id]/retry/route";
 import { createMediaItemSearchRoute } from "./media-items/route";
 import { createMediaItemPreviewRoute } from "./media-items/[id]/route";
 import { createEncodeJobsRoute } from "./encode-jobs/route";
@@ -28,6 +51,7 @@ import {
 import {
   createFilesystemVerificationInventoryRoute,
 } from "./filesystem-verification/route";
+import { readDashboardSnapshot } from "../../lib/dashboard";
 
 const trustedOrigin = "http://localhost:3000";
 
@@ -132,6 +156,211 @@ it("shares unknown validation when canonical output probing is unavailable", asy
   }
 });
 
+it("reports the same closed DVD evidence admission through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const access = fixture.openAccess();
+  try {
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/synthetic-closed-admission",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: `sha256:${"4".repeat(64)}`,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const mutationKey = "00000000-0000-4000-8000-000000000402";
+    const cli = await fixture.run([
+      "submit-archive-request",
+      "--key",
+      mutationKey,
+      "--detected-disc-id",
+      disc.id,
+      "--evidence-format",
+      "dvd-recovery-evidence-v1",
+    ]);
+    expect(cli.exitCode).toBe(2);
+
+    const web = await createArchiveRequestsRoute(
+      new Request(`${trustedOrigin}/api/archive-requests`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+          "Sec-Fetch-Site": "same-origin",
+        },
+        body: JSON.stringify({
+          mutationKey,
+          detectedDiscId: disc.id,
+          evidenceFormat: "dvd-recovery-evidence-v1",
+        }),
+      }),
+      () => access,
+      () => trustedOrigin,
+    );
+    expect(web.status).toBe(409);
+    expect(await web.json()).toEqual(cli.result);
+    expect(cli.result).toEqual({
+      error: {
+        code: "DVD_RECOVERY_EVIDENCE_ADMISSION_CLOSED",
+        message:
+          "New-format DVD Archive Job admission is closed until the recovery and encoding workflow is complete.",
+        blockingReasons: [{
+          code: "DVD_RECOVERY_EVIDENCE_ADMISSION_CLOSED",
+          message:
+            "New-format DVD Archive Job admission is closed until the recovery and encoding workflow is complete.",
+        }],
+      },
+    });
+    expect(access.archiveRequests.list()).toEqual([]);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("preserves re-archive replay but blocks fresh reuse of a marked request", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive: source } = seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    const replayKey = "00000000-0000-4000-8000-000000000417";
+    const initial = createApplicationOperations(access).submitRearchiveRequest({
+      mutationKey: replayKey,
+      sourceArchiveId: source.id,
+    });
+    const requestId = initial.archiveRequest.id;
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    sqlite.prepare(`
+      UPDATE archive_requests
+      SET evidence_format = ?
+      WHERE id = ?
+    `).run(DVD_RECOVERY_EVIDENCE_FORMAT, requestId);
+    sqlite.close();
+
+    const request = (mutationKey: string) => new Request(
+      `${trustedOrigin}/api/rearchive-requests`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+          "Sec-Fetch-Site": "same-origin",
+        },
+        body: JSON.stringify({ mutationKey, sourceArchiveId: source.id }),
+      },
+    );
+    const replayedWeb = await createRearchiveRequestsRoute(
+      request(replayKey),
+      () => access,
+      () => trustedOrigin,
+    );
+    const replayedCli = await fixture.run([
+      "request-rearchive",
+      "--key",
+      replayKey,
+      "--source-archive-id",
+      source.id,
+    ]);
+    expect(replayedWeb.status).toBe(201);
+    expect(replayedCli.exitCode).toBe(0);
+    expect(replayedCli.result).toEqual(await replayedWeb.json());
+    expect(replayedCli.result).toMatchObject({
+      archiveRequest: {
+        id: requestId,
+        status: "pending",
+      },
+    });
+
+    const freshKey = "00000000-0000-4000-8000-000000000418";
+    const blockedWeb = await createRearchiveRequestsRoute(
+      request(freshKey),
+      () => access,
+      () => trustedOrigin,
+    );
+    const blockedCli = await fixture.run([
+      "request-rearchive",
+      "--key",
+      freshKey,
+      "--source-archive-id",
+      source.id,
+    ]);
+    expect(blockedWeb.status).toBe(409);
+    expect(blockedCli.exitCode).toBe(2);
+    expect(blockedCli.result).toEqual(await blockedWeb.json());
+    expect(blockedCli.result).toEqual({
+      error: {
+        code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+        message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+        blockingReasons: [{
+          code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+          message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+        }],
+      },
+    });
+    expect(access.archiveRequests.find(requestId)).toMatchObject({
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+      status: "pending",
+    });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("reports unsupported Archive evidence formats consistently through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const access = fixture.openAccess();
+  try {
+    const mutationKey = "00000000-0000-4000-8000-000000000405";
+    const cli = await fixture.run([
+      "submit-archive-request",
+      "--key",
+      mutationKey,
+      "--detected-disc-id",
+      "synthetic-disc",
+      "--evidence-format",
+      "unsupported-evidence-v2",
+    ]);
+    const web = await createArchiveRequestsRoute(
+      new Request(`${trustedOrigin}/api/archive-requests`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+          "Sec-Fetch-Site": "same-origin",
+        },
+        body: JSON.stringify({
+          mutationKey,
+          detectedDiscId: "synthetic-disc",
+          evidenceFormat: "unsupported-evidence-v2",
+        }),
+      }),
+      () => access,
+      () => trustedOrigin,
+    );
+
+    expect(web.status).toBe(400);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toEqual({
+      error: {
+        code: "UNSUPPORTED_ARCHIVE_EVIDENCE_FORMAT",
+        message: "Archive evidence format is unsupported.",
+      },
+    });
+    expect(access.archiveRequests.list()).toEqual([]);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
 function catalogReviewMutationRequest(
   archiveId: string,
   body: Record<string, unknown>,
@@ -146,6 +375,258 @@ function catalogReviewMutationRequest(
     body: JSON.stringify(body),
   });
 }
+
+const dvdEvidenceEncodingUnavailableError = {
+  error: {
+    code: DVD_RECOVERY_EVIDENCE_ENCODING.code,
+    message: DVD_RECOVERY_EVIDENCE_ENCODING.message,
+    blockingReasons: [{
+      code: DVD_RECOVERY_EVIDENCE_ENCODING.code,
+      message: DVD_RECOVERY_EVIDENCE_ENCODING.message,
+    }],
+  },
+};
+
+it("blocks Catalog Review replacement previews consistently through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const seeded = seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    const review = await fixture.run([
+      "catalog-review",
+      "show",
+      seeded.archive.id,
+    ]);
+    const catalogRevision = (review.result as { catalogRevision: string })
+      .catalogRevision;
+    const command = {
+      action: "complete_review" as const,
+      catalogRevision,
+      outcome: "reviewed_with_selections" as const,
+      replacementEncodes: [{
+        predecessorEncodeJobId: seeded.predecessor.id,
+        encodingProfileId: seeded.predecessor.encodingProfileId,
+        outputPath: seeded.predecessor.outputPath,
+      }],
+    };
+    markArchiveWithDvdRecoveryEvidence(
+      fixture.databasePath,
+      seeded.archive.id,
+      "catalog-review-parity",
+    );
+    const web = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(seeded.archive.id, {
+        ...command,
+        preview: true,
+      }),
+      seeded.archive.id,
+      () => access,
+      () => trustedOrigin,
+      () => fixture.mediaLibraryPath,
+    );
+    const cli = await fixture.run([
+      "catalog-review",
+      "preview-completion",
+      seeded.archive.id,
+      "--json",
+      JSON.stringify(command),
+    ]);
+
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toEqual(dvdEvidenceEncodingUnavailableError);
+    expect(access.catalog.listOriginalDiscArchives({
+      ids: [seeded.archive.id],
+    })[0]).toMatchObject({
+      catalogReviewOutcome: "needs_review",
+      catalogReviewedAt: null,
+    });
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: seeded.predecessor.id,
+        predecessorEncodeJobId: null,
+        reservesOutputPath: true,
+      }),
+    ]);
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    expect(sqlite.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE operation = 'catalog_review.complete.preview'
+    `).get()).toEqual({ count: 0 });
+    sqlite.close();
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("blocks Encode queue resolution consistently through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const seeded = seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    markArchiveWithDvdRecoveryEvidence(
+      fixture.databasePath,
+      seeded.archive.id,
+      "encode-resolution-parity",
+    );
+    const url = new URL(`${trustedOrigin}/api/encode-jobs`);
+    url.searchParams.set(
+      "encodingProfileId",
+      seeded.predecessor.encodingProfileId,
+    );
+    url.searchParams.set(
+      "resolveDiscSelectionId",
+      seeded.correctedSelection.id,
+    );
+    const web = await createEncodeJobsRoute(
+      new Request(url),
+      () => access,
+      () => ({
+        mediaLibraryPath: fixture.mediaLibraryPath,
+        webTrustedOrigin: trustedOrigin,
+      }),
+    );
+    const cli = await fixture.run([
+      "encode-resolve",
+      "--encoding-profile-id",
+      seeded.predecessor.encodingProfileId,
+      "--disc-selection-id",
+      seeded.correctedSelection.id,
+    ]);
+
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toEqual(dvdEvidenceEncodingUnavailableError);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("blocks Re-archive replacement previews consistently through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const seeded = seedRearchiveCatalogReviewFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    const review = await fixture.run([
+      "catalog-review",
+      "show",
+      seeded.targetArchive.id,
+    ]);
+    const initial = (review.result as {
+      rearchiveProposal: {
+        catalogRevision: string;
+        sourceCatalogRevision: string;
+        mappings: Array<{
+          sourceDiscSelectionId: string;
+          proposedMapping: {
+            mediaItemId: string;
+            sourceIdentity: { kind: "dvd_title"; titleNumber: number };
+            label: string | null;
+          };
+        }>;
+      };
+    }).rearchiveProposal;
+    const save = await fixture.run([
+      "catalog-review",
+      "save-rearchive-proposal",
+      seeded.targetArchive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000410",
+      "--json",
+      JSON.stringify({
+        action: "save_rearchive_mapping_proposal",
+        catalogRevision: initial.catalogRevision,
+        sourceCatalogRevision: initial.sourceCatalogRevision,
+        mappings: initial.mappings.map((mapping) => ({
+          sourceDiscSelectionId: mapping.sourceDiscSelectionId,
+          ...mapping.proposedMapping,
+        })),
+      }),
+    ]);
+    const saved = (save.result as {
+      proposal: { catalogRevision: string; sourceCatalogRevision: string };
+    }).proposal;
+    const profile = access.encodingProfiles.create({
+      key: "rearchive-evidence-parity",
+      displayName: "Re-archive evidence parity",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: seeded.sourceSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: join(fixture.mediaLibraryPath, "rearchive-evidence.mkv"),
+    });
+    const command = {
+      action: "accept_rearchive" as const,
+      catalogRevision: saved.catalogRevision,
+      sourceCatalogRevision: saved.sourceCatalogRevision,
+      replacementEncodes: [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: profile.id,
+        outputPath: predecessor.outputPath,
+      }],
+    };
+    markArchiveWithDvdRecoveryEvidence(
+      fixture.databasePath,
+      seeded.targetArchive.id,
+      "rearchive-acceptance-parity",
+    );
+    const web = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(seeded.targetArchive.id, {
+        ...command,
+        preview: true,
+      }),
+      seeded.targetArchive.id,
+      () => access,
+      () => trustedOrigin,
+      () => fixture.mediaLibraryPath,
+    );
+    const cli = await fixture.run([
+      "catalog-review",
+      "preview-rearchive-acceptance",
+      seeded.targetArchive.id,
+      "--json",
+      JSON.stringify(command),
+    ]);
+
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toEqual(dvdEvidenceEncodingUnavailableError);
+    expect(access.catalog.listDiscSelections({
+      ids: [seeded.sourceSelection.id],
+    })).toEqual([expect.objectContaining({
+      id: seeded.sourceSelection.id,
+    })]);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: seeded.targetArchive.id,
+    })).toEqual([]);
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: predecessor.id,
+        status: "queued",
+        reservesOutputPath: true,
+        predecessorEncodeJobId: null,
+      }),
+    ]);
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    expect(sqlite.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE operation = 'rearchive.accept.preview'
+    `).get()).toEqual({ count: 0 });
+    sqlite.close();
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
 
 it("shares Encode Job validation and keyed outcomes across web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
@@ -216,6 +697,235 @@ it("shares Encode Job validation and keyed outcomes across web and CLI", async (
     expect(requeued.exitCode).toBe(0);
     expect(requeued.result).toMatchObject({ job: (await webRequeued.json()).job });
     expect(access.encodeJobs.list()).toHaveLength(2);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("replays persisted Encode enqueue outcomes before DVD evidence blocking", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive, correctedSelection } = seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    access.catalog.completeCatalogReview(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+    );
+    const profile = access.encodingProfiles.list({
+      mediaDomain: "dvd_video",
+      activeOnly: true,
+    })[0]!;
+    const outputPath = join(
+      fixture.mediaLibraryPath,
+      "evidence-enqueue-replay.mkv",
+    );
+    const mutationKey = "synthetic-evidence-enqueue-replay";
+    const blockedMutationKey = "synthetic-evidence-enqueue-blocked";
+    const config = () => ({
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      webTrustedOrigin: trustedOrigin,
+    });
+    const request = (key: string, path = outputPath) => new Request(
+      `${trustedOrigin}/api/encode-jobs`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+        },
+        body: JSON.stringify({
+          mutationKey: key,
+          discSelectionId: correctedSelection.id,
+          encodingProfileId: profile.id,
+          outputPath: path,
+        }),
+      },
+    );
+    const command = (key: string, path = outputPath) => [
+      "encode-enqueue", "--key", key,
+      "--disc-selection-id", correctedSelection.id,
+      "--encoding-profile-id", profile.id,
+      "--output-path", path,
+    ];
+
+    const committed = await createEncodeJobsRoute(
+      request(mutationKey),
+      () => access,
+      config,
+    );
+    expect(committed.status).toBe(200);
+    const committedResult = await committed.json() as { job: object };
+    markArchiveWithDvdRecoveryEvidence(
+      fixture.databasePath,
+      archive.id,
+      "encode-enqueue-replay-parity",
+    );
+
+    const webReplay = await createEncodeJobsRoute(
+      request(mutationKey),
+      () => access,
+      config,
+    );
+    const cliReplay = await fixture.run(command(mutationKey));
+    expect(webReplay.status).toBe(200);
+    expect(cliReplay.exitCode).toBe(0);
+    expect(await webReplay.json()).toEqual(committedResult);
+    expect(cliReplay.result).toMatchObject(committedResult);
+
+    const changedPath = join(
+      fixture.mediaLibraryPath,
+      "evidence-enqueue-replay-changed.mkv",
+    );
+    const webConflict = await createEncodeJobsRoute(
+      request(mutationKey, changedPath),
+      () => access,
+      config,
+    );
+    const cliConflict = await fixture.run(command(mutationKey, changedPath));
+    expect(webConflict.status).toBe(409);
+    expect(cliConflict.exitCode).toBe(2);
+    expect(cliConflict.result).toEqual(await webConflict.json());
+    expect(cliConflict.result).toMatchObject({
+      error: { code: "MUTATION_KEY_CONFLICT" },
+    });
+
+    const webBlocked = await createEncodeJobsRoute(
+      request(blockedMutationKey),
+      () => access,
+      config,
+    );
+    const cliBlocked = await fixture.run(command(blockedMutationKey));
+    expect(webBlocked.status).toBe(409);
+    expect(cliBlocked.exitCode).toBe(2);
+    expect(cliBlocked.result).toEqual(await webBlocked.json());
+    expect(cliBlocked.result).toEqual(dvdEvidenceEncodingUnavailableError);
+
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    expect(sqlite.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE key = ?
+    `).get(blockedMutationKey)).toEqual({ count: 0 });
+    sqlite.close();
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("replays persisted Encode requeue outcomes before DVD evidence blocking", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive, correctedSelection } = seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    access.catalog.completeCatalogReview(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+    );
+    const profile = access.encodingProfiles.list({
+      mediaDomain: "dvd_video",
+      activeOnly: true,
+    })[0]!;
+    const original = access.encodeJobs.enqueue({
+      discSelectionId: correctedSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: join(
+        fixture.mediaLibraryPath,
+        "evidence-requeue-replay.mkv",
+      ),
+    });
+    access.encodeJobs.requestCancellation(original.id);
+    const mutationKey = "synthetic-evidence-requeue-replay";
+    const blockedMutationKey = "synthetic-evidence-requeue-blocked";
+    const config = () => ({
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      webTrustedOrigin: trustedOrigin,
+    });
+    const request = (key: string, priority?: number) => new Request(
+      `${trustedOrigin}/api/encode-jobs`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+        },
+        body: JSON.stringify({
+          action: "requeue",
+          mutationKey: key,
+          encodeJobId: original.id,
+          priority,
+        }),
+      },
+    );
+    const command = (key: string, priority?: number) => [
+      "encode-requeue", "--key", key,
+      "--encode-job-id", original.id,
+      ...(priority === undefined ? [] : ["--priority", String(priority)]),
+    ];
+
+    const committed = await createEncodeJobsRoute(
+      request(mutationKey),
+      () => access,
+      config,
+    );
+    expect(committed.status).toBe(200);
+    const committedResult = await committed.json() as { job: object };
+    access.encodeJobs.requestCancellation(original.id);
+    markArchiveWithDvdRecoveryEvidence(
+      fixture.databasePath,
+      archive.id,
+      "encode-requeue-replay-parity",
+    );
+
+    const webReplay = await createEncodeJobsRoute(
+      request(mutationKey),
+      () => access,
+      config,
+    );
+    const cliReplay = await fixture.run(command(mutationKey));
+    expect(webReplay.status).toBe(200);
+    expect(cliReplay.exitCode).toBe(0);
+    expect(await webReplay.json()).toEqual(committedResult);
+    expect(cliReplay.result).toMatchObject(committedResult);
+
+    const webConflict = await createEncodeJobsRoute(
+      request(mutationKey, 7),
+      () => access,
+      config,
+    );
+    const cliConflict = await fixture.run(command(mutationKey, 7));
+    expect(webConflict.status).toBe(409);
+    expect(cliConflict.exitCode).toBe(2);
+    expect(cliConflict.result).toEqual(await webConflict.json());
+    expect(cliConflict.result).toMatchObject({
+      error: { code: "MUTATION_KEY_CONFLICT" },
+    });
+
+    const webBlocked = await createEncodeJobsRoute(
+      request(blockedMutationKey),
+      () => access,
+      config,
+    );
+    const cliBlocked = await fixture.run(command(blockedMutationKey));
+    expect(webBlocked.status).toBe(409);
+    expect(cliBlocked.exitCode).toBe(2);
+    expect(cliBlocked.result).toEqual(await webBlocked.json());
+    expect(cliBlocked.result).toEqual(dvdEvidenceEncodingUnavailableError);
+
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    expect(sqlite.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE key = ?
+    `).get(blockedMutationKey)).toEqual({ count: 0 });
+    sqlite.close();
   } finally {
     access.close();
     fixture.dispose();
@@ -501,6 +1211,422 @@ it("returns the same operational records and evidence through web and CLI", asyn
       retryability: "appropriate", diagnostic: "Synthetic encode failure",
       evidence: { kind: "exit_status", exitStatus: 17 },
     });
+    const evidenceFixture = new DatabaseSync(fixture.databasePath);
+    evidenceFixture.prepare(`
+      INSERT INTO archive_requests (
+        id, detected_disc_id, evidence_format, status, priority,
+        fulfilled_at, created_at, updated_at
+      ) VALUES (?, ?, ?, 'fulfilled', 0, 1, 1, 1)
+    `).run(
+      "synthetic-evidence-request",
+      archivedDisc.id,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+    );
+    evidenceFixture.prepare(`
+      INSERT INTO archive_jobs (
+        id, archive_request_id, disc_inspection_id, detected_disc_id,
+        original_disc_archive_id, evidence_format, attempt_ordinal, status,
+        priority, progress_phase, progress_percent, progress_bytes,
+        last_progress_at, started_at, completed_at, created_at, updated_at
+      ) VALUES (?, 'synthetic-evidence-request', ?, ?, ?, ?, 1, 'completed',
+        0, 'finalizing', 100, 2048, 1, 1, 1, 1, 1)
+    `).run(
+      "synthetic-evidence-job",
+      completedInspection.id,
+      archivedDisc.id,
+      archiveId,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+    );
+    evidenceFixture.prepare(`
+      UPDATE original_disc_archives
+      SET integrity = 'unknown',
+          integrity_policy_version = NULL,
+          bad_sector_count = NULL,
+          bad_area_count = NULL,
+          bad_sector_ranges = NULL,
+          bad_sector_counts_by_title = NULL
+      WHERE id = ?
+    `).run(archiveId);
+    const unrecoveredSourceRangeRecords = [{
+      startLba: 0,
+      sectorCount: 1,
+      classification: "skipped_untested",
+    }] as const;
+    const unrecoveredSourceRanges = JSON.stringify(
+      unrecoveredSourceRangeRecords,
+    );
+    const boundaryEvidence = archiveBoundaryEvidenceFromRecord(revisedArchive);
+    if (boundaryEvidence === null) {
+      throw new Error("Expected Archive Boundary Evidence");
+    }
+    const boundaryEvidenceDigest =
+      createDvdArchiveBoundaryEvidenceDigest(boundaryEvidence);
+    const manifestId = "synthetic-evidence-manifest";
+    const {
+      unrecoveredSourceRangesDigest: sourceRangesDigest,
+      manifestDigest,
+    } = createDvdArchiveEvidenceManifestDigests({
+      originalDiscArchiveId: archiveId,
+      revision: 1,
+      previousManifestId: null,
+      previousManifestDigest: null,
+      recoveryReadId: null,
+      recoveryReadEvidenceDigest: null,
+      evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+      imageFingerprint: revisedArchive.fingerprint,
+      sectorSizeBytes: 2_048,
+      acceptedEndLbaExclusive: 1,
+      boundaryPolicyVersion: revisedArchive.boundaryPolicyVersion!,
+      boundaryReportedSizeBytes: revisedArchive.boundaryReportedSizeBytes!,
+      boundaryPublishedSizeBytes:
+        revisedArchive.boundaryPublishedSizeBytes!,
+      boundaryEvidenceDigest,
+      unrecoveredSourceRanges: unrecoveredSourceRangeRecords,
+    });
+    evidenceFixture.prepare(`
+      INSERT INTO dvd_archive_evidence_manifests (
+        id, original_disc_archive_id, revision, evidence_format,
+        image_fingerprint, sector_size_bytes, accepted_end_lba_exclusive,
+        boundary_policy_version, boundary_reported_size_bytes,
+        boundary_published_size_bytes, boundary_evidence_digest,
+        unrecovered_source_ranges, unrecovered_source_ranges_digest,
+        manifest_digest, created_at
+      )
+      SELECT ?, id, 1, ?, fingerprint, 2048, 1,
+        boundary_policy_version, boundary_reported_size_bytes,
+        boundary_published_size_bytes, ?, ?, ?, ?, 1
+      FROM original_disc_archives
+      WHERE id = ?
+    `).run(
+      manifestId,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      boundaryEvidenceDigest,
+      unrecoveredSourceRanges,
+      sourceRangesDigest,
+      manifestDigest,
+      archiveId,
+    );
+    evidenceFixture.prepare(`
+      INSERT INTO dvd_archive_evidence_headers (
+        original_disc_archive_id, source_archive_job_id, evidence_format,
+        boundary_policy_version, boundary_reported_size_bytes,
+        boundary_published_size_bytes, boundary_evidence_digest,
+        sector_size_bytes, accepted_end_lba_exclusive, current_manifest_id,
+        current_manifest_revision, current_manifest_digest, created_at,
+        updated_at
+      )
+      SELECT id, 'synthetic-evidence-job', ?, boundary_policy_version,
+        boundary_reported_size_bytes, boundary_published_size_bytes, ?,
+        2048, 1, ?, 1, ?, 1, 1
+      FROM original_disc_archives
+      WHERE id = ?
+    `).run(
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      boundaryEvidenceDigest,
+      manifestId,
+      manifestDigest,
+      archiveId,
+    );
+    evidenceFixture.close();
+    const laggingProjectionResponse = createOperationsResponse(
+      access,
+      new Request(
+        `http://localhost/api/operations?kind=original-disc-archives&id=${archiveId}`,
+      ),
+    );
+    expect(await laggingProjectionResponse.json()).toMatchObject({
+      item: {
+        integrity: "incomplete_read",
+        badSectorCount: 1,
+        badAreaCount: 1,
+        badSectorRanges: null,
+      },
+    });
+    const catalogReviewResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost/api/catalog-reviews/${archiveId}`),
+      archiveId,
+      () => access,
+    );
+    const catalogReviewCli = await fixture.run([
+      "catalog-review",
+      "show",
+      archiveId,
+    ]);
+    expect(catalogReviewCli.result).toEqual(
+      await catalogReviewResponse.json(),
+    );
+    expect(catalogReviewCli.result).toMatchObject({
+      archive: {
+        integrity: "incomplete_read",
+        badSectorCount: 1,
+        badAreaCount: 1,
+        badSectorRanges: null,
+      },
+    });
+    expect(readDashboardSnapshot(access, {
+      catalogReviewView: "reviewed",
+    }).catalogReview).toMatchObject({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          id: archiveId,
+          integrity: "incomplete_read",
+          badSectorCount: 1,
+          badAreaCount: 1,
+          badSectorRanges: null,
+        }),
+      ]),
+    });
+    const projectionFixture = new DatabaseSync(fixture.databasePath);
+    projectionFixture.prepare(`
+      UPDATE original_disc_archives
+      SET integrity_evidence_revision = 1,
+          integrity = 'incomplete_read',
+          integrity_policy_version = ?,
+          bad_sector_count = 1,
+          bad_area_count = 1,
+          bad_sector_ranges = '[{"startLba":0,"sectorCount":1}]',
+          bad_sector_counts_by_title = NULL
+      WHERE id = ?
+    `).run(DVD_RECOVERY_EVIDENCE_FORMAT, archiveId);
+    projectionFixture.prepare(`
+      INSERT INTO archive_recoveries (
+        id, original_disc_archive_id, status, created_at, updated_at
+      ) VALUES ('synthetic-evidence-recovery', ?, 'eligible', 1, 1)
+    `).run(archiveId);
+    projectionFixture.prepare(`
+      INSERT INTO archive_requests (
+        id, detected_disc_id, evidence_format, status, priority,
+        created_at, updated_at
+      ) VALUES (
+        'synthetic-evidence-pending-request', ?, ?, 'pending', 0, 1, 1
+      )
+    `).run(archivedDisc.id, DVD_RECOVERY_EVIDENCE_FORMAT);
+    projectionFixture.close();
+    const markedRequestResponse = createOperationsResponse(
+      access,
+      new Request(
+        "http://localhost/api/operations?kind=archive-requests&id=synthetic-evidence-pending-request",
+      ),
+    );
+    const markedRequestCli = await fixture.run([
+      "inspect",
+      "archive-requests",
+      "synthetic-evidence-pending-request",
+    ]);
+    expect(markedRequestCli.result).toEqual(
+      await markedRequestResponse.json(),
+    );
+    expect(markedRequestCli.result).toMatchObject({
+      item: {
+        evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+        waiting: {
+          code: "dvd_recovery_evidence_admission_closed",
+          message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+        },
+        availableActions: [
+          expect.objectContaining({
+            name: "cancel",
+            eligible: true,
+            blockingReasons: [],
+          }),
+          expect.objectContaining({
+            name: "retry",
+            eligible: false,
+            blockingReasons: [{
+              code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+              message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+            }],
+          }),
+        ],
+      },
+    });
+    const cancelKey = "00000000-0000-4000-8000-000000000403";
+    const cancelRequest = () => new Request(
+      "http://localhost/api/archive-requests/synthetic-evidence-pending-request",
+      {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost",
+          Origin: "http://localhost",
+        },
+        body: JSON.stringify({ mutationKey: cancelKey }),
+      },
+    );
+    const webCancellation = await createArchiveRequestCancellationRoute(
+      cancelRequest(),
+      "synthetic-evidence-pending-request",
+      () => access,
+      () => "http://localhost",
+    );
+    const cliCancellation = await fixture.run([
+      "cancel-archive-request",
+      "--key",
+      cancelKey,
+      "--archive-request-id",
+      "synthetic-evidence-pending-request",
+    ]);
+    expect(webCancellation.status).toBe(200);
+    expect(cliCancellation.exitCode).toBe(0);
+    expect(cliCancellation.result).toEqual(await webCancellation.json());
+    expect(cliCancellation.result).toMatchObject({
+      archiveRequest: { status: "cancelled" },
+    });
+    const replayedCancellation = await createArchiveRequestCancellationRoute(
+      cancelRequest(),
+      "synthetic-evidence-pending-request",
+      () => access,
+      () => "http://localhost",
+    );
+    expect(replayedCancellation.status).toBe(200);
+    expect(await replayedCancellation.json()).toEqual(cliCancellation.result);
+
+    const retryKey = "00000000-0000-4000-8000-000000000404";
+    const retryRequest = new Request(
+      "http://localhost/api/archive-requests/synthetic-evidence-pending-request/retry",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost",
+          Origin: "http://localhost",
+        },
+        body: JSON.stringify({ mutationKey: retryKey }),
+      },
+    );
+    const webRetry = await createArchiveRequestRetryRoute(
+      retryRequest,
+      "synthetic-evidence-pending-request",
+      () => access,
+      () => "http://localhost",
+    );
+    const cliRetry = await fixture.run([
+      "retry-archive-request",
+      "--key",
+      retryKey,
+      "--archive-request-id",
+      "synthetic-evidence-pending-request",
+    ]);
+    expect(webRetry.status).toBe(409);
+    expect(cliRetry.exitCode).toBe(2);
+    expect(cliRetry.result).toEqual(await webRetry.json());
+    expect(cliRetry.result).toEqual({
+      error: {
+        code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+        message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+        blockingReasons: [{
+          code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+          message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+        }],
+      },
+    });
+    expect(access.archiveRequests.find(
+      "synthetic-evidence-pending-request" as ArchiveRequestId,
+    )).toMatchObject({ status: "cancelled" });
+    const replayFixture = new DatabaseSync(fixture.databasePath);
+    expect(replayFixture.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE key IN (?, ?)
+    `).get(
+      "00000000-0000-4000-8000-000000000403",
+      "00000000-0000-4000-8000-000000000404",
+    )).toEqual({ count: 1 });
+    replayFixture.close();
+    expect(access.catalog.listDiscSelections({ encodeEligibleOnly: true }))
+      .not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: selection.id }),
+      ]));
+    const unreviewedEvidenceFixture = new DatabaseSync(fixture.databasePath);
+    unreviewedEvidenceFixture.prepare(`
+      UPDATE original_disc_archives
+      SET catalog_review_outcome = 'needs_review',
+          catalog_reviewed_at = NULL
+      WHERE id = ?
+    `).run(archiveId);
+    unreviewedEvidenceFixture.close();
+    const encodeConfig = () => ({
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      webTrustedOrigin: trustedOrigin,
+    });
+    const blockedEncodeError = {
+      error: {
+        code: DVD_RECOVERY_EVIDENCE_ENCODING.code,
+        message: DVD_RECOVERY_EVIDENCE_ENCODING.message,
+        blockingReasons: [{
+          code: DVD_RECOVERY_EVIDENCE_ENCODING.code,
+          message: DVD_RECOVERY_EVIDENCE_ENCODING.message,
+        }],
+      },
+    };
+    for (const blockedMutation of [
+      {
+        command: [
+          "encode-requeue-preview", "--encode-job-id", encodeJob.id,
+        ],
+        method: "PATCH",
+        body: {
+          action: "preview_requeue",
+          encodeJobId: encodeJob.id,
+        },
+      },
+      {
+        command: [
+          "encode-enqueue", "--key", "synthetic-evidence-encode-enqueue",
+          "--disc-selection-id", selection.id,
+          "--encoding-profile-id", profile.id,
+          "--output-path", join(fixture.mediaLibraryPath, "blocked-evidence.mkv"),
+        ],
+        method: "POST",
+        body: {
+          mutationKey: "synthetic-evidence-encode-enqueue",
+          discSelectionId: selection.id,
+          encodingProfileId: profile.id,
+          outputPath: join(fixture.mediaLibraryPath, "blocked-evidence.mkv"),
+        },
+      },
+      {
+        command: [
+          "encode-requeue", "--key", "synthetic-evidence-encode-requeue",
+          "--encode-job-id", encodeJob.id,
+        ],
+        method: "PATCH",
+        body: {
+          action: "requeue",
+          mutationKey: "synthetic-evidence-encode-requeue",
+          encodeJobId: encodeJob.id,
+        },
+      },
+    ] as const) {
+      const web = await createEncodeJobsRoute(new Request(
+        `${trustedOrigin}/api/encode-jobs`,
+        {
+          method: blockedMutation.method,
+          headers: {
+            "Content-Type": "application/json",
+            Host: "localhost:3000",
+            Origin: trustedOrigin,
+          },
+          body: JSON.stringify(blockedMutation.body),
+        },
+      ), () => access, encodeConfig);
+      const cli = await fixture.run(blockedMutation.command);
+      expect(web.status).toBe(409);
+      expect(cli.exitCode).toBe(2);
+      expect(cli.result).toEqual(await web.json());
+      expect(cli.result).toEqual(blockedEncodeError);
+    }
+    const encodeReplayFixture = new DatabaseSync(fixture.databasePath);
+    expect(encodeReplayFixture.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE key IN (?, ?)
+    `).get(
+      "synthetic-evidence-encode-enqueue",
+      "synthetic-evidence-encode-requeue",
+    )).toEqual({ count: 0 });
+    encodeReplayFixture.close();
     const incident = access.workerIncidents.record({
       schemaVersion: 1,
       workerKind: "archive",
@@ -594,12 +1720,27 @@ it("returns the same operational records and evidence through web and CLI", asyn
         attempts: [expect.objectContaining({ reasonCode: "metadata_read_failed" })],
         availableActions: [expect.objectContaining({ eligible: true })],
       } });
-    expect((await fixture.run(["inspect", "original-disc-archives", archiveId])).result)
-      .toMatchObject({ item: {
+    const archiveInspection = await fixture.run([
+      "inspect", "original-disc-archives", archiveId,
+    ]);
+    expect(archiveInspection.result).toMatchObject({ item: {
         boundaryReportedSizeBytes: 2_048,
         boundaryPublishedSizeBytes: 2_048,
-        integrity: "clean_read",
+        integrity: "incomplete_read",
+        badSectorCount: 1,
+        badAreaCount: 1,
+        badSectorRanges: null,
       } });
+    expect(
+      (archiveInspection.result as {
+        item: object;
+      }).item,
+    ).not.toHaveProperty("dvdRecoveryEvidence");
+    expect(
+      (archiveInspection.result as {
+        item: object;
+      }).item,
+    ).not.toHaveProperty("integrityEvidenceRevision");
     expect((await fixture.run(["inspect", "encode-jobs", encodeJob.id])).result)
       .toMatchObject({ item: {
         status: "failed",
@@ -607,7 +1748,14 @@ it("returns the same operational records and evidence through web and CLI", asyn
         correctionLinks: [expect.objectContaining({ id: encodeJob.id })],
         failureReports: [expect.objectContaining({ reasonCode: "command_failed" })],
         availableActions: expect.arrayContaining([
-          expect.objectContaining({ name: "requeue", eligible: true }),
+          expect.objectContaining({
+            name: "requeue",
+            eligible: false,
+            blockingReasons: [expect.objectContaining({
+              code: DVD_RECOVERY_EVIDENCE_ENCODING.code,
+              message: DVD_RECOVERY_EVIDENCE_ENCODING.message,
+            })],
+          }),
         ]),
       } });
   } finally {

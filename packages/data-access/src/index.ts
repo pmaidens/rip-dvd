@@ -18,9 +18,34 @@ export type {
 } from "./archive-read-failure.js";
 export {
   createCleanReadArchiveIntegrityEvidence,
+  createIncompleteReadArchiveIntegrityEvidence,
   createUnknownArchiveIntegrityEvidence,
   createWatchableSalvageArchiveIntegrityEvidence,
+  withAuthoritativeDvdArchiveIntegrity,
 } from "./archive-integrity.js";
+export {
+  DVD_RECOVERY_EVIDENCE_ADMISSION,
+  DVD_RECOVERY_EVIDENCE_ENCODING,
+  DVD_RECOVERY_EVIDENCE_FORMAT,
+  DvdRecoveryEvidenceAdmissionClosedError,
+  DvdRecoveryEvidenceEncodingUnavailableError,
+  assertDvdRecoveryEvidenceAdmissionAvailable,
+} from "./dvd-recovery-evidence.js";
+export {
+  assertDvdArchiveBoundaryEvidenceDigest,
+  assertDvdArchiveEvidenceManifestDigests,
+  assertDvdArchiveRecoveryReadEvidenceDigest,
+  assertDvdUnrecoveredSourceRangesDigest,
+  createDvdArchiveBoundaryEvidenceDigest,
+  createDvdArchiveEvidenceManifestDigests,
+  createDvdArchiveRecoveryReadEvidenceDigest,
+  createDvdUnrecoveredSourceRangesDigest,
+} from "./dvd-archive-evidence-digests.js";
+export type {
+  DvdArchiveEvidenceManifestDigestInput,
+  DvdArchiveEvidenceManifestDigests,
+  DvdArchiveRecoveryReadEvidenceDigestInput,
+} from "./dvd-archive-evidence-digests.js";
 export {
   archiveBoundaryEvidenceFromRecord,
   createCorrectedDvdArchiveBoundaryEvidence,
@@ -85,10 +110,12 @@ export * from "./dvd-scan.js";
 export {
   ARCHIVE_FAILURE_DETAIL_VERSIONS,
   ARCHIVE_INTEGRITIES,
+  ARCHIVE_RECOVERY_STATUSES,
   ARCHIVE_READ_FAILURE_CATEGORIES,
   ARCHIVE_READ_FAILURE_STAGES,
   CATALOG_REVIEW_OUTCOMES,
   DISC_SELECTION_KINDS,
+  DVD_ARCHIVE_EVIDENCE_FORMATS,
   DVD_SALVAGE_REJECTION_DESCRIPTIONS,
   ENCODE_WORKER_INCIDENT_RECOVERY_AREAS,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
@@ -112,6 +139,7 @@ export {
   DISC_INSPECTION_SETTLING_OBSERVATION_TARGET,
   DISC_INSPECTION_SETTLING_QUIET_WINDOW_MS,
   DISC_INSPECTION_SETTLING_TIMEOUT_MS,
+  DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
   DVD_LOGICAL_SECTOR_BYTES,
   ENCODE_JOB_LEASE_DURATION_MS,
 } from "./types.js";

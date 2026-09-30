@@ -1,5 +1,11 @@
 import {
+  DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
+  DVD_RECOVERY_EVIDENCE_ADMISSION,
+  DVD_RECOVERY_EVIDENCE_ENCODING,
+  type DvdArchiveEvidenceHeader,
+  DVD_RECOVERY_EVIDENCE_FORMAT,
   WORKER_KINDS,
+  withAuthoritativeDvdArchiveIntegrity,
   type ArchiveJob,
   type ArchiveJobId,
   type ArchiveAuditRun,
@@ -194,9 +200,21 @@ function visibleEncodeJobs(
   ));
 }
 
-function visibleArchive({ archivePath: _archivePath, ...archive }: OriginalDiscArchive) {
+function visibleArchive(
+  archive: OriginalDiscArchive,
+  evidenceHeadersByArchiveId: ReadonlyMap<
+    OriginalDiscArchiveId,
+    DvdArchiveEvidenceHeader
+  >,
+) {
+  const evidenceHeader = evidenceHeadersByArchiveId.get(archive.id) ?? null;
+  const {
+    archivePath: _archivePath,
+    integrityEvidenceRevision: _integrityEvidenceRevision,
+    ...authoritativeArchive
+  } = withAuthoritativeDvdArchiveIntegrity(archive, evidenceHeader);
   return {
-    ...archive,
+    ...authoritativeArchive,
     storage: {
       recordedSizeBytes: archive.sizeBytes,
       verification: {
@@ -206,6 +224,33 @@ function visibleArchive({ archivePath: _archivePath, ...archive }: OriginalDiscA
       },
     },
   };
+}
+
+function evidenceHeadersForArchives(
+  access: Pick<ConsistentReadAccess, "catalog">,
+  archives: readonly OriginalDiscArchive[],
+) {
+  const evidenceHeaders = new Map<
+    OriginalDiscArchiveId,
+    DvdArchiveEvidenceHeader
+  >();
+  const archiveIds = [...new Set(archives.map((archive) => archive.id))];
+  for (
+    let offset = 0;
+    offset < archiveIds.length;
+    offset += DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT
+  ) {
+    const batch = access.catalog.findDvdArchiveEvidenceHeaders(
+      archiveIds.slice(
+        offset,
+        offset + DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
+      ),
+    );
+    for (const [archiveId, evidenceHeader] of batch) {
+      evidenceHeaders.set(archiveId, evidenceHeader);
+    }
+  }
+  return evidenceHeaders;
 }
 
 function visibleDrive({ devicePath: _devicePath, serialNumber: _serialNumber, ...drive }:
@@ -291,6 +336,26 @@ function recentWork<T extends { status: string; updatedAt: Date; id: string }>(
 }
 
 function requestActions(request: ArchiveRequest) {
+  if (request.evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT) {
+    const cancelEligible = ["pending", "running", "needs_attention"].includes(
+      request.status,
+    );
+    return [
+      recoveryAction(
+        "cancel",
+        cancelEligible,
+        `Archive Request is ${request.status}.`,
+        "archiveRequestId",
+      ),
+      recoveryAction(
+        "retry",
+        false,
+        DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+        "archiveRequestId",
+        DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+      ),
+    ];
+  }
   const reason = `Archive Request is ${request.status}.`;
   return [
     recoveryAction("cancel", ["pending", "running", "needs_attention"].includes(request.status), reason, "archiveRequestId"),
@@ -313,13 +378,14 @@ function recoveryAction(
   eligible: boolean,
   reason: string,
   targetInput: "archiveRequestId" | "discInspectionId",
+  blockingCode = "INVALID_TRANSITION",
 ) {
   return {
     name,
     eligible,
     requiredInputs: ["mutationKey", targetInput],
     reason: eligible ? null : reason,
-    blockingReasons: eligible ? [] : [{ code: "INVALID_TRANSITION", message: reason }],
+    blockingReasons: eligible ? [] : [{ code: blockingCode, message: reason }],
   };
 }
 
@@ -327,6 +393,13 @@ export function encodeRequeueAvailability(
   access: Pick<ConsistentReadAccess, "encodeJobs">,
   job: EncodeJob,
   selectionEligible: boolean,
+  selectionBlockingReason: {
+    code: string;
+    message: string;
+  } = {
+    code: "INVALID_TRANSITION",
+    message: "Requires an active Disc Selection with completed Catalog Review.",
+  },
 ) {
   const replacesOutput = job.status === "completed" || job.replaceExistingOutput;
   const requiredInputs = replacesOutput
@@ -335,18 +408,19 @@ export function encodeRequeueAvailability(
       "acknowledgeReplacement",
     ]
     : ["mutationKey", "encodeJobId"];
-  const blocked = (reason: string) => ({
+  const blocked = (reason: string, code = "INVALID_TRANSITION") => ({
     eligible: false,
     requiredInputs,
     reason,
-    blockingReasons: [{ code: "INVALID_TRANSITION", message: reason }],
+    blockingReasons: [{ code, message: reason }],
   });
   if (!["completed", "failed", "cancelled"].includes(job.status)) {
     return blocked(`Encode Job is ${job.status}.`);
   }
   if (!selectionEligible) {
     return blocked(
-      "Requires an active Disc Selection with completed Catalog Review.",
+      selectionBlockingReason.message,
+      selectionBlockingReason.code,
     );
   }
   if (job.partialCleanupOutputPath !== null ||
@@ -492,8 +566,11 @@ function readList(access: ConsistentReadAccess, kind: OperationKind, limit: numb
       return recentWork(access.archiveJobs.list(undefined, {
         policy: boundedPolicy(limit),
       }), ["running"], limit).map(visibleArchiveJob);
-    case "original-disc-archives":
-      return access.catalog.listOriginalDiscArchives({ limit }).map(visibleArchive);
+    case "original-disc-archives": {
+      const archives = access.catalog.listOriginalDiscArchives({ limit });
+      const evidenceHeaders = evidenceHeadersForArchives(access, archives);
+      return archives.map((archive) => visibleArchive(archive, evidenceHeaders));
+    }
     case "encode-jobs":
       return visibleEncodeJobs(access, recentWork(access.encodeJobs.list(undefined, {
         policy: boundedPolicy(limit),
@@ -531,6 +608,10 @@ function readDetail(
       const requests = access.archiveRequests.listForDetectedDisc(disc.id);
       const relevantRequest = access.archiveRequests
         .listRelevantForDetectedDiscs([disc.id])[0] ?? null;
+      const archives = access.catalog.listOriginalDiscArchives({
+        detectedDiscId: disc.id,
+      });
+      const evidenceHeaders = evidenceHeadersForArchives(access, archives);
       return {
         ...visibleDisc(disc), scanData: disc.scanData,
         inspections: access.discInspections.list({ detectedDiscId: disc.id })
@@ -540,8 +621,9 @@ function readDetail(
         archiveJobs: access.archiveJobs.list(undefined, {
           detectedDiscIds: [disc.id],
         }).map(visibleArchiveJob),
-        archives: access.catalog.listOriginalDiscArchives({ detectedDiscId: disc.id })
-          .map(visibleArchive),
+        archives: archives.map((archive) =>
+          visibleArchive(archive, evidenceHeaders)
+        ),
         availableActions: detectedDiscActions(disc, relevantRequest),
       };
     }
@@ -581,15 +663,21 @@ function readDetail(
     case "archive-jobs": {
       const job = access.archiveJobs.find(id as ArchiveJobId);
       if (!job) return null;
+      const archives = job.originalDiscArchiveId === null
+        ? []
+        : access.catalog.listOriginalDiscArchives({
+            ids: [job.originalDiscArchiveId],
+          });
+      const evidenceHeaders = evidenceHeadersForArchives(access, archives);
       return {
         ...visibleArchiveJob(job),
         archiveRequest: access.archiveRequests.find(job.archiveRequestId),
         discInspection: job.discInspectionId === null ? null :
           access.discInspections.list({ ids: [job.discInspectionId] })
             .map(visibleInspection)[0] ?? null,
-        archive: job.originalDiscArchiveId === null ? null :
-          access.catalog.listOriginalDiscArchives({ ids: [job.originalDiscArchiveId] })
-            .map(visibleArchive)[0] ?? null,
+        archive: archives.map((archive) =>
+          visibleArchive(archive, evidenceHeaders)
+        )[0] ?? null,
       };
     }
     case "original-disc-archives": {
@@ -603,6 +691,15 @@ function readDetail(
       const newArchives = access.catalog.listOriginalDiscArchives({
         rearchiveSourceArchiveId: archive.id,
       });
+      const relatedArchives = [
+        archive,
+        ...(previousArchive === null ? [] : [previousArchive]),
+        ...newArchives,
+      ];
+      const evidenceHeaders = evidenceHeadersForArchives(
+        access,
+        relatedArchives,
+      );
       const discSelections = access.catalog.listDiscSelections({
         originalDiscArchiveId: archive.id,
         includeHistorical: true,
@@ -620,7 +717,7 @@ function readDetail(
         ? null
         : "Fresh re-archive requests are supported only for DVD archives";
       return {
-        ...visibleArchive(archive),
+        ...visibleArchive(archive, evidenceHeaders),
         detectedDisc: access.catalog.listDetectedDiscs(undefined, {
           ids: [archive.detectedDiscId],
         }).map(visibleDisc)[0] ?? null,
@@ -629,8 +726,10 @@ function readDetail(
         lineage: {
           previousArchive: previousArchive === null
             ? null
-            : visibleArchive(previousArchive),
-          newArchives: newArchives.map(visibleArchive),
+            : visibleArchive(previousArchive, evidenceHeaders),
+          newArchives: newArchives.map((newArchive) =>
+            visibleArchive(newArchive, evidenceHeaders)
+          ),
           rearchiveRequests: access.archiveRequests
             .listForRearchiveSources([archive.id]),
         },
@@ -661,10 +760,25 @@ function readDetail(
       const job = access.encodeJobs.find(id as EncodeJobId);
       if (!job) return null;
       const selection = access.catalog.listDiscSelections({ ids: [job.discSelectionId] })[0];
+      const archives = selection === undefined
+        ? []
+        : access.catalog.listOriginalDiscArchives({
+            ids: [selection.originalDiscArchiveId],
+          });
+      const evidenceHeaders = evidenceHeadersForArchives(access, archives);
       const requeueSelectionEligible = access.catalog.listDiscSelections({
         ids: [job.discSelectionId], encodeEligibleOnly: true,
       }).length > 0;
-      const requeue = encodeRequeueAvailability(access, job, requeueSelectionEligible);
+      const evidenceBlocked = selection !== undefined &&
+        evidenceHeaders.has(selection.originalDiscArchiveId);
+      const requeue = encodeRequeueAvailability(
+        access,
+        job,
+        requeueSelectionEligible,
+        evidenceBlocked
+          ? DVD_RECOVERY_EVIDENCE_ENCODING
+          : undefined,
+      );
       const history = access.encodeJobs.listForDiscSelection(
         job.discSelectionId,
       );
@@ -732,9 +846,9 @@ function readDetail(
         },
         failureReports: access.encodeJobs.listFailureReports([job.id]),
         discSelection: selection ?? null,
-        archive: selection ? access.catalog.listOriginalDiscArchives({
-          ids: [selection.originalDiscArchiveId],
-        }).map(visibleArchive)[0] ?? null : null,
+        archive: archives.map((archive) =>
+          visibleArchive(archive, evidenceHeaders)
+        )[0] ?? null,
         history: history.map((candidate) => visibleById.get(candidate.id)!),
         correctionLinks: directCorrectionLinks.map((candidate) =>
           visibleById.get(candidate.id)!

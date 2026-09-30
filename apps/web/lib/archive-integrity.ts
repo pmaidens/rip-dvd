@@ -6,6 +6,7 @@ import type {
 const ARCHIVE_INTEGRITY_LABELS = {
   unknown: "Unknown read quality",
   clean_read: "Clean read",
+  incomplete_read: "Incomplete read",
   watchable_salvage: "Watchable salvage",
 } satisfies Record<ArchiveIntegrity, string>;
 

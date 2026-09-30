@@ -2,13 +2,41 @@ import { DomainInvariantError } from "./errors.js";
 import { MAX_DVD_TITLES } from "./dvd-scan.js";
 import type {
   CleanReadArchiveIntegrityEvidence,
+  DvdArchiveEvidenceHeader,
   DvdTitleBadSectorCount,
+  IncompleteReadArchiveIntegrityEvidence,
   UnreadableSectorRange,
+  OriginalDiscArchive,
   UnknownArchiveIntegrityEvidence,
   WatchableSalvageArchiveIntegrityEvidence,
 } from "./types.js";
+import { DVD_RECOVERY_EVIDENCE_FORMAT } from "./dvd-recovery-evidence.js";
 
 const MAX_WATCHABLE_SALVAGE_BAD_SECTORS = 32;
+
+export function withAuthoritativeDvdArchiveIntegrity<
+  TArchive extends OriginalDiscArchive,
+>(
+  archive: TArchive,
+  header: DvdArchiveEvidenceHeader | null,
+): TArchive {
+  if (header === null) return archive;
+  const integrity = header.unrecoveredSourceRanges.length === 0
+    ? createCleanReadArchiveIntegrityEvidence(header.evidenceFormat)
+    : createIncompleteReadArchiveIntegrityEvidence(
+      header.unrecoveredSourceRanges,
+    );
+  return {
+    ...archive,
+    integrity: integrity.integrity,
+    integrityEvidenceRevision: header.currentManifestRevision,
+    integrityPolicyVersion: integrity.policyVersion,
+    badSectorCount: integrity.badSectorCount,
+    badAreaCount: integrity.badAreaCount,
+    badSectorRanges: null,
+    badSectorCountsByTitle: null,
+  };
+}
 
 function normalizePolicyVersion(policyVersion: string): string {
   const normalizedPolicyVersion = policyVersion.trim();
@@ -32,6 +60,46 @@ export function createCleanReadArchiveIntegrityEvidence(
     badSectorCount: 0,
     badAreaCount: 0,
     badSectorRanges: [],
+  };
+}
+
+export function createIncompleteReadArchiveIntegrityEvidence(
+  unresolvedSectorRanges: readonly UnreadableSectorRange[],
+): IncompleteReadArchiveIntegrityEvidence {
+  const ranges = unresolvedSectorRanges.map(({ startLba, sectorCount }) => ({
+    startLba,
+    sectorCount,
+  }));
+  let previousEndLba = -1;
+  let badSectorCount = 0;
+  for (const range of ranges) {
+    const endLba = range.startLba + range.sectorCount;
+    if (
+      !Number.isSafeInteger(range.startLba) ||
+      range.startLba < 0 ||
+      !Number.isSafeInteger(range.sectorCount) ||
+      range.sectorCount <= 0 ||
+      !Number.isSafeInteger(endLba) ||
+      range.startLba < previousEndLba
+    ) {
+      throw new DomainInvariantError(
+        "Incomplete-read sector ranges must be normalized",
+      );
+    }
+    previousEndLba = endLba;
+    badSectorCount += range.sectorCount;
+  }
+  if (ranges.length === 0 || !Number.isSafeInteger(badSectorCount)) {
+    throw new DomainInvariantError(
+      "Incomplete-read evidence requires unresolved source",
+    );
+  }
+  return {
+    integrity: "incomplete_read",
+    policyVersion: DVD_RECOVERY_EVIDENCE_FORMAT,
+    badSectorCount,
+    badAreaCount: ranges.length,
+    badSectorRanges: ranges,
   };
 }
 
