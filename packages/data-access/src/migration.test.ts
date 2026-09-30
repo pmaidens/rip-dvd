@@ -1900,6 +1900,47 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     { name: "dvd_evidence_recovery_read_update_guard" },
   ]);
   finalDatabase.close();
+
+  for (const tamper of [
+    {
+      suffix: "initial-manifest",
+      mutation: `
+        DROP TRIGGER dvd_evidence_manifest_update_guard;
+        UPDATE dvd_archive_evidence_manifests
+        SET unrecovered_source_ranges =
+          '[{"startLba":0,"sectorCount":1,"classification":"skipped_untested"}]'
+        WHERE id = 'evidence-new-format-manifest-1';
+      `,
+      expected:
+        "Persisted Unrecovered Source ranges digest does not match its contents",
+    },
+    {
+      suffix: "older-recovery-read",
+      mutation: `
+        DROP TRIGGER dvd_evidence_recovery_read_update_guard;
+        UPDATE dvd_archive_recovery_reads
+        SET outcome = 'recovered'
+        WHERE id = 'evidence-new-format-read-1';
+      `,
+      expected:
+        "Persisted DVD Archive Recovery evidence digest does not match its contents",
+    },
+  ]) {
+    const tamperedPath = join(
+      dirname(databasePath),
+      `tampered-${tamper.suffix}.sqlite`,
+    );
+    copyFileSync(databasePath, tamperedPath);
+    const tamperedDatabase = new DatabaseSync(tamperedPath);
+    tamperedDatabase.exec(tamper.mutation);
+    tamperedDatabase.close();
+
+    const tamperedAccess = createDataAccess({ databasePath: tamperedPath });
+    expect(() => tamperedAccess.catalog.findDvdArchiveEvidenceHeader(
+      "evidence-new-format-archive" as OriginalDiscArchiveId,
+    )).toThrow(tamper.expected);
+    tamperedAccess.close();
+  }
 });
 
 it("fails closed instead of inventing checkpoint identities for interstitial evidence", () => {

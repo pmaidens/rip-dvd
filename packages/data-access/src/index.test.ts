@@ -34,6 +34,7 @@ import {
   createDiscSelectionSourceIdentity,
   createUnknownArchiveIntegrityEvidence,
   createWatchableSalvageArchiveIntegrityEvidence,
+  DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
   DVD_RECOVERY_EVIDENCE_FORMAT,
   DVD_TITLE_MAP_SCHEMA_VERSION,
   DomainInvariantError,
@@ -688,6 +689,28 @@ afterEach(() => {
 });
 
 describe("data-access facade", () => {
+  it("bounds set-based DVD evidence-header reads", () => {
+    const access = openTestDatabase();
+    const ids = Array.from(
+      { length: DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT + 1 },
+      (_, index) => `synthetic-archive-${index}` as OriginalDiscArchiveId,
+    );
+    const batchRead = vi.spyOn(
+      access.catalog,
+      "findDvdArchiveEvidenceHeaders",
+    );
+
+    expect(access.catalog.findDvdArchiveEvidenceHeaders([])).toEqual(new Map());
+    expect(access.catalog.findDvdArchiveEvidenceHeaders(ids.slice(0, 100)))
+      .toEqual(new Map());
+    expect(access.catalog.findDvdArchiveEvidenceHeader(ids[0]!)).toBeNull();
+    expect(batchRead).toHaveBeenLastCalledWith([ids[0]]);
+    expect(() => access.catalog.findDvdArchiveEvidenceHeaders(ids)).toThrow(
+      `limited to ${DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT} archives`,
+    );
+    access.close();
+  });
+
   it("keeps every attached drive lane while bounding all missing-drive history", () => {
     const access = openTestDatabase();
     for (let index = 0; index < 32; index += 1) {

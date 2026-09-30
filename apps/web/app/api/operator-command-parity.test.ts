@@ -1401,6 +1401,14 @@ it("returns the same operational records and evidence through web and CLI", asyn
       .not.toEqual(expect.arrayContaining([
         expect.objectContaining({ id: selection.id }),
       ]));
+    const unreviewedEvidenceFixture = new DatabaseSync(fixture.databasePath);
+    unreviewedEvidenceFixture.prepare(`
+      UPDATE original_disc_archives
+      SET catalog_review_outcome = 'needs_review',
+          catalog_reviewed_at = NULL
+      WHERE id = ?
+    `).run(archiveId);
+    unreviewedEvidenceFixture.close();
     const encodeConfig = () => ({
       mediaLibraryPath: fixture.mediaLibraryPath,
       webTrustedOrigin: trustedOrigin,

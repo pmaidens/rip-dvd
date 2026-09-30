@@ -200,6 +200,7 @@ export const DISC_INSPECTION_SETTLING_OBSERVATION_TARGET = 3;
 export const DISC_INSPECTION_SETTLING_QUIET_WINDOW_MS = 5_000;
 export const DISC_INSPECTION_SETTLING_TIMEOUT_MS = 30_000;
 export const DVD_LOGICAL_SECTOR_BYTES = 2_048;
+export const DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT = 1_000;
 export const ENCODE_JOB_LEASE_DURATION_MS = 60_000;
 
 export interface ServiceHealth {
@@ -1339,6 +1340,9 @@ export interface CatalogAccess {
   findDvdArchiveEvidenceHeader(
     id: OriginalDiscArchiveId,
   ): DvdArchiveEvidenceHeader | null;
+  findDvdArchiveEvidenceHeaders(
+    ids: readonly OriginalDiscArchiveId[],
+  ): ReadonlyMap<OriginalDiscArchiveId, DvdArchiveEvidenceHeader>;
   findArchiveRecovery(id: OriginalDiscArchiveId): ArchiveRecovery | null;
   listCatalogReviewArchives(options: {
     view: CatalogReviewArchiveView;
@@ -1906,6 +1910,7 @@ export type SnapshotCatalogAccess = Pick<
   | "listDetectedDiscs"
   | "listOriginalDiscArchives"
   | "findDvdArchiveEvidenceHeader"
+  | "findDvdArchiveEvidenceHeaders"
   | "findArchiveRecovery"
   | "listCatalogReviewArchives"
   | "listMediaItems"
