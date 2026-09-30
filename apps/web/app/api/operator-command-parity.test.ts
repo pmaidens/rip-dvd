@@ -617,19 +617,58 @@ it("returns the same operational records and evidence through web and CLI", asyn
           bad_sector_counts_by_title = NULL
       WHERE id = ?
     `).run(archiveId);
+    const unrecoveredSourceRanges = JSON.stringify([{
+      startLba: 0,
+      sectorCount: 1,
+      classification: "skipped_untested",
+    }]);
+    const boundaryEvidenceDigest = "a".repeat(64);
+    const sourceRangesDigest = "b".repeat(64);
+    const manifestDigest = "c".repeat(64);
+    const manifestId = "synthetic-evidence-manifest";
+    evidenceFixture.prepare(`
+      INSERT INTO dvd_archive_evidence_manifests (
+        id, original_disc_archive_id, revision, evidence_format,
+        image_fingerprint, sector_size_bytes, accepted_end_lba_exclusive,
+        boundary_policy_version, boundary_reported_size_bytes,
+        boundary_published_size_bytes, boundary_evidence_digest,
+        unrecovered_source_ranges, unrecovered_source_ranges_digest,
+        manifest_digest, created_at
+      )
+      SELECT ?, id, 1, ?, fingerprint, 2048, 1,
+        boundary_policy_version, boundary_reported_size_bytes,
+        boundary_published_size_bytes, ?, ?, ?, ?, 1
+      FROM original_disc_archives
+      WHERE id = ?
+    `).run(
+      manifestId,
+      DVD_RECOVERY_EVIDENCE_FORMAT,
+      boundaryEvidenceDigest,
+      unrecoveredSourceRanges,
+      sourceRangesDigest,
+      manifestDigest,
+      archiveId,
+    );
     evidenceFixture.prepare(`
       INSERT INTO dvd_archive_evidence_headers (
         original_disc_archive_id, source_archive_job_id, evidence_format,
-        accepted_end_lba_exclusive, unrecovered_source_ranges, created_at
-      ) VALUES (?, 'synthetic-evidence-job', ?, 1, ?, 1)
+        boundary_policy_version, boundary_reported_size_bytes,
+        boundary_published_size_bytes, boundary_evidence_digest,
+        sector_size_bytes, accepted_end_lba_exclusive, current_manifest_id,
+        current_manifest_revision, current_manifest_digest, created_at,
+        updated_at
+      )
+      SELECT id, 'synthetic-evidence-job', ?, boundary_policy_version,
+        boundary_reported_size_bytes, boundary_published_size_bytes, ?,
+        2048, 1, ?, 1, ?, 1, 1
+      FROM original_disc_archives
+      WHERE id = ?
     `).run(
-      archiveId,
       DVD_RECOVERY_EVIDENCE_FORMAT,
-      JSON.stringify([{
-        startLba: 0,
-        sectorCount: 1,
-        classification: "skipped_untested",
-      }]),
+      boundaryEvidenceDigest,
+      manifestId,
+      manifestDigest,
+      archiveId,
     );
     evidenceFixture.close();
     const laggingProjectionResponse = createOperationsResponse(
@@ -643,7 +682,7 @@ it("returns the same operational records and evidence through web and CLI", asyn
         integrity: "incomplete_read",
         badSectorCount: 1,
         badAreaCount: 1,
-        badSectorRanges: [{ startLba: 0, sectorCount: 1 }],
+        badSectorRanges: null,
       },
     });
     const catalogReviewResponse = await createCatalogReviewRoute(
@@ -664,7 +703,7 @@ it("returns the same operational records and evidence through web and CLI", asyn
         integrity: "incomplete_read",
         badSectorCount: 1,
         badAreaCount: 1,
-        badSectorRanges: [{ startLba: 0, sectorCount: 1 }],
+        badSectorRanges: null,
       },
     });
     expect(readDashboardSnapshot(access, {
@@ -677,7 +716,7 @@ it("returns the same operational records and evidence through web and CLI", asyn
           integrity: "incomplete_read",
           badSectorCount: 1,
           badAreaCount: 1,
-          badSectorRanges: [{ startLba: 0, sectorCount: 1 }],
+          badSectorRanges: null,
         }),
       ]),
     });
@@ -818,6 +857,77 @@ it("returns the same operational records and evidence through web and CLI", asyn
       .not.toEqual(expect.arrayContaining([
         expect.objectContaining({ id: selection.id }),
       ]));
+    const encodeConfig = () => ({
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      webTrustedOrigin: trustedOrigin,
+    });
+    const blockedEncodeError = {
+      error: {
+        code: DVD_RECOVERY_EVIDENCE_ENCODING.code,
+        message: DVD_RECOVERY_EVIDENCE_ENCODING.message,
+        blockingReasons: [{
+          code: DVD_RECOVERY_EVIDENCE_ENCODING.code,
+          message: DVD_RECOVERY_EVIDENCE_ENCODING.message,
+        }],
+      },
+    };
+    for (const blockedMutation of [
+      {
+        command: [
+          "encode-enqueue", "--key", "synthetic-evidence-encode-enqueue",
+          "--disc-selection-id", selection.id,
+          "--encoding-profile-id", profile.id,
+          "--output-path", join(fixture.mediaLibraryPath, "blocked-evidence.mkv"),
+        ],
+        method: "POST",
+        body: {
+          mutationKey: "synthetic-evidence-encode-enqueue",
+          discSelectionId: selection.id,
+          encodingProfileId: profile.id,
+          outputPath: join(fixture.mediaLibraryPath, "blocked-evidence.mkv"),
+        },
+      },
+      {
+        command: [
+          "encode-requeue", "--key", "synthetic-evidence-encode-requeue",
+          "--encode-job-id", encodeJob.id,
+        ],
+        method: "PATCH",
+        body: {
+          action: "requeue",
+          mutationKey: "synthetic-evidence-encode-requeue",
+          encodeJobId: encodeJob.id,
+        },
+      },
+    ] as const) {
+      const web = await createEncodeJobsRoute(new Request(
+        `${trustedOrigin}/api/encode-jobs`,
+        {
+          method: blockedMutation.method,
+          headers: {
+            "Content-Type": "application/json",
+            Host: "localhost:3000",
+            Origin: trustedOrigin,
+          },
+          body: JSON.stringify(blockedMutation.body),
+        },
+      ), () => access, encodeConfig);
+      const cli = await fixture.run(blockedMutation.command);
+      expect(web.status).toBe(409);
+      expect(cli.exitCode).toBe(2);
+      expect(cli.result).toEqual(await web.json());
+      expect(cli.result).toEqual(blockedEncodeError);
+    }
+    const encodeReplayFixture = new DatabaseSync(fixture.databasePath);
+    expect(encodeReplayFixture.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE key IN (?, ?)
+    `).get(
+      "synthetic-evidence-encode-enqueue",
+      "synthetic-evidence-encode-requeue",
+    )).toEqual({ count: 0 });
+    encodeReplayFixture.close();
     const incident = access.workerIncidents.record({
       schemaVersion: 1,
       workerKind: "archive",
@@ -911,27 +1021,22 @@ it("returns the same operational records and evidence through web and CLI", asyn
         attempts: [expect.objectContaining({ reasonCode: "metadata_read_failed" })],
         availableActions: [expect.objectContaining({ eligible: true })],
       } });
-    expect((await fixture.run(["inspect", "original-disc-archives", archiveId])).result)
-      .toMatchObject({ item: {
+    const archiveInspection = await fixture.run([
+      "inspect", "original-disc-archives", archiveId,
+    ]);
+    expect(archiveInspection.result).toMatchObject({ item: {
         boundaryReportedSizeBytes: 2_048,
         boundaryPublishedSizeBytes: 2_048,
         integrity: "incomplete_read",
-        dvdRecoveryEvidence: {
-          header: {
-            evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
-            acceptedEndLbaExclusive: 1,
-            unrecoveredSourceRanges: [{
-              startLba: 0,
-              sectorCount: 1,
-              classification: "skipped_untested",
-            }],
-          },
-          recovery: {
-            id: "synthetic-evidence-recovery",
-            status: "eligible",
-          },
-        },
+        badSectorCount: 1,
+        badAreaCount: 1,
+        badSectorRanges: null,
       } });
+    expect(
+      (archiveInspection.result as {
+        item: object;
+      }).item,
+    ).not.toHaveProperty("dvdRecoveryEvidence");
     expect((await fixture.run(["inspect", "encode-jobs", encodeJob.id])).result)
       .toMatchObject({ item: {
         status: "failed",

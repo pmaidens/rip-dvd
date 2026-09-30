@@ -66,6 +66,7 @@ import {
   discSelectionSupersessions,
   discSelections,
   dvdArchiveEvidenceHeaders,
+  dvdArchiveEvidenceManifests,
   encodeJobFailureReports,
   encodeJobs,
   encodingProfiles,
@@ -117,7 +118,7 @@ import { createDvdMetadataFingerprint } from "../dvd-metadata-fingerprint.js";
 import { createWatchableSalvageArchiveIntegrityEvidence } from "../archive-integrity.js";
 import {
   assertDvdRecoveryEvidenceAdmissionAvailable,
-  DVD_RECOVERY_EVIDENCE_ENCODING,
+  DvdRecoveryEvidenceEncodingUnavailableError,
 } from "../dvd-recovery-evidence.js";
 import { encodingProfileQueueBlockingReasons } from "../encoding-profile-eligibility.js";
 import { validateDvdArchiveBoundaryEvidence } from "../archive-boundary.js";
@@ -6959,8 +6960,34 @@ export function createDataAccessInternal(
       findDvdArchiveEvidenceHeader(id) {
         if (!hasDvdRecoveryEvidenceSchema) return null;
         return database
-          .select()
+          .select({
+            originalDiscArchiveId:
+              dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+            sourceArchiveJobId: dvdArchiveEvidenceHeaders.sourceArchiveJobId,
+            evidenceFormat: dvdArchiveEvidenceHeaders.evidenceFormat,
+            boundaryEvidenceDigest:
+              dvdArchiveEvidenceHeaders.boundaryEvidenceDigest,
+            sectorSizeBytes: dvdArchiveEvidenceHeaders.sectorSizeBytes,
+            acceptedEndLbaExclusive:
+              dvdArchiveEvidenceHeaders.acceptedEndLbaExclusive,
+            currentManifestId: dvdArchiveEvidenceHeaders.currentManifestId,
+            currentManifestRevision:
+              dvdArchiveEvidenceHeaders.currentManifestRevision,
+            currentManifestDigest:
+              dvdArchiveEvidenceHeaders.currentManifestDigest,
+            unrecoveredSourceRanges:
+              dvdArchiveEvidenceManifests.unrecoveredSourceRanges,
+            createdAt: dvdArchiveEvidenceHeaders.createdAt,
+            updatedAt: dvdArchiveEvidenceHeaders.updatedAt,
+          })
           .from(dvdArchiveEvidenceHeaders)
+          .innerJoin(
+            dvdArchiveEvidenceManifests,
+            eq(
+              dvdArchiveEvidenceManifests.id,
+              dvdArchiveEvidenceHeaders.currentManifestId,
+            ),
+          )
           .where(eq(dvdArchiveEvidenceHeaders.originalDiscArchiveId, id))
           .get() ?? null;
       },
@@ -12395,9 +12422,7 @@ export function createDataAccessInternal(
           selectionReview: ReturnType<typeof selectReviewState>,
         ) => {
           if (selectionReview.evidenceFormat !== null) {
-            throw new DomainInvariantError(
-              DVD_RECOVERY_EVIDENCE_ENCODING.message,
-            );
+            throw new DvdRecoveryEvidenceEncodingUnavailableError();
           }
           if (
             selectionReview.catalogReviewOutcome !==
@@ -14418,6 +14443,28 @@ export function createDataAccessInternal(
         );
       },
       requeue(id, options) {
+        if (hasDvdRecoveryEvidenceSchema) {
+          const evidenceArchive = database
+            .select({ id: dvdArchiveEvidenceHeaders.originalDiscArchiveId })
+            .from(encodeJobs)
+            .innerJoin(
+              discSelections,
+              eq(discSelections.id, encodeJobs.discSelectionId),
+            )
+            .innerJoin(
+              dvdArchiveEvidenceHeaders,
+              eq(
+                dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+                discSelections.originalDiscArchiveId,
+              ),
+            )
+            .where(eq(encodeJobs.id, id))
+            .limit(1)
+            .get();
+          if (evidenceArchive !== undefined) {
+            throw new DvdRecoveryEvidenceEncodingUnavailableError();
+          }
+        }
         const outputPath = options?.outputPath === undefined
           ? undefined
           : requireNonEmpty(options.outputPath, "outputPath");

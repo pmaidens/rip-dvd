@@ -211,12 +211,6 @@ function visibleArchive(
   } = withAuthoritativeDvdArchiveIntegrity(archive, evidenceHeader);
   return {
     ...authoritativeArchive,
-    dvdRecoveryEvidence: evidenceHeader === null
-      ? null
-      : {
-          header: evidenceHeader,
-          recovery: access.catalog.findArchiveRecovery(archive.id),
-        },
     storage: {
       recordedSizeBytes: archive.sizeBytes,
       verification: {

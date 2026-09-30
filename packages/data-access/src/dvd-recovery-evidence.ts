@@ -29,6 +29,19 @@ export class DvdRecoveryEvidenceAdmissionClosedError extends Error {
   }
 }
 
+export class DvdRecoveryEvidenceEncodingUnavailableError extends Error {
+  readonly code = DVD_RECOVERY_EVIDENCE_ENCODING.code;
+  readonly blockingReasons = [{
+    code: DVD_RECOVERY_EVIDENCE_ENCODING.code,
+    message: DVD_RECOVERY_EVIDENCE_ENCODING.message,
+  }] as const;
+
+  constructor() {
+    super(DVD_RECOVERY_EVIDENCE_ENCODING.message);
+    this.name = "DvdRecoveryEvidenceEncodingUnavailableError";
+  }
+}
+
 export function assertDvdRecoveryEvidenceAdmissionAvailable(
   evidenceFormat: DvdArchiveEvidenceFormat | null | undefined,
 ): void {

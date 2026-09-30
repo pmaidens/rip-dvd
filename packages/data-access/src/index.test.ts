@@ -685,6 +685,8 @@ describe("data-access facade", () => {
         "disc_inspections",
         "disc_selection_supersessions",
         "dvd_archive_evidence_headers",
+        "dvd_archive_evidence_manifests",
+        "dvd_archive_recovery_reads",
         "encode_job_failure_reports",
         "filesystem_verification_runs",
         "mutation_invocations",
@@ -693,7 +695,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(27);
+    expect(identifierTables).toHaveLength(29);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "legacy_cutover_staged_sidecars"
@@ -1240,7 +1242,8 @@ describe("data-access facade", () => {
           name !== "20260922182659_rearchive-ordinary-uniqueness" &&
           name !== "20260929222006_dvd-evidence-compatibility" &&
           name !== "20260929231006_dvd-evidence-authority" &&
-          name !== "20260930002622_wandering_micromax",
+          name !== "20260930002622_wandering_micromax" &&
+          name !== "20260930003626_dvd-evidence-checkpoints",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8276,6 +8279,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20260930003626_dvd-evidence-checkpoints",
+        },
+        {
           name: "20260930002622_wandering_micromax",
         },
         {
@@ -8301,9 +8307,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20260922170551_durable-filesystem-verification",
-        },
-        {
-          name: "20260922161825_operation-detail-lookups",
         },
       ]);
     expect(

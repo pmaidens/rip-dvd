@@ -1,6 +1,7 @@
 import {
   discSelectionSourceDescription,
   encodingProfileQueueBlockingReasons,
+  DvdRecoveryEvidenceEncodingUnavailableError,
   type ConsistentReadAccess,
   type DataAccess,
   type DiscSelection,
@@ -20,6 +21,26 @@ import { encodeRequeueAvailability } from "./operations.js";
 
 const ENCODE_SELECTION_PAGE_SIZE = 100;
 const ENCODE_PROFILE_PAGE_SIZE = 100;
+
+function requireEvidenceEncodingAvailable(
+  access: DataAccess,
+  discSelectionId: DiscSelectionId,
+): void {
+  access.readConsistentSnapshot((snapshot) => {
+    const selection = snapshot.catalog.listDiscSelections({
+      ids: [discSelectionId],
+      includeHistorical: true,
+    })[0];
+    if (
+      selection !== undefined &&
+      snapshot.catalog.findDvdArchiveEvidenceHeader(
+        selection.originalDiscArchiveId,
+      ) !== null
+    ) {
+      throw new DvdRecoveryEvidenceEncodingUnavailableError();
+    }
+  });
+}
 
 function isQueueEligibleProfile(profile: EncodingProfile): boolean {
   return encodingProfileQueueBlockingReasons(profile).length === 0;
@@ -66,7 +87,9 @@ export function enqueueEncodeJob(
     mutationKey: unknown;
   },
 ): EncodeJob {
-  return access.encodeJobs.enqueue(parseEncodeEnqueueInput(mediaLibraryPath, input));
+  const parsed = parseEncodeEnqueueInput(mediaLibraryPath, input);
+  requireEvidenceEncodingAvailable(access, parsed.discSelectionId);
+  return access.encodeJobs.enqueue(parsed);
 }
 
 export function parseEncodeEnqueueInput(
@@ -115,6 +138,10 @@ export function requeueEncodeJob(
   const expectedRevision = typeof input.expectedRevision === "string"
     ? input.expectedRevision
     : undefined;
+  const current = access.encodeJobs.find(encodeJobId);
+  if (current !== null) {
+    requireEvidenceEncodingAvailable(access, current.discSelectionId);
+  }
   return access.encodeJobs.requeue(encodeJobId, {
     outputPath,
     priority: input.priority as number | undefined,

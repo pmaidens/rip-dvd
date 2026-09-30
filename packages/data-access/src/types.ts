@@ -374,9 +374,15 @@ export interface DvdArchiveEvidenceHeader {
   originalDiscArchiveId: OriginalDiscArchiveId;
   sourceArchiveJobId: ArchiveJobId;
   evidenceFormat: DvdArchiveEvidenceFormat;
+  boundaryEvidenceDigest: string;
+  sectorSizeBytes: number;
   acceptedEndLbaExclusive: number;
+  currentManifestId: string;
+  currentManifestRevision: number;
+  currentManifestDigest: string;
   unrecoveredSourceRanges: readonly DvdUnrecoveredSourceRange[];
   createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface DvdUnrecoveredSourceRange extends UnreadableSectorRange {

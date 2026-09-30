@@ -10,6 +10,7 @@ import {
 } from "@rip-dvd/application";
 import {
   DomainInvariantError,
+  DvdRecoveryEvidenceEncodingUnavailableError,
   InvalidStatusTransitionError,
   MutationKeyConflictError,
   RecordNotFoundError,
@@ -257,6 +258,13 @@ export async function createEncodeJobsRoute(
     });
     return response({ job: serializeJob(job) });
   } catch (error) {
+    if (error instanceof DvdRecoveryEvidenceEncodingUnavailableError) {
+      return response({ error: {
+        code: error.code,
+        message: error.message,
+        blockingReasons: error.blockingReasons,
+      } }, 409);
+    }
     if (error instanceof InvalidEncodeJobInputError || error instanceof InvalidMutationKeyError) {
       return response({ error: "Invalid Encode Job" }, 400);
     }

@@ -27,6 +27,7 @@ import {
   DomainInvariantError,
   DVD_RECOVERY_EVIDENCE_FORMAT,
   DvdRecoveryEvidenceAdmissionClosedError,
+  DvdRecoveryEvidenceEncodingUnavailableError,
   InvalidStatusTransitionError,
   MutationKeyConflictError,
   RecordNotFoundError,
@@ -1318,6 +1319,14 @@ function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) 
     });
   } catch (error) {
     if (error instanceof CommandFailure) throw error;
+    if (error instanceof DvdRecoveryEvidenceEncodingUnavailableError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+      );
+    }
     if (error instanceof MutationKeyConflictError) {
       throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
     }

@@ -1129,6 +1129,71 @@ export const archiveJobs = sqliteTable(
   ],
 );
 
+export const dvdArchiveEvidenceManifests = sqliteTable(
+  "dvd_archive_evidence_manifests",
+  {
+    id: text("id").notNull().primaryKey(),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
+    revision: integer("revision").notNull(),
+    previousManifestId: text("previous_manifest_id")
+      .references((): AnySQLiteColumn => dvdArchiveEvidenceManifests.id, {
+        onDelete: "restrict",
+      }),
+    recoveryReadId: text("recovery_read_id")
+      .references((): AnySQLiteColumn => dvdArchiveRecoveryReads.id, {
+        onDelete: "restrict",
+      }),
+    evidenceFormat: text("evidence_format", {
+      enum: DVD_ARCHIVE_EVIDENCE_FORMATS,
+    }).$type<DvdArchiveEvidenceFormat>().notNull(),
+    imageFingerprint: text("image_fingerprint").notNull(),
+    sectorSizeBytes: integer("sector_size_bytes").notNull(),
+    acceptedEndLbaExclusive: integer("accepted_end_lba_exclusive").notNull(),
+    boundaryPolicyVersion: text("boundary_policy_version").notNull(),
+    boundaryReportedSizeBytes: integer("boundary_reported_size_bytes")
+      .notNull(),
+    boundaryPublishedSizeBytes: integer("boundary_published_size_bytes")
+      .notNull(),
+    boundaryEvidenceDigest: text("boundary_evidence_digest").notNull(),
+    unrecoveredSourceRanges: text("unrecovered_source_ranges", {
+      mode: "json",
+    }).$type<readonly DvdUnrecoveredSourceRange[]>().notNull(),
+    unrecoveredSourceRangesDigest: text(
+      "unrecovered_source_ranges_digest",
+    ).notNull(),
+    manifestDigest: text("manifest_digest").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check("dvd_archive_evidence_manifests_id_not_null", sql`${table.id} is not null`),
+    uniqueIndex("dvd_archive_evidence_manifests_archive_revision_unique")
+      .on(table.originalDiscArchiveId, table.revision),
+    uniqueIndex("dvd_archive_evidence_manifests_archive_digest_unique")
+      .on(table.originalDiscArchiveId, table.manifestDigest),
+    uniqueIndex("dvd_archive_evidence_manifests_recovery_read_unique")
+      .on(table.recoveryReadId),
+    check(
+      "dvd_archive_evidence_manifests_revision_check",
+      sql`typeof(${table.revision}) = 'integer' and ${table.revision} > 0 and ((${table.revision} = 1 and ${table.previousManifestId} is null and ${table.recoveryReadId} is null) or (${table.revision} > 1 and ${table.previousManifestId} is not null and ${table.recoveryReadId} is not null))`,
+    ),
+    check(
+      "dvd_archive_evidence_manifests_extent_check",
+      sql`${table.sectorSizeBytes} = 2048 and typeof(${table.acceptedEndLbaExclusive}) = 'integer' and ${table.acceptedEndLbaExclusive} > 0 and typeof(${table.boundaryReportedSizeBytes}) = 'integer' and ${table.boundaryReportedSizeBytes} > 0 and typeof(${table.boundaryPublishedSizeBytes}) = 'integer' and ${table.boundaryPublishedSizeBytes} = ${table.acceptedEndLbaExclusive} * ${table.sectorSizeBytes} and ${table.boundaryPublishedSizeBytes} <= ${table.boundaryReportedSizeBytes}`,
+    ),
+    check(
+      "dvd_archive_evidence_manifests_source_ranges_check",
+      sql`json_valid(${table.unrecoveredSourceRanges}) and json_type(${table.unrecoveredSourceRanges}) = 'array'`,
+    ),
+    check(
+      "dvd_archive_evidence_manifests_identity_check",
+      sql`length(${table.imageFingerprint}) between 1 and 512 and length(${table.boundaryPolicyVersion}) between 1 and 128 and length(${table.boundaryEvidenceDigest}) = 64 and ${table.boundaryEvidenceDigest} not glob '*[^0-9a-f]*' and length(${table.unrecoveredSourceRangesDigest}) = 64 and ${table.unrecoveredSourceRangesDigest} not glob '*[^0-9a-f]*' and length(${table.manifestDigest}) = 64 and ${table.manifestDigest} not glob '*[^0-9a-f]*'`,
+    ),
+  ],
+);
+
 export const dvdArchiveEvidenceHeaders = sqliteTable(
   "dvd_archive_evidence_headers",
   {
@@ -1144,11 +1209,23 @@ export const dvdArchiveEvidenceHeaders = sqliteTable(
     evidenceFormat: text("evidence_format", {
       enum: DVD_ARCHIVE_EVIDENCE_FORMATS,
     }).$type<DvdArchiveEvidenceFormat>().notNull(),
+    boundaryPolicyVersion: text("boundary_policy_version").notNull(),
+    boundaryReportedSizeBytes: integer("boundary_reported_size_bytes")
+      .notNull(),
+    boundaryPublishedSizeBytes: integer("boundary_published_size_bytes")
+      .notNull(),
+    boundaryEvidenceDigest: text("boundary_evidence_digest").notNull(),
+    sectorSizeBytes: integer("sector_size_bytes").notNull(),
     acceptedEndLbaExclusive: integer("accepted_end_lba_exclusive").notNull(),
-    unrecoveredSourceRanges: text("unrecovered_source_ranges", {
-      mode: "json",
-    }).$type<readonly DvdUnrecoveredSourceRange[]>().notNull(),
+    currentManifestId: text("current_manifest_id")
+      .notNull()
+      .references(() => dvdArchiveEvidenceManifests.id, {
+        onDelete: "restrict",
+      }),
+    currentManifestRevision: integer("current_manifest_revision").notNull(),
+    currentManifestDigest: text("current_manifest_digest").notNull(),
     createdAt: createdAt(),
+    updatedAt: updatedAt(),
   },
   (table) => [
     check(
@@ -1166,8 +1243,51 @@ export const dvdArchiveEvidenceHeaders = sqliteTable(
       sql`typeof(${table.acceptedEndLbaExclusive}) = 'integer' and ${table.acceptedEndLbaExclusive} > 0`,
     ),
     check(
-      "dvd_archive_evidence_headers_source_ranges_check",
-      sql`json_valid(${table.unrecoveredSourceRanges}) and json_type(${table.unrecoveredSourceRanges}) = 'array'`,
+      "dvd_archive_evidence_headers_boundary_check",
+      sql`length(${table.boundaryPolicyVersion}) between 1 and 128 and length(${table.boundaryEvidenceDigest}) = 64 and ${table.boundaryEvidenceDigest} not glob '*[^0-9a-f]*' and ${table.sectorSizeBytes} = 2048 and typeof(${table.boundaryReportedSizeBytes}) = 'integer' and ${table.boundaryReportedSizeBytes} > 0 and typeof(${table.boundaryPublishedSizeBytes}) = 'integer' and ${table.boundaryPublishedSizeBytes} = ${table.acceptedEndLbaExclusive} * ${table.sectorSizeBytes} and ${table.boundaryPublishedSizeBytes} <= ${table.boundaryReportedSizeBytes}`,
+    ),
+    check(
+      "dvd_archive_evidence_headers_current_revision_check",
+      sql`typeof(${table.currentManifestRevision}) = 'integer' and ${table.currentManifestRevision} > 0 and length(${table.currentManifestDigest}) = 64 and ${table.currentManifestDigest} not glob '*[^0-9a-f]*'`,
+    ),
+  ],
+);
+
+export const dvdArchiveRecoveryReads = sqliteTable(
+  "dvd_archive_recovery_reads",
+  {
+    id: text("id").notNull().primaryKey(),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .references(() => dvdArchiveEvidenceHeaders.originalDiscArchiveId, {
+        onDelete: "restrict",
+      }),
+    fromManifestId: text("from_manifest_id")
+      .notNull()
+      .references(() => dvdArchiveEvidenceManifests.id, {
+        onDelete: "restrict",
+      }),
+    fromManifestRevision: integer("from_manifest_revision").notNull(),
+    startLba: integer("start_lba").notNull(),
+    sectorCount: integer("sector_count").notNull(),
+    outcome: text("outcome", { enum: ["recovered", "failed"] }).notNull(),
+    evidenceDigest: text("evidence_digest").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check("dvd_archive_recovery_reads_id_not_null", sql`${table.id} is not null`),
+    check(
+      "dvd_archive_recovery_reads_revision_check",
+      sql`typeof(${table.fromManifestRevision}) = 'integer' and ${table.fromManifestRevision} > 0`,
+    ),
+    check(
+      "dvd_archive_recovery_reads_sector_check",
+      sql`typeof(${table.startLba}) = 'integer' and ${table.startLba} >= 0 and ${table.sectorCount} = 1`,
+    ),
+    check(
+      "dvd_archive_recovery_reads_outcome_check",
+      sql`${table.outcome} in ('recovered', 'failed') and length(${table.evidenceDigest}) = 64 and ${table.evidenceDigest} not glob '*[^0-9a-f]*'`,
     ),
   ],
 );

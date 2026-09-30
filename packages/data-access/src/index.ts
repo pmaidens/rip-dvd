@@ -28,6 +28,7 @@ export {
   DVD_RECOVERY_EVIDENCE_ENCODING,
   DVD_RECOVERY_EVIDENCE_FORMAT,
   DvdRecoveryEvidenceAdmissionClosedError,
+  DvdRecoveryEvidenceEncodingUnavailableError,
   assertDvdRecoveryEvidenceAdmissionAvailable,
 } from "./dvd-recovery-evidence.js";
 export {

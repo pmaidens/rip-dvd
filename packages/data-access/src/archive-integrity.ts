@@ -32,7 +32,7 @@ export function withAuthoritativeDvdArchiveIntegrity<
     integrityPolicyVersion: integrity.policyVersion,
     badSectorCount: integrity.badSectorCount,
     badAreaCount: integrity.badAreaCount,
-    badSectorRanges: integrity.badSectorRanges,
+    badSectorRanges: null,
     badSectorCountsByTitle: null,
   };
 }
