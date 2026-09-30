@@ -53,6 +53,13 @@ import {
 } from "./bounded-child-process.js";
 import { createByteProgressRateEstimator } from "./byte-progress-rate.js";
 import {
+  DVD_INITIAL_COPY_RESULT_PREFIX,
+  parseDvdInitialCopyResultProtocol,
+  type DvdInitialCopyRequest,
+  type DvdInitialCopyResult,
+  type DvdInitialCopyRunner,
+} from "./dvd-initial-copy.js";
+import {
   DvdReadFailureError,
   DVD_RECOVERY_POLICY_VERSION,
   DVD_READ_FAILURE_RESULT_PREFIX,
@@ -174,6 +181,12 @@ export interface DvdCopyRunner {
   ): Promise<void>;
   waitForInactive(devicePath: string, outputPath: string): Promise<void>;
 }
+
+type DvdNativeCopyRequest =
+  | (DvdCopyRequest & { resultKind: "recovery" })
+  | (DvdInitialCopyRequest & { resultKind: "initial_copy" });
+
+type DvdNativeCopyResult = DvdRecoveryResult | DvdInitialCopyResult;
 
 export class DvdArchiveReadFailureError extends DvdReadFailureError {
   readonly retentionError: unknown | null;
@@ -429,7 +442,7 @@ export function createNodeDvdCopyRunner({
   spawnProcess?: SpawnDvdCopyProcess;
   stallTimeoutMs?: number;
   timeoutMs?: number;
-} = {}): DvdCopyRunner {
+} = {}): DvdCopyRunner & DvdInitialCopyRunner {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
     throw new Error("DVD archive copy timeout is invalid");
   }
@@ -457,8 +470,8 @@ export function createNodeDvdCopyRunner({
     }
   };
   const coordinator = createBoundedSingleFlightCoordinator<
-    DvdCopyRequest,
-    DvdRecoveryResult
+    DvdNativeCopyRequest,
+    DvdNativeCopyResult
   >({
     exhaustedCapacityError: "A DVD archive copy is already active",
     invalidCapacityError: "DVD archive copy capacity is invalid",
@@ -466,11 +479,21 @@ export function createNodeDvdCopyRunner({
     validateReuse() {
       throw new Error("DVD archive copy is still active");
     },
-    start(request): ActiveBoundedProcess<DvdRecoveryResult> {
-      const continuationProtocol = dvdCopyContinuationProtocol(
-        request.continuation,
-        request.sizeBytes,
-      );
+    start(request): ActiveBoundedProcess<DvdNativeCopyResult> {
+      const continuationProtocol = request.resultKind === "initial_copy"
+        ? {
+          authorizationPayload: "1",
+          helperOperation: "initial-copy-authorized" as const,
+          imageFilesystemIdentity: undefined,
+          operationSizeBytes: request.sizeBytes,
+          }
+        : dvdCopyContinuationProtocol(
+            request.continuation,
+            request.sizeBytes,
+          );
+      const authorizeProbe = request.resultKind === "recovery"
+        ? request.authorizeProbe
+        : undefined;
       const lockDescriptor = openDeviceLock(request.devicePath);
       let child: DvdCopyChildProcess;
       try {
@@ -523,13 +546,14 @@ export function createNodeDvdCopyRunner({
       let highestCopiedBytes = 0;
       let diagnostics = "";
       let recoveryResultPayload: string | undefined;
+      let initialCopyResultPayload: string | undefined;
       let readFailureResultPayload: string | undefined;
-      let resolveResult!: (result: DvdRecoveryResult) => void;
+      let resolveResult!: (result: DvdNativeCopyResult) => void;
       let rejectResult!: (reason: unknown) => void;
       let resolveClosed!: () => void;
       let stallTimeout: ReturnType<typeof setTimeout> | undefined;
       let probeAuthorizationTimeout: ReturnType<typeof setTimeout> | undefined;
-      const result = new Promise<DvdRecoveryResult>((resolve, reject) => {
+      const result = new Promise<DvdNativeCopyResult>((resolve, reject) => {
         resolveResult = resolve;
         rejectResult = reject;
       });
@@ -542,10 +566,10 @@ export function createNodeDvdCopyRunner({
           rejectResult(error);
         }
       };
-      const resolveOperation = (recoveryResult: DvdRecoveryResult) => {
+      const resolveOperation = (copyResult: DvdNativeCopyResult) => {
         if (!operationSettled) {
           operationSettled = true;
-          resolveResult(recoveryResult);
+          resolveResult(copyResult);
         }
       };
       const confirmClosed = () => {
@@ -709,10 +733,10 @@ export function createNodeDvdCopyRunner({
         }, COPY_START_AUTHORIZATION_TIMEOUT_MS);
         probeAuthorizationTimeout.unref();
         try {
-          if (request.authorizeProbe === undefined) {
+          if (authorizeProbe === undefined) {
             throw new Error("DVD boundary probe authorization is unavailable");
           }
-          const authorization = request.authorizeProbe();
+          const authorization = authorizeProbe();
           if (authorization instanceof Promise) {
             void authorization.then(
               grantProbeAuthorization,
@@ -781,6 +805,7 @@ export function createNodeDvdCopyRunner({
           if (segment.startsWith(DVD_RECOVERY_RESULT_PREFIX)) {
             if (
               recoveryResultPayload !== undefined ||
+              initialCopyResultPayload !== undefined ||
               readFailureResultPayload !== undefined
             ) {
               throw new Error("DVD terminal helper result is malformed");
@@ -790,9 +815,23 @@ export function createNodeDvdCopyRunner({
             );
             continue;
           }
+          if (segment.startsWith(DVD_INITIAL_COPY_RESULT_PREFIX)) {
+            if (
+              recoveryResultPayload !== undefined ||
+              initialCopyResultPayload !== undefined ||
+              readFailureResultPayload !== undefined
+            ) {
+              throw new Error("DVD terminal helper result is malformed");
+            }
+            initialCopyResultPayload = segment.slice(
+              DVD_INITIAL_COPY_RESULT_PREFIX.length,
+            );
+            continue;
+          }
           if (segment.startsWith(DVD_READ_FAILURE_RESULT_PREFIX)) {
             if (
               recoveryResultPayload !== undefined ||
+              initialCopyResultPayload !== undefined ||
               readFailureResultPayload !== undefined
             ) {
               throw new Error("DVD terminal helper result is malformed");
@@ -857,20 +896,32 @@ export function createNodeDvdCopyRunner({
           return;
         }
         if (code === 0) {
-          if (
-            recoveryResultPayload === undefined ||
-            readFailureResultPayload !== undefined
-          ) {
-            rejectOperation(new Error("DVD recovery helper result is missing"));
-            return;
-          }
           try {
-            resolveOperation(
-              parseDvdRecoveryResultProtocol(
+            if (request.resultKind === "initial_copy") {
+              if (
+                initialCopyResultPayload === undefined ||
+                recoveryResultPayload !== undefined ||
+                readFailureResultPayload !== undefined
+              ) {
+                throw new Error("DVD initial-copy helper result is missing");
+              }
+              resolveOperation(parseDvdInitialCopyResultProtocol(
+                initialCopyResultPayload,
+                continuationProtocol.operationSizeBytes,
+              ));
+            } else {
+              if (
+                recoveryResultPayload === undefined ||
+                initialCopyResultPayload !== undefined ||
+                readFailureResultPayload !== undefined
+              ) {
+                throw new Error("DVD recovery helper result is missing");
+              }
+              resolveOperation(parseDvdRecoveryResultProtocol(
                 recoveryResultPayload,
                 continuationProtocol.operationSizeBytes,
-              ),
-            );
+              ));
+            }
           } catch (error) {
             rejectOperation(error);
           }
@@ -879,7 +930,8 @@ export function createNodeDvdCopyRunner({
         if (
           code === DVD_READ_FAILURE_EXIT_STATUS &&
           readFailureResultPayload !== undefined &&
-          recoveryResultPayload === undefined
+          recoveryResultPayload === undefined &&
+          initialCopyResultPayload === undefined
         ) {
           try {
             const terminalResult = parseDvdReadFailureTerminalResultProtocol(
@@ -899,7 +951,9 @@ export function createNodeDvdCopyRunner({
         }
         if (
           code === DVD_READ_FAILURE_EXIT_STATUS ||
-          readFailureResultPayload !== undefined
+          readFailureResultPayload !== undefined ||
+          recoveryResultPayload !== undefined ||
+          initialCopyResultPayload !== undefined
         ) {
           rejectOperation(
             new Error("DVD read failure helper result is invalid"),
@@ -933,11 +987,32 @@ export function createNodeDvdCopyRunner({
       }
       requirePartialInactive(request.outputPath);
       requireInactive(safeDevicePath);
-      return coordinator.run(copyKey(safeDevicePath, request.outputPath), request, {
-        signal: request.signal,
-        timeoutError: "DVD archive copy timed out",
-        timeoutMs,
-      });
+      return coordinator.run(
+        copyKey(safeDevicePath, request.outputPath),
+        { ...request, resultKind: "recovery" },
+        {
+          signal: request.signal,
+          timeoutError: "DVD archive copy timed out",
+          timeoutMs,
+        },
+      ) as Promise<DvdRecoveryResult>;
+    },
+    copyInitial(request) {
+      const safeDevicePath = requireSafeOpticalDevicePath(request.devicePath);
+      if (activeCopiesByOutputPath.has(request.outputPath)) {
+        return Promise.reject(new Error("DVD archive copy is still active"));
+      }
+      requirePartialInactive(request.outputPath);
+      requireInactive(safeDevicePath);
+      return coordinator.run(
+        copyKey(safeDevicePath, request.outputPath),
+        { ...request, resultKind: "initial_copy" },
+        {
+          signal: request.signal,
+          timeoutError: "DVD initial copy timed out",
+          timeoutMs,
+        },
+      ) as Promise<DvdInitialCopyResult>;
     },
     isActive(devicePath, outputPath) {
       const safeDevicePath = requireSafeOpticalDevicePath(devicePath);
