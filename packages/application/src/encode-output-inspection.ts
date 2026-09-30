@@ -1008,13 +1008,13 @@ export async function exportEncodeOutput(
   const parsedIdentity = parseEncodeOutputArtifactIdentity(
     input.artifactIdentity,
   );
-  const base = resolveEncodeOutputAuthority(access, parsedIdentity);
-  if (base.authorityUnavailableReason !== null) {
+  const initialAuthority = resolveEncodeOutputAuthority(access, parsedIdentity);
+  if (initialAuthority.authorityUnavailableReason !== null) {
     throw new EncodeOutputExportRejectedError(
       "OUTPUT_AUTHORITY_CHANGED",
-      base.authorityUnavailableReason,
-      base.artifactIdentity,
-      await currentEncodeOutputIdentity(base.outputPath),
+      initialAuthority.authorityUnavailableReason,
+      initialAuthority.artifactIdentity,
+      await currentEncodeOutputIdentity(initialAuthority.outputPath),
     );
   }
   let source: Awaited<ReturnType<typeof open>> | undefined;
@@ -1024,22 +1024,25 @@ export async function exportEncodeOutput(
   try {
     let pathBeforeOpen: Stats;
     try {
-      pathBeforeOpen = await lstat(base.outputPath);
+      pathBeforeOpen = await lstat(initialAuthority.outputPath);
     } catch (error) {
-      throw await rejectedSourceOpen(base, error);
+      throw await rejectedSourceOpen(initialAuthority, error);
     }
-    const pathRejection = exportSourceRejection(base, pathBeforeOpen);
+    const pathRejection = exportSourceRejection(
+      initialAuthority,
+      pathBeforeOpen,
+    );
     if (pathRejection !== null) throw pathRejection;
     try {
       source = await open(
-        base.outputPath,
+        initialAuthority.outputPath,
         constants.O_RDONLY | constants.O_NOFOLLOW,
       );
     } catch (error) {
-      throw await rejectedSourceOpen(base, error);
+      throw await rejectedSourceOpen(initialAuthority, error);
     }
     const before = await source.stat();
-    const sourceRejection = exportSourceRejection(base, before);
+    const sourceRejection = exportSourceRejection(initialAuthority, before);
     if (sourceRejection !== null) throw sourceRejection;
     const sourceIdentity = encodeOutputFilesystemIdentity(before);
     try {
@@ -1055,7 +1058,7 @@ export async function exportEncodeOutput(
         code === "EEXIST"
           ? "The Encode Output export destination already exists."
           : "The Encode Output export destination is unavailable.",
-        base.artifactIdentity,
+        initialAuthority.artifactIdentity,
         sourceIdentity,
       );
     }
@@ -1072,8 +1075,8 @@ export async function exportEncodeOutput(
         error.area === "source"
           ? "The recorded Encode Output file could not be read."
           : "The Encode Output export destination could not be written.",
-        base.artifactIdentity,
-        await currentEncodeOutputIdentity(base.outputPath),
+        initialAuthority.artifactIdentity,
+        await currentEncodeOutputIdentity(initialAuthority.outputPath),
       );
     }
     try {
@@ -1082,8 +1085,8 @@ export async function exportEncodeOutput(
       throw new EncodeOutputExportRejectedError(
         "EXPORT_DESTINATION_UNAVAILABLE",
         "The Encode Output export destination could not be synchronized.",
-        base.artifactIdentity,
-        await currentEncodeOutputIdentity(base.outputPath),
+        initialAuthority.artifactIdentity,
+        await currentEncodeOutputIdentity(initialAuthority.outputPath),
       );
     }
     try {
@@ -1102,8 +1105,8 @@ export async function exportEncodeOutput(
       throw new EncodeOutputExportRejectedError(
         "EXPORT_DESTINATION_UNAVAILABLE",
         "The Encode Output export destination changed during export.",
-        base.artifactIdentity,
-        await currentEncodeOutputIdentity(base.outputPath),
+        initialAuthority.artifactIdentity,
+        await currentEncodeOutputIdentity(initialAuthority.outputPath),
       );
     }
     let after: Stats;
@@ -1113,18 +1116,18 @@ export async function exportEncodeOutput(
       throw new EncodeOutputExportRejectedError(
         "OUTPUT_FILE_UNAVAILABLE",
         "The recorded Encode Output file could not be inspected after export.",
-        base.artifactIdentity,
-        await currentEncodeOutputIdentity(base.outputPath),
+        initialAuthority.artifactIdentity,
+        await currentEncodeOutputIdentity(initialAuthority.outputPath),
       );
     }
     let currentPath: Stats;
     try {
-      currentPath = await lstat(base.outputPath);
+      currentPath = await lstat(initialAuthority.outputPath);
     } catch {
       throw new EncodeOutputExportRejectedError(
         "OUTPUT_CHANGED_DURING_EXPORT",
         "The Encode Output changed while it was being exported.",
-        base.artifactIdentity,
+        initialAuthority.artifactIdentity,
         null,
       );
     }
@@ -1135,15 +1138,17 @@ export async function exportEncodeOutput(
       throw new EncodeOutputExportRejectedError(
         "OUTPUT_CHANGED_DURING_EXPORT",
         "The Encode Output changed while it was being exported.",
-        base.artifactIdentity,
+        initialAuthority.artifactIdentity,
         encodeOutputFilesystemIdentity(currentPath),
       );
     }
-    if (encodeOutputAuthorityChanged(access, parsedIdentity, base)) {
+    if (
+      encodeOutputAuthorityChanged(access, parsedIdentity, initialAuthority)
+    ) {
       throw new EncodeOutputExportRejectedError(
         "OUTPUT_AUTHORITY_CHANGED",
         "Encode Output authority changed while the artifact was being exported.",
-        base.artifactIdentity,
+        initialAuthority.artifactIdentity,
         encodeOutputFilesystemIdentity(currentPath),
       );
     }
@@ -1151,17 +1156,17 @@ export async function exportEncodeOutput(
     return {
       schemaVersion: 1 as const,
       artifact: {
-        identity: base.artifactIdentity,
+        identity: initialAuthority.artifactIdentity,
         type: "canonical_encode_output" as const,
-        state: base.artifactState,
+        state: initialAuthority.artifactState,
       },
       byteSize,
       destination: input.destination,
       sourceIdentity,
       provenance: historicalProvenance(
-        base.job,
-        base.originalDiscArchiveId,
-        base.retainedOutputId,
+        initialAuthority.job,
+        initialAuthority.originalDiscArchiveId,
+        initialAuthority.retainedOutputId,
       ),
     };
   } finally {
