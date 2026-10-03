@@ -22,6 +22,23 @@ COPY packages/worker-runtime/package.json packages/worker-runtime/package.json
 RUN pnpm install --frozen-lockfile
 RUN pnpm check:toolchain
 
+FROM dependencies AS handbrake-dvd-label-builder
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends libdvdread-dev \
+  && rm -rf /var/lib/apt/lists/*
+COPY docker/handbrake-dvd-label.c docker/test-handbrake-dvd-label.c /tmp/
+RUN gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
+    -Wall -Wextra -Werror -Wformat=2 -fPIC -shared \
+    /tmp/handbrake-dvd-label.c -ldl -Wl,-z,defs \
+    --output /usr/local/lib/rip-dvd-handbrake-dvd-label.so \
+  && gcc -std=c17 -O2 -Wall -Wextra -Werror -fPIC -shared \
+    -DRIP_DVD_LABEL_MOCK /tmp/test-handbrake-dvd-label.c \
+    --output /tmp/libdvdread-label-mock.so \
+  && gcc -std=c17 -O2 -Wall -Wextra -Werror \
+    /tmp/test-handbrake-dvd-label.c -L/tmp -ldvdread-label-mock -Wl,-rpath,/tmp \
+    --output /tmp/test-handbrake-dvd-label \
+  && LD_PRELOAD=/usr/local/lib/rip-dvd-handbrake-dvd-label.so /tmp/test-handbrake-dvd-label
+
 FROM build-base AS dvdcss-reader-builder
 ARG LIBDVDCSS_VERSION=1.6.0
 ARG LIBDVDCSS_SHA256=7ea556c846b7bfc32d47b41cae56d1863a6b6d5f706bb162778d6f298490977c
@@ -89,15 +106,6 @@ RUN pnpm --filter @rip-dvd/config build \
   && pnpm --filter @rip-dvd/data-access build \
   && pnpm --filter @rip-dvd/application build \
   && pnpm --filter @rip-dvd/worker-runtime build
-
-FROM dependencies AS validation
-COPY --from=dvdcss-reader-builder /usr/local/bin/rip-dvd-dvdcss-reader /usr/local/bin/rip-dvd-dvdcss-reader
-COPY --from=dvdcss-reader-builder /tmp/rip-dvd-dvdcss-reader-test /tmp/rip-dvd-dvdcss-reader-test
-ENV RIP_DVD_NATIVE_TEST_EXECUTABLE="/tmp/rip-dvd-dvdcss-reader-test"
-COPY . .
-RUN pnpm check \
-  && pnpm db:check \
-  && pnpm build
 
 FROM shared-builder AS web-builder
 # Next type-checks the web tests, which import archive-worker production code.
@@ -215,6 +223,8 @@ COPY --from=dvdcss-reader-builder /usr/local/lib/libdvdcss.so.2.4.0 /usr/local/l
 COPY --from=dvdcss-reader-builder /usr/local/lib/libdvdcss-sg-io.so.0 /usr/local/lib/libdvdcss-sg-io.so.0
 COPY docker/lsdvd-with-css.sh /usr/local/bin/rip-dvd-lsdvd
 COPY docker/handbrake-with-css.sh /usr/local/bin/rip-dvd-handbrake
+COPY --from=handbrake-dvd-label-builder /usr/local/lib/rip-dvd-handbrake-dvd-label.so /usr/local/lib/rip-dvd-handbrake-dvd-label.so
+COPY docker/handbrake-dvd-label.c /usr/share/doc/rip-dvd-handbrake/handbrake-dvd-label.c
 COPY --from=dvdcss-reader-builder /tmp/libdvdcss.tar.xz /usr/share/doc/rip-dvd-dvdcss-reader/libdvdcss-1.6.0.tar.xz
 COPY --from=dvdcss-reader-builder /tmp/libdvdcss-source/COPYING /usr/share/doc/rip-dvd-dvdcss-reader/COPYING
 COPY docker/dvdcss-reader.c /usr/share/doc/rip-dvd-dvdcss-reader/dvdcss-reader.c
@@ -243,6 +253,8 @@ RUN mkdir --parents /media/movies /media/originals \
 COPY --from=dvdcss-reader-builder /usr/local/lib/libdvdcss.so.2.4.0 /usr/local/lib/libdvdcss.so.2
 COPY --from=dvdcss-reader-builder /usr/local/lib/libdvdcss-sg-io.so.0 /usr/local/lib/libdvdcss-sg-io.so.0
 COPY docker/handbrake-with-css.sh /usr/local/bin/rip-dvd-handbrake
+COPY --from=handbrake-dvd-label-builder /usr/local/lib/rip-dvd-handbrake-dvd-label.so /usr/local/lib/rip-dvd-handbrake-dvd-label.so
+COPY docker/handbrake-dvd-label.c /usr/share/doc/rip-dvd-handbrake/handbrake-dvd-label.c
 COPY docker/encode-worker-entrypoint.sh ./scripts/encode-worker-entrypoint.sh
 COPY --from=encode-worker-builder --chown=node:node /encode-worker ./apps/encode-worker
 RUN chmod 0555 /usr/local/bin/rip-dvd-handbrake \
@@ -254,3 +266,28 @@ ENV DVDCSS_CACHE="off"
 USER node
 ENTRYPOINT ["sh", "/app/scripts/encode-worker-entrypoint.sh"]
 CMD ["node", "apps/encode-worker/dist/index.js"]
+
+# Author a tiny synthetic DVD with a real VobSub stream. These tools and media
+# stay out of production images; validation depends on the successful scan.
+FROM encode-worker AS handbrake-dvd-scan-test
+USER root
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends dvdauthor genisoimage \
+  && rm -rf /var/lib/apt/lists/*
+COPY docker/test-handbrake-dvd-label.mjs /tmp/test-handbrake-dvd-label.mjs
+USER node
+RUN node /tmp/test-handbrake-dvd-label.mjs \
+  && touch /tmp/handbrake-dvd-scan-passed
+
+FROM dependencies AS validation
+COPY --from=handbrake-dvd-scan-test /tmp/handbrake-dvd-scan-passed /tmp/handbrake-dvd-scan-passed
+COPY --from=dvdcss-reader-builder /usr/local/bin/rip-dvd-dvdcss-reader /usr/local/bin/rip-dvd-dvdcss-reader
+COPY --from=dvdcss-reader-builder /tmp/rip-dvd-dvdcss-reader-test /tmp/rip-dvd-dvdcss-reader-test
+ENV RIP_DVD_NATIVE_TEST_EXECUTABLE="/tmp/rip-dvd-dvdcss-reader-test"
+COPY . .
+RUN pnpm check \
+  && pnpm db:check \
+  && pnpm build
+
+# Keep a build without --target equivalent to the encode-worker image.
+FROM encode-worker AS default
