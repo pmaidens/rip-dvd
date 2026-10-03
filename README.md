@@ -652,6 +652,17 @@ and SCSI-generic compatibility bridge. Both worker images fail startup if their
 required CSS runtime is unavailable. The archive-worker image carries that
 source archive, its license, and the project bridge source alongside the
 binaries.
+The HandBrake wrapper also loads a scoped compatibility library that converts
+libdvdread's Latin-1 UDF volume label to UTF-8 before HandBrake serializes title
+metadata. This prevents accented labels from producing an empty JSON title
+list. It changes only the in-memory label; archives and subtitle validation
+remain unchanged. Other libdvdread consumers do not load this library.
+The `handbrake-dvd-scan-test` Docker target generates a synthetic DVD with audio
+and VobSub subtitles and checks ASCII, accented, and maximum-length labels
+through HandBrake and the encode worker's scanner. The `validation` target
+includes this regression and a short encode checked by the worker's output
+validator. Run it alone with
+`docker build --file docker/runtime.Dockerfile --target handbrake-dvd-scan-test .`.
 The short-lived deployment-tools image owns schema migration and SQLite backup
 commands instead of expanding the web image's attack surface.
 
