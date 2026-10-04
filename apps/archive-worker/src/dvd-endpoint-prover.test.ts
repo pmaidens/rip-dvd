@@ -25,7 +25,11 @@ function endpointPayload(firstExcludedLba = 4) {
   };
 }
 
-function createEndpointChild(payload = endpointPayload()) {
+function createEndpointChild(
+  payload = endpointPayload(),
+  output = `rip-dvd-endpoint-proof ${JSON.stringify(payload)}\n`,
+  exitCode = 0,
+) {
   const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
   const ready = Object.assign(new EventEmitter(), { destroy: vi.fn() });
   let grantCount = 0;
@@ -56,10 +60,10 @@ function createEndpointChild(payload = endpointPayload()) {
             }
             stderr.emit(
               "data",
-              Buffer.from(`rip-dvd-endpoint-proof ${JSON.stringify(payload)}\n`),
+              Buffer.from(output),
             );
             closed = true;
-            child.emit("close", 0, null);
+            child.emit("close", exitCode, null);
           });
           return true;
         }),
@@ -185,6 +189,111 @@ describe("DVD normal endpoint proof", () => {
       firstExcludedLba: 4,
       signal: new AbortController().signal,
     })).rejects.toThrow("DVD endpoint proof is malformed");
+  });
+
+  it("accepts one valid proof alongside native SCSI diagnostics", async () => {
+    const payload = endpointPayload();
+    const child = createEndpointChild(payload, [
+      "DVD SCSI read command failed: status=2 host=0 driver=8",
+      "DVD SCSI read command failed: status=2 host=0 driver=8",
+      `rip-dvd-endpoint-proof ${JSON.stringify(payload)}`,
+      "DVD helper diagnostic after proof",
+      "",
+    ].join("\n"));
+    const authorizeProbe = vi.fn();
+    const prover = createNodeDvdEndpointProver({
+      copyRunner: {
+        withDeviceInactive: async (_devicePath, operation) => operation(),
+      },
+      spawnProcess: () => child,
+      timeoutMs: 1_000,
+    });
+
+    await expect(prover.prove({
+      authorizeProbe,
+      devicePath: "/dev/sr0",
+      firstExcludedLba: 4,
+      signal: new AbortController().signal,
+    })).resolves.toEqual(parseDvdEndpointProof(JSON.stringify(payload), 4));
+    expect(authorizeProbe).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([
+    [
+      "diagnostics without a proof",
+      "DVD SCSI read command failed: status=2 host=0 driver=8\n",
+    ],
+    [
+      "duplicate proofs",
+      Array(2)
+        .fill(`rip-dvd-endpoint-proof ${JSON.stringify(endpointPayload())}\n`)
+        .join(""),
+    ],
+    [
+      "conflicting proofs",
+      [endpointPayload(), endpointPayload(5)]
+        .map((payload) => `rip-dvd-endpoint-proof ${JSON.stringify(payload)}\n`)
+        .join(""),
+    ],
+    [
+      "a malformed proof alongside a valid proof",
+      `rip-dvd-endpoint-proof {malformed}\nrip-dvd-endpoint-proof ${JSON.stringify(endpointPayload())}\n`,
+    ],
+  ])("fails closed with %s", async (_reason, output) => {
+    const child = createEndpointChild(endpointPayload(), output);
+    const prover = createNodeDvdEndpointProver({
+      copyRunner: {
+        withDeviceInactive: async (_devicePath, operation) => operation(),
+      },
+      spawnProcess: () => child,
+      timeoutMs: 1_000,
+    });
+
+    await expect(prover.prove({
+      authorizeProbe() {},
+      devicePath: "/dev/sr0",
+      firstExcludedLba: 4,
+      signal: new AbortController().signal,
+    })).rejects.toThrow("DVD endpoint proof result is missing");
+  });
+
+  it("rejects malformed proof evidence even with diagnostic output", async () => {
+    const payload = endpointPayload(5);
+    const child = createEndpointChild(payload,
+      `DVD SCSI read command failed: status=2 host=0 driver=8\nrip-dvd-endpoint-proof ${JSON.stringify(payload)}\n`,
+    );
+    const prover = createNodeDvdEndpointProver({
+      copyRunner: {
+        withDeviceInactive: async (_devicePath, operation) => operation(),
+      },
+      spawnProcess: () => child,
+      timeoutMs: 1_000,
+    });
+
+    await expect(prover.prove({
+      authorizeProbe() {},
+      devicePath: "/dev/sr0",
+      firstExcludedLba: 4,
+      signal: new AbortController().signal,
+    })).rejects.toThrow("DVD endpoint proof is malformed");
+  });
+
+  it("rejects a valid proof when the helper exits unsuccessfully", async () => {
+    const child = createEndpointChild(endpointPayload(), undefined, 1);
+    const prover = createNodeDvdEndpointProver({
+      copyRunner: {
+        withDeviceInactive: async (_devicePath, operation) => operation(),
+      },
+      spawnProcess: () => child,
+      timeoutMs: 1_000,
+    });
+
+    await expect(prover.prove({
+      authorizeProbe() {},
+      devicePath: "/dev/sr0",
+      firstExcludedLba: 4,
+      signal: new AbortController().signal,
+    })).rejects.toThrow("DVD endpoint proof failed");
   });
 
   it("classifies readable data at the requested endpoint", async () => {
