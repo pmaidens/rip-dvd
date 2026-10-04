@@ -8,6 +8,7 @@ import {
   MAX_OPTICAL_DRIVE_COMMAND_OUTPUT_BYTES,
   nodeCommandRunner,
   OPTICAL_DRIVE_COMMAND_TIMEOUT_MS,
+  type CommandResult,
   type CommandRunner,
 } from "./optical-drive-command-runner.js";
 import { decodeLsblkOpticalDrives } from "./optical-drive-discovery.js";
@@ -124,7 +125,19 @@ export function createLinuxOpticalDriveHardware({
           timeoutMs: OPTICAL_DRIVE_COMMAND_TIMEOUT_MS,
         },
       ).then(
-        (result) => ({ kind: "result" as const, result }),
+        async (result) => {
+          let cachedCapacityResult: CommandResult | undefined;
+          if (result.exitCode === 0) {
+            cachedCapacityResult = await runner.run(
+              "blockdev", ["--getsize64", safeDevicePath], {
+                maxBufferBytes: 128, signal,
+                timeoutMs: OPTICAL_DRIVE_COMMAND_TIMEOUT_MS,
+              },
+            );
+          }
+          return { kind: "result" as const, result, cachedCapacityResult };
+        },
+      ).catch(
         (error: unknown) => ({ error, kind: "error" as const }),
       );
       signal.throwIfAborted();
@@ -155,7 +168,23 @@ export function createLinuxOpticalDriveHardware({
       if (decoded.kind === "retryable") {
         return { mediaGeneration, capacityBytes: null };
       }
-      return { mediaGeneration, capacityBytes: decoded.capacityBytes };
+      const cached = capacityOutcome.cachedCapacityResult;
+      if (cached === undefined || cached.exitCode !== 0 ||
+          !/^\d+\s*$/.test(cached.stdout) ||
+          !Number.isSafeInteger(Number(cached.stdout)) ||
+          Number(cached.stdout) < 0) {
+        throw new DiscInspectionError("retry", "drive_not_ready",
+          "Linux cached DVD capacity could not be observed");
+      }
+      const cachedBytes = Number(cached.stdout);
+      return {
+        mediaGeneration, capacityBytes: decoded.capacityBytes,
+        ...(cachedBytes === decoded.capacityBytes ? {} : {
+          readPathNotice: cachedBytes < decoded.capacityBytes
+            ? "scsi_capacity_exceeds_cached_size" as const
+            : "cached_size_exceeds_scsi_capacity" as const,
+        }),
+      };
     },
 
     async observeMediaGeneration(binding, signal) {

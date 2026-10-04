@@ -203,6 +203,10 @@ export const discInspections = sqliteTable(
       .references(() => detectedDiscs.id, { onDelete: "restrict" }),
     mediaGeneration: text("media_generation").notNull(),
     mediaCapacityBytes: integer("media_capacity_bytes"),
+    readPathNotice: text("read_path_notice", { enum: [
+      "scsi_capacity_exceeds_cached_size",
+      "cached_size_exceeds_scsi_capacity",
+    ] }),
     settlingBaselineCapacityBytes: integer(
       "settling_baseline_capacity_bytes",
     ),

@@ -795,6 +795,13 @@ function DiscInspectionItem({
         </div>
         <StatusBadge value={inspection.status} />
       </div>
+      {inspection.readPathNotice ? (
+        <p role="status">
+          DVD capacity differs from Linux's cached size. Using the SCSI recovery
+          read path automatically. Disc Inspection uses the drive's
+          direct capacity and normal identity checks.
+        </p>
+      ) : null}
       <span className="visually-hidden" aria-live="polite" aria-atomic="true">
         Disc Inspection {displayTerm(inspection.status)} ·{" "}
         {displayTerm(inspection.phase)}

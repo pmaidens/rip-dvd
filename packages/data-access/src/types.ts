@@ -267,12 +267,17 @@ export interface DetectedDisc {
   updatedAt: Date;
 }
 
+export type DiscInspectionReadPathNotice =
+  | "scsi_capacity_exceeds_cached_size"
+  | "cached_size_exceeds_scsi_capacity";
+
 export interface DiscInspection {
   id: DiscInspectionId;
   opticalDriveId: OpticalDriveId;
   detectedDiscId: DetectedDiscId | null;
   mediaGeneration: string;
   mediaCapacityBytes: number | null;
+  readPathNotice?: DiscInspectionReadPathNotice | null;
   settlingBaselineCapacityBytes: number | null;
   stableObservationCount: number | null;
   settlingQuietWindowStartedAt: Date | null;
@@ -1100,6 +1105,7 @@ export interface ClaimedDiscInspectionStart {
 }
 
 export type DiscInspectionEvent =
+  | { type: "read_path_notice"; notice: DiscInspectionReadPathNotice }
   | {
       type: "metadata";
       volumeLabel: string | null;

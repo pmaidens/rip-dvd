@@ -1508,7 +1508,8 @@ describe("data-access facade", () => {
           name !== "20260930002706_dvd-evidence-compatibility" &&
           name !== "20260930003106_dvd-evidence-authority" &&
           name !== "20260930002622_wandering_micromax" &&
-          name !== "20260930003626_dvd-evidence-checkpoints",
+          name !== "20260930003626_dvd-evidence-checkpoints" &&
+          name !== "20261004053119_scsi-read-path-notice",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8734,6 +8735,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261004053119_scsi-read-path-notice",
+        },
+        {
           name: "20260930003626_dvd-evidence-checkpoints",
         },
         {
@@ -8759,9 +8763,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20260922174811_rearchive-lineage",
-        },
-        {
-          name: "20260922170551_durable-filesystem-verification",
         },
       ]);
     expect(

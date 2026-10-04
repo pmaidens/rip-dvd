@@ -65,14 +65,18 @@ struct scsi_idlun_result {
 
 struct sg_device_association {
     int source_descriptor;
+    off_t position;
     struct stat source_identity;
     struct scsi_device_identity scsi_identity;
     enum sg_device_acquire_outcome outcome;
     int descriptor;
+    int uses_block_passthrough;
     struct stat descriptor_identity;
     int failure_errno;
     struct sg_device_association *next;
 };
+
+static off_t kernel_seek(int descriptor, off_t offset, int whence);
 
 static _Thread_local struct read_scope current_read_scope;
 static pthread_mutex_t sg_device_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -81,6 +85,7 @@ static struct sg_device_association *sg_device_associations;
 #ifdef RIP_DVD_READER_TESTING
 static struct {
     int enabled;
+    off_t cached_size;
     int fail_discovery;
     int fail_open;
     int report_cleanup_at_exit;
@@ -89,6 +94,8 @@ static struct {
     uint32_t source_identity_check_count;
     uint32_t failing_source_identity_check_ordinal;
     uint32_t failing_content_read_ordinal;
+    int fail_read_syscall;
+    int short_read_bytes;
     struct rip_dvd_scsi_test_metrics metrics;
 } scsi_test_adapter;
 #endif
@@ -306,7 +313,7 @@ static int close_sg_descriptor(int descriptor)
 static void release_sg_device_association(
     struct sg_device_association *association)
 {
-    if (association->descriptor >= 0) {
+    if (association->descriptor >= 0 && !association->uses_block_passthrough) {
         close_sg_descriptor(association->descriptor);
     }
     free(association);
@@ -388,7 +395,9 @@ static int acquire_sg_device(
             block_descriptor, &source_scsi_identity) < 0) {
         int saved_errno = errno;
         if (association != NULL && association->descriptor >= 0) {
-            close_sg_descriptor(association->descriptor);
+            if (!association->uses_block_passthrough) {
+                close_sg_descriptor(association->descriptor);
+            }
             association->descriptor = -1;
             association->outcome = SG_DEVICE_OPEN_FAILED;
             association->failure_errno = saved_errno;
@@ -412,6 +421,9 @@ static int acquire_sg_device(
             errno = association->failure_errno;
             return -1;
         }
+        if (association->uses_block_passthrough) {
+            return block_descriptor;
+        }
         struct stat descriptor_identity;
         if (fstat(association->descriptor, &descriptor_identity) != 0 ||
             !sg_identity_is_compatible(&descriptor_identity) ||
@@ -431,12 +443,19 @@ static int acquire_sg_device(
         }
         association->outcome = SG_DEVICE_OPEN_FAILED;
         association->failure_errno = ENODEV;
+        *outcome = SG_DEVICE_OPEN_FAILED;
         errno = ENODEV;
         return -1;
     }
 
     association = calloc(1, sizeof(*association));
     if (association == NULL) {
+        *outcome = SG_DEVICE_UNAVAILABLE;
+        return -1;
+    }
+    association->position = kernel_seek(block_descriptor, 0, SEEK_CUR);
+    if (association->position < 0) {
+        free(association);
         *outcome = SG_DEVICE_UNAVAILABLE;
         return -1;
     }
@@ -449,9 +468,13 @@ static int acquire_sg_device(
 
     char path[PATH_MAX];
     if (resolve_sg_device(block_descriptor, path) < 0) {
-        association->failure_errno = errno;
-        *outcome = SG_DEVICE_UNAVAILABLE;
-        return -1;
+        /* SG_IO on the already bound block descriptor also addresses the
+         * drive directly. It must use the same logical cursor, never read(). */
+        association->descriptor = block_descriptor;
+        association->uses_block_passthrough = 1;
+        association->outcome = SG_DEVICE_READY;
+        *outcome = SG_DEVICE_READY;
+        return block_descriptor;
     }
     association->outcome = SG_DEVICE_OPEN_FAILED;
     *outcome = SG_DEVICE_OPEN_FAILED;
@@ -521,6 +544,10 @@ static int execute_sg_io(int descriptor, unsigned long request, void *argument)
         }
         if (scsi_test_adapter.failing_content_read_ordinal ==
             scsi_test_adapter.metrics.content_read_count) {
+            if (scsi_test_adapter.fail_read_syscall) {
+                errno = ETIMEDOUT;
+                return -1;
+            }
             uint8_t fixed_sense[18] = { 0 };
             fixed_sense[0] = 0xf0;
             fixed_sense[2] = 0x03;
@@ -556,6 +583,10 @@ static int execute_sg_io(int descriptor, unsigned long request, void *argument)
             (off_t)(lba * DVD_LOGICAL_BLOCK_BYTES));
         if (bytes_read < 0) {
             return -1;
+        }
+        if (scsi_test_adapter.short_read_bytes > 0 && bytes_read >= scsi_test_adapter.short_read_bytes) {
+            bytes_read -= scsi_test_adapter.short_read_bytes;
+            scsi_test_adapter.short_read_bytes = 0;
         }
         io->status = 0;
         io->host_status = 0;
@@ -642,6 +673,18 @@ void rip_dvd_scsi_test_adapter_fail_source_identity_check(
     pthread_mutex_unlock(&sg_device_mutex);
 }
 
+void rip_dvd_scsi_test_adapter_stale_capacity(void)
+{
+    scsi_test_adapter.cached_size = 8 * DVD_LOGICAL_BLOCK_BYTES;
+}
+
+void rip_dvd_scsi_test_adapter_read_diagnostic(int syscall_failure, int short_bytes)
+{
+    scsi_test_adapter.fail_read_syscall = syscall_failure;
+    scsi_test_adapter.failing_content_read_ordinal = syscall_failure ? 1 : 0;
+    scsi_test_adapter.short_read_bytes = short_bytes;
+}
+
 void rip_dvd_scsi_test_adapter_fail_content_read(uint32_t read_ordinal)
 {
     pthread_mutex_lock(&sg_device_mutex);
@@ -704,12 +747,58 @@ static void capture_read_completion(int block_descriptor,
     memcpy(completion->sense, sense, completion->sense_length);
 }
 
-static int set_read_position(int descriptor, ssize_t bytes_read)
+static off_t kernel_seek(int descriptor, off_t offset, int whence)
 {
-    if (bytes_read < 0 || lseek(descriptor, bytes_read, SEEK_CUR) < 0) {
+#ifdef RIP_DVD_READER_TESTING
+    if (scsi_test_adapter.enabled && scsi_test_adapter.cached_size > 0 &&
+        (fcntl(descriptor, F_GETFL) & O_ACCMODE) == O_RDONLY) {
+        off_t target = whence == SEEK_CUR
+            ? lseek(descriptor, 0, SEEK_CUR) + offset : offset;
+        if (target > scsi_test_adapter.cached_size) {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+#endif
+    return lseek(descriptor, offset, whence);
+}
+
+/* The SCSI command addresses content independently of Linux's cached size.
+ * Keep libdvdcss seeks and reads on the same insertion-scoped logical cursor. */
+off_t dvdcss_linux_lseek(int descriptor, off_t offset, int whence)
+{
+    pthread_mutex_lock(&sg_device_mutex);
+    enum sg_device_acquire_outcome outcome = SG_DEVICE_UNAVAILABLE;
+    int sg_descriptor = -1;
+    int flags = fcntl(descriptor, F_GETFL);
+    if (flags >= 0 && (flags & O_ACCMODE) == O_RDONLY) {
+        sg_descriptor = acquire_sg_device(descriptor, &outcome);
+    }
+    if (sg_descriptor < 0) {
+        int saved_errno = errno;
+        pthread_mutex_unlock(&sg_device_mutex);
+        if (outcome == SG_DEVICE_OPEN_FAILED) {
+            fprintf(stderr, "DVD SCSI positioning session unavailable: %s\n", strerror(saved_errno));
+            errno = saved_errno;
+            return -1;
+        }
+        return kernel_seek(descriptor, offset, whence);
+    }
+    struct sg_device_association *association = sg_device_associations;
+    while (association->source_descriptor != descriptor) {
+        association = association->next;
+    }
+    off_t base = whence == SEEK_SET ? 0 : association->position;
+    if ((whence != SEEK_SET && whence != SEEK_CUR) ||
+        offset < -base || offset > INT64_MAX - base) {
+        pthread_mutex_unlock(&sg_device_mutex);
+        errno = EINVAL;
         return -1;
     }
-    return 0;
+    association->position = base + offset;
+    off_t position = association->position;
+    pthread_mutex_unlock(&sg_device_mutex);
+    return position;
 }
 
 ssize_t dvdcss_linux_read(int descriptor, void *buffer, size_t length)
@@ -717,34 +806,45 @@ ssize_t dvdcss_linux_read(int descriptor, void *buffer, size_t length)
     struct rip_dvd_scsi_completion *expected =
         &current_read_scope.completion;
     pthread_mutex_lock(&sg_device_mutex);
-    if (!current_read_scope.active ||
-        expected->requested_lba > UINT32_MAX ||
-        expected->requested_block_count == 0 ||
-        expected->requested_block_count > UINT16_MAX ||
-        length != (size_t)expected->requested_block_count *
-                      DVD_LOGICAL_BLOCK_BYTES) {
-        ssize_t result = read(descriptor, buffer, length);
-        pthread_mutex_unlock(&sg_device_mutex);
-        return result;
-    }
-    off_t offset = lseek(descriptor, 0, SEEK_CUR);
-    if (offset < 0 || (uint64_t)offset % DVD_LOGICAL_BLOCK_BYTES != 0 ||
-        (uint64_t)offset / DVD_LOGICAL_BLOCK_BYTES !=
-            expected->requested_lba) {
-        ssize_t result = read(descriptor, buffer, length);
-        pthread_mutex_unlock(&sg_device_mutex);
-        return result;
-    }
     enum sg_device_acquire_outcome outcome = SG_DEVICE_UNAVAILABLE;
     int sg_descriptor = acquire_sg_device(descriptor, &outcome);
     if (sg_descriptor < 0) {
-        ssize_t result = read(descriptor, buffer, length);
+        int saved_errno = errno;
         pthread_mutex_unlock(&sg_device_mutex);
-        return result;
+        if (outcome == SG_DEVICE_OPEN_FAILED) {
+            if (current_read_scope.active) {
+                expected->local_error = saved_errno;
+            }
+            fprintf(stderr, "DVD SCSI session unavailable: %s\n", strerror(saved_errno));
+            errno = saved_errno;
+            return -1;
+        }
+        return read(descriptor, buffer, length);
+    }
+    struct sg_device_association *association = sg_device_associations;
+    while (association->source_descriptor != descriptor) {
+        association = association->next;
+    }
+    uint64_t requested_lba = (uint64_t)association->position / DVD_LOGICAL_BLOCK_BYTES;
+    size_t requested_blocks = length / DVD_LOGICAL_BLOCK_BYTES;
+    if (association->position % DVD_LOGICAL_BLOCK_BYTES != 0 ||
+        length == 0 || length % DVD_LOGICAL_BLOCK_BYTES != 0 ||
+        requested_lba > UINT32_MAX || requested_blocks > UINT16_MAX ||
+        requested_blocks - 1 > UINT32_MAX - requested_lba ||
+        (current_read_scope.active &&
+         (expected->requested_lba != requested_lba ||
+          expected->requested_block_count != requested_blocks))) {
+        if (current_read_scope.active) {
+            expected->local_error = EINVAL;
+        }
+        pthread_mutex_unlock(&sg_device_mutex);
+        fprintf(stderr, "DVD logical read position or request is invalid\n");
+        errno = EINVAL;
+        return -1;
     }
     uint8_t command[10] = { 0 };
-    uint32_t lba = (uint32_t)expected->requested_lba;
-    uint16_t block_count = (uint16_t)expected->requested_block_count;
+    uint32_t lba = (uint32_t)requested_lba;
+    uint16_t block_count = (uint16_t)requested_blocks;
     command[0] = SCSI_READ_10;
     command[2] = (uint8_t)(lba >> 24);
     command[3] = (uint8_t)(lba >> 16);
@@ -766,24 +866,83 @@ ssize_t dvdcss_linux_read(int descriptor, void *buffer, size_t length)
     };
     int result = execute_sg_io(sg_descriptor, SG_IO, &io);
     int saved_errno = errno;
-    if (result == 0) {
+    if (result == 0 && current_read_scope.active) {
         capture_read_completion(descriptor, &io, sense);
     }
+    if (result < 0) {
+        fprintf(stderr, "DVD SCSI read syscall failed: %s\n", strerror(saved_errno));
+    }
     if (result < 0 || (io.info & SG_INFO_OK_MASK) != SG_INFO_OK ||
-        io.resid < 0 || (uint32_t)io.resid > io.dxfer_len) {
+        io.status != 0 || io.host_status != 0 || io.driver_status != 0) {
+        if (result == 0) {
+            fprintf(stderr, "DVD SCSI read command failed: status=%u host=%u driver=%u\n",
+                    io.status, io.host_status, io.driver_status);
+        }
         pthread_mutex_unlock(&sg_device_mutex);
         errno = result < 0 ? saved_errno : EIO;
         return -1;
     }
-    ssize_t bytes_read = (ssize_t)(io.dxfer_len - (uint32_t)io.resid);
-    if ((size_t)bytes_read % DVD_LOGICAL_BLOCK_BYTES != 0 ||
-        set_read_position(descriptor, bytes_read) < 0) {
+    if (io.resid < 0 || (uint32_t)io.resid > io.dxfer_len) {
+        if (current_read_scope.active) {
+            expected->local_error = EPROTO;
+        }
         pthread_mutex_unlock(&sg_device_mutex);
-        errno = EIO;
+        fprintf(stderr, "DVD SCSI read returned an invalid residual byte count\n");
+        errno = EPROTO;
         return -1;
+    }
+    ssize_t bytes_read = (ssize_t)(io.dxfer_len - (uint32_t)io.resid);
+    if ((size_t)bytes_read % DVD_LOGICAL_BLOCK_BYTES != 0) {
+        if (current_read_scope.active) {
+            expected->local_error = EPROTO;
+        }
+        fprintf(stderr, "DVD SCSI read returned a partial logical sector\n");
+        pthread_mutex_unlock(&sg_device_mutex);
+        errno = EPROTO;
+        return -1;
+    }
+    association->position += bytes_read;
+    if ((size_t)bytes_read != length) {
+        fprintf(stderr, "DVD SCSI short read: %zd of %zu bytes\n", bytes_read, length);
     }
     pthread_mutex_unlock(&sg_device_mutex);
     return bytes_read;
+}
+
+ssize_t dvdcss_linux_readv(int descriptor, const struct iovec *vectors, int count)
+{
+    if (count < 0 || count > IOV_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+    size_t length = 0;
+    for (int index = 0; index < count; index++) {
+        if (vectors[index].iov_len > (size_t)SSIZE_MAX - length) {
+            errno = EINVAL;
+            return -1;
+        }
+        length += vectors[index].iov_len;
+    }
+    if (length == 0) {
+        return 0;
+    }
+    unsigned char *buffer = malloc(length);
+    if (buffer == NULL) {
+        return -1;
+    }
+    ssize_t result = dvdcss_linux_read(descriptor, buffer, length);
+    size_t copied = 0;
+    for (int index = 0; result > 0 && index < count && copied < (size_t)result; index++) {
+        size_t remaining = (size_t)result - copied;
+        size_t part = vectors[index].iov_len < remaining
+            ? vectors[index].iov_len : remaining;
+        memcpy(vectors[index].iov_base, buffer + copied, part);
+        copied += part;
+    }
+    int saved_errno = errno;
+    free(buffer);
+    errno = saved_errno;
+    return result;
 }
 
 static int send_sg_command(int sg_descriptor,

@@ -298,19 +298,27 @@ it("keeps the fresh and published bounded migration paths intact", () => {
     isEnabled: true,
     isPresent: true,
   });
-  const started = boundedAccess.discInspections.beginOrResume({
-    opticalDriveId: drive.id,
-    mediaGeneration: "fixture-bounded-generation",
-    mediaCapacityBytes: null,
-  });
-  expect(started.inspection).toMatchObject({
-    phase: "settling",
-    stableObservationCount: 0,
-    settlingBaselineCapacityBytes: null,
-  });
   boundedAccess.close();
 
+  // Seed the historical schema directly. Today's ORM includes columns that
+  // this intentionally bounded migration subset does not have yet.
+  const inspectionId = "fixture-bounded-inspection";
   const publishedSqlite = new DatabaseSync(databasePath);
+  publishedSqlite.prepare(`
+    INSERT INTO disc_inspections (
+      id, optical_drive_id, media_generation, stable_observation_count,
+      settling_started_at, settling_reset_count, phase_started_at,
+      attempt_started_at, started_at, created_at, updated_at
+    ) VALUES (?, ?, 'fixture-bounded-generation', 0, 1, 0, 1, 1, 1, 1, 1)
+  `).run(inspectionId, drive.id);
+  expect(publishedSqlite.prepare(`
+    SELECT phase, stable_observation_count, settling_baseline_capacity_bytes
+    FROM disc_inspections WHERE id = ?
+  `).get(inspectionId)).toEqual({
+    phase: "settling",
+    stable_observation_count: 0,
+    settling_baseline_capacity_bytes: null,
+  });
   publishedSqlite
     .prepare("UPDATE __drizzle_migrations SET hash = ? WHERE name = ?")
     .run(publishedBoundedSettlingHash, boundedSettlingMigration);
@@ -318,10 +326,11 @@ it("keeps the fresh and published bounded migration paths intact", () => {
 
   const currentAccess = createDataAccess({ databasePath });
   expect(
-    currentAccess.discInspections.list({ ids: [started.inspection.id] }),
+    currentAccess.discInspections.list(),
   ).toEqual([
     expect.objectContaining({
-      id: started.inspection.id,
+      id: inspectionId,
+      readPathNotice: null,
       phase: "settling",
       mediaGeneration: "fixture-bounded-generation",
       stableObservationCount: 0,

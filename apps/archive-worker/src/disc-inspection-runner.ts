@@ -406,6 +406,11 @@ export async function runDiscInspection({
       throw error;
     }
   }
+  if (startedInspection.claim !== null && mediaObservation.readPathNotice) {
+    access.discInspections.record(startedInspection.claim, {
+      type: "read_path_notice", notice: mediaObservation.readPathNotice,
+    });
+  }
   if (startedInspection.claim === null) {
     const inspection = startedInspection.inspection;
     if (inspection.status !== "completed" || inspection.detectedDiscId === null) {
@@ -483,6 +488,11 @@ export async function runDiscInspection({
       );
       claim = observed.claim;
       inspection = observed.inspection;
+      if (observation.readPathNotice) {
+        inspection = access.discInspections.record(claim, {
+          type: "read_path_notice", notice: observation.readPathNotice,
+        });
+      }
       settledMediaGeneration = inspection.mediaGeneration;
       settledMediaCapacityBytes = inspection.mediaCapacityBytes;
     }

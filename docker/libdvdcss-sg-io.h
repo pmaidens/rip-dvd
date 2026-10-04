@@ -6,6 +6,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
+/* Declare libc before interposition, including its large-file redirects. */
+#include <unistd.h>
+#include <sys/uio.h>
 
 #define RIP_DVD_SCSI_MAX_SENSE_BYTES 252
 
@@ -31,6 +34,7 @@ struct rip_dvd_scsi_test_metrics {
 #endif
 
 struct rip_dvd_scsi_completion {
+    int local_error;
     int captured;
     int command_completed;
     int descriptor;
@@ -47,7 +51,9 @@ struct rip_dvd_scsi_completion {
 
 int dvdcss_linux_ioctl(int descriptor, unsigned long request, ...);
 ssize_t dvdcss_linux_read(int descriptor, void *buffer, size_t length);
+ssize_t dvdcss_linux_readv(int descriptor, const struct iovec *vectors, int count);
 int dvdcss_linux_close(int descriptor);
+off_t dvdcss_linux_lseek(int descriptor, off_t offset, int whence);
 void rip_dvd_scsi_read_scope_begin(uint64_t requested_lba,
                                    uint32_t requested_block_count,
                                    uint32_t retry_ordinal);
@@ -55,6 +61,8 @@ int rip_dvd_scsi_read_scope_end(struct rip_dvd_scsi_completion *completion);
 
 #ifdef RIP_DVD_READER_TESTING
 void rip_dvd_scsi_test_adapter_begin(void);
+void rip_dvd_scsi_test_adapter_stale_capacity(void);
+void rip_dvd_scsi_test_adapter_read_diagnostic(int syscall_failure, int short_bytes);
 void rip_dvd_scsi_test_adapter_fail_discovery(void);
 void rip_dvd_scsi_test_adapter_fail_open(void);
 void rip_dvd_scsi_test_adapter_fail_content_read(uint32_t read_ordinal);
@@ -73,7 +81,9 @@ void rip_dvd_scsi_test_adapter_snapshot(
 #ifndef RIP_DVD_SG_IO_IMPLEMENTATION
 #define ioctl dvdcss_linux_ioctl
 #define read dvdcss_linux_read
+#define readv dvdcss_linux_readv
 #define close dvdcss_linux_close
+#define lseek dvdcss_linux_lseek
 #endif
 
 #endif

@@ -745,6 +745,7 @@ function initialDiscSettlingState(
 ) {
   return {
     phase: "settling" as const,
+    readPathNotice: null,
     mediaCapacityBytes,
     settlingBaselineCapacityBytes:
       mediaCapacityBytes === null ? settlingBaselineCapacityBytes : null,
@@ -10724,6 +10725,7 @@ export function createDataAccessInternal(
               .set({
                 mediaGeneration,
                 mediaCapacityBytes,
+                ...(evidenceReset ? { readPathNotice: null } : {}),
                 settlingBaselineCapacityBytes,
                 stableObservationCount,
                 settlingQuietWindowStartedAt: quietWindowStartedAt,
@@ -10859,12 +10861,32 @@ export function createDataAccessInternal(
           }
           if (
             current.phase === "settling" &&
+            event.type !== "read_path_notice" &&
             event.type !== "retry" &&
             event.type !== "fail" &&
             event.type !== "abort"
           ) {
             throw new DomainInvariantError(
               "Disc Inspection must finish settling before recording work progress",
+            );
+          }
+          if (event.type === "read_path_notice") {
+            if (event.notice !== "scsi_capacity_exceeds_cached_size" &&
+                event.notice !== "cached_size_exceeds_scsi_capacity") {
+              throw new DomainInvariantError("Invalid DVD read path notice");
+            }
+            return requireRow(
+              transaction
+                .update(discInspections)
+                .set({ readPathNotice: event.notice, updatedAt: timestamp })
+                .where(and(
+                  eq(discInspections.id, current.id),
+                  eq(discInspections.claimToken, claim.claimToken),
+                ))
+                .returning()
+                .get(),
+              "disc inspection",
+              current.id,
             );
           }
           const recordAttempt = (
