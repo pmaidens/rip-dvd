@@ -24,6 +24,7 @@ import type {
   DiscInspection,
   DiscInspectionPhase,
   DiscInspectionReasonCode,
+  DiscInspectionReadPathNotice,
   DiscInspectionStatus,
   EncodeJob,
   EncodeJobFailureReport,
@@ -76,6 +77,7 @@ export interface DashboardOpticalDrive {
 
 export interface DashboardDiscInspection {
   id: string;
+  readPathNotice?: DiscInspectionReadPathNotice | null;
   activityRevision?: string;
   status: DiscInspectionStatus;
   phase: DiscInspectionPhase;
@@ -1680,6 +1682,7 @@ function readDashboardSnapshotRecords(
               lastSeenAt: drive.lastSeenAt.toISOString(),
               currentInspection: inspection === undefined ? null : {
                 id: inspection.id,
+                ...(inspection.readPathNotice ? { readPathNotice: inspection.readPathNotice } : {}),
                 activityRevision: inspection.updatedAt.toISOString(),
                 status: inspection.status,
                 phase: inspection.phase,

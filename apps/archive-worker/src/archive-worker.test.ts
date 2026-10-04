@@ -408,11 +408,13 @@ function directCapacityOutput(capacityBytes: number): string {
 
 function createLinuxSettlingHardware({
   capacityResult,
+  cachedCapacityBytes = 8192,
   deviceInstanceObserver,
   drives,
   mediaGeneration,
   mediaGenerationObserver,
 }: {
+  cachedCapacityBytes?: number;
   capacityResult(
     devicePath: string,
     signal: AbortSignal,
@@ -439,6 +441,9 @@ function createLinuxSettlingHardware({
           }),
           stderr: "",
         };
+      }
+      if (executable === "blockdev") {
+        return { exitCode: 0, stdout: String(cachedCapacityBytes), stderr: "" };
       }
       if (executable === "sg_readcap") {
         return await capacityResult(arguments_[2]!, options.signal);
@@ -7361,13 +7366,14 @@ describe("archive worker polling", () => {
     access.close();
   });
 
-  it("ignores stale block-device size and carries direct capacity into the Archive Job", async () => {
+  it.each([
+    [8192, 10240, "scsi_capacity_exceeds_cached_size"],
+    [10240, 8192, "cached_size_exceeds_scsi_capacity"],
+  ])("automatically completes inspection with cached %i and direct %i capacity", async (staleBlockDeviceCapacityBytes, mediaCapacityBytes, notice) => {
     vi.useFakeTimers();
     const startedAt = new Date("2026-08-22T18:00:00.000Z");
     vi.setSystemTime(startedAt);
     const access = openTestDataAccess();
-    const staleBlockDeviceCapacityBytes = 4_700_372_992;
-    const mediaCapacityBytes = 4_700_375_040;
     let directCapacityBytes = staleBlockDeviceCapacityBytes;
     let mediaGeneration = "old-media-generation";
     const run = vi.fn(async (executable: string) => {
@@ -7501,7 +7507,7 @@ describe("archive worker polling", () => {
     ).toHaveLength(6);
     expect(
       run.mock.calls.filter(([executable]) => executable === "blockdev"),
-    ).toHaveLength(0);
+    ).toHaveLength(6);
     expect(settlingWaits.wait).toHaveBeenCalledTimes(2);
     expect(settlingWaits.wait).toHaveBeenCalledWith(
       2_500,
@@ -7511,6 +7517,8 @@ describe("archive worker polling", () => {
       expect.objectContaining({
         id: inspectionId,
         status: "completed",
+        reasonCode: null,
+        readPathNotice: notice,
         mediaGeneration,
         mediaCapacityBytes,
         stableObservationCount: 3,
@@ -7747,6 +7755,9 @@ describe("archive worker polling", () => {
             stderr: "",
           };
         }
+        if (executable === "blockdev") {
+          return { exitCode: 0, stdout: String(mediaCapacityBytes), stderr: "" };
+        }
         if (executable === "sg_readcap") {
           return {
             exitCode: 0,
@@ -7888,6 +7899,9 @@ describe("archive worker polling", () => {
             }),
             stderr: "",
           };
+        }
+        if (executable === "blockdev") {
+          return { exitCode: 0, stdout: "4700372992", stderr: "" };
         }
         if (executable === "sg_readcap") {
           return {
@@ -8043,6 +8057,9 @@ describe("archive worker polling", () => {
             ].join("\n"),
             stderr: "",
           };
+        }
+        if (executable === "blockdev") {
+          return { exitCode: 0, stdout: "2048", stderr: "" };
         }
         if (executable === "sg_readcap") {
           return { exitCode: 0, stdout: directCapacityOutput(2_048), stderr: "" };
@@ -8241,6 +8258,9 @@ describe("archive worker polling", () => {
             stderr: "",
           };
         }
+        if (executable === "blockdev") {
+          return { exitCode: 0, stdout: "2048", stderr: "" };
+        }
         if (executable === "sg_readcap") {
           return { exitCode: 0, stdout: directCapacityOutput(2_048), stderr: "" };
         }
@@ -8315,6 +8335,9 @@ describe("archive worker polling", () => {
             ].join("\n"),
             stderr: "",
           };
+        }
+        if (executable === "blockdev") {
+          return { exitCode: 0, stdout: "2048", stderr: "" };
         }
         if (executable === "sg_readcap") {
           return { exitCode: 0, stdout: directCapacityOutput(2_048), stderr: "" };
@@ -9171,4 +9194,36 @@ describe("archive worker polling", () => {
     expect(waitForNextPoll).toHaveBeenCalledTimes(1);
     access.close();
   });
+});
+
+it("keeps the fallback notice while rejecting a scan whose metadata checks fail", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  const access = openTestDataAccess();
+  const waits = createControlledSettlingWaits();
+  const scanDvd = vi.fn(async () => {
+    throw new DiscInspectionError("fail", "invalid_metadata", "Synthetic invalid metadata");
+  });
+  const hardware: OpticalDriveHardware = {
+    ...stableDeviceBinding(),
+    discover: vi.fn(async () => [{ devicePath: "/dev/sr0", serialNumber: "SYNTHETIC-NOTICE-DRIVE" }]),
+    observeMedia: vi.fn(async () => ({
+      mediaGeneration: "test-media-generation", capacityBytes: 8192,
+      readPathNotice: "scsi_capacity_exceeds_cached_size" as const,
+    })),
+    scanDvd,
+  };
+  const polling = pollArchiveWorkerOnce({
+    access, configuredDevicePath: "/dev/sr0", hardware, log: vi.fn(),
+    signal: new AbortController().signal, waitForNextSettlingObservation: waits.wait,
+  });
+  await waits.waitUntilPending(); waits.releaseNext();
+  await waits.waitUntilPending(); waits.releaseNext();
+  await polling;
+  expect(scanDvd).toHaveBeenCalledOnce();
+  expect(access.discInspections.list({ currentOnly: true })).toEqual([
+    expect.objectContaining({ status: "failed", reasonCode: "invalid_metadata",
+      readPathNotice: "scsi_capacity_exceeds_cached_size", detectedDiscId: null }),
+  ]);
+  expect(access.catalog.listDetectedDiscs()).toEqual([]);
+  access.close();
 });

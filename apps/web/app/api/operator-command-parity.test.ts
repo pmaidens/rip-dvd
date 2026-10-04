@@ -1973,3 +1973,33 @@ it("shares Media Item search, revision previews, keyed mutations, and replay bet
     fixture.dispose();
   }
 });
+
+it.each([
+  "scsi_capacity_exceeds_cached_size",
+  "cached_size_exceeds_scsi_capacity",
+] as const)("shares the persistent informational %s notice through web and CLI", async (notice) => {
+  const fixture = createOperatorWorkflowFixture();
+  const access = fixture.openAccess();
+  try {
+    const drive = access.catalog.upsertOpticalDrive({ devicePath: "/dev/sr0", isEnabled: true, isPresent: true });
+    const started = access.discInspections.beginOrResume({
+      opticalDriveId: drive.id, mediaGeneration: "synthetic-notice-generation", mediaCapacityBytes: 8192,
+    });
+    access.discInspections.record(started.claim!, { type: "read_path_notice", notice });
+    const response = createOperationsResponse(access, new Request(
+      `http://localhost/api/operations?kind=disc-inspections&id=${started.inspection.id}`,
+    ));
+    const cli = await fixture.run(["inspect", "disc-inspections", started.inspection.id]);
+    expect(response.status).toBe(200);
+    expect(cli.exitCode).toBe(0);
+    expect(cli.result).toEqual(await response.json());
+    expect(cli.result).toMatchObject({ item: {
+      status: "running", phase: "settling", reasonCode: null, readPathNotice: notice,
+    } });
+    expect(readDashboardSnapshot(access).opticalDrives).toMatchObject({ items: [
+      { currentInspection: { readPathNotice: notice } },
+    ] });
+  } finally {
+    access.close(); fixture.dispose();
+  }
+});

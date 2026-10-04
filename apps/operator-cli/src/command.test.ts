@@ -3150,3 +3150,56 @@ it("serializes concurrent same-key Encoding Profile creation across CLI processe
     profiles: [expect.objectContaining({ key: "concurrent-synthetic" })],
   });
 });
+
+it.each([
+  "scsi_capacity_exceeds_cached_size",
+  "cached_size_exceeds_scsi_capacity",
+] as const)("keeps the informational %s notice after normal scan completion", async (notice) => {
+  const current = fixture();
+  const access = current.openAccess();
+  const drive = access.catalog.upsertOpticalDrive({ devicePath: "/dev/sr0", isEnabled: true, isPresent: true });
+  const started = beginSettledDiscInspectionForTest(access, {
+    opticalDriveId: drive.id, mediaGeneration: "synthetic-notice-generation", mediaCapacityBytes: 8192,
+  });
+  access.discInspections.record(started.claim, { type: "read_path_notice", notice });
+  access.discInspections.record(started.claim, {
+    type: "metadata", volumeLabel: "SYNTHETIC_NOTICE", titleCount: 1,
+    chapterCount: 1, audioStreamCount: 0, subtitleStreamCount: 0, totalBytes: 8192,
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id, discKind: "dvd", fingerprint: "synthetic-notice-fingerprint", sizeBytes: 8192,
+  });
+  access.discInspections.record(started.claim, { type: "complete", detectedDiscId: disc.id });
+  access.close();
+  const inspected = await current.run(["inspect", "disc-inspections", started.inspection.id]);
+  expect(inspected.exitCode).toBe(0);
+  expect(inspected.result).toMatchObject({ item: {
+    readPathNotice: notice, status: "completed", reasonCode: null, mediaCapacityBytes: 8192,
+    attempts: [expect.objectContaining({ outcome: "completed" })],
+  } });
+  const waited = await current.run(["wait", "disc-inspections", started.inspection.id, "--timeout-ms", "0"]);
+  expect(waited.exitCode).toBe(0);
+  expect(JSON.stringify(waited.result)).toContain(notice);
+});
+
+it("clears an informational read path notice when settling evidence changes and rejects the old claim", async () => {
+  const current = fixture();
+  const access = current.openAccess();
+  const drive = access.catalog.upsertOpticalDrive({ devicePath: "/dev/sr0", isEnabled: true, isPresent: true });
+  const started = access.discInspections.beginOrResume({
+    opticalDriveId: drive.id, mediaGeneration: "synthetic-first-generation", mediaCapacityBytes: 8192,
+  });
+  access.discInspections.record(started.claim!, { type: "read_path_notice", notice: "scsi_capacity_exceeds_cached_size" });
+  access.discInspections.recordSettlingObservation(started.claim!, {
+    mediaGeneration: "synthetic-next-generation", mediaCapacityBytes: 8192,
+  });
+  expect(() => access.discInspections.record(started.claim!, {
+    type: "read_path_notice", notice: "cached_size_exceeds_scsi_capacity",
+  })).toThrow();
+  access.close();
+  const inspected = await current.run(["inspect", "disc-inspections", started.inspection.id]);
+  expect(inspected.exitCode).toBe(0);
+  expect(inspected.result).toMatchObject({ item: {
+    status: "running", phase: "settling", readPathNotice: null, mediaGeneration: "synthetic-next-generation",
+  } });
+});

@@ -1,4 +1,4 @@
-import type { DiscoveredOpticalDrive } from "@rip-dvd/data-access";
+import type { DiscInspectionReadPathNotice, DiscoveredOpticalDrive } from "@rip-dvd/data-access";
 import type { DvdTitleMap } from "@rip-dvd/data-access/dvd-scan";
 
 import type { DiscInspectionScanOptions } from "./optical-drive-dvd-scanner.js";
@@ -19,6 +19,7 @@ export interface BoundOpticalDrive {
 export interface OpticalMediaObservation {
   mediaGeneration: string;
   capacityBytes: number | null;
+  readPathNotice?: DiscInspectionReadPathNotice;
 }
 
 export interface OpticalDriveHardware {

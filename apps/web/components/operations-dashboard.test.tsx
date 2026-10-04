@@ -2771,3 +2771,14 @@ describe.each(dashboardMutationCases)("$action dashboard mutation", (mutationCas
     await act(async () => root.unmount());
   });
 });
+
+it.each(["running", "completed"] as const)("shows the SCSI fallback as information while %s", (status) => {
+  const inspection = failedDiscInspection("synthetic-notice", {
+    status, phase: status === "running" ? "reading_metadata" : "confirming_media",
+    reasonCode: null, readPathNotice: "scsi_capacity_exceeds_cached_size", investigation: undefined,
+  });
+  const html = renderToStaticMarkup(<DashboardView section="discs" state={stateWithDiscInspection(inspection)} />);
+  expect(html).toContain("Using the SCSI recovery");
+  expect(html).toContain('role="status"');
+  expect(html).not.toContain("Retry inspection");
+});

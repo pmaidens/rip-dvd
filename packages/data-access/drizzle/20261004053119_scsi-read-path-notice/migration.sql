@@ -1,0 +1,1 @@
+ALTER TABLE `disc_inspections` ADD `read_path_notice` text;

@@ -518,7 +518,7 @@ function runTestCopyWithDeclaredSectors(name, faults, declaredSectorCount) {
   return { ...result, outputPath };
 }
 
-function runEndpointTest(firstExcludedLba, faults = "none") {
+function runEndpointTest(firstExcludedLba, faults = "none", mode = "valid") {
   return spawnSync(
     testExecutable,
     [
@@ -527,13 +527,13 @@ function runEndpointTest(firstExcludedLba, faults = "none") {
       String(firstExcludedLba * 2_048),
       faults,
       "0",
-      "valid",
+      mode,
     ],
     { encoding: "utf8" },
   );
 }
 
-function runTestResume(outputPath, faults, bitmapHex) {
+function runTestResume(outputPath, faults, bitmapHex, mode = "valid") {
   const output = statSync(outputPath);
   const result = spawnSync(
     testExecutable,
@@ -544,7 +544,7 @@ function runTestResume(outputPath, faults, bitmapHex) {
       String(content.byteLength),
       faults,
       "0",
-      "valid",
+      mode,
       bitmapHex,
       `${output.dev}:${output.ino}`,
     ],
@@ -994,21 +994,17 @@ assertScsiMetrics(concurrentSources, "concurrent per-read evidence", {
   ],
 });
 
-for (const [scenario, openCount] of [
-  ["discovery-failure", 0],
-  ["open-failure", 1],
-]) {
-  const unavailableSession = runScsiSessionTest(scenario);
-  assertScsiMetrics(unavailableSession, `${scenario} retry suppression`, {
-    discoveryCount: 1,
-    openCount,
-    closeCount: 0,
-    contentReadCount: 0,
-    requestSenseCount: 0,
-    diagnosticCommandCount: 0,
-    requests: [],
-  });
-}
+const blockPassthrough = runScsiSessionTest("discovery-failure");
+assertScsiMetrics(blockPassthrough, "bound block-descriptor SCSI passthrough", {
+  discoveryCount: 1, openCount: 0, closeCount: 0,
+  contentReadCount: 2, requestSenseCount: 0, diagnosticCommandCount: 0,
+  requests: [{ lba: 0, blocks: 31 }, { lba: 0, blocks: 31 }],
+});
+const failedOpen = runScsiSessionTest("open-failure");
+assertScsiMetrics(failedOpen, "open-failure retry suppression", {
+  discoveryCount: 1, openCount: 1, closeCount: 0,
+  contentReadCount: 0, requestSenseCount: 0, diagnosticCommandCount: 0, requests: [],
+});
 
 const failedSession = runScsiSessionTest("read-failure");
 assertScsiMetrics(failedSession, "failed SCSI session cleanup", {
@@ -2837,4 +2833,58 @@ const invalid = spawnSync(executable, ["hash", sourcePath, "4095"], {
 });
 if (invalid.status !== 2 || !invalid.stderr.includes("size is invalid")) {
   throw new Error("libdvdcss reader accepted a partial DVD block");
+}
+
+const staleCapacity = runTestCopy("stale-capacity", "none", "stale-capacity");
+if (staleCapacity.status !== 0 || !readFileSync(staleCapacity.outputPath).equals(content)) {
+  throw new Error(`SCSI copy across stale cached capacity failed: ${staleCapacity.stderr}`);
+}
+
+const stalePositions = runScsiSessionTest("stale-capacity");
+if (stalePositions.status !== 0 || scsiSessionResult(stalePositions.stderr).contentReadCount < 5 ||
+    !stalePositions.stderr.includes("logical read position")) {
+  throw new Error(`SCSI and libdvdcss cursor regression failed: ${stalePositions.stderr}`);
+}
+const staleResumePath = prepareOutput("/tmp/rip-dvd-reader-stale-resume.img");
+const staleResumeContent = Buffer.from(content);
+staleResumeContent.fill(0, 35 * 2048, 36 * 2048);
+writeFileSync(staleResumePath, staleResumeContent);
+const staleResumeBitmap = Buffer.alloc(5);
+staleResumeBitmap[4] = 1 << 3;
+const staleResume = runTestResume(staleResumePath, "none", staleResumeBitmap.toString("hex"), "stale-capacity");
+if (staleResume.status !== 0 || !readFileSync(staleResumePath).equals(content)) {
+  throw new Error(`SCSI recovery beyond cached size failed: ${staleResume.stderr}`);
+}
+const staleEndpoint = runEndpointTest(40,
+  rawCompletionFault(40, "always", descriptorOutOfRangeSense(40)), "stale-capacity");
+if (staleEndpoint.status !== 0 || endpointProof(staleEndpoint.stderr).firstExcludedLba !== 40) {
+  throw new Error(`SCSI endpoint beyond cached size failed: ${staleEndpoint.stderr}`);
+}
+const staleDamage = runTestCopy("stale-damage",
+  rawCompletionFault(35, "always", fixedMediumSense(35)), "stale-capacity");
+if (staleDamage.status !== 0 || recoveryResult(staleDamage.stderr).badSectorCount !== 1) {
+  throw new Error(`SCSI damage policy with stale size failed: ${staleDamage.stderr}`);
+}
+
+const staleBlockPassthrough = runScsiSessionTest("stale-block-passthrough");
+if (staleBlockPassthrough.status !== 0 || scsiSessionResult(staleBlockPassthrough.stderr).openCount !== 0) {
+  throw new Error(`Bound block-descriptor SCSI recovery failed: ${staleBlockPassthrough.stderr}`);
+}
+
+const syscallFailure = runTestCopy("wrapped-syscall-error", "none", "wrapped-syscall-error");
+if (syscallFailure.status !== 3 || !syscallFailure.stderr.includes("SCSI read syscall failed") ||
+    readFailureResult(syscallFailure.stderr).category !== "unknown" ||
+    syscallFailure.stderr.includes(recoveryResultPrefix)) {
+  throw new Error(`SCSI syscall diagnostic failed: ${syscallFailure.stderr}`);
+}
+const shortRead = runTestCopy("wrapped-short-read", "none", "wrapped-short-read");
+if (shortRead.status !== 0 || !readFileSync(shortRead.outputPath).equals(content) ||
+    !shortRead.stderr.includes("SCSI short read") || recoveryResult(shortRead.stderr).badSectorCount !== 0) {
+  throw new Error(`SCSI aligned short-read handling failed: ${shortRead.stderr}`);
+}
+const partialSector = runTestCopy("wrapped-partial-sector", "none", "wrapped-partial-sector");
+if (partialSector.status !== 1 || !partialSector.stderr.includes("partial logical sector") ||
+    !partialSector.stderr.includes("local read bookkeeping") ||
+    partialSector.stderr.includes(readFailureResultPrefix) || partialSector.stderr.includes(recoveryResultPrefix)) {
+  throw new Error(`SCSI partial-sector local diagnostic failed: ${partialSector.stderr}`);
 }

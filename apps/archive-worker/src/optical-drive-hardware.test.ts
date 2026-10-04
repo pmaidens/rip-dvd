@@ -98,12 +98,10 @@ describe("Linux Optical Drive hardware boundary", () => {
   it("observes direct DVD capacity between stable generation and drive fences", async () => {
     const signal = new AbortController().signal;
     const runner: CommandRunner = {
-      run: vi.fn().mockResolvedValue({
-        exitCode: 0,
-        signal: null,
-        stderr: "",
-        stdout: "0x230540 0x800\n",
-      }),
+      run: vi.fn(async (executable) => ({
+        exitCode: 0, signal: null, stderr: "",
+        stdout: executable === "blockdev" ? "4700372992\n" : "0x230540 0x800\n",
+      })),
     };
     const mediaGenerationObserver = stableMediaGenerationObserver();
     const deviceInstanceObserver = stableDeviceInstanceObserver();
@@ -133,6 +131,22 @@ describe("Linux Optical Drive hardware boundary", () => {
     expect(mediaGenerationObserver.observe).toHaveBeenCalledTimes(2);
     expect(deviceInstanceObserver.observe).toHaveBeenCalledTimes(2);
     expect(onMediaGeneration).toHaveBeenCalledExactlyOnceWith("1");
+  });
+
+  it.each([
+    [4096, "scsi_capacity_exceeds_cached_size"],
+    [16384, "cached_size_exceeds_scsi_capacity"],
+    [0, "scsi_capacity_exceeds_cached_size"],
+  ])("selects SCSI capacity with cached size %i", async (cached, notice) => {
+    const hardware = createTestOpticalDriveHardware({
+      platform: "linux", mediaGenerationObserver: stableMediaGenerationObserver(),
+      runner: { run: vi.fn(async (executable) => ({
+        exitCode: 0, signal: null, stderr: "",
+        stdout: executable === "blockdev" ? String(cached) : "0x4 0x800",
+      })) },
+    });
+    await expect(hardware.observeMedia(boundOpticalDrive(), new AbortController().signal))
+      .resolves.toEqual({ mediaGeneration: "1", capacityBytes: 8192, readPathNotice: notice });
   });
 
   it("discards direct capacity when media generation changes during the command", async () => {

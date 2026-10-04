@@ -1029,6 +1029,11 @@ static struct backend_read_result backend_read(
         transport = dvdcss_transport_read(
             backend, buffer, lba, block_count, absolute, retry_ordinal);
     }
+    if (transport.completion.local_error != 0) {
+        errno = transport.completion.local_error;
+        fail_errno("DVD local read bookkeeping failed");
+        return (struct backend_read_result){ .status = BACKEND_READ_FATAL };
+    }
     if (transport.status == TRANSPORT_READ_SUCCESS) {
         return (struct backend_read_result){
             .status = BACKEND_READ_SUCCESS,
@@ -2601,7 +2606,11 @@ static int initialize_test_backend(const char *source_path,
     }
     int wait_for_cancellation = 0;
     int fail_wrapped_content_read = 0;
-    if (strcmp(result_mode, "valid") == 0) {
+    if (strcmp(result_mode, "valid") == 0 ||
+        strcmp(result_mode, "stale-capacity") == 0 ||
+        strcmp(result_mode, "wrapped-syscall-error") == 0 ||
+        strcmp(result_mode, "wrapped-short-read") == 0 ||
+        strcmp(result_mode, "wrapped-partial-sector") == 0) {
         *test_result_mode = TEST_RESULT_VALID;
     } else if (strcmp(result_mode, "cancellation") == 0) {
         *test_result_mode = TEST_RESULT_VALID;
@@ -2654,6 +2663,16 @@ static int initialize_test_backend(const char *source_path,
         return 1;
     }
     rip_dvd_scsi_test_adapter_begin();
+    if (strcmp(result_mode, "stale-capacity") == 0) {
+        rip_dvd_scsi_test_adapter_stale_capacity();
+    }
+    if (strcmp(result_mode, "wrapped-syscall-error") == 0) {
+        rip_dvd_scsi_test_adapter_read_diagnostic(1, 0);
+    } else if (strcmp(result_mode, "wrapped-short-read") == 0) {
+        rip_dvd_scsi_test_adapter_read_diagnostic(0, DVDCSS_BLOCK_SIZE);
+    } else if (strcmp(result_mode, "wrapped-partial-sector") == 0) {
+        rip_dvd_scsi_test_adapter_read_diagnostic(0, 1);
+    }
     if (fail_wrapped_content_read) {
         rip_dvd_scsi_test_adapter_fail_content_read(1);
     }
@@ -2848,6 +2867,8 @@ enum scsi_test_scenario {
     SCSI_TEST_SCENARIO_OPEN_FAILURE,
     SCSI_TEST_SCENARIO_READ_FAILURE,
     SCSI_TEST_SCENARIO_NORMAL_EXIT,
+    SCSI_TEST_SCENARIO_STALE_CAPACITY,
+    SCSI_TEST_SCENARIO_STALE_BLOCK_PASSTHROUGH,
 };
 
 static enum scsi_test_scenario parse_scsi_test_scenario(const char *value)
@@ -2879,10 +2900,73 @@ static enum scsi_test_scenario parse_scsi_test_scenario(const char *value)
     if (strcmp(value, "read-failure") == 0) {
         return SCSI_TEST_SCENARIO_READ_FAILURE;
     }
+    if (strcmp(value, "stale-block-passthrough") == 0) {
+        return SCSI_TEST_SCENARIO_STALE_BLOCK_PASSTHROUGH;
+    }
+    if (strcmp(value, "stale-capacity") == 0) {
+        return SCSI_TEST_SCENARIO_STALE_CAPACITY;
+    }
     if (strcmp(value, "normal-exit") == 0) {
         return SCSI_TEST_SCENARIO_NORMAL_EXIT;
     }
     return SCSI_TEST_SCENARIO_INVALID;
+}
+
+static int test_stale_capacity_positions(int descriptor, const char *source)
+{
+    unsigned char actual[DVDCSS_BLOCK_SIZE];
+    unsigned char expected[DVDCSS_BLOCK_SIZE];
+    /* The first scoped read crossed the synthetic kernel boundary. A following
+     * unscoped metadata read must use the advanced logical cursor. */
+    if (lseek(descriptor, 0, SEEK_CUR) != READ_BLOCKS * DVDCSS_BLOCK_SIZE ||
+        read(descriptor, actual, sizeof(actual)) != sizeof(actual) ||
+        pread(descriptor, expected, sizeof(expected),
+              READ_BLOCKS * DVDCSS_BLOCK_SIZE) != sizeof(expected) ||
+        memcmp(actual, expected, sizeof(actual)) != 0 ||
+        lseek(descriptor, 35 * DVDCSS_BLOCK_SIZE, SEEK_SET) != 35 * DVDCSS_BLOCK_SIZE) {
+        return 1;
+    }
+    rip_dvd_scsi_read_scope_begin(35, 1, 0);
+    ssize_t result = read(descriptor, actual, sizeof(actual));
+    struct rip_dvd_scsi_completion completion = { 0 };
+    rip_dvd_scsi_read_scope_end(&completion);
+    if (result != sizeof(actual) || !completion.captured ||
+        pread(descriptor, expected, sizeof(expected), 35 * DVDCSS_BLOCK_SIZE) != sizeof(expected) ||
+        memcmp(actual, expected, sizeof(actual)) != 0 ||
+        lseek(descriptor, -DVDCSS_BLOCK_SIZE, SEEK_CUR) != 35 * DVDCSS_BLOCK_SIZE) {
+        return 1;
+    }
+    rip_dvd_scsi_read_scope_begin(34, 1, 0);
+    result = read(descriptor, actual, sizeof(actual));
+    rip_dvd_scsi_read_scope_end(&completion);
+    if (result >= 0 || completion.local_error != EINVAL || completion.captured) {
+        return 1;
+    }
+    /* Exercise the compiled libdvdcss seek/read bookkeeping too. */
+    dvdcss_t dvdcss = dvdcss_open(source);
+    if (dvdcss == NULL) {
+        return 1;
+    }
+    int status = dvdcss_seek(dvdcss, 35, DVDCSS_NOFLAGS) == 35 &&
+        dvdcss_read(dvdcss, actual, 1, DVDCSS_NOFLAGS) == 1 &&
+        memcmp(actual, expected, sizeof(actual)) == 0 &&
+        dvdcss_read(dvdcss, actual, 1, DVDCSS_NOFLAGS) == 1 &&
+        pread(descriptor, expected, sizeof(expected), 36 * DVDCSS_BLOCK_SIZE) == sizeof(expected) &&
+        memcmp(actual, expected, sizeof(actual)) == 0 ? 0 : 1;
+    unsigned char second[DVDCSS_BLOCK_SIZE];
+    struct iovec vectors[2] = {
+        { .iov_base = actual, .iov_len = sizeof(actual) },
+        { .iov_base = second, .iov_len = sizeof(second) },
+    };
+    if (status == 0 && (dvdcss_seek(dvdcss, 35, DVDCSS_NOFLAGS) != 35 ||
+        dvdcss_readv(dvdcss, vectors, 2, DVDCSS_NOFLAGS) != 2 ||
+        memcmp(second, expected, sizeof(second)) != 0 ||
+        pread(descriptor, expected, sizeof(expected), 35 * DVDCSS_BLOCK_SIZE) != sizeof(expected) ||
+        memcmp(actual, expected, sizeof(actual)) != 0)) {
+        status = 1;
+    }
+    dvdcss_close(dvdcss);
+    return status;
 }
 
 static int run_test_scsi_session(int argc, char **argv)
@@ -2917,6 +3001,13 @@ static int run_test_scsi_session(int argc, char **argv)
     }
 
     rip_dvd_scsi_test_adapter_begin();
+    if (scenario == SCSI_TEST_SCENARIO_STALE_CAPACITY ||
+        scenario == SCSI_TEST_SCENARIO_STALE_BLOCK_PASSTHROUGH) {
+        rip_dvd_scsi_test_adapter_stale_capacity();
+    }
+    if (scenario == SCSI_TEST_SCENARIO_STALE_BLOCK_PASSTHROUGH) {
+        rip_dvd_scsi_test_adapter_fail_discovery();
+    }
     int expect_failure = scenario == SCSI_TEST_SCENARIO_READ_FAILURE;
     if (expect_failure) {
         rip_dvd_scsi_test_adapter_fail_content_read(1);
@@ -2925,18 +3016,26 @@ static int run_test_scsi_session(int argc, char **argv)
     } else if (scenario == SCSI_TEST_SCENARIO_OPEN_FAILURE) {
         rip_dvd_scsi_test_adapter_fail_open();
     } else if (scenario == SCSI_TEST_SCENARIO_IDENTITY_CHECK_FAILURE) {
-        rip_dvd_scsi_test_adapter_fail_source_identity_check(2);
+        rip_dvd_scsi_test_adapter_fail_source_identity_check(3);
     }
-    int status = scenario == SCSI_TEST_SCENARIO_CONCURRENT_SOURCES
+    int status = scenario == SCSI_TEST_SCENARIO_OPEN_FAILURE
+        ? (lseek(first_descriptor, 0, SEEK_SET) < 0 ? 0 : 1)
+        : scenario == SCSI_TEST_SCENARIO_CONCURRENT_SOURCES
         ? run_concurrent_scsi_test_reads(first_descriptor, second_descriptor)
         : run_scsi_test_read(first_descriptor, expect_failure);
 
     if (status == 0 &&
         (scenario == SCSI_TEST_SCENARIO_DISCOVERY_FAILURE ||
          scenario == SCSI_TEST_SCENARIO_OPEN_FAILURE)) {
-        status = run_scsi_test_read(first_descriptor, 0);
+        status = scenario == SCSI_TEST_SCENARIO_OPEN_FAILURE
+            ? (lseek(first_descriptor, 0, SEEK_SET) < 0 ? 0 : 1)
+            : run_scsi_test_read(first_descriptor, 0);
     }
 
+    if (status == 0 && (scenario == SCSI_TEST_SCENARIO_STALE_CAPACITY ||
+                        scenario == SCSI_TEST_SCENARIO_STALE_BLOCK_PASSTHROUGH)) {
+        status = test_stale_capacity_positions(first_descriptor, argv[3]);
+    }
     if (status == 0 && scenario == SCSI_TEST_SCENARIO_SOURCE_CHANGE) {
         status = run_scsi_test_read(second_descriptor, 0);
         if (status == 0) {
@@ -2949,16 +3048,12 @@ static int run_test_scsi_session(int argc, char **argv)
     } else if (status == 0 &&
                scenario == SCSI_TEST_SCENARIO_SG_IDENTITY_CHANGE) {
         rip_dvd_scsi_test_adapter_change_sg_drive_identity();
-        status = run_scsi_test_read(first_descriptor, 0);
-        if (status == 0) {
-            status = run_scsi_test_read(first_descriptor, 0);
-        }
+        status = lseek(first_descriptor, 0, SEEK_SET) < 0 &&
+            lseek(first_descriptor, 0, SEEK_SET) < 0 ? 0 : 1;
     } else if (status == 0 &&
                scenario == SCSI_TEST_SCENARIO_IDENTITY_CHECK_FAILURE) {
-        status = run_scsi_test_read(first_descriptor, 0);
-        if (status == 0) {
-            status = run_scsi_test_read(first_descriptor, 0);
-        }
+        status = lseek(first_descriptor, 0, SEEK_SET) < 0 &&
+            lseek(first_descriptor, 0, SEEK_SET) < 0 ? 0 : 1;
     } else if (status == 0 &&
                scenario == SCSI_TEST_SCENARIO_DESCRIPTOR_REUSE) {
         int reused_descriptor = first_descriptor;
