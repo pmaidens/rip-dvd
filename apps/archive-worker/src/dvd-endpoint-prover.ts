@@ -325,19 +325,18 @@ function runEndpointProofProcess({
         ));
         return;
       }
-      const outputLines = diagnostics
+      // Native SCSI diagnostics share stderr with the structured result.
+      // Validate exactly one proof without treating those diagnostics as proofs.
+      const proofLines = diagnostics
         .split("\n")
-        .filter((line) => line.length > 0);
-      if (
-        outputLines.length !== 1 ||
-        !outputLines[0].startsWith(ENDPOINT_PROOF_PREFIX)
-      ) {
+        .filter((line) => line.startsWith(ENDPOINT_PROOF_PREFIX));
+      if (proofLines.length !== 1) {
         reject(new Error("DVD endpoint proof result is missing"));
         return;
       }
       try {
         resolve(parseDvdEndpointProof(
-          outputLines[0].slice(ENDPOINT_PROOF_PREFIX.length),
+          proofLines[0].slice(ENDPOINT_PROOF_PREFIX.length),
           firstExcludedLba,
         ));
       } catch (error) {
