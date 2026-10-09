@@ -37,7 +37,6 @@ describe("loadConfig", () => {
       archiveDevicePath: "/dev/sr0",
       webTrustedOrigin: "http://localhost:3000",
       workerPollIntervalMs: 5_000,
-      archiveCopyStallTimeoutMs: 1_800_000,
       archiveWorkerConcurrency: 2,
       encodeWorkerConcurrency: 1,
     });
@@ -50,18 +49,23 @@ describe("loadConfig", () => {
         RIP_DVD_ARCHIVE_DEVICE_PATH: "/dev/dvd",
         RIP_DVD_WORKER_POLL_INTERVAL_MS: "10000",
         RIP_DVD_ARCHIVE_WORKER_CONCURRENCY: "2",
-        RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS: "900000",
         RIP_DVD_ENCODE_WORKER_CONCURRENCY: "3",
         RIP_DVD_WEB_TRUSTED_ORIGIN: "https://dvd.example.test:8443/",
       }),
     ).toMatchObject({
       archiveDevicePath: "/dev/dvd",
-      archiveCopyStallTimeoutMs: 900_000,
       workerPollIntervalMs: 10_000,
       archiveWorkerConcurrency: 2,
       encodeWorkerConcurrency: 3,
       webTrustedOrigin: "https://dvd.example.test:8443",
     });
+  });
+
+  it("ignores the retired archive stall timeout in existing environments", () => {
+    expect(loadConfig({
+      ...requiredEnvironment,
+      RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS: "0",
+    })).toEqual(loadConfig(requiredEnvironment));
   });
 
   it.each([
@@ -116,7 +120,6 @@ describe("loadConfig", () => {
 
   it.each([
     ["RIP_DVD_WORKER_POLL_INTERVAL_MS", "0"],
-    ["RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS", "0"],
     ["RIP_DVD_ARCHIVE_WORKER_CONCURRENCY", "1.5"],
     ["RIP_DVD_ENCODE_WORKER_CONCURRENCY", "many"],
   ])("rejects an invalid positive integer for %s", (name, value) => {

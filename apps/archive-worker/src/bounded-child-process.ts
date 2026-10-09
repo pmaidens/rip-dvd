@@ -68,11 +68,15 @@ interface BoundedSingleFlightCoordinatorOptions<Request, Result> {
   validateReuse?(activeRequest: Request, requested: Request): void;
 }
 
-interface BoundedProcessWaitOptions {
+type BoundedProcessWaitOptions = {
   signal: AbortSignal;
+} & ({
   timeoutError: string;
   timeoutMs: number;
-}
+} | {
+  timeoutError?: never;
+  timeoutMs?: never;
+});
 
 export interface BoundedSingleFlightCoordinator<Request, Result> {
   isActive(key: string): boolean;
@@ -152,16 +156,15 @@ export function createBoundedSingleFlightCoordinator<Request, Result>({
         removeAbortListener = () => signal.removeEventListener("abort", onAbort);
       });
       let timeout: NodeJS.Timeout | undefined;
-      const timedOut = new Promise<never>((_resolve, reject) => {
-        timeout = setTimeout(() => reject(new Error(timeoutError)), timeoutMs);
-        timeout.unref();
-      });
+      const outcomes = [trackedProcess.process.result, aborted];
+      if (timeoutMs !== undefined) {
+        outcomes.push(new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error(timeoutError)), timeoutMs);
+          timeout.unref();
+        }));
+      }
       try {
-        return await Promise.race([
-          trackedProcess.process.result,
-          aborted,
-          timedOut,
-        ]);
+        return await Promise.race(outcomes);
       } finally {
         clearTimeout(timeout);
         removeAbortListener();

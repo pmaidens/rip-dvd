@@ -27,7 +27,6 @@ await runConfiguredAsyncWorker(
     });
     const copyRunner = createNodeDvdCopyRunner({
       maxActiveCopies: config.archiveWorkerConcurrency,
-      stallTimeoutMs: config.archiveCopyStallTimeoutMs,
     });
     const workers = new AbortController();
     const stopWorkers = () => workers.abort(signal.reason);
