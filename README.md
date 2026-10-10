@@ -446,10 +446,13 @@ Docker Compose defaults. Compose fixes the database and library paths to
 `/data/rip-dvd.sqlite`, `/media/movies`, and `/media/originals` so they always
 remain inside the declared persistent mounts. Direct, non-Compose launches can
 still set those three `RIP_DVD_*_PATH` variables through the shared loader.
-The archive worker also stops a copy after 30 minutes without an increase in
-copied bytes. Set `RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS` to a positive millisecond
-value to change that cutoff. This watchdog is separate from the overall archive
-operation timeout.
+Disc archive copies have no elapsed-time or no-progress cutoff. A slow copy
+continues until it completes, fails, or the operator cancels its Archive Request
+through the web interface or `rip-dvd cancel-archive-request`. Worker shutdown
+and loss of claim or source authority also stop the copy. Cancellation keeps
+the drive and output protected until the native reader exits. The retired
+`RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS` setting is ignored in existing environments.
+Inspection, authorization, and archive-validation helpers retain their bounds.
 
 ### Server-local JSON commands
 

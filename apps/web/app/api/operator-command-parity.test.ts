@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -54,6 +54,104 @@ import {
 import { readDashboardSnapshot } from "../../lib/dashboard";
 
 const trustedOrigin = "http://localhost:3000";
+
+it.each(["web", "cli"] as const)(
+  "keeps long-running archives cancellable through %s with adapter parity",
+  async (firstAdapter) => {
+    const fixture = createOperatorWorkflowFixture();
+    const access = fixture.openAccess();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath: "/dev/synthetic-drive", isEnabled: true, isPresent: true,
+      });
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id, discKind: "dvd",
+        fingerprint: "synthetic-long-running-disc",
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+      const settled = beginSettledDiscInspectionForTest(access, {
+        opticalDriveId: drive.id,
+        mediaGeneration: "synthetic-long-running-generation",
+        mediaCapacityBytes: 2_048,
+      });
+      access.discInspections.record(settled.claim, {
+        type: "metadata", volumeLabel: "SYNTHETIC_DISC",
+        titleCount: 0, chapterCount: 0, audioStreamCount: 0,
+        subtitleStreamCount: 0, totalBytes: 2_048,
+      });
+      const inspection = access.discInspections.record(settled.claim, {
+        type: "complete", detectedDiscId: disc.id,
+      });
+      settled.restoreSystemTime();
+      const claim = access.archiveJobs.startForInspection(
+        inspection.id, "synthetic-long-running-worker",
+      )!;
+      // Renew the live worker claim without any byte-progress updates.
+      for (let elapsed = 0; elapsed < 13 * 60 * 60_000; elapsed += 30_000) {
+        vi.setSystemTime(Date.now() + 30_000);
+        access.archiveJobs.renewClaim(claim);
+      }
+      const observed = await fixture.run([
+        "wait", "archive-requests", request.id, "--timeout-ms", "0",
+      ]);
+      expect(observed.result).toMatchObject({
+        outcome: "timeout", current: { status: "running" },
+      });
+      expect(access.archiveJobs.find(claim.id)?.status).toBe("running");
+      const inspected = await fixture.run(["inspect", "archive-requests", request.id]);
+      expect(inspected.result).toMatchObject({ item: {
+        availableActions: expect.arrayContaining([
+          expect.objectContaining({ name: "cancel", eligible: true }),
+        ]),
+      } });
+      const key = "synthetic-long-running-cancellation";
+      const webCancel = () => createArchiveRequestCancellationRoute(
+        new Request(`${trustedOrigin}/api/archive-requests/${request.id}`, {
+          method: "DELETE",
+          headers: {
+            "Content-Type": "application/json",
+            Host: "localhost:3000",
+            Origin: trustedOrigin,
+          },
+          body: JSON.stringify({ mutationKey: key }),
+        }),
+        request.id,
+        () => access,
+        () => trustedOrigin,
+      );
+      const cliCancel = () => fixture.run([
+        "cancel-archive-request", "--key", key, "--archive-request-id", request.id,
+      ]);
+      let web: Response;
+      let cli: Awaited<ReturnType<typeof cliCancel>>;
+      if (firstAdapter === "web") {
+        web = await webCancel();
+        cli = await cliCancel();
+      } else {
+        cli = await cliCancel();
+        web = await webCancel();
+      }
+      expect(web.status).toBe(200);
+      expect(cli.exitCode).toBe(0);
+      expect(cli.result).toEqual(await web.json());
+      expect(cli.result).toMatchObject({
+        archiveRequest: { id: request.id, status: "cancellation_requested" },
+      });
+      access.archiveJobs.abort(claim, "Synthetic operator cancellation");
+      expect((await fixture.run([
+        "wait", "archive-requests", request.id, "--timeout-ms", "0",
+      ])).result).toMatchObject({
+        outcome: "settled", current: { status: "cancelled" },
+      });
+    } finally {
+      vi.useRealTimers();
+      access.close();
+      fixture.dispose();
+    }
+  },
+);
 
 it("shares canonical Encode Output inspection across web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();

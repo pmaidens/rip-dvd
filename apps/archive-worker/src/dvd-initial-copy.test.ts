@@ -413,7 +413,6 @@ describe("Archive Job DVD initial-copy boundary", () => {
     const runner = createNodeDvdCopyRunner({
       requireInactive: () => undefined,
       spawnProcess: spawnProcess as never,
-      timeoutMs: 1_000,
     });
 
     const completed = await runDvdInitialCopyForArchiveJob({

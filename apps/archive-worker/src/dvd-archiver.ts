@@ -128,8 +128,6 @@ const MAX_COPY_DIAGNOSTIC_BYTES = 65_536;
 const MAX_COPY_PROTOCOL_BYTES = 1_200_000;
 const MAX_PROC_ENTRIES = 4_096;
 const MAX_PROC_FILE_DESCRIPTORS = 65_536;
-const COPY_TIMEOUT_MS = 12 * 60 * 60_000;
-const COPY_STALL_TIMEOUT_MS = 30 * 60_000;
 const COPY_AUTHORIZATION_READY_TIMEOUT_MS = 5_000;
 const COPY_START_AUTHORIZATION_TIMEOUT_MS = 5 * 60_000;
 const DEVICE_RECOVERY_LOCK_TIMEOUT_MS = 5_000;
@@ -432,28 +430,18 @@ export function createNodeDvdCopyRunner({
   requireInactive = requireDeviceInactive,
   spawnLockProcess = spawn as unknown as SpawnDvdDeviceLockProcess,
   spawnProcess = spawn as unknown as SpawnDvdCopyProcess,
-  stallTimeoutMs = COPY_STALL_TIMEOUT_MS,
-  timeoutMs = COPY_TIMEOUT_MS,
 }: {
   deviceLockTimeoutMs?: number;
   maxActiveCopies?: number;
   requireInactive?: (devicePath: string) => void;
   spawnLockProcess?: SpawnDvdDeviceLockProcess;
   spawnProcess?: SpawnDvdCopyProcess;
-  stallTimeoutMs?: number;
-  timeoutMs?: number;
 } = {}): DvdCopyRunner & DvdInitialCopyRunner {
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
-    throw new Error("DVD archive copy timeout is invalid");
-  }
   if (
     !Number.isSafeInteger(deviceLockTimeoutMs) ||
     deviceLockTimeoutMs <= 0
   ) {
     throw new Error("DVD archive recovery lock timeout is invalid");
-  }
-  if (!Number.isSafeInteger(stallTimeoutMs) || stallTimeoutMs <= 0) {
-    throw new Error("DVD archive copy stall timeout is invalid");
   }
   const copyKey = (devicePath: string, outputPath: string) =>
     JSON.stringify([devicePath, outputPath]);
@@ -543,7 +531,6 @@ export function createNodeDvdCopyRunner({
       let probeAuthorizationBuffer = "";
       let probeAuthorizationPending = false;
       let progressBuffer = "";
-      let highestCopiedBytes = 0;
       let diagnostics = "";
       let recoveryResultPayload: string | undefined;
       let initialCopyResultPayload: string | undefined;
@@ -551,7 +538,6 @@ export function createNodeDvdCopyRunner({
       let resolveResult!: (result: DvdNativeCopyResult) => void;
       let rejectResult!: (reason: unknown) => void;
       let resolveClosed!: () => void;
-      let stallTimeout: ReturnType<typeof setTimeout> | undefined;
       let probeAuthorizationTimeout: ReturnType<typeof setTimeout> | undefined;
       const result = new Promise<DvdNativeCopyResult>((resolve, reject) => {
         resolveResult = resolve;
@@ -583,7 +569,6 @@ export function createNodeDvdCopyRunner({
           return;
         }
         cancellationRequested = true;
-        clearTimeout(stallTimeout);
         clearTimeout(probeAuthorizationTimeout);
         child.stderr.destroy();
         child.stdio[4].destroy();
@@ -598,14 +583,6 @@ export function createNodeDvdCopyRunner({
           // continues to protect the live output path.
           child.unref();
         }
-      };
-      const armStallTimeout = () => {
-        clearTimeout(stallTimeout);
-        stallTimeout = setTimeout(() => {
-          rejectOperation(new Error("DVD archive copy stalled"));
-          cancel();
-        }, stallTimeoutMs);
-        stallTimeout.unref();
       };
       const authorizationReadyTimeout = setTimeout(() => {
         if (!authorizationSettled) {
@@ -648,7 +625,6 @@ export function createNodeDvdCopyRunner({
           authorizationSettled = true;
           clearTimeout(startAuthorizationTimeout);
           child.stdio[5].end(continuationProtocol.authorizationPayload);
-          armStallTimeout();
         };
         const rejectAuthorization = (error: unknown) => {
           if (authorizationSettled) {
@@ -708,7 +684,6 @@ export function createNodeDvdCopyRunner({
           }
           probeAuthorizationPending = false;
           clearTimeout(probeAuthorizationTimeout);
-          armStallTimeout();
         };
         try {
           probeAuthorization.write("1", completeProbeAuthorization);
@@ -725,7 +700,6 @@ export function createNodeDvdCopyRunner({
           return;
         }
         probeAuthorizationPending = true;
-        clearTimeout(stallTimeout);
         probeAuthorizationTimeout = setTimeout(() => {
           rejectProbeAuthorization(
             new Error("DVD boundary probe authorization timed out"),
@@ -844,10 +818,6 @@ export function createNodeDvdCopyRunner({
           const match = /^\s*(\d+)\s+bytes\b/.exec(segment);
           const bytes = match ? Number(match[1]) : Number.NaN;
           if (Number.isSafeInteger(bytes) && bytes >= 0) {
-            if (bytes > highestCopiedBytes) {
-              highestCopiedBytes = bytes;
-              armStallTimeout();
-            }
             request.onBytesCopied(bytes);
           } else {
             appendDiagnostic(segment);
@@ -878,7 +848,6 @@ export function createNodeDvdCopyRunner({
       child.once("close", (code, signal) => {
         clearTimeout(authorizationReadyTimeout);
         clearTimeout(startAuthorizationTimeout);
-        clearTimeout(stallTimeout);
         clearTimeout(probeAuthorizationTimeout);
         confirmClosed();
         if (cancellationRequested) {
@@ -992,8 +961,6 @@ export function createNodeDvdCopyRunner({
         { ...request, resultKind: "recovery" },
         {
           signal: request.signal,
-          timeoutError: "DVD archive copy timed out",
-          timeoutMs,
         },
       ) as Promise<DvdRecoveryResult>;
     },
@@ -1009,8 +976,6 @@ export function createNodeDvdCopyRunner({
         { ...request, resultKind: "initial_copy" },
         {
           signal: request.signal,
-          timeoutError: "DVD initial copy timed out",
-          timeoutMs,
         },
       ) as Promise<DvdInitialCopyResult>;
     },
