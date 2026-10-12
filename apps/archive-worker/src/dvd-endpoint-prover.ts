@@ -10,7 +10,6 @@ import type { DvdCopyRunner } from "./dvd-archiver.js";
 import { requireSafeOpticalDevicePath } from "./optical-media-generation.js";
 
 const ENDPOINT_PROOF_PREFIX = "rip-dvd-endpoint-proof ";
-const ENDPOINT_PROOF_TIMEOUT_MS = 5 * 60_000;
 const MAX_ENDPOINT_OUTPUT_BYTES = 65_536;
 
 export interface DvdNormalEndpointProof {
@@ -175,10 +174,8 @@ function runEndpointProofProcess({
   firstExcludedLba,
   signal,
   spawnProcess,
-  timeoutMs,
 }: DvdEndpointProofRequest & {
   spawnProcess: SpawnDvdEndpointProcess;
-  timeoutMs: number;
 }): Promise<DvdNormalEndpointProof> {
   const child = spawnProcess(
     "rip-dvd-dvdcss-reader",
@@ -217,10 +214,6 @@ function runEndpointProofProcess({
         child.kill("SIGKILL");
       }
     };
-    const timeout = setTimeout(() => {
-      rejectAfterClose(new Error("DVD endpoint proof timed out"));
-    }, timeoutMs);
-    timeout.unref();
     const onAbort = () => {
       try {
         signal.throwIfAborted();
@@ -294,7 +287,6 @@ function runEndpointProofProcess({
     });
     child.once("error", rejectAfterClose);
     child.once("close", (code, processSignal) => {
-      clearTimeout(timeout);
       signal.removeEventListener("abort", onAbort);
       authorizationReady?.destroy();
       authorizationGrant?.destroy();
@@ -349,15 +341,10 @@ function runEndpointProofProcess({
 export function createNodeDvdEndpointProver({
   copyRunner,
   spawnProcess = spawn as unknown as SpawnDvdEndpointProcess,
-  timeoutMs = ENDPOINT_PROOF_TIMEOUT_MS,
 }: {
   copyRunner: Pick<DvdCopyRunner, "withDeviceInactive">;
   spawnProcess?: SpawnDvdEndpointProcess;
-  timeoutMs?: number;
 }): DvdEndpointProver {
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
-    throw new Error("DVD endpoint proof timeout is invalid");
-  }
   return {
     async prove(request) {
       request.signal.throwIfAborted();
@@ -374,7 +361,6 @@ export function createNodeDvdEndpointProver({
           ...request,
           devicePath,
           spawnProcess,
-          timeoutMs,
         });
       });
       if (proof === undefined) {

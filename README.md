@@ -446,13 +446,24 @@ Docker Compose defaults. Compose fixes the database and library paths to
 `/data/rip-dvd.sqlite`, `/media/movies`, and `/media/originals` so they always
 remain inside the declared persistent mounts. Direct, non-Compose launches can
 still set those three `RIP_DVD_*_PATH` variables through the shared loader.
-Disc archive copies have no elapsed-time or no-progress cutoff. A slow copy
-continues until it completes, fails, or the operator cancels its Archive Request
-through the web interface or `rip-dvd cancel-archive-request`. Worker shutdown
-and loss of claim or source authority also stop the copy. Cancellation keeps
-the drive and output protected until the native reader exits. The retired
-`RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS` setting is ignored in existing environments.
-Inspection, authorization, and archive-validation helpers retain their bounds.
+DVD archiving has no elapsed-time or inactivity cutoff. Initial copy, rescue
+and recovery, helper authorization, and archive validation keep running until
+they complete, encounter an actual failure, or the operator cancels the Archive
+Request. A silent or slow archive continues to occupy its drive and worker slot.
+Cancel it from the dashboard or with
+`rip-dvd cancel-archive-request --key <key> --archive-request-id <id>`.
+Cancellation stops the helper and retains
+request-owned resumable rescue state. The request remains cancellation requested
+until the worker confirms the helper has closed, so a blocked kernel read cannot
+release the drive or partial image for another writer prematurely.
+
+`RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS` has been removed. Existing environment values
+are ignored. Small drive identity, media-generation, capacity, and inspection
+probes still have deadlines, as do lock acquisition and separate read-only
+Archive Audits. Per-command SCSI timeouts still report actual I/O failures.
+Worker leases still renew throughout an archive, including periods without
+progress. CLI `wait --timeout-ms` limits only the wait for a response and does
+not stop the archive.
 
 ### Server-local JSON commands
 

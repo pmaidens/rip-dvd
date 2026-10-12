@@ -29,6 +29,15 @@ describe("normalizeHttpOrigin", () => {
 });
 
 describe("loadConfig", () => {
+  it.each(["1", "1800000", "0", "invalid"])(
+    "ignores a retired archive stall setting (%s)",
+    (value) => {
+      expect(loadConfig({
+        ...requiredEnvironment,
+        RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS: value,
+      })).toEqual(loadConfig(requiredEnvironment));
+    },
+  );
   it("loads required paths and applies worker defaults", () => {
     expect(loadConfig(requiredEnvironment)).toEqual({
       databasePath: "/data/rip-dvd.sqlite",

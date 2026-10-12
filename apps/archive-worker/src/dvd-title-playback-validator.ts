@@ -6,7 +6,6 @@ import {
 } from "./optical-drive-command-runner.js";
 
 const PLAYBACK_OUTPUT_LIMIT_BYTES = 1_048_576;
-const PLAYBACK_TIMEOUT_MS = 12 * 60 * 60_000;
 const MAX_PLAYBACK_FRAME_COUNT = 1_000_000_000;
 
 export interface DvdTitlePlaybackRequest {
@@ -176,7 +175,6 @@ export function createNodeDvdTitlePlaybackValidator({
           {
             maxBufferBytes: PLAYBACK_OUTPUT_LIMIT_BYTES,
             signal,
-            timeoutMs: PLAYBACK_TIMEOUT_MS,
           },
         );
       } catch (error) {

@@ -2593,6 +2593,112 @@ describe("DVD archive publication", () => {
     },
   );
 
+  it.each([
+    ["copy", "progressing"],
+    ["copy", "stalled"],
+    ["copyInitial", "progressing"],
+    ["copyInitial", "stalled"],
+  ] as const)("keeps %s %s past former deadlines until cancelled", async (operation, progress) => {
+    vi.useFakeTimers();
+    const child = createMockDvdCopyChild();
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => child),
+    });
+    const outputPath = join(
+      createOriginalsLibrary(),
+      ".stalled.iso.rip-dvd-partial",
+    );
+    let outcome: unknown;
+    const controller = new AbortController();
+    void runner[operation]({
+      devicePath: "/dev/zero",
+      outputPath,
+      sizeBytes: 1_000,
+      signal: controller.signal,
+      onBytesCopied: () => undefined,
+    }).then(
+      () => {
+        outcome = "resolved";
+      },
+      (error: unknown) => {
+        outcome = error;
+      },
+    );
+    child.stdio[4].emit(
+      "data",
+      Buffer.from("rip-dvd-copy-authorization-ready\n"),
+    );
+
+    // Progress stays within the former stall window while crossing the
+    // former total deadline. A stalled read crosses both without output.
+    for (let step = 1; step <= 78; step += 1) {
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      if (progress === "progressing") {
+        child.stderr.emit("data", Buffer.from(`${step} bytes\n`));
+      }
+    }
+    expect(outcome).toBeUndefined();
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(runner.isActive("/dev/zero", outputPath)).toBe(true);
+
+    const cancellation = new Error("Archive Request cancellation requested");
+    controller.abort(cancellation);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(outcome).toBe(cancellation);
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(child.stderr.destroy).toHaveBeenCalledOnce();
+    expect(child.unref).toHaveBeenCalledOnce();
+    expect(runner.isActive("/dev/zero", outputPath)).toBe(true);
+    child.emit("close", null, "SIGKILL");
+    await runner.waitForInactive("/dev/zero", outputPath);
+    expect(runner.isActive("/dev/zero", outputPath)).toBe(false);
+  });
+
+  it.each(["readiness", "start", "boundary"] as const)(
+    "keeps helper %s authorization pending until operator cancellation",
+    async (stage) => {
+      vi.useFakeTimers();
+      const child = createMockDvdCopyChild();
+      const controller = new AbortController();
+      const runner = createNodeDvdCopyRunner({
+        requireInactive: () => undefined,
+        spawnProcess: () => child,
+      });
+      const pending = () => new Promise<void>(() => {});
+      const outputPath = join(createOriginalsLibrary(), ".authorization.partial");
+      let outcome: unknown;
+      const completion = runner.copy({
+        authorizeStart: stage === "start" ? pending : undefined,
+        authorizeProbe: pending,
+        devicePath: "/dev/zero",
+        outputPath,
+        sizeBytes: 2_048,
+        signal: controller.signal,
+        onBytesCopied() {},
+      });
+      void completion.catch((error: unknown) => { outcome = error; });
+      if (stage !== "readiness") {
+        child.stdio[4].emit("data", Buffer.from("rip-dvd-copy-authorization-ready\n"));
+      }
+      if (stage === "boundary") {
+        child.stdio[6].emit("data", Buffer.from("rip-dvd-boundary-probe-authorization-ready\n"));
+      }
+      await vi.advanceTimersByTimeAsync(13 * 60 * 60_000);
+      expect(outcome).toBeUndefined();
+      expect(child.kill).not.toHaveBeenCalled();
+
+      const cancellation = new Error("Archive Request cancellation requested");
+      controller.abort(cancellation);
+      await expect(completion).rejects.toBe(cancellation);
+      expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+      expect(child.stdio[5].destroy).toHaveBeenCalledOnce();
+      expect(child.stdio[7].destroy).toHaveBeenCalledOnce();
+      child.emit("close", null, "SIGKILL");
+      await runner.waitForInactive("/dev/zero", outputPath);
+    },
+  );
+
   it("contains progress callback failures and waits for the reader to close", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
@@ -3004,7 +3110,7 @@ describe("DVD archive publication", () => {
     ]);
     const baseOptions = {
       archiveRequestId,
-      devicePath: "/dev/sr0",
+      devicePath: "/dev/zero",
       fingerprint: `dvdmeta-sha256:${digest}`,
       originalsLibraryPath,
       sizeBytes,
@@ -3048,11 +3154,61 @@ describe("DVD archive publication", () => {
       waitForInactive: vi.fn(async () => undefined),
     };
 
-    await expect(preserveDvdArchive({
-      ...baseOptions,
-      runner: interruptedRunner,
-      signal: new AbortController().signal,
-    })).rejects.toThrow(failure);
+    if (
+      failure === "Archive Request cancellation requested" &&
+      supportsLinuxWriterOwnership
+    ) {
+      vi.useFakeTimers();
+      const child = createMockDvdCopyChild();
+      const controller = new AbortController();
+      let started!: () => void;
+      const helperStarted = new Promise<void>((resolve) => { started = resolve; });
+      const nativeRunner = createNodeDvdCopyRunner({
+        requireInactive: () => undefined,
+        spawnLockProcess: () => {
+          const lockChild = Object.assign(new EventEmitter(), {
+            stderr: Object.assign(new EventEmitter(), { destroy: vi.fn() }),
+            kill: vi.fn(() => true),
+            unref: vi.fn(),
+          });
+          queueMicrotask(() => lockChild.emit("close", 0, null));
+          return lockChild;
+        },
+        spawnProcess: () => {
+          started();
+          return child;
+        },
+      });
+      const cancelled = preserveDvdArchive({
+        ...baseOptions,
+        runner: nativeRunner,
+        signal: controller.signal,
+      });
+      let outcome: unknown;
+      void cancelled.catch((error: unknown) => { outcome = error; });
+      await helperStarted;
+      child.stdio[4].emit("data", Buffer.from("rip-dvd-copy-authorization-ready\n"));
+      const improvedImage = Buffer.from(readFileSync(rescueImagePath));
+      improvedImage.fill(4, 2_048);
+      writeFileSync(rescueImagePath, improvedImage);
+      await vi.advanceTimersByTimeAsync(13 * 60 * 60_000);
+      expect(outcome).toBeUndefined();
+      expect(child.kill).not.toHaveBeenCalled();
+      controller.abort(new Error(failure));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+      expect(outcome).toBeUndefined();
+      expect(readFileSync(rescueImagePath)).toEqual(improvedImage);
+      child.emit("close", null, "SIGKILL");
+      await expect(cancelled).rejects.toThrow(failure);
+      vi.useRealTimers();
+    } else {
+      await expect(preserveDvdArchive({
+        ...baseOptions,
+        runner: interruptedRunner,
+        signal: new AbortController().signal,
+      })).rejects.toThrow(failure);
+    }
 
     expect(existsSync(rescueImagePath)).toBe(true);
     const completionRunner: DvdCopyRunner = {
@@ -6250,7 +6406,7 @@ describe("DVD archive publication", () => {
           active = true;
           partialPath = outputPath;
           writeFileSync(outputPath, "live partial");
-          throw new Error("DVD archive copy timed out");
+          throw new Error("DVD archive helper failed");
         }
         writeFileSync(outputPath, content);
         return createCleanDvdRecoveryResult(sizeBytes);
@@ -6271,7 +6427,7 @@ describe("DVD archive publication", () => {
     };
 
     await expect(preserveDvdArchive(options)).rejects.toThrow(
-      "DVD archive copy timed out",
+      "DVD archive helper failed",
     );
     expect(readFileSync(partialPath!, "utf8")).toBe("live partial");
     expect(existsSync(`${partialPath}.failed`)).toBe(false);

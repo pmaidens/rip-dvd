@@ -133,7 +133,7 @@ describe("retained DVD completeness proof process", () => {
     expect(snapshot.dispose).toHaveBeenCalledTimes(1);
   });
 
-  it("runs both validators against one exact retained-prefix snapshot", async () => {
+  it("copies a retained-prefix snapshot beyond the former time bound and runs both validators", async () => {
     const directory = mkdtempSync(join(tmpdir(), "dvd-proof-test-"));
     const imagePath = join(directory, "retained.partial");
     const candidateBoundaryLba = 600;
@@ -169,6 +169,11 @@ describe("retained DVD completeness proof process", () => {
           : lsdvdOutput,
       };
     });
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => {
+      now += 6 * 60_000;
+      return now;
+    });
     try {
       const prover = createNodeDvdCompletenessProver({ runner: { run } });
 
@@ -182,6 +187,7 @@ describe("retained DVD completeness proof process", () => {
       expect(snapshotPath).toBeDefined();
       expect(existsSync(snapshotPath!)).toBe(false);
     } finally {
+      clock.mockRestore();
       rmSync(directory, { force: true, recursive: true });
     }
   });

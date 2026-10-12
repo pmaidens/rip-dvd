@@ -153,6 +153,7 @@ export function createBoundedSingleFlightCoordinator<Request, Result>({
           }
         };
         signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
         removeAbortListener = () => signal.removeEventListener("abort", onAbort);
       });
       let timeout: NodeJS.Timeout | undefined;

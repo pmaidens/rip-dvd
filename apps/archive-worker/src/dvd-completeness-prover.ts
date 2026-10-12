@@ -46,7 +46,6 @@ type DvdCandidateSnapshotFactory = (request: {
 }) => Promise<DvdCandidateSnapshot>;
 
 const SNAPSHOT_BUFFER_BYTES = 8 * 1_024 * 1_024;
-const SNAPSHOT_TIMEOUT_MS = 5 * 60_000;
 
 function sameFileMetadata(
   left: BigIntStats,
@@ -85,14 +84,10 @@ const createDvdCandidateSnapshot: DvdCandidateSnapshotFactory = async ({
         0o600,
       );
       try {
-        const deadline = Date.now() + SNAPSHOT_TIMEOUT_MS;
         const buffer = Buffer.allocUnsafe(SNAPSHOT_BUFFER_BYTES);
         let copied = 0;
         while (copied < candidateByteCount) {
           signal.throwIfAborted();
-          if (Date.now() > deadline) {
-            throw new Error("DVD completeness snapshot exceeded its time bound");
-          }
           const requestedBytes = Math.min(
             buffer.byteLength,
             candidateByteCount - copied,
@@ -108,6 +103,7 @@ const createDvdCandidateSnapshot: DvdCandidateSnapshotFactory = async ({
           }
           let written = 0;
           while (written < bytesRead) {
+            signal.throwIfAborted();
             const result = await destination.write(
               buffer,
               written,
@@ -121,6 +117,7 @@ const createDvdCandidateSnapshot: DvdCandidateSnapshotFactory = async ({
           }
           copied += bytesRead;
         }
+        signal.throwIfAborted();
         await destination.sync();
       } finally {
         await destination.close();

@@ -143,7 +143,6 @@ describe("DVD normal endpoint proof", () => {
     const prover = createNodeDvdEndpointProver({
       copyRunner: { withDeviceInactive },
       spawnProcess: vi.fn(() => child),
-      timeoutMs: 1_000,
     });
 
     await expect(prover.prove({
@@ -180,7 +179,6 @@ describe("DVD normal endpoint proof", () => {
         withDeviceInactive: async (_devicePath, operation) => operation(),
       },
       spawnProcess: () => child,
-      timeoutMs: 1_000,
     });
 
     await expect(prover.prove({
@@ -206,7 +204,6 @@ describe("DVD normal endpoint proof", () => {
         withDeviceInactive: async (_devicePath, operation) => operation(),
       },
       spawnProcess: () => child,
-      timeoutMs: 1_000,
     });
 
     await expect(prover.prove({
@@ -246,7 +243,6 @@ describe("DVD normal endpoint proof", () => {
         withDeviceInactive: async (_devicePath, operation) => operation(),
       },
       spawnProcess: () => child,
-      timeoutMs: 1_000,
     });
 
     await expect(prover.prove({
@@ -267,7 +263,6 @@ describe("DVD normal endpoint proof", () => {
         withDeviceInactive: async (_devicePath, operation) => operation(),
       },
       spawnProcess: () => child,
-      timeoutMs: 1_000,
     });
 
     await expect(prover.prove({
@@ -285,7 +280,6 @@ describe("DVD normal endpoint proof", () => {
         withDeviceInactive: async (_devicePath, operation) => operation(),
       },
       spawnProcess: () => child,
-      timeoutMs: 1_000,
     });
 
     await expect(prover.prove({
@@ -306,7 +300,6 @@ describe("DVD normal endpoint proof", () => {
         withDeviceInactive: async (_devicePath, operation) => operation(),
       },
       spawnProcess: () => child,
-      timeoutMs: 1_000,
     });
 
     const rejection = prover.prove({
@@ -326,7 +319,6 @@ describe("DVD normal endpoint proof", () => {
         withDeviceInactive: async (_devicePath, operation) => operation(),
       },
       spawnProcess: () => child,
-      timeoutMs: 1_000,
     });
 
     await expect(prover.prove({
@@ -340,7 +332,7 @@ describe("DVD normal endpoint proof", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGKILL");
   });
 
-  it("fails closed when the endpoint helper times out", async () => {
+  it("keeps a silent endpoint helper running until operator cancellation", async () => {
     vi.useFakeTimers();
     const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
     const ready = Object.assign(new EventEmitter(), { destroy: vi.fn() });
@@ -366,20 +358,26 @@ describe("DVD normal endpoint proof", () => {
         withDeviceInactive: async (_devicePath, operation) => operation(),
       },
       spawnProcess: () => child,
-      timeoutMs: 10,
     });
 
     try {
+      const controller = new AbortController();
+      let settled = false;
       const proof = prover.prove({
         authorizeProbe() {},
         devicePath: "/dev/sr0",
         firstExcludedLba: 4,
-        signal: new AbortController().signal,
+        signal: controller.signal,
       });
+      void proof.then(() => { settled = true; }, () => { settled = true; });
+      await vi.advanceTimersByTimeAsync(13 * 60 * 60_000);
+      expect(settled).toBe(false);
+      expect(child.kill).not.toHaveBeenCalled();
       const rejected = expect(proof).rejects.toThrow(
-        "DVD endpoint proof timed out",
+        "Archive Request cancellation requested",
       );
-      await vi.advanceTimersByTimeAsync(10);
+      controller.abort(new Error("Archive Request cancellation requested"));
+      await vi.advanceTimersByTimeAsync(0);
       await rejected;
       expect(child.kill).toHaveBeenCalledWith("SIGKILL");
     } finally {
