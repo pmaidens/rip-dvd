@@ -412,7 +412,6 @@ describe("Linux Optical Drive hardware boundary", () => {
       const cancelled = runner.run(process.execPath, [scriptPath], {
         maxBufferBytes: 1_024,
         signal: controller.signal,
-        timeoutMs: 5_000,
       });
       await vi.waitFor(async () => {
         const pids = (await readFile(pidPath, "utf8")).trim().split("\n");
@@ -1706,7 +1705,6 @@ describe("Linux Optical Drive hardware boundary", () => {
     await execFileAsync("mkfifo", [devicePath]);
     const controller = new AbortController();
     const reader = createNodeDiscContentReader({
-      hashTimeoutMs: 5_000,
       probeLauncher: createNodeFileDiscContentProbeLauncher(),
     });
     let shutdownWatchdog: NodeJS.Timeout | undefined;
@@ -1758,7 +1756,6 @@ describe("Linux Optical Drive hardware boundary", () => {
       }),
     };
     const reader = createNodeDiscContentReader({
-      hashTimeoutMs: 50,
       maxActiveHashes: 2,
       probeLauncher: launcher,
     });

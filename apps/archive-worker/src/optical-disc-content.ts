@@ -12,7 +12,6 @@ import {
 import { requireDvdContentSize } from "./dvd-content-policy.js";
 import { optionalBoundedText } from "./bounded-text.js";
 
-const DEFAULT_CONTENT_HASH_TIMEOUT_MS = 8 * 60 * 60_000;
 const DEFAULT_MAX_ACTIVE_HASHES = 32;
 const MAX_CONTENT_HASH_OUTPUT_BYTES = 128;
 const MAX_CONTENT_HASH_DIAGNOSTIC_BYTES = 65_536;
@@ -76,7 +75,6 @@ interface NodeFileDiscContentProbeLauncherOptions {
 }
 
 interface NodeDiscContentReaderOptions {
-  hashTimeoutMs?: number;
   maxActiveHashes?: number;
   probeLauncher?: DiscContentProbeLauncher;
 }
@@ -314,13 +312,8 @@ export function createNodeDiscContentReader(
 ): DiscContentReader {
   const probeLauncher =
     options.probeLauncher ?? nodeDiscContentProbeLauncher;
-  const hashTimeoutMs =
-    options.hashTimeoutMs ?? DEFAULT_CONTENT_HASH_TIMEOUT_MS;
   const maxActiveHashes =
     options.maxActiveHashes ?? DEFAULT_MAX_ACTIVE_HASHES;
-  if (!Number.isSafeInteger(hashTimeoutMs) || hashTimeoutMs <= 0) {
-    throw new Error("DVD content hashing timeout is invalid");
-  }
   const activeHashes = createBoundedSingleFlightCoordinator({
     maxActiveProcesses: maxActiveHashes,
     invalidCapacityError: "DVD content hashing capacity is invalid",
@@ -347,8 +340,6 @@ export function createNodeDiscContentReader(
         { devicePath, sizeBytes: safeSize, onBytesHashed },
         {
           signal,
-          timeoutError: "DVD content hashing timed out",
-          timeoutMs: hashTimeoutMs,
         },
       );
       if (!isDvdContentId(contentId)) {

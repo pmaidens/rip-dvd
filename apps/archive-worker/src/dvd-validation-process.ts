@@ -4,9 +4,7 @@ import { decodeLsdvdNavigationMetadata } from "./dvd-metadata.js";
 import type { CommandRunner } from "./optical-drive-command-runner.js";
 
 const CLASSIFIER_OUTPUT_LIMIT_BYTES = 4_096;
-const CLASSIFIER_TIMEOUT_MS = 5 * 60_000;
 const NAVIGATION_OUTPUT_LIMIT_BYTES = 1_048_576;
-const NAVIGATION_TIMEOUT_MS = 5 * 60_000;
 
 export const DVD_LAYOUT_CLASSIFIER_SCRIPT_PATH = fileURLToPath(
   new URL("./dvd-layout-classifier-cli.js", import.meta.url),
@@ -33,7 +31,6 @@ export async function runDvdLayoutClassifier({
       {
         maxBufferBytes: CLASSIFIER_OUTPUT_LIMIT_BYTES,
         signal,
-        timeoutMs: CLASSIFIER_TIMEOUT_MS,
       },
     );
   } catch (error) {
@@ -64,7 +61,6 @@ export async function readDvdNavigation({
       {
         maxBufferBytes: NAVIGATION_OUTPUT_LIMIT_BYTES,
         signal,
-        timeoutMs: NAVIGATION_TIMEOUT_MS,
       },
     );
   } catch (error) {

@@ -5877,7 +5877,8 @@ describe("archive worker polling", () => {
     expect(existsSync(rescuePaths.mapPath)).toBe(false);
   });
 
-  it("does not finalize cancellation until the copy helper is closed", async () => {
+  // Allow for thousands of real SQLite renewals and polls in the simulation.
+  it("renews a silent archive beyond former deadlines and finalizes cancellation only after helper closure", async () => {
     vi.useFakeTimers();
     const access = openTestDataAccess();
     const originalsLibraryPath = mkdtempSync(join(tmpdir(), "rip-dvd-cancel-"));
@@ -5953,6 +5954,13 @@ describe("archive worker polling", () => {
     });
     await started;
 
+    // These heartbeat and cancellation-poll callbacks are synchronous. Avoid
+    // an event-loop wait for each simulated second of the long archive.
+    vi.advanceTimersByTime(13 * 60 * 60_000);
+    expect(access.archiveJobs.list(["running"])).toHaveLength(1);
+    expect(access.archiveRequests.find(request.id)?.status).toBe("running");
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(copyRunner.waitForInactive).not.toHaveBeenCalled();
     expect(access.archiveRequests.cancel(request.id).status).toBe("cancellation_requested");
     await vi.advanceTimersByTimeAsync(1_000);
 
@@ -5980,7 +5988,7 @@ describe("archive worker polling", () => {
       workerKind: "archive",
       resolvedLimit: 20,
     })).toEqual([]);
-  });
+  }, 15_000);
 
   it("recovers an expired cancellation only after archive work is proven inactive", async () => {
     vi.useFakeTimers();

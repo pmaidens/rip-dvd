@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, expect, it, vi } from "vitest";
 import type { CatalogMetadataLookup } from "@rip-dvd/application";
 import {
+  ARCHIVE_JOB_LEASE_DURATION_MS,
   createCleanReadArchiveIntegrityEvidence,
   type DataAccess,
   encodeOutputFilesystemIdentity,
@@ -2918,7 +2919,17 @@ it("retries unsuccessful Archive Requests and failed Disc Inspections while reta
   });
   const resumedAccess = current.openAccess();
   const secondClaim = resumedAccess.archiveJobs.startForInspection(completedInspection.id, "synthetic-worker")!;
+  vi.useFakeTimers({ toFake: ["Date"] });
+  const stepMs = ARCHIVE_JOB_LEASE_DURATION_MS / 2;
+  for (let elapsed = 0; elapsed < 13 * 60 * 60_000; elapsed += stepMs) {
+    vi.setSystemTime(Date.now() + stepMs);
+    resumedAccess.archiveJobs.renewClaim(secondClaim);
+  }
   resumedAccess.close();
+  expect((await current.run(["inspect", "archive-requests", request.id])).result)
+    .toMatchObject({ item: { status: "running", archiveJobs: [
+      { id: firstClaim.id, status: "failed" }, { id: secondClaim.id, status: "running" },
+    ] } });
   expect(secondClaim.archiveRequestId).toBe(request.id);
   expect(secondClaim.attemptOrdinal).toBe(2);
   expect((await current.run(args)).result).toEqual(retried.result);
@@ -2938,6 +2949,7 @@ it("retries unsuccessful Archive Requests and failed Disc Inspections while reta
     .toMatchObject({ item: { status: "cancelled", archiveJobs: [
       { id: firstClaim.id, status: "failed" }, { id: secondClaim.id, status: "aborted" },
     ] } });
+  vi.useRealTimers();
 
   const failedAccess = current.openAccess();
   const failedStart = beginSettledDiscInspectionForTest(failedAccess, {

@@ -23,7 +23,8 @@ export type CommandResult = CommandOutput &
 export interface CommandRunnerOptions {
   maxBufferBytes: number;
   signal: AbortSignal;
-  timeoutMs: number;
+  /** Ancillary probes set a deadline; archive validation omits it. */
+  timeoutMs?: number;
 }
 
 export interface CommandRunner {
@@ -72,8 +73,9 @@ export function createNodeCommandRunner(
   return {
     async run(executable, arguments_, commandOptions) {
       if (
-        !Number.isSafeInteger(commandOptions.timeoutMs) ||
-        commandOptions.timeoutMs <= 0
+        commandOptions.timeoutMs !== undefined &&
+        (!Number.isSafeInteger(commandOptions.timeoutMs) ||
+          commandOptions.timeoutMs <= 0)
       ) {
         throw new Error("device command timeout is invalid");
       }
@@ -91,11 +93,13 @@ export function createNodeCommandRunner(
           arguments_,
           maxOutputBytes: commandOptions.maxBufferBytes,
         },
-        {
-          signal: commandOptions.signal,
-          timeoutError: "device command timed out",
-          timeoutMs: commandOptions.timeoutMs,
-        },
+        commandOptions.timeoutMs === undefined
+          ? { signal: commandOptions.signal }
+          : {
+              signal: commandOptions.signal,
+              timeoutError: "device command timed out",
+              timeoutMs: commandOptions.timeoutMs,
+            },
       );
       if (completion.exitCode === null) {
         if (completion.signal === null) {
