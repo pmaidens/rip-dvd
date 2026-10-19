@@ -70,6 +70,7 @@ import {
   dvdArchiveEvidenceHeaders,
   dvdArchiveEvidenceManifests,
   dvdArchiveRecoveryReads,
+  dvdRecoveryStoragePreflights,
   encodeJobFailureReports,
   encodeJobs,
   encodingProfiles,
@@ -125,6 +126,11 @@ import {
   DvdRecoveryEvidenceAdmissionClosedError,
   DvdRecoveryEvidenceEncodingUnavailableError,
 } from "../dvd-recovery-evidence.js";
+import {
+  assertDvdRecoveryStoragePreflightInput,
+  DVD_RECOVERY_STORAGE_PREFLIGHT_VERSION,
+  type DvdRecoveryStoragePreflight,
+} from "../dvd-recovery-storage-preflight.js";
 import { encodingProfileQueueBlockingReasons } from "../encoding-profile-eligibility.js";
 import {
   archiveBoundaryEvidenceFromRecord,
@@ -6337,10 +6343,55 @@ export function createDataAccessInternal(
     });
   }
 
+  function readCurrentDvdRecoveryStoragePreflight():
+    DvdRecoveryStoragePreflight | null {
+    const row = database
+      .select()
+      .from(dvdRecoveryStoragePreflights)
+      .where(eq(dvdRecoveryStoragePreflights.scope, "originals_library"))
+      .get();
+    if (row === undefined) return null;
+    const preflight: DvdRecoveryStoragePreflight = {
+      contractVersion: row.contractVersion as
+        typeof DVD_RECOVERY_STORAGE_PREFLIGHT_VERSION,
+      status: row.status,
+      reasonCode: row.reasonCode,
+      facts: row.facts,
+      checkedAt: row.checkedAt,
+    };
+    assertDvdRecoveryStoragePreflightInput(preflight);
+    return preflight;
+  }
+
   const access: LegacySidecarDataAccess = {
     notifications: createNotificationAccess(database, now),
+    dvdRecoveryStorage: {
+      readCurrent: readCurrentDvdRecoveryStoragePreflight,
+      record(input) {
+        assertDvdRecoveryStoragePreflightInput(input);
+        const checkedAt = now();
+        database.insert(dvdRecoveryStoragePreflights).values({
+          scope: "originals_library",
+          ...input,
+          checkedAt,
+        }).onConflictDoUpdate({
+          target: dvdRecoveryStoragePreflights.scope,
+          set: { ...input, checkedAt },
+        }).run();
+        const recorded = readCurrentDvdRecoveryStoragePreflight();
+        if (recorded === null) {
+          throw new DomainInvariantError(
+            "DVD recovery storage preflight was not recorded",
+          );
+        }
+        return recorded;
+      },
+    },
     readConsistentSnapshot(read) {
       const snapshotAccess: ConsistentReadAccess = {
+        dvdRecoveryStorage: {
+          readCurrent: readCurrentDvdRecoveryStoragePreflight,
+        },
         catalog: {
           listOpticalDrives: (options) =>
             access.catalog.listOpticalDrives(options),

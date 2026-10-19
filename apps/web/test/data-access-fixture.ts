@@ -15,6 +15,7 @@ import {
 import { afterEach } from "vitest";
 
 type SnapshotOverrides = {
+  dvdRecoveryStorage?: Partial<ConsistentReadAccess["dvdRecoveryStorage"]>;
   catalog?: Partial<ConsistentReadAccess["catalog"]>;
   encodingProfiles?: Partial<ConsistentReadAccess["encodingProfiles"]>;
   discInspections?: Partial<ConsistentReadAccess["discInspections"]>;
@@ -64,6 +65,10 @@ export function withSnapshotOverrides(
     readConsistentSnapshot(read) {
       return access.readConsistentSnapshot((snapshotAccess) =>
         read({
+          dvdRecoveryStorage: {
+            ...snapshotAccess.dvdRecoveryStorage,
+            ...overrides.dvdRecoveryStorage,
+          },
           catalog: {
             ...snapshotAccess.catalog,
             ...overrides.catalog,

@@ -646,6 +646,19 @@ server:
 4. Keep the database on the Compose-managed `rip-dvd-data` local volume. SQLite
    is not supported on NFS, SMB, or another network filesystem.
 
+The Archive Worker records a versioned storage preflight for DVD Archive
+Recovery. Its `linux-rwf-atomic-v1` provider requires per-file kernel atomic-write
+support, an aligned protection unit that fits in the bounded undo journal,
+durable journal and image synchronization, atomic checkpoint replacement,
+directory synchronization, and cross-process writer exclusion. Filesystem type
+alone cannot qualify storage. Unproved configurations report
+`STORAGE_UNSUPPORTED`, without a claim that the storage is unsafe.
+Network storage stays unsupported until a storage provider
+demonstrates cross-host exclusion and safe disconnect and reconnect behavior.
+Run `rip-dvd readiness` to inspect the retained path-free result and any failed
+prerequisite. New-format DVD admission remains closed until the full recovery
+and encoding rollout is complete.
+
 The runtime mount and hardware boundary is deliberately narrow:
 
 | Service | SQLite data | Media Library | Original Disc Archive | Optical device |

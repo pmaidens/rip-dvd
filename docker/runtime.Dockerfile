@@ -40,6 +40,18 @@ RUN gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
     --output /tmp/test-handbrake-dvd-label \
   && LD_PRELOAD=/usr/local/lib/rip-dvd-handbrake-dvd-label.so /tmp/test-handbrake-dvd-label
 
+FROM build-base AS recovery-atomic-probe-builder
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends gcc libc6-dev \
+  && rm -rf /var/lib/apt/lists/*
+COPY docker/recovery-atomic-probe.c docker/test-recovery-atomic-probe.c /tmp/
+RUN gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
+    -Wall -Wextra -Werror -Wformat=2 /tmp/recovery-atomic-probe.c \
+    --output /usr/local/bin/rip-dvd-recovery-atomic-probe \
+  && gcc -std=c17 -O2 -Wall -Wextra -Werror /tmp/test-recovery-atomic-probe.c \
+    --output /tmp/test-recovery-atomic-probe \
+  && /tmp/test-recovery-atomic-probe
+
 FROM build-base AS dvdcss-reader-builder
 ARG LIBDVDCSS_VERSION=1.6.0
 ARG LIBDVDCSS_SHA256=7ea556c846b7bfc32d47b41cae56d1863a6b6d5f706bb162778d6f298490977c
@@ -222,6 +234,7 @@ RUN mkdir --parents /data && chown node:node /data
 COPY --from=worker-runtime-base --chown=node:node /app /app
 
 FROM worker-runtime-base AS archive-worker
+COPY --from=recovery-atomic-probe-builder /usr/local/bin/rip-dvd-recovery-atomic-probe /usr/local/bin/rip-dvd-recovery-atomic-probe
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends handbrake-cli libssl3 lsdvd sg3-utils util-linux \
   && rm -rf /var/lib/apt/lists/* \
@@ -291,6 +304,7 @@ RUN node /tmp/test-handbrake-dvd-label.mjs \
   && touch /tmp/handbrake-dvd-scan-passed
 
 FROM dependencies AS validation
+COPY --from=recovery-atomic-probe-builder /usr/local/bin/rip-dvd-recovery-atomic-probe /usr/local/bin/rip-dvd-recovery-atomic-probe
 COPY --from=handbrake-dvd-scan-test /tmp/handbrake-dvd-scan-passed /tmp/handbrake-dvd-scan-passed
 COPY --from=dvdcss-reader-builder /usr/local/bin/rip-dvd-dvdcss-reader /usr/local/bin/rip-dvd-dvdcss-reader
 COPY --from=dvdcss-reader-builder /tmp/rip-dvd-dvdcss-reader-test /tmp/rip-dvd-dvdcss-reader-test

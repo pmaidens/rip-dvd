@@ -7,6 +7,7 @@ const listArchiveJobs = vi.fn();
 const listEncodeJobs = vi.fn();
 const listVerificationRuns = vi.fn();
 const listArchiveAudits = vi.fn();
+const readDvdRecoveryStoragePreflight = vi.fn();
 const readConsistentSnapshot = vi.fn((read: (access: unknown) => unknown) =>
   read({
     catalog: { listOpticalDrives },
@@ -16,6 +17,7 @@ const readConsistentSnapshot = vi.fn((read: (access: unknown) => unknown) =>
     encodeJobs: { list: listEncodeJobs },
     filesystemVerification: { listActive: listVerificationRuns },
     archiveAudits: { listActive: listArchiveAudits },
+    dvdRecoveryStorage: { readCurrent: readDvdRecoveryStoragePreflight },
   }),
 );
 
@@ -43,6 +45,7 @@ describe("GET /api/deployment-readiness", () => {
     listEncodeJobs.mockReturnValue([]);
     listVerificationRuns.mockReturnValue([]);
     listArchiveAudits.mockReturnValue([]);
+    readDvdRecoveryStoragePreflight.mockReturnValue(null);
   });
 
   it("returns global active work and authoritative optical-drive identities", async () => {
@@ -57,6 +60,23 @@ describe("GET /api/deployment-readiness", () => {
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     await expect(response.json()).resolves.toEqual({
       schemaVersion: 1,
+      dvdRecoveryStorage: {
+        available: false,
+        blockingReasons: [{
+          code: "STORAGE_UNSUPPORTED",
+          message:
+            "The Originals Library storage has not been examined for DVD Archive Recovery.",
+        }],
+        preflight: {
+          contractVersion: "dvd-recovery-storage-preflight-v1",
+          status: "unsupported",
+          reasonCode: "STORAGE_UNSUPPORTED",
+          reason:
+            "The Originals Library storage has not been examined for DVD Archive Recovery.",
+          facts: null,
+          checkedAt: null,
+        },
+      },
       activeWork: [
         {
           kind: "archive_request",

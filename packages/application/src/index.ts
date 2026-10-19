@@ -67,6 +67,7 @@ import {
   inspectEncodeOutput,
   type EncodeOutputMediaProbe,
 } from "./encode-output-inspection.js";
+import { describeDvdRecoveryStorage } from "./dvd-recovery-storage.js";
 
 export class InvalidProfileInputError extends Error {
   constructor(message = "Invalid Encoding Profile input.") {
@@ -245,6 +246,9 @@ function readDeploymentReadiness(access: ConsistentReadAccess) {
 
   return {
     schemaVersion: 1,
+    dvdRecoveryStorage: describeDvdRecoveryStorage(
+      access.dvdRecoveryStorage.readCurrent(),
+    ),
     activeWork: [
       ...inspections,
       ...archiveRequests,
@@ -572,6 +576,7 @@ export function createApplicationOperations(
 }
 
 export { formatVolumeLabel } from "./catalog-label.js";
+export { describeDvdRecoveryStorage } from "./dvd-recovery-storage.js";
 export {
   FILESYSTEM_VERIFICATION_INVENTORY_PAGE_LIMIT,
   readFilesystemVerificationInventory,

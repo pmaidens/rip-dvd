@@ -57,6 +57,11 @@ import {
   ENCODE_JOB_FAILURE_SIGNALS,
   ENCODE_JOB_FAILURE_VALIDATION_CHECKS,
 } from "../encode-job-failure-report.js";
+import {
+  DVD_RECOVERY_STORAGE_PREFLIGHT_STATUSES,
+  DVD_RECOVERY_STORAGE_REASON_CODES,
+  type DvdRecoveryStoragePreflightFacts,
+} from "../dvd-recovery-storage-preflight.js";
 import type {
   ArchiveRequestId,
   ArchiveAuditRunId,
@@ -1324,6 +1329,46 @@ export const archiveRecoveries = sqliteTable(
     check(
       "archive_recoveries_status_check",
       sql`${table.status} in (${sqliteStringLiterals(ARCHIVE_RECOVERY_STATUSES)})`,
+    ),
+  ],
+);
+
+export const dvdRecoveryStoragePreflights = sqliteTable(
+  "dvd_recovery_storage_preflights",
+  {
+    scope: text("scope").notNull().primaryKey(),
+    contractVersion: text("contract_version").notNull(),
+    status: text("status", {
+      enum: DVD_RECOVERY_STORAGE_PREFLIGHT_STATUSES,
+    }).notNull(),
+    reasonCode: text("reason_code", {
+      enum: DVD_RECOVERY_STORAGE_REASON_CODES,
+    }),
+    facts: text("facts", { mode: "json" })
+      .$type<DvdRecoveryStoragePreflightFacts>()
+      .notNull(),
+    checkedAt: integer("checked_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    check(
+      "dvd_recovery_storage_preflights_scope_check",
+      sql`${table.scope} is not null and ${table.scope} = 'originals_library'`,
+    ),
+    check(
+      "dvd_recovery_storage_preflights_version_check",
+      sql`${table.contractVersion} = 'dvd-recovery-storage-preflight-v1'`,
+    ),
+    check(
+      "dvd_recovery_storage_preflights_status_check",
+      sql`${table.status} in (${sqliteStringLiterals(DVD_RECOVERY_STORAGE_PREFLIGHT_STATUSES)})`,
+    ),
+    check(
+      "dvd_recovery_storage_preflights_reason_check",
+      sql`(${table.status} = 'supported' and ${table.reasonCode} is null) or (${table.status} = 'unsupported' and ${table.reasonCode} is not null and ${table.reasonCode} = 'STORAGE_UNSUPPORTED') or (${table.status} = 'failed_prerequisite' and ${table.reasonCode} is not null and ${table.reasonCode} in (${sqliteStringLiterals(DVD_RECOVERY_STORAGE_REASON_CODES.filter((code) => code !== "STORAGE_UNSUPPORTED"))}))`,
+    ),
+    check(
+      "dvd_recovery_storage_preflights_facts_check",
+      sql`json_valid(${table.facts}) and json_type(${table.facts}) = 'object'`,
     ),
   ],
 );

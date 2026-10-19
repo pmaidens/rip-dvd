@@ -50,6 +50,10 @@ import type {
   ArchiveAuditCounts,
   ArchiveAuditFinding,
 } from "./archive-audit-types.js";
+import type {
+  DvdRecoveryStoragePreflight,
+  DvdRecoveryStoragePreflightInput,
+} from "./dvd-recovery-storage-preflight.js";
 
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
 export type ArchiveIntegrity = (typeof ARCHIVE_INTEGRITIES)[number];
@@ -1913,6 +1917,13 @@ export interface WorkerIncidentAccess {
   }): WorkerIncident[];
 }
 
+export interface DvdRecoveryStorageAccess {
+  readCurrent(): DvdRecoveryStoragePreflight | null;
+  record(
+    input: DvdRecoveryStoragePreflightInput,
+  ): DvdRecoveryStoragePreflight;
+}
+
 export type SnapshotCatalogAccess = Pick<
   CatalogAccess,
   | "listOpticalDrives"
@@ -1940,6 +1951,10 @@ export type SnapshotCatalogAccess = Pick<
 >;
 
 export interface ConsistentReadAccess {
+  readonly dvdRecoveryStorage: Pick<
+    DvdRecoveryStorageAccess,
+    "readCurrent"
+  >;
   readonly catalog: SnapshotCatalogAccess;
   readonly encodingProfiles: Pick<EncodingProfileAccess, "list">;
   readonly discInspections: Pick<DiscInspectionAccess, "list" | "listAttempts">;
@@ -1986,6 +2001,7 @@ export interface EncodeOutputInspectionReadAccess
 
 export interface DataAccess {
   readonly notifications: import("./notification-types.js").NotificationAccess;
+  readonly dvdRecoveryStorage: DvdRecoveryStorageAccess;
   readonly catalog: CatalogAccess;
   readonly encodingProfiles: EncodingProfileAccess;
   readonly discInspections: DiscInspectionAccess;
