@@ -126,3 +126,12 @@ separate secure origin. They add no server mutation or CLI command. Existing
 shared administration contract through upgrades. CLI workflows use real SQLite
 persistence in `apps/operator-cli/src/notifications.test.ts`; focused HTTP parity
 remains in `apps/web/app/api/notifications/route.test.ts`.
+
+The marked DVD initial-copy boundary operation evaluates normal endpoint proof
+and the bounded `dvd-full-extent-metadata-v1` decision before supplying publication
+prerequisites. Corrected extents retain strict completeness and title-map proof.
+This adds no background work type or operator command. Both operator adapters
+continue to reject new evidence-format admission; checkpoint publication and
+policy-version binding are separate work. Worker behavior is covered by
+`apps/archive-worker/src/dvd-initial-boundary.test.ts` and
+`apps/archive-worker/src/dvd-full-extent-validator.test.ts`.

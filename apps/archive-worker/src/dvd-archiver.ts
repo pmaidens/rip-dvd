@@ -53,6 +53,7 @@ import {
 } from "./bounded-child-process.js";
 import { createByteProgressRateEstimator } from "./byte-progress-rate.js";
 import {
+  DvdInitialCopyBoundaryError,
   DVD_INITIAL_COPY_RESULT_PREFIX,
   parseDvdInitialCopyResultProtocol,
   type DvdInitialCopyRequest,
@@ -477,9 +478,7 @@ export function createNodeDvdCopyRunner({
             request.continuation,
             request.sizeBytes,
           );
-      const authorizeProbe = request.resultKind === "recovery"
-        ? request.authorizeProbe
-        : undefined;
+      const authorizeProbe = request.authorizeProbe;
       const lockDescriptor = openDeviceLock(request.devicePath);
       let child: DvdCopyChildProcess;
       try {
@@ -759,7 +758,8 @@ export function createNodeDvdCopyRunner({
             if (
               recoveryResultPayload !== undefined ||
               initialCopyResultPayload !== undefined ||
-              readFailureResultPayload !== undefined
+              (readFailureResultPayload !== undefined &&
+                request.resultKind !== "initial_copy")
             ) {
               throw new Error("DVD terminal helper result is malformed");
             }
@@ -771,7 +771,8 @@ export function createNodeDvdCopyRunner({
           if (segment.startsWith(DVD_READ_FAILURE_RESULT_PREFIX)) {
             if (
               recoveryResultPayload !== undefined ||
-              initialCopyResultPayload !== undefined ||
+              (initialCopyResultPayload !== undefined &&
+                request.resultKind !== "initial_copy") ||
               readFailureResultPayload !== undefined
             ) {
               throw new Error("DVD terminal helper result is malformed");
@@ -862,20 +863,38 @@ export function createNodeDvdCopyRunner({
         if (
           code === DVD_READ_FAILURE_EXIT_STATUS &&
           readFailureResultPayload !== undefined &&
-          recoveryResultPayload === undefined &&
-          initialCopyResultPayload === undefined
+          recoveryResultPayload === undefined
         ) {
           try {
             const terminalResult = parseDvdReadFailureTerminalResultProtocol(
               readFailureResultPayload,
               continuationProtocol.operationSizeBytes,
             );
-            rejectOperation(
-              new DvdReadFailureError(
+            if (request.resultKind === "initial_copy") {
+              if (
+                initialCopyResultPayload === undefined ||
+                terminalResult.readFailure.category !== "out_of_range" ||
+                terminalResult.recoveryResult !== null
+              ) {
+                throw new Error("DVD initial-copy boundary result is invalid");
+              }
+              rejectOperation(new DvdInitialCopyBoundaryError(
+                terminalResult.readFailure,
+                parseDvdInitialCopyResultProtocol(
+                  initialCopyResultPayload,
+                  continuationProtocol.operationSizeBytes,
+                  terminalResult.readFailure.retainedImageByteCount,
+                ),
+              ));
+            } else {
+              if (initialCopyResultPayload !== undefined) {
+                throw new Error("DVD read failure helper result is invalid");
+              }
+              rejectOperation(new DvdReadFailureError(
                 terminalResult.readFailure,
                 terminalResult.recoveryResult,
-              ),
-            );
+              ));
+            }
           } catch (error) {
             rejectOperation(error);
           }

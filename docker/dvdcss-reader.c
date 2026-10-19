@@ -1843,14 +1843,15 @@ static int emit_recovery_result(uint64_t size_bytes,
 }
 
 static int emit_initial_copy_result(
-    uint64_t size_bytes, const struct initial_copy_state *initial_copy)
+    uint64_t declared_byte_count, uint64_t retained_byte_count,
+    const struct initial_copy_state *initial_copy)
 {
     if (initial_copy->emit_malformed_result) {
         fprintf(stderr, INITIAL_COPY_RESULT_PREFIX "{malformed}\n");
         return ferror(stderr) == 0 ? 0 :
             fail_errno("DVD initial-copy result output failed");
     }
-    uint64_t recovered_byte_count = size_bytes -
+    uint64_t recovered_byte_count = retained_byte_count -
         initial_copy->skipped_sector_count * DVDCSS_BLOCK_SIZE;
     fprintf(stderr,
             INITIAL_COPY_RESULT_PREFIX
@@ -1861,7 +1862,7 @@ static int emit_initial_copy_result(
             ",\"skippedSectorCount\":%" PRIu64
             ",\"skippedRegionCount\":%" PRIu64
             ",\"skippedSectorBitmapHex\":\"",
-            size_bytes, recovered_byte_count,
+            declared_byte_count, recovered_byte_count,
             initial_copy->skipped_sector_count,
             initial_copy->skipped_region_count);
     if (initial_copy->skipped_sector_count > 0) {
@@ -1993,16 +1994,38 @@ static int run_initial_copy(struct read_backend *backend,
         .hash = NULL,
         .output_fd = output_fd,
     };
+    struct recovery_state boundary = {
+        .allow_boundary_proof = 1,
+    };
     int status = read_disc(
-        backend, size_bytes, &state, NULL, &initial_copy, 0);
-    if (status == 0 && fsync(output_fd) != 0) {
+        backend, size_bytes, &state, &boundary, &initial_copy, 0);
+    rollback_boundary_image(output_fd, &boundary);
+    struct stat output_metadata;
+    uint64_t retained_byte_count = 0;
+    if (fstat(output_fd, &output_metadata) != 0 ||
+        output_metadata.st_size < 0) {
+        status = fail_errno("DVD initial-copy size inspection failed");
+    } else {
+        retained_byte_count = (uint64_t)output_metadata.st_size;
+    }
+    int retain_boundary_result =
+        status == READ_FAILURE_EXIT_STATUS && boundary.boundary_failure;
+    if ((status == 0 || retain_boundary_result) && fsync(output_fd) != 0) {
         status = fail_errno("DVD initial-copy sync failed");
     }
-    if (close(output_fd) != 0 && status == 0) {
+    if (close(output_fd) != 0 && (status == 0 || retain_boundary_result)) {
         status = fail_errno("DVD initial-copy close failed");
     }
     if (status == 0) {
-        status = emit_initial_copy_result(size_bytes, &initial_copy);
+        status = emit_initial_copy_result(
+            size_bytes, retained_byte_count, &initial_copy);
+    } else if (status == READ_FAILURE_EXIT_STATUS &&
+               boundary.boundary_failure) {
+        int result_status = emit_initial_copy_result(
+            size_bytes, retained_byte_count, &initial_copy);
+        if (result_status != 0) {
+            status = result_status;
+        }
     }
     free(skipped_sector_bitmap);
     return status;

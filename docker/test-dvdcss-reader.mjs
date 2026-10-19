@@ -847,6 +847,56 @@ if (
   );
 }
 
+const skippedThenCorrectedBoundary = runTestInitialCopy(
+  "skipped-then-corrected-boundary",
+  [
+    rawCompletionFault(5, "always", fixedMediumAtFive),
+    rawTailCompletionFault(35, "always", fixedOutOfRangeSense(35)),
+  ].join(","),
+);
+const skippedThenCorrectedFailure = readFailureResult(
+  skippedThenCorrectedBoundary.stderr,
+);
+const skippedThenCorrectedResult = initialCopyResult(
+  skippedThenCorrectedBoundary.stderr,
+);
+const skippedThenCorrectedImage = Buffer.from(
+  content.subarray(0, 35 * 2_048),
+);
+skippedThenCorrectedImage.fill(0, 0, 31 * 2_048);
+if (
+  skippedThenCorrectedBoundary.status !== 3 ||
+  skippedThenCorrectedFailure.category !== "out_of_range" ||
+  skippedThenCorrectedFailure.boundaryProofVersion !==
+    "dvd-sector-boundary-proof-v1" ||
+  skippedThenCorrectedFailure.firstFailingLba !== 35 ||
+  skippedThenCorrectedFailure.retainedImageByteCount !== 35 * 2_048 ||
+  skippedThenCorrectedResult.declaredByteCount !== content.byteLength ||
+  skippedThenCorrectedResult.recoveredByteCount !== 4 * 2_048 ||
+  skippedThenCorrectedResult.skippedSectorCount !== 31 ||
+  skippedThenCorrectedResult.skippedRegionCount !== 1 ||
+  skippedThenCorrectedResult.skippedRequestCount !== 1 ||
+  skippedThenCorrectedResult.skippedSectorBitmapHex !== "ffffff7f00" ||
+  !readFileSync(skippedThenCorrectedBoundary.outputPath).equals(
+    skippedThenCorrectedImage,
+  ) ||
+  JSON.stringify(testReads(skippedThenCorrectedBoundary.stderr)) !==
+    JSON.stringify([
+      { lba: 0, blocks: 31 },
+      { lba: 31, blocks: 9 },
+      { lba: 31, blocks: 4 },
+      { lba: 34, blocks: 1 },
+      { lba: 35, blocks: 1 },
+      { lba: 35, blocks: 1 },
+      { lba: 36, blocks: 1 },
+      { lba: 39, blocks: 1 },
+    ])
+) {
+  throw new Error(
+    `libdvdcss corrected initial boundary check failed: ${skippedThenCorrectedBoundary.stderr}`,
+  );
+}
+
 for (const [name, fault, expectedCategory] of [
   [
     "transport",

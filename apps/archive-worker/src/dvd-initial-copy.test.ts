@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createNodeDvdCopyRunner } from "./dvd-archiver.js";
 
 import {
+  DvdInitialCopyBoundaryError,
   DVD_INITIAL_COPY_POLICY_VERSION,
   DVD_INITIAL_COPY_RESULT_PREFIX,
   parseDvdInitialCopyResultProtocol,
@@ -21,6 +22,7 @@ import {
   type DvdInitialCopyResult,
   type DvdInitialCopyRunner,
 } from "./dvd-initial-copy.js";
+import { DVD_READ_FAILURE_RESULT_PREFIX } from "./dvd-recovery-contracts.js";
 
 const SECTOR_SIZE_BYTES = 2_048;
 const createdDirectories: string[] = [];
@@ -163,6 +165,24 @@ describe("DVD initial-copy protocol", () => {
       sectorCount: 4,
       classification: "skipped_untested",
     }]);
+  });
+
+  it("keeps only source ranges inside a proven corrected extent", () => {
+    const result = parseDvdInitialCopyResultProtocol(resultPayload({
+      recoveredByteCount: 2 * SECTOR_SIZE_BYTES,
+      skippedSectorCount: 2,
+      skippedRegionCount: 1,
+      skippedSectorBitmapHex: "03",
+      skippedRequestCount: 1,
+      diagnostics: [mediumErrorDiagnostic(0, 2)],
+    }), 8 * SECTOR_SIZE_BYTES, 4 * SECTOR_SIZE_BYTES);
+
+    expect(result.unrecoveredSourceRanges).toEqual([{
+      startLba: 0,
+      sectorCount: 2,
+      classification: "skipped_untested",
+    }]);
+    expect(result.recoveredByteCount).toBe(2 * SECTOR_SIZE_BYTES);
   });
 
   it("retains exactly the bounded diagnostics before marking truncation", () => {
@@ -434,6 +454,125 @@ describe("Archive Job DVD initial-copy boundary", () => {
       classification: "skipped_untested",
     }]);
     expect(readFileSync(outputPath)).toEqual(image);
+  });
+
+  it("retains current Unrecovered Source when the native reader proves a shorter boundary", async () => {
+    const directory = temporaryDirectory();
+    const outputPath = join(directory, "native-corrected.iso.partial");
+    const declaredByteCount = 8 * SECTOR_SIZE_BYTES;
+    const acceptedByteCount = 4 * SECTOR_SIZE_BYTES;
+    const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+    const authorizationReady = Object.assign(new EventEmitter(), {
+      destroy: vi.fn(),
+    });
+    const probeAuthorizationReady = Object.assign(new EventEmitter(), {
+      destroy: vi.fn(),
+    });
+    const authorizeBoundaryProbe = vi.fn();
+    const probeAuthorizationGrant = Object.assign(new EventEmitter(), {
+      destroy: vi.fn(),
+      write: vi.fn((_chunk: string, callback: (error?: Error) => void) => {
+        callback();
+        stderr.emit("data", Buffer.from(
+          `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify({
+            protocolVersion: 1,
+            category: "out_of_range",
+            classifierVersion: "scsi-read-classifier-v2",
+            scsiStatus: 2,
+            hostStatus: 0,
+            driverStatus: 8,
+            senseResponseCode: 0x72,
+            senseKey: 0x05,
+            asc: 0x21,
+            ascq: 0,
+            informationLba: 4,
+            requestedLba: 4,
+            requestedBlockCount: 1,
+            retryOrdinal: 1,
+            declaredByteCount,
+            firstFailingLba: 4,
+            retainedImageByteCount: acceptedByteCount,
+            boundaryProofVersion: "dvd-sector-boundary-proof-v1",
+            candidateConfirmationCount: 2,
+            precedingSectorLba: 3,
+          })}\n${DVD_INITIAL_COPY_RESULT_PREFIX}${resultPayload({
+            declaredByteCount,
+            recoveredByteCount: 3 * SECTOR_SIZE_BYTES,
+            skippedSectorCount: 1,
+            skippedRegionCount: 1,
+            skippedSectorBitmapHex: "02",
+            skippedRequestCount: 1,
+            diagnostics: [mediumErrorDiagnostic(1, 1)],
+          })}\n`,
+        ));
+        child.emit("close", 3, null);
+        return true;
+      }),
+    });
+    const child = Object.assign(new EventEmitter(), {
+      stderr,
+      stdio: [
+        null,
+        null,
+        stderr,
+        null,
+        authorizationReady,
+        {
+          destroy: vi.fn(),
+          end: vi.fn(() => {
+            writeFileSync(outputPath, Buffer.alloc(acceptedByteCount, 0x51));
+            queueMicrotask(() => probeAuthorizationReady.emit(
+              "data",
+              Buffer.from("rip-dvd-boundary-probe-authorization-ready\n"),
+            ));
+          }),
+        },
+        probeAuthorizationReady,
+        probeAuthorizationGrant,
+      ],
+      kill: vi.fn(() => true),
+      unref: vi.fn(),
+    });
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => {
+        queueMicrotask(() => authorizationReady.emit(
+          "data",
+          Buffer.from("rip-dvd-copy-authorization-ready\n"),
+        ));
+        return child;
+      }) as never,
+    });
+
+    let caught: unknown;
+    try {
+      await runDvdInitialCopyForArchiveJob({
+        authorizeBoundaryProbe,
+        devicePath: "/dev/zero",
+        onProgress: vi.fn(),
+        outputPath,
+        runner,
+        signal: new AbortController().signal,
+        sizeBytes: declaredByteCount,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(DvdInitialCopyBoundaryError);
+    expect(caught).toMatchObject({
+      boundaryFailure: { firstFailingLba: 4 },
+      initialCopyResult: {
+        recoveredByteCount: 3 * SECTOR_SIZE_BYTES,
+        unrecoveredSourceRanges: [{
+          startLba: 1,
+          sectorCount: 1,
+          classification: "skipped_untested",
+        }],
+      },
+    });
+    expect(authorizeBoundaryProbe).toHaveBeenCalledOnce();
+    expect(probeAuthorizationGrant.write).toHaveBeenCalledOnce();
   });
 
   it.each([

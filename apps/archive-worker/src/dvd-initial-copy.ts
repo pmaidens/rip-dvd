@@ -5,6 +5,11 @@ import type {
   DvdUnrecoveredSourceRange,
 } from "@rip-dvd/data-access";
 
+import {
+  DvdReadFailureError,
+  type OutOfRangeDvdReadFailureResult,
+} from "./dvd-recovery-contracts.js";
+
 export const DVD_INITIAL_COPY_POLICY_VERSION =
   "dvd-initial-copy-v1" as const;
 export const DVD_INITIAL_COPY_RESULT_PREFIX =
@@ -39,6 +44,7 @@ export interface DvdInitialCopyResult {
 }
 
 export interface DvdInitialCopyRequest {
+  authorizeProbe?(): void | Promise<void>;
   authorizeStart?(): void | Promise<void>;
   devicePath: string;
   outputPath: string;
@@ -55,6 +61,17 @@ export interface DvdInitialCopyRunner {
 export interface CompletedDvdInitialCopy extends DvdInitialCopyResult {
   imageFilesystemIdentity: string;
   imagePath: string;
+}
+
+export class DvdInitialCopyBoundaryError extends DvdReadFailureError {
+  override readonly name = "DvdInitialCopyBoundaryError";
+
+  constructor(
+    readonly boundaryFailure: OutOfRangeDvdReadFailureResult,
+    readonly initialCopyResult: DvdInitialCopyResult,
+  ) {
+    super(boundaryFailure);
+  }
 }
 
 const INITIAL_COPY_RESULT_KEYS = [
@@ -197,6 +214,7 @@ function skippedSectorCount(bitmap: Buffer): number {
 export function parseDvdInitialCopyResultProtocol(
   payload: string,
   expectedByteCount: number,
+  acceptedByteCount = expectedByteCount,
 ): DvdInitialCopyResult {
   let parsed: unknown;
   try {
@@ -210,11 +228,16 @@ export function parseDvdInitialCopyResultProtocol(
   if (
     !Number.isSafeInteger(expectedByteCount) ||
     expectedByteCount <= 0 ||
-    expectedByteCount % DVD_SECTOR_SIZE_BYTES !== 0
+    expectedByteCount % DVD_SECTOR_SIZE_BYTES !== 0 ||
+    !Number.isSafeInteger(acceptedByteCount) ||
+    acceptedByteCount <= 0 ||
+    acceptedByteCount > expectedByteCount ||
+    acceptedByteCount % DVD_SECTOR_SIZE_BYTES !== 0
   ) {
     throw new Error("DVD initial-copy expected size is invalid");
   }
   const totalSectorCount = expectedByteCount / DVD_SECTOR_SIZE_BYTES;
+  const acceptedSectorCount = acceptedByteCount / DVD_SECTOR_SIZE_BYTES;
   const skippedRequestCount = Number(parsed.skippedRequestCount);
   if (
     parsed.protocolVersion !== 1 ||
@@ -251,7 +274,7 @@ export function parseDvdInitialCopyResultProtocol(
     actualSkippedSectorCount !== parsed.skippedSectorCount ||
     ranges.length !== parsed.skippedRegionCount ||
     parsed.recoveredByteCount !==
-      expectedByteCount - actualSkippedSectorCount * DVD_SECTOR_SIZE_BYTES ||
+      acceptedByteCount - actualSkippedSectorCount * DVD_SECTOR_SIZE_BYTES ||
     (actualSkippedSectorCount === 0) !== (skippedRequestCount === 0) ||
     skippedRequestCount < ranges.length
   ) {
@@ -264,7 +287,7 @@ export function parseDvdInitialCopyResultProtocol(
     skippedRequestCount,
     diagnosticsTruncated: parsed.diagnosticsTruncated,
     diagnostics: parsed.diagnostics.map((diagnostic) =>
-      parseDiagnostic(diagnostic, totalSectorCount)
+      parseDiagnostic(diagnostic, acceptedSectorCount)
     ),
     unrecoveredSourceRanges: ranges,
   };
@@ -272,16 +295,29 @@ export function parseDvdInitialCopyResultProtocol(
     result,
     expectedByteCount,
     "DVD initial-copy helper result is malformed",
+    acceptedByteCount,
   );
   return result;
 }
 
-function validateDvdInitialCopyResult(
+export function validateDvdInitialCopyResult(
   result: DvdInitialCopyResult,
   expectedByteCount: number,
   invalidResultMessage: string,
+  acceptedByteCount = expectedByteCount,
 ): void {
-  const totalSectorCount = expectedByteCount / DVD_SECTOR_SIZE_BYTES;
+  if (
+    !Number.isSafeInteger(expectedByteCount) ||
+    expectedByteCount <= 0 ||
+    expectedByteCount % DVD_SECTOR_SIZE_BYTES !== 0 ||
+    !Number.isSafeInteger(acceptedByteCount) ||
+    acceptedByteCount <= 0 ||
+    acceptedByteCount > expectedByteCount ||
+    acceptedByteCount % DVD_SECTOR_SIZE_BYTES !== 0
+  ) {
+    throw new Error(invalidResultMessage);
+  }
+  const totalSectorCount = acceptedByteCount / DVD_SECTOR_SIZE_BYTES;
   let skippedSectorCount = 0;
   let previousEndLba = 0;
   if (
@@ -311,7 +347,7 @@ function validateDvdInitialCopyResult(
     result.copyPolicyVersion !== DVD_INITIAL_COPY_POLICY_VERSION ||
     result.declaredByteCount !== expectedByteCount ||
     result.recoveredByteCount !==
-      expectedByteCount - skippedSectorCount * DVD_SECTOR_SIZE_BYTES ||
+      acceptedByteCount - skippedSectorCount * DVD_SECTOR_SIZE_BYTES ||
     !Number.isSafeInteger(result.skippedRequestCount) ||
     result.skippedRequestCount < 0 ||
     result.skippedRequestCount < result.unrecoveredSourceRanges.length ||
@@ -365,7 +401,28 @@ function validateDvdInitialCopyResult(
   }
 }
 
+export async function readDvdInitialCopyImageIdentity(
+  imagePath: string,
+  expectedByteCount: number,
+  invalidImageMessage: string,
+): Promise<string> {
+  const image = await lstat(imagePath);
+  if (
+    !image.isFile() ||
+    image.isSymbolicLink() ||
+    image.size !== expectedByteCount ||
+    !Number.isSafeInteger(image.dev) ||
+    image.dev < 0 ||
+    !Number.isSafeInteger(image.ino) ||
+    image.ino <= 0
+  ) {
+    throw new Error(invalidImageMessage);
+  }
+  return `${image.dev}:${image.ino}`;
+}
+
 export async function runDvdInitialCopyForArchiveJob({
+  authorizeBoundaryProbe,
   authorizeCopy,
   devicePath,
   onProgress,
@@ -374,6 +431,7 @@ export async function runDvdInitialCopyForArchiveJob({
   signal,
   sizeBytes,
 }: {
+  authorizeBoundaryProbe?(): void | Promise<void>;
   authorizeCopy?(): void | Promise<void>;
   devicePath: string;
   onProgress(progress: ArchiveJobProgress): void;
@@ -394,6 +452,7 @@ export async function runDvdInitialCopyForArchiveJob({
   let result: DvdInitialCopyResult;
   try {
     result = await runner.copyInitial({
+      authorizeProbe: authorizeBoundaryProbe,
       authorizeStart: authorizeCopy,
       devicePath,
       outputPath,
@@ -422,21 +481,13 @@ export async function runDvdInitialCopyForArchiveJob({
     sizeBytes,
     "DVD initial-copy result is invalid",
   );
-  const image = await lstat(outputPath);
-  if (
-    !image.isFile() ||
-    image.isSymbolicLink() ||
-    image.size !== sizeBytes ||
-    !Number.isSafeInteger(image.dev) ||
-    image.dev < 0 ||
-    !Number.isSafeInteger(image.ino) ||
-    image.ino <= 0
-  ) {
-    throw new Error("DVD initial copy did not produce the expected image");
-  }
   return {
     ...result,
-    imageFilesystemIdentity: `${image.dev}:${image.ino}`,
+    imageFilesystemIdentity: await readDvdInitialCopyImageIdentity(
+      outputPath,
+      sizeBytes,
+      "DVD initial copy did not produce the expected image",
+    ),
     imagePath: outputPath,
   };
 }
