@@ -548,7 +548,7 @@ function verifyCurrent() {
 
 function diagnostics() {
   const plan = loadPlan();
-  const logs = runCheckedSync("docker", ["compose", "logs", "--tail", "200", "--timestamps", "web", "archive-worker", "encode-worker"], { allowFailure: true });
+  const logs = runCheckedSync("docker", ["compose", "logs", "--tail", "200", "--timestamps", "web", "archive-worker", "encode-worker", "notification-worker"], { allowFailure: true });
   const compose = runCheckedSync("docker", ["compose", "ps", "--all"], { allowFailure: true });
   const resources = (() => {
     try { return checkResources({ ...plan.config, minimumRootFreeBytes: 0, minimumMemoryAvailableBytes: 0 }); }

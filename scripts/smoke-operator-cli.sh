@@ -43,6 +43,12 @@ docker compose --project-name "$project_name" --profile maintenance build operat
 docker compose --project-name "$project_name" --profile maintenance run --rm \
   --entrypoint ffprobe operator-cli -version >/dev/null
 
+notification_status="$(invoke notifications status)"
+printf '%s\n' "$notification_status" | assert_json_fields \
+  'schemaVersion=1' 'configured=false'
+notification_deliveries="$(invoke notifications deliveries --limit 1)"
+printf '%s\n' "$notification_deliveries" | assert_json_fields 'schemaVersion=1'
+
 help_output="$(invoke)"
 printf '%s\n' "$help_output" | assert_json_fields \
   'schemaVersion=1' 'usage=rip-dvd <command>'
@@ -96,4 +102,24 @@ printf '%s\n' "$status_output" | assert_json_fields \
 
 [ -z "$(docker compose --project-name "$project_name" ps --quiet web)" ]
 
-printf 'Operator CLI deployment smoke passed.\n'
+# The independently managed dispatcher must include its runtime dependencies,
+# migrate the same SQLite volume, and stop gracefully with no web container.
+docker compose --project-name "$project_name" build notification-worker
+docker compose --project-name "$project_name" up --detach --no-deps notification-worker
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+  if docker compose --project-name "$project_name" logs --no-color notification-worker 2>&1 \
+    | grep -F 'Notification dispatcher started' >/dev/null; then
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+[ "$attempt" -lt 30 ]
+docker compose --project-name "$project_name" stop --timeout 10 notification-worker
+dispatcher_id="$(docker compose --project-name "$project_name" ps --all --quiet notification-worker)"
+[ "$(docker inspect --format '{{.State.ExitCode}}' "$dispatcher_id")" -eq 0 ]
+docker compose --project-name "$project_name" logs --no-color notification-worker 2>&1 \
+  | grep -F 'Notification worker received SIGTERM; stopping' >/dev/null
+
+printf 'Operator CLI and notification dispatcher deployment smoke passed.\n'

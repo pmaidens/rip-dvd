@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { DeploymentError } from "./deploy-state.mjs";
 import { REPOSITORY_ROOT, runCheckedSync, sanitizeText } from "./deploy-support.mjs";
 
-const RUNTIME_SERVICES = ["web", "archive-worker", "encode-worker"];
+const RUNTIME_SERVICES = ["web", "archive-worker", "encode-worker", "notification-worker"];
 
 export function loadConfig(path) {
   let source;

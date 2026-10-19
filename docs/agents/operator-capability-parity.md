@@ -63,6 +63,8 @@ and compare both adapters with the same application rule.
 | Consequential previews, acknowledgement, and stale revision rejection | Catalog Review, Disc Selection, Media Item, Encoding Profile, Encode Job, and Re-archive routes above | Matching `rip-dvd` preview and mutation commands | `apps/web/app/api/operator-command-parity.test.ts`, `apps/operator-cli/src/disc-selection.test.ts`, `apps/operator-cli/src/catalog-review-completion.test.ts`, `apps/operator-cli/src/rearchive-acceptance.test.ts`, `apps/web/test/browser/catalog-review.e2e.ts`, `apps/web/test/browser/encode-jobs.e2e.ts` |
 | Durable background work, bounded waits, restart observation, and prior provenance | `apps/web/app/api/operations/route.ts` and the work-specific routes above | `rip-dvd inspect`, `rip-dvd wait` for Disc Inspections, Archive Requests, Archive Jobs, Encode Jobs, Archive Audits, and Filesystem Verifications | `apps/operator-cli/src/command.test.ts`, `apps/operator-cli/src/full-operator-parity.integration.test.ts`, `scripts/smoke-operator-cli.sh` |
 | Connected diagnosis, recovery, fresh preservation, review, acceptance, and replacement | The preservation, Catalog Review, and encoding routes above | Supported `rip-dvd` request, inspect, retry, review, acceptance, and encoding commands | `apps/operator-cli/src/full-operator-parity.integration.test.ts` |
+| Notification outcome navigation and safe missing-target fallback | `/notifications/target`, `GET apps/web/app/api/operations/route.ts` | `rip-dvd inspect` archive-jobs and original-disc-archives | `apps/web/test/browser/notifications.e2e.ts`, `apps/operator-cli/src/notifications.test.ts` |
+| Browser notification configuration, subscription administration, queued tests and bounded delivery inspection | `apps/web/app/api/notifications/route.ts`, `/notifications` | `rip-dvd notifications` status, subscriptions, register, remove, test, deliveries | `apps/operator-cli/src/notifications.test.ts`, `apps/web/app/api/notifications/route.test.ts`, `apps/web/test/browser/notifications.e2e.ts` |
 <!-- capability-inventory:end -->
 
 ## Enforced web adapter boundaries
@@ -104,3 +106,9 @@ to commands and tests.
 `pnpm test:browser` builds every workspace package imported by the production
 Next build before starting Playwright. This is intentional. A browser pass that
 depends on stale `dist` output is not a valid parity result.
+
+- `GET apps/web/app/api/notifications/route.ts`: notification readiness, subscriptions and bounded deliveries.
+- `POST apps/web/app/api/notifications/route.ts`: subscription registration/reconciliation and queued test submission.
+- `DELETE apps/web/app/api/notifications/route.ts`: subscription opt-out.
+
+Browser permission and Home Screen installation are browser-only. The CLI administers subscriptions directly through shared application operations. Notification dispatch runs independently in the managed notification worker.

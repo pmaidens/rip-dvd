@@ -1,3 +1,4 @@
+import { createNotificationOperations } from "./notifications.js";
 import { isHandBrakePreset } from "@rip-dvd/config";
 import {
   DVD_RECOVERY_EVIDENCE_FORMAT,
@@ -261,6 +262,7 @@ export function createApplicationOperations(
   dependencies: { encodeOutputMediaProbe?: EncodeOutputMediaProbe } = {},
 ) {
   return {
+    ...createNotificationOperations(access),
     health: () => access.checkHealth(),
     readiness: () => access.readConsistentSnapshot(readDeploymentReadiness),
     listEncodingProfiles: () => ({
@@ -625,3 +627,10 @@ export {
   resolveQueueLogicalJobs,
   serializeJob,
 } from "./encode-jobs.js";
+
+export * from "./notifications.js";
+export * from "./notification-policy.js";
+export * from "./notification-validation.js";
+export * from "./notification-config.js";
+export * from "./notification-dispatch.js";
+export * from "./notification-transport.js";

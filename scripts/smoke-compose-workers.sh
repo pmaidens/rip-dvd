@@ -8,7 +8,7 @@ run_token="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 test -n "$run_token"
 project_name_prefix="${COMPOSE_PROJECT_NAME:-rip-dvd-worker-smoke-$(date -u +%Y%m%d%H%M%S)}"
 project_name_base="${project_name_prefix}-${run_token}"
-worker_roles="archive encode"
+worker_roles="archive encode notification"
 
 load_worker_descriptor() {
   case "$1" in
@@ -23,6 +23,12 @@ load_worker_descriptor() {
       worker_writable_path=/media/movies
       worker_ready_message="Encode worker ready"
       worker_shutdown_message="Encode worker received SIGTERM; stopping"
+      ;;
+    notification)
+      worker_service=notification-worker
+      worker_writable_path=/data
+      worker_ready_message="Notification dispatcher started"
+      worker_shutdown_message="Notification worker received SIGTERM; stopping"
       ;;
     *)
       printf 'Unknown worker role: %s\n' "$1" >&2
@@ -72,7 +78,7 @@ preflight_project() {
   check_project_resource "$candidate" networks \
     docker network ls --quiet --filter label=com.docker.compose.project="$candidate"
 
-  for service in web archive-worker encode-worker
+  for service in web archive-worker encode-worker notification-worker
   do
     check_project_resource "$candidate" containers \
       docker ps --all --quiet --filter name=^/"${candidate}-${service}-[0-9][0-9]*"$
@@ -87,7 +93,7 @@ preflight_project() {
   check_project_resource "$candidate" networks \
     docker network ls --quiet --filter name=^"${candidate}_default"$
 
-  for service in web archive-worker encode-worker
+  for service in web archive-worker encode-worker notification-worker
   do
     check_project_resource "$candidate" images \
       docker image ls --quiet "${candidate}-${service}"

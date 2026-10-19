@@ -1975,6 +1975,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
   expect(JSON.parse(stdout.pop()!)).toEqual({
     schemaVersion: 1,
     commands: [
+      "notifications",
       "generate-key",
       "submit-archive-request",
       "request-rearchive",

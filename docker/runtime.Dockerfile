@@ -15,6 +15,7 @@ COPY apps/web/package.json apps/web/package.json
 COPY apps/operator-cli/package.json apps/operator-cli/package.json
 COPY apps/archive-worker/package.json apps/archive-worker/package.json
 COPY apps/encode-worker/package.json apps/encode-worker/package.json
+COPY apps/notification-worker/package.json apps/notification-worker/package.json
 COPY packages/config/package.json packages/config/package.json
 COPY packages/application/package.json packages/application/package.json
 COPY packages/data-access/package.json packages/data-access/package.json
@@ -140,6 +141,11 @@ COPY apps/encode-worker apps/encode-worker
 RUN pnpm --filter @rip-dvd/encode-worker build \
   && pnpm --filter @rip-dvd/encode-worker --prod deploy --legacy /encode-worker
 
+FROM shared-builder AS notification-worker-builder
+COPY apps/notification-worker apps/notification-worker
+RUN pnpm --filter @rip-dvd/notification-worker build \
+  && pnpm --filter @rip-dvd/notification-worker --prod deploy --legacy /notification-worker
+
 FROM shared-builder AS deployment-tools-builder
 RUN pnpm --filter @rip-dvd/data-access --prod deploy --legacy /deployment-tools
 
@@ -189,6 +195,11 @@ FROM encode-output-inspection-runtime AS operator-cli
 COPY --from=operator-cli-builder --chown=node:node /operator-cli ./apps/operator-cli
 USER node
 ENTRYPOINT ["node", "apps/operator-cli/dist/entry.js"]
+
+FROM runtime-base AS notification-worker
+COPY --from=notification-worker-builder --chown=node:node /notification-worker ./apps/notification-worker
+USER node
+CMD ["node", "apps/notification-worker/dist/index.js"]
 
 FROM runtime-base AS worker-runtime-base
 COPY --from=shared-builder --chown=node:node /app/packages/config/package.json ./packages/config/package.json

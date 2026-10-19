@@ -1,3 +1,4 @@
+import { createNotificationAccess } from "./notifications.js";
 import {
   closeSync,
   existsSync,
@@ -6318,6 +6319,7 @@ export function createDataAccessInternal(
   }
 
   const access: LegacySidecarDataAccess = {
+    notifications: createNotificationAccess(database, now),
     readConsistentSnapshot(read) {
       const snapshotAccess: ConsistentReadAccess = {
         catalog: {

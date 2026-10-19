@@ -1,5 +1,9 @@
+import { runNotifications } from "./notifications.js";
+import { StructuredInputError } from "./structured-input.js";
 import {
   createApplicationOperations,
+  InvalidNotificationInputError,
+  NotificationsUnavailableError,
   createTmdbCatalogLookup,
   EncodeOutputExportRejectedError,
   InvalidEncodeOutputArtifactIdentityError,
@@ -109,6 +113,13 @@ function isRetiredCommand(name: string): name is keyof typeof retiredCommandGuid
 }
 
 const commandDefinitions = [
+  {
+    name: "notifications",
+    description: "Inspect push readiness, register/reconcile or remove subscriptions, submit a test, and inspect deliveries.",
+    usage: "rip-dvd notifications status|subscriptions|deliveries|register|remove|test [--key <key>] [--json <object>|--stdin|--file <path>] [--id <id>] [--event-id <id>] [--limit <1..100>]",
+    inputs: { arguments: ["action"], options: ["--key", "--json", "--stdin", "--file", "--id", "--event-id", "--limit"] },
+    example: "rip-dvd notifications status",
+  },
   {
     name: "generate-key",
     description: "Generate a mutation key without submitting work.",
@@ -1379,6 +1390,22 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         throw new CommandFailure("INVALID_ARGUMENTS", "generate-key takes no arguments.", 2);
       }
       emit(io.stdout, { mutationKey: generateMutationKey() });
+      return 0;
+    }
+    if (name === "notifications") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+      } else {
+        try { emit(io.stdout, runNotifications(rest, io)); }
+        catch (error) {
+          if (error instanceof InvalidNotificationInputError || error instanceof StructuredInputError) throw new CommandFailure("INVALID_ARGUMENTS", error.message, 2);
+          if (error instanceof InvalidMutationKeyError) throw new CommandFailure("INVALID_MUTATION_KEY", error.message, 2);
+          if (error instanceof MutationKeyConflictError) throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+          if (error instanceof RecordNotFoundError) throw new CommandFailure("NOT_FOUND", "Notification subscription not found.", 2);
+          if (error instanceof NotificationsUnavailableError) throw new CommandFailure("NOTIFICATIONS_UNAVAILABLE", error.message, 1);
+          throw error;
+        }
+      }
       return 0;
     }
     if (name === "submit-archive-request") {
