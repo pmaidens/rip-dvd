@@ -15,14 +15,18 @@ export async function controlledSubscription(page: Page, permission: "granted" |
     Notification.requestPermission = async () => { localStorage.setItem("synthetic-permission-prompts", String(Number(localStorage.getItem("synthetic-permission-prompts") || 0) + 1)); return permission; };
     function current(): PushSubscription | null {
       if (localStorage.getItem("synthetic-push-subscription") !== "yes") return null;
-      return { endpoint: subscription.endpoint, expirationTime: null, options: { applicationServerKey: null, userVisibleOnly: true }, getKey: () => null, toJSON: () => subscription,
+      const endpoint = `${subscription.endpoint}-${localStorage.getItem("synthetic-push-generation")}`;
+      return { endpoint, expirationTime: null, options: { applicationServerKey: null, userVisibleOnly: true }, getKey: () => null, toJSON: () => ({ ...subscription, endpoint }),
         unsubscribe: async () => { localStorage.removeItem("synthetic-push-subscription"); return true; } };
     }
     PushManager.prototype.getSubscription = async () => current();
-    PushManager.prototype.subscribe = async () => { localStorage.setItem("synthetic-push-subscription", "yes"); return current()!; };
+    PushManager.prototype.subscribe = async () => {
+      localStorage.setItem("synthetic-push-generation", String(Number(localStorage.getItem("synthetic-push-generation") || 0) + 1));
+      localStorage.setItem("synthetic-push-subscription", "yes");
+      return current()!;
+    };
   }, { subscription: input, permission });
 }
-
 
 export async function deliverPush(worker: Worker, data: string) {
   const result = await worker.evaluate(async (data) => {
@@ -34,7 +38,6 @@ export async function deliverPush(worker: Worker, data: string) {
   }, data);
   expect(result).toEqual(["displayed"]);
 }
-
 
 export function dispatchQueuedPushes(): unknown[] {
   const data = pathToFileURL(resolve("../../packages/data-access/dist/index.js")).href;
@@ -51,6 +54,7 @@ export function dispatchQueuedPushes(): unknown[] {
 }
 
 export async function clickNotification(worker: Worker, tag: string): Promise<void> {
+  await expect.poll(() => worker.evaluate(async () => (await self.registration.getNotifications()).map((item) => item.tag))).toContain(tag);
   await worker.evaluate(async (tag) => {
     const notification = (await self.registration.getNotifications()).find((item) => item.tag === tag)!;
     const event = new NotificationEvent("notificationclick", { notification });

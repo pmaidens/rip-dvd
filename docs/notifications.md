@@ -139,7 +139,11 @@ Browser tests use a separate localhost secure context with full Chromium.
 Install both Playwright Chromium runtimes with
 `pnpm --filter @rip-dvd/web exec playwright install chromium` before running
 `pnpm test:browser`. The existing reserved HTTP-host projects still exercise
-insecure-origin behavior.
+insecure-origin behavior. The secure notification project selects Chromium's
+built-in notification backend with `--disable-features=SystemNotifications` so
+native notification-center permissions do not hide browser notifications from
+automation. This preserves browser permission and secure-context checks, actual
+`showNotification`/`getNotifications`, and service worker lifecycle behavior.
 
 Upgrade browser tests keep an application page open while a test-only proxy
 changes the served worker bytes. A frozen version 1 fixture verifies compatibility

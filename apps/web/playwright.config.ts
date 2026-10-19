@@ -56,7 +56,9 @@ export default defineConfig({
   projects: [
     {
       name: "secure-notifications", testMatch: secureNotificationTests,
-      use: { browserName: "chromium", channel: "chromium", baseURL: "http://localhost:3101", viewport: { width: 390, height: 844 }, permissions: ["notifications"] },
+      // Keep real browser notifications observable without depending on the OS bridge.
+      use: { launchOptions: { args: ["--disable-features=SystemNotifications", "--no-proxy-server"] },
+        browserName: "chromium", channel: "chromium", baseURL: "http://localhost:3101", viewport: { width: 390, height: 844 }, permissions: ["notifications"] },
     },
     {
       name: "desktop",

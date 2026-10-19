@@ -4,7 +4,6 @@ declare const self: ServiceWorkerGlobalScope;
 import { expect, test } from "@playwright/test";
 import { controlledSubscription, deliverPush, dispatchQueuedPushes } from "./notification-test-support";
 
-
 test("installs metadata and opts in, displays the queued test, navigates, and opts out without reopening permission", async ({ page, context }) => {
   await context.grantPermissions(["notifications"], { origin: "http://localhost:3101" });
   await controlledSubscription(page);
