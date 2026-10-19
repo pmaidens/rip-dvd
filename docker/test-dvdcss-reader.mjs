@@ -2,7 +2,10 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
+  closeSync,
+  constants,
   existsSync,
+  openSync,
   readdirSync,
   readFileSync,
   readlinkSync,
@@ -1103,6 +1106,106 @@ if (
   !readFileSync(authorizedCopyPath).equals(content)
 ) {
   throw new Error("libdvdcss reader authorized copy check failed");
+}
+
+const legacyInitialCopyPath = prepareOutput(
+  "/tmp/rip-dvd-reader-legacy-initial-copy.img",
+);
+const legacyInitialCopy = spawnSync(
+  executable,
+  [
+    "initial-copy-authorized",
+    sourcePath,
+    legacyInitialCopyPath,
+    String(content.byteLength),
+  ],
+  { stdio: "ignore" },
+);
+if (legacyInitialCopy.status !== 2 || existsSync(legacyInitialCopyPath)) {
+  throw new Error("legacy initial-copy helper operation remained available");
+}
+
+const unownedInitialCopyPath = prepareOutput(
+  "/tmp/rip-dvd-reader-unowned-initial-copy.img",
+);
+const unownedInitialCopy = spawnSync(
+  executable,
+  [
+    "initial-copy-owned-v1",
+    sourcePath,
+    unownedInitialCopyPath,
+    String(content.byteLength),
+  ],
+  {
+    stdio: [
+      "ignore",
+      "ignore",
+      "pipe",
+      "ignore",
+      "ignore",
+      "ignore",
+      "ignore",
+      "ignore",
+      "ignore",
+    ],
+  },
+);
+if (unownedInitialCopy.status !== 1 || existsSync(unownedInitialCopyPath)) {
+  throw new Error("unowned initial-copy helper operation was accepted");
+}
+
+const ownedInitialCopyPath = prepareOutput(
+  "/tmp/rip-dvd-reader-owned-initial-copy.img",
+);
+const ownershipPath = prepareOutput(
+  "/tmp/rip-dvd-reader-archive-ownership.lock",
+);
+writeFileSync(ownershipPath, "", { mode: 0o600 });
+const ownershipDescriptor = openSync(
+  ownershipPath,
+  constants.O_RDWR | constants.O_NOFOLLOW,
+);
+const ownedInitialCopy = spawn(
+  "flock",
+  [
+    "--exclusive",
+    "--no-fork",
+    "/proc/self/fd/3",
+    executable,
+    "initial-copy-owned-v1",
+    sourcePath,
+    ownedInitialCopyPath,
+    String(content.byteLength),
+  ],
+  {
+    stdio: [
+      "ignore",
+      "ignore",
+      "pipe",
+      ownershipDescriptor,
+      "pipe",
+      "pipe",
+      "ignore",
+      "ignore",
+      ownershipDescriptor,
+    ],
+  },
+);
+closeSync(ownershipDescriptor);
+const [ownedReady] = await once(ownedInitialCopy.stdio[4], "data");
+if (
+  ownedReady.toString("utf8") !== "rip-dvd-copy-authorization-ready\n" ||
+  existsSync(ownedInitialCopyPath)
+) {
+  throw new Error("owned initial copy began before copy authorization");
+}
+ownedInitialCopy.stdio[5].end("1");
+const [ownedInitialStatus] = await once(ownedInitialCopy, "close");
+if (
+  ownedInitialStatus !== 0 ||
+  !readFileSync(ownedInitialCopyPath).equals(content)
+) {
+  throw new Error("owned initial-copy helper check failed");
 }
 
 const retry = runTestCopy(

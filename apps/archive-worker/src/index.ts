@@ -70,6 +70,7 @@ await runConfiguredAsyncWorker(
         access,
         intervalMs: config.workerPollIntervalMs,
         log,
+        originalsLibraryPath: config.originalsLibraryPath,
         signal: workers.signal,
       })), stopOnFailure(runArchiveAuditWorker({
         access,

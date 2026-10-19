@@ -1,0 +1,51 @@
+# Hold archive image ownership across complete I/O intervals
+
+Original Disc Archives carrying `dvd-recovery-evidence-v1` may eventually be
+updated in place by DVD Archive Recovery. Every process that reads or writes
+one of these images must therefore participate in one archive-wide ownership
+contract. New-format admission remains closed, and historical archives keep
+their existing behavior.
+
+The production contract is `archive-image-ownership-v1`. It stores one
+owner-only lock file per archive in the Originals Library's private
+`.rip-dvd-archive-ownership` directory. The archive ID is represented by a
+SHA-256 filename rather than copied into the path. A writer takes an exclusive
+Linux `flock`; a stable reader takes a shared lock. The lock file's device and
+inode must continue to match the descriptor throughout the operation. Missing,
+replaced, unsafe, or unverifiable lock state fails closed as
+`CONSISTENCY_FAULT`.
+
+The process that performs image I/O inherits the locked descriptor. An initial
+copy helper receives the exclusive descriptor, and HandBrake and Archive Audit
+helpers receive the shared descriptor. The inherited open-file description
+keeps the operating-system lock alive if the worker process dies while its
+helper continues. A worker lease or heartbeat is not ownership and cannot
+override a live lock.
+
+Writers also publish a private, versioned worker claim with creation,
+heartbeat, and lease-expiry times. This claim is diagnostic evidence only.
+Inspection reports the operating-system writer and worker claim separately. An
+active writer blocks stable reads with `WRITER_NOT_QUIESCENT`; an uncertain
+lock, invalid claim, or active claim without a proven writer blocks them with
+`CONSISTENCY_FAULT`. An expired claim does not hide a live writer, and is not by
+itself evidence that a writer still exists.
+
+Initial DVD publication holds exclusive ownership across the copy, evidence
+publication, and reconciliation interval. Existing encode source reads,
+Archive Audit file scans, and Original Disc Archive Filesystem Verification
+hold shared ownership for the complete image-read interval. Catalog-only work
+does not take an image lock. Title Damage Assessment and Damage Preview must
+use the same shared interval when they gain image-reading implementations.
+
+The only declared production storage setup is the local Linux
+`linux-rwf-atomic-v1` provider from ADR 0007. Other production platforms fail
+closed because this decision does not establish cross-process exclusion there.
+An in-process backend exists only under the test environment so platform-neutral
+unit and adapter parity tests can exercise the contract. Network filesystems
+remain unsupported until a provider proves cross-host exclusion and safe
+disconnect behavior.
+
+The native helper accepts new-format initial copying only through the
+`initial-copy-owned-v1` operation and verifies its inherited exclusive lock.
+The prior helper operation is rejected. This keeps legacy or unowned helper
+entry points from writing a new-format archive image.

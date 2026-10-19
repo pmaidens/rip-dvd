@@ -33,6 +33,7 @@ export interface ProvenDvdInitialArchiveBoundary {
 }
 // This produces publication prerequisites for marked jobs. Admission remains closed.
 export async function runDvdInitialArchiveBoundaryForArchiveJob({
+  archiveOwnershipDescriptor,
   authorizeBoundaryProbe,
   authorizeCopy,
   completenessProver,
@@ -46,6 +47,7 @@ export async function runDvdInitialArchiveBoundaryForArchiveJob({
   signal,
   sizeBytes,
 }: {
+  archiveOwnershipDescriptor?: number;
   authorizeBoundaryProbe(): void | Promise<void>;
   authorizeCopy?(): void | Promise<void>;
   completenessProver?: DvdCompletenessProver;
@@ -65,6 +67,7 @@ export async function runDvdInitialArchiveBoundaryForArchiveJob({
   let boundary: DvdInitialCopyBoundaryError | undefined;
   try {
     initialCopy = await runDvdInitialCopyForArchiveJob({
+      archiveOwnershipDescriptor,
       authorizeBoundaryProbe,
       authorizeCopy,
       devicePath,

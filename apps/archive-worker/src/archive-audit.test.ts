@@ -5,7 +5,8 @@ import type {
   OpticalDriveId,
   OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
-import { describe, expect, it } from "vitest";
+import type { ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   type ArchiveAuditFileInspection,
@@ -218,6 +219,51 @@ describe("Original Disc Archive audit", () => {
       "consistent",
     ]);
     expect(report.counts.suspiciousCapacityReuseSignals).toBe(0);
+  });
+
+  it("holds shared archive ownership while inspecting marked images", async () => {
+    const ownershipSignal = new AbortController().signal;
+    const assertOwned = vi.fn();
+    const inspect = vi.fn(async () => successfulInspection());
+    const withConsistentRead = vi.fn(async (request: {
+      task(handle: {
+        descriptor: number;
+        signal: AbortSignal;
+        assertOwned(): void;
+      }): Promise<unknown>;
+    }) => request.task({
+      descriptor: 47,
+      signal: ownershipSignal,
+      assertOwned,
+    }));
+
+    await runArchiveAudit({
+      records: [auditRecord("1", {
+        evidenceFormat: "dvd-recovery-evidence-v1",
+      })],
+      recordsTruncated: false,
+      recordLimit: 1,
+      concurrency: 1,
+      fileTimeoutMs: 5_000,
+      runtimeTimeoutMs: 120_000,
+      originalsLibraryPath: "/archives",
+      fileInspector: { inspect },
+      archiveImageOwnership: {
+        withConsistentRead,
+      } as unknown as ArchiveImageOwnership,
+      signal: new AbortController().signal,
+    });
+
+    expect(withConsistentRead).toHaveBeenCalledWith(expect.objectContaining({
+      archiveId: archiveId("archive-1"),
+      originalsLibraryPath: "/archives",
+    }));
+    expect(inspect).toHaveBeenCalledWith(
+      "/archives/1.iso",
+      "/archives",
+      ownershipSignal,
+      47,
+    );
   });
 
   it("compares reported boundaries while accepting proven excluded tails", async () => {

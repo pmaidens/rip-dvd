@@ -9,6 +9,10 @@ import {
   type ArchiveAuditReason,
   type ArchiveAuditReport,
 } from "@rip-dvd/data-access";
+import {
+  defaultArchiveImageOwnership,
+  type ArchiveImageOwnership,
+} from "@rip-dvd/worker-runtime";
 
 import type { DvdImageGeometry } from "./dvd-geometry-validator.js";
 
@@ -63,6 +67,7 @@ export interface ArchiveAuditFileInspector {
     archivePath: string,
     originalsLibraryPath: string,
     signal: AbortSignal,
+    ownershipDescriptor?: number,
   ): Promise<ArchiveAuditFileInspection>;
 }
 
@@ -78,6 +83,7 @@ export interface RunArchiveAuditRequest {
   signal: AbortSignal;
   now?: () => Date;
   onFinding?: (finding: ArchiveAuditFinding, index: number) => void | Promise<void>;
+  archiveImageOwnership?: ArchiveImageOwnership;
 }
 
 function geometryInBytes(
@@ -259,6 +265,7 @@ export async function runArchiveAudit({
   signal,
   now = () => new Date(),
   onFinding,
+  archiveImageOwnership = defaultArchiveImageOwnership,
 }: RunArchiveAuditRequest): Promise<ArchiveAuditReport> {
   if (
     !Number.isSafeInteger(concurrency) ||
@@ -300,11 +307,23 @@ export async function runArchiveAudit({
             geometry: null,
             outcome: "containment_rejection" as const,
           }
-        : await fileInspector.inspect(
-            record.archivePath,
-            originalsLibraryPath,
-            signal,
-          );
+        : record.evidenceFormat === "dvd-recovery-evidence-v1"
+          ? await archiveImageOwnership.withConsistentRead({
+              archiveId: record.archiveId,
+              originalsLibraryPath,
+              signal,
+              task: (ownership) => fileInspector.inspect(
+                record.archivePath!,
+                originalsLibraryPath,
+                ownership.signal,
+                ownership.descriptor,
+              ),
+            })
+          : await fileInspector.inspect(
+              record.archivePath,
+              originalsLibraryPath,
+              signal,
+            );
       const result = primaryResult(record, inspection);
       findings[index] = {
         archiveId: record.archiveId,

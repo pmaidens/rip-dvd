@@ -1,5 +1,17 @@
 import { loadConfig, type RuntimeConfig } from "@rip-dvd/config";
 
+export {
+  ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME,
+  ARCHIVE_IMAGE_OWNERSHIP_VERSION,
+  ArchiveImageOwnershipError,
+  createArchiveImageOwnership,
+  defaultArchiveImageOwnership,
+  type ArchiveImageOwnership,
+  type ArchiveImageOwnershipHandle,
+  type ArchiveImageOwnershipInspection,
+  type ArchiveImageOwnershipReasonCode,
+} from "./archive-image-ownership.js";
+
 export type WorkerSignal = "SIGINT" | "SIGTERM";
 
 export interface WorkerLifecycleHost<TimerHandle> {

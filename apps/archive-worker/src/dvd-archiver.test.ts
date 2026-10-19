@@ -1113,6 +1113,7 @@ describe("DVD archive publication", () => {
           "pipe",
           "pipe",
           "pipe",
+          expect.any(Number),
         ],
       },
     );
@@ -2494,6 +2495,7 @@ describe("DVD archive publication", () => {
       });
       const controller = new AbortController();
       const request = {
+        archiveOwnershipDescriptor: 8,
         devicePath: "/dev/zero",
         outputPath: join(createOriginalsLibrary(), ".slow.iso.rip-dvd-partial"),
         sizeBytes: 1_000,
@@ -2541,6 +2543,7 @@ describe("DVD archive publication", () => {
         spawnProcess: vi.fn(() => child),
       });
       const request = {
+        archiveOwnershipDescriptor: 8,
         devicePath: "/dev/zero",
         outputPath: join(createOriginalsLibrary(), ".long.iso.rip-dvd-partial"),
         sizeBytes: 2_048,
@@ -2612,6 +2615,7 @@ describe("DVD archive publication", () => {
     let outcome: unknown;
     const controller = new AbortController();
     void runner[operation]({
+      archiveOwnershipDescriptor: 8,
       devicePath: "/dev/zero",
       outputPath,
       sizeBytes: 1_000,

@@ -107,6 +107,9 @@ importers:
       '@playwright/test':
         specifier: 1.62.1
         version: 1.62.1
+      '@rip-dvd/worker-runtime':
+        specifier: workspace:*
+        version: link:../../packages/worker-runtime
       '@types/react':
         specifier: 19.2.17
         version: 19.2.17
@@ -125,6 +128,9 @@ importers:
       '@rip-dvd/data-access':
         specifier: workspace:*
         version: link:../data-access
+      '@rip-dvd/worker-runtime':
+        specifier: workspace:*
+        version: link:../worker-runtime
       web-push:
         specifier: 3.6.7
         version: 3.6.7(supports-color@7.2.0)

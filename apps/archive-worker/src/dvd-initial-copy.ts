@@ -44,6 +44,7 @@ export interface DvdInitialCopyResult {
 }
 
 export interface DvdInitialCopyRequest {
+  archiveOwnershipDescriptor?: number;
   authorizeProbe?(): void | Promise<void>;
   authorizeStart?(): void | Promise<void>;
   devicePath: string;
@@ -422,6 +423,7 @@ export async function readDvdInitialCopyImageIdentity(
 }
 
 export async function runDvdInitialCopyForArchiveJob({
+  archiveOwnershipDescriptor,
   authorizeBoundaryProbe,
   authorizeCopy,
   devicePath,
@@ -431,6 +433,7 @@ export async function runDvdInitialCopyForArchiveJob({
   signal,
   sizeBytes,
 }: {
+  archiveOwnershipDescriptor?: number;
   authorizeBoundaryProbe?(): void | Promise<void>;
   authorizeCopy?(): void | Promise<void>;
   devicePath: string;
@@ -452,6 +455,7 @@ export async function runDvdInitialCopyForArchiveJob({
   let result: DvdInitialCopyResult;
   try {
     result = await runner.copyInitial({
+      archiveOwnershipDescriptor,
       authorizeProbe: authorizeBoundaryProbe,
       authorizeStart: authorizeCopy,
       devicePath,

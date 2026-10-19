@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   DetectedDiscId,
   DiscInspectionId,
+  DvdArchiveEvidenceFormat,
   OpticalDriveId,
   OriginalDiscArchiveId,
 } from "./types.js";
@@ -17,6 +18,7 @@ const SQLITE_BUSY_TIMEOUT_MS = 5_000;
 
 export interface ArchiveAuditRecord {
   archiveId: OriginalDiscArchiveId;
+  evidenceFormat?: DvdArchiveEvidenceFormat | null;
   detectedDiscId: DetectedDiscId;
   opticalDriveId: OpticalDriveId;
   discInspectionId: DiscInspectionId | null;
@@ -38,6 +40,7 @@ export interface ArchiveAuditRecordPage {
 
 interface ArchiveAuditRow {
   archive_id: unknown;
+  evidence_format: unknown;
   archive_id_too_long: unknown;
   detected_disc_id: unknown;
   detected_disc_id_too_long: unknown;
@@ -120,6 +123,12 @@ function nullableSize(value: unknown, field: string): number | null {
   return value as number;
 }
 
+function evidenceFormat(value: unknown): DvdArchiveEvidenceFormat | null {
+  if (value === null) return null;
+  if (value === "dvd-recovery-evidence-v1") return value;
+  throw new Error("Archive audit evidence format is invalid");
+}
+
 function archiveAuditRecordFromRow(row: ArchiveAuditRow): ArchiveAuditRecord {
   if (row.record_relationship_invalid !== 0) {
     throw new Error("Archive audit catalog relationship is invalid");
@@ -144,6 +153,7 @@ function archiveAuditRecordFromRow(row: ArchiveAuditRow): ArchiveAuditRecord {
       row.archive_id_too_long,
       "archive identity",
     ),
+    evidenceFormat: evidenceFormat(row.evidence_format),
     detectedDiscId: requireDomainId<DetectedDiscId>(
       row.detected_disc_id,
       row.detected_disc_id_too_long,
@@ -219,6 +229,7 @@ export function readArchiveAuditRecords(
       )
       select
         substr(archive.id, 1, ${MAX_DOMAIN_ID_BYTES + 1}) as archive_id,
+        evidence.evidence_format,
         length(cast(archive.id as blob)) > ${MAX_DOMAIN_ID_BYTES}
           as archive_id_too_long,
         substr(archive.detected_disc_id, 1, ${MAX_DOMAIN_ID_BYTES + 1})
@@ -256,6 +267,8 @@ export function readArchiveAuditRecords(
         archive.boundary_excluded_sector_count as boundary_excluded_sector_count,
         archive.archived_at
       from bounded_archive_records as archive
+      left join dvd_archive_evidence_headers as evidence
+        on evidence.original_disc_archive_id = archive.id
       left join detected_discs as disc on disc.id = archive.detected_disc_id
       left join optical_drives as drive on drive.id = disc.optical_drive_id
       left join archive_jobs as publication_job on publication_job.id = (

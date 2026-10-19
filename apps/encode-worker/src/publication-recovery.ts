@@ -38,6 +38,11 @@ import {
   type PublicationMutationRecoveryLock,
   type RunningEncodeJob,
 } from "@rip-dvd/data-access";
+import {
+  defaultArchiveImageOwnership,
+  type ArchiveImageOwnership,
+  type ArchiveImageOwnershipHandle,
+} from "@rip-dvd/worker-runtime";
 
 import {
   encodeOutputFilesystemIdentity,
@@ -481,6 +486,7 @@ export function createEncodePublicationMutationRecoveryLock(
 
 export interface EncodePublicationOptions {
   access: DataAccess;
+  archiveImageOwnership?: ArchiveImageOwnership;
   atomicPathExchange: AtomicPathExchange;
   log(message: string): void;
   mediaLibraryPath: string;
@@ -1844,12 +1850,15 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
       ids: [archive.detectedDiscId],
     })[0];
     const archivedTitles = decodeArchivedDvdTitles(detectedDisc?.scanData);
+    const evidenceFormat = snapshot.catalog
+      .findDvdArchiveEvidenceHeader(archive.id)?.evidenceFormat ?? null;
     const selectionPlan = resolveSelectionExecutionPlan(
       sourceIdentity,
       archivedTitles,
     );
     return {
       archive,
+      evidenceFormat,
       preset: preset.trim(),
       ...selectionPlan,
     };
@@ -1983,21 +1992,6 @@ export async function executeEncodeClaim(
       );
     }
     replaceableFinal = existingFinal ?? undefined;
-    let expectedVobSubStreams:
-      | readonly EncodeOutputVobSubExpectation[]
-      | undefined;
-    if (input.subtitleScanTitleNumber !== undefined) {
-      expectedVobSubStreams = await runEncodePreparationStep(
-        () => options.subtitleScanner.scan(
-          sourcePath,
-          input.subtitleScanTitleNumber,
-          signal,
-        ),
-        "input_unavailable",
-      );
-      signal.throwIfAborted();
-      renewClaim();
-    }
     try {
       await moveAside(paths.legacyPartialPath);
       await moveStalePartials(finalPath, options.runner);
@@ -2008,50 +2002,86 @@ export async function executeEncodeClaim(
         "preparation",
       );
     }
-    const parseProgress = createProgressParser((progress) => {
-      failurePhase = progress.phase;
-      try {
-        options.access.encodeJobs.updateProgress(claim, progress);
-      } catch (error) {
-        try {
-          renewClaim();
-        } catch (renewalError) {
-          if (renewalError instanceof EncodeCancellationRequestedError) {
-            return;
-          }
-        }
-        throw error;
+    let expectedVobSubStreams:
+      | readonly EncodeOutputVobSubExpectation[]
+      | undefined;
+    const readArchive = async (
+      ownership?: ArchiveImageOwnershipHandle,
+    ): Promise<void> => {
+      const readSignal = ownership?.signal ?? signal;
+      if (input.subtitleScanTitleNumber !== undefined) {
+        expectedVobSubStreams = await runEncodePreparationStep(
+          () => options.subtitleScanner.scan(
+            sourcePath,
+            input.subtitleScanTitleNumber,
+            readSignal,
+          ),
+          "input_unavailable",
+        );
+        readSignal.throwIfAborted();
+        ownership?.assertOwned();
+        renewClaim();
       }
-    });
-    const arguments_ = [
-      "--no-dvdnav",
-      ...input.selectionArguments,
-      "-i",
-      sourcePath,
-      "-o",
-      partialPath,
-      "--format",
-      "av_mkv",
-      "--preset",
-      input.preset,
-      "--all-subtitles",
-      "--subtitle-burned=none",
-    ];
-    failurePhase = "encoding";
-    options.access.encodeJobs.updateProgress(claim, {
-      progressPercent: 0,
-      phase: "encoding",
-      etaSeconds: null,
-    });
-    renewClaim();
-    await options.runner.run({
-      arguments_,
-      onOutput: parseProgress,
-      outputPath: partialPath,
-      signal,
-    });
-    parseProgress("", true);
-    signal.throwIfAborted();
+      const parseProgress = createProgressParser((progress) => {
+        failurePhase = progress.phase;
+        try {
+          options.access.encodeJobs.updateProgress(claim, progress);
+        } catch (error) {
+          try {
+            renewClaim();
+          } catch (renewalError) {
+            if (renewalError instanceof EncodeCancellationRequestedError) {
+              return;
+            }
+          }
+          throw error;
+        }
+      });
+      const arguments_ = [
+        "--no-dvdnav",
+        ...input.selectionArguments,
+        "-i",
+        sourcePath,
+        "-o",
+        paths.partialPath,
+        "--format",
+        "av_mkv",
+        "--preset",
+        input.preset,
+        "--all-subtitles",
+        "--subtitle-burned=none",
+      ];
+      failurePhase = "encoding";
+      options.access.encodeJobs.updateProgress(claim, {
+        progressPercent: 0,
+        phase: "encoding",
+        etaSeconds: null,
+      });
+      renewClaim();
+      await options.runner.run({
+        arguments_,
+        onOutput: parseProgress,
+        outputPath: paths.partialPath,
+        ...(ownership === undefined
+          ? {}
+          : { sourceOwnershipDescriptor: ownership.descriptor }),
+        signal: readSignal,
+      });
+      parseProgress("", true);
+      readSignal.throwIfAborted();
+      ownership?.assertOwned();
+    };
+    if (input.evidenceFormat === null) {
+      await readArchive();
+    } else {
+      await (options.archiveImageOwnership ?? defaultArchiveImageOwnership)
+        .withConsistentRead({
+          archiveId: input.archive.id,
+          originalsLibraryPath: options.originalsLibraryPath,
+          signal,
+          task: readArchive,
+        });
+    }
     failurePhase = "validation";
     options.access.encodeJobs.updateProgress(claim, {
       progressPercent: 100,

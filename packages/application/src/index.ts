@@ -217,7 +217,11 @@ export {
   validOperationLimit,
   waitForOperation,
 } from "./operations.js";
-export type { OperationKind, WaitableKind } from "./operations.js";
+export type {
+  OperationInspectionOptions,
+  OperationKind,
+  WaitableKind,
+} from "./operations.js";
 
 function readDeploymentReadiness(access: ConsistentReadAccess) {
   const inspections = access.discInspections

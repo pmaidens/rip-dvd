@@ -64,6 +64,7 @@ export function createOperatorWorkflowFixture() {
         openAccess,
         readFile: (path) => readFileSync(path, "utf8"),
         mediaLibraryPath: () => mediaLibraryPath,
+        originalsLibraryPath: () => originalsLibraryPath,
         ...options,
         ...(lookup === undefined ? {} : { getLookup: () => lookup }),
         ...(stdin === undefined ? {} : { readStdin: () => stdin }),

@@ -1,4 +1,8 @@
 import type { DataAccess } from "@rip-dvd/data-access";
+import {
+  defaultArchiveImageOwnership,
+  type ArchiveImageOwnership,
+} from "@rip-dvd/worker-runtime";
 import { runDurableWorkPoller } from "./durable-work-poller.js";
 import {
   recordArchiveClaimRecoveryIncident,
@@ -10,6 +14,11 @@ import {
 export async function pollFilesystemVerification(
   access: DataAccess,
   log: (message: string) => void = () => {},
+  options: {
+    originalsLibraryPath?: string;
+    archiveImageOwnership?: ArchiveImageOwnership;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<boolean> {
   const incidentOptions = { access, log };
   try {
@@ -37,7 +46,23 @@ export async function pollFilesystemVerification(
       }
     }, 5_000);
     try {
-      await access.filesystemVerification.execute(claim);
+      const evidenceHeader = claim.target === "original_disc_archive"
+        ? access.catalog.findDvdArchiveEvidenceHeader(claim.targetId)
+        : null;
+      if (evidenceHeader === null) {
+        await access.filesystemVerification.execute(claim);
+      } else {
+        if (options.originalsLibraryPath === undefined) {
+          throw new Error("Archive image ownership is unavailable");
+        }
+        await (options.archiveImageOwnership ?? defaultArchiveImageOwnership)
+          .withConsistentRead({
+            archiveId: claim.targetId,
+            originalsLibraryPath: options.originalsLibraryPath,
+            signal: options.signal ?? new AbortController().signal,
+            task: () => access.filesystemVerification.execute(claim),
+          });
+      }
     } catch {
       // A stale claim cannot change a newer attempt. Other failures retain a
       // generic outcome; filesystem paths and raw diagnostics stay private.
@@ -58,13 +83,17 @@ export async function runFilesystemVerificationWorker(input: {
   access: DataAccess;
   intervalMs: number;
   log(message: string): void;
+  originalsLibraryPath: string;
   signal: AbortSignal;
 }): Promise<void> {
   await runDurableWorkPoller({
     intervalMs: input.intervalMs,
     signal: input.signal,
     log: input.log,
-    poll: () => pollFilesystemVerification(input.access, input.log),
+    poll: () => pollFilesystemVerification(input.access, input.log, {
+      originalsLibraryPath: input.originalsLibraryPath,
+      signal: input.signal,
+    }),
     pollFailureMessage: "Filesystem verification worker poll failed.",
     waitFailureMessage: "Verification worker wait failed",
   });

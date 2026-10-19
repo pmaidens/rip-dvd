@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",
+    "@rip-dvd/worker-runtime": "workspace:*",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "happy-dom": "20.11.2"

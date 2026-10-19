@@ -22,6 +22,7 @@ import {
   type EncodeOutputMediaProbe,
 } from "@rip-dvd/application";
 import type { ArchiveRequestId, MediaItemId } from "@rip-dvd/data-access";
+import { defaultArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 
 import {
   createOperatorWorkflowFixture,
@@ -1879,7 +1880,8 @@ it("returns the same operational records and evidence through web and CLI", asyn
       "archive-jobs", "original-disc-archives", "encode-jobs", "worker-incidents", "activity",
     ]) {
       const response = createOperationsResponse(access,
-        new Request(`http://localhost/api/operations?kind=${kind}`));
+        new Request(`http://localhost/api/operations?kind=${kind}`),
+        fixture.originalsLibraryPath);
       expect(response.status).toBe(200);
       expect(response.headers.get("Cache-Control")).toBe("no-store");
       expect((await fixture.run(["inspect", kind])).result).toEqual(await response.json());
@@ -1895,7 +1897,8 @@ it("returns the same operational records and evidence through web and CLI", asyn
       ["worker-incidents", incident.id],
     ]) {
       const response = createOperationsResponse(access,
-        new Request(`http://localhost/api/operations?kind=${kind}&id=${id}`));
+        new Request(`http://localhost/api/operations?kind=${kind}&id=${id}`),
+        fixture.originalsLibraryPath);
       expect(response.status).toBe(200);
       expect((await fixture.run(["inspect", kind, id])).result).toEqual(await response.json());
     }
@@ -1982,8 +1985,47 @@ it("returns the same operational records and evidence through web and CLI", asyn
               code: "STORAGE_UNSUPPORTED",
             })],
           },
+          ownership: {
+            writer: { state: "inactive" },
+            workerClaim: { state: "none" },
+            stableRead: { available: true, blockingReasons: [] },
+          },
         },
       } });
+    await defaultArchiveImageOwnership.withWriter({
+      archiveId,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {
+        const response = createOperationsResponse(
+          access,
+          new Request(
+            `http://localhost/api/operations?kind=original-disc-archives&id=${archiveId}`,
+          ),
+          fixture.originalsLibraryPath,
+        );
+        const cli = await fixture.run([
+          "inspect",
+          "original-disc-archives",
+          archiveId,
+        ]);
+        expect(cli.result).toEqual(await response.json());
+        expect(cli.result).toMatchObject({
+          item: {
+            archiveRecovery: {
+              ownership: {
+                writer: { state: "active" },
+                workerClaim: { state: "active" },
+                stableRead: {
+                  available: false,
+                  blockingReasons: [{ code: "WRITER_NOT_QUIESCENT" }],
+                },
+              },
+            },
+          },
+        });
+      },
+    });
     expect(
       (archiveInspection.result as {
         item: object;

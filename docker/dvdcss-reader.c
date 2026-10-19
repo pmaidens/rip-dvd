@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -3296,7 +3297,7 @@ int main(int argc, char **argv)
     int authorized_copy = argc > 1 &&
         strcmp(argv[1], "copy-authorized") == 0;
     int authorized_initial_copy = argc > 1 &&
-        strcmp(argv[1], "initial-copy-authorized") == 0;
+        strcmp(argv[1], "initial-copy-owned-v1") == 0;
     int authorized_resume = argc > 1 &&
         strcmp(argv[1], "resume-authorized") == 0;
     int authorized_boundary_resume = argc > 1 &&
@@ -3307,7 +3308,7 @@ int main(int argc, char **argv)
                      !authorized_resume && !authorized_boundary_resume)) {
         fprintf(stderr,
                 "usage: %s hash DEVICE SIZE | "
-                "copy|initial-copy-authorized DEVICE OUTPUT SIZE\n",
+                "copy|initial-copy-owned-v1 DEVICE OUTPUT SIZE\n",
                 argv[0]);
         return 2;
     }
@@ -3324,6 +3325,15 @@ int main(int argc, char **argv)
     if (parse_size(argv[operation == OPERATION_HASH ? 3 : 4],
                    &size_bytes) != 0) {
         return 2;
+    }
+    if (authorized_initial_copy) {
+        struct stat ownership_stat;
+        if (fstat(8, &ownership_stat) != 0 ||
+            !S_ISREG(ownership_stat.st_mode) ||
+            flock(8, LOCK_EX | LOCK_NB) != 0) {
+            fprintf(stderr, "DVD archive image ownership is unavailable\n");
+            return 1;
+        }
     }
     unsigned char *resume_bitmap = NULL;
     uint64_t resume_bad_sector_count = 0;

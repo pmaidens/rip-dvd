@@ -29,6 +29,10 @@ import {
   type WorkerIncident,
   type WorkerIncidentId,
 } from "@rip-dvd/data-access";
+import {
+  defaultArchiveImageOwnership,
+  type ArchiveImageOwnership,
+} from "@rip-dvd/worker-runtime";
 
 import { describeArchiveRequestWaitingStatus } from "./archive-request-waiting-status.js";
 import {
@@ -55,6 +59,14 @@ export type OperationKind = (typeof OPERATION_KINDS)[number];
 export type WaitableKind = Extract<OperationKind,
   "disc-inspections" | "archive-requests" | "archive-jobs" | "encode-jobs" | "archive-audits" | "filesystem-verifications"
 >;
+
+export interface OperationInspectionOptions {
+  id?: string;
+  limit?: number;
+  offset?: number;
+  originalsLibraryPath?: string;
+  archiveImageOwnership?: Pick<ArchiveImageOwnership, "inspect">;
+}
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
@@ -591,7 +603,12 @@ function readDetail(
   access: ConsistentReadAccess,
   kind: Exclude<OperationKind, "activity">,
   id: string,
-  options: { limit: number; offset: number },
+  options: {
+    limit: number;
+    offset: number;
+    originalsLibraryPath?: string;
+    archiveImageOwnership?: Pick<ArchiveImageOwnership, "inspect">;
+  },
 ) {
   switch (kind) {
     case "optical-drives": {
@@ -726,6 +743,14 @@ function readDetail(
         : describeDvdRecoveryStorage(
           access.dvdRecoveryStorage.readCurrent(),
         );
+      const ownership = evidenceHeader === null ||
+          options.originalsLibraryPath === undefined
+        ? null
+        : (options.archiveImageOwnership ?? defaultArchiveImageOwnership)
+          .inspect({
+            archiveId: archive.id,
+            originalsLibraryPath: options.originalsLibraryPath,
+          });
       return {
         ...visibleArchive(archive, evidenceHeaders),
         ...(recoveryStorage === null
@@ -740,8 +765,10 @@ function readDetail(
                   message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
                 },
                 ...recoveryStorage.blockingReasons,
+                ...(ownership?.stableRead.blockingReasons ?? []),
               ],
               storage: recoveryStorage,
+              ...(ownership === null ? {} : { ownership }),
             },
           }),
         detectedDisc: access.catalog.listDetectedDiscs(undefined, {
@@ -904,7 +931,7 @@ function readDetail(
 export function inspectOperations(
   access: Pick<DataAccess, "readConsistentSnapshot">,
   kind: OperationKind,
-  options: { id?: string; limit?: number; offset?: number } = {},
+  options: OperationInspectionOptions = {},
 ) {
   const limit = options.limit ?? DEFAULT_LIMIT;
   const offset = options.offset ?? 0;
@@ -924,7 +951,16 @@ export function inspectOperations(
           snapshot,
           kind as Exclude<OperationKind, "activity">,
           options.id!,
-          { limit, offset },
+          {
+            limit,
+            offset,
+            ...(options.originalsLibraryPath === undefined
+              ? {}
+              : { originalsLibraryPath: options.originalsLibraryPath }),
+            ...(options.archiveImageOwnership === undefined
+              ? {}
+              : { archiveImageOwnership: options.archiveImageOwnership }),
+          },
         ),
       }
   );

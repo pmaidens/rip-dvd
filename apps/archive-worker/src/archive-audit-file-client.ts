@@ -113,11 +113,18 @@ export function createBoundedArchiveAuditFileInspector({
     throw new TypeError("Archive audit file timeout must be a positive integer");
   }
   return {
-    inspect(archivePath, originalsLibraryPath, signal) {
+    inspect(
+      archivePath,
+      originalsLibraryPath,
+      signal,
+      ownershipDescriptor,
+    ) {
       signal.throwIfAborted();
       return new Promise<ArchiveAuditFileInspection>((resolve, reject) => {
         const child = spawn(process.execPath, [helperPath], {
-          stdio: ["pipe", "pipe", "pipe"],
+          stdio: ownershipDescriptor === undefined
+            ? ["pipe", "pipe", "pipe"]
+            : ["pipe", "pipe", "pipe", ownershipDescriptor],
         });
         let stdout = "";
         let outputTooLarge = false;
@@ -147,8 +154,8 @@ export function createBoundedArchiveAuditFileInspector({
         }, timeoutMs);
         signal.addEventListener("abort", abort, { once: true });
 
-        child.stdout.setEncoding("utf8");
-        child.stdout.on("data", (chunk: string) => {
+        child.stdout!.setEncoding("utf8");
+        child.stdout!.on("data", (chunk: string) => {
           stdout += chunk;
           if (Buffer.byteLength(stdout) > MAX_HELPER_OUTPUT_BYTES) {
             outputTooLarge = true;
@@ -156,13 +163,13 @@ export function createBoundedArchiveAuditFileInspector({
           }
         });
         let stderrBytes = 0;
-        child.stderr.on("data", (chunk: Buffer) => {
+        child.stderr!.on("data", (chunk: Buffer) => {
           stderrBytes += chunk.byteLength;
           if (stderrBytes > MAX_HELPER_OUTPUT_BYTES) {
             child.kill("SIGKILL");
           }
         });
-        child.stdin.on("error", () => undefined);
+        child.stdin!.on("error", () => undefined);
         child.once("error", () => {
           finish({
             actualSizeBytes: null,
@@ -181,7 +188,7 @@ export function createBoundedArchiveAuditFileInspector({
             outcome: "read_error",
           });
         });
-        child.stdin.end(JSON.stringify({ archivePath, originalsLibraryPath }));
+        child.stdin!.end(JSON.stringify({ archivePath, originalsLibraryPath }));
       });
     },
   };
