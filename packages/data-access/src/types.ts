@@ -1583,6 +1583,10 @@ export interface DvdInitialArchiveSave {
 }
 
 export interface ArchiveJobAccess {
+  /** Marked-only lease operations. Neither admits a new job. Reclaim requires
+   * archive exclusion and proven native-writer inactivity at the workflow. */
+  renewDvdInitialClaim(claim: RunningArchiveJob): RunningArchiveJob;
+  reclaimDvdInitialSave(claim: RunningArchiveJob, workerId: string): RunningArchiveJob;
   /** Dormant marked-job save. Does not admit or start new-format jobs. */
   publishDvdInitial(claim: RunningArchiveJob, input: DvdInitialArchiveSave): ArchiveJob;
   find(id: ArchiveJobId): ArchiveJob | null;

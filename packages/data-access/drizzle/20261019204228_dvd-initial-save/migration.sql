@@ -1,7 +1,7 @@
 DROP TRIGGER `dvd_evidence_archive_job_update_guard`;--> statement-breakpoint
 CREATE TRIGGER `dvd_evidence_archive_job_update_guard`
 BEFORE UPDATE ON `archive_jobs`
-WHEN NOT (
+WHEN NOT ((
   OLD.`evidence_format` = 'dvd-recovery-evidence-v1'
   AND OLD.`status` = 'running' AND NEW.`status` = 'completed'
   AND OLD.`original_disc_archive_id` IS NULL AND NEW.`original_disc_archive_id` IS NOT NULL
@@ -49,7 +49,54 @@ WHEN NOT (
   AND NEW.`read_failure_sense_key` IS OLD.`read_failure_sense_key`
   AND NEW.`read_failure_asc` IS OLD.`read_failure_asc`
   AND NEW.`read_failure_ascq` IS OLD.`read_failure_ascq`
-)
+) OR (
+  OLD.`evidence_format` = 'dvd-recovery-evidence-v1'
+  AND NEW.`evidence_format` = OLD.`evidence_format`
+  AND OLD.`status` = 'running' AND NEW.`status` = 'running'
+  AND OLD.`original_disc_archive_id` IS NULL
+  AND OLD.`completed_at` IS NULL AND NEW.`updated_at` >= OLD.`updated_at`
+  AND EXISTS (SELECT 1 FROM `archive_requests` AS r
+    WHERE r.`id` = OLD.`archive_request_id` AND r.`status` = 'running'
+      AND r.`evidence_format` = OLD.`evidence_format`)
+  AND (
+    (NEW.`claim_token` = OLD.`claim_token`
+      AND NEW.`claimed_by` IS OLD.`claimed_by` AND NEW.`claimed_at` IS OLD.`claimed_at`
+      AND OLD.`updated_at` > NEW.`updated_at` - 60000)
+    OR (NEW.`claim_token` IS NOT OLD.`claim_token` AND NEW.`claim_token` IS NOT NULL
+      AND length(NEW.`claim_token`) = 36 AND length(NEW.`claimed_by`) > 0
+      AND NEW.`claimed_at` = NEW.`updated_at`
+      AND OLD.`updated_at` <= NEW.`updated_at` - 60000)
+  )
+  AND NEW.`id` IS OLD.`id`
+  AND NEW.`archive_request_id` IS OLD.`archive_request_id`
+  AND NEW.`disc_inspection_id` IS OLD.`disc_inspection_id`
+  AND NEW.`detected_disc_id` IS OLD.`detected_disc_id`
+  AND NEW.`original_disc_archive_id` IS OLD.`original_disc_archive_id`
+  AND NEW.`attempt_ordinal` IS OLD.`attempt_ordinal`
+  AND NEW.`priority` IS OLD.`priority`
+  AND NEW.`progress_phase` IS OLD.`progress_phase`
+  AND NEW.`progress_percent` IS OLD.`progress_percent`
+  AND NEW.`progress_bytes` IS OLD.`progress_bytes`
+  AND NEW.`progress_eta_seconds` IS OLD.`progress_eta_seconds`
+  AND NEW.`last_progress_at` IS OLD.`last_progress_at`
+  AND NEW.`started_at` IS OLD.`started_at`
+  AND NEW.`completed_at` IS OLD.`completed_at`
+  AND NEW.`error_message` IS OLD.`error_message`
+  AND NEW.`created_at` IS OLD.`created_at`
+  AND NEW.`failure_detail_version` IS OLD.`failure_detail_version`
+  AND NEW.`read_failure_stage` IS OLD.`read_failure_stage`
+  AND NEW.`read_failure_category` IS OLD.`read_failure_category`
+  AND NEW.`read_failure_classifier_version` IS OLD.`read_failure_classifier_version`
+  AND NEW.`read_failure_lba` IS OLD.`read_failure_lba`
+  AND NEW.`read_failure_requested_block_count` IS OLD.`read_failure_requested_block_count`
+  AND NEW.`read_failure_retry_count` IS OLD.`read_failure_retry_count`
+  AND NEW.`read_failure_scsi_status` IS OLD.`read_failure_scsi_status`
+  AND NEW.`read_failure_host_status` IS OLD.`read_failure_host_status`
+  AND NEW.`read_failure_driver_status` IS OLD.`read_failure_driver_status`
+  AND NEW.`read_failure_sense_key` IS OLD.`read_failure_sense_key`
+  AND NEW.`read_failure_asc` IS OLD.`read_failure_asc`
+  AND NEW.`read_failure_ascq` IS OLD.`read_failure_ascq`
+))
 BEGIN
   SELECT CASE
     WHEN (

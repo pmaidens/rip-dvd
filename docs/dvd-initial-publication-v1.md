@@ -6,9 +6,10 @@ part of #394. Admission remains closed. `saveDvdInitialArchiveForArchiveJob`
 consumes its checkpoint in the atomic database save. #409 owns operator
 evidence presentation through web and the public JSON CLI.
 
-The caller holds archive exclusion, closes all copy helpers, and fences each
-mutation with the current claim and cancellation state. It must keep that
-exclusion through reconciliation and the subsequent database save. No legacy
+The filesystem publication caller holds archive exclusion, closes all copy
+helpers, and fences each mutation with the current claim and cancellation state.
+The Archive Job save and reconciliation operations acquire that exclusion and
+keep it through the database save and cleanup. No legacy
 rescue helper may keep write access after this ownership transfer. The module
 does no optical reads, recovery reads, whole-image hashing, or metadata recheck.
 
@@ -96,6 +97,19 @@ The archive ID derives from the source Archive Job ID and remains stable across
 restarts. `reconcileDvdInitialArchiveForArchiveJob` supplies the existing database
 projection when replaying durable intent. A completed save returns its existing
 Job and archive after verifying that evidence and lifecycle records agree.
+
+Marked-only heartbeats renew the current claim independently of byte progress.
+The legacy renewal method still rejects marked jobs. An expired pre-commit save
+may be reclaimed only while holding archive exclusion and the native device
+inactivity lock, after checking that no helper owns the staging inode. Without
+those proofs reconciliation returns `DVD_INITIAL_SAVE_OWNERSHIP_LOST`. Reclaim
+replaces the token through a compare-and-swap against the expired attempt; the
+old token can no longer renew or commit. Reconciliation then finishes durable
+intent without another source read. Completed-save replay needs no device
+access. The database trigger permits only unchanged running-job heartbeats,
+expired token replacement, cancellation, and the manifest-backed terminal save.
+These operations cannot create an Archive Job or admit a new-format Request.
+
 Missing or conflicting database lifecycle records raise
 `DVD_INITIAL_SAVE_CONSISTENCY_FAULT`; a lost running claim or cancelled Request
 raises `DVD_INITIAL_SAVE_OWNERSHIP_LOST`. Filesystem faults keep their specific
@@ -110,7 +124,8 @@ watchability, playback, or encoding eligibility. The database first inserts an
 unknown projection inside the transaction, then installs authoritative evidence
 and its matching integrity projection before commit. Existing evidence guards
 remain in force. Closed-admission triggers allow only the marked initial terminal
-handoff backed by its manifest; scheduling and legacy mutations stay closed.
+handoff backed by its manifest and the marked lease operations described above;
+scheduling and legacy mutations stay closed.
 Later Recovery has no authority to change the completed Archive Job outcome.
 This adds no operator operation or Recovery reads.
 

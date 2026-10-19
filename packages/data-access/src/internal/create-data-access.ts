@@ -6364,6 +6364,31 @@ export function createDataAccessInternal(
     return preflight;
   }
 
+  function updateDvdInitialClaim(claim: RunningArchiveJob, workerId?: string): RunningArchiveJob {
+    const timestamp = now();
+    const expiredBefore = new Date(timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS);
+    const renewed = database.update(archiveJobs).set({
+      updatedAt: timestamp,
+      ...(workerId === undefined ? {} : {
+        claimToken: newId<ArchiveJobClaimToken>(), claimedBy: workerId, claimedAt: timestamp,
+      }),
+    }).where(and(
+      eq(archiveJobs.id, claim.id), eq(archiveJobs.status, "running"),
+      eq(archiveJobs.archiveRequestId, claim.archiveRequestId),
+      eq(archiveJobs.detectedDiscId, claim.detectedDiscId),
+      eq(archiveJobs.evidenceFormat, DVD_RECOVERY_EVIDENCE_FORMAT),
+      eq(archiveJobs.claimToken, claim.claimToken),
+      workerId === undefined ? gt(archiveJobs.updatedAt, expiredBefore) : lte(archiveJobs.updatedAt, expiredBefore),
+      exists(database.select({ id: archiveRequests.id }).from(archiveRequests).where(and(
+        eq(archiveRequests.id, archiveJobs.archiveRequestId),
+        eq(archiveRequests.evidenceFormat, DVD_RECOVERY_EVIDENCE_FORMAT),
+        eq(archiveRequests.status, "running"),
+      ))),
+    )).returning().get();
+    if (!renewed) throw new DvdInitialSaveFault("DVD_INITIAL_SAVE_OWNERSHIP_LOST");
+    return asRunningArchiveJob(renewed);
+  }
+
   function publishArchive(
     claim: RunningArchiveJob,
     input: Parameters<import("../types.js").ArchiveJobAccess["publish"]>[1],
@@ -12699,6 +12724,14 @@ export function createDataAccessInternal(
           archiveProgress.delete(id);
           return asRunningArchiveJob(job);
         }, { behavior: "immediate" });
+      },
+
+      renewDvdInitialClaim(claim) {
+        return updateDvdInitialClaim(claim);
+      },
+
+      reclaimDvdInitialSave(claim, workerId) {
+        return updateDvdInitialClaim(claim, requireNonEmpty(workerId, "workerId"));
       },
 
       renewClaim(claim) {

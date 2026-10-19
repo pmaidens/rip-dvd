@@ -2,8 +2,8 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, expect, it } from "vitest";
-import { createDataAccess, type RunningArchiveJob } from "@rip-dvd/data-access";
+import { afterEach, expect, it, vi } from "vitest";
+import { ARCHIVE_JOB_LEASE_DURATION_MS, createDataAccess, type RunningArchiveJob } from "@rip-dvd/data-access";
 import { beginSettledDiscInspectionForTest } from "@rip-dvd/data-access/test-support";
 import { runDvdInitialArchiveBoundaryForArchiveJob } from "./dvd-initial-boundary.js";
 import { isoProfileImage } from "./dvd-metadata-profile-fixtures.js";
@@ -12,6 +12,7 @@ import { DvdInitialCopyBoundaryError } from "./dvd-initial-copy.js";
 import { saveDvdInitialArchiveForArchiveJob, reconcileDvdInitialArchiveForArchiveJob, runDvdInitialArchiveJob } from "./dvd-initial-save.js";
 const directories: string[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -106,13 +107,13 @@ async function jobFixture(damaged = false, corrected = false) {
   for (const guard of guards) sqlite.exec(String(guard.sql));
   sqlite.close();
   const reopened = createDataAccess({ databasePath });
-  return { ...f, access: reopened, claim: reopened.archiveJobs.find(claim.id) as RunningArchiveJob, databasePath };
+  return { ...f, access: reopened, claim: reopened.archiveJobs.find(claim.id) as RunningArchiveJob, databasePath, exclusion: createInProcessDvdRescueWorkspaceLock() };
 }
 
 it.each([false, true])("saves the initial image, full evidence, job, request and separate Recovery together, damaged=%s", async (damaged) => {
   const f = await jobFixture(damaged);
   try {
-    const saved = await saveDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, proven: f.proven });
+    const saved = await saveDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion, proven: f.proven });
     const id = saved.originalDiscArchiveId!;
     expect(saved.status).toBe("completed");
     expect(f.access.archiveRequests.find(f.claim.archiveRequestId)?.status).toBe("fulfilled");
@@ -125,7 +126,7 @@ it.each([false, true])("saves the initial image, full evidence, job, request and
     expect(header.acceptedEndLbaExclusive).toBe(64);
     const pointer = JSON.parse(await readFile(join(f.identity.originalsLibraryPath, ".dvd-evidence", id, "checkpoint.json"), "utf8"));
     expect(pointer.currentManifestDigest).toBe(header.currentManifestDigest);
-    expect((await reconcileDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath })).originalDiscArchiveId).toBe(id);
+    expect((await reconcileDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion })).originalDiscArchiveId).toBe(id);
     expect(f.access.catalog.listOriginalDiscArchives({})).toHaveLength(1);
   } finally { f.access.close(); }
 });
@@ -133,7 +134,7 @@ it.each([false, true])("saves the initial image, full evidence, job, request and
 it.each(["after:intent", "after:image", "after:manifest", "after:link", "before:pointer", "after:pointer", "before:database", "after:database", "before:cleanup", "after:cleanup"] as const)(
   "reconciles %s to the same complete save without losing evidence", async (interruption) => {
     const f = await jobFixture(true);
-    const options = { access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath };
+    const options = { access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion };
     try {
       await expect(saveDvdInitialArchiveForArchiveJob({ ...options, proven: f.proven, fault(point) {
         if (point === interruption) throw new Error("synthetic interruption");
@@ -164,7 +165,7 @@ it("rolls back every database projection if Recovery creation fails, then replay
   const f = await jobFixture(true);
   const sqlite = new DatabaseSync(f.databasePath);
   sqlite.exec("CREATE TRIGGER synthetic_save_failure BEFORE INSERT ON archive_recoveries BEGIN SELECT RAISE(ABORT, 'synthetic database interruption'); END");
-  const options = { access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath };
+  const options = { access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion };
   try {
     await expect(saveDvdInitialArchiveForArchiveJob({ ...options, proven: f.proven })).rejects.toMatchObject({ cause: { message: "synthetic database interruption" } });
     expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
@@ -181,7 +182,7 @@ it("rolls back every database projection if Recovery creation fails, then replay
 
 it("preserves archive evidence after removing request staging and rejects a missing committed pointer", async () => {
   const f = await jobFixture(true);
-  const options = { access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath };
+  const options = { access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion };
   try {
     const saved = await saveDvdInitialArchiveForArchiveJob({ ...options, proven: f.proven });
     await rm(join(f.proven.initialCopy.imagePath, ".."), { recursive: true, force: true });
@@ -197,7 +198,7 @@ it("preserves archive evidence after removing request staging and rejects a miss
 it("keeps the completed preservation outcome when a later recovery caller fails", async () => {
   const f = await jobFixture(true);
   try {
-    const completed = await saveDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, proven: f.proven });
+    const completed = await saveDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion, proven: f.proven });
     expect(() => f.access.archiveJobs.fail(f.claim, "synthetic recovery failure")).toThrow();
     expect(f.access.archiveJobs.find(f.claim.id)).toEqual(completed);
     expect(f.access.archiveRequests.find(f.claim.archiveRequestId)?.status).toBe("fulfilled");
@@ -207,7 +208,7 @@ it("keeps the completed preservation outcome when a later recovery caller fails"
 it("does not advance the database when image bytes change before the save", async () => {
   const f = await jobFixture(true);
   try {
-    await expect(saveDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, proven: f.proven,
+    await expect(saveDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion, proven: f.proven,
       async fault(point) {
         if (point === "before:database") await writeFile(f.proven.initialCopy.imagePath, Buffer.alloc(f.image.length, 7));
       },
@@ -226,8 +227,7 @@ it("holds exclusion and waits for the initial helper to close before transferrin
   let excluded = false;
   const lock = createInProcessDvdRescueWorkspaceLock();
   const saving = runDvdInitialArchiveJob({
-    access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath,
-    exclusion: { async withLock(options) {
+    access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: { async withLock(options) {
       return lock.withLock({ ...options, async task() {
         excluded = true;
         try { return await options.task(); } finally { excluded = false; }
@@ -253,7 +253,7 @@ it("holds exclusion and waits for the initial helper to close before transferrin
 it.each([false, true])("saves the strict corrected extent without treating the excluded suffix as source damage, damaged=%s", async damaged => {
   const f = await jobFixture(damaged, true);
   try {
-    const completed = await saveDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, proven: f.proven });
+    const completed = await saveDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion, proven: f.proven });
     const archive = f.access.catalog.listOriginalDiscArchives()[0]!;
     expect(await readFile(archive.archivePath)).toEqual(f.image);
     expect(archive).toMatchObject({ sizeBytes: 64 * 2048, boundaryReportedSizeBytes: 80 * 2048, boundaryExcludedSectorCount: 16, integrity: damaged ? "incomplete_read" : "clean_read", badSectorCount: damaged ? 5 : 0 });
@@ -277,7 +277,7 @@ it("blocks ownership transfer if the initial helper cannot prove closure", async
 
 it("reports a corrupt database projection as a consistency fault without changing the artifact", async () => {
   const f = await jobFixture(true);
-  const options = { access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath };
+  const options = { access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion };
   const sqlite = new DatabaseSync(f.databasePath);
   try {
     const saved = await saveDvdInitialArchiveForArchiveJob({ ...options, proven: f.proven });
@@ -292,11 +292,79 @@ it("reports a corrupt database projection as a consistency fault without changin
 it("cannot commit when cancellation arrives at the database boundary", async () => {
   const f = await jobFixture(true);
   try {
-    await expect(saveDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, proven: f.proven,
+    await expect(saveDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion, proven: f.proven,
       fault(point) { if (point === "before:database") f.access.archiveRequests.cancel(f.claim.archiveRequestId); },
     })).rejects.toMatchObject({ code: "DVD_INITIAL_SAVE_OWNERSHIP_LOST" });
     expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
     expect(f.access.archiveJobs.find(f.claim.id)?.status).toBe("running");
     expect(f.access.archiveRequests.find(f.claim.archiveRequestId)?.status).toBe("cancellation_requested");
+  } finally { f.access.close(); }
+});
+
+it("renews a marked initial copy through several claim leases without opening admission", async () => {
+  const f = await jobFixture();
+  vi.useFakeTimers();
+  try {
+    const saved = await runDvdInitialArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: createInProcessDvdRescueWorkspaceLock(), boundary: { ...f.boundary,
+        runner: { ...f.boundary.runner, async copyInitial(input) {
+          await vi.advanceTimersByTimeAsync(3 * ARCHIVE_JOB_LEASE_DURATION_MS);
+          return f.boundary.runner.copyInitial(input);
+        } },
+      },
+    });
+    expect(saved.status).toBe("completed");
+    expect(f.access.catalog.findArchiveRecovery(saved.originalDiscArchiveId!)?.status).toBe("completed");
+    expect(() => f.access.archiveJobs.renewClaim(f.claim)).toThrow();
+  } finally { f.access.close(); }
+});
+
+it("reconciles an expired pre-commit save only after exclusive writer inactivity, and fences its old claim", async () => {
+  const f = await jobFixture(true);
+  const options = { access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion };
+  try {
+    await expect(saveDvdInitialArchiveForArchiveJob({ ...options, proven: f.proven, fault(point) {
+      if (point === "after:pointer") throw new Error("synthetic restart");
+    } })).rejects.toThrow("synthetic restart");
+    f.access.close();
+    f.access = createDataAccess({ databasePath: f.databasePath });
+    options.access = f.access;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 2 * ARCHIVE_JOB_LEASE_DURATION_MS);
+    let inactive = false;
+    const saved = await reconcileDvdInitialArchiveForArchiveJob({ ...options,
+      exclusion: createInProcessDvdRescueWorkspaceLock(),
+      writer: { devicePath: f.boundary.devicePath, outputPath: f.proven.initialCopy.imagePath,
+        runner: { isActive() { expect(inactive).toBe(true); return false; }, async withDeviceInactive(_device, task) {
+          inactive = true;
+          try { await task(); } finally { inactive = false; }
+        } },
+      },
+    });
+    expect(saved.status).toBe("completed");
+    expect(saved.claimToken).not.toBe(f.claim.claimToken);
+    expect(f.access.catalog.listOriginalDiscArchives()).toHaveLength(1);
+    expect(f.access.catalog.findArchiveRecovery(saved.originalDiscArchiveId!)?.status).toBe("eligible");
+    expect(() => f.access.archiveJobs.renewDvdInitialClaim(f.claim)).toThrow();
+  } finally { f.access.close(); }
+});
+
+it("does not replace an expired claim while a native writer remains or inactivity is unproved", async () => {
+  const f = await jobFixture(true);
+  const options = { access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion };
+  try {
+    await expect(saveDvdInitialArchiveForArchiveJob({ ...options, proven: f.proven, fault(point) {
+      if (point === "after:pointer") throw new Error("synthetic restart");
+    } })).rejects.toThrow("synthetic restart");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 2 * ARCHIVE_JOB_LEASE_DURATION_MS);
+    await expect(reconcileDvdInitialArchiveForArchiveJob(options)).rejects.toMatchObject({ code: "DVD_INITIAL_SAVE_OWNERSHIP_LOST" });
+    await expect(reconcileDvdInitialArchiveForArchiveJob({ ...options,
+      writer: { devicePath: f.boundary.devicePath, outputPath: f.proven.initialCopy.imagePath,
+        runner: { isActive() { return true; }, async withDeviceInactive(_device, task) { await task(); } },
+      },
+    })).rejects.toMatchObject({ code: "DVD_INITIAL_SAVE_OWNERSHIP_LOST" });
+    expect(f.access.archiveJobs.find(f.claim.id)?.claimToken).toBe(f.claim.claimToken);
+    expect(f.access.archiveJobs.find(f.claim.id)?.status).toBe("running");
+    expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
   } finally { f.access.close(); }
 });
