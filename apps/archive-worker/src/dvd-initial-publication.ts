@@ -157,6 +157,8 @@ function checkpointFor(manifest: DvdInitialManifest): DvdInitialCheckpoint {
 }
 function checkProjection(pointer: unknown, projection: PublicationControls["databaseProjection"]) {
   if (!projection) return;
+  if (pointer !== undefined && (pointer === null || typeof pointer !== "object" || Array.isArray(pointer)))
+    throw new DvdInitialPublicationFault("DVD_PUBLICATION_CHECKPOINT_CONFLICT");
   const checkpoint = pointer as DvdInitialCheckpoint | undefined;
   if (!Number.isSafeInteger(projection.currentManifestRevision) || projection.currentManifestRevision < 1 ||
     checkpoint === undefined || projection.currentManifestRevision > checkpoint.currentManifestRevision)

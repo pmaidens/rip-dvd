@@ -276,6 +276,14 @@ it("does not recreate evidence missing behind an authoritative pointer", async (
   await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
 });
 
+it("reports a malformed checkpoint with an existing database projection as a specific fault", async () => {
+  const { identity, proven } = await fixture();
+  const saved = await publishDvdInitialArchive({ ...identity, proven });
+  await writeFile(evidencePath(identity, "checkpoint.json"), "null");
+  await expect(reconcileDvdInitialArchivePublication({ ...identity, databaseProjection: saved.checkpoint }))
+    .rejects.toMatchObject({ code: "DVD_PUBLICATION_CHECKPOINT_CONFLICT" });
+});
+
 it("can clean request staging after the Archive Job claim has completed", async () => {
   const { identity, proven } = await fixture();
   let jobCompleted = false;
