@@ -265,6 +265,11 @@ async function completePublication(controls: PublicationControls, paths: Publica
   await verifyImage(paths.archive, manifest);
   return {
     archivePath: paths.archive, manifest, checkpoint,
+    async verifyPublication() {
+      await verifyEvidence();
+      await verifyCheckpoint();
+      await verifyImage(paths.archive, manifest);
+    },
     async finalizePublication() {
       // The caller still holds archive exclusion, but its Archive Job claim may
       // already be completed by the database save. Do not renew that old claim.

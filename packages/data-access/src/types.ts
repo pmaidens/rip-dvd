@@ -1571,7 +1571,24 @@ export interface EncodingProfileAccess {
   }): EncodingProfile[];
 }
 
+/** Revision 1 projection accepted only after durable filesystem reconciliation. */
+export interface DvdInitialArchiveSave {
+  archivePath: string;
+  boundaryEvidence: ArchiveBoundaryEvidence;
+  manifest: import("./dvd-archive-evidence-digests.js").DvdArchiveEvidenceManifestDigestInput &
+    import("./dvd-archive-evidence-digests.js").DvdArchiveEvidenceManifestDigests & {
+      id: string;
+      sourceArchiveJobId: string;
+    };
+}
+
 export interface ArchiveJobAccess {
+  /** Marked-only lease operations. Neither admits a new job. Reclaim requires
+   * archive exclusion and proven native-writer inactivity at the workflow. */
+  renewDvdInitialClaim(claim: RunningArchiveJob): RunningArchiveJob;
+  reclaimDvdInitialSave(claim: RunningArchiveJob, workerId: string): RunningArchiveJob;
+  /** Dormant marked-job save. Does not admit or start new-format jobs. */
+  publishDvdInitial(claim: RunningArchiveJob, input: DvdInitialArchiveSave): ArchiveJob;
   find(id: ArchiveJobId): ArchiveJob | null;
   listForInspection(id: DiscInspectionId): ArchiveJob[];
   listForArchive(id: OriginalDiscArchiveId): ArchiveJob[];

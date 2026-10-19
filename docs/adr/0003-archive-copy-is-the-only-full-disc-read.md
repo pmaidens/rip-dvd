@@ -149,5 +149,11 @@ and synchronizes each containing directory. Its complete publication digest
 also binds the policy versions, integrity projection, and validated filesystem
 image identity. Replay verifies these bindings and rejects competing artifacts
 without overwrite. Request staging cleanup retains the archive-owned evidence.
-Atomic application/database completion and operator exposure remain separate
-slices; this workflow does not open new-format admission.
+The dormant Archive Job workflow now commits the archive, authoritative initial
+evidence, completed Job, fulfilled Request, and separate Recovery in one database
+transaction after verifying the durable checkpoint. Clean reads create completed
+Recovery; remaining source creates eligible Recovery only after commit. Replay
+uses the same Job-bound archive identity and durable intent, including after a
+lost commit response. It preserves archive-owned evidence and never sends this
+artifact through legacy quarantine or failure handling. Operator exposure remains
+a separate slice, and this workflow does not open new-format admission.

@@ -39,3 +39,15 @@ export class StaleJobAttemptError extends Error {
     this.name = "StaleJobAttemptError";
   }
 }
+
+/** A marked initial save cannot be reconciled with its durable lifecycle. */
+export class DvdInitialSaveFault extends DomainInvariantError {
+  constructor(
+    readonly code: "DVD_INITIAL_SAVE_CONSISTENCY_FAULT" | "DVD_INITIAL_SAVE_OWNERSHIP_LOST",
+    options?: ErrorOptions,
+  ) {
+    super(code);
+    this.name = "DvdInitialSaveFault";
+    this.cause = options?.cause;
+  }
+}

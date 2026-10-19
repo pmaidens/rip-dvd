@@ -1,3 +1,4 @@
+import { DvdInitialSaveFault } from "../errors.js";
 import { createNotificationAccess, createNotificationEventWriter } from "./notifications.js";
 import { recordNotificationOutcome } from "../notification-policy.js";
 import {
@@ -6363,6 +6364,476 @@ export function createDataAccessInternal(
     return preflight;
   }
 
+  function updateDvdInitialClaim(claim: RunningArchiveJob, workerId?: string): RunningArchiveJob {
+    const timestamp = now();
+    const expiredBefore = new Date(timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS);
+    const renewed = database.update(archiveJobs).set({
+      updatedAt: timestamp,
+      ...(workerId === undefined ? {} : {
+        claimToken: newId<ArchiveJobClaimToken>(), claimedBy: workerId, claimedAt: timestamp,
+      }),
+    }).where(and(
+      eq(archiveJobs.id, claim.id), eq(archiveJobs.status, "running"),
+      eq(archiveJobs.archiveRequestId, claim.archiveRequestId),
+      eq(archiveJobs.detectedDiscId, claim.detectedDiscId),
+      eq(archiveJobs.evidenceFormat, DVD_RECOVERY_EVIDENCE_FORMAT),
+      eq(archiveJobs.claimToken, claim.claimToken),
+      workerId === undefined ? gt(archiveJobs.updatedAt, expiredBefore) : lte(archiveJobs.updatedAt, expiredBefore),
+      exists(database.select({ id: archiveRequests.id }).from(archiveRequests).where(and(
+        eq(archiveRequests.id, archiveJobs.archiveRequestId),
+        eq(archiveRequests.evidenceFormat, DVD_RECOVERY_EVIDENCE_FORMAT),
+        eq(archiveRequests.status, "running"),
+      ))),
+    )).returning().get();
+    if (!renewed) throw new DvdInitialSaveFault("DVD_INITIAL_SAVE_OWNERSHIP_LOST");
+    return asRunningArchiveJob(renewed);
+  }
+
+  function publishArchive(
+    claim: RunningArchiveJob,
+    input: Parameters<import("../types.js").ArchiveJobAccess["publish"]>[1],
+    initialSave?: import("../types.js").DvdInitialArchiveSave,
+  ): ArchiveJob {
+
+    const initial = initialSave?.manifest;
+    if (!initial) requireLegacyArchiveJobMutation(claim);
+    else {
+      if (claim.evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT ||
+        initial.sourceArchiveJobId !== claim.id || initial.revision !== 1 ||
+        initial.previousManifestId !== null || initial.recoveryReadId !== null ||
+        initial.previousManifestDigest !== null || initial.recoveryReadEvidenceDigest !== null ||
+        initial.evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT ||
+        initial.unrecoveredSourceRanges.some(r => r.classification !== "skipped_untested"))
+        throw new DomainInvariantError("Invalid initial DVD save provenance");
+      assertDvdArchiveEvidenceManifestDigests(initial);
+      assertDvdArchiveBoundaryEvidenceDigest(input.boundaryEvidence, initial.boundaryEvidenceDigest);
+      if (initial.boundaryPolicyVersion !== input.boundaryEvidence.policyVersion ||
+        initial.boundaryReportedSizeBytes !== input.boundaryEvidence.reportedSizeBytes ||
+        initial.boundaryPublishedSizeBytes !== input.sizeBytes)
+        throw new DomainInvariantError("Initial DVD save boundary conflicts with checkpoint");
+      const existing = access.archiveJobs.find(claim.id);
+      if (existing?.status === "completed") {
+        const header = access.catalog.findDvdArchiveEvidenceHeader(initial.originalDiscArchiveId as OriginalDiscArchiveId);
+        const archive = access.catalog.listOriginalDiscArchives({ ids: [initial.originalDiscArchiveId as OriginalDiscArchiveId] })[0];
+        if (existing.originalDiscArchiveId !== initial.originalDiscArchiveId ||
+          header?.sourceArchiveJobId !== claim.id || header.currentManifestId !== initial.id ||
+          header.currentManifestRevision !== 1 || header.currentManifestDigest !== initial.manifestDigest ||
+          archive?.archivePath !== input.archivePath ||
+          access.archiveRequests.find(existing.archiveRequestId)?.status !== "fulfilled" ||
+          access.catalog.findArchiveRecovery(archive.id) === null)
+          throw new DvdInitialSaveFault("DVD_INITIAL_SAVE_CONSISTENCY_FAULT");
+        return existing;
+      }
+    }
+    const archivePath = requireNonEmpty(input.archivePath, "archivePath");
+    const sizeBytes = requirePositiveSafeInteger(input.sizeBytes, "sizeBytes");
+    const boundaryEvidence = validateDvdArchiveBoundaryEvidence(
+      input.boundaryEvidence,
+      sizeBytes,
+    );
+    const boundaryProof =
+      "endpointProof" in boundaryEvidence
+        ? {
+            firstExcludedLba:
+              boundaryEvidence.endpointProof.firstExcludedLba,
+            maximumReferencedLba: null,
+            outOfRangeEvidence:
+              boundaryEvidence.endpointProof.outOfRangeEvidence,
+          }
+        : "outOfRangeEvidence" in boundaryEvidence
+          ? {
+              firstExcludedLba: boundaryEvidence.firstExcludedLba,
+              maximumReferencedLba:
+                boundaryEvidence.maximumReferencedLba,
+              outOfRangeEvidence: boundaryEvidence.outOfRangeEvidence,
+            }
+          : null;
+    const boundaryProofColumns =
+      boundaryProof !== null
+        ? {
+            boundaryFirstExcludedLba: boundaryProof.firstExcludedLba,
+            boundaryMaximumReferencedLba:
+              boundaryProof.maximumReferencedLba,
+            boundaryReadFailureClassifierVersion:
+              boundaryProof.outOfRangeEvidence.classifierVersion,
+            boundaryReadFailureScsiStatus:
+              boundaryProof.outOfRangeEvidence.scsiStatus,
+            boundaryReadFailureHostStatus:
+              boundaryProof.outOfRangeEvidence.hostStatus,
+            boundaryReadFailureDriverStatus:
+              boundaryProof.outOfRangeEvidence.driverStatus,
+            boundaryReadFailureSenseResponseCode:
+              boundaryProof.outOfRangeEvidence.senseResponseCode,
+            boundaryReadFailureSenseKey:
+              boundaryProof.outOfRangeEvidence.senseKey,
+            boundaryReadFailureAsc:
+              boundaryProof.outOfRangeEvidence.asc,
+            boundaryReadFailureAscq:
+              boundaryProof.outOfRangeEvidence.ascq,
+          }
+        : {
+            boundaryFirstExcludedLba: null,
+            boundaryMaximumReferencedLba: null,
+            boundaryReadFailureClassifierVersion: null,
+            boundaryReadFailureScsiStatus: null,
+            boundaryReadFailureHostStatus: null,
+            boundaryReadFailureDriverStatus: null,
+            boundaryReadFailureSenseResponseCode: null,
+            boundaryReadFailureSenseKey: null,
+            boundaryReadFailureAsc: null,
+            boundaryReadFailureAscq: null,
+          };
+    const integrityEvidence = input.integrityEvidence;
+    let integrityPolicyVersion: string | null;
+    let badSectorCountsByTitle = null;
+    if (integrityEvidence.integrity === "unknown") {
+      if (
+        integrityEvidence.policyVersion !== null ||
+        integrityEvidence.badSectorCount !== null ||
+        integrityEvidence.badAreaCount !== null ||
+        integrityEvidence.badSectorRanges !== null
+      ) {
+        throw new DomainInvariantError(
+          "Unknown Archive Integrity evidence is invalid",
+        );
+      }
+      integrityPolicyVersion = null;
+    } else if (integrityEvidence.integrity === "clean_read") {
+      integrityPolicyVersion = requireNonEmpty(
+        integrityEvidence.policyVersion,
+        "integrityEvidence.policyVersion",
+      );
+      if (
+        integrityPolicyVersion.length > 128 ||
+        integrityEvidence.badSectorCount !== 0 ||
+        integrityEvidence.badAreaCount !== 0 ||
+        !Array.isArray(integrityEvidence.badSectorRanges) ||
+        integrityEvidence.badSectorRanges.length !== 0
+      ) {
+        throw new DomainInvariantError(
+          "Clean-read Archive Integrity evidence is invalid",
+        );
+      }
+    } else if (integrityEvidence.integrity === "incomplete_read") {
+      if (!initial) throw new DomainInvariantError(
+        "Incomplete-read evidence requires an admitted dvd-recovery-evidence-v1 Archive Job",
+      );
+      integrityPolicyVersion = DVD_RECOVERY_EVIDENCE_FORMAT;
+    } else {
+      integrityPolicyVersion = requireNonEmpty(
+        integrityEvidence.policyVersion,
+        "integrityEvidence.policyVersion",
+      );
+      const validatedEvidence =
+        createWatchableSalvageArchiveIntegrityEvidence(
+          integrityPolicyVersion,
+          integrityEvidence.badSectorRanges,
+          integrityEvidence.badSectorCountsByTitle,
+        );
+      if (
+        validatedEvidence.badSectorCount !==
+          integrityEvidence.badSectorCount ||
+        validatedEvidence.badAreaCount !== integrityEvidence.badAreaCount
+      ) {
+        throw new DomainInvariantError(
+          "Watchable-salvage Archive Integrity evidence is invalid",
+        );
+      }
+      badSectorCountsByTitle = validatedEvidence.badSectorCountsByTitle;
+    }
+    const requireCurrentClaim = (
+      querySource: Pick<typeof database, "select">,
+    ) => {
+      const checkedAt = now();
+      const current = querySource
+        .select({
+          archiveRequestId: archiveJobs.archiveRequestId,
+          detectedDiscId: archiveJobs.detectedDiscId,
+          discKind: detectedDiscs.discKind,
+          fingerprint: detectedDiscs.fingerprint,
+          rearchiveSourceArchiveId:
+            archiveRequests.rearchiveSourceArchiveId,
+          jobEvidenceFormat: archiveJobs.evidenceFormat,
+          requestEvidenceFormat: archiveRequests.evidenceFormat,
+          sourceInspectionId: archiveJobs.discInspectionId,
+          sourceInspectionTotalBytes: discInspections.totalBytes,
+        })
+        .from(archiveJobs)
+        .innerJoin(
+          archiveRequests,
+          eq(archiveRequests.id, archiveJobs.archiveRequestId),
+        )
+        .innerJoin(
+          detectedDiscs,
+          eq(detectedDiscs.id, archiveJobs.detectedDiscId),
+        )
+        .leftJoin(
+          discInspections,
+          and(
+            eq(discInspections.id, archiveJobs.discInspectionId),
+            eq(
+              discInspections.detectedDiscId,
+              archiveJobs.detectedDiscId,
+            ),
+            eq(discInspections.status, "completed"),
+          ),
+        )
+        .where(
+          and(
+            eq(archiveJobs.id, claim.id),
+            eq(archiveJobs.detectedDiscId, claim.detectedDiscId),
+            eq(archiveJobs.status, "running"),
+            eq(archiveJobs.claimToken, claim.claimToken),
+            eq(archiveRequests.status, "running"),
+            gt(
+              archiveJobs.updatedAt,
+              new Date(
+                checkedAt.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+              ),
+            ),
+          ),
+        )
+        .get();
+      if (current === undefined) {
+        throw new StaleJobAttemptError("archive job", claim.id);
+      }
+      if (initial && (current.jobEvidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT ||
+        current.requestEvidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT ||
+        current.fingerprint !== initial.imageFingerprint || current.discKind !== "dvd"))
+        throw new DomainInvariantError("Initial DVD save does not match the marked source job");
+      if (
+        current.sourceInspectionId === null ||
+        current.sourceInspectionTotalBytes === null ||
+        current.sourceInspectionTotalBytes !==
+          boundaryEvidence.reportedSizeBytes
+      ) {
+        throw new DomainInvariantError(
+          "Archive Boundary Evidence does not match the source Disc Inspection",
+        );
+      }
+      return current;
+    };
+    const currentDisc = requireCurrentClaim(database);
+    if (currentDisc.discKind === "dvd") {
+      reconcileLegacyDvdArchiveContentId(
+        currentDisc.fingerprint,
+        sizeBytes,
+        requireCurrentClaim,
+      );
+    }
+    const timestamp = now();
+    const completed = database.transaction((transaction) => {
+      const current = requireCurrentClaim(transaction);
+      const disc = requireRow(
+        transaction
+          .select()
+          .from(detectedDiscs)
+          .where(eq(detectedDiscs.id, current.detectedDiscId))
+          .get(),
+        "detected disc",
+        current.detectedDiscId,
+      );
+      const rearchiveSource =
+        current.rearchiveSourceArchiveId === null
+          ? null
+          : requireRow(
+              transaction
+                .select()
+                .from(originalDiscArchives)
+                .where(eq(
+                  originalDiscArchives.id,
+                  current.rearchiveSourceArchiveId,
+                ))
+                .get(),
+              "original disc archive",
+              current.rearchiveSourceArchiveId,
+            );
+      if (
+        rearchiveSource !== null &&
+        !originalArchiveMatchesFingerprintOrContentIdAlias(
+          rearchiveSource.id,
+          disc.fingerprint,
+          transaction,
+        )
+      ) {
+        throw new DomainInvariantError(
+          "Re-archive source does not match the Archive Job disc identity",
+        );
+      }
+      if (
+        rearchiveSource === null &&
+        findOriginalArchiveByFingerprintOrContentIdAlias(
+          disc.fingerprint,
+          transaction,
+        )
+      ) {
+        throw new DomainInvariantError(
+          "DVD content already has Original Disc Archive provenance",
+        );
+      }
+      requireLegacyDvdArchiveIdentitiesResolved(
+        disc.discKind,
+        disc.fingerprint,
+        transaction,
+      );
+      const archive = requireRow(
+        transaction
+          .insert(originalDiscArchives)
+          .values({
+            id: initial ? initial.originalDiscArchiveId as OriginalDiscArchiveId : newId<OriginalDiscArchiveId>(),
+            detectedDiscId: disc.id,
+            rearchiveSourceArchiveId: rearchiveSource?.id ?? null,
+            discKind: disc.discKind,
+            archiveFormat: "iso",
+            archivePath,
+            fingerprint: disc.fingerprint,
+            boundaryPolicyVersion: boundaryEvidence.policyVersion,
+            boundaryReportedSizeBytes:
+              boundaryEvidence.reportedSizeBytes,
+            boundaryPublishedSizeBytes:
+              boundaryEvidence.publishedSizeBytes,
+            boundaryExcludedSectorCount:
+              boundaryEvidence.excludedSectorCount,
+            ...boundaryProofColumns,
+            integrity: initial ? "unknown" : integrityEvidence.integrity,
+            integrityPolicyVersion: initial ? null : integrityPolicyVersion,
+            badSectorCount: initial ? null : integrityEvidence.badSectorCount,
+            badAreaCount: initial ? null : integrityEvidence.badAreaCount,
+            badSectorRanges: initial ? null : integrityEvidence.badSectorRanges,
+            badSectorCountsByTitle,
+            legacyCutoverPending:
+              transaction
+                .select({
+                  sidecarPath: legacyCutoverStagedSidecars.sidecarPath,
+                })
+                .from(legacyCutoverStagedSidecars)
+                .where(
+                  legacyCutoverFenceCondition(
+                    disc.fingerprint,
+                    archivePath,
+                  ),
+                )
+                .limit(1)
+                .get() !== undefined,
+            sizeBytes,
+            archivedAt: timestamp,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          })
+          .returning()
+          .get(),
+        "original disc archive",
+        disc.id,
+      );
+      transaction
+        .update(detectedDiscs)
+        .set({ status: "archived", updatedAt: timestamp })
+        .where(eq(detectedDiscs.fingerprint, disc.fingerprint))
+        .run();
+      const requestFulfillmentScope = !initial && rearchiveSource === null
+        ? exists(
+            transaction
+              .select({ id: detectedDiscs.id })
+              .from(detectedDiscs)
+              .where(
+                and(
+                  eq(detectedDiscs.id, archiveRequests.detectedDiscId),
+                  eq(detectedDiscs.fingerprint, disc.fingerprint),
+                ),
+              ),
+          )
+        : eq(archiveRequests.id, current.archiveRequestId);
+      if (initial) {
+        transaction.insert(dvdArchiveEvidenceManifests).values({
+          ...initial, originalDiscArchiveId: archive.id, createdAt: timestamp,
+        }).run();
+      }
+      const job = requireRow(
+        transaction
+          .update(archiveJobs)
+          .set({
+            originalDiscArchiveId: archive.id,
+            status: "completed",
+            ...archiveTerminalProgressPatchForClaim(
+              claim.id,
+              claim.claimToken,
+            ),
+            progressPhase: "finalizing",
+            progressPercent: 100,
+            progressBytes: sizeBytes,
+            lastProgressAt: timestamp,
+            completedAt: timestamp,
+            errorMessage: null,
+            updatedAt: timestamp,
+          })
+          .where(
+            and(
+              eq(archiveJobs.id, claim.id),
+              eq(archiveJobs.status, "running"),
+              eq(archiveJobs.claimToken, claim.claimToken),
+            ),
+          )
+          .returning()
+          .get(),
+        "archive job",
+        claim.id,
+      );
+      transaction
+        .update(archiveRequests)
+        .set({
+          status: "fulfilled",
+          fulfilledAt: timestamp,
+          updatedAt: timestamp,
+        })
+        .where(
+          and(
+            inArray(archiveRequests.status, [
+              "pending",
+              "running",
+              "needs_attention",
+            ]),
+            requestFulfillmentScope,
+          ),
+        )
+        .run();
+      if (initial) {
+        transaction.insert(dvdArchiveEvidenceHeaders).values({
+          originalDiscArchiveId: archive.id, sourceArchiveJobId: job.id,
+          evidenceFormat: initial.evidenceFormat,
+          boundaryPolicyVersion: initial.boundaryPolicyVersion,
+          boundaryReportedSizeBytes: initial.boundaryReportedSizeBytes,
+          boundaryPublishedSizeBytes: initial.boundaryPublishedSizeBytes,
+          boundaryEvidenceDigest: initial.boundaryEvidenceDigest,
+          sectorSizeBytes: initial.sectorSizeBytes,
+          acceptedEndLbaExclusive: initial.acceptedEndLbaExclusive,
+          currentManifestId: initial.id, currentManifestRevision: 1,
+          currentManifestDigest: initial.manifestDigest,
+          createdAt: timestamp, updatedAt: timestamp,
+        }).run();
+        transaction.update(originalDiscArchives).set({
+          integrity: integrityEvidence.integrity, integrityEvidenceRevision: 1,
+          integrityPolicyVersion, badSectorCount: integrityEvidence.badSectorCount,
+          badAreaCount: integrityEvidence.badAreaCount, badSectorRanges: integrityEvidence.badSectorRanges,
+        }).where(eq(originalDiscArchives.id, archive.id)).run();
+        transaction.insert(archiveRecoveries).values({
+          id: newId<import("../types.js").ArchiveRecoveryId>(), originalDiscArchiveId: archive.id,
+          status: initial.unrecoveredSourceRanges.length ? "eligible" : "completed",
+          createdAt: timestamp, updatedAt: timestamp,
+        }).run();
+      }
+      recordNotificationOutcome(createNotificationEventWriter(transaction, now), {
+        kind: "archive_saved",
+        sourceEventId: `archive-job:${job.id}:completed`,
+        archiveJobId: job.id,
+        label: disc.volumeLabel,
+        remainingSource: (integrityEvidence.badSectorCount ?? 0) > 0,
+      });
+      return job;
+    }, { behavior: "immediate" });
+    archiveProgress.delete(claim.id);
+    return completed;
+  }
+
   const access: LegacySidecarDataAccess = {
     notifications: createNotificationAccess(database, now),
     dvdRecoveryStorage: {
@@ -12255,6 +12726,14 @@ export function createDataAccessInternal(
         }, { behavior: "immediate" });
       },
 
+      renewDvdInitialClaim(claim) {
+        return updateDvdInitialClaim(claim);
+      },
+
+      reclaimDvdInitialSave(claim, workerId) {
+        return updateDvdInitialClaim(claim, requireNonEmpty(workerId, "workerId"));
+      },
+
       renewClaim(claim) {
         requireLegacyArchiveJobMutation(claim);
         const timestamp = now();
@@ -12674,377 +13153,18 @@ export function createDataAccessInternal(
       },
 
       publish(claim, input) {
-        requireLegacyArchiveJobMutation(claim);
-        const archivePath = requireNonEmpty(input.archivePath, "archivePath");
-        const sizeBytes = requirePositiveSafeInteger(input.sizeBytes, "sizeBytes");
-        const boundaryEvidence = validateDvdArchiveBoundaryEvidence(
-          input.boundaryEvidence,
-          sizeBytes,
-        );
-        const boundaryProof =
-          "endpointProof" in boundaryEvidence
-            ? {
-                firstExcludedLba:
-                  boundaryEvidence.endpointProof.firstExcludedLba,
-                maximumReferencedLba: null,
-                outOfRangeEvidence:
-                  boundaryEvidence.endpointProof.outOfRangeEvidence,
-              }
-            : "outOfRangeEvidence" in boundaryEvidence
-              ? {
-                  firstExcludedLba: boundaryEvidence.firstExcludedLba,
-                  maximumReferencedLba:
-                    boundaryEvidence.maximumReferencedLba,
-                  outOfRangeEvidence: boundaryEvidence.outOfRangeEvidence,
-                }
-              : null;
-        const boundaryProofColumns =
-          boundaryProof !== null
-            ? {
-                boundaryFirstExcludedLba: boundaryProof.firstExcludedLba,
-                boundaryMaximumReferencedLba:
-                  boundaryProof.maximumReferencedLba,
-                boundaryReadFailureClassifierVersion:
-                  boundaryProof.outOfRangeEvidence.classifierVersion,
-                boundaryReadFailureScsiStatus:
-                  boundaryProof.outOfRangeEvidence.scsiStatus,
-                boundaryReadFailureHostStatus:
-                  boundaryProof.outOfRangeEvidence.hostStatus,
-                boundaryReadFailureDriverStatus:
-                  boundaryProof.outOfRangeEvidence.driverStatus,
-                boundaryReadFailureSenseResponseCode:
-                  boundaryProof.outOfRangeEvidence.senseResponseCode,
-                boundaryReadFailureSenseKey:
-                  boundaryProof.outOfRangeEvidence.senseKey,
-                boundaryReadFailureAsc:
-                  boundaryProof.outOfRangeEvidence.asc,
-                boundaryReadFailureAscq:
-                  boundaryProof.outOfRangeEvidence.ascq,
-              }
-            : {
-                boundaryFirstExcludedLba: null,
-                boundaryMaximumReferencedLba: null,
-                boundaryReadFailureClassifierVersion: null,
-                boundaryReadFailureScsiStatus: null,
-                boundaryReadFailureHostStatus: null,
-                boundaryReadFailureDriverStatus: null,
-                boundaryReadFailureSenseResponseCode: null,
-                boundaryReadFailureSenseKey: null,
-                boundaryReadFailureAsc: null,
-                boundaryReadFailureAscq: null,
-              };
-        const integrityEvidence = input.integrityEvidence;
-        let integrityPolicyVersion: string | null;
-        let badSectorCountsByTitle = null;
-        if (integrityEvidence.integrity === "unknown") {
-          if (
-            integrityEvidence.policyVersion !== null ||
-            integrityEvidence.badSectorCount !== null ||
-            integrityEvidence.badAreaCount !== null ||
-            integrityEvidence.badSectorRanges !== null
-          ) {
-            throw new DomainInvariantError(
-              "Unknown Archive Integrity evidence is invalid",
-            );
-          }
-          integrityPolicyVersion = null;
-        } else if (integrityEvidence.integrity === "clean_read") {
-          integrityPolicyVersion = requireNonEmpty(
-            integrityEvidence.policyVersion,
-            "integrityEvidence.policyVersion",
-          );
-          if (
-            integrityPolicyVersion.length > 128 ||
-            integrityEvidence.badSectorCount !== 0 ||
-            integrityEvidence.badAreaCount !== 0 ||
-            !Array.isArray(integrityEvidence.badSectorRanges) ||
-            integrityEvidence.badSectorRanges.length !== 0
-          ) {
-            throw new DomainInvariantError(
-              "Clean-read Archive Integrity evidence is invalid",
-            );
-          }
-        } else if (integrityEvidence.integrity === "incomplete_read") {
-          throw new DomainInvariantError(
-            "Incomplete-read evidence requires an admitted dvd-recovery-evidence-v1 Archive Job",
-          );
-        } else {
-          integrityPolicyVersion = requireNonEmpty(
-            integrityEvidence.policyVersion,
-            "integrityEvidence.policyVersion",
-          );
-          const validatedEvidence =
-            createWatchableSalvageArchiveIntegrityEvidence(
-              integrityPolicyVersion,
-              integrityEvidence.badSectorRanges,
-              integrityEvidence.badSectorCountsByTitle,
-            );
-          if (
-            validatedEvidence.badSectorCount !==
-              integrityEvidence.badSectorCount ||
-            validatedEvidence.badAreaCount !== integrityEvidence.badAreaCount
-          ) {
-            throw new DomainInvariantError(
-              "Watchable-salvage Archive Integrity evidence is invalid",
-            );
-          }
-          badSectorCountsByTitle = validatedEvidence.badSectorCountsByTitle;
-        }
-        const requireCurrentClaim = (
-          querySource: Pick<typeof database, "select">,
-        ) => {
-          const checkedAt = now();
-          const current = querySource
-            .select({
-              archiveRequestId: archiveJobs.archiveRequestId,
-              detectedDiscId: archiveJobs.detectedDiscId,
-              discKind: detectedDiscs.discKind,
-              fingerprint: detectedDiscs.fingerprint,
-              rearchiveSourceArchiveId:
-                archiveRequests.rearchiveSourceArchiveId,
-              sourceInspectionId: archiveJobs.discInspectionId,
-              sourceInspectionTotalBytes: discInspections.totalBytes,
-            })
-            .from(archiveJobs)
-            .innerJoin(
-              archiveRequests,
-              eq(archiveRequests.id, archiveJobs.archiveRequestId),
-            )
-            .innerJoin(
-              detectedDiscs,
-              eq(detectedDiscs.id, archiveJobs.detectedDiscId),
-            )
-            .leftJoin(
-              discInspections,
-              and(
-                eq(discInspections.id, archiveJobs.discInspectionId),
-                eq(
-                  discInspections.detectedDiscId,
-                  archiveJobs.detectedDiscId,
-                ),
-                eq(discInspections.status, "completed"),
-              ),
-            )
-            .where(
-              and(
-                eq(archiveJobs.id, claim.id),
-                eq(archiveJobs.detectedDiscId, claim.detectedDiscId),
-                eq(archiveJobs.status, "running"),
-                eq(archiveJobs.claimToken, claim.claimToken),
-                eq(archiveRequests.status, "running"),
-                gt(
-                  archiveJobs.updatedAt,
-                  new Date(
-                    checkedAt.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
-                  ),
-                ),
-              ),
-            )
-            .get();
-          if (current === undefined) {
-            throw new StaleJobAttemptError("archive job", claim.id);
-          }
-          if (
-            current.sourceInspectionId === null ||
-            current.sourceInspectionTotalBytes === null ||
-            current.sourceInspectionTotalBytes !==
-              boundaryEvidence.reportedSizeBytes
-          ) {
-            throw new DomainInvariantError(
-              "Archive Boundary Evidence does not match the source Disc Inspection",
-            );
-          }
-          return current;
-        };
-        const currentDisc = requireCurrentClaim(database);
-        if (currentDisc.discKind === "dvd") {
-          reconcileLegacyDvdArchiveContentId(
-            currentDisc.fingerprint,
-            sizeBytes,
-            requireCurrentClaim,
-          );
-        }
-        const timestamp = now();
-        const completed = database.transaction((transaction) => {
-          const current = requireCurrentClaim(transaction);
-          const disc = requireRow(
-            transaction
-              .select()
-              .from(detectedDiscs)
-              .where(eq(detectedDiscs.id, current.detectedDiscId))
-              .get(),
-            "detected disc",
-            current.detectedDiscId,
-          );
-          const rearchiveSource =
-            current.rearchiveSourceArchiveId === null
-              ? null
-              : requireRow(
-                  transaction
-                    .select()
-                    .from(originalDiscArchives)
-                    .where(eq(
-                      originalDiscArchives.id,
-                      current.rearchiveSourceArchiveId,
-                    ))
-                    .get(),
-                  "original disc archive",
-                  current.rearchiveSourceArchiveId,
-                );
-          if (
-            rearchiveSource !== null &&
-            !originalArchiveMatchesFingerprintOrContentIdAlias(
-              rearchiveSource.id,
-              disc.fingerprint,
-              transaction,
-            )
-          ) {
-            throw new DomainInvariantError(
-              "Re-archive source does not match the Archive Job disc identity",
-            );
-          }
-          if (
-            rearchiveSource === null &&
-            findOriginalArchiveByFingerprintOrContentIdAlias(
-              disc.fingerprint,
-              transaction,
-            )
-          ) {
-            throw new DomainInvariantError(
-              "DVD content already has Original Disc Archive provenance",
-            );
-          }
-          requireLegacyDvdArchiveIdentitiesResolved(
-            disc.discKind,
-            disc.fingerprint,
-            transaction,
-          );
-          const archive = requireRow(
-            transaction
-              .insert(originalDiscArchives)
-              .values({
-                id: newId<OriginalDiscArchiveId>(),
-                detectedDiscId: disc.id,
-                rearchiveSourceArchiveId: rearchiveSource?.id ?? null,
-                discKind: disc.discKind,
-                archiveFormat: "iso",
-                archivePath,
-                fingerprint: disc.fingerprint,
-                boundaryPolicyVersion: boundaryEvidence.policyVersion,
-                boundaryReportedSizeBytes:
-                  boundaryEvidence.reportedSizeBytes,
-                boundaryPublishedSizeBytes:
-                  boundaryEvidence.publishedSizeBytes,
-                boundaryExcludedSectorCount:
-                  boundaryEvidence.excludedSectorCount,
-                ...boundaryProofColumns,
-                integrity: integrityEvidence.integrity,
-                integrityPolicyVersion,
-                badSectorCount: integrityEvidence.badSectorCount,
-                badAreaCount: integrityEvidence.badAreaCount,
-                badSectorRanges: integrityEvidence.badSectorRanges,
-                badSectorCountsByTitle,
-                legacyCutoverPending:
-                  transaction
-                    .select({
-                      sidecarPath: legacyCutoverStagedSidecars.sidecarPath,
-                    })
-                    .from(legacyCutoverStagedSidecars)
-                    .where(
-                      legacyCutoverFenceCondition(
-                        disc.fingerprint,
-                        archivePath,
-                      ),
-                    )
-                    .limit(1)
-                    .get() !== undefined,
-                sizeBytes,
-                archivedAt: timestamp,
-                createdAt: timestamp,
-                updatedAt: timestamp,
-              })
-              .returning()
-              .get(),
-            "original disc archive",
-            disc.id,
-          );
-          transaction
-            .update(detectedDiscs)
-            .set({ status: "archived", updatedAt: timestamp })
-            .where(eq(detectedDiscs.fingerprint, disc.fingerprint))
-            .run();
-          const requestFulfillmentScope = rearchiveSource === null
-            ? exists(
-                transaction
-                  .select({ id: detectedDiscs.id })
-                  .from(detectedDiscs)
-                  .where(
-                    and(
-                      eq(detectedDiscs.id, archiveRequests.detectedDiscId),
-                      eq(detectedDiscs.fingerprint, disc.fingerprint),
-                    ),
-                  ),
-              )
-            : eq(archiveRequests.id, current.archiveRequestId);
-          transaction
-            .update(archiveRequests)
-            .set({
-              status: "fulfilled",
-              fulfilledAt: timestamp,
-              updatedAt: timestamp,
-            })
-            .where(
-              and(
-                inArray(archiveRequests.status, [
-                  "pending",
-                  "running",
-                  "needs_attention",
-                ]),
-                requestFulfillmentScope,
-              ),
-            )
-            .run();
-          const job = requireRow(
-            transaction
-              .update(archiveJobs)
-              .set({
-                originalDiscArchiveId: archive.id,
-                status: "completed",
-                ...archiveTerminalProgressPatchForClaim(
-                  claim.id,
-                  claim.claimToken,
-                ),
-                progressPhase: "finalizing",
-                progressPercent: 100,
-                progressBytes: sizeBytes,
-                lastProgressAt: timestamp,
-                completedAt: timestamp,
-                errorMessage: null,
-                updatedAt: timestamp,
-              })
-              .where(
-                and(
-                  eq(archiveJobs.id, claim.id),
-                  eq(archiveJobs.status, "running"),
-                  eq(archiveJobs.claimToken, claim.claimToken),
-                ),
-              )
-              .returning()
-              .get(),
-            "archive job",
-            claim.id,
-          );
-          recordNotificationOutcome(createNotificationEventWriter(transaction, now), {
-            kind: "archive_saved",
-            sourceEventId: `archive-job:${job.id}:completed`,
-            archiveJobId: job.id,
-            label: disc.volumeLabel,
-            remainingSource: (archive.badSectorCount ?? 0) > 0,
-          });
-          return job;
-        }, { behavior: "immediate" });
-        archiveProgress.delete(claim.id);
-        return completed;
+        return publishArchive(claim, input);
+      },
+      publishDvdInitial(claim, input) {
+        const ranges = input.manifest.unrecoveredSourceRanges.map(({ startLba, sectorCount }) => ({ startLba, sectorCount }));
+        return publishArchive(claim, {
+          archivePath: input.archivePath, boundaryEvidence: input.boundaryEvidence,
+          sizeBytes: input.manifest.boundaryPublishedSizeBytes,
+          integrityEvidence: ranges.length === 0
+            ? { integrity: "clean_read", policyVersion: DVD_RECOVERY_EVIDENCE_FORMAT, badSectorCount: 0, badAreaCount: 0, badSectorRanges: [] }
+            : { integrity: "incomplete_read", policyVersion: DVD_RECOVERY_EVIDENCE_FORMAT,
+                badSectorCount: ranges.reduce((n, r) => n + r.sectorCount, 0), badAreaCount: ranges.length, badSectorRanges: ranges },
+        }, input);
       },
 
       fail(claim, errorMessageInput) {
