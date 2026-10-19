@@ -180,6 +180,57 @@ describe("archive image ownership", () => {
     expect(inspectedPaths).toContain(realpathSync(imagePath));
   });
 
+  it("classifies every image path used during an ownership interval", async () => {
+    const originalsLibraryPath = root();
+    const primaryImagePath = join(originalsLibraryPath, "staging.iso");
+    const additionalImagePath = join(originalsLibraryPath, "published.iso");
+    writeFileSync(primaryImagePath, "synthetic staging image", { mode: 0o600 });
+    writeFileSync(additionalImagePath, "synthetic published image", { mode: 0o600 });
+    const ownership = createArchiveImageOwnership({
+      inspectStorage: (path) => path === realpathSync(additionalImagePath)
+        ? { filesystemType: "synthetic-network", storageClass: "network" }
+        : { filesystemType: "test-in-process", storageClass: "local" },
+    });
+
+    await expect(ownership.withWriter({
+      archiveId: "synthetic-archive",
+      additionalImagePaths: [additionalImagePath],
+      imagePath: primaryImagePath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {},
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+  });
+
+  it.each(["directory", "lock"] as const)(
+    "fails closed when the actual ownership %s is on unsupported storage",
+    async (unsupportedPath) => {
+      const originalsLibraryPath = root();
+      const directory = join(
+        realpathSync(originalsLibraryPath),
+        ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME,
+      );
+      const ownership = createArchiveImageOwnership({
+        inspectStorage: (path) => {
+          const unsupported = unsupportedPath === "directory"
+            ? path === directory
+            : path.endsWith(".lock");
+          return unsupported
+            ? { filesystemType: "synthetic-network", storageClass: "network" }
+            : { filesystemType: "test-in-process", storageClass: "local" };
+        },
+      });
+
+      await expect(ownership.withWriter({
+        archiveId: "synthetic-archive",
+        imagePath: originalsLibraryPath,
+        originalsLibraryPath,
+        signal: new AbortController().signal,
+        async task() {},
+      })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+    },
+  );
+
   it("fails closed when local storage changes during an interval", async () => {
     let storageClass: "local" | "network" = "local";
     const ownership = createArchiveImageOwnership({
@@ -204,12 +255,37 @@ describe("archive image ownership", () => {
     })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
   });
 
+  it.each(["directory", "lock"] as const)(
+    "fails closed when the ownership %s becomes publicly accessible",
+    async (changedPath) => {
+      const originalsLibraryPath = root();
+      const ownership = createArchiveImageOwnership();
+
+      await expect(ownership.withWriter({
+        archiveId: "synthetic-archive",
+        imagePath: originalsLibraryPath,
+        originalsLibraryPath,
+        signal: new AbortController().signal,
+        async task({ assertOwned }) {
+          const path = changedPath === "directory"
+            ? join(
+              originalsLibraryPath,
+              ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME,
+            )
+            : ownershipFile(originalsLibraryPath, ".lock");
+          chmodSync(path, 0o755);
+          assertOwned();
+        },
+      })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+    },
+  );
+
   it("normalizes a post-acquisition storage inspection failure", async () => {
     let inspections = 0;
     const ownership = createArchiveImageOwnership({
       inspectStorage: () => {
         inspections += 1;
-        if (inspections === 2) throw new Error("synthetic storage failure");
+        if (inspections === 6) throw new Error("synthetic storage failure");
         return { filesystemType: "test-in-process", storageClass: "local" };
       },
     });

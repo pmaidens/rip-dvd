@@ -61,6 +61,11 @@ interface PublicationPaths {
   pointer: string;
 }
 
+export interface DvdInitialArchivePublicationImagePaths {
+  archivePath: string;
+  stagingPath: string;
+}
+
 function hasCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
 }
@@ -105,6 +110,18 @@ async function pathsFor(identity: PublicationIdentity): Promise<PublicationPaths
     manifest: join(directory, "initial-manifest.json"),
     pointer: join(directory, "checkpoint.json"),
   };
+}
+
+export async function resolveDvdInitialArchiveImagePath(
+  identity: PublicationIdentity,
+): Promise<string> {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(identity.originalDiscArchiveId)) {
+    throw new DvdInitialPublicationFault("DVD_PUBLICATION_PATH_CONFLICT");
+  }
+  return join(
+    await realpath(identity.originalsLibraryPath),
+    `${identity.originalDiscArchiveId}.iso`,
+  );
 }
 async function readRecord(path: string, code: DvdInitialPublicationFaultCode): Promise<unknown | undefined> {
   let file;
@@ -313,9 +330,9 @@ export async function publishDvdInitialArchive(options: PublicationIdentity & Pu
 
 /** Resolve and validate the durable staging intent before ownership is
  * acquired. Reconciliation validates the same intent again under ownership. */
-export async function readDvdInitialArchivePublicationImagePath(
+export async function readDvdInitialArchivePublicationImagePaths(
   options: PublicationIdentity,
-): Promise<string> {
+): Promise<DvdInitialArchivePublicationImagePaths> {
   const paths = await pathsFor(options);
   const value = await readRecord(
     paths.intent,
@@ -324,16 +341,29 @@ export async function readDvdInitialArchivePublicationImagePath(
   if (value === undefined) {
     throw new DvdInitialPublicationFault("DVD_PUBLICATION_INTENT_MISSING");
   }
-  return verifyIntent(value, options, paths).stagingPath;
+  return {
+    archivePath: paths.archive,
+    stagingPath: verifyIntent(value, options, paths).stagingPath,
+  };
 }
 
 /** Replay durable intent without another optical read, metadata pass or image hash. */
-export async function reconcileDvdInitialArchivePublication(options: PublicationIdentity & PublicationControls) {
+export async function reconcileDvdInitialArchivePublication(
+  options: PublicationIdentity & PublicationControls & {
+    expectedImagePaths: DvdInitialArchivePublicationImagePaths;
+  },
+) {
   await authorize(options);
   const paths = await pathsFor(options);
   const value = await readRecord(paths.intent, "DVD_PUBLICATION_INTENT_CONFLICT");
   if (value === undefined) throw new DvdInitialPublicationFault("DVD_PUBLICATION_INTENT_MISSING");
   const intent = verifyIntent(value, options, paths);
+  if (
+    intent.stagingPath !== options.expectedImagePaths.stagingPath ||
+    paths.archive !== options.expectedImagePaths.archivePath
+  ) {
+    throw new DvdInitialPublicationFault("DVD_PUBLICATION_INTENT_CONFLICT");
+  }
   await step(options, "intent", () => installRecord(paths.intent, intent, "DVD_PUBLICATION_INTENT_CONFLICT"));
   return completePublication(options, paths, intent);
 }

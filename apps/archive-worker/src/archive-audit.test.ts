@@ -27,6 +27,7 @@ function auditRecord(
 ): ArchiveAuditRecord {
   return {
     archiveId: archiveId(`archive-${id}`),
+    evidenceFormat: null,
     detectedDiscId: detectedDiscId(`disc-${id}`),
     opticalDriveId: opticalDriveId(`drive-${id}`),
     discInspectionId: discInspectionId(`inspection-${id}`),

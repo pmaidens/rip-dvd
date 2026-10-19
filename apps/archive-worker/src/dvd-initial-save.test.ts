@@ -188,6 +188,42 @@ it("fails closed when reconciliation finds persisted staging on unsupported stor
   }
 });
 
+it("fails closed when reconciliation finds the published image on unsupported storage", async () => {
+  const f = await jobFixture();
+  const options = {
+    access: f.access,
+    claim: f.claim,
+    originalsLibraryPath: f.identity.originalsLibraryPath,
+    exclusion: f.exclusion,
+  };
+  try {
+    await expect(saveDvdInitialArchiveForArchiveJob({
+      ...options,
+      proven: f.proven,
+      fault(point) {
+        if (point === "after:link") throw new Error("synthetic interruption");
+      },
+    })).rejects.toThrow("synthetic interruption");
+    const publishedImagePath = await realpath(join(
+      f.identity.originalsLibraryPath,
+      `dvd-${f.claim.id}.iso`,
+    ));
+    const archiveImageOwnership = createArchiveImageOwnership({
+      inspectStorage: (path) => path === publishedImagePath
+        ? { filesystemType: "synthetic-network", storageClass: "network" }
+        : { filesystemType: "test-in-process", storageClass: "local" },
+    });
+
+    await expect(reconcileDvdInitialArchiveForArchiveJob({
+      ...options,
+      archiveImageOwnership,
+    })).rejects.toMatchObject({ code: "DVD_INITIAL_SAVE_CONSISTENCY_FAULT" });
+    expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
+  } finally {
+    f.access.close();
+  }
+});
+
 it.each(["after:intent", "after:image", "after:manifest", "after:link", "before:pointer", "after:pointer", "before:database", "after:database", "before:cleanup", "after:cleanup"] as const)(
   "reconciles %s to the same complete save without losing evidence", async (interruption) => {
     const f = await jobFixture(true);

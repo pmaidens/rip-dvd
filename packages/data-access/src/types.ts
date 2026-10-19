@@ -2017,7 +2017,22 @@ export interface EncodeOutputInspectionReadAccess
 }
 
 export interface DataAccess {
-  readDvdInitialCheckpoint(id: OriginalDiscArchiveId): Promise<import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence | null>;
+  readDvdInitialCheckpoint(
+    id: OriginalDiscArchiveId,
+    ownership: {
+      withConsistentRead<Result>(request: {
+        archiveId: string;
+        imagePath: string | null;
+        originalsLibraryPath: string;
+        signal: AbortSignal;
+        task(handle: {
+          descriptor: number;
+          signal: AbortSignal;
+          assertOwned(): void;
+        }): Promise<Result>;
+      }): Promise<Result>;
+    },
+  ): Promise<import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence | null>;
   readonly notifications: import("./notification-types.js").NotificationAccess;
   readonly dvdRecoveryStorage: DvdRecoveryStorageAccess;
   readonly catalog: CatalogAccess;

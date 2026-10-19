@@ -49,4 +49,24 @@ describe("bounded archive audit record reader", () => {
       new AbortController().signal,
     )).rejects.toThrow("Archive audit record read failed");
   });
+
+  it("rejects worker records without an explicit evidence format", async () => {
+    const reader = createBoundedArchiveAuditRecordReader({
+      workerPath: worker(`
+        import { parentPort } from "node:worker_threads";
+        parentPort.postMessage({
+          page: {
+            records: [{ archivedAt: new Date() }],
+            truncated: false,
+          },
+        });
+      `),
+    });
+
+    await expect(reader.read(
+      "/data/catalog.sqlite",
+      10,
+      new AbortController().signal,
+    )).rejects.toThrow("Archive audit record read failed");
+  });
 });

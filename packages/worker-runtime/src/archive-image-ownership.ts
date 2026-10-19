@@ -77,6 +77,7 @@ export interface ArchiveImageOwnershipHandle {
 
 interface OwnershipRequest<Result> {
   archiveId: string;
+  additionalImagePaths?: readonly string[];
   imagePath: string | null;
   originalsLibraryPath: string;
   signal: AbortSignal;
@@ -233,11 +234,15 @@ function ownershipStoragePathsAreSupported(
   authorityRoot: string,
   imagePath: string | null,
   inspectStorage: (path: string) => LinuxStorageInspection,
+  additionalImagePaths: readonly string[] = [],
+  ownershipPaths: readonly string[] = [],
 ): boolean {
   const paths = new Set([
     root,
     authorityRoot,
     resolveStorageProbePath(root, imagePath),
+    ...additionalImagePaths.map((path) => resolveStorageProbePath(root, path)),
+    ...ownershipPaths,
   ]);
   return [...paths].every((path) =>
     ownershipStorageIsSupported(inspectStorage(path))
@@ -279,6 +284,7 @@ async function pathsFor(
   create: boolean,
   authorityRootPath: string | undefined,
   inspectStorage: (path: string) => LinuxStorageInspection,
+  additionalImagePaths: readonly string[],
 ): Promise<OwnershipPaths | null> {
   let root: string;
   try {
@@ -293,6 +299,7 @@ async function pathsFor(
       authorityRoot,
       imagePath,
       inspectStorage,
+      additionalImagePaths,
     )) {
       throw new Error("Archive image storage is unsupported");
     }
@@ -315,6 +322,9 @@ async function pathsFor(
       validateDirectory(directory);
       if (await realpath(directory) !== directory) {
         throw new Error("Ownership directory changed");
+      }
+      if (!ownershipStorageIsSupported(inspectStorage(directory))) {
+        throw new Error("Ownership directory storage is unsupported");
       }
     } catch (cause) {
       throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause });
@@ -379,6 +389,9 @@ function pathsForSync(
     }
     if (realpathSync(directory) !== directory) {
       throw new Error("Ownership directory changed");
+    }
+    if (!ownershipStorageIsSupported(inspectStorage(directory))) {
+      throw new Error("Ownership directory storage is unsupported");
     }
     const stem = ownershipStem(archiveId);
     return {
@@ -459,13 +472,17 @@ function assertLockIdentity(descriptor: number, path: string): LockIdentity {
   try {
     const opened = fstatSync(descriptor, { bigint: true });
     const linked = lstatSync(path, { bigint: true });
+    const effectiveUserId = process.geteuid?.();
     if (
       !opened.isFile() ||
       !linked.isFile() ||
       linked.isSymbolicLink() ||
       opened.dev !== linked.dev ||
       opened.ino !== linked.ino ||
-      opened.nlink !== 1n
+      opened.nlink !== 1n ||
+      (opened.mode & 0o077n) !== 0n ||
+      effectiveUserId === undefined ||
+      opened.uid !== BigInt(effectiveUserId)
     ) {
       throw new Error("Ownership lock changed");
     }
@@ -827,6 +844,7 @@ async function writeRecord(
 }
 
 function currentNamespaceIdentity(paths: OwnershipPaths): NamespaceIdentityRecord {
+  validateDirectory(paths.directory);
   const originalsRoot = lstatSync(paths.root, { bigint: true });
   const directory = lstatSync(paths.directory, { bigint: true });
   if (
@@ -1001,6 +1019,7 @@ export function createArchiveImageOwnership({
       true,
       authorityRootPath,
       inspectStorage,
+      request.additionalImagePaths ?? [],
     );
     if (paths === null) {
       throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
@@ -1028,6 +1047,16 @@ export function createArchiveImageOwnership({
       return error;
     };
     try {
+      if (!ownershipStoragePathsAreSupported(
+        paths.root,
+        paths.authorityRoot,
+        request.imagePath,
+        inspectStorage,
+        request.additionalImagePaths,
+        [paths.directory, paths.lock],
+      )) {
+        throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
+      }
       await establishNamespaceIdentity(paths);
       lockIdentity = assertLockIdentity(descriptor, paths.lock);
       await establishLockIdentity(
@@ -1051,6 +1080,8 @@ export function createArchiveImageOwnership({
             paths.authorityRoot,
             request.imagePath,
             inspectStorage,
+            request.additionalImagePaths,
+            [paths.directory, paths.lock],
           )
         ) {
           throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
@@ -1114,6 +1145,8 @@ export function createArchiveImageOwnership({
             paths.authorityRoot,
             request.imagePath,
             inspectStorage,
+            request.additionalImagePaths,
+            [paths.directory, paths.lock],
           )) {
             throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
           }
@@ -1229,6 +1262,16 @@ export function createArchiveImageOwnership({
             },
             stableRead: { available: true, blockingReasons: [] },
           };
+        }
+        if (!ownershipStoragePathsAreSupported(
+          paths.root,
+          paths.authorityRoot,
+          imagePath,
+          inspectStorage,
+          [],
+          [paths.directory, paths.lock],
+        )) {
+          return consistencyFaultInspection();
         }
         const lockIdentity = assertLockIdentity(descriptor, paths.lock);
         const identityFault =

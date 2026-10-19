@@ -17,6 +17,7 @@ import { pollArchiveAudit } from "./archive-audit-worker.js";
 function auditRecord(id: string): ArchiveAuditRecord {
   return {
     archiveId: `archive-${id}` as OriginalDiscArchiveId,
+    evidenceFormat: null,
     detectedDiscId: `disc-${id}` as DetectedDiscId,
     opticalDriveId: "synthetic-drive" as OpticalDriveId,
     discInspectionId: `inspection-${id}` as DiscInspectionId,

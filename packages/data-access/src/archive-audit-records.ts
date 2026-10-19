@@ -18,7 +18,7 @@ const SQLITE_BUSY_TIMEOUT_MS = 5_000;
 
 export interface ArchiveAuditRecord {
   archiveId: OriginalDiscArchiveId;
-  evidenceFormat?: DvdArchiveEvidenceFormat | null;
+  evidenceFormat: DvdArchiveEvidenceFormat | null;
   detectedDiscId: DetectedDiscId;
   opticalDriveId: OpticalDriveId;
   discInspectionId: DiscInspectionId | null;

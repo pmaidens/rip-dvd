@@ -8,7 +8,8 @@ import {
 import { runDvdInitialArchiveBoundaryForArchiveJob, type ProvenDvdInitialArchiveBoundary } from "./dvd-initial-boundary.js";
 import {
   publishDvdInitialArchive, reconcileDvdInitialArchivePublication,
-  readDvdInitialArchivePublicationImagePath,
+  readDvdInitialArchivePublicationImagePaths,
+  resolveDvdInitialArchiveImagePath,
   type DvdInitialPublicationStep,
 } from "./dvd-initial-publication.js";
 
@@ -93,6 +94,7 @@ async function withOwnedClaim<T>(
   options: SaveOptions,
   imagePath: string | null,
   task: (owned: SaveOptions) => Promise<T>,
+  additionalImagePaths: readonly string[] = [],
 ): Promise<T> {
   const identity = publicationOptions(options);
   const signal = options.signal ?? new AbortController().signal;
@@ -100,6 +102,7 @@ async function withOwnedClaim<T>(
     return await (options.archiveImageOwnership ?? defaultArchiveImageOwnership)
       .withWriter({
         archiveId: identity.originalDiscArchiveId,
+        additionalImagePaths,
         imagePath,
         originalsLibraryPath: options.originalsLibraryPath,
         signal,
@@ -186,20 +189,32 @@ async function saveWithExclusionHeld(options: SaveOptions & { proven: ProvenDvdI
 /** Publication faults retain intent and evidence for reconciliation. This path
  * never uses legacy published-image quarantine or terminal-failure handling. */
 export async function saveDvdInitialArchiveForArchiveJob(options: SaveOptions & { proven: ProvenDvdInitialArchiveBoundary }) {
+  const archivePath = await resolveDvdInitialArchiveImagePath(
+    publicationOptions(options),
+  );
   return withOwnedClaim(
     options,
     options.proven.initialCopy.imagePath,
     owned => saveWithExclusionHeld({ ...owned, proven: options.proven }),
+    [archivePath],
   );
 }
 
 export async function reconcileDvdInitialArchiveForArchiveJob(options: SaveOptions) {
-  const imagePath = await readDvdInitialArchivePublicationImagePath(
+  const imagePaths = await readDvdInitialArchivePublicationImagePaths(
     publicationOptions(options),
   );
-  return withOwnedClaim(options, imagePath, async owned => commitSave(owned,
-    await reconcileDvdInitialArchivePublication(publicationOptions(owned)),
-  ));
+  return withOwnedClaim(
+    options,
+    imagePaths.stagingPath,
+    async owned => commitSave(owned,
+      await reconcileDvdInitialArchivePublication({
+        ...publicationOptions(owned),
+        expectedImagePaths: imagePaths,
+      }),
+    ),
+    [imagePaths.archivePath],
+  );
 }
 
 /** Full initial-copy/save workflow. Lease renewal runs independently of byte
@@ -210,6 +225,9 @@ export async function runDvdInitialArchiveJob(options: SaveOptions & {
   const signal = options.signal
     ? AbortSignal.any([options.signal, options.boundary.signal])
     : options.boundary.signal;
+  const archivePath = await resolveDvdInitialArchiveImagePath(
+    publicationOptions(options),
+  );
   return withOwnedClaim(
     { ...options, signal },
     options.boundary.outputPath,
@@ -232,5 +250,6 @@ export async function runDvdInitialArchiveJob(options: SaveOptions & {
       });
       return saveWithExclusionHeld({ ...owned, proven });
     },
+    [archivePath],
   );
 }

@@ -21,6 +21,9 @@ descriptor information proves that the specific held descriptor still owns
 the expected shared or exclusive `flock`; a conflict caused by a different
 owner is not accepted as proof. Missing, unlocked, replaced, unsafe, or
 unverifiable lock state fails closed as `CONSISTENCY_FAULT`.
+The actual ownership directory and named lock are storage-classified after
+creation and throughout the interval, and their owner-only mode and effective
+user ownership are revalidated rather than trusted from acquisition time.
 
 The process that performs image I/O inherits the locked descriptor. An initial
 copy helper receives the exclusive descriptor, and HandBrake and Archive Audit
@@ -41,10 +44,15 @@ with `CONSISTENCY_FAULT`. An expired claim for the current lock inode does not
 hide a live writer, and is not by itself evidence that a writer still exists.
 
 Initial DVD publication holds exclusive ownership across the copy, evidence
-publication, and reconciliation interval. Existing encode source reads,
+publication, and reconciliation interval. Both the durable staging path and
+final archive path are bound to the interval, and reconciliation rejects an
+intent whose path differs from the one admitted before lock acquisition.
+Existing encode source reads,
 including subtitle scans, Archive Audit file scans, and Original Disc Archive
 Filesystem Verification hold shared ownership for the complete image-read
-interval. Catalog-only work does not take an image lock. Title Damage
+interval. Archive-evidence checkpoint validation also holds a shared interval
+while it reads the checkpoint, manifest, and image identity. Catalog-only work
+does not take an image lock. Title Damage
 Assessment and Damage Preview must use the same shared interval when they gain
 image-reading implementations.
 
@@ -53,8 +61,9 @@ which is one filesystem class recognized by the `linux-rwf-atomic-v1`
 provider from ADR 0007. Ownership classifies the actual archive image when it
 exists, the nearest existing ancestor of a known staging or destination path,
 the Originals Library root, and the durable ownership authority beside the
-database. It rechecks those live classifications throughout every interval. A
-network or unknown filesystem used for staging, mounted below a local library
+database, including the actual ownership directory and lock file. It rechecks
+those live classifications throughout every interval. A network or unknown
+filesystem used for staging or publication, mounted below a local library
 root, or used for ownership authority therefore still fails closed.
 The separate recovery preflight remains responsible for proving atomic
 mutation and durability. XFS, Btrfs, other production platforms, and network

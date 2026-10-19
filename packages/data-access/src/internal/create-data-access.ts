@@ -6836,17 +6836,54 @@ export function createDataAccessInternal(
   }
 
   const access: LegacySidecarDataAccess = {
-    async readDvdInitialCheckpoint(id) {
+    async readDvdInitialCheckpoint(id, ownership) {
       const readSnapshot = () => access.readConsistentSnapshot(reader => {
         const archive = reader.catalog.listOriginalDiscArchives({ ids: [id] })[0];
         if (!archive) throw new RecordNotFoundError("Original Disc Archive", id);
         return { archive, header: reader.catalog.findDvdArchiveEvidenceHeader(id), jobs: reader.archiveJobs.listForArchive(id) };
       });
-      const snapshot = readSnapshot();
-      const manifest = await readCommittedDvdInitialCheckpoint({ originalsLibraryPath: normalizedOriginalsLibraryPath, ...snapshot });
-      if (canonicalPublicationJson(readSnapshot()) !== canonicalPublicationJson(snapshot))
-        throw new DvdCheckpointReadFault("DVD_EVIDENCE_CHANGED_DURING_READ");
-      return manifest;
+      const admissionSnapshot = readSnapshot();
+      const marked = admissionSnapshot.header !== null ||
+        admissionSnapshot.jobs.some(job =>
+          job.evidenceFormat === "dvd-recovery-evidence-v1"
+        );
+      if (!marked) return null;
+      if (normalizedOriginalsLibraryPath === undefined) {
+        throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE");
+      }
+      return ownership.withConsistentRead({
+        archiveId: id,
+        imagePath: admissionSnapshot.archive.archivePath,
+        originalsLibraryPath: normalizedOriginalsLibraryPath,
+        signal: new AbortController().signal,
+        task: async ({ assertOwned }) => {
+          assertOwned();
+          const snapshot = readSnapshot();
+          if (
+            canonicalPublicationJson(snapshot) !==
+              canonicalPublicationJson(admissionSnapshot)
+          ) {
+            throw new DvdCheckpointReadFault(
+              "DVD_EVIDENCE_CHANGED_DURING_READ",
+            );
+          }
+          const manifest = await readCommittedDvdInitialCheckpoint({
+            originalsLibraryPath: normalizedOriginalsLibraryPath,
+            ...snapshot,
+            assertImageOwnership: assertOwned,
+          });
+          assertOwned();
+          if (
+            canonicalPublicationJson(readSnapshot()) !==
+              canonicalPublicationJson(snapshot)
+          ) {
+            throw new DvdCheckpointReadFault(
+              "DVD_EVIDENCE_CHANGED_DURING_READ",
+            );
+          }
+          return manifest;
+        },
+      });
     },
     notifications: createNotificationAccess(database, now),
     dvdRecoveryStorage: {

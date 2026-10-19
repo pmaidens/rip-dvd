@@ -53,10 +53,12 @@ export async function readCommittedDvdInitialCheckpoint(input: {
   archive: OriginalDiscArchive;
   header: DvdArchiveEvidenceHeader | null;
   jobs: readonly ArchiveJob[];
+  assertImageOwnership(): void;
 }): Promise<CommittedDvdInitialEvidence | null> {
   const { archive, header, jobs } = input;
   const markedJobs = jobs.filter(job => job.evidenceFormat === "dvd-recovery-evidence-v1");
   if (header === null && markedJobs.length === 0) return null;
+  input.assertImageOwnership();
   if (!input.originalsLibraryPath) throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE");
   let root: string;
   let directory: string;
@@ -69,7 +71,9 @@ export async function readCommittedDvdInitialCheckpoint(input: {
   } catch { throw new DvdCheckpointReadFault("DVD_PUBLICATION_PATH_CONFLICT"); }
   const pointerPath = join(directory, "checkpoint.json");
   const pointer = await readRecord(pointerPath, "DVD_EVIDENCE_CHECKPOINT_UNAVAILABLE");
+  input.assertImageOwnership();
   const raw = await readRecord(join(directory, "initial-manifest.json"), "DVD_PUBLICATION_MANIFEST_CONFLICT");
+  input.assertImageOwnership();
   let manifest: CommittedDvdInitialEvidence;
   try {
     manifest = raw as CommittedDvdInitialEvidence;
@@ -145,7 +149,9 @@ export async function readCommittedDvdInitialCheckpoint(input: {
       throw new Error("Image differs from checkpoint");
   } catch { throw new DvdCheckpointReadFault("DVD_PUBLICATION_IMAGE_CONFLICT"); }
   finally { await image?.close(); }
+  input.assertImageOwnership();
   if (canonicalPublicationJson(await readRecord(pointerPath, "DVD_EVIDENCE_CHECKPOINT_UNAVAILABLE")) !== canonicalPublicationJson(pointer))
     throw new DvdCheckpointReadFault("DVD_EVIDENCE_CHANGED_DURING_READ");
+  input.assertImageOwnership();
   return manifest;
 }
