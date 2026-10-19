@@ -1,3 +1,4 @@
+import { canonicalPublicationJson, DvdCheckpointReadFault, readCommittedDvdInitialCheckpoint } from "../dvd-initial-checkpoint.js";
 import { DvdInitialSaveFault } from "../errors.js";
 import { createNotificationAccess, createNotificationEventWriter } from "./notifications.js";
 import { recordNotificationOutcome } from "../notification-policy.js";
@@ -6835,6 +6836,18 @@ export function createDataAccessInternal(
   }
 
   const access: LegacySidecarDataAccess = {
+    async readDvdInitialCheckpoint(id) {
+      const readSnapshot = () => access.readConsistentSnapshot(reader => {
+        const archive = reader.catalog.listOriginalDiscArchives({ ids: [id] })[0];
+        if (!archive) throw new RecordNotFoundError("Original Disc Archive", id);
+        return { archive, header: reader.catalog.findDvdArchiveEvidenceHeader(id), jobs: reader.archiveJobs.listForArchive(id) };
+      });
+      const snapshot = readSnapshot();
+      const manifest = await readCommittedDvdInitialCheckpoint({ originalsLibraryPath: normalizedOriginalsLibraryPath, ...snapshot });
+      if (canonicalPublicationJson(readSnapshot()) !== canonicalPublicationJson(snapshot))
+        throw new DvdCheckpointReadFault("DVD_EVIDENCE_CHANGED_DURING_READ");
+      return manifest;
+    },
     notifications: createNotificationAccess(database, now),
     dvdRecoveryStorage: {
       readCurrent: readCurrentDvdRecoveryStoragePreflight,

@@ -26,6 +26,7 @@ const owner =
       const config = loadConfig();
       return createDataAccess({
         databasePath: config.databasePath,
+        originalsLibraryPath: config.originalsLibraryPath,
       });
     },
     {

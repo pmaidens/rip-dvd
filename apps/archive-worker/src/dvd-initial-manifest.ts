@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
 import {
+  canonicalPublicationJson, createDvdInitialPublicationDigest,
   createDvdArchiveBoundaryEvidenceDigest,
   createDvdArchiveEvidenceManifestDigests,
   type DvdArchiveEvidenceManifestDigestInput,
@@ -28,16 +28,7 @@ export interface DvdInitialManifest extends DvdArchiveEvidenceManifestDigestInpu
   publicationDigest: string;
 }
 
-// Canonical object encoding also binds the full metadata decision and policies.
-// The existing manifestDigest remains the compatible database chain digest.
-export function canonicalPublicationJson(value: unknown): string {
-  return JSON.stringify(value, (_key, item: unknown) => {
-    if (item !== null && typeof item === "object" && !Array.isArray(item)) {
-      return Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
-    }
-    return item;
-  });
-}
+export { canonicalPublicationJson } from "@rip-dvd/data-access";
 
 export function createDvdInitialManifest({
   originalDiscArchiveId, sourceArchiveJobId, imageFingerprint, proven,
@@ -91,7 +82,7 @@ export function createDvdInitialManifest({
   };
   // Clone at the ownership boundary. Caller mutations cannot change this save.
   return JSON.parse(canonicalPublicationJson({ ...manifest,
-    publicationDigest: createHash("sha256").update("rip-dvd:dvd-initial-publication:v1\0").update(canonicalPublicationJson(manifest)).digest("hex"),
+    publicationDigest: createDvdInitialPublicationDigest(manifest),
   })) as DvdInitialManifest;
 }
 

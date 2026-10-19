@@ -1,3 +1,4 @@
+import { inspectArchiveEvidence } from "./archive-evidence.js";
 import { createNotificationOperations } from "./notifications.js";
 import { isHandBrakePreset } from "@rip-dvd/config";
 import {
@@ -356,6 +357,8 @@ export function createApplicationOperations(
       previewEncodeRequeue(access, input),
     cancelEncodeJob: (input: Parameters<typeof cancelEncodeJob>[1]) =>
       cancelEncodeJob(access, input),
+    inspectArchiveEvidence: (archiveId: string, options?: { limit?: number; cursor?: string }) =>
+      inspectArchiveEvidence(access, archiveId, options),
     inspectEncodeOutput: (artifactIdentity: unknown) =>
       inspectEncodeOutput(
         access,
@@ -639,3 +642,5 @@ export * from "./notification-validation.js";
 export * from "./notification-config.js";
 export * from "./notification-dispatch.js";
 export * from "./notification-transport.js";
+
+export { inspectArchiveEvidence, InvalidArchiveEvidenceInputError } from "./archive-evidence.js";

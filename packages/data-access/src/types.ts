@@ -2017,6 +2017,7 @@ export interface EncodeOutputInspectionReadAccess
 }
 
 export interface DataAccess {
+  readDvdInitialCheckpoint(id: OriginalDiscArchiveId): Promise<import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence | null>;
   readonly notifications: import("./notification-types.js").NotificationAccess;
   readonly dvdRecoveryStorage: DvdRecoveryStorageAccess;
   readonly catalog: CatalogAccess;
