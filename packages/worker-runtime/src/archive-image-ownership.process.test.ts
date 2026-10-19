@@ -23,6 +23,10 @@ import {
 
 const roots: string[] = [];
 const helperPids: number[] = [];
+const inspectSyntheticLocalStorage = () => ({
+  filesystemType: "synthetic-local",
+  storageClass: "local" as const,
+});
 
 afterEach(() => {
   for (const pid of helperPids.splice(0)) {
@@ -142,7 +146,9 @@ it.runIf(process.platform === "linux")(
     await waitForFileGrowth(writePath, sizeBeforeParentExit);
     await new Promise<void>((resolve) => setTimeout(resolve, 200));
 
-    const ownership = createArchiveImageOwnership();
+    const ownership = createArchiveImageOwnership({
+      inspectStorage: inspectSyntheticLocalStorage,
+    });
     expect(ownership.inspect({
       archiveId: "surviving-helper-archive",
       originalsLibraryPath,
@@ -172,7 +178,9 @@ it.runIf(process.platform === "linux")(
       join(tmpdir(), "rip-dvd-image-ownership-process-"),
     );
     roots.push(originalsLibraryPath);
-    const ownership = createArchiveImageOwnership();
+    const ownership = createArchiveImageOwnership({
+      inspectStorage: inspectSyntheticLocalStorage,
+    });
 
     await ownership.withConsistentRead({
       archiveId: "cross-process-reader-archive",
@@ -198,6 +206,7 @@ it.runIf(process.platform === "linux")(
     roots.push(originalsLibraryPath);
     const ownership = createArchiveImageOwnership({
       ownershipCheckIntervalMs: 60_000,
+      inspectStorage: inspectSyntheticLocalStorage,
     });
 
     await expect(ownership.withWriter({
@@ -240,6 +249,7 @@ it.runIf(process.platform === "linux")(
     roots.push(originalsLibraryPath);
     const ownership = createArchiveImageOwnership({
       ownershipCheckIntervalMs: 60_000,
+      inspectStorage: inspectSyntheticLocalStorage,
     });
 
     await expect(ownership.withConsistentRead({

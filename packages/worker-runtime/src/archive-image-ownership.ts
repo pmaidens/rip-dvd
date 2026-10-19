@@ -19,6 +19,11 @@ import {
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import {
+  inspectLinuxStorage,
+  type LinuxStorageInspection,
+} from "./linux-storage.js";
+
 export const ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME =
   ".rip-dvd-archive-ownership";
 export const ARCHIVE_IMAGE_OWNERSHIP_VERSION =
@@ -134,6 +139,7 @@ interface CreateOwnershipOptions {
   ownershipCheckIntervalMs?: number;
   now?: () => Date;
   backend?: LockBackend;
+  inspectStorage?: (path: string) => LinuxStorageInspection;
 }
 
 function reasonMessage(code: ArchiveImageOwnershipReasonCode): string {
@@ -176,6 +182,7 @@ async function pathsFor(
   originalsLibraryPath: string,
   archiveId: string,
   create: boolean,
+  inspectStorage: (path: string) => LinuxStorageInspection,
 ): Promise<OwnershipPaths | null> {
   let root: string;
   try {
@@ -183,6 +190,9 @@ async function pathsFor(
     const rootMetadata = await lstat(root);
     if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
       throw new Error("Originals Library root is unsafe");
+    }
+    if (inspectStorage(root).storageClass !== "local") {
+      throw new Error("Originals Library storage is unsupported");
     }
   } catch (cause) {
     throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause });
@@ -218,12 +228,16 @@ async function pathsFor(
 function pathsForSync(
   originalsLibraryPath: string,
   archiveId: string,
+  inspectStorage: (path: string) => LinuxStorageInspection,
 ): OwnershipPaths | null {
   try {
     const root = realpathSync(originalsLibraryPath);
     const rootMetadata = lstatSync(root);
     if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
       throw new Error("Originals Library root is unsafe");
+    }
+    if (inspectStorage(root).storageClass !== "local") {
+      throw new Error("Originals Library storage is unsupported");
     }
     const directory = join(root, ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME);
     try {
@@ -695,6 +709,14 @@ export function createArchiveImageOwnership({
     : process.env.NODE_ENV === "test"
       ? createInProcessLockBackend()
       : createUnsupportedLockBackend(),
+  inspectStorage = process.platform === "linux"
+    ? inspectLinuxStorage
+    : () => ({
+      filesystemType: process.env.NODE_ENV === "test"
+        ? "synthetic-local"
+        : "unsupported-platform",
+      storageClass: process.env.NODE_ENV === "test" ? "local" : "unknown",
+    }),
 }: CreateOwnershipOptions = {}): ArchiveImageOwnership {
   if (
     !Number.isSafeInteger(acquisitionTimeoutMs) ||
@@ -716,6 +738,7 @@ export function createArchiveImageOwnership({
       request.originalsLibraryPath,
       request.archiveId,
       true,
+      inspectStorage,
     );
     if (paths === null) {
       throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
@@ -757,7 +780,10 @@ export function createArchiveImageOwnership({
         request.signal,
       );
       const acquiredIdentity = assertLockIdentity(descriptor, paths.lock);
-      if (!sameLockIdentity(acquiredIdentity, lockIdentity)) {
+      if (
+        !sameLockIdentity(acquiredIdentity, lockIdentity) ||
+        inspectStorage(paths.directory).storageClass !== "local"
+      ) {
         throw failOwnership(new ArchiveImageOwnershipError(
           "CONSISTENCY_FAULT",
         ));
@@ -812,6 +838,9 @@ export function createArchiveImageOwnership({
       const assertOwned = () => {
         try {
           const currentIdentity = assertLockIdentity(descriptor, paths.lock);
+          if (inspectStorage(paths.directory).storageClass !== "local") {
+            throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
+          }
           const establishedIdentity = readLockIdentitySync(
             paths.identity,
             request.archiveId,
@@ -879,7 +908,7 @@ export function createArchiveImageOwnership({
       }
       let paths: OwnershipPaths | null;
       try {
-        paths = pathsForSync(originalsLibraryPath, archiveId);
+        paths = pathsForSync(originalsLibraryPath, archiveId, inspectStorage);
       } catch {
         return consistencyFaultInspection();
       }

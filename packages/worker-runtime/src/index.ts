@@ -12,6 +12,11 @@ export {
   type ArchiveImageOwnershipReasonCode,
 } from "./archive-image-ownership.js";
 
+export {
+  inspectLinuxStorage,
+  type LinuxStorageInspection,
+} from "./linux-storage.js";
+
 export type WorkerSignal = "SIGINT" | "SIGTERM";
 
 export interface WorkerLifecycleHost<TimerHandle> {

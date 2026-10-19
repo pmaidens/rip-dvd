@@ -54,6 +54,57 @@ afterEach(() => {
 });
 
 describe("archive image ownership", () => {
+  it.each(["network", "unknown"] as const)(
+    "fails closed on %s storage",
+    async (storageClass) => {
+      const ownership = createArchiveImageOwnership({
+        inspectStorage: () => ({
+          filesystemType: `synthetic-${storageClass}`,
+          storageClass,
+        }),
+      });
+      const originalsLibraryPath = root();
+
+      expect(ownership.inspect({
+        archiveId: "synthetic-archive",
+        originalsLibraryPath,
+      })).toMatchObject({
+        writer: { state: "uncertain" },
+        stableRead: {
+          available: false,
+          blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
+        },
+      });
+      await expect(ownership.withConsistentRead({
+        archiveId: "synthetic-archive",
+        originalsLibraryPath,
+        signal: new AbortController().signal,
+        async task() {},
+      })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+    },
+  );
+
+  it("fails closed when local storage changes during an interval", async () => {
+    let storageClass: "local" | "network" = "local";
+    const ownership = createArchiveImageOwnership({
+      inspectStorage: () => ({
+        filesystemType: `synthetic-${storageClass}`,
+        storageClass,
+      }),
+    });
+    const originalsLibraryPath = root();
+
+    await expect(ownership.withConsistentRead({
+      archiveId: "synthetic-archive",
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task({ assertOwned }) {
+        storageClass = "network";
+        assertOwned();
+      },
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+  });
+
   it("excludes writers from a shared consistent-read interval", async () => {
     const ownership = createArchiveImageOwnership();
     const originalsLibraryPath = root();

@@ -7,6 +7,10 @@ const [originalsLibraryPath, readyPath, writePath] = process.argv.slice(2);
 const ownership = createArchiveImageOwnership({
   claimLeaseDurationMs: 150,
   ownershipCheckIntervalMs: 25,
+  inspectStorage: () => ({
+    filesystemType: "synthetic-local",
+    storageClass: "local",
+  }),
 });
 await ownership.withWriter({
   archiveId: "surviving-helper-archive",

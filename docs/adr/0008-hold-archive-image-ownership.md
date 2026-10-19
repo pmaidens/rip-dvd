@@ -42,13 +42,16 @@ interval. Catalog-only work does not take an image lock. Title Damage
 Assessment and Damage Preview must use the same shared interval when they gain
 image-reading implementations.
 
-The only declared production storage setup is the local Linux
-`linux-rwf-atomic-v1` provider from ADR 0007. Other production platforms fail
-closed because this decision does not establish cross-process exclusion there.
-An in-process backend exists only under the test environment so platform-neutral
-unit and adapter parity tests can exercise the contract. Network filesystems
-remain unsupported until a provider proves cross-host exclusion and safe
-disconnect behavior.
+The only declared production storage setup is a local Linux filesystem class
+recognized by the `linux-rwf-atomic-v1` provider from ADR 0007. Ownership
+rechecks that live storage classification before every acquisition and
+inspection; network and unknown filesystems fail closed. The separate recovery
+preflight remains responsible for proving atomic mutation and durability.
+Other production platforms fail closed because this decision does not
+establish cross-process exclusion there. An in-process backend exists only
+under the test environment so platform-neutral unit and adapter parity tests
+can exercise the contract. Network filesystems remain unsupported until a
+provider proves cross-host exclusion and safe disconnect behavior.
 
 The native helper accepts new-format initial copying only through the
 `initial-copy-owned-v1` operation. An independent Linux lock probe must first

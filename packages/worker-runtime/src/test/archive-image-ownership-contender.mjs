@@ -1,7 +1,12 @@
 import { createArchiveImageOwnership } from "../../dist/archive-image-ownership.js";
 
 const [mode, originalsLibraryPath, archiveId] = process.argv.slice(2);
-const ownership = createArchiveImageOwnership();
+const ownership = createArchiveImageOwnership({
+  inspectStorage: () => ({
+    filesystemType: "synthetic-local",
+    storageClass: "local",
+  }),
+});
 
 try {
   await ownership[mode]({

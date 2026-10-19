@@ -13,7 +13,6 @@ import {
   realpathSync,
   renameSync,
   rmdirSync,
-  statfsSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
@@ -32,24 +31,11 @@ import {
   type DvdRecoveryStoragePreflightInput,
   type DvdRecoveryStorageReasonCode,
 } from "@rip-dvd/data-access";
+import { inspectLinuxStorage } from "@rip-dvd/worker-runtime";
 
 const PREFLIGHT_WORKSPACE_PREFIX = ".rip-dvd-recovery-preflight-v1-";
 const PREFLIGHT_WRITE_CHUNK_BYTES = 64 * 1_024;
 const FLOCK_CONFLICT_EXIT_CODE = 75;
-
-const LOCAL_FILESYSTEMS = new Map<bigint, string>([
-  [0xef53n, "ext"],
-  [0x58465342n, "xfs"],
-  [0x9123683en, "btrfs"],
-]);
-
-const NETWORK_FILESYSTEMS = new Map<bigint, string>([
-  [0x6969n, "nfs"],
-  [0x517bn, "smb"],
-  [0xff534d42n, "cifs"],
-  [0x01021997n, "9p"],
-  [0x73757245n, "coda"],
-]);
 
 export type DvdRecoveryStoragePreflightStage =
   | "journal_reservation"
@@ -132,32 +118,26 @@ function probeNodeAtomicImage(path: string): ReturnType<
   };
 }
 
-function normalizedFilesystemType(type: number | bigint): bigint {
-  return BigInt.asUintN(32, BigInt(type));
-}
-
 function inspectNodeStorage(path: string): DvdRecoveryStorageInspection {
-  const type = normalizedFilesystemType(statfsSync(path, { bigint: true }).type);
-  const localName = LOCAL_FILESYSTEMS.get(type);
-  if (localName !== undefined) {
+  const inspection = inspectLinuxStorage(path);
+  if (inspection.storageClass === "local") {
     return {
-      filesystemType: localName,
+      filesystemType: inspection.filesystemType,
       storageClass: "local",
       crossHostWriterExclusion: "not_applicable",
       disconnectionBehavior: "not_applicable",
     };
   }
-  const networkName = NETWORK_FILESYSTEMS.get(type);
-  if (networkName !== undefined) {
+  if (inspection.storageClass === "network") {
     return {
-      filesystemType: networkName,
+      filesystemType: inspection.filesystemType,
       storageClass: "network",
       crossHostWriterExclusion: "unproven",
       disconnectionBehavior: "unproven",
     };
   }
   return {
-    filesystemType: `linux-magic-0x${type.toString(16)}`,
+    filesystemType: inspection.filesystemType,
     storageClass: "unknown",
     crossHostWriterExclusion: "unproven",
     disconnectionBehavior: "unproven",
