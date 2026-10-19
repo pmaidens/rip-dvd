@@ -15559,7 +15559,12 @@ describe("DVD Archive Recovery storage preflight persistence", () => {
       facts: {
         filesystemType: "synthetic-local",
         storageClass: "local",
+        mutationProtection: {
+          status: "verified", contract: "linux-rwf-atomic-v1",
+          unitBytes: 4_096, memoryAlignmentBytes: 512,
+        },
         journalReservationBytes: 1_048_576,
+        journalPayloadBytes: 983_040,
         journalReservation: "verified",
         journalSynchronization: "verified",
         imageSynchronization: "verified",
@@ -15575,7 +15580,37 @@ describe("DVD Archive Recovery storage preflight persistence", () => {
       status: "supported",
       checkedAt: expect.any(Date),
     });
+    expect(() => access.dvdRecoveryStorage.record({
+      ...supported,
+      facts: {
+        ...supported.facts,
+        mutationProtection: {
+          status: "verified", contract: "linux-rwf-atomic-v1",
+          unitBytes: 1_048_576, memoryAlignmentBytes: 512,
+        },
+      },
+    })).toThrow("Supported DVD recovery storage preflight is incomplete");
+    expect(() => access.dvdRecoveryStorage.record({
+      ...supported,
+      facts: {
+        ...supported.facts,
+        mutationProtection: {
+          status: "unproven", contract: null, unitBytes: null,
+          memoryAlignmentBytes: null,
+        },
+      },
+    })).toThrow("Supported DVD recovery storage preflight is incomplete");
     access.close();
+
+    const sqlite = new DatabaseSync(databasePath);
+    expect(() => sqlite.exec(`
+      update dvd_recovery_storage_preflights set scope = null
+    `)).toThrow();
+    expect(() => sqlite.exec(`
+      update dvd_recovery_storage_preflights
+      set status = 'failed_prerequisite', reason_code = null
+    `)).toThrow();
+    sqlite.close();
 
     const reopened = openTestDatabase(databasePath);
     expect(reopened.dvdRecoveryStorage.readCurrent()).toEqual(supported);

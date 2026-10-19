@@ -1129,7 +1129,12 @@ it("shares supported, unsupported, and failed recovery storage preflight through
   const verifiedFacts = {
     filesystemType: "synthetic-local",
     storageClass: "local" as const,
+    mutationProtection: {
+      status: "verified" as const, contract: "linux-rwf-atomic-v1" as const,
+      unitBytes: 4_096, memoryAlignmentBytes: 512,
+    },
     journalReservationBytes: 1_048_576,
+    journalPayloadBytes: 983_040,
     journalReservation: "verified" as const,
     journalSynchronization: "verified" as const,
     imageSynchronization: "verified" as const,
@@ -1176,6 +1181,44 @@ it("shares supported, unsupported, and failed recovery storage preflight through
           blockingReasons: [expect.objectContaining({
             code: "STORAGE_UNSUPPORTED",
           })],
+        },
+      },
+      {
+        input: {
+          contractVersion: "dvd-recovery-storage-preflight-v1" as const,
+          status: "unsupported" as const,
+          reasonCode: "STORAGE_UNSUPPORTED" as const,
+          facts: {
+            ...verifiedFacts,
+            mutationProtection: {
+              status: "unproven" as const, contract: null, unitBytes: null,
+              memoryAlignmentBytes: null,
+            },
+            imageSynchronization: "not_tested" as const,
+          },
+        },
+        expected: {
+          available: false,
+          blockingReasons: [expect.objectContaining({ code: "STORAGE_UNSUPPORTED" })],
+        },
+      },
+      {
+        input: {
+          contractVersion: "dvd-recovery-storage-preflight-v1" as const,
+          status: "failed_prerequisite" as const,
+          reasonCode: "JOURNAL_CAPACITY_INSUFFICIENT" as const,
+          facts: {
+            ...verifiedFacts,
+            mutationProtection: {
+              ...verifiedFacts.mutationProtection,
+              unitBytes: 1_048_576,
+            },
+            imageSynchronization: "not_tested" as const,
+          },
+        },
+        expected: {
+          available: false,
+          blockingReasons: [expect.objectContaining({ code: "JOURNAL_CAPACITY_INSUFFICIENT" })],
         },
       },
       {

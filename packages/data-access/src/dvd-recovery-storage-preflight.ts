@@ -2,6 +2,10 @@ export const DVD_RECOVERY_STORAGE_PREFLIGHT_VERSION =
   "dvd-recovery-storage-preflight-v1" as const;
 
 export const DVD_RECOVERY_JOURNAL_RESERVATION_BYTES = 1_048_576;
+export const DVD_RECOVERY_JOURNAL_METADATA_BYTES = 65_536;
+export const DVD_RECOVERY_JOURNAL_PAYLOAD_BYTES =
+  DVD_RECOVERY_JOURNAL_RESERVATION_BYTES - DVD_RECOVERY_JOURNAL_METADATA_BYTES;
+export const DVD_RECOVERY_ATOMIC_WRITE_CONTRACT = "linux-rwf-atomic-v1" as const;
 
 export const DVD_RECOVERY_STORAGE_PREFLIGHT_STATUSES = [
   "supported",
@@ -12,6 +16,7 @@ export const DVD_RECOVERY_STORAGE_PREFLIGHT_STATUSES = [
 export const DVD_RECOVERY_STORAGE_REASON_CODES = [
   "STORAGE_UNSUPPORTED",
   "STORAGE_INSPECTION_FAILED",
+  "JOURNAL_CAPACITY_INSUFFICIENT",
   "JOURNAL_RESERVATION_FAILED",
   "JOURNAL_SYNC_FAILED",
   "IMAGE_SYNC_FAILED",
@@ -27,6 +32,8 @@ export const DVD_RECOVERY_STORAGE_REASON_MESSAGES = {
     "The Originals Library storage has not demonstrated the recovery durability and ownership contract.",
   STORAGE_INSPECTION_FAILED:
     "The Originals Library storage could not be inspected for recovery prerequisites.",
+  JOURNAL_CAPACITY_INSUFFICIENT:
+    "The bounded recovery undo journal cannot protect one complete storage mutation unit.",
   JOURNAL_RESERVATION_FAILED:
     "The bounded recovery undo journal could not reserve its required space.",
   JOURNAL_SYNC_FAILED:
@@ -57,10 +64,25 @@ export type DvdRecoveryStorageCapabilityState =
 export type DvdRecoveryNetworkCapabilityState =
   "verified" | "not_applicable" | "unproven";
 
+/** Verified contracts cover fixed units aligned from file offset zero. */
+export type DvdRecoveryMutationProtection = {
+  status: "unproven";
+  contract: null;
+  unitBytes: null;
+  memoryAlignmentBytes: null;
+} | {
+  status: "verified";
+  contract: typeof DVD_RECOVERY_ATOMIC_WRITE_CONTRACT;
+  unitBytes: number;
+  memoryAlignmentBytes: number;
+};
+
 export interface DvdRecoveryStoragePreflightFacts {
   filesystemType: string;
   storageClass: DvdRecoveryStorageClass;
+  mutationProtection: DvdRecoveryMutationProtection;
   journalReservationBytes: number;
+  journalPayloadBytes: number;
   journalReservation: DvdRecoveryStorageCapabilityState;
   journalSynchronization: DvdRecoveryStorageCapabilityState;
   imageSynchronization: DvdRecoveryStorageCapabilityState;
@@ -95,6 +117,11 @@ const NETWORK_CAPABILITY_STATES = new Set<DvdRecoveryNetworkCapabilityState>([
   "unproven",
 ]);
 
+function isPowerOfTwo(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0 &&
+    Number.isInteger(Math.log2(value));
+}
+
 export function assertDvdRecoveryStoragePreflightInput(
   input: DvdRecoveryStoragePreflightInput,
 ): void {
@@ -112,6 +139,7 @@ export function assertDvdRecoveryStoragePreflightInput(
     !["local", "network", "unknown"].includes(input.facts.storageClass) ||
     input.facts.journalReservationBytes !==
       DVD_RECOVERY_JOURNAL_RESERVATION_BYTES ||
+    input.facts.journalPayloadBytes !== DVD_RECOVERY_JOURNAL_PAYLOAD_BYTES ||
     !CAPABILITY_STATES.has(input.facts.journalReservation) ||
     !CAPABILITY_STATES.has(input.facts.journalSynchronization) ||
     !CAPABILITY_STATES.has(input.facts.imageSynchronization) ||
@@ -134,6 +162,20 @@ export function assertDvdRecoveryStoragePreflightInput(
   if (!localNetworkFactsAreValid || !networkFactsAreValid) {
     throw new Error("DVD recovery storage network facts are invalid");
   }
+  const protection = input.facts.mutationProtection;
+  if (
+    protection === undefined ||
+    (protection.status === "unproven"
+      ? protection.contract !== null || protection.unitBytes !== null ||
+        protection.memoryAlignmentBytes !== null
+      : protection.status !== "verified" ||
+        protection.contract !== DVD_RECOVERY_ATOMIC_WRITE_CONTRACT ||
+        !isPowerOfTwo(protection.unitBytes) ||
+        !isPowerOfTwo(protection.memoryAlignmentBytes) ||
+        protection.memoryAlignmentBytes > DVD_RECOVERY_JOURNAL_RESERVATION_BYTES)
+  ) {
+    throw new Error("DVD recovery storage mutation protection is invalid");
+  }
 
   if (input.status === "supported") {
     const requiredCapabilities = [
@@ -152,6 +194,8 @@ export function assertDvdRecoveryStoragePreflightInput(
     if (
       input.reasonCode !== null ||
       input.facts.storageClass === "unknown" ||
+      protection.status !== "verified" ||
+      protection.unitBytes > DVD_RECOVERY_JOURNAL_PAYLOAD_BYTES ||
       requiredCapabilities.some((state) => state !== "verified") ||
       !networkProofIsValid
     ) {

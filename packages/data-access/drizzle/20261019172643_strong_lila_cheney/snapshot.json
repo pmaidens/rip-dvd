@@ -6677,7 +6677,7 @@
       "table": "dvd_archive_recovery_reads"
     },
     {
-      "value": "\"scope\" = 'originals_library'",
+      "value": "\"scope\" is not null and \"scope\" = 'originals_library'",
       "name": "dvd_recovery_storage_preflights_scope_check",
       "entityType": "checks",
       "table": "dvd_recovery_storage_preflights"
@@ -6695,7 +6695,7 @@
       "table": "dvd_recovery_storage_preflights"
     },
     {
-      "value": "(\"status\" = 'supported' and \"reason_code\" is null) or (\"status\" = 'unsupported' and \"reason_code\" = 'STORAGE_UNSUPPORTED') or (\"status\" = 'failed_prerequisite' and \"reason_code\" in ('STORAGE_INSPECTION_FAILED', 'JOURNAL_RESERVATION_FAILED', 'JOURNAL_SYNC_FAILED', 'IMAGE_SYNC_FAILED', 'CHECKPOINT_SYNC_FAILED', 'CHECKPOINT_REPLACEMENT_FAILED', 'DIRECTORY_SYNC_FAILED', 'WRITER_EXCLUSION_FAILED', 'PREFLIGHT_CLEANUP_FAILED'))",
+      "value": "(\"status\" = 'supported' and \"reason_code\" is null) or (\"status\" = 'unsupported' and \"reason_code\" is not null and \"reason_code\" = 'STORAGE_UNSUPPORTED') or (\"status\" = 'failed_prerequisite' and \"reason_code\" is not null and \"reason_code\" in ('STORAGE_INSPECTION_FAILED', 'JOURNAL_CAPACITY_INSUFFICIENT', 'JOURNAL_RESERVATION_FAILED', 'JOURNAL_SYNC_FAILED', 'IMAGE_SYNC_FAILED', 'CHECKPOINT_SYNC_FAILED', 'CHECKPOINT_REPLACEMENT_FAILED', 'DIRECTORY_SYNC_FAILED', 'WRITER_EXCLUSION_FAILED', 'PREFLIGHT_CLEANUP_FAILED'))",
       "name": "dvd_recovery_storage_preflights_reason_check",
       "entityType": "checks",
       "table": "dvd_recovery_storage_preflights"

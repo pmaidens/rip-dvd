@@ -5,13 +5,38 @@ write, the Archive Worker must prove the configured Originals Library meets the
 versioned `dvd-recovery-storage-preflight-v1` contract. New-format admission
 remains closed. This decision adds the dormant storage gate only.
 
-The first contract supports local Linux ext-family, XFS, and Btrfs filesystems.
-It reserves and writes a one-mebibyte undo-journal probe, synchronizes that
+The production provider is `linux-rwf-atomic-v1`. It requires the kernel's
+per-file `STATX_WRITE_ATOMIC` and direct-I/O alignment capabilities and probes
+an overwrite through `O_DIRECT`, `O_SYNC`, and `pwritev2(RWF_ATOMIC | RWF_SYNC)`.
+The complete write must succeed, synchronize, and read back correctly. It never
+retries a short write as fragments or falls back to ordinary buffered writes.
+Filesystem type and filesystem block size alone cannot establish this contract.
+
+The provider chooses a power-of-two unit within the returned atomic bounds,
+large enough for direct-I/O offset and read alignment. Units start at file
+offset zero and each write must cover a complete naturally aligned unit.
+The one-mebibyte journal reservation leaves 64 KiB for framing, checksums,
+prior evidence, and metadata, so at least one unit must fit within the remaining
+960 KiB. The future writer must enforce that metadata bound and journal all
+affected units, including previously successful neighboring bytes. It must
+recheck the actual archive inode's capabilities before each mutation. An EOF
+tail that cannot form a complete unit is unavailable under this contract.
+
+The preflight reserves and writes a one-mebibyte undo-journal probe, synchronizes that
 journal before any image probe, synchronizes an image update, synchronizes
 checkpoint evidence, atomically replaces the checkpoint pointer, synchronizes
 the containing directory, and proves that a second process cannot acquire the
-writer lock. The one-mebibyte reservation is the maximum protected batch for
-this contract, not a recovery duration or total-work limit.
+writer lock. The reservation bounds one outstanding batch, not recovery time.
+
+The provider relies on the Linux atomic-write and synchronization interfaces,
+including the backing device honoring those guarantees. It does not claim to
+tolerate arbitrary hardware failure or prove the guarantees from a successful
+ordinary write. The kernel's [ext4 atomic-write documentation](https://www.kernel.org/doc/html/latest/filesystems/ext4/atomic_writes.html)
+and [pwritev2 interface contract](https://man7.org/linux/man-pages/man2/pwritev2.2.html)
+define the requirements. Native syscall tests cover absent capabilities,
+alignment, capacity, short writes, sync failure, and read-back corruption.
+Physical supported-host testing remains a prerequisite of the first live
+admission gate in #391; synthetic tests do not claim that qualification.
 
 An unknown filesystem is unexamined and reports `STORAGE_UNSUPPORTED`. This is
 not a claim that the storage is unsafe. Network filesystems also report
@@ -21,7 +46,9 @@ same-host lock test alone cannot support network recovery.
 
 The worker stores the latest path-free result in SQLite. Web readiness, JSON
 CLI readiness, and new-format Original Disc Archive inspection read that same
-record. They report whether recovery storage is available, the contract
+record. This is an observation, not lasting write authorization: mount, inode,
+kernel, device, or configuration changes require a fresh preflight. They report
+whether recovery storage is available, the contract
 version, the tested facts, the observation time, and either
 `STORAGE_UNSUPPORTED` or a specific failed prerequisite. Historical archives
 do not gain recovery fields.

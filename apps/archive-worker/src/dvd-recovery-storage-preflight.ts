@@ -21,8 +21,11 @@ import { isAbsolute, join, resolve } from "node:path";
 
 import {
   DVD_RECOVERY_JOURNAL_RESERVATION_BYTES,
+  DVD_RECOVERY_JOURNAL_PAYLOAD_BYTES,
+  DVD_RECOVERY_ATOMIC_WRITE_CONTRACT,
   DVD_RECOVERY_STORAGE_PREFLIGHT_VERSION,
   type DataAccess,
+  type DvdRecoveryMutationProtection,
   type DvdRecoveryNetworkCapabilityState,
   type DvdRecoveryStorageClass,
   type DvdRecoveryStoragePreflightFacts,
@@ -67,6 +70,10 @@ export interface DvdRecoveryStorageInspection {
 
 export interface DvdRecoveryStoragePreflightDependencies {
   inspectStorage(path: string): DvdRecoveryStorageInspection;
+  probeImage(path: string): {
+    status: "supported" | "unsupported" | "capacity_insufficient";
+    protection: DvdRecoveryMutationProtection;
+  };
   verifyCrossProcessWriterExclusion(lockPath: string): void;
   beforeStage?(stage: DvdRecoveryStoragePreflightStage): void;
 }
@@ -75,6 +82,54 @@ class StoragePreflightFailure extends Error {
   constructor(readonly code: DvdRecoveryStorageReasonCode) {
     super(code);
   }
+}
+
+class StorageUnsupported extends Error {}
+
+function probeNodeAtomicImage(path: string): ReturnType<
+  DvdRecoveryStoragePreflightDependencies["probeImage"]
+> {
+  const probe = spawnSync(
+    "/usr/local/bin/rip-dvd-recovery-atomic-probe",
+    [path, String(DVD_RECOVERY_JOURNAL_PAYLOAD_BYTES)],
+    { encoding: "utf8", timeout: 10_000, maxBuffer: 4_096 },
+  );
+  if (probe.error !== undefined || probe.status !== 0) {
+    throw new StoragePreflightFailure(
+      probe.error !== undefined ? "STORAGE_INSPECTION_FAILED" : "IMAGE_SYNC_FAILED",
+    );
+  }
+  const result = JSON.parse(probe.stdout) as Record<string, unknown>;
+  if (result.status === "unsupported") {
+    return {
+      status: "unsupported",
+      protection: {
+        status: "unproven",
+        contract: null,
+        unitBytes: null,
+        memoryAlignmentBytes: null,
+      },
+    };
+  }
+  if (
+    (result.status !== "supported" && result.status !== "capacity_insufficient") ||
+    typeof result.unitBytes !== "number" ||
+    !Number.isSafeInteger(result.unitBytes) || result.unitBytes <= 0 ||
+    typeof result.memoryAlignmentBytes !== "number" ||
+    !Number.isSafeInteger(result.memoryAlignmentBytes) ||
+    result.memoryAlignmentBytes <= 0 ||
+    (result.status === "supported" &&
+      result.unitBytes > DVD_RECOVERY_JOURNAL_PAYLOAD_BYTES)
+  ) throw new StoragePreflightFailure("STORAGE_INSPECTION_FAILED");
+  return {
+    status: result.status,
+    protection: {
+      status: "verified",
+      contract: DVD_RECOVERY_ATOMIC_WRITE_CONTRACT,
+      unitBytes: result.unitBytes,
+      memoryAlignmentBytes: result.memoryAlignmentBytes,
+    },
+  };
 }
 
 function normalizedFilesystemType(type: number | bigint): bigint {
@@ -109,7 +164,7 @@ function inspectNodeStorage(path: string): DvdRecoveryStorageInspection {
   };
 }
 
-function verifyNodeWriterExclusion(lockPath: string): void {
+export function verifyNodeRecoveryWriterExclusion(lockPath: string): void {
   const firstDescriptor = openSync(
     lockPath,
     fsConstants.O_CREAT |
@@ -117,11 +172,12 @@ function verifyNodeWriterExclusion(lockPath: string): void {
       fsConstants.O_NOFOLLOW,
     0o600,
   );
-  const secondDescriptor = openSync(
-    lockPath,
-    fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
-  );
+  let secondDescriptor: number | null = null;
   try {
+    secondDescriptor = openSync(
+      lockPath,
+      fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
+    );
     const first = spawnSync(
       "flock",
       [
@@ -155,14 +211,15 @@ function verifyNodeWriterExclusion(lockPath: string): void {
         new Error("Recovery writer lock did not exclude a competing process");
     }
   } finally {
-    closeSync(secondDescriptor);
+    if (secondDescriptor !== null) closeSync(secondDescriptor);
     closeSync(firstDescriptor);
   }
 }
 
 const defaultDependencies: DvdRecoveryStoragePreflightDependencies = {
   inspectStorage: inspectNodeStorage,
-  verifyCrossProcessWriterExclusion: verifyNodeWriterExclusion,
+  probeImage: probeNodeAtomicImage,
+  verifyCrossProcessWriterExclusion: verifyNodeRecoveryWriterExclusion,
 };
 
 function initialFacts(
@@ -171,7 +228,14 @@ function initialFacts(
   return {
     filesystemType: inspection.filesystemType,
     storageClass: inspection.storageClass,
+    mutationProtection: {
+      status: "unproven",
+      contract: null,
+      unitBytes: null,
+      memoryAlignmentBytes: null,
+    },
     journalReservationBytes: DVD_RECOVERY_JOURNAL_RESERVATION_BYTES,
+    journalPayloadBytes: DVD_RECOVERY_JOURNAL_PAYLOAD_BYTES,
     journalReservation: "not_tested",
     journalSynchronization: "not_tested",
     imageSynchronization: "not_tested",
@@ -258,30 +322,6 @@ function writeSyncedFile(path: string, contents: Buffer): void {
   }
 }
 
-function overwriteSyncedFile(path: string, contents: Buffer): void {
-  const descriptor = openSync(
-    path,
-    fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
-  );
-  try {
-    let offset = 0;
-    while (offset < contents.length) {
-      const written = writeSync(
-        descriptor,
-        contents,
-        offset,
-        contents.length - offset,
-        offset,
-      );
-      if (written <= 0) throw new Error("Recovery preflight update stalled");
-      offset += written;
-    }
-    fsyncSync(descriptor);
-  } finally {
-    closeSync(descriptor);
-  }
-}
-
 function removePreflightWorkspace(path: string): void {
   for (const name of [
     "undo-journal.bin",
@@ -355,7 +395,7 @@ export function runDvdRecoveryStoragePreflight(
   }
 
   let workspace: string | null = null;
-  let result: DvdRecoveryStoragePreflightInput;
+  let result = failedResult(facts, "STORAGE_INSPECTION_FAILED");
   let journalDescriptor: number | null = null;
   try {
     runCapability(
@@ -431,22 +471,26 @@ export function runDvdRecoveryStoragePreflight(
       () => synchronizeDirectory(preflightWorkspace),
     );
 
-    runCapability(
-      dependencies,
-      "image_sync",
-      "IMAGE_SYNC_FAILED",
-      facts,
-      "imageSynchronization",
-      () => {
-        const imageProbePath = join(preflightWorkspace, "image-probe.bin");
-        writeSyncedFile(imageProbePath, Buffer.alloc(2_048));
-        const updatedContents = randomFillSync(Buffer.allocUnsafe(2_048));
-        overwriteSyncedFile(imageProbePath, updatedContents);
-        if (!readFileSync(imageProbePath).equals(updatedContents)) {
-          throw new Error("Recovery image update was not observed");
-        }
-      },
-    );
+    try {
+      dependencies.beforeStage?.("image_sync");
+      const imageProbePath = join(preflightWorkspace, "image-probe.bin");
+      writeSyncedFile(imageProbePath, Buffer.alloc(0));
+      const probe = dependencies.probeImage(imageProbePath);
+      facts.mutationProtection = probe.protection;
+      if (probe.status === "unsupported") throw new StorageUnsupported();
+      if (probe.status === "capacity_insufficient") {
+        throw new StoragePreflightFailure("JOURNAL_CAPACITY_INSUFFICIENT");
+      }
+      facts.imageSynchronization = "verified";
+    } catch (error) {
+      if (error instanceof StorageUnsupported) throw error;
+      if (error instanceof StoragePreflightFailure) {
+        if (error.code === "IMAGE_SYNC_FAILED") facts.imageSynchronization = "failed";
+        throw error;
+      }
+      facts.imageSynchronization = "failed";
+      throw new StoragePreflightFailure("IMAGE_SYNC_FAILED");
+    }
 
     const checkpointPath = join(preflightWorkspace, "checkpoint.current");
     const checkpointCandidatePath = join(
@@ -506,7 +550,7 @@ export function runDvdRecoveryStoragePreflight(
       facts,
     };
   } catch (error) {
-    result = failedResult(
+    result = error instanceof StorageUnsupported ? unsupportedResult(facts) : failedResult(
       facts,
       error instanceof StoragePreflightFailure
         ? error.code
@@ -530,7 +574,7 @@ export function runDvdRecoveryStoragePreflight(
       }
     }
   }
-  return result!;
+  return result;
 }
 
 export function recordDvdRecoveryStoragePreflight(

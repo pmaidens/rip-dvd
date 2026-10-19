@@ -1352,7 +1352,7 @@ export const dvdRecoveryStoragePreflights = sqliteTable(
   (table) => [
     check(
       "dvd_recovery_storage_preflights_scope_check",
-      sql`${table.scope} = 'originals_library'`,
+      sql`${table.scope} is not null and ${table.scope} = 'originals_library'`,
     ),
     check(
       "dvd_recovery_storage_preflights_version_check",
@@ -1364,7 +1364,7 @@ export const dvdRecoveryStoragePreflights = sqliteTable(
     ),
     check(
       "dvd_recovery_storage_preflights_reason_check",
-      sql`(${table.status} = 'supported' and ${table.reasonCode} is null) or (${table.status} = 'unsupported' and ${table.reasonCode} = 'STORAGE_UNSUPPORTED') or (${table.status} = 'failed_prerequisite' and ${table.reasonCode} in (${sqliteStringLiterals(DVD_RECOVERY_STORAGE_REASON_CODES.filter((code) => code !== "STORAGE_UNSUPPORTED"))}))`,
+      sql`(${table.status} = 'supported' and ${table.reasonCode} is null) or (${table.status} = 'unsupported' and ${table.reasonCode} is not null and ${table.reasonCode} = 'STORAGE_UNSUPPORTED') or (${table.status} = 'failed_prerequisite' and ${table.reasonCode} is not null and ${table.reasonCode} in (${sqliteStringLiterals(DVD_RECOVERY_STORAGE_REASON_CODES.filter((code) => code !== "STORAGE_UNSUPPORTED"))}))`,
     ),
     check(
       "dvd_recovery_storage_preflights_facts_check",
