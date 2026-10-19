@@ -343,18 +343,25 @@ it("does not let an old in-flight expired-subscription response disable a re-ena
   } finally { access.close(); }
 });
 
-it("invalidates a definitively expired subscription even when the message expires during sending", async () => {
+it.each(["alone", "with competing maintenance"])("invalidates a definitively expired subscription when the message expires during sending %s", async (mode) => {
   const { fixture, subscription } = configure();
   await register(fixture, subscription, "synthetic-expiry-race-register");
   await fixture.run(["notifications", "test", "--key", "synthetic-expiry-race-test"]);
   const access = fixture.openAccess();
+  const competing = fixture.openAccess();
   try {
     const expiry = access.notifications.deliveries({ limit: 1 })[0]!.expiresAt;
     let timestamp = new Date(expiry.getTime() - 1);
-    await dispatchNotifications(access, async () => { timestamp = new Date(expiry.getTime() + 1); throw { statusCode: 410 }; }, { now: () => timestamp });
+    await dispatchNotifications(access, async () => {
+      timestamp = new Date(expiry.getTime() + 1);
+      if (mode === "with competing maintenance") {
+        expect(await dispatchNotifications(competing, async () => { throw new Error("Must not send expired messages"); }, { now: () => timestamp })).toEqual({ accepted: 0, failed: 0 });
+      }
+      throw { statusCode: 410 };
+    }, { now: () => timestamp });
     expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: [{ status: "expired", failureCode: "message_expired" }] });
     expect((await fixture.run(["notifications", "subscriptions"])).result).toMatchObject({ subscriptions: [{ active: false }] });
-  } finally { access.close(); }
+  } finally { competing.close(); access.close(); }
 });
 
 it.each(["shutdown", "deadline"] as const)("closes the maintained push sender's active connection on %s", async (reason) => {

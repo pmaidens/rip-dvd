@@ -187,9 +187,10 @@ export function createNotificationAccess(database: Database, now: () => Date): N
     maintain(input) {
       if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) throw new RangeError("Invalid notification maintenance limit");
       database.transaction((tx) => {
-        const expired = tx.select().from(deliveries).where(and(pending(), or(
+        const expired = tx.select().from(deliveries).where(and(pending(),
+          or(isNull(deliveries.leaseUntil), lte(deliveries.leaseUntil, input.now)), or(
           lte(deliveries.createdAt, new Date(input.now.getTime() - NOTIFICATION_LIFETIME_MS)),
-          and(eq(deliveries.attemptCount, NOTIFICATION_MAX_ATTEMPTS), or(isNull(deliveries.leaseUntil), lte(deliveries.leaseUntil, input.now))))))
+          eq(deliveries.attemptCount, NOTIFICATION_MAX_ATTEMPTS))))
           .orderBy(asc(deliveries.createdAt)).limit(input.limit).all();
         for (const row of expired) {
           const lifetimeEnded = row.createdAt.getTime() + NOTIFICATION_LIFETIME_MS <= input.now.getTime();
