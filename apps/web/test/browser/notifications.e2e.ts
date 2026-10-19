@@ -21,7 +21,14 @@ test("installs metadata and opts in, displays the queued test, navigates, and op
   await expect(page.getByRole("status")).toContainText("Queued for delivery");
   const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
   expect(await worker.evaluate(() => Notification.permission)).toBe("granted");
-  const sent = dispatchQueuedPushes();
+  dispatchQueuedPushes({ throttle: true });
+  await page.getByRole("button", { name: "Check notification status" }).click();
+  await expect(page.getByRole("status")).toContainText("Retrying delivery after a temporary failure");
+  await expect(page.getByRole("list", { name: "Recent notification deliveries" })).toContainText("Reason: throttled");
+  const sent = dispatchQueuedPushes({ advanceMs: 60_000 });
+  await page.getByRole("button", { name: "Check notification status" }).click();
+  await expect(page.getByRole("status")).toHaveText("Accepted by the push service. Device display is not confirmed.");
+  await expect(page.getByRole("list", { name: "Recent notification deliveries" })).toContainText("Attempts: 2");
   expect(sent.length).toBeGreaterThan(0);
   for (const payload of sent) {
     await deliverPush(worker, JSON.stringify(payload));

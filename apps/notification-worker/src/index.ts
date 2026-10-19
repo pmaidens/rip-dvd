@@ -13,7 +13,7 @@ await runConfiguredAsyncWorker({ workerName: "Notification", readyMessage: () =>
       if (sender) {
         try { await dispatchNotifications(access, sender, { signal }); }
         catch { log("Notification dispatch pass failed; queued work remains durable"); }
-      }
+      } else access.notifications.maintain({ now: new Date(), limit: 100 });
       await setTimeout(Math.min(config.workerPollIntervalMs, 5_000), undefined, { signal }).catch(() => undefined);
     }
   } finally { access.close(); }

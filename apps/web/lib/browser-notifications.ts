@@ -103,11 +103,26 @@ export async function submitBrowserTest(): Promise<string> {
   return result.eventId;
 }
 
+export interface BrowserNotificationDelivery {
+  id: string;
+  status: "queued" | "retrying" | "accepted" | "expired" | "failed";
+  failureCode: string | null;
+  attemptCount: number;
+  nextAttemptAt: string | null;
+  expiresAt: string;
+}
+
+export async function readNotificationDeliveries(): Promise<BrowserNotificationDelivery[]> {
+  return (await api("deliveries&limit=25")).deliveries;
+}
+
 export async function readBrowserTestDelivery(eventId: string): Promise<string> {
   const result = await api(`deliveries&eventId=${encodeURIComponent(eventId)}`);
   const records: { status: string }[] = result.deliveries;
   if (records.length === 0) return "No active browser was eligible for this event.";
   return records.every((record) => record.status === "accepted") ? "Accepted by the push service. Device display is not confirmed."
     : records.some((record) => record.status === "failed") ? "Delivery failed or a browser was disabled. Inspect delivery records for details."
+      : records.some((record) => record.status === "expired") ? "Delivery expired. This message will not be sent."
+        : records.some((record) => record.status === "retrying") ? "Retrying delivery after a temporary failure. Inspect delivery records for the next attempt."
       : "Queued for delivery.";
 }

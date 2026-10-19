@@ -1,4 +1,5 @@
 import { beginSettledDiscInspectionForTest } from "@rip-dvd/data-access/test-support";
+import { dispatchNotifications } from "@rip-dvd/application";
 import { createOperationsResponse } from "../operations/route";
 import { createECDH } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
@@ -31,6 +32,16 @@ it("keeps direct JSON CLI and HTTP notification operations equivalent with real 
     const event = await (await request("test", "POST", { mutationKey: "synthetic-http-test" })).json();
     expect(event).toEqual((await fixture.run(["notifications", "test", "--key", "synthetic-http-test"])).result);
     expect(await (await request("deliveries")).json()).toEqual((await fixture.run(["notifications", "deliveries"])).result);
+    const timestamp = new Date();
+    await dispatchNotifications(access, async () => { throw { statusCode: 429, headers: { "retry-after": "60" }, body: "Sensitive provider detail" }; }, { now: () => timestamp });
+    const retrying = await (await request("deliveries")).json();
+    expect(retrying).toMatchObject({ deliveries: [{ status: "retrying", failureCode: "throttled", attemptCount: 1,
+      nextAttemptAt: new Date(timestamp.getTime() + 60_000).toISOString() }] });
+    expect(retrying).toEqual((await fixture.run(["notifications", "deliveries"])).result);
+    await dispatchNotifications(access, async () => undefined, { now: () => new Date(timestamp.getTime() + 60_000) });
+    const accepted = await (await request("deliveries")).json();
+    expect(accepted).toMatchObject({ deliveries: [{ status: "accepted", failureCode: null, attemptCount: 2, nextAttemptAt: null }] });
+    expect(accepted).toEqual((await fixture.run(["notifications", "deliveries"])).result);
     expect(await (await request("subscriptions")).json()).toEqual((await fixture.run(["notifications", "subscriptions"])).result);
     const remove = { mutationKey: "synthetic-http-remove", subscriptionId: registered.subscription.id };
     expect(await (await request("", "DELETE", remove)).json()).toEqual((await fixture.run(["notifications", "remove", "--key", remove.mutationKey, "--id", remove.subscriptionId])).result);

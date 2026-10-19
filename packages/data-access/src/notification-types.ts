@@ -34,17 +34,30 @@ export interface NotificationDeliverySummary {
   id: string;
   eventId: string;
   subscriptionId: string;
-  status: "queued" | "accepted" | "failed";
-  failureCode: "subscription_disabled" | "sender_rejected" | null;
+  status: "queued" | "retrying" | "accepted" | "expired" | "failed";
+  failureCode: NotificationFailureCode | null;
+  attemptCount: number;
+  nextAttemptAt: Date | null;
+  expiresAt: Date;
   createdAt: Date;
   completedAt: Date | null;
 }
+
+export type NotificationFailureCode = "subscription_disabled" | "subscription_expired" | "sender_rejected"
+  | "network_error" | "timeout" | "throttled" | "provider_unavailable" | "attempt_limit" | "message_expired";
+
+export type NotificationDeliveryResult =
+  | { status: "accepted" }
+  | { status: "failed"; failureCode: NotificationFailureCode }
+  | { status: "retrying"; failureCode: NotificationFailureCode; nextAttemptAt: Date };
 
 export interface NotificationDeliveryClaim {
   id: string;
   token: string;
   subscription: NotificationSubscriptionInput;
   payload: NotificationPayload;
+  attemptCount: number;
+  expiresAt: Date;
 }
 
 export interface NotificationAccess {
@@ -57,8 +70,10 @@ export interface NotificationAccess {
   /** Synchronous outcome work and event snapshots commit or roll back together. */
   transaction<T>(write: (events: NotificationEventWriter) => T): T;
   claim(input: { now: Date; leaseMs: number }): NotificationDeliveryClaim | null;
-  isDispatchable(claim: NotificationDeliveryClaim): boolean;
-  finish(claim: NotificationDeliveryClaim, status: "accepted" | "failed", now: Date): boolean;
+  isDispatchable(claim: NotificationDeliveryClaim, now?: Date): boolean;
+  settle(claim: NotificationDeliveryClaim, result: NotificationDeliveryResult, now: Date): NotificationDeliverySummary["status"] | null;
+  /** Bounded expiry and retained-history deletion. Deduplication receipts survive cleanup. */
+  maintain(input: { now: Date; limit: number }): void;
   heartbeat(now: Date): void;
   lastHeartbeat(): Date | null;
 }
