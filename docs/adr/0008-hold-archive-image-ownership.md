@@ -7,19 +7,20 @@ contract. New-format admission remains closed, and historical archives keep
 their existing behavior.
 
 The production contract is `archive-image-ownership-v1`. It stores one
-owner-only lock file per archive in the Originals Library's private
-`.rip-dvd-archive-ownership` directory. The archive ID is represented by a
-SHA-256 filename rather than copied into the path. A writer takes an exclusive
-Linux `flock`; a stable reader takes a shared lock. The lock file's device and
-inode are permanently recorded when the lock is first created. A separate
-owner-only identity file in the Originals Library binds the ownership
-directory's device and inode, so replacing the directory cannot create a
-second lock namespace. Every reader, writer, and inspection must prove that
-the namespace, named lock, and held descriptor still match those identity
-records. Linux descriptor information proves that the specific held descriptor
-still owns the expected shared or exclusive `flock`; a conflict caused by a
-different owner is not accepted as proof. Missing, unlocked, replaced, unsafe,
-or unverifiable lock state fails closed as `CONSISTENCY_FAULT`.
+owner-only lock file per archive in a private
+`.rip-dvd-archive-ownership` directory beside the shared database. The archive
+ID is represented by a SHA-256 filename rather than copied into the path. A
+writer takes an exclusive Linux `flock`; a stable reader takes a shared lock.
+The lock file's device and inode are permanently recorded when the lock is
+first created. A separate owner-only identity file in that durable authority
+binds both the lock directory and the Originals Library root by device and
+inode. Replacing either path therefore cannot create a second live lock
+namespace. Every reader, writer, and inspection must prove that the namespace,
+named lock, and held descriptor still match those identity records. Linux
+descriptor information proves that the specific held descriptor still owns
+the expected shared or exclusive `flock`; a conflict caused by a different
+owner is not accepted as proof. Missing, unlocked, replaced, unsafe, or
+unverifiable lock state fails closed as `CONSISTENCY_FAULT`.
 
 The process that performs image I/O inherits the locked descriptor. An initial
 copy helper receives the exclusive descriptor, and HandBrake and Archive Audit
@@ -51,10 +52,10 @@ The only declared production storage setup is a local Linux ext filesystem,
 which is one filesystem class recognized by the `linux-rwf-atomic-v1`
 provider from ADR 0007. Ownership classifies the actual archive image when it
 exists, the nearest existing ancestor of a known staging or destination path,
-and the Originals Library root that stores the ownership namespace. It rechecks
-those live classifications throughout every interval. A network or unknown
-filesystem used for staging or mounted below a local library root therefore
-still fails closed.
+the Originals Library root, and the durable ownership authority beside the
+database. It rechecks those live classifications throughout every interval. A
+network or unknown filesystem used for staging, mounted below a local library
+root, or used for ownership authority therefore still fails closed.
 The separate recovery preflight remains responsible for proving atomic
 mutation and durability. XFS, Btrfs, other production platforms, and network
 filesystems remain unsupported by this ownership contract until their process

@@ -81,6 +81,7 @@ async function runContender(
   originalsLibraryPath: string,
   imagePath: string,
   archiveId: string,
+  authorityRootPath = "",
 ): Promise<{ ok: boolean; code?: string | null }> {
   const child = spawn(
     process.execPath,
@@ -93,6 +94,7 @@ async function runContender(
       originalsLibraryPath,
       imagePath,
       archiveId,
+      authorityRootPath,
     ],
     { stdio: ["ignore", "pipe", "inherit"] },
   );
@@ -408,6 +410,45 @@ it.runIf(processStorageSupported)(
           originalsLibraryPath,
           imagePath,
           "replaced-directory-archive",
+        )).resolves.toEqual({ ok: false, code: "CONSISTENCY_FAULT" });
+        assertOwned();
+      },
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+  },
+);
+
+it.runIf(processStorageSupported)(
+  "blocks a second namespace after the Originals root is replaced",
+  async () => {
+    const testRoot = mkdtempSync(
+      join(tmpdir(), "rip-dvd-image-ownership-process-"),
+    );
+    roots.push(testRoot);
+    const originalsLibraryPath = join(testRoot, "originals");
+    const authorityRootPath = join(testRoot, "authority");
+    mkdirSync(originalsLibraryPath, { mode: 0o700 });
+    mkdirSync(authorityRootPath, { mode: 0o700 });
+    const imagePath = join(testRoot, "synthetic-archive.iso");
+    writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
+    const ownership = createArchiveImageOwnership({
+      authorityRootPath,
+      ownershipCheckIntervalMs: 60_000,
+    });
+
+    await expect(ownership.withWriter({
+      archiveId: "replaced-root-archive",
+      imagePath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task({ assertOwned }) {
+        renameSync(originalsLibraryPath, `${originalsLibraryPath}.replaced`);
+        mkdirSync(originalsLibraryPath, { mode: 0o700 });
+        await expect(runContender(
+          "withWriter",
+          originalsLibraryPath,
+          imagePath,
+          "replaced-root-archive",
+          authorityRootPath,
         )).resolves.toEqual({ ok: false, code: "CONSISTENCY_FAULT" });
         assertOwned();
       },

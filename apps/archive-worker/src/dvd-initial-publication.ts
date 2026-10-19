@@ -311,6 +311,22 @@ export async function publishDvdInitialArchive(options: PublicationIdentity & Pu
   return completePublication(options, paths, intent);
 }
 
+/** Resolve and validate the durable staging intent before ownership is
+ * acquired. Reconciliation validates the same intent again under ownership. */
+export async function readDvdInitialArchivePublicationImagePath(
+  options: PublicationIdentity,
+): Promise<string> {
+  const paths = await pathsFor(options);
+  const value = await readRecord(
+    paths.intent,
+    "DVD_PUBLICATION_INTENT_CONFLICT",
+  );
+  if (value === undefined) {
+    throw new DvdInitialPublicationFault("DVD_PUBLICATION_INTENT_MISSING");
+  }
+  return verifyIntent(value, options, paths).stagingPath;
+}
+
 /** Replay durable intent without another optical read, metadata pass or image hash. */
 export async function reconcileDvdInitialArchivePublication(options: PublicationIdentity & PublicationControls) {
   await authorize(options);

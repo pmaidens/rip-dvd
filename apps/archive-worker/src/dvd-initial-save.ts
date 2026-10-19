@@ -8,6 +8,7 @@ import {
 import { runDvdInitialArchiveBoundaryForArchiveJob, type ProvenDvdInitialArchiveBoundary } from "./dvd-initial-boundary.js";
 import {
   publishDvdInitialArchive, reconcileDvdInitialArchivePublication,
+  readDvdInitialArchivePublicationImagePath,
   type DvdInitialPublicationStep,
 } from "./dvd-initial-publication.js";
 
@@ -193,10 +194,9 @@ export async function saveDvdInitialArchiveForArchiveJob(options: SaveOptions & 
 }
 
 export async function reconcileDvdInitialArchiveForArchiveJob(options: SaveOptions) {
-  const identity = publicationOptions(options);
-  const imagePath = options.access.catalog.listOriginalDiscArchives({
-    ids: [identity.originalDiscArchiveId],
-  })[0]?.archivePath ?? options.writer?.outputPath ?? null;
+  const imagePath = await readDvdInitialArchivePublicationImagePath(
+    publicationOptions(options),
+  );
   return withOwnedClaim(options, imagePath, async owned => commitSave(owned,
     await reconcileDvdInitialArchivePublication(publicationOptions(owned)),
   ));

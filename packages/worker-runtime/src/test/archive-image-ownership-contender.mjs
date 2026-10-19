@@ -1,7 +1,15 @@
 import { createArchiveImageOwnership } from "../../dist/archive-image-ownership.js";
 
-const [mode, originalsLibraryPath, imagePath, archiveId] = process.argv.slice(2);
-const ownership = createArchiveImageOwnership();
+const [
+  mode,
+  originalsLibraryPath,
+  imagePath,
+  archiveId,
+  authorityRootPath,
+] = process.argv.slice(2);
+const ownership = createArchiveImageOwnership({
+  ...(authorityRootPath ? { authorityRootPath } : {}),
+});
 
 try {
   await ownership[mode]({
