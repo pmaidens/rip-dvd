@@ -2,10 +2,14 @@ import type { DataAccess } from "@rip-dvd/data-access";
 import { parseMutationKey } from "./mutation-key.js";
 import { readNotificationConfiguration } from "./notification-config.js";
 import { formatNotification } from "./notification-policy.js";
-import { InvalidNotificationInputError, notificationId, notificationLimit, notificationRecord, validateNotificationSubscription } from "./notification-validation.js";
+import { InvalidNotificationInputError, notificationId, notificationLimit, notificationRecord, requireCurrentPushSubscription, validateNotificationSubscription } from "./notification-validation.js";
 
 export class NotificationsUnavailableError extends Error {
   constructor() { super("Notifications are not configured for a secure application origin."); this.name = "NotificationsUnavailableError"; }
+}
+
+function requireNotificationConfiguration(): void {
+  if (!readNotificationConfiguration().ready) throw new NotificationsUnavailableError();
 }
 
 export function createNotificationOperations(access: DataAccess) {
@@ -34,8 +38,10 @@ export function createNotificationOperations(access: DataAccess) {
       const mutationKey = parseMutationKey(record.mutationKey);
       const subscription = validateNotificationSubscription(record.subscription);
       if (typeof record.enable !== "boolean") throw new InvalidNotificationInputError("Explicit enable or reconcile is required.");
-      if (record.enable && !readNotificationConfiguration().ready) throw new NotificationsUnavailableError();
-      return { schemaVersion: 1, ...access.notifications.register({ mutationKey, subscription, enable: record.enable }) };
+      return { schemaVersion: 1, ...access.notifications.register({ mutationKey, subscription, enable: record.enable }, () => {
+        if (record.enable) requireNotificationConfiguration();
+        requireCurrentPushSubscription(subscription);
+      }) };
     },
     removeNotificationSubscription(input: unknown) {
       const record = notificationRecord(input);
@@ -44,8 +50,7 @@ export function createNotificationOperations(access: DataAccess) {
     submitTestNotification(input: unknown) {
       const record = notificationRecord(input);
       const mutationKey = parseMutationKey(record.mutationKey);
-      if (!readNotificationConfiguration().ready) throw new NotificationsUnavailableError();
-      return { schemaVersion: 1, ...access.notifications.submitTest({ mutationKey, event: formatNotification({ kind: "test", sourceEventId: `test:${mutationKey}` }) }),
+      return { schemaVersion: 1, ...access.notifications.submitTest({ mutationKey, event: formatNotification({ kind: "test", sourceEventId: `test:${mutationKey}` }) }, requireNotificationConfiguration),
         status: "queued", deliveryMeaning: "Queued for the dispatcher. Provider acceptance does not prove device display." };
     },
   };

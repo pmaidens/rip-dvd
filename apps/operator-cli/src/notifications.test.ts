@@ -12,7 +12,7 @@ import { dispatchNotifications, recordNotificationOutcome } from "@rip-dvd/appli
 
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
-afterEach(() => { vi.unstubAllEnvs(); fixtures.splice(0).forEach((fixture) => fixture.dispose()); });
+afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); fixtures.splice(0).forEach((fixture) => fixture.dispose()); });
 
 it("discovers notification administration and reports configuration without secrets", async () => {
   vi.stubEnv("RIP_DVD_WEB_TRUSTED_ORIGIN", "https://operator.example");
@@ -191,4 +191,24 @@ it("stops claiming on shutdown and leaves remaining work durable", async () => {
     ]) });
     expect(await dispatchNotifications(access, async () => undefined)).toEqual({ accepted: 1, failed: 0 });
   } finally { access.close(); }
+});
+
+it("replays committed registrations and tests after expiry or configuration changes, while checking new mutations", async () => {
+  const { fixture, subscription } = configure();
+  const expirationTime = Date.now() + 60_000;
+  const expiring = { ...subscription, expirationTime };
+  const first = await register(fixture, expiring, "synthetic-expiring-registration");
+  const submitted = await fixture.run(["notifications", "test", "--key", "synthetic-config-replay"]);
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(expirationTime + 1);
+  const replayArgs = ["notifications", "register", "--key", "synthetic-expiring-registration", "--json", JSON.stringify({ subscription: expiring, enable: true })];
+  expect((await fixture.run(replayArgs)).result).toMatchObject({ subscription: first });
+  expect((await fixture.run(["notifications", "register", "--key", "synthetic-expired-new", "--json", JSON.stringify({ subscription: expiring, enable: true })])).result)
+    .toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
+  vi.stubEnv("RIP_DVD_VAPID_PRIVATE_KEY", "");
+  expect((await fixture.run(replayArgs)).result).toMatchObject({ subscription: first });
+  expect((await fixture.run(["notifications", "test", "--key", "synthetic-config-replay"])).result).toEqual(submitted.result);
+  expect((await fixture.run(["notifications", "test", "--key", "synthetic-config-new"])).result).toMatchObject({ error: { code: "NOTIFICATIONS_UNAVAILABLE" } });
+  expect((await fixture.run(["notifications", "register", "--key", "synthetic-expiring-registration", "--json", JSON.stringify({ subscription: expiring, enable: false })])).result)
+    .toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
 });

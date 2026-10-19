@@ -48,11 +48,12 @@ export interface NotificationDeliveryClaim {
 }
 
 export interface NotificationAccess {
-  register(input: { mutationKey: string; subscription: NotificationSubscriptionInput; enable: boolean }): { subscription: NotificationSubscriptionSummary };
+  /** Mutable admission checks run inside the new mutation, after replay/conflict resolution. */
+  register(input: { mutationKey: string; subscription: NotificationSubscriptionInput; enable: boolean }, validateNewMutation?: () => void): { subscription: NotificationSubscriptionSummary };
   disable(input: { mutationKey: string; subscriptionId: string }): { subscription: NotificationSubscriptionSummary };
   subscriptions(input: { id?: string; limit: number }): NotificationSubscriptionSummary[];
   deliveries(input: { eventId?: string; limit: number }): NotificationDeliverySummary[];
-  submitTest(input: { mutationKey: string; event: NotificationEventInput }): { eventId: string; recipientCount: number };
+  submitTest(input: { mutationKey: string; event: NotificationEventInput }, validateNewMutation?: () => void): { eventId: string; recipientCount: number };
   /** Synchronous outcome work and event snapshots commit or roll back together. */
   transaction<T>(write: (events: NotificationEventWriter) => T): T;
   claim(input: { now: Date; leaseMs: number }): NotificationDeliveryClaim | null;

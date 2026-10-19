@@ -46,10 +46,17 @@ export function validateNotificationSubscription(value: unknown): NotificationSu
   try { ECDH.convertKey(p256dh, "prime256v1"); } catch { throw new InvalidNotificationInputError("Invalid push public key."); }
   base64Key(keys.auth, 16);
   if (input.expirationTime !== undefined && input.expirationTime !== null &&
-    (typeof input.expirationTime !== "number" || !Number.isSafeInteger(input.expirationTime) || input.expirationTime <= Date.now())) {
+    (typeof input.expirationTime !== "number" || !Number.isSafeInteger(input.expirationTime) || input.expirationTime <= 0)) {
     throw new InvalidNotificationInputError("Invalid subscription expiry.");
   }
   return { endpoint: validatePushEndpoint(input.endpoint),
     expirationTime: input.expirationTime as number | null | undefined ?? null,
     keys: { p256dh: p256dh.toString("base64url"), auth: keys.auth as string } };
+}
+
+
+export function requireCurrentPushSubscription(subscription: NotificationSubscriptionInput): void {
+  if (subscription.expirationTime !== null && subscription.expirationTime <= Date.now()) {
+    throw new InvalidNotificationInputError("Push subscription has expired.");
+  }
 }

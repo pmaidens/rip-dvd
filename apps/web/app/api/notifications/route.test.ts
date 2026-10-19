@@ -1,3 +1,5 @@
+import { beginSettledDiscInspectionForTest } from "@rip-dvd/data-access/test-support";
+import { createOperationsResponse } from "../operations/route";
 import { createECDH } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import { createOperatorWorkflowFixture } from "../../../../operator-cli/src/operator-workflow.test-support.js";
@@ -37,5 +39,27 @@ it("keeps direct JSON CLI and HTTP notification operations equivalent with real 
     expect((await request("", "POST", { ...input, mutationKey: "synthetic-invalid", subscription: { ...subscription, endpoint: "https://127.0.0.1/private" } })).status).toBe(400);
     const nonJson = await handleNotifications(new Request("https://operator.example/api/notifications", { method: "POST", headers: { Host: "operator.example", Origin: "https://operator.example", "Content-Type": "text/plain" }, body: "{}" }), () => access, () => "https://operator.example");
     expect(nonJson.status).toBe(415);
+  } finally { access.close(); }
+});
+
+
+it("shows a labeled Archive Job notification target through both CLI and HTTP detail", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const access = fixture.openAccess();
+  try {
+    const drive = access.catalog.upsertOpticalDrive({ devicePath: "/dev/synthetic-notification-drive", isEnabled: true, isPresent: true });
+    const disc = access.catalog.registerDetectedDisc({ opticalDriveId: drive.id, discKind: "dvd", fingerprint: "synthetic-notification-target", volumeLabel: "Synthetic labeled disc" });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.archiveRequests.create({ detectedDiscId: disc.id });
+    const settled = beginSettledDiscInspectionForTest(access, { opticalDriveId: drive.id, mediaGeneration: "synthetic-notification-target", mediaCapacityBytes: 2048 });
+    const inspection = access.discInspections.record(settled.claim, { type: "complete", detectedDiscId: disc.id });
+    settled.restoreSystemTime();
+    const job = access.archiveJobs.startForInspection(inspection.id, "synthetic-notification-worker")!;
+    access.archiveJobs.fail(job, "Synthetic navigation outcome");
+    const cli = await fixture.run(["inspect", "archive-jobs", job.id]);
+    expect(cli.exitCode).toBe(0);
+    expect(cli.result).toMatchObject({ item: { detectedDisc: { volumeLabel: "Synthetic labeled disc" } } });
+    const http = createOperationsResponse(access, new Request(`https://operator.example/api/operations?kind=archive-jobs&id=${job.id}`));
+    expect(await http.json()).toEqual(cli.result);
   } finally { access.close(); }
 });

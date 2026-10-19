@@ -68,8 +68,9 @@ export function createNotificationAccess(database: Database, now: () => Date): N
     }
   }
   return {
-    register(input) {
+    register(input, validateNewMutation) {
       return mutation(input.mutationKey, "notification_register", { subscription: input.subscription, enable: input.enable }, (tx) => {
+        validateNewMutation?.();
         const existing = tx.select().from(subscriptions).where(eq(subscriptions.endpoint, input.subscription.endpoint)).get();
         const timestamp = now();
         if (existing) {
@@ -104,8 +105,11 @@ export function createNotificationAccess(database: Database, now: () => Date): N
         .from(deliveries).where(input.eventId ? eq(deliveries.eventId, input.eventId) : undefined)
         .orderBy(desc(deliveries.createdAt), desc(deliveries.id)).limit(input.limit).all();
     },
-    submitTest(input) {
-      return mutation(input.mutationKey, "notification_test", input.event, (tx) => createNotificationEventWriter(tx, now).recordEvent(input.event));
+    submitTest(input, validateNewMutation) {
+      return mutation(input.mutationKey, "notification_test", input.event, (tx) => {
+        validateNewMutation?.();
+        return createNotificationEventWriter(tx, now).recordEvent(input.event);
+      });
     },
     transaction(write) {
       let result: ReturnType<typeof write>;

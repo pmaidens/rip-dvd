@@ -127,6 +127,16 @@ test("handles malformed push data, missing labels and unsafe click destinations"
   await expect(page.getByText("This notification target is no longer available.", { exact: false })).toBeVisible();
 });
 
+test("opens a labeled Archive Job target using its current shared operation detail", async ({ page }) => {
+  const response = await page.request.get("/api/operations?kind=archive-jobs");
+  const { items } = await response.json();
+  const job = items.find((item: { status: string }) => item.status === "failed");
+  expect(job).toBeTruthy();
+  await page.goto(`/notifications/target?kind=archive-jobs&id=${encodeURIComponent(job.id)}`);
+  await expect(page.getByRole("heading", { name: "SYNTHETIC_NOTIFICATION_DISC" })).toBeVisible();
+  await expect(page.getByText("failed", { exact: true })).toBeVisible();
+});
+
 test("explains denied permission and unsupported APIs", async ({ page }) => {
   await controlledSubscription(page, "denied");
   await page.goto("/notifications");

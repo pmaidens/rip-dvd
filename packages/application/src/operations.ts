@@ -671,6 +671,9 @@ function readDetail(
       const evidenceHeaders = evidenceHeadersForArchives(access, archives);
       return {
         ...visibleArchiveJob(job),
+        detectedDisc: access.catalog.listDetectedDiscs(undefined, {
+          ids: [job.detectedDiscId],
+        }).map(visibleDisc)[0] ?? null,
         archiveRequest: access.archiveRequests.find(job.archiveRequestId),
         discInspection: job.discInspectionId === null ? null :
           access.discInspections.list({ ids: [job.discInspectionId] })
