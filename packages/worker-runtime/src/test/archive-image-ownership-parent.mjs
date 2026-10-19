@@ -23,6 +23,7 @@ await ownership.withWriter({
       { detached: true, stdio: ["ignore", "ignore", "ignore", descriptor] },
     );
     child.unref();
+    setInterval(() => undefined, 60_000);
     await new Promise(() => undefined);
   },
 });

@@ -38,7 +38,7 @@ afterEach(() => {
 });
 
 async function waitForFile(path: string): Promise<void> {
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + 10_000;
   while (!existsSync(path)) {
     if (Date.now() >= deadline) throw new Error("Helper did not become ready");
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
@@ -46,10 +46,27 @@ async function waitForFile(path: string): Promise<void> {
 }
 
 async function waitForFileGrowth(path: string, size: number): Promise<void> {
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + 10_000;
   while (!existsSync(path) || statSync(path).size <= size) {
     if (Date.now() >= deadline) throw new Error("Helper stopped writing");
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function withDeadline<Result>(
+  promise: Promise<Result>,
+  message: string,
+): Promise<Result> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), 5_000);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -117,8 +134,11 @@ it.runIf(process.platform === "linux")(
     await waitForFile(writePath);
     helperPids.push(Number(readFileSync(readyPath, "utf8")));
     const sizeBeforeParentExit = statSync(writePath).size;
-    parent.kill("SIGKILL");
-    await new Promise<void>((resolve) => parent.once("close", () => resolve()));
+    const parentClosed = once(parent, "close");
+    if (!parent.kill("SIGKILL")) {
+      throw new Error("Parent could not be terminated");
+    }
+    await withDeadline(parentClosed, "Parent did not terminate");
     await waitForFileGrowth(writePath, sizeBeforeParentExit);
     await new Promise<void>((resolve) => setTimeout(resolve, 200));
 
@@ -142,6 +162,7 @@ it.runIf(process.platform === "linux")(
       async task() {},
     })).rejects.toMatchObject({ code: "WRITER_NOT_QUIESCENT" });
   },
+  30_000,
 );
 
 it.runIf(process.platform === "linux")(
@@ -202,6 +223,48 @@ it.runIf(process.platform === "linux")(
     })).toMatchObject({
       writer: { state: "uncertain" },
       workerClaim: { state: "active" },
+      stableRead: {
+        available: false,
+        blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
+      },
+    });
+  },
+);
+
+it.runIf(process.platform === "linux")(
+  "blocks a writer after the named lock is replaced during a shared interval",
+  async () => {
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-image-ownership-process-"),
+    );
+    roots.push(originalsLibraryPath);
+    const ownership = createArchiveImageOwnership({
+      ownershipCheckIntervalMs: 60_000,
+    });
+
+    await expect(ownership.withConsistentRead({
+      archiveId: "replaced-reader-lock-archive",
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task({ assertOwned }) {
+        const path = lockPath(originalsLibraryPath);
+        renameSync(path, `${path}.replaced`);
+        writeFileSync(path, "replacement", { mode: 0o600 });
+        await expect(runContender(
+          "withWriter",
+          originalsLibraryPath,
+          "replaced-reader-lock-archive",
+        )).resolves.toEqual({ ok: false, code: "CONSISTENCY_FAULT" });
+        assertOwned();
+      },
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+
+    expect(ownership.inspect({
+      archiveId: "replaced-reader-lock-archive",
+      originalsLibraryPath,
+    })).toMatchObject({
+      writer: { state: "uncertain" },
+      workerClaim: { state: "none" },
       stableRead: {
         available: false,
         blockingReasons: [{ code: "CONSISTENCY_FAULT" }],

@@ -1154,6 +1154,44 @@ if (unownedInitialCopy.status !== 1 || existsSync(unownedInitialCopyPath)) {
   throw new Error("unowned initial-copy helper operation was accepted");
 }
 
+const unlockedInitialCopyPath = prepareOutput(
+  "/tmp/rip-dvd-reader-unlocked-initial-copy.img",
+);
+const unlockedOwnershipPath = prepareOutput(
+  "/tmp/rip-dvd-reader-unlocked-archive-ownership.lock",
+);
+writeFileSync(unlockedOwnershipPath, "", { mode: 0o600 });
+const unlockedOwnershipDescriptor = openSync(
+  unlockedOwnershipPath,
+  constants.O_RDWR | constants.O_NOFOLLOW,
+);
+const unlockedInitialCopy = spawnSync(
+  executable,
+  [
+    "initial-copy-owned-v1",
+    sourcePath,
+    unlockedInitialCopyPath,
+    String(content.byteLength),
+  ],
+  {
+    stdio: [
+      "ignore",
+      "ignore",
+      "pipe",
+      "ignore",
+      "ignore",
+      "ignore",
+      "ignore",
+      "ignore",
+      unlockedOwnershipDescriptor,
+    ],
+  },
+);
+closeSync(unlockedOwnershipDescriptor);
+if (unlockedInitialCopy.status !== 1 || existsSync(unlockedInitialCopyPath)) {
+  throw new Error("unlocked initial-copy helper operation was accepted");
+}
+
 const ownedInitialCopyPath = prepareOutput(
   "/tmp/rip-dvd-reader-owned-initial-copy.img",
 );
@@ -1165,13 +1203,18 @@ const ownershipDescriptor = openSync(
   ownershipPath,
   constants.O_RDWR | constants.O_NOFOLLOW,
 );
-const ownedInitialCopy = spawn(
+const ownershipLock = spawnSync(
   "flock",
+  ["--exclusive", "3"],
+  { stdio: ["ignore", "ignore", "pipe", ownershipDescriptor] },
+);
+if (ownershipLock.status !== 0) {
+  closeSync(ownershipDescriptor);
+  throw new Error("owned initial-copy test could not acquire ownership");
+}
+const ownedInitialCopy = spawn(
+  executable,
   [
-    "--exclusive",
-    "--no-fork",
-    "3",
-    executable,
     "initial-copy-owned-v1",
     sourcePath,
     ownedInitialCopyPath,
@@ -1182,7 +1225,7 @@ const ownedInitialCopy = spawn(
       "ignore",
       "ignore",
       "pipe",
-      ownershipDescriptor,
+      "ignore",
       "pipe",
       "pipe",
       "ignore",
@@ -1192,7 +1235,16 @@ const ownedInitialCopy = spawn(
   },
 );
 closeSync(ownershipDescriptor);
-const [ownedReady] = await once(ownedInitialCopy.stdio[4], "data");
+const ownedStderr = [];
+ownedInitialCopy.stderr.on("data", (chunk) => ownedStderr.push(chunk));
+const [ownedReady] = await Promise.race([
+  once(ownedInitialCopy.stdio[4], "data"),
+  once(ownedInitialCopy, "close").then(([status]) => {
+    throw new Error(
+      `owned initial copy exited before authorization (${status}): ${Buffer.concat(ownedStderr).toString("utf8")}`,
+    );
+  }),
+]);
 if (
   ownedReady.toString("utf8") !== "rip-dvd-copy-authorization-ready\n" ||
   existsSync(ownedInitialCopyPath)

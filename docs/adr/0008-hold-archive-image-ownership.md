@@ -11,9 +11,10 @@ owner-only lock file per archive in the Originals Library's private
 `.rip-dvd-archive-ownership` directory. The archive ID is represented by a
 SHA-256 filename rather than copied into the path. A writer takes an exclusive
 Linux `flock`; a stable reader takes a shared lock. The lock file's device and
-inode must continue to match the descriptor throughout the operation. Missing,
-replaced, unsafe, or unverifiable lock state fails closed as
-`CONSISTENCY_FAULT`.
+inode are permanently recorded when the lock is first created. Every reader,
+writer, and inspection must prove that the named lock and held descriptor still
+match that identity record. Missing, replaced, unsafe, or unverifiable lock
+state fails closed as `CONSISTENCY_FAULT`.
 
 The process that performs image I/O inherits the locked descriptor. An initial
 copy helper receives the exclusive descriptor, and HandBrake and Archive Audit
@@ -50,6 +51,9 @@ remain unsupported until a provider proves cross-host exclusion and safe
 disconnect behavior.
 
 The native helper accepts new-format initial copying only through the
-`initial-copy-owned-v1` operation and verifies its inherited exclusive lock.
-The prior helper operation is rejected. This keeps legacy or unowned helper
-entry points from writing a new-format archive image.
+`initial-copy-owned-v1` operation. An independent Linux lock probe must first
+prove that the inherited descriptor's file is already exclusively locked; an
+idempotent check then proves that the inherited open-file description owns that
+lock. An unlocked descriptor is rejected rather than locked by the helper. The
+prior helper operation is rejected. This keeps legacy or unowned helper entry
+points from writing a new-format archive image.

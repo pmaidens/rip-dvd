@@ -13,7 +13,6 @@ import {
   lstat,
   mkdir,
   open,
-  readFile,
   realpath,
   rename,
   unlink,
@@ -101,10 +100,21 @@ interface LockIdentity {
   lockInode: string;
 }
 
+interface LockIdentityRecord extends LockIdentity {
+  version: typeof ARCHIVE_IMAGE_OWNERSHIP_VERSION;
+  archiveId: string;
+}
+
 interface OwnershipPaths {
   directory: string;
   lock: string;
+  identity: string;
   claim: string;
+}
+
+interface OpenedLock {
+  descriptor: number;
+  created: boolean;
 }
 
 interface LockBackend {
@@ -200,6 +210,7 @@ async function pathsFor(
   return {
     directory,
     lock: join(directory, `${stem}.lock`),
+    identity: join(directory, `${stem}.identity.json`),
     claim: join(directory, `${stem}.claim.json`),
   };
 }
@@ -228,6 +239,7 @@ function pathsForSync(
     return {
       directory,
       lock: join(directory, `${stem}.lock`),
+      identity: join(directory, `${stem}.identity.json`),
       claim: join(directory, `${stem}.claim.json`),
     };
   } catch (cause) {
@@ -236,16 +248,34 @@ function pathsForSync(
   }
 }
 
-function openLock(path: string, create: boolean): number | null {
+function openLock(path: string, create: boolean): OpenedLock | null {
   let descriptor: number;
+  let created = false;
   try {
-    descriptor = openSync(
-      path,
-      constants.O_RDWR |
-        constants.O_NOFOLLOW |
-        (create ? constants.O_CREAT : 0),
-      0o600,
-    );
+    if (create) {
+      try {
+        descriptor = openSync(
+          path,
+          constants.O_RDWR |
+            constants.O_NOFOLLOW |
+            constants.O_CREAT |
+            constants.O_EXCL,
+          0o600,
+        );
+        created = true;
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+        descriptor = openSync(
+          path,
+          constants.O_RDWR | constants.O_NOFOLLOW,
+        );
+      }
+    } else {
+      descriptor = openSync(
+        path,
+        constants.O_RDWR | constants.O_NOFOLLOW,
+      );
+    }
   } catch (cause) {
     if (!create && (cause as NodeJS.ErrnoException).code === "ENOENT") {
       return null;
@@ -269,7 +299,7 @@ function openLock(path: string, create: boolean): number | null {
     ) {
       throw new Error("Ownership lock is unsafe");
     }
-    return descriptor;
+    return { descriptor, created };
   } catch (cause) {
     closeSync(descriptor);
     throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause });
@@ -468,22 +498,79 @@ function isClaimRecord(
   );
 }
 
-function readClaimSync(path: string, archiveId: string): WriterClaimRecord | null | "invalid" {
+function isLockIdentityRecord(
+  value: unknown,
+  archiveId: string,
+): value is LockIdentityRecord {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    Object.keys(record).sort().join(",") ===
+      "archiveId,lockDevice,lockInode,version" &&
+    record.version === ARCHIVE_IMAGE_OWNERSHIP_VERSION &&
+    record.archiveId === archiveId &&
+    typeof record.lockDevice === "string" &&
+    /^\d+$/.test(record.lockDevice) &&
+    typeof record.lockInode === "string" &&
+    /^\d+$/.test(record.lockInode)
+  );
+}
+
+function readPrivateJsonSync(path: string): unknown | null | "invalid" {
+  let descriptor: number;
   try {
-    const value: unknown = JSON.parse(readFileSync(path, "utf8"));
-    return isClaimRecord(value, archiveId) ? value : "invalid";
+    descriptor = openSync(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : "invalid";
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? null
+      : "invalid";
+  }
+  try {
+    const opened = fstatSync(descriptor);
+    const linked = lstatSync(path);
+    const effectiveUserId = process.geteuid?.();
+    if (
+      !opened.isFile() ||
+      !linked.isFile() ||
+      linked.isSymbolicLink() ||
+      opened.dev !== linked.dev ||
+      opened.ino !== linked.ino ||
+      opened.nlink !== 1 ||
+      (opened.mode & 0o077) !== 0 ||
+      effectiveUserId === undefined ||
+      opened.uid !== effectiveUserId
+    ) {
+      return "invalid";
+    }
+    return JSON.parse(readFileSync(descriptor, "utf8")) as unknown;
+  } catch {
+    return "invalid";
+  } finally {
+    closeSync(descriptor);
   }
 }
 
-async function readClaim(path: string, archiveId: string): Promise<WriterClaimRecord | null | "invalid"> {
-  try {
-    const value: unknown = JSON.parse(await readFile(path, "utf8"));
-    return isClaimRecord(value, archiveId) ? value : "invalid";
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : "invalid";
-  }
+function readClaimSync(
+  path: string,
+  archiveId: string,
+): WriterClaimRecord | null | "invalid" {
+  const value = readPrivateJsonSync(path);
+  if (value === null || value === "invalid") return value;
+  return isClaimRecord(value, archiveId) ? value : "invalid";
+}
+
+function readLockIdentitySync(
+  path: string,
+  archiveId: string,
+): LockIdentityRecord | null | "invalid" {
+  const value = readPrivateJsonSync(path);
+  if (value === null || value === "invalid") return value;
+  return isLockIdentityRecord(value, archiveId) ? value : "invalid";
 }
 
 async function syncDirectory(path: string): Promise<void> {
@@ -498,7 +585,10 @@ async function syncDirectory(path: string): Promise<void> {
   }
 }
 
-async function writeClaim(path: string, record: WriterClaimRecord): Promise<void> {
+async function writeRecord(
+  path: string,
+  record: WriterClaimRecord | LockIdentityRecord,
+): Promise<void> {
   const temporary = `${path}.${randomUUID()}.tmp`;
   const file = await open(
     temporary,
@@ -523,6 +613,35 @@ async function writeClaim(path: string, record: WriterClaimRecord): Promise<void
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+  }
+}
+
+async function establishLockIdentity(
+  paths: OwnershipPaths,
+  opened: OpenedLock,
+  archiveId: string,
+  lockIdentity: LockIdentity,
+): Promise<void> {
+  const existing = readLockIdentitySync(paths.identity, archiveId);
+  if (opened.created) {
+    if (existing !== null) {
+      throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
+    }
+    await writeRecord(paths.identity, {
+      version: ARCHIVE_IMAGE_OWNERSHIP_VERSION,
+      archiveId,
+      ...lockIdentity,
+    });
+  }
+  const established = opened.created
+    ? readLockIdentitySync(paths.identity, archiveId)
+    : existing;
+  if (
+    established === null ||
+    established === "invalid" ||
+    !sameLockIdentity(established, lockIdentity)
+  ) {
+    throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
   }
 }
 
@@ -601,10 +720,11 @@ export function createArchiveImageOwnership({
     if (paths === null) {
       throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
     }
-    const descriptor = openLock(paths.lock, true);
-    if (descriptor === null) {
+    const opened = openLock(paths.lock, true);
+    if (opened === null) {
       throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
     }
+    const { descriptor } = opened;
     let releaseBackend: () => void = () => undefined;
     const controller = new AbortController();
     const signal = AbortSignal.any([request.signal, controller.signal]);
@@ -623,14 +743,26 @@ export function createArchiveImageOwnership({
       return error;
     };
     try {
+      lockIdentity = assertLockIdentity(descriptor, paths.lock);
+      await establishLockIdentity(
+        paths,
+        opened,
+        request.archiveId,
+        lockIdentity,
+      );
       releaseBackend = await backend.acquire(
         descriptor,
         paths.lock,
         mode,
         request.signal,
       );
-      lockIdentity = assertLockIdentity(descriptor, paths.lock);
-      const existingClaim = await readClaim(paths.claim, request.archiveId);
+      const acquiredIdentity = assertLockIdentity(descriptor, paths.lock);
+      if (!sameLockIdentity(acquiredIdentity, lockIdentity)) {
+        throw failOwnership(new ArchiveImageOwnershipError(
+          "CONSISTENCY_FAULT",
+        ));
+      }
+      const existingClaim = readClaimSync(paths.claim, request.archiveId);
       if (
         existingClaim === "invalid" ||
         (existingClaim !== null &&
@@ -652,7 +784,7 @@ export function createArchiveImageOwnership({
           lockIdentity,
         );
         try {
-          await writeClaim(paths.claim, claim);
+          await writeRecord(paths.claim, claim);
         } catch (cause) {
           throw failOwnership(cause);
         }
@@ -670,7 +802,7 @@ export function createArchiveImageOwnership({
           );
           const nextClaim = claim;
           heartbeatWrite = heartbeatWrite
-            .then(() => writeClaim(paths.claim, nextClaim))
+            .then(() => writeRecord(paths.claim, nextClaim))
             .catch((cause) => {
               failOwnership(cause);
             });
@@ -680,9 +812,16 @@ export function createArchiveImageOwnership({
       const assertOwned = () => {
         try {
           const currentIdentity = assertLockIdentity(descriptor, paths.lock);
+          const establishedIdentity = readLockIdentitySync(
+            paths.identity,
+            request.archiveId,
+          );
           if (
             lockIdentity === undefined ||
-            !sameLockIdentity(currentIdentity, lockIdentity)
+            !sameLockIdentity(currentIdentity, lockIdentity) ||
+            establishedIdentity === null ||
+            establishedIdentity === "invalid" ||
+            !sameLockIdentity(establishedIdentity, lockIdentity)
           ) {
             throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
           }
@@ -718,7 +857,7 @@ export function createArchiveImageOwnership({
       await heartbeatWrite;
       if (claim !== undefined && !retainClaim) {
         try {
-          const current = await readClaim(paths.claim, request.archiveId);
+          const current = readClaimSync(paths.claim, request.archiveId);
           if (current !== "invalid" && current?.claimId === claim.claimId) {
             await unlink(paths.claim);
             await syncDirectory(paths.directory);
@@ -758,19 +897,36 @@ export function createArchiveImageOwnership({
       }
       let descriptor: number | null = null;
       try {
-        descriptor = openLock(paths.lock, false);
-        let writerState: ArchiveImageOwnershipInspection["writer"]["state"] =
-          descriptor === null
-          ? "inactive"
-          : backend.inspect(descriptor, paths.lock);
-        const lockIdentity = descriptor === null
-          ? null
-          : assertLockIdentity(descriptor, paths.lock);
+        const opened = openLock(paths.lock, false);
+        descriptor = opened?.descriptor ?? null;
+        const identity = readLockIdentitySync(paths.identity, archiveId);
         const claim = readClaimSync(paths.claim, archiveId);
+        if (descriptor === null) {
+          if (identity !== null || claim !== null) {
+            return consistencyFaultInspection();
+          }
+          return {
+            contractVersion: ARCHIVE_IMAGE_OWNERSHIP_VERSION,
+            writer: { state: "inactive" },
+            workerClaim: {
+              state: "none",
+              claimedAt: null,
+              leaseExpiresAt: null,
+            },
+            stableRead: { available: true, blockingReasons: [] },
+          };
+        }
+        const lockIdentity = assertLockIdentity(descriptor, paths.lock);
+        const identityFault =
+          identity === null ||
+          identity === "invalid" ||
+          !sameLockIdentity(identity, lockIdentity);
+        let writerState: ArchiveImageOwnershipInspection["writer"]["state"] =
+          identityFault ? "uncertain" : backend.inspect(descriptor, paths.lock);
         if (
           claim !== null &&
           claim !== "invalid" &&
-          (lockIdentity === null || !sameLockIdentity(claim, lockIdentity))
+          !sameLockIdentity(claim, lockIdentity)
         ) {
           writerState = "uncertain";
         }
