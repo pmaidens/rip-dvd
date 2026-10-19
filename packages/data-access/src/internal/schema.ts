@@ -1742,7 +1742,7 @@ export const notificationEventReceipts = sqliteTable("notification_event_receipt
   eventId: text("event_id").notNull(),
   payloadDigest: text("payload_digest").notNull(),
   recipientCount: integer("recipient_count").notNull(),
-});
+}, (table) => [check("notification_event_receipts_id_not_null", sql`${table.sourceEventId} is not null`)]);
 
 export const notificationDeliveries = sqliteTable("notification_deliveries", {
   id: text("id").primaryKey(),

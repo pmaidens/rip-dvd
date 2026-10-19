@@ -174,11 +174,11 @@ export function createNotificationAccess(database: Database, now: () => Date): N
           nextAttemptAt: status === "retrying" && result.status === "retrying" ? result.nextAttemptAt : null,
           completedAt: status === "retrying" ? null : timestamp, claimToken: null, leaseUntil: null })
           .where(eq(deliveries.id, claim.id)).run();
-        if (failureCode === "subscription_expired") {
+        if (result.status === "failed" && result.failureCode === "subscription_expired") {
           // An obsolete in-flight generation cannot deactivate a newly enabled one.
           tx.update(subscriptions).set({ active: false, updatedAt: timestamp })
             .where(and(eq(subscriptions.id, row.subscriptionId), eq(subscriptions.generation, row.generation))).run();
-          tx.update(deliveries).set({ status: "failed", failureCode, completedAt: timestamp, nextAttemptAt: null, claimToken: null, leaseUntil: null })
+          tx.update(deliveries).set({ status: "failed", failureCode: "subscription_expired", completedAt: timestamp, nextAttemptAt: null, claimToken: null, leaseUntil: null })
             .where(and(eq(deliveries.subscriptionId, row.subscriptionId), eq(deliveries.generation, row.generation), pending())).run();
         }
         return status;

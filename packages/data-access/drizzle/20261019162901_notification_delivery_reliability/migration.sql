@@ -2,7 +2,8 @@ CREATE TABLE `notification_event_receipts` (
 	`source_event_id` text PRIMARY KEY,
 	`event_id` text NOT NULL,
 	`payload_digest` text NOT NULL,
-	`recipient_count` integer NOT NULL
+	`recipient_count` integer NOT NULL,
+	CONSTRAINT "notification_event_receipts_id_not_null" CHECK("source_event_id" is not null)
 );
 --> statement-breakpoint
 ALTER TABLE `notification_deliveries` ADD `attempt_count` integer DEFAULT 0 NOT NULL;--> statement-breakpoint

@@ -5,10 +5,15 @@ import { execFileSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { Agent } from "node:https";
+import { createServer } from "node:http";
+import { connect } from "node:net";
+import { once } from "node:events";
+import type { TLSSocket } from "node:tls";
 import { drizzle } from "drizzle-orm/node-sqlite";
 import { sql } from "drizzle-orm";
 import { createNotificationEventWriter } from "@rip-dvd/data-access";
-import { dispatchNotifications, recordNotificationOutcome } from "@rip-dvd/application";
+import { createWebPushSender, dispatchNotifications, readNotificationConfiguration, recordNotificationOutcome } from "@rip-dvd/application";
 
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
@@ -336,6 +341,66 @@ it("does not let an old in-flight expired-subscription response disable a re-ena
     await fixture.run(["notifications", "test", "--key", "synthetic-inflight-future"]);
     expect(await dispatchNotifications(access, async () => undefined)).toEqual({ accepted: 1, failed: 0 });
   } finally { access.close(); }
+});
+
+it("invalidates a definitively expired subscription even when the message expires during sending", async () => {
+  const { fixture, subscription } = configure();
+  await register(fixture, subscription, "synthetic-expiry-race-register");
+  await fixture.run(["notifications", "test", "--key", "synthetic-expiry-race-test"]);
+  const access = fixture.openAccess();
+  try {
+    const expiry = access.notifications.deliveries({ limit: 1 })[0]!.expiresAt;
+    let timestamp = new Date(expiry.getTime() - 1);
+    await dispatchNotifications(access, async () => { timestamp = new Date(expiry.getTime() + 1); throw { statusCode: 410 }; }, { now: () => timestamp });
+    expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: [{ status: "expired", failureCode: "message_expired" }] });
+    expect((await fixture.run(["notifications", "subscriptions"])).result).toMatchObject({ subscriptions: [{ active: false }] });
+  } finally { access.close(); }
+});
+
+it.each(["shutdown", "deadline"] as const)("closes the maintained push sender's active connection on %s", async (reason) => {
+  const { fixture, subscription } = configure();
+  await register(fixture, subscription, "synthetic-network-abort-register");
+  await fixture.run(["notifications", "test", "--key", "synthetic-network-abort-test"]);
+  let started!: () => void;
+  let closed!: () => void;
+  const responseStarted = new Promise<void>((resolve) => { started = resolve; });
+  const responseClosed = new Promise<void>((resolve) => { closed = resolve; });
+  const server = createServer((request, response) => {
+    request.resume();
+    response.writeHead(201);
+    response.write("Synthetic unfinished provider response");
+    response.on("close", closed);
+    started();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("Expected controlled provider port");
+  // Redirect only the external socket boundary. Exercise real Web Push encryption and sending.
+  const connection = vi.spyOn(Agent.prototype, "createConnection").mockImplementation(() => connect({ host: "127.0.0.1", port: address.port }) as TLSSocket);
+  const configuration = readNotificationConfiguration();
+  if (!configuration.ready) throw new Error("Expected synthetic push configuration");
+  const controller = new AbortController();
+  const access = fixture.openAccess();
+  try {
+    if (reason === "deadline") vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const running = dispatchNotifications(access, createWebPushSender(configuration.configuration), { signal: controller.signal });
+    await responseStarted;
+    if (reason === "shutdown") controller.abort();
+    else await vi.advanceTimersByTimeAsync(10_000);
+    await running;
+    vi.useRealTimers();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([responseClosed, new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("Push connection remained open after cancellation")), 1_000); })]);
+    } finally { clearTimeout(timeout); }
+  } finally {
+    vi.useRealTimers();
+    connection.mockRestore();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    access.close();
+  }
 });
 
 it("uses one formatter for the agreed recovery facts without changing domain lifecycles", async () => {

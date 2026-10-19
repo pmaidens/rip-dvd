@@ -6868,6 +6868,12 @@
       "table": "mutation_invocations"
     },
     {
+      "value": "\"source_event_id\" is not null",
+      "name": "notification_event_receipts_id_not_null",
+      "entityType": "checks",
+      "table": "notification_event_receipts"
+    },
+    {
       "value": "\"id\" is not null",
       "name": "notification_deliveries_id_not_null",
       "entityType": "checks",
