@@ -1,5 +1,5 @@
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdtemp, mkdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
@@ -308,6 +308,47 @@ it("does not advance the database when image bytes change before the save", asyn
     })).rejects.toMatchObject({ code: "DVD_PUBLICATION_IMAGE_CONFLICT" });
     expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
     expect(f.access.archiveJobs.find(f.claim.id)?.status).toBe("running");
+  } finally { f.access.close(); }
+});
+
+it("rejects an initial publication when the Originals symlink retargets after ownership admission", async () => {
+  const f = await jobFixture(true);
+  const fixtureRoot = dirname(f.identity.originalsLibraryPath);
+  const admittedParentPath = join(fixtureRoot, "admitted-parent");
+  const replacementParentPath = join(fixtureRoot, "replacement-parent");
+  const configuredParentPath = join(fixtureRoot, "configured-parent");
+  const admittedOriginalsPath = join(admittedParentPath, "originals");
+  const replacementOriginalsPath = join(replacementParentPath, "originals");
+  const configuredOriginalsPath = join(configuredParentPath, "originals");
+  await mkdir(admittedParentPath);
+  await mkdir(replacementOriginalsPath, { recursive: true });
+  await rename(f.identity.originalsLibraryPath, admittedOriginalsPath);
+  await symlink(admittedParentPath, configuredParentPath);
+  const lock = createInProcessDvdRescueWorkspaceLock();
+  try {
+    await expect(saveDvdInitialArchiveForArchiveJob({
+      access: f.access,
+      claim: f.claim,
+      originalsLibraryPath: configuredOriginalsPath,
+      exclusion: {
+        async withLock(options) {
+          return lock.withLock({
+            ...options,
+            async task() {
+              await rm(configuredParentPath);
+              await symlink(replacementParentPath, configuredParentPath);
+              return options.task();
+            },
+          });
+        },
+      },
+      proven: f.proven,
+    })).rejects.toMatchObject({ code: "DVD_PUBLICATION_PATH_CONFLICT" });
+    expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    await expect(readFile(join(
+      replacementOriginalsPath,
+      `${f.identity.originalDiscArchiveId}.iso`,
+    ))).rejects.toMatchObject({ code: "ENOENT" });
   } finally { f.access.close(); }
 });
 

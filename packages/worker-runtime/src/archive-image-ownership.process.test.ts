@@ -21,6 +21,7 @@ import { afterEach, expect, it } from "vitest";
 
 import {
   ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME,
+  ARCHIVE_IMAGE_OWNERSHIP_NAMESPACE_IDENTITY_NAME,
   createArchiveImageOwnership,
 } from "./archive-image-ownership.js";
 import { inspectLinuxStorage } from "./linux-storage.js";
@@ -448,6 +449,93 @@ it.runIf(processStorageSupported)(
           originalsLibraryPath,
           imagePath,
           "replaced-root-archive",
+          authorityRootPath,
+        )).resolves.toEqual({ ok: false, code: "CONSISTENCY_FAULT" });
+        assertOwned();
+      },
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+  },
+);
+
+it.runIf(processStorageSupported)(
+  "blocks a second namespace after the ownership authority root is replaced",
+  async () => {
+    const testRoot = mkdtempSync(
+      join(tmpdir(), "rip-dvd-image-ownership-process-"),
+    );
+    roots.push(testRoot);
+    const originalsLibraryPath = join(testRoot, "originals");
+    const authorityRootPath = join(testRoot, "authority");
+    mkdirSync(originalsLibraryPath, { mode: 0o700 });
+    mkdirSync(authorityRootPath, { mode: 0o700 });
+    const imagePath = join(testRoot, "synthetic-archive.iso");
+    writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
+    const ownership = createArchiveImageOwnership({
+      authorityRootPath,
+      ownershipCheckIntervalMs: 60_000,
+    });
+
+    await expect(ownership.withWriter({
+      archiveId: "replaced-authority-archive",
+      imagePath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task({ assertOwned }) {
+        renameSync(authorityRootPath, `${authorityRootPath}.replaced`);
+        mkdirSync(authorityRootPath, { mode: 0o700 });
+        await expect(runContender(
+          "withWriter",
+          originalsLibraryPath,
+          imagePath,
+          "replaced-authority-archive",
+          authorityRootPath,
+        )).resolves.toEqual({ ok: false, code: "CONSISTENCY_FAULT" });
+        assertOwned();
+      },
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+  },
+);
+
+it.runIf(processStorageSupported)(
+  "blocks rebootstrap after the ownership directory and authority identity move together",
+  async () => {
+    const testRoot = mkdtempSync(
+      join(tmpdir(), "rip-dvd-image-ownership-process-"),
+    );
+    roots.push(testRoot);
+    const originalsLibraryPath = join(testRoot, "originals");
+    const authorityRootPath = join(testRoot, "authority");
+    mkdirSync(originalsLibraryPath, { mode: 0o700 });
+    mkdirSync(authorityRootPath, { mode: 0o700 });
+    const imagePath = join(testRoot, "synthetic-archive.iso");
+    writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
+    const ownership = createArchiveImageOwnership({
+      authorityRootPath,
+      ownershipCheckIntervalMs: 60_000,
+    });
+
+    await expect(ownership.withWriter({
+      archiveId: "moved-authority-pair-archive",
+      imagePath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task({ assertOwned }) {
+        const directory = join(
+          authorityRootPath,
+          ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME,
+        );
+        const identity = join(
+          authorityRootPath,
+          ARCHIVE_IMAGE_OWNERSHIP_NAMESPACE_IDENTITY_NAME,
+        );
+        renameSync(directory, `${directory}.replaced`);
+        renameSync(identity, `${identity}.replaced`);
+        mkdirSync(directory, { mode: 0o700 });
+        await expect(runContender(
+          "withWriter",
+          originalsLibraryPath,
+          imagePath,
+          "moved-authority-pair-archive",
           authorityRootPath,
         )).resolves.toEqual({ ok: false, code: "CONSISTENCY_FAULT" });
         assertOwned();

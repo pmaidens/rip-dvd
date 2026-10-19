@@ -202,6 +202,7 @@ struct operation_state {
     enum operation operation;
     EVP_MD_CTX *hash;
     int output_fd;
+    int ownership_descriptor;
     uint64_t last_progress_bytes;
     struct timespec last_progress_at;
 };
@@ -315,10 +316,26 @@ static int parse_endpoint_lba(const char *text, uint64_t *lba)
     return 0;
 }
 
-static int write_all(int descriptor, const unsigned char *buffer, size_t length)
+static int require_archive_image_ownership(int descriptor)
+{
+    if (descriptor < 0) {
+        return 0;
+    }
+    if (!descriptor_holds_exclusive_flock(descriptor)) {
+        fprintf(stderr, "DVD archive image ownership is unavailable\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int write_all(int descriptor, const unsigned char *buffer, size_t length,
+                     int ownership_descriptor)
 {
     size_t written = 0;
     while (written < length) {
+        if (require_archive_image_ownership(ownership_descriptor) != 0) {
+            return 1;
+        }
         ssize_t result = write(descriptor, buffer + written, length - written);
         if (result < 0) {
             if (errno == EINTR) {
@@ -367,7 +384,8 @@ static int consume(struct operation_state *state, const unsigned char *buffer,
         }
         return emit_hash_progress(state, bytes_read, 0);
     }
-    if (write_all(state->output_fd, buffer, length) != 0) {
+    if (write_all(state->output_fd, buffer, length,
+                  state->ownership_descriptor) != 0) {
         return 1;
     }
     fprintf(stderr, "%" PRIu64 " bytes copied\n", bytes_read);
@@ -1830,6 +1848,7 @@ static int run_hash(struct read_backend *backend, uint64_t size_bytes)
         .operation = OPERATION_HASH,
         .hash = hash,
         .output_fd = -1,
+        .ownership_descriptor = -1,
         .last_progress_bytes = 0,
     };
     if (clock_gettime(CLOCK_MONOTONIC, &state.last_progress_at) != 0) {
@@ -1994,6 +2013,7 @@ static int run_copy(struct read_backend *backend, const char *output_path,
         .operation = OPERATION_COPY,
         .hash = NULL,
         .output_fd = output_fd,
+        .ownership_descriptor = -1,
     };
     int status = read_disc(
         backend, size_bytes, &state, &recovery, NULL, 0);
@@ -2013,8 +2033,12 @@ static int run_copy(struct read_backend *backend, const char *output_path,
 
 static int run_initial_copy(struct read_backend *backend,
                             const char *output_path, uint64_t size_bytes,
-                            enum test_result_mode test_result_mode)
+                            enum test_result_mode test_result_mode,
+                            int ownership_descriptor)
 {
+    if (require_archive_image_ownership(ownership_descriptor) != 0) {
+        return 1;
+    }
     int output_fd = open(output_path,
                          O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
                          S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
@@ -2039,13 +2063,19 @@ static int run_initial_copy(struct read_backend *backend,
         .operation = OPERATION_COPY,
         .hash = NULL,
         .output_fd = output_fd,
+        .ownership_descriptor = ownership_descriptor,
     };
     struct recovery_state boundary = {
         .allow_boundary_proof = 1,
     };
     int status = read_disc(
         backend, size_bytes, &state, &boundary, &initial_copy, 0);
-    rollback_boundary_image(output_fd, &boundary);
+    if (boundary.boundary_failure &&
+        require_archive_image_ownership(ownership_descriptor) != 0) {
+        status = 1;
+    } else {
+        rollback_boundary_image(output_fd, &boundary);
+    }
     struct stat output_metadata;
     uint64_t retained_byte_count = 0;
     if (fstat(output_fd, &output_metadata) != 0 ||
@@ -2056,8 +2086,12 @@ static int run_initial_copy(struct read_backend *backend,
     }
     int retain_boundary_result =
         status == READ_FAILURE_EXIT_STATUS && boundary.boundary_failure;
-    if ((status == 0 || retain_boundary_result) && fsync(output_fd) != 0) {
-        status = fail_errno("DVD initial-copy sync failed");
+    if (status == 0 || retain_boundary_result) {
+        if (require_archive_image_ownership(ownership_descriptor) != 0) {
+            status = 1;
+        } else if (fsync(output_fd) != 0) {
+            status = fail_errno("DVD initial-copy sync failed");
+        }
     }
     if (close(output_fd) != 0 && (status == 0 || retain_boundary_result)) {
         status = fail_errno("DVD initial-copy close failed");
@@ -2208,6 +2242,7 @@ static int run_resume(struct read_backend *backend, const char *output_path,
         .operation = OPERATION_COPY,
         .hash = NULL,
         .output_fd = output_fd,
+        .ownership_descriptor = -1,
     };
     uint64_t bytes_processed =
         size_bytes - prior_bad_sector_count * DVDCSS_BLOCK_SIZE;
@@ -2378,6 +2413,7 @@ static int run_boundary_resume(
     struct operation_state state = {
         .operation = OPERATION_COPY,
         .output_fd = output_fd,
+        .ownership_descriptor = -1,
         .last_progress_bytes = image_byte_count,
     };
     int status = read_disc(
@@ -3200,7 +3236,44 @@ static int run_test_initial_copy(int argc, char **argv)
         return setup_status;
     }
     int status = run_initial_copy(
-        &backend, argv[3], size_bytes, test_result_mode);
+        &backend, argv[3], size_bytes, test_result_mode, -1);
+    return close_test_backend(&backend, status);
+}
+
+static int run_test_owned_initial_copy(int argc, char **argv)
+{
+    if (argc != 8) {
+        fprintf(stderr,
+                "usage: %s initial-copy-owned-test SOURCE OUTPUT SIZE FAULTS DELAY MODE\n",
+                argv[0]);
+        return 2;
+    }
+    uint64_t size_bytes = 0;
+    enum test_result_mode test_result_mode;
+    struct read_backend backend;
+    int setup_status = initialize_test_backend(
+        argv[2], argv[4], argv[5], argv[6], argv[7], 0, &size_bytes,
+        &test_result_mode, &backend);
+    if (setup_status != 0) {
+        return setup_status;
+    }
+    int status = require_archive_image_ownership(8);
+    unsigned char *resume_bitmap = NULL;
+    uint64_t resume_bad_sector_count = 0;
+    uint64_t boundary_image_byte_count = 0;
+    if (status == 0) {
+        status = await_copy_authorization(
+            size_bytes, AUTHORIZED_RESUME_NONE, &resume_bitmap,
+            &resume_bad_sector_count, &boundary_image_byte_count);
+    }
+    if (status == 0) {
+        status = require_archive_image_ownership(8);
+    }
+    if (status == 0) {
+        status = run_initial_copy(
+            &backend, argv[3], size_bytes, test_result_mode, 8);
+    }
+    free(resume_bitmap);
     return close_test_backend(&backend, status);
 }
 
@@ -3305,6 +3378,9 @@ int main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "initial-copy-test") == 0) {
         return run_test_initial_copy(argc, argv);
     }
+    if (argc > 1 && strcmp(argv[1], "initial-copy-owned-test") == 0) {
+        return run_test_owned_initial_copy(argc, argv);
+    }
     if (argc > 1 && strcmp(argv[1], "resume-test") == 0) {
         return run_test_resume(argc, argv);
     }
@@ -3372,8 +3448,7 @@ int main(int argc, char **argv)
         return 2;
     }
     if (authorized_initial_copy) {
-        if (!descriptor_holds_exclusive_flock(8)) {
-            fprintf(stderr, "DVD archive image ownership is unavailable\n");
+        if (require_archive_image_ownership(8) != 0) {
             return 1;
         }
     }
@@ -3393,6 +3468,11 @@ int main(int argc, char **argv)
                                  &boundary_image_byte_count) != 0) {
         return 1;
     }
+    if (authorized_initial_copy &&
+        require_archive_image_ownership(8) != 0) {
+        free(resume_bitmap);
+        return 1;
+    }
     dvdcss_t dvdcss = dvdcss_open(argv[2]);
     if (dvdcss == NULL) {
         free(resume_bitmap);
@@ -3405,7 +3485,7 @@ int main(int argc, char **argv)
         status = run_hash(&backend, size_bytes);
     } else if (authorized_initial_copy) {
         status = run_initial_copy(
-            &backend, argv[3], size_bytes, TEST_RESULT_VALID);
+            &backend, argv[3], size_bytes, TEST_RESULT_VALID, 8);
     } else if (authorized_resume) {
         status = run_resume(&backend, argv[3], size_bytes, resume_bitmap,
                             resume_bad_sector_count, argv[5],

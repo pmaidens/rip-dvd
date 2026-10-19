@@ -123,6 +123,20 @@ export async function resolveDvdInitialArchiveImagePath(
     `${identity.originalDiscArchiveId}.iso`,
   );
 }
+
+export async function resolveDvdInitialArchivePublicationImagePaths(
+  identity: PublicationIdentity,
+  stagingImagePath: string,
+): Promise<DvdInitialArchivePublicationImagePaths> {
+  const sourcePath = resolve(stagingImagePath);
+  return {
+    archivePath: await resolveDvdInitialArchiveImagePath(identity),
+    stagingPath: join(
+      await realpath(dirname(sourcePath)),
+      basename(sourcePath),
+    ),
+  };
+}
 async function readRecord(path: string, code: DvdInitialPublicationFaultCode): Promise<unknown | undefined> {
   let file;
   try { file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (error) {
@@ -310,13 +324,22 @@ async function completePublication(controls: PublicationControls, paths: Publica
 /** Dormant marked-job publication seam. Caller holds archive exclusion and has
  * closed every copy helper before supplying the proven immutable image. #408
  * consumes the returned checkpoint in its atomic database save. */
-export async function publishDvdInitialArchive(options: PublicationIdentity & PublicationControls & { proven: ProvenDvdInitialArchiveBoundary }) {
+export async function publishDvdInitialArchive(options: PublicationIdentity & PublicationControls & {
+  expectedImagePaths: DvdInitialArchivePublicationImagePaths;
+  proven: ProvenDvdInitialArchiveBoundary;
+}) {
   await authorize(options);
   const manifest = createDvdInitialManifest(options);
   const paths = await pathsFor(options);
   const sourcePath = resolve(options.proven.initialCopy.imagePath);
   const stagingPath = join(await realpath(dirname(sourcePath)), basename(sourcePath));
   checkStagingPath(stagingPath, paths);
+  if (
+    stagingPath !== options.expectedImagePaths.stagingPath ||
+    paths.archive !== options.expectedImagePaths.archivePath
+  ) {
+    throw new DvdInitialPublicationFault("DVD_PUBLICATION_PATH_CONFLICT");
+  }
   const intent: PublicationIntent = { version: "dvd-initial-publication-v1", stagingPath, manifest };
   // Never create intent around a foreign existing artifact or checkpoint.
   if (await readRecord(paths.intent, "DVD_PUBLICATION_INTENT_CONFLICT") === undefined &&

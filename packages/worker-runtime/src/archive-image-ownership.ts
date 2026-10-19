@@ -34,8 +34,10 @@ const CLAIM_LEASE_DURATION_MS = 60_000;
 const OWNERSHIP_CHECK_INTERVAL_MS = 1_000;
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 const MAX_ARCHIVE_ID_BYTES = 128;
-const OWNERSHIP_NAMESPACE_IDENTITY_NAME =
+export const ARCHIVE_IMAGE_OWNERSHIP_NAMESPACE_IDENTITY_NAME =
   ".rip-dvd-archive-ownership.identity.json";
+const ORIGINALS_NAMESPACE_IDENTITY_NAME =
+  ".rip-dvd-archive-ownership.authority.json";
 
 export type ArchiveImageOwnershipReasonCode =
   | "WRITER_NOT_QUIESCENT"
@@ -117,6 +119,8 @@ interface LockIdentityRecord extends LockIdentity {
 
 interface NamespaceIdentityRecord {
   version: typeof ARCHIVE_IMAGE_OWNERSHIP_VERSION;
+  authorityRootDevice: string;
+  authorityRootInode: string;
   originalsRootDevice: string;
   originalsRootInode: string;
   directoryDevice: string;
@@ -129,6 +133,7 @@ interface OwnershipPaths {
   directory: string;
   directoryCreated: boolean;
   namespaceIdentity: string;
+  originalsNamespaceIdentity: string;
   lock: string;
   identity: string;
   claim: string;
@@ -337,7 +342,11 @@ async function pathsFor(
       directoryCreated,
       namespaceIdentity: join(
         authorityRoot,
-        OWNERSHIP_NAMESPACE_IDENTITY_NAME,
+        ARCHIVE_IMAGE_OWNERSHIP_NAMESPACE_IDENTITY_NAME,
+      ),
+      originalsNamespaceIdentity: join(
+        root,
+        ORIGINALS_NAMESPACE_IDENTITY_NAME,
       ),
       lock: join(directory, `${stem}.lock`),
       identity: join(directory, `${stem}.identity.json`),
@@ -374,13 +383,20 @@ function pathsForSync(
     const directory = join(authorityRoot, ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME);
     const namespaceIdentity = join(
       authorityRoot,
-      OWNERSHIP_NAMESPACE_IDENTITY_NAME,
+      ARCHIVE_IMAGE_OWNERSHIP_NAMESPACE_IDENTITY_NAME,
+    );
+    const originalsNamespaceIdentity = join(
+      root,
+      ORIGINALS_NAMESPACE_IDENTITY_NAME,
     );
     try {
       validateDirectory(directory);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        if (readNamespaceIdentitySync(namespaceIdentity) !== null) {
+        if (
+          readNamespaceIdentitySync(namespaceIdentity) !== null ||
+          readNamespaceIdentitySync(originalsNamespaceIdentity) !== null
+        ) {
           throw new Error("Ownership namespace is missing");
         }
         return null;
@@ -400,6 +416,7 @@ function pathsForSync(
       directory,
       directoryCreated: false,
       namespaceIdentity,
+      originalsNamespaceIdentity,
       lock: join(directory, `${stem}.lock`),
       identity: join(directory, `${stem}.identity.json`),
       claim: join(directory, `${stem}.claim.json`),
@@ -724,8 +741,12 @@ function isNamespaceIdentityRecord(
   const record = value as Record<string, unknown>;
   return (
     Object.keys(record).sort().join(",") ===
-      "directoryDevice,directoryInode,originalsRootDevice,originalsRootInode,version" &&
+      "authorityRootDevice,authorityRootInode,directoryDevice,directoryInode,originalsRootDevice,originalsRootInode,version" &&
     record.version === ARCHIVE_IMAGE_OWNERSHIP_VERSION &&
+    typeof record.authorityRootDevice === "string" &&
+    /^\d+$/.test(record.authorityRootDevice) &&
+    typeof record.authorityRootInode === "string" &&
+    /^\d+$/.test(record.authorityRootInode) &&
     typeof record.originalsRootDevice === "string" &&
     /^\d+$/.test(record.originalsRootDevice) &&
     typeof record.originalsRootInode === "string" &&
@@ -845,9 +866,12 @@ async function writeRecord(
 
 function currentNamespaceIdentity(paths: OwnershipPaths): NamespaceIdentityRecord {
   validateDirectory(paths.directory);
+  const authorityRoot = lstatSync(paths.authorityRoot, { bigint: true });
   const originalsRoot = lstatSync(paths.root, { bigint: true });
   const directory = lstatSync(paths.directory, { bigint: true });
   if (
+    !authorityRoot.isDirectory() ||
+    authorityRoot.isSymbolicLink() ||
     !originalsRoot.isDirectory() ||
     originalsRoot.isSymbolicLink() ||
     !directory.isDirectory() ||
@@ -857,6 +881,8 @@ function currentNamespaceIdentity(paths: OwnershipPaths): NamespaceIdentityRecor
   }
   return {
     version: ARCHIVE_IMAGE_OWNERSHIP_VERSION,
+    authorityRootDevice: authorityRoot.dev.toString(),
+    authorityRootInode: authorityRoot.ino.toString(),
     originalsRootDevice: originalsRoot.dev.toString(),
     originalsRootInode: originalsRoot.ino.toString(),
     directoryDevice: directory.dev.toString(),
@@ -868,40 +894,58 @@ function sameNamespaceIdentity(
   left: NamespaceIdentityRecord,
   right: NamespaceIdentityRecord,
 ): boolean {
-  return left.originalsRootDevice === right.originalsRootDevice &&
+  return left.authorityRootDevice === right.authorityRootDevice &&
+    left.authorityRootInode === right.authorityRootInode &&
+    left.originalsRootDevice === right.originalsRootDevice &&
     left.originalsRootInode === right.originalsRootInode &&
     left.directoryDevice === right.directoryDevice &&
     left.directoryInode === right.directoryInode;
 }
 
 function assertNamespaceIdentity(paths: OwnershipPaths): void {
-  const recorded = readNamespaceIdentitySync(paths.namespaceIdentity);
+  const authorityRecord = readNamespaceIdentitySync(paths.namespaceIdentity);
+  const originalsRecord = readNamespaceIdentitySync(
+    paths.originalsNamespaceIdentity,
+  );
   const current = currentNamespaceIdentity(paths);
   if (
-    recorded === null ||
-    recorded === "invalid" ||
-    !sameNamespaceIdentity(recorded, current)
+    authorityRecord === null ||
+    authorityRecord === "invalid" ||
+    originalsRecord === null ||
+    originalsRecord === "invalid" ||
+    !sameNamespaceIdentity(authorityRecord, originalsRecord) ||
+    !sameNamespaceIdentity(authorityRecord, current)
   ) {
     throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
   }
 }
 
 async function establishNamespaceIdentity(paths: OwnershipPaths): Promise<void> {
-  const existing = readNamespaceIdentitySync(paths.namespaceIdentity);
+  const existingAuthority = readNamespaceIdentitySync(paths.namespaceIdentity);
+  const existingOriginals = readNamespaceIdentitySync(
+    paths.originalsNamespaceIdentity,
+  );
   const current = currentNamespaceIdentity(paths);
   if (paths.directoryCreated) {
-    if (existing !== null) {
+    if (existingAuthority !== null || existingOriginals !== null) {
       throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
     }
     await writeRecord(paths.namespaceIdentity, current);
+    await writeRecord(paths.originalsNamespaceIdentity, current);
   }
-  const established = paths.directoryCreated
+  const establishedAuthority = paths.directoryCreated
     ? readNamespaceIdentitySync(paths.namespaceIdentity)
-    : existing;
+    : existingAuthority;
+  const establishedOriginals = paths.directoryCreated
+    ? readNamespaceIdentitySync(paths.originalsNamespaceIdentity)
+    : existingOriginals;
   if (
-    established === null ||
-    established === "invalid" ||
-    !sameNamespaceIdentity(established, current)
+    establishedAuthority === null ||
+    establishedAuthority === "invalid" ||
+    establishedOriginals === null ||
+    establishedOriginals === "invalid" ||
+    !sameNamespaceIdentity(establishedAuthority, establishedOriginals) ||
+    !sameNamespaceIdentity(establishedAuthority, current)
   ) {
     throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
   }

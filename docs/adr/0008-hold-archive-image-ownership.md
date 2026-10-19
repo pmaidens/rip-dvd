@@ -12,10 +12,11 @@ owner-only lock file per archive in a private
 ID is represented by a SHA-256 filename rather than copied into the path. A
 writer takes an exclusive Linux `flock`; a stable reader takes a shared lock.
 The lock file's device and inode are permanently recorded when the lock is
-first created. A separate owner-only identity file in that durable authority
-binds both the lock directory and the Originals Library root by device and
-inode. Replacing either path therefore cannot create a second live lock
-namespace. Every reader, writer, and inspection must prove that the namespace,
+first created. Matching owner-only identity files in the durable authority and
+the Originals Library root bind both roots and the lock directory by device
+and inode. Either surviving root therefore rejects replacement of the other
+root, including movement of the lock directory with its authority-side
+identity. Every reader, writer, and inspection must prove that the namespace,
 named lock, and held descriptor still match those identity records. Linux
 descriptor information proves that the specific held descriptor still owns
 the expected shared or exclusive `flock`; a conflict caused by a different
@@ -45,8 +46,9 @@ hide a live writer, and is not by itself evidence that a writer still exists.
 
 Initial DVD publication holds exclusive ownership across the copy, evidence
 publication, and reconciliation interval. Both the durable staging path and
-final archive path are bound to the interval, and reconciliation rejects an
-intent whose path differs from the one admitted before lock acquisition.
+final archive path are resolved and bound before lock acquisition. Initial
+publication and reconciliation both reject a path or intent that differs from
+the admitted paths.
 Existing encode source reads,
 including subtitle scans, Archive Audit file scans, and Original Disc Archive
 Filesystem Verification hold shared ownership for the complete image-read
@@ -76,7 +78,9 @@ contract.
 The native helper accepts new-format initial copying only through the
 `initial-copy-owned-v1` operation. Linux descriptor information must prove that
 the inherited open-file description already owns an exclusive `flock`. The
-helper never acquires or reacquires that lock. An unlocked descriptor is
-rejected, even when another descriptor holds a conflicting lock. The prior
-helper operation is rejected. This keeps legacy or unowned helper entry points
-from writing a new-format archive image.
+helper never acquires or reacquires that lock. It revalidates the inherited
+lock after authorization and before creating, writing, truncating, or syncing
+the image. An unlocked descriptor is rejected, even when another descriptor
+holds a conflicting lock, and lock loss stops later writes. The prior helper
+operation is rejected. This keeps legacy or unowned helper entry points from
+writing a new-format archive image.

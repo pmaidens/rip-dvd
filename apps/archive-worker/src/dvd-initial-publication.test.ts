@@ -6,9 +6,10 @@ import { runDvdInitialArchiveBoundaryForArchiveJob } from "./dvd-initial-boundar
 import { isoProfileImage } from "./dvd-metadata-profile-fixtures.js";
 import { DvdInitialCopyBoundaryError } from "./dvd-initial-copy.js";
 import {
-  publishDvdInitialArchive,
+  publishDvdInitialArchive as publishArchive,
   readDvdInitialArchivePublicationImagePaths,
   reconcileDvdInitialArchivePublication as reconcilePublication,
+  resolveDvdInitialArchivePublicationImagePaths,
 } from "./dvd-initial-publication.js";
 
 const directories: string[] = [];
@@ -23,6 +24,17 @@ async function reconcileDvdInitialArchivePublication(
   const expectedImagePaths =
     await readDvdInitialArchivePublicationImagePaths(options);
   return reconcilePublication({ ...options, expectedImagePaths });
+}
+
+async function publishDvdInitialArchive(
+  options: Omit<Parameters<typeof publishArchive>[0], "expectedImagePaths">,
+) {
+  const expectedImagePaths =
+    await resolveDvdInitialArchivePublicationImagePaths(
+      options,
+      options.proven.initialCopy.imagePath,
+    );
+  return publishArchive({ ...options, expectedImagePaths });
 }
 
 async function fixture(damaged = false, corrected = false) {

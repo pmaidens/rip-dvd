@@ -1313,6 +1313,108 @@ if (
   throw new Error("owned initial-copy helper check failed");
 }
 
+const ownershipLossPath = prepareOutput(
+  "/tmp/rip-dvd-reader-ownership-loss.lock",
+);
+const ownershipLossOutputPath = prepareOutput(
+  "/tmp/rip-dvd-reader-ownership-loss.img",
+);
+writeFileSync(ownershipLossPath, "", { mode: 0o600 });
+const ownershipLossDescriptor = openSync(
+  ownershipLossPath,
+  constants.O_RDWR | constants.O_NOFOLLOW,
+);
+const ownershipLossLock = spawnSync(
+  "flock",
+  ["--exclusive", "3"],
+  { stdio: ["ignore", "ignore", "pipe", ownershipLossDescriptor] },
+);
+if (ownershipLossLock.status !== 0) {
+  closeSync(ownershipLossDescriptor);
+  throw new Error("ownership-loss test could not acquire ownership");
+}
+const ownershipLossCopy = spawn(
+  testExecutable,
+  [
+    "initial-copy-owned-test",
+    sourcePath,
+    ownershipLossOutputPath,
+    String(content.byteLength),
+    "none",
+    "100",
+    "valid",
+  ],
+  {
+    stdio: [
+      "ignore",
+      "ignore",
+      "pipe",
+      "ignore",
+      "pipe",
+      "pipe",
+      "ignore",
+      "ignore",
+      ownershipLossDescriptor,
+    ],
+  },
+);
+const ownershipLossClose = once(ownershipLossCopy, "close");
+const ownershipLossStderr = [];
+let resolveFirstOwnedWrite;
+const firstOwnedWrite = new Promise((resolve) => {
+  resolveFirstOwnedWrite = resolve;
+});
+ownershipLossCopy.stderr.on("data", (chunk) => {
+  ownershipLossStderr.push(chunk);
+  if (Buffer.concat(ownershipLossStderr).includes("63488 bytes copied\n")) {
+    resolveFirstOwnedWrite();
+  }
+});
+const [ownershipLossReady] = await Promise.race([
+  once(ownershipLossCopy.stdio[4], "data"),
+  ownershipLossClose.then(([status]) => {
+    throw new Error(
+      `ownership-loss copy exited before authorization (${status}): ${Buffer.concat(ownershipLossStderr).toString("utf8")}`,
+    );
+  }),
+]);
+if (
+  ownershipLossReady.toString("utf8") !==
+  "rip-dvd-copy-authorization-ready\n"
+) {
+  throw new Error("ownership-loss copy did not request authorization");
+}
+ownershipLossCopy.stdio[5].end("1");
+await Promise.race([
+  firstOwnedWrite,
+  ownershipLossClose.then(([status]) => {
+    throw new Error(
+      `ownership-loss copy exited before its first write (${status}): ${Buffer.concat(ownershipLossStderr).toString("utf8")}`,
+    );
+  }),
+]);
+const ownershipUnlock = spawnSync(
+  "flock",
+  ["--unlock", "3"],
+  { stdio: ["ignore", "ignore", "pipe", ownershipLossDescriptor] },
+);
+closeSync(ownershipLossDescriptor);
+if (ownershipUnlock.status !== 0) {
+  throw new Error("ownership-loss test could not release ownership");
+}
+const [ownershipLossStatus] = await ownershipLossClose;
+if (
+  ownershipLossStatus !== 1 ||
+  statSync(ownershipLossOutputPath).size !== 31 * 2_048 ||
+  !Buffer.concat(ownershipLossStderr)
+    .toString("utf8")
+    .includes("DVD archive image ownership is unavailable")
+) {
+  throw new Error(
+    `owned initial copy continued after ownership loss: ${Buffer.concat(ownershipLossStderr).toString("utf8")}`,
+  );
+}
+
 const retry = runTestCopy(
   "retry",
   rawCompletionFault(5, 1, fixedMediumAtFive),

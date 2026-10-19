@@ -9,7 +9,8 @@ import { runDvdInitialArchiveBoundaryForArchiveJob, type ProvenDvdInitialArchive
 import {
   publishDvdInitialArchive, reconcileDvdInitialArchivePublication,
   readDvdInitialArchivePublicationImagePaths,
-  resolveDvdInitialArchiveImagePath,
+  resolveDvdInitialArchivePublicationImagePaths,
+  type DvdInitialArchivePublicationImagePaths,
   type DvdInitialPublicationStep,
 } from "./dvd-initial-publication.js";
 
@@ -182,21 +183,32 @@ async function withOwnedClaim<T>(
   }
 }
 
-async function saveWithExclusionHeld(options: SaveOptions & { proven: ProvenDvdInitialArchiveBoundary }) {
-  return commitSave(options, await publishDvdInitialArchive({ ...publicationOptions(options), proven: options.proven }));
+async function saveWithExclusionHeld(
+  options: SaveOptions & { proven: ProvenDvdInitialArchiveBoundary },
+  expectedImagePaths: DvdInitialArchivePublicationImagePaths,
+) {
+  return commitSave(options, await publishDvdInitialArchive({
+    ...publicationOptions(options),
+    expectedImagePaths,
+    proven: options.proven,
+  }));
 }
 
 /** Publication faults retain intent and evidence for reconciliation. This path
  * never uses legacy published-image quarantine or terminal-failure handling. */
 export async function saveDvdInitialArchiveForArchiveJob(options: SaveOptions & { proven: ProvenDvdInitialArchiveBoundary }) {
-  const archivePath = await resolveDvdInitialArchiveImagePath(
+  const imagePaths = await resolveDvdInitialArchivePublicationImagePaths(
     publicationOptions(options),
+    options.proven.initialCopy.imagePath,
   );
   return withOwnedClaim(
     options,
-    options.proven.initialCopy.imagePath,
-    owned => saveWithExclusionHeld({ ...owned, proven: options.proven }),
-    [archivePath],
+    imagePaths.stagingPath,
+    owned => saveWithExclusionHeld(
+      { ...owned, proven: options.proven },
+      imagePaths,
+    ),
+    [imagePaths.archivePath],
   );
 }
 
@@ -225,12 +237,13 @@ export async function runDvdInitialArchiveJob(options: SaveOptions & {
   const signal = options.signal
     ? AbortSignal.any([options.signal, options.boundary.signal])
     : options.boundary.signal;
-  const archivePath = await resolveDvdInitialArchiveImagePath(
+  const imagePaths = await resolveDvdInitialArchivePublicationImagePaths(
     publicationOptions(options),
+    options.boundary.outputPath,
   );
   return withOwnedClaim(
     { ...options, signal },
-    options.boundary.outputPath,
+    imagePaths.stagingPath,
     async owned => {
       const identity = publicationOptions(owned);
       await identity.authorizeMutation();
@@ -248,8 +261,8 @@ export async function runDvdInitialArchiveJob(options: SaveOptions & {
           await identity.authorizeMutation();
         },
       });
-      return saveWithExclusionHeld({ ...owned, proven });
+      return saveWithExclusionHeld({ ...owned, proven }, imagePaths);
     },
-    [archivePath],
+    [imagePaths.archivePath],
   );
 }

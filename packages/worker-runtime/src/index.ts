@@ -2,6 +2,7 @@ import { loadConfig, type RuntimeConfig } from "@rip-dvd/config";
 
 export {
   ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME,
+  ARCHIVE_IMAGE_OWNERSHIP_NAMESPACE_IDENTITY_NAME,
   ARCHIVE_IMAGE_OWNERSHIP_VERSION,
   ArchiveImageOwnershipError,
   createArchiveImageOwnership,
