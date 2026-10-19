@@ -88,10 +88,38 @@ send push. Archive Integrity is read-completeness evidence, not watchability or
 encode authorization. The test command uses the same formatter, queue,
 recipient policy, dispatcher, transport and display worker as outcome events.
 
-Claims have finite ownership and interrupted claims can be reclaimed. Stable
-event/subscription identities and display tags reduce repeated logical work and
-visible duplicates; push remains best effort. Comprehensive retry, expiry and
-concurrent-dispatch policies belong to the follow-up delivery ticket.
+Each dispatch pass claims at most 20 deliveries, with a 30-second ownership
+lease and a 10-second send deadline. Expired leases can be reclaimed after a
+restart. Tokens fence stale owners, and each claim consumes one of eight allowed
+attempts, including attempts interrupted by a crash. Shutdown stops claiming
+and signals the sender. An uncertain in-flight delivery remains leased until
+expiry so another worker cannot immediately claim it.
+
+Network errors, timeouts, HTTP 408, throttling and provider 5xx failures retry
+after exponential delays starting at five seconds and capped at one hour.
+`Retry-After` seconds and HTTP dates may delay the next attempt further. A delay
+beyond the 24-hour message lifetime expires the delivery. The remaining lifetime
+also sets the push service TTL. HTTP 404 and 410 deactivate the expired
+subscription; other permanent rejections fail that delivery without disabling a
+valid browser. Disabling cancels queued and retrying work, including claims that
+have not finished. A new eligible generation never inherits an earlier delivery.
+
+Notifications shows recent queued, retrying, accepted, expired and failed
+deliveries. `rip-dvd notifications deliveries` returns the same redacted failure
+codes, attempt counts, next attempt times and expiry. Provider response bodies,
+endpoints and keys never appear in those diagnostics. Acceptance means only that
+the push service accepted the request. Lost responses can cause a retry even
+when a provider already accepted the previous send. Stable payloads and
+event-specific display tags reduce duplicates but cannot guarantee exactly-once
+network delivery or device display.
+
+Dispatch maintenance expires obsolete messages and deletes up to 100 terminal
+delivery records and 100 empty events per pass, seven days after completion.
+Small identity receipts retain the source identity, payload digest, original
+event identity and recipient count after payload cleanup. They prevent repeated
+source processing from replaying old events or selecting new recipients.
+Inactive subscription records retain opt-out and generation history. Cleanup
+does not delete these receipts or opt-outs and never changes source outcomes.
 
 ## Worker updates and payload compatibility
 

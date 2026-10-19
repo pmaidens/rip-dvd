@@ -1736,23 +1736,34 @@ export const notificationEvents = sqliteTable("notification_events", {
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 }, (table) => [check("notification_events_id_not_null", sql`${table.id} is not null`)]);
 
+// Minimal receipts preserve source identity after payloads and delivery history expire.
+export const notificationEventReceipts = sqliteTable("notification_event_receipts", {
+  sourceEventId: text("source_event_id").primaryKey().notNull(),
+  eventId: text("event_id").notNull(),
+  payloadDigest: text("payload_digest").notNull(),
+  recipientCount: integer("recipient_count").notNull(),
+}, (table) => [check("notification_event_receipts_id_not_null", sql`${table.sourceEventId} is not null`)]);
+
 export const notificationDeliveries = sqliteTable("notification_deliveries", {
   id: text("id").primaryKey(),
   eventId: text("event_id").notNull().references(() => notificationEvents.id),
   subscriptionId: text("subscription_id").notNull().references(() => notificationSubscriptions.id),
   generation: integer("generation").notNull(),
-  status: text("status", { enum: ["queued", "accepted", "failed"] }).notNull(),
-  failureCode: text("failure_code", { enum: ["subscription_disabled", "sender_rejected"] }),
+  status: text("status", { enum: ["queued", "retrying", "accepted", "expired", "failed"] }).notNull(),
+  failureCode: text("failure_code").$type<import("../notification-types.js").NotificationFailureCode>(),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  nextAttemptAt: integer("next_attempt_at", { mode: "timestamp_ms" }),
   claimToken: text("claim_token"),
   leaseUntil: integer("lease_until", { mode: "timestamp_ms" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   completedAt: integer("completed_at", { mode: "timestamp_ms" }),
 }, (table) => [
   check("notification_deliveries_id_not_null", sql`${table.id} is not null`),
-  check("notification_deliveries_status_check", sql`${table.status} in ('queued', 'accepted', 'failed')`),
+  check("notification_deliveries_status_check", sql`${table.status} in ('queued', 'retrying', 'accepted', 'expired', 'failed')`),
+  check("notification_deliveries_attempt_count_check", sql`${table.attemptCount} >= 0 and ${table.attemptCount} <= 8`),
   check("notification_deliveries_generation_check", sql`${table.generation} > 0`),
   uniqueIndex("notification_delivery_identity").on(table.eventId, table.subscriptionId),
-  index("notification_delivery_queue").on(table.status, table.leaseUntil, table.createdAt),
+  index("notification_delivery_queue").on(table.status, table.nextAttemptAt, table.leaseUntil, table.createdAt),
 ]);
 
 export const notificationDispatcher = sqliteTable("notification_dispatcher", {

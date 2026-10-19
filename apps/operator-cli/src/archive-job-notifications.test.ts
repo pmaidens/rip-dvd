@@ -213,3 +213,74 @@ it("gives a retried Archive Request a distinct attempt outcome without rewriting
     expect(access.archiveJobs.find(claim.id)).toEqual(first);
   } finally { access.close(); }
 });
+
+it.each([
+  { kind: "timeout", error: { code: "ETIMEDOUT" }, status: "retrying", failureCode: "timeout" },
+  { kind: "lost response", error: { code: "ECONNRESET" }, status: "retrying", failureCode: "network_error" },
+  { kind: "throttle", error: { statusCode: 429, headers: { "retry-after": "30" } }, status: "retrying", failureCode: "throttled" },
+  { kind: "provider outage", error: { statusCode: 503 }, status: "retrying", failureCode: "provider_unavailable" },
+  { kind: "expired subscription", error: { statusCode: 410 }, status: "failed", failureCode: "subscription_expired" },
+  { kind: "permanent rejection", error: { statusCode: 403 }, status: "failed", failureCode: "sender_rejected" },
+])("retains an Archive Job outcome through $kind and dispatcher restart", async ({ error, status, failureCode }) => {
+  const { fixture } = await notificationWorkflow();
+  const { access, claim } = await startArchiveJob(fixture, "Synthetic delivery disc");
+  access.archiveJobs.fail(claim, "Synthetic source failure");
+  const before = (await fixture.run(["inspect", "archive-jobs", claim.id])).result;
+  const timestamp = new Date();
+  const sent: NotificationPayload[] = [];
+  await dispatchNotifications(access, async (_recipient, payload) => {
+    sent.push(payload);
+    throw { ...error, body: "Synthetic sensitive provider response", message: "https://web.push.apple.com/synthetic-secret" };
+  }, { now: () => timestamp });
+  access.close();
+  const inspected = await fixture.run(["notifications", "deliveries"]);
+  expect(inspected.result).toMatchObject({ deliveries: [
+    { status, failureCode, attemptCount: 1 }, { status, failureCode, attemptCount: 1 },
+  ] });
+  expect(inspected.stdout).not.toContain("synthetic-secret");
+  expect(inspected.stdout).not.toContain("sensitive provider response");
+  expect((await fixture.run(["notifications", "subscriptions"])).result).toMatchObject({ subscriptions: [
+    { active: failureCode !== "subscription_expired" }, { active: failureCode !== "subscription_expired" },
+  ] });
+  const restarted = fixture.openAccess();
+  try {
+    expect(await dispatchNotifications(restarted, async (_recipient, payload) => { sent.push(payload); }, {
+      now: () => new Date(timestamp.getTime() + 60_000),
+    })).toEqual({ accepted: status === "retrying" ? 2 : 0, failed: 0 });
+    expect(new Set(sent.map((payload) => payload.tag)).size).toBe(1);
+    expect(sent.every((payload) => JSON.stringify(payload) === JSON.stringify(sent[0]))).toBe(true);
+    expect((await fixture.run(["inspect", "archive-jobs", claim.id])).result).toEqual(before);
+  } finally { restarted.close(); }
+});
+
+it("fences abandoned Archive Job delivery claims and competing dispatchers", async () => {
+  const { fixture } = await notificationWorkflow();
+  const { access, claim: archiveClaim } = await startArchiveJob(fixture);
+  access.archiveJobs.fail(archiveClaim, "Synthetic failure");
+  const timestamp = new Date();
+  const abandoned = access.notifications.claim({ now: timestamp, leaseMs: 1_000 })!;
+  access.close();
+  const first = fixture.openAccess();
+  const second = fixture.openAccess();
+  const sent: string[] = [];
+  let release!: () => void;
+  let started!: () => void;
+  const sending = new Promise<void>((resolve) => { started = resolve; });
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const now = () => new Date(timestamp.getTime() + 1_001);
+  try {
+    const running = dispatchNotifications(first, async (recipient) => { sent.push(recipient.endpoint); started(); await blocked; }, { now });
+    await sending;
+    expect(second.notifications.settle(abandoned, { status: "accepted" }, now())).toBeNull();
+    const competing = await dispatchNotifications(second, async (recipient) => { sent.push(recipient.endpoint); }, { now });
+    release();
+    const completed = await running;
+    expect(completed.accepted + competing.accepted).toBe(2);
+    expect(sent).toHaveLength(2);
+    expect(new Set(sent).size).toBe(2);
+    expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: expect.arrayContaining([
+      expect.objectContaining({ status: "accepted", attemptCount: 2 }), expect.objectContaining({ status: "accepted", attemptCount: 1 }),
+    ]) });
+    expect((await fixture.run(["inspect", "archive-jobs", archiveClaim.id])).result).toMatchObject({ item: { status: "failed" } });
+  } finally { release(); first.close(); second.close(); }
+});

@@ -5,10 +5,15 @@ import { execFileSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { Agent } from "node:https";
+import { createServer } from "node:http";
+import { connect } from "node:net";
+import { once } from "node:events";
+import type { TLSSocket } from "node:tls";
 import { drizzle } from "drizzle-orm/node-sqlite";
 import { sql } from "drizzle-orm";
 import { createNotificationEventWriter } from "@rip-dvd/data-access";
-import { dispatchNotifications, recordNotificationOutcome } from "@rip-dvd/application";
+import { createWebPushSender, dispatchNotifications, readNotificationConfiguration, recordNotificationOutcome } from "@rip-dvd/application";
 
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
@@ -148,9 +153,261 @@ it("reclaims an interrupted bounded claim after restart and fences the previous 
   try {
     expect(await dispatchNotifications(second, async () => undefined, { now: () => timestamp })).toEqual({ accepted: 0, failed: 0 });
     expect(await dispatchNotifications(second, async () => undefined, { now: () => new Date(timestamp.getTime() + 1_001) })).toEqual({ accepted: 1, failed: 0 });
-    expect(second.notifications.finish(claim, "failed", new Date())).toBe(false);
+    expect(second.notifications.settle(claim, { status: "failed", failureCode: "sender_rejected" }, new Date())).toBeNull();
   } finally { second.close(); }
   expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: [{ status: "accepted" }] });
+});
+
+it("retains a throttled delivery across restart and honors provider retry guidance", async () => {
+  const { fixture, subscription } = configure();
+  await register(fixture, subscription, "synthetic-throttle-register");
+  await fixture.run(["notifications", "test", "--key", "synthetic-throttle-test"]);
+  const timestamp = new Date();
+  const first = fixture.openAccess();
+  const sent: unknown[] = [];
+  try {
+    await dispatchNotifications(first, async (_recipient, payload) => {
+      sent.push(payload);
+      throw { statusCode: 429, headers: { "retry-after": "120" }, body: subscription.endpoint };
+    }, { now: () => timestamp });
+  } finally { first.close(); }
+  const inspected = await fixture.run(["notifications", "deliveries"]);
+  expect(inspected.result).toMatchObject({ deliveries: [{ status: "retrying", failureCode: "throttled", attemptCount: 1,
+    nextAttemptAt: new Date(timestamp.getTime() + 120_000).toISOString() }] });
+  expect(inspected.stdout).not.toContain(subscription.endpoint);
+  const restarted = fixture.openAccess();
+  try {
+    const send = async (_recipient: unknown, payload: unknown) => { sent.push(payload); };
+    expect(await dispatchNotifications(restarted, send, { now: () => new Date(timestamp.getTime() + 119_999) })).toEqual({ accepted: 0, failed: 0 });
+    expect(await dispatchNotifications(restarted, send, { now: () => new Date(timestamp.getTime() + 120_000) })).toEqual({ accepted: 1, failed: 0 });
+  } finally { restarted.close(); }
+  expect(sent).toHaveLength(2);
+  expect(sent[1]).toEqual(sent[0]);
+});
+
+it("expires stale queued messages after restart and bounds retries even after repeated crashes", async () => {
+  const { fixture, subscription } = configure();
+  await register(fixture, subscription, "synthetic-bounded-register");
+  await fixture.run(["notifications", "test", "--key", "synthetic-bounded-test"]);
+  let timestamp = new Date();
+  for (let attempt = 1; attempt <= 8; attempt += 1) {
+    const access = fixture.openAccess();
+    try {
+      expect(access.notifications.claim({ now: timestamp, leaseMs: 1_000 })).toMatchObject({ attemptCount: attempt });
+    } finally { access.close(); }
+    timestamp = new Date(timestamp.getTime() + 1_001);
+  }
+  const access = fixture.openAccess();
+  try {
+    const send = async () => { throw new Error("Must not exceed attempt cap or send expired work"); };
+    expect(await dispatchNotifications(access, send, { now: () => timestamp })).toEqual({ accepted: 0, failed: 0 });
+    expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: [{ status: "failed", failureCode: "attempt_limit", attemptCount: 8 }] });
+    await fixture.run(["notifications", "test", "--key", "synthetic-expired-test"]);
+    expect(await dispatchNotifications(access, send, { now: () => new Date(timestamp.getTime() + 86_400_000) })).toEqual({ accepted: 0, failed: 0 });
+    expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: expect.arrayContaining([
+      expect.objectContaining({ status: "expired", failureCode: "message_expired", attemptCount: 0 }),
+    ]) });
+  } finally { access.close(); }
+});
+
+it("caps transient retries and respects HTTP-date guidance beyond the delivery lifetime", async () => {
+  const { fixture, subscription } = configure();
+  await register(fixture, subscription, "synthetic-retry-cap-register");
+  await fixture.run(["notifications", "test", "--key", "synthetic-retry-cap-test"]);
+  const timestamp = new Date();
+  const access = fixture.openAccess();
+  try {
+    for (const offset of [0, 5_000, 15_000, 35_000, 75_000, 155_000, 315_000, 635_000]) {
+      await dispatchNotifications(access, async () => { throw { statusCode: 503 }; }, { now: () => new Date(timestamp.getTime() + offset) });
+    }
+    expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: [{ status: "failed", attemptCount: 8, failureCode: "attempt_limit" }] });
+    await fixture.run(["notifications", "test", "--key", "synthetic-guidance-expiry"]);
+    await dispatchNotifications(access, async () => { throw { statusCode: 503, headers: { "retry-after": new Date(timestamp.getTime() + 172_800_000).toUTCString() } }; }, { now: () => timestamp });
+    expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: expect.arrayContaining([
+      expect.objectContaining({ status: "expired", failureCode: "message_expired", attemptCount: 1 }),
+    ]) });
+  } finally { access.close(); }
+});
+
+it("prevents old retries after disable, cleanup, re-enable and repeated source processing", async () => {
+  const { fixture, subscription } = configure();
+  const browser = await register(fixture, subscription, "synthetic-cleanup-register");
+  const source = { kind: "archive_failed" as const, sourceEventId: "synthetic-cleanup-source", archiveJobId: "synthetic-job" };
+  const timestamp = new Date();
+  const access = fixture.openAccess();
+  try {
+    const first = access.notifications.transaction((writer) => recordNotificationOutcome(writer, source));
+    await dispatchNotifications(access, async () => { throw { code: "ECONNRESET" }; }, { now: () => timestamp });
+    await fixture.run(["notifications", "remove", "--key", "synthetic-cleanup-disable", "--id", browser.id]);
+    await register(fixture, subscription, "synthetic-cleanup-reenable");
+    await register(fixture, { ...subscription, endpoint: "https://web.push.apple.com/synthetic-new-browser" }, "synthetic-cleanup-new-browser");
+    await dispatchNotifications(access, async () => { throw new Error("Must not replay old recipients"); }, { now: () => new Date(timestamp.getTime() + 10_000) });
+    access.notifications.maintain({ now: new Date(timestamp.getTime() + 8 * 86_400_000), limit: 1 });
+    expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: [] });
+    expect(access.notifications.transaction((writer) => recordNotificationOutcome(writer, source))).toEqual(first);
+    expect(() => access.notifications.transaction((writer) => recordNotificationOutcome(writer, { ...source, label: "Changed facts" }))).toThrow("conflicting facts");
+    expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: [] });
+    await fixture.run(["notifications", "test", "--key", "synthetic-cleanup-future"]);
+    expect(await dispatchNotifications(access, async () => undefined)).toEqual({ accepted: 2, failed: 0 });
+  } finally { access.close(); }
+});
+
+it("bounds history deletion per pass and retains subscription opt-out", async () => {
+  const { fixture, subscription } = configure();
+  const browser = await register(fixture, subscription, "synthetic-retention-register");
+  for (const key of ["synthetic-retention-first", "synthetic-retention-second", "synthetic-retention-third"]) {
+    await fixture.run(["notifications", "test", "--key", key]);
+  }
+  const access = fixture.openAccess();
+  const timestamp = new Date();
+  try {
+    await dispatchNotifications(access, async () => undefined, { now: () => timestamp });
+    await fixture.run(["notifications", "remove", "--key", "synthetic-retention-disable", "--id", browser.id]);
+    const later = new Date(timestamp.getTime() + 8 * 86_400_000);
+    for (const remaining of [2, 1, 0]) {
+      access.notifications.maintain({ now: later, limit: 1 });
+      expect(((await fixture.run(["notifications", "deliveries"])).result as { deliveries: unknown[] }).deliveries).toHaveLength(remaining);
+    }
+    expect(await register(fixture, subscription, "synthetic-retention-reconcile", false)).toMatchObject({ active: false });
+  } finally { access.close(); }
+});
+
+it("aborts an in-flight sender promptly and recovers the uncertain delivery after its lease", async () => {
+  const { fixture, subscription } = configure();
+  await register(fixture, subscription, "synthetic-abort-register");
+  await fixture.run(["notifications", "test", "--key", "synthetic-abort-test"]);
+  const access = fixture.openAccess();
+  const controller = new AbortController();
+  const timestamp = new Date();
+  try {
+    const running = dispatchNotifications(access, async (_recipient, _payload, options) => {
+      expect(options.ttlSeconds).toBeGreaterThan(0);
+      return new Promise<void>((_resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+        controller.abort();
+      });
+    }, { signal: controller.signal, now: () => timestamp });
+    expect(await running).toEqual({ accepted: 0, failed: 0 });
+    expect(await dispatchNotifications(access, async () => undefined, { now: () => timestamp })).toEqual({ accepted: 0, failed: 0 });
+    expect(await dispatchNotifications(access, async () => undefined, { now: () => new Date(timestamp.getTime() + 30_001) })).toEqual({ accepted: 1, failed: 0 });
+  } finally { access.close(); }
+});
+
+it("times out a silent sender and schedules bounded retry work", async () => {
+  const { fixture, subscription } = configure();
+  await register(fixture, subscription, "synthetic-deadline-register");
+  await fixture.run(["notifications", "test", "--key", "synthetic-deadline-test"]);
+  const timestamp = Date.now();
+  vi.useFakeTimers();
+  vi.setSystemTime(timestamp);
+  const access = fixture.openAccess();
+  try {
+    const running = dispatchNotifications(access, async () => new Promise<void>(() => undefined));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await running).toEqual({ accepted: 0, failed: 0 });
+    expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: [{ status: "retrying", attemptCount: 1,
+      failureCode: "timeout", nextAttemptAt: new Date(timestamp + 15_000).toISOString() }] });
+  } finally { access.close(); }
+});
+
+it("deactivates locally expired subscriptions before sending", async () => {
+  const { fixture, subscription } = configure();
+  const timestamp = Date.now();
+  await register(fixture, { ...subscription, expirationTime: timestamp + 60_000 }, "synthetic-expiration-register");
+  await fixture.run(["notifications", "test", "--key", "synthetic-expiration-test"]);
+  const access = fixture.openAccess();
+  try {
+    expect(await dispatchNotifications(access, async () => { throw new Error("Must not send expired subscription"); }, {
+      now: () => new Date(timestamp + 60_001),
+    })).toEqual({ accepted: 0, failed: 1 });
+    expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: [{ status: "failed", failureCode: "subscription_expired" }] });
+    expect((await fixture.run(["notifications", "subscriptions"])).result).toMatchObject({ subscriptions: [{ active: false }] });
+  } finally { access.close(); }
+});
+
+it("does not let an old in-flight expired-subscription response disable a re-enabled browser", async () => {
+  const { fixture, subscription } = configure();
+  const browser = await register(fixture, subscription, "synthetic-inflight-register");
+  await fixture.run(["notifications", "test", "--key", "synthetic-inflight-test"]);
+  const access = fixture.openAccess();
+  try {
+    await dispatchNotifications(access, async () => {
+      await fixture.run(["notifications", "remove", "--key", "synthetic-inflight-disable", "--id", browser.id]);
+      await register(fixture, subscription, "synthetic-inflight-reenable");
+      throw { statusCode: 410 };
+    });
+    expect((await fixture.run(["notifications", "subscriptions"])).result).toMatchObject({ subscriptions: [{ active: true, generation: 2 }] });
+    expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: [{ status: "failed", failureCode: "subscription_disabled", nextAttemptAt: null }] });
+    await fixture.run(["notifications", "test", "--key", "synthetic-inflight-future"]);
+    expect(await dispatchNotifications(access, async () => undefined)).toEqual({ accepted: 1, failed: 0 });
+  } finally { access.close(); }
+});
+
+it.each(["alone", "with competing maintenance"])("invalidates a definitively expired subscription when the message expires during sending %s", async (mode) => {
+  const { fixture, subscription } = configure();
+  await register(fixture, subscription, "synthetic-expiry-race-register");
+  await fixture.run(["notifications", "test", "--key", "synthetic-expiry-race-test"]);
+  const access = fixture.openAccess();
+  const competing = fixture.openAccess();
+  try {
+    const expiry = access.notifications.deliveries({ limit: 1 })[0]!.expiresAt;
+    let timestamp = new Date(expiry.getTime() - 1);
+    await dispatchNotifications(access, async () => {
+      timestamp = new Date(expiry.getTime() + 1);
+      if (mode === "with competing maintenance") {
+        expect(await dispatchNotifications(competing, async () => { throw new Error("Must not send expired messages"); }, { now: () => timestamp })).toEqual({ accepted: 0, failed: 0 });
+      }
+      throw { statusCode: 410 };
+    }, { now: () => timestamp });
+    expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: [{ status: "expired", failureCode: "message_expired" }] });
+    expect((await fixture.run(["notifications", "subscriptions"])).result).toMatchObject({ subscriptions: [{ active: false }] });
+  } finally { competing.close(); access.close(); }
+});
+
+it.each(["shutdown", "deadline"] as const)("closes the maintained push sender's active connection on %s", async (reason) => {
+  const { fixture, subscription } = configure();
+  await register(fixture, subscription, "synthetic-network-abort-register");
+  await fixture.run(["notifications", "test", "--key", "synthetic-network-abort-test"]);
+  let started!: () => void;
+  let closed!: () => void;
+  const responseStarted = new Promise<void>((resolve) => { started = resolve; });
+  const responseClosed = new Promise<void>((resolve) => { closed = resolve; });
+  const server = createServer((request, response) => {
+    request.resume();
+    response.writeHead(201);
+    response.write("Synthetic unfinished provider response");
+    response.on("close", closed);
+    started();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("Expected controlled provider port");
+  // Redirect only the external socket boundary. Exercise real Web Push encryption and sending.
+  const connection = vi.spyOn(Agent.prototype, "createConnection").mockImplementation(() => connect({ host: "127.0.0.1", port: address.port }) as TLSSocket);
+  const configuration = readNotificationConfiguration();
+  if (!configuration.ready) throw new Error("Expected synthetic push configuration");
+  const controller = new AbortController();
+  const access = fixture.openAccess();
+  try {
+    if (reason === "deadline") vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const running = dispatchNotifications(access, createWebPushSender(configuration.configuration), { signal: controller.signal });
+    await responseStarted;
+    if (reason === "shutdown") controller.abort();
+    else await vi.advanceTimersByTimeAsync(10_000);
+    await running;
+    vi.useRealTimers();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([responseClosed, new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("Push connection remained open after cancellation")), 1_000); })]);
+    } finally { clearTimeout(timeout); }
+  } finally {
+    vi.useRealTimers();
+    connection.mockRestore();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    access.close();
+  }
 });
 
 it("uses one formatter for the agreed recovery facts without changing domain lifecycles", async () => {

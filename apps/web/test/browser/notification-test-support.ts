@@ -39,18 +39,22 @@ export async function deliverPush(worker: Worker, data: string) {
   expect(result).toEqual(["displayed"]);
 }
 
-export function dispatchQueuedPushes(): unknown[] {
+export function dispatchQueuedPushes(options: { throttle?: boolean; advanceMs?: number } = {}): unknown[] {
   const data = pathToFileURL(resolve("../../packages/data-access/dist/index.js")).href;
   const app = pathToFileURL(resolve("../../packages/application/dist/index.js")).href;
   return JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", `
     import { createDataAccess } from ${JSON.stringify(data)};
     import { dispatchNotifications } from ${JSON.stringify(app)};
     const access = createDataAccess({ databasePath: process.argv[1] });
+    const options = JSON.parse(process.argv[2]);
     const payloads = [];
-    await dispatchNotifications(access, async (_subscription, payload) => { payloads.push(payload); });
+    await dispatchNotifications(access, async (_subscription, payload) => {
+      payloads.push(payload);
+      if (options.throttle) throw { statusCode: 429, headers: { "retry-after": "30" } };
+    }, { now: () => new Date(Date.now() + (options.advanceMs ?? 0)) });
     access.close();
     console.log(JSON.stringify(payloads));
-  `, resolve("test-results/catalog-review-browser-data/rip-dvd.sqlite")], { encoding: "utf8" }));
+  `, resolve("test-results/catalog-review-browser-data/rip-dvd.sqlite"), JSON.stringify(options)], { encoding: "utf8" }));
 }
 
 export async function clickNotification(worker: Worker, tag: string): Promise<void> {

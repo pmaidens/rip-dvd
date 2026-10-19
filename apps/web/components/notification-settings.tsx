@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { browserNotificationProblem, disableBrowserPush, enableBrowserPush, readBrowserTestDelivery, readPushReadiness,
-  reconcileBrowserPush, submitBrowserTest, type PushReadiness } from "../lib/browser-notifications";
+  readNotificationDeliveries, reconcileBrowserPush, submitBrowserTest, type BrowserNotificationDelivery, type PushReadiness } from "../lib/browser-notifications";
 
 export function NotificationSettings() {
   const [readiness, setReadiness] = useState<PushReadiness | null>(null);
@@ -11,11 +11,12 @@ export function NotificationSettings() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("Checking notification readiness…");
   const [eventId, setEventId] = useState<string | null>(null);
+  const [deliveries, setDeliveries] = useState<BrowserNotificationDelivery[]>([]);
   useEffect(() => {
     let cancelled = false;
     setProblem(browserNotificationProblem());
-    void Promise.all([readPushReadiness(), reconcileBrowserPush()]).then(([status, enabled]) => {
-      if (!cancelled) { setReadiness(status); setActive(enabled); setMessage(enabled ? "Notifications enabled on this browser." : "Notifications disabled on this browser."); }
+    void Promise.all([readPushReadiness(), reconcileBrowserPush(), readNotificationDeliveries()]).then(([status, enabled, recent]) => {
+      if (!cancelled) { setReadiness(status); setActive(enabled); setDeliveries(recent); setMessage(enabled ? "Notifications enabled on this browser." : "Notifications disabled on this browser."); }
     }).catch(() => { if (!cancelled) setMessage("Notification service is unavailable. Try checking status again."); });
     return () => { cancelled = true; };
   }, []);
@@ -43,9 +44,19 @@ export function NotificationSettings() {
       <button disabled={busy || !active || !readiness?.configured} onClick={() => void run(async () => { setEventId(await submitBrowserTest()); setMessage("Queued for delivery. Provider acceptance does not prove device display."); })}>Send test notification</button>
       <button disabled={busy} onClick={() => void run(async () => {
         setReadiness(await readPushReadiness()); setActive(await reconcileBrowserPush());
+        setDeliveries(await readNotificationDeliveries());
         setMessage(eventId ? await readBrowserTestDelivery(eventId) : "Notification status refreshed.");
       })}>Check notification status</button>
     </div>
     <p>Disabling prevents later dispatch. An already accepted push cannot be recalled. Push is best effort; provider acceptance does not guarantee device display.</p>
+    <h2>Recent deliveries</h2>
+    <p>The latest 25 delivery records are retained for seven days after completion. Temporary failures retry up to eight attempts within 24 hours.</p>
+    {deliveries.length === 0 ? <p>No retained deliveries.</p> : <ul aria-label="Recent notification deliveries">{deliveries.map((delivery) => <li key={delivery.id}>
+      {delivery.status === "accepted" ? "Accepted by the push service. Device display is not confirmed." : delivery.status === "retrying" ? "Retrying" : delivery.status === "expired" ? "Expired" : delivery.status === "failed" ? "Failed" : "Queued"}
+      {` · Attempts: ${delivery.attemptCount}`}
+      {delivery.failureCode && ` · Reason: ${delivery.failureCode.replaceAll("_", " ")}`}
+      {delivery.nextAttemptAt && ` · Next attempt: ${new Date(delivery.nextAttemptAt).toLocaleString()}`}
+      {` · Expires: ${new Date(delivery.expiresAt).toLocaleString()}`}
+    </li>)}</ul>}
   </main>;
 }

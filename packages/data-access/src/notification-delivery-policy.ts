@@ -1,0 +1,3 @@
+export const NOTIFICATION_LIFETIME_MS = 24 * 60 * 60 * 1_000;
+export const NOTIFICATION_MAX_ATTEMPTS = 8;
+export const NOTIFICATION_HISTORY_MS = 7 * 24 * 60 * 60 * 1_000;
