@@ -106,17 +106,31 @@ async function withOwnedClaim<T>(options: SaveOptions, task: (owned: SaveOptions
         return run(options.access.archiveJobs.renewDvdInitialClaim(options.claim));
       const writer = options.writer;
       if (!writer) throw new DvdInitialSaveFault("DVD_INITIAL_SAVE_OWNERSHIP_LOST");
-      let result!: T;
-      await writer.runner.withDeviceInactive(writer.devicePath, async () => {
-        signal.throwIfAborted();
-        if (writer.runner.isActive(writer.devicePath, writer.outputPath))
-          throw new DvdInitialSaveFault("DVD_INITIAL_SAVE_OWNERSHIP_LOST");
-        const claim = options.access.archiveJobs.reclaimDvdInitialSave(
-          options.claim, options.workerId ?? options.claim.claimedBy ?? "dvd-initial-save",
-        );
-        result = await run(claim);
-      });
-      return result;
+      let result: { value: T } | undefined;
+      let taskFailed = false;
+      try {
+        await writer.runner.withDeviceInactive(writer.devicePath, async () => {
+          try {
+            signal.throwIfAborted();
+            let active: boolean;
+            try {
+              active = writer.runner.isActive(writer.devicePath, writer.outputPath);
+            } catch (cause) {
+              throw new DvdInitialSaveFault("DVD_INITIAL_SAVE_OWNERSHIP_LOST", { cause });
+            }
+            if (active) throw new DvdInitialSaveFault("DVD_INITIAL_SAVE_OWNERSHIP_LOST");
+            const claim = options.access.archiveJobs.reclaimDvdInitialSave(
+              options.claim, options.workerId ?? options.claim.claimedBy ?? "dvd-initial-save",
+            );
+            result = { value: await run(claim) };
+          } catch (error) { taskFailed = true; throw error; }
+        });
+      } catch (cause) {
+        if (taskFailed) throw cause;
+        throw new DvdInitialSaveFault("DVD_INITIAL_SAVE_OWNERSHIP_LOST", { cause });
+      }
+      if (!result) throw new DvdInitialSaveFault("DVD_INITIAL_SAVE_OWNERSHIP_LOST");
+      return result.value;
     },
   });
 }

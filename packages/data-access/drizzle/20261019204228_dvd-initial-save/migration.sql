@@ -5,7 +5,7 @@ WHEN NOT ((
   OLD.`evidence_format` = 'dvd-recovery-evidence-v1'
   AND OLD.`status` = 'running' AND NEW.`status` = 'completed'
   AND OLD.`original_disc_archive_id` IS NULL AND NEW.`original_disc_archive_id` IS NOT NULL
-  AND OLD.`completed_at` IS NULL AND NEW.`completed_at` = NEW.`updated_at`
+  AND OLD.`completed_at` IS NULL AND NEW.`completed_at` IS NEW.`updated_at`
   AND NEW.`updated_at` >= OLD.`updated_at` AND NEW.`error_message` IS NULL
   AND NEW.`progress_phase` = 'finalizing' AND NEW.`progress_percent` = 100
   AND NEW.`progress_eta_seconds` IS NULL AND NEW.`last_progress_at` = NEW.`updated_at`
@@ -51,20 +51,22 @@ WHEN NOT ((
   AND NEW.`read_failure_ascq` IS OLD.`read_failure_ascq`
 ) OR (
   OLD.`evidence_format` = 'dvd-recovery-evidence-v1'
-  AND NEW.`evidence_format` = OLD.`evidence_format`
+  AND NEW.`evidence_format` IS OLD.`evidence_format`
   AND OLD.`status` = 'running' AND NEW.`status` = 'running'
+  AND OLD.`claim_token` IS NOT NULL
   AND OLD.`original_disc_archive_id` IS NULL
   AND OLD.`completed_at` IS NULL AND NEW.`updated_at` >= OLD.`updated_at`
   AND EXISTS (SELECT 1 FROM `archive_requests` AS r
     WHERE r.`id` = OLD.`archive_request_id` AND r.`status` = 'running'
       AND r.`evidence_format` = OLD.`evidence_format`)
   AND (
-    (NEW.`claim_token` = OLD.`claim_token`
+    (NEW.`claim_token` IS OLD.`claim_token`
       AND NEW.`claimed_by` IS OLD.`claimed_by` AND NEW.`claimed_at` IS OLD.`claimed_at`
       AND OLD.`updated_at` > NEW.`updated_at` - 60000)
     OR (NEW.`claim_token` IS NOT OLD.`claim_token` AND NEW.`claim_token` IS NOT NULL
-      AND length(NEW.`claim_token`) = 36 AND length(NEW.`claimed_by`) > 0
-      AND NEW.`claimed_at` = NEW.`updated_at`
+      AND length(NEW.`claim_token`) = 36
+      AND typeof(NEW.`claimed_by`) = 'text' AND length(NEW.`claimed_by`) > 0
+      AND NEW.`claimed_at` IS NEW.`updated_at`
       AND OLD.`updated_at` <= NEW.`updated_at` - 60000)
   )
   AND NEW.`id` IS OLD.`id`

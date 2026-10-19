@@ -368,3 +368,82 @@ it("does not replace an expired claim while a native writer remains or inactivit
     expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
   } finally { f.access.close(); }
 });
+
+it("keeps marked lease and completion guards closed when nullable fields are cleared", async () => {
+  const f = await jobFixture();
+  const sqlite = new DatabaseSync(f.databasePath);
+  try {
+    for (const column of ["evidence_format", "claim_token"]) {
+      expect(() => sqlite.prepare(`UPDATE archive_jobs SET ${column} = NULL WHERE id = ?`).run(f.claim.id)).toThrow(/admission is closed/);
+    }
+    const future = Date.now() + 2 * ARCHIVE_JOB_LEASE_DURATION_MS;
+    for (const column of ["claimed_by", "claimed_at"]) {
+      expect(() => sqlite.prepare(`UPDATE archive_jobs SET claim_token = '00000000-0000-4000-8000-000000000408', claimed_at = ?, updated_at = ?, ${column} = NULL WHERE id = ?`).run(future, future, f.claim.id)).toThrow(/admission is closed/);
+    }
+    expect(f.access.archiveJobs.find(f.claim.id)?.evidenceFormat).toBe("dvd-recovery-evidence-v1");
+    expect(f.access.archiveJobs.find(f.claim.id)?.claimToken).toBe(f.claim.claimToken);
+  } finally { sqlite.close(); f.access.close(); }
+});
+
+it.each(["acquisition", "inspection"] as const)("reports native inactivity %s failure as ownership loss", async failure => {
+  const f = await jobFixture(true);
+  const options = { access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion };
+  try {
+    await expect(saveDvdInitialArchiveForArchiveJob({ ...options, proven: f.proven, fault(point) {
+      if (point === "after:pointer") throw new Error("synthetic restart");
+    } })).rejects.toThrow("synthetic restart");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 2 * ARCHIVE_JOB_LEASE_DURATION_MS);
+    await expect(reconcileDvdInitialArchiveForArchiveJob({ ...options,
+      writer: { devicePath: f.boundary.devicePath, outputPath: f.proven.initialCopy.imagePath,
+        runner: { isActive() { throw new Error("synthetic unproved inode ownership"); },
+          async withDeviceInactive(_device, task) {
+            if (failure === "acquisition") throw new Error("DVD archive device is still active");
+            await task();
+          },
+        },
+      },
+    })).rejects.toMatchObject({ code: "DVD_INITIAL_SAVE_OWNERSHIP_LOST" });
+    expect(f.access.archiveJobs.find(f.claim.id)?.claimToken).toBe(f.claim.claimToken);
+    expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
+  } finally { f.access.close(); }
+});
+
+it("rejects a nullable terminal timestamp even with a valid initial manifest present", async () => {
+  const f = await jobFixture();
+  const sqlite = new DatabaseSync(f.databasePath);
+  try {
+    sqlite.exec(`CREATE TRIGGER synthetic_invalid_completion AFTER INSERT ON dvd_archive_evidence_manifests BEGIN
+      UPDATE archive_jobs SET status = 'completed', original_disc_archive_id = NEW.original_disc_archive_id,
+        progress_phase = 'finalizing', progress_percent = 100, progress_bytes = NEW.boundary_published_size_bytes,
+        progress_eta_seconds = NULL, last_progress_at = NEW.created_at,
+        completed_at = NULL, error_message = NULL, updated_at = NEW.created_at
+      WHERE id = '${f.claim.id}';
+    END`);
+    await expect(saveDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion, proven: f.proven }))
+      .rejects.toMatchObject({ cause: { message: expect.stringMatching(/admission is closed/) } });
+    expect(f.access.archiveJobs.find(f.claim.id)?.status).toBe("running");
+    expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
+  } finally { sqlite.close(); f.access.close(); }
+});
+
+it("preserves downstream publication faults after safely replacing an expired claim", async () => {
+  const f = await jobFixture();
+  const options = { access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion };
+  try {
+    await expect(saveDvdInitialArchiveForArchiveJob({ ...options, proven: f.proven, fault(point) {
+      if (point === "after:pointer") throw new Error("synthetic restart");
+    } })).rejects.toThrow("synthetic restart");
+    const archiveId = `dvd-${f.claim.id}`;
+    await rm(join(f.identity.originalsLibraryPath, ".dvd-evidence", archiveId, "initial-manifest.json"));
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 2 * ARCHIVE_JOB_LEASE_DURATION_MS);
+    await expect(reconcileDvdInitialArchiveForArchiveJob({ ...options,
+      writer: { devicePath: f.boundary.devicePath, outputPath: f.proven.initialCopy.imagePath,
+        runner: { isActive() { return false; }, async withDeviceInactive(_device, task) { await task(); } },
+      },
+    })).rejects.toMatchObject({ code: "DVD_PUBLICATION_CHECKPOINT_CONFLICT" });
+    expect(f.access.archiveJobs.find(f.claim.id)?.status).toBe("running");
+    expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
+  } finally { f.access.close(); }
+});
