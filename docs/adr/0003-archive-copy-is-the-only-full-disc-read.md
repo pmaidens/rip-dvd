@@ -53,6 +53,35 @@ filesystem synchronization, catalog persistence, or publication. This narrow
 geometry gate is separate from the stricter corrected-boundary completeness
 proof described above.
 
+For marked new-format Archive Jobs, issue #405 will implement the accepted
+[`dvd-full-extent-metadata-v1` contract](../dvd-full-extent-metadata-profile-v1.md).
+It applies after a proven normal endpoint at the full Disc Inspection extent.
+It checks a closed list of geometry, file-location, IFO/BUP address, VOBU-map,
+and NAV-pack fields, with exact source-sector dependencies. It permits missing
+metadata explained by recorded Unrecovered Source while retaining unknown
+structural and title impact. Independently readable listed fields still have
+to agree, including fields in a later descriptor, another filesystem view,
+or a VOB whose IFO is unavailable. Unexplained local failures, listed readable
+contradictions, unsupported layouts, and exceeded work bounds block publication.
+V1 also requires a surviving supported bootstrap and readable geometry claim;
+complete loss of those declarations blocks this first profile.
+
+This bounded profile was chosen so source damage can be preserved without
+making initial preservation depend on proving complete DVD navigation semantics.
+The linked contract is authoritative for its exact fields, discovery rules,
+comparisons, and limits. It retains partial observations rather than catching a
+failure around an entire filesystem view or treating a generic navigation-tool
+failure as evidence of source damage. Unlisted playback, VM-command, timing,
+and title-mapping semantics remain for later assessment or a new profile version.
+The report is distinct from Archive Boundary Evidence, Archive Integrity, and
+the source map. It performs bounded reads of saved metadata and adds no whole-disc
+read, whole-image snapshot, or hash pass to full-extent validation.
+
+The strict smaller-extent proof and legacy publication policy above remain the
+applicable rules for their own paths. The new-format decision is accepted here
+as an implementation contract; admission stays closed until the required
+recovery, assessment, damage-decision, and encoding gates are complete.
+
 Both publication paths require stable Optical Drive identity and
 media-generation evidence, a current Archive Job claim, filesystem
 synchronization, and atomic no-overwrite publication. Every endpoint read is
