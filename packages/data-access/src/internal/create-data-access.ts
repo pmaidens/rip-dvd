@@ -1,4 +1,5 @@
-import { createNotificationAccess } from "./notifications.js";
+import { createNotificationAccess, createNotificationEventWriter } from "./notifications.js";
+import { recordNotificationOutcome } from "../notification-policy.js";
 import {
   closeSync,
   existsSync,
@@ -5820,6 +5821,23 @@ export function createDataAccessInternal(
       readFailureAscq: ascq,
     };
   };
+  const recordArchiveJobFailure = (
+    transaction: CatalogTransaction,
+    job: ArchiveJob,
+  ): void => {
+    const disc = requireRow(
+      transaction.select().from(detectedDiscs)
+        .where(eq(detectedDiscs.id, job.detectedDiscId)).get(),
+      "detected disc",
+      job.detectedDiscId,
+    );
+    recordNotificationOutcome(createNotificationEventWriter(transaction, now), {
+      kind: "archive_failed",
+      sourceEventId: `archive-job:${job.id}:failed`,
+      archiveJobId: job.id,
+      label: disc.volumeLabel,
+    });
+  };
   const failArchiveJob = (
     claim: RunningArchiveJob,
     errorMessageInput: string,
@@ -5906,6 +5924,7 @@ export function createDataAccessInternal(
         "archive request",
         job.archiveRequestId,
       );
+      if (!cancellationWins) recordArchiveJobFailure(transaction, job);
       return job;
     }, { behavior: "immediate" });
     archiveProgress.delete(claim.id);
@@ -12286,6 +12305,7 @@ export function createDataAccessInternal(
               "archive request",
               candidate.archiveRequestId,
             );
+            recordArchiveJobFailure(transaction, failedJob);
           }
           const jobsById = new Map(terminalJobs.map((job) => [job.id, job]));
           const jobs = expired.flatMap(({ id }) => {
@@ -12933,7 +12953,7 @@ export function createDataAccessInternal(
               ),
             )
             .run();
-          return requireRow(
+          const job = requireRow(
             transaction
               .update(archiveJobs)
               .set({
@@ -12963,6 +12983,14 @@ export function createDataAccessInternal(
             "archive job",
             claim.id,
           );
+          recordNotificationOutcome(createNotificationEventWriter(transaction, now), {
+            kind: "archive_saved",
+            sourceEventId: `archive-job:${job.id}:completed`,
+            archiveJobId: job.id,
+            label: disc.volumeLabel,
+            remainingSource: (archive.badSectorCount ?? 0) > 0,
+          });
+          return job;
         }, { behavior: "immediate" });
         archiveProgress.delete(claim.id);
         return completed;

@@ -155,3 +155,6 @@ export function createDataAccess(input: CreateDataAccessOptions): DataAccess {
 
 export type * from "./notification-types.js";
 export { createNotificationEventWriter, type NotificationTransaction } from "./internal/notifications.js";
+
+export { formatNotification, recordNotificationOutcome } from "./notification-policy.js";
+export type { NotificationOutcome } from "./notification-policy.js";

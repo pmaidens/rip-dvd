@@ -1212,6 +1212,12 @@ describe("archive worker polling", () => {
 
   it("matches requested work, streams progress, and publishes the archive atomically", async () => {
     const access = openTestDataAccess();
+    access.notifications.register({
+      mutationKey: "synthetic-worker-notification",
+      enable: true,
+      subscription: { endpoint: "https://web.push.apple.com/synthetic-worker", expirationTime: null,
+        keys: { p256dh: "synthetic-key", auth: "synthetic-auth" } },
+    });
     const originalsLibraryPath = mkdtempSync(
       join(tmpdir(), "rip-dvd-originals-"),
     );
@@ -1270,6 +1276,7 @@ describe("archive worker polling", () => {
     const copyRunner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath, onBytesCopied, sizeBytes }) => {
         onBytesCopied(2_048);
+        expect(access.notifications.deliveries({ limit: 10 })).toEqual([]);
         writeFileSync(outputPath, archiveBytes);
         onBytesCopied(archiveBytes.byteLength);
         return createCleanDvdRecoveryResult(sizeBytes);
@@ -1327,6 +1334,15 @@ describe("archive worker polling", () => {
     });
     expect(readFileSync(archive.archivePath)).toEqual(archiveBytes);
     expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);
+    expect(access.notifications.deliveries({ limit: 10 })).toEqual([
+      expect.objectContaining({ status: "queued" }),
+    ]);
+    const notification = access.notifications.claim({ now: new Date(), leaseMs: 1_000 });
+    expect(notification?.payload).toMatchObject({
+      label: "EXAMPLE_DISC",
+      body: "Original Disc Archive saved.",
+      destination: `/notifications/target?kind=archive-jobs&id=${completed[0]!.id}`,
+    });
     expect(salvageValidator.validate).not.toHaveBeenCalled();
     expect(completenessProver.prove).not.toHaveBeenCalled();
   });
