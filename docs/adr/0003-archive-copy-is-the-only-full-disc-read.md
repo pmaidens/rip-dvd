@@ -53,7 +53,7 @@ filesystem synchronization, catalog persistence, or publication. This narrow
 geometry gate is separate from the stricter corrected-boundary completeness
 proof described above.
 
-For marked new-format Archive Jobs, issue #405 will implement the accepted
+For marked new-format Archive Jobs, the boundary workflow implements the accepted
 [`dvd-full-extent-metadata-v1` contract](../dvd-full-extent-metadata-profile-v1.md).
 It applies after a proven normal endpoint at the full Disc Inspection extent.
 It checks a closed list of geometry, file-location, IFO/BUP address, VOBU-map,
@@ -140,3 +140,14 @@ a separately bounded evidence-chain audit validates every predecessor,
 recovery read, transition, and stored digest. This digest contract does not
 publish range paging or install filesystem checkpoints; those remain separate
 workflow capabilities.
+
+The dormant initial publication workflow now implements the filesystem
+checkpoint contract in [DVD initial publication v1](../dvd-initial-publication-v1.md).
+It persists publication intent before synchronizing and linking the image,
+persists immutable initial evidence before installing the authoritative pointer,
+and synchronizes each containing directory. Its complete publication digest
+also binds the policy versions, integrity projection, and validated filesystem
+image identity. Replay verifies these bindings and rejects competing artifacts
+without overwrite. Request staging cleanup retains the archive-owned evidence.
+Atomic application/database completion and operator exposure remain separate
+slices; this workflow does not open new-format admission.
