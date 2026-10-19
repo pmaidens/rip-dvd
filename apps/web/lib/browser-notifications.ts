@@ -29,8 +29,24 @@ async function api(action: string, method = "GET", input?: unknown) {
 
 export async function readPushReadiness(): Promise<PushReadiness> { return api("status"); }
 
-async function registration() {
-  return navigator.serviceWorker.register("/sw.js", { scope: "/", updateViaCache: "none" });
+let workerRegistration: Promise<ServiceWorkerRegistration> | undefined;
+let lastUpdateCheck = -Infinity;
+const updateCheckIntervalMs = 5 * 60_000;
+
+function registration(): Promise<ServiceWorkerRegistration> {
+  workerRegistration ??= navigator.serviceWorker.register("/sw.js", { scope: "/", updateViaCache: "none" })
+    .catch((error) => { workerRegistration = undefined; throw error; });
+  return workerRegistration;
+}
+
+export async function checkBrowserPushUpdate(): Promise<void> {
+  if (!window.isSecureContext || !("serviceWorker" in navigator)) return;
+  const now = Date.now();
+  if (now - lastUpdateCheck < updateCheckIntervalMs) return;
+  // Throttle failed checks too, and reserve the interval before asynchronous work.
+  lastUpdateCheck = now;
+  try { await (await registration()).update(); }
+  catch { /* The active worker and subscription controls remain usable offline. */ }
 }
 
 async function save(subscription: PushSubscription, enable: boolean): Promise<SubscriptionSummary> {

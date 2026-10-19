@@ -1,40 +1,8 @@
 /// <reference lib="webworker" />
 declare const self: ServiceWorkerGlobalScope;
 
-import { expect, test, type Page, type Worker } from "@playwright/test";
-import { createECDH } from "node:crypto";
-import { resolve } from "node:path";
-import { execFileSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
-
-async function controlledSubscription(page: Page, permission: "granted" | "denied" = "granted") {
-  const key = createECDH("prime256v1"); key.setPrivateKey(Buffer.alloc(32, 2));
-  const input = { endpoint: "https://web.push.apple.com/synthetic-browser-test", expirationTime: null,
-    keys: { p256dh: key.getPublicKey().toString("base64url"), auth: Buffer.alloc(16, 3).toString("base64url") } };
-  await page.addInitScript(({ subscription, permission }) => {
-    Object.defineProperty(Notification, "permission", { get: () => permission });
-    Notification.requestPermission = async () => { localStorage.setItem("synthetic-permission-prompts", String(Number(localStorage.getItem("synthetic-permission-prompts") || 0) + 1)); return permission; };
-    function current(): PushSubscription | null {
-      if (localStorage.getItem("synthetic-push-subscription") !== "yes") return null;
-      return { endpoint: subscription.endpoint, expirationTime: null, options: { applicationServerKey: null, userVisibleOnly: true }, getKey: () => null, toJSON: () => subscription,
-        unsubscribe: async () => { localStorage.removeItem("synthetic-push-subscription"); return true; } };
-    }
-    PushManager.prototype.getSubscription = async () => current();
-    PushManager.prototype.subscribe = async () => { localStorage.setItem("synthetic-push-subscription", "yes"); return current()!; };
-  }, { subscription: input, permission });
-}
-
-
-async function deliverPush(worker: Worker, data: string) {
-  const result = await worker.evaluate(async (data) => {
-    const event = new PushEvent("push", { data });
-    const lifetime: Promise<unknown>[] = [];
-    event.waitUntil = (promise) => { lifetime.push(promise); };
-    self.dispatchEvent(event);
-    return Promise.allSettled(lifetime).then((results) => results.map((result) => result.status === "rejected" ? String(result.reason) : "displayed"));
-  }, data);
-  expect(result).toEqual(["displayed"]);
-}
+import { expect, test } from "@playwright/test";
+import { controlledSubscription, deliverPush, dispatchQueuedPushes } from "./notification-test-support";
 
 test("installs metadata and opts in, displays the queued test, navigates, and opts out without reopening permission", async ({ page, context }) => {
   await context.grantPermissions(["notifications"], { origin: "http://localhost:3101" });
@@ -53,17 +21,7 @@ test("installs metadata and opts in, displays the queued test, navigates, and op
   await expect(page.getByRole("status")).toContainText("Queued for delivery");
   const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
   expect(await worker.evaluate(() => Notification.permission)).toBe("granted");
-  const data = pathToFileURL(resolve("../../packages/data-access/dist/index.js")).href;
-  const app = pathToFileURL(resolve("../../packages/application/dist/index.js")).href;
-  const sent = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", `
-    import { createDataAccess } from ${JSON.stringify(data)};
-    import { dispatchNotifications } from ${JSON.stringify(app)};
-    const access = createDataAccess({ databasePath: process.argv[1] });
-    const payloads = [];
-    await dispatchNotifications(access, async (_subscription, payload) => { payloads.push(payload); });
-    access.close();
-    console.log(JSON.stringify(payloads));
-  `, resolve("test-results/catalog-review-browser-data/rip-dvd.sqlite")], { encoding: "utf8" }));
+  const sent = dispatchQueuedPushes();
   expect(sent.length).toBeGreaterThan(0);
   for (const payload of sent) {
     await deliverPush(worker, JSON.stringify(payload));

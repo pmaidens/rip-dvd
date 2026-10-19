@@ -115,7 +115,7 @@ function isRetiredCommand(name: string): name is keyof typeof retiredCommandGuid
 const commandDefinitions = [
   {
     name: "notifications",
-    description: "Inspect push readiness, register/reconcile or remove subscriptions, submit a test, and inspect deliveries for archive saves and failed attempts.",
+    description: "Inspect push readiness, register/reconcile or remove subscriptions, submit a test, and inspect deliveries for archive saves and failed attempts. Browser worker updates preserve subscriptions; no re-registration is needed.",
     usage: "rip-dvd notifications status|subscriptions|deliveries|register|remove|test [--key <key>] [--json <object>|--stdin|--file <path>] [--id <id>] [--event-id <id>] [--limit <1..100>]",
     inputs: { arguments: ["action"], options: ["--key", "--json", "--stdin", "--file", "--id", "--event-id", "--limit"] },
     example: "rip-dvd notifications status",

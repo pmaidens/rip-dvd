@@ -5,6 +5,7 @@ const browserDataRoot = resolve("test-results/catalog-review-browser-data");
 // Loopback origins are secure contexts even over HTTP. Use a reserved test
 // hostname so Chromium exercises the same API restrictions as an HTTP host.
 const baseURL = "http://rip-dvd.test:3100";
+const secureNotificationTests = ["notifications.e2e.ts", "notification-updates.e2e.ts"];
 
 export default defineConfig({
   testDir: "./test/browser",
@@ -54,17 +55,19 @@ export default defineConfig({
   }],
   projects: [
     {
-      name: "secure-notifications", testMatch: "notifications.e2e.ts",
-      use: { browserName: "chromium", channel: "chromium", baseURL: "http://localhost:3101", viewport: { width: 390, height: 844 }, permissions: ["notifications"] },
+      name: "secure-notifications", testMatch: secureNotificationTests,
+      // Keep real browser notifications observable without depending on the OS bridge.
+      use: { launchOptions: { args: ["--disable-features=SystemNotifications", "--no-proxy-server"] },
+        browserName: "chromium", channel: "chromium", baseURL: "http://localhost:3101", viewport: { width: 390, height: 844 }, permissions: ["notifications"] },
     },
     {
       name: "desktop",
-      testIgnore: "notifications.e2e.ts",
+      testIgnore: secureNotificationTests,
       use: { browserName: "chromium", viewport: { width: 1_440, height: 1_000 } },
     },
     {
       name: "narrow-mobile",
-      testIgnore: "notifications.e2e.ts",
+      testIgnore: secureNotificationTests,
       use: { browserName: "chromium", viewport: { width: 390, height: 844 } },
     },
   ],

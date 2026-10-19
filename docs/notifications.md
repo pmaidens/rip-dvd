@@ -91,13 +91,63 @@ recipient policy, dispatcher, transport and display worker as outcome events.
 Claims have finite ownership and interrupted claims can be reclaimed. Stable
 event/subscription identities and display tags reduce repeated logical work and
 visible duplicates; push remains best effort. Comprehensive retry, expiry and
-concurrent-dispatch policies belong to the follow-up delivery ticket. Automatic
-worker update activation belongs to the separate update ticket. The root-scoped
-`/sw.js` worker currently only displays supplied payloads and handles safe clicks.
-It has no application cache, fetch interception or detail-fetch dependency.
+concurrent-dispatch policies belong to the follow-up delivery ticket.
+
+## Worker updates and payload compatibility
+
+The single root-scoped registration always uses `/sw.js`, served as JavaScript
+with `Cache-Control: no-cache, max-age=0, must-revalidate`. Registration sets
+`updateViaCache: "none"`. Keep this URL, scope and VAPID keys stable across
+ordinary deployments. Deploy changed worker bytes through the normal web image
+update, then open the app or return an open app to the foreground. Browser code
+checks on opening, foreground return and page restoration, at most once per five
+minutes in each open page, including failed checks. Repeated subscription status
+checks reuse the same registration. No permission prompt is needed to update.
+
+A successfully installed worker calls `skipWaiting`, then claims existing
+clients on activation. Open pages continue without an automatic navigation or
+reload. Updates preserve the registration and PushSubscription. Do not
+unregister, clear browser data or disable/re-enable notifications as an update
+procedure. A malformed script or rejected installation leaves the previous
+active worker in place, and update-check failures do not block notification
+controls. After correcting a failed deployment, a later check can retry.
+The [service worker lifecycle specification](https://www.w3.org/TR/service-workers/)
+defines activation and replacement behavior.
+
+The worker only displays complete supplied notifications, handles safe clicks
+and activates updates. It has no application cache, fetch interception, imported
+application code or detail-fetch dependency. Keep update orchestration in the
+browser utility and policy, formatting and dispatch in application modules.
+
+Payload version 1 contains `version: 1`, `title`, `label`, `body`, `tag` and a
+same-origin `destination`. Keep that contract readable by both the previous and
+new worker during deployments and while accepted pushes remain in flight. New
+optional fields must not change existing meanings. An incompatible payload
+version requires a separate compatibility plan before a producer starts using
+it. Missing labels use a generic fallback; malformed or unsupported payloads
+show a generic notification. Unsafe destinations fall back to `/notifications`.
+Clicks validate destinations again, reuse a same-origin app window when possible,
+and otherwise open one. The test-notification command retains the same payload
+and delivery workflow throughout upgrades.
+
+Browsers control network checks and worker execution. Offline, suspended or
+sleeping clients may keep an earlier worker until the browser next runs a
+successful check. A deployment cannot guarantee immediate activation on every
+device. Physical iPhone delivery testing remains an operator follow-up.
 
 Browser tests use a separate localhost secure context with full Chromium.
 Install both Playwright Chromium runtimes with
 `pnpm --filter @rip-dvd/web exec playwright install chromium` before running
 `pnpm test:browser`. The existing reserved HTTP-host projects still exercise
-insecure-origin behavior.
+insecure-origin behavior. The secure notification project selects Chromium's
+built-in notification backend with `--disable-features=SystemNotifications` so
+native notification-center permissions do not hide browser notifications from
+automation. This preserves browser permission and secure-context checks, actual
+`showNotification`/`getNotifications`, and service worker lifecycle behavior.
+
+Upgrade browser tests keep an application page open while a test-only proxy
+changes the served worker bytes. A frozen version 1 fixture verifies compatibility
+with the previous worker. The browser performs installation and activation;
+subscription/provider behavior uses the same controlled boundary as test push.
+The tests inspect registration identity, subscription data, page lifetime, actual
+notification display and click navigation, including rejected updates.

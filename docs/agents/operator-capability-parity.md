@@ -64,7 +64,7 @@ and compare both adapters with the same application rule.
 | Durable background work, bounded waits, restart observation, and prior provenance | `apps/web/app/api/operations/route.ts` and the work-specific routes above | `rip-dvd inspect`, `rip-dvd wait` for Disc Inspections, Archive Requests, Archive Jobs, Encode Jobs, Archive Audits, and Filesystem Verifications | `apps/operator-cli/src/command.test.ts`, `apps/operator-cli/src/full-operator-parity.integration.test.ts`, `scripts/smoke-operator-cli.sh` |
 | Connected diagnosis, recovery, fresh preservation, review, acceptance, and replacement | The preservation, Catalog Review, and encoding routes above | Supported `rip-dvd` request, inspect, retry, review, acceptance, and encoding commands | `apps/operator-cli/src/full-operator-parity.integration.test.ts` |
 | Archive Job saved/failure notifications from any submitting client, outcome navigation, labeled detail and safe missing-target fallback | `/notifications/target`, `GET apps/web/app/api/operations/route.ts` | `rip-dvd inspect` archive-jobs and original-disc-archives | `apps/web/test/browser/notifications.e2e.ts`, `apps/operator-cli/src/archive-job-notifications.test.ts`, `apps/web/app/api/notifications/route.test.ts`, `apps/archive-worker/src/archive-worker.test.ts` |
-| Browser notification configuration, subscription administration, queued tests and bounded delivery inspection | `apps/web/app/api/notifications/route.ts`, `/notifications` | `rip-dvd notifications` status, subscriptions, register, remove, test, deliveries | `apps/operator-cli/src/notifications.test.ts`, `apps/web/app/api/notifications/route.test.ts`, `apps/web/test/browser/notifications.e2e.ts` |
+| Browser notification configuration, subscription administration preserved through worker updates, queued tests and bounded delivery inspection | `apps/web/app/api/notifications/route.ts`, `/notifications` | `rip-dvd notifications` status, subscriptions, register, remove, test, deliveries | `apps/operator-cli/src/notifications.test.ts`, `apps/web/app/api/notifications/route.test.ts`, `apps/web/test/browser/notifications.e2e.ts`, `apps/web/test/browser/notification-updates.e2e.ts` |
 <!-- capability-inventory:end -->
 
 ## Enforced web adapter boundaries
@@ -118,3 +118,11 @@ atomically queue notifications at persistence. These producers add no operator
 mutation command. Existing notification delivery inspection and Archive Job detail
 commands expose the same outcomes to HTTP and JSON CLI clients. Cancellation and
 cooperative abort do not emit failure notifications.
+
+Notification worker update checks, activation and subscription continuity are
+browser-only lifecycle behavior, covered by `notification-updates.e2e.ts` on the
+separate secure origin. They add no server mutation or CLI command. Existing
+`rip-dvd notifications` subscription, test and delivery operations remain the
+shared administration contract through upgrades. CLI workflows use real SQLite
+persistence in `apps/operator-cli/src/notifications.test.ts`; focused HTTP parity
+remains in `apps/web/app/api/notifications/route.test.ts`.
