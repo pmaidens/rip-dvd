@@ -55,9 +55,19 @@ export async function pollFilesystemVerification(
         if (options.originalsLibraryPath === undefined) {
           throw new Error("Archive image ownership is unavailable");
         }
+        if (claim.target !== "original_disc_archive") {
+          throw new Error("Archive image ownership target is invalid");
+        }
+        const archive = access.catalog.listOriginalDiscArchives({
+          ids: [claim.targetId],
+        })[0];
+        if (archive === undefined) {
+          throw new Error("Archive image ownership is unavailable");
+        }
         await (options.archiveImageOwnership ?? defaultArchiveImageOwnership)
           .withConsistentRead({
             archiveId: claim.targetId,
+            imagePath: archive.archivePath,
             originalsLibraryPath: options.originalsLibraryPath,
             signal: options.signal ?? new AbortController().signal,
             task: () => access.filesystemVerification.execute(claim),

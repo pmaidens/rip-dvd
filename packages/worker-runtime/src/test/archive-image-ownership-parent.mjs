@@ -3,17 +3,14 @@ import { fileURLToPath } from "node:url";
 
 import { createArchiveImageOwnership } from "../../dist/archive-image-ownership.js";
 
-const [originalsLibraryPath, readyPath, writePath] = process.argv.slice(2);
+const [originalsLibraryPath, imagePath, readyPath, writePath] = process.argv.slice(2);
 const ownership = createArchiveImageOwnership({
   claimLeaseDurationMs: 150,
   ownershipCheckIntervalMs: 25,
-  inspectStorage: () => ({
-    filesystemType: "synthetic-local",
-    storageClass: "local",
-  }),
 });
 await ownership.withWriter({
   archiveId: "surviving-helper-archive",
+  imagePath,
   originalsLibraryPath,
   signal: new AbortController().signal,
   async task({ descriptor }) {

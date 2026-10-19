@@ -1,16 +1,12 @@
 import { createArchiveImageOwnership } from "../../dist/archive-image-ownership.js";
 
-const [mode, originalsLibraryPath, archiveId] = process.argv.slice(2);
-const ownership = createArchiveImageOwnership({
-  inspectStorage: () => ({
-    filesystemType: "synthetic-local",
-    storageClass: "local",
-  }),
-});
+const [mode, originalsLibraryPath, imagePath, archiveId] = process.argv.slice(2);
+const ownership = createArchiveImageOwnership();
 
 try {
   await ownership[mode]({
     archiveId,
+    imagePath,
     originalsLibraryPath,
     signal: new AbortController().signal,
     async task() {},

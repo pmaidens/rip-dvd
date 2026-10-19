@@ -17,7 +17,7 @@ import {
   rename,
   unlink,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 import {
   inspectLinuxStorage,
@@ -34,6 +34,8 @@ const CLAIM_LEASE_DURATION_MS = 60_000;
 const OWNERSHIP_CHECK_INTERVAL_MS = 1_000;
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 const MAX_ARCHIVE_ID_BYTES = 128;
+const OWNERSHIP_NAMESPACE_IDENTITY_NAME =
+  ".rip-dvd-archive-ownership.identity.json";
 
 export type ArchiveImageOwnershipReasonCode =
   | "WRITER_NOT_QUIESCENT"
@@ -75,6 +77,7 @@ export interface ArchiveImageOwnershipHandle {
 
 interface OwnershipRequest<Result> {
   archiveId: string;
+  imagePath: string | null;
   originalsLibraryPath: string;
   signal: AbortSignal;
   task(handle: ArchiveImageOwnershipHandle): Promise<Result>;
@@ -83,6 +86,7 @@ interface OwnershipRequest<Result> {
 export interface ArchiveImageOwnership {
   inspect(input: {
     archiveId: string;
+    imagePath: string;
     originalsLibraryPath: string;
   }): ArchiveImageOwnershipInspection;
   withConsistentRead<Result>(request: OwnershipRequest<Result>): Promise<Result>;
@@ -110,8 +114,17 @@ interface LockIdentityRecord extends LockIdentity {
   archiveId: string;
 }
 
+interface NamespaceIdentityRecord {
+  version: typeof ARCHIVE_IMAGE_OWNERSHIP_VERSION;
+  directoryDevice: string;
+  directoryInode: string;
+}
+
 interface OwnershipPaths {
+  root: string;
   directory: string;
+  directoryCreated: boolean;
+  namespaceIdentity: string;
   lock: string;
   identity: string;
   claim: string;
@@ -130,6 +143,11 @@ interface LockBackend {
     mode: "shared" | "exclusive",
     signal: AbortSignal,
   ): Promise<() => void>;
+  assertHeld(
+    descriptor: number,
+    lockPath: string,
+    mode: "shared" | "exclusive",
+  ): void;
   inspect(descriptor: number, lockPath: string): "inactive" | "active" | "uncertain";
 }
 
@@ -178,9 +196,42 @@ function validateDirectory(path: string): void {
   }
 }
 
+function ownershipStorageIsSupported(
+  inspection: LinuxStorageInspection,
+): boolean {
+  return inspection.storageClass === "local" &&
+    (inspection.filesystemType === "ext" ||
+      inspection.filesystemType === "test-in-process");
+}
+
+function requireContainedStoragePath(root: string, imagePath: string | null): string {
+  if (imagePath === null) return root;
+  let probePath: string;
+  try {
+    probePath = realpathSync(imagePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    try {
+      probePath = realpathSync(dirname(imagePath));
+    } catch (parentError) {
+      if ((parentError as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw parentError;
+      }
+      probePath = root;
+    }
+  }
+  const relation = relative(root, probePath);
+  if (relation === ".." || relation.startsWith(`..${sep}`) ||
+    isAbsolute(relation)) {
+    throw new Error("Archive image path is outside the Originals Library");
+  }
+  return probePath;
+}
+
 async function pathsFor(
   originalsLibraryPath: string,
   archiveId: string,
+  imagePath: string | null,
   create: boolean,
   inspectStorage: (path: string) => LinuxStorageInspection,
 ): Promise<OwnershipPaths | null> {
@@ -191,16 +242,21 @@ async function pathsFor(
     if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
       throw new Error("Originals Library root is unsafe");
     }
-    if (inspectStorage(root).storageClass !== "local") {
+    const storagePath = requireContainedStoragePath(root, imagePath);
+    if (!ownershipStorageIsSupported(inspectStorage(storagePath))) {
       throw new Error("Originals Library storage is unsupported");
     }
   } catch (cause) {
     throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause });
   }
   const directory = join(root, ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME);
+  let directoryCreated = false;
   try {
     if (create) {
-      await mkdir(directory, { recursive: true, mode: 0o700 });
+      directoryCreated = (await mkdir(directory, {
+        recursive: true,
+        mode: 0o700,
+      })) !== undefined;
     } else {
       try {
         await lstat(directory);
@@ -218,7 +274,10 @@ async function pathsFor(
   }
   const stem = ownershipStem(archiveId);
   return {
+    root,
     directory,
+    directoryCreated,
+    namespaceIdentity: join(root, OWNERSHIP_NAMESPACE_IDENTITY_NAME),
     lock: join(directory, `${stem}.lock`),
     identity: join(directory, `${stem}.identity.json`),
     claim: join(directory, `${stem}.claim.json`),
@@ -228,6 +287,7 @@ async function pathsFor(
 function pathsForSync(
   originalsLibraryPath: string,
   archiveId: string,
+  imagePath: string,
   inspectStorage: (path: string) => LinuxStorageInspection,
 ): OwnershipPaths | null {
   try {
@@ -236,14 +296,21 @@ function pathsForSync(
     if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
       throw new Error("Originals Library root is unsafe");
     }
-    if (inspectStorage(root).storageClass !== "local") {
+    const storagePath = requireContainedStoragePath(root, imagePath);
+    if (!ownershipStorageIsSupported(inspectStorage(storagePath))) {
       throw new Error("Originals Library storage is unsupported");
     }
     const directory = join(root, ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME);
+    const namespaceIdentity = join(root, OWNERSHIP_NAMESPACE_IDENTITY_NAME);
     try {
       validateDirectory(directory);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        if (readNamespaceIdentitySync(namespaceIdentity) !== null) {
+          throw new Error("Ownership namespace is missing");
+        }
+        return null;
+      }
       throw error;
     }
     if (realpathSync(directory) !== directory) {
@@ -251,7 +318,10 @@ function pathsForSync(
     }
     const stem = ownershipStem(archiveId);
     return {
+      root,
       directory,
+      directoryCreated: false,
+      namespaceIdentity,
       lock: join(directory, `${stem}.lock`),
       identity: join(directory, `${stem}.identity.json`),
       claim: join(directory, `${stem}.claim.json`),
@@ -409,6 +479,44 @@ function createNodeLockBackend(
         if (signal.aborted) abort();
       });
     },
+    assertHeld(descriptor, lockPath, mode) {
+      const probe = openLock(lockPath, false);
+      if (probe === null) {
+        throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
+      }
+      try {
+        const heldIdentity = assertLockIdentity(descriptor, lockPath);
+        const probeIdentity = assertLockIdentity(probe.descriptor, lockPath);
+        if (!sameLockIdentity(heldIdentity, probeIdentity)) {
+          throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
+        }
+        const result = spawnSync(
+          "flock",
+          [
+            mode === "exclusive" ? "--shared" : "--exclusive",
+            "--nonblock",
+            "--conflict-exit-code",
+            String(FLOCK_CONFLICT_EXIT_CODE),
+            "3",
+          ],
+          {
+            shell: false,
+            stdio: ["ignore", "ignore", "ignore", probe.descriptor],
+            timeout: ACQUISITION_TIMEOUT_MS,
+          },
+        );
+        if (
+          result.error !== undefined ||
+          result.status !== FLOCK_CONFLICT_EXIT_CODE
+        ) {
+          throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT", {
+            cause: result.error,
+          });
+        }
+      } finally {
+        closeSync(probe.descriptor);
+      }
+    },
     inspect(descriptor) {
       const result = spawnSync(
         "flock",
@@ -466,6 +574,15 @@ function createInProcessLockBackend(): LockBackend {
         if (!owned.writer && owned.readers === 0) inProcessLocks.delete(lockPath);
       };
     },
+    assertHeld(_descriptor, lockPath, mode) {
+      const current = inProcessLocks.get(lockPath);
+      if (
+        current === undefined ||
+        (mode === "exclusive" ? !current.writer : current.readers < 1)
+      ) {
+        throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
+      }
+    },
     inspect(_descriptor, lockPath) {
       return inProcessLocks.get(lockPath)?.writer ? "active" : "inactive";
     },
@@ -476,6 +593,9 @@ function createUnsupportedLockBackend(): LockBackend {
   return {
     supported: false,
     async acquire() {
+      throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
+    },
+    assertHeld() {
       throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
     },
     inspect() {
@@ -529,6 +649,24 @@ function isLockIdentityRecord(
     /^\d+$/.test(record.lockDevice) &&
     typeof record.lockInode === "string" &&
     /^\d+$/.test(record.lockInode)
+  );
+}
+
+function isNamespaceIdentityRecord(
+  value: unknown,
+): value is NamespaceIdentityRecord {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    Object.keys(record).sort().join(",") ===
+      "directoryDevice,directoryInode,version" &&
+    record.version === ARCHIVE_IMAGE_OWNERSHIP_VERSION &&
+    typeof record.directoryDevice === "string" &&
+    /^\d+$/.test(record.directoryDevice) &&
+    typeof record.directoryInode === "string" &&
+    /^\d+$/.test(record.directoryInode)
   );
 }
 
@@ -587,6 +725,14 @@ function readLockIdentitySync(
   return isLockIdentityRecord(value, archiveId) ? value : "invalid";
 }
 
+function readNamespaceIdentitySync(
+  path: string,
+): NamespaceIdentityRecord | null | "invalid" {
+  const value = readPrivateJsonSync(path);
+  if (value === null || value === "invalid") return value;
+  return isNamespaceIdentityRecord(value) ? value : "invalid";
+}
+
 async function syncDirectory(path: string): Promise<void> {
   const directory = await open(
     path,
@@ -601,7 +747,7 @@ async function syncDirectory(path: string): Promise<void> {
 
 async function writeRecord(
   path: string,
-  record: WriterClaimRecord | LockIdentityRecord,
+  record: WriterClaimRecord | LockIdentityRecord | NamespaceIdentityRecord,
 ): Promise<void> {
   const temporary = `${path}.${randomUUID()}.tmp`;
   const file = await open(
@@ -627,6 +773,59 @@ async function writeRecord(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+  }
+}
+
+function currentNamespaceIdentity(directory: string): NamespaceIdentityRecord {
+  const metadata = lstatSync(directory, { bigint: true });
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
+  }
+  return {
+    version: ARCHIVE_IMAGE_OWNERSHIP_VERSION,
+    directoryDevice: metadata.dev.toString(),
+    directoryInode: metadata.ino.toString(),
+  };
+}
+
+function sameNamespaceIdentity(
+  left: NamespaceIdentityRecord,
+  right: NamespaceIdentityRecord,
+): boolean {
+  return left.directoryDevice === right.directoryDevice &&
+    left.directoryInode === right.directoryInode;
+}
+
+function assertNamespaceIdentity(paths: OwnershipPaths): void {
+  const recorded = readNamespaceIdentitySync(paths.namespaceIdentity);
+  const current = currentNamespaceIdentity(paths.directory);
+  if (
+    recorded === null ||
+    recorded === "invalid" ||
+    !sameNamespaceIdentity(recorded, current)
+  ) {
+    throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
+  }
+}
+
+async function establishNamespaceIdentity(paths: OwnershipPaths): Promise<void> {
+  const existing = readNamespaceIdentitySync(paths.namespaceIdentity);
+  const current = currentNamespaceIdentity(paths.directory);
+  if (paths.directoryCreated) {
+    if (existing !== null) {
+      throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
+    }
+    await writeRecord(paths.namespaceIdentity, current);
+  }
+  const established = paths.directoryCreated
+    ? readNamespaceIdentitySync(paths.namespaceIdentity)
+    : existing;
+  if (
+    established === null ||
+    established === "invalid" ||
+    !sameNamespaceIdentity(established, current)
+  ) {
+    throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
   }
 }
 
@@ -713,7 +912,7 @@ export function createArchiveImageOwnership({
     ? inspectLinuxStorage
     : () => ({
       filesystemType: process.env.NODE_ENV === "test"
-        ? "synthetic-local"
+        ? "test-in-process"
         : "unsupported-platform",
       storageClass: process.env.NODE_ENV === "test" ? "local" : "unknown",
     }),
@@ -737,6 +936,7 @@ export function createArchiveImageOwnership({
     const paths = await pathsFor(
       request.originalsLibraryPath,
       request.archiveId,
+      request.imagePath,
       true,
       inspectStorage,
     );
@@ -766,6 +966,7 @@ export function createArchiveImageOwnership({
       return error;
     };
     try {
+      await establishNamespaceIdentity(paths);
       lockIdentity = assertLockIdentity(descriptor, paths.lock);
       await establishLockIdentity(
         paths,
@@ -782,12 +983,15 @@ export function createArchiveImageOwnership({
       const acquiredIdentity = assertLockIdentity(descriptor, paths.lock);
       if (
         !sameLockIdentity(acquiredIdentity, lockIdentity) ||
-        inspectStorage(paths.directory).storageClass !== "local"
+        !ownershipStorageIsSupported(inspectStorage(
+          requireContainedStoragePath(paths.root, request.imagePath),
+        ))
       ) {
         throw failOwnership(new ArchiveImageOwnershipError(
           "CONSISTENCY_FAULT",
         ));
       }
+      backend.assertHeld(descriptor, paths.lock, mode);
       const existingClaim = readClaimSync(paths.claim, request.archiveId);
       if (
         existingClaim === "invalid" ||
@@ -838,9 +1042,13 @@ export function createArchiveImageOwnership({
       const assertOwned = () => {
         try {
           const currentIdentity = assertLockIdentity(descriptor, paths.lock);
-          if (inspectStorage(paths.directory).storageClass !== "local") {
+          if (!ownershipStorageIsSupported(inspectStorage(
+            requireContainedStoragePath(paths.root, request.imagePath),
+          ))) {
             throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
           }
+          assertNamespaceIdentity(paths);
+          backend.assertHeld(descriptor, paths.lock, mode);
           const establishedIdentity = readLockIdentitySync(
             paths.identity,
             request.archiveId,
@@ -902,13 +1110,18 @@ export function createArchiveImageOwnership({
   };
 
   return {
-    inspect({ archiveId, originalsLibraryPath }) {
+    inspect({ archiveId, imagePath, originalsLibraryPath }) {
       if (!backend.supported) {
         return consistencyFaultInspection();
       }
       let paths: OwnershipPaths | null;
       try {
-        paths = pathsForSync(originalsLibraryPath, archiveId, inspectStorage);
+        paths = pathsForSync(
+          originalsLibraryPath,
+          archiveId,
+          imagePath,
+          inspectStorage,
+        );
       } catch {
         return consistencyFaultInspection();
       }
@@ -926,6 +1139,7 @@ export function createArchiveImageOwnership({
       }
       let descriptor: number | null = null;
       try {
+        assertNamespaceIdentity(paths);
         const opened = openLock(paths.lock, false);
         descriptor = opened?.descriptor ?? null;
         const identity = readLockIdentitySync(paths.identity, archiveId);

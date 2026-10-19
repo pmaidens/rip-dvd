@@ -749,6 +749,7 @@ function readDetail(
         : (options.archiveImageOwnership ?? defaultArchiveImageOwnership)
           .inspect({
             archiveId: archive.id,
+            imagePath: archive.archivePath,
             originalsLibraryPath: options.originalsLibraryPath,
           });
       return {

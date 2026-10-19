@@ -11,10 +11,14 @@ owner-only lock file per archive in the Originals Library's private
 `.rip-dvd-archive-ownership` directory. The archive ID is represented by a
 SHA-256 filename rather than copied into the path. A writer takes an exclusive
 Linux `flock`; a stable reader takes a shared lock. The lock file's device and
-inode are permanently recorded when the lock is first created. Every reader,
-writer, and inspection must prove that the named lock and held descriptor still
-match that identity record. Missing, replaced, unsafe, or unverifiable lock
-state fails closed as `CONSISTENCY_FAULT`.
+inode are permanently recorded when the lock is first created. A separate
+owner-only identity file in the Originals Library binds the ownership
+directory's device and inode, so replacing the directory cannot create a
+second lock namespace. Every reader, writer, and inspection must prove that
+the namespace, named lock, and held descriptor still match those identity
+records. An independent conflicting-lock probe also proves the expected
+shared or exclusive `flock` remains held. Missing, unlocked, replaced, unsafe,
+or unverifiable lock state fails closed as `CONSISTENCY_FAULT`.
 
 The process that performs image I/O inherits the locked descriptor. An initial
 copy helper receives the exclusive descriptor, and HandBrake and Archive Audit
@@ -42,16 +46,19 @@ interval. Catalog-only work does not take an image lock. Title Damage
 Assessment and Damage Preview must use the same shared interval when they gain
 image-reading implementations.
 
-The only declared production storage setup is a local Linux filesystem class
-recognized by the `linux-rwf-atomic-v1` provider from ADR 0007. Ownership
-rechecks that live storage classification before every acquisition and
-inspection; network and unknown filesystems fail closed. The separate recovery
-preflight remains responsible for proving atomic mutation and durability.
-Other production platforms fail closed because this decision does not
-establish cross-process exclusion there. An in-process backend exists only
-under the test environment so platform-neutral unit and adapter parity tests
-can exercise the contract. Network filesystems remain unsupported until a
-provider proves cross-host exclusion and safe disconnect behavior.
+The only declared production storage setup is a local Linux ext filesystem,
+which is one filesystem class recognized by the `linux-rwf-atomic-v1`
+provider from ADR 0007. Ownership classifies the actual archive image when it
+exists, or the Originals Library root before a new image exists, and rechecks
+that live classification throughout every interval. A network or unknown
+filesystem mounted below a local library root therefore still fails closed.
+The separate recovery preflight remains responsible for proving atomic
+mutation and durability. XFS, Btrfs, other production platforms, and network
+filesystems remain unsupported by this ownership contract until their process
+behavior is covered and any required cross-host exclusion and safe disconnect
+behavior are proven. An in-process backend exists only under the test
+environment so platform-neutral unit and adapter parity tests can exercise the
+contract.
 
 The native helper accepts new-format initial copying only through the
 `initial-copy-owned-v1` operation. An independent Linux lock probe must first

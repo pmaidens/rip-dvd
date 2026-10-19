@@ -310,6 +310,7 @@ export async function runArchiveAudit({
         : record.evidenceFormat === "dvd-recovery-evidence-v1"
           ? await archiveImageOwnership.withConsistentRead({
               archiveId: record.archiveId,
+              imagePath: record.archivePath!,
               originalsLibraryPath,
               signal,
               task: (ownership) => fileInspector.inspect(

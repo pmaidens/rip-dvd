@@ -1994,6 +1994,7 @@ it("returns the same operational records and evidence through web and CLI", asyn
       } });
     await defaultArchiveImageOwnership.withWriter({
       archiveId,
+      imagePath: join(fixture.originalsLibraryPath, "synthetic.iso"),
       originalsLibraryPath: fixture.originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {

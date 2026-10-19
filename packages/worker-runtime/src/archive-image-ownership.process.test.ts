@@ -1,7 +1,8 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -20,13 +21,12 @@ import {
   ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME,
   createArchiveImageOwnership,
 } from "./archive-image-ownership.js";
+import { inspectLinuxStorage } from "./linux-storage.js";
 
 const roots: string[] = [];
 const helperPids: number[] = [];
-const inspectSyntheticLocalStorage = () => ({
-  filesystemType: "synthetic-local",
-  storageClass: "local" as const,
-});
+const processStorageSupported = process.platform === "linux" &&
+  inspectLinuxStorage(tmpdir()).filesystemType === "ext";
 
 afterEach(() => {
   for (const pid of helperPids.splice(0)) {
@@ -77,6 +77,7 @@ async function withDeadline<Result>(
 async function runContender(
   mode: "withConsistentRead" | "withWriter",
   originalsLibraryPath: string,
+  imagePath: string,
   archiveId: string,
 ): Promise<{ ok: boolean; code?: string | null }> {
   const child = spawn(
@@ -88,6 +89,7 @@ async function runContender(
       )),
       mode,
       originalsLibraryPath,
+      imagePath,
       archiveId,
     ],
     { stdio: ["ignore", "pipe", "inherit"] },
@@ -112,7 +114,7 @@ function lockPath(originalsLibraryPath: string): string {
   return join(directory, name);
 }
 
-it.runIf(process.platform === "linux")(
+it.runIf(processStorageSupported)(
   "retains writer exclusion in the actual helper after the parent dies and reports an expired claim",
   async () => {
     const originalsLibraryPath = mkdtempSync(
@@ -121,6 +123,8 @@ it.runIf(process.platform === "linux")(
     roots.push(originalsLibraryPath);
     const readyPath = join(originalsLibraryPath, "helper.ready");
     const writePath = join(originalsLibraryPath, "helper.writes");
+    const imagePath = join(originalsLibraryPath, "synthetic-archive.iso");
+    writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
     const parent = spawn(
       process.execPath,
       [
@@ -129,6 +133,7 @@ it.runIf(process.platform === "linux")(
           import.meta.url,
         )),
         originalsLibraryPath,
+        imagePath,
         readyPath,
         writePath,
       ],
@@ -146,11 +151,10 @@ it.runIf(process.platform === "linux")(
     await waitForFileGrowth(writePath, sizeBeforeParentExit);
     await new Promise<void>((resolve) => setTimeout(resolve, 200));
 
-    const ownership = createArchiveImageOwnership({
-      inspectStorage: inspectSyntheticLocalStorage,
-    });
+    const ownership = createArchiveImageOwnership();
     expect(ownership.inspect({
       archiveId: "surviving-helper-archive",
+      imagePath,
       originalsLibraryPath,
     })).toMatchObject({
       writer: { state: "active" },
@@ -163,6 +167,7 @@ it.runIf(process.platform === "linux")(
 
     await expect(ownership.withWriter({
       archiveId: "surviving-helper-archive",
+      imagePath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {},
@@ -171,25 +176,27 @@ it.runIf(process.platform === "linux")(
   30_000,
 );
 
-it.runIf(process.platform === "linux")(
+it.runIf(processStorageSupported)(
   "excludes a writer in another process for the complete shared interval",
   async () => {
     const originalsLibraryPath = mkdtempSync(
       join(tmpdir(), "rip-dvd-image-ownership-process-"),
     );
     roots.push(originalsLibraryPath);
-    const ownership = createArchiveImageOwnership({
-      inspectStorage: inspectSyntheticLocalStorage,
-    });
+    const imagePath = join(originalsLibraryPath, "synthetic-archive.iso");
+    writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
+    const ownership = createArchiveImageOwnership();
 
     await ownership.withConsistentRead({
       archiveId: "cross-process-reader-archive",
+      imagePath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {
         await expect(runContender(
           "withWriter",
           originalsLibraryPath,
+          imagePath,
           "cross-process-reader-archive",
         )).resolves.toEqual({ ok: false, code: "WRITER_NOT_QUIESCENT" });
       },
@@ -197,20 +204,22 @@ it.runIf(process.platform === "linux")(
   },
 );
 
-it.runIf(process.platform === "linux")(
+it.runIf(processStorageSupported)(
   "blocks a second process after the named lock inode is replaced",
   async () => {
     const originalsLibraryPath = mkdtempSync(
       join(tmpdir(), "rip-dvd-image-ownership-process-"),
     );
     roots.push(originalsLibraryPath);
+    const imagePath = join(originalsLibraryPath, "synthetic-archive.iso");
+    writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
     const ownership = createArchiveImageOwnership({
       ownershipCheckIntervalMs: 60_000,
-      inspectStorage: inspectSyntheticLocalStorage,
     });
 
     await expect(ownership.withWriter({
       archiveId: "replaced-lock-archive",
+      imagePath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task({ assertOwned }) {
@@ -220,6 +229,7 @@ it.runIf(process.platform === "linux")(
         await expect(runContender(
           "withWriter",
           originalsLibraryPath,
+          imagePath,
           "replaced-lock-archive",
         )).resolves.toEqual({ ok: false, code: "CONSISTENCY_FAULT" });
         assertOwned();
@@ -228,6 +238,7 @@ it.runIf(process.platform === "linux")(
 
     expect(ownership.inspect({
       archiveId: "replaced-lock-archive",
+      imagePath,
       originalsLibraryPath,
     })).toMatchObject({
       writer: { state: "uncertain" },
@@ -240,20 +251,22 @@ it.runIf(process.platform === "linux")(
   },
 );
 
-it.runIf(process.platform === "linux")(
+it.runIf(processStorageSupported)(
   "blocks a writer after the named lock is replaced during a shared interval",
   async () => {
     const originalsLibraryPath = mkdtempSync(
       join(tmpdir(), "rip-dvd-image-ownership-process-"),
     );
     roots.push(originalsLibraryPath);
+    const imagePath = join(originalsLibraryPath, "synthetic-archive.iso");
+    writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
     const ownership = createArchiveImageOwnership({
       ownershipCheckIntervalMs: 60_000,
-      inspectStorage: inspectSyntheticLocalStorage,
     });
 
     await expect(ownership.withConsistentRead({
       archiveId: "replaced-reader-lock-archive",
+      imagePath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task({ assertOwned }) {
@@ -263,6 +276,7 @@ it.runIf(process.platform === "linux")(
         await expect(runContender(
           "withWriter",
           originalsLibraryPath,
+          imagePath,
           "replaced-reader-lock-archive",
         )).resolves.toEqual({ ok: false, code: "CONSISTENCY_FAULT" });
         assertOwned();
@@ -271,6 +285,7 @@ it.runIf(process.platform === "linux")(
 
     expect(ownership.inspect({
       archiveId: "replaced-reader-lock-archive",
+      imagePath,
       originalsLibraryPath,
     })).toMatchObject({
       writer: { state: "uncertain" },
@@ -280,5 +295,71 @@ it.runIf(process.platform === "linux")(
         blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
       },
     });
+  },
+);
+
+it.runIf(processStorageSupported)(
+  "fails closed when the held shared flock is explicitly released",
+  async () => {
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-image-ownership-process-"),
+    );
+    roots.push(originalsLibraryPath);
+    const imagePath = join(originalsLibraryPath, "synthetic-archive.iso");
+    writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
+    const ownership = createArchiveImageOwnership({
+      ownershipCheckIntervalMs: 60_000,
+    });
+
+    await expect(ownership.withConsistentRead({
+      archiveId: "unlocked-reader-archive",
+      imagePath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task({ descriptor, assertOwned }) {
+        const unlocked = spawnSync("flock", ["--unlock", "3"], {
+          stdio: ["ignore", "ignore", "ignore", descriptor],
+        });
+        expect(unlocked.status).toBe(0);
+        assertOwned();
+      },
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+  },
+);
+
+it.runIf(processStorageSupported)(
+  "blocks a second namespace after the ownership directory is replaced",
+  async () => {
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-image-ownership-process-"),
+    );
+    roots.push(originalsLibraryPath);
+    const imagePath = join(originalsLibraryPath, "synthetic-archive.iso");
+    writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
+    const ownership = createArchiveImageOwnership({
+      ownershipCheckIntervalMs: 60_000,
+    });
+
+    await expect(ownership.withWriter({
+      archiveId: "replaced-directory-archive",
+      imagePath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task({ assertOwned }) {
+        const directory = join(
+          originalsLibraryPath,
+          ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME,
+        );
+        renameSync(directory, `${directory}.replaced`);
+        mkdirSync(directory, { mode: 0o700 });
+        await expect(runContender(
+          "withWriter",
+          originalsLibraryPath,
+          imagePath,
+          "replaced-directory-archive",
+        )).resolves.toEqual({ ok: false, code: "CONSISTENCY_FAULT" });
+        assertOwned();
+      },
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
   },
 );

@@ -1,14 +1,16 @@
 import {
   chmodSync,
   mkdtempSync,
+  mkdirSync,
   readdirSync,
+  realpathSync,
   readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -67,6 +69,7 @@ describe("archive image ownership", () => {
 
       expect(ownership.inspect({
         archiveId: "synthetic-archive",
+        imagePath: originalsLibraryPath,
         originalsLibraryPath,
       })).toMatchObject({
         writer: { state: "uncertain" },
@@ -77,6 +80,7 @@ describe("archive image ownership", () => {
       });
       await expect(ownership.withConsistentRead({
         archiveId: "synthetic-archive",
+        imagePath: originalsLibraryPath,
         originalsLibraryPath,
         signal: new AbortController().signal,
         async task() {},
@@ -84,11 +88,94 @@ describe("archive image ownership", () => {
     },
   );
 
+  it.each(["xfs", "btrfs"] as const)(
+    "keeps unverified local %s ownership storage closed",
+    async (filesystemType) => {
+      const ownership = createArchiveImageOwnership({
+        inspectStorage: () => ({ filesystemType, storageClass: "local" }),
+      });
+      const originalsLibraryPath = root();
+
+      await expect(ownership.withConsistentRead({
+        archiveId: "synthetic-archive",
+        imagePath: originalsLibraryPath,
+        originalsLibraryPath,
+        signal: new AbortController().signal,
+        async task() {},
+      })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+    },
+  );
+
+  it("classifies the archive image instead of only the library root", async () => {
+    const originalsLibraryPath = root();
+    const imagePath = join(originalsLibraryPath, "mounted", "archive.iso");
+    const inspectedPaths: string[] = [];
+    const ownership = createArchiveImageOwnership({
+      inspectStorage: (path) => {
+        inspectedPaths.push(path);
+        const isImage = path === realpathSync(imagePath);
+        return {
+          filesystemType: isImage ? "synthetic-network" : "test-in-process",
+          storageClass: isImage ? "network" : "local",
+        };
+      },
+    });
+    mkdirSync(dirname(imagePath), { mode: 0o700 });
+    writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
+
+    await expect(ownership.withConsistentRead({
+      archiveId: "synthetic-archive",
+      imagePath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {},
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+    expect(inspectedPaths).toContain(realpathSync(imagePath));
+  });
+
+  it("classifies the library root before an archive image exists", async () => {
+    const originalsLibraryPath = root();
+    const inspectedPaths: string[] = [];
+    const ownership = createArchiveImageOwnership({
+      inspectStorage: (path) => {
+        inspectedPaths.push(path);
+        return { filesystemType: "test-in-process", storageClass: "local" };
+      },
+    });
+
+    await ownership.withWriter({
+      archiveId: "synthetic-archive",
+      imagePath: null,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {},
+    });
+
+    expect(inspectedPaths).toContain(realpathSync(originalsLibraryPath));
+  });
+
+  it("rejects an archive image outside the library root", async () => {
+    const originalsLibraryPath = root();
+    const imagePath = join(root(), "archive.iso");
+    writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
+    const ownership = createArchiveImageOwnership();
+
+    await expect(ownership.withConsistentRead({
+      archiveId: "synthetic-archive",
+      imagePath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {},
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+  });
+
   it("fails closed when local storage changes during an interval", async () => {
     let storageClass: "local" | "network" = "local";
     const ownership = createArchiveImageOwnership({
       inspectStorage: () => ({
-        filesystemType: `synthetic-${storageClass}`,
+        filesystemType: storageClass === "local"
+          ? "test-in-process"
+          : `synthetic-${storageClass}`,
         storageClass,
       }),
     });
@@ -96,6 +183,7 @@ describe("archive image ownership", () => {
 
     await expect(ownership.withConsistentRead({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task({ assertOwned }) {
@@ -112,6 +200,7 @@ describe("archive image ownership", () => {
     const release = deferred<void>();
     const reading = ownership.withConsistentRead({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {
@@ -123,6 +212,7 @@ describe("archive image ownership", () => {
 
     await expect(ownership.withWriter({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {},
@@ -132,6 +222,7 @@ describe("archive image ownership", () => {
     await reading;
     await expect(ownership.withWriter({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {},
@@ -145,6 +236,7 @@ describe("archive image ownership", () => {
     const release = deferred<void>();
     const writing = ownership.withWriter({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {
@@ -156,6 +248,7 @@ describe("archive image ownership", () => {
 
     expect(ownership.inspect({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
     })).toMatchObject({
       writer: { state: "active" },
@@ -170,6 +263,7 @@ describe("archive image ownership", () => {
     await writing;
     expect(ownership.inspect({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
     })).toMatchObject({
       writer: { state: "inactive" },
@@ -185,6 +279,7 @@ describe("archive image ownership", () => {
     let claimContents = "";
     await ownership.withWriter({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {
@@ -196,6 +291,7 @@ describe("archive image ownership", () => {
 
     await expect(ownership.withConsistentRead({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {},
@@ -207,6 +303,7 @@ describe("archive image ownership", () => {
     const originalsLibraryPath = root();
     await ownership.withConsistentRead({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {},
@@ -218,6 +315,7 @@ describe("archive image ownership", () => {
 
     await expect(ownership.withConsistentRead({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {},
@@ -232,6 +330,7 @@ describe("archive image ownership", () => {
 
     await expect(ownership.withWriter({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task({ signal }) {
@@ -249,6 +348,7 @@ describe("archive image ownership", () => {
 
     expect(ownership.inspect({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
     })).toMatchObject({
       writer: { state: "uncertain" },
@@ -260,6 +360,7 @@ describe("archive image ownership", () => {
     });
     await expect(ownership.withWriter({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {},
@@ -271,6 +372,7 @@ describe("archive image ownership", () => {
     const originalsLibraryPath = root();
     await ownership.withConsistentRead({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {},
@@ -279,6 +381,7 @@ describe("archive image ownership", () => {
 
     expect(ownership.inspect({
       archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
       originalsLibraryPath,
     })).toMatchObject({
       writer: { state: "uncertain" },

@@ -2078,6 +2078,7 @@ export async function executeEncodeClaim(
       await (options.archiveImageOwnership ?? defaultArchiveImageOwnership)
         .withConsistentRead({
           archiveId: input.archive.id,
+          imagePath: sourcePath,
           originalsLibraryPath: options.originalsLibraryPath,
           signal,
           task: readArchive,
