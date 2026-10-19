@@ -1571,7 +1571,20 @@ export interface EncodingProfileAccess {
   }): EncodingProfile[];
 }
 
+/** Revision 1 projection accepted only after durable filesystem reconciliation. */
+export interface DvdInitialArchiveSave {
+  archivePath: string;
+  boundaryEvidence: ArchiveBoundaryEvidence;
+  manifest: import("./dvd-archive-evidence-digests.js").DvdArchiveEvidenceManifestDigestInput &
+    import("./dvd-archive-evidence-digests.js").DvdArchiveEvidenceManifestDigests & {
+      id: string;
+      sourceArchiveJobId: string;
+    };
+}
+
 export interface ArchiveJobAccess {
+  /** Dormant marked-job save. Does not admit or start new-format jobs. */
+  publishDvdInitial(claim: RunningArchiveJob, input: DvdInitialArchiveSave): ArchiveJob;
   find(id: ArchiveJobId): ArchiveJob | null;
   listForInspection(id: DiscInspectionId): ArchiveJob[];
   listForArchive(id: OriginalDiscArchiveId): ArchiveJob[];

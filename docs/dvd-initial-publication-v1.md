@@ -2,8 +2,8 @@
 
 `publishDvdInitialArchive` consumes the proven initial copy returned by
 `runDvdInitialArchiveBoundaryForArchiveJob`. This is the dormant filesystem
-part of #394. Admission remains closed. #408 owns the atomic application and
-database completion, including Archive Recovery creation. #409 owns operator
+part of #394. Admission remains closed. `saveDvdInitialArchiveForArchiveJob`
+consumes its checkpoint in the atomic database save. #409 owns operator
 evidence presentation through web and the public JSON CLI.
 
 The caller holds archive exclusion, closes all copy helpers, and fences each
@@ -83,10 +83,36 @@ The database handoff must supply any existing `databaseProjection`. An absent
 projection may lag the pointer. A projection above the durable revision, or a
 projection present without a pointer, fails with
 `DVD_PUBLICATION_PROJECTION_AHEAD`. An equal revision must have the same
-manifest identity and digest. #408 must use only the returned checkpoint in
-its database transaction; it must not advance a projection before this call
-succeeds. This slice creates no database rows and does not complete an Archive
-Job, Archive Request, or Archive Recovery.
+manifest identity and digest. The Archive Job save uses only the returned,
+verified manifest in `archiveJobs.publishDvdInitial`. One immediate database
+transaction creates the Original Disc Archive, initial evidence projection,
+and Archive Recovery, completes the Archive Job, and fulfills its Archive
+Request. No projection advances before filesystem verification succeeds.
+
+The dormant `runDvdInitialArchiveJob` workflow holds the existing fingerprint
+exclusion through copy, boundary proof, publication, database save, and cleanup.
+It waits for the initial helper to close before validating the saved image.
+The archive ID derives from the source Archive Job ID and remains stable across
+restarts. `reconcileDvdInitialArchiveForArchiveJob` supplies the existing database
+projection when replaying durable intent. A completed save returns its existing
+Job and archive after verifying that evidence and lifecycle records agree.
+Missing or conflicting database lifecycle records raise
+`DVD_INITIAL_SAVE_CONSISTENCY_FAULT`; a lost running claim or cancelled Request
+raises `DVD_INITIAL_SAVE_OWNERSHIP_LOST`. Filesystem faults keep their specific
+publication codes. An interruption retains the image and evidence for replay,
+including when the database transaction rolls back or its commit response is
+lost. This path never calls legacy image quarantine or rewrites the Job as failed.
+
+An empty current source map records `clean_read` and completed Recovery. A
+nonempty map records `incomplete_read` and eligible Recovery, visible together
+only after commit. Neither integrity value asserts structural validity,
+watchability, playback, or encoding eligibility. The database first inserts an
+unknown projection inside the transaction, then installs authoritative evidence
+and its matching integrity projection before commit. Existing evidence guards
+remain in force. Closed-admission triggers allow only the marked initial terminal
+handoff backed by its manifest; scheduling and legacy mutations stay closed.
+Later Recovery has no authority to change the completed Archive Job outcome.
+This adds no operator operation or Recovery reads.
 
 Conflict codes distinguish missing intent, conflicting intent, image,
 manifest, checkpoint, projection, and unsafe paths. Fault injection before

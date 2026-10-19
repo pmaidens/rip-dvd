@@ -1512,7 +1512,8 @@ describe("data-access facade", () => {
           name !== "20260930003106_dvd-evidence-authority" &&
           name !== "20260930002622_wandering_micromax" &&
           name !== "20260930003626_dvd-evidence-checkpoints" &&
-          name !== "20261004053119_scsi-read-path-notice",
+          name !== "20261004053119_scsi-read-path-notice" &&
+          name !== "20261019204228_dvd-initial-save",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8738,6 +8739,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261019204228_dvd-initial-save",
+        },
+        {
           name: "20261019172643_strong_lila_cheney",
         },
         {
@@ -8763,9 +8767,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20260929225801_lonely_microchip",
-        },
-        {
-          name: "20260922212838_modern_khan",
         },
       ]);
     expect(

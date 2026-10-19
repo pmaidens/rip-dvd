@@ -475,6 +475,8 @@ export async function runDvdInitialCopyForArchiveJob({
     await runner.waitForInactive(devicePath, outputPath);
     throw error;
   }
+  // A successful result alone does not prove that the helper released its writer.
+  await runner.waitForInactive(devicePath, outputPath);
   signal.throwIfAborted();
   validateDvdInitialCopyResult(
     result,
