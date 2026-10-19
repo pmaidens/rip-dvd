@@ -31,6 +31,7 @@ export {
   DvdRecoveryEvidenceEncodingUnavailableError,
   assertDvdRecoveryEvidenceAdmissionAvailable,
 } from "./dvd-recovery-evidence.js";
+export * from "./dvd-recovery-storage-preflight.js";
 export {
   assertDvdArchiveBoundaryEvidenceDigest,
   assertDvdArchiveEvidenceManifestDigests,

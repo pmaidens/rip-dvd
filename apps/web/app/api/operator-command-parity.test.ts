@@ -1123,6 +1123,103 @@ it("returns the same health and readiness results through web and CLI adapters",
   }
 });
 
+it("shares supported, unsupported, and failed recovery storage preflight through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const access = fixture.openAccess();
+  const verifiedFacts = {
+    filesystemType: "synthetic-local",
+    storageClass: "local" as const,
+    journalReservationBytes: 1_048_576,
+    journalReservation: "verified" as const,
+    journalSynchronization: "verified" as const,
+    imageSynchronization: "verified" as const,
+    checkpointSynchronization: "verified" as const,
+    checkpointReplacement: "verified" as const,
+    directorySynchronization: "verified" as const,
+    crossProcessWriterExclusion: "verified" as const,
+    crossHostWriterExclusion: "not_applicable" as const,
+    disconnectionBehavior: "not_applicable" as const,
+  };
+  try {
+    const cases = [
+      {
+        input: {
+          contractVersion: "dvd-recovery-storage-preflight-v1" as const,
+          status: "supported" as const,
+          reasonCode: null,
+          facts: verifiedFacts,
+        },
+        expected: { available: true, blockingReasons: [] },
+      },
+      {
+        input: {
+          contractVersion: "dvd-recovery-storage-preflight-v1" as const,
+          status: "unsupported" as const,
+          reasonCode: "STORAGE_UNSUPPORTED" as const,
+          facts: {
+            ...verifiedFacts,
+            filesystemType: "synthetic-network",
+            storageClass: "network" as const,
+            journalReservation: "not_tested" as const,
+            journalSynchronization: "not_tested" as const,
+            imageSynchronization: "not_tested" as const,
+            checkpointSynchronization: "not_tested" as const,
+            checkpointReplacement: "not_tested" as const,
+            directorySynchronization: "not_tested" as const,
+            crossProcessWriterExclusion: "not_tested" as const,
+            crossHostWriterExclusion: "unproven" as const,
+            disconnectionBehavior: "unproven" as const,
+          },
+        },
+        expected: {
+          available: false,
+          blockingReasons: [expect.objectContaining({
+            code: "STORAGE_UNSUPPORTED",
+          })],
+        },
+      },
+      {
+        input: {
+          contractVersion: "dvd-recovery-storage-preflight-v1" as const,
+          status: "failed_prerequisite" as const,
+          reasonCode: "JOURNAL_SYNC_FAILED" as const,
+          facts: {
+            ...verifiedFacts,
+            journalSynchronization: "failed" as const,
+            imageSynchronization: "not_tested" as const,
+            checkpointSynchronization: "not_tested" as const,
+            checkpointReplacement: "not_tested" as const,
+            directorySynchronization: "not_tested" as const,
+            crossProcessWriterExclusion: "not_tested" as const,
+          },
+        },
+        expected: {
+          available: false,
+          blockingReasons: [expect.objectContaining({
+            code: "JOURNAL_SYNC_FAILED",
+          })],
+        },
+      },
+    ];
+
+    for (const testCase of cases) {
+      access.dvdRecoveryStorage.record(testCase.input);
+      const web = createDeploymentReadinessResponse(access);
+      const cli = await fixture.run(["readiness"]);
+
+      expect(web.status).toBe(200);
+      expect(cli.exitCode).toBe(0);
+      expect(cli.result).toEqual(await web.json());
+      expect(cli.result).toMatchObject({
+        dvdRecoveryStorage: testCase.expected,
+      });
+    }
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
 it("returns the same Catalog Review detail and candidates through web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
   const { archive, previousSelection, correctedSelection, predecessor } =
@@ -1828,6 +1925,21 @@ it("returns the same operational records and evidence through web and CLI", asyn
         badSectorCount: 1,
         badAreaCount: 1,
         badSectorRanges: null,
+        archiveRecovery: {
+          available: false,
+          blockingReasons: expect.arrayContaining([
+            expect.objectContaining({
+              code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+            }),
+            expect.objectContaining({ code: "STORAGE_UNSUPPORTED" }),
+          ]),
+          storage: {
+            available: false,
+            blockingReasons: [expect.objectContaining({
+              code: "STORAGE_UNSUPPORTED",
+            })],
+          },
+        },
       } });
     expect(
       (archiveInspection.result as {

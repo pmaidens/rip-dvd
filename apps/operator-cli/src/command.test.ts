@@ -1386,6 +1386,23 @@ it("reports deployment readiness from persisted Optical Drive and Disc Inspectio
   expect(result.stderr).toBe("");
   expect(result.result).toEqual({
     schemaVersion: 1,
+    dvdRecoveryStorage: {
+      available: false,
+      blockingReasons: [{
+        code: "STORAGE_UNSUPPORTED",
+        message:
+          "The Originals Library storage has not been examined for DVD Archive Recovery.",
+      }],
+      preflight: {
+        contractVersion: "dvd-recovery-storage-preflight-v1",
+        status: "unsupported",
+        reasonCode: "STORAGE_UNSUPPORTED",
+        reason:
+          "The Originals Library storage has not been examined for DVD Archive Recovery.",
+        facts: null,
+        checkedAt: null,
+      },
+    },
     activeWork: [{ kind: "disc_inspection", id: inspection.id, status: "running" }],
     opticalDrives: [{
       id: drive.id,
@@ -2307,6 +2324,23 @@ it("runs as a separate process without the web service", () => {
   expect(readiness.stderr).toBe("");
   expect(JSON.parse(readiness.stdout)).toEqual({
     schemaVersion: 1,
+    dvdRecoveryStorage: {
+      available: false,
+      blockingReasons: [{
+        code: "STORAGE_UNSUPPORTED",
+        message:
+          "The Originals Library storage has not been examined for DVD Archive Recovery.",
+      }],
+      preflight: {
+        contractVersion: "dvd-recovery-storage-preflight-v1",
+        status: "unsupported",
+        reasonCode: "STORAGE_UNSUPPORTED",
+        reason:
+          "The Originals Library storage has not been examined for DVD Archive Recovery.",
+        facts: null,
+        checkedAt: null,
+      },
+    },
     activeWork: [],
     opticalDrives: [],
   });
@@ -2790,6 +2824,8 @@ it("inspects retained archive lineage, historical references, and storage observ
       },
     },
   });
+  expect((sourceInspection.result as { item: object }).item)
+    .not.toHaveProperty("archiveRecovery");
   expect(JSON.stringify(sourceInspection.result)).not.toContain(
     unrelatedArchive.id,
   );

@@ -35,6 +35,7 @@ import {
   encodeOutputArtifactReferences,
   retainedEncodeOutputArtifactIdentity,
 } from "./encode-output-inspection.js";
+import { describeDvdRecoveryStorage } from "./dvd-recovery-storage.js";
 
 export const OPERATION_KINDS = [
   "optical-drives",
@@ -719,8 +720,30 @@ function readDetail(
       const rearchiveReason = rearchiveEligible
         ? null
         : "Fresh re-archive requests are supported only for DVD archives";
+      const evidenceHeader = evidenceHeaders.get(archive.id) ?? null;
+      const recoveryStorage = evidenceHeader === null
+        ? null
+        : describeDvdRecoveryStorage(
+          access.dvdRecoveryStorage.readCurrent(),
+        );
       return {
         ...visibleArchive(archive, evidenceHeaders),
+        ...(recoveryStorage === null
+          ? {}
+          : {
+            archiveRecovery: {
+              record: access.catalog.findArchiveRecovery(archive.id),
+              available: false,
+              blockingReasons: [
+                {
+                  code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
+                  message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
+                },
+                ...recoveryStorage.blockingReasons,
+              ],
+              storage: recoveryStorage,
+            },
+          }),
         detectedDisc: access.catalog.listDetectedDiscs(undefined, {
           ids: [archive.detectedDiscId],
         }).map(visibleDisc)[0] ?? null,

@@ -12,6 +12,7 @@ import { createNodeDvdEndpointProver } from "./dvd-endpoint-prover.js";
 import { createLinuxOpticalDriveHardware } from "./optical-drive-hardware.js";
 import { runFilesystemVerificationWorker } from "./filesystem-verification-worker.js";
 import { createNodeDvdSalvageValidator } from "./dvd-salvage-validator.js";
+import { recordDvdRecoveryStoragePreflight } from "./dvd-recovery-storage-preflight.js";
 
 await runConfiguredAsyncWorker(
   {
@@ -28,6 +29,15 @@ await runConfiguredAsyncWorker(
     const copyRunner = createNodeDvdCopyRunner({
       maxActiveCopies: config.archiveWorkerConcurrency,
     });
+    const storagePreflight = recordDvdRecoveryStoragePreflight(
+      access,
+      config.originalsLibraryPath,
+    );
+    log(
+      storagePreflight.status === "supported"
+        ? "DVD Archive Recovery storage preflight passed"
+        : `DVD Archive Recovery storage preflight unavailable: ${storagePreflight.reasonCode}`,
+    );
     const workers = new AbortController();
     const stopWorkers = () => workers.abort(signal.reason);
     signal.addEventListener("abort", stopWorkers, { once: true });

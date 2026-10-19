@@ -952,6 +952,7 @@ describe("data-access facade", () => {
         "dvd_archive_evidence_headers",
         "dvd_archive_evidence_manifests",
         "dvd_archive_recovery_reads",
+        "dvd_recovery_storage_preflights",
         "encode_job_failure_reports",
         "filesystem_verification_runs",
         "mutation_invocations",
@@ -960,10 +961,12 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(34);
+    expect(identifierTables).toHaveLength(35);
     expect(
       identifierTables.every(({ name, sql }) =>
-        name === "legacy_cutover_staged_sidecars"
+        name === "dvd_recovery_storage_preflights"
+          ? sql.includes("`scope` text PRIMARY KEY")
+          : name === "legacy_cutover_staged_sidecars"
           ? sql.includes("PRIMARY KEY(`originals_library_path`, `sidecar_path`)")
           : name === "dvd_archive_evidence_headers"
             ? sql.includes("dvd_archive_evidence_headers_archive_id_not_null")
@@ -8735,6 +8738,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261019172643_strong_lila_cheney",
+        },
+        {
           name: "20261019162901_notification_delivery_reliability",
         },
         {
@@ -8760,9 +8766,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20260922212838_modern_khan",
-        },
-        {
-          name: "20260922185615_durable-archive-audits",
         },
       ]);
     expect(
@@ -15542,5 +15545,53 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     vi.advanceTimersByTime(2);
     expect(access.encodeJobs.recoverExpiredClaims()).toEqual([]);
     access.close();
+  });
+});
+
+describe("DVD Archive Recovery storage preflight persistence", () => {
+  it("retains and replaces the current path-free storage result", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const supported = access.dvdRecoveryStorage.record({
+      contractVersion: "dvd-recovery-storage-preflight-v1",
+      status: "supported",
+      reasonCode: null,
+      facts: {
+        filesystemType: "synthetic-local",
+        storageClass: "local",
+        journalReservationBytes: 1_048_576,
+        journalReservation: "verified",
+        journalSynchronization: "verified",
+        imageSynchronization: "verified",
+        checkpointSynchronization: "verified",
+        checkpointReplacement: "verified",
+        directorySynchronization: "verified",
+        crossProcessWriterExclusion: "verified",
+        crossHostWriterExclusion: "not_applicable",
+        disconnectionBehavior: "not_applicable",
+      },
+    });
+    expect(supported).toMatchObject({
+      status: "supported",
+      checkedAt: expect.any(Date),
+    });
+    access.close();
+
+    const reopened = openTestDatabase(databasePath);
+    expect(reopened.dvdRecoveryStorage.readCurrent()).toEqual(supported);
+    expect(reopened.dvdRecoveryStorage.record({
+      ...supported,
+      status: "failed_prerequisite",
+      reasonCode: "JOURNAL_SYNC_FAILED",
+      facts: {
+        ...supported.facts,
+        journalSynchronization: "failed",
+      },
+    })).toMatchObject({
+      status: "failed_prerequisite",
+      reasonCode: "JOURNAL_SYNC_FAILED",
+      facts: { journalSynchronization: "failed" },
+    });
+    reopened.close();
   });
 });
