@@ -23,19 +23,23 @@ helper continues. A worker lease or heartbeat is not ownership and cannot
 override a live lock.
 
 Writers also publish a private, versioned worker claim with creation,
-heartbeat, and lease-expiry times. This claim is diagnostic evidence only.
-Inspection reports the operating-system writer and worker claim separately. An
-active writer blocks stable reads with `WRITER_NOT_QUIESCENT`; an uncertain
-lock, invalid claim, or active claim without a proven writer blocks them with
-`CONSISTENCY_FAULT`. An expired claim does not hide a live writer, and is not by
-itself evidence that a writer still exists.
+heartbeat, lease-expiry, and lock device and inode values. This claim is
+diagnostic evidence only. A claim for a different lock inode blocks readers
+and writers, even after its lease expires. A worker that loses the named lock
+path retains its claim so inspection can report the fault. Inspection reports
+the operating-system writer and worker claim separately. An active writer
+blocks stable reads with `WRITER_NOT_QUIESCENT`; an uncertain lock, invalid
+claim, mismatched claim, or active claim without a proven writer blocks them
+with `CONSISTENCY_FAULT`. An expired claim for the current lock inode does not
+hide a live writer, and is not by itself evidence that a writer still exists.
 
 Initial DVD publication holds exclusive ownership across the copy, evidence
 publication, and reconciliation interval. Existing encode source reads,
-Archive Audit file scans, and Original Disc Archive Filesystem Verification
-hold shared ownership for the complete image-read interval. Catalog-only work
-does not take an image lock. Title Damage Assessment and Damage Preview must
-use the same shared interval when they gain image-reading implementations.
+including subtitle scans, Archive Audit file scans, and Original Disc Archive
+Filesystem Verification hold shared ownership for the complete image-read
+interval. Catalog-only work does not take an image lock. Title Damage
+Assessment and Damage Preview must use the same shared interval when they gain
+image-reading implementations.
 
 The only declared production storage setup is the local Linux
 `linux-rwf-atomic-v1` provider from ADR 0007. Other production platforms fail

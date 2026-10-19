@@ -92,6 +92,13 @@ interface WriterClaimRecord {
   claimedAt: string;
   heartbeatAt: string;
   leaseExpiresAt: string;
+  lockDevice: string;
+  lockInode: string;
+}
+
+interface LockIdentity {
+  lockDevice: string;
+  lockInode: string;
 }
 
 interface OwnershipPaths {
@@ -269,23 +276,35 @@ function openLock(path: string, create: boolean): number | null {
   }
 }
 
-function assertLockIdentity(descriptor: number, path: string): void {
+function assertLockIdentity(descriptor: number, path: string): LockIdentity {
   try {
-    const opened = fstatSync(descriptor);
-    const linked = lstatSync(path);
+    const opened = fstatSync(descriptor, { bigint: true });
+    const linked = lstatSync(path, { bigint: true });
     if (
       !opened.isFile() ||
       !linked.isFile() ||
       linked.isSymbolicLink() ||
       opened.dev !== linked.dev ||
       opened.ino !== linked.ino ||
-      opened.nlink !== 1
+      opened.nlink !== 1n
     ) {
       throw new Error("Ownership lock changed");
     }
+    return {
+      lockDevice: opened.dev.toString(),
+      lockInode: opened.ino.toString(),
+    };
   } catch (cause) {
     throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause });
   }
+}
+
+function sameLockIdentity(
+  left: LockIdentity,
+  right: LockIdentity,
+): boolean {
+  return left.lockDevice === right.lockDevice &&
+    left.lockInode === right.lockInode;
 }
 
 function createNodeLockBackend(
@@ -431,7 +450,7 @@ function isClaimRecord(
   const record = value as Record<string, unknown>;
   return (
     Object.keys(record).sort().join(",") ===
-      "archiveId,claimId,claimedAt,heartbeatAt,leaseExpiresAt,version" &&
+      "archiveId,claimId,claimedAt,heartbeatAt,leaseExpiresAt,lockDevice,lockInode,version" &&
     record.version === ARCHIVE_IMAGE_OWNERSHIP_VERSION &&
     record.archiveId === archiveId &&
     typeof record.claimId === "string" &&
@@ -439,6 +458,10 @@ function isClaimRecord(
     typeof record.claimedAt === "string" &&
     typeof record.heartbeatAt === "string" &&
     typeof record.leaseExpiresAt === "string" &&
+    typeof record.lockDevice === "string" &&
+    /^\d+$/.test(record.lockDevice) &&
+    typeof record.lockInode === "string" &&
+    /^\d+$/.test(record.lockInode) &&
     Number.isFinite(Date.parse(record.claimedAt)) &&
     Number.isFinite(Date.parse(record.heartbeatAt)) &&
     Number.isFinite(Date.parse(record.leaseExpiresAt))
@@ -509,6 +532,7 @@ function createClaim(
   claimedAt: Date,
   heartbeatAt: Date,
   leaseDurationMs: number,
+  lockIdentity: LockIdentity,
 ): WriterClaimRecord {
   return {
     version: ARCHIVE_IMAGE_OWNERSHIP_VERSION,
@@ -519,6 +543,26 @@ function createClaim(
     leaseExpiresAt: new Date(
       heartbeatAt.getTime() + leaseDurationMs,
     ).toISOString(),
+    ...lockIdentity,
+  };
+}
+
+function consistencyFaultInspection(): ArchiveImageOwnershipInspection {
+  return {
+    contractVersion: ARCHIVE_IMAGE_OWNERSHIP_VERSION,
+    writer: { state: "uncertain" },
+    workerClaim: {
+      state: "invalid",
+      claimedAt: null,
+      leaseExpiresAt: null,
+    },
+    stableRead: {
+      available: false,
+      blockingReasons: [{
+        code: "CONSISTENCY_FAULT",
+        message: reasonMessage("CONSISTENCY_FAULT"),
+      }],
+    },
   };
 }
 
@@ -568,6 +612,16 @@ export function createArchiveImageOwnership({
     let heartbeat: NodeJS.Timeout | undefined;
     let heartbeatWrite = Promise.resolve();
     let claim: WriterClaimRecord | undefined;
+    let retainClaim = false;
+    let lockIdentity: LockIdentity | undefined;
+    const failOwnership = (cause: unknown): ArchiveImageOwnershipError => {
+      retainClaim = true;
+      const error = cause instanceof ArchiveImageOwnershipError
+        ? cause
+        : new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause });
+      if (!controller.signal.aborted) controller.abort(error);
+      return error;
+    };
     try {
       releaseBackend = await backend.acquire(
         descriptor,
@@ -575,7 +629,18 @@ export function createArchiveImageOwnership({
         mode,
         request.signal,
       );
-      assertLockIdentity(descriptor, paths.lock);
+      lockIdentity = assertLockIdentity(descriptor, paths.lock);
+      const existingClaim = await readClaim(paths.claim, request.archiveId);
+      if (
+        existingClaim === "invalid" ||
+        (existingClaim !== null &&
+          (!sameLockIdentity(existingClaim, lockIdentity) ||
+            Date.parse(existingClaim.leaseExpiresAt) > now().getTime()))
+      ) {
+        throw failOwnership(new ArchiveImageOwnershipError(
+          "CONSISTENCY_FAULT",
+        ));
+      }
       if (mode === "exclusive") {
         const claimedAt = now();
         claim = createClaim(
@@ -584,8 +649,13 @@ export function createArchiveImageOwnership({
           claimedAt,
           claimedAt,
           claimLeaseDurationMs,
+          lockIdentity,
         );
-        await writeClaim(paths.claim, claim);
+        try {
+          await writeClaim(paths.claim, claim);
+        } catch (cause) {
+          throw failOwnership(cause);
+        }
         heartbeat = setInterval(() => {
           const currentClaim = claim;
           if (currentClaim === undefined || controller.signal.aborted) return;
@@ -596,19 +666,30 @@ export function createArchiveImageOwnership({
             new Date(currentClaim.claimedAt),
             heartbeatAt,
             claimLeaseDurationMs,
+            currentClaim,
           );
           const nextClaim = claim;
           heartbeatWrite = heartbeatWrite
             .then(() => writeClaim(paths.claim, nextClaim))
             .catch((cause) => {
-              controller.abort(
-                new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause }),
-              );
+              failOwnership(cause);
             });
         }, Math.max(1, Math.floor(claimLeaseDurationMs / 3)));
         heartbeat.unref();
       }
-      const assertOwned = () => assertLockIdentity(descriptor, paths.lock);
+      const assertOwned = () => {
+        try {
+          const currentIdentity = assertLockIdentity(descriptor, paths.lock);
+          if (
+            lockIdentity === undefined ||
+            !sameLockIdentity(currentIdentity, lockIdentity)
+          ) {
+            throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
+          }
+        } catch (cause) {
+          throw failOwnership(cause);
+        }
+      };
       monitor = setInterval(() => {
         try {
           assertOwned();
@@ -635,7 +716,7 @@ export function createArchiveImageOwnership({
       if (monitor !== undefined) clearInterval(monitor);
       if (heartbeat !== undefined) clearInterval(heartbeat);
       await heartbeatWrite;
-      if (claim !== undefined) {
+      if (claim !== undefined && !retainClaim) {
         try {
           const current = await readClaim(paths.claim, request.archiveId);
           if (current !== "invalid" && current?.claimId === claim.claimId) {
@@ -655,43 +736,13 @@ export function createArchiveImageOwnership({
   return {
     inspect({ archiveId, originalsLibraryPath }) {
       if (!backend.supported) {
-        return {
-          contractVersion: ARCHIVE_IMAGE_OWNERSHIP_VERSION,
-          writer: { state: "uncertain" },
-          workerClaim: {
-            state: "invalid",
-            claimedAt: null,
-            leaseExpiresAt: null,
-          },
-          stableRead: {
-            available: false,
-            blockingReasons: [{
-              code: "CONSISTENCY_FAULT",
-              message: reasonMessage("CONSISTENCY_FAULT"),
-            }],
-          },
-        };
+        return consistencyFaultInspection();
       }
       let paths: OwnershipPaths | null;
       try {
         paths = pathsForSync(originalsLibraryPath, archiveId);
       } catch {
-        return {
-          contractVersion: ARCHIVE_IMAGE_OWNERSHIP_VERSION,
-          writer: { state: "uncertain" },
-          workerClaim: {
-            state: "invalid",
-            claimedAt: null,
-            leaseExpiresAt: null,
-          },
-          stableRead: {
-            available: false,
-            blockingReasons: [{
-              code: "CONSISTENCY_FAULT",
-              message: reasonMessage("CONSISTENCY_FAULT"),
-            }],
-          },
-        };
+        return consistencyFaultInspection();
       }
       if (paths === null) {
         return {
@@ -705,47 +756,60 @@ export function createArchiveImageOwnership({
           stableRead: { available: true, blockingReasons: [] },
         };
       }
-      const descriptor = openLock(paths.lock, false);
-      let writerState: ArchiveImageOwnershipInspection["writer"]["state"];
+      let descriptor: number | null = null;
       try {
-        writerState = descriptor === null
+        descriptor = openLock(paths.lock, false);
+        let writerState: ArchiveImageOwnershipInspection["writer"]["state"] =
+          descriptor === null
           ? "inactive"
           : backend.inspect(descriptor, paths.lock);
+        const lockIdentity = descriptor === null
+          ? null
+          : assertLockIdentity(descriptor, paths.lock);
+        const claim = readClaimSync(paths.claim, archiveId);
+        if (
+          claim !== null &&
+          claim !== "invalid" &&
+          (lockIdentity === null || !sameLockIdentity(claim, lockIdentity))
+        ) {
+          writerState = "uncertain";
+        }
+        const workerClaim: ArchiveImageOwnershipInspection["workerClaim"] =
+          claim === "invalid"
+            ? { state: "invalid", claimedAt: null, leaseExpiresAt: null }
+            : claim === null
+              ? { state: "none", claimedAt: null, leaseExpiresAt: null }
+              : {
+                  state: Date.parse(claim.leaseExpiresAt) > now().getTime()
+                    ? "active"
+                    : "expired",
+                  claimedAt: claim.claimedAt,
+                  leaseExpiresAt: claim.leaseExpiresAt,
+                };
+        const code: ArchiveImageOwnershipReasonCode | null =
+          writerState === "active"
+            ? "WRITER_NOT_QUIESCENT"
+            : writerState === "uncertain" ||
+                workerClaim.state === "invalid" ||
+                workerClaim.state === "active"
+              ? "CONSISTENCY_FAULT"
+              : null;
+        return {
+          contractVersion: ARCHIVE_IMAGE_OWNERSHIP_VERSION,
+          writer: { state: writerState },
+          workerClaim,
+          stableRead: code === null
+            ? { available: true, blockingReasons: [] }
+            : {
+                available: false,
+                blockingReasons: [{ code, message: reasonMessage(code) }],
+              },
+        };
+      } catch {
+        return consistencyFaultInspection();
       } finally {
         if (descriptor !== null) closeSync(descriptor);
       }
-      const claim = readClaimSync(paths.claim, archiveId);
-      const workerClaim: ArchiveImageOwnershipInspection["workerClaim"] =
-        claim === "invalid"
-          ? { state: "invalid", claimedAt: null, leaseExpiresAt: null }
-          : claim === null
-            ? { state: "none", claimedAt: null, leaseExpiresAt: null }
-            : {
-                state: Date.parse(claim.leaseExpiresAt) > now().getTime()
-                  ? "active"
-                  : "expired",
-                claimedAt: claim.claimedAt,
-                leaseExpiresAt: claim.leaseExpiresAt,
-              };
-      const code: ArchiveImageOwnershipReasonCode | null =
-        writerState === "active"
-          ? "WRITER_NOT_QUIESCENT"
-          : writerState === "uncertain" ||
-              workerClaim.state === "invalid" ||
-              workerClaim.state === "active"
-            ? "CONSISTENCY_FAULT"
-            : null;
-      return {
-        contractVersion: ARCHIVE_IMAGE_OWNERSHIP_VERSION,
-        writer: { state: writerState },
-        workerClaim,
-        stableRead: code === null
-          ? { available: true, blockingReasons: [] }
-          : {
-              available: false,
-              blockingReasons: [{ code, message: reasonMessage(code) }],
-            },
-      };
     },
     withConsistentRead: (request) => withLock(request, "shared"),
     withWriter: (request) => withLock(request, "exclusive"),

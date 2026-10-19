@@ -1,5 +1,5 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
+import type { Readable } from "node:stream";
 
 import {
   MAX_DVD_SUBTITLES_PER_TITLE,
@@ -8,7 +8,6 @@ import {
 
 import type { EncodeOutputVobSubExpectation } from "./encode-output-validator.js";
 
-const runNodeCommand = promisify(execFile);
 const SCAN_TIMEOUT_MS = 120_000;
 const MAX_SCAN_OUTPUT_BYTES = 4 * 1024 * 1024;
 
@@ -17,6 +16,7 @@ export interface DvdSubtitleScanner {
     sourcePath: string,
     titleNumber: number,
     signal: AbortSignal,
+    sourceOwnershipDescriptor?: number,
   ): Promise<readonly EncodeOutputVobSubExpectation[]>;
 }
 
@@ -28,9 +28,100 @@ type ScanCommandRunner = (
     killSignal: "SIGKILL";
     maxBuffer: number;
     signal: AbortSignal;
+    sourceOwnershipDescriptor?: number;
     timeout: number;
   },
 ) => Promise<{ stdout: string }>;
+
+interface ScanChildProcess {
+  stderr: Readable;
+  stdout: Readable;
+  kill(signal: NodeJS.Signals): boolean;
+  once(event: "error", listener: (error: Error) => void): void;
+  once(
+    event: "close",
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): void;
+}
+
+type SpawnScan = (
+  executable: string,
+  arguments_: readonly string[],
+  options: {
+    killSignal: "SIGKILL";
+    shell: false;
+    signal: AbortSignal;
+    stdio:
+      | ["ignore", "pipe", "pipe"]
+      | ["ignore", "pipe", "pipe", number];
+    timeout: number;
+  },
+) => ScanChildProcess;
+
+function createScanCommandRunner(
+  spawnProcess: SpawnScan,
+): ScanCommandRunner {
+  return (
+    executable,
+    arguments_,
+    options,
+  ) => new Promise((resolve, reject) => {
+    options.signal.throwIfAborted();
+    const child = spawnProcess(executable, arguments_, {
+      killSignal: options.killSignal,
+      shell: false,
+      signal: options.signal,
+      stdio: options.sourceOwnershipDescriptor === undefined
+        ? ["ignore", "pipe", "pipe"]
+        : ["ignore", "pipe", "pipe", options.sourceOwnershipDescriptor],
+      timeout: options.timeout,
+    });
+    const stdout: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let settled = false;
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      if (error === undefined) {
+        resolve({ stdout: Buffer.concat(stdout).toString(options.encoding) });
+      } else {
+        reject(error);
+      }
+    };
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > options.maxBuffer) {
+        child.kill(options.killSignal);
+        finish(new Error(
+          "HandBrake DVD subtitle scan output exceeded its limit",
+        ));
+        return;
+      }
+      stdout.push(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes > options.maxBuffer) {
+        child.kill(options.killSignal);
+        finish(new Error(
+          "HandBrake DVD subtitle scan output exceeded its limit",
+        ));
+      }
+    });
+    child.once("error", finish);
+    child.once("close", (code, signal) => {
+      if (code === 0) finish();
+      else {
+        finish(new Error(
+          `HandBrake DVD subtitle scan exited with ${
+            code ?? signal ?? "unknown"
+          }`,
+        ));
+      }
+    });
+  });
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -106,10 +197,20 @@ function subtitleExpectations(
 }
 
 export function createNodeDvdSubtitleScanner({
-  runCommand = runNodeCommand,
-}: { runCommand?: ScanCommandRunner } = {}): DvdSubtitleScanner {
+  runCommand,
+  spawnProcess = spawn as SpawnScan,
+}: {
+  runCommand?: ScanCommandRunner;
+  spawnProcess?: SpawnScan;
+} = {}): DvdSubtitleScanner {
+  const commandRunner = runCommand ?? createScanCommandRunner(spawnProcess);
   return {
-    async scan(sourcePath, titleNumber, signal) {
+    async scan(
+      sourcePath,
+      titleNumber,
+      signal,
+      sourceOwnershipDescriptor,
+    ) {
       signal.throwIfAborted();
       if (
         !Number.isSafeInteger(titleNumber) ||
@@ -120,7 +221,7 @@ export function createNodeDvdSubtitleScanner({
       }
       let stdout: string;
       try {
-        ({ stdout } = await runCommand(
+        ({ stdout } = await commandRunner(
           "nice",
           [
             "-n", "19", "ionice", "-c", "3", "rip-dvd-handbrake",
@@ -137,12 +238,15 @@ export function createNodeDvdSubtitleScanner({
             killSignal: "SIGKILL",
             maxBuffer: MAX_SCAN_OUTPUT_BYTES,
             signal,
+            ...(sourceOwnershipDescriptor === undefined
+              ? {}
+              : { sourceOwnershipDescriptor }),
             timeout: SCAN_TIMEOUT_MS,
           },
         ));
       } catch {
         signal.throwIfAborted();
-        // execFile errors include command arguments and raw media diagnostics.
+        // Process errors can include command arguments and raw media diagnostics.
         throw new Error("HandBrake DVD subtitle scan failed");
       }
       signal.throwIfAborted();

@@ -1,4 +1,12 @@
-import { mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,6 +32,19 @@ function deferred<T>() {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+function ownershipFile(
+  originalsLibraryPath: string,
+  suffix: ".claim.json" | ".lock",
+): string {
+  const directory = join(
+    originalsLibraryPath,
+    ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME,
+  );
+  const name = readdirSync(directory).find((entry) => entry.endsWith(suffix));
+  if (name === undefined) throw new Error(`Missing ownership ${suffix} file`);
+  return join(directory, name);
 }
 
 afterEach(() => {
@@ -106,6 +127,52 @@ describe("archive image ownership", () => {
     });
   });
 
+  it("rejects a stable read while a retained active claim is unproven", async () => {
+    const ownership = createArchiveImageOwnership();
+    const originalsLibraryPath = root();
+    let claimPath = "";
+    let claimContents = "";
+    await ownership.withWriter({
+      archiveId: "synthetic-archive",
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {
+        claimPath = ownershipFile(originalsLibraryPath, ".claim.json");
+        claimContents = readFileSync(claimPath, "utf8");
+      },
+    });
+    writeFileSync(claimPath, claimContents, { mode: 0o600 });
+
+    await expect(ownership.withConsistentRead({
+      archiveId: "synthetic-archive",
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {},
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+  });
+
+  it("rejects a stable read when the worker claim is invalid", async () => {
+    const ownership = createArchiveImageOwnership();
+    const originalsLibraryPath = root();
+    await ownership.withConsistentRead({
+      archiveId: "synthetic-archive",
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {},
+    });
+    const lockPath = ownershipFile(originalsLibraryPath, ".lock");
+    writeFileSync(lockPath.replace(/\.lock$/, ".claim.json"), "{}\n", {
+      mode: 0o600,
+    });
+
+    await expect(ownership.withConsistentRead({
+      archiveId: "synthetic-archive",
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {},
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+  });
+
   it("fails closed when the named lock inode changes", async () => {
     const ownership = createArchiveImageOwnership({
       ownershipCheckIntervalMs: 10,
@@ -117,14 +184,7 @@ describe("archive image ownership", () => {
       originalsLibraryPath,
       signal: new AbortController().signal,
       async task({ signal }) {
-        const directory = join(
-          originalsLibraryPath,
-          ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME,
-        );
-        const lockName = (await import("node:fs/promises"))
-          .readdir(directory)
-          .then((entries) => entries.find((entry) => entry.endsWith(".lock"))!);
-        const lockPath = join(directory, await lockName);
+        const lockPath = ownershipFile(originalsLibraryPath, ".lock");
         renameSync(lockPath, `${lockPath}.replaced`);
         writeFileSync(lockPath, "replacement", { mode: 0o600 });
         await new Promise<void>((resolve, reject) => {
@@ -135,5 +195,47 @@ describe("archive image ownership", () => {
         });
       },
     })).rejects.toBeInstanceOf(ArchiveImageOwnershipError);
+
+    expect(ownership.inspect({
+      archiveId: "synthetic-archive",
+      originalsLibraryPath,
+    })).toMatchObject({
+      writer: { state: "uncertain" },
+      workerClaim: { state: "active" },
+      stableRead: {
+        available: false,
+        blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
+      },
+    });
+    await expect(ownership.withWriter({
+      archiveId: "synthetic-archive",
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {},
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+  });
+
+  it("returns a fail-closed inspection when the lock path is unsafe", async () => {
+    const ownership = createArchiveImageOwnership();
+    const originalsLibraryPath = root();
+    await ownership.withConsistentRead({
+      archiveId: "synthetic-archive",
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {},
+    });
+    chmodSync(ownershipFile(originalsLibraryPath, ".lock"), 0o666);
+
+    expect(ownership.inspect({
+      archiveId: "synthetic-archive",
+      originalsLibraryPath,
+    })).toMatchObject({
+      writer: { state: "uncertain" },
+      workerClaim: { state: "invalid" },
+      stableRead: {
+        available: false,
+        blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
+      },
+    });
   });
 });

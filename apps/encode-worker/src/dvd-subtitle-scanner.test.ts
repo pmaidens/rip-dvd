@@ -1,3 +1,6 @@
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+
 import { describe, expect, it, vi } from "vitest";
 
 import { createNodeDvdSubtitleScanner } from "./dvd-subtitle-scanner.js";
@@ -83,6 +86,30 @@ describe("HandBrake DVD subtitle scan", () => {
       ["-n", "19", "ionice", "-c", "3", "rip-dvd-handbrake", "--no-dvdnav", "--scan", "--json", "--title", "4", "--min-duration", "0", "--previews", "1:0", "-i", "/source.iso"],
       { encoding: "utf8", killSignal: "SIGKILL", maxBuffer: 4 * 1024 * 1024, signal, timeout: 120_000 },
     ]);
+  });
+
+  it("passes shared archive ownership to the scan process", async () => {
+    const child = Object.assign(new EventEmitter(), {
+      stderr: new PassThrough(),
+      stdout: new PassThrough(),
+      kill: vi.fn(() => true),
+    });
+    const spawnProcess = vi.fn(() => child);
+    const signal = new AbortController().signal;
+    const scanning = createNodeDvdSubtitleScanner({ spawnProcess })
+      .scan("/source.iso", 4, signal, 47);
+    child.stdout.end(`JSON Title Set: ${JSON.stringify(scanResult([]))}\n`);
+    child.emit("close", 0, null);
+    await expect(scanning).resolves.toEqual([]);
+
+    expect(spawnProcess).toHaveBeenCalledWith(
+      "nice",
+      expect.any(Array),
+      expect.objectContaining({
+        signal,
+        stdio: ["ignore", "pipe", "pipe", 47],
+      }),
+    );
   });
 
   it("preserves cancellation before and during a scan", async () => {

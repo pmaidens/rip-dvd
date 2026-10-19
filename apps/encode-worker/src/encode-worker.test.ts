@@ -57,7 +57,10 @@ import {
 import {
   encodeOutputFilesystemIdentity,
 } from "./encode-output-filesystem-identity.js";
-import { createNodeDvdSubtitleScanner } from "./dvd-subtitle-scanner.js";
+import {
+  createNodeDvdSubtitleScanner,
+  type DvdSubtitleScanner,
+} from "./dvd-subtitle-scanner.js";
 import dvdVariants from "./test-fixtures/handbrake-dvd-variants.json" with { type: "json" };
 
 vi.mock("./dvd-subtitle-scanner.js", async (importOriginal) => ({
@@ -1352,7 +1355,7 @@ describe("encode worker polling", () => {
   });
 
   it("holds shared ownership for the complete marked archive encode read", async () => {
-    const fixture = createQueuedJob();
+    const fixture = createQueuedJob({ kind: "dvd_title", titleNumber: 4 });
     const evidence: DvdArchiveEvidenceHeader = {
       originalDiscArchiveId: fixture.archive.id,
       sourceArchiveJobId: "synthetic-archive-job" as DvdArchiveEvidenceHeader["sourceArchiveJobId"],
@@ -1403,6 +1406,18 @@ describe("encode worker polling", () => {
         writeFileSync(outputPath, "consistent encode", { flag: "wx" });
       }),
     };
+    const subtitleScanner: DvdSubtitleScanner = {
+      scan: vi.fn(async (
+        _sourcePath,
+        _titleNumber,
+        _signal,
+        sourceOwnershipDescriptor,
+      ) => {
+        expect(ownershipActive).toBe(true);
+        expect(sourceOwnershipDescriptor).toBe(47);
+        return [];
+      }),
+    };
 
     await pollEncodeWorker({
       ...fixture,
@@ -1410,10 +1425,12 @@ describe("encode worker polling", () => {
       concurrency: 1,
       log: vi.fn(),
       runner,
+      subtitleScanner,
       signal: new AbortController().signal,
     });
 
     expect(runner.run).toHaveBeenCalledOnce();
+    expect(subtitleScanner.scan).toHaveBeenCalledOnce();
     expect(assertOwned).toHaveBeenCalled();
     expect(ownershipActive).toBe(false);
     fixture.access.close();

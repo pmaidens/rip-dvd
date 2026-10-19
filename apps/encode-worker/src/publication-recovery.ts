@@ -2015,6 +2015,7 @@ export async function executeEncodeClaim(
             sourcePath,
             input.subtitleScanTitleNumber,
             readSignal,
+            ownership?.descriptor,
           ),
           "input_unavailable",
         );

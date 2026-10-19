@@ -1,12 +1,25 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { once } from "node:events";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, expect, it } from "vitest";
 
-import { createArchiveImageOwnership } from "./archive-image-ownership.js";
+import {
+  ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME,
+  createArchiveImageOwnership,
+} from "./archive-image-ownership.js";
 
 const roots: string[] = [];
 const helperPids: number[] = [];
@@ -32,6 +45,52 @@ async function waitForFile(path: string): Promise<void> {
   }
 }
 
+async function waitForFileGrowth(path: string, size: number): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!existsSync(path) || statSync(path).size <= size) {
+    if (Date.now() >= deadline) throw new Error("Helper stopped writing");
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function runContender(
+  mode: "withConsistentRead" | "withWriter",
+  originalsLibraryPath: string,
+  archiveId: string,
+): Promise<{ ok: boolean; code?: string | null }> {
+  const child = spawn(
+    process.execPath,
+    [
+      fileURLToPath(new URL(
+        "./test/archive-image-ownership-contender.mjs",
+        import.meta.url,
+      )),
+      mode,
+      originalsLibraryPath,
+      archiveId,
+    ],
+    { stdio: ["ignore", "pipe", "inherit"] },
+  );
+  const chunks: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+  const [code] = await once(child, "close") as [number | null];
+  if (code !== 0) throw new Error(`Contender exited with ${code}`);
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+    ok: boolean;
+    code?: string | null;
+  };
+}
+
+function lockPath(originalsLibraryPath: string): string {
+  const directory = join(
+    originalsLibraryPath,
+    ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME,
+  );
+  const name = readdirSync(directory).find((entry) => entry.endsWith(".lock"));
+  if (name === undefined) throw new Error("Ownership lock is missing");
+  return join(directory, name);
+}
+
 it.runIf(process.platform === "linux")(
   "retains writer exclusion in the actual helper after the parent dies and reports an expired claim",
   async () => {
@@ -40,6 +99,7 @@ it.runIf(process.platform === "linux")(
     );
     roots.push(originalsLibraryPath);
     const readyPath = join(originalsLibraryPath, "helper.ready");
+    const writePath = join(originalsLibraryPath, "helper.writes");
     const parent = spawn(
       process.execPath,
       [
@@ -49,14 +109,18 @@ it.runIf(process.platform === "linux")(
         )),
         originalsLibraryPath,
         readyPath,
+        writePath,
       ],
       { stdio: "ignore" },
     );
     await waitForFile(readyPath);
+    await waitForFile(writePath);
     helperPids.push(Number(readFileSync(readyPath, "utf8")));
+    const sizeBeforeParentExit = statSync(writePath).size;
     parent.kill("SIGKILL");
     await new Promise<void>((resolve) => parent.once("close", () => resolve()));
-    await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    await waitForFileGrowth(writePath, sizeBeforeParentExit);
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
 
     const ownership = createArchiveImageOwnership();
     expect(ownership.inspect({
@@ -77,5 +141,71 @@ it.runIf(process.platform === "linux")(
       signal: new AbortController().signal,
       async task() {},
     })).rejects.toMatchObject({ code: "WRITER_NOT_QUIESCENT" });
+  },
+);
+
+it.runIf(process.platform === "linux")(
+  "excludes a writer in another process for the complete shared interval",
+  async () => {
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-image-ownership-process-"),
+    );
+    roots.push(originalsLibraryPath);
+    const ownership = createArchiveImageOwnership();
+
+    await ownership.withConsistentRead({
+      archiveId: "cross-process-reader-archive",
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {
+        await expect(runContender(
+          "withWriter",
+          originalsLibraryPath,
+          "cross-process-reader-archive",
+        )).resolves.toEqual({ ok: false, code: "WRITER_NOT_QUIESCENT" });
+      },
+    });
+  },
+);
+
+it.runIf(process.platform === "linux")(
+  "blocks a second process after the named lock inode is replaced",
+  async () => {
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-image-ownership-process-"),
+    );
+    roots.push(originalsLibraryPath);
+    const ownership = createArchiveImageOwnership({
+      ownershipCheckIntervalMs: 60_000,
+    });
+
+    await expect(ownership.withWriter({
+      archiveId: "replaced-lock-archive",
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task({ assertOwned }) {
+        const path = lockPath(originalsLibraryPath);
+        renameSync(path, `${path}.replaced`);
+        writeFileSync(path, "replacement", { mode: 0o600 });
+        await expect(runContender(
+          "withWriter",
+          originalsLibraryPath,
+          "replaced-lock-archive",
+        )).resolves.toEqual({ ok: false, code: "CONSISTENCY_FAULT" });
+        assertOwned();
+      },
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+
+    expect(ownership.inspect({
+      archiveId: "replaced-lock-archive",
+      originalsLibraryPath,
+    })).toMatchObject({
+      writer: { state: "uncertain" },
+      workerClaim: { state: "active" },
+      stableRead: {
+        available: false,
+        blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
+      },
+    });
   },
 );

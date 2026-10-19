@@ -1170,7 +1170,7 @@ const ownedInitialCopy = spawn(
   [
     "--exclusive",
     "--no-fork",
-    "/proc/self/fd/3",
+    "3",
     executable,
     "initial-copy-owned-v1",
     sourcePath,
