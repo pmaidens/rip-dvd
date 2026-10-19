@@ -142,3 +142,39 @@ cleanup does not renew the Archive Job claim that the transaction completed.
 It never recursively removes a directory or
 deletes archive-owned evidence. The archive and checkpoint remain available
 when the entire request staging directory is subsequently removed.
+
+## Operator evidence reads
+
+`rip-dvd archive-evidence <archive-id> [--limit 1..100] [--cursor <cursor>]`
+and `GET /api/archive-evidence/<archive-id>` call the same application operation.
+They read the committed pointer and immutable manifest without reconciling or
+writing any artifact. The Originals Library is mounted read-only in web and
+CLI containers. A missing database header can lag a committed checkpoint only
+when the saved archive has explicit marked source-job provenance. Historical
+archives receive `DVD_EVIDENCE_NOT_RECORDED`; their recorded integrity keeps
+its prior meaning.
+
+Available responses identify the revision by number, manifest ID, manifest
+digest and publication digest. They report the accepted half-open extent,
+Archive Boundary Evidence, current integrity, normalized source classification
+counts, skipped and total unresolved counts and percentages. The denominator
+is the accepted extent. Excluded suffix sectors enter neither the map nor that
+denominator. Read completeness does not establish playback or encode readiness.
+
+The default summary contains at most 20 compact ranges; callers may request
+1 through 100. `rangeOffset` identifies the first returned range. `truncated`
+means more ranges follow this page. `complete` means this page reaches the end
+of the map, and only then is `nextCursor` null. Follow each cursor to retrieve
+the complete map. Cursors bind the archive, complete revision identity and next
+range offset, and remain stable across repeated reads of the same checkpoint.
+A cursor for a different revision returns `DVD_EVIDENCE_CURSOR_STALE` with the
+current revision and no ranges. The initial reader fails closed if a pointer
+claims a checkpoint it cannot validate; later recovery checkpoint readers belong
+to the recovery work.
+
+Unavailable responses include a stable reason, null evidence and ranges,
+`complete: false`, and no cursor. Missing files, identity or digest conflicts,
+ahead or inconsistent projections, and a checkpoint that changes during the
+read cannot become a zero-damage result. Only a verified clean checkpoint
+reports known zero counts. Reads recheck the pointer and database snapshot
+before returning. New-format admission remains closed.

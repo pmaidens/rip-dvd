@@ -2,6 +2,7 @@ import { runNotifications } from "./notifications.js";
 import { StructuredInputError } from "./structured-input.js";
 import {
   createApplicationOperations,
+  InvalidArchiveEvidenceInputError,
   InvalidNotificationInputError,
   NotificationsUnavailableError,
   createTmdbCatalogLookup,
@@ -172,6 +173,13 @@ const commandDefinitions = [
       options: ["--key", "--limit", "--concurrency", "--file-timeout-ms", "--runtime-timeout-ms"],
     },
     example: "rip-dvd submit-archive-audit --key 00000000-0000-4000-8000-000000000001 --limit 100",
+  },
+  {
+    name: "archive-evidence",
+    description: "Read committed DVD evidence and complete revision-bound source ranges.",
+    usage: "rip-dvd archive-evidence <archive-id> [--limit 1..100] [--cursor <cursor>]",
+    inputs: { arguments: ["archive-id"], options: ["--limit", "--cursor"] },
+    example: "rip-dvd archive-evidence <archive-id> --limit 20",
   },
   {
     name: "encode-output",
@@ -1065,12 +1073,12 @@ const profileCommands = commandDefinitions.filter(
   (definition) => "category" in definition && definition.category === "encoding_profile",
 );
 
-function profileOptions(args: readonly string[], allowed: readonly string[]): Map<string, string> {
+function profileOptions(args: readonly string[], allowed: readonly string[], invalidMessage = "Invalid Encoding Profile options."): Map<string, string> {
   const options = new Map<string, string>();
   for (let index = 0; index < args.length;) {
     const name = args[index]!;
     if (!allowed.includes(name) || options.has(name)) {
-      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Encoding Profile options.", 2);
+      throw new CommandFailure("INVALID_ARGUMENTS", invalidMessage, 2);
     }
     if (name === "--acknowledge") {
       options.set(name, "true");
@@ -1079,7 +1087,7 @@ function profileOptions(args: readonly string[], allowed: readonly string[]): Ma
     }
     const value = args[index + 1];
     if (value === undefined || value.startsWith("--")) {
-      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Encoding Profile options.", 2);
+      throw new CommandFailure("INVALID_ARGUMENTS", invalidMessage, 2);
     }
     options.set(name, value);
     index += 2;
@@ -1487,6 +1495,29 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         emit(io.stdout, help(name));
       } else {
         emit(io.stdout, runEncodeCommand(name, rest, io));
+      }
+      return 0;
+    }
+    if (name === "archive-evidence") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+      } else {
+        const [id, ...args] = rest;
+        const options = profileOptions(args, ["--limit", "--cursor"], "Invalid archive evidence options.");
+        if (!id) throw new CommandFailure("INVALID_ARGUMENTS", "Archive ID is required.", 2);
+        const access = io.openAccess();
+        try {
+          emit(io.stdout, await createApplicationOperations(access).inspectArchiveEvidence(id, {
+            ...(options.has("--limit") ? { limit: Number(options.get("--limit")) } : {}),
+            ...(options.has("--cursor") ? { cursor: options.get("--cursor")! } : {}),
+          }));
+        } catch (error) {
+          if (error instanceof InvalidArchiveEvidenceInputError)
+            throw new CommandFailure("INVALID_ARGUMENTS", error.message, 2);
+          if (error instanceof RecordNotFoundError)
+            throw new CommandFailure("NOT_FOUND", "Original Disc Archive was not found.", 2);
+          throw new CommandFailure("INSPECTION_UNAVAILABLE", "Archive evidence is unavailable.", 1);
+        } finally { access.close(); }
       }
       return 0;
     }
