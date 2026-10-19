@@ -28,10 +28,10 @@ export interface ProvenDvdInitialArchiveBoundary {
     | CorrectedDvdArchiveBoundaryEvidence
     | NormalDvdArchiveBoundaryEvidence;
   initialCopy: CompletedDvdInitialCopy;
+  imageMtimeNs: string;
   metadataDecision: DvdFullExtentMetadataDecision | null;
 }
-// This produces publication prerequisites for marked jobs. Admission remains closed;
-// installing checkpoints and committing publication policy versions belong to #406.
+// This produces publication prerequisites for marked jobs. Admission remains closed.
 export async function runDvdInitialArchiveBoundaryForArchiveJob({
   authorizeBoundaryProbe,
   authorizeCopy,
@@ -133,6 +133,7 @@ export async function runDvdInitialArchiveBoundaryForArchiveJob({
     const f = boundary.boundaryFailure;
     return {
       initialCopy,
+      imageMtimeNs: before.mtimeNs.toString(),
       metadataDecision: null,
       boundaryEvidence: createCorrectedDvdArchiveBoundaryEvidence({
         reportedSizeBytes: sizeBytes,
@@ -186,5 +187,5 @@ export async function runDvdInitialArchiveBoundaryForArchiveJob({
     throw new Error("DVD full-extent metadata blocks publication", {
       cause: metadataDecision,
     });
-  return { initialCopy, boundaryEvidence, metadataDecision };
+  return { initialCopy, imageMtimeNs: before.mtimeNs.toString(), boundaryEvidence, metadataDecision };
 }
