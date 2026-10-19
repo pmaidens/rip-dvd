@@ -280,9 +280,7 @@ it("stops at the ISO descriptor work bound without scanning for a terminator", a
     image.write("CD001", lba * 2048 + 1);
     image[lba * 2048 + 6] = 1;
   }
-  expect((await validate(image)).blockers[0]?.reason).toBe(
-    "work_bound",
-  );
+  expect((await validate(image)).blockers[0]?.reason).toBe("work_bound");
 });
 it.each([
   ["endian disagreement", 16, 84, 63],
@@ -527,3 +525,187 @@ it("checks a clean Joliet peer and reconciles its DVD paths with ISO", async () 
   both32(image.subarray(17 * 2048), 80, 63);
   expect((await validate(image)).decision).toBe("blocked");
 });
+it.each([
+  [8192, 2],
+  [4096, 4],
+])(
+  "checks known allocation lengths and recorded blocks with an unresolved partition: info=%i blocks=%i",
+  async (informationBytes, recordedBlocks) => {
+    const { udfProfileImage, udfTag } = await import(
+      "./dvd-metadata-profile-fixtures.js"
+    );
+    const image = udfProfileImage();
+    for (const lba of [259, 275]) {
+      const b = image.subarray(lba * 2048, (lba + 1) * 2048);
+      b.writeUInt32LE(12, 264);
+      b.writeUInt32LE(2, 268);
+      b[446] = 1;
+      b[447] = 6;
+      b.writeUInt16LE(1, 448);
+      b.writeUInt16LE(1, 450);
+      udfTag(b, 6, lba, 436);
+    }
+    const fe = image.subarray(314 * 2048, 315 * 2048);
+    fe.fill(0, 176);
+    fe.writeUInt16LE(1, 34);
+    fe.writeBigUInt64LE(BigInt(informationBytes), 56);
+    fe.writeBigUInt64LE(BigInt(recordedBlocks), 64);
+    fe.writeUInt32LE(32, 172);
+    fe.writeUInt32LE(2048, 176);
+    fe.writeUInt32LE(110, 180);
+    fe.writeUInt32LE(2048, 192);
+    fe.writeUInt16LE(1, 200);
+    udfTag(fe, 261, 14, 192);
+    for (const lba of [402, 404])
+      image.writeUInt32BE(8 + informationBytes / 2048 - 1, lba * 2048 + 0xc);
+    const result = await validate(
+      image,
+      [257, 273, 410].map((startLba) => ({
+        startLba,
+        sectorCount: 1,
+        classification: "skipped_untested",
+      })),
+    );
+    expect(result.decision).toBe("blocked");
+    expect(result.blockers[0]?.message).toMatch(
+      /Allocation lengths|Recorded blocks/,
+    );
+  },
+);
+it("keeps a known menu VOB boundary when another directory block and control headers are unavailable", async () => {
+  const { isoRecord, both32, navPack } = await import(
+    "./dvd-metadata-profile-fixtures.js"
+  );
+  const image = isoProfileImage();
+  both32(image.subarray(21 * 2048), 68 + 10, 4096);
+  Buffer.concat([
+    isoRecord(32, 4096, "VTS_01_0.IFO;1"),
+    isoRecord(34, 4096, "VTS_01_0.BUP;1"),
+    isoRecord(40, 8192, "VTS_01_1.VOB;1"),
+    isoRecord(48, 2048, "VTS_01_0.VOB;1"),
+  ]).copy(image, 23 * 2048);
+  navPack(1).copy(image, 48 * 2048);
+  const result = await validate(
+    image,
+    [22, 32, 34].map((startLba) => ({
+      startLba,
+      sectorCount: 1,
+      classification: "skipped_untested",
+    })),
+  );
+  expect(result.decision).toBe("blocked");
+  expect(result.blockers[0]?.field).toContain("menu.NAV");
+});
+it.each(["ISO", "UDF"])(
+  "does not let a %s root gap hide required-file absence in a complete VIDEO_TS directory",
+  async (filesystem) => {
+    const { isoProfileImage, udfProfileImage, isoRecord, udfTag } =
+      await import("./dvd-metadata-profile-fixtures.js");
+    const image = filesystem === "ISO" ? isoProfileImage() : udfProfileImage();
+    let gap: number;
+    if (filesystem === "ISO") {
+      isoRecord(50, 4096, 0, true).copy(image, 16 * 2048 + 156);
+      Buffer.concat([
+        isoRecord(50, 4096, 0, true),
+        isoRecord(50, 4096, 1, true),
+        isoRecord(22, 2048, "VIDEO_TS", true),
+      ]).copy(image, 50 * 2048);
+      image.fill(0, 22 * 2048, 23 * 2048);
+      Buffer.concat([
+        isoRecord(22, 2048, 0, true),
+        isoRecord(50, 4096, 1, true),
+        isoRecord(30, 2048, "VIDEO_TS.IFO;1"),
+        isoRecord(32, 4096, "VTS_01_0.IFO;1"),
+        isoRecord(34, 4096, "VTS_01_0.BUP;1"),
+        isoRecord(40, 8192, "VTS_01_1.VOB;1"),
+      ]).copy(image, 22 * 2048);
+      gap = 51;
+    } else {
+      const root = image.subarray(301 * 2048, 302 * 2048);
+      root.writeBigUInt64LE(4096n, 56);
+      root.writeBigUInt64LE(2n, 64);
+      root.writeUInt32LE(4096, 176);
+      root.writeUInt32LE(20, 180);
+      udfTag(root, 261, 1, 168);
+      const originalRoot = image.subarray(302 * 2048, 303 * 2048);
+      let at = 0;
+      while (originalRoot.readUInt16LE(at) === 257) {
+        const length = Math.ceil((38 + originalRoot[at + 19]!) / 4) * 4;
+        const fid = Buffer.from(originalRoot.subarray(at, at + length));
+        udfTag(fid, 257, 20, length - 16);
+        fid.copy(image, 320 * 2048 + at);
+        at += length;
+      }
+      const originalVideo = Buffer.from(image.subarray(304 * 2048, 305 * 2048));
+      const records: Buffer[] = [];
+      at = 0;
+      while (originalVideo.readUInt16LE(at) === 257) {
+        const length = Math.ceil((38 + originalVideo[at + 19]!) / 4) * 4;
+        const fid = originalVideo.subarray(at, at + length);
+        const name = fid.toString("latin1", 39, 38 + fid[19]!);
+        if (name !== "VIDEO_TS.BUP") records.push(fid);
+        at += length;
+      }
+      const video = Buffer.concat(records);
+      image.fill(0, 304 * 2048, 305 * 2048);
+      video.copy(image, 304 * 2048);
+      const fe = image.subarray(303 * 2048, 304 * 2048);
+      fe.writeBigUInt64LE(BigInt(video.length), 56);
+      udfTag(fe, 261, 3, 168);
+      gap = 321;
+    }
+    const result = await validate(image, [
+      { startLba: gap, sectorCount: 1, classification: "skipped_untested" },
+    ]);
+    expect(result.decision).toBe("blocked");
+    expect(result.blockers[0]?.message).toContain("required IFO/BUP");
+  },
+);
+it.each([false, true])(
+  "compares IFO/BUP fields from complementary partial views, contradictory BUP=%s",
+  async (contradiction) => {
+    const { udfProfileImage, isoRecord, both32, udfTag } = await import(
+      "./dvd-metadata-profile-fixtures.js"
+    );
+    const image = udfProfileImage(true);
+    both32(image.subarray(21 * 2048), 68 + 10, 4096);
+    image.fill(0, 22 * 2048, 24 * 2048);
+    Buffer.concat([
+      isoRecord(22, 4096, 0, true),
+      isoRecord(21, 2048, 1, true),
+      isoRecord(400, 2048, "VIDEO_TS.IFO;1"),
+      isoRecord(402, 4096, "VTS_01_0.IFO;1"),
+      isoRecord(404, 4096, "VTS_01_0.BUP;1"),
+      isoRecord(410, 8192, "VTS_01_1.VOB;1"),
+    ]).copy(image, 22 * 2048);
+    const original = Buffer.from(image.subarray(304 * 2048, 305 * 2048));
+    const records: Buffer[] = [];
+    let at = 0;
+    while (original.readUInt16LE(at) === 257) {
+      const length = Math.ceil((38 + original[at + 19]!) / 4) * 4;
+      const fid = original.subarray(at, at + length);
+      if (fid.toString("latin1", 39, 38 + fid[19]!) !== "VIDEO_TS.IFO")
+        records.push(fid);
+      at += length;
+    }
+    image.fill(0, 304 * 2048, 305 * 2048);
+    Buffer.concat(records).copy(image, 304 * 2048);
+    const fe = image.subarray(303 * 2048, 304 * 2048);
+    fe.writeBigUInt64LE(4096n, 56);
+    fe.writeBigUInt64LE(2n, 64);
+    fe.writeUInt32LE(4096, 176);
+    udfTag(fe, 261, 3, 168);
+    if (contradiction) image.writeUInt16BE(2, 401 * 2048 + 0x3e);
+    const result = await validate(
+      image,
+      [23, 305].map((startLba) => ({
+        startLba,
+        sectorCount: 1,
+        classification: "skipped_untested",
+      })),
+    );
+    expect(result.decision).toBe(contradiction ? "blocked" : "publishable");
+    if (contradiction)
+      expect(result.blockers[0]?.field).toContain("titleSetCount");
+  },
+);

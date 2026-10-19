@@ -556,7 +556,7 @@ async function fileEntry(
   const allocations: Entry["allocations"] = [],
     mappings: FileMapping[] = [];
   let offsetKnown = true;
-  let known = true,
+  let lengthsKnown = true,
     total = 0,
     recorded = 0,
     firstStart: number | undefined,
@@ -621,10 +621,9 @@ async function fileEntry(
         total += a.bytes;
         recorded += Math.ceil(a.bytes / SECTOR);
       } else {
-        known = false;
+        lengthsKnown = false;
         offsetKnown = false;
       }
-      if (a.start === undefined) known = false;
       if (at === 0) firstStart = a.start;
       if (!directory && end !== undefined && a.start !== undefined)
         reader.check(
@@ -638,7 +637,7 @@ async function fileEntry(
           ? a.start + a.bytes
           : undefined;
     }
-    if (known) {
+    if (lengthsKnown) {
       if (info !== undefined)
         reader.check(
           total >= info &&
@@ -659,7 +658,7 @@ async function fileEntry(
         allocations.flatMap((a) => a.prerequisites),
       );
   } else {
-    known = false;
+    lengthsKnown = false;
     reader.dependent(`${name}.allocations`, [
       `${first.name}.icbFlags`,
       `${first.name}.allocationDescriptorLength`,
@@ -865,7 +864,10 @@ async function directory(
     view.prerequisites.push(...entry.prerequisites);
   }
   if (!video) {
-    if (videoIcb)
+    if (videoIcb) {
+      // A known child location starts an independent inventory branch.
+      view.complete = true;
+      view.prerequisites = [];
       await directory(
         reader,
         seq,
@@ -876,7 +878,7 @@ async function directory(
         true,
         visited,
       );
-    else if (complete) reader.fail(name, "Complete UDF root has no VIDEO_TS");
+    } else if (complete) reader.fail(name, "Complete UDF root has no VIDEO_TS");
     else reader.dependent(`${name}.VIDEO_TS`, view.prerequisites);
   }
 }

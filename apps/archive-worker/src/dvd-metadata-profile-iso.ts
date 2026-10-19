@@ -195,9 +195,12 @@ async function directory(
   }
   if (!complete) view.complete = false;
   if (!video) {
-    if (videoEntry)
+    if (videoEntry) {
+      // Root gaps do not weaken the independently located VIDEO_TS inventory.
+      view.complete = true;
+      view.prerequisites = [];
       await directory(reader, view, videoEntry, location, joliet, volume, true);
-    else if (complete)
+    } else if (complete)
       reader.fail(name, "Complete root directory has no VIDEO_TS");
     else reader.dependent(`${name}.VIDEO_TS`, view.prerequisites);
   }

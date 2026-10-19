@@ -44,6 +44,7 @@ export interface FileClaim {
 export interface FilesystemView {
   name: string;
   files: Map<string, FileClaim>;
+  // Completeness of the VIDEO_TS inventory once its location is known.
   complete: boolean;
   prerequisites: string[];
 }

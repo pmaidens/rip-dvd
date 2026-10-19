@@ -69,7 +69,7 @@ function domain(
     .sort((a, b) => a.path.localeCompare(b.path));
   let sectors = 0,
     end: number | undefined,
-    complete = view.complete,
+    complete = title ? view.complete : files.length > 0 || view.complete,
     offsetKnown = true;
   const mappings: Domain["mappings"] = [];
   let previousSuffix = 0;
@@ -332,8 +332,54 @@ async function nav(
     r.expect(r.u8("reserved", 1057), 0, "reserved");
   }
 }
+// Merge only known facts. Complete inventories have already checked peer absence.
+function knownInventory(reader: ProfileReader): FilesystemView {
+  const files = new Map<string, FileClaim>();
+  for (const view of reader.views)
+    for (const file of view.files.values()) {
+      const prior = files.get(file.path);
+      const mappings = [
+        ...fileMappings(prior ?? { path: file.path, prerequisites: [] }),
+        ...fileMappings(file),
+      ].sort((a, b) => a.offset - b.offset);
+      const merged: typeof mappings = [];
+      for (const mapping of mappings) {
+        const last = merged.at(-1);
+        if (
+          last &&
+          mapping.offset <= last.offset + last.bytes &&
+          mapping.start - last.start === mapping.offset - last.offset
+        )
+          last.bytes = Math.max(
+            last.bytes,
+            mapping.offset + mapping.bytes - last.offset,
+          );
+        else merged.push({ ...mapping });
+      }
+      files.set(file.path, {
+        path: file.path,
+        start: prior?.start ?? file.start,
+        bytes: prior?.bytes ?? file.bytes,
+        mappings: merged,
+        prerequisites: [...(prior?.prerequisites ?? []), ...file.prerequisites],
+      });
+    }
+  return {
+    name: "reconciled",
+    files,
+    complete: reader.views.some((v) => v.complete),
+    prerequisites: reader.views.flatMap((v) => v.prerequisites),
+  };
+}
 export async function inspectDvdProfile(reader: ProfileReader) {
   const inspected = new Map<number, { domain: string; offset: number }>();
+  const inventory = knownInventory(reader);
+  const knownTitleNumbers = [...inventory.files.keys()].flatMap((path) => {
+    const match = /^VIDEO_TS\/VTS_(\d\d)_/.exec(path);
+    return match ? [Number(match[1])] : [];
+  });
+  const knownMaps = new Map<string, MapClaim>();
+  const navJobs: { view: string; domain: Domain; mapKey: string }[] = [];
   for (const view of reader.views) {
     reader.currentView = view.name;
     const sets = new Set<string>(["VIDEO_TS/VIDEO_TS"]);
@@ -348,8 +394,8 @@ export async function inspectDvdProfile(reader: ProfileReader) {
     for (const prefix of sets) {
       const manager = prefix === "VIDEO_TS/VIDEO_TS",
         control = manager ? prefix : `${prefix}_0`;
-      const menu = domain(reader, view, control, false),
-        title = manager ? undefined : domain(reader, view, prefix, true);
+      const menu = domain(reader, inventory, control, false),
+        title = manager ? undefined : domain(reader, inventory, prefix, true);
       const pair = [
         view.files.get(`${control}.IFO`),
         view.files.get(`${control}.BUP`),
@@ -360,15 +406,10 @@ export async function inspectDvdProfile(reader: ProfileReader) {
           control,
           "Complete inventory is missing required IFO/BUP pair",
         );
-      const headerValues: (
-        | Record<string, number | string | undefined>
-        | undefined
-      )[] = [];
       const menuMaps: (MapClaim | undefined)[] = [],
         titleMaps: (MapClaim | undefined)[] = [];
       for (const file of pair) {
         if (!file || file.start === undefined) {
-          headerValues.push(undefined);
           menuMaps.push(undefined);
           titleMaps.push(undefined);
           reader.dependent(
@@ -388,7 +429,6 @@ export async function inspectDvdProfile(reader: ProfileReader) {
         }
         const r = await fileRecord(reader, file, 0, SECTOR, file.path);
         if (!r) {
-          headerValues.push(undefined);
           menuMaps.push(undefined);
           titleMaps.push(undefined);
           continue;
@@ -406,6 +446,10 @@ export async function inspectDvdProfile(reader: ProfileReader) {
             : r.be32("titleMapPointer", 0xe4),
           titleSetCount: manager ? r.be16("titleSetCount", 0x3e) : undefined,
         };
+        for (const [key, value] of Object.entries(values))
+          reader.mirror(`${control}.IFO/BUP.${key}`, value, [
+            `${file.path}.${key}`,
+          ]);
         r.expect(
           values.identifier,
           manager ? "DVDVIDEO-VMG" : "DVDVIDEO-VTS",
@@ -443,7 +487,7 @@ export async function inspectDvdProfile(reader: ProfileReader) {
           reader.check(
             values.titleSetCount >= 1 &&
               values.titleSetCount <= 99 &&
-              titleNumbers.every((n) => n <= values.titleSetCount!),
+              knownTitleNumbers.every((n) => n <= values.titleSetCount!),
             file.path,
             "Invalid VMG title-set count",
           );
@@ -455,14 +499,14 @@ export async function inspectDvdProfile(reader: ProfileReader) {
               "VMG count disagrees with complete title-set inventory",
             );
         }
-        const base = pair[0]?.start;
+        const base = inventory.files.get(`${control}.IFO`)?.start;
+        const knownPair = [
+          inventory.files.get(`${control}.IFO`),
+          inventory.files.get(`${control}.BUP`),
+        ].filter((f): f is FileClaim => !!f);
         const related = manager
-          ? pair.filter((f): f is FileClaim => !!f).concat(menu.files)
-          : [
-              ...pair.filter((f): f is FileClaim => !!f),
-              ...menu.files,
-              ...title!.files,
-            ];
+          ? knownPair.concat(menu.files)
+          : [...knownPair, ...menu.files, ...title!.files];
         if (values.domainLastSector !== undefined && base !== undefined) {
           const end = base + (values.domainLastSector + 1) * SECTOR;
           reader.extent(base, end - base, `${file.path}.domainEnd`);
@@ -474,7 +518,7 @@ export async function inspectDvdProfile(reader: ProfileReader) {
                 "Domain end does not contain related file",
               );
           if (
-            view.complete &&
+            inventory.complete &&
             related.every((f) => f.start !== undefined && f.bytes !== undefined)
           )
             reader.check(
@@ -528,30 +572,41 @@ export async function inspectDvdProfile(reader: ProfileReader) {
             ? await map(reader, file, values.titleMapPointer, title, "titleMap")
             : undefined,
         );
-        headerValues.push(values);
       }
-      if (headerValues[0] && headerValues[1])
-        for (const key of Object.keys(headerValues[0]))
-          if (
-            headerValues[0][key] !== undefined ||
-            headerValues[1][key] !== undefined
-          )
-            reader.compare(
-              `${control}.IFO/BUP.${key}`,
-              headerValues[0][key],
-              headerValues[1][key],
-              [`${control}.IFO.${key}`, `${control}.BUP.${key}`],
-            );
       compareMaps(reader, menuMaps[0], menuMaps[1]);
       compareMaps(reader, titleMaps[0], titleMaps[1]);
-      await nav(reader, menu, [mergedMap(menuMaps[0], menuMaps[1])], inspected);
-      if (title)
-        await nav(
-          reader,
-          title,
-          [mergedMap(titleMaps[0], titleMaps[1])],
-          inspected,
-        );
+      for (const [kind, domain, maps] of [
+        ["menu", menu, menuMaps],
+        ["title", title, titleMaps],
+      ] as const) {
+        if (!domain) continue;
+        const key = `${control}.${kind}`;
+        const current = mergedMap(maps[0], maps[1]);
+        const prior = knownMaps.get(key);
+        compareMaps(reader, prior, current);
+        const combined = mergedMap(prior, current);
+        if (combined) {
+          let previous: [number, number] | undefined;
+          for (const slot of [...combined.entries].sort(
+            (a, b) => a[0] - b[0],
+          )) {
+            if (previous)
+              reader.check(
+                slot[1] - previous[1] >= slot[0] - previous[0],
+                key,
+                "Reconciled map entries cannot be strictly increasing across source gaps",
+              );
+            previous = slot;
+          }
+          knownMaps.set(key, combined);
+        }
+        navJobs.push({ view: view.name, domain, mapKey: key });
+      }
     }
+  }
+  // Maps discovered through different partial views still constrain the same NAV.
+  for (const job of navJobs) {
+    reader.currentView = job.view;
+    await nav(reader, job.domain, [knownMaps.get(job.mapKey)], inspected);
   }
 }
