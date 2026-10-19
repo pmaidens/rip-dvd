@@ -18,7 +18,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/file.h>
-#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -84,70 +83,38 @@ static int descriptor_holds_exclusive_flock(int descriptor) {
         return 0;
     }
 
-    char descriptor_path[64];
-    int descriptor_path_length = snprintf(
-        descriptor_path, sizeof(descriptor_path),
-        "/proc/self/fd/%d", descriptor);
-    if (descriptor_path_length < 0 ||
-        (size_t)descriptor_path_length >= sizeof(descriptor_path)) {
+    char descriptor_info_path[64];
+    int descriptor_info_path_length = snprintf(
+        descriptor_info_path, sizeof(descriptor_info_path),
+        "/proc/self/fdinfo/%d", descriptor);
+    if (descriptor_info_path_length < 0 ||
+        (size_t)descriptor_info_path_length >= sizeof(descriptor_info_path)) {
         return 0;
     }
-    char lock_path[PATH_MAX];
-    ssize_t lock_path_length = readlink(
-        descriptor_path, lock_path, sizeof(lock_path) - 1);
-    if (lock_path_length <= 0 ||
-        (size_t)lock_path_length >= sizeof(lock_path) - 1) {
+    FILE *descriptor_info = fopen(descriptor_info_path, "r");
+    if (descriptor_info == NULL) {
         return 0;
     }
-    lock_path[lock_path_length] = '\0';
-
-    /* The child closes the inherited description before reopening the path.
-       Its shared probe must already be blocked before the parent performs an
-       idempotent exclusive check, so an unlocked fd cannot self-authorize. */
-    pid_t probe_process = fork();
-    if (probe_process < 0) {
+    int held_exclusive_flocks = 0;
+    char line[512];
+    while (fgets(line, sizeof(line), descriptor_info) != NULL) {
+        unsigned int lock_id;
+        char lock_type[16];
+        char advisory[16];
+        char access[16];
+        if (sscanf(line, "lock: %u: %15s %15s %15s",
+                   &lock_id, lock_type, advisory, access) == 4 &&
+            strcmp(lock_type, "FLOCK") == 0 &&
+            strcmp(advisory, "ADVISORY") == 0 &&
+            strcmp(access, "WRITE") == 0) {
+            held_exclusive_flocks += 1;
+        }
+    }
+    int read_failed = ferror(descriptor_info);
+    if (fclose(descriptor_info) != 0) {
         return 0;
     }
-    if (probe_process == 0) {
-        if (close(descriptor) != 0) {
-            _exit(1);
-        }
-        int probe_descriptor = open(
-            lock_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-        if (probe_descriptor < 0) {
-            _exit(1);
-        }
-        struct stat probe_stat;
-        if (fstat(probe_descriptor, &probe_stat) != 0 ||
-            probe_stat.st_dev != descriptor_stat.st_dev ||
-            probe_stat.st_ino != descriptor_stat.st_ino) {
-            close(probe_descriptor);
-            _exit(1);
-        }
-        errno = 0;
-        int probe_status = flock(probe_descriptor, LOCK_SH | LOCK_NB);
-        int probe_errno = errno;
-        if (probe_status == 0) {
-            flock(probe_descriptor, LOCK_UN);
-        }
-        close(probe_descriptor);
-        _exit(probe_status != 0 &&
-                      (probe_errno == EWOULDBLOCK || probe_errno == EAGAIN)
-                  ? 0
-                  : 1);
-    }
-
-    int probe_status;
-    while (waitpid(probe_process, &probe_status, 0) < 0) {
-        if (errno != EINTR) {
-            return 0;
-        }
-    }
-    if (!WIFEXITED(probe_status) || WEXITSTATUS(probe_status) != 0) {
-        return 0;
-    }
-
-    return flock(descriptor, LOCK_EX | LOCK_NB) == 0;
+    return !read_failed && held_exclusive_flocks == 1;
 }
 
 enum backend_read_status {

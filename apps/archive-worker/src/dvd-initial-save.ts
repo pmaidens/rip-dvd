@@ -187,7 +187,7 @@ async function saveWithExclusionHeld(options: SaveOptions & { proven: ProvenDvdI
 export async function saveDvdInitialArchiveForArchiveJob(options: SaveOptions & { proven: ProvenDvdInitialArchiveBoundary }) {
   return withOwnedClaim(
     options,
-    null,
+    options.proven.initialCopy.imagePath,
     owned => saveWithExclusionHeld({ ...owned, proven: options.proven }),
   );
 }
@@ -196,7 +196,7 @@ export async function reconcileDvdInitialArchiveForArchiveJob(options: SaveOptio
   const identity = publicationOptions(options);
   const imagePath = options.access.catalog.listOriginalDiscArchives({
     ids: [identity.originalDiscArchiveId],
-  })[0]?.archivePath ?? null;
+  })[0]?.archivePath ?? options.writer?.outputPath ?? null;
   return withOwnedClaim(options, imagePath, async owned => commitSave(owned,
     await reconcileDvdInitialArchivePublication(publicationOptions(owned)),
   ));
@@ -212,7 +212,7 @@ export async function runDvdInitialArchiveJob(options: SaveOptions & {
     : options.boundary.signal;
   return withOwnedClaim(
     { ...options, signal },
-    null,
+    options.boundary.outputPath,
     async owned => {
       const identity = publicationOptions(owned);
       await identity.authorizeMutation();

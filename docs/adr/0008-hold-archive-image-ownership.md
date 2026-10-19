@@ -16,8 +16,9 @@ owner-only identity file in the Originals Library binds the ownership
 directory's device and inode, so replacing the directory cannot create a
 second lock namespace. Every reader, writer, and inspection must prove that
 the namespace, named lock, and held descriptor still match those identity
-records. An independent conflicting-lock probe also proves the expected
-shared or exclusive `flock` remains held. Missing, unlocked, replaced, unsafe,
+records. Linux descriptor information proves that the specific held descriptor
+still owns the expected shared or exclusive `flock`; a conflict caused by a
+different owner is not accepted as proof. Missing, unlocked, replaced, unsafe,
 or unverifiable lock state fails closed as `CONSISTENCY_FAULT`.
 
 The process that performs image I/O inherits the locked descriptor. An initial
@@ -49,9 +50,11 @@ image-reading implementations.
 The only declared production storage setup is a local Linux ext filesystem,
 which is one filesystem class recognized by the `linux-rwf-atomic-v1`
 provider from ADR 0007. Ownership classifies the actual archive image when it
-exists, or the Originals Library root before a new image exists, and rechecks
-that live classification throughout every interval. A network or unknown
-filesystem mounted below a local library root therefore still fails closed.
+exists, the nearest existing ancestor of a known staging or destination path,
+and the Originals Library root that stores the ownership namespace. It rechecks
+those live classifications throughout every interval. A network or unknown
+filesystem used for staging or mounted below a local library root therefore
+still fails closed.
 The separate recovery preflight remains responsible for proving atomic
 mutation and durability. XFS, Btrfs, other production platforms, and network
 filesystems remain unsupported by this ownership contract until their process
@@ -61,9 +64,9 @@ environment so platform-neutral unit and adapter parity tests can exercise the
 contract.
 
 The native helper accepts new-format initial copying only through the
-`initial-copy-owned-v1` operation. An independent Linux lock probe must first
-prove that the inherited descriptor's file is already exclusively locked; an
-idempotent check then proves that the inherited open-file description owns that
-lock. An unlocked descriptor is rejected rather than locked by the helper. The
-prior helper operation is rejected. This keeps legacy or unowned helper entry
-points from writing a new-format archive image.
+`initial-copy-owned-v1` operation. Linux descriptor information must prove that
+the inherited open-file description already owns an exclusive `flock`. The
+helper never acquires or reacquires that lock. An unlocked descriptor is
+rejected, even when another descriptor holds a conflicting lock. The prior
+helper operation is rejected. This keeps legacy or unowned helper entry points
+from writing a new-format archive image.

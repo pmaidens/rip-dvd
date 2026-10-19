@@ -17,7 +17,7 @@ import {
   rename,
   unlink,
 } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 import {
   inspectLinuxStorage,
@@ -204,28 +204,35 @@ function ownershipStorageIsSupported(
       inspection.filesystemType === "test-in-process");
 }
 
-function requireContainedStoragePath(root: string, imagePath: string | null): string {
+function resolveStorageProbePath(root: string, imagePath: string | null): string {
   if (imagePath === null) return root;
-  let probePath: string;
-  try {
-    probePath = realpathSync(imagePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  if (!isAbsolute(imagePath)) {
+    throw new Error("Archive image path is not absolute");
+  }
+  let probePath = imagePath;
+  while (true) {
     try {
-      probePath = realpathSync(dirname(imagePath));
-    } catch (parentError) {
-      if ((parentError as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw parentError;
-      }
-      probePath = root;
+      return realpathSync(probePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    const parent = dirname(probePath);
+    if (parent === probePath) {
+      throw new Error("Archive image storage is unavailable");
+    }
+    probePath = parent;
   }
-  const relation = relative(root, probePath);
-  if (relation === ".." || relation.startsWith(`..${sep}`) ||
-    isAbsolute(relation)) {
-    throw new Error("Archive image path is outside the Originals Library");
-  }
-  return probePath;
+}
+
+function ownershipStoragePathsAreSupported(
+  root: string,
+  imagePath: string | null,
+  inspectStorage: (path: string) => LinuxStorageInspection,
+): boolean {
+  const paths = new Set([root, resolveStorageProbePath(root, imagePath)]);
+  return [...paths].every((path) =>
+    ownershipStorageIsSupported(inspectStorage(path))
+  );
 }
 
 async function pathsFor(
@@ -242,9 +249,8 @@ async function pathsFor(
     if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
       throw new Error("Originals Library root is unsafe");
     }
-    const storagePath = requireContainedStoragePath(root, imagePath);
-    if (!ownershipStorageIsSupported(inspectStorage(storagePath))) {
-      throw new Error("Originals Library storage is unsupported");
+    if (!ownershipStoragePathsAreSupported(root, imagePath, inspectStorage)) {
+      throw new Error("Archive image storage is unsupported");
     }
   } catch (cause) {
     throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause });
@@ -296,9 +302,8 @@ function pathsForSync(
     if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
       throw new Error("Originals Library root is unsafe");
     }
-    const storagePath = requireContainedStoragePath(root, imagePath);
-    if (!ownershipStorageIsSupported(inspectStorage(storagePath))) {
-      throw new Error("Originals Library storage is unsupported");
+    if (!ownershipStoragePathsAreSupported(root, imagePath, inspectStorage)) {
+      throw new Error("Archive image storage is unsupported");
     }
     const directory = join(root, ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME);
     const namespaceIdentity = join(root, OWNERSHIP_NAMESPACE_IDENTITY_NAME);
@@ -479,42 +484,23 @@ function createNodeLockBackend(
         if (signal.aborted) abort();
       });
     },
-    assertHeld(descriptor, lockPath, mode) {
-      const probe = openLock(lockPath, false);
-      if (probe === null) {
-        throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
-      }
+    assertHeld(descriptor, _lockPath, mode) {
       try {
-        const heldIdentity = assertLockIdentity(descriptor, lockPath);
-        const probeIdentity = assertLockIdentity(probe.descriptor, lockPath);
-        if (!sameLockIdentity(heldIdentity, probeIdentity)) {
-          throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
-        }
-        const result = spawnSync(
-          "flock",
-          [
-            mode === "exclusive" ? "--shared" : "--exclusive",
-            "--nonblock",
-            "--conflict-exit-code",
-            String(FLOCK_CONFLICT_EXIT_CODE),
-            "3",
-          ],
-          {
-            shell: false,
-            stdio: ["ignore", "ignore", "ignore", probe.descriptor],
-            timeout: ACQUISITION_TIMEOUT_MS,
-          },
+        const evidence = readFileSync(
+          `/proc/self/fdinfo/${descriptor}`,
+          "utf8",
         );
-        if (
-          result.error !== undefined ||
-          result.status !== FLOCK_CONFLICT_EXIT_CODE
-        ) {
-          throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT", {
-            cause: result.error,
-          });
+        const heldModes = [...evidence.matchAll(
+          /^lock:\s+\d+:\s+FLOCK\s+ADVISORY\s+(READ|WRITE)\b/gm,
+        )].map((match) => match[1]);
+        const expected = mode === "exclusive" ? "WRITE" : "READ";
+        if (heldModes.length !== 1 || heldModes[0] !== expected) {
+          throw new Error("Descriptor does not hold the expected flock");
         }
-      } finally {
-        closeSync(probe.descriptor);
+      } catch (cause) {
+        throw cause instanceof ArchiveImageOwnershipError
+          ? cause
+          : new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause });
       }
     },
     inspect(descriptor) {
@@ -980,16 +966,20 @@ export function createArchiveImageOwnership({
         mode,
         request.signal,
       );
-      const acquiredIdentity = assertLockIdentity(descriptor, paths.lock);
-      if (
-        !sameLockIdentity(acquiredIdentity, lockIdentity) ||
-        !ownershipStorageIsSupported(inspectStorage(
-          requireContainedStoragePath(paths.root, request.imagePath),
-        ))
-      ) {
-        throw failOwnership(new ArchiveImageOwnershipError(
-          "CONSISTENCY_FAULT",
-        ));
+      try {
+        const acquiredIdentity = assertLockIdentity(descriptor, paths.lock);
+        if (
+          !sameLockIdentity(acquiredIdentity, lockIdentity) ||
+          !ownershipStoragePathsAreSupported(
+            paths.root,
+            request.imagePath,
+            inspectStorage,
+          )
+        ) {
+          throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
+        }
+      } catch (cause) {
+        throw failOwnership(cause);
       }
       backend.assertHeld(descriptor, paths.lock, mode);
       const existingClaim = readClaimSync(paths.claim, request.archiveId);
@@ -1042,9 +1032,11 @@ export function createArchiveImageOwnership({
       const assertOwned = () => {
         try {
           const currentIdentity = assertLockIdentity(descriptor, paths.lock);
-          if (!ownershipStorageIsSupported(inspectStorage(
-            requireContainedStoragePath(paths.root, request.imagePath),
-          ))) {
+          if (!ownershipStoragePathsAreSupported(
+            paths.root,
+            request.imagePath,
+            inspectStorage,
+          )) {
             throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
           }
           assertNamespaceIdentity(paths);

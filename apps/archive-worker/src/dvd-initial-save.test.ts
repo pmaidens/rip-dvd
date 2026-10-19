@@ -1,10 +1,11 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { ARCHIVE_JOB_LEASE_DURATION_MS, createDataAccess, type RunningArchiveJob } from "@rip-dvd/data-access";
 import { beginSettledDiscInspectionForTest } from "@rip-dvd/data-access/test-support";
+import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { runDvdInitialArchiveBoundaryForArchiveJob } from "./dvd-initial-boundary.js";
 import { isoProfileImage } from "./dvd-metadata-profile-fixtures.js";
 import { createInProcessDvdRescueWorkspaceLock } from "./dvd-rescue-workspace-lock.js";
@@ -129,6 +130,29 @@ it.each([false, true])("saves the initial image, full evidence, job, request and
     expect((await reconcileDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion })).originalDiscArchiveId).toBe(id);
     expect(f.access.catalog.listOriginalDiscArchives({})).toHaveLength(1);
   } finally { f.access.close(); }
+});
+
+it("fails closed when the staged image is on unsupported storage", async () => {
+  const f = await jobFixture();
+  const stagedImagePath = await realpath(f.proven.initialCopy.imagePath);
+  const archiveImageOwnership = createArchiveImageOwnership({
+    inspectStorage: (path) => path === stagedImagePath
+      ? { filesystemType: "synthetic-network", storageClass: "network" }
+      : { filesystemType: "test-in-process", storageClass: "local" },
+  });
+  try {
+    await expect(saveDvdInitialArchiveForArchiveJob({
+      access: f.access,
+      archiveImageOwnership,
+      claim: f.claim,
+      originalsLibraryPath: f.identity.originalsLibraryPath,
+      exclusion: f.exclusion,
+      proven: f.proven,
+    })).rejects.toMatchObject({ code: "DVD_INITIAL_SAVE_CONSISTENCY_FAULT" });
+    expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
+  } finally {
+    f.access.close();
+  }
 });
 
 it.each(["after:intent", "after:image", "after:manifest", "after:link", "before:pointer", "after:pointer", "before:database", "after:database", "before:cleanup", "after:cleanup"] as const)(

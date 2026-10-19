@@ -1192,6 +1192,59 @@ if (unlockedInitialCopy.status !== 1 || existsSync(unlockedInitialCopyPath)) {
   throw new Error("unlocked initial-copy helper operation was accepted");
 }
 
+const maskedInitialCopyPath = prepareOutput(
+  "/tmp/rip-dvd-reader-masked-initial-copy.img",
+);
+const maskedOwnershipPath = prepareOutput(
+  "/tmp/rip-dvd-reader-masked-archive-ownership.lock",
+);
+writeFileSync(maskedOwnershipPath, "", { mode: 0o600 });
+const maskedOwnershipDescriptor = openSync(
+  maskedOwnershipPath,
+  constants.O_RDWR | constants.O_NOFOLLOW,
+);
+const rivalOwnershipDescriptor = openSync(
+  maskedOwnershipPath,
+  constants.O_RDWR | constants.O_NOFOLLOW,
+);
+const rivalOwnershipLock = spawnSync(
+  "flock",
+  ["--exclusive", "3"],
+  { stdio: ["ignore", "ignore", "pipe", rivalOwnershipDescriptor] },
+);
+if (rivalOwnershipLock.status !== 0) {
+  closeSync(maskedOwnershipDescriptor);
+  closeSync(rivalOwnershipDescriptor);
+  throw new Error("masked ownership test could not acquire rival ownership");
+}
+const maskedInitialCopy = spawnSync(
+  executable,
+  [
+    "initial-copy-owned-v1",
+    sourcePath,
+    maskedInitialCopyPath,
+    String(content.byteLength),
+  ],
+  {
+    stdio: [
+      "ignore",
+      "ignore",
+      "pipe",
+      "ignore",
+      "ignore",
+      "ignore",
+      "ignore",
+      "ignore",
+      maskedOwnershipDescriptor,
+    ],
+  },
+);
+closeSync(maskedOwnershipDescriptor);
+closeSync(rivalOwnershipDescriptor);
+if (maskedInitialCopy.status !== 1 || existsSync(maskedInitialCopyPath)) {
+  throw new Error("a rival descriptor was accepted as initial-copy ownership");
+}
+
 const ownedInitialCopyPath = prepareOutput(
   "/tmp/rip-dvd-reader-owned-initial-copy.img",
 );

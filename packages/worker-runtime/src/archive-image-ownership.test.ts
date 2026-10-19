@@ -154,11 +154,21 @@ describe("archive image ownership", () => {
     expect(inspectedPaths).toContain(realpathSync(originalsLibraryPath));
   });
 
-  it("rejects an archive image outside the library root", async () => {
+  it("classifies an archive image outside the library root", async () => {
     const originalsLibraryPath = root();
     const imagePath = join(root(), "archive.iso");
     writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
-    const ownership = createArchiveImageOwnership();
+    const inspectedPaths: string[] = [];
+    const ownership = createArchiveImageOwnership({
+      inspectStorage: (path) => {
+        inspectedPaths.push(path);
+        const isImage = path === realpathSync(imagePath);
+        return {
+          filesystemType: isImage ? "synthetic-network" : "test-in-process",
+          storageClass: isImage ? "network" : "local",
+        };
+      },
+    });
 
     await expect(ownership.withConsistentRead({
       archiveId: "synthetic-archive",
@@ -167,6 +177,7 @@ describe("archive image ownership", () => {
       signal: new AbortController().signal,
       async task() {},
     })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+    expect(inspectedPaths).toContain(realpathSync(imagePath));
   });
 
   it("fails closed when local storage changes during an interval", async () => {
@@ -190,6 +201,26 @@ describe("archive image ownership", () => {
         storageClass = "network";
         assertOwned();
       },
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+  });
+
+  it("normalizes a post-acquisition storage inspection failure", async () => {
+    let inspections = 0;
+    const ownership = createArchiveImageOwnership({
+      inspectStorage: () => {
+        inspections += 1;
+        if (inspections === 2) throw new Error("synthetic storage failure");
+        return { filesystemType: "test-in-process", storageClass: "local" };
+      },
+    });
+    const originalsLibraryPath = root();
+
+    await expect(ownership.withConsistentRead({
+      archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {},
     })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
   });
 

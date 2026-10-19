@@ -1,9 +1,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import {
+  closeSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -299,7 +301,7 @@ it.runIf(processStorageSupported)(
 );
 
 it.runIf(processStorageSupported)(
-  "fails closed when the held shared flock is explicitly released",
+  "does not mistake a competing shared flock for the released reader's lock",
   async () => {
     const originalsLibraryPath = mkdtempSync(
       join(tmpdir(), "rip-dvd-image-ownership-process-"),
@@ -321,7 +323,56 @@ it.runIf(processStorageSupported)(
           stdio: ["ignore", "ignore", "ignore", descriptor],
         });
         expect(unlocked.status).toBe(0);
-        assertOwned();
+        const rival = openSync(lockPath(originalsLibraryPath), "r+");
+        try {
+          const locked = spawnSync("flock", ["--shared", "--nonblock", "3"], {
+            stdio: ["ignore", "ignore", "ignore", rival],
+          });
+          expect(locked.status).toBe(0);
+          assertOwned();
+        } finally {
+          closeSync(rival);
+        }
+      },
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+  },
+);
+
+it.runIf(processStorageSupported)(
+  "does not mistake a competing exclusive flock for the released writer's lock",
+  async () => {
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-image-ownership-process-"),
+    );
+    roots.push(originalsLibraryPath);
+    const imagePath = join(originalsLibraryPath, "synthetic-archive.iso");
+    writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
+    const ownership = createArchiveImageOwnership({
+      ownershipCheckIntervalMs: 60_000,
+    });
+
+    await expect(ownership.withWriter({
+      archiveId: "unlocked-writer-archive",
+      imagePath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task({ descriptor, assertOwned }) {
+        const unlocked = spawnSync("flock", ["--unlock", "3"], {
+          stdio: ["ignore", "ignore", "ignore", descriptor],
+        });
+        expect(unlocked.status).toBe(0);
+        const rival = openSync(lockPath(originalsLibraryPath), "r+");
+        try {
+          const locked = spawnSync(
+            "flock",
+            ["--exclusive", "--nonblock", "3"],
+            { stdio: ["ignore", "ignore", "ignore", rival] },
+          );
+          expect(locked.status).toBe(0);
+          assertOwned();
+        } finally {
+          closeSync(rival);
+        }
       },
     })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
   },
