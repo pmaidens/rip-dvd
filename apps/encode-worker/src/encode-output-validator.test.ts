@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { createNodeDvdSubtitleScanner } from "./dvd-subtitle-scanner.js";
 import {
   createNodeEncodeOutputValidator,
   type MediaToolRunRequest,
@@ -467,7 +468,75 @@ describe("encode output validation", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("rejects a subtitle stream without a language tag", async () => {
+  it.each([
+    { name: "absent tags", tags: undefined, title: null },
+    { name: "empty tags", tags: {}, title: null },
+    { name: "title only", tags: { title: "Commentary" }, title: "Commentary" },
+    { name: "explicit und", tags: { language: "und" }, title: null },
+  ])("matches an unspecified scanned language with $name", async ({ tags, title }) => {
+    const scanner = createNodeDvdSubtitleScanner({
+      runCommand: async () => ({
+        stdout: `JSON Title Set: ${JSON.stringify({
+          TitleList: [{
+            Index: 4,
+            SubtitleList: [
+              {
+                TrackNumber: 1,
+                SourceName: "VOBSUB",
+                Format: "bitmap",
+                LanguageCode: "und",
+                ...(title ? { Name: title } : {}),
+              },
+              { TrackNumber: 2, SourceName: "CC608", Format: "text", LanguageCode: "eng" },
+            ],
+          }],
+        })}`,
+      }),
+    });
+    const signal = new AbortController().signal;
+    const expectedVobSubStreams = await scanner.scan("/source.iso", 4, signal);
+    expect(expectedVobSubStreams).toEqual([{ languageCode: "und", title }]);
+    const runMediaTool = createMediaToolRunner({
+      subtitleStreams: [
+        {
+          codec_name: "dvd_subtitle",
+          disposition: { default: 0, forced: 0 },
+          index: 2,
+          tags,
+        },
+        {
+          codec_name: "ass",
+          disposition: { default: 0, forced: 0 },
+          index: 3,
+          tags: { language: "eng" },
+        },
+      ],
+    });
+    const repairer = {
+      removeEmptyVobSubStreams: vi.fn(async () => {
+        throw new Error("Unexpected repair");
+      }),
+    };
+    const validator = createNodeEncodeOutputValidator({ repairer, runMediaTool });
+
+    await expect(validator.prepareAndValidate("/media/subtitled.mkv", signal, {
+      expectedDurationSeconds: 8_078,
+      expectedVobSubStreams,
+    })).resolves.toBeUndefined();
+
+    expect(repairer.removeEmptyVobSubStreams).not.toHaveBeenCalled();
+    expect(runMediaTool).toHaveBeenCalledWith(expect.objectContaining({
+      arguments_: expect.arrayContaining(["-count_packets"]),
+    }));
+    expect(runMediaTool).toHaveBeenCalledWith(expect.objectContaining({ executable: "ffmpeg" }));
+  });
+
+  it.each([
+    { languageCode: "eng", tags: undefined },
+    { languageCode: "fra", tags: {} },
+    { languageCode: "eng", tags: { language: "und" } },
+    { languageCode: "und", tags: { language: "eng" } },
+  ])("rejects a source language mismatch for $languageCode against $tags", async ({ languageCode, tags }) => {
     const validator = createNodeEncodeOutputValidator({
       runMediaTool: createMediaToolRunner({
         subtitleStreams: [
@@ -475,14 +544,39 @@ describe("encode output validation", () => {
             codec_name: "dvd_subtitle",
             disposition: { default: 0, forced: 0 },
             index: 2,
-            tags: {},
+            tags,
           },
         ],
       }),
     });
 
     await expect(
-      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal),
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal, {
+        expectedVobSubStreams: [{ languageCode }],
+      }),
+    ).rejects.toThrow("source VobSub stream 1 has language");
+  });
+
+  it.each([
+    null, [], "invalid", 7,
+    ...[null, "", " ", "unknown", "xx", 7, [], {}].map((language) => ({ language })),
+    { title: null }, { title: "" }, { title: "unknown" },
+  ])("rejects malformed subtitle tags %j even for an unspecified source language", async (tags) => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [{
+          codec_name: "dvd_subtitle",
+          disposition: { default: 0, forced: 0 },
+          index: 2,
+          tags,
+        }],
+      }),
+    });
+
+    await expect(
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal, {
+        expectedVobSubStreams: [{ languageCode: "und" }],
+      }),
     ).rejects.toThrow(
       "Encode output validation failed: subtitle stream metadata is incomplete",
     );

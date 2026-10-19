@@ -75,10 +75,14 @@ interface ProbeFormat {
   duration?: unknown;
 }
 
-interface CompleteSubtitleStream extends ProbeStream {
+interface SubtitleStreamMetadata extends ProbeStream {
   codec_name: string;
   disposition: Record<string, unknown>;
   index: number;
+  tags?: Record<string, unknown>;
+}
+
+interface CompleteSubtitleStream extends SubtitleStreamMetadata {
   tags: Record<string, unknown>;
 }
 
@@ -227,9 +231,9 @@ function isProbeFlag(value: unknown): boolean {
   return value === 0 || value === 1;
 }
 
-function hasCompleteSubtitleMetadata(
+function hasValidSubtitleMetadata(
   value: unknown,
-): value is CompleteSubtitleStream {
+): value is SubtitleStreamMetadata {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }
@@ -253,7 +257,8 @@ function hasCompleteSubtitleMetadata(
   return (
     isProbeFlag(disposition.default) &&
     isProbeFlag(disposition.forced) &&
-    normalizedLanguageName(tags.language) !== null &&
+    (tags.language === undefined ||
+      normalizedLanguageName(tags.language) !== null) &&
     optionalIdentifiedMetadata(tags.title)
   );
 }
@@ -388,14 +393,22 @@ function validatedSubtitleStreams(result: ProbeResult): CompleteSubtitleStream[]
   const streams: CompleteSubtitleStream[] = [];
   const indexes = new Set<number>();
   for (const stream of result.streams) {
-    if (!hasCompleteSubtitleMetadata(stream) || indexes.has(stream.index)) {
+    if (!hasValidSubtitleMetadata(stream) || indexes.has(stream.index)) {
       throw validationError(
         "subtitle_streams",
         "subtitle stream metadata is incomplete",
       );
     }
     indexes.add(stream.index);
-    streams.push(stream);
+    // ffprobe may omit an unspecified language. Match the source scan's und
+    // without treating an explicit malformed value as an unspecified language.
+    streams.push({
+      ...stream,
+      tags: {
+        ...stream.tags,
+        language: stream.tags?.language === undefined ? "und" : stream.tags.language,
+      },
+    });
   }
   return streams;
 }
