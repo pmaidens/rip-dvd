@@ -263,3 +263,17 @@ describe("retained DVD completeness proof process", () => {
     expect(snapshot.dispose).toHaveBeenCalledTimes(1);
   });
 });
+
+it("does not waive corrected completeness when substituted metadata intersects source evidence", async () => {
+  const { isoProfileImage } = await import("./dvd-metadata-profile-fixtures.js");
+  const directory = mkdtempSync(join(tmpdir(), "dvd-corrected-source-"));
+  try {
+    const imagePath = join(directory, "retained.iso");
+    const image = isoProfileImage();
+    writeFileSync(imagePath, image);
+    const run = vi.fn<CommandRunner["run"]>();
+    const prover = createNodeDvdCompletenessProver({ runner: { run } });
+    await expect(prover.prove({ candidateBoundaryLba: image.length / 2048, expectedTitleMap, imagePath, signal: new AbortController().signal, unrecoveredSourceRanges: [{ startLba: 16, sectorCount: 1, classification: "skipped_untested" }] })).rejects.toThrow();
+    expect(run).not.toHaveBeenCalled();
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});

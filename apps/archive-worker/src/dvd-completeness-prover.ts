@@ -3,12 +3,14 @@ import { lstat, mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { DvdUnrecoveredSourceRange } from "@rip-dvd/data-access";
 import type { DvdTitleMap } from "@rip-dvd/data-access/dvd-scan";
 
 import {
   nodeCommandRunner,
   type CommandRunner,
 } from "./optical-drive-command-runner.js";
+import { classifyDvdImageDamage } from "./dvd-layout-classifier.js";
 import { requireDvdContentSize } from "./dvd-content-policy.js";
 import { dvdTitleMapsAgree } from "./dvd-title-map-verification.js";
 import { DVD_SECTOR_SIZE_BYTES } from "./dvd-recovery-contracts.js";
@@ -23,6 +25,7 @@ export interface DvdCompletenessProofRequest {
   expectedTitleMap: DvdTitleMap;
   imagePath: string;
   signal: AbortSignal;
+  unrecoveredSourceRanges?: readonly DvdUnrecoveredSourceRange[];
 }
 
 export interface DvdCompletenessProof {
@@ -202,6 +205,7 @@ export function createNodeDvdCompletenessProver({
       expectedTitleMap,
       imagePath,
       signal,
+      unrecoveredSourceRanges = [],
     }) {
       if (
         !Number.isSafeInteger(candidateBoundaryLba) ||
@@ -223,6 +227,23 @@ export function createNodeDvdCompletenessProver({
         signal,
       });
       try {
+        // Corrected extents keep strict metadata completeness. Source damage supplies
+        // no waiver, even if substituted bytes happen to form readable metadata.
+        if (unrecoveredSourceRanges.length) {
+          signal.throwIfAborted();
+          const damage = await classifyDvdImageDamage({
+            expectedByteCount: candidateByteCount,
+            imagePath: snapshot.imagePath,
+            unreadableSectorRanges: unrecoveredSourceRanges,
+          });
+          signal.throwIfAborted();
+          await snapshot.verifyUnchanged();
+          if (damage.outcome === "rejected") {
+            throw new Error(
+              "DVD completeness proof intersects Unrecovered Source metadata",
+            );
+          }
+        }
         const proof = parseClassifierProof(
           await runDvdLayoutClassifier({
             arguments: [
