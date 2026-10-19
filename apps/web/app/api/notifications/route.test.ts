@@ -47,6 +47,9 @@ it("shows a labeled Archive Job notification target through both CLI and HTTP de
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
   const access = fixture.openAccess();
   try {
+    access.notifications.register({ mutationKey: "synthetic-outcome-parity", enable: true,
+      subscription: { endpoint: "https://web.push.apple.com/synthetic-parity", expirationTime: null,
+        keys: { p256dh: "synthetic-key", auth: "synthetic-auth" } } });
     const drive = access.catalog.upsertOpticalDrive({ devicePath: "/dev/synthetic-notification-drive", isEnabled: true, isPresent: true });
     const disc = access.catalog.registerDetectedDisc({ opticalDriveId: drive.id, discKind: "dvd", fingerprint: "synthetic-notification-target", volumeLabel: "Synthetic labeled disc" });
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
@@ -56,6 +59,10 @@ it("shows a labeled Archive Job notification target through both CLI and HTTP de
     settled.restoreSystemTime();
     const job = access.archiveJobs.startForInspection(inspection.id, "synthetic-notification-worker")!;
     access.archiveJobs.fail(job, "Synthetic navigation outcome");
+    const deliveries = await fixture.run(["notifications", "deliveries"]);
+    expect(deliveries.result).toMatchObject({ deliveries: [{ status: "queued" }] });
+    const httpDeliveries = await handleNotifications(new Request("https://operator.example/api/notifications?action=deliveries"), () => access);
+    expect(await httpDeliveries.json()).toEqual(deliveries.result);
     const cli = await fixture.run(["inspect", "archive-jobs", job.id]);
     expect(cli.exitCode).toBe(0);
     expect(cli.result).toMatchObject({ item: { detectedDisc: { volumeLabel: "Synthetic labeled disc" } } });

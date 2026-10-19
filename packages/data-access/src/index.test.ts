@@ -13638,6 +13638,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     sqlite.close();
 
     const gatedAccess = openTestDatabase(databasePath);
+    gatedAccess.notifications.register({ mutationKey: "synthetic-closed-admission-notification", enable: true,
+      subscription: { endpoint: "https://web.push.apple.com/synthetic-closed-admission", expirationTime: null,
+        keys: { p256dh: "synthetic-key", auth: "synthetic-auth" } } });
     expect(gatedAccess.archiveRequests.waitingStatus(scheduledRequest.id))
       .toEqual({ code: "dvd_recovery_evidence_admission_closed" });
     expect(gatedAccess.archiveJobs.startForInspection(
@@ -13663,6 +13666,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ]) {
       expect(mutate).toThrow(DvdRecoveryEvidenceAdmissionClosedError);
     }
+    expect(gatedAccess.notifications.deliveries({ limit: 10 })).toEqual([]);
     expect(gatedAccess.archiveJobs.find(markedClaim.id)).toMatchObject({
       status: "running",
       evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,

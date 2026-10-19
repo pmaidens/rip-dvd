@@ -55,8 +55,23 @@ inactive record so reconciliation cannot silently enable it again.
 
 ## Outcome producers
 
-This ticket supplies the common contract, formatter and transactional recorder.
-It does not connect real Archive Job or Archive Recovery transitions.
+Archive Job publication and failure record an event in the same SQLite
+transaction as the outcome. Ordinary failures, classified read failures and
+expired worker claims are covered. Cancellation, cooperative abort, progress
+and transient reads do not independently alert. All eligible subscriptions
+receive these outcomes, including requests submitted through the JSON CLI.
+
+Each Archive Job attempt has a stable saved or failed event identity. Repeated
+publication or failure processing cannot create a second logical event, and
+retrying a request creates a new attempt with its own outcome. Push transport
+runs independently and cannot revise the Archive Job or saved archive.
+
+Saved alerts with remaining source say so without claiming complete recovery,
+structural validity, watchability or encode eligibility. Existing DVD evidence
+admission gates remain closed; notifications do not admit new evidence formats.
+Later Archive Recovery transitions are integrated separately.
+
+The shared contract, formatter and transactional recorder are reused by producers.
 `recordNotificationOutcome(writer, outcome)` accepts authoritative facts and a
 stable source-event identity, formats a complete version 1 payload and records
 it using a writer bound to the producer's existing SQLite outcome transaction.
