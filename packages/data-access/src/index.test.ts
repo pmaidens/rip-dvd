@@ -960,7 +960,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(29);
+    expect(identifierTables).toHaveLength(33);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "legacy_cutover_staged_sidecars"
@@ -8735,6 +8735,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261019154548_notifications",
+        },
+        {
           name: "20261004053119_scsi-read-path-notice",
         },
         {
@@ -8760,9 +8763,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20260922182659_rearchive-ordinary-uniqueness",
-        },
-        {
-          name: "20260922174811_rearchive-lineage",
         },
       ]);
     expect(

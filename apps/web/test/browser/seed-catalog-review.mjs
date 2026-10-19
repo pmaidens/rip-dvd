@@ -68,7 +68,7 @@ function createArchive({ key, label, fingerprintFill, titles }) {
 }
 
 async function seedArchiveRequest(variant) {
-  const fingerprint = `sha256:${variant === "desktop" ? "12".repeat(32) : "34".repeat(32)}`;
+  const fingerprint = `sha256:${(variant === "desktop" ? "12" : variant === "mobile" ? "34" : "56").repeat(32)}`;
   const drive = access.catalog.upsertOpticalDrive({
     devicePath: `/dev/browser-intake-${variant}`,
     displayName: `Browser intake ${variant}`,
@@ -92,11 +92,17 @@ async function seedArchiveRequest(variant) {
     opticalDriveId: drive.id,
     discKind: "dvd",
     fingerprint,
-    volumeLabel: `HTTP archive fixture ${variant}`,
+    volumeLabel: variant === "notification" ? "SYNTHETIC_NOTIFICATION_DISC" : `HTTP archive fixture ${variant}`,
     scanData: { schemaVersion: 2, contentId: fingerprint, titles: [detailedTitle(1, 5_400, 14)] },
   });
   access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-  access.discInspections.record(claim, { type: "complete", detectedDiscId: disc.id });
+  const inspection = access.discInspections.record(claim, { type: "complete", detectedDiscId: disc.id });
+  if (variant === "notification") {
+    access.archiveRequests.create({ detectedDiscId: disc.id });
+    const job = access.archiveJobs.startForInspection(inspection.id, "synthetic-notification-worker");
+    if (!job) throw new Error("Expected a synthetic notification target Archive Job");
+    access.archiveJobs.fail(job, "Synthetic outcome for notification navigation coverage");
+  }
 }
 
 function completeReview(archiveId) {
@@ -413,7 +419,7 @@ function seedEncodeQueue(variant, fingerprintFills) {
 }
 
 try {
-  await Promise.all([seedArchiveRequest("desktop"), seedArchiveRequest("mobile")]);
+  await Promise.all([seedArchiveRequest("desktop"), seedArchiveRequest("mobile"), seedArchiveRequest("notification")]);
   seedKeyboardJourney("desktop", "1");
   seedComplexLayout("desktop", "2");
   seedKeyboardJourney("mobile", "3");

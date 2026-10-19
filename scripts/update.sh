@@ -216,7 +216,7 @@ verify_updated_services() {
   fi
 
   running_services="$(docker compose ps --status running --services)"
-  for service in web archive-worker encode-worker; do
+  for service in web archive-worker encode-worker notification-worker; do
     if ! printf '%s\n' "$running_services" | grep -F -x "$service" >/dev/null; then
       printf 'Updated service is not running: %s\n' "$service" >&2
       return 1

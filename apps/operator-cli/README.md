@@ -516,3 +516,6 @@ Pass its `revision` with `--acknowledge`; a later job change returns
 the preview action. Running cancellation remains cooperative; the worker
 settles it after observing the request. Malformed inputs return exit 2 with a
 JSON error. Database or configuration failures return exit 1.
+
+Notification administration is available through `rip-dvd notifications`. See
+[Browser notifications](../../docs/notifications.md) for configuration and commands.

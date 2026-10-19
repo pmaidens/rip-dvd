@@ -1985,6 +1985,7 @@ export interface EncodeOutputInspectionReadAccess
 }
 
 export interface DataAccess {
+  readonly notifications: import("./notification-types.js").NotificationAccess;
   readonly catalog: CatalogAccess;
   readonly encodingProfiles: EncodingProfileAccess;
   readonly discInspections: DiscInspectionAccess;

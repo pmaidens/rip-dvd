@@ -1,0 +1,17 @@
+{
+  "name": "@rip-dvd/notification-worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@rip-dvd/application": "workspace:*",
+    "@rip-dvd/config": "workspace:*",
+    "@rip-dvd/data-access": "workspace:*",
+    "@rip-dvd/worker-runtime": "workspace:*"
+  }
+}

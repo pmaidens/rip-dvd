@@ -16,5 +16,8 @@
     "@rip-dvd/application": "workspace:*",
     "@rip-dvd/config": "workspace:*",
     "@rip-dvd/data-access": "workspace:*"
+  },
+  "devDependencies": {
+    "drizzle-orm": "1.0.0-rc.4"
   }
 }

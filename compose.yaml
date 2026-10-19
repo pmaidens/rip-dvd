@@ -6,6 +6,9 @@ x-runtime-environment: &runtime-environment
   RIP_DVD_ORIGINALS_LIBRARY_PATH: /media/originals
   RIP_DVD_ARCHIVE_DEVICE_PATH: ${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}
   RIP_DVD_WEB_TRUSTED_ORIGIN: ${RIP_DVD_WEB_TRUSTED_ORIGIN:-http://localhost:${RIP_DVD_WEB_PORT:-3000}}
+  RIP_DVD_VAPID_PUBLIC_KEY: ${RIP_DVD_VAPID_PUBLIC_KEY:-}
+  RIP_DVD_VAPID_PRIVATE_KEY: ${RIP_DVD_VAPID_PRIVATE_KEY:-}
+  RIP_DVD_VAPID_SUBJECT: ${RIP_DVD_VAPID_SUBJECT:-}
   RIP_DVD_WORKER_POLL_INTERVAL_MS: ${RIP_DVD_WORKER_POLL_INTERVAL_MS:-5000}
   RIP_DVD_ARCHIVE_WORKER_CONCURRENCY: ${RIP_DVD_ARCHIVE_WORKER_CONCURRENCY:-2}
   RIP_DVD_ENCODE_WORKER_CONCURRENCY: ${RIP_DVD_ENCODE_WORKER_CONCURRENCY:-1}
@@ -103,6 +106,17 @@ services:
       timeout: 3s
       retries: 10
       start_period: 10s
+    restart: unless-stopped
+
+  notification-worker:
+    build:
+      context: .
+      dockerfile: docker/runtime.Dockerfile
+      target: notification-worker
+    environment:
+      <<: *runtime-environment
+    volumes:
+      - rip-dvd-data:/data
     restart: unless-stopped
 
   archive-worker:

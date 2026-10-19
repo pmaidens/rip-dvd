@@ -8,8 +8,8 @@
     "pretest": "node ../encode-worker/scripts/build-atomic-exchange.mjs",
     "start": "next start",
     "test": "tsc -p ../../packages/config/tsconfig.build.json && tsc -p ../../packages/data-access/tsconfig.build.json && vitest run",
-    "test:browser": "playwright test",
-    "test:browser:serve": "next build && node test/browser/seed-catalog-review.mjs && node test/browser/start-catalog-review-server.mjs",
+    "test:browser": "next build && playwright test",
+    "test:browser:serve": "node test/browser/seed-catalog-review.mjs && node test/browser/start-catalog-review-server.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint components lib app --max-warnings 0"
   },

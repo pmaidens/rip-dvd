@@ -26,7 +26,7 @@ export default defineConfig({
     trace: "retain-on-failure",
     video: "retain-on-failure",
   },
-  webServer: {
+  webServer: [{
     command: "pnpm test:browser:serve",
     url: "http://127.0.0.1:3100/api/health",
     reuseExistingServer: false,
@@ -39,14 +39,32 @@ export default defineConfig({
       RIP_DVD_ORIGINALS_LIBRARY_PATH: resolve(browserDataRoot, "originals"),
       RIP_DVD_WEB_TRUSTED_ORIGIN: baseURL,
     },
-  },
+  }, {
+    command: "node test/browser/start-notification-server.mjs",
+    url: "http://localhost:3101/api/health",
+    reuseExistingServer: false,
+    timeout: 120_000,
+    env: {
+      HOSTNAME: "127.0.0.1", PORT: "3101",
+      RIP_DVD_DATABASE_PATH: resolve(browserDataRoot, "rip-dvd.sqlite"),
+      RIP_DVD_MEDIA_LIBRARY_PATH: resolve(browserDataRoot, "media"),
+      RIP_DVD_ORIGINALS_LIBRARY_PATH: resolve(browserDataRoot, "originals"),
+      RIP_DVD_WEB_TRUSTED_ORIGIN: "http://localhost:3101",
+    },
+  }],
   projects: [
     {
+      name: "secure-notifications", testMatch: "notifications.e2e.ts",
+      use: { browserName: "chromium", channel: "chromium", baseURL: "http://localhost:3101", viewport: { width: 390, height: 844 }, permissions: ["notifications"] },
+    },
+    {
       name: "desktop",
+      testIgnore: "notifications.e2e.ts",
       use: { browserName: "chromium", viewport: { width: 1_440, height: 1_000 } },
     },
     {
       name: "narrow-mobile",
+      testIgnore: "notifications.e2e.ts",
       use: { browserName: "chromium", viewport: { width: 390, height: 844 } },
     },
   ],

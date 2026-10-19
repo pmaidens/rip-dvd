@@ -9,6 +9,7 @@ const destinations = [
   { href: "/catalog", label: "Catalog" },
   { href: "/encoding", label: "Encoding" },
   { href: "/verification", label: "Verification" },
+  { href: "/notifications", label: "Notifications" },
 ] as const;
 
 export function AppNavigation() {

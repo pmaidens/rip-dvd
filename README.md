@@ -1659,8 +1659,12 @@ tests against isolated SQLite files.
 - `apps/web`: Next.js web control plane
 - `apps/archive-worker`: archive-worker process entry point
 - `apps/encode-worker`: encode-worker process entry point
+- `apps/notification-worker`: durable browser push dispatcher
 - `packages/config`: shared runtime environment loader
 - `packages/data-access`: Drizzle schema, versioned migrations, and domain-level SQLite facade
 - `packages/worker-runtime`: shared worker heartbeat and signal lifecycle
-- `docker/runtime.Dockerfile`: shared multi-target definition for three role-specific images
-- `compose.yaml`: local three-service deployment
+- `docker/runtime.Dockerfile`: shared multi-target definition for role-specific images
+- `compose.yaml`: local four-service deployment
+
+Browser push setup, opt-in and JSON CLI administration are described in
+[Browser notifications](docs/notifications.md).

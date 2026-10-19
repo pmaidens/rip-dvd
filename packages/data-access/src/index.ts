@@ -152,3 +152,6 @@ export type { FilesystemPathProbe } from "./internal/bounded-filesystem-path-pro
 export function createDataAccess(input: CreateDataAccessOptions): DataAccess {
   return createDataAccessInternal(input);
 }
+
+export type * from "./notification-types.js";
+export { createNotificationEventWriter, type NotificationTransaction } from "./internal/notifications.js";

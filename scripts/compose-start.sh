@@ -78,7 +78,7 @@ sh "$script_directory/compose-migrate.sh"
 start_runtime_services() {
   case "$block_io_weights_enabled" in
     0)
-      docker compose up --detach --no-build web archive-worker encode-worker
+      docker compose up --detach --no-build web archive-worker encode-worker notification-worker
       ;;
     1)
       if [ -f compose.override.yaml ]; then
@@ -86,12 +86,12 @@ start_runtime_services() {
           --file compose.yaml \
           --file compose.override.yaml \
           --file compose.linux-priority.yaml \
-          up --detach --no-build web archive-worker encode-worker
+          up --detach --no-build web archive-worker encode-worker notification-worker
       else
         docker compose \
           --file compose.yaml \
           --file compose.linux-priority.yaml \
-          up --detach --no-build web archive-worker encode-worker
+          up --detach --no-build web archive-worker encode-worker notification-worker
       fi
       ;;
   esac

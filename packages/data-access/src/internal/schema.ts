@@ -1714,3 +1714,48 @@ export const workerIncidents = sqliteTable(
     ),
   ],
 );
+
+export const notificationSubscriptions = sqliteTable("notification_subscriptions", {
+  id: text("id").primaryKey(),
+  endpoint: text("endpoint").notNull().unique(),
+  subscription: text("subscription", { mode: "json" }).$type<import("../notification-types.js").NotificationSubscriptionInput>().notNull(),
+  active: integer("active", { mode: "boolean" }).notNull(),
+  generation: integer("generation").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+}, (table) => [
+  check("notification_subscriptions_id_not_null", sql`${table.id} is not null`),
+  check("notification_subscriptions_active_check", sql`${table.active} in (0, 1)`),
+  check("notification_subscriptions_generation_check", sql`${table.generation} > 0`),
+]);
+
+export const notificationEvents = sqliteTable("notification_events", {
+  id: text("id").primaryKey(),
+  sourceEventId: text("source_event_id").notNull().unique(),
+  payload: text("payload", { mode: "json" }).$type<import("../notification-types.js").NotificationPayload>().notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+}, (table) => [check("notification_events_id_not_null", sql`${table.id} is not null`)]);
+
+export const notificationDeliveries = sqliteTable("notification_deliveries", {
+  id: text("id").primaryKey(),
+  eventId: text("event_id").notNull().references(() => notificationEvents.id),
+  subscriptionId: text("subscription_id").notNull().references(() => notificationSubscriptions.id),
+  generation: integer("generation").notNull(),
+  status: text("status", { enum: ["queued", "accepted", "failed"] }).notNull(),
+  failureCode: text("failure_code", { enum: ["subscription_disabled", "sender_rejected"] }),
+  claimToken: text("claim_token"),
+  leaseUntil: integer("lease_until", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+}, (table) => [
+  check("notification_deliveries_id_not_null", sql`${table.id} is not null`),
+  check("notification_deliveries_status_check", sql`${table.status} in ('queued', 'accepted', 'failed')`),
+  check("notification_deliveries_generation_check", sql`${table.generation} > 0`),
+  uniqueIndex("notification_delivery_identity").on(table.eventId, table.subscriptionId),
+  index("notification_delivery_queue").on(table.status, table.leaseUntil, table.createdAt),
+]);
+
+export const notificationDispatcher = sqliteTable("notification_dispatcher", {
+  id: integer("id").primaryKey(),
+  heartbeatAt: integer("heartbeat_at", { mode: "timestamp_ms" }).notNull(),
+}, (table) => [check("notification_dispatcher_id_not_null", sql`${table.id} is not null and ${table.id} = 1`)]);
