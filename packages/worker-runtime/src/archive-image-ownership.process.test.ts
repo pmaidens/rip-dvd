@@ -182,6 +182,87 @@ it.runIf(processStorageSupported)(
 );
 
 it.runIf(processStorageSupported)(
+  "fails closed when the per-archive triplet disappears during a live helper",
+  async () => {
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-image-ownership-process-"),
+    );
+    roots.push(originalsLibraryPath);
+    const readyPath = join(originalsLibraryPath, "helper.ready");
+    const writePath = join(originalsLibraryPath, "helper.writes");
+    const imagePath = join(originalsLibraryPath, "synthetic-archive.iso");
+    writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
+    const parent = spawn(
+      process.execPath,
+      [
+        fileURLToPath(new URL(
+          "./test/archive-image-ownership-parent.mjs",
+          import.meta.url,
+        )),
+        originalsLibraryPath,
+        imagePath,
+        readyPath,
+        writePath,
+      ],
+      { stdio: "ignore" },
+    );
+    if (parent.pid !== undefined) helperPids.push(parent.pid);
+    await waitForFile(readyPath);
+    await waitForFile(writePath);
+    helperPids.push(Number(readFileSync(readyPath, "utf8")));
+
+    const directory = join(
+      originalsLibraryPath,
+      ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME,
+    );
+    const removeTriplet = () => {
+      for (const entry of readdirSync(directory)) {
+        if (
+          entry.endsWith(".lock") ||
+          entry.endsWith(".identity.json") ||
+          entry.endsWith(".claim.json")
+        ) {
+          rmSync(join(directory, entry), { force: true });
+        }
+      }
+    };
+    const sizeBeforeRemoval = statSync(writePath).size;
+    removeTriplet();
+    await waitForFileGrowth(writePath, sizeBeforeRemoval);
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    removeTriplet();
+
+    const ownership = createArchiveImageOwnership();
+    expect(ownership.inspect({
+      archiveId: "surviving-helper-archive",
+      imagePath,
+      originalsLibraryPath,
+    })).toMatchObject({
+      writer: { state: "uncertain" },
+      workerClaim: { state: "invalid" },
+      stableRead: {
+        available: false,
+        blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
+      },
+    });
+
+    await expect(runContender(
+      "withConsistentRead",
+      originalsLibraryPath,
+      imagePath,
+      "surviving-helper-archive",
+    )).resolves.toEqual({ ok: false, code: "CONSISTENCY_FAULT" });
+    await expect(runContender(
+      "withWriter",
+      originalsLibraryPath,
+      imagePath,
+      "surviving-helper-archive",
+    )).resolves.toEqual({ ok: false, code: "CONSISTENCY_FAULT" });
+  },
+  30_000,
+);
+
+it.runIf(processStorageSupported)(
   "excludes a writer in another process for the complete shared interval",
   async () => {
     const originalsLibraryPath = mkdtempSync(

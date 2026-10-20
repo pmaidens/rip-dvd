@@ -27,6 +27,10 @@ creation and throughout the interval, and their owner-only mode and effective
 user ownership are revalidated rather than trusted from acquisition time.
 Shared namespace-anchor bootstrap happens before any per-archive lock file, so
 a concurrent first-use failure cannot leave an unbound archive lock behind.
+Each initialized archive also has a durable lock-identity anchor in the
+Originals Library root, outside the per-archive lock, identity, and claim
+triplet. Missing or replaced triplet state therefore cannot authorize a new
+lock inode while an earlier descriptor may still be live.
 
 The process that performs image I/O inherits the locked descriptor. An initial
 copy helper receives the exclusive descriptor, and HandBrake and Archive Audit
