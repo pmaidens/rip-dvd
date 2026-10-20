@@ -20,6 +20,7 @@ const MAX_PROC_COMMAND_BYTES = 65_536;
 export interface HandBrakeRunRequest {
   arguments_: readonly string[];
   onOutput(text: string): void;
+  onStderr?(text: string): void;
   outputPath: string;
   sourceOwnershipDescriptor?: number;
   signal: AbortSignal;
@@ -291,6 +292,7 @@ export function createNodeHandBrakeRunner({
     run({
       arguments_,
       onOutput,
+      onStderr,
       outputPath,
       sourceOwnershipDescriptor,
       signal,
@@ -359,10 +361,11 @@ export function createNodeHandBrakeRunner({
           child.stderr.destroy();
           finish(error);
         };
-        const capture = (chunk: Buffer) => {
+        const capture = (chunk: Buffer, stderr: boolean) => {
           const text = chunk.toString("utf8");
           diagnostics = boundedDiagnostic(`${diagnostics}${text}`);
           try {
+            if (stderr) onStderr?.(text);
             onOutput(text);
           } catch (error) {
             cancel(error);
@@ -393,8 +396,8 @@ export function createNodeHandBrakeRunner({
           );
         }, timeoutMs);
         timeout.unref();
-        child.stdout.on("data", capture);
-        child.stderr.on("data", capture);
+        child.stdout.on("data", (chunk: Buffer) => capture(chunk, false));
+        child.stderr.on("data", (chunk: Buffer) => capture(chunk, true));
         child.once("error", (error) => finish(error));
         child.once("close", (code, closeSignal) => {
           if (terminationTimeout !== undefined) {

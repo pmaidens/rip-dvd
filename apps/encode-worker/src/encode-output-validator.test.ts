@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { subtitleLog } from "./test-fixtures/handbrake-subtitle-log.js";
+import { createHandBrakeSubtitleProvenanceParser } from "./handbrake-subtitle-provenance.js";
+
 import { createNodeDvdSubtitleScanner } from "./dvd-subtitle-scanner.js";
 import {
   createNodeEncodeOutputValidator,
@@ -101,6 +104,137 @@ function createMediaToolRunner({
 }
 
 describe("encode output validation", () => {
+  it.each([true, false])("preserves complete sources and search playback flags, reused=%s", async (reused) => {
+    const expectedVobSubStreams = [
+      { languageCode: "eng", sourceTrackNumber: 1, title: null },
+      { languageCode: "eng", sourceTrackNumber: 2, title: null },
+    ];
+    const parser = createHandBrakeSubtitleProvenanceParser();
+    parser.push(subtitleLog({ search: true, reused }));
+    const repairer = { removeEmptyVobSubStreams: vi.fn(async () => {}) };
+    const runMediaTool = createMediaToolRunner({
+      subtitleStreams: [
+        { index: 2, codec_name: "dvd_subtitle", disposition: { default: 1, forced: 1 }, tags: { language: "eng" } },
+        { index: 3, codec_name: "dvd_subtitle", disposition: { default: 0, forced: 0 }, tags: { language: "eng" } },
+        ...(!reused ? [{ index: 4, codec_name: "dvd_subtitle", disposition: { default: 0, forced: 0 }, tags: { language: "eng" } }] : []),
+      ],
+    });
+    const validator = createNodeEncodeOutputValidator({ repairer, runMediaTool });
+    await expect(validator.prepareAndValidate("/media/subtitled.mkv", new AbortController().signal, {
+      expectedVobSubStreams,
+      vobSubProvenance: parser.finish(expectedVobSubStreams),
+    })).resolves.toBeUndefined();
+    expect(repairer.removeEmptyVobSubStreams).not.toHaveBeenCalled();
+    expect(runMediaTool).toHaveBeenCalledWith(expect.objectContaining({
+      arguments_: expect.arrayContaining(["-count_packets"]),
+    }));
+  });
+
+  it.each([
+    { name: "language", language: "fra", title: "Commentary", defaultFlag: 1, forcedFlag: 1, error: "source VobSub stream 2 has language" },
+    { name: "title", language: "eng", title: undefined, defaultFlag: 1, forcedFlag: 1, error: "source VobSub stream 2 has title" },
+    { name: "default flag", language: "eng", title: "Commentary", defaultFlag: 0, forcedFlag: 1, error: "disposition inconsistent" },
+    { name: "forced flag", language: "eng", title: "Commentary", defaultFlag: 1, forcedFlag: 0, error: "disposition inconsistent" },
+  ])("rejects incorrect $name on a source reused by search", async ({ language, title, defaultFlag, forcedFlag, error }) => {
+    const expectedVobSubStreams = [
+      { languageCode: "eng", sourceTrackNumber: 1, title: null },
+      { languageCode: "eng", sourceTrackNumber: 2, title: "Commentary" },
+    ];
+    const parser = createHandBrakeSubtitleProvenanceParser();
+    parser.push(subtitleLog({ search: true, reused: true }));
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({ subtitleStreams: [
+        { index: 2, codec_name: "dvd_subtitle", disposition: { default: defaultFlag, forced: forcedFlag }, tags: { language, title } },
+        { index: 3, codec_name: "dvd_subtitle", disposition: { default: 0, forced: 0 }, tags: { language: "eng" } },
+      ] }),
+    });
+    await expect(validator.prepareAndValidate("/media/subtitled.mkv", new AbortController().signal, {
+      expectedVobSubStreams,
+      vobSubProvenance: parser.finish(expectedVobSubStreams),
+    })).rejects.toThrow(error);
+  });
+
+  it("matches source metadata by identity after search reorders a named source", async () => {
+    const expectedVobSubStreams = [
+      { languageCode: "fra", sourceTrackNumber: 1, title: "Commentary" },
+      { languageCode: "eng", sourceTrackNumber: 2, title: null },
+    ];
+    const parser = createHandBrakeSubtitleProvenanceParser();
+    parser.push(subtitleLog({ search: true, reused: true }));
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({ subtitleStreams: [
+        { index: 2, codec_name: "dvd_subtitle", disposition: { default: 1, forced: 1 }, tags: { language: "eng" } },
+        { index: 3, codec_name: "dvd_subtitle", disposition: { default: 0, forced: 0 }, tags: { language: "fra", title: "Commentary" } },
+      ] }),
+    });
+    await expect(validator.prepareAndValidate("/media/subtitled.mkv", new AbortController().signal, {
+      expectedVobSubStreams,
+      vobSubProvenance: parser.finish(expectedVobSubStreams),
+    })).resolves.toBeUndefined();
+  });
+
+  it("does not count a derived search result as its missing complete source", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({ subtitleStreams: [
+        { index: 2, codec_name: "dvd_subtitle", disposition: { default: 1, forced: 1 }, tags: { language: "eng" } },
+        { index: 3, codec_name: "dvd_subtitle", disposition: { default: 0, forced: 0 }, tags: { language: "eng" } },
+      ] }),
+    });
+    await expect(validator.prepareAndValidate("/media/subtitled.mkv", new AbortController().signal, {
+      expectedVobSubStreams: [
+        { languageCode: "eng", sourceTrackNumber: 1 },
+        { languageCode: "eng", sourceTrackNumber: 2 },
+      ],
+      vobSubProvenance: [
+        { sourceTrackNumber: 2, kind: "foreign_audio_search", default: true, forced: true },
+        { sourceTrackNumber: 1, kind: "source", default: false, forced: false },
+      ],
+    })).rejects.toThrow("expected 2 source VobSub streams, found 1");
+  });
+
+  it.each([false, true])("revalidates renumbered reused source flags after empty-track cleanup, damaged=%s", async (damaged) => {
+    const expectedVobSubStreams = [
+      { languageCode: "fra", sourceTrackNumber: 1, title: "Commentary" },
+      { languageCode: "eng", sourceTrackNumber: 2, title: null },
+    ];
+    const originalExpectations = structuredClone(expectedVobSubStreams);
+    const parser = createHandBrakeSubtitleProvenanceParser();
+    parser.push(subtitleLog({ search: true, reused: true }));
+    let cleaned = false;
+    const repairer = { removeEmptyVobSubStreams: vi.fn(async () => { cleaned = true; }) };
+    const validator = createNodeEncodeOutputValidator({
+      repairer,
+      runMediaTool: async (request) => createMediaToolRunner({
+        subtitleStreams: cleaned ? [
+          { index: 2, codec_name: "dvd_subtitle", disposition: { default: damaged ? 0 : 1, forced: 1 }, tags: { language: "eng" } },
+        ] : [
+          { index: 6, codec_name: "dvd_subtitle", disposition: { default: 1, forced: 1 }, tags: { language: "eng" } },
+          { index: 8, codec_name: "dvd_subtitle", disposition: { default: 0, forced: 0 }, tags: { language: "fra", title: "Commentary" } },
+        ],
+        subtitlePacketStreams: cleaned ? [
+          { index: 2, codec_name: "dvd_subtitle", nb_read_packets: "4" },
+        ] : [
+          { index: 6, codec_name: "dvd_subtitle", nb_read_packets: "4" },
+          { index: 8, codec_name: "dvd_subtitle", nb_read_packets: "0" },
+        ],
+      })(request),
+    });
+    const validation = validator.prepareAndValidate("/media/subtitled.mkv", new AbortController().signal, {
+      expectedVobSubStreams,
+      vobSubProvenance: parser.finish(expectedVobSubStreams),
+    });
+    if (damaged) {
+      await expect(validation).rejects.toThrow("disposition inconsistent");
+    } else {
+      await expect(validation).resolves.toBeUndefined();
+    }
+    expect(repairer.removeEmptyVobSubStreams).toHaveBeenCalledWith(expect.objectContaining({
+      emptyStreamIndexes: [8],
+      retainedSubtitleDispositions: [{ default: true, forced: true }],
+    }));
+    expect(expectedVobSubStreams).toEqual(originalExpectations);
+  });
+
   it.each([
     { title: null, actualTitle: undefined, valid: true },
     { title: "Commentary", actualTitle: "Commentary", valid: true },
@@ -495,7 +629,7 @@ describe("encode output validation", () => {
     });
     const signal = new AbortController().signal;
     const expectedVobSubStreams = await scanner.scan("/source.iso", 4, signal);
-    expect(expectedVobSubStreams).toEqual([{ languageCode: "und", title }]);
+    expect(expectedVobSubStreams).toEqual([{ languageCode: "und", sourceTrackNumber: 1, title }]);
     const runMediaTool = createMediaToolRunner({
       subtitleStreams: [
         {

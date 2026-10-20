@@ -25,8 +25,8 @@ describe("HandBrake DVD subtitle scan", () => {
   it("retains separate widescreen and letterbox streams in HandBrake order", async () => {
     await expect(scannerReturning(dvdVariants).scan("/source.iso", 4, new AbortController().signal))
       .resolves.toEqual([
-        { languageCode: "eng", title: null },
-        { languageCode: "eng", title: null },
+        { languageCode: "eng", sourceTrackNumber: 1, title: null },
+        { languageCode: "eng", sourceTrackNumber: 2, title: null },
       ]);
   });
 
@@ -38,14 +38,23 @@ describe("HandBrake DVD subtitle scan", () => {
     ];
     await expect(scannerReturning(scanResult(subtitles)).scan("/source.iso", 4, new AbortController().signal))
       .resolves.toEqual([
-        { languageCode: "fra", title: "Commentary" },
-        { languageCode: "und", title: "Closed Caption" },
+        { languageCode: "fra", sourceTrackNumber: 1, title: "Commentary" },
+        { languageCode: "und", sourceTrackNumber: 2, title: "Closed Caption" },
       ]);
   });
 
   it("accepts a complete scan with no subtitles", async () => {
     await expect(scannerReturning(scanResult([])).scan("/source.iso", 4, new AbortController().signal))
       .resolves.toEqual([]);
+  });
+
+  it("keeps the original source ordinal when a closed-caption track precedes VobSub", async () => {
+    await expect(scannerReturning(scanResult([
+      { TrackNumber: 1, SourceName: "CC608", Format: "text" },
+      { ...variant, TrackNumber: 2 },
+    ])).scan("/source.iso", 4, new AbortController().signal)).resolves.toEqual([
+      { languageCode: "eng", sourceTrackNumber: 2, title: null },
+    ]);
   });
 
   it.each([

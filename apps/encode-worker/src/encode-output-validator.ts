@@ -5,6 +5,7 @@ import type {
   EncodeJobFailureValidationCheck,
 } from "@rip-dvd/data-access";
 
+import type { HandBrakeVobSubProvenance } from "./handbrake-subtitle-provenance.js";
 import {
   createNodeEncodeOutputRepairer,
   type EncodeOutputRepairer,
@@ -44,10 +45,12 @@ export interface EncodeOutputValidator {
 export interface EncodeOutputValidationExpectations {
   expectedDurationSeconds?: number;
   expectedVobSubStreams?: readonly EncodeOutputVobSubExpectation[];
+  vobSubProvenance?: readonly HandBrakeVobSubProvenance[];
 }
 
 export interface EncodeOutputVobSubExpectation {
   languageCode?: string;
+  sourceTrackNumber?: number;
   title?: string | null;
 }
 
@@ -293,10 +296,75 @@ async function runTool(
 
 function sourceVobSubStreams(
   streams: readonly CompleteSubtitleStream[],
+  expectations?: readonly EncodeOutputVobSubExpectation[],
+  provenance?: readonly HandBrakeVobSubProvenance[],
+  declaredExpectations = expectations,
 ): readonly CompleteSubtitleStream[] {
   const vobSubStreams = streams.filter(
     (stream) => stream.codec_name === "dvd_subtitle",
   );
+  if (provenance !== undefined) {
+    if (
+      !Array.isArray(provenance) ||
+      !Array.isArray(expectations) ||
+      expectations.some((source) =>
+        typeof source !== "object" || source === null ||
+        !Number.isSafeInteger(source.sourceTrackNumber) || source.sourceTrackNumber! < 1,
+      ) ||
+      new Set(expectations.map((source) => source.sourceTrackNumber)).size !== expectations.length
+    ) {
+      throw validationError("subtitle_streams", "subtitle source provenance is invalid");
+    }
+    if (provenance.length !== vobSubStreams.length) {
+      throw validationError(
+        "subtitle_streams",
+        `expected ${provenance.length} VobSub output streams, found ${vobSubStreams.length}`,
+      );
+    }
+    const sourceStreams = new Map<number, CompleteSubtitleStream>();
+    let searchCount = 0;
+    for (const [position, track] of provenance.entries()) {
+      // A derived search track can survive cleanup of its empty source track.
+      const expectation = declaredExpectations?.find(
+        (source) => source.sourceTrackNumber === track?.sourceTrackNumber,
+      );
+      if (
+        !track || !expectation ||
+        typeof track.default !== "boolean" || typeof track.forced !== "boolean" ||
+        (track.kind !== "source" && track.kind !== "foreign_audio_search")
+      ) {
+        throw validationError("subtitle_streams", "subtitle source provenance is invalid");
+      }
+      const stream = vobSubStreams[position]!;
+      if (
+        stream.disposition.default !== Number(track.default) ||
+        stream.disposition.forced !== Number(track.forced)
+      ) {
+        throw validationError(
+          "subtitle_streams",
+          "a VobSub stream has a disposition inconsistent with HandBrake source provenance",
+        );
+      }
+      if (track.kind === "source") {
+        if (sourceStreams.has(track.sourceTrackNumber)) {
+          throw validationError("subtitle_streams", "a source VobSub stream was counted more than once");
+        }
+        sourceStreams.set(track.sourceTrackNumber, stream);
+      } else {
+        if (++searchCount > 1 || !track.forced) {
+          throw validationError("subtitle_streams", "foreign-audio-search VobSub provenance is invalid");
+        }
+        validateExpectedVobSubStreams([stream], [expectation]);
+      }
+    }
+    const sources = expectations.flatMap((source) => {
+      const stream = sourceStreams.get(source.sourceTrackNumber!);
+      return stream ? [stream] : [];
+    });
+    // Exact source coverage is checked independently of derived search tracks.
+    validateExpectedVobSubStreams(sources, expectations);
+    return sources;
+  }
   const foreignAudioSearchStreams = vobSubStreams.filter((stream) => {
     return (
       stream.disposition.default === 1 && stream.disposition.forced === 1
@@ -494,6 +562,7 @@ async function validateSubtitleStreams({
 }): Promise<void> {
   let removedEmptyStreams = false;
   let expectedVobSubStreams = expectations.expectedVobSubStreams;
+  let vobSubProvenance = expectations.vobSubProvenance;
   while (true) {
     const subtitleProbe = parseProbeResult(
       (
@@ -523,7 +592,12 @@ async function validateSubtitleStreams({
       "subtitle_streams",
     );
     const subtitleStreams = validatedSubtitleStreams(subtitleProbe);
-    const sourceStreams = sourceVobSubStreams(subtitleStreams);
+    const sourceStreams = sourceVobSubStreams(
+      subtitleStreams,
+      expectedVobSubStreams,
+      vobSubProvenance,
+      expectations.expectedVobSubStreams,
+    );
     validateExpectedVobSubStreams(sourceStreams, expectedVobSubStreams);
     const vobSubIndexes = new Set(
       subtitleStreams
@@ -583,6 +657,12 @@ async function validateSubtitleStreams({
     // Filter by source position, since remuxing can renumber stream indexes.
     expectedVobSubStreams = expectedVobSubStreams?.filter(
       (_, position) => !emptyIndexes.has(sourceStreams[position]!.index),
+    );
+    const vobSubStreams = subtitleStreams.filter(
+      (stream) => stream.codec_name === "dvd_subtitle",
+    );
+    vobSubProvenance = vobSubProvenance?.filter(
+      (_, position) => !emptyIndexes.has(vobSubStreams[position]!.index),
     );
     try {
       await repairer.removeEmptyVobSubStreams({

@@ -66,6 +66,7 @@ import {
 } from "./handbrake-runner.js";
 import { normalizeErrorMessage } from "./normalize-error-message.js";
 import { createProgressParser } from "./progress-parser.js";
+import { createHandBrakeSubtitleProvenanceParser } from "./handbrake-subtitle-provenance.js";
 import {
   recordEncodePublicationRecoveryIncident,
   resolveEncodePublicationRecoveryIncident,
@@ -2008,6 +2009,7 @@ export async function executeEncodeClaim(
     let expectedVobSubStreams:
       | readonly EncodeOutputVobSubExpectation[]
       | undefined;
+    const subtitleProvenance = createHandBrakeSubtitleProvenanceParser();
     const readArchive = async (
       ownership?: ArchiveImageOwnershipHandle,
     ): Promise<void> => {
@@ -2065,6 +2067,7 @@ export async function executeEncodeClaim(
       await options.runner.run({
         arguments_,
         onOutput: parseProgress,
+        onStderr: (text) => subtitleProvenance.push(text),
         outputPath: paths.partialPath,
         ...(ownership === undefined
           ? {}
@@ -2105,6 +2108,9 @@ export async function executeEncodeClaim(
       ...(expectedVobSubStreams === undefined
         ? {}
         : { expectedVobSubStreams }),
+      ...(expectedVobSubStreams?.some((source) => source.sourceTrackNumber !== undefined)
+        ? { vobSubProvenance: subtitleProvenance.finish(expectedVobSubStreams) }
+        : {}),
     });
     signal.throwIfAborted();
     const validatedPartialMetadata = await requireRegularOutputForValidation(

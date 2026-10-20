@@ -97,7 +97,7 @@ try {
       "/app/apps/encode-worker/dist/dvd-subtitle-scanner.js"
     );
     const expectedVobSubStreams = await nodeDvdSubtitleScanner.scan(path, 1, new AbortController().signal);
-    assert.deepEqual(expectedVobSubStreams, [{ languageCode: "fra", title: null }],
+    assert.deepEqual(expectedVobSubStreams, [{ languageCode: "fra", sourceTrackNumber: 1, title: null }],
       "worker must receive the complete subtitle expectation");
     if (label === "Café des étoiles") {
       const output = join(directory, "encoded.mkv");

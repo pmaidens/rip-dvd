@@ -54,3 +54,32 @@ Main-feature resolved-title provenance remains tracked in
 [#246](https://github.com/pmaidens/rip-dvd/issues/246). Existing completed-output
 backfill remains tracked in [#249](https://github.com/pmaidens/rip-dvd/issues/249).
 Neither is included in this repair.
+
+## Foreign-audio-search source reuse
+
+HandBrake can reuse a complete source track as its foreign-audio-search result.
+For example, when every subtitle in a source track is forced, HandBrake removes
+the ordinary duplicate and moves the search selection to the first output
+position. That output still preserves the complete source even though it has
+default and forced dispositions. Excluding it by disposition loses a source
+from validation.
+
+The scanner now retains each source track number. During encoding, a bounded
+stderr parser reads HandBrake 1.9.2's final sanitized subtitle mapping and its
+search statistics. Log source numbers are zero-based, while JSON scan track
+numbers are one-based. Matching candidate identity and statistics establish
+whether a forced-only selection contains the complete source or is an
+additional subset. A subset never replaces its complete source expectation.
+Missing, malformed or contradictory provenance stops validation.
+
+Validation matches the planned output order, source identities, metadata and
+dispositions, counting every complete source exactly once. The command and
+playback flags remain unchanged. Packet validation and empty-track cleanup
+still apply to every VobSub output. Cleanup filters the output mapping as well
+as source expectations before revalidation, retaining original metadata for
+any additional search track that survives.
+
+Synthetic process fixtures cover the two-source reuse case, an additional
+search subset, missing sources, reordered metadata, incorrect flags, malformed
+provenance and cleanup. Main-feature selections without resolved source
+provenance retain their existing validation behavior.

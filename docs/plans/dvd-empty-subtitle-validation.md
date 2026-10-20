@@ -15,9 +15,10 @@ validates the cleaned output again before publication.
 
 An omitted packet count is accepted as zero only when the probe includes the
 identified VobSub stream. Missing streams, duplicate or unexpected indexes,
-malformed counts and probe errors still fail. Foreign-audio-search tracks remain
-separate from source expectations. Removing an empty search track does not
-remove a source expectation.
+malformed counts and probe errors still fail. An additional, filtered
+foreign-audio-search track remains separate from source expectations. A search
+result that reuses a complete source counts as that source. Cleanup removes a
+source expectation only when it removes the corresponding complete source.
 
 Worker regression tests run the real scanner and validator through worker
 polling, with simulated HandBrake and media-tool results. They cover one empty
