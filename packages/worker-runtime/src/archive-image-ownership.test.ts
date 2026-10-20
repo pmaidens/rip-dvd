@@ -662,6 +662,89 @@ describe("archive image ownership", () => {
     })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
   });
 
+  it("rejects an expired-looking claim with an impossible timeline", async () => {
+    const ownership = createArchiveImageOwnership();
+    const originalsLibraryPath = root();
+    let claimPath = "";
+    let claim: Record<string, unknown> = {};
+    await ownership.withWriter({
+      archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {
+        claimPath = ownershipFile(originalsLibraryPath, ".claim.json");
+        claim = JSON.parse(readFileSync(claimPath, "utf8")) as Record<
+          string,
+          unknown
+        >;
+      },
+    });
+    writeFileSync(claimPath, `${JSON.stringify({
+      ...claim,
+      claimedAt: "2999-01-01T00:00:00.000Z",
+      heartbeatAt: "2000-01-02T00:00:00.000Z",
+      leaseExpiresAt: "2000-01-01T00:00:00.000Z",
+    })}\n`, { mode: 0o600 });
+
+    expect(ownership.inspect({
+      archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+    })).toMatchObject({
+      workerClaim: { state: "invalid" },
+      stableRead: {
+        available: false,
+        blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
+      },
+    });
+    await expect(ownership.withConsistentRead({
+      archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {},
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+  });
+
+  it("rejects noncanonical claim timestamps", async () => {
+    const ownership = createArchiveImageOwnership();
+    const originalsLibraryPath = root();
+    let claimPath = "";
+    let claim: Record<string, unknown> = {};
+    await ownership.withWriter({
+      archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {
+        claimPath = ownershipFile(originalsLibraryPath, ".claim.json");
+        claim = JSON.parse(readFileSync(claimPath, "utf8")) as Record<
+          string,
+          unknown
+        >;
+      },
+    });
+    writeFileSync(claimPath, `${JSON.stringify({
+      ...claim,
+      claimedAt: "2000-01-01T00:00:00Z",
+      heartbeatAt: "2000-01-01T00:00:01Z",
+      leaseExpiresAt: "2000-01-01T00:00:02Z",
+    })}\n`, { mode: 0o600 });
+
+    expect(ownership.inspect({
+      archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+    })).toMatchObject({
+      workerClaim: { state: "invalid" },
+      stableRead: {
+        available: false,
+        blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
+      },
+    });
+  });
+
   it("fails closed when the named lock inode changes", async () => {
     const ownership = createArchiveImageOwnership({
       ownershipCheckIntervalMs: 10,

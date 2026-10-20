@@ -786,6 +786,19 @@ function isClaimRecord(
     return false;
   }
   const record = value as Record<string, unknown>;
+  const claimedAt = typeof record.claimedAt === "string"
+    ? Date.parse(record.claimedAt)
+    : Number.NaN;
+  const heartbeatAt = typeof record.heartbeatAt === "string"
+    ? Date.parse(record.heartbeatAt)
+    : Number.NaN;
+  const leaseExpiresAt = typeof record.leaseExpiresAt === "string"
+    ? Date.parse(record.leaseExpiresAt)
+    : Number.NaN;
+  const hasCanonicalTimestamp = (timestamp: unknown, epochMs: number) =>
+    typeof timestamp === "string" &&
+    Number.isFinite(epochMs) &&
+    new Date(epochMs).toJSON() === timestamp;
   return (
     Object.keys(record).sort().join(",") ===
       "archiveId,claimId,claimedAt,heartbeatAt,leaseExpiresAt,lockDevice,lockInode,version" &&
@@ -793,16 +806,15 @@ function isClaimRecord(
     record.archiveId === archiveId &&
     typeof record.claimId === "string" &&
     /^[0-9a-f-]{36}$/.test(record.claimId) &&
-    typeof record.claimedAt === "string" &&
-    typeof record.heartbeatAt === "string" &&
-    typeof record.leaseExpiresAt === "string" &&
+    hasCanonicalTimestamp(record.claimedAt, claimedAt) &&
+    hasCanonicalTimestamp(record.heartbeatAt, heartbeatAt) &&
+    hasCanonicalTimestamp(record.leaseExpiresAt, leaseExpiresAt) &&
+    claimedAt <= heartbeatAt &&
+    heartbeatAt < leaseExpiresAt &&
     typeof record.lockDevice === "string" &&
     /^\d+$/.test(record.lockDevice) &&
     typeof record.lockInode === "string" &&
-    /^\d+$/.test(record.lockInode) &&
-    Number.isFinite(Date.parse(record.claimedAt)) &&
-    Number.isFinite(Date.parse(record.heartbeatAt)) &&
-    Number.isFinite(Date.parse(record.leaseExpiresAt))
+    /^\d+$/.test(record.lockInode)
   );
 }
 
