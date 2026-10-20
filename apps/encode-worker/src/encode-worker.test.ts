@@ -61,6 +61,7 @@ import {
   createNodeDvdSubtitleScanner,
   type DvdSubtitleScanner,
 } from "./dvd-subtitle-scanner.js";
+import { subtitleLog } from "./test-fixtures/handbrake-subtitle-log.js";
 import dvdVariants from "./test-fixtures/handbrake-dvd-variants.json" with { type: "json" };
 
 vi.mock("./dvd-subtitle-scanner.js", async (importOriginal) => ({
@@ -1128,6 +1129,8 @@ describe("encode worker polling", () => {
     outputCount?: number;
     language?: string;
     foreignAudioSearch?: boolean;
+    reusedSearch?: boolean;
+    missingProvenance?: boolean;
     emptyForeignAudioSearch?: boolean;
     emptyCount?: number;
     scanCount?: number;
@@ -1137,8 +1140,8 @@ describe("encode worker polling", () => {
     { name: "empty foreign-audio-search with empty sources", foreignAudioSearch: true, emptyForeignAudioSearch: true, emptyCount: 2 },
     { name: "one empty trailer subtitle", scanCount: 1, outputCount: 1, emptyCount: 1 },
     { name: "empty source with foreign-audio-search", emptyCount: 2, foreignAudioSearch: true },
-    { name: "empty extra track", outputCount: 3, emptyCount: 1, expectedFailure: "expected 2 source VobSub streams, found 3" },
-    { name: "empty missing variant", outputCount: 1, emptyCount: 1, expectedFailure: "expected 2 source VobSub streams, found 1" },
+    { name: "empty extra track", outputCount: 3, emptyCount: 1, expectedFailure: "expected 2 VobSub output streams, found 3" },
+    { name: "empty missing variant", outputCount: 1, emptyCount: 1, expectedFailure: "expected 2 VobSub output streams, found 1" },
     { name: "empty incorrect language", emptyCount: 2, language: "fra", expectedFailure: "has language fra, expected eng" },
     { name: "all empty source variants", emptyCount: 2 },
     { name: "mixed empty and populated source variants", emptyCount: 1 },
@@ -1146,12 +1149,19 @@ describe("encode worker polling", () => {
     { name: "legacy count-only metadata", legacy: true, chapters: false },
     { name: "a chapter range", legacy: false, chapters: true },
     { name: "a foreign-audio-search result", foreignAudioSearch: true },
-    { name: "one missing variant", outputCount: 1, expectedFailure: "expected 2 source VobSub streams, found 1" },
-    { name: "an extra source track", outputCount: 3, expectedFailure: "expected 2 source VobSub streams, found 3" },
+    { name: "a preserved source reused by foreign-audio search", foreignAudioSearch: true, reusedSearch: true },
+    { name: "an empty source beside a populated reused search track", foreignAudioSearch: true, reusedSearch: true, emptyCount: 1 },
+    { name: "an empty reused search track beside a populated source", foreignAudioSearch: true, reusedSearch: true, emptyForeignAudioSearch: true },
+    { name: "a reused source in a chapter range", chapters: true, foreignAudioSearch: true, reusedSearch: true },
+    { name: "a missing source alongside a derived search track", foreignAudioSearch: true, outputCount: 1, expectedFailure: "expected 3 VobSub output streams, found 2" },
+    { name: "a missing source alongside a reused search track", foreignAudioSearch: true, reusedSearch: true, outputCount: 1, expectedFailure: "expected 2 VobSub output streams, found 1" },
+    { name: "unavailable HandBrake provenance", missingProvenance: true, expectedFailure: "HandBrake subtitle provenance is incomplete or invalid" },
+    { name: "one missing variant", outputCount: 1, expectedFailure: "expected 2 VobSub output streams, found 1" },
+    { name: "an extra source track", outputCount: 3, expectedFailure: "expected 2 VobSub output streams, found 3" },
     { name: "incorrect language metadata", language: "fra", expectedFailure: "has language fra, expected eng" },
   ])("validates DVD display variants with $name and one stored declaration", async ({
     legacy, chapters, outputCount = 2, language = "eng",
-    foreignAudioSearch = false, emptyForeignAudioSearch = false, emptyCount = 0, scanCount = 2, expectedFailure,
+    foreignAudioSearch = false, reusedSearch = false, missingProvenance = false, emptyForeignAudioSearch = false, emptyCount = 0, scanCount = 2, expectedFailure,
   }) => {
     const fixture = createQueuedJob(chapters
       ? { kind: "dvd_chapters", titleNumber: 4, chapterStart: 3, chapterEnd: 5 }
@@ -1184,14 +1194,14 @@ describe("encode worker polling", () => {
           stderr: "",
           stdout: JSON.stringify(selector === "s" ? {
             streams: [
-              ...Array.from({ length: outputCount }, (_, index) => ({
-                index: index + 3, codec_name: "dvd_subtitle", nb_read_packets: index < emptyCount ? undefined : "10",
-                disposition: { default: 0, forced: 0 }, tags: { language },
-              })).filter((stream) => !removedIndexes.has(stream.index)),
               ...(foreignAudioSearch && !removedIndexes.has(2) ? [{
                 index: 2, codec_name: "dvd_subtitle", nb_read_packets: emptyForeignAudioSearch ? undefined : "1",
                 disposition: { default: 1, forced: 1 }, tags: { language: "eng" },
               }] : []),
+              ...Array.from({ length: outputCount - Number(reusedSearch) }, (_, index) => ({
+                index: index + 3, codec_name: "dvd_subtitle", nb_read_packets: index < emptyCount ? undefined : "10",
+                disposition: { default: 0, forced: 0 }, tags: { language },
+              })).filter((stream) => !removedIndexes.has(stream.index)),
             ],
           } : {
             format: { duration: "3600" }, packets: [{ pts_time: "0.0" }],
@@ -1203,7 +1213,10 @@ describe("encode worker polling", () => {
     await pollEncodeWorker({
       ...fixture, concurrency: 1, log: vi.fn(), outputValidator,
       subtitleScanner: createNodeDvdSubtitleScanner({ runCommand: scanCommand }),
-      runner: { run: async ({ outputPath }) => { writeFileSync(outputPath, "two subtitle variants"); } },
+      runner: { run: async ({ outputPath, onStderr }) => {
+        if (!missingProvenance) onStderr?.(subtitleLog({ sourceCount: scanCount, search: foreignAudioSearch, reused: reusedSearch }));
+        writeFileSync(outputPath, "two subtitle variants");
+      } },
       signal: new AbortController().signal,
     });
     expect(fixture.access.encodeJobs.list(), JSON.stringify(fixture.access.encodeJobs.listFailureReports([fixture.job.id]))).toEqual([
@@ -7875,10 +7888,12 @@ describe("node HandBrake runner", () => {
     const spawnProcess = vi.fn(() => child);
     const runner = createNodeHandBrakeRunner({ spawnProcess });
     const onOutput = vi.fn();
+    const onStderr = vi.fn();
 
     const running = runner.run({
       arguments_: ["--main-feature", "-i", "/source.iso", "-o", "/partial.mkv"],
       onOutput,
+      onStderr,
       outputPath: "/partial.mkv",
       signal: new AbortController().signal,
     });
@@ -7905,6 +7920,9 @@ describe("node HandBrake runner", () => {
     expect(onOutput).toHaveBeenCalledWith(
       "Encoding: task 1 of 1, 10.00 %\r",
     );
+    stdout.emit("data", Buffer.from("stdout progress\r"));
+    expect(onOutput).toHaveBeenCalledWith("stdout progress\r");
+    expect(onStderr.mock.calls).toEqual([["Encoding: task 1 of 1, 10.00 %\r"]]);
     child.emit("close", 0, null);
     await expect(running).resolves.toBeUndefined();
     expect(runner.isActive?.("/partial.mkv")).toBe(false);

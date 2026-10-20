@@ -187,6 +187,7 @@ function subtitleExpectations(
     }
     expectations.push({
       languageCode: subtitle.LanguageCode,
+      sourceTrackNumber: subtitle.TrackNumber,
       title: name ?? null,
     });
   }
