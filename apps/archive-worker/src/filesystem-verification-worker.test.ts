@@ -3,6 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
+import type {
+  ArchiveImageOwnership,
+  ArchiveImageOwnershipHandle,
+} from "@rip-dvd/worker-runtime";
 import { expect, it, vi } from "vitest";
 
 import { pollFilesystemVerification } from "./filesystem-verification-worker.js";
@@ -75,6 +79,90 @@ it("executes queued verification and retains its result for later readers", asyn
       status: "completed", resultStatus: "accessible",
     });
     expect(access.encodeJobs.find(job.id)).toMatchObject({ verificationStatus: "accessible" });
+
+    const evidenceLookup = vi.spyOn(
+      access.catalog,
+      "findDvdArchiveEvidenceHeader",
+    ).mockReturnValue(null);
+    const archiveJobLookup = vi.spyOn(
+      access.archiveJobs,
+      "listForArchive",
+    ).mockReturnValue([{
+      evidenceFormat: "dvd-recovery-evidence-v1",
+    }] as never);
+    let ownershipActive = false;
+    const assertOwned = vi.fn();
+    const archiveImageOwnership: ArchiveImageOwnership = {
+      inspect: vi.fn(),
+      async withConsistentRead<Result>(request: {
+        archiveId: string;
+        originalsLibraryPath: string;
+        signal: AbortSignal;
+        task(handle: ArchiveImageOwnershipHandle): Promise<Result>;
+      }) {
+        ownershipActive = true;
+        try {
+          return await request.task({
+            descriptor: 47,
+            signal: request.signal,
+            assertOwned,
+          });
+        } finally {
+          ownershipActive = false;
+        }
+      },
+      async withWriter() {
+        throw new Error("not used");
+      },
+      async withInitialPublicationWriter() {
+        throw new Error("not used");
+      },
+    };
+    const executeMarkedOriginal = access.filesystemVerification.execute.bind(
+      access.filesystemVerification,
+    );
+    const executeMarked = vi.spyOn(access.filesystemVerification, "execute")
+      .mockImplementation(async (claim, options) => {
+        expect(ownershipActive).toBe(true);
+        return executeMarkedOriginal(claim, options);
+      });
+    const markedRun = access.filesystemVerification.submit({
+      mutationKey: "synthetic-marked-invocation",
+      target: "original_disc_archive",
+      targetId: archive.id,
+    });
+    expect(await pollFilesystemVerification(access, undefined, {
+      archiveImageOwnership,
+      originalsLibraryPath: directory,
+    })).toBe(true);
+    expect(access.filesystemVerification.find(markedRun.id)?.status).toBe(
+      "completed",
+    );
+    expect(assertOwned).toHaveBeenCalledOnce();
+
+    const verifiedArchive = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0];
+    assertOwned.mockImplementationOnce(() => {
+      throw new Error("synthetic ownership loss");
+    });
+    const ownershipLossRun = access.filesystemVerification.submit({
+      mutationKey: "synthetic-ownership-loss-invocation",
+      target: "original_disc_archive",
+      targetId: archive.id,
+    });
+    expect(await pollFilesystemVerification(access, undefined, {
+      archiveImageOwnership,
+      originalsLibraryPath: directory,
+    })).toBe(true);
+    expect(access.filesystemVerification.find(ownershipLossRun.id)?.status)
+      .toBe("failed");
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toEqual(verifiedArchive);
+
+    executeMarked.mockRestore();
+    archiveJobLookup.mockRestore();
+    evidenceLookup.mockRestore();
     expect(await pollFilesystemVerification(access)).toBe(false);
 
     vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });

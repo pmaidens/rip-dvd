@@ -48,8 +48,13 @@ function createAuditDatabase(): string {
       id text primary key,
       original_disc_archive_id text,
       disc_inspection_id text,
+      evidence_format text,
       status text not null,
       completed_at integer
+    );
+    create table dvd_archive_evidence_headers (
+      original_disc_archive_id text primary key,
+      evidence_format text not null
     );
     insert into optical_drives values ('drive-1'), ('drive-2');
     insert into detected_discs values
@@ -68,9 +73,10 @@ function createAuditDatabase(): string {
       ('archive-cd', 'disc-cd', 'cd', 'bin_cue', '/archives/cd.bin',
        1000, null, null, null, 3000);
     insert into archive_jobs values
-      ('job-old', 'archive-1', 'inspection-old', 'completed', 900),
-      ('job-1', 'archive-1', 'inspection-1', 'completed', 1100),
-      ('job-2', 'archive-2', 'inspection-2', 'completed', 2100);
+      ('job-old', 'archive-1', 'inspection-old', null, 'completed', 900),
+      ('job-1', 'archive-1', 'inspection-1', null, 'completed', 1100),
+      ('job-2', 'archive-2', 'inspection-2',
+       'dvd-recovery-evidence-v1', 'completed', 2100);
   `);
   sqlite.close();
   return databasePath;
@@ -105,6 +111,8 @@ describe("read-only archive audit records", () => {
       "archive-1",
       "archive-2",
     ]);
+    expect(allRecords.records.map(({ evidenceFormat }) => evidenceFormat))
+      .toEqual([null, "dvd-recovery-evidence-v1"]);
     expect(allRecords.truncated).toBe(false);
 
     const verification = new DatabaseSync(databasePath, { readOnly: true });

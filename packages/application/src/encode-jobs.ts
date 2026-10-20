@@ -1,5 +1,6 @@
 import {
   discSelectionSourceDescription,
+  dvdRecoveryEvidenceFormatForArchive,
   encodingProfileQueueBlockingReasons,
   DvdRecoveryEvidenceEncodingUnavailableError,
   type ConsistentReadAccess,
@@ -33,8 +34,11 @@ function requireEvidenceEncodingAvailable(
     })[0];
     if (
       selection !== undefined &&
-      snapshot.catalog.findDvdArchiveEvidenceHeader(
-        selection.originalDiscArchiveId,
+      dvdRecoveryEvidenceFormatForArchive(
+        snapshot.catalog.findDvdArchiveEvidenceHeader(
+          selection.originalDiscArchiveId,
+        ),
+        snapshot.archiveJobs.listForArchive(selection.originalDiscArchiveId),
       ) !== null
     ) {
       throw new DvdRecoveryEvidenceEncodingUnavailableError();

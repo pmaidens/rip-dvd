@@ -6,9 +6,10 @@ import {
   canonicalPublicationJson, createDvdInitialPublicationDigest,
   type DvdUnrecoveredSourceRange,
 } from "@rip-dvd/data-access";
+import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { createOperatorWorkflowFixture, markArchiveWithDvdRecoveryEvidence, seedCatalogReviewForReadFixture } from "./operator-workflow.test-support.js";
 
-export function seedCommittedArchiveEvidence(
+export async function seedCommittedArchiveEvidence(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   ranges: readonly DvdUnrecoveredSourceRange[] = [],
   corrected = false,
@@ -79,6 +80,15 @@ export function seedCommittedArchiveEvidence(
   const pointer = { originalDiscArchiveId: archive.id, currentManifestId: manifest.id, currentManifestRevision: 1, currentManifestDigest: manifest.manifestDigest, publicationDigest: manifest.publicationDigest };
   writeFileSync(join(directory, "initial-manifest.json"), canonicalPublicationJson(manifest));
   writeFileSync(join(directory, "checkpoint.json"), canonicalPublicationJson(pointer));
+  await createArchiveImageOwnership({
+    authorityRootPath: fixture.originalsLibraryPath,
+  }).withInitialPublicationWriter({
+    archiveId: archive.id,
+    imagePath: archivePath,
+    originalsLibraryPath: fixture.originalsLibraryPath,
+    signal: new AbortController().signal,
+    async task() {},
+  });
   return { archive: recorded, manifest, pointer, directory };
 }
 

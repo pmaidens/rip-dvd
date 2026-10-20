@@ -38,12 +38,14 @@
   "files": ["dist"],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "pretest": "pnpm --filter @rip-dvd/config --filter @rip-dvd/data-access --filter @rip-dvd/worker-runtime build",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@rip-dvd/config": "workspace:*",
     "@rip-dvd/data-access": "workspace:*",
+    "@rip-dvd/worker-runtime": "workspace:*",
     "web-push": "3.6.7"
   },
   "devDependencies": {

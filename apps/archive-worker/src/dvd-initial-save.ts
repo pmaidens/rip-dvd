@@ -1,8 +1,16 @@
 import type { ArchiveJob, DataAccess, OriginalDiscArchiveId, RunningArchiveJob } from "@rip-dvd/data-access";
 import { ARCHIVE_JOB_LEASE_DURATION_MS, DomainInvariantError, DvdInitialSaveFault } from "@rip-dvd/data-access";
+import {
+  ArchiveImageOwnershipError,
+  defaultArchiveImageOwnership,
+  type ArchiveImageOwnership,
+} from "@rip-dvd/worker-runtime";
 import { runDvdInitialArchiveBoundaryForArchiveJob, type ProvenDvdInitialArchiveBoundary } from "./dvd-initial-boundary.js";
 import {
   publishDvdInitialArchive, reconcileDvdInitialArchivePublication,
+  readDvdInitialArchivePublicationImagePaths,
+  resolveDvdInitialArchivePublicationImagePaths,
+  type DvdInitialArchivePublicationImagePaths,
   type DvdInitialPublicationStep,
 } from "./dvd-initial-publication.js";
 
@@ -11,6 +19,9 @@ type SaveOptions = {
   claim: RunningArchiveJob;
   originalsLibraryPath: string;
   exclusion: import("./dvd-rescue-workspace-lock.js").DvdRescueWorkspaceLock;
+  archiveImageOwnership?: ArchiveImageOwnership;
+  archiveOwnershipDescriptor?: number;
+  assertArchiveOwnership?(): void;
   workerId?: string;
   /** Required to replace an expired claim; native exclusion and inode-owner
    * inspection must both prove no old writer remains. */
@@ -48,6 +59,7 @@ function publicationOptions(options: SaveOptions) {
     imageFingerprint: disc.fingerprint, databaseProjection,
     authorizeMutation: async () => {
       options.signal?.throwIfAborted();
+      options.assertArchiveOwnership?.();
       const job = access.archiveJobs.find(claim.id);
       const request = access.archiveRequests.find(claim.archiveRequestId);
       if (job?.status !== "completed") {
@@ -67,6 +79,7 @@ async function commitSave(options: SaveOptions, publication: Awaited<ReturnType<
   options.signal?.throwIfAborted();
   await publication.verifyPublication();
   options.signal?.throwIfAborted();
+  options.assertArchiveOwnership?.();
   const completed = options.access.archiveJobs.publishDvdInitial(options.claim, {
     archivePath: publication.archivePath, boundaryEvidence: publication.manifest.boundaryEvidence,
     manifest: publication.manifest,
@@ -79,15 +92,44 @@ async function commitSave(options: SaveOptions, publication: Awaited<ReturnType<
 }
 
 
-async function withOwnedClaim<T>(options: SaveOptions, task: (owned: SaveOptions) => Promise<T>): Promise<T> {
+async function withOwnedClaim<T>(
+  options: SaveOptions,
+  imagePath: string | null,
+  task: (owned: SaveOptions) => Promise<T>,
+  additionalImagePaths: readonly string[] = [],
+  initializeOwnership = false,
+): Promise<T> {
   const identity = publicationOptions(options);
   const signal = options.signal ?? new AbortController().signal;
-  return options.exclusion.withLock({
-    fingerprint: identity.imageFingerprint, originalsLibraryPath: options.originalsLibraryPath, signal,
-    task: async () => {
+  try {
+    const ownership = options.archiveImageOwnership ??
+      defaultArchiveImageOwnership;
+    const withWriter = initializeOwnership
+      ? ownership.withInitialPublicationWriter
+      : ownership.withWriter;
+    return await withWriter({
+        archiveId: identity.originalDiscArchiveId,
+        additionalImagePaths,
+        imagePath,
+        originalsLibraryPath: options.originalsLibraryPath,
+        signal,
+        task: async (archiveOwnership) => options.exclusion.withLock({
+          fingerprint: identity.imageFingerprint,
+          originalsLibraryPath: options.originalsLibraryPath,
+          signal: archiveOwnership.signal,
+          task: async () => {
       const run = async (claim: RunningArchiveJob) => {
         const controller = new AbortController();
-        const owned = { ...options, claim, signal: AbortSignal.any([signal, controller.signal]) };
+        const owned = {
+          ...options,
+          claim,
+          archiveOwnershipDescriptor: archiveOwnership.descriptor,
+          assertArchiveOwnership: archiveOwnership.assertOwned,
+          signal: AbortSignal.any([
+            archiveOwnership.signal,
+            controller.signal,
+          ]),
+        };
         const heartbeat = setInterval(() => {
           try {
             if (options.access.archiveJobs.find(claim.id)?.status === "completed") return;
@@ -99,7 +141,7 @@ async function withOwnedClaim<T>(options: SaveOptions, task: (owned: SaveOptions
       };
       const current = options.access.archiveJobs.find(options.claim.id);
       if (current?.status === "completed") return run(options.claim);
-      signal.throwIfAborted();
+      archiveOwnership.signal.throwIfAborted();
       if (current?.status !== "running" || current.claimToken !== options.claim.claimToken)
         throw new DvdInitialSaveFault("DVD_INITIAL_SAVE_OWNERSHIP_LOST");
       if (current.updatedAt.getTime() > Date.now() - ARCHIVE_JOB_LEASE_DURATION_MS)
@@ -111,7 +153,7 @@ async function withOwnedClaim<T>(options: SaveOptions, task: (owned: SaveOptions
       try {
         await writer.runner.withDeviceInactive(writer.devicePath, async () => {
           try {
-            signal.throwIfAborted();
+            archiveOwnership.signal.throwIfAborted();
             let active: boolean;
             try {
               active = writer.runner.isActive(writer.devicePath, writer.outputPath);
@@ -131,24 +173,67 @@ async function withOwnedClaim<T>(options: SaveOptions, task: (owned: SaveOptions
       }
       if (!result) throw new DvdInitialSaveFault("DVD_INITIAL_SAVE_OWNERSHIP_LOST");
       return result.value;
-    },
-  });
+          },
+        }),
+      });
+  } catch (cause) {
+    if (cause instanceof ArchiveImageOwnershipError) {
+      throw new DvdInitialSaveFault(
+        cause.code === "WRITER_NOT_QUIESCENT"
+          ? "DVD_INITIAL_SAVE_OWNERSHIP_LOST"
+          : "DVD_INITIAL_SAVE_CONSISTENCY_FAULT",
+        { cause },
+      );
+    }
+    throw cause;
+  }
 }
 
-async function saveWithExclusionHeld(options: SaveOptions & { proven: ProvenDvdInitialArchiveBoundary }) {
-  return commitSave(options, await publishDvdInitialArchive({ ...publicationOptions(options), proven: options.proven }));
+async function saveWithExclusionHeld(
+  options: SaveOptions & { proven: ProvenDvdInitialArchiveBoundary },
+  expectedImagePaths: DvdInitialArchivePublicationImagePaths,
+) {
+  return commitSave(options, await publishDvdInitialArchive({
+    ...publicationOptions(options),
+    expectedImagePaths,
+    proven: options.proven,
+  }));
 }
 
 /** Publication faults retain intent and evidence for reconciliation. This path
  * never uses legacy published-image quarantine or terminal-failure handling. */
 export async function saveDvdInitialArchiveForArchiveJob(options: SaveOptions & { proven: ProvenDvdInitialArchiveBoundary }) {
-  return withOwnedClaim(options, owned => saveWithExclusionHeld({ ...owned, proven: options.proven }));
+  const imagePaths = await resolveDvdInitialArchivePublicationImagePaths(
+    publicationOptions(options),
+    options.proven.initialCopy.imagePath,
+  );
+  return withOwnedClaim(
+    options,
+    imagePaths.stagingPath,
+    owned => saveWithExclusionHeld(
+      { ...owned, proven: options.proven },
+      imagePaths,
+    ),
+    [imagePaths.archivePath],
+    true,
+  );
 }
 
 export async function reconcileDvdInitialArchiveForArchiveJob(options: SaveOptions) {
-  return withOwnedClaim(options, async owned => commitSave(owned,
-    await reconcileDvdInitialArchivePublication(publicationOptions(owned)),
-  ));
+  const imagePaths = await readDvdInitialArchivePublicationImagePaths(
+    publicationOptions(options),
+  );
+  return withOwnedClaim(
+    options,
+    imagePaths.stagingPath,
+    async owned => commitSave(owned,
+      await reconcileDvdInitialArchivePublication({
+        ...publicationOptions(owned),
+        expectedImagePaths: imagePaths,
+      }),
+    ),
+    [imagePaths.archivePath],
+  );
 }
 
 /** Full initial-copy/save workflow. Lease renewal runs independently of byte
@@ -159,22 +244,33 @@ export async function runDvdInitialArchiveJob(options: SaveOptions & {
   const signal = options.signal
     ? AbortSignal.any([options.signal, options.boundary.signal])
     : options.boundary.signal;
-  return withOwnedClaim({ ...options, signal }, async owned => {
-    const identity = publicationOptions(owned);
-    await identity.authorizeMutation();
-    const proven = await runDvdInitialArchiveBoundaryForArchiveJob({
-      ...options.boundary, signal: owned.signal!,
-      async authorizeCopy() {
-        await identity.authorizeMutation();
-        await options.boundary.authorizeCopy?.();
-        await identity.authorizeMutation();
-      },
-      async authorizeBoundaryProbe() {
-        await identity.authorizeMutation();
-        await options.boundary.authorizeBoundaryProbe();
-        await identity.authorizeMutation();
-      },
-    });
-    return saveWithExclusionHeld({ ...owned, proven });
-  });
+  const imagePaths = await resolveDvdInitialArchivePublicationImagePaths(
+    publicationOptions(options),
+    options.boundary.outputPath,
+  );
+  return withOwnedClaim(
+    { ...options, signal },
+    imagePaths.stagingPath,
+    async owned => {
+      const identity = publicationOptions(owned);
+      await identity.authorizeMutation();
+      const proven = await runDvdInitialArchiveBoundaryForArchiveJob({
+        ...options.boundary, signal: owned.signal!,
+        archiveOwnershipDescriptor: owned.archiveOwnershipDescriptor!,
+        async authorizeCopy() {
+          await identity.authorizeMutation();
+          await options.boundary.authorizeCopy?.();
+          await identity.authorizeMutation();
+        },
+        async authorizeBoundaryProbe() {
+          await identity.authorizeMutation();
+          await options.boundary.authorizeBoundaryProbe();
+          await identity.authorizeMutation();
+        },
+      });
+      return saveWithExclusionHeld({ ...owned, proven }, imagePaths);
+    },
+    [imagePaths.archivePath],
+    true,
+  );
 }

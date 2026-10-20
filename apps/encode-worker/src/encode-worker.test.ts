@@ -29,10 +29,15 @@ import {
   ENCODE_JOB_LEASE_DURATION_MS,
   rearchiveAcceptancePreviewEvidence,
   type DataAccess,
+  type DvdArchiveEvidenceHeader,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { seedRearchiveReviewFixtureForTest } from "@rip-dvd/data-access/rearchive-test-support";
+import type {
+  ArchiveImageOwnership,
+  ArchiveImageOwnershipHandle,
+} from "@rip-dvd/worker-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -52,7 +57,10 @@ import {
 import {
   encodeOutputFilesystemIdentity,
 } from "./encode-output-filesystem-identity.js";
-import { createNodeDvdSubtitleScanner } from "./dvd-subtitle-scanner.js";
+import {
+  createNodeDvdSubtitleScanner,
+  type DvdSubtitleScanner,
+} from "./dvd-subtitle-scanner.js";
 import dvdVariants from "./test-fixtures/handbrake-dvd-variants.json" with { type: "json" };
 
 vi.mock("./dvd-subtitle-scanner.js", async (importOriginal) => ({
@@ -1343,6 +1351,95 @@ describe("encode worker polling", () => {
     ]);
     expect(readFileSync(fixture.outputPath, "utf8")).toBe("complete encode");
     expect(existsSync(request.outputPath)).toBe(false);
+    fixture.access.close();
+  });
+
+  it("holds shared ownership for the complete marked archive encode read", async () => {
+    const fixture = createQueuedJob({ kind: "dvd_title", titleNumber: 4 });
+    const evidence: DvdArchiveEvidenceHeader = {
+      originalDiscArchiveId: fixture.archive.id,
+      sourceArchiveJobId: "synthetic-archive-job" as DvdArchiveEvidenceHeader["sourceArchiveJobId"],
+      evidenceFormat: "dvd-recovery-evidence-v1",
+      boundaryEvidenceDigest: "synthetic-boundary-digest",
+      sectorSizeBytes: 2_048,
+      acceptedEndLbaExclusive: 1,
+      currentManifestId: "synthetic-manifest",
+      currentManifestRevision: 1,
+      currentManifestDigest: "synthetic-manifest-digest",
+      unrecoveredSourceRanges: [],
+      createdAt: new Date("2026-10-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-10-01T00:00:00.000Z"),
+    };
+    vi.spyOn(fixture.access.catalog, "findDvdArchiveEvidenceHeader")
+      .mockReturnValue(null);
+    vi.spyOn(fixture.access.archiveJobs, "listForArchive")
+      .mockImplementation((id) => id === fixture.archive.id
+        ? [{ evidenceFormat: evidence.evidenceFormat } as never]
+        : []);
+    let ownershipActive = false;
+    const assertOwned = vi.fn(() => {
+      expect(ownershipActive).toBe(true);
+    });
+    const archiveImageOwnership: ArchiveImageOwnership = {
+      inspect: vi.fn(),
+      async withConsistentRead<Result>(request: {
+        archiveId: string;
+        originalsLibraryPath: string;
+        signal: AbortSignal;
+        task(handle: ArchiveImageOwnershipHandle): Promise<Result>;
+      }) {
+        ownershipActive = true;
+        try {
+          return await request.task({
+            descriptor: 47,
+            signal: request.signal,
+            assertOwned,
+          });
+        } finally {
+          ownershipActive = false;
+        }
+      },
+      async withWriter() {
+        throw new Error("not used");
+      },
+      async withInitialPublicationWriter() {
+        throw new Error("not used");
+      },
+    };
+    const runner: HandBrakeRunner = {
+      run: vi.fn(async ({ outputPath, sourceOwnershipDescriptor }) => {
+        expect(ownershipActive).toBe(true);
+        expect(sourceOwnershipDescriptor).toBe(47);
+        writeFileSync(outputPath, "consistent encode", { flag: "wx" });
+      }),
+    };
+    const subtitleScanner: DvdSubtitleScanner = {
+      scan: vi.fn(async (
+        _sourcePath,
+        _titleNumber,
+        _signal,
+        sourceOwnershipDescriptor,
+      ) => {
+        expect(ownershipActive).toBe(true);
+        expect(sourceOwnershipDescriptor).toBe(47);
+        return [];
+      }),
+    };
+
+    await pollEncodeWorker({
+      ...fixture,
+      archiveImageOwnership,
+      concurrency: 1,
+      log: vi.fn(),
+      runner,
+      subtitleScanner,
+      signal: new AbortController().signal,
+    });
+
+    expect(runner.run).toHaveBeenCalledOnce();
+    expect(subtitleScanner.scan).toHaveBeenCalledOnce();
+    expect(assertOwned).toHaveBeenCalled();
+    expect(ownershipActive).toBe(false);
     fixture.access.close();
   });
 
@@ -7811,6 +7908,33 @@ describe("node HandBrake runner", () => {
     child.emit("close", 0, null);
     await expect(running).resolves.toBeUndefined();
     expect(runner.isActive?.("/partial.mkv")).toBe(false);
+  });
+
+  it("passes shared archive ownership to the HandBrake process", async () => {
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: vi.fn(() => true),
+      unref: vi.fn(),
+    });
+    const spawnProcess = vi.fn(() => child);
+    const runner = createNodeHandBrakeRunner({ spawnProcess });
+
+    const running = runner.run({
+      arguments_: ["-i", "/source.iso", "-o", "/partial.mkv"],
+      onOutput: vi.fn(),
+      outputPath: "/partial.mkv",
+      sourceOwnershipDescriptor: 47,
+      signal: new AbortController().signal,
+    });
+
+    expect(spawnProcess).toHaveBeenCalledWith(
+      "nice",
+      expect.any(Array),
+      { shell: false, stdio: ["ignore", "pipe", "pipe", 47] },
+    );
+    child.emit("close", 0, null);
+    await expect(running).resolves.toBeUndefined();
   });
 
   it.each([

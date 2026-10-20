@@ -2,6 +2,11 @@ import {
   DvdCheckpointReadFault, RecordNotFoundError,
   type DataAccess, type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
+import {
+  ArchiveImageOwnershipError,
+  defaultArchiveImageOwnership,
+  type ArchiveImageOwnership,
+} from "@rip-dvd/worker-runtime";
 
 export class InvalidArchiveEvidenceInputError extends Error {}
 
@@ -29,6 +34,7 @@ export async function inspectArchiveEvidence(
   access: DataAccess,
   archiveId: string,
   options: { limit?: number; cursor?: string } = {},
+  archiveImageOwnership: ArchiveImageOwnership = defaultArchiveImageOwnership,
 ) {
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(archiveId) ||
     (options.limit !== undefined && (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 100)) ||
@@ -45,9 +51,19 @@ export async function inspectArchiveEvidence(
     truncated: false, complete: false, nextCursor: null,
   });
   let manifest;
-  try { manifest = await access.readDvdInitialCheckpoint(archiveId as OriginalDiscArchiveId); }
+  try {
+    manifest = await access.readDvdInitialCheckpoint(
+      archiveId as OriginalDiscArchiveId,
+      archiveImageOwnership,
+    );
+  }
   catch (error) {
-    return unavailable(error instanceof DvdCheckpointReadFault ? error.code : "DVD_EVIDENCE_PROJECTION_INVALID");
+    return unavailable(
+      error instanceof DvdCheckpointReadFault ||
+        error instanceof ArchiveImageOwnershipError
+        ? error.code
+        : "DVD_EVIDENCE_PROJECTION_INVALID",
+    );
   }
   if (manifest === null) return unavailable("DVD_EVIDENCE_NOT_RECORDED");
   const revision: EvidenceRevision = {

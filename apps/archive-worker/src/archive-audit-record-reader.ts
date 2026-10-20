@@ -29,7 +29,10 @@ function isRecordPage(
       record !== null &&
       typeof record === "object" &&
       "archivedAt" in record &&
-      record.archivedAt instanceof Date
+      record.archivedAt instanceof Date &&
+      "evidenceFormat" in record &&
+      (record.evidenceFormat === null ||
+        record.evidenceFormat === "dvd-recovery-evidence-v1")
     );
 }
 

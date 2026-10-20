@@ -1,6 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 
 import type { DataAccess } from "@rip-dvd/data-access";
+import type { ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 
 import {
   nodeDvdSubtitleScanner,
@@ -60,6 +61,7 @@ export {
 
 export interface PollEncodeWorkerOptions {
   access: DataAccess;
+  archiveImageOwnership?: ArchiveImageOwnership;
   atomicPathExchange?: AtomicPathExchange;
   concurrency: number;
   log(message: string): void;

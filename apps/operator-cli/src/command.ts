@@ -56,6 +56,7 @@ interface CommandIO {
   openAccess(): DataAccess;
   encodeOutputMediaProbe?: EncodeOutputMediaProbe;
   mediaLibraryPath?(): string;
+  originalsLibraryPath?(): string;
   getLookup?(): CatalogMetadataLookup | null;
   readStdin?(): string;
   readFile?(path: string): string;
@@ -968,6 +969,8 @@ function inspectCommand(rest: readonly string[], io: CommandIO) {
         ...(positional.length === 2 ? { id } : {}),
         limit,
         offset,
+        originalsLibraryPath:
+          io.originalsLibraryPath?.() ?? loadConfig().originalsLibraryPath,
       }));
     if ("item" in result && result.item === null) {
       throw new CommandFailure("NOT_FOUND", "Operational record was not found.", 2);

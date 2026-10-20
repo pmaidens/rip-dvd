@@ -21,6 +21,7 @@ export interface HandBrakeRunRequest {
   arguments_: readonly string[];
   onOutput(text: string): void;
   outputPath: string;
+  sourceOwnershipDescriptor?: number;
   signal: AbortSignal;
 }
 
@@ -80,7 +81,12 @@ interface HandBrakeChildProcess {
 type SpawnHandBrake = (
   executable: string,
   arguments_: readonly string[],
-  options: { shell: false; stdio: ["ignore", "pipe", "pipe"] },
+  options: {
+    shell: false;
+    stdio:
+      | ["ignore", "pipe", "pipe"]
+      | ["ignore", "pipe", "pipe", number];
+  },
 ) => HandBrakeChildProcess;
 
 function boundedDiagnostic(value: string): string {
@@ -282,7 +288,13 @@ export function createNodeHandBrakeRunner({
     whenInactive(outputPath) {
       return inactiveWaiters.get(outputPath)?.promise ?? Promise.resolve();
     },
-    run({ arguments_, onOutput, outputPath, signal }) {
+    run({
+      arguments_,
+      onOutput,
+      outputPath,
+      sourceOwnershipDescriptor,
+      signal,
+    }) {
       signal.throwIfAborted();
       if (activeOutputs.has(outputPath)) {
         return Promise.reject(new Error("HandBrake output is still active"));
@@ -302,7 +314,17 @@ export function createNodeHandBrakeRunner({
               "rip-dvd-handbrake",
               ...arguments_,
             ],
-            { shell: false, stdio: ["ignore", "pipe", "pipe"] },
+            {
+              shell: false,
+              stdio: sourceOwnershipDescriptor === undefined
+                ? ["ignore", "pipe", "pipe"]
+                : [
+                    "ignore",
+                    "pipe",
+                    "pipe",
+                    sourceOwnershipDescriptor,
+                  ],
+            },
           );
         } catch (error) {
           releaseOutput(outputPath);

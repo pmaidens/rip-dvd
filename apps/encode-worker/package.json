@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/build-atomic-exchange.mjs",
-    "pretest": "node scripts/build-atomic-exchange.mjs",
+    "pretest": "pnpm --filter @rip-dvd/config --filter @rip-dvd/worker-runtime build && node scripts/build-atomic-exchange.mjs",
     "start": "node dist/index.js",
     "test": "vitest run --config vitest.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"

@@ -436,6 +436,7 @@ describe("Archive Job DVD initial-copy boundary", () => {
     });
 
     const completed = await runDvdInitialCopyForArchiveJob({
+      archiveOwnershipDescriptor: 8,
       devicePath: "/dev/zero",
       onProgress: vi.fn(),
       outputPath,
@@ -446,7 +447,7 @@ describe("Archive Job DVD initial-copy boundary", () => {
 
     expect(spawnProcess).toHaveBeenCalledOnce();
     expect(spawnProcess.mock.calls[0]![1]).toContain(
-      "initial-copy-authorized",
+      "initial-copy-owned-v1",
     );
     expect(completed.unrecoveredSourceRanges).toEqual([{
       startLba: 1,
@@ -547,6 +548,7 @@ describe("Archive Job DVD initial-copy boundary", () => {
     let caught: unknown;
     try {
       await runDvdInitialCopyForArchiveJob({
+        archiveOwnershipDescriptor: 8,
         authorizeBoundaryProbe,
         devicePath: "/dev/zero",
         onProgress: vi.fn(),

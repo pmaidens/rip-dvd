@@ -24,6 +24,12 @@ _Avoid_: Queued Archive Job, approval
 Further attempts to recover unresolved source regions in a saved Original Disc Archive. Cataloging may proceed during Archive Recovery, but encoding requires a stable archive after recovery stops or completes.
 _Avoid_: Re-archive, new Archive Request
 
+**Archive Image Ownership**:
+The operating-system lock held across a complete read or write interval for a
+mutable Original Disc Archive image. Writer claims and worker leases are
+diagnostic coordination evidence; they do not replace this ownership.
+_Avoid_: Worker lease, recovery claim, database lock
+
 **Recovery Stop**:
 An operator's decision to stop Archive Recovery and keep the saved Original Disc Archive with its remaining damage evidence. Recovery stays stopped until explicitly resumed, and may resume only when no Encode Job is queued or running against that archive.
 _Avoid_: Archive Request cancellation, archive deletion

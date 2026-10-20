@@ -69,6 +69,7 @@ import {
   type EncodeOutputMediaProbe,
 } from "./encode-output-inspection.js";
 import { describeDvdRecoveryStorage } from "./dvd-recovery-storage.js";
+import type { ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 
 export class InvalidProfileInputError extends Error {
   constructor(message = "Invalid Encoding Profile input.") {
@@ -217,7 +218,11 @@ export {
   validOperationLimit,
   waitForOperation,
 } from "./operations.js";
-export type { OperationKind, WaitableKind } from "./operations.js";
+export type {
+  OperationInspectionOptions,
+  OperationKind,
+  WaitableKind,
+} from "./operations.js";
 
 function readDeploymentReadiness(access: ConsistentReadAccess) {
   const inspections = access.discInspections
@@ -264,7 +269,10 @@ function readDeploymentReadiness(access: ConsistentReadAccess) {
 
 export function createApplicationOperations(
   access: DataAccess,
-  dependencies: { encodeOutputMediaProbe?: EncodeOutputMediaProbe } = {},
+  dependencies: {
+    archiveImageOwnership?: ArchiveImageOwnership;
+    encodeOutputMediaProbe?: EncodeOutputMediaProbe;
+  } = {},
 ) {
   return {
     ...createNotificationOperations(access),
@@ -358,7 +366,12 @@ export function createApplicationOperations(
     cancelEncodeJob: (input: Parameters<typeof cancelEncodeJob>[1]) =>
       cancelEncodeJob(access, input),
     inspectArchiveEvidence: (archiveId: string, options?: { limit?: number; cursor?: string }) =>
-      inspectArchiveEvidence(access, archiveId, options),
+      inspectArchiveEvidence(
+        access,
+        archiveId,
+        options,
+        dependencies.archiveImageOwnership,
+      ),
     inspectEncodeOutput: (artifactIdentity: unknown) =>
       inspectEncodeOutput(
         access,

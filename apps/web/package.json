@@ -7,8 +7,8 @@
     "dev": "next dev",
     "pretest": "node ../encode-worker/scripts/build-atomic-exchange.mjs",
     "start": "next start",
-    "test": "tsc -p ../../packages/config/tsconfig.build.json && tsc -p ../../packages/data-access/tsconfig.build.json && vitest run",
-    "test:browser": "next build && playwright test",
+    "test": "tsc -p ../../packages/config/tsconfig.build.json && tsc -p ../../packages/data-access/tsconfig.build.json && tsc -p ../../packages/worker-runtime/tsconfig.build.json && vitest run",
+    "test:browser": "tsc -p ../../packages/worker-runtime/tsconfig.build.json && next build && playwright test",
     "test:browser:serve": "node test/browser/seed-catalog-review.mjs && node test/browser/start-catalog-review-server.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint components lib app --max-warnings 0"
@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",
+    "@rip-dvd/worker-runtime": "workspace:*",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "happy-dom": "20.11.2"

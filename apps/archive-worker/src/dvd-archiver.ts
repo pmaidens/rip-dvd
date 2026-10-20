@@ -326,6 +326,7 @@ interface DvdCopyChildProcess {
     DvdCopyWritablePipe,
     DvdCopyReadablePipe?,
     DvdProbeAuthorizationWritablePipe?,
+    null?,
   ];
   stderr: {
     destroy(): void;
@@ -373,6 +374,7 @@ type SpawnDvdCopyProcess = (
       "pipe",
       "pipe",
       "pipe",
+      number,
     ];
   },
 ) => DvdCopyChildProcess;
@@ -467,10 +469,22 @@ export function createNodeDvdCopyRunner({
       throw new Error("DVD archive copy is still active");
     },
     start(request): ActiveBoundedProcess<DvdNativeCopyResult> {
+      const archiveOwnershipDescriptor =
+        request.resultKind === "initial_copy"
+          ? request.archiveOwnershipDescriptor
+          : undefined;
+      if (
+        request.resultKind === "initial_copy" &&
+        (!Number.isSafeInteger(archiveOwnershipDescriptor) ||
+          archiveOwnershipDescriptor === undefined ||
+          archiveOwnershipDescriptor <= 2)
+      ) {
+        throw new Error("DVD initial-copy archive ownership is unavailable");
+      }
       const continuationProtocol = request.resultKind === "initial_copy"
         ? {
           authorizationPayload: "1",
-          helperOperation: "initial-copy-authorized" as const,
+          helperOperation: "initial-copy-owned-v1" as const,
           imageFilesystemIdentity: undefined,
           operationSizeBytes: request.sizeBytes,
           }
@@ -513,6 +527,9 @@ export function createNodeDvdCopyRunner({
               "pipe",
               "pipe",
               "pipe",
+              request.resultKind === "initial_copy"
+                ? archiveOwnershipDescriptor!
+                : lockDescriptor,
             ],
           },
         );

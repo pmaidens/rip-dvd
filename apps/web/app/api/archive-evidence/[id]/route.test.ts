@@ -1,6 +1,7 @@
 import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { expect, it } from "vitest";
+import { defaultArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
 import { seedCommittedArchiveEvidence } from "../../../../../operator-cli/src/archive-evidence.test-support.js";
 import { createArchiveEvidenceRoute } from "./route";
@@ -8,7 +9,7 @@ import { createArchiveEvidenceRoute } from "./route";
 it.each(["clean", "damaged", "long", "historical", "missing"])("matches CLI evidence and paging for %s", async (kind) => {
   const fixture = createOperatorWorkflowFixture();
   const ranges = kind === "long" ? Array.from({ length: 113 }, (_, index) => ({ startLba: index * 2, sectorCount: 1, classification: "skipped_untested" as const })) : kind === "damaged" ? [{ startLba: 8, sectorCount: 64, classification: "skipped_untested" as const }] : [];
-  const saved = kind === "historical" ? seedCatalogReviewForReadFixture(fixture) : seedCommittedArchiveEvidence(fixture, ranges);
+  const saved = kind === "historical" ? seedCatalogReviewForReadFixture(fixture) : await seedCommittedArchiveEvidence(fixture, ranges);
   if (kind === "missing" && "directory" in saved) unlinkSync(join(saved.directory, "checkpoint.json"));
   const access = fixture.openAccess();
   try {
@@ -26,6 +27,41 @@ it.each(["clean", "damaged", "long", "historical", "missing"])("matches CLI evid
       cursor = body.nextCursor;
     } while (cursor !== null);
   } finally { access.close(); fixture.dispose(); }
+});
+
+it("keeps web and CLI evidence reads unavailable throughout a writer interval", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const saved = await seedCommittedArchiveEvidence(fixture);
+  const access = fixture.openAccess();
+  try {
+    await defaultArchiveImageOwnership.withInitialPublicationWriter({
+      archiveId: saved.archive.id,
+      imagePath: saved.archive.archivePath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {
+        const web = await createArchiveEvidenceRoute(
+          new Request(
+            `http://localhost/api/archive-evidence/${saved.archive.id}`,
+          ),
+          saved.archive.id,
+          () => access,
+        );
+        const cli = await fixture.run(["archive-evidence", saved.archive.id]);
+        const body = await web.json();
+        expect(web.status).toBe(200);
+        expect(cli.exitCode).toBe(0);
+        expect(body).toMatchObject({
+          available: false,
+          unavailableReason: "WRITER_NOT_QUIESCENT",
+        });
+        expect(cli.result).toEqual(body);
+      },
+    });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
 });
 
 it.each(["limit=0", "limit=101", "cursor=bad", "offset=1", "limit=1&limit=2"])("rejects invalid paging %s", async (query) => {

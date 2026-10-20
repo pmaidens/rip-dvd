@@ -552,6 +552,29 @@ function markArchiveWithDvdRecoveryEvidence(
   }
 }
 
+function removeDvdArchiveEvidenceHeaderForTest(
+  databasePath: string,
+  originalDiscArchiveId: string,
+): void {
+  const sqlite = new DatabaseSync(databasePath);
+  const guards = sqlite.prepare(`
+    SELECT name, sql
+    FROM sqlite_master
+    WHERE type = 'trigger' AND tbl_name = 'dvd_archive_evidence_headers'
+  `).all() as Array<{ name: string; sql: string }>;
+  try {
+    sqlite.exec("PRAGMA foreign_keys = OFF");
+    for (const guard of guards) sqlite.exec(`DROP TRIGGER "${guard.name}"`);
+    sqlite.prepare(`
+      DELETE FROM dvd_archive_evidence_headers
+      WHERE original_disc_archive_id = ?
+    `).run(originalDiscArchiveId);
+  } finally {
+    for (const guard of guards) sqlite.exec(guard.sql);
+    sqlite.close();
+  }
+}
+
 function completeDiscInspection(
   access: ReturnType<typeof openTestDatabase>,
   input: {
@@ -13499,11 +13522,23 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       mutationKey: requeueMutationKey,
     });
     access.encodeJobs.requestCancellation(enqueued.id);
+    const claimProfile = access.encodingProfiles.create({
+      key: "evidence-encode-claim",
+      displayName: "Evidence encode claim",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: claimProfile.id,
+      outputPath: "/media/movies/Evidence Encode Claim.mkv",
+    });
     markArchiveWithDvdRecoveryEvidence(
       databasePath,
       archive.id,
       "evidence-encode-replay",
     );
+    removeDvdArchiveEvidenceHeaderForTest(databasePath, archive.id);
 
     expect(access.encodeJobs.enqueue(enqueueInput)).toEqual(enqueued);
     expect(() => access.encodeJobs.enqueue({
@@ -13528,6 +13563,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       discSelectionIds: [selection.id],
       encodingProfileId: profile.id,
     })).toThrow(DvdRecoveryEvidenceEncodingUnavailableError);
+    expect(access.encodeJobs.listQueueDiscSelections({
+      historyGroup: "not_encoded",
+      limit: 10,
+    })).toMatchObject({ selections: [], total: 0 });
+    expect(access.encodeJobs.claimNext("headerless-evidence-worker")).toBeNull();
     access.close();
 
     const replayCheck = new DatabaseSync(databasePath);

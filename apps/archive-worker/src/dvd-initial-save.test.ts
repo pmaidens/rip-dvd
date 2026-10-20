@@ -1,10 +1,14 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdtemp, mkdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { ARCHIVE_JOB_LEASE_DURATION_MS, createDataAccess, type RunningArchiveJob } from "@rip-dvd/data-access";
 import { beginSettledDiscInspectionForTest } from "@rip-dvd/data-access/test-support";
+import {
+  createArchiveImageOwnership,
+  type ArchiveImageOwnership,
+} from "@rip-dvd/worker-runtime";
 import { runDvdInitialArchiveBoundaryForArchiveJob } from "./dvd-initial-boundary.js";
 import { isoProfileImage } from "./dvd-metadata-profile-fixtures.js";
 import { createInProcessDvdRescueWorkspaceLock } from "./dvd-rescue-workspace-lock.js";
@@ -131,6 +135,145 @@ it.each([false, true])("saves the initial image, full evidence, job, request and
   } finally { f.access.close(); }
 });
 
+it("reasserts archive ownership after publication verification and before the database commit", async () => {
+  const f = await jobFixture(true);
+  const ownership = createArchiveImageOwnership();
+  let databaseBoundaryReached = false;
+  let assertionsAfterBoundary = 0;
+  let assertionsAtCommit = -1;
+  const archiveImageOwnership: ArchiveImageOwnership = {
+    ...ownership,
+    async withInitialPublicationWriter(request) {
+      return ownership.withInitialPublicationWriter({
+        ...request,
+        async task(handle) {
+          return request.task({
+            ...handle,
+            assertOwned() {
+              handle.assertOwned();
+              if (databaseBoundaryReached) assertionsAfterBoundary += 1;
+            },
+          });
+        },
+      });
+    },
+  };
+  const publish = f.access.archiveJobs.publishDvdInitial.bind(
+    f.access.archiveJobs,
+  );
+  vi.spyOn(f.access.archiveJobs, "publishDvdInitial")
+    .mockImplementation((claim, input) => {
+      assertionsAtCommit = assertionsAfterBoundary;
+      return publish(claim, input);
+    });
+  try {
+    await saveDvdInitialArchiveForArchiveJob({
+      access: f.access,
+      archiveImageOwnership,
+      claim: f.claim,
+      originalsLibraryPath: f.identity.originalsLibraryPath,
+      exclusion: f.exclusion,
+      fault(point) {
+        if (point === "before:database") databaseBoundaryReached = true;
+      },
+      proven: f.proven,
+    });
+    expect(assertionsAtCommit).toBe(2);
+  } finally { f.access.close(); }
+});
+
+it("fails closed when the staged image is on unsupported storage", async () => {
+  const f = await jobFixture();
+  const stagedImagePath = await realpath(f.proven.initialCopy.imagePath);
+  const archiveImageOwnership = createArchiveImageOwnership({
+    inspectStorage: (path) => path === stagedImagePath
+      ? { filesystemType: "synthetic-network", storageClass: "network" }
+      : { filesystemType: "test-in-process", storageClass: "local" },
+  });
+  try {
+    await expect(saveDvdInitialArchiveForArchiveJob({
+      access: f.access,
+      archiveImageOwnership,
+      claim: f.claim,
+      originalsLibraryPath: f.identity.originalsLibraryPath,
+      exclusion: f.exclusion,
+      proven: f.proven,
+    })).rejects.toMatchObject({ code: "DVD_INITIAL_SAVE_CONSISTENCY_FAULT" });
+    expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
+  } finally {
+    f.access.close();
+  }
+});
+
+it("fails closed when reconciliation finds persisted staging on unsupported storage", async () => {
+  const f = await jobFixture();
+  const options = {
+    access: f.access,
+    claim: f.claim,
+    originalsLibraryPath: f.identity.originalsLibraryPath,
+    exclusion: f.exclusion,
+  };
+  try {
+    await expect(saveDvdInitialArchiveForArchiveJob({
+      ...options,
+      proven: f.proven,
+      fault(point) {
+        if (point === "after:intent") throw new Error("synthetic interruption");
+      },
+    })).rejects.toThrow("synthetic interruption");
+    const stagedImagePath = await realpath(f.proven.initialCopy.imagePath);
+    const archiveImageOwnership = createArchiveImageOwnership({
+      inspectStorage: (path) => path === stagedImagePath
+        ? { filesystemType: "synthetic-network", storageClass: "network" }
+        : { filesystemType: "test-in-process", storageClass: "local" },
+    });
+
+    await expect(reconcileDvdInitialArchiveForArchiveJob({
+      ...options,
+      archiveImageOwnership,
+    })).rejects.toMatchObject({ code: "DVD_INITIAL_SAVE_CONSISTENCY_FAULT" });
+    expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
+  } finally {
+    f.access.close();
+  }
+});
+
+it("fails closed when reconciliation finds the published image on unsupported storage", async () => {
+  const f = await jobFixture();
+  const options = {
+    access: f.access,
+    claim: f.claim,
+    originalsLibraryPath: f.identity.originalsLibraryPath,
+    exclusion: f.exclusion,
+  };
+  try {
+    await expect(saveDvdInitialArchiveForArchiveJob({
+      ...options,
+      proven: f.proven,
+      fault(point) {
+        if (point === "after:link") throw new Error("synthetic interruption");
+      },
+    })).rejects.toThrow("synthetic interruption");
+    const publishedImagePath = await realpath(join(
+      f.identity.originalsLibraryPath,
+      `dvd-${f.claim.id}.iso`,
+    ));
+    const archiveImageOwnership = createArchiveImageOwnership({
+      inspectStorage: (path) => path === publishedImagePath
+        ? { filesystemType: "synthetic-network", storageClass: "network" }
+        : { filesystemType: "test-in-process", storageClass: "local" },
+    });
+
+    await expect(reconcileDvdInitialArchiveForArchiveJob({
+      ...options,
+      archiveImageOwnership,
+    })).rejects.toMatchObject({ code: "DVD_INITIAL_SAVE_CONSISTENCY_FAULT" });
+    expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
+  } finally {
+    f.access.close();
+  }
+});
+
 it.each(["after:intent", "after:image", "after:manifest", "after:link", "before:pointer", "after:pointer", "before:database", "after:database", "before:cleanup", "after:cleanup"] as const)(
   "reconciles %s to the same complete save without losing evidence", async (interruption) => {
     const f = await jobFixture(true);
@@ -215,6 +358,47 @@ it("does not advance the database when image bytes change before the save", asyn
     })).rejects.toMatchObject({ code: "DVD_PUBLICATION_IMAGE_CONFLICT" });
     expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
     expect(f.access.archiveJobs.find(f.claim.id)?.status).toBe("running");
+  } finally { f.access.close(); }
+});
+
+it("rejects an initial publication when the Originals symlink retargets after ownership admission", async () => {
+  const f = await jobFixture(true);
+  const fixtureRoot = dirname(f.identity.originalsLibraryPath);
+  const admittedParentPath = join(fixtureRoot, "admitted-parent");
+  const replacementParentPath = join(fixtureRoot, "replacement-parent");
+  const configuredParentPath = join(fixtureRoot, "configured-parent");
+  const admittedOriginalsPath = join(admittedParentPath, "originals");
+  const replacementOriginalsPath = join(replacementParentPath, "originals");
+  const configuredOriginalsPath = join(configuredParentPath, "originals");
+  await mkdir(admittedParentPath);
+  await mkdir(replacementOriginalsPath, { recursive: true });
+  await rename(f.identity.originalsLibraryPath, admittedOriginalsPath);
+  await symlink(admittedParentPath, configuredParentPath);
+  const lock = createInProcessDvdRescueWorkspaceLock();
+  try {
+    await expect(saveDvdInitialArchiveForArchiveJob({
+      access: f.access,
+      claim: f.claim,
+      originalsLibraryPath: configuredOriginalsPath,
+      exclusion: {
+        async withLock(options) {
+          return lock.withLock({
+            ...options,
+            async task() {
+              await rm(configuredParentPath);
+              await symlink(replacementParentPath, configuredParentPath);
+              return options.task();
+            },
+          });
+        },
+      },
+      proven: f.proven,
+    })).rejects.toMatchObject({ code: "DVD_PUBLICATION_PATH_CONFLICT" });
+    expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    await expect(readFile(join(
+      replacementOriginalsPath,
+      `${f.identity.originalDiscArchiveId}.iso`,
+    ))).rejects.toMatchObject({ code: "ENOENT" });
   } finally { f.access.close(); }
 });
 

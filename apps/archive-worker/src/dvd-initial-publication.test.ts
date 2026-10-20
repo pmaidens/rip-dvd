@@ -1,19 +1,41 @@
 import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, it } from "vitest";
 import { runDvdInitialArchiveBoundaryForArchiveJob } from "./dvd-initial-boundary.js";
 import { isoProfileImage } from "./dvd-metadata-profile-fixtures.js";
 import { DvdInitialCopyBoundaryError } from "./dvd-initial-copy.js";
 import {
-  publishDvdInitialArchive,
-  reconcileDvdInitialArchivePublication,
+  publishDvdInitialArchive as publishArchive,
+  readDvdInitialArchivePublicationImagePaths,
+  reconcileDvdInitialArchivePublication as reconcilePublication,
+  resolveDvdInitialArchivePublicationImagePaths,
 } from "./dvd-initial-publication.js";
 
 const directories: string[] = [];
 afterEach(async () => {
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
+
+async function reconcileDvdInitialArchivePublication(
+  options: Parameters<typeof readDvdInitialArchivePublicationImagePaths>[0] &
+    Omit<Parameters<typeof reconcilePublication>[0], "expectedImagePaths">,
+) {
+  const expectedImagePaths =
+    await readDvdInitialArchivePublicationImagePaths(options);
+  return reconcilePublication({ ...options, expectedImagePaths });
+}
+
+async function publishDvdInitialArchive(
+  options: Omit<Parameters<typeof publishArchive>[0], "expectedImagePaths">,
+) {
+  const expectedImagePaths =
+    await resolveDvdInitialArchivePublicationImagePaths(
+      options,
+      options.proven.initialCopy.imagePath,
+    );
+  return publishArchive({ ...options, expectedImagePaths });
+}
 
 async function fixture(damaged = false, corrected = false) {
   const directory = await mkdtemp(join(tmpdir(), "dvd-initial-publication-"));
@@ -227,6 +249,26 @@ it("requires persisted intent even when image size and checkpoint appear complet
   await expect(reconcileDvdInitialArchivePublication(identity)).rejects.toMatchObject({ code: "DVD_PUBLICATION_INTENT_MISSING" });
   await expect(publishDvdInitialArchive({ ...identity, proven })).rejects.toMatchObject({ code: "DVD_PUBLICATION_INTENT_MISSING" });
   expect(await readFile(saved.archivePath)).toEqual(await readFile(proven.initialCopy.imagePath));
+});
+
+it("rejects an intent path that changes after ownership admission", async () => {
+  const { identity, proven } = await fixture();
+  await expect(publishDvdInitialArchive({ ...identity, proven, fault(point) {
+    if (point === "after:intent") throw new Error("interruption");
+  } })).rejects.toThrow("interruption");
+  const expectedImagePaths =
+    await readDvdInitialArchivePublicationImagePaths(identity);
+  const intentPath = evidencePath(identity, "publication-intent.json");
+  const intent = JSON.parse(await readFile(intentPath, "utf8"));
+  await writeFile(intentPath, JSON.stringify({
+    ...intent,
+    stagingPath: join(dirname(expectedImagePaths.stagingPath), "other.partial"),
+  }));
+
+  await expect(reconcilePublication({
+    ...identity,
+    expectedImagePaths,
+  })).rejects.toMatchObject({ code: "DVD_PUBLICATION_INTENT_CONFLICT" });
 });
 
 it("rejects an intent belonging to another source job", async () => {

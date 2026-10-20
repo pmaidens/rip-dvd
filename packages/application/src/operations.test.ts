@@ -201,4 +201,77 @@ describe("inspectOperations", () => {
       archives[DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT]!.id,
     ]);
   });
+
+  it("inspects ownership when a durable Archive Job marker outlives its evidence header", () => {
+    const archive = syntheticArchive(1);
+    const inspect = vi.fn(() => ({
+      contractVersion: "archive-image-ownership-v1" as const,
+      writer: { state: "uncertain" as const },
+      workerClaim: {
+        state: "invalid" as const,
+        claimedAt: null,
+        leaseExpiresAt: null,
+      },
+      stableRead: {
+        available: false,
+        blockingReasons: [{
+          code: "CONSISTENCY_FAULT" as const,
+          message: "Archive image ownership is inconsistent or unavailable.",
+        }],
+      },
+    }));
+    const snapshot = {
+      catalog: {
+        listOriginalDiscArchives: vi.fn((filters: {
+          ids?: readonly OriginalDiscArchiveId[];
+        }) =>
+          filters.ids?.includes(archive.id)
+            ? [archive]
+            : []
+        ),
+        findDvdArchiveEvidenceHeaders: vi.fn(() => new Map()),
+        listDiscSelections: vi.fn(() => []),
+        listDetectedDiscs: vi.fn(() => []),
+        findArchiveRecovery: vi.fn(() => null),
+      },
+      archiveJobs: {
+        listForArchive: vi.fn(() => [{
+          evidenceFormat: "dvd-recovery-evidence-v1",
+        }]),
+      },
+      archiveRequests: { listForRearchiveSources: vi.fn(() => []) },
+      encodeJobs: { listForDiscSelection: vi.fn(() => []) },
+      dvdRecoveryStorage: { readCurrent: vi.fn(() => null) },
+    } as unknown as ConsistentReadAccess;
+    const access = {
+      readConsistentSnapshot<T>(
+        read: (consistent: ConsistentReadAccess) => T,
+      ): T {
+        return read(snapshot);
+      },
+    };
+
+    const result = inspectOperations(access, "original-disc-archives", {
+      id: archive.id,
+      originalsLibraryPath: "/media/originals",
+      archiveImageOwnership: { inspect },
+    });
+
+    expect(inspect).toHaveBeenCalledWith({
+      archiveId: archive.id,
+      imagePath: archive.archivePath,
+      originalsLibraryPath: "/media/originals",
+    });
+    expect(result.item).toMatchObject({
+      archiveRecovery: {
+        ownership: {
+          writer: { state: "uncertain" },
+          stableRead: {
+            available: false,
+            blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
+          },
+        },
+      },
+    });
+  });
 });

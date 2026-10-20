@@ -30,6 +30,7 @@ export {
   DvdRecoveryEvidenceAdmissionClosedError,
   DvdRecoveryEvidenceEncodingUnavailableError,
   assertDvdRecoveryEvidenceAdmissionAvailable,
+  dvdRecoveryEvidenceFormatForArchive,
 } from "./dvd-recovery-evidence.js";
 export * from "./dvd-recovery-storage-preflight.js";
 export {

@@ -1,4 +1,11 @@
-import type { DataAccess } from "@rip-dvd/data-access";
+import {
+  dvdRecoveryEvidenceFormatForArchive,
+  type DataAccess,
+} from "@rip-dvd/data-access";
+import {
+  defaultArchiveImageOwnership,
+  type ArchiveImageOwnership,
+} from "@rip-dvd/worker-runtime";
 import { runDurableWorkPoller } from "./durable-work-poller.js";
 import {
   recordArchiveClaimRecoveryIncident,
@@ -10,6 +17,11 @@ import {
 export async function pollFilesystemVerification(
   access: DataAccess,
   log: (message: string) => void = () => {},
+  options: {
+    originalsLibraryPath?: string;
+    archiveImageOwnership?: ArchiveImageOwnership;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<boolean> {
   const incidentOptions = { access, log };
   try {
@@ -37,7 +49,39 @@ export async function pollFilesystemVerification(
       }
     }, 5_000);
     try {
-      await access.filesystemVerification.execute(claim);
+      const evidenceFormat = claim.target === "original_disc_archive"
+        ? dvdRecoveryEvidenceFormatForArchive(
+            access.catalog.findDvdArchiveEvidenceHeader(claim.targetId),
+            access.archiveJobs.listForArchive(claim.targetId),
+          )
+        : null;
+      if (evidenceFormat === null) {
+        await access.filesystemVerification.execute(claim);
+      } else {
+        if (options.originalsLibraryPath === undefined) {
+          throw new Error("Archive image ownership is unavailable");
+        }
+        if (claim.target !== "original_disc_archive") {
+          throw new Error("Archive image ownership target is invalid");
+        }
+        const archive = access.catalog.listOriginalDiscArchives({
+          ids: [claim.targetId],
+        })[0];
+        if (archive === undefined) {
+          throw new Error("Archive image ownership is unavailable");
+        }
+        await (options.archiveImageOwnership ?? defaultArchiveImageOwnership)
+          .withConsistentRead({
+            archiveId: claim.targetId,
+            imagePath: archive.archivePath,
+            originalsLibraryPath: options.originalsLibraryPath,
+            signal: options.signal ?? new AbortController().signal,
+            task: ({ assertOwned }) => access.filesystemVerification.execute(
+              claim,
+              { assertStable: assertOwned },
+            ),
+          });
+      }
     } catch {
       // A stale claim cannot change a newer attempt. Other failures retain a
       // generic outcome; filesystem paths and raw diagnostics stay private.
@@ -58,13 +102,17 @@ export async function runFilesystemVerificationWorker(input: {
   access: DataAccess;
   intervalMs: number;
   log(message: string): void;
+  originalsLibraryPath: string;
   signal: AbortSignal;
 }): Promise<void> {
   await runDurableWorkPoller({
     intervalMs: input.intervalMs,
     signal: input.signal,
     log: input.log,
-    poll: () => pollFilesystemVerification(input.access, input.log),
+    poll: () => pollFilesystemVerification(input.access, input.log, {
+      originalsLibraryPath: input.originalsLibraryPath,
+      signal: input.signal,
+    }),
     pollFailureMessage: "Filesystem verification worker poll failed.",
     waitFailureMessage: "Verification worker wait failed",
   });
