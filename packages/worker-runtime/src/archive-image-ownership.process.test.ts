@@ -22,7 +22,7 @@ import { afterEach, expect, it } from "vitest";
 import {
   ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME,
   ARCHIVE_IMAGE_OWNERSHIP_NAMESPACE_IDENTITY_NAME,
-  createArchiveImageOwnership,
+  createArchiveImageOwnership as createArchiveImageOwnershipBase,
 } from "./archive-image-ownership.js";
 import { inspectLinuxStorage } from "./linux-storage.js";
 
@@ -30,6 +30,23 @@ const roots: string[] = [];
 const helperPids: number[] = [];
 const processStorageSupported = process.platform === "linux" &&
   inspectLinuxStorage(tmpdir()).filesystemType === "ext";
+
+function createArchiveImageOwnership(
+  options?: Parameters<typeof createArchiveImageOwnershipBase>[0],
+): ReturnType<typeof createArchiveImageOwnershipBase> {
+  const ownership = createArchiveImageOwnershipBase(options);
+  return {
+    ...ownership,
+    withConsistentRead: request => ownership.withConsistentRead({
+      ...request,
+      initialize: true,
+    }),
+    withWriter: request => ownership.withWriter({
+      ...request,
+      initialize: true,
+    }),
+  };
+}
 
 afterEach(() => {
   for (const pid of helperPids.splice(0)) {
@@ -182,7 +199,7 @@ it.runIf(processStorageSupported)(
 );
 
 it.runIf(processStorageSupported)(
-  "fails closed when the per-archive triplet disappears during a live helper",
+  "fails closed when every per-archive record disappears during a live helper",
   async () => {
     const originalsLibraryPath = mkdtempSync(
       join(tmpdir(), "rip-dvd-image-ownership-process-"),
@@ -223,6 +240,14 @@ it.runIf(processStorageSupported)(
           entry.endsWith(".claim.json")
         ) {
           rmSync(join(directory, entry), { force: true });
+        }
+      }
+      for (const entry of readdirSync(originalsLibraryPath)) {
+        if (
+          entry.startsWith(".rip-dvd-archive-ownership.archive-") &&
+          entry.endsWith(".identity.json")
+        ) {
+          rmSync(join(originalsLibraryPath, entry), { force: true });
         }
       }
     };
@@ -519,6 +544,7 @@ it.runIf(processStorageSupported)(
       (_unused, index) => ({
         archiveId: `fresh-namespace-archive-${index}`,
         imagePath,
+        initialize: true,
         originalsLibraryPath,
         signal: new AbortController().signal,
         async task() {},
@@ -527,11 +553,12 @@ it.runIf(processStorageSupported)(
     const firstAttempts = await Promise.allSettled(
       requests.map((request) => ownership.withConsistentRead(request)),
     );
-    await expect(Promise.all(requests.map((request, index) =>
-      firstAttempts[index]?.status === "fulfilled"
-        ? undefined
-        : ownership.withConsistentRead(request)
-    ))).resolves.toEqual(Array.from({ length: 8 }, () => undefined));
+    for (const [index, request] of requests.entries()) {
+      if (firstAttempts[index]?.status !== "fulfilled") {
+        await expect(ownership.withConsistentRead(request))
+          .resolves.toBeUndefined();
+      }
+    }
   },
 );
 

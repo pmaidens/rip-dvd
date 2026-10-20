@@ -9,7 +9,7 @@ import { createArchiveEvidenceRoute } from "./route";
 it.each(["clean", "damaged", "long", "historical", "missing"])("matches CLI evidence and paging for %s", async (kind) => {
   const fixture = createOperatorWorkflowFixture();
   const ranges = kind === "long" ? Array.from({ length: 113 }, (_, index) => ({ startLba: index * 2, sectorCount: 1, classification: "skipped_untested" as const })) : kind === "damaged" ? [{ startLba: 8, sectorCount: 64, classification: "skipped_untested" as const }] : [];
-  const saved = kind === "historical" ? seedCatalogReviewForReadFixture(fixture) : seedCommittedArchiveEvidence(fixture, ranges);
+  const saved = kind === "historical" ? seedCatalogReviewForReadFixture(fixture) : await seedCommittedArchiveEvidence(fixture, ranges);
   if (kind === "missing" && "directory" in saved) unlinkSync(join(saved.directory, "checkpoint.json"));
   const access = fixture.openAccess();
   try {
@@ -31,12 +31,13 @@ it.each(["clean", "damaged", "long", "historical", "missing"])("matches CLI evid
 
 it("keeps web and CLI evidence reads unavailable throughout a writer interval", async () => {
   const fixture = createOperatorWorkflowFixture();
-  const saved = seedCommittedArchiveEvidence(fixture);
+  const saved = await seedCommittedArchiveEvidence(fixture);
   const access = fixture.openAccess();
   try {
     await defaultArchiveImageOwnership.withWriter({
       archiveId: saved.archive.id,
       imagePath: saved.archive.archivePath,
+      initialize: true,
       originalsLibraryPath: fixture.originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {

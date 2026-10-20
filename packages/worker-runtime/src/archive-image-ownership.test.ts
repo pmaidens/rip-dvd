@@ -17,10 +17,27 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ARCHIVE_IMAGE_OWNERSHIP_DIRECTORY_NAME,
   ArchiveImageOwnershipError,
-  createArchiveImageOwnership,
+  createArchiveImageOwnership as createArchiveImageOwnershipBase,
 } from "./archive-image-ownership.js";
 
 const roots: string[] = [];
+
+function createArchiveImageOwnership(
+  options?: Parameters<typeof createArchiveImageOwnershipBase>[0],
+): ReturnType<typeof createArchiveImageOwnershipBase> {
+  const ownership = createArchiveImageOwnershipBase(options);
+  return {
+    ...ownership,
+    withConsistentRead: request => ownership.withConsistentRead({
+      ...request,
+      initialize: true,
+    }),
+    withWriter: request => ownership.withWriter({
+      ...request,
+      initialize: true,
+    }),
+  };
+}
 
 function root(): string {
   const path = mkdtempSync(join(tmpdir(), "rip-dvd-image-ownership-"));
@@ -298,6 +315,88 @@ describe("archive image ownership", () => {
       signal: new AbortController().signal,
       async task() {},
     })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+  });
+
+  it("revalidates archive identity after lock acquisition before starting work", async () => {
+    const originalsLibraryPath = root();
+    const held = new Set<number>();
+    let taskCalled = false;
+    const ownership = createArchiveImageOwnership({
+      backend: {
+        supported: true,
+        async acquire(descriptor, lockPath) {
+          held.add(descriptor);
+          if (lockPath.endsWith(".lock")) {
+            const anchor = readdirSync(originalsLibraryPath).find((entry) =>
+              entry.startsWith(".rip-dvd-archive-ownership.archive-") &&
+              entry.endsWith(".identity.json")
+            );
+            if (anchor === undefined) throw new Error("Archive anchor is missing");
+            rmSync(join(originalsLibraryPath, anchor));
+          }
+          return () => held.delete(descriptor);
+        },
+        assertHeld(descriptor) {
+          if (!held.has(descriptor)) {
+            throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
+          }
+        },
+        inspect() {
+          return "inactive";
+        },
+      },
+    });
+
+    await expect(ownership.withWriter({
+      archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {
+        taskCalled = true;
+      },
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+    expect(taskCalled).toBe(false);
+  });
+
+  it("surfaces a pending heartbeat failure after protected work completes", async () => {
+    const originalsLibraryPath = root();
+    const heartbeatStarted = deferred<void>();
+    const rejectHeartbeat = deferred<void>();
+    const taskFinished = deferred<void>();
+    const ownership = createArchiveImageOwnership({
+      claimLeaseDurationMs: 30,
+      async writeHeartbeatRecord() {
+        heartbeatStarted.resolve();
+        await rejectHeartbeat.promise;
+        throw new Error("synthetic heartbeat failure");
+      },
+    });
+
+    const result = ownership.withWriter({
+      archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {
+        await heartbeatStarted.promise;
+        taskFinished.resolve();
+      },
+    });
+    await taskFinished.promise;
+    rejectHeartbeat.resolve();
+    await expect(result).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+    expect(ownership.inspect({
+      archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+    })).toMatchObject({
+      workerClaim: { state: "active" },
+      stableRead: {
+        available: false,
+        blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
+      },
+    });
   });
 
   it("excludes writers from a shared consistent-read interval", async () => {

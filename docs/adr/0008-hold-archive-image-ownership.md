@@ -30,7 +30,11 @@ a concurrent first-use failure cannot leave an unbound archive lock behind.
 Each initialized archive also has a durable lock-identity anchor in the
 Originals Library root, outside the per-archive lock, identity, and claim
 triplet. Missing or replaced triplet state therefore cannot authorize a new
-lock inode while an earlier descriptor may still be live.
+lock inode while an earlier descriptor may still be live. A namespace-wide,
+inode-bound registry records initialization before the first per-archive lock
+is created. Only the initial publication path may add an archive; all later
+read, write, reconciliation, and inspection paths fail closed when registered
+state is missing.
 
 The process that performs image I/O inherits the locked descriptor. An initial
 copy helper receives the exclusive descriptor, and HandBrake and Archive Audit

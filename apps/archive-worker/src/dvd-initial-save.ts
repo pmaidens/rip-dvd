@@ -97,6 +97,7 @@ async function withOwnedClaim<T>(
   imagePath: string | null,
   task: (owned: SaveOptions) => Promise<T>,
   additionalImagePaths: readonly string[] = [],
+  initializeOwnership = false,
 ): Promise<T> {
   const identity = publicationOptions(options);
   const signal = options.signal ?? new AbortController().signal;
@@ -106,6 +107,7 @@ async function withOwnedClaim<T>(
         archiveId: identity.originalDiscArchiveId,
         additionalImagePaths,
         imagePath,
+        initialize: initializeOwnership,
         originalsLibraryPath: options.originalsLibraryPath,
         signal,
         task: async (archiveOwnership) => options.exclusion.withLock({
@@ -210,6 +212,7 @@ export async function saveDvdInitialArchiveForArchiveJob(options: SaveOptions & 
       imagePaths,
     ),
     [imagePaths.archivePath],
+    true,
   );
 }
 
@@ -265,5 +268,6 @@ export async function runDvdInitialArchiveJob(options: SaveOptions & {
       return saveWithExclusionHeld({ ...owned, proven }, imagePaths);
     },
     [imagePaths.archivePath],
+    true,
   );
 }

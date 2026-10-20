@@ -24,7 +24,7 @@ it("keeps historical integrity and unknown evidence distinct from zero damage", 
 it("reads damaged committed evidence using only the accepted extent", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
-  const { archive } = seedCommittedArchiveEvidence(fixture, [
+  const { archive } = await seedCommittedArchiveEvidence(fixture, [
     { startLba: 10, sectorCount: 128, classification: "skipped_untested" },
     { startLba: 1023, sectorCount: 1, classification: "skipped_untested" },
   ], true);
@@ -48,7 +48,7 @@ it("reads damaged committed evidence using only the accepted extent", async () =
 it("reports a clean checkpoint as complete with a known zero", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
-  const { archive } = seedCommittedArchiveEvidence(fixture);
+  const { archive } = await seedCommittedArchiveEvidence(fixture);
   expect((await fixture.run(["archive-evidence", archive.id])).result).toMatchObject({
     available: true, evidence: { integrity: "clean_read", skippedSectorCount: 0,
       unresolvedSectorCount: 0, unresolvedPercentage: 0 },
@@ -60,7 +60,7 @@ it("pages every compact range without omission and reuses stable cursors", async
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const ranges = Array.from({ length: 137 }, (_, i) => ({ startLba: i * 3, sectorCount: 1, classification: "skipped_untested" as const }));
-  const { archive } = seedCommittedArchiveEvidence(fixture, ranges);
+  const { archive } = await seedCommittedArchiveEvidence(fixture, ranges);
   const first = await fixture.run(["archive-evidence", archive.id]);
   expect(first.result).toMatchObject({ truncated: true, complete: false, evidence: { rangeCount: 137, unresolvedSectorCount: 137 } });
   expect((await fixture.run(["archive-evidence", archive.id])).result).toEqual(first.result);
@@ -81,7 +81,7 @@ it("pages every compact range without omission and reuses stable cursors", async
 it("uses the filesystem checkpoint while the database header is missing", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
-  const { archive } = seedCommittedArchiveEvidence(fixture, [{ startLba: 8, sectorCount: 2, classification: "skipped_untested" }]);
+  const { archive } = await seedCommittedArchiveEvidence(fixture, [{ startLba: 8, sectorCount: 2, classification: "skipped_untested" }]);
   withEvidenceGuardsDisabled(fixture.databasePath, db => {
     db.prepare("DELETE FROM dvd_archive_evidence_headers WHERE original_disc_archive_id = ?").run(archive.id);
   });
@@ -96,7 +96,7 @@ it.each([
 ] as const)("keeps missing %s unavailable rather than clean", async (filename, reason) => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
-  const { archive, directory } = seedCommittedArchiveEvidence(fixture);
+  const { archive, directory } = await seedCommittedArchiveEvidence(fixture);
   unlinkSync(join(directory, filename));
   expect((await fixture.run(["archive-evidence", archive.id])).result).toMatchObject({
     available: false, unavailableReason: reason, evidence: null, ranges: null, complete: false,
@@ -106,7 +106,7 @@ it.each([
 it("rejects stale cursors and never presents evidence from a different revision", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
-  const { archive, directory, pointer } = seedCommittedArchiveEvidence(fixture, [
+  const { archive, directory, pointer } = await seedCommittedArchiveEvidence(fixture, [
     { startLba: 1, sectorCount: 1, classification: "skipped_untested" },
     { startLba: 5, sectorCount: 1, classification: "skipped_untested" },
   ]);
@@ -126,7 +126,7 @@ it("rejects stale cursors and never presents evidence from a different revision"
 it.each(["digest", "image", "projection"])("fails closed for a conflicting %s", async (conflict) => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
-  const { archive, directory, manifest } = seedCommittedArchiveEvidence(fixture);
+  const { archive, directory, manifest } = await seedCommittedArchiveEvidence(fixture);
   const reason = conflict === "digest" ? "DVD_PUBLICATION_MANIFEST_CONFLICT" : conflict === "image" ? "DVD_PUBLICATION_IMAGE_CONFLICT" : "DVD_EVIDENCE_PROJECTION_INVALID";
   if (conflict === "digest") writeFileSync(join(directory, "initial-manifest.json"), JSON.stringify({ ...manifest, acceptedEndLbaExclusive: 1025 }));
   if (conflict === "image") writeFileSync(archive.archivePath, Buffer.alloc(archive.sizeBytes!, 1));

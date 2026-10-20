@@ -11,6 +11,7 @@ const ownership = createArchiveImageOwnership({
 await ownership.withWriter({
   archiveId: "surviving-helper-archive",
   imagePath,
+  initialize: true,
   originalsLibraryPath,
   signal: new AbortController().signal,
   async task({ descriptor }) {
