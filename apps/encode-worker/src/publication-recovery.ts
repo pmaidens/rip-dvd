@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   decodeArchivedDvdTitles,
+  dvdRecoveryEvidenceFormatForArchive,
   encodingProfileSettingsBlockingReasons,
   ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
   ENCODE_JOB_LEASE_DURATION_MS,
@@ -1850,8 +1851,10 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
       ids: [archive.detectedDiscId],
     })[0];
     const archivedTitles = decodeArchivedDvdTitles(detectedDisc?.scanData);
-    const evidenceFormat = snapshot.catalog
-      .findDvdArchiveEvidenceHeader(archive.id)?.evidenceFormat ?? null;
+    const evidenceFormat = dvdRecoveryEvidenceFormatForArchive(
+      snapshot.catalog.findDvdArchiveEvidenceHeader(archive.id),
+      snapshot.archiveJobs.listForArchive(archive.id),
+    );
     const selectionPlan = resolveSelectionExecutionPlan(
       sourceIdentity,
       archivedTitles,

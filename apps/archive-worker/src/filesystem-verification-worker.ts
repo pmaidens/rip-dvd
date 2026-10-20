@@ -1,4 +1,7 @@
-import type { DataAccess } from "@rip-dvd/data-access";
+import {
+  dvdRecoveryEvidenceFormatForArchive,
+  type DataAccess,
+} from "@rip-dvd/data-access";
 import {
   defaultArchiveImageOwnership,
   type ArchiveImageOwnership,
@@ -46,10 +49,13 @@ export async function pollFilesystemVerification(
       }
     }, 5_000);
     try {
-      const evidenceHeader = claim.target === "original_disc_archive"
-        ? access.catalog.findDvdArchiveEvidenceHeader(claim.targetId)
+      const evidenceFormat = claim.target === "original_disc_archive"
+        ? dvdRecoveryEvidenceFormatForArchive(
+            access.catalog.findDvdArchiveEvidenceHeader(claim.targetId),
+            access.archiveJobs.listForArchive(claim.targetId),
+          )
         : null;
-      if (evidenceHeader === null) {
+      if (evidenceFormat === null) {
         await access.filesystemVerification.execute(claim);
       } else {
         if (options.originalsLibraryPath === undefined) {

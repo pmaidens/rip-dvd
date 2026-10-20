@@ -48,6 +48,7 @@ function createAuditDatabase(): string {
       id text primary key,
       original_disc_archive_id text,
       disc_inspection_id text,
+      evidence_format text,
       status text not null,
       completed_at integer
     );
@@ -72,11 +73,10 @@ function createAuditDatabase(): string {
       ('archive-cd', 'disc-cd', 'cd', 'bin_cue', '/archives/cd.bin',
        1000, null, null, null, 3000);
     insert into archive_jobs values
-      ('job-old', 'archive-1', 'inspection-old', 'completed', 900),
-      ('job-1', 'archive-1', 'inspection-1', 'completed', 1100),
-      ('job-2', 'archive-2', 'inspection-2', 'completed', 2100);
-    insert into dvd_archive_evidence_headers values
-      ('archive-2', 'dvd-recovery-evidence-v1');
+      ('job-old', 'archive-1', 'inspection-old', null, 'completed', 900),
+      ('job-1', 'archive-1', 'inspection-1', null, 'completed', 1100),
+      ('job-2', 'archive-2', 'inspection-2',
+       'dvd-recovery-evidence-v1', 'completed', 2100);
   `);
   sqlite.close();
   return databasePath;

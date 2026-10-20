@@ -1371,7 +1371,11 @@ describe("encode worker polling", () => {
       updatedAt: new Date("2026-10-01T00:00:00.000Z"),
     };
     vi.spyOn(fixture.access.catalog, "findDvdArchiveEvidenceHeader")
-      .mockImplementation((id) => id === fixture.archive.id ? evidence : null);
+      .mockReturnValue(null);
+    vi.spyOn(fixture.access.archiveJobs, "listForArchive")
+      .mockImplementation((id) => id === fixture.archive.id
+        ? [{ evidenceFormat: evidence.evidenceFormat } as never]
+        : []);
     let ownershipActive = false;
     const assertOwned = vi.fn(() => {
       expect(ownershipActive).toBe(true);

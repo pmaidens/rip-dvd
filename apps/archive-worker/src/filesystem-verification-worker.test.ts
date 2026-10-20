@@ -83,7 +83,13 @@ it("executes queued verification and retains its result for later readers", asyn
     const evidenceLookup = vi.spyOn(
       access.catalog,
       "findDvdArchiveEvidenceHeader",
-    ).mockReturnValue({ evidenceFormat: "dvd-recovery-evidence-v1" } as never);
+    ).mockReturnValue(null);
+    const archiveJobLookup = vi.spyOn(
+      access.archiveJobs,
+      "listForArchive",
+    ).mockReturnValue([{
+      evidenceFormat: "dvd-recovery-evidence-v1",
+    }] as never);
     let ownershipActive = false;
     const assertOwned = vi.fn();
     const archiveImageOwnership: ArchiveImageOwnership = {
@@ -152,6 +158,7 @@ it("executes queued verification and retains its result for later readers", asyn
       .toEqual(verifiedArchive);
 
     executeMarked.mockRestore();
+    archiveJobLookup.mockRestore();
     evidenceLookup.mockRestore();
     expect(await pollFilesystemVerification(access)).toBe(false);
 

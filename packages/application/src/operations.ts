@@ -2,6 +2,7 @@ import {
   DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
   DVD_RECOVERY_EVIDENCE_ADMISSION,
   DVD_RECOVERY_EVIDENCE_ENCODING,
+  dvdRecoveryEvidenceFormatForArchive,
   type DvdArchiveEvidenceHeader,
   DVD_RECOVERY_EVIDENCE_FORMAT,
   WORKER_KINDS,
@@ -738,12 +739,16 @@ function readDetail(
         ? null
         : "Fresh re-archive requests are supported only for DVD archives";
       const evidenceHeader = evidenceHeaders.get(archive.id) ?? null;
-      const recoveryStorage = evidenceHeader === null
+      const evidenceFormat = dvdRecoveryEvidenceFormatForArchive(
+        evidenceHeader,
+        access.archiveJobs.listForArchive(archive.id),
+      );
+      const recoveryStorage = evidenceFormat === null
         ? null
         : describeDvdRecoveryStorage(
           access.dvdRecoveryStorage.readCurrent(),
         );
-      const ownership = evidenceHeader === null ||
+      const ownership = evidenceFormat === null ||
           options.originalsLibraryPath === undefined
         ? null
         : (options.archiveImageOwnership ?? defaultArchiveImageOwnership)
@@ -824,7 +829,10 @@ function readDetail(
         ids: [job.discSelectionId], encodeEligibleOnly: true,
       }).length > 0;
       const evidenceBlocked = selection !== undefined &&
-        evidenceHeaders.has(selection.originalDiscArchiveId);
+        dvdRecoveryEvidenceFormatForArchive(
+          evidenceHeaders.get(selection.originalDiscArchiveId),
+          access.archiveJobs.listForArchive(selection.originalDiscArchiveId),
+        ) !== null;
       const requeue = encodeRequeueAvailability(
         access,
         job,

@@ -1611,16 +1611,7 @@ export function createArchiveImageOwnership({
         return consistencyFaultInspection();
       }
       if (paths === null) {
-        return {
-          contractVersion: ARCHIVE_IMAGE_OWNERSHIP_VERSION,
-          writer: { state: "inactive" },
-          workerClaim: {
-            state: "none",
-            claimedAt: null,
-            leaseExpiresAt: null,
-          },
-          stableRead: { available: true, blockingReasons: [] },
-        };
+        return consistencyFaultInspection();
       }
       let descriptor: number | null = null;
       try {
@@ -1647,16 +1638,7 @@ export function createArchiveImageOwnership({
           ) {
             return consistencyFaultInspection();
           }
-          return {
-            contractVersion: ARCHIVE_IMAGE_OWNERSHIP_VERSION,
-            writer: { state: "inactive" },
-            workerClaim: {
-              state: "none",
-              claimedAt: null,
-              leaseExpiresAt: null,
-            },
-            stableRead: { available: true, blockingReasons: [] },
-          };
+          return consistencyFaultInspection();
         }
         if (!registered) return consistencyFaultInspection();
         if (!ownershipStoragePathsAreSupported(

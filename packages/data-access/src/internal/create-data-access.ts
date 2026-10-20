@@ -124,6 +124,7 @@ import { createDvdMetadataFingerprint } from "../dvd-metadata-fingerprint.js";
 import { createWatchableSalvageArchiveIntegrityEvidence } from "../archive-integrity.js";
 import {
   assertDvdRecoveryEvidenceAdmissionAvailable,
+  dvdRecoveryEvidenceFormatForArchive,
   DVD_RECOVERY_EVIDENCE_FORMAT,
   DvdRecoveryEvidenceAdmissionClosedError,
   DvdRecoveryEvidenceEncodingUnavailableError,
@@ -6843,11 +6844,10 @@ export function createDataAccessInternal(
         return { archive, header: reader.catalog.findDvdArchiveEvidenceHeader(id), jobs: reader.archiveJobs.listForArchive(id) };
       });
       const admissionSnapshot = readSnapshot();
-      const marked = admissionSnapshot.header !== null ||
-        admissionSnapshot.jobs.some(job =>
-          job.evidenceFormat === "dvd-recovery-evidence-v1"
-        );
-      if (!marked) return null;
+      if (dvdRecoveryEvidenceFormatForArchive(
+        admissionSnapshot.header,
+        admissionSnapshot.jobs,
+      ) === null) return null;
       if (normalizedOriginalsLibraryPath === undefined) {
         throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE");
       }

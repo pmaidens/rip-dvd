@@ -229,7 +229,17 @@ export function readArchiveAuditRecords(
       )
       select
         substr(archive.id, 1, ${MAX_DOMAIN_ID_BYTES + 1}) as archive_id,
-        evidence.evidence_format,
+        coalesce(
+          evidence.evidence_format,
+          (
+            select candidate.evidence_format
+            from archive_jobs as candidate
+            where candidate.original_disc_archive_id = archive.id
+              and candidate.evidence_format is not null
+            order by candidate.completed_at desc, candidate.id desc
+            limit 1
+          )
+        ) as evidence_format,
         length(cast(archive.id as blob)) > ${MAX_DOMAIN_ID_BYTES}
           as archive_id_too_long,
         substr(archive.detected_disc_id, 1, ${MAX_DOMAIN_ID_BYTES + 1})

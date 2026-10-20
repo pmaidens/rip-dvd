@@ -1,7 +1,29 @@
-import type { DvdArchiveEvidenceFormat } from "./types.js";
+import { DomainInvariantError } from "./errors.js";
+import type {
+  ArchiveJob,
+  DvdArchiveEvidenceFormat,
+  DvdArchiveEvidenceHeader,
+} from "./types.js";
 
 export const DVD_RECOVERY_EVIDENCE_FORMAT =
   "dvd-recovery-evidence-v1" as const;
+
+export function dvdRecoveryEvidenceFormatForArchive(
+  header: Pick<DvdArchiveEvidenceHeader, "evidenceFormat"> | null | undefined,
+  jobs: readonly Pick<ArchiveJob, "evidenceFormat">[],
+): DvdArchiveEvidenceFormat | null {
+  const formats = [
+    header?.evidenceFormat,
+    ...jobs.map(({ evidenceFormat }) => evidenceFormat),
+  ].filter((format): format is DvdArchiveEvidenceFormat => format !== null &&
+    format !== undefined);
+  if (formats.some((format) => format !== DVD_RECOVERY_EVIDENCE_FORMAT)) {
+    throw new DomainInvariantError(
+      "Persisted DVD Archive Evidence format is invalid",
+    );
+  }
+  return formats.length === 0 ? null : DVD_RECOVERY_EVIDENCE_FORMAT;
+}
 
 export const DVD_RECOVERY_EVIDENCE_ADMISSION = {
   state: "closed",

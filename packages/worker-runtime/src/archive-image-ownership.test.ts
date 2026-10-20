@@ -73,6 +73,47 @@ afterEach(() => {
 });
 
 describe("archive image ownership", () => {
+  it("fails inspection closed before the ownership namespace exists", () => {
+    const originalsLibraryPath = root();
+    const ownership = createArchiveImageOwnershipBase();
+
+    expect(ownership.inspect({
+      archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+    })).toMatchObject({
+      writer: { state: "uncertain" },
+      stableRead: {
+        available: false,
+        blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
+      },
+    });
+  });
+
+  it("fails inspection closed for an unregistered archive", async () => {
+    const originalsLibraryPath = root();
+    const ownership = createArchiveImageOwnership();
+    await ownership.withWriter({
+      archiveId: "initialized-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {},
+    });
+
+    expect(ownership.inspect({
+      archiveId: "unregistered-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+    })).toMatchObject({
+      writer: { state: "uncertain" },
+      stableRead: {
+        available: false,
+        blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
+      },
+    });
+  });
+
   it.each(["network", "unknown"] as const)(
     "fails closed on %s storage",
     async (storageClass) => {
