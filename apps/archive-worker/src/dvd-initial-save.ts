@@ -79,6 +79,7 @@ async function commitSave(options: SaveOptions, publication: Awaited<ReturnType<
   options.signal?.throwIfAborted();
   await publication.verifyPublication();
   options.signal?.throwIfAborted();
+  options.assertArchiveOwnership?.();
   const completed = options.access.archiveJobs.publishDvdInitial(options.claim, {
     archivePath: publication.archivePath, boundaryEvidence: publication.manifest.boundaryEvidence,
     manifest: publication.manifest,

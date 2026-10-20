@@ -70,7 +70,10 @@ export async function pollFilesystemVerification(
             imagePath: archive.archivePath,
             originalsLibraryPath: options.originalsLibraryPath,
             signal: options.signal ?? new AbortController().signal,
-            task: () => access.filesystemVerification.execute(claim),
+            task: ({ assertOwned }) => access.filesystemVerification.execute(
+              claim,
+              { assertStable: assertOwned },
+            ),
           });
       }
     } catch {

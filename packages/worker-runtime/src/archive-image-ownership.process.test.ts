@@ -382,6 +382,79 @@ it.runIf(processStorageSupported)(
 );
 
 it.runIf(processStorageSupported)(
+  "retains the writer claim when a helper rejects immediately after lock loss",
+  async () => {
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-image-ownership-process-"),
+    );
+    roots.push(originalsLibraryPath);
+    const imagePath = join(originalsLibraryPath, "synthetic-archive.iso");
+    writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
+    const ownership = createArchiveImageOwnership({
+      ownershipCheckIntervalMs: 60_000,
+    });
+
+    await expect(ownership.withWriter({
+      archiveId: "rejected-helper-archive",
+      imagePath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task({ descriptor }) {
+        const unlocked = spawnSync("flock", ["--unlock", "3"], {
+          stdio: ["ignore", "ignore", "ignore", descriptor],
+        });
+        expect(unlocked.status).toBe(0);
+        throw new Error("synthetic helper failure");
+      },
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+
+    expect(ownership.inspect({
+      archiveId: "rejected-helper-archive",
+      imagePath,
+      originalsLibraryPath,
+    })).toMatchObject({
+      workerClaim: { state: "active" },
+      stableRead: {
+        available: false,
+        blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
+      },
+    });
+  },
+);
+
+it.runIf(processStorageSupported)(
+  "does not poison archive locks during concurrent fresh-namespace initialization",
+  async () => {
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-image-ownership-process-"),
+    );
+    roots.push(originalsLibraryPath);
+    const imagePath = join(originalsLibraryPath, "synthetic-archive.iso");
+    writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
+    const ownership = createArchiveImageOwnership();
+
+    const requests = Array.from(
+      { length: 8 },
+      (_unused, index) => ({
+        archiveId: `fresh-namespace-archive-${index}`,
+        imagePath,
+        originalsLibraryPath,
+        signal: new AbortController().signal,
+        async task() {},
+      }),
+    );
+    const firstAttempts = await Promise.allSettled(
+      requests.map((request) => ownership.withConsistentRead(request)),
+    );
+    await expect(Promise.all(requests.map((request, index) =>
+      firstAttempts[index]?.status === "fulfilled"
+        ? undefined
+        : ownership.withConsistentRead(request)
+    ))).resolves.toEqual(Array.from({ length: 8 }, () => undefined));
+  },
+);
+
+it.runIf(processStorageSupported)(
   "blocks a second namespace after the ownership directory is replaced",
   async () => {
     const originalsLibraryPath = mkdtempSync(

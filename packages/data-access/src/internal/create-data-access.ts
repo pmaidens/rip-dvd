@@ -16302,7 +16302,7 @@ export function createDataAccessInternal(
           return claimed === undefined ? null : toFilesystemVerificationRun(claimed);
         });
       },
-      async execute(claim) {
+      async execute(claim, options) {
         if (claim.status !== "running" || claim.claimToken === null) {
           throw new StaleJobAttemptError("verification run", claim.id);
         }
@@ -16320,6 +16320,7 @@ export function createDataAccessInternal(
           claim.target === "original_disc_archive" ? originalsVerificationRoot : mediaVerificationRoot,
           archive?.sizeBytes ?? undefined,
         );
+        options?.assertStable?.();
         return database.transaction((transaction) => {
           const current = transaction.select().from(filesystemVerificationRuns)
             .where(eq(filesystemVerificationRuns.id, claim.id)).get();

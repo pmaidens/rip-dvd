@@ -920,9 +920,13 @@ function assertNamespaceIdentity(paths: OwnershipPaths): void {
   }
 }
 
-async function establishNamespaceIdentity(paths: OwnershipPaths): Promise<void> {
-  const existingAuthority = readNamespaceIdentitySync(paths.namespaceIdentity);
-  const existingOriginals = readNamespaceIdentitySync(
+async function establishNamespaceIdentity(
+  paths: OwnershipPaths,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<void> {
+  let existingAuthority = readNamespaceIdentitySync(paths.namespaceIdentity);
+  let existingOriginals = readNamespaceIdentitySync(
     paths.originalsNamespaceIdentity,
   );
   const current = currentNamespaceIdentity(paths);
@@ -932,6 +936,19 @@ async function establishNamespaceIdentity(paths: OwnershipPaths): Promise<void> 
     }
     await writeRecord(paths.namespaceIdentity, current);
     await writeRecord(paths.originalsNamespaceIdentity, current);
+  } else if (existingAuthority === null && existingOriginals === null) {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      signal.throwIfAborted();
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      existingAuthority = readNamespaceIdentitySync(paths.namespaceIdentity);
+      existingOriginals = readNamespaceIdentitySync(
+        paths.originalsNamespaceIdentity,
+      );
+    } while (
+      (existingAuthority === null || existingOriginals === null) &&
+      Date.now() < deadline
+    );
   }
   const establishedAuthority = paths.directoryCreated
     ? readNamespaceIdentitySync(paths.namespaceIdentity)
@@ -1068,6 +1085,17 @@ export function createArchiveImageOwnership({
     if (paths === null) {
       throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
     }
+    try {
+      await establishNamespaceIdentity(
+        paths,
+        request.signal,
+        acquisitionTimeoutMs,
+      );
+    } catch (cause) {
+      throw cause instanceof ArchiveImageOwnershipError
+        ? cause
+        : new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause });
+    }
     const opened = openLock(paths.lock, true);
     if (opened === null) {
       throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
@@ -1082,6 +1110,7 @@ export function createArchiveImageOwnership({
     let claim: WriterClaimRecord | undefined;
     let retainClaim = false;
     let lockIdentity: LockIdentity | undefined;
+    let assertOwned: (() => void) | undefined;
     const failOwnership = (cause: unknown): ArchiveImageOwnershipError => {
       retainClaim = true;
       const error = cause instanceof ArchiveImageOwnershipError
@@ -1101,7 +1130,6 @@ export function createArchiveImageOwnership({
       )) {
         throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
       }
-      await establishNamespaceIdentity(paths);
       lockIdentity = assertLockIdentity(descriptor, paths.lock);
       await establishLockIdentity(
         paths,
@@ -1181,7 +1209,7 @@ export function createArchiveImageOwnership({
         }, Math.max(1, Math.floor(claimLeaseDurationMs / 3)));
         heartbeat.unref();
       }
-      const assertOwned = () => {
+      const assertCurrentOwnership = () => {
         try {
           const currentIdentity = assertLockIdentity(descriptor, paths.lock);
           if (!ownershipStoragePathsAreSupported(
@@ -1213,19 +1241,31 @@ export function createArchiveImageOwnership({
           throw failOwnership(cause);
         }
       };
+      assertOwned = assertCurrentOwnership;
       monitor = setInterval(() => {
         try {
-          assertOwned();
+          assertCurrentOwnership();
         } catch (error) {
           controller.abort(error);
         }
       }, ownershipCheckIntervalMs);
       monitor.unref();
-      const result = await request.task({ descriptor, signal, assertOwned });
+      const result = await request.task({
+        descriptor,
+        signal,
+        assertOwned: assertCurrentOwnership,
+      });
       signal.throwIfAborted();
-      assertOwned();
+      assertCurrentOwnership();
       return result;
     } catch (cause) {
+      if (assertOwned !== undefined) {
+        try {
+          assertOwned();
+        } catch (ownershipCause) {
+          throw ownershipCause;
+        }
+      }
       if (cause instanceof ArchiveImageOwnershipError) throw cause;
       if (controller.signal.aborted) {
         throw controller.signal.reason instanceof ArchiveImageOwnershipError

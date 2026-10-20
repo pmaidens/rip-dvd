@@ -5,7 +5,10 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { ARCHIVE_JOB_LEASE_DURATION_MS, createDataAccess, type RunningArchiveJob } from "@rip-dvd/data-access";
 import { beginSettledDiscInspectionForTest } from "@rip-dvd/data-access/test-support";
-import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import {
+  createArchiveImageOwnership,
+  type ArchiveImageOwnership,
+} from "@rip-dvd/worker-runtime";
 import { runDvdInitialArchiveBoundaryForArchiveJob } from "./dvd-initial-boundary.js";
 import { isoProfileImage } from "./dvd-metadata-profile-fixtures.js";
 import { createInProcessDvdRescueWorkspaceLock } from "./dvd-rescue-workspace-lock.js";
@@ -129,6 +132,53 @@ it.each([false, true])("saves the initial image, full evidence, job, request and
     expect(pointer.currentManifestDigest).toBe(header.currentManifestDigest);
     expect((await reconcileDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion })).originalDiscArchiveId).toBe(id);
     expect(f.access.catalog.listOriginalDiscArchives({})).toHaveLength(1);
+  } finally { f.access.close(); }
+});
+
+it("reasserts archive ownership after publication verification and before the database commit", async () => {
+  const f = await jobFixture(true);
+  const ownership = createArchiveImageOwnership();
+  let databaseBoundaryReached = false;
+  let assertionsAfterBoundary = 0;
+  let assertionsAtCommit = -1;
+  const archiveImageOwnership: ArchiveImageOwnership = {
+    ...ownership,
+    async withWriter(request) {
+      return ownership.withWriter({
+        ...request,
+        async task(handle) {
+          return request.task({
+            ...handle,
+            assertOwned() {
+              handle.assertOwned();
+              if (databaseBoundaryReached) assertionsAfterBoundary += 1;
+            },
+          });
+        },
+      });
+    },
+  };
+  const publish = f.access.archiveJobs.publishDvdInitial.bind(
+    f.access.archiveJobs,
+  );
+  vi.spyOn(f.access.archiveJobs, "publishDvdInitial")
+    .mockImplementation((claim, input) => {
+      assertionsAtCommit = assertionsAfterBoundary;
+      return publish(claim, input);
+    });
+  try {
+    await saveDvdInitialArchiveForArchiveJob({
+      access: f.access,
+      archiveImageOwnership,
+      claim: f.claim,
+      originalsLibraryPath: f.identity.originalsLibraryPath,
+      exclusion: f.exclusion,
+      fault(point) {
+        if (point === "before:database") databaseBoundaryReached = true;
+      },
+      proven: f.proven,
+    });
+    expect(assertionsAtCommit).toBe(2);
   } finally { f.access.close(); }
 });
 

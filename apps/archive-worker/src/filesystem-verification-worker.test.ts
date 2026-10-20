@@ -85,6 +85,7 @@ it("executes queued verification and retains its result for later readers", asyn
       "findDvdArchiveEvidenceHeader",
     ).mockReturnValue({ evidenceFormat: "dvd-recovery-evidence-v1" } as never);
     let ownershipActive = false;
+    const assertOwned = vi.fn();
     const archiveImageOwnership: ArchiveImageOwnership = {
       inspect: vi.fn(),
       async withConsistentRead<Result>(request: {
@@ -98,7 +99,7 @@ it("executes queued verification and retains its result for later readers", asyn
           return await request.task({
             descriptor: 47,
             signal: request.signal,
-            assertOwned: vi.fn(),
+            assertOwned,
           });
         } finally {
           ownershipActive = false;
@@ -112,9 +113,9 @@ it("executes queued verification and retains its result for later readers", asyn
       access.filesystemVerification,
     );
     const executeMarked = vi.spyOn(access.filesystemVerification, "execute")
-      .mockImplementation(async (claim) => {
+      .mockImplementation(async (claim, options) => {
         expect(ownershipActive).toBe(true);
-        return executeMarkedOriginal(claim);
+        return executeMarkedOriginal(claim, options);
       });
     const markedRun = access.filesystemVerification.submit({
       mutationKey: "synthetic-marked-invocation",
@@ -128,6 +129,28 @@ it("executes queued verification and retains its result for later readers", asyn
     expect(access.filesystemVerification.find(markedRun.id)?.status).toBe(
       "completed",
     );
+    expect(assertOwned).toHaveBeenCalledOnce();
+
+    const verifiedArchive = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0];
+    assertOwned.mockImplementationOnce(() => {
+      throw new Error("synthetic ownership loss");
+    });
+    const ownershipLossRun = access.filesystemVerification.submit({
+      mutationKey: "synthetic-ownership-loss-invocation",
+      target: "original_disc_archive",
+      targetId: archive.id,
+    });
+    expect(await pollFilesystemVerification(access, undefined, {
+      archiveImageOwnership,
+      originalsLibraryPath: directory,
+    })).toBe(true);
+    expect(access.filesystemVerification.find(ownershipLossRun.id)?.status)
+      .toBe("failed");
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toEqual(verifiedArchive);
+
     executeMarked.mockRestore();
     evidenceLookup.mockRestore();
     expect(await pollFilesystemVerification(access)).toBe(false);

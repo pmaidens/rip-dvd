@@ -25,6 +25,8 @@ unverifiable lock state fails closed as `CONSISTENCY_FAULT`.
 The actual ownership directory and named lock are storage-classified after
 creation and throughout the interval, and their owner-only mode and effective
 user ownership are revalidated rather than trusted from acquisition time.
+Shared namespace-anchor bootstrap happens before any per-archive lock file, so
+a concurrent first-use failure cannot leave an unbound archive lock behind.
 
 The process that performs image I/O inherits the locked descriptor. An initial
 copy helper receives the exclusive descriptor, and HandBrake and Archive Audit
@@ -43,18 +45,24 @@ blocks stable reads with `WRITER_NOT_QUIESCENT`; an uncertain lock, invalid
 claim, mismatched claim, or active claim without a proven writer blocks them
 with `CONSISTENCY_FAULT`. An expired claim for the current lock inode does not
 hide a live writer, and is not by itself evidence that a writer still exists.
+If protected work rejects, ownership is revalidated before claim cleanup so a
+fast helper failure after lock loss retains the claim and reports a consistency
+fault.
 
 Initial DVD publication holds exclusive ownership across the copy, evidence
 publication, and reconciliation interval. Both the durable staging path and
 final archive path are resolved and bound before lock acquisition. Initial
 publication and reconciliation both reject a path or intent that differs from
-the admitted paths.
+the admitted paths. Publication reasserts ownership after filesystem
+verification and immediately before its database commit.
 Existing encode source reads,
 including subtitle scans, Archive Audit file scans, and Original Disc Archive
 Filesystem Verification hold shared ownership for the complete image-read
-interval. Archive-evidence checkpoint validation also holds a shared interval
-while it reads the checkpoint, manifest, and image identity. Catalog-only work
-does not take an image lock. Title Damage
+interval. Filesystem Verification passes its stable-read assertion through the
+probe boundary and invokes it immediately before persisting the result.
+Archive-evidence checkpoint validation also holds a shared interval while it
+reads the checkpoint, manifest, and image identity. Catalog-only work does not
+take an image lock. Title Damage
 Assessment and Damage Preview must use the same shared interval when they gain
 image-reading implementations.
 

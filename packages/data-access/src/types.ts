@@ -1885,7 +1885,10 @@ export interface FilesystemVerificationAccess {
   claimNext(): FilesystemVerificationRun | null;
   recoverExpiredClaims(): number;
   renewClaim(claim: FilesystemVerificationRun): boolean;
-  execute(claim: FilesystemVerificationRun): Promise<FilesystemVerificationRun>;
+  execute(
+    claim: FilesystemVerificationRun,
+    options?: { assertStable?(): void },
+  ): Promise<FilesystemVerificationRun>;
   fail(claim: FilesystemVerificationRun): FilesystemVerificationRun | null;
   listOriginalDiscArchives(options: {
     limit: number;
