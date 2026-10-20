@@ -1402,6 +1402,9 @@ describe("encode worker polling", () => {
       async withWriter() {
         throw new Error("not used");
       },
+      async withInitialPublicationWriter() {
+        throw new Error("not used");
+      },
     };
     const runner: HandBrakeRunner = {
       run: vi.fn(async ({ outputPath, sourceOwnershipDescriptor }) => {

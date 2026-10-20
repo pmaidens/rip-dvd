@@ -26,16 +26,33 @@ function createArchiveImageOwnership(
   options?: Parameters<typeof createArchiveImageOwnershipBase>[0],
 ): ReturnType<typeof createArchiveImageOwnershipBase> {
   const ownership = createArchiveImageOwnershipBase(options);
+  const initialized = new Set<string>();
+  const keyFor = (request: { archiveId: string; originalsLibraryPath: string }) =>
+    `${request.originalsLibraryPath}\0${request.archiveId}`;
+  const initialize = async (
+    request: Parameters<typeof ownership.withConsistentRead>[0],
+  ) => {
+    const key = keyFor(request);
+    if (initialized.has(key)) return;
+    await ownership.withInitialPublicationWriter({
+      ...request,
+      async task() {},
+    });
+    initialized.add(key);
+  };
   return {
     ...ownership,
-    withConsistentRead: request => ownership.withConsistentRead({
-      ...request,
-      initialize: true,
-    }),
-    withWriter: request => ownership.withWriter({
-      ...request,
-      initialize: true,
-    }),
+    async withConsistentRead(request) {
+      await initialize(request);
+      return ownership.withConsistentRead(request);
+    },
+    async withWriter(request) {
+      const key = keyFor(request);
+      if (initialized.has(key)) return ownership.withWriter(request);
+      const result = await ownership.withInitialPublicationWriter(request);
+      initialized.add(key);
+      return result;
+    },
   };
 }
 
@@ -88,6 +105,28 @@ describe("archive image ownership", () => {
         blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
       },
     });
+  });
+
+  it("leaves missing ownership state untouched for ordinary reads and writes", async () => {
+    const originalsLibraryPath = root();
+    const authorityRootPath = root();
+    const ownership = createArchiveImageOwnershipBase({ authorityRootPath });
+    const request = {
+      archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {},
+    };
+
+    await expect(ownership.withConsistentRead(request)).rejects.toMatchObject({
+      code: "CONSISTENCY_FAULT",
+    });
+    await expect(ownership.withWriter(request)).rejects.toMatchObject({
+      code: "CONSISTENCY_FAULT",
+    });
+    expect(readdirSync(authorityRootPath)).toEqual([]);
+    expect(readdirSync(originalsLibraryPath)).toEqual([]);
   });
 
   it("fails inspection closed for an unregistered archive", async () => {

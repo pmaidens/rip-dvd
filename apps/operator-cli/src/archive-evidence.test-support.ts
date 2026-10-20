@@ -82,10 +82,9 @@ export async function seedCommittedArchiveEvidence(
   writeFileSync(join(directory, "checkpoint.json"), canonicalPublicationJson(pointer));
   await createArchiveImageOwnership({
     authorityRootPath: fixture.originalsLibraryPath,
-  }).withWriter({
+  }).withInitialPublicationWriter({
     archiveId: archive.id,
     imagePath: archivePath,
-    initialize: true,
     originalsLibraryPath: fixture.originalsLibraryPath,
     signal: new AbortController().signal,
     async task() {},

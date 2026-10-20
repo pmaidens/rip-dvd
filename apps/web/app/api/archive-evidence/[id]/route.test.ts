@@ -34,10 +34,9 @@ it("keeps web and CLI evidence reads unavailable throughout a writer interval", 
   const saved = await seedCommittedArchiveEvidence(fixture);
   const access = fixture.openAccess();
   try {
-    await defaultArchiveImageOwnership.withWriter({
+    await defaultArchiveImageOwnership.withInitialPublicationWriter({
       archiveId: saved.archive.id,
       imagePath: saved.archive.archivePath,
-      initialize: true,
       originalsLibraryPath: fixture.originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {

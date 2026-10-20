@@ -1961,10 +1961,9 @@ it("returns the same operational records and evidence through web and CLI", asyn
         attempts: [expect.objectContaining({ reasonCode: "metadata_read_failed" })],
         availableActions: [expect.objectContaining({ eligible: true })],
       } });
-    await defaultArchiveImageOwnership.withWriter({
+    await defaultArchiveImageOwnership.withInitialPublicationWriter({
       archiveId,
       imagePath: join(fixture.originalsLibraryPath, "synthetic.iso"),
-      initialize: true,
       originalsLibraryPath: fixture.originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {},
@@ -2000,10 +1999,9 @@ it("returns the same operational records and evidence through web and CLI", asyn
           },
         },
       } });
-    await defaultArchiveImageOwnership.withWriter({
+    await defaultArchiveImageOwnership.withInitialPublicationWriter({
       archiveId,
       imagePath: join(fixture.originalsLibraryPath, "synthetic.iso"),
-      initialize: true,
       originalsLibraryPath: fixture.originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {

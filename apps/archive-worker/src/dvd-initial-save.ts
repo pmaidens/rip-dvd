@@ -102,12 +102,15 @@ async function withOwnedClaim<T>(
   const identity = publicationOptions(options);
   const signal = options.signal ?? new AbortController().signal;
   try {
-    return await (options.archiveImageOwnership ?? defaultArchiveImageOwnership)
-      .withWriter({
+    const ownership = options.archiveImageOwnership ??
+      defaultArchiveImageOwnership;
+    const withWriter = initializeOwnership
+      ? ownership.withInitialPublicationWriter
+      : ownership.withWriter;
+    return await withWriter({
         archiveId: identity.originalDiscArchiveId,
         additionalImagePaths,
         imagePath,
-        initialize: initializeOwnership,
         originalsLibraryPath: options.originalsLibraryPath,
         signal,
         task: async (archiveOwnership) => options.exclusion.withLock({

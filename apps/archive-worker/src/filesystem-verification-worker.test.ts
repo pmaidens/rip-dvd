@@ -114,6 +114,9 @@ it("executes queued verification and retains its result for later readers", asyn
       async withWriter() {
         throw new Error("not used");
       },
+      async withInitialPublicationWriter() {
+        throw new Error("not used");
+      },
     };
     const executeMarkedOriginal = access.filesystemVerification.execute.bind(
       access.filesystemVerification,

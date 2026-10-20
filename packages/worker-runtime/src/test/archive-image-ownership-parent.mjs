@@ -8,10 +8,9 @@ const ownership = createArchiveImageOwnership({
   claimLeaseDurationMs: 150,
   ownershipCheckIntervalMs: 25,
 });
-await ownership.withWriter({
+await ownership.withInitialPublicationWriter({
   archiveId: "surviving-helper-archive",
   imagePath,
-  initialize: true,
   originalsLibraryPath,
   signal: new AbortController().signal,
   async task({ descriptor }) {

@@ -143,8 +143,8 @@ it("reasserts archive ownership after publication verification and before the da
   let assertionsAtCommit = -1;
   const archiveImageOwnership: ArchiveImageOwnership = {
     ...ownership,
-    async withWriter(request) {
-      return ownership.withWriter({
+    async withInitialPublicationWriter(request) {
+      return ownership.withInitialPublicationWriter({
         ...request,
         async task(handle) {
           return request.task({

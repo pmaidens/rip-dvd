@@ -85,7 +85,6 @@ export interface ArchiveImageOwnershipHandle {
 }
 
 interface OwnershipRequest<Result> {
-  initialize?: boolean;
   archiveId: string;
   additionalImagePaths?: readonly string[];
   imagePath: string | null;
@@ -100,6 +99,9 @@ export interface ArchiveImageOwnership {
     imagePath: string;
     originalsLibraryPath: string;
   }): ArchiveImageOwnershipInspection;
+  withInitialPublicationWriter<Result>(
+    request: OwnershipRequest<Result>,
+  ): Promise<Result>;
   withConsistentRead<Result>(request: OwnershipRequest<Result>): Promise<Result>;
   withWriter<Result>(request: OwnershipRequest<Result>): Promise<Result>;
 }
@@ -1365,13 +1367,14 @@ export function createArchiveImageOwnership({
   const withLock = async <Result>(
     request: OwnershipRequest<Result>,
     mode: "shared" | "exclusive",
+    initialize: boolean,
   ): Promise<Result> => {
     request.signal.throwIfAborted();
     const paths = await pathsFor(
       request.originalsLibraryPath,
       request.archiveId,
       request.imagePath,
-      true,
+      initialize,
       authorityRootPath,
       inspectStorage,
       request.additionalImagePaths ?? [],
@@ -1380,11 +1383,15 @@ export function createArchiveImageOwnership({
       throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
     }
     try {
-      await establishNamespaceIdentity(
-        paths,
-        request.signal,
-        acquisitionTimeoutMs,
-      );
+      if (initialize) {
+        await establishNamespaceIdentity(
+          paths,
+          request.signal,
+          acquisitionTimeoutMs,
+        );
+      } else {
+        assertNamespaceIdentity(paths);
+      }
     } catch (cause) {
       throw cause instanceof ArchiveImageOwnershipError
         ? cause
@@ -1393,7 +1400,7 @@ export function createArchiveImageOwnership({
     const opened = await prepareArchiveLock(
       paths,
       request.archiveId,
-      request.initialize === true,
+      initialize,
       request.signal,
       backend,
     );
@@ -1709,8 +1716,10 @@ export function createArchiveImageOwnership({
         if (descriptor !== null) closeSync(descriptor);
       }
     },
-    withConsistentRead: (request) => withLock(request, "shared"),
-    withWriter: (request) => withLock(request, "exclusive"),
+    withInitialPublicationWriter: (request) =>
+      withLock(request, "exclusive", true),
+    withConsistentRead: (request) => withLock(request, "shared", false),
+    withWriter: (request) => withLock(request, "exclusive", false),
   };
 }
 

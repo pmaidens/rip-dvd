@@ -35,16 +35,33 @@ function createArchiveImageOwnership(
   options?: Parameters<typeof createArchiveImageOwnershipBase>[0],
 ): ReturnType<typeof createArchiveImageOwnershipBase> {
   const ownership = createArchiveImageOwnershipBase(options);
+  const initialized = new Set<string>();
+  const keyFor = (request: { archiveId: string; originalsLibraryPath: string }) =>
+    `${request.originalsLibraryPath}\0${request.archiveId}`;
+  const initialize = async (
+    request: Parameters<typeof ownership.withConsistentRead>[0],
+  ) => {
+    const key = keyFor(request);
+    if (initialized.has(key)) return;
+    await ownership.withInitialPublicationWriter({
+      ...request,
+      async task() {},
+    });
+    initialized.add(key);
+  };
   return {
     ...ownership,
-    withConsistentRead: request => ownership.withConsistentRead({
-      ...request,
-      initialize: true,
-    }),
-    withWriter: request => ownership.withWriter({
-      ...request,
-      initialize: true,
-    }),
+    async withConsistentRead(request) {
+      await initialize(request);
+      return ownership.withConsistentRead(request);
+    },
+    async withWriter(request) {
+      const key = keyFor(request);
+      if (initialized.has(key)) return ownership.withWriter(request);
+      const result = await ownership.withInitialPublicationWriter(request);
+      initialized.add(key);
+      return result;
+    },
   };
 }
 
@@ -173,7 +190,7 @@ it.runIf(processStorageSupported)(
     await waitForFileGrowth(writePath, sizeBeforeParentExit);
     await new Promise<void>((resolve) => setTimeout(resolve, 200));
 
-    const ownership = createArchiveImageOwnership();
+    const ownership = createArchiveImageOwnershipBase();
     expect(ownership.inspect({
       archiveId: "surviving-helper-archive",
       imagePath,
@@ -537,28 +554,32 @@ it.runIf(processStorageSupported)(
     roots.push(originalsLibraryPath);
     const imagePath = join(originalsLibraryPath, "synthetic-archive.iso");
     writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
-    const ownership = createArchiveImageOwnership();
+    const ownership = createArchiveImageOwnershipBase();
 
     const requests = Array.from(
       { length: 8 },
       (_unused, index) => ({
         archiveId: `fresh-namespace-archive-${index}`,
         imagePath,
-        initialize: true,
         originalsLibraryPath,
         signal: new AbortController().signal,
         async task() {},
       }),
     );
     const firstAttempts = await Promise.allSettled(
-      requests.map((request) => ownership.withConsistentRead(request)),
+      requests.map((request) =>
+        ownership.withInitialPublicationWriter(request)
+      ),
     );
     for (const [index, request] of requests.entries()) {
       if (firstAttempts[index]?.status !== "fulfilled") {
-        await expect(ownership.withConsistentRead(request))
+        await expect(ownership.withInitialPublicationWriter(request))
           .resolves.toBeUndefined();
       }
     }
+    await Promise.all(requests.map((request) =>
+      expect(ownership.withConsistentRead(request)).resolves.toBeUndefined()
+    ));
   },
 );
 
