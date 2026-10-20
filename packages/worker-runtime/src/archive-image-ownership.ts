@@ -1213,6 +1213,7 @@ async function prepareArchiveLock(
   initialize: boolean,
   signal: AbortSignal,
   backend: LockBackend,
+  acquisitionTimeoutMs: number,
 ): Promise<OpenedLock> {
   const registry = openLock(paths.registry, false);
   if (registry === null) {
@@ -1222,12 +1223,28 @@ async function prepareArchiveLock(
   let opened: OpenedLock | null = null;
   try {
     try {
-      releaseRegistry = await backend.acquire(
-        registry.descriptor,
-        paths.registry,
-        "exclusive",
-        signal,
-      );
+      const deadline = Date.now() + acquisitionTimeoutMs;
+      while (true) {
+        try {
+          releaseRegistry = await backend.acquire(
+            registry.descriptor,
+            paths.registry,
+            "exclusive",
+            signal,
+          );
+          break;
+        } catch (cause) {
+          if (
+            !(cause instanceof ArchiveImageOwnershipError) ||
+            cause.code !== "WRITER_NOT_QUIESCENT" ||
+            Date.now() >= deadline
+          ) {
+            throw cause;
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, 10));
+          signal.throwIfAborted();
+        }
+      }
     } catch (cause) {
       throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause });
     }
@@ -1343,14 +1360,17 @@ export function createArchiveImageOwnership({
     : process.env.NODE_ENV === "test"
       ? createInProcessLockBackend()
       : createUnsupportedLockBackend(),
-  inspectStorage = process.platform === "linux"
-    ? inspectLinuxStorage
-    : () => ({
-      filesystemType: process.env.NODE_ENV === "test"
-        ? "test-in-process"
-        : "unsupported-platform",
-      storageClass: process.env.NODE_ENV === "test" ? "local" : "unknown",
-    }),
+  inspectStorage = process.env.NODE_ENV === "test"
+    ? () => ({
+      filesystemType: "test-in-process",
+      storageClass: "local",
+    })
+    : process.platform === "linux"
+      ? inspectLinuxStorage
+      : () => ({
+        filesystemType: "unsupported-platform",
+        storageClass: "unknown",
+      }),
   writeHeartbeatRecord = writeRecord,
 }: CreateOwnershipOptions = {}): ArchiveImageOwnership {
   if (
@@ -1403,6 +1423,7 @@ export function createArchiveImageOwnership({
       initialize,
       request.signal,
       backend,
+      acquisitionTimeoutMs,
     );
     const { descriptor } = opened;
     let releaseBackend: () => void = () => undefined;

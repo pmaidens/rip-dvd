@@ -34,7 +34,10 @@ const processStorageSupported = process.platform === "linux" &&
 function createArchiveImageOwnership(
   options?: Parameters<typeof createArchiveImageOwnershipBase>[0],
 ): ReturnType<typeof createArchiveImageOwnershipBase> {
-  const ownership = createArchiveImageOwnershipBase(options);
+  const ownership = createArchiveImageOwnershipBase({
+    inspectStorage: inspectLinuxStorage,
+    ...options,
+  });
   const initialized = new Set<string>();
   const keyFor = (request: { archiveId: string; originalsLibraryPath: string }) =>
     `${request.originalsLibraryPath}\0${request.archiveId}`;
@@ -116,7 +119,7 @@ async function runContender(
   originalsLibraryPath: string,
   imagePath: string,
   archiveId: string,
-  authorityRootPath = "",
+  authorityRootPath = originalsLibraryPath,
 ): Promise<{ ok: boolean; code?: string | null }> {
   const child = spawn(
     process.execPath,
@@ -131,7 +134,10 @@ async function runContender(
       archiveId,
       authorityRootPath,
     ],
-    { stdio: ["ignore", "pipe", "inherit"] },
+    {
+      env: { ...process.env, NODE_ENV: "production" },
+      stdio: ["ignore", "pipe", "inherit"],
+    },
   );
   const chunks: Buffer[] = [];
   child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -175,8 +181,12 @@ it.runIf(processStorageSupported)(
         imagePath,
         readyPath,
         writePath,
+        originalsLibraryPath,
       ],
-      { stdio: "ignore" },
+      {
+        env: { ...process.env, NODE_ENV: "production" },
+        stdio: "ignore",
+      },
     );
     await waitForFile(readyPath);
     await waitForFile(writePath);
@@ -190,7 +200,9 @@ it.runIf(processStorageSupported)(
     await waitForFileGrowth(writePath, sizeBeforeParentExit);
     await new Promise<void>((resolve) => setTimeout(resolve, 200));
 
-    const ownership = createArchiveImageOwnershipBase();
+    const ownership = createArchiveImageOwnershipBase({
+      inspectStorage: inspectLinuxStorage,
+    });
     expect(ownership.inspect({
       archiveId: "surviving-helper-archive",
       imagePath,
@@ -237,8 +249,12 @@ it.runIf(processStorageSupported)(
         imagePath,
         readyPath,
         writePath,
+        originalsLibraryPath,
       ],
-      { stdio: "ignore" },
+      {
+        env: { ...process.env, NODE_ENV: "production" },
+        stdio: "ignore",
+      },
     );
     if (parent.pid !== undefined) helperPids.push(parent.pid);
     await waitForFile(readyPath);
@@ -554,7 +570,9 @@ it.runIf(processStorageSupported)(
     roots.push(originalsLibraryPath);
     const imagePath = join(originalsLibraryPath, "synthetic-archive.iso");
     writeFileSync(imagePath, "synthetic image", { mode: 0o600 });
-    const ownership = createArchiveImageOwnershipBase();
+    const ownership = createArchiveImageOwnershipBase({
+      inspectStorage: inspectLinuxStorage,
+    });
 
     const requests = Array.from(
       { length: 8 },

@@ -441,11 +441,13 @@ describe("archive image ownership", () => {
 
   it("surfaces a pending heartbeat failure after protected work completes", async () => {
     const originalsLibraryPath = root();
+    const now = new Date("2026-01-01T00:00:00.000Z");
     const heartbeatStarted = deferred<void>();
     const rejectHeartbeat = deferred<void>();
     const taskFinished = deferred<void>();
     const ownership = createArchiveImageOwnership({
       claimLeaseDurationMs: 30,
+      now: () => now,
       async writeHeartbeatRecord() {
         heartbeatStarted.resolve();
         await rejectHeartbeat.promise;

@@ -3,8 +3,15 @@ import { fileURLToPath } from "node:url";
 
 import { createArchiveImageOwnership } from "../../dist/archive-image-ownership.js";
 
-const [originalsLibraryPath, imagePath, readyPath, writePath] = process.argv.slice(2);
+const [
+  originalsLibraryPath,
+  imagePath,
+  readyPath,
+  writePath,
+  authorityRootPath,
+] = process.argv.slice(2);
 const ownership = createArchiveImageOwnership({
+  authorityRootPath,
   claimLeaseDurationMs: 150,
   ownershipCheckIntervalMs: 25,
 });
