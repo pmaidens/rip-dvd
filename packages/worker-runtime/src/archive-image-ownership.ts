@@ -1615,12 +1615,7 @@ export function createArchiveImageOwnership({
       }
       let descriptor: number | null = null;
       try {
-        assertNamespaceIdentity(paths);
-        const registry = readArchiveRegistrySync(paths.registry);
-        if (registry === null || registry === "invalid") {
-          return consistencyFaultInspection();
-        }
-        const registered = registry.has(ownershipStem(archiveId));
+        assertArchiveRegistered(paths, archiveId);
         const opened = openLock(paths.lock, false);
         descriptor = opened?.descriptor ?? null;
         const identity = readLockIdentitySync(paths.identity, archiveId);
@@ -1630,17 +1625,8 @@ export function createArchiveImageOwnership({
         );
         const claim = readClaimSync(paths.claim, archiveId);
         if (descriptor === null) {
-          if (
-            registered ||
-            identity !== null ||
-            archiveIdentity !== null ||
-            claim !== null
-          ) {
-            return consistencyFaultInspection();
-          }
           return consistencyFaultInspection();
         }
-        if (!registered) return consistencyFaultInspection();
         if (!ownershipStoragePathsAreSupported(
           paths.root,
           paths.authorityRoot,
@@ -1682,13 +1668,18 @@ export function createArchiveImageOwnership({
                   leaseExpiresAt: claim.leaseExpiresAt,
                 };
         const code: ArchiveImageOwnershipReasonCode | null =
-          writerState === "active"
-            ? "WRITER_NOT_QUIESCENT"
-            : writerState === "uncertain" ||
-                workerClaim.state === "invalid" ||
-                workerClaim.state === "active"
+          writerState === "uncertain" || workerClaim.state === "invalid"
               ? "CONSISTENCY_FAULT"
+            : writerState === "active"
+              ? "WRITER_NOT_QUIESCENT"
+              : workerClaim.state === "active"
+                ? "CONSISTENCY_FAULT"
               : null;
+        const finalLockIdentity = assertLockIdentity(descriptor, paths.lock);
+        assertArchiveRegistered(paths, archiveId);
+        if (!sameLockIdentity(finalLockIdentity, lockIdentity)) {
+          return consistencyFaultInspection();
+        }
         return {
           contractVersion: ARCHIVE_IMAGE_OWNERSHIP_VERSION,
           writer: { state: writerState },

@@ -7,6 +7,7 @@
   "scripts": {
     "audit:archives": "node dist/archive-audit-entry.js",
     "build": "tsc -p tsconfig.build.json",
+    "pretest": "pnpm --filter @rip-dvd/config --filter @rip-dvd/worker-runtime build",
     "start": "node dist/index.js",
     "test": "vitest run --config vitest.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"

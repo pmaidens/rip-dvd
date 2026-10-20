@@ -519,6 +519,99 @@ describe("archive image ownership", () => {
     });
   });
 
+  it("reports an invalid live-writer claim as a consistency fault", async () => {
+    const ownership = createArchiveImageOwnership({
+      claimLeaseDurationMs: 30_000,
+    });
+    const originalsLibraryPath = root();
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const writing = ownership.withWriter({
+      archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {
+        entered.resolve();
+        await release.promise;
+      },
+    });
+    await entered.promise;
+    const lockPath = ownershipFile(originalsLibraryPath, ".lock");
+    writeFileSync(lockPath.replace(/\.lock$/, ".claim.json"), "{}\n", {
+      mode: 0o600,
+    });
+
+    expect(ownership.inspect({
+      archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+    })).toMatchObject({
+      writer: { state: "active" },
+      workerClaim: { state: "invalid" },
+      stableRead: {
+        available: false,
+        blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
+      },
+    });
+
+    release.resolve();
+    await writing;
+  });
+
+  it("fails inspection closed when the registry changes during inspection", async () => {
+    const originalsLibraryPath = root();
+    const held = new Set<number>();
+    let replaceRegistry = false;
+    const ownership = createArchiveImageOwnership({
+      backend: {
+        supported: true,
+        async acquire(descriptor) {
+          held.add(descriptor);
+          return () => held.delete(descriptor);
+        },
+        assertHeld(descriptor) {
+          if (!held.has(descriptor)) {
+            throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
+          }
+        },
+        inspect() {
+          if (replaceRegistry) {
+            replaceRegistry = false;
+            const registryPath = join(
+              originalsLibraryPath,
+              ".rip-dvd-archive-ownership.registry",
+            );
+            const contents = readFileSync(registryPath);
+            renameSync(registryPath, `${registryPath}.replaced`);
+            writeFileSync(registryPath, contents, { mode: 0o600 });
+          }
+          return "inactive";
+        },
+      },
+    });
+    await ownership.withWriter({
+      archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      async task() {},
+    });
+    replaceRegistry = true;
+
+    expect(ownership.inspect({
+      archiveId: "synthetic-archive",
+      imagePath: originalsLibraryPath,
+      originalsLibraryPath,
+    })).toMatchObject({
+      writer: { state: "uncertain" },
+      stableRead: {
+        available: false,
+        blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
+      },
+    });
+  });
+
   it("rejects a stable read while a retained active claim is unproven", async () => {
     const ownership = createArchiveImageOwnership();
     const originalsLibraryPath = root();

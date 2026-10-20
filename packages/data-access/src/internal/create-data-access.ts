@@ -38,7 +38,7 @@ import {
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-sqlite";
 import { migrate } from "drizzle-orm/node-sqlite/migrator";
-import { alias } from "drizzle-orm/sqlite-core";
+import { alias, type AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 
 import {
   createBoundedFilesystemPathProbe,
@@ -1249,6 +1249,29 @@ export function createDataAccessInternal(
     from sqlite_schema
     where type = 'table' and name = 'dvd_archive_evidence_headers'
   `).get() !== undefined;
+  const dvdRecoveryEvidenceMarkerCondition = (
+    querySource: Pick<typeof database, "select">,
+    archiveId: AnySQLiteColumn,
+  ) => or(
+    exists(
+      querySource
+        .select({ id: dvdArchiveEvidenceHeaders.originalDiscArchiveId })
+        .from(dvdArchiveEvidenceHeaders)
+        .where(eq(
+          dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+          archiveId,
+        )),
+    ),
+    exists(
+      querySource
+        .select({ id: archiveJobs.id })
+        .from(archiveJobs)
+        .where(and(
+          eq(archiveJobs.originalDiscArchiveId, archiveId),
+          eq(archiveJobs.evidenceFormat, DVD_RECOVERY_EVIDENCE_FORMAT),
+        )),
+    ),
+  );
   const dvdRecoveryEvidenceEncodeExclusion = {
     rawSql: !hasDvdRecoveryEvidenceSchema
       ? ""
@@ -1257,21 +1280,20 @@ export function createDataAccessInternal(
           from dvd_archive_evidence_headers as recovery_evidence
           where recovery_evidence.original_disc_archive_id =
             reviewed_archive.id
+        )
+        and not exists (
+          select 1
+          from archive_jobs as recovery_job
+          where recovery_job.original_disc_archive_id = reviewed_archive.id
+            and recovery_job.evidence_format =
+              '${DVD_RECOVERY_EVIDENCE_FORMAT}'
         )`,
     forArchive: (querySource: Pick<typeof database, "select">) =>
       hasDvdRecoveryEvidenceSchema
-        ? notExists(
-          querySource
-            .select({
-              originalDiscArchiveId:
-                dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-            })
-            .from(dvdArchiveEvidenceHeaders)
-            .where(eq(
-              dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-              originalDiscArchives.id,
-            )),
-        )
+        ? sql`not ${dvdRecoveryEvidenceMarkerCondition(
+            querySource,
+            originalDiscArchives.id,
+          )}`
         : undefined,
   };
   const requireDvdRecoveryEvidenceEncodingAvailableForEncodeJob = (
@@ -1280,20 +1302,19 @@ export function createDataAccessInternal(
   ): void => {
     if (!hasDvdRecoveryEvidenceSchema) return;
     const evidenceArchive = querySource
-      .select({ id: dvdArchiveEvidenceHeaders.originalDiscArchiveId })
+      .select({ id: discSelections.originalDiscArchiveId })
       .from(encodeJobs)
       .innerJoin(
         discSelections,
         eq(discSelections.id, encodeJobs.discSelectionId),
       )
-      .innerJoin(
-        dvdArchiveEvidenceHeaders,
-        eq(
-          dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+      .where(and(
+        eq(encodeJobs.id, id),
+        dvdRecoveryEvidenceMarkerCondition(
+          querySource,
           discSelections.originalDiscArchiveId,
         ),
-      )
-      .where(eq(encodeJobs.id, id))
+      ))
       .limit(1)
       .get();
     if (evidenceArchive !== undefined) {
@@ -1306,16 +1327,15 @@ export function createDataAccessInternal(
   ): void => {
     if (!hasDvdRecoveryEvidenceSchema || discSelectionIds.length === 0) return;
     const evidenceArchive = querySource
-      .select({ id: dvdArchiveEvidenceHeaders.originalDiscArchiveId })
+      .select({ id: discSelections.originalDiscArchiveId })
       .from(discSelections)
-      .innerJoin(
-        dvdArchiveEvidenceHeaders,
-        eq(
-          dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+      .where(and(
+        inArray(discSelections.id, discSelectionIds),
+        dvdRecoveryEvidenceMarkerCondition(
+          querySource,
           discSelections.originalDiscArchiveId,
         ),
-      )
-      .where(inArray(discSelections.id, discSelectionIds))
+      ))
       .limit(1)
       .get();
     if (evidenceArchive !== undefined) {
@@ -4827,16 +4847,19 @@ export function createDataAccessInternal(
     originalDiscArchiveId: OriginalDiscArchiveId,
   ): DvdEvidenceReplacementEncodingCapability {
     if (hasDvdRecoveryEvidenceSchema) {
-      const evidenceHeader = reader
-        .select({ id: dvdArchiveEvidenceHeaders.originalDiscArchiveId })
-        .from(dvdArchiveEvidenceHeaders)
-        .where(eq(
-          dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-          originalDiscArchiveId,
+      const markedArchive = reader
+        .select({ id: originalDiscArchives.id })
+        .from(originalDiscArchives)
+        .where(and(
+          eq(originalDiscArchives.id, originalDiscArchiveId),
+          dvdRecoveryEvidenceMarkerCondition(
+            reader,
+            originalDiscArchives.id,
+          ),
         ))
         .limit(1)
         .get();
-      if (evidenceHeader !== undefined) {
+      if (markedArchive !== undefined) {
         throw new DvdRecoveryEvidenceEncodingUnavailableError();
       }
     }
@@ -13680,12 +13703,24 @@ export function createDataAccessInternal(
                   originalDiscArchives.legacyCutoverPending,
                 originalDiscArchiveId: originalDiscArchives.id,
                 evidenceFormat: hasDvdRecoveryEvidenceSchema
-                  ? sql<DvdArchiveEvidenceFormat | null>`(
-                      select ${dvdArchiveEvidenceHeaders.evidenceFormat}
-                      from ${dvdArchiveEvidenceHeaders}
-                      where ${dvdArchiveEvidenceHeaders.originalDiscArchiveId} =
-                        ${originalDiscArchives.id}
-                      limit 1
+                  ? sql<DvdArchiveEvidenceFormat | null>`coalesce(
+                      (
+                        select ${dvdArchiveEvidenceHeaders.evidenceFormat}
+                        from ${dvdArchiveEvidenceHeaders}
+                        where ${dvdArchiveEvidenceHeaders.originalDiscArchiveId} =
+                          ${originalDiscArchives.id}
+                        limit 1
+                      ),
+                      (
+                        select ${archiveJobs.evidenceFormat}
+                        from ${archiveJobs}
+                        where ${archiveJobs.originalDiscArchiveId} =
+                            ${originalDiscArchives.id}
+                          and ${archiveJobs.evidenceFormat} is not null
+                        order by ${archiveJobs.completedAt} desc,
+                          ${archiveJobs.id} desc
+                        limit 1
+                      )
                     )`
                   : sql<DvdArchiveEvidenceFormat | null>`null`,
               })
