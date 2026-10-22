@@ -1,10 +1,11 @@
 import { lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  DataAccess,
-  DvdStructuralCheckAttempt,
-  OriginalDiscArchiveId,
+import {
+  StaleDvdStructuralCheckpointError,
+  type DataAccess,
+  type DvdStructuralCheckAttempt,
+  type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import {
   ArchiveImageOwnershipError,
@@ -241,6 +242,70 @@ describe("node DVD structural checker", () => {
 });
 
 describe("DVD structural check execution", () => {
+  function accessThatLosesOwnership(
+    recordFailed: DataAccess["dvdStructuralAssessments"]["recordFailed"],
+  ): DataAccess {
+    return {
+      catalog: {
+        findDvdArchiveEvidenceHeader() {
+          return {
+            currentManifestId: checkpoint.manifestId,
+            currentManifestRevision: checkpoint.manifestRevision,
+            currentManifestDigest: checkpoint.manifestDigest,
+            acceptedEndLbaExclusive: checkpoint.acceptedEndLbaExclusive,
+          };
+        },
+      },
+      async assessDvdStructure(
+        _id: OriginalDiscArchiveId,
+        _ownership: ArchiveImageOwnership,
+        assess: Parameters<DataAccess["assessDvdStructure"]>[2],
+      ) {
+        const committedCheckpoint = {
+          id: checkpoint.manifestId,
+          revision: checkpoint.manifestRevision,
+          manifestDigest: checkpoint.manifestDigest,
+          acceptedEndLbaExclusive: checkpoint.acceptedEndLbaExclusive,
+          image: { filesystemIdentity: "1:2", mtimeNs: "0" },
+          unrecoveredSourceRanges: [],
+        } as unknown as Parameters<typeof assess>[0];
+        const prepared = await assess(committedCheckpoint, {
+          descriptor: 17,
+          signal: new AbortController().signal,
+          assertOwned() {},
+        }, "/synthetic/archive.iso");
+        if (prepared?.outcome !== "completed") {
+          throw new Error("Expected a completed structural check preparation");
+        }
+        throw new ArchiveImageOwnershipError("WRITER_NOT_QUIESCENT");
+      },
+      dvdStructuralAssessments: { recordFailed },
+    } as unknown as DataAccess;
+  }
+
+  const checker = {
+    async check({ checkpoint: attemptedCheckpoint }: {
+      checkpoint: typeof checkpoint;
+    }) {
+      return ([
+        "filesystem_structure",
+        "dvd_navigation",
+        "title_enumeration",
+      ] as const).map((checkKind) => ({
+        checkKind,
+        policyVersion: "synthetic-structural-check-v1",
+        testedExtent: {
+          startLba: 0,
+          endLbaExclusive: attemptedCheckpoint.acceptedEndLbaExclusive,
+          observedSectorCount: attemptedCheckpoint.acceptedEndLbaExclusive,
+        },
+        outcome: "valid" as const,
+        reason: null,
+        evidenceReference: `synthetic-evidence:${checkKind}`,
+      }));
+    },
+  };
+
   it("does not bind a failed attempt to a checkpoint that advanced after the check", async () => {
     const nextCheckpoint = {
       ...checkpoint,
@@ -344,6 +409,36 @@ describe("DVD structural check execution", () => {
         manifestId: checkpoint.manifestId,
         manifestRevision: checkpoint.manifestRevision,
       },
+    });
+  });
+
+  it("propagates a persistence failure while recording an owned-check failure", async () => {
+    const persistenceFailure = new Error("Synthetic persistence failure");
+    const access = accessThatLosesOwnership(() => {
+      throw persistenceFailure;
+    });
+
+    await expect(runDvdStructuralCheck({
+      access,
+      archiveImageOwnership: {} as ArchiveImageOwnership,
+      originalDiscArchiveId: checkpoint.originalDiscArchiveId,
+      checker,
+    })).rejects.toBe(persistenceFailure);
+  });
+
+  it("suppresses only a stale checkpoint while recording an owned-check failure", async () => {
+    const access = accessThatLosesOwnership(() => {
+      throw new StaleDvdStructuralCheckpointError();
+    });
+
+    await expect(runDvdStructuralCheck({
+      access,
+      archiveImageOwnership: {} as ArchiveImageOwnership,
+      originalDiscArchiveId: checkpoint.originalDiscArchiveId,
+      checker,
+    })).resolves.toMatchObject({
+      outcome: "unavailable",
+      reason: { code: "CONSISTENCY_FAULT" },
     });
   });
 });

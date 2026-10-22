@@ -4,6 +4,7 @@ import {
   createDvdStructuralAssessment,
   DVD_STRUCTURAL_CHECK_KINDS,
   DvdCheckpointReadFault,
+  StaleDvdStructuralCheckpointError,
   type DataAccess,
   type DvdStructuralCheckpoint,
   type DvdStructuralFindingInput,
@@ -257,7 +258,10 @@ export async function runDvdStructuralCheck({
           checkpoint: attemptedCheckpoint,
           reason,
         });
-      } catch {
+      } catch (persistenceError) {
+        if (!(persistenceError instanceof StaleDvdStructuralCheckpointError)) {
+          throw persistenceError;
+        }
         // A concurrently advanced checkpoint must not inherit this failure.
       }
     }

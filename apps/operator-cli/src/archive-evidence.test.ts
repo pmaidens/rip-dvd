@@ -1,10 +1,11 @@
 import { unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type {
-  DataAccess,
-  DvdStructuralFindingInput,
-  OriginalDiscArchiveId,
+import {
+  StaleDvdStructuralCheckpointError,
+  type DataAccess,
+  type DvdStructuralFindingInput,
+  type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import {
@@ -322,6 +323,36 @@ it("marks the last structural assessment outdated when the checkpoint advances",
       },
     },
   });
+});
+
+it("rejects a failed structural attempt for a stale checkpoint explicitly", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const { archive, manifest } = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  const staleCheckpoint = {
+    originalDiscArchiveId: archive.id,
+    manifestId: manifest.id,
+    manifestRevision: manifest.revision,
+    manifestDigest: manifest.manifestDigest,
+    acceptedEndLbaExclusive: manifest.acceptedEndLbaExclusive,
+  };
+  advanceCommittedArchiveEvidence(fixture, manifest);
+  const access = fixture.openAccess();
+  try {
+    expect(() => access.dvdStructuralAssessments.recordFailed({
+      checkpoint: staleCheckpoint,
+      reason: {
+        code: "CONSISTENCY_FAULT",
+        message: "A consistent image read was unavailable.",
+      },
+    })).toThrow(StaleDvdStructuralCheckpointError);
+  } finally {
+    access.close();
+  }
 });
 
 it("records a structural assessment against the current recovery checkpoint", async () => {

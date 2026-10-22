@@ -202,6 +202,7 @@ import {
   MutationKeyConflictError,
   RecordNotFoundError,
   StaleCatalogRevisionError,
+  StaleDvdStructuralCheckpointError,
   StaleJobAttemptError,
 } from "../errors.js";
 import type { LegacySidecarDataAccess } from "../legacy-sidecar-types.js";
@@ -6444,12 +6445,22 @@ export function createDataAccessInternal(
     )).get();
     if (
       header === undefined ||
-      header.evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT ||
+      header.evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT
+    ) {
+      throw new DomainInvariantError(
+        "DVD structural check requires a committed recovery checkpoint",
+      );
+    }
+    if (
       header.currentManifestId !== checkpoint.manifestId ||
       header.currentManifestRevision !== checkpoint.manifestRevision ||
       header.currentManifestDigest !== checkpoint.manifestDigest ||
       header.acceptedEndLbaExclusive !==
-        checkpoint.acceptedEndLbaExclusive ||
+        checkpoint.acceptedEndLbaExclusive
+    ) {
+      throw new StaleDvdStructuralCheckpointError();
+    }
+    if (
       manifest === undefined ||
       manifest.originalDiscArchiveId !== checkpoint.originalDiscArchiveId ||
       manifest.revision !== checkpoint.manifestRevision ||
@@ -6458,9 +6469,7 @@ export function createDataAccessInternal(
         checkpoint.acceptedEndLbaExclusive ||
       manifest.evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT
     ) {
-      throw new DomainInvariantError(
-        "DVD structural check does not match a committed checkpoint",
-      );
+      throw new DomainInvariantError("DVD structural checkpoint is inconsistent");
     }
     return manifest;
   }
