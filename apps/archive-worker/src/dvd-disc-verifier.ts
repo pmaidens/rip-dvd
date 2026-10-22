@@ -291,7 +291,10 @@ export async function verifyInsertedDvdAgainstSamples(input: {
   devicePath: string;
   reader: DvdVerificationSourceReader;
   startedAtMs: number;
+  /** Wall clock used only to account for time spent before this execution. */
   now?(): number;
+  /** Monotonic clock that enforces the remaining in-process read budget. */
+  monotonicNow?(): number;
   signal?: AbortSignal;
   insertionIsCurrent(): boolean | Promise<boolean>;
   checkpointIsCurrent(): boolean;
@@ -300,7 +303,16 @@ export async function verifyInsertedDvdAgainstSamples(input: {
     finding: DvdDiscVerificationSampleFinding,
   ): void | Promise<void>;
 }) {
-  const now = input.now ?? Date.now;
+  const wallNow = input.now ?? Date.now;
+  const monotonicNow = input.monotonicNow ?? performance.now.bind(performance);
+  const elapsedBeforeExecutionMs = Math.max(
+    0,
+    wallNow() - input.startedAtMs,
+  );
+  const monotonicStartedAtMs = monotonicNow();
+  const remainingBudgetMs = () =>
+    DVD_DISC_VERIFICATION_READ_DEADLINE_MS - elapsedBeforeExecutionMs -
+    Math.max(0, monotonicNow() - monotonicStartedAtMs);
   const manifest = input.manifest;
   const metadataMatches = input.observedMetadataFingerprint ===
     input.sourceMetadataFingerprint;
@@ -317,8 +329,8 @@ export async function verifyInsertedDvdAgainstSamples(input: {
       interrupted = true;
       break;
     }
-    let elapsedMs = now() - input.startedAtMs;
-    if (elapsedMs >= DVD_DISC_VERIFICATION_READ_DEADLINE_MS) {
+    let timeoutMs = remainingBudgetMs();
+    if (timeoutMs <= 0) {
       budgetExhausted = true;
       break;
     }
@@ -327,13 +339,12 @@ export async function verifyInsertedDvdAgainstSamples(input: {
         interrupted = true;
         break;
       }
-      elapsedMs = now() - input.startedAtMs;
-      if (elapsedMs >= DVD_DISC_VERIFICATION_READ_DEADLINE_MS) {
+      timeoutMs = remainingBudgetMs();
+      if (timeoutMs <= 0) {
         budgetExhausted = true;
         break;
       }
     }
-    const timeoutMs = DVD_DISC_VERIFICATION_READ_DEADLINE_MS - elapsedMs;
     const activeRead = input.reader.start({
       devicePath: input.devicePath,
       startLba: sample.startLba,

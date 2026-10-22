@@ -160,10 +160,9 @@ function staleDiscVerificationError(
   });
 }
 
-export async function inspectDvdDiscVerification(
+function dvdDiscVerificationContext(
   access: DataAccess,
   archiveRecoveryId: ArchiveRecoveryId,
-  archiveImageOwnership: ArchiveImageOwnership = defaultArchiveImageOwnership,
 ) {
   const recovery = access.catalog.findArchiveRecoveryById(archiveRecoveryId);
   if (recovery === null) {
@@ -184,6 +183,18 @@ export async function inspectDvdDiscVerification(
   if (sourceDisc === undefined) {
     throw new RecordNotFoundError("detected disc", archive.detectedDiscId);
   }
+  return { archive, recovery, sourceDisc };
+}
+
+export async function inspectDvdDiscVerification(
+  access: DataAccess,
+  archiveRecoveryId: ArchiveRecoveryId,
+  archiveImageOwnership: ArchiveImageOwnership = defaultArchiveImageOwnership,
+) {
+  const { archive, recovery, sourceDisc } = dvdDiscVerificationContext(
+    access,
+    archiveRecoveryId,
+  );
   const inspectAtCheckpoint = (checkpoint: {
     revision: number;
     digest: string;
@@ -350,27 +361,10 @@ export async function requestDvdDiscVerification(
   },
   archiveImageOwnership: ArchiveImageOwnership = defaultArchiveImageOwnership,
 ) {
-  const recovery = access.catalog.findArchiveRecoveryById(
+  const { archive, recovery, sourceDisc } = dvdDiscVerificationContext(
+    access,
     input.archiveRecoveryId,
   );
-  if (recovery === null) {
-    throw new RecordNotFoundError("archive recovery", input.archiveRecoveryId);
-  }
-  const archive = access.catalog.listOriginalDiscArchives({
-    ids: [recovery.originalDiscArchiveId],
-  })[0];
-  if (archive === undefined) {
-    throw new RecordNotFoundError(
-      "original disc archive",
-      recovery.originalDiscArchiveId,
-    );
-  }
-  const sourceDisc = access.catalog.listDetectedDiscs(undefined, {
-    ids: [archive.detectedDiscId],
-  })[0];
-  if (sourceDisc === undefined) {
-    throw new RecordNotFoundError("detected disc", archive.detectedDiscId);
-  }
   const replay = access.dvdDiscVerifications.replaySubmission(input);
   if (replay !== null) {
     return { verification: visibleVerification(replay, true) };

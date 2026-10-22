@@ -201,7 +201,8 @@ it("starts no new source read once the sixty-second budget is exhausted", async 
     observedMetadataFingerprint: metadataFingerprint,
     devicePath: "/dev/synthetic-disc", reader: source.reader,
     startedAtMs: 0,
-    now: () => {
+    now: () => 0,
+    monotonicNow: () => {
       clock += 30_000;
       return clock;
     },
@@ -225,12 +226,14 @@ it("rechecks the deadline after asynchronous read authorization", async () => {
     outcome: "readable",
     bytes: sampleBytes(index),
   }));
-  let clock = 59_999;
+  let clock = 0;
   const result = await verifyInsertedDvdAgainstSamples({
     manifest: manifest(), sourceMetadataFingerprint: metadataFingerprint,
     observedMetadataFingerprint: metadataFingerprint,
     devicePath: "/dev/synthetic-disc", reader: source.reader,
-    startedAtMs: 0, now: () => clock,
+    startedAtMs: 0,
+    now: () => 0,
+    monotonicNow: () => clock,
     insertionIsCurrent: () => true,
     checkpointIsCurrent: () => true,
     async authorizeRead() {
@@ -248,6 +251,41 @@ it("rechecks the deadline after asynchronous read authorization", async () => {
     budgetExhausted: true,
   });
   expect(source.run).not.toHaveBeenCalled();
+});
+
+it("does not extend the read budget when wall time moves backward", async () => {
+  let wallClock = 30_000;
+  let monotonicClock = 0;
+  const source = reader((index) => {
+    wallClock = -30_000;
+    monotonicClock = 30_000;
+    return {
+      outcome: "readable",
+      bytes: sampleBytes(index),
+    };
+  });
+  const result = await verifyInsertedDvdAgainstSamples({
+    manifest: manifest(),
+    sourceMetadataFingerprint: metadataFingerprint,
+    observedMetadataFingerprint: metadataFingerprint,
+    devicePath: "/dev/synthetic-disc",
+    reader: source.reader,
+    startedAtMs: 0,
+    now: () => wallClock,
+    monotonicNow: () => monotonicClock,
+    insertionIsCurrent: () => true,
+    checkpointIsCurrent: () => true,
+  });
+
+  expect(result).toMatchObject({
+    outcome: "inconclusive",
+    reasons: [
+      "DISC_SAMPLE_COVERAGE_INCOMPLETE",
+      "DISC_VERIFICATION_TIMEOUT",
+    ],
+    budgetExhausted: true,
+  });
+  expect(source.run).toHaveBeenCalledTimes(1);
 });
 
 it("cancels a hung read at the deadline and waits for quiescence", async () => {
