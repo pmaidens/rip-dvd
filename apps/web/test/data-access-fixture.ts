@@ -15,6 +15,9 @@ import {
 import { afterEach } from "vitest";
 
 type SnapshotOverrides = {
+  dvdTitleDamageAssessments?: Partial<
+    ConsistentReadAccess["dvdTitleDamageAssessments"]
+  >;
   dvdStructuralAssessments?: Partial<
     ConsistentReadAccess["dvdStructuralAssessments"]
   >;
@@ -71,6 +74,10 @@ export function withSnapshotOverrides(
     readConsistentSnapshot(read) {
       return access.readConsistentSnapshot((snapshotAccess) =>
         read({
+          dvdTitleDamageAssessments: {
+            ...snapshotAccess.dvdTitleDamageAssessments,
+            ...overrides.dvdTitleDamageAssessments,
+          },
           dvdStructuralAssessments: {
             ...snapshotAccess.dvdStructuralAssessments,
             ...overrides.dvdStructuralAssessments,

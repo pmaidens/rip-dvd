@@ -6,6 +6,9 @@ import type {
   CatalogReviewOutcome,
   ArchiveIntegrity,
   DvdTitleBadSectorCount,
+  DvdTitleDamageAssessmentItem,
+  DvdTitleDamageUnknownReason,
+  DvdUnrecoveredSourceRange,
   UnreadableSectorRange,
   DiscSelectionSourceIdentityInput,
   DiscSelectionKind,
@@ -178,6 +181,7 @@ export interface CatalogReviewDto {
   reviewOutcome: CatalogReviewOutcome;
   rawScan: { titles: DvdTitle[] };
   titleIdentity?: CatalogReviewTitleIdentity;
+  titleDamage?: CatalogReviewTitleDamage;
   coverage: CatalogReviewCoverage;
   reviewActionAvailability: CatalogReviewActionAvailability;
   rearchiveProposal?: CatalogReviewRearchiveProposal;
@@ -285,6 +289,22 @@ export interface CatalogReviewTitleIdentityItem {
     continuity: CatalogReviewTitleIdentityItem["reviewContinuity"];
     createdAt: string;
   };
+}
+
+export interface CatalogReviewTitleDamage {
+  state: "unavailable" | "pending" | "current" | "outdated";
+  checkpointRevision: number | null;
+  assessmentIdentity: string | null;
+  currentAssessmentIdentity: string | null;
+  items: readonly DvdTitleDamageAssessmentItem[];
+  truncated: boolean;
+  unknownTitleImpact: {
+    unrecoveredSourceSectorCount: number;
+    unrecoveredSourceRanges: readonly DvdUnrecoveredSourceRange[];
+    reasons: readonly DvdTitleDamageUnknownReason[];
+  } | null;
+  noTitleMissingSourceProved: boolean;
+  unavailableReasons: readonly DvdTitleDamageUnknownReason[];
 }
 
 export interface CatalogReviewArchiveEvidence {

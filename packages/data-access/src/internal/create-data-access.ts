@@ -86,6 +86,8 @@ import {
   dvdRecoveryReconciliations,
   dvdStructuralAssessments,
   dvdStructuralCheckAttempts,
+  dvdTitleDamageAssessmentAttempts,
+  dvdTitleDamageAssessments,
   dvdTitleIdentities,
   dvdTitleIdentityObservations,
   dvdTitleIdentitySelectionBindings,
@@ -198,6 +200,13 @@ import {
   normalizeDvdTitleIdentityObservation,
   planDvdTitleIdentityContinuity,
 } from "../dvd-title-identity.js";
+import {
+  createDvdTitleDamageAssessment,
+  DVD_TITLE_DAMAGE_ASSESSMENT_POLICY_VERSION,
+  type DvdTitleDamageAssessmentRecord,
+  type DvdTitleDamageMappingInput,
+  type RecordDvdTitleDamageAssessmentInput,
+} from "../dvd-title-damage-assessment.js";
 import { isArchiveReadFailureEvidenceConsistent } from "../archive-read-failure.js";
 import {
   decodeArchivedDvdTitles,
@@ -8508,6 +8517,498 @@ export function createDataAccessInternal(
     return projected;
   }
 
+  function titleDamageStructuralFindings(
+    assessment: DvdStructuralAssessmentRecord,
+  ) {
+    const dvdNavigation = assessment.findings.find((finding) =>
+      finding.checkKind === "dvd_navigation"
+    );
+    const titleEnumeration = assessment.findings.find((finding) =>
+      finding.checkKind === "title_enumeration"
+    );
+    if (dvdNavigation === undefined || titleEnumeration === undefined) {
+      throw new DomainInvariantError(
+        "Title Damage Assessment is missing structural dependencies",
+      );
+    }
+    return {
+      dvdNavigation: dvdNavigation.outcome,
+      titleEnumeration: titleEnumeration.outcome,
+    };
+  }
+
+  function titleDamageMappings(
+    originalDiscArchiveId: OriginalDiscArchiveId,
+    manifestId: string,
+    mappings: RecordDvdTitleDamageAssessmentInput["titles"],
+  ): DvdTitleDamageMappingInput[] {
+    const observations = database.select()
+      .from(dvdTitleIdentityObservations)
+      .where(eq(dvdTitleIdentityObservations.manifestId, manifestId))
+      .all();
+    const observationById = new Map(observations.map((observation) => [
+      observation.id,
+      observation,
+    ]));
+    if (
+      observations.length !== mappings.length ||
+      new Set(mappings.map((mapping) =>
+        mapping.titleIdentityObservationId
+      )).size !== mappings.length
+    ) {
+      throw new DomainInvariantError(
+        "Title Damage Assessment must cover every current Title Identity observation once",
+      );
+    }
+    return mappings.map((mapping) => {
+      const observation = observationById.get(
+        mapping.titleIdentityObservationId,
+      );
+      if (observation === undefined) {
+        throw new DomainInvariantError(
+          "Title Damage Assessment references a different checkpoint observation",
+        );
+      }
+      const identity = database.select({
+        originalDiscArchiveId: dvdTitleIdentities.originalDiscArchiveId,
+      }).from(dvdTitleIdentities).where(eq(
+        dvdTitleIdentities.id,
+        observation.titleIdentityId,
+      )).get();
+      if (identity?.originalDiscArchiveId !== originalDiscArchiveId) {
+        throw new DomainInvariantError(
+          "Title Damage Assessment references another archive's Title Identity",
+        );
+      }
+      return {
+        titleIdentityId: observation.titleIdentityId,
+        titleIdentityObservationId: observation.id,
+        displayTitleNumber: observation.displayTitleNumber,
+        selection: {
+          selectedPath: observation.selectedPath,
+          angleNumber: observation.angleNumber,
+          chapterStart: observation.chapterStart,
+          chapterEnd: observation.chapterEnd,
+        },
+        sourceReferences: mapping.sourceReferences,
+        mappingCoverage: mapping.mappingCoverage,
+      };
+    });
+  }
+
+  function createValidatedDvdTitleDamageAssessment(
+    input: Parameters<typeof createDvdTitleDamageAssessment>[0],
+    sourceExtentsByObservation: ReadonlyMap<
+      string,
+      readonly { startLba: number; sectorCount: number }[]
+    >,
+  ) {
+    const assessment = createDvdTitleDamageAssessment(input);
+    for (const item of assessment.items) {
+      if (
+        canonicalPublicationJson(item.uniqueSourceRanges) !==
+          canonicalPublicationJson(
+            sourceExtentsByObservation.get(
+              item.titleIdentityObservationId,
+            ),
+          )
+      ) {
+        throw new DomainInvariantError(
+          "Title Damage Assessment source map does not match its Title Identity observation",
+        );
+      }
+    }
+    return assessment;
+  }
+
+  function toDvdTitleDamageAssessment(
+    row: typeof dvdTitleDamageAssessments.$inferSelect,
+  ): DvdTitleDamageAssessmentRecord {
+    const manifest = database.select().from(dvdArchiveEvidenceManifests)
+      .where(eq(dvdArchiveEvidenceManifests.id, row.manifestId)).get();
+    if (
+      manifest === undefined ||
+      manifest.originalDiscArchiveId !== row.originalDiscArchiveId ||
+      manifest.revision !== row.manifestRevision ||
+      manifest.manifestDigest !== row.manifestDigest ||
+      manifest.acceptedEndLbaExclusive !== row.acceptedEndLbaExclusive ||
+      manifest.evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT
+    ) {
+      throw new DomainInvariantError(
+        "Title Damage Assessment checkpoint evidence is inconsistent",
+      );
+    }
+    const structuralAssessment = findDvdStructuralAssessment(
+      row.structuralAssessmentIdentity,
+    );
+    if (
+      structuralAssessment.checkpoint.originalDiscArchiveId !==
+        row.originalDiscArchiveId ||
+      structuralAssessment.checkpoint.manifestId !== row.manifestId ||
+      structuralAssessment.checkpoint.manifestRevision !==
+        row.manifestRevision ||
+      structuralAssessment.checkpoint.manifestDigest !== row.manifestDigest ||
+      structuralAssessment.checkpoint.acceptedEndLbaExclusive !==
+        row.acceptedEndLbaExclusive
+    ) {
+      throw new DomainInvariantError(
+        "Title Damage Assessment structural evidence is inconsistent",
+      );
+    }
+    const observations = database.select({
+      id: dvdTitleIdentityObservations.id,
+      sourceExtents: dvdTitleIdentityObservations.sourceExtents,
+    }).from(dvdTitleIdentityObservations).where(eq(
+      dvdTitleIdentityObservations.manifestId,
+      row.manifestId,
+    )).all();
+    const sourceExtentsById = new Map(observations.map((observation) => [
+      observation.id,
+      observation.sourceExtents,
+    ]));
+    const assessment = createValidatedDvdTitleDamageAssessment({
+      checkpoint: {
+        originalDiscArchiveId: row.originalDiscArchiveId,
+        manifestId: row.manifestId,
+        manifestRevision: row.manifestRevision,
+        manifestDigest: row.manifestDigest,
+        acceptedEndLbaExclusive: row.acceptedEndLbaExclusive,
+      },
+      titleIdentityReviewSetIdentity: row.titleIdentityReviewSetIdentity,
+      structuralAssessmentIdentity: row.structuralAssessmentIdentity,
+      structuralFindings: titleDamageStructuralFindings(structuralAssessment),
+      unrecoveredSourceRanges: manifest.unrecoveredSourceRanges,
+      titles: titleDamageMappings(
+        row.originalDiscArchiveId,
+        row.manifestId,
+        row.titleMappings,
+      ),
+    }, sourceExtentsById);
+    if (
+      assessment.id !== row.id ||
+      assessment.policyVersion !== row.policyVersion
+    ) {
+      throw new DomainInvariantError(
+        "Persisted Title Damage Assessment is invalid",
+      );
+    }
+    return { ...assessment, createdAt: row.createdAt };
+  }
+
+  function inspectDvdTitleDamageAssessment(
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ) {
+    const archive = access.catalog.listOriginalDiscArchives({
+      ids: [originalDiscArchiveId],
+    })[0];
+    if (archive === undefined) {
+      throw new RecordNotFoundError(
+        "Original Disc Archive",
+        originalDiscArchiveId,
+      );
+    }
+    const header = database.select().from(dvdArchiveEvidenceHeaders).where(eq(
+      dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+      originalDiscArchiveId,
+    )).get();
+    const unavailable = (code: string, message: string) => ({
+      schemaVersion: 1 as const,
+      policyVersion: DVD_TITLE_DAMAGE_ASSESSMENT_POLICY_VERSION,
+      originalDiscArchiveId,
+      state: "unavailable" as const,
+      checkpoint: null,
+      currentAssessmentIdentity: null,
+      assessment: null,
+      unavailableReasons: [{ code, message }],
+    });
+    const marked = dvdRecoveryEvidenceFormatForArchive(
+      header,
+      access.archiveJobs.listForArchive(originalDiscArchiveId),
+    );
+    if (marked === null) {
+      return unavailable(
+        "UNSUPPORTED_EVIDENCE_FORMAT",
+        "Title Damage Assessment requires dvd-recovery-evidence-v1.",
+      );
+    }
+    if (header === undefined) {
+      return unavailable(
+        "CONSISTENCY_FAULT",
+        "The committed DVD checkpoint is unavailable.",
+      );
+    }
+    const checkpoint = {
+      originalDiscArchiveId,
+      manifestId: header.currentManifestId,
+      manifestRevision: header.currentManifestRevision,
+      manifestDigest: header.currentManifestDigest,
+      acceptedEndLbaExclusive: header.acceptedEndLbaExclusive,
+    };
+    const reviewSet = readDvdTitleIdentityReviewSet(originalDiscArchiveId);
+    const structural = inspectDvdStructuralAssessment(originalDiscArchiveId);
+    const latestRow = database.select({ assessment: dvdTitleDamageAssessments })
+      .from(dvdTitleDamageAssessmentAttempts)
+      .innerJoin(
+        dvdTitleDamageAssessments,
+        eq(
+          dvdTitleDamageAssessments.id,
+          dvdTitleDamageAssessmentAttempts.assessmentId,
+        ),
+      )
+      .where(eq(
+        dvdTitleDamageAssessmentAttempts.originalDiscArchiveId,
+        originalDiscArchiveId,
+      ))
+      .orderBy(desc(dvdTitleDamageAssessmentAttempts.sequence)).limit(1)
+      .get()?.assessment;
+    const currentRow = latestRow !== undefined &&
+        reviewSet !== null &&
+        structural.state === "current" &&
+        structural.currentAssessmentIdentity !== null &&
+        latestRow.originalDiscArchiveId === originalDiscArchiveId &&
+        latestRow.manifestId === header.currentManifestId &&
+        latestRow.manifestRevision === header.currentManifestRevision &&
+        latestRow.manifestDigest === header.currentManifestDigest &&
+        latestRow.acceptedEndLbaExclusive ===
+          header.acceptedEndLbaExclusive &&
+        latestRow.titleIdentityReviewSetIdentity ===
+          reviewSet.reviewSetIdentity &&
+        latestRow.structuralAssessmentIdentity ===
+          structural.currentAssessmentIdentity
+      ? latestRow
+      : undefined;
+    const assessmentRow = currentRow ?? latestRow;
+    const reasons = [] as Array<{ code: string; message: string }>;
+    if (reviewSet === null) {
+      reasons.push({
+        code: "TITLE_IDENTITY_NOT_RECORDED",
+        message: "Title Identity observations are not recorded for this checkpoint.",
+      });
+    }
+    if (structural.state !== "current") {
+      reasons.push({
+        code: structural.state === "outdated"
+          ? "STRUCTURAL_ASSESSMENT_OUTDATED"
+          : "STRUCTURAL_ASSESSMENT_PENDING",
+        message: structural.state === "outdated"
+          ? "The latest Structural Assessment belongs to an older checkpoint."
+          : "A current Structural Assessment is not recorded.",
+      });
+    }
+    if (currentRow === undefined) {
+      reasons.push({
+        code: assessmentRow === undefined
+          ? "TITLE_DAMAGE_ASSESSMENT_NOT_RECORDED"
+          : "TITLE_DAMAGE_ASSESSMENT_OUTDATED",
+        message: assessmentRow === undefined
+          ? "A Title Damage Assessment is not recorded for this checkpoint."
+          : "The latest Title Damage Assessment does not match current evidence.",
+      });
+    }
+    return {
+      schemaVersion: 1 as const,
+      policyVersion: DVD_TITLE_DAMAGE_ASSESSMENT_POLICY_VERSION,
+      originalDiscArchiveId,
+      state: currentRow !== undefined
+        ? "current" as const
+        : assessmentRow !== undefined
+        ? "outdated" as const
+        : "pending" as const,
+      checkpoint,
+      currentAssessmentIdentity: currentRow?.id ?? null,
+      assessment: assessmentRow === undefined
+        ? null
+        : toDvdTitleDamageAssessment(assessmentRow),
+      unavailableReasons: reasons,
+    };
+  }
+
+  function recordDvdTitleDamageAssessment(
+    input: RecordDvdTitleDamageAssessmentInput,
+  ): DvdTitleDamageAssessmentRecord {
+    const archive = access.catalog.listOriginalDiscArchives({
+      ids: [input.originalDiscArchiveId],
+    })[0];
+    if (archive === undefined) {
+      throw new RecordNotFoundError(
+        "Original Disc Archive",
+        input.originalDiscArchiveId,
+      );
+    }
+    const catalogRevision = archive.updatedAt;
+    const header = access.catalog.findDvdArchiveEvidenceHeader(
+      input.originalDiscArchiveId,
+    );
+    if (
+      header === null ||
+      header.evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT
+    ) {
+      throw new DomainInvariantError(
+        "Title Damage Assessment requires a committed recovery checkpoint",
+      );
+    }
+    if (
+      header.currentManifestId !== input.checkpoint.manifestId ||
+      header.currentManifestRevision !== input.checkpoint.manifestRevision ||
+      header.currentManifestDigest !== input.checkpoint.manifestDigest
+    ) {
+      throw new DomainInvariantError(
+        "Title Damage Assessment does not match the current committed checkpoint",
+      );
+    }
+    const reviewSet = readDvdTitleIdentityReviewSet(
+      input.originalDiscArchiveId,
+    );
+    if (
+      reviewSet === null ||
+      reviewSet.reviewSetIdentity !==
+        input.titleIdentityReviewSetIdentity ||
+      reviewSet.checkpoint.manifestId !== input.checkpoint.manifestId ||
+      reviewSet.checkpoint.manifestRevision !==
+        input.checkpoint.manifestRevision ||
+      reviewSet.checkpoint.manifestDigest !== input.checkpoint.manifestDigest
+    ) {
+      throw new DomainInvariantError(
+        "Title Damage Assessment does not match the current Title Identity review set",
+      );
+    }
+    const structural = findDvdStructuralAssessment(
+      input.structuralAssessmentIdentity,
+    );
+    if (
+      structural.checkpoint.originalDiscArchiveId !==
+        input.originalDiscArchiveId ||
+      structural.checkpoint.manifestId !== input.checkpoint.manifestId ||
+      structural.checkpoint.manifestRevision !==
+        input.checkpoint.manifestRevision ||
+      structural.checkpoint.manifestDigest !== input.checkpoint.manifestDigest
+    ) {
+      throw new DomainInvariantError(
+        "Title Damage Assessment does not match its Structural Assessment",
+      );
+    }
+    const sourceExtentsByObservation = new Map(
+      reviewSet.items.filter((item) => item.presentAtCurrentCheckpoint)
+        .map((item) => [
+          item.observation.id,
+          item.observation.sourceExtents,
+        ]),
+    );
+    const assessment = createValidatedDvdTitleDamageAssessment({
+      checkpoint: {
+        originalDiscArchiveId: input.originalDiscArchiveId,
+        manifestId: header.currentManifestId,
+        manifestRevision: header.currentManifestRevision,
+        manifestDigest: header.currentManifestDigest,
+        acceptedEndLbaExclusive: header.acceptedEndLbaExclusive,
+      },
+      titleIdentityReviewSetIdentity: reviewSet.reviewSetIdentity,
+      structuralAssessmentIdentity: structural.id,
+      structuralFindings: titleDamageStructuralFindings(
+        structural,
+      ),
+      unrecoveredSourceRanges: header.unrecoveredSourceRanges,
+      titles: titleDamageMappings(
+        input.originalDiscArchiveId,
+        header.currentManifestId,
+        input.titles,
+      ),
+    }, sourceExtentsByObservation);
+    const createdAt = now();
+    database.transaction((transaction) => {
+      const currentArchive = transaction.select({
+        updatedAt: originalDiscArchives.updatedAt,
+      }).from(originalDiscArchives).where(eq(
+        originalDiscArchives.id,
+        input.originalDiscArchiveId,
+      )).get();
+      const currentHeader = transaction.select()
+        .from(dvdArchiveEvidenceHeaders)
+        .where(eq(
+          dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+          input.originalDiscArchiveId,
+        )).get();
+      const currentStructural = transaction.select({
+        assessmentIdentity: dvdStructuralCheckAttempts.assessmentId,
+      }).from(dvdStructuralCheckAttempts).where(and(
+        eq(
+          dvdStructuralCheckAttempts.originalDiscArchiveId,
+          input.originalDiscArchiveId,
+        ),
+        eq(
+          dvdStructuralCheckAttempts.manifestId,
+          input.checkpoint.manifestId,
+        ),
+        eq(
+          dvdStructuralCheckAttempts.manifestRevision,
+          input.checkpoint.manifestRevision,
+        ),
+        eq(
+          dvdStructuralCheckAttempts.manifestDigest,
+          input.checkpoint.manifestDigest,
+        ),
+        eq(dvdStructuralCheckAttempts.outcome, "completed"),
+      )).orderBy(desc(dvdStructuralCheckAttempts.sequence)).limit(1).get();
+      const currentTitleSet = transaction.select({
+        manifestId: dvdTitleIdentitySets.manifestId,
+      }).from(dvdTitleIdentitySets).where(and(
+        eq(
+          dvdTitleIdentitySets.originalDiscArchiveId,
+          input.originalDiscArchiveId,
+        ),
+        eq(
+          dvdTitleIdentitySets.manifestId,
+          input.checkpoint.manifestId,
+        ),
+      )).get();
+      if (
+        currentArchive?.updatedAt.getTime() !== catalogRevision.getTime() ||
+        currentHeader?.currentManifestId !== input.checkpoint.manifestId ||
+        currentHeader.currentManifestRevision !==
+          input.checkpoint.manifestRevision ||
+        currentHeader.currentManifestDigest !==
+          input.checkpoint.manifestDigest ||
+        currentStructural?.assessmentIdentity !==
+            input.structuralAssessmentIdentity ||
+        currentTitleSet === undefined
+      ) {
+        throw new DomainInvariantError(
+          "Title Damage Assessment evidence changed before persistence",
+        );
+      }
+      transaction.insert(dvdTitleDamageAssessments).values({
+        id: assessment.id,
+        originalDiscArchiveId: input.originalDiscArchiveId,
+        manifestId: input.checkpoint.manifestId,
+        manifestRevision: input.checkpoint.manifestRevision,
+        manifestDigest: input.checkpoint.manifestDigest,
+        acceptedEndLbaExclusive: header.acceptedEndLbaExclusive,
+        titleIdentityReviewSetIdentity:
+          input.titleIdentityReviewSetIdentity,
+        structuralAssessmentIdentity:
+          input.structuralAssessmentIdentity,
+        policyVersion: assessment.policyVersion,
+        titleMappings: input.titles,
+        createdAt,
+      }).onConflictDoNothing({
+        target: dvdTitleDamageAssessments.id,
+      }).run();
+      transaction.insert(dvdTitleDamageAssessmentAttempts).values({
+        originalDiscArchiveId: input.originalDiscArchiveId,
+        assessmentId: assessment.id,
+        createdAt,
+      }).run();
+    }, { behavior: "immediate" });
+    const persisted = database.select().from(dvdTitleDamageAssessments)
+      .where(eq(dvdTitleDamageAssessments.id, assessment.id)).get();
+    if (persisted === undefined) {
+      throw new DomainInvariantError(
+        "Title Damage Assessment was not recorded",
+      );
+    }
+    return toDvdTitleDamageAssessment(persisted);
+  }
+
   const access: LegacySidecarDataAccess = {
     async readDvdCheckpoint(id, ownership) {
       const read = await withDvdCheckpointRead(
@@ -8609,11 +9110,62 @@ export function createDataAccessInternal(
       );
       return read?.result ?? null;
     },
+    async assessDvdTitleDamage(id, ownership, assess) {
+      const read = await withDvdCheckpointRead(
+        id,
+        ownership,
+        readCommittedDvdCheckpoint,
+        async (manifest, handle) => {
+          const titleIdentity = readDvdTitleIdentityReviewSet(id);
+          const structural = inspectDvdStructuralAssessment(id);
+          if (
+            titleIdentity === null ||
+            titleIdentity.checkpoint.manifestId !== manifest.id ||
+            titleIdentity.checkpoint.manifestRevision !== manifest.revision ||
+            titleIdentity.checkpoint.manifestDigest !==
+              manifest.manifestDigest ||
+            structural.state !== "current" ||
+            structural.currentAssessmentIdentity === null
+          ) {
+            throw new DomainInvariantError(
+              "Title Damage Assessment requires current title and structural evidence",
+            );
+          }
+          const titles = await assess({
+            checkpoint: titleIdentity.checkpoint,
+            titleIdentity,
+            structuralAssessmentIdentity:
+              structural.currentAssessmentIdentity,
+          }, handle);
+          handle.assertOwned();
+          return {
+            titleIdentityReviewSetIdentity:
+              titleIdentity.reviewSetIdentity,
+            structuralAssessmentIdentity:
+              structural.currentAssessmentIdentity,
+            titles,
+          };
+        },
+        (manifest, prepared) => recordDvdTitleDamageAssessment({
+          originalDiscArchiveId: id,
+          checkpoint: {
+            manifestId: manifest.id,
+            manifestRevision: manifest.revision,
+            manifestDigest: manifest.manifestDigest,
+          },
+          ...prepared,
+        }),
+      );
+      return read?.result ?? null;
+    },
     dvdStructuralAssessments: {
       recordFailed(input) {
         return recordFailedDvdStructuralAttempt(input);
       },
       inspect: inspectDvdStructuralAssessment,
+    },
+    dvdTitleDamageAssessments: {
+      inspect: inspectDvdTitleDamageAssessment,
     },
     dvdRecoveryStorage: {
       readCurrent: readCurrentDvdRecoveryStoragePreflight,
@@ -9442,6 +9994,9 @@ export function createDataAccessInternal(
     },
     readConsistentSnapshot(read) {
       const snapshotAccess: ConsistentReadAccess = {
+        dvdTitleDamageAssessments: {
+          inspect: inspectDvdTitleDamageAssessment,
+        },
         dvdStructuralAssessments: {
           inspect: inspectDvdStructuralAssessment,
         },

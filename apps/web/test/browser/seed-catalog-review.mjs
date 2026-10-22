@@ -3,6 +3,14 @@ import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout } from "node:timers/promises";
 
+import {
+  archiveBoundaryEvidenceFromRecord,
+  createDvdArchiveBoundaryEvidenceDigest,
+  createDvdArchiveEvidenceManifestDigests,
+  createDvdStructuralAssessment,
+  createDvdTitleDamageAssessment,
+  DVD_RECOVERY_EVIDENCE_FORMAT,
+} from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 
 const databasePath = process.env.RIP_DVD_DATABASE_PATH;
@@ -44,7 +52,9 @@ function createArchive({ key, label, fingerprintFill, titles }) {
     displayName: `Browser fixture ${key}`,
     isPresent: true,
   });
-  const fingerprint = `sha256:${fingerprintFill.repeat(64)}`;
+  const fingerprint = `sha256:${fingerprintFill.repeat(
+    Math.ceil(64 / fingerprintFill.length),
+  ).slice(0, 64)}`;
   const disc = access.catalog.registerDetectedDisc({
     opticalDriveId: drive.id,
     discKind: "dvd",
@@ -132,6 +142,320 @@ function detailedTitle(number, durationSeconds, chapters) {
       content: `Closed-captions-and-forced-narrative-${index}`,
     })),
   };
+}
+
+function seedTitleDamagePaging(variant, fingerprintFill) {
+  const key = `damage-${variant}`;
+  const acceptedEndLbaExclusive = 4_096;
+  const archive = createArchive({
+    key,
+    label: `CATALOG_BROWSER_DAMAGE_${variant.toUpperCase()}`,
+    fingerprintFill,
+    titles: Array.from({ length: 21 }, (_, index) =>
+      detailedTitle(index + 1, 3_600, 4)
+    ),
+  });
+  const fixtureId = `browser-${key}`;
+  const requestId = `${fixtureId}-request`;
+  const jobId = `${fixtureId}-job`;
+  const inspectionId = `${fixtureId}-inspection`;
+  const manifestId = `${fixtureId}-manifest`;
+  const unrecoveredSourceRanges = [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }];
+  const sqlite = new DatabaseSync(databasePath);
+  sqlite.prepare(`
+    UPDATE original_disc_archives
+    SET size_bytes = ?,
+        boundary_policy_version = 'dvd-archive-boundary-v2',
+        boundary_reported_size_bytes = ?,
+        boundary_published_size_bytes = ?,
+        boundary_excluded_sector_count = 0,
+        boundary_first_excluded_lba = ?,
+        boundary_maximum_referenced_lba = NULL,
+        boundary_read_failure_classifier_version = 'scsi-read-classifier-v2',
+        boundary_read_failure_scsi_status = 2,
+        boundary_read_failure_host_status = 0,
+        boundary_read_failure_driver_status = 8,
+        boundary_read_failure_sense_response_code = 114,
+        boundary_read_failure_sense_key = 5,
+        boundary_read_failure_asc = 33,
+        boundary_read_failure_ascq = 0,
+        integrity = 'unknown',
+        integrity_evidence_revision = NULL,
+        integrity_policy_version = NULL,
+        bad_sector_count = NULL,
+        bad_area_count = NULL,
+        bad_sector_ranges = NULL,
+        bad_sector_counts_by_title = NULL
+    WHERE id = ?
+  `).run(
+    acceptedEndLbaExclusive * 2_048,
+    acceptedEndLbaExclusive * 2_048,
+    acceptedEndLbaExclusive * 2_048,
+    acceptedEndLbaExclusive,
+    archive.id,
+  );
+  const updatedArchive = access.catalog.listOriginalDiscArchives({
+    ids: [archive.id],
+  })[0];
+  if (!updatedArchive) throw new Error("Missing Title Damage fixture archive");
+  const boundaryEvidence = archiveBoundaryEvidenceFromRecord(updatedArchive);
+  if (!boundaryEvidence) {
+    throw new Error("Missing Title Damage fixture boundary evidence");
+  }
+  const boundaryEvidenceDigest =
+    createDvdArchiveBoundaryEvidenceDigest(boundaryEvidence);
+  const manifestInput = {
+    originalDiscArchiveId: archive.id,
+    revision: 1,
+    previousManifestId: null,
+    previousManifestDigest: null,
+    recoveryReadId: null,
+    recoveryReadEvidenceDigest: null,
+    evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+    imageFingerprint: updatedArchive.fingerprint,
+    sectorSizeBytes: 2_048,
+    acceptedEndLbaExclusive,
+    boundaryPolicyVersion: boundaryEvidence.policyVersion,
+    boundaryReportedSizeBytes: boundaryEvidence.reportedSizeBytes,
+    boundaryPublishedSizeBytes: boundaryEvidence.publishedSizeBytes,
+    boundaryEvidenceDigest,
+    unrecoveredSourceRanges,
+  };
+  const manifestDigests = createDvdArchiveEvidenceManifestDigests(
+    manifestInput,
+  );
+  sqlite.prepare(`
+    INSERT INTO disc_inspections (
+      id, optical_drive_id, detected_disc_id, media_generation, is_current,
+      status, phase, total_bytes, phase_started_at, attempt_started_at,
+      started_at, completed_at, created_at, updated_at
+    )
+    SELECT ?, optical_drive_id, id, ?, 0, 'completed', 'confirming_media', ?,
+      1, 1, 1, 1, 1, 1
+    FROM detected_discs
+    WHERE id = ?
+  `).run(
+    inspectionId,
+    `${fixtureId}-generation`,
+    boundaryEvidence.reportedSizeBytes,
+    archive.detectedDiscId,
+  );
+  sqlite.prepare(`
+    INSERT INTO archive_requests (
+      id, detected_disc_id, evidence_format, status, priority,
+      fulfilled_at, created_at, updated_at
+    ) VALUES (?, ?, ?, 'fulfilled', 0, 1, 1, 1)
+  `).run(requestId, archive.detectedDiscId, DVD_RECOVERY_EVIDENCE_FORMAT);
+  sqlite.prepare(`
+    INSERT INTO archive_jobs (
+      id, archive_request_id, disc_inspection_id, detected_disc_id,
+      original_disc_archive_id, evidence_format, attempt_ordinal, status,
+      priority, progress_phase, progress_percent, progress_bytes,
+      last_progress_at, started_at, completed_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 1, 'completed', 0, 'finalizing', 100, ?,
+      1, 1, 1, 1, 1)
+  `).run(
+    jobId,
+    requestId,
+    inspectionId,
+    archive.detectedDiscId,
+    archive.id,
+    DVD_RECOVERY_EVIDENCE_FORMAT,
+    boundaryEvidence.publishedSizeBytes,
+  );
+  sqlite.prepare(`
+    INSERT INTO dvd_archive_evidence_manifests (
+      id, original_disc_archive_id, revision, evidence_format,
+      image_fingerprint, sector_size_bytes, accepted_end_lba_exclusive,
+      boundary_policy_version, boundary_reported_size_bytes,
+      boundary_published_size_bytes, boundary_evidence_digest,
+      unrecovered_source_ranges, unrecovered_source_ranges_digest,
+      manifest_digest, created_at
+    ) VALUES (?, ?, 1, ?, ?, 2048, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+  `).run(
+    manifestId,
+    archive.id,
+    DVD_RECOVERY_EVIDENCE_FORMAT,
+    updatedArchive.fingerprint,
+    acceptedEndLbaExclusive,
+    boundaryEvidence.policyVersion,
+    boundaryEvidence.reportedSizeBytes,
+    boundaryEvidence.publishedSizeBytes,
+    boundaryEvidenceDigest,
+    JSON.stringify(unrecoveredSourceRanges),
+    manifestDigests.unrecoveredSourceRangesDigest,
+    manifestDigests.manifestDigest,
+  );
+  sqlite.prepare(`
+    INSERT INTO dvd_archive_evidence_headers (
+      original_disc_archive_id, source_archive_job_id, evidence_format,
+      boundary_policy_version, boundary_reported_size_bytes,
+      boundary_published_size_bytes, boundary_evidence_digest,
+      sector_size_bytes, accepted_end_lba_exclusive, current_manifest_id,
+      current_manifest_revision, current_manifest_digest, created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 2048, ?, ?, 1, ?, 1, 1)
+  `).run(
+    archive.id,
+    jobId,
+    DVD_RECOVERY_EVIDENCE_FORMAT,
+    boundaryEvidence.policyVersion,
+    boundaryEvidence.reportedSizeBytes,
+    boundaryEvidence.publishedSizeBytes,
+    boundaryEvidenceDigest,
+    acceptedEndLbaExclusive,
+    manifestId,
+    manifestDigests.manifestDigest,
+  );
+  sqlite.close();
+
+  const checkpoint = {
+    originalDiscArchiveId: archive.id,
+    manifestId,
+    manifestRevision: 1,
+    manifestDigest: manifestDigests.manifestDigest,
+    acceptedEndLbaExclusive,
+  };
+  const reviewSet = access.catalog.recordDvdTitleIdentityObservations({
+    originalDiscArchiveId: archive.id,
+    checkpoint,
+    observations: Array.from({ length: 21 }, (_, index) => ({
+      displayTitleNumber: index + 1,
+      navigation: {
+        videoTitleSetNumber: index + 1,
+        titleSetTitleNumber: 1,
+        programChainNumber: 1,
+      },
+      selectedPath: [{
+        programNumber: 1,
+        cellNumber: 1,
+        vobId: index + 1,
+        cellId: 1,
+      }],
+      angleNumber: 1,
+      angleCount: 1,
+      chapterStart: 1,
+      chapterEnd: 4,
+      chapterCount: 4,
+      sourceExtents: [{ startLba: index * 100, sectorCount: 50 }],
+    })),
+  });
+  const structuralFindings = [
+    "filesystem_structure",
+    "dvd_navigation",
+    "title_enumeration",
+  ].map((checkKind) => ({
+    checkKind,
+    policyVersion: `synthetic-${checkKind}-v1`,
+    testedExtent: {
+      startLba: 0,
+      endLbaExclusive: acceptedEndLbaExclusive,
+      observedSectorCount: 100,
+    },
+    outcome: "valid",
+    reason: null,
+    evidenceReference: `synthetic:${checkKind}`,
+  }));
+  const structural = createDvdStructuralAssessment({
+    checkpoint,
+    findings: structuralFindings,
+  });
+  const currentItems = reviewSet.items.filter((item) =>
+    item.presentAtCurrentCheckpoint
+  );
+  const storedMappings = currentItems.map((item) => ({
+    titleIdentityObservationId: item.observation.id,
+    sourceReferences: item.observation.sourceExtents.map((range) => ({
+      kind: "multiplexed_content",
+      ...range,
+    })),
+    mappingCoverage: {
+      state: "complete",
+      policyVersion: "synthetic-title-map-v1",
+      unknownReasons: [],
+    },
+  }));
+  const assessment = createDvdTitleDamageAssessment({
+    checkpoint,
+    titleIdentityReviewSetIdentity: reviewSet.reviewSetIdentity,
+    structuralAssessmentIdentity: structural.id,
+    structuralFindings: {
+      dvdNavigation: "valid",
+      titleEnumeration: "valid",
+    },
+    unrecoveredSourceRanges,
+    titles: currentItems.map((item, index) => ({
+      titleIdentityId: item.titleIdentityId,
+      titleIdentityObservationId: item.observation.id,
+      displayTitleNumber: item.observation.displayTitleNumber,
+      selection: {
+        selectedPath: item.observation.selectedPath,
+        angleNumber: item.observation.angleNumber,
+        chapterStart: item.observation.chapterStart,
+        chapterEnd: item.observation.chapterEnd,
+      },
+      ...storedMappings[index],
+    })),
+  });
+  const evidenceSqlite = new DatabaseSync(databasePath);
+  evidenceSqlite.prepare(`
+    INSERT INTO dvd_structural_assessments (
+      id, original_disc_archive_id, manifest_id, manifest_revision,
+      manifest_digest, accepted_end_lba_exclusive, policy_version, validity,
+      findings, created_at
+    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, 1)
+  `).run(
+    structural.id,
+    archive.id,
+    manifestId,
+    manifestDigests.manifestDigest,
+    acceptedEndLbaExclusive,
+    structural.policyVersion,
+    structural.validity,
+    JSON.stringify(structural.findings),
+  );
+  evidenceSqlite.prepare(`
+    INSERT INTO dvd_structural_check_attempts (
+      original_disc_archive_id, manifest_id, manifest_revision,
+      manifest_digest, accepted_end_lba_exclusive, outcome, assessment_id,
+      findings, failure_code, failure_message, created_at
+    ) VALUES (?, ?, 1, ?, ?, 'completed', ?, ?, NULL, NULL, 1)
+  `).run(
+    archive.id,
+    manifestId,
+    manifestDigests.manifestDigest,
+    acceptedEndLbaExclusive,
+    structural.id,
+    JSON.stringify(structural.findings),
+  );
+  evidenceSqlite.prepare(`
+    INSERT INTO dvd_title_damage_assessments (
+      id, original_disc_archive_id, manifest_id, manifest_revision,
+      manifest_digest, accepted_end_lba_exclusive,
+      title_identity_review_set_identity, structural_assessment_identity,
+      policy_version, title_mappings, created_at
+    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 1)
+  `).run(
+    assessment.id,
+    archive.id,
+    manifestId,
+    manifestDigests.manifestDigest,
+    acceptedEndLbaExclusive,
+    reviewSet.reviewSetIdentity,
+    structural.id,
+    assessment.policyVersion,
+    JSON.stringify(storedMappings),
+  );
+  evidenceSqlite.prepare(`
+    INSERT INTO dvd_title_damage_assessment_attempts (
+      original_disc_archive_id, assessment_id, created_at
+    ) VALUES (?, ?, 1)
+  `).run(archive.id, assessment.id);
+  evidenceSqlite.close();
 }
 
 function seedKeyboardJourney(variant, fingerprintFill) {
@@ -420,6 +744,8 @@ function seedEncodeQueue(variant, fingerprintFills) {
 
 try {
   await Promise.all([seedArchiveRequest("desktop"), seedArchiveRequest("mobile"), seedArchiveRequest("notification")]);
+  seedTitleDamagePaging("desktop", "ab");
+  seedTitleDamagePaging("mobile", "cd");
   seedKeyboardJourney("desktop", "1");
   seedComplexLayout("desktop", "2");
   seedKeyboardJourney("mobile", "3");

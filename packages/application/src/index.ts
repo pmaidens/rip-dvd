@@ -1,4 +1,5 @@
 import { inspectArchiveEvidence } from "./archive-evidence.js";
+import { inspectCatalogTitleDamage } from "./catalog-title-damage.js";
 import { createNotificationOperations } from "./notifications.js";
 import { isHandBrakePreset } from "@rip-dvd/config";
 import {
@@ -394,6 +395,10 @@ export function createApplicationOperations(
         options,
         dependencies.archiveImageOwnership,
       ),
+    inspectCatalogTitleDamage: (
+      archiveId: string,
+      options?: { limit?: number; cursor?: string },
+    ) => inspectCatalogTitleDamage(access, archiveId, options),
     inspectEncodeOutput: (artifactIdentity: unknown) =>
       inspectEncodeOutput(
         access,
@@ -752,3 +757,8 @@ export * from "./notification-dispatch.js";
 export * from "./notification-transport.js";
 
 export { inspectArchiveEvidence, InvalidArchiveEvidenceInputError } from "./archive-evidence.js";
+export {
+  inspectCatalogTitleDamage,
+  InvalidCatalogTitleDamageInputError,
+  StaleCatalogTitleDamageCursorError,
+} from "./catalog-title-damage.js";

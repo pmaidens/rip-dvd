@@ -94,6 +94,7 @@ stdout. Invalid input exits 2; an unavailable read exits 1.
 
 ```sh
 rip-dvd catalog-review show <archive-id>
+rip-dvd catalog-review damage <archive-id> [--limit 100] [--cursor <cursor>]
 rip-dvd catalog-review suggest <archive-id>
 rip-dvd catalog-review suggest <archive-id> --tmdb-id 42 --media-type movie
 ```
@@ -108,13 +109,22 @@ Use `--selection-offset`, `--correction-offset`, `--correction-job-offset`,
 `--correction-output-offset`, `--replacement-offset`, and
 `--replacement-profile-offset` to read later pages. Offsets start at zero.
 
+`damage` returns revision-bound Title Damage Assessment evidence. Each response
+includes the checkpoint revision, item offset, bounded items, truncation state,
+and a next cursor. Continue with the returned `nextCursor` until it is `null`.
+The default limit is 20 and the maximum is 100. A cursor stops being valid when
+the checkpoint or its current assessment changes and returns
+`TITLE_DAMAGE_CURSOR_STALE`; restart without a cursor to inspect the current
+state. Outdated assessments retain their summary and unavailable reasons but do
+not expose a partial historical item page.
+
 `suggest` returns a proposal or a `needs_review` reason. When TMDB search
 succeeds, `candidates` contains the returned movie and TV matches, even if
 the proposed match is uncertain or absent. A selected TMDB identity must be
 present in the current search results. The lookup does not change the catalog;
 accept a proposal through a catalog mutation workflow with its revision.
 
-Both commands return `REVIEW_NOT_FOUND` for an unknown archive ID.
+All three commands return `REVIEW_NOT_FOUND` for an unknown archive ID.
 `INVALID_ARGUMENTS` covers malformed offsets and TMDB selections. A failed
 read returns `CATALOG_REVIEW_UNAVAILABLE` without exposing database or
 provider details.

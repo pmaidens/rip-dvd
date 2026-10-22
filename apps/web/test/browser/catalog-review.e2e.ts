@@ -179,6 +179,36 @@ test("keyboard-only mapping and job-free correction announce their results", asy
   await expectNoPageOverflow(page);
 });
 
+test("Title Damage paging retrieves evidence beyond the review summary", async ({ page }, testInfo) => {
+  const variant = fixtureVariant(testInfo.project.name);
+  await openCatalogReview(
+    page,
+    `CATALOG_BROWSER_DAMAGE_${variant.toUpperCase()}`,
+  );
+
+  const titleDamage = page.getByRole("heading", {
+    name: "Title missing source",
+    level: 3,
+  }).locator("xpath=ancestor::section[1]");
+  await expect(titleDamage.getByText("DVD title 20", { exact: true }))
+    .toBeVisible();
+  await expect(titleDamage.getByText("DVD title 21", { exact: true }))
+    .toHaveCount(0);
+  const loadMore = titleDamage.getByRole("button", {
+    name: "Load more Title Damage evidence",
+  });
+  const pageResponse = page.waitForResponse((response) =>
+    response.url().includes("/api/catalog-reviews/") &&
+    response.url().includes("/damage?limit=100") &&
+    response.request().method() === "GET"
+  );
+  await loadMore.click();
+  expect((await pageResponse).status()).toBe(200);
+  await expect(titleDamage.getByText("DVD title 21", { exact: true }))
+    .toBeVisible();
+  await expect(loadMore).toHaveCount(0);
+});
+
 test("complex Catalog Review remains responsive and exposes accessible state", async ({ page }, testInfo) => {
   const variant = fixtureVariant(testInfo.project.name);
   await openCatalogReview(

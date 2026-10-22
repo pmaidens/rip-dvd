@@ -3,6 +3,7 @@ import { StructuredInputError } from "./structured-input.js";
 import {
   createApplicationOperations,
   DvdDiscVerificationUnavailableError,
+  InvalidCatalogTitleDamageInputError,
   InvalidArchiveEvidenceInputError,
   InvalidNotificationInputError,
   NotificationsUnavailableError,
@@ -27,6 +28,7 @@ import {
   type EncodeOutputMediaProbe,
   InvalidEncodeJobInputError,
   serializeJob,
+  StaleCatalogTitleDamageCursorError,
   UnsupportedArchiveEvidenceFormatError,
 } from "@rip-dvd/application";
 import { loadConfig } from "@rip-dvd/config";
@@ -250,12 +252,13 @@ const commandDefinitions = [
   },
   {
     name: "catalog-review",
-    description: "Inspect, preview, or complete a Catalog Review and review Mapping Proposals.",
-    usage: "rip-dvd catalog-review <show|suggest|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive> <archive-id> [options]",
+    description: "Inspect, preview, or complete a Catalog Review and review Mapping Proposals or Title Damage evidence.",
+    usage: "rip-dvd catalog-review <show|damage|suggest|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive> <archive-id> [options]",
     inputs: {
-      arguments: ["show|suggest|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive", "archive-id"],
+      arguments: ["show|damage|suggest|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive", "archive-id"],
       options: [
         "show: --selection-offset, --correction-offset, --correction-job-offset, --correction-output-offset, --replacement-offset, --replacement-profile-offset",
+        "damage: --limit <1..100> --cursor <cursor>",
         "suggest: --tmdb-id <positive integer> --media-type <movie|tv_show> (together, optional)",
         "apply-proposal: --key <key> and exactly one of --json <object>, --stdin, --file <path>",
         "preview-completion: exactly one of --json <object>, --stdin, --file <path>",
@@ -1012,10 +1015,11 @@ function nonnegativeInteger(value: string | undefined): number | null {
 
 function reviewArguments(rest: readonly string[]):
   | { action: "show"; id: OriginalDiscArchiveId; coordinates: CatalogReviewPageCoordinates }
+  | { action: "damage"; id: OriginalDiscArchiveId; options: { limit?: number; cursor?: string } }
   | { action: "suggest"; id: OriginalDiscArchiveId; selection?: CatalogMetadataSelection } {
   const [action, id, ...options] = rest;
-  if (action !== "show" && action !== "suggest") {
-    throw new CommandFailure("INVALID_ARGUMENTS", "Expected catalog-review show or suggest.", 2);
+  if (action !== "show" && action !== "damage" && action !== "suggest") {
+    throw new CommandFailure("INVALID_ARGUMENTS", "Expected catalog-review show, damage, or suggest.", 2);
   }
   if (!id || id.trim().length === 0 || id.length > 256) {
     throw new CommandFailure("INVALID_ARGUMENTS", "A valid archive ID is required.", 2);
@@ -1050,6 +1054,41 @@ function reviewArguments(rest: readonly string[]):
     }
     return { action, id: id as OriginalDiscArchiveId, coordinates };
   }
+  if (action === "damage") {
+    if (
+      [...parsed.keys()].some((key) =>
+        key !== "--limit" && key !== "--cursor"
+      )
+    ) {
+      throw new CommandFailure(
+        "INVALID_ARGUMENTS",
+        "Invalid Title Damage Assessment option.",
+        2,
+      );
+    }
+    const limitValue = parsed.get("--limit");
+    const limit = limitValue === undefined ? undefined : positiveInteger(limitValue);
+    const cursor = parsed.get("--cursor");
+    if (
+      (limitValue !== undefined &&
+        (limit === null || limit === undefined || limit > 100)) ||
+      (cursor !== undefined && cursor.length === 0)
+    ) {
+      throw new CommandFailure(
+        "INVALID_ARGUMENTS",
+        "Invalid Title Damage Assessment paging input.",
+        2,
+      );
+    }
+    return {
+      action,
+      id: id as OriginalDiscArchiveId,
+      options: {
+        ...(limit === undefined || limit === null ? {} : { limit }),
+        ...(cursor === undefined ? {} : { cursor }),
+      },
+    };
+  }
   if ([...parsed.keys()].some((key) => key !== "--tmdb-id" && key !== "--media-type")) {
     throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Catalog suggestion option.", 2);
   }
@@ -1075,6 +1114,9 @@ async function runCatalogReview(rest: readonly string[], io: CommandIO) {
   try {
     access = io.openAccess();
     const operations = createApplicationOperations(access);
+    if (input.action === "damage") {
+      return operations.inspectCatalogTitleDamage(input.id, input.options);
+    }
     const credential = tmdbCredentialFromEnvironment();
     const lookup = io.getLookup
       ? io.getLookup()
@@ -1096,6 +1138,25 @@ async function runCatalogReview(rest: readonly string[], io: CommandIO) {
     return result;
   } catch (error) {
     if (error instanceof CommandFailure) throw error;
+    if (error instanceof InvalidCatalogTitleDamageInputError) {
+      throw new CommandFailure("INVALID_ARGUMENTS", error.message, 2);
+    }
+    if (error instanceof StaleCatalogTitleDamageCursorError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        undefined,
+        { current: error.current },
+      );
+    }
+    if (error instanceof RecordNotFoundError) {
+      throw new CommandFailure(
+        "REVIEW_NOT_FOUND",
+        "Original Disc Archive not found.",
+        2,
+      );
+    }
     throw new CommandFailure("CATALOG_REVIEW_UNAVAILABLE", "Catalog Review is unavailable.", 1);
   } finally {
     access?.close();
