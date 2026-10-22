@@ -201,3 +201,74 @@ it("loads the complete current evidence through the paging route", async () => {
 
   await act(async () => root.unmount());
 });
+
+it("ignores a page response after the assessment evidence changes", async () => {
+  let resolveResponse!: (response: Response) => void;
+  const pendingResponse = new Promise<Response>((resolve) => {
+    resolveResponse = resolve;
+  });
+  vi.stubGlobal("fetch", vi.fn(() => pendingResponse));
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+
+  await act(async () => root.render(
+    <CatalogReviewTitleDamageEvidence
+      originalDiscArchiveId="synthetic-archive"
+      titleDamage={{ ...titleDamage, truncated: true }}
+    />,
+  ));
+  act(() => container.querySelector("button")?.click());
+
+  const newerTitleDamage: CatalogReviewTitleDamage = {
+    ...titleDamage,
+    checkpointRevision: 5,
+    assessmentIdentity: "synthetic-assessment-new",
+    currentAssessmentIdentity: "synthetic-assessment-new",
+    items: [{
+      ...titleDamage.items[0]!,
+      titleIdentityId: "synthetic-title-new",
+      titleIdentityObservationId: "synthetic-observation-new",
+      displayTitleNumber: 99,
+    }] as unknown as CatalogReviewTitleDamage["items"],
+    truncated: false,
+  };
+  await act(async () => root.render(
+    <CatalogReviewTitleDamageEvidence
+      originalDiscArchiveId="synthetic-archive"
+      titleDamage={newerTitleDamage}
+    />,
+  ));
+  expect(container.textContent).toContain("DVD title 99");
+  expect(container.textContent).not.toContain("DVD title 1");
+
+  await act(async () => {
+    resolveResponse(Response.json({
+      schemaVersion: 1,
+      originalDiscArchiveId: "synthetic-archive",
+      state: "current",
+      checkpointRevision: 4,
+      assessmentIdentity: "synthetic-assessment",
+      currentAssessmentIdentity: "synthetic-assessment",
+      createdAt: "2026-10-22T12:00:00.000Z",
+      items: [{
+        ...titleDamage.items[0]!,
+        titleIdentityId: "synthetic-title-late",
+        titleIdentityObservationId: "synthetic-observation-late",
+        displayTitleNumber: 77,
+      }],
+      itemOffset: 0,
+      truncated: false,
+      nextCursor: null,
+      unknownTitleImpact: titleDamage.unknownTitleImpact,
+      noTitleMissingSourceProved: false,
+      unavailableReasons: [],
+    }));
+    await pendingResponse;
+  });
+
+  expect(container.textContent).toContain("DVD title 99");
+  expect(container.textContent).not.toContain("DVD title 77");
+
+  await act(async () => root.unmount());
+});

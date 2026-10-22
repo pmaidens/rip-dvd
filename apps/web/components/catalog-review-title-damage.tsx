@@ -1,12 +1,35 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useRef, useState } from "react";
 
 import type { CatalogReviewTitleDamage } from "./catalog-review-model";
 
 function percentage(value: number): string {
   if (value > 0 && value < 0.01) return "<0.01%";
   return `${value.toFixed(2).replace(/\.00$/, "")}%`;
+}
+
+interface TitleDamagePagingState {
+  evidenceKey: string;
+  items: CatalogReviewTitleDamage["items"];
+  nextCursor: string | null;
+  firstPageLoaded: boolean;
+  isLoading: boolean;
+  pageError: string | null;
+}
+
+function initialPagingState(
+  evidenceKey: string,
+  items: CatalogReviewTitleDamage["items"],
+): TitleDamagePagingState {
+  return {
+    evidenceKey,
+    items,
+    nextCursor: null,
+    firstPageLoaded: false,
+    isLoading: false,
+    pageError: null,
+  };
 }
 
 export function CatalogReviewTitleDamageEvidence({
@@ -16,20 +39,21 @@ export function CatalogReviewTitleDamageEvidence({
   originalDiscArchiveId: string;
   titleDamage?: CatalogReviewTitleDamage;
 }) {
-  const [items, setItems] = useState(titleDamage?.items ?? []);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [firstPageLoaded, setFirstPageLoaded] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [pageError, setPageError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setItems(titleDamage?.items ?? []);
-    setNextCursor(null);
-    setFirstPageLoaded(false);
-    setIsLoading(false);
-    setPageError(null);
-  }, [originalDiscArchiveId, titleDamage]);
-
+  const evidenceKey = JSON.stringify([
+    originalDiscArchiveId,
+    titleDamage?.state ?? null,
+    titleDamage?.checkpointRevision ?? null,
+    titleDamage?.assessmentIdentity ?? null,
+    titleDamage?.currentAssessmentIdentity ?? null,
+  ]);
+  const activeEvidenceKey = useRef(evidenceKey);
+  activeEvidenceKey.current = evidenceKey;
+  const [paging, setPaging] = useState(() =>
+    initialPagingState(evidenceKey, titleDamage?.items ?? [])
+  );
+  const currentPaging = paging.evidenceKey === evidenceKey
+    ? paging
+    : initialPagingState(evidenceKey, titleDamage?.items ?? []);
   if (
     titleDamage === undefined ||
     titleDamage.unavailableReasons.some((reason) =>
@@ -40,16 +64,21 @@ export function CatalogReviewTitleDamageEvidence({
   }
   const expectedAssessmentIdentity = titleDamage.assessmentIdentity;
   const canLoadMore = titleDamage.state === "current" &&
-    (firstPageLoaded ? nextCursor !== null : titleDamage.truncated);
+    (currentPaging.firstPageLoaded
+      ? currentPaging.nextCursor !== null
+      : titleDamage.truncated);
 
   async function loadMore(): Promise<void> {
-    if (!canLoadMore || isLoading) return;
-    setIsLoading(true);
-    setPageError(null);
+    if (!canLoadMore || currentPaging.isLoading) return;
+    const requestEvidenceKey = evidenceKey;
+    const requestStartsFirstPage = !currentPaging.firstPageLoaded;
+    setPaging({ ...currentPaging, isLoading: true, pageError: null });
     try {
       const parameters = new URLSearchParams({ limit: "100" });
-      if (firstPageLoaded && nextCursor !== null) {
-        parameters.set("cursor", nextCursor);
+      if (
+        currentPaging.firstPageLoaded && currentPaging.nextCursor !== null
+      ) {
+        parameters.set("cursor", currentPaging.nextCursor);
       }
       const response = await fetch(
         `/api/catalog-reviews/${encodeURIComponent(originalDiscArchiveId)}/damage?${parameters}`,
@@ -80,19 +109,34 @@ export function CatalogReviewTitleDamageEvidence({
       }
       const pageItems = body.items as CatalogReviewTitleDamage["items"];
       const pageCursor = body.nextCursor as string | null;
-      setItems((current) =>
-        firstPageLoaded ? [...current, ...pageItems] : pageItems
-      );
-      setNextCursor(pageCursor);
-      setFirstPageLoaded(true);
+      if (activeEvidenceKey.current !== requestEvidenceKey) return;
+      setPaging((current) => {
+        if (current.evidenceKey !== requestEvidenceKey) return current;
+        return {
+          ...current,
+          items: requestStartsFirstPage
+            ? pageItems
+            : [...current.items, ...pageItems],
+          nextCursor: pageCursor,
+          firstPageLoaded: true,
+        };
+      });
     } catch (error) {
-      setPageError(
-        error instanceof Error
-          ? error.message
-          : "Title Damage evidence could not be loaded.",
-      );
+      if (activeEvidenceKey.current !== requestEvidenceKey) return;
+      setPaging((current) => current.evidenceKey === requestEvidenceKey
+        ? {
+          ...current,
+          pageError: error instanceof Error
+            ? error.message
+            : "Title Damage evidence could not be loaded.",
+        }
+        : current);
     } finally {
-      setIsLoading(false);
+      if (activeEvidenceKey.current === requestEvidenceKey) {
+        setPaging((current) => current.evidenceKey === requestEvidenceKey
+          ? { ...current, isLoading: false }
+          : current);
+      }
     }
   }
 
@@ -115,9 +159,9 @@ export function CatalogReviewTitleDamageEvidence({
         ) : (
           <p>Checkpoint {titleDamage.checkpointRevision}.</p>
         )}
-      {items.length > 0 ? (
+      {currentPaging.items.length > 0 ? (
         <ul className="stack-list">
-          {items.map((item) => (
+          {currentPaging.items.map((item) => (
             <li key={item.titleIdentityObservationId}>
               <strong>DVD title {item.displayTitleNumber}</strong>
               <span>
@@ -182,10 +226,16 @@ export function CatalogReviewTitleDamageEvidence({
             </ul>
           </div>
         ) : null}
-      {pageError === null ? null : <p role="alert">{pageError}</p>}
+      {currentPaging.pageError === null
+        ? null
+        : <p role="alert">{currentPaging.pageError}</p>}
       {canLoadMore ? (
-        <button type="button" disabled={isLoading} onClick={loadMore}>
-          {isLoading
+        <button
+          type="button"
+          disabled={currentPaging.isLoading}
+          onClick={loadMore}
+        >
+          {currentPaging.isLoading
             ? "Loading Title Damage evidence…"
             : "Load more Title Damage evidence"}
         </button>
