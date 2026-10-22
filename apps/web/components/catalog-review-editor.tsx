@@ -190,7 +190,10 @@ export function CatalogReviewView({
       ) : null}
 
       <CatalogReviewTitleIdentity titleIdentity={review.titleIdentity} />
-      <CatalogReviewTitleDamageEvidence titleDamage={review.titleDamage} />
+      <CatalogReviewTitleDamageEvidence
+        originalDiscArchiveId={review.archive.id}
+        titleDamage={review.titleDamage}
+      />
 
       {review.rearchiveProposal ? (
         <CatalogReviewRearchiveProposal

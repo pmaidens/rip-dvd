@@ -123,6 +123,24 @@ export function inspectCatalogTitleDamage(
   ) {
     throw new StaleCatalogTitleDamageCursorError(current);
   }
+  if (!assessmentIsCurrent) {
+    return {
+      schemaVersion: 1,
+      originalDiscArchiveId: archiveId,
+      state: result.state,
+      checkpointRevision: assessment.checkpoint.manifestRevision,
+      assessmentIdentity: assessment.id,
+      currentAssessmentIdentity: result.currentAssessmentIdentity,
+      createdAt: assessment.createdAt.toISOString(),
+      items: [],
+      itemOffset: 0,
+      truncated: false,
+      nextCursor: null,
+      unknownTitleImpact: assessment.unknownTitleImpact,
+      noTitleMissingSourceProved: assessment.noTitleMissingSourceProved,
+      unavailableReasons: result.unavailableReasons,
+    };
+  }
   const offset = cursor === null ? 0 : cursor[6];
   if (cursor !== null && offset >= assessment.items.length) {
     throw new InvalidCatalogTitleDamageInputError(

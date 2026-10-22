@@ -316,6 +316,24 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   });
 
   advanceCommittedArchiveEvidence(fixture, manifest);
+  const outdated = await fixture.run([
+    "catalog-review",
+    "damage",
+    archive.id,
+    "--limit",
+    "1",
+  ]);
+  expect(outdated).toMatchObject({
+    exitCode: 0,
+    result: {
+      state: "outdated",
+      assessmentIdentity: recorded.id,
+      currentAssessmentIdentity: null,
+      items: [],
+      truncated: false,
+      nextCursor: null,
+    },
+  });
   const staleResult = await fixture.run([
     "catalog-review",
     "damage",

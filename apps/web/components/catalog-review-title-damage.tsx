@@ -1,3 +1,7 @@
+"use client";
+
+import { useEffect, useState } from "react";
+
 import type { CatalogReviewTitleDamage } from "./catalog-review-model";
 
 function percentage(value: number): string {
@@ -5,10 +9,26 @@ function percentage(value: number): string {
 }
 
 export function CatalogReviewTitleDamageEvidence({
+  originalDiscArchiveId,
   titleDamage,
 }: {
+  originalDiscArchiveId: string;
   titleDamage?: CatalogReviewTitleDamage;
 }) {
+  const [items, setItems] = useState(titleDamage?.items ?? []);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [firstPageLoaded, setFirstPageLoaded] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setItems(titleDamage?.items ?? []);
+    setNextCursor(null);
+    setFirstPageLoaded(false);
+    setIsLoading(false);
+    setPageError(null);
+  }, [originalDiscArchiveId, titleDamage]);
+
   if (
     titleDamage === undefined ||
     titleDamage.unavailableReasons.some((reason) =>
@@ -17,6 +37,64 @@ export function CatalogReviewTitleDamageEvidence({
   ) {
     return null;
   }
+  const expectedAssessmentIdentity = titleDamage.assessmentIdentity;
+  const canLoadMore = titleDamage.state === "current" &&
+    (firstPageLoaded ? nextCursor !== null : titleDamage.truncated);
+
+  async function loadMore(): Promise<void> {
+    if (!canLoadMore || isLoading) return;
+    setIsLoading(true);
+    setPageError(null);
+    try {
+      const parameters = new URLSearchParams({ limit: "100" });
+      if (firstPageLoaded && nextCursor !== null) {
+        parameters.set("cursor", nextCursor);
+      }
+      const response = await fetch(
+        `/api/catalog-reviews/${encodeURIComponent(originalDiscArchiveId)}/damage?${parameters}`,
+        { headers: { Accept: "application/json" } },
+      );
+      const body: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(
+          response.status === 409
+            ? "Title Damage evidence changed. Reload the Catalog Review."
+            : "Title Damage evidence could not be loaded.",
+        );
+      }
+      if (
+        typeof body !== "object" || body === null ||
+        !("assessmentIdentity" in body) ||
+        body.assessmentIdentity !== expectedAssessmentIdentity ||
+        !("currentAssessmentIdentity" in body) ||
+        body.currentAssessmentIdentity !== expectedAssessmentIdentity ||
+        !("state" in body) || body.state !== "current" ||
+        !("items" in body) || !Array.isArray(body.items) ||
+        !("nextCursor" in body) ||
+        (body.nextCursor !== null && typeof body.nextCursor !== "string")
+      ) {
+        throw new Error(
+          "Title Damage evidence changed. Reload the Catalog Review.",
+        );
+      }
+      const pageItems = body.items as CatalogReviewTitleDamage["items"];
+      const pageCursor = body.nextCursor as string | null;
+      setItems((current) =>
+        firstPageLoaded ? [...current, ...pageItems] : pageItems
+      );
+      setNextCursor(pageCursor);
+      setFirstPageLoaded(true);
+    } catch (error) {
+      setPageError(
+        error instanceof Error
+          ? error.message
+          : "Title Damage evidence could not be loaded.",
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   return (
     <section className="catalog-pane" aria-labelledby="title-damage-heading">
       <h3 id="title-damage-heading">Title missing source</h3>
@@ -36,9 +114,9 @@ export function CatalogReviewTitleDamageEvidence({
         ) : (
           <p>Checkpoint {titleDamage.checkpointRevision}.</p>
         )}
-      {titleDamage.items.length > 0 ? (
+      {items.length > 0 ? (
         <ul className="stack-list">
-          {titleDamage.items.map((item) => (
+          {items.map((item) => (
             <li key={item.titleIdentityObservationId}>
               <strong>DVD title {item.displayTitleNumber}</strong>
               <span>
@@ -103,8 +181,13 @@ export function CatalogReviewTitleDamageEvidence({
             </ul>
           </div>
         ) : null}
-      {titleDamage.truncated ? (
-        <p>More Title Damage evidence is available through paging.</p>
+      {pageError === null ? null : <p role="alert">{pageError}</p>}
+      {canLoadMore ? (
+        <button type="button" disabled={isLoading} onClick={loadMore}>
+          {isLoading
+            ? "Loading Title Damage evidence…"
+            : "Load more Title Damage evidence"}
+        </button>
       ) : null}
     </section>
   );

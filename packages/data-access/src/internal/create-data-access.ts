@@ -8916,18 +8916,26 @@ export function createDataAccessInternal(
           input.originalDiscArchiveId,
         )).get();
       const currentStructural = transaction.select({
-        id: dvdStructuralAssessments.id,
-      }).from(dvdStructuralAssessments).where(and(
-        eq(dvdStructuralAssessments.id, structural.assessment!.id),
+        assessmentIdentity: dvdStructuralCheckAttempts.assessmentId,
+      }).from(dvdStructuralCheckAttempts).where(and(
         eq(
-          dvdStructuralAssessments.originalDiscArchiveId,
+          dvdStructuralCheckAttempts.originalDiscArchiveId,
           input.originalDiscArchiveId,
         ),
         eq(
-          dvdStructuralAssessments.manifestId,
+          dvdStructuralCheckAttempts.manifestId,
           input.checkpoint.manifestId,
         ),
-      )).get();
+        eq(
+          dvdStructuralCheckAttempts.manifestRevision,
+          input.checkpoint.manifestRevision,
+        ),
+        eq(
+          dvdStructuralCheckAttempts.manifestDigest,
+          input.checkpoint.manifestDigest,
+        ),
+        eq(dvdStructuralCheckAttempts.outcome, "completed"),
+      )).orderBy(desc(dvdStructuralCheckAttempts.sequence)).limit(1).get();
       const currentTitleSet = transaction.select({
         manifestId: dvdTitleIdentitySets.manifestId,
       }).from(dvdTitleIdentitySets).where(and(
@@ -8947,7 +8955,9 @@ export function createDataAccessInternal(
           input.checkpoint.manifestRevision ||
         currentHeader.currentManifestDigest !==
           input.checkpoint.manifestDigest ||
-        currentStructural === undefined || currentTitleSet === undefined
+        currentStructural?.assessmentIdentity !==
+            input.structuralAssessmentIdentity ||
+        currentTitleSet === undefined
       ) {
         throw new DomainInvariantError(
           "Title Damage Assessment evidence changed before persistence",
