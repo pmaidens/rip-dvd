@@ -174,6 +174,10 @@ type ConcurrentOperation = (
   | { operation: "complete-encode"; claim: RunningEncodeJob }
   | { operation: "claim-encode" }
   | {
+      operation: "queue-stale-and-claim-encode";
+      encodeJobId: EncodeJobId;
+    }
+  | {
       operation: "request-archive-recovery";
       archiveRecoveryId: ArchiveRecoveryId;
     }
@@ -13916,7 +13920,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           outputPath:
             `/media/movies/Recovery ${operation} Race ${ordering}.mkv`,
         });
-      if (operation === "requeue") {
+      if (
+        operation === "requeue" ||
+        (operation === "claim" && ordering === "recovery-first")
+      ) {
         const claim = access.encodeJobs.claimNext(
           `recovery-${operation}-race-preparation-${ordering}`,
         );
@@ -13948,6 +13955,12 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           mutationKey: `recovery-requeue-race-${ordering}`,
           delayMs: encodeDelayMs,
         }
+        : ordering === "recovery-first"
+        ? {
+          operation: "queue-stale-and-claim-encode",
+          encodeJobId: existingJob!.id,
+          delayMs: encodeDelayMs,
+        }
         : { operation: "claim-encode", delayMs: encodeDelayMs };
 
       const results = await runBarrierWorkers({
@@ -13964,7 +13977,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         ],
       });
 
-      if (operation === "claim") {
+      if (operation === "claim" && ordering === "encode-first") {
         expect(results[0]).toEqual({
           outcome: "rejected",
           code: "ENCODE_WORK_CONFLICT",
@@ -13981,10 +13994,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         ]);
       } else if (ordering === "recovery-first") {
         expect(results[0]).toEqual({ outcome: "requested", id: recoveryId });
-        expect(results[1]).toEqual({
-          outcome: "rejected",
-          code: "ENCODE_WORK_CONFLICT",
-        });
+        expect(results[1]).toEqual(operation === "claim"
+          ? { outcome: "rejected" }
+          : { outcome: "rejected", code: "ENCODE_WORK_CONFLICT" });
         expect(
           exclusionAccess.catalog.findArchiveRecovery(archive.id),
         ).toMatchObject({
@@ -13995,7 +14007,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           ? []
           : [expect.objectContaining({
             id: existingJob!.id,
-            status: "failed",
+            status: operation === "requeue" ? "failed" : "queued",
           })]);
       } else {
         expect(results[0]).toEqual({

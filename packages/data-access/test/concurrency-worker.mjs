@@ -1,4 +1,5 @@
 import { parentPort, workerData } from "node:worker_threads";
+import { DatabaseSync } from "node:sqlite";
 
 import {
   createDataAccess,
@@ -163,6 +164,34 @@ try {
       });
     }
   } else if (workerData.operation === "claim-encode") {
+    const claim = access.encodeJobs.claimNext(workerData.workerId);
+    parentPort.postMessage({
+      type: "result",
+      value: claim
+        ? { outcome: "claimed", id: claim.id }
+        : { outcome: "rejected" },
+    });
+  } else if (workerData.operation === "queue-stale-and-claim-encode") {
+    const staleQueue = new DatabaseSync(workerData.databasePath);
+    try {
+      staleQueue.prepare(`
+        UPDATE encode_jobs
+        SET status = 'queued',
+            progress_phase = NULL,
+            progress_percent = 0,
+            progress_eta_seconds = NULL,
+            claimed_by = NULL,
+            claim_token = NULL,
+            claimed_at = NULL,
+            started_at = NULL,
+            completed_at = NULL,
+            error_message = NULL,
+            updated_at = ?
+        WHERE id = ?
+      `).run(Date.now(), workerData.encodeJobId);
+    } finally {
+      staleQueue.close();
+    }
     const claim = access.encodeJobs.claimNext(workerData.workerId);
     parentPort.postMessage({
       type: "result",
