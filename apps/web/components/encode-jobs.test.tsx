@@ -211,6 +211,95 @@ describe("EncodeJobsView", () => {
     expect(html).toContain("Already queued</small>");
   });
 
+  it("renders recovery-owned work as unavailable even for a terminal job", () => {
+    const profileId = "profile-v2" as EncodingProfileId;
+    const conflictMessage =
+      "Archive Recovery and queued or running Encode Jobs cannot use the same Original Disc Archive.";
+    const selection: EncodeSelectionOption = {
+      id: "selection-recovery-owned" as DiscSelectionId,
+      mediaItemId: "movie-recovery-owned",
+      mediaTitle: "Recovery owned",
+      mediaYear: 2003,
+      sourceDescription: "DVD main feature",
+      hasCompletedEncode: true,
+      priorCompletedJob: null,
+      logicalJob: {
+        id: "job-recovery-owned" as EncodeJobId,
+        encodingProfileId: profileId,
+        outputPath: "/media/movies/Recovery owned (2003).mkv",
+        status: "failed",
+        queueAvailable: true,
+      },
+      suggestedOutputPath: "/media/movies/Recovery owned (2003).mkv",
+      queueAction: {
+        eligible: false,
+        reason: conflictMessage,
+        blockingReasons: [{
+          code: "ENCODE_WORK_CONFLICT",
+          message: conflictMessage,
+        }],
+      },
+    };
+    const html = renderToStaticMarkup(
+      <EncodeJobsView
+        selectedProfileId={profileId}
+        checkedSelections={[]}
+        worklistRows={[{
+          selection,
+          outputPath: selection.logicalJob!.outputPath,
+          status: "ready",
+          error: null,
+          attemptedProfile: null,
+        }]}
+        queueSummary={null}
+        profileUnavailable={false}
+        state={{
+          status: "loaded",
+          historyGroup: "re_encode",
+          query: "",
+          counts: { notEncoded: 0, reEncode: 1 },
+          selections: [selection],
+          profiles: [{
+            id: profileId,
+            displayName: "DVD library",
+            version: 2,
+          }],
+          page: {
+            offset: 0,
+            limit: 100,
+            total: 1,
+            hasPrevious: false,
+            hasNext: false,
+          },
+          profilePage: {
+            offset: 0,
+            limit: 100,
+            hasPrevious: false,
+            hasNext: false,
+          },
+        }}
+        isSaving={false}
+        requestError={null}
+        onToggleSelection={() => undefined}
+        onAddSelected={() => undefined}
+        onWorklistPath={() => undefined}
+        onRemoveWorklistRow={() => undefined}
+        onClearWorklist={() => undefined}
+        onQueueWorklist={() => undefined}
+        onRetry={() => undefined}
+        onHistoryGroup={() => undefined}
+        onSearch={() => undefined}
+        onProfileChange={() => undefined}
+        onSelectionPage={() => undefined}
+        onProfilePage={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Recovery in progress");
+    expect(html).toContain(conflictMessage);
+    expect(html).toContain("Queue 0 Encode Jobs");
+  });
+
   it("offers a failed-only retry while untouched rows remain ready", () => {
     const profileId = "profile-v2" as EncodingProfileId;
     const selection = (id: string, title: string): EncodeSelectionOption => ({
@@ -797,6 +886,23 @@ describe("EncodeJobsView", () => {
       "/api/encode-jobs?encodingProfileId=profile-v2&resolveDiscSelectionId=selection-1&resolveDiscSelectionId=selection-2",
       { cache: "no-store", headers: { Accept: "application/json" } },
     );
+  });
+
+  it("surfaces a structured recovery conflict from queue resolution", async () => {
+    const conflictMessage =
+      "Archive Recovery and queued or running Encode Jobs cannot use the same Original Disc Archive.";
+    const fetcher = vi.fn(async () => Response.json({
+      error: {
+        code: "ENCODE_WORK_CONFLICT",
+        message: conflictMessage,
+      },
+    }, { status: 409 }));
+
+    await expect(requestQueueLogicalJobResolutions(
+      ["selection-recovery-owned" as DiscSelectionId],
+      "profile-v2" as EncodingProfileId,
+      fetcher,
+    )).rejects.toThrow(conflictMessage);
   });
 
   it("recovers when the selected Encoding Profile becomes inactive", async () => {

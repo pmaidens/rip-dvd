@@ -13942,6 +13942,81 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     restarted.close();
   });
 
+  it("keeps queue resolution unavailable across restart when the evidence gate opens", () => {
+    const databasePath = createTestDatabasePath();
+    const { access, archive, mistakenSelection } =
+      createDiscSelectionCorrectionFixture({
+        databasePath,
+        key: "recovery-queue-resolution",
+      });
+    const profile = access.encodingProfiles.create({
+      key: "recovery-queue-resolution",
+      displayName: "Recovery queue resolution",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    const failed = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Recovery Queue Resolution.mkv",
+    });
+    const encodeClaim = access.encodeJobs.claimNext(
+      "recovery-queue-resolution-preparation",
+    );
+    if (encodeClaim === null) throw new Error("Expected Encode Job claim");
+    access.encodeJobs.fail(encodeClaim, "Synthetic terminal Encode Job");
+    const recoveryId = "recovery-queue-resolution" as ArchiveRecoveryId;
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      archive.id,
+      "recovery-queue-resolution",
+      { archiveRecoveryId: recoveryId },
+    );
+    access.close();
+
+    const assertResolutionConflict = () => {
+      const gateOpen = openEncodeExclusionTestDatabase(databasePath);
+      try {
+        expect(() => gateOpen.encodeJobs.resolveQueueLogicalJobs({
+          discSelectionIds: [mistakenSelection.id],
+          encodingProfileId: profile.id,
+        })).toThrow(EncodeWorkConflictError);
+        try {
+          gateOpen.encodeJobs.resolveQueueLogicalJobs({
+            discSelectionIds: [mistakenSelection.id],
+            encodingProfileId: profile.id,
+          });
+        } catch (error) {
+          expect(error).toMatchObject({
+            code: "ENCODE_WORK_CONFLICT",
+            current: {
+              archiveRecovery: {
+                id: recoveryId,
+                originalDiscArchiveId: archive.id,
+                work: { status: "requested" },
+              },
+              encodeJobs: [],
+            },
+          });
+        }
+        expect(gateOpen.encodeJobs.find(failed.id)).toMatchObject({
+          status: "failed",
+        });
+      } finally {
+        gateOpen.close();
+      }
+    };
+
+    const gateOpen = openEncodeExclusionTestDatabase(databasePath);
+    expect(gateOpen.archiveRecoveryWork.request(recoveryId)).toMatchObject({
+      archiveRecoveryId: recoveryId,
+      status: "requested",
+    });
+    gateOpen.close();
+    assertResolutionConflict();
+    assertResolutionConflict();
+  });
+
   it.each([
     ["enqueue", "recovery-first", 0, 150],
     ["enqueue", "encode-first", 150, 0],

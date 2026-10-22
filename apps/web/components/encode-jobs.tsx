@@ -37,6 +37,14 @@ export interface EncodeSelectionOption {
   priorCompletedJob: PriorCompletedEncodeJob | null;
   logicalJob: LogicalEncodeJob | null;
   suggestedOutputPath: string | null;
+  queueAction?: {
+    eligible: boolean;
+    reason: string | null;
+    blockingReasons: readonly {
+      code: string;
+      message: string;
+    }[];
+  };
 }
 
 export interface EncodeProfileOption {
@@ -195,15 +203,34 @@ type EncodeWorklistAction =
         | "Already queued"
         | "Running"
         | "Cancellation requested"
-        | "Cleanup in progress";
+        | "Cleanup in progress"
+        | "Recovery in progress";
+      reason: string;
     };
 
-function worklistAction(job: LogicalEncodeJob | null): EncodeWorklistAction {
+function worklistAction(
+  selection: Pick<EncodeSelectionOption, "logicalJob" | "queueAction">,
+): EncodeWorklistAction {
+  const recoveryConflict = selection.queueAction?.blockingReasons.find(
+    ({ code }) => code === "ENCODE_WORK_CONFLICT",
+  );
+  if (recoveryConflict !== undefined) {
+    return {
+      kind: "unavailable",
+      label: "Recovery in progress",
+      reason: recoveryConflict.message,
+    };
+  }
+  const job = selection.logicalJob;
   if (job === null) {
     return { kind: "enqueue", label: "New Encode Job" };
   }
   if (isTerminalEncodeJobStatus(job.status) && !job.queueAvailable) {
-    return { kind: "unavailable", label: "Cleanup in progress" };
+    return {
+      kind: "unavailable",
+      label: "Cleanup in progress",
+      reason: activeJobDescription(job.status),
+    };
   }
   switch (job.status) {
     case "failed":
@@ -212,11 +239,23 @@ function worklistAction(job: LogicalEncodeJob | null): EncodeWorklistAction {
     case "completed":
       return { kind: "requeue", label: "Re-encode" };
     case "queued":
-      return { kind: "unavailable", label: "Already queued" };
+      return {
+        kind: "unavailable",
+        label: "Already queued",
+        reason: activeJobDescription(job.status),
+      };
     case "running":
-      return { kind: "unavailable", label: "Running" };
+      return {
+        kind: "unavailable",
+        label: "Running",
+        reason: activeJobDescription(job.status),
+      };
     case "cancellation_requested":
-      return { kind: "unavailable", label: "Cancellation requested" };
+      return {
+        kind: "unavailable",
+        label: "Cancellation requested",
+        reason: activeJobDescription(job.status),
+      };
   }
 }
 
@@ -226,7 +265,7 @@ function rowIsUnresolved(row: EncodeWorklistRow): boolean {
 
 function rowIsActionable(row: EncodeWorklistRow): boolean {
   return rowIsUnresolved(row) &&
-    worklistAction(row.selection.logicalJob).kind !== "unavailable";
+    worklistAction(row.selection).kind !== "unavailable";
 }
 
 function worklistStatusLabel(status: EncodeWorklistRowStatus): string {
@@ -364,7 +403,7 @@ function EncodeSelectionPicker({
         {selections.map((selection) => {
           const isInWorklist = worklistSelectionIds.has(selection.id);
           const existingJob = selection.logicalJob;
-          const action = worklistAction(existingJob);
+          const action = worklistAction(selection);
           return (
             <li key={selection.id}>
               <label>
@@ -398,9 +437,9 @@ function EncodeSelectionPicker({
                       Reserved final output: {existingJob.outputPath}
                     </small>
                   )}
-                  {action.kind !== "unavailable" || existingJob === null
-                    ? null
-                    : <small>{activeJobDescription(existingJob.status)}</small>}
+                  {action.kind === "unavailable"
+                    ? <small>{action.reason}</small>
+                    : null}
                 </span>
               </label>
             </li>
@@ -476,7 +515,7 @@ function EncodeWorklistPanel({
             {rows.map((row) => {
               const title = row.selection.mediaTitle;
               const logicalJob = row.selection.logicalJob;
-              const action = worklistAction(logicalJob);
+              const action = worklistAction(row.selection);
               return (
                 <tr key={row.selection.id}>
                   <td data-label="Media Item">
@@ -497,6 +536,9 @@ function EncodeWorklistPanel({
                   </td>
                   <td data-label="Intent">
                     <strong>{action.label}</strong>
+                    {action.kind === "unavailable"
+                      ? <span>{action.reason}</span>
+                      : null}
                   </td>
                   <td data-label="Final output path">
                     <label>
@@ -861,14 +903,17 @@ type EncodeJobsFetch = (
 async function errorMessage(response: Response, fallback: string) {
   try {
     const body: unknown = await response.json();
-    if (
-      typeof body === "object" &&
-      body !== null &&
-      "error" in body &&
-      typeof body.error === "string" &&
-      body.error.trim() !== ""
-    ) {
-      return body.error.trim().slice(0, 512);
+    if (typeof body === "object" && body !== null && "error" in body) {
+      const error = body.error;
+      const message = typeof error === "string"
+        ? error
+        : typeof error === "object" && error !== null && "message" in error &&
+            typeof error.message === "string"
+        ? error.message
+        : null;
+      if (message !== null && message.trim() !== "") {
+        return message.trim().slice(0, 512);
+      }
     }
   } catch {
     // Keep the bounded fallback for non-JSON responses.
@@ -1208,7 +1253,7 @@ function useEncodeWorklist({
     let failed = 0;
     const unavailable = rows.filter((row) =>
       rowIsUnresolved(row) &&
-      worklistAction(row.selection.logicalJob).kind === "unavailable"
+      worklistAction(row.selection).kind === "unavailable"
     ).length;
     try {
       for (const row of actionableRows) {
@@ -1218,7 +1263,7 @@ function useEncodeWorklist({
           attemptedProfile: profile,
         });
         try {
-          const action = worklistAction(row.selection.logicalJob);
+          const action = worklistAction(row.selection);
           let queuedJob: LogicalEncodeJob;
           if (action.kind === "enqueue") {
             queuedJob = await queueEncodeJob({

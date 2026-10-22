@@ -1387,7 +1387,19 @@ export function createDataAccessInternal(
     querySource: Pick<typeof database, "select">,
     discSelectionIds: readonly DiscSelectionId[],
   ): void => {
-    if (!dvdRecoveryEvidenceEncodingGateClosed || discSelectionIds.length === 0) return;
+    if (discSelectionIds.length === 0) return;
+    const archiveIds = new Set(
+      querySource
+        .select({ id: discSelections.originalDiscArchiveId })
+        .from(discSelections)
+        .where(inArray(discSelections.id, discSelectionIds))
+        .all()
+        .map(({ id }) => id),
+    );
+    for (const archiveId of archiveIds) {
+      requireNoArchiveRecoveryWork(querySource, archiveId);
+    }
+    if (!dvdRecoveryEvidenceEncodingGateClosed) return;
     const evidenceArchive = querySource
       .select({ id: discSelections.originalDiscArchiveId })
       .from(discSelections)

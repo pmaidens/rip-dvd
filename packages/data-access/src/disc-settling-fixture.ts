@@ -1,11 +1,27 @@
 import { vi } from "vitest";
 
 import { createNormalDvdArchiveBoundaryEvidence } from "./archive-boundary.js";
+import {
+  createDataAccessInternal,
+  type CreateDataAccessOptions,
+} from "./internal/create-data-access.js";
+import { createLegacySidecarImportAccess } from "./internal/legacy-sidecar-migration.js";
+import type { LegacySidecarDataAccess } from "./legacy-sidecar-types.js";
 import type { DataAccess } from "./types.js";
 
 const SETTLING_OBSERVATION_ELAPSED_MS = [0, 2_500, 5_000] as const;
 
 type DiscSettlingTestDataAccess = Pick<DataAccess, "discInspections">;
+
+export function createDvdRecoveryEvidenceEncodingTestAccess(
+  options: CreateDataAccessOptions,
+): LegacySidecarDataAccess {
+  return createDataAccessInternal(
+    options,
+    { createAccess: createLegacySidecarImportAccess },
+    { allowDvdRecoveryEvidenceEncodingForExclusionTest: true },
+  );
+}
 
 export function createNormalDvdArchiveBoundaryEvidenceForTest(
   reportedSizeBytes: number,
