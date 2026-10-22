@@ -9736,7 +9736,26 @@ export function createDataAccessInternal(
               "stopping",
             );
           }
+          requireNoActiveEncodeWork(transaction, recovery);
           const timestamp = now();
+          if (recovery.work === null) {
+            requireRow(
+              transaction.insert(archiveRecoveryWork).values({
+                archiveRecoveryId: recovery.id,
+                originalDiscArchiveId: recovery.originalDiscArchiveId,
+                attemptId: recovery.attemptId,
+                status: "requested",
+                verificationId: null,
+                requestedAt: timestamp,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              }).returning({
+                archiveRecoveryId: archiveRecoveryWork.archiveRecoveryId,
+              }).get(),
+              "Archive Recovery work",
+              recovery.id,
+            );
+          }
           const stopped = requireRow(
             transaction.update(archiveRecoveries).set({
               status: "stopping",

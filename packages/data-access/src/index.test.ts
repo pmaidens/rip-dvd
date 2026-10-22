@@ -54,6 +54,7 @@ import {
 } from "./disc-settling-fixture.js";
 import type {
   ArchiveJobId,
+  ArchiveRecoveryAttemptId,
   ArchiveRecoveryId,
   ArchiveRequestId,
   DetectedDiscId,
@@ -130,6 +131,7 @@ type ConcurrentWorkerResult =
         | "reviewed"
         | "skipped"
         | "started"
+        | "stopping"
         | "versioned";
       id?: string;
       code?: string;
@@ -180,6 +182,12 @@ type ConcurrentOperation = (
   | {
       operation: "request-archive-recovery";
       archiveRecoveryId: ArchiveRecoveryId;
+    }
+  | {
+      operation: "stop-archive-recovery";
+      archiveRecoveryId: ArchiveRecoveryId;
+      attemptId: ArchiveRecoveryAttemptId;
+      mutationKey: string;
     }
   | {
       operation: "complete-catalog-review";
@@ -14398,6 +14406,150 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           expect.objectContaining({
             ...(existingJob === null ? {} : { id: existingJob.id }),
             status: "queued",
+          }),
+        ]);
+      }
+      exclusionAccess.close();
+    },
+  );
+
+  it.each([
+    ["enqueue", "stop-first", 0, 150],
+    ["enqueue", "encode-first", 150, 0],
+    ["requeue", "stop-first", 0, 150],
+    ["requeue", "encode-first", 150, 0],
+    ["claim", "stop-first", 0, 150],
+    ["claim", "encode-first", 150, 0],
+  ] as const)(
+    "atomically resolves the Stop/%s race with %s ordering",
+    async (operation, ordering, stopDelayMs, encodeDelayMs) => {
+      const databasePath = createTestDatabasePath();
+      const { access, archive, mistakenSelection } =
+        createDiscSelectionCorrectionFixture({
+          databasePath,
+          key: `stop-${operation}-race-${ordering}`,
+        });
+      const profile = access.encodingProfiles.create({
+        key: `stop-${operation}-race-${ordering}`,
+        displayName: `Stop ${operation} race ${ordering}`,
+        mediaDomain: "dvd_video",
+        settings: { preset: "Fast 480p30" },
+      });
+      const recoveryId =
+        `stop-${operation}-race-${ordering}` as ArchiveRecoveryId;
+      const existingJob = operation === "enqueue"
+        ? null
+        : access.encodeJobs.enqueue({
+          discSelectionId: mistakenSelection.id,
+          encodingProfileId: profile.id,
+          outputPath: `/media/movies/Stop ${operation} Race ${ordering}.mkv`,
+        });
+      if (
+        operation === "requeue" ||
+        (operation === "claim" && ordering === "stop-first")
+      ) {
+        const claim = access.encodeJobs.claimNext(
+          `stop-${operation}-race-preparation-${ordering}`,
+        );
+        if (claim === null) throw new Error("Expected Encode Job claim");
+        access.encodeJobs.fail(claim, "Synthetic race predecessor failure");
+      }
+      markArchiveWithDvdRecoveryEvidence(
+        databasePath,
+        archive.id,
+        `stop-${operation}-race-${ordering}`,
+        { archiveRecoveryId: recoveryId },
+      );
+      const recovery = access.catalog.findArchiveRecovery(archive.id);
+      if (recovery === null) throw new Error("Expected Archive Recovery");
+      access.close();
+      const exclusionAccess = openEncodeExclusionTestDatabase(databasePath);
+
+      const encodeOperation: ConcurrentOperation = operation === "enqueue"
+        ? {
+          operation: "enqueue-encode",
+          discSelectionId: mistakenSelection.id,
+          encodingProfileId: profile.id,
+          outputPath:
+            `/media/movies/Stop Enqueue Race Fresh ${ordering}.mkv`,
+          delayMs: encodeDelayMs,
+        }
+        : operation === "requeue"
+        ? {
+          operation: "requeue-encode",
+          encodeJobId: existingJob!.id,
+          mutationKey: `stop-requeue-race-${ordering}`,
+          delayMs: encodeDelayMs,
+        }
+        : ordering === "stop-first"
+        ? {
+          operation: "queue-stale-and-claim-encode",
+          encodeJobId: existingJob!.id,
+          delayMs: encodeDelayMs,
+        }
+        : { operation: "claim-encode", delayMs: encodeDelayMs };
+      const stopMutationKeys = {
+        enqueue: {
+          "stop-first": "00000000-0000-4000-8000-000000000481",
+          "encode-first": "00000000-0000-4000-8000-000000000482",
+        },
+        requeue: {
+          "stop-first": "00000000-0000-4000-8000-000000000483",
+          "encode-first": "00000000-0000-4000-8000-000000000484",
+        },
+        claim: {
+          "stop-first": "00000000-0000-4000-8000-000000000485",
+          "encode-first": "00000000-0000-4000-8000-000000000486",
+        },
+      } as const;
+
+      const results = await runBarrierWorkers({
+        databasePath,
+        allowDvdRecoveryEvidenceEncodingForExclusionTest: true,
+        mode: "operation",
+        operations: [{
+          operation: "stop-archive-recovery",
+          archiveRecoveryId: recoveryId,
+          attemptId: recovery.attemptId,
+          mutationKey: stopMutationKeys[operation][ordering],
+          delayMs: stopDelayMs,
+        }, encodeOperation],
+      });
+
+      if (ordering === "stop-first") {
+        expect(results[0]).toEqual({
+          outcome: "stopping",
+          id: recoveryId,
+        });
+        expect(results[1]).toEqual(operation === "claim"
+          ? { outcome: "rejected" }
+          : { outcome: "rejected", code: "ENCODE_WORK_CONFLICT" });
+        expect(exclusionAccess.catalog.findArchiveRecovery(archive.id))
+          .toMatchObject({
+            id: recoveryId,
+            status: "stopping",
+            work: expect.objectContaining({ status: "requested" }),
+          });
+        expect(exclusionAccess.encodeJobs.list()).toEqual(operation === "enqueue"
+          ? []
+          : [expect.objectContaining({
+            id: existingJob!.id,
+            status: operation === "requeue" ? "failed" : "queued",
+          })]);
+      } else {
+        expect(results[0]).toEqual({
+          outcome: "rejected",
+          code: "ENCODE_WORK_CONFLICT",
+        });
+        expect(results[1]).toMatchObject({
+          outcome: operation === "claim" ? "claimed" : "enqueued",
+        });
+        expect(exclusionAccess.catalog.findArchiveRecovery(archive.id))
+          .toMatchObject({ id: recoveryId, status: "eligible", work: null });
+        expect(exclusionAccess.encodeJobs.list()).toEqual([
+          expect.objectContaining({
+            ...(existingJob === null ? {} : { id: existingJob.id }),
+            status: operation === "claim" ? "running" : "queued",
           }),
         ]);
       }

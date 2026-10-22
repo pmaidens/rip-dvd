@@ -21,9 +21,11 @@ reservation and pass-scoped verification before filesystem I/O, at each commit
 boundary, and inside the database projection transaction. The claim does not
 expire with an Encode Job lease and is released only after the writer is
 quiescent. Stop preserves that reservation through reconciliation and releases
-it only as Stop completes. A deferred Stop keeps its queue position but yields
-the worker to unrelated eligible Recovery work. The latest storage
-preflight must be supported, and a recovered observation must re-prove the actual archive inode's
+it only as Stop completes; when no pass has been claimed yet, Stop creates the
+reservation atomically with its state change. A deferred Stop keeps its queue
+position but yields the worker to unrelated eligible Recovery work. The latest
+storage preflight must be supported, and a recovered observation must re-prove
+the actual archive inode's
 `linux-rwf-atomic-v1` unit and alignment. All filesystem work and the database
 projection run under the archive's exclusive image-ownership interval.
 

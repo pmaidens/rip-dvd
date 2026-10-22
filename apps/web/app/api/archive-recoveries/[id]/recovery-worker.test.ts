@@ -655,6 +655,7 @@ it("faults an unreconcilable Stop so it cannot poison the stopping queue", async
         stopOperationId: null,
         stopRequestedAt: null,
         stoppedAt: null,
+        work: expect.objectContaining({ status: "requested" }),
       });
     expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(false);
     expect(reconcile).toHaveBeenCalledTimes(1);
@@ -699,6 +700,7 @@ it("keeps Stop pending while archive ownership is not quiescent", async () => {
       stopRequestedAt: requested.stopRequestedAt,
       stoppedAt: null,
       faultCode: null,
+      work: expect.objectContaining({ status: "requested" }),
     });
     expect(deferred!.updatedAt.getTime()).toBeGreaterThan(
       requested.updatedAt.getTime(),
