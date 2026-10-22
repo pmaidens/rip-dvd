@@ -1,21 +1,10 @@
 import {
-  archiveRecoveryWorkIdentity,
   RecordNotFoundError,
   type ArchiveRecoveryId,
   type DataAccess,
   type DvdRecoveryReconciliation,
 } from "@rip-dvd/data-access";
-
-function visibleArchiveRecovery(
-  recovery: ReturnType<typeof reconciliationContext>,
-) {
-  return {
-    ...recovery,
-    work: recovery.work === null
-      ? null
-      : archiveRecoveryWorkIdentity(recovery.work),
-  };
-}
+import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 
 function visibleReconciliation(record: DvdRecoveryReconciliation) {
   const {

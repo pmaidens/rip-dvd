@@ -7,6 +7,7 @@ import type {
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
   ARCHIVE_INTEGRITIES,
+  ARCHIVE_RECOVERY_FAULT_CODES,
   ARCHIVE_RECOVERY_STATUSES,
   ARCHIVE_RECOVERY_WORK_STATUSES,
   CATALOG_REVIEW_OUTCOMES,
@@ -81,6 +82,8 @@ export type DvdUnrecoveredSourceClassification =
   (typeof DVD_UNRECOVERED_SOURCE_CLASSIFICATIONS)[number];
 export type ArchiveRecoveryStatus =
   (typeof ARCHIVE_RECOVERY_STATUSES)[number];
+export type ArchiveRecoveryFaultCode =
+  (typeof ARCHIVE_RECOVERY_FAULT_CODES)[number];
 export type ArchiveRecoveryWorkStatus =
   (typeof ARCHIVE_RECOVERY_WORK_STATUSES)[number];
 export type CatalogReviewOutcome = (typeof CATALOG_REVIEW_OUTCOMES)[number];
@@ -538,10 +541,16 @@ export interface ArchiveRecovery {
   stopOperationId: ArchiveRecoveryStopOperationId | null;
   stopRequestedAt: Date | null;
   stoppedAt: Date | null;
-  faultCode: string | null;
+  faultCode: ArchiveRecoveryFaultCode | null;
   work: ArchiveRecoveryWork | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface ArchiveRecoveryStopReceipt extends ArchiveRecovery {
+  status: "stopping";
+  stopOperationId: ArchiveRecoveryStopOperationId;
+  stopRequestedAt: Date;
 }
 
 export type DvdDiscVerificationStatus =
@@ -639,7 +648,7 @@ export interface ArchiveRecoveryWorkAccess {
     mutationKey: string;
     archiveRecoveryId: ArchiveRecoveryId;
     attemptId: ArchiveRecoveryAttemptId;
-  }): ArchiveRecovery;
+  }): ArchiveRecoveryStopReceipt;
   completeStop(input: {
     archiveRecoveryId: ArchiveRecoveryId;
     attemptId: ArchiveRecoveryAttemptId;
@@ -648,7 +657,7 @@ export interface ArchiveRecoveryWorkAccess {
   settlePass(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
   markFault(input: {
     claim: ClaimedArchiveRecoveryWork;
-    faultCode: string;
+    faultCode: ArchiveRecoveryFaultCode;
     retainWork: boolean;
   }): ArchiveRecovery;
   release(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;

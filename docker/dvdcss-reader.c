@@ -320,14 +320,14 @@ static int parse_endpoint_lba(const char *text, uint64_t *lba)
     return 0;
 }
 
-static int parse_sample_lba(const char *text, uint64_t *lba)
+static int parse_source_read_lba(const char *text, uint64_t *lba)
 {
     char *end = NULL;
     errno = 0;
     unsigned long long value = strtoull(text, &end, 10);
     if (errno != 0 || end == text || *end != '\0' ||
         value > MAX_DVD_CONTENT_BYTES / DVDCSS_BLOCK_SIZE) {
-        fprintf(stderr, "DVD Disc Verification sample LBA is invalid\n");
+        fprintf(stderr, "DVD source read LBA is invalid\n");
         return 1;
     }
     *lba = (uint64_t)value;
@@ -1922,14 +1922,14 @@ static int run_hash(struct read_backend *backend, uint64_t size_bytes)
         fail_errno("DVD content hash output failed");
 }
 
-static int run_verification_sample(struct read_backend *backend,
-                                   uint64_t start_lba, int block_count,
-                                   uint64_t accepted_end_lba_exclusive)
+static int run_source_read(struct read_backend *backend,
+                           uint64_t start_lba, int block_count,
+                           uint64_t accepted_end_lba_exclusive)
 {
     size_t byte_count = (size_t)block_count * DVDCSS_BLOCK_SIZE;
     unsigned char *buffer = NULL;
     if (posix_memalign((void **)&buffer, DVDCSS_BLOCK_SIZE, byte_count) != 0) {
-        fprintf(stderr, "DVD Disc Verification sample allocation failed\n");
+        fprintf(stderr, "DVD source read allocation failed\n");
         return 1;
     }
     struct backend_read_result result = backend_read(
@@ -1962,7 +1962,7 @@ static int run_verification_sample(struct read_backend *backend,
             &result.failure, NULL,
             accepted_end_lba_exclusive * DVDCSS_BLOCK_SIZE, 0);
     } else {
-        fprintf(stderr, "DVD Disc Verification sample read failed\n");
+        fprintf(stderr, "DVD source read failed\n");
         status = 1;
     }
     free(buffer);
@@ -3486,7 +3486,7 @@ static int run_test_source_read(int argc, char **argv,
         start_lba + block_count > size_bytes / DVDCSS_BLOCK_SIZE) {
         return close_test_backend(&backend, 2);
     }
-    int status = run_verification_sample(
+    int status = run_source_read(
         &backend, start_lba, (int)block_count,
         size_bytes / DVDCSS_BLOCK_SIZE);
     return close_test_backend(&backend, status);
@@ -3554,15 +3554,15 @@ int main(int argc, char **argv)
             (verification_sample && argc != 7) ||
             (recovery_sector && argc != 6)
         ) {
-            fprintf(stderr, "DVD Disc Verification sample arguments are invalid\n");
+            fprintf(stderr, "DVD source read arguments are invalid\n");
             return 2;
         }
         uint64_t start_lba = 0;
         uint64_t block_count = 0;
         uint64_t accepted_end_lba_exclusive = 0;
-        if (parse_sample_lba(argv[3], &start_lba) != 0 ||
-            parse_sample_lba(argv[4], &block_count) != 0 ||
-            parse_sample_lba(argv[5], &accepted_end_lba_exclusive) != 0 ||
+        if (parse_source_read_lba(argv[3], &start_lba) != 0 ||
+            parse_source_read_lba(argv[4], &block_count) != 0 ||
+            parse_source_read_lba(argv[5], &accepted_end_lba_exclusive) != 0 ||
             (verification_sample
                 ? arm_verification_lifetime(argv[6])
                 : require_source_read_parent()) != 0 ||
@@ -3571,7 +3571,7 @@ int main(int argc, char **argv)
             start_lba + block_count > accepted_end_lba_exclusive ||
             start_lba > MAX_DVD_CONTENT_BYTES / DVDCSS_BLOCK_SIZE -
                 block_count) {
-            fprintf(stderr, "DVD Disc Verification sample range is invalid\n");
+            fprintf(stderr, "DVD source read range is invalid\n");
             return 2;
         }
         dvdcss_t dvdcss = dvdcss_open(argv[2]);
@@ -3580,7 +3580,7 @@ int main(int argc, char **argv)
             return 1;
         }
         struct read_backend backend = { .dvdcss = dvdcss };
-        int status = run_verification_sample(
+        int status = run_source_read(
             &backend, start_lba, (int)block_count,
             accepted_end_lba_exclusive);
         if (dvdcss_close(dvdcss) != 0 && status == 0) {

@@ -5,6 +5,7 @@ import { seedDvdDiscVerificationFixture } from "../../../../../../operator-cli/s
 import {
   createDvdRecoveryStopRoute,
 } from "./route.js";
+import { createOperationsResponse } from "../../../operations/route.js";
 
 const fixtures: Array<ReturnType<typeof createOperatorWorkflowFixture>> = [];
 
@@ -84,6 +85,75 @@ it("offers the same attempt-bound durable Stop through web and CLI", async () =>
     expect(await competing.json()).toMatchObject({
       error: { code: "RECOVERY_STOP_REJECTED" },
     });
+
+    const stopping = access.catalog.findArchiveRecoveryById(
+      seeded.recoveryId,
+    )!;
+    access.archiveRecoveryWork.completeStop({
+      archiveRecoveryId: stopping.id,
+      attemptId: stopping.attemptId,
+      stopOperationId: stopping.stopOperationId!,
+    });
+    const webStatus = createOperationsResponse(
+      access,
+      new Request(
+        `http://localhost:3000/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    const cliStatus = await fixture.run([
+      "inspect",
+      "archive-recoveries",
+      seeded.recoveryId,
+    ]);
+    expect(webStatus.status).toBe(200);
+    expect(cliStatus.result).toEqual(await webStatus.json());
+    expect(cliStatus.result).toMatchObject({
+      item: {
+        status: "stopped",
+        availableActions: expect.arrayContaining([
+          expect.objectContaining({
+            name: "stop",
+            blockingReasons: expect.arrayContaining([
+              expect.objectContaining({ code: "RECOVERY_STOPPED" }),
+            ]),
+          }),
+        ]),
+      },
+    });
+    expect((await fixture.run([
+      "wait",
+      "archive-recoveries",
+      seeded.recoveryId,
+      "--timeout-ms",
+      "0",
+    ])).result).toMatchObject({
+      outcome: "settled",
+      current: { status: "stopped" },
+    });
+
+    const stoppedWeb = await createDvdRecoveryStopRoute(
+      request(
+        seeded.recoveryId,
+        "00000000-0000-4000-8000-000000000458",
+        seeded.attemptId,
+      ),
+      seeded.recoveryId,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const stoppedCli = await fixture.run([
+      "archive-recovery",
+      "stop",
+      seeded.recoveryId,
+      "--key",
+      "00000000-0000-4000-8000-000000000459",
+      "--attempt-id",
+      seeded.attemptId,
+    ]);
+    expect(stoppedWeb.status).toBe(409);
+    expect(stoppedCli.exitCode).toBe(2);
+    expect(stoppedCli.result).toEqual(await stoppedWeb.json());
   } finally {
     access.close();
   }
@@ -106,8 +176,20 @@ it("rejects a stale Stop attempt without changing the current attempt", async ()
       () => "http://localhost:3000",
     );
 
+    const webResult = await response.json();
+    const cli = await fixture.run([
+      "archive-recovery",
+      "stop",
+      seeded.recoveryId,
+      "--key",
+      "00000000-0000-4000-8000-000000000441",
+      "--attempt-id",
+      "stale-recovery-attempt",
+    ]);
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(webResult);
+    expect(webResult).toEqual({
       error: {
         code: "STALE_RECOVERY_ATTEMPT",
         message: "Archive Recovery attempt is stale.",

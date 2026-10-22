@@ -4,13 +4,13 @@ import {
   DVD_RECOVERY_STORAGE_REASON_MESSAGES,
   dvdDiscVerificationCheckpointIsCurrent,
   dvdDiscVerificationInsertionIsCurrent,
+  dvdRecoveryWriteAuthority,
   RecordNotFoundError,
   StaleDvdDiscVerificationError,
   DvdSourceSampleManifestProjectionError,
   type ArchiveRecoveryId,
   type DataAccess,
   type DiscInspectionId,
-  type DvdRecoveryWriteAuthority,
   type DvdSourceSampleManifest,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
@@ -77,29 +77,6 @@ function visibleVerification(
     completedAt: verification.completedAt?.toISOString() ?? null,
     createdAt: verification.createdAt.toISOString(),
     updatedAt: verification.updatedAt.toISOString(),
-  };
-}
-
-function recoveryWriteAuthority(
-  verification: NonNullable<ReturnType<
-    DataAccess["dvdDiscVerifications"]["findLatestForRecovery"]
-  >>,
-): DvdRecoveryWriteAuthority | null {
-  if (
-    verification.status !== "completed" ||
-    verification.outcome !== "match" ||
-    verification.workerExecutionId === null
-  ) return null;
-  return {
-    verificationId: verification.id,
-    archiveRecoveryId: verification.archiveRecoveryId,
-    originalDiscArchiveId: verification.originalDiscArchiveId,
-    discInspectionId: verification.discInspectionId,
-    detectedDiscId: verification.detectedDiscId,
-    mediaGeneration: verification.mediaGeneration,
-    verificationWorkerExecutionId: verification.workerExecutionId,
-    checkpointRevision: verification.checkpointRevision,
-    checkpointDigest: verification.checkpointDigest,
   };
 }
 
@@ -341,7 +318,7 @@ export async function inspectDvdDiscVerification(
         ].filter((reason) => reason !== null);
         const authority = latest === null
           ? null
-          : recoveryWriteAuthority(latest);
+          : dvdRecoveryWriteAuthority(latest);
         return authorityReasons.length === 0 && authority !== null
           ? { available: true, blockingReasons: [], authority }
           : { available: false, blockingReasons: authorityReasons };

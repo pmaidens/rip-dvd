@@ -50,6 +50,7 @@ import {
 } from "./encode-output-inspection.js";
 import { describeDvdRecoveryStorage } from "./dvd-recovery-storage.js";
 import { dvdRecoveryStopAction } from "./dvd-recovery-stop.js";
+import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 
 export const OPERATION_KINDS = [
   "optical-drives",
@@ -117,15 +118,6 @@ function visibleInspection({ claimToken: _claimToken, ...inspection }: DiscInspe
 
 function visibleArchiveJob({ claimToken: _claimToken, claimedBy: _claimedBy, ...job }: ArchiveJob) {
   return job;
-}
-
-function visibleArchiveRecovery(recovery: ArchiveRecovery) {
-  return {
-    ...recovery,
-    work: recovery.work === null
-      ? null
-      : archiveRecoveryWorkIdentity(recovery.work),
-  };
 }
 
 function visibleDvdRecoveryReconciliation(

@@ -6,7 +6,11 @@ import {
 } from "./archive-read-failure.js";
 import { DomainInvariantError } from "./errors.js";
 import { canonicalJson } from "./canonical-json.js";
-import type { DvdUnrecoveredSourceRange } from "./types.js";
+import type {
+  DvdDiscVerification,
+  DvdRecoveryWriteAuthority,
+  DvdUnrecoveredSourceRange,
+} from "./types.js";
 
 export const DVD_DISC_VERIFICATION_POLICY_VERSION =
   "dvd-disc-verification-v1" as const;
@@ -48,6 +52,27 @@ export type DvdDiscVerificationOutcome =
   | "match"
   | "mismatch"
   | "inconclusive";
+
+export function dvdRecoveryWriteAuthority(
+  verification: DvdDiscVerification,
+): DvdRecoveryWriteAuthority | null {
+  if (
+    verification.status !== "completed" ||
+    verification.outcome !== "match" ||
+    verification.workerExecutionId === null
+  ) return null;
+  return {
+    verificationId: verification.id,
+    archiveRecoveryId: verification.archiveRecoveryId,
+    originalDiscArchiveId: verification.originalDiscArchiveId,
+    discInspectionId: verification.discInspectionId,
+    detectedDiscId: verification.detectedDiscId,
+    mediaGeneration: verification.mediaGeneration,
+    verificationWorkerExecutionId: verification.workerExecutionId,
+    checkpointRevision: verification.checkpointRevision,
+    checkpointDigest: verification.checkpointDigest,
+  };
+}
 
 export type DvdDiscVerificationReasonCode =
   | "DISC_METADATA_MISMATCH"

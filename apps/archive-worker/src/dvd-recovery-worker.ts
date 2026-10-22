@@ -1,9 +1,9 @@
 import {
   dvdDiscVerificationInsertionIsCurrent,
+  dvdRecoveryWriteAuthority,
   type ArchiveRecovery,
   type ClaimedArchiveRecoveryWork,
   type DataAccess,
-  type DvdDiscVerification,
   type DvdRecoveryWriteAuthority,
 } from "@rip-dvd/data-access";
 import {
@@ -53,27 +53,6 @@ export class DvdRecoveryPassFault extends Error {
   ) {
     super(code, options);
   }
-}
-
-function writeAuthority(
-  verification: DvdDiscVerification,
-): DvdRecoveryWriteAuthority | null {
-  if (
-    verification.status !== "completed" ||
-    verification.outcome !== "match" ||
-    verification.workerExecutionId === null
-  ) return null;
-  return {
-    verificationId: verification.id,
-    archiveRecoveryId: verification.archiveRecoveryId,
-    originalDiscArchiveId: verification.originalDiscArchiveId,
-    discInspectionId: verification.discInspectionId,
-    detectedDiscId: verification.detectedDiscId,
-    mediaGeneration: verification.mediaGeneration,
-    verificationWorkerExecutionId: verification.workerExecutionId,
-    checkpointRevision: verification.checkpointRevision,
-    checkpointDigest: verification.checkpointDigest,
-  };
 }
 
 function sourceFaultCode(
@@ -310,7 +289,7 @@ export async function pollDvdRecoveryPass(input: {
   const candidate = input.access.archiveRecoveryWork
     .findNextVerifiedCandidate();
   if (candidate === null) return false;
-  const authority = writeAuthority(candidate.verification);
+  const authority = dvdRecoveryWriteAuthority(candidate.verification);
   if (authority === null) {
     throw new Error("DVD Recovery candidate lacks write authority");
   }
@@ -366,12 +345,16 @@ export async function pollDvdRecoveryPass(input: {
         let admittedRead: ActiveBoundedProcess<DvdSourceRead> | undefined;
         try {
           input.access.archiveRecoveryWork.admitSourceRead(claim, () => {
-            admittedRead = input.reader.start({
-              devicePath,
-              startLba,
-              sectorCount: 1,
-              acceptedEndLbaExclusive: checkpoint.acceptedEndLbaExclusive,
-            });
+            try {
+              admittedRead = input.reader.start({
+                devicePath,
+                startLba,
+                sectorCount: 1,
+                acceptedEndLbaExclusive: checkpoint.acceptedEndLbaExclusive,
+              });
+            } catch (cause) {
+              throw new DvdRecoveryPassFault("SOURCE_READ_FAILED", { cause });
+            }
           });
         } catch (error) {
           if (admittedRead !== undefined) {

@@ -268,6 +268,7 @@ import type {
   ArchiveRecoveryAttemptId,
   ArchiveRecoveryClaimToken,
   ArchiveRecoveryId,
+  ArchiveRecoveryStopReceipt,
   ArchiveRecoveryStopOperationId,
   ArchiveRecoveryWork,
   ArchiveReadFailureCategory,
@@ -5186,6 +5187,15 @@ export function createDataAccessInternal(
         : value) as T;
   }
 
+  function decodeArchiveRecoveryStopReceipt(
+    stored: string,
+  ): ArchiveRecoveryStopReceipt {
+    return JSON.parse(stored, (field, value: unknown) =>
+      field.endsWith("At") && typeof value === "string"
+        ? new Date(value)
+        : value) as ArchiveRecoveryStopReceipt;
+  }
+
   function decodeCatalogReviewCompletionOutcome(
     stored: string,
   ): CompletedCatalogReviewWithReplacements {
@@ -9535,8 +9545,9 @@ export function createDataAccessInternal(
             input.mutationKey,
             operation,
             semanticInput,
-            () => true,
+            decodeArchiveRecoveryStopReceipt,
           );
+          if (replay !== undefined) return replay;
           const recovery = findArchiveRecoveryRecord(transaction, {
             archiveRecoveryId: input.archiveRecoveryId,
           });
@@ -9552,7 +9563,6 @@ export function createDataAccessInternal(
               attemptId: recovery.attemptId,
             });
           }
-          if (replay !== undefined) return recovery;
           if (
             recovery.status !== "eligible" &&
             recovery.status !== "running"
@@ -9581,24 +9591,22 @@ export function createDataAccessInternal(
             "Archive Recovery",
             recovery.id,
           );
-          recordMutationInvocation(
+          return recordMutationInvocation(
             transaction,
             input.mutationKey,
             operation,
             semanticInput,
             {
-              archiveRecoveryId: stopped.id,
-              attemptId: stopped.attemptId,
-              stopOperationId: stopped.stopOperationId,
+              ...stopped,
+              status: "stopping" as const,
+              stopOperationId: stopped.stopOperationId!,
+              stopRequestedAt: stopped.stopRequestedAt!,
+              work: findArchiveRecoveryRecord(transaction, {
+                archiveRecoveryId: stopped.id,
+              })?.work ?? null,
             },
             timestamp,
           );
-          return {
-            ...stopped,
-            work: findArchiveRecoveryRecord(transaction, {
-              archiveRecoveryId: stopped.id,
-            })?.work ?? null,
-          };
         }, { behavior: "immediate" });
       },
       completeStop(input) {
@@ -9681,7 +9689,8 @@ export function createDataAccessInternal(
         }, { behavior: "immediate" });
       },
       markFault(input) {
-        const faultCode = requireNonEmpty(input.faultCode, "faultCode");
+        requireNonEmpty(input.faultCode, "faultCode");
+        const faultCode = input.faultCode;
         return database.transaction((transaction) => {
           const recovery = requireCurrentArchiveRecoveryClaim(
             transaction,

@@ -463,6 +463,28 @@ it("rejects source-read admission after Stop commits", async () => {
   }
 });
 
+it("records a synchronous source-start failure as a read fault", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  await completeVerification(fixture, seeded);
+  const start = vi.fn(() => {
+    throw new Error("Synthetic source vanished before process start");
+  });
+  const input = pollInput(fixture, { start });
+  try {
+    expect(await pollDvdRecoveryPass(input)).toBe(true);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "faulted",
+        faultCode: "SOURCE_READ_FAILED",
+      });
+  } finally {
+    input.access.close();
+  }
+});
+
 it("keeps a transport fault out of source evidence and preserves the Archive Job", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);

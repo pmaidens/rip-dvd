@@ -1,20 +1,11 @@
 import {
-  archiveRecoveryWorkIdentity,
   RecordNotFoundError,
   type ArchiveRecovery,
   type ArchiveRecoveryAttemptId,
   type ArchiveRecoveryId,
   type DataAccess,
 } from "@rip-dvd/data-access";
-
-function visibleArchiveRecovery(recovery: ArchiveRecovery) {
-  return {
-    ...recovery,
-    work: recovery.work === null
-      ? null
-      : archiveRecoveryWorkIdentity(recovery.work),
-  };
-}
+import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 
 export function dvdRecoveryStopAction(recovery: ArchiveRecovery) {
   const reason = recovery.status === "completed"
@@ -70,9 +61,6 @@ export function requestDvdRecoveryStop(
     );
   }
   const stopped = access.archiveRecoveryWork.requestStop(input);
-  if (stopped.stopOperationId === null) {
-    throw new Error("Archive Recovery Stop has no durable operation identity");
-  }
   return {
     archiveRecovery: visibleArchiveRecovery(stopped),
     operation: {
