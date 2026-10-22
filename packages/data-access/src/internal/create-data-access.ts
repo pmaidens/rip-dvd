@@ -160,6 +160,7 @@ import {
   assertDvdArchiveEvidenceManifestDigests,
   assertDvdArchiveRecoveryReadEvidenceDigest,
 } from "../dvd-archive-evidence-digests.js";
+import { assertDvdEvidenceRangeTransition } from "../dvd-evidence-transition.js";
 import { isArchiveReadFailureEvidenceConsistent } from "../archive-read-failure.js";
 import {
   decodeArchivedDvdTitles,
@@ -216,6 +217,7 @@ import type {
   ArchiveJobStatus,
   ArchiveJobProgress,
   ArchiveReadFailureCategory,
+  ArchiveRecoveryId,
   ArchiveRequestId,
   ArchiveRequest,
   ArchiveRequestStatus,
@@ -332,92 +334,6 @@ const DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
 const ENCODE_JOB_FAILURE_REPORT_JOB_LIMIT = 400;
 const DVD_ARCHIVE_EVIDENCE_AUDIT_MANIFEST_LIMIT = 10_000;
-
-function expectedDvdEvidenceRangesAfterRecoveryRead(
-  ranges: readonly DvdUnrecoveredSourceRange[],
-  startLba: number,
-  outcome: "recovered" | "failed",
-): DvdUnrecoveredSourceRange[] {
-  const containingIndex = ranges.findIndex((range) =>
-    startLba >= range.startLba &&
-    startLba < range.startLba + range.sectorCount
-  );
-  if (containingIndex < 0) {
-    throw new DomainInvariantError(
-      "Persisted DVD Archive Recovery evidence does not target Unrecovered Source",
-    );
-  }
-
-  const containing = ranges[containingIndex]!;
-  if (outcome === "failed" && containing.classification === "individually_failed") {
-    throw new DomainInvariantError(
-      "Persisted DVD Archive Evidence contains a redundant failed recovery transition",
-    );
-  }
-  const replacements: DvdUnrecoveredSourceRange[] = [];
-  if (startLba > containing.startLba) {
-    replacements.push({
-      startLba: containing.startLba,
-      sectorCount: startLba - containing.startLba,
-      classification: containing.classification,
-    });
-  }
-  if (outcome === "failed") {
-    replacements.push({
-      startLba,
-      sectorCount: 1,
-      classification: "individually_failed",
-    });
-  }
-  const containingEndLbaExclusive =
-    containing.startLba + containing.sectorCount;
-  if (startLba + 1 < containingEndLbaExclusive) {
-    replacements.push({
-      startLba: startLba + 1,
-      sectorCount: containingEndLbaExclusive - startLba - 1,
-      classification: containing.classification,
-    });
-  }
-
-  const next = [
-    ...ranges.slice(0, containingIndex),
-    ...replacements,
-    ...ranges.slice(containingIndex + 1),
-  ];
-  return next.reduce<DvdUnrecoveredSourceRange[]>((normalized, range) => {
-    const previous = normalized.at(-1);
-    if (
-      previous !== undefined &&
-      previous.classification === range.classification &&
-      previous.startLba + previous.sectorCount === range.startLba
-    ) {
-      normalized[normalized.length - 1] = {
-        ...previous,
-        sectorCount: previous.sectorCount + range.sectorCount,
-      };
-    } else {
-      normalized.push(range);
-    }
-    return normalized;
-  }, []);
-}
-
-function assertDvdEvidenceRangeTransition(
-  previous: readonly DvdUnrecoveredSourceRange[],
-  current: readonly DvdUnrecoveredSourceRange[],
-  recoveryRead: { startLba: number; outcome: "recovered" | "failed" },
-): void {
-  const expected = expectedDvdEvidenceRangesAfterRecoveryRead(
-    previous,
-    recoveryRead.startLba,
-    recoveryRead.outcome,
-  );
-  if (JSON.stringify(expected) !== JSON.stringify(current)) {
-    throw new DomainInvariantError(
-      "Persisted DVD Archive Evidence ranges do not match their recovery read",
-    );
-  }
-}
 
 function discSelectionMutationEvidence(
   jobs: readonly {
@@ -1125,6 +1041,42 @@ function toDvdDiscVerification(
     reasons: row.reasons,
     findings: row.findings,
   };
+}
+
+function dvdDiscVerificationSemanticInput(input: {
+  archiveRecoveryId: ArchiveRecoveryId;
+  discInspectionId: DiscInspectionId;
+  checkpointRevision: number;
+  checkpointDigest: string;
+}): string {
+  return JSON.stringify({
+    archiveRecoveryId: input.archiveRecoveryId,
+    discInspectionId: input.discInspectionId,
+    checkpointRevision: input.checkpointRevision,
+    checkpointDigest: input.checkpointDigest,
+  });
+}
+
+function decodeDvdDiscVerificationOutcome(
+  stored: string,
+): DvdDiscVerification {
+  const outcome = JSON.parse(stored) as DvdDiscVerificationRow & {
+    claimedAt: string | null;
+    startedAt: string | null;
+    completedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+  };
+  return toDvdDiscVerification({
+    ...outcome,
+    claimedAt: outcome.claimedAt === null ? null : new Date(outcome.claimedAt),
+    startedAt: outcome.startedAt === null ? null : new Date(outcome.startedAt),
+    completedAt: outcome.completedAt === null
+      ? null
+      : new Date(outcome.completedAt),
+    createdAt: new Date(outcome.createdAt),
+    updatedAt: new Date(outcome.updatedAt),
+  });
 }
 
 function validateDvdDiscVerificationManifestBinding(
@@ -6998,15 +6950,29 @@ export function createDataAccessInternal(
       });
     },
     async withDvdCurrentCheckpoint(id, ownership, task) {
-      const readSnapshot = () => access.readConsistentSnapshot(reader => {
-        const archive = reader.catalog.listOriginalDiscArchives({ ids: [id] })[0];
-        if (!archive) throw new RecordNotFoundError("Original Disc Archive", id);
-        return {
-          archive,
-          header: reader.catalog.findDvdArchiveEvidenceHeader(id),
-          jobs: reader.archiveJobs.listForArchive(id),
-        };
-      });
+      const readSnapshot = () => {
+        try {
+          return access.readConsistentSnapshot(reader => {
+            const archive = reader.catalog.listOriginalDiscArchives({ ids: [id] })[0];
+            if (!archive) {
+              throw new RecordNotFoundError("Original Disc Archive", id);
+            }
+            return {
+              archive,
+              header: reader.catalog.findDvdArchiveEvidenceHeader(id),
+              jobs: reader.archiveJobs.listForArchive(id),
+            };
+          });
+        } catch (error) {
+          if (error instanceof DomainInvariantError) {
+            throw new DvdCheckpointReadFault(
+              "DVD_PUBLICATION_CHECKPOINT_CONFLICT",
+              { cause: error },
+            );
+          }
+          throw error;
+        }
+      };
       const admissionSnapshot = readSnapshot();
       if (dvdRecoveryEvidenceFormatForArchive(
         admissionSnapshot.header,
@@ -7078,13 +7044,19 @@ export function createDataAccessInternal(
       },
     },
     dvdDiscVerifications: {
+      replaySubmission(input) {
+        const semanticInput = dvdDiscVerificationSemanticInput(input);
+        return database.transaction((transaction) =>
+          readMutationInvocation(
+            transaction,
+            input.mutationKey,
+            "dvd_disc_verification.submit",
+            semanticInput,
+            decodeDvdDiscVerificationOutcome,
+          ) ?? null);
+      },
       submit(input) {
-        const semanticInput = JSON.stringify({
-          archiveRecoveryId: input.archiveRecoveryId,
-          discInspectionId: input.discInspectionId,
-          checkpointRevision: input.checkpointRevision,
-          checkpointDigest: input.checkpointDigest,
-        });
+        const semanticInput = dvdDiscVerificationSemanticInput(input);
         return database.transaction((transaction) => {
           const operation = "dvd_disc_verification.submit";
           const previous = readMutationInvocation(
@@ -7092,29 +7064,7 @@ export function createDataAccessInternal(
             input.mutationKey,
             operation,
             semanticInput,
-            (stored) => {
-              const outcome = JSON.parse(stored) as DvdDiscVerificationRow & {
-                claimedAt: string | null;
-                startedAt: string | null;
-                completedAt: string | null;
-                createdAt: string;
-                updatedAt: string;
-              };
-              return toDvdDiscVerification({
-                ...outcome,
-                claimedAt: outcome.claimedAt === null
-                  ? null
-                  : new Date(outcome.claimedAt),
-                startedAt: outcome.startedAt === null
-                  ? null
-                  : new Date(outcome.startedAt),
-                completedAt: outcome.completedAt === null
-                  ? null
-                  : new Date(outcome.completedAt),
-                createdAt: new Date(outcome.createdAt),
-                updatedAt: new Date(outcome.updatedAt),
-              });
-            },
+            decodeDvdDiscVerificationOutcome,
           );
           if (previous !== undefined) return previous;
           const recovery = requireRow(
@@ -7195,6 +7145,16 @@ export function createDataAccessInternal(
           }
           const id = newId<DvdDiscVerificationId>();
           const timestamp = now();
+          const attemptOrdinal = requireRow(
+            transaction.select({
+              value: sql<number>`coalesce(max(${dvdDiscVerifications.attemptOrdinal}), 0) + 1`,
+            }).from(dvdDiscVerifications).where(eq(
+              dvdDiscVerifications.archiveRecoveryId,
+              recovery.id,
+            )).get(),
+            "DVD disc verification attempt sequence",
+            recovery.id,
+          ).value;
           const storedSourceManifest = transaction
             .select({ manifest: dvdSourceSampleManifests.manifest })
             .from(dvdSourceSampleManifests)
@@ -7213,6 +7173,7 @@ export function createDataAccessInternal(
             transaction.insert(dvdDiscVerifications).values({
               id,
               archiveRecoveryId: recovery.id,
+              attemptOrdinal,
               originalDiscArchiveId: recovery.originalDiscArchiveId,
               discInspectionId: inspection.id,
               detectedDiscId: observedDisc.id,
@@ -7252,8 +7213,7 @@ export function createDataAccessInternal(
         const row = database.select().from(dvdDiscVerifications)
           .where(eq(dvdDiscVerifications.archiveRecoveryId, id))
           .orderBy(
-            desc(dvdDiscVerifications.createdAt),
-            desc(dvdDiscVerifications.id),
+            desc(dvdDiscVerifications.attemptOrdinal),
           ).limit(1).get();
         return row === undefined ? null : toDvdDiscVerification(row);
       },

@@ -426,6 +426,7 @@ export type DvdDiscVerificationStatus =
 export interface DvdDiscVerification {
   id: DvdDiscVerificationId;
   archiveRecoveryId: ArchiveRecoveryId;
+  attemptOrdinal: number;
   originalDiscArchiveId: OriginalDiscArchiveId;
   discInspectionId: DiscInspectionId;
   detectedDiscId: DetectedDiscId;
@@ -1991,6 +1992,13 @@ export interface DvdRecoveryStorageAccess {
 }
 
 export interface DvdDiscVerificationAccess {
+  replaySubmission(input: {
+    mutationKey: string;
+    archiveRecoveryId: ArchiveRecoveryId;
+    discInspectionId: DiscInspectionId;
+    checkpointRevision: number;
+    checkpointDigest: string;
+  }): DvdDiscVerification | null;
   submit(input: {
     mutationKey: string;
     archiveRecoveryId: ArchiveRecoveryId;

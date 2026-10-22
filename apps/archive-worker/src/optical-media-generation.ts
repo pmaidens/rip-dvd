@@ -1,4 +1,4 @@
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, readFileSync } from "node:fs";
 import { basename, isAbsolute, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -45,9 +45,21 @@ interface NodeMediaGenerationProbeLauncherOptions {
 }
 
 interface NodeMediaGenerationObserverOptions {
+  bootIdentity?: string;
   maxActiveProbes?: number;
   observationTimeoutMs?: number;
   probeLauncher?: MediaGenerationProbeLauncher;
+}
+
+function requireBootIdentity(value: unknown): string {
+  const identity = optionalBoundedText(value, 36);
+  if (
+    identity === undefined ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(identity)
+  ) {
+    throw new Error("Host boot identity is unavailable");
+  }
+  return identity;
 }
 
 export function requireSafeOpticalDevicePath(value: unknown): string {
@@ -68,7 +80,7 @@ function requireMediaGeneration(value: unknown): string {
   const generation =
     typeof value === "number" && Number.isSafeInteger(value)
       ? String(value)
-      : optionalBoundedText(value, 32);
+      : optionalBoundedText(value, 20);
   if (generation === undefined || !/^\d+$/.test(generation)) {
     throw new Error("Optical Drive media generation is unavailable");
   }
@@ -115,6 +127,15 @@ export function createNodeMediaGenerationObserver(
   if (!Number.isSafeInteger(observationTimeoutMs) || observationTimeoutMs <= 0) {
     throw new Error("Optical Drive media observation timeout is invalid");
   }
+  let bootIdentity = options.bootIdentity === undefined
+    ? undefined
+    : requireBootIdentity(options.bootIdentity);
+  const currentBootIdentity = () => {
+    bootIdentity ??= requireBootIdentity(
+      readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(),
+    );
+    return bootIdentity;
+  };
   const activeProbes = createBoundedSingleFlightCoordinator({
     maxActiveProcesses: maxActiveProbes,
     invalidCapacityError: "Optical Drive media observation capacity is invalid",
@@ -165,7 +186,7 @@ export function createNodeMediaGenerationObserver(
         }
         throw error;
       }
-      return requireMediaGeneration(value);
+      return `${currentBootIdentity()}:${requireMediaGeneration(value)}`;
     },
   };
 }

@@ -22,6 +22,8 @@ archive-owned `.dvd-evidence/<archive-id>/` directory containing:
   staging path. It contains the complete expected manifest so interrupted
   publication can finish without regenerating evidence from a damaged source.
 - `initial-manifest.json`, the immutable revision 1 manifest.
+- `recovery-manifest-<revision>.json`, each immutable revision 2 or later
+  manifest with its one-sector recovery-read evidence.
 - `checkpoint.json`, the authoritative committed checkpoint pointer.
 
 These files are runtime operator evidence. They must never be committed to the
@@ -56,6 +58,14 @@ The database stores an exact projection of the publication's source-sample
 manifest. Update and deletion triggers make that projection immutable; readers
 compare it canonically with the publication-digest-protected manifest before it
 can authorize verification.
+
+For revision 2 or later, a current-checkpoint read also loads the immutable
+current recovery manifest and its immediate predecessor from this directory.
+It validates both manifest digests, the current recovery-read digest, the exact
+one-sector source-map transition, and the archive, image, extent, boundary,
+predecessor, revision, and pointer bindings before the database projection can
+authorize an operator action. Revision 2 names `initial-manifest.json` as its
+predecessor; later revisions name the preceding recovery-manifest file.
 
 ## Durability order
 

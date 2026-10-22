@@ -145,12 +145,17 @@ predecessor digest, exact recovery-read digest when present, image and extent,
 boundary digest, and normalized source-map digest. Data-access constructors
 compute these values before a future writer persists them, and authoritative
 reads validate the current manifest, its immediate transition, and the marked
-source-job provenance without loading the complete recovery history. The
+source-job provenance without loading the complete recovery history. Revision
+2 and later are represented by immutable
+`recovery-manifest-<revision>.json` records beside the initial publication
+manifest; an authoritative current-checkpoint read validates the current record
+and its immediate filesystem predecessor before accepting the durable pointer
+and matching database projection. The
 current digest is the authenticated checkpoint for that bounded projection;
 a separately bounded evidence-chain audit validates every predecessor,
 recovery read, transition, and stored digest. This digest contract does not
-publish range paging or install filesystem checkpoints; those remain separate
-workflow capabilities.
+publish range paging; filesystem installation remains a separate recovery
+workflow capability.
 
 The dormant initial publication workflow now implements the filesystem
 checkpoint contract in [DVD initial publication v1](../dvd-initial-publication-v1.md).

@@ -278,19 +278,21 @@ it("resolves immutable revision-one samples beside a validated later checkpoint"
       archiveId,
     )!;
     const recoveryReadId = `${archiveId}:synthetic-read-2`;
-    const recoveryReadDigest = createDvdArchiveRecoveryReadEvidenceDigest({
+    const recoveryRead = {
       originalDiscArchiveId: archiveId,
       fromManifestId: initialHeader.currentManifestId,
       fromManifestRevision: initialHeader.currentManifestRevision,
       startLba: 32,
       sectorCount: 1,
-      outcome: "recovered",
-    });
+      outcome: "recovered" as const,
+    };
+    const recoveryReadDigest =
+      createDvdArchiveRecoveryReadEvidenceDigest(recoveryRead);
     const currentRanges = initialHeader.unrecoveredSourceRanges.filter(
       (range) => range.startLba !== 32,
     );
     const currentManifestId = `${archiveId}:synthetic-revision-2`;
-    const currentManifest = createDvdArchiveEvidenceManifestDigests({
+    const currentManifestPayload = {
       originalDiscArchiveId: archiveId,
       revision: 2,
       previousManifestId: initialHeader.currentManifestId,
@@ -306,7 +308,17 @@ it("resolves immutable revision-one samples beside a validated later checkpoint"
       boundaryPublishedSizeBytes: archive.boundaryPublishedSizeBytes!,
       boundaryEvidenceDigest: initialHeader.boundaryEvidenceDigest,
       unrecoveredSourceRanges: currentRanges,
-    });
+    };
+    const currentManifest = {
+      id: currentManifestId,
+      ...currentManifestPayload,
+      ...createDvdArchiveEvidenceManifestDigests(currentManifestPayload),
+      recoveryRead: {
+        id: recoveryReadId,
+        ...recoveryRead,
+        evidenceDigest: recoveryReadDigest,
+      },
+    };
     const currentManifestDigest = currentManifest.manifestDigest;
     const sqlite = new DatabaseSync(f.databasePath);
     try {
@@ -372,6 +384,11 @@ it("resolves immutable revision-one samples beside a validated later checkpoint"
       currentManifestDigest,
       publicationDigest: pointer.publicationDigest,
     }));
+    const recoveryManifestPath = join(
+      dirname(pointerPath),
+      "recovery-manifest-2.json",
+    );
+    await writeFile(recoveryManifestPath, JSON.stringify(currentManifest));
     const resolved = await f.access.withDvdCurrentCheckpoint(
       archiveId,
       createArchiveImageOwnership(),
@@ -387,6 +404,17 @@ it("resolves immutable revision-one samples beside a validated later checkpoint"
         sourceSampleManifest: { checkpointRevision: 1 },
       },
     });
+
+    const hiddenRecoveryManifestPath = `${recoveryManifestPath}.hidden`;
+    await rename(recoveryManifestPath, hiddenRecoveryManifestPath);
+    await expect(f.access.withDvdCurrentCheckpoint(
+      archiveId,
+      createArchiveImageOwnership(),
+      async ({ checkpoint }) => checkpoint,
+    )).rejects.toMatchObject({
+      code: "DVD_PUBLICATION_CHECKPOINT_CONFLICT",
+    });
+    await rename(hiddenRecoveryManifestPath, recoveryManifestPath);
 
     const corrupt = new DatabaseSync(f.databasePath);
     try {
@@ -408,7 +436,9 @@ it("resolves immutable revision-one samples beside a validated later checkpoint"
       archiveId,
       createArchiveImageOwnership(),
       async ({ checkpoint }) => checkpoint,
-    )).rejects.toThrow("authoritative links are incomplete");
+    )).rejects.toMatchObject({
+      code: "DVD_PUBLICATION_CHECKPOINT_CONFLICT",
+    });
   } finally {
     f.access.close();
   }

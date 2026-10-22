@@ -1,5 +1,11 @@
+import { renameSync } from "node:fs";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
-import { createDataAccess } from "@rip-dvd/data-access";
+import {
+  createDataAccess,
+  type ArchiveRecoveryId,
+} from "@rip-dvd/data-access";
 
 import { seedDvdDiscVerificationFixture } from "./dvd-disc-verification.test-support.js";
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
@@ -49,6 +55,24 @@ it("inspects, submits, replays, and rejects stale inserted-disc verification", a
     result: { verification: { status: "queued", current: true } },
   });
   expect(replayed.result).toEqual(submitted.result);
+
+  const checkpointPath = join(seeded.directory, "checkpoint.json");
+  const hiddenCheckpointPath = `${checkpointPath}.hidden`;
+  renameSync(checkpointPath, hiddenCheckpointPath);
+  try {
+    const replayWithoutCheckpoint = await fixture.run(command);
+    expect(replayWithoutCheckpoint.result).toEqual(submitted.result);
+    const changedReplay = await fixture.run([
+      ...command.slice(0, -1),
+      "f".repeat(64),
+    ]);
+    expect(changedReplay).toMatchObject({
+      exitCode: 2,
+      result: { error: { code: "MUTATION_KEY_CONFLICT" } },
+    });
+  } finally {
+    renameSync(hiddenCheckpointPath, checkpointPath);
+  }
 
   const after = await fixture.run([
     "archive-recovery", "inspect-verification", recoveryId,
@@ -228,4 +252,53 @@ it("reports unavailable checkpoint storage as a stable action reason", async () 
       },
     },
   });
+});
+
+it("selects the latest verification by its durable attempt sequence", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-10-22T12:00:00.000Z"));
+  const submit = (key: string) => fixture.run([
+    "archive-recovery", "verify-disc", seeded.recoveryId,
+    "--key", key,
+    "--disc-inspection-id", seeded.inspection.id,
+    "--checkpoint-revision", "1",
+    "--checkpoint-digest", seeded.manifest.manifestDigest,
+  ]);
+  const first = await submit("00000000-0000-4000-8000-000000000446");
+  const firstId = (first.result as { verification: { id: string } })
+    .verification.id;
+  const worker = fixture.openAccess();
+  worker.dvdDiscVerifications.fail(
+    worker.dvdDiscVerifications.claimNext("first-attempt-worker")!,
+  );
+  worker.close();
+  const second = await submit("00000000-0000-4000-8000-000000000447");
+  const secondId = (second.result as { verification: { id: string } })
+    .verification.id;
+
+  const sqlite = new DatabaseSync(fixture.databasePath);
+  sqlite.prepare("UPDATE dvd_disc_verifications SET id = ? WHERE id = ?")
+    .run("zzzz-older-attempt", firstId);
+  sqlite.prepare("UPDATE dvd_disc_verifications SET id = ? WHERE id = ?")
+    .run("aaaa-newer-attempt", secondId);
+  sqlite.close();
+
+  const access = fixture.openAccess();
+  try {
+    const recovery = access.catalog.findArchiveRecoveryById(
+      seeded.recoveryId as ArchiveRecoveryId,
+    )!;
+    expect(access.dvdDiscVerifications.findLatestForRecovery(
+      recovery.id,
+    )).toMatchObject({
+      id: "aaaa-newer-attempt",
+      attemptOrdinal: 2,
+      createdAt: new Date("2026-10-22T12:00:00.000Z"),
+    });
+  } finally {
+    access.close();
+  }
 });

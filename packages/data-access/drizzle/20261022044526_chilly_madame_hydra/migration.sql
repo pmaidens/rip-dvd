@@ -1,6 +1,7 @@
 CREATE TABLE `dvd_disc_verifications` (
 	`id` text PRIMARY KEY,
 	`archive_recovery_id` text NOT NULL,
+	`attempt_ordinal` integer NOT NULL,
 	`original_disc_archive_id` text NOT NULL,
 	`disc_inspection_id` text NOT NULL,
 	`detected_disc_id` text NOT NULL,
@@ -29,6 +30,7 @@ CREATE TABLE `dvd_disc_verifications` (
 	CONSTRAINT "dvd_disc_verifications_id_not_null" CHECK("id" is not null),
 	CONSTRAINT "dvd_disc_verifications_status_check" CHECK("status" in ('queued', 'running', 'completed', 'failed')),
 	CONSTRAINT "dvd_disc_verifications_checkpoint_check" CHECK(typeof("checkpoint_revision") = 'integer' and "checkpoint_revision" > 0 and length("checkpoint_digest") = 64 and "checkpoint_digest" not glob '*[^0-9a-f]*'),
+	CONSTRAINT "dvd_disc_verifications_attempt_check" CHECK(typeof("attempt_ordinal") = 'integer' and "attempt_ordinal" > 0),
 	CONSTRAINT "dvd_disc_verifications_json_check" CHECK(json_valid("reasons") and json_type("reasons") = 'array' and json_valid("findings") and json_type("findings") = 'array'),
 	CONSTRAINT "dvd_disc_verifications_result_check" CHECK(("status" in ('queued', 'running') and "outcome" is null and "completed_at" is null and "failure_code" is null) or ("status" = 'completed' and "outcome" in ('match', 'mismatch', 'inconclusive') and "completed_at" is not null and "failure_code" is null) or ("status" = 'failed' and "outcome" is null and "completed_at" is not null and "failure_code" = 'DISC_VERIFICATION_UNAVAILABLE')),
 	CONSTRAINT "dvd_disc_verifications_claim_check" CHECK(("status" = 'running' and "claim_token" is not null and "claimed_at" is not null and "worker_execution_id" is not null and "started_at" is not null) or ("status" <> 'running' and "claim_token" is null and "claimed_at" is null))
@@ -51,5 +53,5 @@ CREATE TRIGGER `dvd_source_sample_manifests_delete_guard`
 BEFORE DELETE ON `dvd_source_sample_manifests`
 BEGIN SELECT RAISE(ABORT, 'DVD source sample manifests are immutable'); END;
 --> statement-breakpoint
-CREATE INDEX `dvd_disc_verifications_recovery_created_idx` ON `dvd_disc_verifications` (`archive_recovery_id`,`created_at`,`id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `dvd_disc_verifications_recovery_attempt_unique` ON `dvd_disc_verifications` (`archive_recovery_id`,`attempt_ordinal`);--> statement-breakpoint
 CREATE INDEX `dvd_disc_verifications_status_created_idx` ON `dvd_disc_verifications` (`status`,`created_at`,`id`);

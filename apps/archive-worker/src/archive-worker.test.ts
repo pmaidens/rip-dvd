@@ -78,6 +78,7 @@ import {
 } from "./optical-drive-hardware.js";
 
 const temporaryDirectories: string[] = [];
+const TEST_BOOT_IDENTITY = "00000000-0000-4000-8000-000000000001";
 const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
 const supportsLinuxWriterOwnership = existsSync("/proc/self/fd");
 const passingDvdGeometryValidator = {
@@ -6677,6 +6678,7 @@ describe("archive worker polling", () => {
       }),
     };
     const mediaGenerationObserver = createNodeMediaGenerationObserver({
+      bootIdentity: TEST_BOOT_IDENTITY,
       probeLauncher,
     });
     const { hardware, runner } = createLinuxSettlingHardware({
@@ -6740,6 +6742,7 @@ describe("archive worker polling", () => {
       }),
     };
     const mediaGenerationObserver = createNodeMediaGenerationObserver({
+      bootIdentity: TEST_BOOT_IDENTITY,
       probeLauncher,
     });
     const { hardware, runner } = createLinuxSettlingHardware({

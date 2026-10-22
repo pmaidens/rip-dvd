@@ -2065,6 +2065,16 @@
       "table": "dvd_disc_verifications"
     },
     {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "attempt_ordinal",
+      "entityType": "columns",
+      "table": "dvd_disc_verifications"
+    },
+    {
       "type": "text",
       "notNull": true,
       "autoincrement": false,
@@ -6064,18 +6074,14 @@
           "isExpression": false
         },
         {
-          "value": "created_at",
-          "isExpression": false
-        },
-        {
-          "value": "id",
+          "value": "attempt_ordinal",
           "isExpression": false
         }
       ],
-      "isUnique": false,
+      "isUnique": true,
       "where": null,
       "origin": "manual",
-      "name": "dvd_disc_verifications_recovery_created_idx",
+      "name": "dvd_disc_verifications_recovery_attempt_unique",
       "entityType": "indexes",
       "table": "dvd_disc_verifications"
     },
@@ -7096,6 +7102,12 @@
     {
       "value": "typeof(\"checkpoint_revision\") = 'integer' and \"checkpoint_revision\" > 0 and length(\"checkpoint_digest\") = 64 and \"checkpoint_digest\" not glob '*[^0-9a-f]*'",
       "name": "dvd_disc_verifications_checkpoint_check",
+      "entityType": "checks",
+      "table": "dvd_disc_verifications"
+    },
+    {
+      "value": "typeof(\"attempt_ordinal\") = 'integer' and \"attempt_ordinal\" > 0",
+      "name": "dvd_disc_verifications_attempt_check",
       "entityType": "checks",
       "table": "dvd_disc_verifications"
     },

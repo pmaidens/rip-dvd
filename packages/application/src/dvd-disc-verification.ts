@@ -282,6 +282,10 @@ export async function requestDvdDiscVerification(
   if (recovery === null) {
     throw new RecordNotFoundError("archive recovery", input.archiveRecoveryId);
   }
+  const replay = access.dvdDiscVerifications.replaySubmission(input);
+  if (replay !== null) {
+    return { verification: visibleVerification(replay, true) };
+  }
   let submitted;
   try {
     submitted = await access.withDvdCurrentCheckpoint(

@@ -27,6 +27,7 @@ import {
 import { readActiveMediaGeneration } from "./optical-media-probe.js";
 
 const execFileAsync = promisify(execFile);
+const TEST_BOOT_IDENTITY = "00000000-0000-4000-8000-000000000001";
 const nodeFileDiscContentReader = createNodeDiscContentReader({
   probeLauncher: createNodeFileDiscContentProbeLauncher(),
 });
@@ -529,6 +530,7 @@ describe("Linux Optical Drive hardware boundary", () => {
       scriptPath: fixture.scriptPath,
     });
     const observer = createNodeMediaGenerationObserver({
+      bootIdentity: TEST_BOOT_IDENTITY,
       observationTimeoutMs: 500,
       probeLauncher: launcher,
     });
@@ -539,12 +541,41 @@ describe("Linux Optical Drive hardware boundary", () => {
       await expectProbeProcessesExited(fixture.pidPath, 1);
       await expect(
         observer.observe("/dev/sr0", new AbortController().signal),
-      ).resolves.toBe("29");
+      ).resolves.toBe(`${TEST_BOOT_IDENTITY}:29`);
 
       await expectProbeProcessesExited(fixture.pidPath);
     } finally {
       await fixture.cleanup();
     }
+  });
+
+  it("changes media identity when the host boot changes even if diskseq repeats", async () => {
+    const probeLauncher = {
+      start: vi.fn(() => ({
+        cancel: vi.fn(),
+        closed: Promise.resolve(),
+        result: Promise.resolve("29\n"),
+      })),
+    };
+    const first = createNodeMediaGenerationObserver({
+      bootIdentity: TEST_BOOT_IDENTITY,
+      probeLauncher,
+    });
+    const secondBootIdentity =
+      "00000000-0000-4000-8000-000000000002";
+    const second = createNodeMediaGenerationObserver({
+      bootIdentity: secondBootIdentity,
+      probeLauncher,
+    });
+
+    await expect(first.observe(
+      "/dev/sr0",
+      new AbortController().signal,
+    )).resolves.toBe(`${TEST_BOOT_IDENTITY}:29`);
+    await expect(second.observe(
+      "/dev/sr0",
+      new AbortController().signal,
+    )).resolves.toBe(`${secondBootIdentity}:29`);
   });
 
   it("kills and retires an aborted production probe before the next observation", async () => {
@@ -553,6 +584,7 @@ describe("Linux Optical Drive hardware boundary", () => {
       scriptPath: fixture.scriptPath,
     });
     const observer = createNodeMediaGenerationObserver({
+      bootIdentity: TEST_BOOT_IDENTITY,
       observationTimeoutMs: 2_000,
       probeLauncher: launcher,
     });
@@ -567,7 +599,7 @@ describe("Linux Optical Drive hardware boundary", () => {
       await expectProbeProcessesExited(fixture.pidPath, 1);
       await expect(
         observer.observe("/dev/sr0", new AbortController().signal),
-      ).resolves.toBe("29");
+      ).resolves.toBe(`${TEST_BOOT_IDENTITY}:29`);
       await expectProbeProcessesExited(fixture.pidPath);
     } finally {
       await fixture.cleanup();
@@ -604,6 +636,7 @@ describe("Linux Optical Drive hardware boundary", () => {
       }),
     };
     const observer = createNodeMediaGenerationObserver({
+      bootIdentity: TEST_BOOT_IDENTITY,
       observationTimeoutMs: 10,
       probeLauncher: launcher,
     });
@@ -629,7 +662,9 @@ describe("Linux Optical Drive hardware boundary", () => {
     );
     expect(launcher.start).toHaveBeenCalledTimes(2);
     pendingProbes[1]?.resolve("31\n");
-    await expect(recoveredObservation).resolves.toBe("31");
+    await expect(recoveredObservation).resolves.toBe(
+      `${TEST_BOOT_IDENTITY}:31`,
+    );
   });
 
   it("bounds never-closing helpers across distinct historical device paths", async () => {
@@ -641,6 +676,7 @@ describe("Linux Optical Drive hardware boundary", () => {
       })),
     };
     const observer = createNodeMediaGenerationObserver({
+      bootIdentity: TEST_BOOT_IDENTITY,
       observationTimeoutMs: 1,
       probeLauncher: launcher,
     });
@@ -684,6 +720,7 @@ describe("Linux Optical Drive hardware boundary", () => {
       }),
     };
     const observer = createNodeMediaGenerationObserver({
+      bootIdentity: TEST_BOOT_IDENTITY,
       maxActiveProbes: 2,
       observationTimeoutMs: 5,
       probeLauncher: launcher,
@@ -708,7 +745,9 @@ describe("Linux Optical Drive hardware boundary", () => {
     );
     probes.get("/dev/sr2")?.resolve("41\n");
     probes.get("/dev/sr2")?.close();
-    await expect(healthyObservation).resolves.toBe("41");
+    await expect(healthyObservation).resolves.toBe(
+      `${TEST_BOOT_IDENTITY}:41`,
+    );
     expect(launcher.start).toHaveBeenCalledTimes(3);
   });
 
@@ -725,6 +764,7 @@ describe("Linux Optical Drive hardware boundary", () => {
       },
     });
     const observer = createNodeMediaGenerationObserver({
+      bootIdentity: TEST_BOOT_IDENTITY,
       observationTimeoutMs: 100,
       probeLauncher: launcher,
     });
@@ -752,7 +792,7 @@ describe("Linux Optical Drive hardware boundary", () => {
 
       await expect(
         observer.observe("/dev/sr0", new AbortController().signal),
-      ).resolves.toBe("29");
+      ).resolves.toBe(`${TEST_BOOT_IDENTITY}:29`);
       await expectProbeProcessesExited(fixture.pidPath);
     } finally {
       if (stuckPid !== undefined) {
@@ -776,6 +816,7 @@ describe("Linux Optical Drive hardware boundary", () => {
       terminateProcess,
     });
     const observer = createNodeMediaGenerationObserver({
+      bootIdentity: TEST_BOOT_IDENTITY,
       observationTimeoutMs: 500,
       probeLauncher: launcher,
     });
@@ -804,7 +845,7 @@ describe("Linux Optical Drive hardware boundary", () => {
 
       await expect(
         observer.observe("/dev/sr0", new AbortController().signal),
-      ).resolves.toBe("29");
+      ).resolves.toBe(`${TEST_BOOT_IDENTITY}:29`);
       await expectProbeProcessesExited(fixture.pidPath);
     } finally {
       if (stuckPid !== undefined) {

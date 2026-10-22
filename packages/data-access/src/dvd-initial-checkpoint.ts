@@ -2,8 +2,16 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { assertDvdArchiveBoundaryEvidenceDigest, assertDvdArchiveEvidenceManifestDigests } from "./dvd-archive-evidence-digests.js";
+import {
+  assertDvdArchiveBoundaryEvidenceDigest,
+  assertDvdArchiveEvidenceManifestDigests,
+  assertDvdArchiveRecoveryReadEvidenceDigest,
+  type DvdArchiveEvidenceManifestDigestInput,
+  type DvdArchiveEvidenceManifestDigests,
+  type DvdArchiveRecoveryReadEvidenceDigestInput,
+} from "./dvd-archive-evidence-digests.js";
 import { archiveBoundaryEvidenceFromRecord, type ArchiveBoundaryEvidence } from "./archive-boundary.js";
+import { assertDvdEvidenceRangeTransition } from "./dvd-evidence-transition.js";
 import { validateDvdSourceSampleManifest } from "./dvd-disc-verification.js";
 import type { ArchiveJob, DvdArchiveEvidenceHeader, DvdInitialArchiveSave, OriginalDiscArchive } from "./types.js";
 
@@ -21,7 +29,10 @@ export interface CommittedDvdCurrentCheckpoint {
 }
 
 export class DvdCheckpointReadFault extends Error {
-  constructor(readonly code: string) { super(code); }
+  constructor(readonly code: string, options?: ErrorOptions) {
+    super(code, options);
+    this.name = "DvdCheckpointReadFault";
+  }
 }
 
 interface DvdCheckpointPointer {
@@ -30,6 +41,16 @@ interface DvdCheckpointPointer {
   currentManifestRevision: number;
   currentManifestDigest: string;
   publicationDigest: string;
+}
+
+interface DvdRecoveryManifestRecord extends
+  DvdArchiveEvidenceManifestDigestInput,
+  DvdArchiveEvidenceManifestDigests {
+  id: string;
+  recoveryRead: DvdArchiveRecoveryReadEvidenceDigestInput & {
+    id: string;
+    evidenceDigest: string;
+  };
 }
 
 export function canonicalPublicationJson(value: unknown): string {
@@ -61,6 +82,95 @@ async function readRecord(path: string, code: string): Promise<unknown> {
     return value;
   } catch { throw new DvdCheckpointReadFault(code); }
   finally { await file?.close(); }
+}
+
+function assertRecoveryManifestStaticProvenance(
+  manifest: DvdRecoveryManifestRecord,
+  initial: CommittedDvdInitialEvidence,
+): void {
+  if (
+    manifest.originalDiscArchiveId !== initial.originalDiscArchiveId ||
+    manifest.evidenceFormat !== initial.evidenceFormat ||
+    manifest.imageFingerprint !== initial.imageFingerprint ||
+    manifest.sectorSizeBytes !== initial.sectorSizeBytes ||
+    manifest.acceptedEndLbaExclusive !== initial.acceptedEndLbaExclusive ||
+    manifest.boundaryPolicyVersion !== initial.boundaryPolicyVersion ||
+    manifest.boundaryReportedSizeBytes !== initial.boundaryReportedSizeBytes ||
+    manifest.boundaryPublishedSizeBytes !== initial.boundaryPublishedSizeBytes ||
+    manifest.boundaryEvidenceDigest !== initial.boundaryEvidenceDigest
+  ) {
+    throw new Error("Recovery manifest provenance differs");
+  }
+}
+
+function assertRecoveryManifestRecord(
+  raw: unknown,
+  initial: CommittedDvdInitialEvidence,
+): asserts raw is DvdRecoveryManifestRecord {
+  const manifest = raw as DvdRecoveryManifestRecord;
+  const expectedKeys = [
+    "acceptedEndLbaExclusive",
+    "boundaryEvidenceDigest",
+    "boundaryPolicyVersion",
+    "boundaryPublishedSizeBytes",
+    "boundaryReportedSizeBytes",
+    "evidenceFormat",
+    "id",
+    "imageFingerprint",
+    "manifestDigest",
+    "originalDiscArchiveId",
+    "previousManifestDigest",
+    "previousManifestId",
+    "recoveryRead",
+    "recoveryReadEvidenceDigest",
+    "recoveryReadId",
+    "revision",
+    "sectorSizeBytes",
+    "unrecoveredSourceRanges",
+    "unrecoveredSourceRangesDigest",
+  ];
+  const keys = Object.keys(manifest).sort();
+  const recoveryReadKeys = Object.keys(manifest.recoveryRead ?? {}).sort();
+  const expectedRecoveryReadKeys = [
+    "evidenceDigest",
+    "fromManifestId",
+    "fromManifestRevision",
+    "id",
+    "originalDiscArchiveId",
+    "outcome",
+    "sectorCount",
+    "startLba",
+  ];
+  if (
+    keys.length !== expectedKeys.length ||
+    keys.some((key, index) => key !== expectedKeys[index]) ||
+    typeof manifest.id !== "string" ||
+    manifest.id.length === 0 ||
+    manifest.id.length > 256 ||
+    !Number.isSafeInteger(manifest.revision) ||
+    manifest.revision < 2 ||
+    manifest.previousManifestId === null ||
+    manifest.previousManifestDigest === null ||
+    manifest.recoveryReadId === null ||
+    manifest.recoveryReadEvidenceDigest === null ||
+    manifest.recoveryRead === null ||
+    typeof manifest.recoveryRead !== "object" ||
+    recoveryReadKeys.length !== expectedRecoveryReadKeys.length ||
+    recoveryReadKeys.some((key, index) =>
+      key !== expectedRecoveryReadKeys[index]
+    ) ||
+    manifest.recoveryRead.id !== manifest.recoveryReadId ||
+    manifest.recoveryRead.evidenceDigest !==
+      manifest.recoveryReadEvidenceDigest
+  ) {
+    throw new Error("Recovery manifest shape differs");
+  }
+  assertDvdArchiveEvidenceManifestDigests(manifest);
+  assertDvdArchiveRecoveryReadEvidenceDigest(
+    manifest.recoveryRead,
+    manifest.recoveryRead.evidenceDigest,
+  );
+  assertRecoveryManifestStaticProvenance(manifest, initial);
 }
 
 async function readCommittedDvdCheckpointRecords(input: {
@@ -180,6 +290,63 @@ async function readCommittedDvdCheckpointRecords(input: {
     ) throw new Error("Checkpoint differs");
   } catch {
     throw new DvdCheckpointReadFault("DVD_PUBLICATION_CHECKPOINT_CONFLICT");
+  }
+  if (checkpoint.currentManifestRevision > 1) {
+    try {
+      const currentRaw = await readRecord(
+        join(
+          directory,
+          `recovery-manifest-${checkpoint.currentManifestRevision}.json`,
+        ),
+        "DVD_PUBLICATION_CHECKPOINT_CONFLICT",
+      );
+      input.assertImageOwnership();
+      assertRecoveryManifestRecord(currentRaw, manifest);
+      const current = currentRaw;
+      const previous = checkpoint.currentManifestRevision === 2
+        ? manifest
+        : await readRecord(
+          join(
+            directory,
+            `recovery-manifest-${checkpoint.currentManifestRevision - 1}.json`,
+          ),
+          "DVD_PUBLICATION_CHECKPOINT_CONFLICT",
+        );
+      input.assertImageOwnership();
+      if (checkpoint.currentManifestRevision > 2) {
+        assertRecoveryManifestRecord(previous, manifest);
+      }
+      const predecessor = previous as {
+        id: string;
+        revision: number;
+        manifestDigest: string;
+        unrecoveredSourceRanges: CommittedDvdInitialEvidence["unrecoveredSourceRanges"];
+      };
+      if (
+        current.id !== checkpoint.currentManifestId ||
+        current.revision !== checkpoint.currentManifestRevision ||
+        current.manifestDigest !== checkpoint.currentManifestDigest ||
+        predecessor.revision !== current.revision - 1 ||
+        current.previousManifestId !== predecessor.id ||
+        current.previousManifestDigest !== predecessor.manifestDigest ||
+        current.recoveryRead.originalDiscArchiveId !== archive.id ||
+        current.recoveryRead.fromManifestId !== predecessor.id ||
+        current.recoveryRead.fromManifestRevision !== predecessor.revision
+      ) {
+        throw new Error("Recovery manifest transition differs");
+      }
+      assertDvdEvidenceRangeTransition(
+        predecessor.unrecoveredSourceRanges,
+        current.unrecoveredSourceRanges,
+        current.recoveryRead,
+      );
+    } catch (error) {
+      if (error instanceof DvdCheckpointReadFault) throw error;
+      throw new DvdCheckpointReadFault(
+        "DVD_PUBLICATION_CHECKPOINT_CONFLICT",
+        { cause: error },
+      );
+    }
   }
   if (header !== null) {
     if (header.currentManifestRevision > checkpoint.currentManifestRevision)

@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it } from "vitest";
 
 import { createOperatorWorkflowFixture } from "../../../../../../operator-cli/src/operator-workflow.test-support.js";
@@ -120,6 +121,80 @@ it("rejects a stale checkpoint with a stable machine-readable reason", async () 
         code: "DISC_CHECKPOINT_CHANGED",
         message: "DISC_CHECKPOINT_CHANGED",
       },
+    });
+  } finally {
+    access.close();
+  }
+});
+
+it("reports a corrupt current database manifest consistently through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const sqlite = new DatabaseSync(fixture.databasePath);
+  const guard = sqlite.prepare(`
+    SELECT sql FROM sqlite_master
+    WHERE type = 'trigger' AND name = 'dvd_evidence_manifest_update_guard'
+  `).get() as { sql: string };
+  sqlite.exec("DROP TRIGGER dvd_evidence_manifest_update_guard");
+  sqlite.prepare(`
+    UPDATE dvd_archive_evidence_manifests
+    SET manifest_digest = ?
+    WHERE id = ?
+  `).run("f".repeat(64), seeded.manifest.id);
+  sqlite.exec(guard.sql);
+  sqlite.close();
+
+  const access = fixture.openAccess();
+  try {
+    const webInspection = await createDvdDiscVerificationInspectionRoute(
+      seeded.recoveryId,
+      () => access,
+    );
+    const webInspectionBody = await webInspection.json();
+    const cliInspection = await fixture.run([
+      "archive-recovery",
+      "inspect-verification",
+      seeded.recoveryId,
+    ]);
+    expect(webInspection.status).toBe(200);
+    expect(webInspectionBody).toEqual(cliInspection.result);
+    expect(webInspectionBody).toMatchObject({
+      checkpoint: null,
+      action: {
+        available: false,
+        blockingReasons: [
+          expect.objectContaining({ code: "CONSISTENCY_FAULT" }),
+        ],
+      },
+    });
+
+    const body = {
+      mutationKey: "00000000-0000-4000-8000-000000000448",
+      discInspectionId: seeded.inspection.id,
+      checkpointRevision: 1,
+      checkpointDigest: seeded.manifest.manifestDigest,
+    };
+    const webSubmission = await createDvdDiscVerificationRoute(
+      request(seeded.recoveryId, body),
+      seeded.recoveryId,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const cliSubmission = await fixture.run([
+      "archive-recovery", "verify-disc", seeded.recoveryId,
+      "--key", body.mutationKey,
+      "--disc-inspection-id", body.discInspectionId,
+      "--checkpoint-revision", "1",
+      "--checkpoint-digest", body.checkpointDigest,
+    ]);
+    expect(webSubmission.status).toBe(409);
+    expect(await webSubmission.json()).toMatchObject({
+      error: { code: "CONSISTENCY_FAULT" },
+    });
+    expect(cliSubmission).toMatchObject({
+      exitCode: 2,
+      result: { error: { code: "CONSISTENCY_FAULT" } },
     });
   } finally {
     access.close();

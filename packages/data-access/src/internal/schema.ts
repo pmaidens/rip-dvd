@@ -1376,6 +1376,7 @@ export const dvdDiscVerifications = sqliteTable(
       .$type<ArchiveRecoveryId>()
       .notNull()
       .references(() => archiveRecoveries.id, { onDelete: "restrict" }),
+    attemptOrdinal: integer("attempt_ordinal").notNull(),
     originalDiscArchiveId: text("original_disc_archive_id")
       .$type<OriginalDiscArchiveId>()
       .notNull()
@@ -1420,10 +1421,9 @@ export const dvdDiscVerifications = sqliteTable(
   },
   (table) => [
     check("dvd_disc_verifications_id_not_null", sql`${table.id} is not null`),
-    index("dvd_disc_verifications_recovery_created_idx").on(
+    uniqueIndex("dvd_disc_verifications_recovery_attempt_unique").on(
       table.archiveRecoveryId,
-      table.createdAt,
-      table.id,
+      table.attemptOrdinal,
     ),
     index("dvd_disc_verifications_status_created_idx").on(
       table.status,
@@ -1437,6 +1437,10 @@ export const dvdDiscVerifications = sqliteTable(
     check(
       "dvd_disc_verifications_checkpoint_check",
       sql`typeof(${table.checkpointRevision}) = 'integer' and ${table.checkpointRevision} > 0 and length(${table.checkpointDigest}) = 64 and ${table.checkpointDigest} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "dvd_disc_verifications_attempt_check",
+      sql`typeof(${table.attemptOrdinal}) = 'integer' and ${table.attemptOrdinal} > 0`,
     ),
     check(
       "dvd_disc_verifications_json_check",
