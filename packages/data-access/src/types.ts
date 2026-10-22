@@ -1582,6 +1582,25 @@ export interface DvdInitialArchiveSave {
     };
 }
 
+export interface DvdRecoveryCheckpointProjection {
+  recoveryRead: import("./dvd-archive-evidence-digests.js").DvdArchiveRecoveryReadEvidenceDigestInput & {
+    id: string;
+    evidenceDigest: string;
+  };
+  manifest: import("./dvd-archive-evidence-digests.js").DvdArchiveEvidenceManifestDigestInput &
+    import("./dvd-archive-evidence-digests.js").DvdArchiveEvidenceManifestDigests & {
+      id: string;
+    };
+}
+
+export interface DvdRecoveryAccess {
+  /** Project a filesystem-committed next checkpoint. The caller must install
+   * and synchronize the authoritative pointer before invoking this method. */
+  projectCheckpoint(
+    input: DvdRecoveryCheckpointProjection,
+  ): DvdArchiveEvidenceHeader;
+}
+
 export interface ArchiveJobAccess {
   /** Marked-only lease operations. Neither admits a new job. Reclaim requires
    * archive exclusion and proven native-writer inactivity at the workflow. */
@@ -2020,7 +2039,7 @@ export interface EncodeOutputInspectionReadAccess
 }
 
 export interface DataAccess {
-  readDvdInitialCheckpoint(
+  readDvdCheckpoint(
     id: OriginalDiscArchiveId,
     ownership: {
       withConsistentRead<Result>(request: {
@@ -2035,8 +2054,9 @@ export interface DataAccess {
         }): Promise<Result>;
       }): Promise<Result>;
     },
-  ): Promise<import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence | null>;
+  ): Promise<import("./dvd-initial-checkpoint.js").CommittedDvdCheckpointEvidence | null>;
   readonly notifications: import("./notification-types.js").NotificationAccess;
+  readonly dvdRecovery: DvdRecoveryAccess;
   readonly dvdRecoveryStorage: DvdRecoveryStorageAccess;
   readonly catalog: CatalogAccess;
   readonly encodingProfiles: EncodingProfileAccess;

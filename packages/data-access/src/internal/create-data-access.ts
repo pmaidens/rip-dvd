@@ -1,5 +1,8 @@
-import { canonicalPublicationJson, DvdCheckpointReadFault, readCommittedDvdInitialCheckpoint } from "../dvd-initial-checkpoint.js";
+import { canonicalPublicationJson, DvdCheckpointReadFault, readCommittedDvdCheckpoint } from "../dvd-initial-checkpoint.js";
 import { DvdInitialSaveFault } from "../errors.js";
+import {
+  assertDvdEvidenceRangeTransition,
+} from "../dvd-recovery-transition.js";
 import { createNotificationAccess, createNotificationEventWriter } from "./notifications.js";
 import { recordNotificationOutcome } from "../notification-policy.js";
 import {
@@ -234,7 +237,6 @@ import type {
   DiscSelectionSupersession,
   DvdArchiveEvidenceHeader,
   DvdArchiveEvidenceFormat,
-  DvdUnrecoveredSourceRange,
   EncodeJobClaimToken,
   EncodeJobCleanupClaimToken,
   EncodeJobId,
@@ -312,92 +314,6 @@ const DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
 const ENCODE_JOB_FAILURE_REPORT_JOB_LIMIT = 400;
 const DVD_ARCHIVE_EVIDENCE_AUDIT_MANIFEST_LIMIT = 10_000;
-
-function expectedDvdEvidenceRangesAfterRecoveryRead(
-  ranges: readonly DvdUnrecoveredSourceRange[],
-  startLba: number,
-  outcome: "recovered" | "failed",
-): DvdUnrecoveredSourceRange[] {
-  const containingIndex = ranges.findIndex((range) =>
-    startLba >= range.startLba &&
-    startLba < range.startLba + range.sectorCount
-  );
-  if (containingIndex < 0) {
-    throw new DomainInvariantError(
-      "Persisted DVD Archive Recovery evidence does not target Unrecovered Source",
-    );
-  }
-
-  const containing = ranges[containingIndex]!;
-  if (outcome === "failed" && containing.classification === "individually_failed") {
-    throw new DomainInvariantError(
-      "Persisted DVD Archive Evidence contains a redundant failed recovery transition",
-    );
-  }
-  const replacements: DvdUnrecoveredSourceRange[] = [];
-  if (startLba > containing.startLba) {
-    replacements.push({
-      startLba: containing.startLba,
-      sectorCount: startLba - containing.startLba,
-      classification: containing.classification,
-    });
-  }
-  if (outcome === "failed") {
-    replacements.push({
-      startLba,
-      sectorCount: 1,
-      classification: "individually_failed",
-    });
-  }
-  const containingEndLbaExclusive =
-    containing.startLba + containing.sectorCount;
-  if (startLba + 1 < containingEndLbaExclusive) {
-    replacements.push({
-      startLba: startLba + 1,
-      sectorCount: containingEndLbaExclusive - startLba - 1,
-      classification: containing.classification,
-    });
-  }
-
-  const next = [
-    ...ranges.slice(0, containingIndex),
-    ...replacements,
-    ...ranges.slice(containingIndex + 1),
-  ];
-  return next.reduce<DvdUnrecoveredSourceRange[]>((normalized, range) => {
-    const previous = normalized.at(-1);
-    if (
-      previous !== undefined &&
-      previous.classification === range.classification &&
-      previous.startLba + previous.sectorCount === range.startLba
-    ) {
-      normalized[normalized.length - 1] = {
-        ...previous,
-        sectorCount: previous.sectorCount + range.sectorCount,
-      };
-    } else {
-      normalized.push(range);
-    }
-    return normalized;
-  }, []);
-}
-
-function assertDvdEvidenceRangeTransition(
-  previous: readonly DvdUnrecoveredSourceRange[],
-  current: readonly DvdUnrecoveredSourceRange[],
-  recoveryRead: { startLba: number; outcome: "recovered" | "failed" },
-): void {
-  const expected = expectedDvdEvidenceRangesAfterRecoveryRead(
-    previous,
-    recoveryRead.startLba,
-    recoveryRead.outcome,
-  );
-  if (JSON.stringify(expected) !== JSON.stringify(current)) {
-    throw new DomainInvariantError(
-      "Persisted DVD Archive Evidence ranges do not match their recovery read",
-    );
-  }
-}
 
 function discSelectionMutationEvidence(
   jobs: readonly {
@@ -6860,7 +6776,7 @@ export function createDataAccessInternal(
   }
 
   const access: LegacySidecarDataAccess = {
-    async readDvdInitialCheckpoint(id, ownership) {
+    async readDvdCheckpoint(id, ownership) {
       const readSnapshot = () => access.readConsistentSnapshot(reader => {
         const archive = reader.catalog.listOriginalDiscArchives({ ids: [id] })[0];
         if (!archive) throw new RecordNotFoundError("Original Disc Archive", id);
@@ -6890,7 +6806,7 @@ export function createDataAccessInternal(
               "DVD_EVIDENCE_CHANGED_DURING_READ",
             );
           }
-          const manifest = await readCommittedDvdInitialCheckpoint({
+          const manifest = await readCommittedDvdCheckpoint({
             originalsLibraryPath: normalizedOriginalsLibraryPath,
             ...snapshot,
             assertImageOwnership: assertOwned,
@@ -6909,6 +6825,184 @@ export function createDataAccessInternal(
       });
     },
     notifications: createNotificationAccess(database, now),
+    dvdRecovery: {
+      projectCheckpoint(input) {
+        const { manifest, recoveryRead } = input;
+        assertDvdArchiveRecoveryReadEvidenceDigest(
+          recoveryRead,
+          recoveryRead.evidenceDigest,
+        );
+        assertDvdArchiveEvidenceManifestDigests(manifest);
+        if (
+          manifest.originalDiscArchiveId !==
+            recoveryRead.originalDiscArchiveId ||
+          manifest.revision !== recoveryRead.fromManifestRevision + 1 ||
+          manifest.previousManifestId !== recoveryRead.fromManifestId ||
+          manifest.recoveryReadId !== recoveryRead.id ||
+          manifest.recoveryReadEvidenceDigest !==
+            recoveryRead.evidenceDigest
+        ) {
+          throw new DomainInvariantError(
+            "DVD recovery checkpoint does not match its recovery read",
+          );
+        }
+
+        const archiveId = manifest.originalDiscArchiveId as OriginalDiscArchiveId;
+        database.transaction((transaction) => {
+          const current = requireRow(
+            transaction
+              .select({
+                header: dvdArchiveEvidenceHeaders,
+                manifest: dvdArchiveEvidenceManifests,
+                archive: originalDiscArchives,
+                recovery: archiveRecoveries,
+              })
+              .from(dvdArchiveEvidenceHeaders)
+              .innerJoin(
+                dvdArchiveEvidenceManifests,
+                eq(
+                  dvdArchiveEvidenceManifests.id,
+                  dvdArchiveEvidenceHeaders.currentManifestId,
+                ),
+              )
+              .innerJoin(
+                originalDiscArchives,
+                eq(
+                  originalDiscArchives.id,
+                  dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+                ),
+              )
+              .innerJoin(
+                archiveRecoveries,
+                eq(
+                  archiveRecoveries.originalDiscArchiveId,
+                  dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+                ),
+              )
+              .where(
+                eq(dvdArchiveEvidenceHeaders.originalDiscArchiveId, archiveId),
+              )
+              .get(),
+            "DVD Archive Evidence",
+            archiveId,
+          );
+
+          if (
+            current.header.currentManifestRevision === manifest.revision &&
+            current.header.currentManifestId === manifest.id &&
+            current.header.currentManifestDigest === manifest.manifestDigest
+          ) {
+            return;
+          }
+          if (
+            current.header.currentManifestId !==
+              recoveryRead.fromManifestId ||
+            current.header.currentManifestRevision !==
+              recoveryRead.fromManifestRevision ||
+            current.header.currentManifestDigest !==
+              manifest.previousManifestDigest ||
+            current.manifest.manifestDigest !==
+              current.header.currentManifestDigest ||
+            current.manifest.originalDiscArchiveId !== archiveId ||
+            current.recovery.status !== "eligible" ||
+            current.archive.integrityEvidenceRevision !==
+              current.header.currentManifestRevision
+          ) {
+            throw new DomainInvariantError(
+              "DVD recovery checkpoint base revision is stale or inconsistent",
+            );
+          }
+          if (
+            manifest.evidenceFormat !== current.manifest.evidenceFormat ||
+            manifest.imageFingerprint !== current.manifest.imageFingerprint ||
+            manifest.sectorSizeBytes !== current.manifest.sectorSizeBytes ||
+            manifest.acceptedEndLbaExclusive !==
+              current.manifest.acceptedEndLbaExclusive ||
+            manifest.boundaryPolicyVersion !==
+              current.manifest.boundaryPolicyVersion ||
+            manifest.boundaryReportedSizeBytes !==
+              current.manifest.boundaryReportedSizeBytes ||
+            manifest.boundaryPublishedSizeBytes !==
+              current.manifest.boundaryPublishedSizeBytes ||
+            manifest.boundaryEvidenceDigest !==
+              current.manifest.boundaryEvidenceDigest
+          ) {
+            throw new DomainInvariantError(
+              "DVD recovery checkpoint changed immutable archive evidence",
+            );
+          }
+          assertDvdEvidenceRangeTransition(
+            current.manifest.unrecoveredSourceRanges,
+            manifest.unrecoveredSourceRanges,
+            recoveryRead,
+          );
+
+          const timestamp = new Date(Math.max(
+            now().getTime(),
+            current.header.updatedAt.getTime() + 1,
+            current.archive.updatedAt.getTime() + 1,
+            current.recovery.updatedAt.getTime() + 1,
+          ));
+          transaction.insert(dvdArchiveRecoveryReads).values({
+            ...recoveryRead,
+            originalDiscArchiveId: archiveId,
+            createdAt: timestamp,
+          }).run();
+          transaction.insert(dvdArchiveEvidenceManifests).values({
+            ...manifest,
+            originalDiscArchiveId: archiveId,
+            createdAt: timestamp,
+          }).run();
+          transaction.update(dvdArchiveEvidenceHeaders).set({
+            currentManifestId: manifest.id,
+            currentManifestRevision: manifest.revision,
+            currentManifestDigest: manifest.manifestDigest,
+            updatedAt: timestamp,
+          }).where(
+            and(
+              eq(dvdArchiveEvidenceHeaders.originalDiscArchiveId, archiveId),
+              eq(
+                dvdArchiveEvidenceHeaders.currentManifestId,
+                recoveryRead.fromManifestId,
+              ),
+              eq(
+                dvdArchiveEvidenceHeaders.currentManifestRevision,
+                recoveryRead.fromManifestRevision,
+              ),
+            ),
+          ).run();
+
+          const badSectorRanges = manifest.unrecoveredSourceRanges.map(
+            ({ startLba, sectorCount }) => ({ startLba, sectorCount }),
+          );
+          const badSectorCount = badSectorRanges.reduce(
+            (count, range) => count + range.sectorCount,
+            0,
+          );
+          transaction.update(originalDiscArchives).set({
+            integrity: badSectorCount === 0 ? "clean_read" : "incomplete_read",
+            integrityEvidenceRevision: manifest.revision,
+            integrityPolicyVersion: "dvd-recovery-evidence-v1",
+            badSectorCount,
+            badAreaCount: badSectorRanges.length,
+            badSectorRanges,
+            updatedAt: timestamp,
+          }).where(eq(originalDiscArchives.id, archiveId)).run();
+          transaction.update(archiveRecoveries).set({
+            status: badSectorCount === 0 ? "completed" : "eligible",
+            updatedAt: timestamp,
+          }).where(
+            eq(archiveRecoveries.originalDiscArchiveId, archiveId),
+          ).run();
+        }, { behavior: "immediate" });
+
+        const projected = access.catalog.findDvdArchiveEvidenceHeader(archiveId);
+        if (projected === null) {
+          throw new RecordNotFoundError("DVD Archive Evidence", archiveId);
+        }
+        return projected;
+      },
+    },
     dvdRecoveryStorage: {
       readCurrent: readCurrentDvdRecoveryStoragePreflight,
       record(input) {

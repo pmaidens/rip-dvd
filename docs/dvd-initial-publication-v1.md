@@ -168,9 +168,12 @@ of the map, and only then is `nextCursor` null. Follow each cursor to retrieve
 the complete map. Cursors bind the archive, complete revision identity and next
 range offset, and remain stable across repeated reads of the same checkpoint.
 A cursor for a different revision returns `DVD_EVIDENCE_CURSOR_STALE` with the
-current revision and no ranges. The initial reader fails closed if a pointer
-claims a checkpoint it cannot validate; later recovery checkpoint readers belong
-to the recovery work.
+current revision and no ranges. The checkpoint reader fails closed if a pointer
+claims a revision it cannot validate. It follows the immutable chain from this
+initial manifest through the current `dvd-recovery-batch-v1` manifest, validates
+each one-sector source transition, and verifies the current image version and
+protected bytes. The recovery commit contract is documented in
+[DVD recovery batch v1](dvd-recovery-batch-v1.md).
 
 Unavailable responses include a stable reason, null evidence and ranges,
 `complete: false`, and no cursor. Missing files, identity or digest conflicts,
