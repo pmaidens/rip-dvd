@@ -128,10 +128,6 @@ export interface DvdTitleDamageAssessmentInspection {
 }
 
 export interface DvdTitleDamageAssessmentAccess {
-  /** Worker persistence boundary for one checkpoint-stable title map. */
-  record(
-    input: RecordDvdTitleDamageAssessmentInput,
-  ): DvdTitleDamageAssessmentRecord;
   inspect(
     originalDiscArchiveId: OriginalDiscArchiveId,
   ): DvdTitleDamageAssessmentInspection;

@@ -69,6 +69,8 @@ import type {
 } from "./dvd-structural-assessment.js";
 import type {
   DvdTitleDamageAssessmentAccess,
+  DvdTitleDamageAssessmentRecord,
+  RecordDvdTitleDamageMappingInput,
 } from "./dvd-title-damage-assessment.js";
 
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
@@ -2500,6 +2502,18 @@ export interface DataAccess {
     }
     | null
   >;
+  assessDvdTitleDamage(
+    id: OriginalDiscArchiveId,
+    ownership: DvdCheckpointReadOwnership,
+    assess: (
+      input: {
+        checkpoint: DvdTitleIdentityReviewSet["checkpoint"];
+        titleIdentity: DvdTitleIdentityReviewSet;
+        structuralAssessmentIdentity: string;
+      },
+      handle: DvdCheckpointReadHandle,
+    ) => Promise<readonly RecordDvdTitleDamageMappingInput[]>,
+  ): Promise<DvdTitleDamageAssessmentRecord | null>;
   readonly dvdStructuralAssessments: DvdStructuralAssessmentAccess;
   readonly dvdTitleDamageAssessments: DvdTitleDamageAssessmentAccess;
   readonly dvdRecoveryStorage: DvdRecoveryStorageAccess;

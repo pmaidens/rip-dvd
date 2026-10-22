@@ -106,9 +106,16 @@ export function inspectCatalogTitleDamage(
       unavailableReasons: result.unavailableReasons,
     };
   }
+  const assessmentIsCurrent = result.state === "current" &&
+    result.currentAssessmentIdentity === assessment.id &&
+    result.checkpoint?.manifestId === assessment.checkpoint.manifestId &&
+    result.checkpoint.manifestRevision ===
+      assessment.checkpoint.manifestRevision &&
+    result.checkpoint.manifestDigest === assessment.checkpoint.manifestDigest;
   if (
     cursor !== null &&
-    (cursor[1] !== archiveId ||
+    (!assessmentIsCurrent ||
+      cursor[1] !== archiveId ||
       cursor[2] !== assessment.checkpoint.manifestRevision ||
       cursor[3] !== assessment.checkpoint.manifestId ||
       cursor[4] !== assessment.checkpoint.manifestDigest ||
