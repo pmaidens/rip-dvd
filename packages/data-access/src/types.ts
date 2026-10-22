@@ -2122,7 +2122,7 @@ export interface DataAccess {
       }): Promise<ReadResult>;
     },
     task: (input: {
-      checkpoint: import("./dvd-initial-checkpoint.js").CommittedDvdCurrentCheckpoint;
+      checkpoint: import("./dvd-archive-checkpoint.js").CommittedDvdCurrentCheckpoint;
       assertOwned(): void;
     }) => Promise<Result>,
   ): Promise<Result | null>;
@@ -2142,7 +2142,7 @@ export interface DataAccess {
       }): Promise<ReadResult>;
     },
     task: (input: {
-      evidence: import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence;
+      evidence: import("./dvd-archive-checkpoint.js").CommittedDvdInitialEvidence;
       assertOwned(): void;
     }) => Promise<Result>,
   ): Promise<Result | null>;
@@ -2161,7 +2161,7 @@ export interface DataAccess {
         }): Promise<Result>;
       }): Promise<Result>;
     },
-  ): Promise<import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence | null>;
+  ): Promise<import("./dvd-archive-checkpoint.js").CommittedDvdInitialEvidence | null>;
   readonly notifications: import("./notification-types.js").NotificationAccess;
   readonly dvdRecoveryStorage: DvdRecoveryStorageAccess;
   readonly dvdDiscVerifications: DvdDiscVerificationAccess;

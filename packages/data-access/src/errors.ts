@@ -45,9 +45,29 @@ export class StaleDvdDiscVerificationError extends DomainInvariantError {
     readonly code:
       | "DISC_INSERTION_CHANGED"
       | "DISC_CHECKPOINT_CHANGED",
+    readonly currentIdentities: {
+      checkpoint: { revision: number; digest: string } | null;
+      insertion: {
+        discInspectionId: string;
+        detectedDiscId: string;
+        mediaGeneration: string;
+      } | null;
+      insertionCandidates: readonly {
+        discInspectionId: string;
+        detectedDiscId: string;
+        mediaGeneration: string;
+      }[];
+    } | null = null,
   ) {
     super(code);
     this.name = "StaleDvdDiscVerificationError";
+  }
+
+  get reasons(): readonly {
+    code: "DISC_INSERTION_CHANGED" | "DISC_CHECKPOINT_CHANGED";
+    message: string;
+  }[] {
+    return [{ code: this.code, message: this.message }];
   }
 }
 

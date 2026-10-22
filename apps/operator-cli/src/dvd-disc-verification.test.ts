@@ -135,6 +135,34 @@ it("inspects, submits, replays, and rejects stale inserted-disc verification", a
     writeAuthority: { available: true, blockingReasons: [] },
   });
 
+  const storageAccess = fixture.openAccess();
+  const supportedPreflight = storageAccess.dvdRecoveryStorage.readCurrent()!;
+  storageAccess.dvdRecoveryStorage.record({
+    ...supportedPreflight,
+    status: "unsupported",
+    reasonCode: "STORAGE_UNSUPPORTED",
+  });
+  storageAccess.close();
+  const storageBlocked = await fixture.run([
+    "archive-recovery", "inspect-verification", recoveryId,
+  ]);
+  expect(storageBlocked.result).toMatchObject({
+    verification: { status: "completed", outcome: "match", current: true },
+    writeAuthority: {
+      available: false,
+      blockingReasons: [
+        expect.objectContaining({ code: "STORAGE_UNSUPPORTED" }),
+      ],
+    },
+  });
+  const restoredStorageAccess = fixture.openAccess();
+  restoredStorageAccess.dvdRecoveryStorage.record({
+    ...supportedPreflight,
+    status: "supported",
+    reasonCode: null,
+  });
+  restoredStorageAccess.close();
+
   const staleAccess = fixture.openAccess();
   staleAccess.discInspections.clearCurrent({
     opticalDriveId: sourceDisc.opticalDriveId,
@@ -159,7 +187,20 @@ it("inspects, submits, replays, and rejects stale inserted-disc verification", a
   ]);
   expect(stale).toMatchObject({
     exitCode: 2,
-    result: { error: { code: "DISC_INSERTION_CHANGED" } },
+    result: {
+      error: {
+        code: "DISC_INSERTION_CHANGED",
+        reasons: [{ code: "DISC_INSERTION_CHANGED" }],
+        currentIdentities: {
+          checkpoint: {
+            revision: 1,
+            digest: seeded.manifest.manifestDigest,
+          },
+          insertion: null,
+          insertionCandidates: [],
+        },
+      },
+    },
   });
 });
 

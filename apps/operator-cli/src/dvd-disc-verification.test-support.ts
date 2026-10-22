@@ -32,6 +32,32 @@ export async function seedDvdDiscVerificationFixture(
   ]);
   const recoveryId = "synthetic-verification-recovery";
   const access = fixture.openAccess();
+  access.dvdRecoveryStorage.record({
+    contractVersion: "dvd-recovery-storage-preflight-v1",
+    status: "supported",
+    reasonCode: null,
+    facts: {
+      filesystemType: "synthetic-local",
+      storageClass: "local",
+      mutationProtection: {
+        status: "verified",
+        contract: "linux-rwf-atomic-v1",
+        unitBytes: 4_096,
+        memoryAlignmentBytes: 4_096,
+      },
+      journalReservationBytes: 1_048_576,
+      journalPayloadBytes: 983_040,
+      journalReservation: "verified",
+      journalSynchronization: "verified",
+      imageSynchronization: "verified",
+      checkpointSynchronization: "verified",
+      checkpointReplacement: "verified",
+      directorySynchronization: "verified",
+      crossProcessWriterExclusion: "verified",
+      crossHostWriterExclusion: "not_applicable",
+      disconnectionBehavior: "not_applicable",
+    },
+  });
   const sourceDisc = access.catalog.listDetectedDiscs(undefined, {
     ids: [seeded.archive.detectedDiscId],
   })[0]!;

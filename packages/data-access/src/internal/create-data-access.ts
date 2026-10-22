@@ -3,7 +3,7 @@ import {
   DvdCheckpointReadFault,
   readCommittedDvdCurrentCheckpoint,
   readCommittedDvdInitialCheckpoint,
-} from "../dvd-initial-checkpoint.js";
+} from "../dvd-archive-checkpoint.js";
 import { DvdInitialSaveFault } from "../errors.js";
 import { createNotificationAccess, createNotificationEventWriter } from "./notifications.js";
 import { recordNotificationOutcome } from "../notification-policy.js";
@@ -142,6 +142,8 @@ import {
   type DvdRecoveryStoragePreflight,
 } from "../dvd-recovery-storage-preflight.js";
 import {
+  dvdDiscVerificationCheckpointIsCurrent,
+  dvdDiscVerificationInsertionIsCurrent,
   dvdDiscVerificationOutcome,
   DVD_SOURCE_SAMPLE_BAND_COUNT,
   validateDvdDiscVerificationFindings,
@@ -7089,10 +7091,10 @@ export function createDataAccessInternal(
             "DVD Archive Evidence",
             recovery.originalDiscArchiveId,
           );
-          if (
-            header.currentManifestRevision !== input.checkpointRevision ||
-            header.currentManifestDigest !== input.checkpointDigest
-          ) {
+          if (!dvdDiscVerificationCheckpointIsCurrent(input, {
+            revision: header.currentManifestRevision,
+            digest: header.currentManifestDigest,
+          })) {
             throw new StaleDvdDiscVerificationError(
               "DISC_CHECKPOINT_CHANGED",
             );
@@ -7270,15 +7272,19 @@ export function createDataAccessInternal(
                 verification.findings.length === manifest.samples.length,
               budgetExhausted: verification.budgetExhausted,
               interrupted: true,
-              insertionChanged: inspection === undefined ||
-                !inspection.isCurrent ||
-                inspection.status !== "completed" ||
-                inspection.detectedDiscId !== verification.detectedDiscId ||
-                inspection.mediaGeneration !== verification.mediaGeneration,
-              checkpointChanged: header === undefined ||
-                header.currentManifestRevision !==
-                  verification.checkpointRevision ||
-                header.currentManifestDigest !== verification.checkpointDigest,
+              insertionChanged: !dvdDiscVerificationInsertionIsCurrent(
+                verification,
+                inspection,
+              ),
+              checkpointChanged: !dvdDiscVerificationCheckpointIsCurrent(
+                verification,
+                header === undefined
+                  ? null
+                  : {
+                      revision: header.currentManifestRevision,
+                      digest: header.currentManifestDigest,
+                    },
+              ),
               findings: verification.findings,
             });
             transaction.update(dvdDiscVerifications).set({
@@ -7447,15 +7453,17 @@ export function createDataAccessInternal(
             );
           }
           const insertionChanged = result.insertionChanged ||
-            inspection === undefined ||
-            !inspection.isCurrent ||
-            inspection.status !== "completed" ||
-            inspection.detectedDiscId !== current.detectedDiscId ||
-            inspection.mediaGeneration !== current.mediaGeneration;
+            !dvdDiscVerificationInsertionIsCurrent(current, inspection);
           const checkpointChanged = result.checkpointChanged ||
-            header === undefined ||
-            header.currentManifestRevision !== current.checkpointRevision ||
-            header.currentManifestDigest !== current.checkpointDigest;
+            !dvdDiscVerificationCheckpointIsCurrent(
+              current,
+              header === undefined
+                ? null
+                : {
+                    revision: header.currentManifestRevision,
+                    digest: header.currentManifestDigest,
+                  },
+            );
           const evaluated = dvdDiscVerificationOutcome({
             metadataMatches: current.sourceMetadataFingerprint ===
               current.observedMetadataFingerprint,

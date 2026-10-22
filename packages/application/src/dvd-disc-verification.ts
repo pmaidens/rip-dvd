@@ -2,6 +2,9 @@ import {
   assertDvdSourceSampleManifestProjection,
   DomainInvariantError,
   DvdCheckpointReadFault,
+  DVD_RECOVERY_STORAGE_REASON_MESSAGES,
+  dvdDiscVerificationCheckpointIsCurrent,
+  dvdDiscVerificationInsertionIsCurrent,
   RecordNotFoundError,
   StaleDvdDiscVerificationError,
   type ArchiveRecoveryId,
@@ -87,6 +90,77 @@ function authoritativeSourceSampleManifest(
   return published;
 }
 
+function currentDiscVerificationInsertion(
+  access: DataAccess,
+  sourceDriveId: string,
+) {
+  const candidates = access.discInspections.list({
+    currentOnly: true,
+  }).filter((inspection) =>
+    inspection.status === "completed" &&
+    inspection.detectedDiscId !== null
+  ).map((inspection) => ({
+    discInspectionId: inspection.id,
+    detectedDiscId: inspection.detectedDiscId!,
+    mediaGeneration: inspection.mediaGeneration,
+    opticalDriveId: inspection.opticalDriveId,
+  }));
+  const sourceDriveInsertion = candidates.find((candidate) =>
+    candidate.opticalDriveId === sourceDriveId
+  );
+  const current = sourceDriveInsertion ??
+    (candidates.length === 1 ? candidates[0]! : null);
+  const visible = candidates.map(({ opticalDriveId: _opticalDriveId, ...item }) =>
+    item);
+  return {
+    current: current === null
+      ? null
+      : {
+          discInspectionId: current.discInspectionId,
+          detectedDiscId: current.detectedDiscId,
+          mediaGeneration: current.mediaGeneration,
+        },
+    candidates: visible,
+  };
+}
+
+function dvdRecoveryStorageBlockingReason(access: DataAccess):
+  { code: string; message: string } | null {
+  const preflight = access.dvdRecoveryStorage.readCurrent();
+  if (preflight?.status === "supported") return null;
+  const code = preflight?.reasonCode ?? "STORAGE_UNSUPPORTED";
+  return {
+    code,
+    message: DVD_RECOVERY_STORAGE_REASON_MESSAGES[code],
+  };
+}
+
+function staleDiscVerificationError(
+  access: DataAccess,
+  input: {
+    code: "DISC_INSERTION_CHANGED" | "DISC_CHECKPOINT_CHANGED";
+    archiveId: OriginalDiscArchiveId;
+    sourceDriveId: string;
+    fallbackCheckpoint: { revision: number; digest: string };
+  },
+): StaleDvdDiscVerificationError {
+  const insertion = currentDiscVerificationInsertion(
+    access,
+    input.sourceDriveId,
+  );
+  const header = access.catalog.findDvdArchiveEvidenceHeader(input.archiveId);
+  return new StaleDvdDiscVerificationError(input.code, {
+    checkpoint: header === null
+      ? input.fallbackCheckpoint
+      : {
+          revision: header.currentManifestRevision,
+          digest: header.currentManifestDigest,
+        },
+    insertion: insertion.current,
+    insertionCandidates: insertion.candidates,
+  });
+}
+
 export async function inspectDvdDiscVerification(
   access: DataAccess,
   archiveRecoveryId: ArchiveRecoveryId,
@@ -119,17 +193,11 @@ export async function inspectDvdDiscVerification(
     const header = checkpointFailure === null
       ? access.catalog.findDvdArchiveEvidenceHeader(archive.id)
       : null;
-    const currentInspections = access.discInspections.list({
-      currentOnly: true,
-    }).filter((inspection) =>
-      inspection.status === "completed" &&
-      inspection.detectedDiscId !== null
+    const currentInsertion = currentDiscVerificationInsertion(
+      access,
+      sourceDisc.opticalDriveId,
     );
-    const sourceDriveInspection = currentInspections.find((inspection) =>
-      inspection.opticalDriveId === sourceDisc.opticalDriveId
-    );
-    const currentInspection = sourceDriveInspection ??
-      (currentInspections.length === 1 ? currentInspections[0]! : null);
+    const currentInspection = currentInsertion.current;
     const latest = access.dvdDiscVerifications.findLatestForRecovery(
       recovery.id,
     );
@@ -138,25 +206,29 @@ export async function inspectDvdDiscVerification(
       : access.discInspections.list({ ids: [latest.discInspectionId] })[0] ??
         null;
     const latestCurrent = latest !== null &&
-      latestInspection !== null &&
-      latestInspection.isCurrent &&
-      latestInspection.status === "completed" &&
-      latestInspection.detectedDiscId === latest.detectedDiscId &&
-      latestInspection.mediaGeneration === latest.mediaGeneration &&
-      checkpoint !== null &&
-      checkpoint.revision === latest.checkpointRevision &&
-      checkpoint.digest === latest.checkpointDigest &&
+      dvdDiscVerificationInsertionIsCurrent(latest, latestInspection) &&
+      dvdDiscVerificationCheckpointIsCurrent(latest, checkpoint) &&
       header !== null &&
-      header.currentManifestRevision === checkpoint.revision &&
-      header.currentManifestDigest === checkpoint.digest;
-    const blockingReasons: Array<{ code: string; message: string }> = [];
-    if (recovery.status === "completed") {
-      blockingReasons.push({
-        code: "RECOVERY_COMPLETED",
-        message: "Archive Recovery has no unresolved source to verify.",
+      dvdDiscVerificationCheckpointIsCurrent(latest, {
+        revision: header.currentManifestRevision,
+        digest: header.currentManifestDigest,
       });
+    const checkpointReason = checkpointFailure ?? (checkpoint === null ||
+      header === null ||
+      header.currentManifestRevision !== checkpoint.revision ||
+      header.currentManifestDigest !== checkpoint.digest
+      ? {
+          code: "UNSUPPORTED_EVIDENCE_FORMAT",
+          message: "The archive has no current DVD recovery checkpoint.",
+        }
+      : null);
+    const blockingReasons: Array<{ code: string; message: string }> = [];
+    if (checkpointReason !== null) {
+      blockingReasons.push(checkpointReason);
     }
-    if (currentInspection === null && currentInspections.length === 0) {
+    if (
+      currentInspection === null && currentInsertion.candidates.length === 0
+    ) {
       blockingReasons.push({
         code: "DISC_ABSENT",
         message: "No current completed disc insertion is available.",
@@ -167,17 +239,10 @@ export async function inspectDvdDiscVerification(
         message: "More than one current disc insertion is available.",
       });
     }
-    if (checkpointFailure !== null) {
-      blockingReasons.push(checkpointFailure);
-    } else if (
-      checkpoint === null ||
-      header === null ||
-      header.currentManifestRevision !== checkpoint.revision ||
-      header.currentManifestDigest !== checkpoint.digest
-    ) {
+    if (recovery.status === "completed") {
       blockingReasons.push({
-        code: "UNSUPPORTED_EVIDENCE_FORMAT",
-        message: "The archive has no current DVD recovery checkpoint.",
+        code: "RECOVERY_COMPLETED",
+        message: "Archive Recovery has no unresolved source to verify.",
       });
     }
     const active = latest?.status === "queued" ||
@@ -192,43 +257,53 @@ export async function inspectDvdDiscVerification(
       archiveRecovery: recovery,
       checkpoint,
       insertion: currentInspection === null ? null : {
-        discInspectionId: currentInspection.id,
+        discInspectionId: currentInspection.discInspectionId,
         detectedDiscId: currentInspection.detectedDiscId,
         mediaGeneration: currentInspection.mediaGeneration,
       },
-      insertionCandidates: currentInspections.map((inspection) => ({
-        discInspectionId: inspection.id,
-        detectedDiscId: inspection.detectedDiscId,
-        mediaGeneration: inspection.mediaGeneration,
-      })),
+      insertionCandidates: currentInsertion.candidates,
       sourceSampleManifest,
       verification: latest === null
         ? null
         : visibleVerification(latest, latestCurrent),
-      writeAuthority: latestCurrent && latest?.status === "completed" &&
-          latest.outcome === "match"
-        ? { available: true, blockingReasons: [] }
-        : {
-            available: false,
-            blockingReasons: latest === null
-              ? [{
-                  code: "DISC_VERIFICATION_REQUIRED",
-                  message: "The current insertion has not been verified.",
-                }]
-              : !latestCurrent
-                ? [{
-                    code: "DISC_VERIFICATION_STALE",
-                    message: "The verification does not match the current insertion and checkpoint.",
-                  }]
-                : [{
-                    code: latest.outcome === "mismatch"
-                      ? "DISC_VERIFICATION_MISMATCH"
-                      : "DISC_VERIFICATION_INCONCLUSIVE",
-                    message: latest.outcome === "mismatch"
-                      ? "Automatic verification found conflicting source evidence."
-                      : "Automatic verification did not establish a sampled match.",
-                  }],
-          },
+      writeAuthority: (() => {
+        const storageReason = dvdRecoveryStorageBlockingReason(access);
+        const verificationReason = latest === null
+          ? {
+              code: "DISC_VERIFICATION_REQUIRED",
+              message: "The current insertion has not been verified.",
+            }
+          : !latestCurrent
+            ? {
+                code: "DISC_VERIFICATION_STALE",
+                message: "The verification does not match the current insertion and checkpoint.",
+              }
+            : latest.status !== "completed" || latest.outcome !== "match"
+              ? {
+                  code: latest.outcome === "mismatch"
+                    ? "DISC_VERIFICATION_MISMATCH"
+                    : "DISC_VERIFICATION_INCONCLUSIVE",
+                  message: latest.outcome === "mismatch"
+                    ? "Automatic verification found conflicting source evidence."
+                    : "Automatic verification did not establish a sampled match.",
+                }
+              : null;
+        const workflowReason = recovery.status === "completed"
+          ? {
+              code: "RECOVERY_COMPLETED",
+              message: "Archive Recovery has no unresolved source to update.",
+            }
+          : null;
+        const authorityReasons = [
+          checkpointReason,
+          storageReason,
+          verificationReason,
+          workflowReason,
+        ].filter((reason) => reason !== null);
+        return authorityReasons.length === 0
+          ? { available: true, blockingReasons: [] }
+          : { available: false, blockingReasons: authorityReasons };
+      })(),
       action: {
         name: "verify-disc",
         available: blockingReasons.length === 0,
@@ -237,7 +312,7 @@ export async function inspectDvdDiscVerification(
           ? null
           : {
               archiveRecoveryId: recovery.id,
-              discInspectionId: currentInspection.id,
+              discInspectionId: currentInspection.discInspectionId,
               checkpointRevision: checkpoint.revision,
               checkpointDigest: checkpoint.digest,
             },
@@ -282,6 +357,21 @@ export async function requestDvdDiscVerification(
   if (recovery === null) {
     throw new RecordNotFoundError("archive recovery", input.archiveRecoveryId);
   }
+  const archive = access.catalog.listOriginalDiscArchives({
+    ids: [recovery.originalDiscArchiveId],
+  })[0];
+  if (archive === undefined) {
+    throw new RecordNotFoundError(
+      "original disc archive",
+      recovery.originalDiscArchiveId,
+    );
+  }
+  const sourceDisc = access.catalog.listDetectedDiscs(undefined, {
+    ids: [archive.detectedDiscId],
+  })[0];
+  if (sourceDisc === undefined) {
+    throw new RecordNotFoundError("detected disc", archive.detectedDiscId);
+  }
   const replay = access.dvdDiscVerifications.replaySubmission(input);
   if (replay !== null) {
     return { verification: visibleVerification(replay, true) };
@@ -292,13 +382,19 @@ export async function requestDvdDiscVerification(
       recovery.originalDiscArchiveId,
       archiveImageOwnership,
       async ({ checkpoint, assertOwned }) => {
-        if (
-          checkpoint.currentManifestRevision !== input.checkpointRevision ||
-          checkpoint.currentManifestDigest !== input.checkpointDigest
-        ) {
-          throw new StaleDvdDiscVerificationError(
-            "DISC_CHECKPOINT_CHANGED",
-          );
+        if (!dvdDiscVerificationCheckpointIsCurrent(input, {
+          revision: checkpoint.currentManifestRevision,
+          digest: checkpoint.currentManifestDigest,
+        })) {
+          throw staleDiscVerificationError(access, {
+            code: "DISC_CHECKPOINT_CHANGED",
+            archiveId: archive.id,
+            sourceDriveId: sourceDisc.opticalDriveId,
+            fallbackCheckpoint: {
+              revision: checkpoint.currentManifestRevision,
+              digest: checkpoint.currentManifestDigest,
+            },
+          });
         }
         authoritativeSourceSampleManifest(
           access,
@@ -306,7 +402,23 @@ export async function requestDvdDiscVerification(
           checkpoint.initialEvidence.sourceSampleManifest ?? null,
         );
         assertOwned();
-        const verification = access.dvdDiscVerifications.submit(input);
+        let verification;
+        try {
+          verification = access.dvdDiscVerifications.submit(input);
+        } catch (error) {
+          if (error instanceof StaleDvdDiscVerificationError) {
+            throw staleDiscVerificationError(access, {
+              code: error.code,
+              archiveId: archive.id,
+              sourceDriveId: sourceDisc.opticalDriveId,
+              fallbackCheckpoint: {
+                revision: checkpoint.currentManifestRevision,
+                digest: checkpoint.currentManifestDigest,
+              },
+            });
+          }
+          throw error;
+        }
         assertOwned();
         return {
           verification: visibleVerification(verification, true),

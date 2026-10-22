@@ -86,7 +86,12 @@ export async function createDvdDiscVerificationRoute(
       return response({ error: "DVD disc verification target not found" }, 404);
     }
     if (error instanceof MutationKeyConflictError) {
-      return response({ error: error.message }, 409);
+      return response({
+        error: {
+          code: "MUTATION_KEY_CONFLICT",
+          message: error.message,
+        },
+      }, 409);
     }
     if (error instanceof DvdDiscVerificationUnavailableError) {
       return response({
@@ -97,8 +102,17 @@ export async function createDvdDiscVerificationRoute(
         },
       }, 409);
     }
+    if (error instanceof StaleDvdDiscVerificationError) {
+      return response({
+        error: {
+          code: error.code,
+          message: error.message,
+          reasons: error.reasons,
+          currentIdentities: error.currentIdentities,
+        },
+      }, 409);
+    }
     if (
-      error instanceof StaleDvdDiscVerificationError ||
       error instanceof DomainInvariantError &&
         (error.message === "DISC_INSERTION_CHANGED" ||
           error.message === "DISC_CHECKPOINT_CHANGED")

@@ -104,7 +104,7 @@ rediscovered, its new metadata fingerprint is derived from the title map and
 size already stored in the catalog; compatibility does not require rereading
 the disc or ISO.
 
-Source verification is a second, strictly bounded optical-read exception. The
+DVD Disc Verification is a second, strictly bounded optical-read exception. The
 initial publication selects at most one suitable 32-sector window from each of
 16 equal address bands by reading the already durable local image; it never
 reads an unresolved placeholder. It saves the raw-sector digest, address,

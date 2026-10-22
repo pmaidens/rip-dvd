@@ -98,6 +98,150 @@ export type DvdDiscVerificationSampleFinding =
       diagnostic: DvdDiscVerificationDiagnostic;
     };
 
+export function dvdDiscVerificationInsertionIsCurrent(
+  verification: {
+    discInspectionId: string;
+    detectedDiscId: string;
+    mediaGeneration: string;
+  },
+  inspection: {
+    id: string;
+    isCurrent: boolean;
+    status: string;
+    detectedDiscId: string | null;
+    mediaGeneration: string;
+  } | null | undefined,
+): boolean {
+  return inspection !== null && inspection !== undefined &&
+    inspection.id === verification.discInspectionId &&
+    inspection.isCurrent &&
+    inspection.status === "completed" &&
+    inspection.detectedDiscId === verification.detectedDiscId &&
+    inspection.mediaGeneration === verification.mediaGeneration;
+}
+
+export function dvdDiscVerificationCheckpointIsCurrent(
+  verification: { checkpointRevision: number; checkpointDigest: string },
+  checkpoint: { revision: number; digest: string } | null | undefined,
+): boolean {
+  return checkpoint !== null && checkpoint !== undefined &&
+    checkpoint.revision === verification.checkpointRevision &&
+    checkpoint.digest === verification.checkpointDigest;
+}
+
+const DVD_DISC_VERIFICATION_DIAGNOSTIC_CATEGORIES = new Set<
+  DvdDiscVerificationDiagnostic["category"]
+>([
+  "unknown",
+  "medium_error",
+  "not_ready",
+  "unit_attention",
+  "hardware_error",
+  "transport_error",
+  "protection_error",
+  "out_of_range",
+]);
+
+function optionalDiagnosticInteger(
+  value: unknown,
+  maximum: number,
+): value is number | null {
+  return value === null ||
+    Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= maximum;
+}
+
+/** Validates the shared SCSI diagnostic tuple and returns its canonical category. */
+export function normalizeDvdDiscVerificationDiagnostic(
+  candidate: {
+    category: unknown;
+    classifierVersion: unknown;
+    scsiStatus: unknown;
+    hostStatus: unknown;
+    driverStatus: unknown;
+    senseResponseCode: unknown;
+    senseKey: unknown;
+    asc: unknown;
+    ascq: unknown;
+    informationLba: unknown;
+  },
+  expected: { startLba: number; sectorCount: number },
+  categoryEncoding: "normalized" | "read_failure_protocol" = "normalized",
+): DvdDiscVerificationDiagnostic {
+  if (
+    typeof candidate.category !== "string" ||
+    !DVD_DISC_VERIFICATION_DIAGNOSTIC_CATEGORIES.has(
+      candidate.category as DvdDiscVerificationDiagnostic["category"],
+    ) ||
+    typeof candidate.classifierVersion !== "string" ||
+    candidate.classifierVersion.length === 0 ||
+    candidate.classifierVersion.length > 128 ||
+    !optionalDiagnosticInteger(candidate.scsiStatus, 0xff) ||
+    !optionalDiagnosticInteger(candidate.hostStatus, 0xffff) ||
+    !optionalDiagnosticInteger(candidate.driverStatus, 0xffff) ||
+    !optionalDiagnosticInteger(candidate.senseResponseCode, 0xff) ||
+    !optionalDiagnosticInteger(candidate.senseKey, 0x0f) ||
+    !optionalDiagnosticInteger(candidate.asc, 0xff) ||
+    !optionalDiagnosticInteger(candidate.ascq, 0xff) ||
+    !optionalDiagnosticInteger(
+      candidate.informationLba,
+      Number.MAX_SAFE_INTEGER,
+    ) ||
+    ((candidate.scsiStatus === null || candidate.hostStatus === null ||
+      candidate.driverStatus === null) &&
+      (candidate.scsiStatus !== null || candidate.hostStatus !== null ||
+        candidate.driverStatus !== null)) ||
+    (candidate.senseResponseCode === null &&
+      (candidate.senseKey !== null || candidate.asc !== null ||
+        candidate.ascq !== null || candidate.informationLba !== null)) ||
+    (candidate.senseResponseCode !== null &&
+      candidate.senseResponseCode !== 0x70 &&
+      candidate.senseResponseCode !== 0x71 &&
+      candidate.senseResponseCode !== 0x72 &&
+      candidate.senseResponseCode !== 0x73) ||
+    (candidate.asc === null) !== (candidate.ascq === null) ||
+    (candidate.informationLba !== null &&
+      (candidate.informationLba < expected.startLba ||
+        candidate.informationLba >=
+          expected.startLba + expected.sectorCount))
+  ) {
+    throw new DomainInvariantError(
+      "DVD disc verification diagnostic is invalid",
+    );
+  }
+  const diagnostic = candidate as DvdDiscVerificationDiagnostic;
+  const classification = classifyArchiveReadFailureEvidence(diagnostic);
+  const currentSense = diagnostic.senseResponseCode === 0x70 ||
+    diagnostic.senseResponseCode === 0x72;
+  const hasOutOfRangeEvidence = currentSense &&
+    isArchiveReadFailureEvidenceConsistent({
+      ...diagnostic,
+      category: "out_of_range",
+    });
+  const normalizedCategory = hasOutOfRangeEvidence
+    ? "out_of_range"
+    : classification === "transport_error"
+      ? "transport_error"
+      : currentSense
+        ? classification === "recognized_medium_error"
+          ? "medium_error"
+          : classification
+        : "unknown";
+  const encodedCategory = categoryEncoding === "read_failure_protocol" &&
+      normalizedCategory === "medium_error"
+    ? "unknown"
+    : normalizedCategory;
+  if (
+    diagnostic.category !== encodedCategory ||
+    categoryEncoding === "read_failure_protocol" &&
+      normalizedCategory === "out_of_range"
+  ) {
+    throw new DomainInvariantError(
+      "DVD disc verification diagnostic category is invalid",
+    );
+  }
+  return { ...diagnostic, category: normalizedCategory };
+}
+
 function requireDigest(value: string, description: string): void {
   if (!/^[0-9a-f]{64}$/.test(value)) {
     throw new DomainInvariantError(
@@ -333,19 +477,6 @@ export function validateDvdDiscVerificationFindings(
   if (findings.length > manifest.samples.length) {
     throw new DomainInvariantError("DVD disc verification findings are invalid");
   }
-  const diagnosticCategories = new Set([
-    "unknown",
-    "medium_error",
-    "not_ready",
-    "unit_attention",
-    "hardware_error",
-    "transport_error",
-    "protection_error",
-    "out_of_range",
-  ]);
-  const optionalInteger = (value: number | null, maximum: number) =>
-    value === null ||
-    Number.isSafeInteger(value) && value >= 0 && value <= maximum;
   for (const [index, finding] of findings.entries()) {
     const reference = manifest.samples[index];
     if (
@@ -361,71 +492,15 @@ export function validateDvdDiscVerificationFindings(
     }
     if (finding.outcome === "unreadable") {
       const diagnostic = finding.diagnostic;
-      const classification = diagnostic === null
-        ? null
-        : classifyArchiveReadFailureEvidence(diagnostic);
-      const expectedCategory = classification === "recognized_medium_error"
-        ? "medium_error"
-        : classification;
       if (
         finding.observedDigest !== null ||
-        diagnostic === null ||
-        !diagnosticCategories.has(diagnostic.category) ||
-        diagnostic.classifierVersion.length === 0 ||
-        diagnostic.classifierVersion.length > 128 ||
-        !optionalInteger(diagnostic.scsiStatus, 0xff) ||
-        !optionalInteger(diagnostic.hostStatus, 0xffff) ||
-        !optionalInteger(diagnostic.driverStatus, 0xffff) ||
-        !optionalInteger(diagnostic.senseResponseCode, 0xff) ||
-        !optionalInteger(diagnostic.senseKey, 0x0f) ||
-        !optionalInteger(diagnostic.asc, 0xff) ||
-        !optionalInteger(diagnostic.ascq, 0xff) ||
-        !optionalInteger(diagnostic.informationLba, Number.MAX_SAFE_INTEGER) ||
-        ((diagnostic.scsiStatus === null ||
-          diagnostic.hostStatus === null ||
-          diagnostic.driverStatus === null) &&
-          (diagnostic.scsiStatus !== null ||
-            diagnostic.hostStatus !== null ||
-            diagnostic.driverStatus !== null)) ||
-        (diagnostic.senseResponseCode === null &&
-          (diagnostic.senseKey !== null || diagnostic.asc !== null ||
-            diagnostic.ascq !== null ||
-            diagnostic.informationLba !== null)) ||
-        (diagnostic.senseResponseCode !== null &&
-          diagnostic.senseResponseCode !== 0x70 &&
-          diagnostic.senseResponseCode !== 0x71 &&
-          diagnostic.senseResponseCode !== 0x72 &&
-          diagnostic.senseResponseCode !== 0x73) ||
-        (diagnostic.asc === null) !== (diagnostic.ascq === null) ||
-        (diagnostic.informationLba !== null &&
-          (diagnostic.informationLba < finding.startLba ||
-            diagnostic.informationLba >=
-              finding.startLba + finding.sectorCount)) ||
-        (diagnostic.category !== "out_of_range" &&
-          (diagnostic.senseResponseCode === 0x70 ||
-            diagnostic.senseResponseCode === 0x72) &&
-          isArchiveReadFailureEvidenceConsistent({
-            ...diagnostic,
-            category: "out_of_range",
-          })) ||
-        (diagnostic.category === "out_of_range"
-          ? !isArchiveReadFailureEvidenceConsistent({
-              ...diagnostic,
-              category: "out_of_range",
-            })
-          : diagnostic.category !== (
-              classification === "transport_error"
-                ? "transport_error"
-                : diagnostic.senseResponseCode === 0x70 ||
-                    diagnostic.senseResponseCode === 0x72
-                  ? expectedCategory
-                  : "unknown"
-            ))
+        diagnostic === null
       ) {
         throw new DomainInvariantError(
           "DVD disc verification unreadable finding is invalid",
         );
       }
+      normalizeDvdDiscVerificationDiagnostic(diagnostic, finding);
       continue;
     }
     requireDigest(

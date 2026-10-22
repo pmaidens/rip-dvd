@@ -71,6 +71,28 @@ it("keeps web inspection and replayed submission equal to the JSON CLI", async (
     expect(cliReplay.exitCode).toBe(0);
     expect(await webSubmission.json()).toEqual(cliReplay.result);
 
+    const webConflict = await createDvdDiscVerificationRoute(
+      request(seeded.recoveryId, {
+        ...body,
+        checkpointDigest: "f".repeat(64),
+      }),
+      seeded.recoveryId,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const cliConflict = await fixture.run([
+      "archive-recovery", "verify-disc", seeded.recoveryId,
+      "--key", mutationKey,
+      "--disc-inspection-id", seeded.inspection.id,
+      "--checkpoint-revision", "1",
+      "--checkpoint-digest", "f".repeat(64),
+    ]);
+    expect(webConflict.status).toBe(409);
+    expect(await webConflict.json()).toEqual(cliConflict.result);
+    expect(cliConflict.result).toMatchObject({
+      error: { code: "MUTATION_KEY_CONFLICT" },
+    });
+
     const activeMutationKey = "00000000-0000-4000-8000-000000000444";
     const webActive = await createDvdDiscVerificationRoute(
       request(seeded.recoveryId, {
@@ -115,11 +137,40 @@ it("rejects a stale checkpoint with a stable machine-readable reason", async () 
       () => access,
       () => "http://localhost:3000",
     );
+    const cliResponse = await fixture.run([
+      "archive-recovery", "verify-disc", seeded.recoveryId,
+      "--key", "00000000-0000-4000-8000-000000000442",
+      "--disc-inspection-id", seeded.inspection.id,
+      "--checkpoint-revision", "1",
+      "--checkpoint-digest", "f".repeat(64),
+    ]);
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({
+    const responseBody = await response.json();
+    expect(responseBody).toEqual(cliResponse.result);
+    expect(responseBody).toEqual({
       error: {
         code: "DISC_CHECKPOINT_CHANGED",
         message: "DISC_CHECKPOINT_CHANGED",
+        reasons: [{
+          code: "DISC_CHECKPOINT_CHANGED",
+          message: "DISC_CHECKPOINT_CHANGED",
+        }],
+        currentIdentities: {
+          checkpoint: {
+            revision: 1,
+            digest: seeded.manifest.manifestDigest,
+          },
+          insertion: {
+            discInspectionId: seeded.inspection.id,
+            detectedDiscId: seeded.sourceDisc.id,
+            mediaGeneration: "synthetic-verification-generation",
+          },
+          insertionCandidates: [{
+            discInspectionId: seeded.inspection.id,
+            detectedDiscId: seeded.sourceDisc.id,
+            mediaGeneration: "synthetic-verification-generation",
+          }],
+        },
       },
     });
   } finally {
@@ -131,6 +182,11 @@ it("reports a corrupt current database manifest consistently through web and CLI
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const staleAccess = fixture.openAccess();
+  staleAccess.discInspections.clearCurrent({
+    opticalDriveId: seeded.sourceDisc.opticalDriveId,
+  });
+  staleAccess.close();
   const sqlite = new DatabaseSync(fixture.databasePath);
   const guard = sqlite.prepare(`
     SELECT sql FROM sqlite_master
@@ -163,11 +219,14 @@ it("reports a corrupt current database manifest consistently through web and CLI
       checkpoint: null,
       action: {
         available: false,
-        blockingReasons: [
-          expect.objectContaining({ code: "CONSISTENCY_FAULT" }),
-        ],
       },
     });
+    expect((webInspectionBody as {
+      action: { blockingReasons: Array<{ code: string }> };
+    }).action.blockingReasons.map(({ code }) => code)).toEqual([
+      "CONSISTENCY_FAULT",
+      "DISC_ABSENT",
+    ]);
 
     const body = {
       mutationKey: "00000000-0000-4000-8000-000000000448",

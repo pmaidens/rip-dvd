@@ -186,7 +186,7 @@ const commandDefinitions = [
   },
   {
     name: "archive-recovery",
-    description: "Inspect or request bounded inserted-disc verification for an Archive Recovery.",
+    description: "Inspect or request bounded DVD Disc Verification for an Archive Recovery.",
     usage: "rip-dvd archive-recovery <inspect-verification|verify-disc> <archive-recovery-id> [options]",
     inputs: {
       arguments: ["action: inspect-verification|verify-disc", "archive-recovery-id"],
@@ -550,8 +550,19 @@ async function runDvdDiscVerificationCommand(
         message: error.message,
       }]);
     }
+    if (error instanceof StaleDvdDiscVerificationError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        undefined,
+        {
+          reasons: error.reasons,
+          currentIdentities: error.currentIdentities,
+        },
+      );
+    }
     if (
-      error instanceof StaleDvdDiscVerificationError ||
       error instanceof DomainInvariantError &&
         (error.message === "DISC_INSERTION_CHANGED" ||
           error.message === "DISC_CHECKPOINT_CHANGED")

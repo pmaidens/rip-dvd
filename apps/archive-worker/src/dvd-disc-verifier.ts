@@ -4,9 +4,10 @@ import { closeSync, constants, fstatSync, lstatSync, openSync } from "node:fs";
 import {
   assertDvdSourceSampleManifestProjection,
   createDvdSourceSampleDigest,
-  classifyArchiveReadFailureEvidence,
-  isArchiveReadFailureEvidenceConsistent,
   dvdDiscVerificationOutcome,
+  dvdDiscVerificationCheckpointIsCurrent,
+  dvdDiscVerificationInsertionIsCurrent,
+  normalizeDvdDiscVerificationDiagnostic,
   DVD_SOURCE_SAMPLE_BAND_COUNT,
   DVD_SOURCE_SAMPLE_BYTE_COUNT,
   DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS,
@@ -38,14 +39,6 @@ const VERIFICATION_FAILURE_KEYS = [
   "requestedLba", "retryOrdinal", "scsiStatus", "senseKey",
   "senseResponseCode",
 ].sort();
-
-function optionalInteger(
-  value: unknown,
-  maximum: number,
-): value is number | null {
-  return value === null ||
-    Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= maximum;
-}
 
 export function parseDvdVerificationReadFailureProtocol(
   payload: string,
@@ -94,80 +87,21 @@ export function parseDvdVerificationReadFailureProtocol(
     candidate.classifierVersion !== DVD_READ_FAILURE_CLASSIFIER_VERSION ||
     candidate.requestedLba !== expected.startLba ||
     candidate.requestedBlockCount !== expected.sectorCount ||
-    candidate.retryOrdinal !== 0 ||
-    !optionalInteger(candidate.scsiStatus, 0xff) ||
-    !optionalInteger(candidate.hostStatus, 0xffff) ||
-    !optionalInteger(candidate.driverStatus, 0xffff) ||
-    !optionalInteger(candidate.senseResponseCode, 0xff) ||
-    !optionalInteger(candidate.senseKey, 0x0f) ||
-    !optionalInteger(candidate.asc, 0xff) ||
-    !optionalInteger(candidate.ascq, 0xff) ||
-    !optionalInteger(candidate.informationLba, Number.MAX_SAFE_INTEGER) ||
-    ((candidate.scsiStatus === null || candidate.hostStatus === null ||
-      candidate.driverStatus === null) &&
-      (candidate.scsiStatus !== null || candidate.hostStatus !== null ||
-        candidate.driverStatus !== null)) ||
-    (candidate.senseResponseCode === null &&
-      (candidate.senseKey !== null || candidate.asc !== null ||
-        candidate.ascq !== null || candidate.informationLba !== null)) ||
-    (candidate.senseResponseCode !== null &&
-      candidate.senseResponseCode !== 0x70 &&
-      candidate.senseResponseCode !== 0x71 &&
-      candidate.senseResponseCode !== 0x72 &&
-      candidate.senseResponseCode !== 0x73) ||
-    (candidate.asc === null) !== (candidate.ascq === null) ||
-    (candidate.informationLba !== null &&
-      (candidate.informationLba < expected.startLba ||
-        candidate.informationLba >=
-          expected.startLba + expected.sectorCount))
+    candidate.retryOrdinal !== 0
   ) {
     throw new Error("DVD verification read failure result is malformed");
   }
-  const classified = classifyArchiveReadFailureEvidence({
-    scsiStatus: candidate.scsiStatus,
-    hostStatus: candidate.hostStatus,
-    driverStatus: candidate.driverStatus,
-    senseKey: candidate.senseKey,
-    asc: candidate.asc,
-    ascq: candidate.ascq,
-  } as Parameters<typeof classifyArchiveReadFailureEvidence>[0]);
-  const currentSense = candidate.senseResponseCode === 0x70 ||
-    candidate.senseResponseCode === 0x72;
-  const category = classified === "transport_error"
-    ? "transport_error"
-    : currentSense
-      ? classified === "recognized_medium_error"
-        ? "medium_error"
-        : classified
-      : "unknown";
-  const hasOutOfRangeEvidence = isArchiveReadFailureEvidenceConsistent({
-    scsiStatus: candidate.scsiStatus as number | null,
-    hostStatus: candidate.hostStatus as number | null,
-    driverStatus: candidate.driverStatus as number | null,
-    senseKey: candidate.senseKey as number | null,
-    asc: candidate.asc as number | null,
-    ascq: candidate.ascq as number | null,
-    category: "out_of_range",
-  });
-  if (
-    candidate.category !==
-      (category === "medium_error" ? "unknown" : category) ||
-    currentSense && hasOutOfRangeEvidence
-  ) {
+  try {
+    return normalizeDvdDiscVerificationDiagnostic(
+      candidate as Parameters<
+        typeof normalizeDvdDiscVerificationDiagnostic
+      >[0],
+      expected,
+      "read_failure_protocol",
+    );
+  } catch {
     throw new Error("DVD verification read failure result is malformed");
   }
-  return {
-    category,
-    classifierVersion: DVD_READ_FAILURE_CLASSIFIER_VERSION,
-    scsiStatus: candidate.scsiStatus as number | null,
-    hostStatus: candidate.hostStatus as number | null,
-    driverStatus: candidate.driverStatus as number | null,
-    senseResponseCode: candidate.senseResponseCode as number | null,
-    senseKey: candidate.senseKey as number | null,
-    asc: candidate.asc as number | null,
-    ascq: candidate.ascq as number | null,
-    informationLba: candidate.informationLba as number | null,
-  };
 }
 
 export type DvdVerificationSourceRead =
@@ -427,23 +361,21 @@ export async function pollDvdDiscVerification(input: {
           const current = input.access.discInspections.list({
             ids: [claim.discInspectionId],
           })[0];
-          return current !== undefined &&
-            current.isCurrent &&
-            current.status === "completed" &&
-            current.detectedDiscId === claim.detectedDiscId &&
-            current.mediaGeneration === claim.mediaGeneration;
+          return dvdDiscVerificationInsertionIsCurrent(claim, current);
         };
         const checkpointIsCurrent = () => {
           assertOwned();
           const header = input.access.catalog.findDvdArchiveEvidenceHeader(
             claim.originalDiscArchiveId,
           );
-          return checkpoint.currentManifestRevision ===
-              claim.checkpointRevision &&
-            checkpoint.currentManifestDigest === claim.checkpointDigest &&
-            header !== null &&
-            header.currentManifestRevision === claim.checkpointRevision &&
-            header.currentManifestDigest === claim.checkpointDigest;
+          return dvdDiscVerificationCheckpointIsCurrent(claim, {
+            revision: checkpoint.currentManifestRevision,
+            digest: checkpoint.currentManifestDigest,
+          }) && header !== null &&
+            dvdDiscVerificationCheckpointIsCurrent(claim, {
+              revision: header.currentManifestRevision,
+              digest: header.currentManifestDigest,
+            });
         };
         const inspection = input.access.discInspections.list({
           ids: [claim.discInspectionId],

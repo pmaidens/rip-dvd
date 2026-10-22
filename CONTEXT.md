@@ -38,6 +38,15 @@ _Avoid_: Archive Request cancellation, archive deletion
 An operator's explicit assertion that the currently inserted disc is the source for one Archive Recovery attempt, recorded separately from automatic verification findings. It expires after a worker restart, reboot, disc removal, or detected source change.
 _Avoid_: Verified fingerprint match, disc name match, permanent disc approval
 
+**DVD Disc Verification**:
+An automatic, insertion-scoped comparison of bounded raw-sector samples from a
+currently inserted Detected Disc with immutable samples retained by an Original
+Disc Archive. A match may contribute source authority for Archive Recovery only
+while the insertion, archive checkpoint, and recovery storage prerequisites
+remain current. It is neither Operator Disc Confirmation nor Filesystem
+Verification, and it is not a whole-disc hash.
+_Avoid_: Source verification, inserted-disc verification, disc confirmation
+
 **Re-archive Mapping Proposal**:
 An operator-reviewed draft that carries active Disc Selections from a prior Original Disc Archive to a fresh re-archive generation and validates them against the fresh Disc Inspection. It does not create Disc Selections or authorize encoding.
 _Avoid_: Adopted mappings, replacement selections
