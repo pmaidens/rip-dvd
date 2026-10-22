@@ -14,6 +14,7 @@ import { isoProfileImage } from "./dvd-metadata-profile-fixtures.js";
 import { createInProcessDvdRescueWorkspaceLock } from "./dvd-rescue-workspace-lock.js";
 import { DvdInitialCopyBoundaryError } from "./dvd-initial-copy.js";
 import { saveDvdInitialArchiveForArchiveJob, reconcileDvdInitialArchiveForArchiveJob, runDvdInitialArchiveJob } from "./dvd-initial-save.js";
+import { runDvdStructuralCheck } from "./dvd-structural-check.js";
 const directories: string[] = [];
 afterEach(async () => {
   vi.useRealTimers();
@@ -110,7 +111,10 @@ async function jobFixture(damaged = false, corrected = false) {
   sqlite.prepare("UPDATE archive_jobs SET evidence_format = 'dvd-recovery-evidence-v1' WHERE id = ?").run(claim.id);
   for (const guard of guards) sqlite.exec(String(guard.sql));
   sqlite.close();
-  const reopened = createDataAccess({ databasePath });
+  const reopened = createDataAccess({
+    databasePath,
+    originalsLibraryPath: f.identity.originalsLibraryPath,
+  });
   return { ...f, access: reopened, claim: reopened.archiveJobs.find(claim.id) as RunningArchiveJob, databasePath, exclusion: createInProcessDvdRescueWorkspaceLock() };
 }
 
@@ -346,6 +350,82 @@ it("keeps the completed preservation outcome when a later recovery caller fails"
     expect(f.access.archiveJobs.find(f.claim.id)).toEqual(completed);
     expect(f.access.archiveRequests.find(f.claim.archiveRequestId)?.status).toBe("fulfilled");
   } finally { f.access.close(); }
+});
+
+it("records structural checks from one consistent checkpoint read", async () => {
+  const f = await jobFixture(true);
+  try {
+    const saved = await saveDvdInitialArchiveForArchiveJob({
+      access: f.access,
+      claim: f.claim,
+      originalsLibraryPath: f.identity.originalsLibraryPath,
+      exclusion: f.exclusion,
+      proven: f.proven,
+    });
+    const originalDiscArchiveId = saved.originalDiscArchiveId!;
+    const completed = await runDvdStructuralCheck({
+      access: f.access,
+      originalDiscArchiveId,
+      checker: {
+        async check({ checkpoint, descriptor, assertStable }) {
+          expect(descriptor).toBeGreaterThanOrEqual(0);
+          expect(checkpoint.manifestRevision).toBe(1);
+          assertStable();
+          return ([
+            "filesystem_structure",
+            "dvd_navigation",
+            "title_enumeration",
+          ] as const).map((checkKind) => ({
+            checkKind,
+            policyVersion: "synthetic-structural-check-v1",
+            testedExtent: {
+              startLba: 0,
+              endLbaExclusive: checkpoint.acceptedEndLbaExclusive,
+            },
+            outcome: "valid" as const,
+            reason: null,
+            evidenceReference: `synthetic-evidence:${checkKind}`,
+          }));
+        },
+      },
+    });
+    if (completed.outcome !== "completed") {
+      throw new Error("Expected a completed structural check");
+    }
+    expect(completed).toMatchObject({
+      outcome: "completed",
+      assessment: { validity: "valid" },
+    });
+
+    const failed = await runDvdStructuralCheck({
+      access: f.access,
+      originalDiscArchiveId,
+      checker: {
+        async check() {
+          throw new Error("synthetic tool failure");
+        },
+      },
+    });
+    if (failed.outcome !== "failed") {
+      throw new Error("Expected a failed structural check");
+    }
+    expect(failed).toMatchObject({
+      outcome: "failed",
+      reason: { code: "STRUCTURAL_CHECK_FAILED" },
+    });
+    expect(
+      f.access.dvdStructuralAssessments.inspect(originalDiscArchiveId),
+    ).toMatchObject({
+      state: "current",
+      currentAssessmentIdentity: completed.assessment.id,
+      latestAttempt: {
+        sequence: failed.sequence,
+        outcome: "failed",
+      },
+    });
+  } finally {
+    f.access.close();
+  }
 });
 
 it("does not advance the database when image bytes change before the save", async () => {

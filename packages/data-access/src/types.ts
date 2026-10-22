@@ -55,6 +55,9 @@ import type {
   DvdRecoveryStoragePreflight,
   DvdRecoveryStoragePreflightInput,
 } from "./dvd-recovery-storage-preflight.js";
+import type {
+  DvdStructuralAssessmentAccess,
+} from "./dvd-structural-assessment.js";
 
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
 export type ArchiveIntegrity = (typeof ARCHIVE_INTEGRITIES)[number];
@@ -2025,6 +2028,10 @@ export type SnapshotCatalogAccess = Pick<
 >;
 
 export interface ConsistentReadAccess {
+  readonly dvdStructuralAssessments: Pick<
+    DvdStructuralAssessmentAccess,
+    "inspect"
+  >;
   readonly dvdRecoveryStorage: Pick<
     DvdRecoveryStorageAccess,
     "readCurrent"
@@ -2073,6 +2080,22 @@ export interface EncodeOutputInspectionReadAccess
     Pick<EncodeJobAccess, "findRetainedOutput">;
 }
 
+export interface DvdCheckpointReadHandle {
+  descriptor: number;
+  signal: AbortSignal;
+  assertOwned(): void;
+}
+
+export interface DvdCheckpointReadOwnership {
+  withConsistentRead<Result>(request: {
+    archiveId: string;
+    imagePath: string | null;
+    originalsLibraryPath: string;
+    signal: AbortSignal;
+    task(handle: DvdCheckpointReadHandle): Promise<Result>;
+  }): Promise<Result>;
+}
+
 export interface DataAccess {
   readDvdCheckpoint(
     id: OriginalDiscArchiveId,
@@ -2092,6 +2115,22 @@ export interface DataAccess {
   ): Promise<import("./dvd-initial-checkpoint.js").CommittedDvdCheckpointEvidence | null>;
   readonly notifications: import("./notification-types.js").NotificationAccess;
   readonly dvdRecovery: DvdRecoveryAccess;
+  withDvdInitialCheckpointRead<Result>(
+    id: OriginalDiscArchiveId,
+    ownership: DvdCheckpointReadOwnership,
+    inspect: (
+      checkpoint: import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence,
+      handle: DvdCheckpointReadHandle,
+    ) => Promise<Result>,
+  ): Promise<{
+    checkpoint: import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence;
+    result: Result;
+  } | null>;
+  readDvdInitialCheckpoint(
+    id: OriginalDiscArchiveId,
+    ownership: DvdCheckpointReadOwnership,
+  ): Promise<import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence | null>;
+  readonly dvdStructuralAssessments: DvdStructuralAssessmentAccess;
   readonly dvdRecoveryStorage: DvdRecoveryStorageAccess;
   readonly catalog: CatalogAccess;
   readonly encodingProfiles: EncodingProfileAccess;

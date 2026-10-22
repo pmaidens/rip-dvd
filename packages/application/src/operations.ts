@@ -762,6 +762,9 @@ function readDetail(
         evidenceHeader,
         access.archiveJobs.listForArchive(archive.id),
       );
+      const structuralAssessment = evidenceFormat === null
+        ? null
+        : access.dvdStructuralAssessments.inspect(archive.id);
       const recoveryStorage = evidenceFormat === null
         ? null
         : describeDvdRecoveryStorage(
@@ -788,6 +791,9 @@ function readDetail(
         };
       return {
         ...visibleArchive(archive, evidenceHeaders),
+        ...(structuralAssessment === null
+          ? {}
+          : { structuralAssessment }),
         ...(recoveryStorage === null
           ? {}
           : {

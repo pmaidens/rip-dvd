@@ -47,6 +47,7 @@ export type {
   EncodeWorkConflictCurrent,
 } from "./archive-recovery-work.js";
 export * from "./dvd-recovery-storage-preflight.js";
+export * from "./dvd-structural-assessment.js";
 export {
   assertDvdArchiveBoundaryEvidenceDigest,
   assertDvdArchiveEvidenceManifestDigests,

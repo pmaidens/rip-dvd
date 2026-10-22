@@ -1,0 +1,37 @@
+# Bind structural assessments to committed DVD checkpoints
+
+Structural validity is independent of source read completeness. A complete
+Archive Job can preserve every accepted source sector while the resulting DVD
+filesystem, navigation, or title enumeration is invalid or cannot be proved.
+Conversely, an incomplete archive can still have useful structural findings
+for the extent that was tested. Structural findings therefore do not mutate
+Archive Integrity and cannot authorize source-damage acceptance.
+
+For `dvd-recovery-evidence-v1`, a Structural Assessment is an immutable record
+bound to one committed evidence manifest. Its checkpoint includes the archive,
+manifest identity and revision, manifest digest, and accepted end LBA. The
+required findings cover filesystem structure, DVD navigation, and title
+enumeration. Each finding records its check policy, tested extent, outcome,
+reason, and evidence reference. Outcomes are `valid`, `invalid`,
+`indeterminate`, or `not_run`. Overall validity is invalid when any finding
+proves a contradiction, valid only when every required finding is valid, and
+unknown otherwise.
+
+The assessment identity is derived from canonical checkpoint and finding
+semantics. Reordering identical findings reuses the identity; a changed result
+or evidence reference creates a new identity. Every execution also appends an
+immutable attempt record. A failed later attempt remains visible but does not
+erase a completed assessment for the same checkpoint.
+
+Image-reading checks run while shared Archive Image Ownership is held across
+checkpoint validation, checker execution, and final checkpoint revalidation.
+If the committed image cannot be read consistently, the attempt records a
+stable failure reason. The last completed assessment remains visible as
+outdated after the checkpoint advances until a check completes for the new
+checkpoint.
+
+Original Disc Archive inspection exposes the same structural state through
+the web operations route and public JSON CLI. Historical archives retain their
+existing response and meanings. New-format Archive Job admission remains
+closed; this assessment contract does not make the unfinished recovery or
+damage-acceptance workflow available.

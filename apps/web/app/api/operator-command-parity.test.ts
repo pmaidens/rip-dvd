@@ -1958,8 +1958,35 @@ it("returns the same operational records and evidence through web and CLI", asyn
         badSectorCount: 1,
         badAreaCount: 1,
         badSectorRanges: null,
+        structuralAssessment: {
+          state: "pending",
+          currentAssessmentIdentity: null,
+          unavailableReasons: [{ code: "ASSESSMENT_PENDING" }],
+        },
       },
     });
+    const structuralAssessment =
+      access.dvdStructuralAssessments.recordCompleted({
+        checkpoint: {
+          originalDiscArchiveId: archiveId,
+          manifestId,
+          manifestRevision: 1,
+          manifestDigest,
+          acceptedEndLbaExclusive: 1,
+        },
+        findings: ([
+          "filesystem_structure",
+          "dvd_navigation",
+          "title_enumeration",
+        ] as const).map((checkKind) => ({
+          checkKind,
+          policyVersion: "synthetic-structural-check-v1",
+          testedExtent: { startLba: 0, endLbaExclusive: 1 },
+          outcome: "valid" as const,
+          reason: null,
+          evidenceReference: `synthetic-evidence:${checkKind}`,
+        })),
+      });
     const catalogReviewResponse = await createCatalogReviewRoute(
       new Request(`http://localhost/api/catalog-reviews/${archiveId}`),
       archiveId,
@@ -2357,6 +2384,21 @@ it("returns the same operational records and evidence through web and CLI", asyn
         badSectorCount: 1,
         badAreaCount: 1,
         badSectorRanges: null,
+        structuralAssessment: {
+          state: "current",
+          checkpoint: { manifestId, manifestRevision: 1 },
+          currentAssessmentIdentity: structuralAssessment.assessment.id,
+          assessment: {
+            id: structuralAssessment.assessment.id,
+            validity: "valid",
+            findings: [
+              { checkKind: "filesystem_structure", outcome: "valid" },
+              { checkKind: "dvd_navigation", outcome: "valid" },
+              { checkKind: "title_enumeration", outcome: "valid" },
+            ],
+          },
+          unavailableReasons: [],
+        },
         archiveRecovery: {
           available: false,
           blockingReasons: expect.arrayContaining([
