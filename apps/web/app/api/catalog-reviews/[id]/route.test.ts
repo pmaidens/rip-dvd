@@ -10,6 +10,8 @@ import {
   createCorrectedDvdArchiveBoundaryEvidence,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
   type DataAccess,
+  type DvdArchiveEvidenceHeader,
+  type DvdTitleIdentityReviewSet,
   type EncodeJobStatus,
   type MediaItem,
   type MediaItemId,
@@ -601,6 +603,14 @@ describe("Catalog Review API", () => {
           subtitles: [],
         }],
       },
+      titleIdentity: {
+        available: false,
+        unavailableReason: "UNSUPPORTED_EVIDENCE_FORMAT",
+        checkpoint: null,
+        policyVersion: null,
+        reviewSetIdentity: null,
+        items: [],
+      },
       coverage: {
         discSelectionCount: 0,
         mediaItemsWithSelections: 0,
@@ -642,6 +652,126 @@ describe("Catalog Review API", () => {
         limit: 100,
         hasPrevious: false,
         hasNext: false,
+      },
+    });
+  });
+
+  it("returns the same checkpoint-bound Title Identity through the HTTP adapter", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/synthetic-title-identity",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "synthetic-title-identity",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/synthetic-title-identity.iso",
+      fingerprint: "synthetic-title-identity",
+    });
+    const checkpoint = {
+      manifestId: "synthetic-title-manifest-1",
+      manifestRevision: 1,
+      manifestDigest: "a".repeat(64),
+    };
+    const header = {
+      originalDiscArchiveId: archive.id,
+      sourceArchiveJobId: "synthetic-title-job",
+      evidenceFormat: "dvd-recovery-evidence-v1",
+      boundaryEvidenceDigest: "b".repeat(64),
+      sectorSizeBytes: 2_048,
+      acceptedEndLbaExclusive: 1_024,
+      currentManifestId: checkpoint.manifestId,
+      currentManifestRevision: checkpoint.manifestRevision,
+      currentManifestDigest: checkpoint.manifestDigest,
+      unrecoveredSourceRanges: [],
+      createdAt: new Date(1),
+      updatedAt: new Date(1),
+    } as unknown as DvdArchiveEvidenceHeader;
+    const reviewSet = {
+      originalDiscArchiveId: archive.id,
+      evidenceFormat: "dvd-recovery-evidence-v1",
+      checkpoint,
+      policyVersion: "dvd-title-identity-continuity-v1",
+      reviewSetIdentity: "c".repeat(64),
+      createdAt: new Date(2),
+      items: [{
+        titleIdentityId: "synthetic-title-id",
+        presentAtCurrentCheckpoint: true,
+        mappingState: "unmapped",
+        discSelectionIds: [],
+        continuity: {
+          result: "initial",
+          policyVersion: "dvd-title-identity-continuity-v1",
+          previousObservationId: null,
+        },
+        observation: {
+          id: "synthetic-title-observation",
+          titleIdentityId: "synthetic-title-id",
+          checkpoint,
+          displayTitleNumber: 5,
+          navigation: {
+            videoTitleSetNumber: 2,
+            titleSetTitleNumber: 1,
+            programChainNumber: 4,
+          },
+          selectedPath: [{
+            programNumber: 1,
+            cellNumber: 1,
+            vobId: 2,
+            cellId: 3,
+          }],
+          angleNumber: 1,
+          angleCount: 1,
+          chapterStart: 1,
+          chapterEnd: 3,
+          chapterCount: 3,
+          sourceExtents: [{ startLba: 100, sectorCount: 40 }],
+          contentDigest: "d".repeat(64),
+          continuity: {
+            result: "initial",
+            policyVersion: "dvd-title-identity-continuity-v1",
+            previousObservationId: null,
+          },
+          createdAt: new Date(2),
+        },
+      }],
+    } as unknown as DvdTitleIdentityReviewSet;
+    const routeAccess = withSnapshotOverrides(access, {
+      catalog: {
+        findDvdArchiveEvidenceHeaders: () => new Map([[archive.id, header]]),
+        readDvdTitleIdentityReviewSet: () => reviewSet,
+      },
+    });
+
+    const response = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => routeAccess,
+      () => "http://localhost:3000",
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      titleIdentity: {
+        available: true,
+        checkpoint: { manifestRevision: 1 },
+        reviewSetIdentity: reviewSet.reviewSetIdentity,
+        items: [{
+          titleIdentityId: "synthetic-title-id",
+          mappingState: "unmapped",
+          observation: {
+            displayTitleNumber: 5,
+            createdAt: "1970-01-01T00:00:00.002Z",
+          },
+        }],
       },
     });
   });

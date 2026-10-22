@@ -89,6 +89,11 @@ import type {
   DiscInspectionClaimToken,
   DiscInspectionId,
   DiscSelectionId,
+  DvdTitleIdentityId,
+  DvdTitleIdentityObservationId,
+  DvdTitleIdentityContinuityResult,
+  DvdTitleIdentityMappingState,
+  DvdTitleIdentitySelectedPathEntry,
   DvdTitleBadSectorCount,
   DvdArchiveEvidenceFormat,
   DvdUnrecoveredSourceRange,
@@ -1212,6 +1217,176 @@ export const dvdArchiveEvidenceManifests = sqliteTable(
     check(
       "dvd_archive_evidence_manifests_identity_check",
       sql`length(${table.imageFingerprint}) between 1 and 512 and length(${table.boundaryPolicyVersion}) between 1 and 128 and length(${table.boundaryEvidenceDigest}) = 64 and ${table.boundaryEvidenceDigest} not glob '*[^0-9a-f]*' and length(${table.unrecoveredSourceRangesDigest}) = 64 and ${table.unrecoveredSourceRangesDigest} not glob '*[^0-9a-f]*' and length(${table.manifestDigest}) = 64 and ${table.manifestDigest} not glob '*[^0-9a-f]*'`,
+    ),
+  ],
+);
+
+export const dvdTitleIdentities = sqliteTable(
+  "dvd_title_identities",
+  {
+    id: text("id").$type<DvdTitleIdentityId>().notNull().primaryKey(),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check("dvd_title_identities_id_not_null", sql`${table.id} is not null`),
+    index("dvd_title_identities_archive_idx").on(
+      table.originalDiscArchiveId,
+      table.createdAt,
+      table.id,
+    ),
+  ],
+);
+
+export const dvdTitleIdentitySets = sqliteTable(
+  "dvd_title_identity_sets",
+  {
+    manifestId: text("manifest_id")
+      .notNull()
+      .primaryKey()
+      .references(() => dvdArchiveEvidenceManifests.id, {
+        onDelete: "restrict",
+      }),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
+    manifestRevision: integer("manifest_revision").notNull(),
+    manifestDigest: text("manifest_digest").notNull(),
+    observationSetDigest: text("observation_set_digest").notNull(),
+    policyVersion: text("policy_version").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check(
+      "dvd_title_identity_sets_manifest_id_not_null",
+      sql`${table.manifestId} is not null`,
+    ),
+    uniqueIndex("dvd_title_identity_sets_archive_revision_unique").on(
+      table.originalDiscArchiveId,
+      table.manifestRevision,
+    ),
+    check(
+      "dvd_title_identity_sets_checkpoint_check",
+      sql`typeof(${table.manifestRevision}) = 'integer' and ${table.manifestRevision} > 0 and length(${table.manifestDigest}) = 64 and ${table.manifestDigest} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "dvd_title_identity_sets_evidence_check",
+      sql`length(${table.observationSetDigest}) = 64 and ${table.observationSetDigest} not glob '*[^0-9a-f]*' and length(${table.policyVersion}) between 1 and 128`,
+    ),
+  ],
+);
+
+export const dvdTitleIdentityObservations = sqliteTable(
+  "dvd_title_identity_observations",
+  {
+    id: text("id")
+      .$type<DvdTitleIdentityObservationId>()
+      .notNull()
+      .primaryKey(),
+    manifestId: text("manifest_id")
+      .notNull()
+      .references(() => dvdTitleIdentitySets.manifestId, {
+        onDelete: "restrict",
+      }),
+    titleIdentityId: text("title_identity_id")
+      .$type<DvdTitleIdentityId>()
+      .notNull()
+      .references(() => dvdTitleIdentities.id, { onDelete: "restrict" }),
+    previousObservationId: text("previous_observation_id")
+      .$type<DvdTitleIdentityObservationId>()
+      .references((): AnySQLiteColumn => dvdTitleIdentityObservations.id, {
+        onDelete: "restrict",
+      }),
+    displayTitleNumber: integer("display_title_number").notNull(),
+    navigation: text("navigation", { mode: "json" }).$type<{
+      videoTitleSetNumber: number;
+      titleSetTitleNumber: number;
+      programChainNumber: number;
+    }>().notNull(),
+    selectedPath: text("selected_path", { mode: "json" })
+      .$type<readonly DvdTitleIdentitySelectedPathEntry[]>()
+      .notNull(),
+    angleNumber: integer("angle_number").notNull(),
+    angleCount: integer("angle_count").notNull(),
+    chapterStart: integer("chapter_start").notNull(),
+    chapterEnd: integer("chapter_end").notNull(),
+    chapterCount: integer("chapter_count").notNull(),
+    sourceExtents: text("source_extents", { mode: "json" })
+      .$type<readonly UnreadableSectorRange[]>()
+      .notNull(),
+    contentDigest: text("content_digest").notNull(),
+    continuityResult: text("continuity_result", {
+      enum: ["initial", "proved", "uncertain", "new"],
+    }).$type<DvdTitleIdentityContinuityResult>().notNull(),
+    continuityPolicyVersion: text("continuity_policy_version").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check(
+      "dvd_title_identity_observations_id_not_null",
+      sql`${table.id} is not null`,
+    ),
+    uniqueIndex("dvd_title_identity_observations_set_identity_unique").on(
+      table.manifestId,
+      table.titleIdentityId,
+    ),
+    index("dvd_title_identity_observations_content_idx").on(
+      table.manifestId,
+      table.contentDigest,
+    ),
+    check(
+      "dvd_title_identity_observations_number_check",
+      sql`typeof(${table.displayTitleNumber}) = 'integer' and ${table.displayTitleNumber} > 0 and typeof(${table.angleNumber}) = 'integer' and ${table.angleNumber} > 0 and typeof(${table.angleCount}) = 'integer' and ${table.angleCount} >= ${table.angleNumber} and typeof(${table.chapterStart}) = 'integer' and ${table.chapterStart} > 0 and typeof(${table.chapterEnd}) = 'integer' and ${table.chapterEnd} >= ${table.chapterStart} and typeof(${table.chapterCount}) = 'integer' and ${table.chapterCount} >= ${table.chapterEnd}`,
+    ),
+    check(
+      "dvd_title_identity_observations_json_check",
+      sql`json_valid(${table.navigation}) and json_type(${table.navigation}) = 'object' and json_valid(${table.selectedPath}) and json_type(${table.selectedPath}) = 'array' and json_array_length(${table.selectedPath}) > 0 and json_valid(${table.sourceExtents}) and json_type(${table.sourceExtents}) = 'array' and json_array_length(${table.sourceExtents}) > 0`,
+    ),
+    check(
+      "dvd_title_identity_observations_continuity_check",
+      sql`${table.continuityResult} in ('initial', 'proved', 'uncertain', 'new') and ((${table.continuityResult} in ('proved', 'uncertain') and ${table.previousObservationId} is not null) or (${table.continuityResult} in ('initial', 'new') and ${table.previousObservationId} is null)) and length(${table.continuityPolicyVersion}) between 1 and 128 and length(${table.contentDigest}) = 64 and ${table.contentDigest} not glob '*[^0-9a-f]*'`,
+    ),
+  ],
+);
+
+export const dvdTitleIdentitySelectionBindings = sqliteTable(
+  "dvd_title_identity_selection_bindings",
+  {
+    titleIdentityId: text("title_identity_id")
+      .$type<DvdTitleIdentityId>()
+      .notNull()
+      .references(() => dvdTitleIdentities.id, { onDelete: "restrict" }),
+    discSelectionId: text("disc_selection_id")
+      .$type<DiscSelectionId>()
+      .notNull()
+      .references(() => discSelections.id, { onDelete: "restrict" }),
+    lastObservationId: text("last_observation_id")
+      .$type<DvdTitleIdentityObservationId>()
+      .notNull()
+      .references(() => dvdTitleIdentityObservations.id, {
+        onDelete: "restrict",
+      }),
+    state: text("state", {
+      enum: ["mapped", "needs_mapping_review"],
+    }).$type<Exclude<DvdTitleIdentityMappingState, "unmapped">>().notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    primaryKey({
+      name: "dvd_title_identity_selection_bindings_pk",
+      columns: [table.titleIdentityId, table.discSelectionId],
+    }),
+    uniqueIndex("dvd_title_identity_selection_bindings_selection_unique").on(
+      table.discSelectionId,
+    ),
+    check(
+      "dvd_title_identity_selection_bindings_state_check",
+      sql`${table.state} in ('mapped', 'needs_mapping_review')`,
     ),
   ],
 );

@@ -14,6 +14,7 @@ import { CatalogReviewDiscSelections } from "./catalog-review-disc-selections";
 import { CatalogReviewEvidence } from "./catalog-review-evidence";
 import { CatalogReviewMediaItems } from "./catalog-review-media-items";
 import { CatalogReviewRearchiveProposal } from "./catalog-review-rearchive-proposal";
+import { CatalogReviewTitleIdentity } from "./catalog-review-title-identity";
 import type {
   CatalogReviewLoadState,
   CatalogReviewRearchiveProposal as CatalogReviewRearchiveProposalDto,
@@ -226,6 +227,7 @@ export function CatalogReviewView({
           <small>Use these for ambiguous discs, extras, and corrections.</small>
         </summary>
         <div className="catalog-editor-grid">
+          <CatalogReviewTitleIdentity titleIdentity={review.titleIdentity} />
           <CatalogReviewEvidence
             coverage={review.coverage}
             volumeLabel={review.archive.discLabel}

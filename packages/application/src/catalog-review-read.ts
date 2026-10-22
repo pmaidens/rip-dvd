@@ -7,6 +7,8 @@ import {
   type DiscSelection,
   type DiscSelectionActionAvailability,
   type DiscSelectionId,
+  type DvdArchiveEvidenceHeader,
+  type DvdTitleIdentityReviewSet,
   type MediaItem,
   type MediaItemMaintenance,
   type OriginalDiscArchiveId,
@@ -65,6 +67,55 @@ export function serializeDiscSelection(selection: DiscSelection) {
     mediaItemId: selection.mediaItemId,
     sourceIdentity: selection.sourceIdentity,
     label: selection.label,
+  };
+}
+
+function serializeTitleIdentity(
+  evidenceHeader: DvdArchiveEvidenceHeader | null,
+  reviewSet: DvdTitleIdentityReviewSet | null,
+) {
+  if (evidenceHeader === null) {
+    return {
+      available: false as const,
+      unavailableReason: "UNSUPPORTED_EVIDENCE_FORMAT" as const,
+      checkpoint: null,
+      policyVersion: null,
+      reviewSetIdentity: null,
+      items: [],
+    };
+  }
+  const checkpoint = {
+    manifestId: evidenceHeader.currentManifestId,
+    manifestRevision: evidenceHeader.currentManifestRevision,
+    manifestDigest: evidenceHeader.currentManifestDigest,
+  };
+  if (reviewSet === null) {
+    return {
+      available: false as const,
+      unavailableReason: "TITLE_IDENTITY_NOT_RECORDED" as const,
+      checkpoint,
+      policyVersion: null,
+      reviewSetIdentity: null,
+      items: [],
+    };
+  }
+  return {
+    available: true as const,
+    unavailableReason: null,
+    checkpoint: reviewSet.checkpoint,
+    policyVersion: reviewSet.policyVersion,
+    reviewSetIdentity: reviewSet.reviewSetIdentity,
+    items: reviewSet.items.map((item) => ({
+      titleIdentityId: item.titleIdentityId,
+      presentAtCurrentCheckpoint: item.presentAtCurrentCheckpoint,
+      mappingState: item.mappingState,
+      discSelectionIds: item.discSelectionIds,
+      continuity: item.continuity,
+      observation: {
+        ...item.observation,
+        createdAt: item.observation.createdAt.toISOString(),
+      },
+    })),
   };
 }
 
@@ -177,6 +228,8 @@ export function readCatalogReview(
     const evidenceHeaders = snapshot.catalog.findDvdArchiveEvidenceHeaders(
       evidenceArchiveIds,
     );
+    const titleIdentityReviewSet = snapshot.catalog
+      .readDvdTitleIdentityReviewSet(id);
     const archive = withAuthoritativeDvdArchiveIntegrity(
       persistedArchive,
       evidenceHeaders.get(id) ?? null,
@@ -403,6 +456,10 @@ export function readCatalogReview(
       rawScan: {
         titles: rawTitles,
       },
+      titleIdentity: serializeTitleIdentity(
+        evidenceHeaders.get(id) ?? null,
+        titleIdentityReviewSet,
+      ),
       coverage,
       reviewActionAvailability,
       ...(rearchiveProposal === null || rearchiveSourceDisc === undefined

@@ -63,6 +63,12 @@ export {
   dvdEvidenceRangesAfterRecoveryRead,
 } from "./dvd-recovery-transition.js";
 export type { DvdArchiveRecoveryReadOutcome } from "./dvd-recovery-transition.js";
+export {
+  DVD_TITLE_IDENTITY_CONTINUITY_VERSION,
+  dvdTitleIdentityContentDigest,
+  dvdTitleIdentityObservationSetDigest,
+  normalizeDvdTitleIdentityObservation,
+} from "./dvd-title-identity.js";
 export type {
   DvdArchiveEvidenceManifestDigestInput,
   DvdArchiveEvidenceManifestDigests,
