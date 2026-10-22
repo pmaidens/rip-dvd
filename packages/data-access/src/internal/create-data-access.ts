@@ -1,4 +1,8 @@
-import { canonicalPublicationJson, DvdCheckpointReadFault, readCommittedDvdCheckpoint } from "../dvd-initial-checkpoint.js";
+import {
+  canonicalPublicationJson,
+  DvdCheckpointReadFault,
+  readCommittedDvdCheckpoint,
+} from "../dvd-initial-checkpoint.js";
 import { DvdInitialSaveFault } from "../errors.js";
 import {
   assertDvdEvidenceRangeTransition,
@@ -76,6 +80,8 @@ import {
   dvdArchiveEvidenceHeaders,
   dvdArchiveEvidenceManifests,
   dvdArchiveRecoveryReads,
+  dvdStructuralAssessments,
+  dvdStructuralCheckAttempts,
   dvdRecoveryStoragePreflights,
   encodeJobFailureReports,
   encodeJobs,
@@ -144,6 +150,15 @@ import {
   DVD_RECOVERY_STORAGE_PREFLIGHT_VERSION,
   type DvdRecoveryStoragePreflight,
 } from "../dvd-recovery-storage-preflight.js";
+import {
+  createDvdStructuralAssessment,
+  DVD_STRUCTURAL_ASSESSMENT_POLICY_VERSION,
+  validateDvdStructuralFailureReason,
+  type DvdStructuralAssessment,
+  type DvdStructuralAssessmentRecord,
+  type DvdStructuralCheckAttempt,
+  type DvdStructuralCheckpoint,
+} from "../dvd-structural-assessment.js";
 import { encodingProfileQueueBlockingReasons } from "../encoding-profile-eligibility.js";
 import {
   archiveBoundaryEvidenceFromRecord,
@@ -187,6 +202,7 @@ import {
   MutationKeyConflictError,
   RecordNotFoundError,
   StaleCatalogRevisionError,
+  StaleDvdStructuralCheckpointError,
   StaleJobAttemptError,
 } from "../errors.js";
 import type { LegacySidecarDataAccess } from "../legacy-sidecar-types.js";
@@ -6398,6 +6414,293 @@ export function createDataAccessInternal(
     };
   }
 
+  function requireDvdStructuralCheckpoint(
+    querySource: Pick<typeof database, "select">,
+    checkpoint: DvdStructuralCheckpoint,
+  ) {
+    const header = querySource.select({
+      evidenceFormat: dvdArchiveEvidenceHeaders.evidenceFormat,
+      currentManifestId: dvdArchiveEvidenceHeaders.currentManifestId,
+      currentManifestRevision:
+        dvdArchiveEvidenceHeaders.currentManifestRevision,
+      currentManifestDigest: dvdArchiveEvidenceHeaders.currentManifestDigest,
+      acceptedEndLbaExclusive:
+        dvdArchiveEvidenceHeaders.acceptedEndLbaExclusive,
+    }).from(dvdArchiveEvidenceHeaders).where(eq(
+      dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+      checkpoint.originalDiscArchiveId,
+    )).get();
+    const manifest = querySource.select({
+      id: dvdArchiveEvidenceManifests.id,
+      originalDiscArchiveId:
+        dvdArchiveEvidenceManifests.originalDiscArchiveId,
+      revision: dvdArchiveEvidenceManifests.revision,
+      manifestDigest: dvdArchiveEvidenceManifests.manifestDigest,
+      acceptedEndLbaExclusive:
+        dvdArchiveEvidenceManifests.acceptedEndLbaExclusive,
+      evidenceFormat: dvdArchiveEvidenceManifests.evidenceFormat,
+    }).from(dvdArchiveEvidenceManifests).where(eq(
+      dvdArchiveEvidenceManifests.id,
+      checkpoint.manifestId,
+    )).get();
+    if (
+      header === undefined ||
+      header.evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT
+    ) {
+      throw new DomainInvariantError(
+        "DVD structural check requires a committed recovery checkpoint",
+      );
+    }
+    if (
+      header.currentManifestId !== checkpoint.manifestId ||
+      header.currentManifestRevision !== checkpoint.manifestRevision ||
+      header.currentManifestDigest !== checkpoint.manifestDigest ||
+      header.acceptedEndLbaExclusive !==
+        checkpoint.acceptedEndLbaExclusive
+    ) {
+      throw new StaleDvdStructuralCheckpointError();
+    }
+    if (
+      manifest === undefined ||
+      manifest.originalDiscArchiveId !== checkpoint.originalDiscArchiveId ||
+      manifest.revision !== checkpoint.manifestRevision ||
+      manifest.manifestDigest !== checkpoint.manifestDigest ||
+      manifest.acceptedEndLbaExclusive !==
+        checkpoint.acceptedEndLbaExclusive ||
+      manifest.evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT
+    ) {
+      throw new DomainInvariantError("DVD structural checkpoint is inconsistent");
+    }
+    return manifest;
+  }
+
+  function toDvdStructuralAssessment(
+    row: typeof dvdStructuralAssessments.$inferSelect,
+  ): DvdStructuralAssessmentRecord {
+    const assessment = createDvdStructuralAssessment({
+      checkpoint: {
+        originalDiscArchiveId: row.originalDiscArchiveId,
+        manifestId: row.manifestId,
+        manifestRevision: row.manifestRevision,
+        manifestDigest: row.manifestDigest,
+        acceptedEndLbaExclusive: row.acceptedEndLbaExclusive,
+      },
+      findings: row.findings,
+    });
+    if (
+      assessment.id !== row.id ||
+      assessment.policyVersion !== row.policyVersion ||
+      assessment.validity !== row.validity
+    ) {
+      throw new DomainInvariantError(
+        "Persisted DVD structural assessment is invalid",
+      );
+    }
+    return { ...assessment, createdAt: row.createdAt };
+  }
+
+  function findDvdStructuralAssessment(
+    id: string,
+  ): DvdStructuralAssessmentRecord {
+    const row = database.select().from(dvdStructuralAssessments)
+      .where(eq(dvdStructuralAssessments.id, id)).get();
+    if (row === undefined) {
+      throw new DomainInvariantError(
+        "DVD structural check attempt has no assessment",
+      );
+    }
+    return toDvdStructuralAssessment(row);
+  }
+
+  function toDvdStructuralCheckAttempt(
+    row: typeof dvdStructuralCheckAttempts.$inferSelect,
+  ): DvdStructuralCheckAttempt {
+    const checkpoint = {
+      originalDiscArchiveId: row.originalDiscArchiveId,
+      manifestId: row.manifestId,
+      manifestRevision: row.manifestRevision,
+      manifestDigest: row.manifestDigest,
+      acceptedEndLbaExclusive: row.acceptedEndLbaExclusive,
+    };
+    if (row.outcome === "completed") {
+      if (row.assessmentId === null || row.findings === null) {
+        throw new DomainInvariantError(
+          "Completed DVD structural check attempt is incomplete",
+        );
+      }
+      const result = createDvdStructuralAssessment({
+        checkpoint,
+        findings: row.findings,
+      });
+      if (result.id !== row.assessmentId) {
+        throw new DomainInvariantError(
+          "DVD structural check attempt conflicts with its assessment",
+        );
+      }
+      return {
+        sequence: row.sequence,
+        checkpoint,
+        createdAt: row.createdAt,
+        outcome: "completed",
+        assessmentIdentity: row.assessmentId,
+        findings: result.findings,
+        reason: null,
+      };
+    }
+    if (row.failureCode === null || row.failureMessage === null) {
+      throw new DomainInvariantError(
+        "Failed DVD structural check attempt has no reason",
+      );
+    }
+    return {
+      sequence: row.sequence,
+      checkpoint,
+      createdAt: row.createdAt,
+      outcome: "failed",
+      assessmentIdentity: null,
+      findings: null,
+      reason: validateDvdStructuralFailureReason({
+        code: row.failureCode,
+        message: row.failureMessage,
+      }),
+    };
+  }
+
+  function findLatestDvdStructuralAttempt(
+    originalDiscArchiveId: OriginalDiscArchiveId,
+    checkpoint?: DvdStructuralCheckpoint,
+    outcome?: "completed" | "failed",
+  ): DvdStructuralCheckAttempt | null {
+    const conditions = [
+      eq(
+        dvdStructuralCheckAttempts.originalDiscArchiveId,
+        originalDiscArchiveId,
+      ),
+      checkpoint === undefined
+        ? undefined
+        : eq(dvdStructuralCheckAttempts.manifestId, checkpoint.manifestId),
+      checkpoint === undefined
+        ? undefined
+        : eq(
+          dvdStructuralCheckAttempts.manifestRevision,
+          checkpoint.manifestRevision,
+        ),
+      checkpoint === undefined
+        ? undefined
+        : eq(
+          dvdStructuralCheckAttempts.manifestDigest,
+          checkpoint.manifestDigest,
+        ),
+      outcome === undefined
+        ? undefined
+        : eq(dvdStructuralCheckAttempts.outcome, outcome),
+    ].filter((condition) => condition !== undefined);
+    const row = database.select().from(dvdStructuralCheckAttempts)
+      .where(and(...conditions))
+      .orderBy(desc(dvdStructuralCheckAttempts.sequence)).limit(1).get();
+    return row === undefined ? null : toDvdStructuralCheckAttempt(row);
+  }
+
+  function inspectDvdStructuralAssessment(
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ) {
+    const id = originalDiscArchiveId;
+    const archive = access.catalog.listOriginalDiscArchives({ ids: [id] })[0];
+    if (archive === undefined) {
+      throw new RecordNotFoundError(
+        "Original Disc Archive",
+        originalDiscArchiveId,
+      );
+    }
+    const header = access.catalog.findDvdArchiveEvidenceHeader(id);
+    const marked = dvdRecoveryEvidenceFormatForArchive(
+      header,
+      access.archiveJobs.listForArchive(id),
+    );
+    const common = {
+      schemaVersion: 1 as const,
+      policyVersion: DVD_STRUCTURAL_ASSESSMENT_POLICY_VERSION,
+      originalDiscArchiveId,
+    };
+    if (marked === null) {
+      return {
+        ...common,
+        state: "unavailable" as const,
+        checkpoint: null,
+        currentAssessmentIdentity: null,
+        assessment: null,
+        latestAttempt: null,
+        unavailableReasons: [{
+          code: "UNSUPPORTED_EVIDENCE_FORMAT",
+          message: "Structural assessment requires dvd-recovery-evidence-v1.",
+        }],
+      };
+    }
+    if (header === null) {
+      return {
+        ...common,
+        state: "unavailable" as const,
+        checkpoint: null,
+        currentAssessmentIdentity: null,
+        assessment: null,
+        latestAttempt: null,
+        unavailableReasons: [{
+          code: "CONSISTENCY_FAULT",
+          message: "The committed DVD checkpoint is unavailable.",
+        }],
+      };
+    }
+    const checkpoint: DvdStructuralCheckpoint = {
+      originalDiscArchiveId,
+      manifestId: header.currentManifestId,
+      manifestRevision: header.currentManifestRevision,
+      manifestDigest: header.currentManifestDigest,
+      acceptedEndLbaExclusive: header.acceptedEndLbaExclusive,
+    };
+    const latestAttempt = findLatestDvdStructuralAttempt(id, checkpoint);
+    const currentAttempt = findLatestDvdStructuralAttempt(
+      id,
+      checkpoint,
+      "completed",
+    );
+    const priorAttempt = currentAttempt ??
+      findLatestDvdStructuralAttempt(id, undefined, "completed");
+    const assessment = priorAttempt?.outcome === "completed"
+      ? findDvdStructuralAssessment(priorAttempt.assessmentIdentity)
+      : null;
+    const isCurrent = currentAttempt !== null;
+    const state = isCurrent
+      ? "current" as const
+      : assessment === null
+        ? "pending" as const
+        : "outdated" as const;
+    const unavailableReasons = isCurrent
+      ? []
+      : [
+        state === "pending"
+          ? {
+            code: "ASSESSMENT_PENDING",
+            message: "Structural assessment is pending for the current checkpoint.",
+          }
+          : {
+            code: "ASSESSMENT_OUTDATED",
+            message: "The displayed structural assessment is for an older checkpoint.",
+          },
+        ...(latestAttempt?.outcome === "failed"
+          ? [latestAttempt.reason]
+          : []),
+      ];
+    return {
+      ...common,
+      state,
+      checkpoint,
+      currentAssessmentIdentity: isCurrent ? assessment!.id : null,
+      assessment,
+      latestAttempt,
+      unavailableReasons,
+    };
+  }
+
   function finalizeArchiveAuditRun(
     claim: ArchiveAuditRunSummary,
     input: {
@@ -6942,54 +7245,244 @@ export function createDataAccessInternal(
     return completed;
   }
 
+  function recordCompletedDvdStructuralAssessment(input: {
+    checkpoint: DvdStructuralCheckpoint;
+    findings: readonly import("../dvd-structural-assessment.js")
+      .DvdStructuralFindingInput[];
+    imagePath: string;
+  }) {
+    const assessment = createDvdStructuralAssessment(input);
+    const timestamp = now();
+    return database.transaction((transaction) => {
+      requireDvdStructuralCheckpoint(transaction, assessment.checkpoint);
+      const archive = transaction.select({
+        archivePath: originalDiscArchives.archivePath,
+      }).from(originalDiscArchives).where(eq(
+        originalDiscArchives.id,
+        assessment.checkpoint.originalDiscArchiveId,
+      )).get();
+      if (archive?.archivePath !== input.imagePath) {
+        throw new DvdCheckpointReadFault(
+          "DVD_EVIDENCE_CHANGED_DURING_READ",
+        );
+      }
+      transaction.insert(dvdStructuralAssessments).values({
+        id: assessment.id,
+        originalDiscArchiveId: assessment.checkpoint.originalDiscArchiveId,
+        manifestId: assessment.checkpoint.manifestId,
+        manifestRevision: assessment.checkpoint.manifestRevision,
+        manifestDigest: assessment.checkpoint.manifestDigest,
+        acceptedEndLbaExclusive:
+          assessment.checkpoint.acceptedEndLbaExclusive,
+        policyVersion: assessment.policyVersion,
+        validity: assessment.validity,
+        findings: assessment.findings,
+        createdAt: timestamp,
+      }).onConflictDoNothing().run();
+      const persistedRow = transaction.select()
+        .from(dvdStructuralAssessments)
+        .where(eq(dvdStructuralAssessments.id, assessment.id)).get();
+      if (persistedRow === undefined) {
+        throw new DomainInvariantError(
+          "DVD structural assessment was not recorded",
+        );
+      }
+      const persisted = toDvdStructuralAssessment(persistedRow);
+      const attemptRow = transaction.insert(dvdStructuralCheckAttempts)
+        .values({
+          originalDiscArchiveId: assessment.checkpoint.originalDiscArchiveId,
+          manifestId: assessment.checkpoint.manifestId,
+          manifestRevision: assessment.checkpoint.manifestRevision,
+          manifestDigest: assessment.checkpoint.manifestDigest,
+          acceptedEndLbaExclusive:
+            assessment.checkpoint.acceptedEndLbaExclusive,
+          outcome: "completed",
+          assessmentId: assessment.id,
+          findings: assessment.findings,
+          failureCode: null,
+          failureMessage: null,
+          createdAt: timestamp,
+        }).returning().get();
+      if (attemptRow === undefined) {
+        throw new DomainInvariantError(
+          "DVD structural check attempt was not recorded",
+        );
+      }
+      const attempt = toDvdStructuralCheckAttempt(attemptRow);
+      if (attempt.outcome !== "completed") {
+        throw new DomainInvariantError(
+          "DVD structural check attempt outcome is invalid",
+        );
+      }
+      return { attempt, assessment: persisted };
+    });
+  }
+
+  function recordFailedDvdStructuralAttempt(input: {
+    checkpoint: DvdStructuralCheckpoint;
+    reason: { code: string; message: string };
+  }) {
+    const reason = validateDvdStructuralFailureReason(input.reason);
+    const timestamp = now();
+    return database.transaction((transaction) => {
+      requireDvdStructuralCheckpoint(transaction, input.checkpoint);
+      const row = transaction.insert(dvdStructuralCheckAttempts).values({
+        originalDiscArchiveId: input.checkpoint.originalDiscArchiveId,
+        manifestId: input.checkpoint.manifestId,
+        manifestRevision: input.checkpoint.manifestRevision,
+        manifestDigest: input.checkpoint.manifestDigest,
+        acceptedEndLbaExclusive:
+          input.checkpoint.acceptedEndLbaExclusive,
+        outcome: "failed",
+        assessmentId: null,
+        findings: null,
+        failureCode: reason.code,
+        failureMessage: reason.message,
+        createdAt: timestamp,
+      }).returning().get();
+      if (row === undefined) {
+        throw new DomainInvariantError(
+          "DVD structural check failure was not recorded",
+        );
+      }
+      const attempt = toDvdStructuralCheckAttempt(row);
+      if (attempt.outcome !== "failed") {
+        throw new DomainInvariantError(
+          "DVD structural check failure outcome is invalid",
+        );
+      }
+      return attempt;
+    });
+  }
+
+  async function withDvdCheckpointRead<Prepared, Result>(
+    id: OriginalDiscArchiveId,
+    ownership: import("../types.js").DvdCheckpointReadOwnership,
+    inspect: (
+      checkpoint: import("../dvd-initial-checkpoint.js")
+        .CommittedDvdCheckpointEvidence,
+      handle: import("../types.js").DvdCheckpointReadHandle,
+      imagePath: string,
+    ) => Promise<Prepared>,
+    commit: (
+      checkpoint: import("../dvd-initial-checkpoint.js")
+        .CommittedDvdCheckpointEvidence,
+      prepared: Prepared,
+      imagePath: string,
+    ) => Result,
+  ): Promise<{
+    checkpoint: import("../dvd-initial-checkpoint.js")
+      .CommittedDvdCheckpointEvidence;
+    result: Result;
+  } | null> {
+    type Checkpoint = import("../dvd-initial-checkpoint.js")
+      .CommittedDvdCheckpointEvidence;
+    type OwnedReadState = null | {
+      state: "prepared";
+      checkpoint: Checkpoint;
+      imagePath: string;
+      prepared: Prepared;
+    } | {
+      state: "committed";
+      checkpoint: Checkpoint;
+      result: Result;
+    };
+    const readSnapshot = () => access.readConsistentSnapshot((reader) => {
+      const archive = reader.catalog.listOriginalDiscArchives({ ids: [id] })[0];
+      if (!archive) throw new RecordNotFoundError("Original Disc Archive", id);
+      return {
+        archive,
+        header: reader.catalog.findDvdArchiveEvidenceHeader(id),
+        jobs: reader.archiveJobs.listForArchive(id),
+      };
+    });
+    const admissionSnapshot = readSnapshot();
+    if (dvdRecoveryEvidenceFormatForArchive(
+      admissionSnapshot.header,
+      admissionSnapshot.jobs,
+    ) === null) return null;
+    if (normalizedOriginalsLibraryPath === undefined) {
+      throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE");
+    }
+    const owned = await ownership.withConsistentRead<OwnedReadState>({
+      archiveId: id,
+      imagePath: admissionSnapshot.archive.archivePath,
+      originalsLibraryPath: normalizedOriginalsLibraryPath,
+      signal: new AbortController().signal,
+      task: async (handle) => {
+        handle.assertOwned();
+        const snapshot = readSnapshot();
+        if (
+          canonicalPublicationJson(snapshot) !==
+            canonicalPublicationJson(admissionSnapshot)
+        ) {
+          throw new DvdCheckpointReadFault(
+            "DVD_EVIDENCE_CHANGED_DURING_READ",
+          );
+        }
+        const checkpoint = await readCommittedDvdCheckpoint({
+          originalsLibraryPath: normalizedOriginalsLibraryPath,
+          ...snapshot,
+          assertImageOwnership: handle.assertOwned,
+        });
+        if (checkpoint === null) return null;
+        const imagePath = snapshot.archive.archivePath;
+        if (imagePath === null) {
+          throw new DvdCheckpointReadFault(
+            "DVD_EVIDENCE_CHECKPOINT_UNAVAILABLE",
+          );
+        }
+        handle.assertOwned();
+        const prepared = await inspect(checkpoint, handle, imagePath);
+        handle.assertOwned();
+        if (
+          canonicalPublicationJson(readSnapshot()) !==
+            canonicalPublicationJson(snapshot)
+        ) {
+          throw new DvdCheckpointReadFault(
+            "DVD_EVIDENCE_CHANGED_DURING_READ",
+          );
+        }
+        return {
+          state: "prepared" as const,
+          checkpoint,
+          imagePath,
+          prepared,
+        };
+      },
+      commit: (prepared, handle) => {
+        if (prepared === null) return null;
+        if (prepared.state !== "prepared") {
+          throw new DvdCheckpointReadFault("CONSISTENCY_FAULT");
+        }
+        handle.assertOwned();
+        return {
+          state: "committed" as const,
+          checkpoint: prepared.checkpoint,
+          result: commit(
+            prepared.checkpoint,
+            prepared.prepared,
+            prepared.imagePath,
+          ),
+        };
+      },
+    });
+    if (owned === null) return null;
+    if (owned.state !== "committed") {
+      throw new DvdCheckpointReadFault("CONSISTENCY_FAULT");
+    }
+    return { checkpoint: owned.checkpoint, result: owned.result };
+  }
+
   const access: LegacySidecarDataAccess = {
     async readDvdCheckpoint(id, ownership) {
-      const readSnapshot = () => access.readConsistentSnapshot(reader => {
-        const archive = reader.catalog.listOriginalDiscArchives({ ids: [id] })[0];
-        if (!archive) throw new RecordNotFoundError("Original Disc Archive", id);
-        return { archive, header: reader.catalog.findDvdArchiveEvidenceHeader(id), jobs: reader.archiveJobs.listForArchive(id) };
-      });
-      const admissionSnapshot = readSnapshot();
-      if (dvdRecoveryEvidenceFormatForArchive(
-        admissionSnapshot.header,
-        admissionSnapshot.jobs,
-      ) === null) return null;
-      if (normalizedOriginalsLibraryPath === undefined) {
-        throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE");
-      }
-      return ownership.withConsistentRead({
-        archiveId: id,
-        imagePath: admissionSnapshot.archive.archivePath,
-        originalsLibraryPath: normalizedOriginalsLibraryPath,
-        signal: new AbortController().signal,
-        task: async ({ assertOwned }) => {
-          assertOwned();
-          const snapshot = readSnapshot();
-          if (
-            canonicalPublicationJson(snapshot) !==
-              canonicalPublicationJson(admissionSnapshot)
-          ) {
-            throw new DvdCheckpointReadFault(
-              "DVD_EVIDENCE_CHANGED_DURING_READ",
-            );
-          }
-          const manifest = await readCommittedDvdCheckpoint({
-            originalsLibraryPath: normalizedOriginalsLibraryPath,
-            ...snapshot,
-            assertImageOwnership: assertOwned,
-          });
-          assertOwned();
-          if (
-            canonicalPublicationJson(readSnapshot()) !==
-              canonicalPublicationJson(snapshot)
-          ) {
-            throw new DvdCheckpointReadFault(
-              "DVD_EVIDENCE_CHANGED_DURING_READ",
-            );
-          }
-          return manifest;
-        },
-      });
+      const read = await withDvdCheckpointRead(
+        id,
+        ownership,
+        async () => undefined,
+        () => undefined,
+      );
+      return read?.checkpoint ?? null;
     },
     notifications: createNotificationAccess(database, now),
     dvdRecovery: {
@@ -7172,6 +7665,47 @@ export function createDataAccessInternal(
         return projected;
       },
     },
+    async assessDvdStructure(id, ownership, assess) {
+      const read = await withDvdCheckpointRead(
+        id,
+        ownership,
+        async (manifest, handle, imagePath) =>
+          assess(manifest, handle, imagePath),
+        (manifest, prepared, imagePath) => {
+          const checkpoint = {
+            originalDiscArchiveId: id,
+            manifestId: manifest.id,
+            manifestRevision: manifest.revision,
+            manifestDigest: manifest.manifestDigest,
+            acceptedEndLbaExclusive: manifest.acceptedEndLbaExclusive,
+          };
+          if (prepared.outcome === "failed") {
+            return {
+              outcome: "failed" as const,
+              attempt: recordFailedDvdStructuralAttempt({
+                checkpoint,
+                reason: prepared.reason,
+              }),
+            };
+          }
+          const completed = recordCompletedDvdStructuralAssessment({
+            checkpoint: {
+              ...checkpoint,
+            },
+            findings: prepared.findings,
+            imagePath,
+          });
+          return { outcome: "completed" as const, ...completed };
+        },
+      );
+      return read?.result ?? null;
+    },
+    dvdStructuralAssessments: {
+      recordFailed(input) {
+        return recordFailedDvdStructuralAttempt(input);
+      },
+      inspect: inspectDvdStructuralAssessment,
+    },
     dvdRecoveryStorage: {
       readCurrent: readCurrentDvdRecoveryStoragePreflight,
       record(input) {
@@ -7347,6 +7881,9 @@ export function createDataAccessInternal(
     },
     readConsistentSnapshot(read) {
       const snapshotAccess: ConsistentReadAccess = {
+        dvdStructuralAssessments: {
+          inspect: inspectDvdStructuralAssessment,
+        },
         dvdRecoveryStorage: {
           readCurrent: readCurrentDvdRecoveryStoragePreflight,
         },

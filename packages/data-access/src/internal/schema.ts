@@ -64,6 +64,10 @@ import {
   DVD_RECOVERY_STORAGE_REASON_CODES,
   type DvdRecoveryStoragePreflightFacts,
 } from "../dvd-recovery-storage-preflight.js";
+import {
+  type DvdStructuralFindingInput,
+  type DvdStructuralValidity,
+} from "../dvd-structural-assessment.js";
 import type {
   ArchiveRequestId,
   ArchiveAuditRunId,
@@ -1267,6 +1271,112 @@ export const dvdArchiveEvidenceHeaders = sqliteTable(
     check(
       "dvd_archive_evidence_headers_current_revision_check",
       sql`typeof(${table.currentManifestRevision}) = 'integer' and ${table.currentManifestRevision} > 0 and length(${table.currentManifestDigest}) = 64 and ${table.currentManifestDigest} not glob '*[^0-9a-f]*'`,
+    ),
+  ],
+);
+
+export const dvdStructuralAssessments = sqliteTable(
+  "dvd_structural_assessments",
+  {
+    id: text("id").notNull().primaryKey(),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
+    manifestId: text("manifest_id")
+      .notNull()
+      .references(() => dvdArchiveEvidenceManifests.id, {
+        onDelete: "restrict",
+      }),
+    manifestRevision: integer("manifest_revision").notNull(),
+    manifestDigest: text("manifest_digest").notNull(),
+    acceptedEndLbaExclusive: integer("accepted_end_lba_exclusive")
+      .notNull(),
+    policyVersion: text("policy_version").notNull(),
+    validity: text("validity")
+      .$type<DvdStructuralValidity>()
+      .notNull(),
+    findings: text("findings", { mode: "json" })
+      .$type<readonly DvdStructuralFindingInput[]>()
+      .notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("dvd_structural_assessments_checkpoint_idx").on(
+      table.originalDiscArchiveId,
+      table.manifestRevision,
+      table.createdAt,
+      table.id,
+    ),
+    check(
+      "dvd_structural_assessments_identity_check",
+      sql`length(${table.id}) = 90 and substr(${table.id}, 1, 26) = 'dvd-structural-assessment:' and substr(${table.id}, 27) not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "dvd_structural_assessments_checkpoint_check",
+      sql`typeof(${table.manifestRevision}) = 'integer' and ${table.manifestRevision} > 0 and length(${table.manifestDigest}) = 64 and ${table.manifestDigest} not glob '*[^0-9a-f]*' and typeof(${table.acceptedEndLbaExclusive}) = 'integer' and ${table.acceptedEndLbaExclusive} > 0`,
+    ),
+    check(
+      "dvd_structural_assessments_policy_check",
+      sql`${table.policyVersion} = 'dvd-structural-assessment-v1'`,
+    ),
+    check(
+      "dvd_structural_assessments_validity_check",
+      sql`${table.validity} in ('valid', 'invalid', 'unknown')`,
+    ),
+    check(
+      "dvd_structural_assessments_findings_check",
+      sql`json_valid(${table.findings}) and json_type(${table.findings}) = 'array' and json_array_length(${table.findings}) = 3`,
+    ),
+  ],
+);
+
+export const dvdStructuralCheckAttempts = sqliteTable(
+  "dvd_structural_check_attempts",
+  {
+    sequence: integer("sequence").primaryKey({ autoIncrement: true }),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
+    manifestId: text("manifest_id")
+      .notNull()
+      .references(() => dvdArchiveEvidenceManifests.id, {
+        onDelete: "restrict",
+      }),
+    manifestRevision: integer("manifest_revision").notNull(),
+    manifestDigest: text("manifest_digest").notNull(),
+    acceptedEndLbaExclusive: integer("accepted_end_lba_exclusive")
+      .notNull(),
+    outcome: text("outcome", { enum: ["completed", "failed"] })
+      .notNull(),
+    assessmentId: text("assessment_id")
+      .references(() => dvdStructuralAssessments.id, {
+        onDelete: "restrict",
+      }),
+    findings: text("findings", { mode: "json" })
+      .$type<readonly DvdStructuralFindingInput[]>(),
+    failureCode: text("failure_code"),
+    failureMessage: text("failure_message"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("dvd_structural_check_attempts_checkpoint_idx").on(
+      table.originalDiscArchiveId,
+      table.manifestRevision,
+      table.sequence,
+    ),
+    check(
+      "dvd_structural_check_attempts_checkpoint_check",
+      sql`typeof(${table.manifestRevision}) = 'integer' and ${table.manifestRevision} > 0 and length(${table.manifestDigest}) = 64 and ${table.manifestDigest} not glob '*[^0-9a-f]*' and typeof(${table.acceptedEndLbaExclusive}) = 'integer' and ${table.acceptedEndLbaExclusive} > 0`,
+    ),
+    check(
+      "dvd_structural_check_attempts_outcome_check",
+      sql`${table.outcome} in ('completed', 'failed')`,
+    ),
+    check(
+      "dvd_structural_check_attempts_shape_check",
+      sql`(${table.outcome} = 'completed' and ${table.assessmentId} is not null and ${table.findings} is not null and json_valid(${table.findings}) and json_type(${table.findings}) = 'array' and json_array_length(${table.findings}) = 3 and ${table.failureCode} is null and ${table.failureMessage} is null) or (${table.outcome} = 'failed' and ${table.assessmentId} is null and ${table.findings} is null and typeof(${table.failureCode}) = 'text' and length(${table.failureCode}) between 1 and 128 and typeof(${table.failureMessage}) = 'text' and length(${table.failureMessage}) between 1 and 512)`,
     ),
   ],
 );

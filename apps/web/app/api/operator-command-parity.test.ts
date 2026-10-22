@@ -7,6 +7,7 @@ import {
   createCleanReadArchiveIntegrityEvidence,
   createDvdArchiveBoundaryEvidenceDigest,
   createDvdArchiveEvidenceManifestDigests,
+  createDvdStructuralAssessment,
   DVD_RECOVERY_EVIDENCE_ADMISSION,
   DVD_RECOVERY_EVIDENCE_ENCODING,
   DVD_RECOVERY_EVIDENCE_FORMAT,
@@ -23,7 +24,10 @@ import {
   type EncodeOutputMediaProbe,
 } from "@rip-dvd/application";
 import type { ArchiveRequestId, MediaItemId } from "@rip-dvd/data-access";
-import { defaultArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import {
+  createArchiveImageOwnership,
+  defaultArchiveImageOwnership,
+} from "@rip-dvd/worker-runtime";
 
 import {
   createOperatorWorkflowFixture,
@@ -31,6 +35,10 @@ import {
   seedCatalogReviewForReadFixture,
   seedRearchiveCatalogReviewFixture,
 } from "../../../operator-cli/src/operator-workflow.test-support.js";
+import {
+  advanceCommittedArchiveEvidence,
+  seedCommittedArchiveEvidence,
+} from "../../../operator-cli/src/archive-evidence.test-support.js";
 import { createCatalogReviewRoute } from "./catalog-reviews/[id]/route";
 import { createCatalogSuggestionRoute } from "./catalog-reviews/[id]/suggestion/route";
 import { createDeploymentReadinessResponse } from "./deployment-readiness/route";
@@ -56,6 +64,141 @@ import {
 import { readDashboardSnapshot } from "../../lib/dashboard";
 
 const trustedOrigin = "http://localhost:3000";
+
+it("keeps every structural assessment state identical through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive, manifest } = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  const access = fixture.openAccess();
+  const inspectBoth = async () => {
+    const web = createOperationsResponse(
+      access,
+      new Request(
+        `${trustedOrigin}/api/operations?kind=original-disc-archives&id=${archive.id}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    const cli = await fixture.run([
+      "inspect",
+      "original-disc-archives",
+      archive.id,
+    ]);
+    expect(web.status).toBe(200);
+    expect(cli.exitCode, JSON.stringify(cli.result)).toBe(0);
+    expect(cli.result).toEqual(await web.json());
+    return cli.result as {
+      item: { structuralAssessment: Record<string, unknown> };
+    };
+  };
+  try {
+    expect((await inspectBoth()).item.structuralAssessment).toMatchObject({
+      state: "pending",
+      currentAssessmentIdentity: null,
+      unavailableReasons: [{ code: "ASSESSMENT_PENDING" }],
+    });
+
+    access.dvdStructuralAssessments.recordFailed({
+      checkpoint: {
+        originalDiscArchiveId: archive.id,
+        manifestId: manifest.id,
+        manifestRevision: manifest.revision,
+        manifestDigest: manifest.manifestDigest,
+        acceptedEndLbaExclusive: manifest.acceptedEndLbaExclusive,
+      },
+      reason: {
+        code: "CONSISTENCY_FAULT",
+        message: "A consistent image read was unavailable.",
+      },
+    });
+    expect((await inspectBoth()).item.structuralAssessment).toMatchObject({
+      state: "pending",
+      currentAssessmentIdentity: null,
+      latestAttempt: {
+        outcome: "failed",
+        reason: { code: "CONSISTENCY_FAULT" },
+      },
+      unavailableReasons: [
+        { code: "ASSESSMENT_PENDING" },
+        { code: "CONSISTENCY_FAULT" },
+      ],
+    });
+
+    const completed = await access.assessDvdStructure(
+      archive.id,
+      createArchiveImageOwnership({
+        authorityRootPath: fixture.originalsLibraryPath,
+      }),
+      async () => ({
+        outcome: "completed",
+        findings: ([
+          "filesystem_structure",
+          "dvd_navigation",
+          "title_enumeration",
+        ] as const).map((checkKind) => ({
+          checkKind,
+          policyVersion: "synthetic-structural-check-v1",
+          testedExtent: {
+            startLba: 0,
+            endLbaExclusive: 1024,
+            observedSectorCount: 32,
+          },
+          outcome: "valid" as const,
+          reason: null,
+          evidenceReference: `synthetic-parity-evidence:${checkKind}`,
+        })),
+      }),
+    );
+    if (completed === null || completed.outcome !== "completed") {
+      throw new Error("Expected structural support");
+    }
+    expect((await inspectBoth()).item.structuralAssessment).toMatchObject({
+      state: "current",
+      currentAssessmentIdentity: completed.assessment.id,
+      assessment: { validity: "valid" },
+      unavailableReasons: [],
+    });
+
+    const current = advanceCommittedArchiveEvidence(fixture, manifest);
+    expect((await inspectBoth()).item.structuralAssessment).toMatchObject({
+      state: "outdated",
+      currentAssessmentIdentity: null,
+      assessment: { id: completed.assessment.id },
+      unavailableReasons: [{ code: "ASSESSMENT_OUTDATED" }],
+    });
+
+    access.dvdStructuralAssessments.recordFailed({
+      checkpoint: {
+        originalDiscArchiveId: archive.id,
+        manifestId: current.id,
+        manifestRevision: current.revision,
+        manifestDigest: current.manifestDigest,
+        acceptedEndLbaExclusive: current.acceptedEndLbaExclusive,
+      },
+      reason: {
+        code: "CONSISTENCY_FAULT",
+        message: "A consistent image read was unavailable.",
+      },
+    });
+    expect((await inspectBoth()).item.structuralAssessment).toMatchObject({
+      state: "outdated",
+      latestAttempt: {
+        outcome: "failed",
+        reason: { code: "CONSISTENCY_FAULT" },
+      },
+      unavailableReasons: [
+        { code: "ASSESSMENT_OUTDATED" },
+        { code: "CONSISTENCY_FAULT" },
+      ],
+    });
+
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
 
 it.each(["web", "cli"] as const)(
   "keeps long-running archives cancellable through %s with adapter parity",
@@ -1958,8 +2101,70 @@ it("returns the same operational records and evidence through web and CLI", asyn
         badSectorCount: 1,
         badAreaCount: 1,
         badSectorRanges: null,
+        structuralAssessment: {
+          state: "pending",
+          currentAssessmentIdentity: null,
+          unavailableReasons: [{ code: "ASSESSMENT_PENDING" }],
+        },
       },
     });
+    const structuralAssessment = {
+      assessment: createDvdStructuralAssessment({
+        checkpoint: {
+          originalDiscArchiveId: archiveId,
+          manifestId,
+          manifestRevision: 1,
+          manifestDigest,
+          acceptedEndLbaExclusive: 1,
+        },
+        findings: ([
+          "filesystem_structure",
+          "dvd_navigation",
+          "title_enumeration",
+        ] as const).map((checkKind) => ({
+          checkKind,
+          policyVersion: "synthetic-structural-check-v1",
+          testedExtent: {
+            startLba: 0,
+            endLbaExclusive: 1,
+            observedSectorCount: 1,
+          },
+          outcome: "valid" as const,
+          reason: null,
+          evidenceReference: `synthetic-evidence:${checkKind}`,
+        })),
+      }),
+    };
+    const structuralFixture = new DatabaseSync(fixture.databasePath);
+    structuralFixture.prepare(`
+      INSERT INTO dvd_structural_assessments (
+        id, original_disc_archive_id, manifest_id, manifest_revision,
+        manifest_digest, accepted_end_lba_exclusive, policy_version,
+        validity, findings, created_at
+      ) VALUES (?, ?, ?, 1, ?, 1, ?, ?, ?, 2)
+    `).run(
+      structuralAssessment.assessment.id,
+      archiveId,
+      manifestId,
+      manifestDigest,
+      structuralAssessment.assessment.policyVersion,
+      structuralAssessment.assessment.validity,
+      JSON.stringify(structuralAssessment.assessment.findings),
+    );
+    structuralFixture.prepare(`
+      INSERT INTO dvd_structural_check_attempts (
+        original_disc_archive_id, manifest_id, manifest_revision,
+        manifest_digest, accepted_end_lba_exclusive, outcome,
+        assessment_id, findings, created_at
+      ) VALUES (?, ?, 1, ?, 1, 'completed', ?, ?, 2)
+    `).run(
+      archiveId,
+      manifestId,
+      manifestDigest,
+      structuralAssessment.assessment.id,
+      JSON.stringify(structuralAssessment.assessment.findings),
+    );
+    structuralFixture.close();
     const catalogReviewResponse = await createCatalogReviewRoute(
       new Request(`http://localhost/api/catalog-reviews/${archiveId}`),
       archiveId,
@@ -2357,6 +2562,21 @@ it("returns the same operational records and evidence through web and CLI", asyn
         badSectorCount: 1,
         badAreaCount: 1,
         badSectorRanges: null,
+        structuralAssessment: {
+          state: "current",
+          checkpoint: { manifestId, manifestRevision: 1 },
+          currentAssessmentIdentity: structuralAssessment.assessment.id,
+          assessment: {
+            id: structuralAssessment.assessment.id,
+            validity: "valid",
+            findings: [
+              { checkKind: "filesystem_structure", outcome: "valid" },
+              { checkKind: "dvd_navigation", outcome: "valid" },
+              { checkKind: "title_enumeration", outcome: "valid" },
+            ],
+          },
+          unavailableReasons: [],
+        },
         archiveRecovery: {
           available: false,
           blockingReasons: expect.arrayContaining([

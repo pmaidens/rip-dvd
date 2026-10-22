@@ -7,6 +7,10 @@ import {
 } from "@rip-dvd/worker-runtime";
 import { runDvdInitialArchiveBoundaryForArchiveJob, type ProvenDvdInitialArchiveBoundary } from "./dvd-initial-boundary.js";
 import {
+  runDvdStructuralCheck,
+  type DvdStructuralChecker,
+} from "./dvd-structural-check.js";
+import {
   publishDvdInitialArchive, reconcileDvdInitialArchivePublication,
   readDvdInitialArchivePublicationImagePaths,
   resolveDvdInitialArchivePublicationImagePaths,
@@ -240,6 +244,7 @@ export async function reconcileDvdInitialArchiveForArchiveJob(options: SaveOptio
  * progress. Exclusion lasts through helper closure, save and staging cleanup. */
 export async function runDvdInitialArchiveJob(options: SaveOptions & {
   boundary: Parameters<typeof runDvdInitialArchiveBoundaryForArchiveJob>[0];
+  structuralChecker?: DvdStructuralChecker;
 }) {
   const signal = options.signal
     ? AbortSignal.any([options.signal, options.boundary.signal])
@@ -248,7 +253,7 @@ export async function runDvdInitialArchiveJob(options: SaveOptions & {
     publicationOptions(options),
     options.boundary.outputPath,
   );
-  return withOwnedClaim(
+  const saved = await withOwnedClaim(
     { ...options, signal },
     imagePaths.stagingPath,
     async owned => {
@@ -273,4 +278,13 @@ export async function runDvdInitialArchiveJob(options: SaveOptions & {
     [imagePaths.archivePath],
     true,
   );
+  if (saved.originalDiscArchiveId !== null) {
+    await runDvdStructuralCheck({
+      access: options.access,
+      archiveImageOwnership: options.archiveImageOwnership,
+      checker: options.structuralChecker,
+      originalDiscArchiveId: saved.originalDiscArchiveId,
+    });
+  }
+  return saved;
 }

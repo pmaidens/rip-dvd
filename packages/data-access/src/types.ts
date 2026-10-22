@@ -55,6 +55,12 @@ import type {
   DvdRecoveryStoragePreflight,
   DvdRecoveryStoragePreflightInput,
 } from "./dvd-recovery-storage-preflight.js";
+import type {
+  DvdStructuralAssessmentAccess,
+  DvdStructuralAssessmentRecord,
+  DvdStructuralCheckAttempt,
+  DvdStructuralFindingInput,
+} from "./dvd-structural-assessment.js";
 
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
 export type ArchiveIntegrity = (typeof ARCHIVE_INTEGRITIES)[number];
@@ -2025,6 +2031,10 @@ export type SnapshotCatalogAccess = Pick<
 >;
 
 export interface ConsistentReadAccess {
+  readonly dvdStructuralAssessments: Pick<
+    DvdStructuralAssessmentAccess,
+    "inspect"
+  >;
   readonly dvdRecoveryStorage: Pick<
     DvdRecoveryStorageAccess,
     "readCurrent"
@@ -2073,25 +2083,60 @@ export interface EncodeOutputInspectionReadAccess
     Pick<EncodeJobAccess, "findRetainedOutput">;
 }
 
+export interface DvdCheckpointReadHandle {
+  descriptor: number;
+  signal: AbortSignal;
+  assertOwned(): void;
+}
+
+export interface DvdCheckpointReadOwnership {
+  withConsistentRead<Result>(request: {
+    archiveId: string;
+    imagePath: string | null;
+    originalsLibraryPath: string;
+    signal: AbortSignal;
+    task(handle: DvdCheckpointReadHandle): Promise<Result>;
+    commit?: (prepared: Result, handle: DvdCheckpointReadHandle) => Result;
+  }): Promise<Result>;
+}
+
 export interface DataAccess {
   readDvdCheckpoint(
     id: OriginalDiscArchiveId,
-    ownership: {
-      withConsistentRead<Result>(request: {
-        archiveId: string;
-        imagePath: string | null;
-        originalsLibraryPath: string;
-        signal: AbortSignal;
-        task(handle: {
-          descriptor: number;
-          signal: AbortSignal;
-          assertOwned(): void;
-        }): Promise<Result>;
-      }): Promise<Result>;
-    },
+    ownership: DvdCheckpointReadOwnership,
   ): Promise<import("./dvd-initial-checkpoint.js").CommittedDvdCheckpointEvidence | null>;
   readonly notifications: import("./notification-types.js").NotificationAccess;
   readonly dvdRecovery: DvdRecoveryAccess;
+  assessDvdStructure(
+    id: OriginalDiscArchiveId,
+    ownership: DvdCheckpointReadOwnership,
+    assess: (
+      checkpoint: import("./dvd-initial-checkpoint.js").CommittedDvdCheckpointEvidence,
+      handle: DvdCheckpointReadHandle,
+      imagePath: string,
+    ) => Promise<
+      | {
+        outcome: "completed";
+        findings: readonly DvdStructuralFindingInput[];
+      }
+      | {
+        outcome: "failed";
+        reason: { code: string; message: string };
+      }
+    >,
+  ): Promise<
+    | {
+      outcome: "completed";
+      attempt: DvdStructuralCheckAttempt & { outcome: "completed" };
+      assessment: DvdStructuralAssessmentRecord;
+    }
+    | {
+      outcome: "failed";
+      attempt: DvdStructuralCheckAttempt & { outcome: "failed" };
+    }
+    | null
+  >;
+  readonly dvdStructuralAssessments: DvdStructuralAssessmentAccess;
   readonly dvdRecoveryStorage: DvdRecoveryStorageAccess;
   readonly catalog: CatalogAccess;
   readonly encodingProfiles: EncodingProfileAccess;

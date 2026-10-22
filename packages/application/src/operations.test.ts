@@ -241,6 +241,22 @@ describe("inspectOperations", () => {
       },
       archiveRequests: { listForRearchiveSources: vi.fn(() => []) },
       encodeJobs: { listForDiscSelection: vi.fn(() => []) },
+      dvdStructuralAssessments: {
+        inspect: vi.fn(() => ({
+          schemaVersion: 1,
+          policyVersion: "dvd-structural-assessment-v1",
+          originalDiscArchiveId: archive.id,
+          state: "unavailable",
+          checkpoint: null,
+          currentAssessmentIdentity: null,
+          assessment: null,
+          latestAttempt: null,
+          unavailableReasons: [{
+            code: "CONSISTENCY_FAULT",
+            message: "The committed DVD checkpoint is unavailable.",
+          }],
+        })),
+      },
       dvdRecoveryStorage: { readCurrent: vi.fn(() => null) },
     } as unknown as ConsistentReadAccess;
     const access = {
@@ -263,6 +279,10 @@ describe("inspectOperations", () => {
       originalsLibraryPath: "/media/originals",
     });
     expect(result.item).toMatchObject({
+      structuralAssessment: {
+        state: "unavailable",
+        unavailableReasons: [{ code: "CONSISTENCY_FAULT" }],
+      },
       archiveRecovery: {
         ownership: {
           writer: { state: "uncertain" },

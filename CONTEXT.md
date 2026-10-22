@@ -50,6 +50,10 @@ _Avoid_: Catalog Review completion, proposal save
 The evidence-backed read completeness of an Original Disc Archive, distinct from structural validity and playback observations. Existing `unknown` records retain their lack of read-quality evidence, `clean_read` records a complete read without remaining unreadable sectors, `incomplete_read` is limited to `dvd-recovery-evidence-v1` archives with remaining Unrecovered Source sectors inside the accepted extent, and historical `watchable_salvage` records acceptance under the salvage policy used at the time; none guarantees an undamaged viewing experience or permission to encode.
 _Avoid_: Bit-perfect, exact copy, Archive Job status
 
+**Structural Assessment**:
+An immutable set of versioned filesystem, DVD navigation, and title-enumeration findings for one committed Original Disc Archive checkpoint. It records each check's tested extent, outcome, reason, and evidence reference. It is separate from Archive Integrity, playback observations, and operator acceptance; a new checkpoint makes the prior assessment outdated.
+_Avoid_: Archive Integrity, watchability verdict, damage acceptance
+
 **Unrecovered Source**:
 Source sectors not yet successfully preserved in an Original Disc Archive. Evidence distinguishes regions skipped without individual testing from sectors individually attempted unsuccessfully and retains their recovery history.
 _Avoid_: Proven unreadable sectors, lost playback

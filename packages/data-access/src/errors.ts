@@ -40,6 +40,13 @@ export class StaleJobAttemptError extends Error {
   }
 }
 
+export class StaleDvdStructuralCheckpointError extends DomainInvariantError {
+  constructor() {
+    super("DVD structural check checkpoint is no longer current");
+    this.name = "StaleDvdStructuralCheckpointError";
+  }
+}
+
 /** A marked initial save cannot be reconciled with its durable lifecycle. */
 export class DvdInitialSaveFault extends DomainInvariantError {
   constructor(

@@ -372,6 +372,7 @@ function knownInventory(reader: ProfileReader): FilesystemView {
   };
 }
 export async function inspectDvdProfile(reader: ProfileReader) {
+  reader.beginStructuralCheck("title_enumeration");
   const inspected = new Map<number, { domain: string; offset: number }>();
   const inventory = knownInventory(reader);
   const knownTitleNumbers = [...inventory.files.keys()].flatMap((path) => {
@@ -604,9 +605,12 @@ export async function inspectDvdProfile(reader: ProfileReader) {
       }
     }
   }
+  reader.completeStructuralCheck("title_enumeration");
+  reader.beginStructuralCheck("dvd_navigation");
   // Maps discovered through different partial views still constrain the same NAV.
   for (const job of navJobs) {
     reader.currentView = job.view;
     await nav(reader, job.domain, [knownMaps.get(job.mapKey)], inspected);
   }
+  reader.completeStructuralCheck("dvd_navigation");
 }
