@@ -434,11 +434,15 @@ function seedTitleDamagePaging(variant, fingerprintFill) {
   );
   evidenceSqlite.prepare(`
     INSERT INTO dvd_title_damage_assessments (
-      id, original_disc_archive_id, manifest_id, manifest_revision,
+      sequence, id, original_disc_archive_id, manifest_id, manifest_revision,
       manifest_digest, accepted_end_lba_exclusive,
       title_identity_review_set_identity, structural_assessment_identity,
       policy_version, title_mappings, created_at
-    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 1)
+    ) VALUES (
+      (SELECT coalesce(max(sequence), 0) + 1
+       FROM dvd_title_damage_assessments),
+      ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 1
+    )
   `).run(
     assessment.id,
     archive.id,
