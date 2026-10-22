@@ -2,6 +2,7 @@ import {
   dvdDiscVerificationInsertionIsCurrent,
   dvdRecoveryWriteAuthority,
   type ArchiveRecovery,
+  type ArchiveRecoveryFaultCode,
   type ClaimedArchiveRecoveryWork,
   type DataAccess,
   type DvdRecoveryWriteAuthority,
@@ -22,7 +23,10 @@ import {
   DvdRecoveryBatchFault,
   type DvdRecoveryAtomicWriter,
 } from "./dvd-recovery-batch.js";
-import { reconcileDvdRecoveryCheckpoint } from "./dvd-recovery-reconciliation.js";
+import {
+  DvdRecoveryReconciliationFault,
+  reconcileDvdRecoveryCheckpoint,
+} from "./dvd-recovery-reconciliation.js";
 import { runDurableWorkPoller } from "./durable-work-poller.js";
 import type { DvdCopyRunner } from "./dvd-archiver.js";
 import {
@@ -258,6 +262,28 @@ async function finalizeStop(input: {
   });
 }
 
+function stopFaultCode(error: unknown): ArchiveRecoveryFaultCode {
+  return error instanceof DvdRecoveryPassFault ||
+      error instanceof DvdRecoveryReconciliationFault
+    ? error.code
+    : "CONSISTENCY_FAULT";
+}
+
+async function finalizeStopSafely(input: Parameters<typeof finalizeStop>[0]) {
+  try {
+    await finalizeStop(input);
+  } catch (error) {
+    if (input.signal.aborted) throw error;
+    if (input.recovery.stopOperationId === null) throw error;
+    input.access.archiveRecoveryWork.markStopFault({
+      archiveRecoveryId: input.recovery.id,
+      attemptId: input.recovery.attemptId,
+      stopOperationId: input.recovery.stopOperationId,
+      faultCode: stopFaultCode(error),
+    });
+  }
+}
+
 export async function pollDvdRecoveryPass(input: {
   access: DataAccess;
   atomicWriter?: DvdRecoveryAtomicWriter;
@@ -277,7 +303,7 @@ export async function pollDvdRecoveryPass(input: {
   const reconcile = input.reconcile ?? reconcileDvdRecoveryCheckpoint;
   const stopping = input.access.archiveRecoveryWork.findNextStopping();
   if (stopping !== null) {
-    await finalizeStop({
+    await finalizeStopSafely({
       ...input,
       archiveImageOwnership,
       reconcile,
@@ -317,7 +343,7 @@ export async function pollDvdRecoveryPass(input: {
         signal.throwIfAborted();
         const before = currentRecovery(input.access, candidate.recovery);
         if (before.status === "stopping") {
-          await finalizeStop({
+          await finalizeStopSafely({
             ...input,
             archiveImageOwnership,
             reconcile,
@@ -372,7 +398,7 @@ export async function pollDvdRecoveryPass(input: {
         });
         const afterRead = currentRecovery(input.access, candidate.recovery);
         if (completed.outcome === "stopped" || afterRead.status === "stopping") {
-          await finalizeStop({
+          await finalizeStopSafely({
             ...input,
             archiveImageOwnership,
             reconcile,
@@ -415,17 +441,13 @@ export async function pollDvdRecoveryPass(input: {
         });
         const afterBatch = currentRecovery(input.access, candidate.recovery);
         if (afterBatch.status === "stopping") {
-          await finalizeStop({
+          await finalizeStopSafely({
             ...input,
             archiveImageOwnership,
             reconcile,
             recovery: afterBatch,
             signal,
           });
-          return true;
-        }
-        if (afterBatch.status === "completed") {
-          input.access.archiveRecoveryWork.settlePass(claim);
           return true;
         }
       }
@@ -435,7 +457,7 @@ export async function pollDvdRecoveryPass(input: {
     if (signal.aborted) throw error;
     const recovery = currentRecovery(input.access, candidate.recovery);
     if (recovery.status === "stopping") {
-      await finalizeStop({
+      await finalizeStopSafely({
         ...input,
         archiveImageOwnership,
         reconcile,

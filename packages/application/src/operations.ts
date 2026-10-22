@@ -49,6 +49,9 @@ import {
   retainedEncodeOutputArtifactIdentity,
 } from "./encode-output-inspection.js";
 import { describeDvdRecoveryStorage } from "./dvd-recovery-storage.js";
+import {
+  dvdRecoveryReconciliationBlockingReasons,
+} from "./dvd-recovery-reconciliation.js";
 import { dvdRecoveryStopAction } from "./dvd-recovery-stop.js";
 import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 
@@ -134,8 +137,8 @@ function archiveRecoveryOperation(
 ) {
   const reconciliation = access.dvdRecoveryReconciliations
     .findLatestForRecovery(recovery.id);
-  const active = reconciliation?.status === "queued" ||
-    reconciliation?.status === "running";
+  const reconciliationBlockingReasons =
+    dvdRecoveryReconciliationBlockingReasons(recovery, reconciliation);
   const recoveryOwnsStatus = recovery.status === "running" ||
     recovery.status === "stopping" || recovery.status === "stopped" ||
     recovery.status === "faulted" || recovery.status === "completed";
@@ -152,14 +155,12 @@ function archiveRecoveryOperation(
     availableActions: [
       {
         name: "reconcile",
-        eligible: !active,
+        eligible: reconciliationBlockingReasons.length === 0,
         requiredInputs: ["mutationKey", "archiveRecoveryId"],
-        reason: active
-          ? "A DVD recovery reconciliation is already active."
-          : null,
-        blockingReasons: active
-          ? ["A DVD recovery reconciliation is already active."]
-          : [],
+        reason: reconciliationBlockingReasons[0]?.message ?? null,
+        blockingReasons: reconciliationBlockingReasons.map(({ message }) =>
+          message
+        ),
       },
       dvdRecoveryStopAction(recovery),
     ],

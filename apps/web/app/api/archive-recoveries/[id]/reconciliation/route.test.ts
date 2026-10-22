@@ -218,6 +218,24 @@ it("rejects reconciliation while a Recovery pass owns the attempt", async () => 
         blockingReasons: [{ code: "RECOVERY_PASS_ACTIVE" }],
       },
     });
+    const genericInspection = await fixture.run([
+      "inspect",
+      "archive-recoveries",
+      seeded.recoveryId,
+    ]);
+    expect(genericInspection.result).toMatchObject({
+      item: {
+        availableActions: expect.arrayContaining([
+          expect.objectContaining({
+            name: "reconcile",
+            eligible: false,
+            blockingReasons: [
+              "The active DVD recovery pass must quiesce first.",
+            ],
+          }),
+        ]),
+      },
+    });
     const web = await createDvdRecoveryReconciliationRoute(
       request(
         seeded.recoveryId,

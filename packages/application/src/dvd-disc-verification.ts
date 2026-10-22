@@ -217,6 +217,7 @@ export async function inspectDvdDiscVerification(
       : access.discInspections.list({ ids: [latest.discInspectionId] })[0] ??
         null;
     const latestCurrent = latest !== null &&
+      latest.archiveRecoveryAttemptId === recovery.attemptId &&
       dvdDiscVerificationInsertionIsCurrent(latest, latestInspection) &&
       dvdDiscVerificationCheckpointIsCurrent(latest, checkpoint) &&
       header !== null &&

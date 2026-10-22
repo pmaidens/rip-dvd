@@ -270,13 +270,20 @@ WHEN OLD.`id` IS NOT NEW.`id`
       ON current_manifest.`id` = evidence_header.`current_manifest_id`
     WHERE evidence_header.`original_disc_archive_id` = NEW.`original_disc_archive_id`
       AND (
-        (NEW.`status` IN ('stopping', 'stopped'))
+        (NEW.`status` IN ('stopping', 'stopped', 'faulted'))
+        OR
+        (NEW.`status` = 'running' AND EXISTS (
+          SELECT 1 FROM `archive_recovery_work` AS recovery_work
+          WHERE recovery_work.`archive_recovery_id` = NEW.`id`
+            AND recovery_work.`attempt_id` = NEW.`attempt_id`
+            AND recovery_work.`status` = 'claimed'
+        ))
         OR
         (json_array_length(current_manifest.`unrecovered_source_ranges`) = 0
           AND NEW.`status` = 'completed')
         OR
         (json_array_length(current_manifest.`unrecovered_source_ranges`) > 0
-          AND NEW.`status` IN ('eligible', 'running', 'faulted'))
+          AND NEW.`status` = 'eligible')
       )
   )
 BEGIN SELECT RAISE(ABORT, 'Archive Recovery identity is immutable and status must match authoritative DVD evidence'); END;--> statement-breakpoint

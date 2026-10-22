@@ -1,5 +1,6 @@
 import {
   RecordNotFoundError,
+  type ArchiveRecovery,
   type ArchiveRecoveryId,
   type DataAccess,
   type DvdRecoveryReconciliation,
@@ -32,18 +33,14 @@ function reconciliationContext(
   return recovery;
 }
 
-export function inspectDvdRecoveryReconciliation(
-  access: DataAccess,
-  archiveRecoveryId: ArchiveRecoveryId,
+export function dvdRecoveryReconciliationBlockingReasons(
+  recovery: Pick<ArchiveRecovery, "status">,
+  latest: Pick<DvdRecoveryReconciliation, "status"> | null,
 ) {
-  const recovery = reconciliationContext(access, archiveRecoveryId);
-  const latest = access.dvdRecoveryReconciliations.findLatestForRecovery(
-    recovery.id,
-  );
   const active = latest?.status === "queued" || latest?.status === "running";
   const recoveryPassActive = recovery.status === "running" ||
     recovery.status === "stopping";
-  const blockingReasons = [
+  return [
     ...(active ? [{
         code: "RECONCILIATION_ACTIVE",
         message: "A DVD recovery reconciliation is already active.",
@@ -53,6 +50,20 @@ export function inspectDvdRecoveryReconciliation(
       message: "The active DVD recovery pass must quiesce first.",
     }] : []),
   ];
+}
+
+export function inspectDvdRecoveryReconciliation(
+  access: DataAccess,
+  archiveRecoveryId: ArchiveRecoveryId,
+) {
+  const recovery = reconciliationContext(access, archiveRecoveryId);
+  const latest = access.dvdRecoveryReconciliations.findLatestForRecovery(
+    recovery.id,
+  );
+  const blockingReasons = dvdRecoveryReconciliationBlockingReasons(
+    recovery,
+    latest,
+  );
   return {
     archiveRecovery: visibleArchiveRecovery(recovery),
     checkpoint: access.catalog.findDvdArchiveEvidenceHeader(

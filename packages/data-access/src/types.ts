@@ -657,6 +657,12 @@ export interface ArchiveRecoveryWorkAccess {
     attemptId: ArchiveRecoveryAttemptId;
     stopOperationId: ArchiveRecoveryStopOperationId;
   }): ArchiveRecovery;
+  markStopFault(input: {
+    archiveRecoveryId: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+    stopOperationId: ArchiveRecoveryStopOperationId;
+    faultCode: ArchiveRecoveryFaultCode;
+  }): ArchiveRecovery;
   settlePass(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
   markFault(input: {
     claim: ClaimedArchiveRecoveryWork;

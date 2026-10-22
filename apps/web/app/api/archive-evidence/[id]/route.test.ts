@@ -824,6 +824,13 @@ it.each([
         },
       })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
 
+      expect(access.catalog.findArchiveRecoveryById(
+        recoveryWorkClaim.archiveRecoveryId,
+      )).toMatchObject({
+        status: "running",
+        work: { claimToken: recoveryWorkClaim.claimToken },
+      });
+
       const result = await reconcileDvdRecoveryCheckpoint({
         access,
         originalsLibraryPath: fixture.originalsLibraryPath,

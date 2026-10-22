@@ -25,7 +25,10 @@ import { createOperatorWorkflowFixture } from "../../../../../operator-cli/src/o
 import type { DvdRecoveryAtomicWriter } from "../../../../../archive-worker/src/dvd-recovery-batch.js";
 import type { DvdRecoverySourceReader } from "../../../../../archive-worker/src/dvd-disc-verifier.js";
 import { pollDvdRecoveryPass } from "../../../../../archive-worker/src/dvd-recovery-worker.js";
-import type { reconcileDvdRecoveryCheckpoint } from "../../../../../archive-worker/src/dvd-recovery-reconciliation.js";
+import {
+  DvdRecoveryReconciliationFault,
+  type reconcileDvdRecoveryCheckpoint,
+} from "../../../../../archive-worker/src/dvd-recovery-reconciliation.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 
@@ -611,6 +614,45 @@ it("finishes a durable Stop after a worker restart without another read", async 
     );
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({ status: "stopped", work: null });
+  } finally {
+    input.access.close();
+  }
+});
+
+it("faults an unreconcilable Stop so it cannot poison the stopping queue", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 901,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }], "/dev/synthetic-recovery-drive");
+  const source = immediateReader(() => {
+    throw new Error("No source read is allowed while stopping");
+  });
+  const input = pollInput(fixture, source.reader);
+  const reconcile = vi.fn(async () => {
+    throw new DvdRecoveryReconciliationFault("STORAGE_UNSUPPORTED");
+  }) as unknown as typeof reconcileDvdRecoveryCheckpoint;
+  try {
+    input.access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000466",
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    });
+
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(true);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "faulted",
+        faultCode: "STORAGE_UNSUPPORTED",
+        stopOperationId: null,
+        stopRequestedAt: null,
+        stoppedAt: null,
+      });
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(false);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(source.start).not.toHaveBeenCalled();
   } finally {
     input.access.close();
   }
