@@ -1609,12 +1609,6 @@ export const dvdTitleDamageAssessments = sqliteTable(
       "dvd_title_damage_assessments_id_not_null",
       sql`${table.id} is not null`,
     ),
-    index("dvd_title_damage_assessments_checkpoint_idx").on(
-      table.originalDiscArchiveId,
-      table.manifestRevision,
-      table.createdAt,
-      table.id,
-    ),
     check(
       "dvd_title_damage_assessments_identity_check",
       sql`length(${table.id}) = 92 and substr(${table.id}, 1, 28) = 'dvd-title-damage-assessment:' and substr(${table.id}, 29) not glob '*[^0-9a-f]*'`,

@@ -161,7 +161,9 @@ function CatalogReviewTitleDamageEvidenceGeneration({
           titleDamage.state === "unavailable" ? (
           <ul>
             {titleDamage.unavailableReasons.map((reason) => (
-              <li key={reason.code}>{reason.message}</li>
+              <li key={`${reason.code}\0${reason.message}`}>
+                {reason.message}
+              </li>
             ))}
           </ul>
         ) : (
@@ -191,7 +193,9 @@ function CatalogReviewTitleDamageEvidenceGeneration({
                   </span>
                   <ul>
                     {item.mappingCoverage.unknownReasons.map((reason) => (
-                      <li key={reason.code}>{reason.message}</li>
+                      <li key={`${reason.code}\0${reason.message}`}>
+                        {reason.message}
+                      </li>
                     ))}
                   </ul>
                 </>
@@ -229,7 +233,9 @@ function CatalogReviewTitleDamageEvidenceGeneration({
             </p>
             <ul>
               {titleDamage.unknownTitleImpact.reasons.map((reason) => (
-                <li key={reason.code}>{reason.message}</li>
+                <li key={`${reason.code}\0${reason.message}`}>
+                  {reason.message}
+                </li>
               ))}
             </ul>
           </div>

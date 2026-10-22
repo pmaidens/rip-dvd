@@ -32,7 +32,6 @@ CREATE TABLE `dvd_title_damage_assessments` (
 );
 --> statement-breakpoint
 CREATE INDEX `dvd_title_damage_assessment_attempts_archive_sequence_idx` ON `dvd_title_damage_assessment_attempts` (`original_disc_archive_id`,`sequence`);--> statement-breakpoint
-CREATE INDEX `dvd_title_damage_assessments_checkpoint_idx` ON `dvd_title_damage_assessments` (`original_disc_archive_id`,`manifest_revision`,`created_at`,`id`);--> statement-breakpoint
 CREATE TRIGGER `dvd_title_damage_assessment_update_guard`
 BEFORE UPDATE ON `dvd_title_damage_assessments`
 BEGIN SELECT RAISE(ABORT, 'DVD Title Damage Assessment is immutable'); END;--> statement-breakpoint

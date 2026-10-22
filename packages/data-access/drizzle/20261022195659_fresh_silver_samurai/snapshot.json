@@ -1,7 +1,7 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "a836821c-782c-4cf9-9968-5b0122aea2e2",
+  "id": "bc0df743-dbcd-4a9d-9206-a4c111f32638",
   "prevIds": [
     "6a8580cc-1757-466b-b438-2e2fe4ec20e6"
   ],
@@ -7703,32 +7703,6 @@
       "name": "dvd_title_damage_assessment_attempts_archive_sequence_idx",
       "entityType": "indexes",
       "table": "dvd_title_damage_assessment_attempts"
-    },
-    {
-      "columns": [
-        {
-          "value": "original_disc_archive_id",
-          "isExpression": false
-        },
-        {
-          "value": "manifest_revision",
-          "isExpression": false
-        },
-        {
-          "value": "created_at",
-          "isExpression": false
-        },
-        {
-          "value": "id",
-          "isExpression": false
-        }
-      ],
-      "isUnique": false,
-      "where": null,
-      "origin": "manual",
-      "name": "dvd_title_damage_assessments_checkpoint_idx",
-      "entityType": "indexes",
-      "table": "dvd_title_damage_assessments"
     },
     {
       "columns": [
