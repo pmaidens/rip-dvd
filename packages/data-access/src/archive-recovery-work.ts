@@ -26,7 +26,7 @@ export type ActiveEncodeWorkStatus =
 
 export type ArchiveRecoveryWorkIdentity = Pick<
   ArchiveRecoveryWork,
-  "archiveRecoveryId" | "originalDiscArchiveId" | "status"
+  "archiveRecoveryId" | "originalDiscArchiveId" | "attemptId" | "status"
 >;
 
 export function archiveRecoveryWorkIdentity(
@@ -35,6 +35,7 @@ export function archiveRecoveryWorkIdentity(
   return {
     archiveRecoveryId: work.archiveRecoveryId,
     originalDiscArchiveId: work.originalDiscArchiveId,
+    attemptId: work.attemptId,
     status: work.status,
   };
 }

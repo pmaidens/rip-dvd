@@ -87,7 +87,9 @@ import type {
   ArchiveJobId,
   ArchiveJobClaimToken,
   ArchiveRecoveryId,
+  ArchiveRecoveryAttemptId,
   ArchiveRecoveryClaimToken,
+  ArchiveRecoveryStopOperationId,
   ArchiveRecoveryStatus,
   ArchiveRecoveryWorkStatus,
   DvdRecoveryReconciliationClaimToken,
@@ -1708,9 +1710,18 @@ export const archiveRecoveries = sqliteTable(
       .references(() => dvdArchiveEvidenceHeaders.originalDiscArchiveId, {
         onDelete: "restrict",
       }),
+    attemptId: text("attempt_id")
+      .$type<ArchiveRecoveryAttemptId>()
+      .notNull(),
+    attemptOrdinal: integer("attempt_ordinal").notNull(),
     status: text("status", { enum: ARCHIVE_RECOVERY_STATUSES })
       .$type<ArchiveRecoveryStatus>()
       .notNull(),
+    stopOperationId: text("stop_operation_id")
+      .$type<ArchiveRecoveryStopOperationId>(),
+    stopRequestedAt: integer("stop_requested_at", { mode: "timestamp_ms" }),
+    stoppedAt: integer("stopped_at", { mode: "timestamp_ms" }),
+    faultCode: text("fault_code"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -1720,9 +1731,23 @@ export const archiveRecoveries = sqliteTable(
       .on(table.originalDiscArchiveId),
     uniqueIndex("archive_recoveries_identity_unique")
       .on(table.id, table.originalDiscArchiveId),
+    uniqueIndex("archive_recoveries_attempt_unique")
+      .on(table.id, table.originalDiscArchiveId, table.attemptId),
+    check(
+      "archive_recoveries_attempt_ordinal_check",
+      sql`typeof(${table.attemptOrdinal}) = 'integer' and ${table.attemptOrdinal} > 0`,
+    ),
     check(
       "archive_recoveries_status_check",
       sql`${table.status} in (${sqliteStringLiterals(ARCHIVE_RECOVERY_STATUSES)})`,
+    ),
+    check(
+      "archive_recoveries_stop_check",
+      sql`(${table.status} = 'stopping' and ${table.stopOperationId} is not null and ${table.stopRequestedAt} is not null and ${table.stoppedAt} is null) or (${table.status} = 'stopped' and ${table.stopOperationId} is not null and ${table.stopRequestedAt} is not null and ${table.stoppedAt} is not null) or (${table.status} not in ('stopping', 'stopped') and ${table.stoppedAt} is null)`,
+    ),
+    check(
+      "archive_recoveries_fault_check",
+      sql`(${table.status} = 'faulted' and ${table.faultCode} is not null) or (${table.status} <> 'faulted' and ${table.faultCode} is null)`,
     ),
   ],
 );
@@ -1741,9 +1766,14 @@ export const archiveRecoveryWork = sqliteTable(
       .references(() => dvdArchiveEvidenceHeaders.originalDiscArchiveId, {
         onDelete: "restrict",
       }),
+    attemptId: text("attempt_id")
+      .$type<ArchiveRecoveryAttemptId>()
+      .notNull(),
     status: text("status", { enum: ARCHIVE_RECOVERY_WORK_STATUSES })
       .$type<ArchiveRecoveryWorkStatus>()
       .notNull(),
+    verificationId: text("verification_id")
+      .$type<DvdDiscVerificationId>(),
     requestedAt: integer("requested_at", { mode: "timestamp_ms" }),
     claimedBy: text("claimed_by"),
     claimToken: text("claim_token").$type<ArchiveRecoveryClaimToken>(),
@@ -1753,12 +1783,17 @@ export const archiveRecoveryWork = sqliteTable(
   },
   (table) => [
     foreignKey({
-      columns: [table.archiveRecoveryId, table.originalDiscArchiveId],
+      columns: [
+        table.archiveRecoveryId,
+        table.originalDiscArchiveId,
+        table.attemptId,
+      ],
       foreignColumns: [
         archiveRecoveries.id,
         archiveRecoveries.originalDiscArchiveId,
+        archiveRecoveries.attemptId,
       ],
-      name: "archive_recovery_work_recovery_archive_fk",
+      name: "archive_recovery_work_attempt_fk",
     }).onDelete("restrict"),
     index("archive_recovery_work_queue_idx")
       .on(table.status, table.requestedAt, table.createdAt),

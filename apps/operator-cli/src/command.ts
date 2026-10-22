@@ -41,6 +41,7 @@ import {
   MutationKeyConflictError,
   RecordNotFoundError,
   StaleDvdDiscVerificationError,
+  StaleArchiveRecoveryAttemptError,
   validateEncodeQueueSearchQuery,
   type OriginalDiscArchiveId,
   type FilesystemVerificationTarget,
@@ -189,11 +190,11 @@ const commandDefinitions = [
   },
   {
     name: "archive-recovery",
-    description: "Inspect or request DVD Disc Verification and checkpoint reconciliation for an Archive Recovery.",
-    usage: "rip-dvd archive-recovery <inspect-verification|verify-disc|inspect-reconciliation|reconcile> <archive-recovery-id> [options]",
+    description: "Inspect or request DVD Disc Verification, checkpoint reconciliation, and safe Stop for an Archive Recovery.",
+    usage: "rip-dvd archive-recovery <inspect-verification|verify-disc|inspect-reconciliation|reconcile|stop> <archive-recovery-id> [options]",
     inputs: {
-      arguments: ["action: inspect-verification|verify-disc|inspect-reconciliation|reconcile", "archive-recovery-id"],
-      options: ["--key", "--disc-inspection-id", "--checkpoint-revision", "--checkpoint-digest"],
+      arguments: ["action: inspect-verification|verify-disc|inspect-reconciliation|reconcile|stop", "archive-recovery-id"],
+      options: ["--key", "--disc-inspection-id", "--checkpoint-revision", "--checkpoint-digest", "--attempt-id"],
     },
     example: "rip-dvd archive-recovery verify-disc <archive-recovery-id> --key 00000000-0000-4000-8000-000000000001 --disc-inspection-id <id> --checkpoint-revision 1 --checkpoint-digest <sha256>",
   },
@@ -638,6 +639,68 @@ async function runDvdRecoveryReconciliationCommand(
     throw new CommandFailure(
       "RECONCILIATION_UNAVAILABLE",
       "DVD recovery reconciliation is unavailable.",
+      1,
+    );
+  }
+}
+
+function dvdRecoveryStopInputs(args: readonly string[]) {
+  const archiveRecoveryId = args[0]?.trim();
+  const { options, mutationKey } = mutationOptions(
+    args.slice(1),
+    ["--key", "--attempt-id"],
+    "Invalid Archive Recovery Stop options.",
+  );
+  const attemptId = options.get("--attempt-id")?.trim();
+  if (
+    options.size !== 2 || !archiveRecoveryId || !attemptId ||
+    archiveRecoveryId.length > 256 || attemptId.length > 256
+  ) {
+    throw new CommandFailure(
+      "INVALID_ARGUMENTS",
+      "Archive Recovery Stop requires the current attempt identity.",
+      2,
+    );
+  }
+  return { mutationKey, archiveRecoveryId, attemptId };
+}
+
+function runDvdRecoveryStopCommand(args: readonly string[], io: CommandIO) {
+  try {
+    return withAccess(io.openAccess, (access) =>
+      createApplicationOperations(access).stopDvdRecovery(
+        dvdRecoveryStopInputs(args),
+      ));
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    if (error instanceof MutationKeyConflictError) {
+      throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    if (error instanceof RecordNotFoundError) {
+      throw new CommandFailure(
+        "NOT_FOUND",
+        "Archive Recovery Stop target was not found.",
+        2,
+      );
+    }
+    if (error instanceof StaleArchiveRecoveryAttemptError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        undefined,
+        { currentIdentities: error.currentIdentities },
+      );
+    }
+    if (
+      error instanceof DomainInvariantError ||
+      error instanceof InvalidStatusTransitionError
+    ) {
+      throw new CommandFailure("RECOVERY_STOP_REJECTED", error.message, 2);
+    }
+    throw new CommandFailure(
+      "RECOVERY_STOP_UNAVAILABLE",
+      "Archive Recovery Stop is unavailable.",
       1,
     );
   }
@@ -1719,17 +1782,20 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         const [action, ...actionArgs] = rest;
         if (
           action !== "inspect-verification" && action !== "verify-disc" &&
-          action !== "inspect-reconciliation" && action !== "reconcile"
+          action !== "inspect-reconciliation" && action !== "reconcile" &&
+          action !== "stop"
         ) {
           throw new CommandFailure(
             "INVALID_ARGUMENTS",
-            "Archive Recovery action must be inspect-verification, verify-disc, inspect-reconciliation, or reconcile.",
+            "Archive Recovery action must be inspect-verification, verify-disc, inspect-reconciliation, reconcile, or stop.",
             2,
           );
         }
         emit(
           io.stdout,
-          action === "inspect-verification" || action === "verify-disc"
+          action === "stop"
+            ? runDvdRecoveryStopCommand(actionArgs, io)
+            : action === "inspect-verification" || action === "verify-disc"
             ? await runDvdDiscVerificationCommand(action, actionArgs, io)
             : await runDvdRecoveryReconciliationCommand(
                 action,

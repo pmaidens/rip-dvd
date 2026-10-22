@@ -240,6 +240,7 @@ import {
   MutationKeyConflictError,
   RecordNotFoundError,
   StaleCatalogRevisionError,
+  StaleArchiveRecoveryAttemptError,
   StaleDvdDiscVerificationError,
   StaleDvdStructuralCheckpointError,
   StaleJobAttemptError,
@@ -264,8 +265,10 @@ import type {
   ArchiveJobStatus,
   ArchiveJobProgress,
   ArchiveRecovery,
+  ArchiveRecoveryAttemptId,
   ArchiveRecoveryClaimToken,
   ArchiveRecoveryId,
+  ArchiveRecoveryStopOperationId,
   ArchiveRecoveryWork,
   ArchiveReadFailureCategory,
   ArchiveRequestId,
@@ -318,6 +321,7 @@ import type {
   DvdRecoveryReconciliationClaimToken,
   DvdRecoveryReconciliationId,
   DvdRecoveryReconciliationPhase,
+  DvdRecoveryWriteAuthority,
   DvdRecoveryCheckpointProjection,
   EncodeJobClaimToken,
   EncodeJobCleanupClaimToken,
@@ -1601,7 +1605,9 @@ export function createDataAccessInternal(
     if (
       recovery?.work?.status !== "claimed" ||
       recovery.work.claimToken !== claim.claimToken ||
-      recovery.work.claimedBy !== claim.claimedBy
+      recovery.work.claimedBy !== claim.claimedBy ||
+      recovery.work.attemptId !== claim.attemptId ||
+      recovery.attemptId !== claim.attemptId
     ) {
       throw new StaleJobAttemptError(
         "Archive Recovery work",
@@ -7597,8 +7603,12 @@ export function createDataAccessInternal(
           integrityPolicyVersion, badSectorCount: integrityEvidence.badSectorCount,
           badAreaCount: integrityEvidence.badAreaCount, badSectorRanges: integrityEvidence.badSectorRanges,
         }).where(eq(originalDiscArchives.id, archive.id)).run();
+        const recoveryId = newId<import("../types.js").ArchiveRecoveryId>();
         transaction.insert(archiveRecoveries).values({
-          id: newId<import("../types.js").ArchiveRecoveryId>(), originalDiscArchiveId: archive.id,
+          id: recoveryId,
+          originalDiscArchiveId: archive.id,
+          attemptId: newId<import("../types.js").ArchiveRecoveryAttemptId>(),
+          attemptOrdinal: 1,
           status: initial.unrecoveredSourceRanges.length ? "eligible" : "completed",
           createdAt: timestamp, updatedAt: timestamp,
         }).run();
@@ -8410,21 +8420,29 @@ export function createDataAccessInternal(
       ) {
         return;
       }
-      if (
-        current.header.currentManifestId !== recoveryRead.fromManifestId ||
+      const staleReasons = [
+        current.header.currentManifestId !== recoveryRead.fromManifestId
+          ? "manifest identity" : null,
         current.header.currentManifestRevision !==
-          recoveryRead.fromManifestRevision ||
-        current.header.currentManifestDigest !==
-          manifest.previousManifestDigest ||
-        current.manifest.manifestDigest !==
-          current.header.currentManifestDigest ||
-        current.manifest.originalDiscArchiveId !== archiveId ||
-        current.recovery.status !== "eligible" ||
+            recoveryRead.fromManifestRevision
+          ? "manifest revision" : null,
+        current.header.currentManifestDigest !== manifest.previousManifestDigest
+          ? "previous digest" : null,
+        current.manifest.manifestDigest !== current.header.currentManifestDigest
+          ? "projected digest" : null,
+        current.manifest.originalDiscArchiveId !== archiveId
+          ? "archive identity" : null,
+        !(["eligible", "running", "stopping"] as const).includes(
+            current.recovery.status as "eligible" | "running" | "stopping",
+          )
+          ? "recovery status" : null,
         current.archive.integrityEvidenceRevision !==
-          current.header.currentManifestRevision
-      ) {
+            current.header.currentManifestRevision
+          ? "integrity revision" : null,
+      ].filter((reason) => reason !== null);
+      if (staleReasons.length > 0) {
         throw new DomainInvariantError(
-          "DVD recovery checkpoint base revision is stale or inconsistent",
+          `DVD recovery checkpoint base revision is stale or inconsistent (${staleReasons.join(", ")})`,
         );
       }
       if (
@@ -8502,7 +8520,13 @@ export function createDataAccessInternal(
         updatedAt: timestamp,
       }).where(eq(originalDiscArchives.id, archiveId)).run();
       transaction.update(archiveRecoveries).set({
-        status: badSectorCount === 0 ? "completed" : "eligible",
+        status: current.recovery.status === "stopping"
+          ? "stopping"
+          : badSectorCount === 0
+            ? "completed"
+            : claim === undefined
+              ? "eligible"
+              : "running",
         updatedAt: timestamp,
       }).where(eq(
         archiveRecoveries.originalDiscArchiveId,
@@ -9221,7 +9245,9 @@ export function createDataAccessInternal(
               .values({
                 archiveRecoveryId: recovery.id,
                 originalDiscArchiveId: recovery.originalDiscArchiveId,
+                attemptId: recovery.attemptId,
                 status: "requested",
+                verificationId: null,
                 requestedAt: timestamp,
                 createdAt: timestamp,
                 updatedAt: timestamp,
@@ -9265,7 +9291,9 @@ export function createDataAccessInternal(
               .values({
                 archiveRecoveryId: recovery.id,
                 originalDiscArchiveId: recovery.originalDiscArchiveId,
+                attemptId: recovery.attemptId,
                 status: "claimed",
+                verificationId: null,
                 requestedAt: null,
                 claimedBy,
                 claimToken,
@@ -9279,6 +9307,7 @@ export function createDataAccessInternal(
               .update(archiveRecoveryWork)
               .set({
                 status: "claimed",
+                verificationId: null,
                 claimedBy,
                 claimToken,
                 claimedAt: timestamp,
@@ -9307,6 +9336,276 @@ export function createDataAccessInternal(
       assertClaim(claim) {
         return requireCurrentArchiveRecoveryClaim(database, claim);
       },
+      bindVerification(claim, authority) {
+        return database.transaction((transaction) => {
+          const recovery = requireCurrentArchiveRecoveryClaim(
+            transaction,
+            claim,
+          );
+          const verification = transaction.select()
+            .from(dvdDiscVerifications)
+            .where(eq(dvdDiscVerifications.id, authority.verificationId))
+            .get();
+          const header = transaction.select()
+            .from(dvdArchiveEvidenceHeaders)
+            .where(eq(
+              dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+              recovery.originalDiscArchiveId,
+            ))
+            .get();
+          if (
+            recovery.status !== "eligible" ||
+            verification === undefined ||
+            verification.status !== "completed" ||
+            verification.outcome !== "match" ||
+            verification.archiveRecoveryId !== recovery.id ||
+            verification.originalDiscArchiveId !==
+              recovery.originalDiscArchiveId ||
+            verification.id !== authority.verificationId ||
+            verification.discInspectionId !== authority.discInspectionId ||
+            verification.detectedDiscId !== authority.detectedDiscId ||
+            verification.mediaGeneration !== authority.mediaGeneration ||
+            verification.workerExecutionId !==
+              authority.verificationWorkerExecutionId ||
+            verification.checkpointRevision !==
+              authority.checkpointRevision ||
+            verification.checkpointDigest !== authority.checkpointDigest ||
+            header === undefined ||
+            header.currentManifestRevision !== authority.checkpointRevision ||
+            header.currentManifestDigest !== authority.checkpointDigest
+          ) {
+            throw new StaleJobAttemptError(
+              "Archive Recovery verification",
+              claim.archiveRecoveryId,
+            );
+          }
+          const timestamp = now();
+          const bound = transaction.update(archiveRecoveryWork).set({
+            verificationId: verification.id,
+            updatedAt: timestamp,
+          }).where(and(
+            eq(archiveRecoveryWork.archiveRecoveryId, claim.archiveRecoveryId),
+            eq(archiveRecoveryWork.claimToken, claim.claimToken),
+            isNull(archiveRecoveryWork.verificationId),
+          )).returning().get();
+          if (
+            bound === undefined || bound.status !== "claimed" ||
+            bound.claimedBy === null || bound.claimToken === null ||
+            bound.claimedAt === null
+          ) {
+            throw new StaleJobAttemptError(
+              "Archive Recovery work",
+              claim.archiveRecoveryId,
+            );
+          }
+          transaction.update(archiveRecoveries).set({
+            status: "running",
+            updatedAt: timestamp,
+          }).where(and(
+            eq(archiveRecoveries.id, recovery.id),
+            eq(archiveRecoveries.attemptId, recovery.attemptId),
+            eq(archiveRecoveries.status, "eligible"),
+          )).run();
+          return bound as ClaimedArchiveRecoveryWork;
+        }, { behavior: "immediate" });
+      },
+      requestStop(input) {
+        const semanticInput = canonicalPublicationJson({
+          archiveRecoveryId: input.archiveRecoveryId,
+          attemptId: input.attemptId,
+        });
+        return database.transaction((transaction) => {
+          const operation = "archive_recovery.stop";
+          const replay = readMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            () => true,
+          );
+          const recovery = findArchiveRecoveryRecord(transaction, {
+            archiveRecoveryId: input.archiveRecoveryId,
+          });
+          if (recovery === null) {
+            throw new RecordNotFoundError(
+              "Archive Recovery",
+              input.archiveRecoveryId,
+            );
+          }
+          if (recovery.attemptId !== input.attemptId) {
+            throw new StaleArchiveRecoveryAttemptError({
+              archiveRecoveryId: recovery.id,
+              attemptId: recovery.attemptId,
+            });
+          }
+          if (replay !== undefined) return recovery;
+          if (
+            recovery.status !== "eligible" &&
+            recovery.status !== "running"
+          ) {
+            throw new InvalidStatusTransitionError(
+              "Archive Recovery",
+              recovery.status,
+              "stopping",
+            );
+          }
+          const timestamp = now();
+          const stopped = requireRow(
+            transaction.update(archiveRecoveries).set({
+              status: "stopping",
+              stopOperationId:
+                newId<ArchiveRecoveryStopOperationId>(),
+              stopRequestedAt: timestamp,
+              stoppedAt: null,
+              faultCode: null,
+              updatedAt: timestamp,
+            }).where(and(
+              eq(archiveRecoveries.id, recovery.id),
+              eq(archiveRecoveries.attemptId, recovery.attemptId),
+              inArray(archiveRecoveries.status, ["eligible", "running"]),
+            )).returning().get(),
+            "Archive Recovery",
+            recovery.id,
+          );
+          recordMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            {
+              archiveRecoveryId: stopped.id,
+              attemptId: stopped.attemptId,
+              stopOperationId: stopped.stopOperationId,
+            },
+            timestamp,
+          );
+          return {
+            ...stopped,
+            work: findArchiveRecoveryRecord(transaction, {
+              archiveRecoveryId: stopped.id,
+            })?.work ?? null,
+          };
+        }, { behavior: "immediate" });
+      },
+      completeStop(input) {
+        return database.transaction((transaction) => {
+          const recovery = findArchiveRecoveryRecord(transaction, {
+            archiveRecoveryId: input.archiveRecoveryId,
+          });
+          if (recovery === null) {
+            throw new RecordNotFoundError(
+              "Archive Recovery",
+              input.archiveRecoveryId,
+            );
+          }
+          if (recovery.attemptId !== input.attemptId) {
+            throw new StaleArchiveRecoveryAttemptError({
+              archiveRecoveryId: recovery.id,
+              attemptId: recovery.attemptId,
+            });
+          }
+          if (
+            recovery.status !== "stopping" ||
+            recovery.stopOperationId !== input.stopOperationId
+          ) {
+            throw new InvalidStatusTransitionError(
+              "Archive Recovery",
+              recovery.status,
+              "stopped",
+            );
+          }
+          const timestamp = now();
+          transaction.delete(archiveRecoveryWork).where(and(
+            eq(archiveRecoveryWork.archiveRecoveryId, recovery.id),
+            eq(archiveRecoveryWork.attemptId, recovery.attemptId),
+          )).run();
+          transaction.update(archiveRecoveries).set({
+            status: "stopped",
+            stoppedAt: timestamp,
+            updatedAt: timestamp,
+          }).where(and(
+            eq(archiveRecoveries.id, recovery.id),
+            eq(archiveRecoveries.attemptId, recovery.attemptId),
+            eq(archiveRecoveries.stopOperationId, input.stopOperationId),
+            eq(archiveRecoveries.status, "stopping"),
+          )).run();
+          return requireRow(
+            findArchiveRecoveryRecord(transaction, {
+              archiveRecoveryId: recovery.id,
+            }) ?? undefined,
+            "Archive Recovery",
+            recovery.id,
+          );
+        }, { behavior: "immediate" });
+      },
+      settlePass(claim) {
+        return database.transaction((transaction) => {
+          const recovery = requireCurrentArchiveRecoveryClaim(
+            transaction,
+            claim,
+          );
+          transaction.delete(archiveRecoveryWork).where(and(
+            eq(archiveRecoveryWork.archiveRecoveryId, claim.archiveRecoveryId),
+            eq(archiveRecoveryWork.claimToken, claim.claimToken),
+          )).run();
+          const timestamp = now();
+          transaction.update(archiveRecoveries).set({
+            status: recovery.status === "completed" ? "completed" : "eligible",
+            updatedAt: timestamp,
+          }).where(and(
+            eq(archiveRecoveries.id, recovery.id),
+            eq(archiveRecoveries.attemptId, recovery.attemptId),
+            inArray(archiveRecoveries.status, ["running", "completed"]),
+          )).run();
+          return requireRow(
+            findArchiveRecoveryRecord(transaction, {
+              archiveRecoveryId: recovery.id,
+            }) ?? undefined,
+            "Archive Recovery",
+            recovery.id,
+          );
+        }, { behavior: "immediate" });
+      },
+      markFault(input) {
+        const faultCode = requireNonEmpty(input.faultCode, "faultCode");
+        return database.transaction((transaction) => {
+          const recovery = findArchiveRecoveryRecord(transaction, {
+            archiveRecoveryId: input.archiveRecoveryId,
+          });
+          if (recovery === null) {
+            throw new RecordNotFoundError(
+              "Archive Recovery",
+              input.archiveRecoveryId,
+            );
+          }
+          if (recovery.attemptId !== input.attemptId) {
+            throw new StaleArchiveRecoveryAttemptError({
+              archiveRecoveryId: recovery.id,
+              attemptId: recovery.attemptId,
+            });
+          }
+          transaction.delete(archiveRecoveryWork).where(and(
+            eq(archiveRecoveryWork.archiveRecoveryId, recovery.id),
+            eq(archiveRecoveryWork.attemptId, recovery.attemptId),
+          )).run();
+          const timestamp = now();
+          transaction.update(archiveRecoveries).set({
+            status: "faulted",
+            faultCode,
+            updatedAt: timestamp,
+          }).where(and(
+            eq(archiveRecoveries.id, recovery.id),
+            eq(archiveRecoveries.attemptId, recovery.attemptId),
+          )).run();
+          return requireRow(
+            findArchiveRecoveryRecord(transaction, {
+              archiveRecoveryId: recovery.id,
+            }) ?? undefined,
+            "Archive Recovery",
+            recovery.id,
+          );
+        }, { behavior: "immediate" });
+      },
       release(claim) {
         return database.transaction((transaction) => {
           const removed = transaction
@@ -9327,16 +9626,32 @@ export function createDataAccessInternal(
               claim.archiveRecoveryId,
             );
           }
-          const recovery = findArchiveRecoveryRecord(transaction, {
+          const recoveryBeforeRelease = findArchiveRecoveryRecord(transaction, {
             archiveRecoveryId: claim.archiveRecoveryId,
           });
-          if (recovery === null) {
+          if (recoveryBeforeRelease === null) {
             throw new RecordNotFoundError(
               "Archive Recovery",
               claim.archiveRecoveryId,
             );
           }
-          return recovery;
+          if (recoveryBeforeRelease.status === "running") {
+            transaction.update(archiveRecoveries).set({
+              status: "eligible",
+              updatedAt: now(),
+            }).where(and(
+              eq(archiveRecoveries.id, recoveryBeforeRelease.id),
+              eq(archiveRecoveries.attemptId, recoveryBeforeRelease.attemptId),
+              eq(archiveRecoveries.status, "running"),
+            )).run();
+          }
+          return requireRow(
+            findArchiveRecoveryRecord(transaction, {
+              archiveRecoveryId: claim.archiveRecoveryId,
+            }) ?? undefined,
+            "Archive Recovery",
+            claim.archiveRecoveryId,
+          );
         }, { behavior: "immediate" });
       },
     },
@@ -9642,7 +9957,7 @@ export function createDataAccessInternal(
             "archive recovery",
             input.archiveRecoveryId,
           );
-          if (recovery.status === "completed") {
+          if (recovery.status !== "eligible") {
             throw new InvalidStatusTransitionError(
               "archive recovery",
               recovery.status,
@@ -11951,7 +12266,10 @@ export function createDataAccessInternal(
         );
         const active = database.select({ id: archiveRecoveries.id })
           .from(archiveRecoveries)
-          .where(activeReconciliation)
+          .where(or(
+            inArray(archiveRecoveries.status, ["running", "stopping"]),
+            activeReconciliation,
+          ))
           .orderBy(desc(archiveRecoveries.updatedAt), desc(archiveRecoveries.id))
           .limit(limit)
           .all();
@@ -11960,19 +12278,23 @@ export function createDataAccessInternal(
           ? active
           : [...active, ...database.select({ id: archiveRecoveries.id })
             .from(archiveRecoveries)
-            .where(notExists(
-              database.select({ id: dvdRecoveryReconciliations.id })
-                .from(dvdRecoveryReconciliations)
-                .where(and(
-                  eq(
-                    dvdRecoveryReconciliations.archiveRecoveryId,
-                    archiveRecoveries.id,
-                  ),
-                  inArray(
-                    dvdRecoveryReconciliations.status,
-                    ["queued", "running"],
-                  ),
-                )),
+            .where(and(
+              ne(archiveRecoveries.status, "running"),
+              ne(archiveRecoveries.status, "stopping"),
+              notExists(
+                database.select({ id: dvdRecoveryReconciliations.id })
+                  .from(dvdRecoveryReconciliations)
+                  .where(and(
+                    eq(
+                      dvdRecoveryReconciliations.archiveRecoveryId,
+                      archiveRecoveries.id,
+                    ),
+                    inArray(
+                      dvdRecoveryReconciliations.status,
+                      ["queued", "running"],
+                    ),
+                  )),
+              ),
             ))
             .orderBy(
               desc(archiveRecoveries.updatedAt),

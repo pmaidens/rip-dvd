@@ -1564,10 +1564,13 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   `);
   expect(() => evidenceFixture.exec(`
     INSERT INTO archive_recoveries (
-      id, original_disc_archive_id, status, created_at, updated_at
+      id, original_disc_archive_id, attempt_id, attempt_ordinal, status,
+      created_at, updated_at
     ) VALUES (
       'evidence-new-format-recovery',
       'evidence-new-format-archive',
+      'evidence-new-format-recovery-attempt',
+      1,
       'completed',
       1,
       1
@@ -1575,10 +1578,13 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   `)).toThrow(/status must match authoritative DVD evidence/i);
   evidenceFixture.exec(`
     INSERT INTO archive_recoveries (
-      id, original_disc_archive_id, status, created_at, updated_at
+      id, original_disc_archive_id, attempt_id, attempt_ordinal, status,
+      created_at, updated_at
     ) VALUES (
       'evidence-new-format-recovery',
       'evidence-new-format-archive',
+      'evidence-new-format-recovery-attempt',
+      1,
       'eligible',
       1,
       1
@@ -1772,7 +1778,13 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
   )).toEqual({
     id: "evidence-new-format-recovery",
     originalDiscArchiveId: "evidence-new-format-archive",
+    attemptId: "evidence-new-format-recovery-attempt",
+    attemptOrdinal: 1,
     status: "eligible",
+    stopOperationId: null,
+    stopRequestedAt: null,
+    stoppedAt: null,
+    faultCode: null,
     work: null,
     createdAt: new Date(1),
     updatedAt: new Date(1),

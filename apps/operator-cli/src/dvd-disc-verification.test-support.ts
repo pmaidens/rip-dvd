@@ -11,6 +11,8 @@ import {
   DVD_SOURCE_SAMPLE_BYTE_REPRESENTATION,
   DVD_SOURCE_SAMPLE_SECTOR_COUNT,
   DVD_DISC_VERIFICATION_POLICY_VERSION,
+  type ArchiveRecoveryAttemptId,
+  type ArchiveRecoveryId,
   type DvdSourceSampleReference,
 } from "@rip-dvd/data-access";
 import { beginSettledDiscInspectionForTest } from "@rip-dvd/data-access/test-support";
@@ -26,11 +28,18 @@ function sampleBytes(index: number): Buffer {
 
 export async function seedDvdDiscVerificationFixture(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
-) {
-  const seeded = await seedCommittedArchiveEvidence(fixture, [
+  ranges: readonly {
+    startLba: number;
+    sectorCount: number;
+    classification: "skipped_untested" | "individually_failed";
+  }[] = [
     { startLba: 900, sectorCount: 1, classification: "skipped_untested" },
-  ]);
-  const recoveryId = "synthetic-verification-recovery";
+  ],
+) {
+  const seeded = await seedCommittedArchiveEvidence(fixture, ranges);
+  const recoveryId = "synthetic-verification-recovery" as ArchiveRecoveryId;
+  const attemptId =
+    "synthetic-verification-recovery-attempt" as ArchiveRecoveryAttemptId;
   const access = fixture.openAccess();
   access.dvdRecoveryStorage.record({
     contractVersion: "dvd-recovery-storage-preflight-v1",
@@ -136,9 +145,25 @@ export async function seedDvdDiscVerificationFixture(
     }),
   );
   const sqlite = new DatabaseSync(fixture.databasePath);
+  sqlite.prepare(`UPDATE original_disc_archives SET
+    integrity = 'incomplete_read', integrity_evidence_revision = 1,
+    integrity_policy_version = 'dvd-recovery-evidence-v1',
+    bad_sector_count = ?, bad_area_count = ?, bad_sector_ranges = ?,
+    bad_sector_counts_by_title = NULL
+    WHERE id = ?`).run(
+      ranges.reduce((total, range) => total + range.sectorCount, 0),
+      ranges.length,
+      JSON.stringify(ranges.map(({ startLba, sectorCount }) => ({
+        startLba,
+        sectorCount,
+      }))),
+      seeded.archive.id,
+    );
   sqlite.prepare(`INSERT INTO archive_recoveries
-    (id, original_disc_archive_id, status, created_at, updated_at)
-    VALUES (?, ?, 'eligible', 1, 1)`).run(recoveryId, seeded.archive.id);
+    (id, original_disc_archive_id, attempt_id, attempt_ordinal, status,
+      created_at, updated_at)
+    VALUES (?, ?, ?, 1, 'eligible', 1, 1)`)
+    .run(recoveryId, seeded.archive.id, attemptId);
   sqlite.prepare(`INSERT INTO dvd_source_sample_manifests
     (original_disc_archive_id, manifest, created_at) VALUES (?, ?, 1)`)
     .run(seeded.archive.id, JSON.stringify(sampleManifest));
@@ -151,6 +176,7 @@ export async function seedDvdDiscVerificationFixture(
       publicationDigest: manifest.publicationDigest,
     },
     recoveryId,
+    attemptId,
     sourceDisc,
     inspection,
     sampleManifest,

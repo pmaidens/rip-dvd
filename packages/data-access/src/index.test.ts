@@ -617,9 +617,14 @@ function markArchiveWithDvdRecoveryEvidence(
       );
       sqlite.prepare(`
         INSERT INTO archive_recoveries (
-          id, original_disc_archive_id, status, created_at, updated_at
-        ) VALUES (?, ?, 'eligible', 1, 1)
-      `).run(digestOverrides.archiveRecoveryId, originalDiscArchiveId);
+          id, original_disc_archive_id, attempt_id, attempt_ordinal, status,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, 1, 'eligible', 1, 1)
+      `).run(
+        digestOverrides.archiveRecoveryId,
+        originalDiscArchiveId,
+        `${digestOverrides.archiveRecoveryId}:attempt:1`,
+      );
     }
   } finally {
     sqlite.close();
@@ -1805,7 +1810,8 @@ describe("data-access facade", () => {
           name !== "20261022044512_parched_norrin_radd" &&
           name !== "20261022044526_chilly_madame_hydra" &&
           name !== "20261022080829_dvd-title-identities" &&
-          name !== "20261022100044_futuristic_cannonball",
+          name !== "20261022100044_futuristic_cannonball" &&
+          name !== "20261022205917_burly_shard",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -9031,6 +9037,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261022205917_burly_shard",
+        },
+        {
           name: "20261022195659_fresh_silver_samurai",
         },
         {
@@ -9062,9 +9071,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20261004053119_scsi-read-path-notice",
-        },
-        {
-          name: "20260930003626_dvd-evidence-checkpoints",
         },
       ]);
     expect(
@@ -13897,10 +13903,14 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const sqlite = new DatabaseSync(databasePath);
     expect(() => sqlite.prepare(`
       INSERT INTO archive_recovery_work (
-        archive_recovery_id, original_disc_archive_id, status, requested_at,
-        created_at, updated_at
-      ) VALUES (?, ?, 'requested', 1, 1, 1)
-    `).run(firstRecoveryId, second.archive.id)).toThrow(/foreign key/i);
+        archive_recovery_id, original_disc_archive_id, attempt_id, status,
+        requested_at, created_at, updated_at
+      ) VALUES (?, ?, ?, 'requested', 1, 1, 1)
+    `).run(
+      firstRecoveryId,
+      second.archive.id,
+      `${firstRecoveryId}:attempt:1`,
+    )).toThrow(/foreign key/i);
     expect(sqlite.prepare(`
       SELECT archive_recovery_id
       FROM archive_recovery_work

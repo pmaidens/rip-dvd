@@ -3451,12 +3451,14 @@ static int run_test_endpoint(int argc, char **argv)
     return close_test_backend(&backend, status);
 }
 
-static int run_test_verification_sample(int argc, char **argv)
+static int run_test_source_read(int argc, char **argv,
+                                uint64_t required_block_count,
+                                const char *operation_name)
 {
     if (argc != 9) {
         fprintf(stderr,
-                "usage: %s verify-sample-test SOURCE SIZE START COUNT FAULTS DELAY MODE\n",
-                argv[0]);
+                "usage: %s %s SOURCE SIZE START COUNT FAULTS DELAY MODE\n",
+                argv[0], operation_name);
         return 2;
     }
     uint64_t size_bytes = 0;
@@ -3474,7 +3476,7 @@ static int run_test_verification_sample(int argc, char **argv)
         parse_test_integer(argv[4], size_bytes / DVDCSS_BLOCK_SIZE,
                            &start_lba) != 0 ||
         parse_test_integer(argv[5], 32, &block_count) != 0 ||
-        block_count != 32 ||
+        block_count != required_block_count ||
         start_lba + block_count > size_bytes / DVDCSS_BLOCK_SIZE) {
         return close_test_backend(&backend, 2);
     }
@@ -3528,7 +3530,10 @@ int main(int argc, char **argv)
         return run_test_endpoint(argc, argv);
     }
     if (argc > 1 && strcmp(argv[1], "verify-sample-test") == 0) {
-        return run_test_verification_sample(argc, argv);
+        return run_test_source_read(argc, argv, 32, "verify-sample-test");
+    }
+    if (argc > 1 && strcmp(argv[1], "recover-sector-test") == 0) {
+        return run_test_source_read(argc, argv, 1, "recover-sector-test");
     }
     if (argc > 1 && strcmp(argv[1], "verification-lifetime-test") == 0) {
         return run_test_verification_lifetime(argc, argv);
@@ -3536,7 +3541,9 @@ int main(int argc, char **argv)
 #endif
     int verification_sample = argc > 1 &&
         strcmp(argv[1], "verify-sample-v1") == 0;
-    if (verification_sample) {
+    int recovery_sector = argc > 1 &&
+        strcmp(argv[1], "recover-sector-v1") == 0;
+    if (verification_sample || recovery_sector) {
         if (argc != 7) {
             fprintf(stderr, "DVD Disc Verification sample arguments are invalid\n");
             return 2;
@@ -3548,7 +3555,7 @@ int main(int argc, char **argv)
             parse_sample_lba(argv[4], &block_count) != 0 ||
             parse_sample_lba(argv[5], &accepted_end_lba_exclusive) != 0 ||
             arm_verification_lifetime(argv[6]) != 0 ||
-            block_count != 32 ||
+            block_count != (verification_sample ? 32 : 1) ||
             accepted_end_lba_exclusive == 0 ||
             start_lba + block_count > accepted_end_lba_exclusive ||
             start_lba > MAX_DVD_CONTENT_BYTES / DVDCSS_BLOCK_SIZE -

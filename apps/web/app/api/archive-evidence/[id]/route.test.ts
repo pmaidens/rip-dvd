@@ -125,10 +125,12 @@ function prepareEligibleRecovery(
       archiveId,
     );
     database.prepare(`INSERT INTO archive_recoveries (
-      id, original_disc_archive_id, status, created_at, updated_at
-    ) VALUES (?, ?, 'eligible', 1, 1)`).run(
+      id, original_disc_archive_id, attempt_id, attempt_ordinal, status,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, 1, 'eligible', 1, 1)`).run(
       `${archiveId}:recovery`,
       archiveId,
+      `${archiveId}:recovery:attempt:1`,
     );
   } finally {
     database.close();
@@ -486,7 +488,7 @@ it("commits one recovered sector through the worker and shared web/CLI evidence 
         badSectorCount: 1,
       });
     expect(access.catalog.findArchiveRecovery(saved.archive.id)).toMatchObject({
-      status: "eligible",
+      status: "running",
     });
     const image = readFileSync(saved.archive.archivePath);
     expect(image.subarray(10 * 2_048, 11 * 2_048)).toEqual(recovered);
@@ -633,6 +635,11 @@ it("rejects a batch at the final readable checkpoint before mutation", async () 
   const access = fixture.openAccess();
   const imageBefore = readFileSync(saved.archive.archivePath);
   const header = access.catalog.findDvdArchiveEvidenceHeader(saved.archive.id)!;
+  const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
+  access.archiveRecoveryWork.bindVerification(
+    recoveryWorkClaim,
+    writeAuthority,
+  );
   const capacityDatabase = new DatabaseSync(fixture.databasePath);
   capacityDatabase.prepare(`
     UPDATE dvd_disc_verifications
@@ -654,7 +661,6 @@ it("rejects a batch at the final readable checkpoint before mutation", async () 
     },
   };
   try {
-    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
     await expect(commitDvdRecoveryBatch({
       access: cappedAccess,
       originalsLibraryPath: fixture.originalsLibraryPath,

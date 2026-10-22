@@ -196,6 +196,9 @@ export type DetectedDiscId = DomainId<"DetectedDisc">;
 export type ArchiveRequestId = DomainId<"ArchiveRequest">;
 export type OriginalDiscArchiveId = DomainId<"OriginalDiscArchive">;
 export type ArchiveRecoveryId = DomainId<"ArchiveRecovery">;
+export type ArchiveRecoveryAttemptId = DomainId<"ArchiveRecoveryAttempt">;
+export type ArchiveRecoveryStopOperationId =
+  DomainId<"ArchiveRecoveryStopOperation">;
 export type ArchiveRecoveryClaimToken = DomainId<"ArchiveRecoveryClaim">;
 export type DvdRecoveryReconciliationId =
   DomainId<"DvdRecoveryReconciliation">;
@@ -529,7 +532,13 @@ export interface DvdUnrecoveredSourceRange extends UnreadableSectorRange {
 export interface ArchiveRecovery {
   id: ArchiveRecoveryId;
   originalDiscArchiveId: OriginalDiscArchiveId;
+  attemptId: ArchiveRecoveryAttemptId;
+  attemptOrdinal: number;
   status: ArchiveRecoveryStatus;
+  stopOperationId: ArchiveRecoveryStopOperationId | null;
+  stopRequestedAt: Date | null;
+  stoppedAt: Date | null;
+  faultCode: string | null;
   work: ArchiveRecoveryWork | null;
   createdAt: Date;
   updatedAt: Date;
@@ -588,7 +597,9 @@ export interface DvdRecoveryWriteAuthority {
 export interface ArchiveRecoveryWork {
   archiveRecoveryId: ArchiveRecoveryId;
   originalDiscArchiveId: OriginalDiscArchiveId;
+  attemptId: ArchiveRecoveryAttemptId;
   status: ArchiveRecoveryWorkStatus;
+  verificationId: DvdDiscVerificationId | null;
   requestedAt: Date | null;
   claimedBy: string | null;
   claimToken: ArchiveRecoveryClaimToken | null;
@@ -611,6 +622,26 @@ export interface ArchiveRecoveryWorkAccess {
     workerId: string,
   ): ClaimedArchiveRecoveryWork;
   assertClaim(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
+  bindVerification(
+    claim: ClaimedArchiveRecoveryWork,
+    authority: DvdRecoveryWriteAuthority,
+  ): ClaimedArchiveRecoveryWork;
+  requestStop(input: {
+    mutationKey: string;
+    archiveRecoveryId: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+  }): ArchiveRecovery;
+  completeStop(input: {
+    archiveRecoveryId: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+    stopOperationId: ArchiveRecoveryStopOperationId;
+  }): ArchiveRecovery;
+  settlePass(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
+  markFault(input: {
+    archiveRecoveryId: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+    faultCode: string;
+  }): ArchiveRecovery;
   release(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
 }
 

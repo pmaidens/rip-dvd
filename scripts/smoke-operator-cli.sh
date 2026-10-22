@@ -73,6 +73,18 @@ set -e
 printf '%s\n' "$reconciliation_output" | assert_json_fields \
   'error.code=NOT_FOUND'
 
+set +e
+stop_output="$(invoke archive-recovery stop \
+  synthetic-missing-recovery \
+  --key synthetic-smoke-recovery-stop-key \
+  --attempt-id synthetic-missing-attempt \
+  2>"$temporary_directory/recovery-stop.stderr")"
+stop_status=$?
+set -e
+[ "$stop_status" -eq 2 ]
+printf '%s\n' "$stop_output" | assert_json_fields \
+  'error.code=NOT_FOUND'
+
 recovery_inventory="$(invoke inspect archive-recoveries)"
 printf '%s\n' "$recovery_inventory" | assert_json_fields \
   'schemaVersion=1' 'kind=archive-recoveries'

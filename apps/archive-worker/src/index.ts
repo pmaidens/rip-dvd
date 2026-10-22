@@ -15,6 +15,7 @@ import { createNodeDvdSalvageValidator } from "./dvd-salvage-validator.js";
 import { recordDvdRecoveryStoragePreflight } from "./dvd-recovery-storage-preflight.js";
 import { runDvdDiscVerificationWorker } from "./dvd-disc-verification-worker.js";
 import { runDvdRecoveryReconciliationWorker } from "./dvd-recovery-reconciliation-worker.js";
+import { runDvdRecoveryWorker } from "./dvd-recovery-worker.js";
 
 await runConfiguredAsyncWorker(
   {
@@ -87,6 +88,14 @@ await runConfiguredAsyncWorker(
         originalsLibraryPath: config.originalsLibraryPath,
         intervalMs: config.workerPollIntervalMs,
         log,
+        signal: workers.signal,
+        workerExecutionId,
+      })), stopOnFailure(runDvdRecoveryWorker({
+        access,
+        deviceInactivity: copyRunner,
+        intervalMs: config.workerPollIntervalMs,
+        log,
+        originalsLibraryPath: config.originalsLibraryPath,
         signal: workers.signal,
         workerExecutionId,
       })), stopOnFailure(runArchiveAuditWorker({

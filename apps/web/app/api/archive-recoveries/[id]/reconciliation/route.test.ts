@@ -39,10 +39,12 @@ async function seedRecovery(
       bad_sector_ranges = '[{"startLba":10,"sectorCount":1}]'
       WHERE id = ?`).run(saved.archive.id);
     database.prepare(`INSERT INTO archive_recoveries (
-      id, original_disc_archive_id, status, created_at, updated_at
-    ) VALUES (?, ?, 'eligible', 1, 1)`).run(
+      id, original_disc_archive_id, attempt_id, attempt_ordinal, status,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, 1, 'eligible', 1, 1)`).run(
       recoveryId,
       saved.archive.id,
+      `${recoveryId}:attempt:1`,
     );
   } finally {
     database.close();

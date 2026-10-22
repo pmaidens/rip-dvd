@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createDiscSelectionSourceIdentity,
   type ArchiveRecovery,
+  type ArchiveRecoveryAttemptId,
   type ArchiveRecoveryClaimToken,
   type ArchiveRecoveryId,
   type ConsistentReadAccess,
@@ -20,6 +21,7 @@ describe("readQueueOptions", () => {
     const timestamp = new Date(1);
     const archiveId = "synthetic-archive" as OriginalDiscArchiveId;
     const recoveryId = "synthetic-recovery" as ArchiveRecoveryId;
+    const attemptId = "synthetic-attempt" as ArchiveRecoveryAttemptId;
     const selection: DiscSelection = {
       id: "synthetic-selection" as DiscSelectionId,
       originalDiscArchiveId: archiveId,
@@ -46,11 +48,19 @@ describe("readQueueOptions", () => {
     const recovery: ArchiveRecovery = {
       id: recoveryId,
       originalDiscArchiveId: archiveId,
+      attemptId,
+      attemptOrdinal: 1,
       status: "eligible",
+      stopOperationId: null,
+      stopRequestedAt: null,
+      stoppedAt: null,
+      faultCode: null,
       work: {
         archiveRecoveryId: recoveryId,
         originalDiscArchiveId: archiveId,
+        attemptId,
         status: "claimed",
+        verificationId: null,
         requestedAt: null,
         claimedBy: "private-worker",
         claimToken: "private-token" as ArchiveRecoveryClaimToken,

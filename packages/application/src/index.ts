@@ -13,6 +13,7 @@ import type {
   ArchiveAuditBounds,
   ArchiveRequestId,
   ArchiveRecoveryId,
+  ArchiveRecoveryAttemptId,
   DetectedDiscId,
   EncodingProfile,
   EncodingProfileId,
@@ -44,6 +45,7 @@ import {
   inspectDvdRecoveryReconciliation,
   requestDvdRecoveryReconciliation,
 } from "./dvd-recovery-reconciliation.js";
+import { requestDvdRecoveryStop } from "./dvd-recovery-stop.js";
 import {
   mutateMediaItem,
   previewMediaItemChange,
@@ -527,6 +529,28 @@ export function createApplicationOperations(
         archiveRecoveryId: archiveRecoveryId as ArchiveRecoveryId,
       });
     },
+    stopDvdRecovery: (input: {
+      mutationKey: unknown;
+      archiveRecoveryId: unknown;
+      attemptId: unknown;
+    }) => {
+      const archiveRecoveryId = requiredString(
+        input.archiveRecoveryId,
+        "Archive Recovery ID",
+      );
+      const attemptId = requiredString(
+        input.attemptId,
+        "Archive Recovery attempt ID",
+      );
+      if (archiveRecoveryId.length > 256 || attemptId.length > 256) {
+        throw new RangeError("Invalid Archive Recovery Stop identity.");
+      }
+      return requestDvdRecoveryStop(access, {
+        mutationKey: parseMutationKey(input.mutationKey),
+        archiveRecoveryId: archiveRecoveryId as ArchiveRecoveryId,
+        attemptId: attemptId as ArchiveRecoveryAttemptId,
+      });
+    },
     verifyDisc: (input: {
       mutationKey: unknown;
       archiveRecoveryId: unknown;
@@ -693,6 +717,10 @@ export {
   inspectDvdRecoveryReconciliation,
   requestDvdRecoveryReconciliation,
 } from "./dvd-recovery-reconciliation.js";
+export {
+  dvdRecoveryStopAction,
+  requestDvdRecoveryStop,
+} from "./dvd-recovery-stop.js";
 export {
   FILESYSTEM_VERIFICATION_INVENTORY_PAGE_LIMIT,
   readFilesystemVerificationInventory,

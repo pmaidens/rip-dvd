@@ -613,6 +613,23 @@ function runVerificationSampleTest(faults = "none") {
   );
 }
 
+function runRecoverySectorTest(startLba, faults = "none") {
+  return spawnSync(
+    testExecutable,
+    [
+      "recover-sector-test",
+      sourcePath,
+      String(content.byteLength),
+      String(startLba),
+      "1",
+      faults,
+      "0",
+      "valid",
+    ],
+    { encoding: "buffer" },
+  );
+}
+
 function runTestResume(outputPath, faults, bitmapHex, mode = "valid") {
   const output = statSync(outputPath);
   const result = spawnSync(
@@ -721,6 +738,15 @@ if (
 ) {
   throw new Error(
     `libdvdcss verification sample check failed: ${verificationSample.stderr.toString("utf8")}`,
+  );
+}
+const recoverySector = runRecoverySectorTest(7);
+if (
+  recoverySector.status !== 0 ||
+  !recoverySector.stdout.equals(content.subarray(7 * 2_048, 8 * 2_048))
+) {
+  throw new Error(
+    `libdvdcss recovery sector check failed: ${recoverySector.stderr.toString("utf8")}`,
   );
 }
 const verificationMediumError = runVerificationSampleTest(

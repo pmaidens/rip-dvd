@@ -25,7 +25,11 @@ export const DVD_UNRECOVERED_SOURCE_CLASSIFICATIONS = [
 
 export const ARCHIVE_RECOVERY_STATUSES = [
   "eligible",
+  "running",
+  "stopping",
+  "stopped",
   "completed",
+  "faulted",
 ] as const;
 
 export const ARCHIVE_RECOVERY_WORK_STATUSES = [

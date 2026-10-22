@@ -2258,8 +2258,12 @@ it("returns the same operational records and evidence through web and CLI", asyn
     `).run(DVD_RECOVERY_EVIDENCE_FORMAT, archiveId);
     projectionFixture.prepare(`
       INSERT INTO archive_recoveries (
-        id, original_disc_archive_id, status, created_at, updated_at
-      ) VALUES ('synthetic-evidence-recovery', ?, 'eligible', 1, 1)
+        id, original_disc_archive_id, attempt_id, attempt_ordinal, status,
+        created_at, updated_at
+      ) VALUES (
+        'synthetic-evidence-recovery', ?,
+        'synthetic-evidence-recovery-attempt', 1, 'eligible', 1, 1
+      )
     `).run(archiveId);
     projectionFixture.prepare(`
       INSERT INTO archive_requests (

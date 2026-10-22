@@ -49,6 +49,7 @@ import {
   retainedEncodeOutputArtifactIdentity,
 } from "./encode-output-inspection.js";
 import { describeDvdRecoveryStorage } from "./dvd-recovery-storage.js";
+import { dvdRecoveryStopAction } from "./dvd-recovery-stop.js";
 
 export const OPERATION_KINDS = [
   "optical-drives",
@@ -143,25 +144,33 @@ function archiveRecoveryOperation(
     .findLatestForRecovery(recovery.id);
   const active = reconciliation?.status === "queued" ||
     reconciliation?.status === "running";
+  const recoveryOwnsStatus = recovery.status === "running" ||
+    recovery.status === "stopping" || recovery.status === "stopped" ||
+    recovery.status === "faulted" || recovery.status === "completed";
   return {
     ...visibleArchiveRecovery(recovery),
     recoveryStatus: recovery.status,
-    status: reconciliation?.status ?? "idle",
+    status: recoveryOwnsStatus
+      ? recovery.status
+      : reconciliation?.status ?? "idle",
     reconciliation: visibleDvdRecoveryReconciliation(reconciliation),
     checkpoint: access.catalog.findDvdArchiveEvidenceHeader(
       recovery.originalDiscArchiveId,
     ),
-    availableActions: [{
-      name: "reconcile",
-      eligible: !active,
-      requiredInputs: ["mutationKey", "archiveRecoveryId"],
-      reason: active
-        ? "A DVD recovery reconciliation is already active."
-        : null,
-      blockingReasons: active
-        ? ["A DVD recovery reconciliation is already active."]
-        : [],
-    }],
+    availableActions: [
+      {
+        name: "reconcile",
+        eligible: !active,
+        requiredInputs: ["mutationKey", "archiveRecoveryId"],
+        reason: active
+          ? "A DVD recovery reconciliation is already active."
+          : null,
+        blockingReasons: active
+          ? ["A DVD recovery reconciliation is already active."]
+          : [],
+      },
+      dvdRecoveryStopAction(recovery),
+    ],
   };
 }
 
@@ -1107,7 +1116,7 @@ const TERMINAL_STATUSES: Record<WaitableKind, readonly string[]> = {
   "disc-inspections": ["completed", "failed", "aborted"],
   "archive-requests": ["fulfilled", "cancelled", "needs_attention"],
   "archive-jobs": ["completed", "failed", "cancelled", "aborted"],
-  "archive-recoveries": ["completed", "failed"],
+  "archive-recoveries": ["completed", "failed", "stopped", "faulted"],
   "encode-jobs": ["completed", "failed", "cancelled"],
   "archive-audits": ["completed", "failed"],
   "filesystem-verifications": ["completed", "failed"],

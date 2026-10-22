@@ -157,8 +157,11 @@ function openOpticalDriveLock(devicePath: string): number {
   }
 }
 
-export function createNodeDvdVerificationSourceReader():
-  DvdVerificationSourceReader {
+function createNodeDvdSourceReader(options: {
+  command: "verify-sample-v1" | "recover-sector-v1";
+  operationName: string;
+  requiredSectorCount: number;
+}): DvdVerificationSourceReader {
   return {
     start(input) {
       const devicePath = requireSafeOpticalDevicePath(input.devicePath);
@@ -166,7 +169,7 @@ export function createNodeDvdVerificationSourceReader():
         !Number.isSafeInteger(input.startLba) ||
         input.startLba < 0 ||
         !Number.isSafeInteger(input.sectorCount) ||
-        input.sectorCount <= 0 ||
+        input.sectorCount !== options.requiredSectorCount ||
         input.startLba + input.sectorCount > input.acceptedEndLbaExclusive ||
         !Number.isSafeInteger(input.timeoutMs) ||
         input.timeoutMs <= 0 ||
@@ -185,7 +188,7 @@ export function createNodeDvdVerificationSourceReader():
             String(FLOCK_CONFLICT_EXIT_CODE),
             "/proc/self/fd/3",
             "rip-dvd-dvdcss-reader",
-            "verify-sample-v1",
+            options.command,
             devicePath,
             String(input.startLba),
             String(input.sectorCount),
@@ -194,10 +197,10 @@ export function createNodeDvdVerificationSourceReader():
           ],
           extraFileDescriptors: [lockDescriptor],
           maxOutputBytes: Math.max(
-            DVD_SOURCE_SAMPLE_BYTE_COUNT,
+            options.requiredSectorCount * 2_048,
             MAX_DIAGNOSTIC_BYTES,
           ),
-          operationName: "DVD Disc Verification source read",
+          operationName: options.operationName,
         });
       } finally {
         closeSync(lockDescriptor);
@@ -210,12 +213,12 @@ export function createNodeDvdVerificationSourceReader():
               throw new DvdVerificationReadDeadlineError();
             }
             if (signal !== null) {
-              throw new Error("DVD Disc Verification helper output is invalid");
+              throw new Error(`${options.operationName} helper output is invalid`);
             }
             if (exitCode === 0) {
-              if (stdout.length !== DVD_SOURCE_SAMPLE_BYTE_COUNT) {
+              if (stdout.length !== input.sectorCount * 2_048) {
                 throw new Error(
-                  "DVD Disc Verification helper returned a short sample",
+                  `${options.operationName} helper returned a short read`,
                 );
               }
               return { outcome: "readable", bytes: stdout };
@@ -225,7 +228,7 @@ export function createNodeDvdVerificationSourceReader():
                 value.startsWith(DVD_READ_FAILURE_RESULT_PREFIX)
               );
             if (exitCode !== 3 || line === undefined) {
-              throw new Error("DVD Disc Verification helper failed");
+              throw new Error(`${options.operationName} helper failed`);
             }
             return {
               outcome: "unreadable",
@@ -239,6 +242,24 @@ export function createNodeDvdVerificationSourceReader():
       };
     },
   };
+}
+
+export function createNodeDvdVerificationSourceReader():
+  DvdVerificationSourceReader {
+  return createNodeDvdSourceReader({
+    command: "verify-sample-v1",
+    operationName: "DVD Disc Verification source read",
+    requiredSectorCount: DVD_SOURCE_SAMPLE_BYTE_COUNT / 2_048,
+  });
+}
+
+export function createNodeDvdRecoverySourceReader():
+  DvdVerificationSourceReader {
+  return createNodeDvdSourceReader({
+    command: "recover-sector-v1",
+    operationName: "DVD Recovery source read",
+    requiredSectorCount: 1,
+  });
 }
 
 async function runBoundedDvdVerificationSourceRead(input: {

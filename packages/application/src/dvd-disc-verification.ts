@@ -273,10 +273,10 @@ export async function inspectDvdDiscVerification(
         message: "More than one current disc insertion is available.",
       });
     }
-    if (recovery.status === "completed") {
+    if (recovery.status !== "eligible") {
       blockingReasons.push({
-        code: "RECOVERY_COMPLETED",
-        message: "Archive Recovery has no unresolved source to verify.",
+        code: `RECOVERY_${recovery.status.toUpperCase()}`,
+        message: "Archive Recovery is not eligible for DVD Disc Verification.",
       });
     }
     const active = latest?.status === "queued" ||
@@ -327,10 +327,10 @@ export async function inspectDvdDiscVerification(
                     message: "The verification has no durable worker execution binding.",
                   }
               : null;
-        const workflowReason = recovery.status === "completed"
+        const workflowReason = recovery.status !== "eligible"
           ? {
-              code: "RECOVERY_COMPLETED",
-              message: "Archive Recovery has no unresolved source to update.",
+              code: `RECOVERY_${recovery.status.toUpperCase()}`,
+              message: "Archive Recovery is not eligible for source updates.",
             }
           : null;
         const authorityReasons = [
