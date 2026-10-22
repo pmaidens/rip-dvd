@@ -1,7 +1,7 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "c463781a-ef00-47cf-bde7-2efaa160c110",
+  "id": "a836821c-782c-4cf9-9968-5b0122aea2e2",
   "prevIds": [
     "6a8580cc-1757-466b-b438-2e2fe4ec20e6"
   ],
@@ -88,6 +88,10 @@
     },
     {
       "name": "dvd_structural_check_attempts",
+      "entityType": "tables"
+    },
+    {
+      "name": "dvd_title_damage_assessment_attempts",
       "entityType": "tables"
     },
     {
@@ -2882,13 +2886,43 @@
     },
     {
       "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
+      "notNull": false,
+      "autoincrement": true,
       "default": null,
       "generated": null,
       "name": "sequence",
       "entityType": "columns",
-      "table": "dvd_title_damage_assessments"
+      "table": "dvd_title_damage_assessment_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "original_disc_archive_id",
+      "entityType": "columns",
+      "table": "dvd_title_damage_assessment_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "assessment_id",
+      "entityType": "columns",
+      "table": "dvd_title_damage_assessment_attempts"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "dvd_title_damage_assessment_attempts"
     },
     {
       "type": "text",
@@ -6085,6 +6119,36 @@
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "nameExplicit": false,
+      "name": "fk_dvd_title_damage_assessment_attempts_original_disc_archive_id_original_disc_archives_id_fk",
+      "entityType": "fks",
+      "table": "dvd_title_damage_assessment_attempts"
+    },
+    {
+      "columns": [
+        "assessment_id"
+      ],
+      "tableTo": "dvd_title_damage_assessments",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_dvd_title_damage_assessment_attempts_assessment_id_dvd_title_damage_assessments_id_fk",
+      "entityType": "fks",
+      "table": "dvd_title_damage_assessment_attempts"
+    },
+    {
+      "columns": [
+        "original_disc_archive_id"
+      ],
+      "tableTo": "original_disc_archives",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
       "name": "fk_dvd_title_damage_assessments_original_disc_archive_id_original_disc_archives_id_fk",
       "entityType": "fks",
       "table": "dvd_title_damage_assessments"
@@ -6727,6 +6791,15 @@
       "nameExplicit": false,
       "name": "dvd_structural_check_attempts_pk",
       "table": "dvd_structural_check_attempts",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "sequence"
+      ],
+      "nameExplicit": false,
+      "name": "dvd_title_damage_assessment_attempts_pk",
+      "table": "dvd_title_damage_assessment_attempts",
       "entityType": "pks"
     },
     {
@@ -7620,10 +7693,6 @@
           "isExpression": false
         },
         {
-          "value": "manifest_revision",
-          "isExpression": false
-        },
-        {
           "value": "sequence",
           "isExpression": false
         }
@@ -7631,21 +7700,33 @@
       "isUnique": false,
       "where": null,
       "origin": "manual",
-      "name": "dvd_title_damage_assessments_checkpoint_idx",
+      "name": "dvd_title_damage_assessment_attempts_archive_sequence_idx",
       "entityType": "indexes",
-      "table": "dvd_title_damage_assessments"
+      "table": "dvd_title_damage_assessment_attempts"
     },
     {
       "columns": [
         {
-          "value": "sequence",
+          "value": "original_disc_archive_id",
+          "isExpression": false
+        },
+        {
+          "value": "manifest_revision",
+          "isExpression": false
+        },
+        {
+          "value": "created_at",
+          "isExpression": false
+        },
+        {
+          "value": "id",
           "isExpression": false
         }
       ],
-      "isUnique": true,
+      "isUnique": false,
       "where": null,
       "origin": "manual",
-      "name": "dvd_title_damage_assessments_sequence_unique",
+      "name": "dvd_title_damage_assessments_checkpoint_idx",
       "entityType": "indexes",
       "table": "dvd_title_damage_assessments"
     },
@@ -8915,14 +8996,14 @@
       "table": "dvd_structural_check_attempts"
     },
     {
-      "value": "\"id\" is not null",
-      "name": "dvd_title_damage_assessments_id_not_null",
+      "value": "length(\"assessment_id\") = 92 and substr(\"assessment_id\", 1, 28) = 'dvd-title-damage-assessment:' and substr(\"assessment_id\", 29) not glob '*[^0-9a-f]*'",
+      "name": "dvd_title_damage_assessment_attempts_identity_check",
       "entityType": "checks",
-      "table": "dvd_title_damage_assessments"
+      "table": "dvd_title_damage_assessment_attempts"
     },
     {
-      "value": "typeof(\"sequence\") = 'integer' and \"sequence\" > 0",
-      "name": "dvd_title_damage_assessments_sequence_check",
+      "value": "\"id\" is not null",
+      "name": "dvd_title_damage_assessments_id_not_null",
       "entityType": "checks",
       "table": "dvd_title_damage_assessments"
     },

@@ -1576,7 +1576,6 @@ export const dvdStructuralCheckAttempts = sqliteTable(
 export const dvdTitleDamageAssessments = sqliteTable(
   "dvd_title_damage_assessments",
   {
-    sequence: integer("sequence").notNull(),
     id: text("id").notNull().primaryKey(),
     originalDiscArchiveId: text("original_disc_archive_id")
       .$type<OriginalDiscArchiveId>()
@@ -1613,14 +1612,8 @@ export const dvdTitleDamageAssessments = sqliteTable(
     index("dvd_title_damage_assessments_checkpoint_idx").on(
       table.originalDiscArchiveId,
       table.manifestRevision,
-      table.sequence,
-    ),
-    uniqueIndex("dvd_title_damage_assessments_sequence_unique").on(
-      table.sequence,
-    ),
-    check(
-      "dvd_title_damage_assessments_sequence_check",
-      sql`typeof(${table.sequence}) = 'integer' and ${table.sequence} > 0`,
+      table.createdAt,
+      table.id,
     ),
     check(
       "dvd_title_damage_assessments_identity_check",
@@ -1641,6 +1634,33 @@ export const dvdTitleDamageAssessments = sqliteTable(
     check(
       "dvd_title_damage_assessments_mappings_check",
       sql`json_valid(${table.titleMappings}) and json_type(${table.titleMappings}) = 'array'`,
+    ),
+  ],
+);
+
+export const dvdTitleDamageAssessmentAttempts = sqliteTable(
+  "dvd_title_damage_assessment_attempts",
+  {
+    sequence: integer("sequence").primaryKey({ autoIncrement: true }),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
+    assessmentId: text("assessment_id")
+      .notNull()
+      .references(() => dvdTitleDamageAssessments.id, {
+        onDelete: "restrict",
+      }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("dvd_title_damage_assessment_attempts_archive_sequence_idx").on(
+      table.originalDiscArchiveId,
+      table.sequence,
+    ),
+    check(
+      "dvd_title_damage_assessment_attempts_identity_check",
+      sql`length(${table.assessmentId}) = 92 and substr(${table.assessmentId}, 1, 28) = 'dvd-title-damage-assessment:' and substr(${table.assessmentId}, 29) not glob '*[^0-9a-f]*'`,
     ),
   ],
 );

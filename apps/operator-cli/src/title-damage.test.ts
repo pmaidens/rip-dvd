@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 
 import type { DvdCheckpointReadOwnership } from "@rip-dvd/data-access";
@@ -337,15 +338,42 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     throw new Error("Expected a later Title Damage Assessment");
   }
   expect(laterRecorded.createdAt).toEqual(recorded.createdAt);
-  expect(
-    laterRecorded.id.localeCompare(recorded.id),
-    `${laterRecorded.id} must sort before ${recorded.id}`,
-  ).toBeLessThan(0);
   expect(access.dvdTitleDamageAssessments.inspect(archive.id)).toMatchObject({
     state: "current",
     currentAssessmentIdentity: laterRecorded.id,
     assessment: { id: laterRecorded.id },
   });
+
+  const restored = await access.assessDvdTitleDamage(
+    archive.id,
+    ownership,
+    async () => mappings,
+  );
+  if (restored === null) {
+    throw new Error("Expected a restored Title Damage Assessment");
+  }
+  expect(restored.id).toBe(recorded.id);
+  expect(access.dvdTitleDamageAssessments.inspect(archive.id)).toMatchObject({
+    state: "current",
+    currentAssessmentIdentity: recorded.id,
+    assessment: { id: recorded.id },
+  });
+  const sqlite = new DatabaseSync(fixture.databasePath);
+  expect(sqlite.prepare(`
+    SELECT assessment_id AS assessmentId
+    FROM dvd_title_damage_assessment_attempts
+    ORDER BY sequence
+  `).all()).toEqual([
+    { assessmentId: recorded.id },
+    { assessmentId: recorded.id },
+    { assessmentId: laterRecorded.id },
+    { assessmentId: recorded.id },
+  ]);
+  expect(sqlite.prepare(`
+    SELECT count(*) AS count
+    FROM dvd_title_damage_assessments
+  `).get()).toEqual({ count: 2 });
+  sqlite.close();
 
   let newerStructuralAssessmentIdentity: string | null = null;
   const racingOwnership: DvdCheckpointReadOwnership = {
@@ -389,7 +417,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   expect(access.dvdTitleDamageAssessments.inspect(archive.id)).toMatchObject({
     state: "outdated",
     currentAssessmentIdentity: null,
-    assessment: { id: laterRecorded.id },
+    assessment: { id: recorded.id },
   });
   access.close();
 
@@ -404,7 +432,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     result: {
       titleDamage: {
         state: "outdated",
-        assessmentIdentity: laterRecorded.id,
+        assessmentIdentity: recorded.id,
         currentAssessmentIdentity: null,
         items: [],
         truncated: false,
@@ -422,7 +450,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     exitCode: 0,
     result: {
       state: "outdated",
-      assessmentIdentity: laterRecorded.id,
+      assessmentIdentity: recorded.id,
       currentAssessmentIdentity: null,
       items: [],
       truncated: false,

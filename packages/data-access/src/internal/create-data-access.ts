@@ -86,6 +86,7 @@ import {
   dvdRecoveryReconciliations,
   dvdStructuralAssessments,
   dvdStructuralCheckAttempts,
+  dvdTitleDamageAssessmentAttempts,
   dvdTitleDamageAssessments,
   dvdTitleIdentities,
   dvdTitleIdentityObservations,
@@ -8726,19 +8727,36 @@ export function createDataAccessInternal(
     };
     const reviewSet = readDvdTitleIdentityReviewSet(originalDiscArchiveId);
     const structural = inspectDvdStructuralAssessment(originalDiscArchiveId);
-    const latestRow = database.select().from(dvdTitleDamageAssessments)
+    const latestRow = database.select({ assessment: dvdTitleDamageAssessments })
+      .from(dvdTitleDamageAssessmentAttempts)
+      .innerJoin(
+        dvdTitleDamageAssessments,
+        eq(
+          dvdTitleDamageAssessments.id,
+          dvdTitleDamageAssessmentAttempts.assessmentId,
+        ),
+      )
       .where(eq(
-        dvdTitleDamageAssessments.originalDiscArchiveId,
+        dvdTitleDamageAssessmentAttempts.originalDiscArchiveId,
         originalDiscArchiveId,
       ))
-      .orderBy(desc(dvdTitleDamageAssessments.sequence)).limit(1).get();
+      .orderBy(desc(dvdTitleDamageAssessmentAttempts.sequence)).limit(1)
+      .get()?.assessment;
     const currentRow = reviewSet === null ||
         structural.state !== "current" ||
         structural.currentAssessmentIdentity === null
       ? undefined
-      : database.select().from(dvdTitleDamageAssessments).where(and(
+      : database.select({ assessment: dvdTitleDamageAssessments })
+        .from(dvdTitleDamageAssessmentAttempts)
+        .innerJoin(
+          dvdTitleDamageAssessments,
+          eq(
+            dvdTitleDamageAssessments.id,
+            dvdTitleDamageAssessmentAttempts.assessmentId,
+          ),
+        ).where(and(
         eq(
-          dvdTitleDamageAssessments.originalDiscArchiveId,
+          dvdTitleDamageAssessmentAttempts.originalDiscArchiveId,
           originalDiscArchiveId,
         ),
         eq(dvdTitleDamageAssessments.manifestId, header.currentManifestId),
@@ -8758,7 +8776,8 @@ export function createDataAccessInternal(
           dvdTitleDamageAssessments.structuralAssessmentIdentity,
           structural.currentAssessmentIdentity,
         ),
-      )).orderBy(desc(dvdTitleDamageAssessments.sequence)).limit(1).get();
+      )).orderBy(desc(dvdTitleDamageAssessmentAttempts.sequence)).limit(1)
+        .get()?.assessment;
     const assessmentRow = currentRow ?? latestRow;
     const reasons = [] as Array<{ code: string; message: string }>;
     if (reviewSet === null) {
@@ -8959,8 +8978,6 @@ export function createDataAccessInternal(
         );
       }
       transaction.insert(dvdTitleDamageAssessments).values({
-        sequence:
-          sql<number>`coalesce((select max(${dvdTitleDamageAssessments.sequence}) from ${dvdTitleDamageAssessments}), 0) + 1`,
         id: assessment.id,
         originalDiscArchiveId: input.originalDiscArchiveId,
         manifestId: input.checkpoint.manifestId,
@@ -8976,6 +8993,11 @@ export function createDataAccessInternal(
         createdAt,
       }).onConflictDoNothing({
         target: dvdTitleDamageAssessments.id,
+      }).run();
+      transaction.insert(dvdTitleDamageAssessmentAttempts).values({
+        originalDiscArchiveId: input.originalDiscArchiveId,
+        assessmentId: assessment.id,
+        createdAt,
       }).run();
     }, { behavior: "immediate" });
     const persisted = database.select().from(dvdTitleDamageAssessments)

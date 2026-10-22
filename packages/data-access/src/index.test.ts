@@ -1222,6 +1222,7 @@ describe("data-access facade", () => {
         "dvd_recovery_reconciliations",
         "dvd_structural_assessments",
         "dvd_structural_check_attempts",
+        "dvd_title_damage_assessment_attempts",
         "dvd_title_damage_assessments",
         "dvd_recovery_storage_preflights",
         "dvd_source_sample_manifests",
@@ -1237,7 +1238,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(46);
+    expect(identifierTables).toHaveLength(47);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -1254,6 +1255,8 @@ describe("data-access facade", () => {
                     ? sql.includes("dvd_structural_assessments_identity_check")
                     : name === "dvd_structural_check_attempts"
                       ? sql.includes("dvd_structural_check_attempts_shape_check")
+                      : name === "dvd_title_damage_assessment_attempts"
+                        ? sql.includes("dvd_title_damage_assessment_attempts_identity_check")
                       : name === "archive_audit_findings"
                         ? sql.includes("PRIMARY KEY(`archive_audit_run_id`, `sequence`)")
                         : name === "rearchive_mapping_proposal_items"
@@ -9028,7 +9031,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
-          name: "20261022193749_woozy_ma_gnuci",
+          name: "20261022195659_fresh_silver_samurai",
         },
         {
           name: "20261022185502_perfect_lily_hollister",
