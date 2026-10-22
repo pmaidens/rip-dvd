@@ -334,6 +334,18 @@ static int parse_sample_lba(const char *text, uint64_t *lba)
     return 0;
 }
 
+static int require_source_read_parent(void)
+{
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0) {
+        return fail_errno("DVD source read parent-death guard failed");
+    }
+    if (getppid() == 1) {
+        fprintf(stderr, "DVD source read parent exited during startup\n");
+        return 1;
+    }
+    return 0;
+}
+
 static int arm_verification_lifetime(const char *text)
 {
     char *end = NULL;
@@ -344,13 +356,7 @@ static int arm_verification_lifetime(const char *text)
         fprintf(stderr, "DVD Disc Verification lifetime is invalid\n");
         return 1;
     }
-    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0) {
-        return fail_errno("DVD Disc Verification parent-death guard failed");
-    }
-    if (getppid() == 1) {
-        fprintf(stderr, "DVD Disc Verification parent exited during startup\n");
-        return 1;
-    }
+    if (require_source_read_parent() != 0) return 1;
     alarm((unsigned int)value);
     return 0;
 }
@@ -3544,7 +3550,10 @@ int main(int argc, char **argv)
     int recovery_sector = argc > 1 &&
         strcmp(argv[1], "recover-sector-v1") == 0;
     if (verification_sample || recovery_sector) {
-        if (argc != 7) {
+        if (
+            (verification_sample && argc != 7) ||
+            (recovery_sector && argc != 6)
+        ) {
             fprintf(stderr, "DVD Disc Verification sample arguments are invalid\n");
             return 2;
         }
@@ -3554,7 +3563,9 @@ int main(int argc, char **argv)
         if (parse_sample_lba(argv[3], &start_lba) != 0 ||
             parse_sample_lba(argv[4], &block_count) != 0 ||
             parse_sample_lba(argv[5], &accepted_end_lba_exclusive) != 0 ||
-            arm_verification_lifetime(argv[6]) != 0 ||
+            (verification_sample
+                ? arm_verification_lifetime(argv[6])
+                : require_source_read_parent()) != 0 ||
             block_count != (verification_sample ? 32 : 1) ||
             accepted_end_lba_exclusive == 0 ||
             start_lba + block_count > accepted_end_lba_exclusive ||

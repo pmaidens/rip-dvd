@@ -1,6 +1,5 @@
 import {
   dvdDiscVerificationInsertionIsCurrent,
-  DVD_DISC_VERIFICATION_READ_DEADLINE_MS,
   type ArchiveRecovery,
   type ClaimedArchiveRecoveryWork,
   type DataAccess,
@@ -295,11 +294,17 @@ export async function pollDvdRecoveryPass(input: {
       recovery,
       verification: input.access.dvdDiscVerifications
         .findLatestForRecovery(recovery.id),
+      checkpoint: input.access.catalog.findDvdArchiveEvidenceHeader(
+        recovery.originalDiscArchiveId,
+      ),
     }))
-    .find(({ recovery, verification }) =>
+    .find(({ recovery, verification, checkpoint }) =>
       recovery.status === "eligible" &&
       verification !== null &&
-      writeAuthority(verification) !== null
+      writeAuthority(verification) !== null &&
+      checkpoint !== null &&
+      checkpoint.currentManifestRevision === verification.checkpointRevision &&
+      checkpoint.currentManifestDigest === verification.checkpointDigest
     );
   if (candidate === undefined || candidate.verification === null) return false;
   const authority = writeAuthority(candidate.verification)!;
@@ -352,12 +357,26 @@ export async function pollDvdRecoveryPass(input: {
         })) {
           throw new DvdRecoveryPassFault("SOURCE_CHANGED");
         }
+        const admitted = currentRecovery(input.access, candidate.recovery);
+        if (admitted.status === "stopping") {
+          await finalizeStop({
+            ...input,
+            archiveImageOwnership,
+            reconcile,
+            recovery: admitted,
+            signal,
+          });
+          return true;
+        }
+        if (admitted.status !== "running") {
+          throw new DvdRecoveryPassFault("SOURCE_CHANGED");
+        }
+        input.access.archiveRecoveryWork.assertClaim(claim);
         const active = input.reader.start({
           devicePath,
           startLba,
           sectorCount: 1,
           acceptedEndLbaExclusive: checkpoint.acceptedEndLbaExclusive,
-          timeoutMs: DVD_DISC_VERIFICATION_READ_DEADLINE_MS,
         });
         const completed = await waitForRead({
           active,
@@ -433,12 +452,13 @@ export async function pollDvdRecoveryPass(input: {
     const recovery = currentRecovery(input.access, candidate.recovery);
     if (recovery.status === "stopping") return true;
     input.access.archiveRecoveryWork.markFault({
-      archiveRecoveryId: recovery.id,
-      attemptId: recovery.attemptId,
+      claim,
       faultCode: error instanceof DvdRecoveryPassFault ||
           error instanceof DvdRecoveryBatchFault
         ? error.code
         : "CONSISTENCY_FAULT",
+      retainWork: error instanceof DvdRecoveryBatchFault &&
+        error.retainRecoveryWork,
     });
   }
   return true;

@@ -117,7 +117,7 @@ export interface DvdVerificationSourceReader {
     startLba: number;
     sectorCount: number;
     acceptedEndLbaExclusive: number;
-    timeoutMs: number;
+    timeoutMs?: number;
   }): ActiveBoundedProcess<DvdVerificationSourceRead>;
 }
 
@@ -158,6 +158,7 @@ function openOpticalDriveLock(devicePath: string): number {
 }
 
 function createNodeDvdSourceReader(options: {
+  boundedLifetime: boolean;
   command: "verify-sample-v1" | "recover-sector-v1";
   operationName: string;
   requiredSectorCount: number;
@@ -171,9 +172,13 @@ function createNodeDvdSourceReader(options: {
         !Number.isSafeInteger(input.sectorCount) ||
         input.sectorCount !== options.requiredSectorCount ||
         input.startLba + input.sectorCount > input.acceptedEndLbaExclusive ||
-        !Number.isSafeInteger(input.timeoutMs) ||
-        input.timeoutMs <= 0 ||
-        input.timeoutMs > DVD_DISC_VERIFICATION_READ_DEADLINE_MS
+        options.boundedLifetime && (
+          !Number.isSafeInteger(input.timeoutMs) ||
+          input.timeoutMs === undefined ||
+          input.timeoutMs <= 0 ||
+          input.timeoutMs > DVD_DISC_VERIFICATION_READ_DEADLINE_MS
+        ) ||
+        !options.boundedLifetime && input.timeoutMs !== undefined
       ) throw new Error("DVD Disc Verification source read is invalid");
       const lockDescriptor = openOpticalDriveLock(devicePath);
       let activeProcess;
@@ -193,7 +198,9 @@ function createNodeDvdSourceReader(options: {
             String(input.startLba),
             String(input.sectorCount),
             String(input.acceptedEndLbaExclusive),
-            String(Math.max(1, Math.ceil(input.timeoutMs / 1_000))),
+            ...(input.timeoutMs === undefined
+              ? []
+              : [String(Math.max(1, Math.ceil(input.timeoutMs / 1_000)))]),
           ],
           extraFileDescriptors: [lockDescriptor],
           maxOutputBytes: Math.max(
@@ -247,6 +254,7 @@ function createNodeDvdSourceReader(options: {
 export function createNodeDvdVerificationSourceReader():
   DvdVerificationSourceReader {
   return createNodeDvdSourceReader({
+    boundedLifetime: true,
     command: "verify-sample-v1",
     operationName: "DVD Disc Verification source read",
     requiredSectorCount: DVD_SOURCE_SAMPLE_BYTE_COUNT / 2_048,
@@ -256,6 +264,7 @@ export function createNodeDvdVerificationSourceReader():
 export function createNodeDvdRecoverySourceReader():
   DvdVerificationSourceReader {
   return createNodeDvdSourceReader({
+    boundedLifetime: false,
     command: "recover-sector-v1",
     operationName: "DVD Recovery source read",
     requiredSectorCount: 1,

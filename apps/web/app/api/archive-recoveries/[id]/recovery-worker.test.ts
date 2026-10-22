@@ -12,6 +12,11 @@ import type {
   DvdDiscVerificationDiagnostic,
   DvdRecoveryWriteAuthority,
 } from "@rip-dvd/data-access";
+import {
+  ArchiveImageOwnershipError,
+  defaultArchiveImageOwnership,
+  type ArchiveImageOwnership,
+} from "@rip-dvd/worker-runtime";
 
 import { seedDvdDiscVerificationFixture } from "../../../../../operator-cli/src/dvd-disc-verification.test-support.js";
 import { createOperatorWorkflowFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
@@ -203,6 +208,9 @@ it("narrows a skipped region sector by sector and preserves recovered positions"
       ),
     )
       .toEqual([100, 101, 102]);
+    expect(source.start.mock.calls.every(([read]) =>
+      read.timeoutMs === undefined
+    )).toBe(true);
     const checkpoint = await input.access.readDvdCheckpoint(
       seeded.archive.id,
       (await import("@rip-dvd/worker-runtime")).defaultArchiveImageOwnership,
@@ -221,10 +229,53 @@ it("narrows a skipped region sector by sector and preserves recovered positions"
       .toEqual(Buffer.alloc(2_048, 102));
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({ status: "eligible", work: null });
+    expect(await pollDvdRecoveryPass(input)).toBe(false);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "eligible", faultCode: null, work: null });
   } finally {
     input.access.close();
   }
 }, 20_000);
+
+it("does not start a source read when Stop commits during insertion observation", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  await completeVerification(fixture, seeded);
+  const source = immediateReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(2_048),
+  }));
+  const input = pollInput(fixture, source.reader);
+  let finishObservation!: (generation: string) => void;
+  const observation = new Promise<string>((resolve) => {
+    finishObservation = resolve;
+  });
+  const observe = vi.fn(() => observation);
+  input.mediaGenerationObserver.observe = observe;
+  const reconcile = vi.fn(async () => ({
+    outcome: "already_consistent",
+    evidence: {},
+  })) as unknown as typeof reconcileDvdRecoveryCheckpoint;
+  try {
+    const polling = pollDvdRecoveryPass({ ...input, reconcile });
+    await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(1));
+    input.access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000453",
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    });
+    finishObservation("synthetic-verification-generation");
+
+    await polling;
+    expect(source.start).not.toHaveBeenCalled();
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "stopped", work: null });
+  } finally {
+    input.access.close();
+  }
+});
 
 it("finishes a fully recovered pass without rewriting the successful Archive Job", async () => {
   const fixture = createOperatorWorkflowFixture();
@@ -401,6 +452,81 @@ it("keeps a transport fault out of source evidence and preserves the Archive Job
       ]));
   } finally {
     input.access.close();
+  }
+});
+
+it.each([
+  "WRITER_NOT_QUIESCENT",
+  "CONSISTENCY_FAULT",
+] as const)("retains the recovery reservation for ownership fault %s", async (
+  faultCode,
+) => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  await completeVerification(fixture, seeded);
+  const source = immediateReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(2_048, 0x5a),
+  }));
+  const input = pollInput(fixture, source.reader);
+  const withWriter = vi.fn(async () => {
+    throw new ArchiveImageOwnershipError(faultCode);
+  });
+  const archiveImageOwnership: ArchiveImageOwnership = {
+    ...defaultArchiveImageOwnership,
+    withWriter,
+  };
+  try {
+    expect(await pollDvdRecoveryPass({
+      ...input,
+      archiveImageOwnership,
+    })).toBe(true);
+    expect(withWriter).toHaveBeenCalledTimes(1);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "faulted",
+        faultCode,
+        work: expect.objectContaining({ status: "claimed" }),
+      });
+  } finally {
+    input.access.close();
+  }
+});
+
+it("preserves a Stop that wins the race with fault recording", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const authority = await completeVerification(fixture, seeded);
+  const access = fixture.openAccess();
+  try {
+    const claim = access.archiveRecoveryWork.claim(
+      access.archiveRecoveryWork.request(seeded.recoveryId).archiveRecoveryId,
+      "synthetic-racing-recovery-worker",
+    );
+    access.archiveRecoveryWork.bindVerification(claim, authority);
+    access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000454",
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    });
+    access.archiveRecoveryWork.markFault({
+      claim,
+      faultCode: "SOURCE_TRANSPORT_ERROR",
+      retainWork: false,
+    });
+    expect(access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "stopping",
+        faultCode: null,
+        work: expect.objectContaining({
+          claimToken: claim.claimToken,
+          status: "claimed",
+        }),
+      });
+  } finally {
+    access.close();
   }
 });
 

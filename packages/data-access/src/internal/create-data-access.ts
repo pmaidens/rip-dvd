@@ -9569,34 +9569,50 @@ export function createDataAccessInternal(
       markFault(input) {
         const faultCode = requireNonEmpty(input.faultCode, "faultCode");
         return database.transaction((transaction) => {
-          const recovery = findArchiveRecoveryRecord(transaction, {
-            archiveRecoveryId: input.archiveRecoveryId,
-          });
-          if (recovery === null) {
-            throw new RecordNotFoundError(
+          const recovery = requireCurrentArchiveRecoveryClaim(
+            transaction,
+            input.claim,
+          );
+          if (recovery.status === "stopping") {
+            return recovery;
+          }
+          if (recovery.status !== "running") {
+            throw new InvalidStatusTransitionError(
               "Archive Recovery",
-              input.archiveRecoveryId,
+              recovery.status,
+              "faulted",
             );
           }
-          if (recovery.attemptId !== input.attemptId) {
-            throw new StaleArchiveRecoveryAttemptError({
-              archiveRecoveryId: recovery.id,
-              attemptId: recovery.attemptId,
-            });
-          }
-          transaction.delete(archiveRecoveryWork).where(and(
-            eq(archiveRecoveryWork.archiveRecoveryId, recovery.id),
-            eq(archiveRecoveryWork.attemptId, recovery.attemptId),
-          )).run();
           const timestamp = now();
-          transaction.update(archiveRecoveries).set({
-            status: "faulted",
-            faultCode,
-            updatedAt: timestamp,
-          }).where(and(
-            eq(archiveRecoveries.id, recovery.id),
-            eq(archiveRecoveries.attemptId, recovery.attemptId),
-          )).run();
+          requireRow(
+            transaction.update(archiveRecoveries).set({
+              status: "faulted",
+              faultCode,
+              updatedAt: timestamp,
+            }).where(and(
+              eq(archiveRecoveries.id, recovery.id),
+              eq(archiveRecoveries.attemptId, recovery.attemptId),
+              eq(archiveRecoveries.status, "running"),
+            )).returning({ id: archiveRecoveries.id }).get(),
+            "Archive Recovery",
+            recovery.id,
+          );
+          if (!input.retainWork) {
+            requireRow(
+              transaction.delete(archiveRecoveryWork).where(and(
+                eq(archiveRecoveryWork.archiveRecoveryId, recovery.id),
+                eq(archiveRecoveryWork.attemptId, recovery.attemptId),
+                eq(
+                  archiveRecoveryWork.claimToken,
+                  input.claim.claimToken,
+                ),
+              )).returning({
+                archiveRecoveryId: archiveRecoveryWork.archiveRecoveryId,
+              }).get(),
+              "Archive Recovery work",
+              recovery.id,
+            );
+          }
           return requireRow(
             findArchiveRecoveryRecord(transaction, {
               archiveRecoveryId: recovery.id,

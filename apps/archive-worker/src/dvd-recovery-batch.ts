@@ -35,7 +35,6 @@ import {
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import {
-  ArchiveImageOwnershipError,
   defaultArchiveImageOwnership,
   type ArchiveImageOwnership,
   type ArchiveImageOwnershipHandle,
@@ -81,15 +80,33 @@ export type DvdRecoveryBatchFaultCode =
   | "CHECKPOINT_SYNC_FAILED"
   | "CHECKPOINT_REPLACEMENT_FAILED";
 
+interface DvdRecoveryBatchFaultOptions extends ErrorOptions {
+  retainRecoveryWork?: boolean;
+}
+
 export class DvdRecoveryBatchFault extends Error {
   override readonly name = "DvdRecoveryBatchFault";
+  readonly retainRecoveryWork: boolean;
 
   constructor(
     readonly code: DvdRecoveryBatchFaultCode,
-    options?: ErrorOptions,
+    options?: DvdRecoveryBatchFaultOptions,
   ) {
     super(code, options);
+    this.retainRecoveryWork = options?.retainRecoveryWork ?? false;
   }
+}
+
+function archiveImageOwnershipFaultCode(
+  cause: unknown,
+): "WRITER_NOT_QUIESCENT" | "CONSISTENCY_FAULT" | null {
+  if (typeof cause === "object" && cause !== null && "code" in cause) {
+    const code = cause.code;
+    if (code === "WRITER_NOT_QUIESCENT" || code === "CONSISTENCY_FAULT") {
+      return code;
+    }
+  }
+  return null;
 }
 
 export interface DvdRecoveryAtomicWriter {
@@ -855,8 +872,12 @@ export async function commitDvdRecoveryBatch(
     });
   } catch (cause) {
     if (cause instanceof DvdRecoveryBatchFault) throw cause;
-    if (cause instanceof ArchiveImageOwnershipError) {
-      throw new DvdRecoveryBatchFault(cause.code, { cause });
+    const ownershipFaultCode = archiveImageOwnershipFaultCode(cause);
+    if (ownershipFaultCode !== null) {
+      throw new DvdRecoveryBatchFault(ownershipFaultCode, {
+        cause,
+        retainRecoveryWork: true,
+      });
     }
     throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT", { cause });
   }

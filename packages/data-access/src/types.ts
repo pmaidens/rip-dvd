@@ -638,9 +638,9 @@ export interface ArchiveRecoveryWorkAccess {
   }): ArchiveRecovery;
   settlePass(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
   markFault(input: {
-    archiveRecoveryId: ArchiveRecoveryId;
-    attemptId: ArchiveRecoveryAttemptId;
+    claim: ClaimedArchiveRecoveryWork;
     faultCode: string;
+    retainWork: boolean;
   }): ArchiveRecovery;
   release(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
 }

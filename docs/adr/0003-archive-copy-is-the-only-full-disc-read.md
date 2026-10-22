@@ -186,3 +186,13 @@ that exact revision into SQLite. A failed observation advances evidence
 without mutating the image. Retained journals and mismatched projections fail
 operator reads closed; this commit operation does not perform reconciliation
 or open new-format admission.
+
+A recovery pass binds a completed matching DVD Disc Verification only when its
+revision and digest are the exact current checkpoint. That binding belongs to
+the claimed Recovery attempt. It remains valid across only the monotonic
+one-sector checkpoint descendants committed by that same claim during the
+pass; it cannot authorize another attempt or a pass that starts from a later
+checkpoint. Once a partial pass settles, another pass requires a new
+checkpoint-current verification. This pass-scoped rule lets one verified pass
+narrow several sectors without treating its own first committed sector as an
+unrelated checkpoint change.
