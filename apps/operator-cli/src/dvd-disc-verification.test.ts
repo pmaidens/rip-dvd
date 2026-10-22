@@ -275,6 +275,82 @@ it("keeps a durable mismatch authoritative when a worker claim expires", async (
   }
 });
 
+it("fences queued and running verification work when Recovery Stop commits", async () => {
+  const queuedFixture = createOperatorWorkflowFixture();
+  fixtures.push(queuedFixture);
+  const queuedSeed = await seedDvdDiscVerificationFixture(queuedFixture);
+  const queuedSubmission = await queuedFixture.run([
+    "archive-recovery", "verify-disc", queuedSeed.recoveryId,
+    "--key", "00000000-0000-4000-8000-000000000470",
+    "--disc-inspection-id", queuedSeed.inspection.id,
+    "--checkpoint-revision", "1",
+    "--checkpoint-digest", queuedSeed.manifest.manifestDigest,
+  ]);
+  expect(queuedSubmission.exitCode).toBe(0);
+  const queuedAccess = queuedFixture.openAccess();
+  try {
+    queuedAccess.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000471",
+      archiveRecoveryId: queuedSeed.recoveryId,
+      attemptId: queuedSeed.attemptId,
+    });
+    expect(queuedAccess.dvdDiscVerifications.claimNext(
+      "synthetic-stopped-queued-verification-worker",
+    )).toBeNull();
+    expect(queuedAccess.dvdDiscVerifications.findLatestForRecovery(
+      queuedSeed.recoveryId,
+    )).toMatchObject({
+      status: "failed",
+      failureCode: "DISC_VERIFICATION_UNAVAILABLE",
+    });
+  } finally {
+    queuedAccess.close();
+  }
+
+  const runningFixture = createOperatorWorkflowFixture();
+  fixtures.push(runningFixture);
+  const runningSeed = await seedDvdDiscVerificationFixture(runningFixture);
+  const runningSubmission = await runningFixture.run([
+    "archive-recovery", "verify-disc", runningSeed.recoveryId,
+    "--key", "00000000-0000-4000-8000-000000000472",
+    "--disc-inspection-id", runningSeed.inspection.id,
+    "--checkpoint-revision", "1",
+    "--checkpoint-digest", runningSeed.manifest.manifestDigest,
+  ]);
+  expect(runningSubmission.exitCode).toBe(0);
+  const runningAccess = runningFixture.openAccess();
+  try {
+    const claim = runningAccess.dvdDiscVerifications.claimNext(
+      "synthetic-stopped-running-verification-worker",
+    );
+    if (claim === null) throw new Error("Expected verification claim");
+    const stop = runningAccess.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000473",
+      archiveRecoveryId: runningSeed.recoveryId,
+      attemptId: runningSeed.attemptId,
+    });
+    const start = vi.fn();
+    expect(runningAccess.dvdDiscVerifications.renewClaim(claim)).toBe(false);
+    expect(runningAccess.dvdDiscVerifications.admitSourceRead(claim, start))
+      .toBe(false);
+    expect(start).not.toHaveBeenCalled();
+    expect(runningAccess.archiveRecoveryWork.prepareStop({
+      archiveRecoveryId: runningSeed.recoveryId,
+      attemptId: runningSeed.attemptId,
+      stopOperationId: stop.stopOperationId,
+    })).toBe(false);
+
+    runningAccess.dvdDiscVerifications.fail(claim);
+    expect(runningAccess.archiveRecoveryWork.prepareStop({
+      archiveRecoveryId: runningSeed.recoveryId,
+      attemptId: runningSeed.attemptId,
+      stopOperationId: stop.stopOperationId,
+    })).toBe(true);
+  } finally {
+    runningAccess.close();
+  }
+});
+
 it("reports unavailable checkpoint storage as a stable action reason", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);

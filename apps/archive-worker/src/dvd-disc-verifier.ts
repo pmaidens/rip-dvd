@@ -556,7 +556,20 @@ export async function pollDvdDiscVerification(input: {
           sourceMetadataFingerprint: claim.sourceMetadataFingerprint,
           observedMetadataFingerprint: claim.observedMetadataFingerprint,
           devicePath: drive.devicePath,
-          reader: input.reader,
+          reader: {
+            start(request) {
+              let active: ActiveBoundedProcess<DvdSourceRead> | undefined;
+              const admitted = input.access.dvdDiscVerifications
+                .admitSourceRead(claim, () => {
+                  assertOwned();
+                  active = input.reader.start(request);
+                });
+              if (!admitted || active === undefined) {
+                throw new Error("DVD Disc Verification claim expired");
+              }
+              return active;
+            },
+          },
           startedAtMs: claim.startedAt.getTime(),
           signal: input.signal,
           insertionIsCurrent: inspectionIsCurrent,

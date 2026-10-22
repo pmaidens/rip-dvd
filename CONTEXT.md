@@ -32,6 +32,10 @@ _Avoid_: Worker lease, recovery claim, database lock
 
 **Recovery Stop**:
 An operator's decision to stop Archive Recovery and keep the saved Original Disc Archive with its remaining damage evidence. Recovery stays stopped until explicitly resumed, and may resume only when no Encode Job is queued or running against that archive.
+The decision also fences DVD Disc Verification for that Recovery attempt:
+queued verification is invalidated, no further verification read is admitted,
+and Stop remains `stopping` until a running verification and its active source
+command have settled.
 _Avoid_: Archive Request cancellation, archive deletion
 
 **Operator Disc Confirmation**:

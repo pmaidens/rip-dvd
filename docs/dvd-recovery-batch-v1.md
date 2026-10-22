@@ -11,7 +11,10 @@ The caller must hold an Archive Recovery that has been transitioned to
 matching DVD Disc Verification bound at the exact checkpoint where that pass
 started. Source-read admission is serialized with Stop in the same immediate
 database transaction; `stopping` is accepted only while an already-admitted
-read or batch settles. After the binding, the same claim
+read or batch settles. The same Stop boundary invalidates queued DVD Disc
+Verification, prevents claim renewal and new verification reads, and waits for
+running verification work to settle before reconciliation and completion.
+After the binding, the same claim
 may commit monotonic one-sector descendants during that pass; a settled pass
 cannot reuse the binding at its later checkpoint. The batch validates the
 reservation and pass-scoped verification before filesystem I/O, at each commit

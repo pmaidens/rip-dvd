@@ -23,7 +23,10 @@ import {
 import { seedDvdDiscVerificationFixture } from "../../../../../operator-cli/src/dvd-disc-verification.test-support.js";
 import { createOperatorWorkflowFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
 import type { DvdRecoveryAtomicWriter } from "../../../../../archive-worker/src/dvd-recovery-batch.js";
-import type { DvdRecoverySourceReader } from "../../../../../archive-worker/src/dvd-disc-verifier.js";
+import {
+  pollDvdDiscVerification,
+  type DvdRecoverySourceReader,
+} from "../../../../../archive-worker/src/dvd-disc-verifier.js";
 import { pollDvdRecoveryPass } from "../../../../../archive-worker/src/dvd-recovery-worker.js";
 import {
   DvdRecoveryReconciliationFault,
@@ -760,6 +763,136 @@ it("keeps Stop pending until device inactivity can be acquired", async () => {
     expect(source.start).not.toHaveBeenCalled();
   } finally {
     input.access.close();
+  }
+});
+
+it("keeps Stop pending until running disc verification settles", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(
+    fixture,
+    [{
+      startLba: 904,
+      sectorCount: 1,
+      classification: "skipped_untested",
+    }],
+    "/dev/synthetic-recovery-drive",
+  );
+  const submitted = await fixture.run([
+    "archive-recovery", "verify-disc", seeded.recoveryId,
+    "--key", "00000000-0000-4000-8000-000000000474",
+    "--disc-inspection-id", seeded.inspection.id,
+    "--checkpoint-revision", "1",
+    "--checkpoint-digest", seeded.manifest.manifestDigest,
+  ]);
+  expect(submitted.exitCode).toBe(0);
+  const source = immediateReader(() => {
+    throw new Error("No recovery read is allowed while stopping");
+  });
+  const input = pollInput(fixture, source.reader);
+  const withDeviceInactive = vi.fn(async (
+    _devicePath: string,
+    mutation: () => void | Promise<void>,
+  ) => {
+    await mutation();
+  });
+  input.deviceInactivity.withDeviceInactive = withDeviceInactive;
+  const reconcile = vi.fn(async () => ({
+    outcome: "already_consistent",
+    evidence: {},
+  })) as unknown as typeof reconcileDvdRecoveryCheckpoint;
+  try {
+    const verificationClaim = input.access.dvdDiscVerifications.claimNext(
+      "synthetic-active-verification-worker",
+    );
+    if (verificationClaim === null) {
+      throw new Error("Expected verification claim");
+    }
+    input.access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000475",
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    });
+
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(false);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "stopping" });
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(withDeviceInactive).not.toHaveBeenCalled();
+
+    input.access.dvdDiscVerifications.fail(verificationClaim);
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(true);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "stopped", work: null });
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(withDeviceInactive).toHaveBeenCalledWith(
+      seeded.verificationDrive.devicePath,
+      expect.any(Function),
+    );
+    expect(source.start).not.toHaveBeenCalled();
+  } finally {
+    input.access.close();
+  }
+});
+
+it("starts no further verification read after Stop commits", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(
+    fixture,
+    undefined,
+    "/dev/synthetic-verification-stop-drive",
+  );
+  const submitted = await fixture.run([
+    "archive-recovery", "verify-disc", seeded.recoveryId,
+    "--key", "00000000-0000-4000-8000-000000000476",
+    "--disc-inspection-id", seeded.inspection.id,
+    "--checkpoint-revision", "1",
+    "--checkpoint-digest", seeded.manifest.manifestDigest,
+  ]);
+  expect(submitted.exitCode).toBe(0);
+  let finishRead!: () => void;
+  const firstRead = new Promise<void>((resolve) => {
+    finishRead = resolve;
+  });
+  const start = vi.fn(() => ({
+    result: firstRead.then(() => ({
+      outcome: "readable" as const,
+      bytes: Buffer.alloc(32 * 2_048),
+    })),
+    closed: firstRead,
+    cancel: vi.fn(),
+  }));
+  const access = fixture.openAccess();
+  try {
+    const polling = pollDvdDiscVerification({
+      access,
+      reader: { start },
+      workerExecutionId: "synthetic-verification-stop-worker",
+      mediaGenerationObserver: {
+        async observe() {
+          return "synthetic-verification-generation";
+        },
+      },
+    });
+    await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+    access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000477",
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    });
+    finishRead();
+    await expect(polling).resolves.toBe(true);
+
+    expect(start).toHaveBeenCalledOnce();
+    expect(access.dvdDiscVerifications.findLatestForRecovery(
+      seeded.recoveryId,
+    )).toMatchObject({
+      status: "failed",
+      failureCode: "DISC_VERIFICATION_UNAVAILABLE",
+    });
+  } finally {
+    access.close();
   }
 });
 

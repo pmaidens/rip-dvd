@@ -118,6 +118,13 @@ samples establish only bounded recovery-source identity;
 they are not a whole-disc hash or a completeness proof. DVD Disc Verification
 is neither Filesystem Verification nor an Archive Audit.
 
+Each verification claim and source-read admission is also bound to the current
+eligible Recovery attempt. Recovery Stop invalidates queued verification,
+denies claim renewal and further read admission, and remains `stopping` until
+the running verification has reaped any active helper and settled. Stop then
+takes device inactivity on the verification drive before it reports
+`stopped`.
+
 This deliberately trades sector-level duplicate detection and general
 post-copy raw-image hash verification for materially less optical-drive wear
 and shorter archive time.

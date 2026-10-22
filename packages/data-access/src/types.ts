@@ -652,6 +652,11 @@ export interface ArchiveRecoveryWorkAccess {
     archiveRecoveryId: ArchiveRecoveryId;
     attemptId: ArchiveRecoveryAttemptId;
   }): ArchiveRecoveryStopReceipt;
+  prepareStop(input: {
+    archiveRecoveryId: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+    stopOperationId: ArchiveRecoveryStopOperationId;
+  }): boolean;
   completeStop(input: {
     archiveRecoveryId: ArchiveRecoveryId;
     attemptId: ArchiveRecoveryAttemptId;
@@ -2383,6 +2388,10 @@ export interface DvdDiscVerificationAccess {
   findLatestForRecovery(id: ArchiveRecoveryId): DvdDiscVerification | null;
   claimNext(workerExecutionId: string): DvdDiscVerification | null;
   renewClaim(claim: DvdDiscVerification): boolean;
+  admitSourceRead(
+    claim: DvdDiscVerification,
+    start: () => void,
+  ): boolean;
   appendFinding(
     claim: DvdDiscVerification,
     finding: DvdDiscVerificationSampleFinding,

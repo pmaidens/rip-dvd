@@ -214,9 +214,22 @@ async function finalizeStop(input: {
   if (input.recovery.stopOperationId === null) {
     throw new Error("Archive Recovery Stop has no operation identity");
   }
+  if (!input.access.archiveRecoveryWork.prepareStop({
+    archiveRecoveryId: input.recovery.id,
+    attemptId: input.recovery.attemptId,
+    stopOperationId: input.recovery.stopOperationId,
+  })) {
+    throw new DvdRecoveryStopDeferred(
+      "Stop is waiting for DVD Disc Verification to settle",
+    );
+  }
   const verificationId = input.recovery.work?.verificationId;
+  const latestVerification = input.access.dvdDiscVerifications
+    .findLatestForRecovery(input.recovery.id);
   const verification = verificationId === null || verificationId === undefined
-    ? null
+    ? latestVerification?.archiveRecoveryAttemptId === input.recovery.attemptId
+      ? latestVerification
+      : null
     : input.access.dvdDiscVerifications.find(verificationId);
   if (
     verificationId !== null && verificationId !== undefined &&
