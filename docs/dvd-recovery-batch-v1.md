@@ -79,11 +79,13 @@ cleans them up.
 
 The SQLite transaction verifies the exact base revision and immutable archive
 evidence, inserts the one-sector recovery read and next manifest, advances the
-header, updates Archive Integrity and normalized counts, and marks Recovery
-completed only when the source map is empty. Replaying the exact already
-projected checkpoint is idempotent; a stale or conflicting base is rejected.
-Revision 10,000 is the final readable checkpoint; a further batch is rejected
-before journal creation or image access.
+header, and updates Archive Integrity and normalized counts. A claimed Recovery
+remains `running` through projection, journal cleanup, and writer release. Pass
+settlement then removes the claim and atomically marks Recovery `completed`
+when the source map is empty or `eligible` when more source evidence remains.
+Replaying the exact already projected checkpoint is idempotent; a stale or
+conflicting base is rejected. Revision 10,000 is the final readable checkpoint;
+a further batch is rejected before journal creation or image access.
 
 ## Recovery checkpoints and operator evidence
 

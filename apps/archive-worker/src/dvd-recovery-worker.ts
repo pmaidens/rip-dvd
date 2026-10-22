@@ -59,6 +59,10 @@ export class DvdRecoveryPassFault extends Error {
   }
 }
 
+class DvdRecoveryStopDeferred extends Error {
+  override readonly name = "DvdRecoveryStopDeferred";
+}
+
 function sourceFaultCode(
   diagnostic: Extract<
     DvdSourceRead,
@@ -246,20 +250,38 @@ async function finalizeStop(input: {
   if (drive === undefined) {
     throw new DvdRecoveryPassFault("SOURCE_CHANGED");
   }
-  await input.deviceInactivity.withDeviceInactive(drive.devicePath, async () => {
-    await input.reconcile({
-      access: input.access,
-      originalsLibraryPath: input.originalsLibraryPath,
-      originalDiscArchiveId: input.recovery.originalDiscArchiveId,
-      archiveImageOwnership: input.archiveImageOwnership,
-      signal: input.signal,
-    });
-    input.access.archiveRecoveryWork.completeStop({
-      archiveRecoveryId: input.recovery.id,
-      attemptId: input.recovery.attemptId,
-      stopOperationId: input.recovery.stopOperationId!,
-    });
-  });
+  let deviceInactive = false;
+  try {
+    await input.deviceInactivity.withDeviceInactive(
+      drive.devicePath,
+      async () => {
+        deviceInactive = true;
+        await input.reconcile({
+          access: input.access,
+          originalsLibraryPath: input.originalsLibraryPath,
+          originalDiscArchiveId: input.recovery.originalDiscArchiveId,
+          archiveImageOwnership: input.archiveImageOwnership,
+          signal: input.signal,
+        });
+        input.access.archiveRecoveryWork.completeStop({
+          archiveRecoveryId: input.recovery.id,
+          attemptId: input.recovery.attemptId,
+          stopOperationId: input.recovery.stopOperationId!,
+        });
+      },
+    );
+  } catch (cause) {
+    if (
+      !deviceInactive ||
+      (cause instanceof DvdRecoveryReconciliationFault &&
+        cause.code === "WRITER_NOT_QUIESCENT")
+    ) {
+      throw new DvdRecoveryStopDeferred("Stop is waiting for quiescence", {
+        cause,
+      });
+    }
+    throw cause;
+  }
 }
 
 function stopFaultCode(error: unknown): ArchiveRecoveryFaultCode {
@@ -272,15 +294,25 @@ function stopFaultCode(error: unknown): ArchiveRecoveryFaultCode {
 async function finalizeStopSafely(input: Parameters<typeof finalizeStop>[0]) {
   try {
     await finalizeStop(input);
+    return "completed" as const;
   } catch (error) {
     if (input.signal.aborted) throw error;
     if (input.recovery.stopOperationId === null) throw error;
+    if (error instanceof DvdRecoveryStopDeferred) {
+      input.access.archiveRecoveryWork.deferStop({
+        archiveRecoveryId: input.recovery.id,
+        attemptId: input.recovery.attemptId,
+        stopOperationId: input.recovery.stopOperationId,
+      });
+      return "deferred" as const;
+    }
     input.access.archiveRecoveryWork.markStopFault({
       archiveRecoveryId: input.recovery.id,
       attemptId: input.recovery.attemptId,
       stopOperationId: input.recovery.stopOperationId,
       faultCode: stopFaultCode(error),
     });
+    return "faulted" as const;
   }
 }
 
@@ -303,14 +335,14 @@ export async function pollDvdRecoveryPass(input: {
   const reconcile = input.reconcile ?? reconcileDvdRecoveryCheckpoint;
   const stopping = input.access.archiveRecoveryWork.findNextStopping();
   if (stopping !== null) {
-    await finalizeStopSafely({
+    const outcome = await finalizeStopSafely({
       ...input,
       archiveImageOwnership,
       reconcile,
       recovery: stopping,
       signal,
     });
-    return true;
+    return outcome !== "deferred";
   }
 
   const candidate = input.access.archiveRecoveryWork
@@ -343,14 +375,14 @@ export async function pollDvdRecoveryPass(input: {
         signal.throwIfAborted();
         const before = currentRecovery(input.access, candidate.recovery);
         if (before.status === "stopping") {
-          await finalizeStopSafely({
+          const outcome = await finalizeStopSafely({
             ...input,
             archiveImageOwnership,
             reconcile,
             recovery: before,
             signal,
           });
-          return true;
+          return outcome !== "deferred";
         }
         if (before.status !== "running") {
           throw new DvdRecoveryPassFault("SOURCE_CHANGED");
@@ -398,14 +430,14 @@ export async function pollDvdRecoveryPass(input: {
         });
         const afterRead = currentRecovery(input.access, candidate.recovery);
         if (completed.outcome === "stopped" || afterRead.status === "stopping") {
-          await finalizeStopSafely({
+          const outcome = await finalizeStopSafely({
             ...input,
             archiveImageOwnership,
             reconcile,
             recovery: afterRead,
             signal,
           });
-          return true;
+          return outcome !== "deferred";
         }
         if (!await insertionIsCurrent({
           access: input.access,
@@ -441,14 +473,14 @@ export async function pollDvdRecoveryPass(input: {
         });
         const afterBatch = currentRecovery(input.access, candidate.recovery);
         if (afterBatch.status === "stopping") {
-          await finalizeStopSafely({
+          const outcome = await finalizeStopSafely({
             ...input,
             archiveImageOwnership,
             reconcile,
             recovery: afterBatch,
             signal,
           });
-          return true;
+          return outcome !== "deferred";
         }
       }
     }
@@ -457,14 +489,14 @@ export async function pollDvdRecoveryPass(input: {
     if (signal.aborted) throw error;
     const recovery = currentRecovery(input.access, candidate.recovery);
     if (recovery.status === "stopping") {
-      await finalizeStopSafely({
+      const outcome = await finalizeStopSafely({
         ...input,
         archiveImageOwnership,
         reconcile,
         recovery,
         signal,
       });
-      return true;
+      return outcome !== "deferred";
     }
     input.access.archiveRecoveryWork.markFault({
       claim,

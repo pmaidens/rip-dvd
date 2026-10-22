@@ -657,6 +657,11 @@ export interface ArchiveRecoveryWorkAccess {
     attemptId: ArchiveRecoveryAttemptId;
     stopOperationId: ArchiveRecoveryStopOperationId;
   }): ArchiveRecovery;
+  deferStop(input: {
+    archiveRecoveryId: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+    stopOperationId: ArchiveRecoveryStopOperationId;
+  }): ArchiveRecovery;
   markStopFault(input: {
     archiveRecoveryId: ArchiveRecoveryId;
     attemptId: ArchiveRecoveryAttemptId;

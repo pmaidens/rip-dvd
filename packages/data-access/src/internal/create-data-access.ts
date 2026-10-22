@@ -9823,6 +9823,65 @@ export function createDataAccessInternal(
           );
         }, { behavior: "immediate" });
       },
+      deferStop(input) {
+        return database.transaction((transaction) => {
+          const recovery = findArchiveRecoveryRecord(transaction, {
+            archiveRecoveryId: input.archiveRecoveryId,
+          });
+          if (recovery === null) {
+            throw new RecordNotFoundError(
+              "Archive Recovery",
+              input.archiveRecoveryId,
+            );
+          }
+          if (recovery.attemptId !== input.attemptId) {
+            throw new StaleArchiveRecoveryAttemptError({
+              archiveRecoveryId: recovery.id,
+              attemptId: recovery.attemptId,
+            });
+          }
+          if (
+            recovery.status !== "stopping" ||
+            recovery.stopOperationId !== input.stopOperationId
+          ) {
+            throw new InvalidStatusTransitionError(
+              "Archive Recovery",
+              recovery.status,
+              "stopping",
+            );
+          }
+          const latestStopping = transaction.select({
+            updatedAt: archiveRecoveries.updatedAt,
+          }).from(archiveRecoveries).where(eq(
+            archiveRecoveries.status,
+            "stopping",
+          )).orderBy(desc(archiveRecoveries.updatedAt)).limit(1).get();
+          const timestamp = new Date(Math.max(
+            now().getTime(),
+            recovery.updatedAt.getTime() + 1,
+            (latestStopping?.updatedAt.getTime() ?? 0) + 1,
+          ));
+          requireRow(
+            transaction.update(archiveRecoveries).set({
+              updatedAt: timestamp,
+            }).where(and(
+              eq(archiveRecoveries.id, recovery.id),
+              eq(archiveRecoveries.attemptId, recovery.attemptId),
+              eq(archiveRecoveries.stopOperationId, input.stopOperationId),
+              eq(archiveRecoveries.status, "stopping"),
+            )).returning({ id: archiveRecoveries.id }).get(),
+            "Archive Recovery",
+            recovery.id,
+          );
+          return requireRow(
+            findArchiveRecoveryRecord(transaction, {
+              archiveRecoveryId: recovery.id,
+            }) ?? undefined,
+            "Archive Recovery",
+            recovery.id,
+          );
+        }, { behavior: "immediate" });
+      },
       markStopFault(input) {
         requireNonEmpty(input.faultCode, "faultCode");
         const faultCode: ArchiveRecoveryFaultCode = input.faultCode;

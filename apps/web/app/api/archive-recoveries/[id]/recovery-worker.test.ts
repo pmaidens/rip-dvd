@@ -658,6 +658,111 @@ it("faults an unreconcilable Stop so it cannot poison the stopping queue", async
   }
 });
 
+it("keeps Stop pending while archive ownership is not quiescent", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 902,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }], "/dev/synthetic-recovery-drive");
+  const source = immediateReader(() => {
+    throw new Error("No source read is allowed while stopping");
+  });
+  const input = pollInput(fixture, source.reader);
+  const reconcile = vi.fn()
+    .mockRejectedValueOnce(
+      new DvdRecoveryReconciliationFault("WRITER_NOT_QUIESCENT"),
+    )
+    .mockResolvedValue({ outcome: "already_consistent", evidence: {} }) as
+      unknown as typeof reconcileDvdRecoveryCheckpoint;
+  try {
+    const requested = input.access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000468",
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    });
+
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(false);
+    const deferred = input.access.catalog.findArchiveRecoveryById(
+      seeded.recoveryId,
+    );
+    expect(deferred).toMatchObject({
+      status: "stopping",
+      stopOperationId: requested.stopOperationId,
+      stopRequestedAt: requested.stopRequestedAt,
+      stoppedAt: null,
+      faultCode: null,
+    });
+    expect(deferred!.updatedAt.getTime()).toBeGreaterThan(
+      requested.updatedAt.getTime(),
+    );
+
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(true);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "stopped",
+        stopOperationId: requested.stopOperationId,
+        work: null,
+      });
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(source.start).not.toHaveBeenCalled();
+  } finally {
+    input.access.close();
+  }
+});
+
+it("keeps Stop pending until device inactivity can be acquired", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 903,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }], "/dev/synthetic-recovery-drive");
+  const source = immediateReader(() => {
+    throw new Error("No source read is allowed while stopping");
+  });
+  const input = pollInput(fixture, source.reader);
+  let inactivityAttempts = 0;
+  input.deviceInactivity.withDeviceInactive = async (_path, mutation) => {
+    inactivityAttempts += 1;
+    if (inactivityAttempts === 1) {
+      throw new Error("DVD archive device is still active");
+    }
+    await mutation();
+  };
+  const reconcile = vi.fn(async () => ({
+    outcome: "already_consistent",
+    evidence: {},
+  })) as unknown as typeof reconcileDvdRecoveryCheckpoint;
+  try {
+    const requested = input.access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000469",
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    });
+
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(false);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "stopping",
+        stopOperationId: requested.stopOperationId,
+        stopRequestedAt: requested.stopRequestedAt,
+        faultCode: null,
+      });
+    expect(reconcile).not.toHaveBeenCalled();
+
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(true);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "stopped", work: null });
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(source.start).not.toHaveBeenCalled();
+  } finally {
+    input.access.close();
+  }
+});
+
 it("rejects source-read admission after Stop commits", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
