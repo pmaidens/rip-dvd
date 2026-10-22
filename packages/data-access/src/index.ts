@@ -189,12 +189,16 @@ export {
   createDvdRecoveryCheckpointPublicationDigest,
   DVD_RECOVERY_MAX_CHECKPOINT_REVISION,
   DvdCheckpointReadFault,
+  readDvdCheckpointForReconciliation,
   readCommittedDvdCheckpoint,
+  readDvdRecoveryManifestForReconciliation,
+  verifyDvdCheckpointImage,
 } from "./dvd-archive-checkpoint.js";
 export type {
   CommittedDvdCheckpointEvidence,
   CommittedDvdCurrentCheckpoint,
   CommittedDvdInitialEvidence,
   CommittedDvdRecoveryEvidence,
+  DvdCheckpointPointer,
   DvdRecoveryProtectedRange,
 } from "./dvd-archive-checkpoint.js";

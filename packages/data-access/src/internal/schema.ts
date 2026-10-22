@@ -87,6 +87,12 @@ import type {
   ArchiveRecoveryClaimToken,
   ArchiveRecoveryStatus,
   ArchiveRecoveryWorkStatus,
+  DvdRecoveryReconciliationClaimToken,
+  DvdRecoveryReconciliationEvidence,
+  DvdRecoveryReconciliationId,
+  DvdRecoveryReconciliationOutcome,
+  DvdRecoveryReconciliationPhase,
+  DvdRecoveryReconciliationStatus,
   ArchiveReadFailureCategory,
   ArchiveReadFailureStage,
   DetectedDiscId,
@@ -1678,6 +1684,81 @@ export const archiveRecoveryWork = sqliteTable(
     check(
       "archive_recovery_work_claim_check",
       sql`(${table.status} = 'requested' and ${table.requestedAt} is not null and ${table.claimedBy} is null and ${table.claimToken} is null and ${table.claimedAt} is null) or (${table.status} = 'claimed' and ${table.claimedBy} is not null and ${table.claimToken} is not null and ${table.claimedAt} is not null)`,
+    ),
+  ],
+);
+
+export const dvdRecoveryReconciliations = sqliteTable(
+  "dvd_recovery_reconciliations",
+  {
+    id: text("id").$type<DvdRecoveryReconciliationId>().notNull().primaryKey(),
+    archiveRecoveryId: text("archive_recovery_id")
+      .$type<ArchiveRecoveryId>()
+      .notNull(),
+    attemptOrdinal: integer("attempt_ordinal").notNull(),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull(),
+    status: text("status").$type<DvdRecoveryReconciliationStatus>().notNull(),
+    phase: text("phase").$type<DvdRecoveryReconciliationPhase>().notNull(),
+    outcome: text("outcome").$type<DvdRecoveryReconciliationOutcome>(),
+    evidence: text("evidence", { mode: "json" })
+      .$type<DvdRecoveryReconciliationEvidence>(),
+    failureCode: text("failure_code").$type<
+      "CONSISTENCY_FAULT" |
+      "WRITER_NOT_QUIESCENT" |
+      "STORAGE_UNSUPPORTED"
+    >(),
+    workerExecutionId: text("worker_execution_id"),
+    claimToken: text("claim_token")
+      .$type<DvdRecoveryReconciliationClaimToken>(),
+    claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
+    startedAt: integer("started_at", { mode: "timestamp_ms" }),
+    completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.archiveRecoveryId, table.originalDiscArchiveId],
+      foreignColumns: [
+        archiveRecoveries.id,
+        archiveRecoveries.originalDiscArchiveId,
+      ],
+      name: "dvd_recovery_reconciliations_recovery_archive_fk",
+    }).onDelete("restrict"),
+    uniqueIndex("dvd_recovery_reconciliations_active_unique")
+      .on(table.archiveRecoveryId)
+      .where(sql`${table.status} in ('queued', 'running')`),
+    uniqueIndex("dvd_recovery_reconciliations_attempt_unique")
+      .on(table.archiveRecoveryId, table.attemptOrdinal),
+    index("dvd_recovery_reconciliations_status_created_idx")
+      .on(table.status, table.createdAt, table.id),
+    index("dvd_recovery_reconciliations_recovery_created_idx")
+      .on(table.archiveRecoveryId, table.createdAt, table.id),
+    check(
+      "dvd_recovery_reconciliations_id_not_null",
+      sql`${table.id} is not null`,
+    ),
+    check(
+      "dvd_recovery_reconciliations_attempt_ordinal_check",
+      sql`typeof(${table.attemptOrdinal}) = 'integer' and ${table.attemptOrdinal} > 0`,
+    ),
+    check(
+      "dvd_recovery_reconciliations_status_check",
+      sql`${table.status} in ('queued', 'running', 'completed', 'failed')`,
+    ),
+    check(
+      "dvd_recovery_reconciliations_phase_check",
+      sql`${table.phase} in ('queued', 'examining', 'rolling_back', 'projecting', 'cleaning_up', 'completed')`,
+    ),
+    check(
+      "dvd_recovery_reconciliations_result_check",
+      sql`(${table.status} in ('queued', 'running') and ${table.outcome} is null and ${table.evidence} is null and ${table.failureCode} is null and ${table.completedAt} is null) or (${table.status} = 'completed' and ${table.phase} = 'completed' and ${table.outcome} in ('already_consistent', 'rolled_back', 'rolled_forward', 'cleaned_up') and ${table.evidence} is not null and json_valid(${table.evidence}) and json_type(${table.evidence}) = 'object' and ${table.failureCode} is null and ${table.completedAt} is not null) or (${table.status} = 'failed' and ${table.phase} = 'completed' and ${table.outcome} is null and ${table.evidence} is null and ${table.failureCode} in ('CONSISTENCY_FAULT', 'WRITER_NOT_QUIESCENT', 'STORAGE_UNSUPPORTED') and ${table.completedAt} is not null)`,
+    ),
+    check(
+      "dvd_recovery_reconciliations_claim_check",
+      sql`(${table.status} = 'running' and ${table.workerExecutionId} is not null and ${table.claimToken} is not null and ${table.claimedAt} is not null and ${table.startedAt} is not null and ${table.phase} <> 'queued' and ${table.phase} <> 'completed') or (${table.status} <> 'running' and ${table.claimToken} is null and ${table.claimedAt} is null)`,
     ),
   ],
 );

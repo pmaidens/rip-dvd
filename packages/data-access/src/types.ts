@@ -192,6 +192,10 @@ export type ArchiveRequestId = DomainId<"ArchiveRequest">;
 export type OriginalDiscArchiveId = DomainId<"OriginalDiscArchive">;
 export type ArchiveRecoveryId = DomainId<"ArchiveRecovery">;
 export type ArchiveRecoveryClaimToken = DomainId<"ArchiveRecoveryClaim">;
+export type DvdRecoveryReconciliationId =
+  DomainId<"DvdRecoveryReconciliation">;
+export type DvdRecoveryReconciliationClaimToken =
+  DomainId<"DvdRecoveryReconciliationClaim">;
 export type DvdDiscVerificationId = DomainId<"DvdDiscVerification">;
 export type DvdDiscVerificationClaimToken =
   DomainId<"DvdDiscVerificationClaim">;
@@ -603,6 +607,113 @@ export interface ArchiveRecoveryWorkAccess {
   ): ClaimedArchiveRecoveryWork;
   assertClaim(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
   release(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
+}
+
+export type DvdRecoveryReconciliationStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed";
+
+export type DvdRecoveryReconciliationPhase =
+  | "queued"
+  | "examining"
+  | "rolling_back"
+  | "projecting"
+  | "cleaning_up"
+  | "completed";
+
+export type DvdRecoveryReconciliationOutcome =
+  | "already_consistent"
+  | "rolled_back"
+  | "rolled_forward"
+  | "cleaned_up";
+
+export interface DvdRecoveryReconciliationEvidence {
+  authoritativeCheckpoint: {
+    revision: number;
+    manifestId: string;
+    manifestDigest: string;
+  };
+  databaseProjectionBefore: {
+    revision: number;
+    manifestId: string;
+    manifestDigest: string;
+  };
+  databaseProjectionAfter: {
+    revision: number;
+    manifestId: string;
+    manifestDigest: string;
+  };
+  journal: "absent" | "removed";
+  uncommittedManifest: "absent" | "removed";
+}
+
+export interface DvdRecoveryReconciliation {
+  id: DvdRecoveryReconciliationId;
+  archiveRecoveryId: ArchiveRecoveryId;
+  attemptOrdinal: number;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  status: DvdRecoveryReconciliationStatus;
+  phase: DvdRecoveryReconciliationPhase;
+  outcome: DvdRecoveryReconciliationOutcome | null;
+  evidence: DvdRecoveryReconciliationEvidence | null;
+  failureCode:
+    | "CONSISTENCY_FAULT"
+    | "WRITER_NOT_QUIESCENT"
+    | "STORAGE_UNSUPPORTED"
+    | null;
+  workerExecutionId: string | null;
+  claimToken: DvdRecoveryReconciliationClaimToken | null;
+  claimedAt: Date | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type ClaimedDvdRecoveryReconciliation =
+  DvdRecoveryReconciliation & {
+    status: "running";
+    workerExecutionId: string;
+    claimToken: DvdRecoveryReconciliationClaimToken;
+    claimedAt: Date;
+    startedAt: Date;
+  };
+
+export interface DvdRecoveryReconciliationAccess {
+  submit(input: {
+    mutationKey: string;
+    archiveRecoveryId: ArchiveRecoveryId;
+  }): DvdRecoveryReconciliation;
+  find(id: DvdRecoveryReconciliationId): DvdRecoveryReconciliation | null;
+  findLatestForRecovery(
+    id: ArchiveRecoveryId,
+  ): DvdRecoveryReconciliation | null;
+  list(options: { limit: number }): DvdRecoveryReconciliation[];
+  listActive(): DvdRecoveryReconciliation[];
+  recoverExpiredClaims(): number;
+  claimNext(workerExecutionId: string):
+    ClaimedDvdRecoveryReconciliation | null;
+  renewClaim(claim: ClaimedDvdRecoveryReconciliation): boolean;
+  requeue(
+    claim: ClaimedDvdRecoveryReconciliation,
+  ): DvdRecoveryReconciliation | null;
+  setPhase(
+    claim: ClaimedDvdRecoveryReconciliation,
+    phase: Exclude<DvdRecoveryReconciliationPhase, "queued" | "completed">,
+  ): ClaimedDvdRecoveryReconciliation;
+  complete(
+    claim: ClaimedDvdRecoveryReconciliation,
+    result: {
+      outcome: DvdRecoveryReconciliationOutcome;
+      evidence: DvdRecoveryReconciliationEvidence;
+    },
+  ): DvdRecoveryReconciliation;
+  fail(
+    claim: ClaimedDvdRecoveryReconciliation,
+    failureCode: NonNullable<DvdRecoveryReconciliation["failureCode"]>,
+  ): DvdRecoveryReconciliation | null;
 }
 
 export interface UnreadableSectorRange {
@@ -1568,6 +1679,7 @@ export interface CatalogAccess {
   ): void;
   findArchiveRecovery(id: OriginalDiscArchiveId): ArchiveRecovery | null;
   findArchiveRecoveryById(id: ArchiveRecoveryId): ArchiveRecovery | null;
+  listArchiveRecoveries(options: { limit: number }): ArchiveRecovery[];
   findDvdSourceSampleManifest(
     id: OriginalDiscArchiveId,
   ): DvdSourceSampleManifest | null;
@@ -1814,6 +1926,11 @@ export interface DvdRecoveryAccess {
    * and synchronize the authoritative pointer before invoking this method. */
   projectCheckpoint(
     input: DvdRecoveryCheckpointProjection,
+  ): DvdArchiveEvidenceHeader;
+  /** Project a filesystem-authoritative checkpoint while an exclusive
+   * reconciliation interval proves no recovery writer remains active. */
+  reconcileCheckpoint(
+    input: Omit<DvdRecoveryCheckpointProjection, "claim">,
   ): DvdArchiveEvidenceHeader;
 }
 
@@ -2226,6 +2343,7 @@ export type SnapshotCatalogAccess = Pick<
   | "readDvdTitleIdentityReviewSet"
   | "findArchiveRecovery"
   | "findArchiveRecoveryById"
+  | "listArchiveRecoveries"
   | "findDvdSourceSampleManifest"
   | "listCatalogReviewArchives"
   | "listMediaItems"
@@ -2253,6 +2371,10 @@ export interface ConsistentReadAccess {
   readonly dvdRecoveryStorage: Pick<
     DvdRecoveryStorageAccess,
     "readCurrent"
+  >;
+  readonly dvdRecoveryReconciliations: Pick<
+    DvdRecoveryReconciliationAccess,
+    "find" | "findLatestForRecovery" | "list" | "listActive"
   >;
   readonly catalog: SnapshotCatalogAccess;
   readonly encodingProfiles: Pick<EncodingProfileAccess, "list">;
@@ -2373,6 +2495,7 @@ export interface DataAccess {
   >;
   readonly dvdStructuralAssessments: DvdStructuralAssessmentAccess;
   readonly dvdRecoveryStorage: DvdRecoveryStorageAccess;
+  readonly dvdRecoveryReconciliations: DvdRecoveryReconciliationAccess;
   readonly dvdDiscVerifications: DvdDiscVerificationAccess;
   readonly catalog: CatalogAccess;
   readonly encodingProfiles: EncodingProfileAccess;

@@ -83,6 +83,7 @@ import {
   dvdArchiveEvidenceManifests,
   dvdArchiveRecoveryReads,
   dvdDiscVerifications,
+  dvdRecoveryReconciliations,
   dvdStructuralAssessments,
   dvdStructuralCheckAttempts,
   dvdTitleIdentities,
@@ -266,6 +267,7 @@ import type {
   CatalogReviewCoverage,
   ClaimedEncodeJob,
   ClaimedArchiveRecoveryWork,
+  ClaimedDvdRecoveryReconciliation,
   ChronologicalListOptions,
   ConsistentReadAccess,
   CreateDiscSelectionInput,
@@ -303,6 +305,11 @@ import type {
   DvdDiscVerification,
   DvdDiscVerificationClaimToken,
   DvdDiscVerificationId,
+  DvdRecoveryReconciliation,
+  DvdRecoveryReconciliationClaimToken,
+  DvdRecoveryReconciliationId,
+  DvdRecoveryReconciliationPhase,
+  DvdRecoveryCheckpointProjection,
   EncodeJobClaimToken,
   EncodeJobCleanupClaimToken,
   EncodeJobId,
@@ -1108,6 +1115,61 @@ function openMigratedDatabase(
 type FilesystemVerificationRow = typeof filesystemVerificationRuns.$inferSelect;
 
 type DvdDiscVerificationRow = typeof dvdDiscVerifications.$inferSelect;
+
+type DvdRecoveryReconciliationRow =
+  typeof dvdRecoveryReconciliations.$inferSelect;
+
+const DVD_RECOVERY_RECONCILIATION_CLAIM_LEASE_MS = 60_000;
+
+function toDvdRecoveryReconciliation(
+  row: DvdRecoveryReconciliationRow,
+): DvdRecoveryReconciliation {
+  return row;
+}
+
+function toClaimedDvdRecoveryReconciliation(
+  row: DvdRecoveryReconciliationRow,
+): ClaimedDvdRecoveryReconciliation {
+  if (
+    row.status !== "running" || row.workerExecutionId === null ||
+    row.claimToken === null || row.claimedAt === null || row.startedAt === null
+  ) {
+    throw new DomainInvariantError(
+      "DVD recovery reconciliation claim is incomplete",
+    );
+  }
+  return row as ClaimedDvdRecoveryReconciliation;
+}
+
+function decodeDvdRecoveryReconciliationOutcome(
+  stored: string,
+): DvdRecoveryReconciliation {
+  const outcome = JSON.parse(stored) as DvdRecoveryReconciliationRow & {
+    claimedAt: string | null;
+    startedAt: string | null;
+    completedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+  };
+  return toDvdRecoveryReconciliation({
+    ...outcome,
+    claimedAt: outcome.claimedAt === null ? null : new Date(outcome.claimedAt),
+    startedAt: outcome.startedAt === null ? null : new Date(outcome.startedAt),
+    completedAt: outcome.completedAt === null
+      ? null
+      : new Date(outcome.completedAt),
+    createdAt: new Date(outcome.createdAt),
+    updatedAt: new Date(outcome.updatedAt),
+  });
+}
+
+function dvdRecoveryReconciliationSemanticInput(input: {
+  archiveRecoveryId: ArchiveRecoveryId;
+}): string {
+  return canonicalPublicationJson({
+    archiveRecoveryId: input.archiveRecoveryId,
+  });
+}
 
 function toDvdDiscVerification(
   row: DvdDiscVerificationRow,
@@ -7692,10 +7754,16 @@ export function createDataAccessInternal(
     const readSnapshot = () => access.readConsistentSnapshot((reader) => {
       const archive = reader.catalog.listOriginalDiscArchives({ ids: [id] })[0];
       if (!archive) throw new RecordNotFoundError("Original Disc Archive", id);
+      const recovery = reader.catalog.findArchiveRecovery(id);
       return {
         archive,
         header: reader.catalog.findDvdArchiveEvidenceHeader(id),
         jobs: reader.archiveJobs.listForArchive(id),
+        reconciliation: recovery === null
+          ? null
+          : reader.dvdRecoveryReconciliations.findLatestForRecovery(
+              recovery.id,
+            ),
       };
     });
     const admissionSnapshot = readSnapshot();
@@ -7703,6 +7771,14 @@ export function createDataAccessInternal(
       admissionSnapshot.header,
       admissionSnapshot.jobs,
     ) === null) return null;
+    if (
+      admissionSnapshot.reconciliation !== null &&
+      admissionSnapshot.reconciliation.status !== "completed"
+    ) {
+      throw new DvdCheckpointReadFault(
+        admissionSnapshot.reconciliation.failureCode ?? "CONSISTENCY_FAULT",
+      );
+    }
     if (normalizedOriginalsLibraryPath === undefined) {
       throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE");
     }
@@ -8249,6 +8325,189 @@ export function createDataAccessInternal(
     };
   }
 
+  function projectDvdRecoveryCheckpoint(
+    input: Omit<DvdRecoveryCheckpointProjection, "claim"> & {
+      claim?: ClaimedArchiveRecoveryWork;
+    },
+  ): DvdArchiveEvidenceHeader {
+    const { claim, manifest, recoveryRead } = input;
+    assertDvdArchiveRecoveryReadEvidenceDigest(
+      recoveryRead,
+      recoveryRead.evidenceDigest,
+    );
+    assertDvdArchiveEvidenceManifestDigests(manifest);
+    if (
+      manifest.originalDiscArchiveId !== recoveryRead.originalDiscArchiveId ||
+      (claim !== undefined &&
+        claim.originalDiscArchiveId !== manifest.originalDiscArchiveId) ||
+      manifest.revision !== recoveryRead.fromManifestRevision + 1 ||
+      manifest.previousManifestId !== recoveryRead.fromManifestId ||
+      manifest.recoveryReadId !== recoveryRead.id ||
+      manifest.recoveryReadEvidenceDigest !== recoveryRead.evidenceDigest
+    ) {
+      throw new DomainInvariantError(
+        "DVD recovery checkpoint does not match its recovery read",
+      );
+    }
+
+    const archiveId = manifest.originalDiscArchiveId as OriginalDiscArchiveId;
+    database.transaction((transaction) => {
+      if (claim !== undefined) {
+        requireCurrentArchiveRecoveryClaim(transaction, claim);
+      }
+      const current = requireRow(
+        transaction
+          .select({
+            header: dvdArchiveEvidenceHeaders,
+            manifest: dvdArchiveEvidenceManifests,
+            archive: originalDiscArchives,
+            recovery: archiveRecoveries,
+          })
+          .from(dvdArchiveEvidenceHeaders)
+          .innerJoin(
+            dvdArchiveEvidenceManifests,
+            eq(
+              dvdArchiveEvidenceManifests.id,
+              dvdArchiveEvidenceHeaders.currentManifestId,
+            ),
+          )
+          .innerJoin(
+            originalDiscArchives,
+            eq(
+              originalDiscArchives.id,
+              dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+            ),
+          )
+          .innerJoin(
+            archiveRecoveries,
+            eq(
+              archiveRecoveries.originalDiscArchiveId,
+              dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+            ),
+          )
+          .where(eq(
+            dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+            archiveId,
+          ))
+          .get(),
+        "DVD Archive Evidence",
+        archiveId,
+      );
+
+      if (
+        current.header.currentManifestRevision === manifest.revision &&
+        current.header.currentManifestId === manifest.id &&
+        current.header.currentManifestDigest === manifest.manifestDigest
+      ) {
+        return;
+      }
+      if (
+        current.header.currentManifestId !== recoveryRead.fromManifestId ||
+        current.header.currentManifestRevision !==
+          recoveryRead.fromManifestRevision ||
+        current.header.currentManifestDigest !==
+          manifest.previousManifestDigest ||
+        current.manifest.manifestDigest !==
+          current.header.currentManifestDigest ||
+        current.manifest.originalDiscArchiveId !== archiveId ||
+        current.recovery.status !== "eligible" ||
+        current.archive.integrityEvidenceRevision !==
+          current.header.currentManifestRevision
+      ) {
+        throw new DomainInvariantError(
+          "DVD recovery checkpoint base revision is stale or inconsistent",
+        );
+      }
+      if (
+        manifest.evidenceFormat !== current.manifest.evidenceFormat ||
+        manifest.imageFingerprint !== current.manifest.imageFingerprint ||
+        manifest.sectorSizeBytes !== current.manifest.sectorSizeBytes ||
+        manifest.acceptedEndLbaExclusive !==
+          current.manifest.acceptedEndLbaExclusive ||
+        manifest.boundaryPolicyVersion !==
+          current.manifest.boundaryPolicyVersion ||
+        manifest.boundaryReportedSizeBytes !==
+          current.manifest.boundaryReportedSizeBytes ||
+        manifest.boundaryPublishedSizeBytes !==
+          current.manifest.boundaryPublishedSizeBytes ||
+        manifest.boundaryEvidenceDigest !==
+          current.manifest.boundaryEvidenceDigest
+      ) {
+        throw new DomainInvariantError(
+          "DVD recovery checkpoint changed immutable archive evidence",
+        );
+      }
+      assertDvdEvidenceRangeTransition(
+        current.manifest.unrecoveredSourceRanges,
+        manifest.unrecoveredSourceRanges,
+        recoveryRead,
+      );
+
+      const timestamp = new Date(Math.max(
+        now().getTime(),
+        current.header.updatedAt.getTime() + 1,
+        current.archive.updatedAt.getTime() + 1,
+        current.recovery.updatedAt.getTime() + 1,
+      ));
+      transaction.insert(dvdArchiveRecoveryReads).values({
+        ...recoveryRead,
+        originalDiscArchiveId: archiveId,
+        createdAt: timestamp,
+      }).run();
+      transaction.insert(dvdArchiveEvidenceManifests).values({
+        ...manifest,
+        originalDiscArchiveId: archiveId,
+        createdAt: timestamp,
+      }).run();
+      transaction.update(dvdArchiveEvidenceHeaders).set({
+        currentManifestId: manifest.id,
+        currentManifestRevision: manifest.revision,
+        currentManifestDigest: manifest.manifestDigest,
+        updatedAt: timestamp,
+      }).where(and(
+        eq(dvdArchiveEvidenceHeaders.originalDiscArchiveId, archiveId),
+        eq(
+          dvdArchiveEvidenceHeaders.currentManifestId,
+          recoveryRead.fromManifestId,
+        ),
+        eq(
+          dvdArchiveEvidenceHeaders.currentManifestRevision,
+          recoveryRead.fromManifestRevision,
+        ),
+      )).run();
+
+      const badSectorRanges = manifest.unrecoveredSourceRanges.map(
+        ({ startLba, sectorCount }) => ({ startLba, sectorCount }),
+      );
+      const badSectorCount = badSectorRanges.reduce(
+        (count, range) => count + range.sectorCount,
+        0,
+      );
+      transaction.update(originalDiscArchives).set({
+        integrity: badSectorCount === 0 ? "clean_read" : "incomplete_read",
+        integrityEvidenceRevision: manifest.revision,
+        integrityPolicyVersion: "dvd-recovery-evidence-v1",
+        badSectorCount,
+        badAreaCount: badSectorRanges.length,
+        badSectorRanges,
+        updatedAt: timestamp,
+      }).where(eq(originalDiscArchives.id, archiveId)).run();
+      transaction.update(archiveRecoveries).set({
+        status: badSectorCount === 0 ? "completed" : "eligible",
+        updatedAt: timestamp,
+      }).where(eq(
+        archiveRecoveries.originalDiscArchiveId,
+        archiveId,
+      )).run();
+    }, { behavior: "immediate" });
+
+    const projected = access.catalog.findDvdArchiveEvidenceHeader(archiveId);
+    if (projected === null) {
+      throw new RecordNotFoundError("DVD Archive Evidence", archiveId);
+    }
+    return projected;
+  }
+
   const access: LegacySidecarDataAccess = {
     async readDvdCheckpoint(id, ownership) {
       const read = await withDvdCheckpointRead(
@@ -8308,182 +8567,10 @@ export function createDataAccessInternal(
     notifications: createNotificationAccess(database, now),
     dvdRecovery: {
       projectCheckpoint(input) {
-        const { claim, manifest, recoveryRead } = input;
-        assertDvdArchiveRecoveryReadEvidenceDigest(
-          recoveryRead,
-          recoveryRead.evidenceDigest,
-        );
-        assertDvdArchiveEvidenceManifestDigests(manifest);
-        if (
-          manifest.originalDiscArchiveId !==
-            recoveryRead.originalDiscArchiveId ||
-          claim.originalDiscArchiveId !== manifest.originalDiscArchiveId ||
-          manifest.revision !== recoveryRead.fromManifestRevision + 1 ||
-          manifest.previousManifestId !== recoveryRead.fromManifestId ||
-          manifest.recoveryReadId !== recoveryRead.id ||
-          manifest.recoveryReadEvidenceDigest !==
-            recoveryRead.evidenceDigest
-        ) {
-          throw new DomainInvariantError(
-            "DVD recovery checkpoint does not match its recovery read",
-          );
-        }
-
-        const archiveId = manifest.originalDiscArchiveId as OriginalDiscArchiveId;
-        database.transaction((transaction) => {
-          requireCurrentArchiveRecoveryClaim(transaction, claim);
-          const current = requireRow(
-            transaction
-              .select({
-                header: dvdArchiveEvidenceHeaders,
-                manifest: dvdArchiveEvidenceManifests,
-                archive: originalDiscArchives,
-                recovery: archiveRecoveries,
-              })
-              .from(dvdArchiveEvidenceHeaders)
-              .innerJoin(
-                dvdArchiveEvidenceManifests,
-                eq(
-                  dvdArchiveEvidenceManifests.id,
-                  dvdArchiveEvidenceHeaders.currentManifestId,
-                ),
-              )
-              .innerJoin(
-                originalDiscArchives,
-                eq(
-                  originalDiscArchives.id,
-                  dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-                ),
-              )
-              .innerJoin(
-                archiveRecoveries,
-                eq(
-                  archiveRecoveries.originalDiscArchiveId,
-                  dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-                ),
-              )
-              .where(
-                eq(dvdArchiveEvidenceHeaders.originalDiscArchiveId, archiveId),
-              )
-              .get(),
-            "DVD Archive Evidence",
-            archiveId,
-          );
-
-          if (
-            current.header.currentManifestRevision === manifest.revision &&
-            current.header.currentManifestId === manifest.id &&
-            current.header.currentManifestDigest === manifest.manifestDigest
-          ) {
-            return;
-          }
-          if (
-            current.header.currentManifestId !==
-              recoveryRead.fromManifestId ||
-            current.header.currentManifestRevision !==
-              recoveryRead.fromManifestRevision ||
-            current.header.currentManifestDigest !==
-              manifest.previousManifestDigest ||
-            current.manifest.manifestDigest !==
-              current.header.currentManifestDigest ||
-            current.manifest.originalDiscArchiveId !== archiveId ||
-            current.recovery.status !== "eligible" ||
-            current.archive.integrityEvidenceRevision !==
-              current.header.currentManifestRevision
-          ) {
-            throw new DomainInvariantError(
-              "DVD recovery checkpoint base revision is stale or inconsistent",
-            );
-          }
-          if (
-            manifest.evidenceFormat !== current.manifest.evidenceFormat ||
-            manifest.imageFingerprint !== current.manifest.imageFingerprint ||
-            manifest.sectorSizeBytes !== current.manifest.sectorSizeBytes ||
-            manifest.acceptedEndLbaExclusive !==
-              current.manifest.acceptedEndLbaExclusive ||
-            manifest.boundaryPolicyVersion !==
-              current.manifest.boundaryPolicyVersion ||
-            manifest.boundaryReportedSizeBytes !==
-              current.manifest.boundaryReportedSizeBytes ||
-            manifest.boundaryPublishedSizeBytes !==
-              current.manifest.boundaryPublishedSizeBytes ||
-            manifest.boundaryEvidenceDigest !==
-              current.manifest.boundaryEvidenceDigest
-          ) {
-            throw new DomainInvariantError(
-              "DVD recovery checkpoint changed immutable archive evidence",
-            );
-          }
-          assertDvdEvidenceRangeTransition(
-            current.manifest.unrecoveredSourceRanges,
-            manifest.unrecoveredSourceRanges,
-            recoveryRead,
-          );
-
-          const timestamp = new Date(Math.max(
-            now().getTime(),
-            current.header.updatedAt.getTime() + 1,
-            current.archive.updatedAt.getTime() + 1,
-            current.recovery.updatedAt.getTime() + 1,
-          ));
-          transaction.insert(dvdArchiveRecoveryReads).values({
-            ...recoveryRead,
-            originalDiscArchiveId: archiveId,
-            createdAt: timestamp,
-          }).run();
-          transaction.insert(dvdArchiveEvidenceManifests).values({
-            ...manifest,
-            originalDiscArchiveId: archiveId,
-            createdAt: timestamp,
-          }).run();
-          transaction.update(dvdArchiveEvidenceHeaders).set({
-            currentManifestId: manifest.id,
-            currentManifestRevision: manifest.revision,
-            currentManifestDigest: manifest.manifestDigest,
-            updatedAt: timestamp,
-          }).where(
-            and(
-              eq(dvdArchiveEvidenceHeaders.originalDiscArchiveId, archiveId),
-              eq(
-                dvdArchiveEvidenceHeaders.currentManifestId,
-                recoveryRead.fromManifestId,
-              ),
-              eq(
-                dvdArchiveEvidenceHeaders.currentManifestRevision,
-                recoveryRead.fromManifestRevision,
-              ),
-            ),
-          ).run();
-
-          const badSectorRanges = manifest.unrecoveredSourceRanges.map(
-            ({ startLba, sectorCount }) => ({ startLba, sectorCount }),
-          );
-          const badSectorCount = badSectorRanges.reduce(
-            (count, range) => count + range.sectorCount,
-            0,
-          );
-          transaction.update(originalDiscArchives).set({
-            integrity: badSectorCount === 0 ? "clean_read" : "incomplete_read",
-            integrityEvidenceRevision: manifest.revision,
-            integrityPolicyVersion: "dvd-recovery-evidence-v1",
-            badSectorCount,
-            badAreaCount: badSectorRanges.length,
-            badSectorRanges,
-            updatedAt: timestamp,
-          }).where(eq(originalDiscArchives.id, archiveId)).run();
-          transaction.update(archiveRecoveries).set({
-            status: badSectorCount === 0 ? "completed" : "eligible",
-            updatedAt: timestamp,
-          }).where(
-            eq(archiveRecoveries.originalDiscArchiveId, archiveId),
-          ).run();
-        }, { behavior: "immediate" });
-
-        const projected = access.catalog.findDvdArchiveEvidenceHeader(archiveId);
-        if (projected === null) {
-          throw new RecordNotFoundError("DVD Archive Evidence", archiveId);
-        }
-        return projected;
+        return projectDvdRecoveryCheckpoint(input);
+      },
+      reconcileCheckpoint(input) {
+        return projectDvdRecoveryCheckpoint(input);
       },
     },
     async assessDvdStructure(id, ownership, assess) {
@@ -8699,6 +8786,278 @@ export function createDataAccessInternal(
           }
           return recovery;
         }, { behavior: "immediate" });
+      },
+    },
+    dvdRecoveryReconciliations: {
+      submit(input) {
+        const semanticInput = dvdRecoveryReconciliationSemanticInput(input);
+        return database.transaction((transaction) => {
+          const operation = "dvd_recovery_reconciliation.submit";
+          const previous = readMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            decodeDvdRecoveryReconciliationOutcome,
+          );
+          if (previous !== undefined) {
+            const current = transaction.select()
+              .from(dvdRecoveryReconciliations)
+              .where(eq(dvdRecoveryReconciliations.id, previous.id))
+              .get();
+            return current === undefined
+              ? previous
+              : toDvdRecoveryReconciliation(current);
+          }
+          const recovery = requireRow(
+            transaction.select().from(archiveRecoveries)
+              .where(eq(archiveRecoveries.id, input.archiveRecoveryId)).get(),
+            "Archive Recovery",
+            input.archiveRecoveryId,
+          );
+          const active = transaction.select({
+            id: dvdRecoveryReconciliations.id,
+          }).from(dvdRecoveryReconciliations).where(and(
+            eq(
+              dvdRecoveryReconciliations.archiveRecoveryId,
+              recovery.id,
+            ),
+            inArray(dvdRecoveryReconciliations.status, ["queued", "running"]),
+          )).get();
+          if (active !== undefined) {
+            throw new InvalidStatusTransitionError(
+              "DVD recovery reconciliation",
+              "active",
+              "queued",
+            );
+          }
+          const id = newId<DvdRecoveryReconciliationId>();
+          const timestamp = now();
+          const attemptOrdinal = requireRow(
+            transaction.select({
+              value: sql<number>`coalesce(max(${dvdRecoveryReconciliations.attemptOrdinal}), 0) + 1`,
+            }).from(dvdRecoveryReconciliations).where(eq(
+              dvdRecoveryReconciliations.archiveRecoveryId,
+              recovery.id,
+            )).get(),
+            "DVD recovery reconciliation attempt sequence",
+            recovery.id,
+          ).value;
+          const row = requireRow(
+            transaction.insert(dvdRecoveryReconciliations).values({
+              id,
+              archiveRecoveryId: recovery.id,
+              attemptOrdinal,
+              originalDiscArchiveId: recovery.originalDiscArchiveId,
+              status: "queued",
+              phase: "queued",
+              createdAt: timestamp,
+              updatedAt: timestamp,
+            }).returning().get(),
+            "DVD recovery reconciliation",
+            id,
+          );
+          recordMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            row,
+            timestamp,
+          );
+          return toDvdRecoveryReconciliation(row);
+        }, { behavior: "immediate" });
+      },
+      find(id) {
+        const row = database.select().from(dvdRecoveryReconciliations)
+          .where(eq(dvdRecoveryReconciliations.id, id)).get();
+        return row === undefined ? null : toDvdRecoveryReconciliation(row);
+      },
+      findLatestForRecovery(id) {
+        const row = database.select().from(dvdRecoveryReconciliations)
+          .where(eq(dvdRecoveryReconciliations.archiveRecoveryId, id))
+          .orderBy(desc(dvdRecoveryReconciliations.attemptOrdinal))
+          .limit(1).get();
+        return row === undefined ? null : toDvdRecoveryReconciliation(row);
+      },
+      list(options) {
+        const limit = requirePositiveSafeInteger(options.limit, "limit");
+        if (limit > 1_000) {
+          throw new DomainInvariantError(
+            "DVD recovery reconciliation reads are limited to 1000 records",
+          );
+        }
+        return database.select().from(dvdRecoveryReconciliations)
+          .orderBy(
+            desc(dvdRecoveryReconciliations.createdAt),
+            desc(dvdRecoveryReconciliations.id),
+          ).limit(limit).all().map(toDvdRecoveryReconciliation);
+      },
+      listActive() {
+        return database.select().from(dvdRecoveryReconciliations)
+          .where(inArray(
+            dvdRecoveryReconciliations.status,
+            ["queued", "running"],
+          ))
+          .orderBy(
+            asc(dvdRecoveryReconciliations.createdAt),
+            asc(dvdRecoveryReconciliations.id),
+          ).all().map(toDvdRecoveryReconciliation);
+      },
+      recoverExpiredClaims() {
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - DVD_RECOVERY_RECONCILIATION_CLAIM_LEASE_MS,
+        );
+        return database.update(dvdRecoveryReconciliations).set({
+          status: "queued",
+          phase: "queued",
+          workerExecutionId: null,
+          claimToken: null,
+          claimedAt: null,
+          startedAt: null,
+          updatedAt: timestamp,
+        }).where(and(
+          eq(dvdRecoveryReconciliations.status, "running"),
+          lt(dvdRecoveryReconciliations.claimedAt, expiredBefore),
+        )).returning({ id: dvdRecoveryReconciliations.id }).all().length;
+      },
+      claimNext(workerExecutionId) {
+        const execution = requireNonEmpty(
+          workerExecutionId.trim(),
+          "DVD recovery reconciliation worker execution ID",
+        );
+        if (execution.length > 256) {
+          throw new DomainInvariantError(
+            "DVD recovery reconciliation worker execution ID is too long",
+          );
+        }
+        return database.transaction((transaction) => {
+          const next = transaction.select().from(dvdRecoveryReconciliations)
+            .where(eq(dvdRecoveryReconciliations.status, "queued"))
+            .orderBy(
+              asc(dvdRecoveryReconciliations.createdAt),
+              asc(dvdRecoveryReconciliations.id),
+            ).limit(1).get();
+          if (next === undefined) return null;
+          const timestamp = now();
+          const claimed = transaction.update(dvdRecoveryReconciliations).set({
+            status: "running",
+            phase: "examining",
+            workerExecutionId: execution,
+            claimToken: newId<DvdRecoveryReconciliationClaimToken>(),
+            claimedAt: timestamp,
+            startedAt: timestamp,
+            updatedAt: timestamp,
+          }).where(and(
+            eq(dvdRecoveryReconciliations.id, next.id),
+            eq(dvdRecoveryReconciliations.status, "queued"),
+          )).returning().get();
+          return claimed === undefined
+            ? null
+            : toClaimedDvdRecoveryReconciliation(claimed);
+        }, { behavior: "immediate" });
+      },
+      renewClaim(claim) {
+        const timestamp = now();
+        return database.update(dvdRecoveryReconciliations).set({
+          claimedAt: timestamp,
+          updatedAt: timestamp,
+        }).where(and(
+          eq(dvdRecoveryReconciliations.id, claim.id),
+          eq(dvdRecoveryReconciliations.status, "running"),
+          eq(dvdRecoveryReconciliations.claimToken, claim.claimToken),
+        )).returning({ id: dvdRecoveryReconciliations.id }).get() !== undefined;
+      },
+      requeue(claim) {
+        const timestamp = now();
+        const row = database.update(dvdRecoveryReconciliations).set({
+          status: "queued",
+          phase: "queued",
+          workerExecutionId: null,
+          claimToken: null,
+          claimedAt: null,
+          startedAt: null,
+          updatedAt: timestamp,
+        }).where(and(
+          eq(dvdRecoveryReconciliations.id, claim.id),
+          eq(dvdRecoveryReconciliations.status, "running"),
+          eq(dvdRecoveryReconciliations.claimToken, claim.claimToken),
+        )).returning().get();
+        return row === undefined ? null : toDvdRecoveryReconciliation(row);
+      },
+      setPhase(claim, phase) {
+        const timestamp = now();
+        const row = database.update(dvdRecoveryReconciliations).set({
+          phase,
+          claimedAt: timestamp,
+          updatedAt: timestamp,
+        }).where(and(
+          eq(dvdRecoveryReconciliations.id, claim.id),
+          eq(dvdRecoveryReconciliations.status, "running"),
+          eq(dvdRecoveryReconciliations.claimToken, claim.claimToken),
+        )).returning().get();
+        if (row === undefined) {
+          throw new StaleJobAttemptError(
+            "DVD recovery reconciliation",
+            claim.id,
+          );
+        }
+        return toClaimedDvdRecoveryReconciliation(row);
+      },
+      complete(claim, result) {
+        const evidence = result.evidence;
+        if (
+          evidence.authoritativeCheckpoint.revision !==
+            evidence.databaseProjectionAfter.revision ||
+          evidence.authoritativeCheckpoint.manifestId !==
+            evidence.databaseProjectionAfter.manifestId ||
+          evidence.authoritativeCheckpoint.manifestDigest !==
+            evidence.databaseProjectionAfter.manifestDigest
+        ) {
+          throw new DomainInvariantError(
+            "DVD recovery reconciliation evidence is not converged",
+          );
+        }
+        const timestamp = now();
+        const row = database.update(dvdRecoveryReconciliations).set({
+          status: "completed",
+          phase: "completed",
+          outcome: result.outcome,
+          evidence,
+          claimToken: null,
+          claimedAt: null,
+          completedAt: timestamp,
+          updatedAt: timestamp,
+        }).where(and(
+          eq(dvdRecoveryReconciliations.id, claim.id),
+          eq(dvdRecoveryReconciliations.status, "running"),
+          eq(dvdRecoveryReconciliations.claimToken, claim.claimToken),
+        )).returning().get();
+        if (row === undefined) {
+          throw new StaleJobAttemptError(
+            "DVD recovery reconciliation",
+            claim.id,
+          );
+        }
+        return toDvdRecoveryReconciliation(row);
+      },
+      fail(claim, failureCode) {
+        const timestamp = now();
+        const row = database.update(dvdRecoveryReconciliations).set({
+          status: "failed",
+          phase: "completed",
+          failureCode,
+          claimToken: null,
+          claimedAt: null,
+          completedAt: timestamp,
+          updatedAt: timestamp,
+        }).where(and(
+          eq(dvdRecoveryReconciliations.id, claim.id),
+          eq(dvdRecoveryReconciliations.status, "running"),
+          eq(dvdRecoveryReconciliations.claimToken, claim.claimToken),
+        )).returning().get();
+        return row === undefined ? null : toDvdRecoveryReconciliation(row);
       },
     },
     dvdDiscVerifications: {
@@ -9089,6 +9448,13 @@ export function createDataAccessInternal(
         dvdRecoveryStorage: {
           readCurrent: readCurrentDvdRecoveryStoragePreflight,
         },
+        dvdRecoveryReconciliations: {
+          find: (id) => access.dvdRecoveryReconciliations.find(id),
+          findLatestForRecovery: (id) =>
+            access.dvdRecoveryReconciliations.findLatestForRecovery(id),
+          list: (options) => access.dvdRecoveryReconciliations.list(options),
+          listActive: () => access.dvdRecoveryReconciliations.listActive(),
+        },
         catalog: {
           listOpticalDrives: (options) =>
             access.catalog.listOpticalDrives(options),
@@ -9106,6 +9472,8 @@ export function createDataAccessInternal(
             access.catalog.findArchiveRecovery(id),
           findArchiveRecoveryById: (id) =>
             access.catalog.findArchiveRecoveryById(id),
+          listArchiveRecoveries: (options) =>
+            access.catalog.listArchiveRecoveries(options),
           findDvdSourceSampleManifest: (id) =>
             access.catalog.findDvdSourceSampleManifest(id),
           listCatalogReviewArchives: (options) =>
@@ -11002,6 +11370,66 @@ export function createDataAccessInternal(
         return findArchiveRecoveryRecord(database, {
           archiveRecoveryId: id,
         });
+      },
+
+      listArchiveRecoveries(options) {
+        if (!hasDvdRecoveryEvidenceSchema) return [];
+        const limit = requirePositiveSafeInteger(options.limit, "limit");
+        if (limit > 100) {
+          throw new DomainInvariantError(
+            "Archive Recovery reads are limited to 100 records",
+          );
+        }
+        const activeReconciliation = exists(
+          database.select({ id: dvdRecoveryReconciliations.id })
+            .from(dvdRecoveryReconciliations)
+            .where(and(
+              eq(
+                dvdRecoveryReconciliations.archiveRecoveryId,
+                archiveRecoveries.id,
+              ),
+              inArray(
+                dvdRecoveryReconciliations.status,
+                ["queued", "running"],
+              ),
+            )),
+        );
+        const active = database.select({ id: archiveRecoveries.id })
+          .from(archiveRecoveries)
+          .where(activeReconciliation)
+          .orderBy(desc(archiveRecoveries.updatedAt), desc(archiveRecoveries.id))
+          .limit(limit)
+          .all();
+        const remaining = limit - active.length;
+        const rows = remaining === 0
+          ? active
+          : [...active, ...database.select({ id: archiveRecoveries.id })
+            .from(archiveRecoveries)
+            .where(notExists(
+              database.select({ id: dvdRecoveryReconciliations.id })
+                .from(dvdRecoveryReconciliations)
+                .where(and(
+                  eq(
+                    dvdRecoveryReconciliations.archiveRecoveryId,
+                    archiveRecoveries.id,
+                  ),
+                  inArray(
+                    dvdRecoveryReconciliations.status,
+                    ["queued", "running"],
+                  ),
+                )),
+            ))
+            .orderBy(
+              desc(archiveRecoveries.updatedAt),
+              desc(archiveRecoveries.id),
+            )
+            .limit(remaining)
+            .all()];
+        return rows
+          .map(({ id }) => findArchiveRecoveryRecord(database, {
+            archiveRecoveryId: id,
+          }))
+          .filter((recovery): recovery is ArchiveRecovery => recovery !== null);
       },
 
       findDvdSourceSampleManifest(id) {

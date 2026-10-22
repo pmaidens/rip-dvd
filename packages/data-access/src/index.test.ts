@@ -1219,6 +1219,7 @@ describe("data-access facade", () => {
         "dvd_archive_evidence_manifests",
         "dvd_archive_recovery_reads",
         "dvd_disc_verifications",
+        "dvd_recovery_reconciliations",
         "dvd_structural_assessments",
         "dvd_structural_check_attempts",
         "dvd_recovery_storage_preflights",
@@ -1235,7 +1236,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(44);
+    expect(identifierTables).toHaveLength(45);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -9026,6 +9027,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261022185502_perfect_lily_hollister",
+        },
+        {
           name: "20261022100044_futuristic_cannonball",
         },
         {
@@ -9054,9 +9058,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20260930003626_dvd-evidence-checkpoints",
-        },
-        {
-          name: "20260930003106_dvd-evidence-authority",
         },
       ]);
     expect(

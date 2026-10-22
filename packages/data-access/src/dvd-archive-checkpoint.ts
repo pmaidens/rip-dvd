@@ -66,7 +66,7 @@ export class DvdCheckpointReadFault extends Error {
   }
 }
 
-interface DvdCheckpointPointer {
+export interface DvdCheckpointPointer {
   originalDiscArchiveId: string;
   currentManifestId: string;
   currentManifestRevision: number;
@@ -243,7 +243,7 @@ function assertRecoveryManifestTransition(
   );
 }
 
-async function verifyImage(
+export async function verifyDvdCheckpointImage(
   archive: OriginalDiscArchive,
   manifest: CommittedDvdCheckpointEvidence,
 ): Promise<void> {
@@ -295,9 +295,16 @@ async function readCommittedDvdCheckpointRecords(input: {
   header: DvdArchiveEvidenceHeader | null;
   jobs: readonly ArchiveJob[];
   assertImageOwnership(): void;
-}, requireInitialPointer: boolean): Promise<{
+}, options: {
+  requireInitialPointer: boolean;
+  permitJournal?: boolean;
+  verifyImage?: boolean;
+}): Promise<{
+  directory: string;
+  journalPresent: boolean;
   initialEvidence: CommittedDvdInitialEvidence;
   currentEvidence: CommittedDvdCheckpointEvidence;
+  previousEvidence: CommittedDvdCheckpointEvidence | null;
   checkpoint: DvdCheckpointPointer;
 } | null> {
   const { archive, header, jobs } = input;
@@ -315,7 +322,8 @@ async function readCommittedDvdCheckpointRecords(input: {
       throw new Error("Evidence path conflict");
   } catch { throw new DvdCheckpointReadFault("DVD_PUBLICATION_PATH_CONFLICT"); }
   const journalPath = join(directory, "recovery-journal.bin");
-  if (await pathExists(journalPath)) {
+  const journalPresent = await pathExists(journalPath);
+  if (journalPresent && options.permitJournal !== true) {
     throw new DvdCheckpointReadFault("CONSISTENCY_FAULT");
   }
   const pointerPath = join(directory, "checkpoint.json");
@@ -407,12 +415,13 @@ async function readCommittedDvdCheckpointRecords(input: {
         (checkpoint.currentManifestId !== manifest.id ||
           checkpoint.currentManifestDigest !== manifest.manifestDigest ||
           checkpoint.publicationDigest !== manifest.publicationDigest)) ||
-      (requireInitialPointer && checkpoint.currentManifestRevision !== 1)
+      (options.requireInitialPointer && checkpoint.currentManifestRevision !== 1)
     ) throw new Error("Checkpoint differs");
   } catch {
     throw new DvdCheckpointReadFault("DVD_PUBLICATION_CHECKPOINT_CONFLICT");
   }
   let currentEvidence: CommittedDvdCheckpointEvidence = manifest;
+  let previousEvidence: CommittedDvdCheckpointEvidence | null = null;
   if (checkpoint.currentManifestRevision > 1) {
     try {
       const currentRaw = await readRecord(
@@ -449,6 +458,7 @@ async function readCommittedDvdCheckpointRecords(input: {
         throw new Error("Recovery checkpoint pointer differs");
       }
       currentEvidence = current;
+      previousEvidence = predecessor;
     } catch (error) {
       if (error instanceof DvdCheckpointReadFault) throw error;
       throw new DvdCheckpointReadFault(
@@ -468,10 +478,12 @@ async function readCommittedDvdCheckpointRecords(input: {
           header.currentManifestDigest !== checkpoint.currentManifestDigest)))
       throw new DvdCheckpointReadFault("DVD_PUBLICATION_CHECKPOINT_CONFLICT");
   }
-  await verifyImage(archive, currentEvidence);
+  if (options.verifyImage !== false) {
+    await verifyDvdCheckpointImage(archive, currentEvidence);
+  }
   input.assertImageOwnership();
   if (
-    await pathExists(journalPath) ||
+    (options.permitJournal !== true && await pathExists(journalPath)) ||
     canonicalJson(
       await readRecord(pointerPath, "DVD_EVIDENCE_CHECKPOINT_UNAVAILABLE"),
     ) !== canonicalJson(pointer)
@@ -479,7 +491,59 @@ async function readCommittedDvdCheckpointRecords(input: {
     throw new DvdCheckpointReadFault("DVD_EVIDENCE_CHANGED_DURING_READ");
   }
   input.assertImageOwnership();
-  return { initialEvidence: manifest, currentEvidence, checkpoint };
+  return {
+    directory,
+    journalPresent,
+    initialEvidence: manifest,
+    currentEvidence,
+    previousEvidence,
+    checkpoint,
+  };
+}
+
+export async function readDvdRecoveryManifestForReconciliation(input: {
+  directory: string;
+  initialEvidence: CommittedDvdInitialEvidence;
+  previousEvidence: CommittedDvdCheckpointEvidence;
+  revision: number;
+  assertImageOwnership(): void;
+}): Promise<CommittedDvdRecoveryEvidence | null> {
+  const path = join(
+    input.directory,
+    `recovery-manifest-${input.revision}.json`,
+  );
+  if (!await pathExists(path)) return null;
+  const raw = await readRecord(path, "DVD_PUBLICATION_CHECKPOINT_CONFLICT");
+  input.assertImageOwnership();
+  try {
+    assertRecoveryManifestRecord(raw, input.initialEvidence);
+    assertRecoveryManifestTransition(raw, input.previousEvidence);
+    if (raw.revision !== input.revision) {
+      throw new Error("Recovery manifest revision differs");
+    }
+    return raw;
+  } catch (error) {
+    throw new DvdCheckpointReadFault(
+      "DVD_PUBLICATION_CHECKPOINT_CONFLICT",
+      { cause: error },
+    );
+  }
+}
+
+/** Read the pointer and evidence records while exclusive ownership permits a
+ * reconciler to inspect an interrupted image and retained journal. */
+export async function readDvdCheckpointForReconciliation(input: {
+  originalsLibraryPath?: string;
+  archive: OriginalDiscArchive;
+  header: DvdArchiveEvidenceHeader | null;
+  jobs: readonly ArchiveJob[];
+  assertImageOwnership(): void;
+}) {
+  return readCommittedDvdCheckpointRecords(input, {
+    requireInitialPointer: false,
+    permitJournal: true,
+    verifyImage: false,
+  });
 }
 
 /** Read only. Never reconcile, install a pointer, or synchronize an operator read. */
@@ -490,7 +554,9 @@ export async function readCommittedDvdInitialCheckpoint(input: {
   jobs: readonly ArchiveJob[];
   assertImageOwnership(): void;
 }): Promise<CommittedDvdInitialEvidence | null> {
-  return (await readCommittedDvdCheckpointRecords(input, true))
+  return (await readCommittedDvdCheckpointRecords(input, {
+    requireInitialPointer: true,
+  }))
     ?.initialEvidence ?? null;
 }
 
@@ -502,7 +568,9 @@ export async function readCommittedDvdCheckpoint(input: {
   jobs: readonly ArchiveJob[];
   assertImageOwnership(): void;
 }): Promise<CommittedDvdCheckpointEvidence | null> {
-  const records = await readCommittedDvdCheckpointRecords(input, false);
+  const records = await readCommittedDvdCheckpointRecords(input, {
+    requireInitialPointer: false,
+  });
   if (records === null) return null;
   const header = input.header;
   if (header !== null) {
@@ -531,7 +599,9 @@ export async function readCommittedDvdCurrentCheckpoint(input: {
   jobs: readonly ArchiveJob[];
   assertImageOwnership(): void;
 }): Promise<CommittedDvdCurrentCheckpoint | null> {
-  const records = await readCommittedDvdCheckpointRecords(input, false);
+  const records = await readCommittedDvdCheckpointRecords(input, {
+    requireInitialPointer: false,
+  });
   if (records === null) return null;
   const header = input.header;
   if (

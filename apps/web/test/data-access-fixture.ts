@@ -19,6 +19,9 @@ type SnapshotOverrides = {
     ConsistentReadAccess["dvdStructuralAssessments"]
   >;
   dvdRecoveryStorage?: Partial<ConsistentReadAccess["dvdRecoveryStorage"]>;
+  dvdRecoveryReconciliations?: Partial<
+    ConsistentReadAccess["dvdRecoveryReconciliations"]
+  >;
   catalog?: Partial<ConsistentReadAccess["catalog"]>;
   encodingProfiles?: Partial<ConsistentReadAccess["encodingProfiles"]>;
   discInspections?: Partial<ConsistentReadAccess["discInspections"]>;
@@ -75,6 +78,10 @@ export function withSnapshotOverrides(
           dvdRecoveryStorage: {
             ...snapshotAccess.dvdRecoveryStorage,
             ...overrides.dvdRecoveryStorage,
+          },
+          dvdRecoveryReconciliations: {
+            ...snapshotAccess.dvdRecoveryReconciliations,
+            ...overrides.dvdRecoveryReconciliations,
           },
           catalog: {
             ...snapshotAccess.catalog,

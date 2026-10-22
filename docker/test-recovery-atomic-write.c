@@ -73,6 +73,10 @@ int main(void) {
             -1, expected, actual, 4096, sizeof(expected), &operations);
         assert(result == (scenario == 0 ? 0 : 1));
     }
+    struct timespec parsed;
+    assert(nanoseconds_to_timespec(1234567890123456789ULL, &parsed) == 0);
+    assert(parsed.tv_sec == 1234567890);
+    assert(parsed.tv_nsec == 123456789);
     puts("Atomic recovery writer tests passed");
     return 0;
 }

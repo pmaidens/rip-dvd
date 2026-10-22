@@ -187,10 +187,10 @@ const commandDefinitions = [
   },
   {
     name: "archive-recovery",
-    description: "Inspect or request bounded DVD Disc Verification for an Archive Recovery.",
-    usage: "rip-dvd archive-recovery <inspect-verification|verify-disc> <archive-recovery-id> [options]",
+    description: "Inspect or request DVD Disc Verification and checkpoint reconciliation for an Archive Recovery.",
+    usage: "rip-dvd archive-recovery <inspect-verification|verify-disc|inspect-reconciliation|reconcile> <archive-recovery-id> [options]",
     inputs: {
-      arguments: ["action: inspect-verification|verify-disc", "archive-recovery-id"],
+      arguments: ["action: inspect-verification|verify-disc|inspect-reconciliation|reconcile", "archive-recovery-id"],
       options: ["--key", "--disc-inspection-id", "--checkpoint-revision", "--checkpoint-digest"],
     },
     example: "rip-dvd archive-recovery verify-disc <archive-recovery-id> --key 00000000-0000-4000-8000-000000000001 --disc-inspection-id <id> --checkpoint-revision 1 --checkpoint-digest <sha256>",
@@ -569,6 +569,72 @@ async function runDvdDiscVerificationCommand(
     throw new CommandFailure(
       "DISC_VERIFICATION_UNAVAILABLE",
       "DVD Disc Verification is unavailable.",
+      1,
+    );
+  }
+}
+
+function dvdRecoveryReconciliationInputs(args: readonly string[]) {
+  const archiveRecoveryId = args[0]?.trim();
+  const { options, mutationKey } = mutationOptions(
+    args.slice(1),
+    ["--key"],
+    "Invalid DVD recovery reconciliation options.",
+  );
+  if (
+    options.size !== 1 || !archiveRecoveryId ||
+    archiveRecoveryId.length > 256
+  ) {
+    throw new CommandFailure(
+      "INVALID_ARGUMENTS",
+      "DVD recovery reconciliation requires an Archive Recovery ID and mutation key.",
+      2,
+    );
+  }
+  return { mutationKey, archiveRecoveryId };
+}
+
+async function runDvdRecoveryReconciliationCommand(
+  name: "inspect-reconciliation" | "reconcile",
+  args: readonly string[],
+  io: CommandIO,
+) {
+  try {
+    return withAccess(io.openAccess, (access) => {
+      const operations = createApplicationOperations(access);
+      return name === "inspect-reconciliation"
+        ? operations.inspectDvdRecoveryReconciliation(
+            verificationInspectionInputs(args).archiveRecoveryId,
+          )
+        : operations.reconcileDvdRecovery(
+            dvdRecoveryReconciliationInputs(args),
+          );
+    });
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    if (error instanceof MutationKeyConflictError) {
+      throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    if (error instanceof RecordNotFoundError) {
+      throw new CommandFailure(
+        "NOT_FOUND",
+        "DVD recovery reconciliation target was not found.",
+        2,
+      );
+    }
+    if (
+      error instanceof DomainInvariantError ||
+      error instanceof InvalidStatusTransitionError
+    ) {
+      throw new CommandFailure(
+        "RECONCILIATION_REJECTED",
+        error.message,
+        2,
+      );
+    }
+    throw new CommandFailure(
+      "RECONCILIATION_UNAVAILABLE",
+      "DVD recovery reconciliation is unavailable.",
       1,
     );
   }
@@ -1590,18 +1656,26 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         emit(io.stdout, help(name));
       } else {
         const [action, ...actionArgs] = rest;
-        if (action !== "inspect-verification" && action !== "verify-disc") {
+        if (
+          action !== "inspect-verification" && action !== "verify-disc" &&
+          action !== "inspect-reconciliation" && action !== "reconcile"
+        ) {
           throw new CommandFailure(
             "INVALID_ARGUMENTS",
-            "Archive Recovery action must be inspect-verification or verify-disc.",
+            "Archive Recovery action must be inspect-verification, verify-disc, inspect-reconciliation, or reconcile.",
             2,
           );
         }
-        emit(io.stdout, await runDvdDiscVerificationCommand(
-          action,
-          actionArgs,
-          io,
-        ));
+        emit(
+          io.stdout,
+          action === "inspect-verification" || action === "verify-disc"
+            ? await runDvdDiscVerificationCommand(action, actionArgs, io)
+            : await runDvdRecoveryReconciliationCommand(
+                action,
+                actionArgs,
+                io,
+              ),
+        );
       }
       return 0;
     }
