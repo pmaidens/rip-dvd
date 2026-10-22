@@ -2,8 +2,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { createNodeDvdFullExtentMetadataValidator } from "./dvd-full-extent-validator.js";
+import {
+  createNodeDvdFullExtentMetadataValidator,
+  structuralEvidenceObservations,
+} from "./dvd-full-extent-validator.js";
 import { isoProfileImage } from "./dvd-metadata-profile-fixtures.js";
+import type { MetadataObservation } from "./dvd-metadata-profile-reader.js";
 import type { DvdUnrecoveredSourceRange } from "@rip-dvd/data-access";
 const directories: string[] = [];
 afterEach(async () => {
@@ -28,6 +32,39 @@ export async function validate(
     unrecoveredSourceRanges: ranges,
   });
 }
+it("includes prerequisite phase evidence in later structural checks", () => {
+  const observations: MetadataObservation[] = [
+    {
+      field: "filesystem",
+      checkKind: "filesystem_structure",
+      status: "known",
+      dependencies: [{ startLba: 1, sectorCount: 1 }],
+    },
+    {
+      field: "titles",
+      checkKind: "title_enumeration",
+      status: "known",
+      dependencies: [{ startLba: 10, sectorCount: 1 }],
+    },
+    {
+      field: "navigation",
+      checkKind: "dvd_navigation",
+      status: "known",
+      dependencies: [{ startLba: 20, sectorCount: 1 }],
+    },
+  ];
+
+  expect(
+    structuralEvidenceObservations(observations, "title_enumeration").map(
+      ({ field }) => field,
+    ),
+  ).toEqual(["filesystem", "titles"]);
+  expect(
+    structuralEvidenceObservations(observations, "dvd_navigation").map(
+      ({ field }) => field,
+    ),
+  ).toEqual(["filesystem", "titles", "navigation"]);
+});
 it("publishes with a source-unavailable IFO and independently valid title NAV", async () => {
   const result = await validate(isoProfileImage(), [
     { startLba: 32, sectorCount: 1, classification: "skipped_untested" },

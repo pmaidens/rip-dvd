@@ -93,6 +93,31 @@ function testedExtent(
     ),
   };
 }
+
+const STRUCTURAL_EVIDENCE_PHASES: Readonly<
+  Record<DvdStructuralCheckKind, readonly DvdStructuralCheckKind[]>
+> = {
+  filesystem_structure: ["filesystem_structure"],
+  title_enumeration: ["filesystem_structure", "title_enumeration"],
+  dvd_navigation: [
+    "filesystem_structure",
+    "title_enumeration",
+    "dvd_navigation",
+  ],
+};
+
+export function structuralEvidenceObservations(
+  observations: readonly MetadataObservation[],
+  checkKind: DvdStructuralCheckKind,
+): readonly MetadataObservation[] {
+  const phases = STRUCTURAL_EVIDENCE_PHASES[checkKind];
+  return observations.filter(
+    (observation) =>
+      observation.checkKind !== undefined &&
+      phases.includes(observation.checkKind),
+  );
+}
+
 export function createNodeDvdFullExtentMetadataValidator(): DvdFullExtentMetadataValidator {
   return {
     async validate(request) {
@@ -235,8 +260,9 @@ export function createNodeDvdFullExtentMetadataValidator(): DvdFullExtentMetadat
         structuralChecks: DVD_STRUCTURAL_CHECK_KINDS.map((checkKind) => {
           const execution = reader?.structuralCheckExecution.get(checkKind) ??
             "not_run";
-          const relevant = observations.filter(
-            (observation) => observation.checkKind === checkKind,
+          const relevant = structuralEvidenceObservations(
+            observations,
+            checkKind,
           );
           return {
             checkKind,

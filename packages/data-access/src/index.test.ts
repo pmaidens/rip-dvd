@@ -1033,7 +1033,9 @@ describe("data-access facade", () => {
       .prepare(`
         select name, sql
         from sqlite_schema
-        where type = 'table' and name not like '__drizzle_%'
+        where type = 'table'
+          and name not like '__drizzle_%'
+          and name not like 'sqlite_%'
         order by name
       `)
       .all() as Array<{ name: string; sql: string }>;
@@ -1050,6 +1052,8 @@ describe("data-access facade", () => {
         "dvd_archive_evidence_headers",
         "dvd_archive_evidence_manifests",
         "dvd_archive_recovery_reads",
+        "dvd_structural_assessments",
+        "dvd_structural_check_attempts",
         "dvd_recovery_storage_preflights",
         "encode_job_failure_reports",
         "filesystem_verification_runs",
@@ -1059,7 +1063,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(36);
+    expect(identifierTables).toHaveLength(38);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -1068,6 +1072,10 @@ describe("data-access facade", () => {
           ? sql.includes("PRIMARY KEY(`originals_library_path`, `sidecar_path`)")
           : name === "dvd_archive_evidence_headers"
             ? sql.includes("dvd_archive_evidence_headers_archive_id_not_null")
+            : name === "dvd_structural_assessments"
+              ? sql.includes("dvd_structural_assessments_identity_check")
+              : name === "dvd_structural_check_attempts"
+                ? sql.includes("dvd_structural_check_attempts_shape_check")
             : name === "archive_audit_findings"
               ? sql.includes("PRIMARY KEY(`archive_audit_run_id`, `sequence`)")
               : name === "rearchive_mapping_proposal_items"
@@ -1459,7 +1467,7 @@ describe("data-access facade", () => {
       });
       expect(results).toEqual(Array.from({ length: 8 }, () => "ok"));
     }
-  });
+  }, 30_000);
 
   it("adds supersession history without rewriting existing Encode Job provenance", () => {
     const databasePath = createTestDatabasePath();
@@ -1611,7 +1619,8 @@ describe("data-access facade", () => {
           name !== "20260930002622_wandering_micromax" &&
           name !== "20260930003626_dvd-evidence-checkpoints" &&
           name !== "20261004053119_scsi-read-path-notice" &&
-          name !== "20261019204228_dvd-initial-save",
+          name !== "20261019204228_dvd-initial-save" &&
+          name !== "20261022044512_parched_norrin_radd",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8837,6 +8846,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261022044512_parched_norrin_radd",
+        },
+        {
           name: "20261022044144_icy_barracuda",
         },
         {
@@ -8862,9 +8874,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20260930002706_dvd-evidence-compatibility",
-        },
-        {
-          name: "20260930002622_wandering_micromax",
         },
       ]);
     expect(

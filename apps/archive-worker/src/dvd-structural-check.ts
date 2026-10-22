@@ -16,6 +16,7 @@ import {
 } from "@rip-dvd/worker-runtime";
 import {
   createNodeDvdFullExtentMetadataValidator,
+  structuralEvidenceObservations,
   type DvdFullExtentMetadataDecision,
   type DvdFullExtentMetadataValidator,
 } from "./dvd-full-extent-validator.js";
@@ -116,8 +117,9 @@ function findingsFromDecision(
       checkKind,
       execution: evidence?.execution ?? "not_run",
       testedExtent: evidence?.testedExtent ?? null,
-      observations: decision.observations.filter(
-        (observation) => observation.checkKind === checkKind,
+      observations: structuralEvidenceObservations(
+        decision.observations,
+        checkKind,
       ),
       blocker: blocked ? blocker : null,
     })).digest("hex");

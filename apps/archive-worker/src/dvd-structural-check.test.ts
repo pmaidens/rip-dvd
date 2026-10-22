@@ -127,6 +127,13 @@ describe("node DVD structural checker", () => {
         );
       }
     }
+    const [filesystem, navigation, titles] = findings;
+    expect(titles?.testedExtent).toMatchObject({
+      startLba: filesystem?.testedExtent?.startLba,
+    });
+    expect(navigation?.testedExtent).toMatchObject({
+      startLba: filesystem?.testedExtent?.startLba,
+    });
   });
 
   it("reports valid only when the complete structural profile is proved", async () => {
