@@ -13,6 +13,7 @@ import {
 } from "@rip-dvd/data-access";
 import {
   beginSettledDiscInspectionForTest,
+  createDvdRecoveryEvidenceEncodingTestAccess,
   createNormalDvdArchiveBoundaryEvidenceForTest,
 } from "@rip-dvd/data-access/test-support";
 import {
@@ -561,16 +562,185 @@ it("blocks Catalog Review replacement previews consistently through web and CLI"
   }
 });
 
-it("blocks Encode queue resolution consistently through web and CLI", async () => {
+it("reports Archive Recovery conflicts for replacement previews through web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
   const seeded = seedCatalogReviewForReadFixture(fixture);
   const access = fixture.openAccess();
   try {
+    const review = await fixture.run([
+      "catalog-review",
+      "show",
+      seeded.archive.id,
+    ]);
+    const catalogRevision = (review.result as { catalogRevision: string })
+      .catalogRevision;
+    const command = {
+      action: "complete_review" as const,
+      catalogRevision,
+      outcome: "reviewed_with_selections" as const,
+      replacementEncodes: [{
+        predecessorEncodeJobId: seeded.predecessor.id,
+        encodingProfileId: seeded.predecessor.encodingProfileId,
+        outputPath: seeded.predecessor.outputPath,
+      }],
+    };
+    const recoveryId = "synthetic-replacement-conflict-recovery";
+    markArchiveWithDvdRecoveryEvidence(
+      fixture.databasePath,
+      seeded.archive.id,
+      "catalog-review-recovery-conflict",
+      {
+        archiveRecovery: {
+          id: recoveryId,
+          workStatus: "claimed",
+        },
+      },
+    );
+    expect(access.catalog.findArchiveRecovery(seeded.archive.id))
+      .toMatchObject({
+        id: recoveryId,
+        work: expect.objectContaining({ status: "claimed" }),
+      });
+    const web = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(seeded.archive.id, {
+        ...command,
+        preview: true,
+      }),
+      seeded.archive.id,
+      () => access,
+      () => trustedOrigin,
+      () => fixture.mediaLibraryPath,
+    );
+    const cli = await fixture.run([
+      "catalog-review",
+      "preview-completion",
+      seeded.archive.id,
+      "--json",
+      JSON.stringify(command),
+    ]);
+
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toMatchObject({
+      error: {
+        code: "ENCODE_WORK_CONFLICT",
+        blockingReasons: [{ code: "ENCODE_WORK_CONFLICT" }],
+        current: {
+          archiveRecovery: {
+            id: recoveryId,
+            originalDiscArchiveId: seeded.archive.id,
+            work: { status: "claimed" },
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(cli.result)).not.toContain("claimToken");
+    expect(JSON.stringify(cli.result)).not.toContain("claimedBy");
+    expect(access.catalog.listOriginalDiscArchives({
+      ids: [seeded.archive.id],
+    })[0]).toMatchObject({
+      catalogReviewOutcome: "needs_review",
+      catalogReviewedAt: null,
+    });
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: seeded.predecessor.id,
+        predecessorEncodeJobId: null,
+      }),
+    ]);
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    expect(sqlite.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE operation = 'catalog_review.complete.preview'
+    `).get()).toEqual({ count: 0 });
+    sqlite.close();
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("reports recovery-owned Encode availability consistently through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const seeded = seedCatalogReviewForReadFixture(fixture);
+  const openGateAccess = () => createDvdRecoveryEvidenceEncodingTestAccess({
+    databasePath: fixture.databasePath,
+    mediaLibraryPath: fixture.mediaLibraryPath,
+    originalsLibraryPath: fixture.originalsLibraryPath,
+  });
+  let access: ReturnType<typeof openGateAccess> | null = null;
+  const getAccess = () => {
+    if (access === null) throw new Error("Expected gate-open data access");
+    return access;
+  };
+  try {
+    const setup = fixture.openAccess();
+    setup.catalog.completeCatalogReview(
+      seeded.archive.id,
+      setup.catalog.listOriginalDiscArchives({
+        ids: [seeded.archive.id],
+      })[0]!.updatedAt,
+      "reviewed_with_selections",
+    );
+    setup.close();
+    const recoveryId = "encode-resolution-parity-recovery";
     markArchiveWithDvdRecoveryEvidence(
       fixture.databasePath,
       seeded.archive.id,
       "encode-resolution-parity",
+      {
+        archiveRecovery: {
+          id: recoveryId,
+          workStatus: "claimed",
+        },
+      },
     );
+    access = openGateAccess();
+    const queueUrl = new URL(`${trustedOrigin}/api/encode-jobs`);
+    queueUrl.searchParams.set(
+      "encodingProfileId",
+      seeded.predecessor.encodingProfileId,
+    );
+    const webQueue = await createEncodeJobsRoute(
+      new Request(queueUrl),
+      getAccess,
+      () => ({
+        mediaLibraryPath: fixture.mediaLibraryPath,
+        webTrustedOrigin: trustedOrigin,
+      }),
+    );
+    const cliQueue = await fixture.run([
+      "encode-queue",
+      "--encoding-profile-id",
+      seeded.predecessor.encodingProfileId,
+    ], undefined, undefined, { openAccess: openGateAccess });
+    expect(webQueue.status).toBe(200);
+    expect(cliQueue.exitCode).toBe(0);
+    expect(cliQueue.result).toEqual(await webQueue.json());
+    expect(cliQueue.result).toMatchObject({
+      selections: expect.arrayContaining([expect.objectContaining({
+        id: seeded.correctedSelection.id,
+        currentWork: expect.objectContaining({
+          archiveRecovery: expect.objectContaining({
+            id: recoveryId,
+            originalDiscArchiveId: seeded.archive.id,
+            work: expect.objectContaining({ status: "claimed" }),
+          }),
+          encodeJobs: [],
+        }),
+        queueAction: expect.objectContaining({
+          eligible: false,
+          blockingReasons: [expect.objectContaining({
+            code: "ENCODE_WORK_CONFLICT",
+          })],
+        }),
+      })]),
+    });
+    expect(JSON.stringify(cliQueue.result)).not.toContain("claimToken");
+    expect(JSON.stringify(cliQueue.result)).not.toContain("claimedBy");
+
     const url = new URL(`${trustedOrigin}/api/encode-jobs`);
     url.searchParams.set(
       "encodingProfileId",
@@ -582,7 +752,7 @@ it("blocks Encode queue resolution consistently through web and CLI", async () =
     );
     const web = await createEncodeJobsRoute(
       new Request(url),
-      () => access,
+      getAccess,
       () => ({
         mediaLibraryPath: fixture.mediaLibraryPath,
         webTrustedOrigin: trustedOrigin,
@@ -594,14 +764,29 @@ it("blocks Encode queue resolution consistently through web and CLI", async () =
       seeded.predecessor.encodingProfileId,
       "--disc-selection-id",
       seeded.correctedSelection.id,
-    ]);
+    ], undefined, undefined, { openAccess: openGateAccess });
 
     expect(web.status).toBe(409);
     expect(cli.exitCode).toBe(2);
     expect(cli.result).toEqual(await web.json());
-    expect(cli.result).toEqual(dvdEvidenceEncodingUnavailableError);
+    expect(cli.result).toMatchObject({
+      error: {
+        code: "ENCODE_WORK_CONFLICT",
+        blockingReasons: [{ code: "ENCODE_WORK_CONFLICT" }],
+        current: {
+          archiveRecovery: {
+            id: recoveryId,
+            originalDiscArchiveId: seeded.archive.id,
+            work: { status: "claimed" },
+          },
+          encodeJobs: [],
+        },
+      },
+    });
+    expect(JSON.stringify(cli.result)).not.toContain("claimToken");
+    expect(JSON.stringify(cli.result)).not.toContain("claimedBy");
   } finally {
-    access.close();
+    access?.close();
     fixture.dispose();
   }
 });
@@ -796,6 +981,200 @@ it("shares Encode Job validation and keyed outcomes across web and CLI", async (
     expect(requeued.exitCode).toBe(0);
     expect(requeued.result).toMatchObject({ job: (await webRequeued.json()).job });
     expect(access.encodeJobs.list()).toHaveLength(2);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("reports Archive Recovery conflicts identically through Encode web and CLI operations", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive, correctedSelection, predecessor } =
+    seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    access.catalog.completeCatalogReview(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+    );
+    const profile = access.encodingProfiles.list({
+      mediaDomain: "dvd_video",
+      activeOnly: true,
+    })[0]!;
+    const recoveryId = "synthetic-encode-conflict-recovery";
+    markArchiveWithDvdRecoveryEvidence(
+      fixture.databasePath,
+      archive.id,
+      "encode-conflict-parity",
+      {
+        archiveRecovery: {
+          id: recoveryId,
+          workStatus: "claimed",
+        },
+      },
+    );
+    const mutationKey = "synthetic-encode-conflict-enqueue";
+    const outputPath = join(
+      fixture.mediaLibraryPath,
+      "encode-conflict-parity.mkv",
+    );
+    const config = () => ({
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      webTrustedOrigin: trustedOrigin,
+    });
+    const webPreview = await createEncodeJobsRoute(new Request(
+      `${trustedOrigin}/api/encode-jobs`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+        },
+        body: JSON.stringify({
+          action: "preview_requeue",
+          encodeJobId: predecessor.id,
+        }),
+      },
+    ), () => access, config);
+    const cliPreview = await fixture.run([
+      "encode-requeue-preview",
+      "--encode-job-id",
+      predecessor.id,
+    ]);
+    expect(webPreview.status).toBe(409);
+    expect(cliPreview.exitCode).toBe(2);
+    expect(cliPreview.result).toEqual(await webPreview.json());
+    expect(cliPreview.result).toMatchObject({
+      error: {
+        code: "ENCODE_WORK_CONFLICT",
+        current: {
+          archiveRecovery: { id: recoveryId },
+        },
+      },
+    });
+
+    const web = await createEncodeJobsRoute(new Request(
+      `${trustedOrigin}/api/encode-jobs`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+        },
+        body: JSON.stringify({
+          mutationKey,
+          discSelectionId: correctedSelection.id,
+          encodingProfileId: profile.id,
+          outputPath,
+        }),
+      },
+    ), () => access, config);
+    const cli = await fixture.run([
+      "encode-enqueue",
+      "--key",
+      mutationKey,
+      "--disc-selection-id",
+      correctedSelection.id,
+      "--encoding-profile-id",
+      profile.id,
+      "--output-path",
+      outputPath,
+    ]);
+
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toMatchObject({
+      error: {
+        code: "ENCODE_WORK_CONFLICT",
+        blockingReasons: [{ code: "ENCODE_WORK_CONFLICT" }],
+        current: {
+          archiveRecovery: {
+            id: recoveryId,
+            originalDiscArchiveId: archive.id,
+            work: {
+              status: "claimed",
+            },
+          },
+          encodeJobs: [],
+        },
+      },
+    });
+    expect(JSON.stringify(cli.result)).not.toContain("claimToken");
+    expect(JSON.stringify(cli.result)).not.toContain("claimedBy");
+    expect(access.encodeJobs.list()).toHaveLength(1);
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    expect(sqlite.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE key = ?
+    `).get(mutationKey)).toEqual({ count: 0 });
+    sqlite.close();
+
+    const archiveWeb = createOperationsResponse(
+      access,
+      new Request(
+        `${trustedOrigin}/api/operations?kind=original-disc-archives&id=${archive.id}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    const archiveCli = await fixture.run([
+      "inspect",
+      "original-disc-archives",
+      archive.id,
+    ]);
+    expect(archiveCli.result).toEqual(await archiveWeb.json());
+    expect(archiveCli.result).toMatchObject({
+      item: {
+        archiveRecovery: {
+          currentWork: {
+            recovery: expect.objectContaining({ status: "claimed" }),
+            encodeJobs: [],
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(archiveCli.result)).not.toContain("claimToken");
+    expect(JSON.stringify(archiveCli.result)).not.toContain("claimedBy");
+
+    const encodeWeb = createOperationsResponse(
+      access,
+      new Request(
+        `${trustedOrigin}/api/operations?kind=encode-jobs&id=${predecessor.id}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    const encodeCli = await fixture.run([
+      "inspect",
+      "encode-jobs",
+      predecessor.id,
+    ]);
+    expect(encodeCli.result).toEqual(await encodeWeb.json());
+    expect(encodeCli.result).toMatchObject({
+      item: {
+        currentWork: {
+          recovery: {
+            id: recoveryId,
+            work: expect.objectContaining({ status: "claimed" }),
+          },
+        },
+        availableActions: expect.arrayContaining([
+          expect.objectContaining({
+            name: "requeue",
+            eligible: false,
+            blockingReasons: [expect.objectContaining({
+              code: "ENCODE_WORK_CONFLICT",
+            })],
+          }),
+        ]),
+      },
+    });
+    expect(JSON.stringify(encodeCli.result)).not.toContain("claimToken");
+    expect(JSON.stringify(encodeCli.result)).not.toContain("claimedBy");
   } finally {
     access.close();
     fixture.dispose();

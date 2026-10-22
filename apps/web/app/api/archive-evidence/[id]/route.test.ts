@@ -12,6 +12,10 @@ import { DatabaseSync } from "node:sqlite";
 import { expect, it } from "vitest";
 import { defaultArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import {
+  ENCODE_JOB_LEASE_DURATION_MS,
+  type OriginalDiscArchiveId,
+} from "@rip-dvd/data-access";
+import {
   commitDvdRecoveryBatch,
   type DvdRecoveryAtomicWriter,
 } from "../../../../../archive-worker/src/dvd-recovery-batch.js";
@@ -111,6 +115,18 @@ function prepareEligibleRecovery(
   }
 }
 
+function claimRecovery(
+  access: ReturnType<ReturnType<typeof createOperatorWorkflowFixture>["openAccess"]>,
+  archiveId: OriginalDiscArchiveId,
+) {
+  const recovery = access.catalog.findArchiveRecovery(archiveId);
+  if (recovery === null) throw new Error("Expected Archive Recovery");
+  return access.archiveRecoveryWork.claim(
+    recovery.id,
+    "synthetic-recovery-worker",
+  );
+}
+
 it.each(["clean", "damaged", "long", "historical", "missing"])("matches CLI evidence and paging for %s", async (kind) => {
   const fixture = createOperatorWorkflowFixture();
   const ranges = kind === "long" ? Array.from({ length: 113 }, (_, index) => ({ startLba: index * 2, sectorCount: 1, classification: "skipped_untested" as const })) : kind === "damaged" ? [{ startLba: 8, sectorCount: 64, classification: "skipped_untested" as const }] : [];
@@ -169,6 +185,86 @@ it("keeps web and CLI evidence reads unavailable throughout a writer interval", 
   }
 });
 
+it("rejects a recovery batch without a current durable work claim", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const saved = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  prepareEligibleRecovery(fixture, saved.archive.id, [{
+    startLba: 10,
+    sectorCount: 1,
+  }]);
+  const access = fixture.openAccess();
+  const imageBefore = readFileSync(saved.archive.archivePath);
+  try {
+    const staleClaim = claimRecovery(access, saved.archive.id);
+    access.archiveRecoveryWork.release(staleClaim);
+    await expect(commitDvdRecoveryBatch({
+      access,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      originalDiscArchiveId: saved.archive.id,
+      recoveryWorkClaim: staleClaim,
+      observation: {
+        startLba: 10,
+        outcome: "recovered",
+        bytes: Buffer.alloc(2_048, 0x61),
+      },
+      atomicWriter: {
+        inspect() { throw new Error("Stale work must fail before image I/O"); },
+        write() { throw new Error("Stale work must fail before image I/O"); },
+      },
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+    expect(readFileSync(saved.archive.archivePath)).toEqual(imageBefore);
+    expect(existsSync(join(saved.directory, "recovery-journal.bin"))).toBe(false);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+}, RECOVERY_TEST_TIMEOUT_MS);
+
+it("rejects a recovery batch whose durable claim is released before mutation", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const saved = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  prepareEligibleRecovery(fixture, saved.archive.id, [{
+    startLba: 10,
+    sectorCount: 1,
+  }]);
+  const access = fixture.openAccess();
+  const imageBefore = readFileSync(saved.archive.archivePath);
+  try {
+    recordSupportedRecoveryStorage(access);
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
+    await expect(commitDvdRecoveryBatch({
+      access,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      originalDiscArchiveId: saved.archive.id,
+      recoveryWorkClaim,
+      observation: {
+        startLba: 10,
+        outcome: "recovered",
+        bytes: Buffer.alloc(2_048, 0x62),
+      },
+      atomicWriter: syntheticAtomicWriter,
+      fault(point) {
+        if (point === "before:journal") {
+          access.archiveRecoveryWork.release(recoveryWorkClaim);
+        }
+      },
+    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+    expect(readFileSync(saved.archive.archivePath)).toEqual(imageBefore);
+    expect(existsSync(join(saved.directory, "recovery-journal.bin"))).toBe(false);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+}, RECOVERY_TEST_TIMEOUT_MS);
+
 it("commits one recovered sector through the worker and shared web/CLI evidence read", async () => {
   const fixture = createOperatorWorkflowFixture();
   const saved = await seedCommittedArchiveEvidence(fixture, [{
@@ -183,11 +279,24 @@ it("commits one recovered sector through the worker and shared web/CLI evidence 
   const access = fixture.openAccess();
   try {
     recordSupportedRecoveryStorage(access);
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
+    const recoveryDatabase = new DatabaseSync(fixture.databasePath);
+    recoveryDatabase.prepare(`
+      UPDATE archive_recovery_work
+      SET claimed_at = ?, updated_at = ?
+      WHERE archive_recovery_id = ?
+    `).run(
+      Date.now() - ENCODE_JOB_LEASE_DURATION_MS - 1,
+      Date.now() - ENCODE_JOB_LEASE_DURATION_MS - 1,
+      recoveryWorkClaim.archiveRecoveryId,
+    );
+    recoveryDatabase.close();
     const recovered = Buffer.alloc(2_048, 0x7b);
     const committed = await commitDvdRecoveryBatch({
       access,
       originalsLibraryPath: fixture.originalsLibraryPath,
       originalDiscArchiveId: saved.archive.id,
+      recoveryWorkClaim,
       observation: { startLba: 10, outcome: "recovered", bytes: recovered },
       atomicWriter: syntheticAtomicWriter,
     });
@@ -249,11 +358,13 @@ it("records a failed source read without mutating the archive image", async () =
   const access = fixture.openAccess();
   try {
     recordSupportedRecoveryStorage(access);
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
     const before = readFileSync(saved.archive.archivePath);
     await commitDvdRecoveryBatch({
       access,
       originalsLibraryPath: fixture.originalsLibraryPath,
       originalDiscArchiveId: saved.archive.id,
+      recoveryWorkClaim,
       observation: { startLba: 10, outcome: "failed" },
       atomicWriter: {
         inspect() { throw new Error("A failed source read must not inspect mutation support"); },
@@ -297,10 +408,12 @@ it("writes every atomic unit needed to cover one recovered sector", async () => 
   const writes: number[] = [];
   try {
     recordSupportedRecoveryStorage(access, 1_024);
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
     await commitDvdRecoveryBatch({
       access,
       originalsLibraryPath: fixture.originalsLibraryPath,
       originalDiscArchiveId: saved.archive.id,
+      recoveryWorkClaim,
       observation: {
         startLba: 10,
         outcome: "recovered",
@@ -353,10 +466,12 @@ it("rejects a batch at the final readable checkpoint before mutation", async () 
     },
   };
   try {
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
     await expect(commitDvdRecoveryBatch({
       access: cappedAccess,
       originalsLibraryPath: fixture.originalsLibraryPath,
       originalDiscArchiveId: saved.archive.id,
+      recoveryWorkClaim,
       observation: {
         startLba: 10,
         outcome: "recovered",
@@ -389,10 +504,12 @@ it("rejects a partial protected-unit write without projecting recovery", async (
   const access = fixture.openAccess();
   try {
     recordSupportedRecoveryStorage(access);
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
     await expect(commitDvdRecoveryBatch({
       access,
       originalsLibraryPath: fixture.originalsLibraryPath,
       originalDiscArchiveId: saved.archive.id,
+      recoveryWorkClaim,
       observation: {
         startLba: 10,
         outcome: "recovered",
@@ -434,10 +551,12 @@ it.each([
   const access = fixture.openAccess();
   try {
     recordSupportedRecoveryStorage(access);
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
     await expect(commitDvdRecoveryBatch({
       access,
       originalsLibraryPath: fixture.originalsLibraryPath,
       originalDiscArchiveId: saved.archive.id,
+      recoveryWorkClaim,
       observation: {
         startLba: 10,
         outcome: "recovered",

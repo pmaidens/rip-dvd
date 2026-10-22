@@ -40,6 +40,7 @@ import {
   DomainInvariantError,
   DvdRecoveryEvidenceAdmissionClosedError,
   DvdRecoveryEvidenceEncodingUnavailableError,
+  EncodeWorkConflictError,
   ENCODE_JOB_LEASE_DURATION_MS,
   InvalidStatusTransitionError,
   MAX_DVD_TITLES,
@@ -53,11 +54,13 @@ import {
 } from "./disc-settling-fixture.js";
 import type {
   ArchiveJobId,
+  ArchiveRecoveryId,
   ArchiveRequestId,
   DetectedDiscId,
   DiscKind,
   DiscInspectionId,
   DiscSelectionId,
+  DvdUnrecoveredSourceRange,
   EncodeJobId,
   EncodeOutputFilesystemIdentity,
   MediaItemId,
@@ -67,6 +70,8 @@ import type {
 } from "./index.js";
 import type { EncodingProfileId } from "./index.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
+import { createDataAccessInternal } from "./internal/create-data-access.js";
+import { createLegacySidecarImportAccess } from "./internal/legacy-sidecar-migration.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -121,11 +126,13 @@ type ConcurrentWorkerResult =
         | "created"
         | "enqueued"
         | "rejected"
+        | "requested"
         | "reviewed"
         | "skipped"
         | "started"
         | "versioned";
       id?: string;
+      code?: string;
       version?: number;
     }
   | null;
@@ -158,9 +165,22 @@ type ConcurrentOperation = (
       encodingProfileId: EncodingProfileId;
       outputPath: string;
     }
+  | {
+      operation: "requeue-encode";
+      encodeJobId: EncodeJobId;
+      mutationKey: string;
+    }
   | { operation: "cancel-encode"; encodeJobId: EncodeJobId }
   | { operation: "complete-encode"; claim: RunningEncodeJob }
   | { operation: "claim-encode" }
+  | {
+      operation: "queue-stale-and-claim-encode";
+      encodeJobId: EncodeJobId;
+    }
+  | {
+      operation: "request-archive-recovery";
+      archiveRecoveryId: ArchiveRecoveryId;
+    }
   | {
       operation: "complete-catalog-review";
       originalDiscArchiveId: OriginalDiscArchiveId;
@@ -199,6 +219,7 @@ type ConcurrentOperation = (
 
 type BarrierWorkerOptions = {
   databasePath: string;
+  allowDvdRecoveryEvidenceEncodingForExclusionTest?: boolean;
 } & (
   | { mode: "open"; count: number }
   | { mode: "operation"; operations: readonly ConcurrentOperation[] }
@@ -229,6 +250,8 @@ async function runBarrierWorkers(
             databasePath,
             mode,
             workerId: `${mode}-worker-${index}`,
+            allowDvdRecoveryEvidenceEncodingForExclusionTest:
+              options.allowDvdRecoveryEvidenceEncodingForExclusionTest,
             ...operation,
           },
         },
@@ -316,6 +339,16 @@ function openTestDatabase(databasePath = createTestDatabasePath()) {
   return createLegacySidecarDataAccess({ databasePath });
 }
 
+function openEncodeExclusionTestDatabase(databasePath: string) {
+  // Production admission remains closed. This internal-only seam exercises
+  // the exclusion that must still hold when later encoding gates open.
+  return createDataAccessInternal(
+    { databasePath },
+    { createAccess: createLegacySidecarImportAccess },
+    { allowDvdRecoveryEvidenceEncodingForExclusionTest: true },
+  );
+}
+
 function markArchiveWithDvdRecoveryEvidence(
   databasePath: string,
   originalDiscArchiveId: string,
@@ -324,6 +357,8 @@ function markArchiveWithDvdRecoveryEvidence(
     boundaryEvidenceDigest?: string;
     manifestDigest?: string;
     unrecoveredSourceRangesDigest?: string;
+    archiveRecoveryId?: string;
+    unrecoveredSourceRanges?: readonly DvdUnrecoveredSourceRange[];
   } = {},
 ): void {
   const sqlite = new DatabaseSync(databasePath);
@@ -441,6 +476,14 @@ function markArchiveWithDvdRecoveryEvidence(
       createDvdArchiveBoundaryEvidenceDigest(boundaryEvidence);
     const boundaryDigest =
       digestOverrides.boundaryEvidenceDigest ?? calculatedBoundaryDigest;
+    const unrecoveredSourceRanges = digestOverrides.unrecoveredSourceRanges ??
+      (digestOverrides.archiveRecoveryId === undefined
+        ? []
+        : [{
+          startLba: 0,
+          sectorCount: 1,
+          classification: "skipped_untested" as const,
+        }]);
     const {
       unrecoveredSourceRangesDigest: sourceRangesDigest,
       manifestDigest,
@@ -459,7 +502,7 @@ function markArchiveWithDvdRecoveryEvidence(
       boundaryReportedSizeBytes: archive.boundary_reported_size_bytes,
       boundaryPublishedSizeBytes: archive.boundary_published_size_bytes,
       boundaryEvidenceDigest: boundaryDigest,
-      unrecoveredSourceRanges: [],
+      unrecoveredSourceRanges,
     });
     sqlite.prepare(`
       INSERT INTO disc_inspections (
@@ -512,7 +555,7 @@ function markArchiveWithDvdRecoveryEvidence(
         boundary_published_size_bytes, boundary_evidence_digest,
         unrecovered_source_ranges, unrecovered_source_ranges_digest,
         manifest_digest, created_at
-      ) VALUES (?, ?, 1, ?, ?, 2048, ?, ?, ?, ?, ?, '[]', ?, ?, 1)
+      ) VALUES (?, ?, 1, ?, ?, 2048, ?, ?, ?, ?, ?, ?, ?, ?, 1)
     `).run(
       manifestId,
       originalDiscArchiveId,
@@ -523,6 +566,7 @@ function markArchiveWithDvdRecoveryEvidence(
       archive.boundary_reported_size_bytes,
       archive.boundary_published_size_bytes,
       boundaryDigest,
+      JSON.stringify(unrecoveredSourceRanges),
       digestOverrides.unrecoveredSourceRangesDigest ?? sourceRangesDigest,
       digestOverrides.manifestDigest ?? manifestDigest,
     );
@@ -547,6 +591,36 @@ function markArchiveWithDvdRecoveryEvidence(
       manifestId,
       digestOverrides.manifestDigest ?? manifestDigest,
     );
+    if (digestOverrides.archiveRecoveryId !== undefined) {
+      const badSectorRanges = unrecoveredSourceRanges.map(
+        ({ startLba, sectorCount }) => ({ startLba, sectorCount }),
+      );
+      sqlite.prepare(`
+        UPDATE original_disc_archives
+        SET integrity = 'incomplete_read',
+            integrity_evidence_revision = 1,
+            integrity_policy_version = ?,
+            bad_sector_count = ?,
+            bad_area_count = ?,
+            bad_sector_ranges = ?,
+            bad_sector_counts_by_title = NULL
+        WHERE id = ?
+      `).run(
+        DVD_RECOVERY_EVIDENCE_FORMAT,
+        badSectorRanges.reduce(
+          (total, range) => total + range.sectorCount,
+          0,
+        ),
+        badSectorRanges.length,
+        JSON.stringify(badSectorRanges),
+        originalDiscArchiveId,
+      );
+      sqlite.prepare(`
+        INSERT INTO archive_recoveries (
+          id, original_disc_archive_id, status, created_at, updated_at
+        ) VALUES (?, ?, 'eligible', 1, 1)
+      `).run(digestOverrides.archiveRecoveryId, originalDiscArchiveId);
+    }
   } finally {
     sqlite.close();
   }
@@ -968,6 +1042,7 @@ describe("data-access facade", () => {
         "archive_audit_findings",
         "archive_audit_runs",
         "archive_recoveries",
+        "archive_recovery_work",
         "archive_requests",
         "disc_inspection_attempts",
         "disc_inspections",
@@ -984,7 +1059,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(35);
+    expect(identifierTables).toHaveLength(36);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -8762,6 +8837,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261022044144_icy_barracuda",
+        },
+        {
           name: "20261019204228_dvd-initial-save",
         },
         {
@@ -8787,9 +8865,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20260930002622_wandering_micromax",
-        },
-        {
-          name: "20260929225801_lonely_microchip",
         },
       ]);
     expect(
@@ -13587,6 +13662,503 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ]);
     replayCheck.close();
   });
+
+  it("rejects an Archive Recovery work reservation for a different archive", () => {
+    const databasePath = createTestDatabasePath();
+    const first = createDiscSelectionCorrectionFixture({
+      databasePath,
+      key: "recovery-work-pair-first",
+      contentIdFill: "a",
+    });
+    first.access.close();
+    const second = createDiscSelectionCorrectionFixture({
+      databasePath,
+      key: "recovery-work-pair-second",
+      contentIdFill: "b",
+    });
+    second.access.close();
+    const firstRecoveryId =
+      "recovery-work-pair-first" as ArchiveRecoveryId;
+    const secondRecoveryId =
+      "recovery-work-pair-second" as ArchiveRecoveryId;
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      first.archive.id,
+      "recovery-work-pair-first",
+      { archiveRecoveryId: firstRecoveryId },
+    );
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      second.archive.id,
+      "recovery-work-pair-second",
+      { archiveRecoveryId: secondRecoveryId },
+    );
+
+    const sqlite = new DatabaseSync(databasePath);
+    expect(() => sqlite.prepare(`
+      INSERT INTO archive_recovery_work (
+        archive_recovery_id, original_disc_archive_id, status, requested_at,
+        created_at, updated_at
+      ) VALUES (?, ?, 'requested', 1, 1, 1)
+    `).run(firstRecoveryId, second.archive.id)).toThrow(/foreign key/i);
+    expect(sqlite.prepare(`
+      SELECT archive_recovery_id
+      FROM archive_recovery_work
+    `).all()).toEqual([]);
+    sqlite.close();
+  });
+
+  it("blocks recovery request and claim when Encode Job work already owns the archive", () => {
+    const databasePath = createTestDatabasePath();
+    const { access, archive, mistakenSelection } =
+      createDiscSelectionCorrectionFixture({
+        databasePath,
+        key: "encode-first-recovery-exclusion",
+      });
+    const profile = access.encodingProfiles.create({
+      key: "encode-first-recovery-exclusion",
+      displayName: "Encode first recovery exclusion",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    const queued = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Encode First Recovery Exclusion.mkv",
+    });
+    const recoveryId =
+      "encode-first-recovery" as ArchiveRecoveryId;
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      archive.id,
+      "encode-first-recovery-exclusion",
+      { archiveRecoveryId: recoveryId },
+    );
+
+    for (const attempt of [
+      () => access.archiveRecoveryWork.request(recoveryId),
+      () => access.archiveRecoveryWork.claim(
+        recoveryId,
+        "encode-first-recovery-worker",
+      ),
+    ]) {
+      expect(attempt).toThrow(EncodeWorkConflictError);
+      try {
+        attempt();
+      } catch (error) {
+        expect(error).toMatchObject({
+          code: "ENCODE_WORK_CONFLICT",
+          current: {
+            archiveRecovery: {
+              id: recoveryId,
+              originalDiscArchiveId: archive.id,
+              work: null,
+            },
+            encodeJobs: [{ id: queued.id, status: "queued" }],
+          },
+        });
+      }
+    }
+    expect(access.encodeJobs.find(queued.id)).toMatchObject({
+      status: "queued",
+    });
+    expect(access.catalog.findArchiveRecovery(archive.id)).toMatchObject({
+      id: recoveryId,
+      work: null,
+    });
+
+    access.encodeJobs.requestCancellation(queued.id);
+    expect(access.archiveRecoveryWork.request(recoveryId)).toMatchObject({
+      archiveRecoveryId: recoveryId,
+      status: "requested",
+    });
+    access.close();
+  });
+
+  it("blocks enqueue, requeue, and stale claims while recovery owns the archive", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
+    const databasePath = createTestDatabasePath();
+    const { access, archive, mistakenSelection } =
+      createDiscSelectionCorrectionFixture({
+        databasePath,
+        key: "recovery-first-encode-exclusion",
+      });
+    const profile = access.encodingProfiles.create({
+      key: "recovery-first-encode-exclusion",
+      displayName: "Recovery first encode exclusion",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    const failed = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Recovery First Encode Exclusion.mkv",
+    });
+    const failedClaim = access.encodeJobs.claimNext(
+      "recovery-first-encode-worker",
+    );
+    if (failedClaim === null) throw new Error("Expected Encode Job claim");
+    access.encodeJobs.fail(failedClaim, "Synthetic Encode failure");
+    const staleProfile = access.encodingProfiles.create({
+      key: "recovery-first-stale-claim",
+      displayName: "Recovery first stale claim",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    const stale = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: staleProfile.id,
+      outputPath: "/media/movies/Recovery First Stale Claim.mkv",
+    });
+    const stalePreparationClaim = access.encodeJobs.claimNext(
+      "recovery-first-stale-preparation",
+    );
+    if (stalePreparationClaim === null) {
+      throw new Error("Expected stale Encode Job preparation claim");
+    }
+    access.encodeJobs.fail(
+      stalePreparationClaim,
+      "Synthetic stale queue preparation",
+    );
+    const recoveryId =
+      "recovery-first-recovery" as ArchiveRecoveryId;
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      archive.id,
+      "recovery-first-encode-exclusion",
+      { archiveRecoveryId: recoveryId },
+    );
+    expect(access.archiveRecoveryWork.request(recoveryId)).toMatchObject({
+      status: "requested",
+      requestedAt: new Date("2026-09-01T12:00:00.000Z"),
+    });
+    const recoveryClaim = access.archiveRecoveryWork.claim(
+      recoveryId,
+      "synthetic-recovery-worker",
+    );
+    expect(recoveryClaim).toMatchObject({
+      archiveRecoveryId: recoveryId,
+      status: "claimed",
+      claimedBy: "synthetic-recovery-worker",
+    });
+
+    const enqueueMutationKey =
+      "00000000-0000-4000-8000-000000000436";
+    const requeueMutationKey =
+      "00000000-0000-4000-8000-000000000437";
+    for (const attempt of [
+      () => access.encodeJobs.enqueue({
+        mutationKey: enqueueMutationKey,
+        discSelectionId: mistakenSelection.id,
+        encodingProfileId: profile.id,
+        outputPath: "/media/movies/Recovery First Fresh Encode.mkv",
+      }),
+      () => access.encodeJobs.requeue(failed.id, {
+        mutationKey: requeueMutationKey,
+      }),
+    ]) {
+      expect(attempt).toThrow(EncodeWorkConflictError);
+      try {
+        attempt();
+      } catch (error) {
+        expect(error).toMatchObject({
+          code: "ENCODE_WORK_CONFLICT",
+          current: {
+            archiveRecovery: {
+              id: recoveryId,
+              originalDiscArchiveId: archive.id,
+              work: expect.objectContaining({ status: "claimed" }),
+            },
+            encodeJobs: [],
+          },
+        });
+      }
+    }
+    expect(access.encodeJobs.find(failed.id)).toMatchObject({
+      status: "failed",
+    });
+    const staleQueue = new DatabaseSync(databasePath);
+    staleQueue.prepare(`
+      UPDATE encode_jobs
+      SET status = 'queued',
+          progress_phase = NULL,
+          progress_percent = 0,
+          progress_eta_seconds = NULL,
+          claimed_by = NULL,
+          claim_token = NULL,
+          claimed_at = NULL,
+          started_at = NULL,
+          completed_at = NULL,
+          error_message = NULL,
+          updated_at = ?
+      WHERE id = ?
+    `).run(Date.now(), stale.id);
+    staleQueue.close();
+    expect(access.encodeJobs.claimNext("stale-queue-worker")).toBeNull();
+    expect(access.encodeJobs.find(stale.id)).toMatchObject({ status: "queued" });
+
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+    access.close();
+    const restarted = openTestDatabase(databasePath);
+    expect(() => restarted.encodeJobs.requeue(failed.id, {
+      mutationKey: "00000000-0000-4000-8000-000000000438",
+    })).toThrow(EncodeWorkConflictError);
+    expect(restarted.catalog.findArchiveRecovery(archive.id)).toMatchObject({
+      work: expect.objectContaining({
+        status: "claimed",
+        claimToken: recoveryClaim.claimToken,
+      }),
+    });
+    expect(restarted.archiveRecoveryWork.assertClaim(recoveryClaim))
+      .toMatchObject({
+        id: recoveryId,
+        work: expect.objectContaining({
+          claimToken: recoveryClaim.claimToken,
+        }),
+      });
+    expect(restarted.archiveRecoveryWork.release(recoveryClaim)).toMatchObject({
+      id: recoveryId,
+      work: null,
+    });
+    expect(() => restarted.archiveRecoveryWork.assertClaim(recoveryClaim))
+      .toThrow(StaleJobAttemptError);
+    expect(() => restarted.encodeJobs.requeue(failed.id, {
+      mutationKey: "00000000-0000-4000-8000-000000000439",
+    })).toThrow(DvdRecoveryEvidenceEncodingUnavailableError);
+
+    const replayCheck = new DatabaseSync(databasePath);
+    expect(replayCheck.prepare(`
+      SELECT key
+      FROM mutation_invocations
+      WHERE key IN (?, ?, ?)
+      ORDER BY key
+    `).all(
+      enqueueMutationKey,
+      requeueMutationKey,
+      "00000000-0000-4000-8000-000000000438",
+    )).toEqual([]);
+    replayCheck.close();
+    restarted.close();
+  });
+
+  it("keeps queue resolution unavailable across restart when the evidence gate opens", () => {
+    const databasePath = createTestDatabasePath();
+    const { access, archive, mistakenSelection } =
+      createDiscSelectionCorrectionFixture({
+        databasePath,
+        key: "recovery-queue-resolution",
+      });
+    const profile = access.encodingProfiles.create({
+      key: "recovery-queue-resolution",
+      displayName: "Recovery queue resolution",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    const failed = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Recovery Queue Resolution.mkv",
+    });
+    const encodeClaim = access.encodeJobs.claimNext(
+      "recovery-queue-resolution-preparation",
+    );
+    if (encodeClaim === null) throw new Error("Expected Encode Job claim");
+    access.encodeJobs.fail(encodeClaim, "Synthetic terminal Encode Job");
+    const recoveryId = "recovery-queue-resolution" as ArchiveRecoveryId;
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      archive.id,
+      "recovery-queue-resolution",
+      { archiveRecoveryId: recoveryId },
+    );
+    access.close();
+
+    const assertResolutionConflict = () => {
+      const gateOpen = openEncodeExclusionTestDatabase(databasePath);
+      try {
+        expect(() => gateOpen.encodeJobs.resolveQueueLogicalJobs({
+          discSelectionIds: [mistakenSelection.id],
+          encodingProfileId: profile.id,
+        })).toThrow(EncodeWorkConflictError);
+        try {
+          gateOpen.encodeJobs.resolveQueueLogicalJobs({
+            discSelectionIds: [mistakenSelection.id],
+            encodingProfileId: profile.id,
+          });
+        } catch (error) {
+          expect(error).toMatchObject({
+            code: "ENCODE_WORK_CONFLICT",
+            current: {
+              archiveRecovery: {
+                id: recoveryId,
+                originalDiscArchiveId: archive.id,
+                work: { status: "requested" },
+              },
+              encodeJobs: [],
+            },
+          });
+        }
+        expect(gateOpen.encodeJobs.find(failed.id)).toMatchObject({
+          status: "failed",
+        });
+      } finally {
+        gateOpen.close();
+      }
+    };
+
+    const gateOpen = openEncodeExclusionTestDatabase(databasePath);
+    expect(gateOpen.archiveRecoveryWork.request(recoveryId)).toMatchObject({
+      archiveRecoveryId: recoveryId,
+      status: "requested",
+    });
+    gateOpen.close();
+    assertResolutionConflict();
+    assertResolutionConflict();
+  });
+
+  it.each([
+    ["enqueue", "recovery-first", 0, 150],
+    ["enqueue", "encode-first", 150, 0],
+    ["requeue", "recovery-first", 0, 150],
+    ["requeue", "encode-first", 150, 0],
+    ["claim", "recovery-first", 0, 150],
+    ["claim", "encode-first", 150, 0],
+  ] as const)(
+    "atomically resolves the %s race with %s ordering",
+    async (operation, ordering, recoveryDelayMs, encodeDelayMs) => {
+      const databasePath = createTestDatabasePath();
+      const { access, archive, mistakenSelection } =
+        createDiscSelectionCorrectionFixture({
+          databasePath,
+          key: `recovery-${operation}-race-${ordering}`,
+        });
+      const profile = access.encodingProfiles.create({
+        key: `recovery-${operation}-race-${ordering}`,
+        displayName: `Recovery ${operation} race ${ordering}`,
+        mediaDomain: "dvd_video",
+        settings: { preset: "Fast 480p30" },
+      });
+      const recoveryId =
+        `recovery-${operation}-race-${ordering}` as ArchiveRecoveryId;
+      const existingJob = operation === "enqueue"
+        ? null
+        : access.encodeJobs.enqueue({
+          discSelectionId: mistakenSelection.id,
+          encodingProfileId: profile.id,
+          outputPath:
+            `/media/movies/Recovery ${operation} Race ${ordering}.mkv`,
+        });
+      if (
+        operation === "requeue" ||
+        (operation === "claim" && ordering === "recovery-first")
+      ) {
+        const claim = access.encodeJobs.claimNext(
+          `recovery-${operation}-race-preparation-${ordering}`,
+        );
+        if (claim === null) throw new Error("Expected Encode Job claim");
+        access.encodeJobs.fail(claim, "Synthetic race predecessor failure");
+      }
+      markArchiveWithDvdRecoveryEvidence(
+        databasePath,
+        archive.id,
+        `recovery-${operation}-race-${ordering}`,
+        { archiveRecoveryId: recoveryId },
+      );
+      access.close();
+      const exclusionAccess = openEncodeExclusionTestDatabase(databasePath);
+
+      const encodeOperation: ConcurrentOperation = operation === "enqueue"
+        ? {
+          operation: "enqueue-encode",
+          discSelectionId: mistakenSelection.id,
+          encodingProfileId: profile.id,
+          outputPath:
+            `/media/movies/Recovery Enqueue Race Fresh ${ordering}.mkv`,
+          delayMs: encodeDelayMs,
+        }
+        : operation === "requeue"
+        ? {
+          operation: "requeue-encode",
+          encodeJobId: existingJob!.id,
+          mutationKey: `recovery-requeue-race-${ordering}`,
+          delayMs: encodeDelayMs,
+        }
+        : ordering === "recovery-first"
+        ? {
+          operation: "queue-stale-and-claim-encode",
+          encodeJobId: existingJob!.id,
+          delayMs: encodeDelayMs,
+        }
+        : { operation: "claim-encode", delayMs: encodeDelayMs };
+
+      const results = await runBarrierWorkers({
+        databasePath,
+        allowDvdRecoveryEvidenceEncodingForExclusionTest: true,
+        mode: "operation",
+        operations: [
+          {
+            operation: "request-archive-recovery",
+            archiveRecoveryId: recoveryId,
+            delayMs: recoveryDelayMs,
+          },
+          encodeOperation,
+        ],
+      });
+
+      if (operation === "claim" && ordering === "encode-first") {
+        expect(results[0]).toEqual({
+          outcome: "rejected",
+          code: "ENCODE_WORK_CONFLICT",
+        });
+        expect(results[1]).toMatchObject({ outcome: "claimed" });
+        expect(
+          exclusionAccess.catalog.findArchiveRecovery(archive.id),
+        ).toMatchObject({ id: recoveryId, work: null });
+        expect(exclusionAccess.encodeJobs.list()).toEqual([
+          expect.objectContaining({
+            id: existingJob!.id,
+            status: "running",
+          }),
+        ]);
+      } else if (ordering === "recovery-first") {
+        expect(results[0]).toEqual({ outcome: "requested", id: recoveryId });
+        expect(results[1]).toEqual(operation === "claim"
+          ? { outcome: "rejected" }
+          : { outcome: "rejected", code: "ENCODE_WORK_CONFLICT" });
+        expect(
+          exclusionAccess.catalog.findArchiveRecovery(archive.id),
+        ).toMatchObject({
+          id: recoveryId,
+          work: expect.objectContaining({ status: "requested" }),
+        });
+        expect(exclusionAccess.encodeJobs.list()).toEqual(operation === "enqueue"
+          ? []
+          : [expect.objectContaining({
+            id: existingJob!.id,
+            status: operation === "requeue" ? "failed" : "queued",
+          })]);
+      } else {
+        expect(results[0]).toEqual({
+          outcome: "rejected",
+          code: "ENCODE_WORK_CONFLICT",
+        });
+        expect(results[1]).toMatchObject({
+          outcome: "enqueued",
+        });
+        expect(
+          exclusionAccess.catalog.findArchiveRecovery(archive.id),
+        ).toMatchObject({ id: recoveryId, work: null });
+        expect(exclusionAccess.encodeJobs.list()).toEqual([
+          expect.objectContaining({
+            ...(existingJob === null ? {} : { id: existingJob.id }),
+            status: "queued",
+          }),
+        ]);
+      }
+      exclusionAccess.close();
+    },
+  );
 
   it("keeps marked DVD evidence work closed at scheduling and worker mutation boundaries", () => {
     const databasePath = createTestDatabasePath();

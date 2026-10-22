@@ -8,6 +8,7 @@ import type {
   ARCHIVE_FORMATS,
   ARCHIVE_INTEGRITIES,
   ARCHIVE_RECOVERY_STATUSES,
+  ARCHIVE_RECOVERY_WORK_STATUSES,
   CATALOG_REVIEW_OUTCOMES,
   DETECTED_DISC_STATUSES,
   DISC_KINDS,
@@ -63,6 +64,8 @@ export type DvdUnrecoveredSourceClassification =
   (typeof DVD_UNRECOVERED_SOURCE_CLASSIFICATIONS)[number];
 export type ArchiveRecoveryStatus =
   (typeof ARCHIVE_RECOVERY_STATUSES)[number];
+export type ArchiveRecoveryWorkStatus =
+  (typeof ARCHIVE_RECOVERY_WORK_STATUSES)[number];
 export type CatalogReviewOutcome = (typeof CATALOG_REVIEW_OUTCOMES)[number];
 export type CompletedCatalogReviewOutcome = Exclude<
   CatalogReviewOutcome,
@@ -176,6 +179,7 @@ export type DetectedDiscId = DomainId<"DetectedDisc">;
 export type ArchiveRequestId = DomainId<"ArchiveRequest">;
 export type OriginalDiscArchiveId = DomainId<"OriginalDiscArchive">;
 export type ArchiveRecoveryId = DomainId<"ArchiveRecovery">;
+export type ArchiveRecoveryClaimToken = DomainId<"ArchiveRecoveryClaim">;
 export type MediaItemId = DomainId<"MediaItem">;
 export type DiscSelectionId = DomainId<"DiscSelection">;
 export type EncodingProfileId = DomainId<"EncodingProfile">;
@@ -404,8 +408,38 @@ export interface ArchiveRecovery {
   id: ArchiveRecoveryId;
   originalDiscArchiveId: OriginalDiscArchiveId;
   status: ArchiveRecoveryStatus;
+  work: ArchiveRecoveryWork | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface ArchiveRecoveryWork {
+  archiveRecoveryId: ArchiveRecoveryId;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  status: ArchiveRecoveryWorkStatus;
+  requestedAt: Date | null;
+  claimedBy: string | null;
+  claimToken: ArchiveRecoveryClaimToken | null;
+  claimedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type ClaimedArchiveRecoveryWork = ArchiveRecoveryWork & {
+  status: "claimed";
+  claimedBy: string;
+  claimToken: ArchiveRecoveryClaimToken;
+  claimedAt: Date;
+};
+
+export interface ArchiveRecoveryWorkAccess {
+  request(id: ArchiveRecoveryId): ArchiveRecoveryWork;
+  claim(
+    id: ArchiveRecoveryId,
+    workerId: string,
+  ): ClaimedArchiveRecoveryWork;
+  assertClaim(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
+  release(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
 }
 
 export interface UnreadableSectorRange {
@@ -1583,6 +1617,7 @@ export interface DvdInitialArchiveSave {
 }
 
 export interface DvdRecoveryCheckpointProjection {
+  claim: ClaimedArchiveRecoveryWork;
   recoveryRead: import("./dvd-archive-evidence-digests.js").DvdArchiveRecoveryReadEvidenceDigestInput & {
     id: string;
     evidenceDigest: string;
@@ -2063,6 +2098,7 @@ export interface DataAccess {
   readonly discInspections: DiscInspectionAccess;
   readonly archiveRequests: ArchiveRequestAccess;
   readonly archiveJobs: ArchiveJobAccess;
+  readonly archiveRecoveryWork: ArchiveRecoveryWorkAccess;
   readonly encodeJobs: EncodeJobAccess;
   readonly workerIncidents: WorkerIncidentAccess;
   readonly filesystemVerification: FilesystemVerificationAccess;

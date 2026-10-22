@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   type AnySQLiteColumn,
   check,
+  foreignKey,
   index,
   integer,
   primaryKey,
@@ -21,6 +22,7 @@ import {
   ARCHIVE_FORMATS,
   ARCHIVE_INTEGRITIES,
   ARCHIVE_RECOVERY_STATUSES,
+  ARCHIVE_RECOVERY_WORK_STATUSES,
   CATALOG_REVIEW_OUTCOMES,
   DETECTED_DISC_STATUSES,
   DISC_INSPECTION_ATTEMPT_OUTCOMES,
@@ -73,7 +75,9 @@ import type {
   ArchiveJobId,
   ArchiveJobClaimToken,
   ArchiveRecoveryId,
+  ArchiveRecoveryClaimToken,
   ArchiveRecoveryStatus,
+  ArchiveRecoveryWorkStatus,
   ArchiveReadFailureCategory,
   ArchiveReadFailureStage,
   DetectedDiscId,
@@ -1326,9 +1330,61 @@ export const archiveRecoveries = sqliteTable(
     check("archive_recoveries_id_not_null", sql`${table.id} is not null`),
     uniqueIndex("archive_recoveries_archive_unique")
       .on(table.originalDiscArchiveId),
+    uniqueIndex("archive_recoveries_identity_unique")
+      .on(table.id, table.originalDiscArchiveId),
     check(
       "archive_recoveries_status_check",
       sql`${table.status} in (${sqliteStringLiterals(ARCHIVE_RECOVERY_STATUSES)})`,
+    ),
+  ],
+);
+
+export const archiveRecoveryWork = sqliteTable(
+  "archive_recovery_work",
+  {
+    archiveRecoveryId: text("archive_recovery_id")
+      .$type<ArchiveRecoveryId>()
+      .notNull()
+      .primaryKey(),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .unique()
+      .references(() => dvdArchiveEvidenceHeaders.originalDiscArchiveId, {
+        onDelete: "restrict",
+      }),
+    status: text("status", { enum: ARCHIVE_RECOVERY_WORK_STATUSES })
+      .$type<ArchiveRecoveryWorkStatus>()
+      .notNull(),
+    requestedAt: integer("requested_at", { mode: "timestamp_ms" }),
+    claimedBy: text("claimed_by"),
+    claimToken: text("claim_token").$type<ArchiveRecoveryClaimToken>(),
+    claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.archiveRecoveryId, table.originalDiscArchiveId],
+      foreignColumns: [
+        archiveRecoveries.id,
+        archiveRecoveries.originalDiscArchiveId,
+      ],
+      name: "archive_recovery_work_recovery_archive_fk",
+    }).onDelete("restrict"),
+    index("archive_recovery_work_queue_idx")
+      .on(table.status, table.requestedAt, table.createdAt),
+    check(
+      "archive_recovery_work_id_not_null",
+      sql`${table.archiveRecoveryId} is not null`,
+    ),
+    check(
+      "archive_recovery_work_status_check",
+      sql`${table.status} in (${sqliteStringLiterals(ARCHIVE_RECOVERY_WORK_STATUSES)})`,
+    ),
+    check(
+      "archive_recovery_work_claim_check",
+      sql`(${table.status} = 'requested' and ${table.requestedAt} is not null and ${table.claimedBy} is null and ${table.claimToken} is null and ${table.claimedAt} is null) or (${table.status} = 'claimed' and ${table.claimedBy} is not null and ${table.claimToken} is not null and ${table.claimedAt} is not null)`,
     ),
   ],
 );

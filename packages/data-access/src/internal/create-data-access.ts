@@ -64,6 +64,7 @@ import {
   archiveRequests,
   archiveJobs,
   archiveRecoveries,
+  archiveRecoveryWork,
   archiveAuditFindings,
   archiveAuditRuns,
   correctedEncodePublicationAuthorities,
@@ -133,6 +134,12 @@ import {
   DvdRecoveryEvidenceEncodingUnavailableError,
 } from "../dvd-recovery-evidence.js";
 import {
+  ACTIVE_ENCODE_WORK_STATUSES,
+  EncodeWorkConflictError,
+  createEncodeWorkConflictCurrent,
+  type EncodeWorkConflictCurrent,
+} from "../archive-recovery-work.js";
+import {
   assertDvdRecoveryStoragePreflightInput,
   DVD_RECOVERY_STORAGE_PREFLIGHT_VERSION,
   type DvdRecoveryStoragePreflight,
@@ -201,6 +208,10 @@ import type {
   ArchiveJobListOptions,
   ArchiveJobStatus,
   ArchiveJobProgress,
+  ArchiveRecovery,
+  ArchiveRecoveryClaimToken,
+  ArchiveRecoveryId,
+  ArchiveRecoveryWork,
   ArchiveReadFailureCategory,
   ArchiveRequestId,
   ArchiveRequest,
@@ -209,6 +220,7 @@ import type {
   CatalogReviewCompletionPreviewDecisionInput,
   CatalogReviewCoverage,
   ClaimedEncodeJob,
+  ClaimedArchiveRecoveryWork,
   ChronologicalListOptions,
   ConsistentReadAccess,
   CreateDiscSelectionInput,
@@ -1053,6 +1065,7 @@ export function createDataAccessInternal(
 export function createDataAccessInternal(
   options: CreateDataAccessOptions,
   legacySidecarMigration: LegacySidecarMigrationAdapter,
+  testOptions?: { allowDvdRecoveryEvidenceEncodingForExclusionTest?: boolean },
 ): LegacySidecarDataAccess;
 export function createDataAccessInternal(
   {
@@ -1064,6 +1077,7 @@ export function createDataAccessInternal(
     filesystemPathProbe = createBoundedFilesystemPathProbe(),
   }: CreateDataAccessOptions,
   legacySidecarMigration?: LegacySidecarMigrationAdapter,
+  testOptions?: { allowDvdRecoveryEvidenceEncodingForExclusionTest?: boolean },
 ): DataAccess | LegacySidecarDataAccess {
   const normalizedDatabasePath = requireNonEmpty(databasePath, "databasePath");
   const normalizedOriginalsLibraryPath =
@@ -1165,6 +1179,9 @@ export function createDataAccessInternal(
     from sqlite_schema
     where type = 'table' and name = 'dvd_archive_evidence_headers'
   `).get() !== undefined;
+  const dvdRecoveryEvidenceEncodingGateClosed =
+    hasDvdRecoveryEvidenceSchema &&
+    testOptions?.allowDvdRecoveryEvidenceEncodingForExclusionTest !== true;
   const dvdRecoveryEvidenceMarkerCondition = (
     querySource: Pick<typeof database, "select">,
     archiveId: AnySQLiteColumn,
@@ -1188,8 +1205,123 @@ export function createDataAccessInternal(
         )),
     ),
   );
+  const findArchiveRecoveryRecord = (
+    querySource: Pick<typeof database, "select">,
+    options: {
+      archiveRecoveryId?: ArchiveRecoveryId;
+      originalDiscArchiveId?: OriginalDiscArchiveId;
+    },
+  ): ArchiveRecovery | null => {
+    const conditions = [
+      options.archiveRecoveryId === undefined
+        ? undefined
+        : eq(archiveRecoveries.id, options.archiveRecoveryId),
+      options.originalDiscArchiveId === undefined
+        ? undefined
+        : eq(
+          archiveRecoveries.originalDiscArchiveId,
+          options.originalDiscArchiveId,
+        ),
+    ].filter((condition) => condition !== undefined);
+    const recovery = querySource
+      .select()
+      .from(archiveRecoveries)
+      .where(and(...conditions))
+      .get();
+    if (recovery === undefined) return null;
+    const work = querySource
+      .select()
+      .from(archiveRecoveryWork)
+      .where(eq(archiveRecoveryWork.archiveRecoveryId, recovery.id))
+      .get() ?? null;
+    return { ...recovery, work };
+  };
+  const listActiveEncodeWorkForArchive = (
+    querySource: Pick<typeof database, "select">,
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ) => querySource
+    .select({
+      id: encodeJobs.id,
+      status: encodeJobs.status,
+      createdAt: encodeJobs.createdAt,
+    })
+    .from(encodeJobs)
+    .innerJoin(
+      discSelections,
+      eq(discSelections.id, encodeJobs.discSelectionId),
+    )
+    .where(and(
+      eq(discSelections.originalDiscArchiveId, originalDiscArchiveId),
+      inArray(encodeJobs.status, ACTIVE_ENCODE_WORK_STATUSES),
+    ))
+    .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
+    .all();
+  const encodeWorkConflictCurrent = (
+    querySource: Pick<typeof database, "select">,
+    recovery: ArchiveRecovery,
+  ): EncodeWorkConflictCurrent => createEncodeWorkConflictCurrent(
+    recovery,
+    listActiveEncodeWorkForArchive(
+      querySource,
+      recovery.originalDiscArchiveId,
+    ),
+  );
+  const requireNoActiveEncodeWork = (
+    querySource: Pick<typeof database, "select">,
+    recovery: ArchiveRecovery,
+  ): void => {
+    const current = encodeWorkConflictCurrent(querySource, recovery);
+    if (current.encodeJobs.length > 0) {
+      throw new EncodeWorkConflictError(current);
+    }
+  };
+  const requireNoArchiveRecoveryWork = (
+    querySource: Pick<typeof database, "select">,
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): void => {
+    const recovery = findArchiveRecoveryRecord(querySource, {
+      originalDiscArchiveId,
+    });
+    if (recovery !== null && recovery.work !== null) {
+      throw new EncodeWorkConflictError(
+        encodeWorkConflictCurrent(querySource, recovery),
+      );
+    }
+  };
+  const requireCurrentArchiveRecoveryClaim = (
+    querySource: Pick<typeof database, "select">,
+    claim: ClaimedArchiveRecoveryWork,
+  ): ArchiveRecovery => {
+    const recovery = findArchiveRecoveryRecord(querySource, {
+      archiveRecoveryId: claim.archiveRecoveryId,
+      originalDiscArchiveId: claim.originalDiscArchiveId,
+    });
+    if (
+      recovery?.work?.status !== "claimed" ||
+      recovery.work.claimToken !== claim.claimToken ||
+      recovery.work.claimedBy !== claim.claimedBy
+    ) {
+      throw new StaleJobAttemptError(
+        "Archive Recovery work",
+        claim.archiveRecoveryId,
+      );
+    }
+    return recovery;
+  };
+  const noArchiveRecoveryWorkCondition = (
+    querySource: Pick<typeof database, "select">,
+    originalDiscArchiveId: AnySQLiteColumn,
+  ) => notExists(
+    querySource
+      .select({ id: archiveRecoveryWork.archiveRecoveryId })
+      .from(archiveRecoveryWork)
+      .where(eq(
+        archiveRecoveryWork.originalDiscArchiveId,
+        originalDiscArchiveId,
+      )),
+  );
   const dvdRecoveryEvidenceEncodeExclusion = {
-    rawSql: !hasDvdRecoveryEvidenceSchema
+    rawSql: !dvdRecoveryEvidenceEncodingGateClosed
       ? ""
       : `and not exists (
           select 1
@@ -1205,7 +1337,7 @@ export function createDataAccessInternal(
               '${DVD_RECOVERY_EVIDENCE_FORMAT}'
         )`,
     forArchive: (querySource: Pick<typeof database, "select">) =>
-      hasDvdRecoveryEvidenceSchema
+      dvdRecoveryEvidenceEncodingGateClosed
         ? sql`not ${dvdRecoveryEvidenceMarkerCondition(
             querySource,
             originalDiscArchives.id,
@@ -1217,6 +1349,20 @@ export function createDataAccessInternal(
     id: EncodeJobId,
   ): void => {
     if (!hasDvdRecoveryEvidenceSchema) return;
+    const targetArchive = querySource
+      .select({ id: discSelections.originalDiscArchiveId })
+      .from(encodeJobs)
+      .innerJoin(
+        discSelections,
+        eq(discSelections.id, encodeJobs.discSelectionId),
+      )
+      .where(eq(encodeJobs.id, id))
+      .limit(1)
+      .get();
+    if (targetArchive !== undefined) {
+      requireNoArchiveRecoveryWork(querySource, targetArchive.id);
+    }
+    if (!dvdRecoveryEvidenceEncodingGateClosed) return;
     const evidenceArchive = querySource
       .select({ id: discSelections.originalDiscArchiveId })
       .from(encodeJobs)
@@ -1241,7 +1387,19 @@ export function createDataAccessInternal(
     querySource: Pick<typeof database, "select">,
     discSelectionIds: readonly DiscSelectionId[],
   ): void => {
-    if (!hasDvdRecoveryEvidenceSchema || discSelectionIds.length === 0) return;
+    if (discSelectionIds.length === 0) return;
+    const archiveIds = new Set(
+      querySource
+        .select({ id: discSelections.originalDiscArchiveId })
+        .from(discSelections)
+        .where(inArray(discSelections.id, discSelectionIds))
+        .all()
+        .map(({ id }) => id),
+    );
+    for (const archiveId of archiveIds) {
+      requireNoArchiveRecoveryWork(querySource, archiveId);
+    }
+    if (!dvdRecoveryEvidenceEncodingGateClosed) return;
     const evidenceArchive = querySource
       .select({ id: discSelections.originalDiscArchiveId })
       .from(discSelections)
@@ -4236,6 +4394,10 @@ export function createDataAccessInternal(
                 "reviewed_with_selections",
               ),
               eq(originalDiscArchives.legacyCutoverPending, false),
+              noArchiveRecoveryWorkCondition(
+                transaction,
+                originalDiscArchives.id,
+              ),
               dvdRecoveryEvidenceEncodeExclusion.forArchive(transaction),
               or(
                 isNull(encodeJobs.predecessorEncodeJobId),
@@ -4313,6 +4475,10 @@ export function createDataAccessInternal(
                       "reviewed_with_selections",
                     ),
                     eq(originalDiscArchives.legacyCutoverPending, false),
+                    noArchiveRecoveryWorkCondition(
+                      transaction,
+                      originalDiscArchives.id,
+                    ),
                     dvdRecoveryEvidenceEncodeExclusion.forArchive(
                       transaction,
                     ),
@@ -4762,7 +4928,8 @@ export function createDataAccessInternal(
     reader: RearchiveProposalReader,
     originalDiscArchiveId: OriginalDiscArchiveId,
   ): DvdEvidenceReplacementEncodingCapability {
-    if (hasDvdRecoveryEvidenceSchema) {
+    requireNoArchiveRecoveryWork(reader, originalDiscArchiveId);
+    if (dvdRecoveryEvidenceEncodingGateClosed) {
       const markedArchive = reader
         .select({ id: originalDiscArchives.id })
         .from(originalDiscArchives)
@@ -6827,7 +6994,7 @@ export function createDataAccessInternal(
     notifications: createNotificationAccess(database, now),
     dvdRecovery: {
       projectCheckpoint(input) {
-        const { manifest, recoveryRead } = input;
+        const { claim, manifest, recoveryRead } = input;
         assertDvdArchiveRecoveryReadEvidenceDigest(
           recoveryRead,
           recoveryRead.evidenceDigest,
@@ -6836,6 +7003,7 @@ export function createDataAccessInternal(
         if (
           manifest.originalDiscArchiveId !==
             recoveryRead.originalDiscArchiveId ||
+          claim.originalDiscArchiveId !== manifest.originalDiscArchiveId ||
           manifest.revision !== recoveryRead.fromManifestRevision + 1 ||
           manifest.previousManifestId !== recoveryRead.fromManifestId ||
           manifest.recoveryReadId !== recoveryRead.id ||
@@ -6849,6 +7017,7 @@ export function createDataAccessInternal(
 
         const archiveId = manifest.originalDiscArchiveId as OriginalDiscArchiveId;
         database.transaction((transaction) => {
+          requireCurrentArchiveRecoveryClaim(transaction, claim);
           const current = requireRow(
             transaction
               .select({
@@ -7023,6 +7192,157 @@ export function createDataAccessInternal(
           );
         }
         return recorded;
+      },
+    },
+    archiveRecoveryWork: {
+      request(id) {
+        return database.transaction((transaction) => {
+          const recovery = findArchiveRecoveryRecord(transaction, {
+            archiveRecoveryId: id,
+          });
+          if (recovery === null) {
+            throw new RecordNotFoundError("Archive Recovery", id);
+          }
+          if (recovery.status !== "eligible") {
+            throw new InvalidStatusTransitionError(
+              "Archive Recovery",
+              recovery.status,
+              "requested",
+            );
+          }
+          if (recovery.work?.status === "claimed") {
+            throw new InvalidStatusTransitionError(
+              "Archive Recovery work",
+              "claimed",
+              "requested",
+            );
+          }
+          if (recovery.work !== null) return recovery.work;
+          requireNoActiveEncodeWork(transaction, recovery);
+          const timestamp = now();
+          return requireRow(
+            transaction
+              .insert(archiveRecoveryWork)
+              .values({
+                archiveRecoveryId: recovery.id,
+                originalDiscArchiveId: recovery.originalDiscArchiveId,
+                status: "requested",
+                requestedAt: timestamp,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .returning()
+              .get(),
+            "Archive Recovery work",
+            recovery.id,
+          );
+        }, { behavior: "immediate" });
+      },
+      claim(id, workerId) {
+        const claimedBy = requireNonEmpty(workerId, "workerId");
+        return database.transaction((transaction) => {
+          const recovery = findArchiveRecoveryRecord(transaction, {
+            archiveRecoveryId: id,
+          });
+          if (recovery === null) {
+            throw new RecordNotFoundError("Archive Recovery", id);
+          }
+          if (recovery.status !== "eligible") {
+            throw new InvalidStatusTransitionError(
+              "Archive Recovery",
+              recovery.status,
+              "claimed",
+            );
+          }
+          if (recovery.work?.status === "claimed") {
+            throw new InvalidStatusTransitionError(
+              "Archive Recovery work",
+              "claimed",
+              "claimed",
+            );
+          }
+          requireNoActiveEncodeWork(transaction, recovery);
+          const timestamp = now();
+          const claimToken = newId<ArchiveRecoveryClaimToken>();
+          const claimed = recovery.work === null
+            ? transaction
+              .insert(archiveRecoveryWork)
+              .values({
+                archiveRecoveryId: recovery.id,
+                originalDiscArchiveId: recovery.originalDiscArchiveId,
+                status: "claimed",
+                requestedAt: null,
+                claimedBy,
+                claimToken,
+                claimedAt: timestamp,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .returning()
+              .get()
+            : transaction
+              .update(archiveRecoveryWork)
+              .set({
+                status: "claimed",
+                claimedBy,
+                claimToken,
+                claimedAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .where(and(
+                eq(archiveRecoveryWork.archiveRecoveryId, recovery.id),
+                eq(archiveRecoveryWork.status, "requested"),
+              ))
+              .returning()
+              .get();
+          if (
+            claimed === undefined ||
+            claimed.status !== "claimed" ||
+            claimed.claimedBy === null ||
+            claimed.claimToken === null ||
+            claimed.claimedAt === null
+          ) {
+            throw new DomainInvariantError(
+              "Archive Recovery work could not be claimed",
+            );
+          }
+          return claimed as ClaimedArchiveRecoveryWork;
+        }, { behavior: "immediate" });
+      },
+      assertClaim(claim) {
+        return requireCurrentArchiveRecoveryClaim(database, claim);
+      },
+      release(claim) {
+        return database.transaction((transaction) => {
+          const removed = transaction
+            .delete(archiveRecoveryWork)
+            .where(and(
+              eq(
+                archiveRecoveryWork.archiveRecoveryId,
+                claim.archiveRecoveryId,
+              ),
+              eq(archiveRecoveryWork.status, "claimed"),
+              eq(archiveRecoveryWork.claimToken, claim.claimToken),
+            ))
+            .returning()
+            .get();
+          if (removed === undefined) {
+            throw new StaleJobAttemptError(
+              "Archive Recovery work",
+              claim.archiveRecoveryId,
+            );
+          }
+          const recovery = findArchiveRecoveryRecord(transaction, {
+            archiveRecoveryId: claim.archiveRecoveryId,
+          });
+          if (recovery === null) {
+            throw new RecordNotFoundError(
+              "Archive Recovery",
+              claim.archiveRecoveryId,
+            );
+          }
+          return recovery;
+        }, { behavior: "immediate" });
       },
     },
     readConsistentSnapshot(read) {
@@ -8652,11 +8972,9 @@ export function createDataAccessInternal(
 
       findArchiveRecovery(id) {
         if (!hasDvdRecoveryEvidenceSchema) return null;
-        return database
-          .select()
-          .from(archiveRecoveries)
-          .where(eq(archiveRecoveries.originalDiscArchiveId, id))
-          .get() ?? null;
+        return findArchiveRecoveryRecord(database, {
+          originalDiscArchiveId: id,
+        });
       },
 
       listCatalogReviewArchives(options) {
@@ -13851,7 +14169,14 @@ export function createDataAccessInternal(
         const validatedArchive = database.transaction(
           (transaction) => {
             const selectionReview = selectReviewState(transaction);
-            if (selectionReview.evidenceFormat !== null) {
+            requireNoArchiveRecoveryWork(
+              transaction,
+              selectionReview.originalDiscArchiveId,
+            );
+            if (
+              dvdRecoveryEvidenceEncodingGateClosed &&
+              selectionReview.evidenceFormat !== null
+            ) {
               throw new DvdRecoveryEvidenceEncodingUnavailableError();
             }
             requireCompletedReview(selectionReview);
@@ -13870,7 +14195,14 @@ export function createDataAccessInternal(
             );
             if (replay) return replay;
             const selectionReview = selectReviewState(transaction);
-            if (selectionReview.evidenceFormat !== null) {
+            requireNoArchiveRecoveryWork(
+              transaction,
+              selectionReview.originalDiscArchiveId,
+            );
+            if (
+              dvdRecoveryEvidenceEncodingGateClosed &&
+              selectionReview.evidenceFormat !== null
+            ) {
               throw new DvdRecoveryEvidenceEncodingUnavailableError();
             }
             requireCompletedReview(selectionReview);

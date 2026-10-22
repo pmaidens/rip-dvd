@@ -1,5 +1,9 @@
 import {
+  activeEncodeWorkIdentities,
+  archiveRecoveryWorkIdentity,
+  createEncodeWorkConflictCurrent,
   DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
+  ENCODE_WORK_CONFLICT,
   DVD_RECOVERY_EVIDENCE_ADMISSION,
   DVD_RECOVERY_EVIDENCE_ENCODING,
   dvdRecoveryEvidenceFormatForArchive,
@@ -9,6 +13,7 @@ import {
   withAuthoritativeDvdArchiveIntegrity,
   type ArchiveJob,
   type ArchiveJobId,
+  type ArchiveRecovery,
   type ArchiveAuditRun,
   type ArchiveAuditRunId,
   type ArchiveAuditRunSummary,
@@ -22,6 +27,7 @@ import {
   type DiscInspectionId,
   type EncodeJob,
   type EncodeJobId,
+  type EncodeWorkConflictCurrent,
   type FilesystemVerificationRun,
   type FilesystemVerificationRunId,
   type OriginalDiscArchive,
@@ -106,6 +112,15 @@ function visibleInspection({ claimToken: _claimToken, ...inspection }: DiscInspe
 
 function visibleArchiveJob({ claimToken: _claimToken, claimedBy: _claimedBy, ...job }: ArchiveJob) {
   return job;
+}
+
+function visibleArchiveRecovery(recovery: ArchiveRecovery) {
+  return {
+    ...recovery,
+    work: recovery.work === null
+      ? null
+      : archiveRecoveryWorkIdentity(recovery.work),
+  };
 }
 
 function presentEncodeJob(
@@ -410,6 +425,7 @@ export function encodeRequeueAvailability(
   selectionBlockingReason: {
     code: string;
     message: string;
+    current?: EncodeWorkConflictCurrent;
   } = {
     code: "INVALID_TRANSITION",
     message: "Requires an active Disc Selection with completed Catalog Review.",
@@ -432,10 +448,12 @@ export function encodeRequeueAvailability(
     return blocked(`Encode Job is ${job.status}.`);
   }
   if (!selectionEligible) {
-    return blocked(
-      selectionBlockingReason.message,
-      selectionBlockingReason.code,
-    );
+    return {
+      eligible: false,
+      requiredInputs,
+      reason: selectionBlockingReason.message,
+      blockingReasons: [selectionBlockingReason],
+    };
   }
   if (job.partialCleanupOutputPath !== null ||
     job.partialCleanupClaimToken !== null || job.partialCleanupLeaseToken !== null) {
@@ -734,6 +752,7 @@ function readDetail(
       const encodeJobs = discSelections.flatMap((selection) =>
         access.encodeJobs.listForDiscSelection(selection.id)
       );
+      const conflictingEncodeJobs = activeEncodeWorkIdentities(encodeJobs);
       const rearchiveEligible = archive.discKind === "dvd";
       const rearchiveReason = rearchiveEligible
         ? null
@@ -757,22 +776,41 @@ function readDetail(
             imagePath: archive.archivePath,
             originalsLibraryPath: options.originalsLibraryPath,
           });
+      const recovery = evidenceFormat === null
+        ? null
+        : access.catalog.findArchiveRecovery(archive.id);
+      const encodeWorkConflict = conflictingEncodeJobs.length === 0
+        ? null
+        : {
+          code: ENCODE_WORK_CONFLICT.code,
+          message: ENCODE_WORK_CONFLICT.message,
+          current: { encodeJobs: conflictingEncodeJobs },
+        };
       return {
         ...visibleArchive(archive, evidenceHeaders),
         ...(recoveryStorage === null
           ? {}
           : {
             archiveRecovery: {
-              record: access.catalog.findArchiveRecovery(archive.id),
+              record: recovery === null
+                ? null
+                : visibleArchiveRecovery(recovery),
               available: false,
               blockingReasons: [
+                ...(ownership?.stableRead.blockingReasons ?? []),
+                ...(encodeWorkConflict === null ? [] : [encodeWorkConflict]),
                 {
                   code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
                   message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
                 },
                 ...recoveryStorage.blockingReasons,
-                ...(ownership?.stableRead.blockingReasons ?? []),
               ],
+              currentWork: {
+                recovery: recovery?.work === undefined || recovery.work === null
+                  ? null
+                  : archiveRecoveryWorkIdentity(recovery.work),
+                encodeJobs: conflictingEncodeJobs,
+              },
               storage: recoveryStorage,
               ...(ownership === null ? {} : { ownership }),
             },
@@ -833,11 +871,29 @@ function readDetail(
           evidenceHeaders.get(selection.originalDiscArchiveId),
           access.archiveJobs.listForArchive(selection.originalDiscArchiveId),
         ) !== null;
+      const recovery = selection === undefined
+        ? null
+        : access.catalog.findArchiveRecovery(selection.originalDiscArchiveId);
+      const recoveryWork = recovery?.work ?? null;
+      const recoveryConflict = recoveryWork === null || recovery === null
+        ? null
+        : {
+          ...ENCODE_WORK_CONFLICT,
+          current: createEncodeWorkConflictCurrent(
+            recovery,
+            access.catalog.listDiscSelections({
+              originalDiscArchiveId: recovery.originalDiscArchiveId,
+              includeHistorical: true,
+            }).flatMap(({ id }) => access.encodeJobs.listForDiscSelection(id)),
+          ),
+        };
       const requeue = encodeRequeueAvailability(
         access,
         job,
-        requeueSelectionEligible,
-        evidenceBlocked
+        requeueSelectionEligible && recoveryConflict === null,
+        recoveryConflict !== null
+          ? recoveryConflict
+          : evidenceBlocked
           ? DVD_RECOVERY_EVIDENCE_ENCODING
           : undefined,
       );
@@ -919,6 +975,19 @@ function readDetail(
           ...output,
           artifactIdentity: retainedEncodeOutputArtifactIdentity(output.id),
         })),
+        ...(recovery === null
+          ? {}
+          : {
+            currentWork: {
+              recovery: {
+                id: recovery.id,
+                originalDiscArchiveId: recovery.originalDiscArchiveId,
+                work: recovery.work === null
+                  ? null
+                  : archiveRecoveryWorkIdentity(recovery.work),
+              },
+            },
+          }),
         availableActions: encodeActions(job, requeue),
       };
     }

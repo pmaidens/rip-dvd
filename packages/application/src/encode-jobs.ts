@@ -1,8 +1,11 @@
 import {
+  createEncodeWorkConflictCurrent,
   discSelectionSourceDescription,
   dvdRecoveryEvidenceFormatForArchive,
   encodingProfileQueueBlockingReasons,
+  ENCODE_WORK_CONFLICT,
   DvdRecoveryEvidenceEncodingUnavailableError,
+  EncodeWorkConflictError,
   type ConsistentReadAccess,
   type DataAccess,
   type DiscSelection,
@@ -32,6 +35,20 @@ function requireEvidenceEncodingAvailable(
       ids: [discSelectionId],
       includeHistorical: true,
     })[0];
+    const recovery = selection === undefined
+      ? null
+      : snapshot.catalog.findArchiveRecovery(
+        selection.originalDiscArchiveId,
+      );
+    if (recovery !== null && recovery.work !== null) {
+      const encodeJobs = snapshot.catalog.listDiscSelections({
+        originalDiscArchiveId: recovery.originalDiscArchiveId,
+        includeHistorical: true,
+      }).flatMap(({ id }) => snapshot.encodeJobs.listForDiscSelection(id));
+      throw new EncodeWorkConflictError(
+        createEncodeWorkConflictCurrent(recovery, encodeJobs),
+      );
+    }
     if (
       selection !== undefined &&
       dvdRecoveryEvidenceFormatForArchive(
@@ -274,6 +291,24 @@ export function readQueueOptions(
       counts: selectionPage.counts,
       selections: selectionPage.selections.map((queueSelection) => {
         const selection = queueSelection.selection;
+        const recovery = snapshot.catalog.findArchiveRecovery(
+          selection.originalDiscArchiveId,
+        );
+        const recoveryConflict = recovery?.work === null ||
+            recovery === null
+          ? null
+          : {
+            ...ENCODE_WORK_CONFLICT,
+            current: createEncodeWorkConflictCurrent(
+              recovery,
+              snapshot.catalog.listDiscSelections({
+                originalDiscArchiveId: recovery.originalDiscArchiveId,
+                includeHistorical: true,
+              }).flatMap(({ id }) =>
+                snapshot.encodeJobs.listForDiscSelection(id)
+              ),
+            ),
+          };
         const mediaItem = mediaItemsById.get(selection.mediaItemId);
         const priorCompletedJob = queueSelection.priorCompletedJob;
         const priorCompletedProfile = queueSelection.priorCompletedProfile;
@@ -307,7 +342,17 @@ export function readQueueOptions(
           reason,
           blockingReasons: [{ code: "INVALID_TRANSITION", message: reason }],
         });
-        const queueAction = encodingProfileId === undefined
+        const queueAction = recoveryConflict !== null
+          ? {
+            name: logicalJob === null ? "enqueue" as const : "requeue" as const,
+            eligible: false,
+            requiredInputs: logicalJob === null
+              ? enqueueRequiredInputs
+              : ["mutationKey", "encodeJobId"],
+            reason: recoveryConflict.message,
+            blockingReasons: [recoveryConflict],
+          }
+          : encodingProfileId === undefined
           ? unavailableAction(
             "enqueue", enqueueRequiredInputs, "Select an Encoding Profile.",
           )
@@ -360,6 +405,9 @@ export function readQueueOptions(
           sourceDescription: discSelectionSourceDescription(
             selection.sourceIdentity,
           ),
+          ...(recoveryConflict === null
+            ? {}
+            : { currentWork: recoveryConflict.current }),
           hasCompletedEncode: queueSelection.hasCompletedEncode,
           priorCompletedJob:
             priorCompletedJob === null || priorCompletedProfile === null

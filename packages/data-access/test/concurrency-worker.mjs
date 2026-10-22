@@ -1,20 +1,31 @@
 import { parentPort, workerData } from "node:worker_threads";
+import { DatabaseSync } from "node:sqlite";
 
 import {
   createDataAccess,
   DomainInvariantError,
+  DvdRecoveryEvidenceEncodingUnavailableError,
+  EncodeWorkConflictError,
   InvalidStatusTransitionError,
 } from "../dist/index.js";
 import { createLegacySidecarDataAccess } from "../dist/legacy-sidecars.js";
+import { createDataAccessInternal } from "../dist/internal/create-data-access.js";
+import { createLegacySidecarImportAccess } from "../dist/internal/legacy-sidecar-migration.js";
 
 const barrier = new Int32Array(workerData.barrier);
 let access;
 
 try {
   if (workerData.mode !== "open") {
-    access = createLegacySidecarDataAccess({
-      databasePath: workerData.databasePath,
-    });
+    access = workerData.allowDvdRecoveryEvidenceEncodingForExclusionTest
+      ? createDataAccessInternal(
+        { databasePath: workerData.databasePath },
+        { createAccess: createLegacySidecarImportAccess },
+        { allowDvdRecoveryEvidenceEncodingForExclusionTest: true },
+      )
+      : createLegacySidecarDataAccess({
+        databasePath: workerData.databasePath,
+      });
   }
 
   parentPort.postMessage({ type: "ready" });
@@ -92,12 +103,32 @@ try {
         value: { outcome: "enqueued", id: job.id },
       });
     } catch (error) {
-      if (!(error instanceof DomainInvariantError)) {
+      if (!(error instanceof DomainInvariantError) &&
+        !(error instanceof DvdRecoveryEvidenceEncodingUnavailableError)) {
         throw error;
       }
       parentPort.postMessage({
         type: "result",
-        value: { outcome: "rejected" },
+        value: { outcome: "rejected", code: error.code },
+      });
+    }
+  } else if (workerData.operation === "requeue-encode") {
+    try {
+      const job = access.encodeJobs.requeue(workerData.encodeJobId, {
+        mutationKey: workerData.mutationKey,
+      });
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "enqueued", id: job.id },
+      });
+    } catch (error) {
+      if (!(error instanceof DomainInvariantError) &&
+        !(error instanceof DvdRecoveryEvidenceEncodingUnavailableError)) {
+        throw error;
+      }
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "rejected", code: error.code },
       });
     }
   } else if (workerData.operation === "cancel-encode") {
@@ -140,6 +171,50 @@ try {
         ? { outcome: "claimed", id: claim.id }
         : { outcome: "rejected" },
     });
+  } else if (workerData.operation === "queue-stale-and-claim-encode") {
+    const staleQueue = new DatabaseSync(workerData.databasePath);
+    try {
+      staleQueue.prepare(`
+        UPDATE encode_jobs
+        SET status = 'queued',
+            progress_phase = NULL,
+            progress_percent = 0,
+            progress_eta_seconds = NULL,
+            claimed_by = NULL,
+            claim_token = NULL,
+            claimed_at = NULL,
+            started_at = NULL,
+            completed_at = NULL,
+            error_message = NULL,
+            updated_at = ?
+        WHERE id = ?
+      `).run(Date.now(), workerData.encodeJobId);
+    } finally {
+      staleQueue.close();
+    }
+    const claim = access.encodeJobs.claimNext(workerData.workerId);
+    parentPort.postMessage({
+      type: "result",
+      value: claim
+        ? { outcome: "claimed", id: claim.id }
+        : { outcome: "rejected" },
+    });
+  } else if (workerData.operation === "request-archive-recovery") {
+    try {
+      const work = access.archiveRecoveryWork.request(
+        workerData.archiveRecoveryId,
+      );
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "requested", id: work.archiveRecoveryId },
+      });
+    } catch (error) {
+      if (!(error instanceof EncodeWorkConflictError)) throw error;
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "rejected", code: error.code },
+      });
+    }
   } else if (workerData.operation === "complete-catalog-review") {
     try {
       const archive = access.catalog.completeCatalogReview(

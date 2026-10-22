@@ -1773,6 +1773,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     id: "evidence-new-format-recovery",
     originalDiscArchiveId: "evidence-new-format-archive",
     status: "eligible",
+    work: null,
     createdAt: new Date(1),
     updatedAt: new Date(1),
   });
