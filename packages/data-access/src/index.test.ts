@@ -1222,6 +1222,7 @@ describe("data-access facade", () => {
         "dvd_recovery_reconciliations",
         "dvd_structural_assessments",
         "dvd_structural_check_attempts",
+        "dvd_title_damage_assessments",
         "dvd_recovery_storage_preflights",
         "dvd_source_sample_manifests",
         "dvd_title_identities",
@@ -9022,12 +9023,15 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 11",
+          "select name from __drizzle_migrations order by id desc limit 12",
         )
         .all(),
       ).toEqual([
         {
           name: "20261022185502_perfect_lily_hollister",
+        },
+        {
+          name: "20261022181444_mysterious_killer_shrike",
         },
         {
           name: "20261022100044_futuristic_cannonball",

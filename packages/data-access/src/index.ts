@@ -49,6 +49,7 @@ export type {
 export * from "./dvd-recovery-storage-preflight.js";
 export * from "./dvd-disc-verification.js";
 export * from "./dvd-structural-assessment.js";
+export * from "./dvd-title-damage-assessment.js";
 export {
   assertDvdArchiveBoundaryEvidenceDigest,
   assertDvdArchiveEvidenceManifestDigests,

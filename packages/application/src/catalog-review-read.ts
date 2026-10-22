@@ -119,6 +119,46 @@ function serializeTitleIdentity(
   };
 }
 
+function serializeTitleDamage(
+  inspection: ReturnType<
+    DataAccess["dvdTitleDamageAssessments"]["inspect"]
+  >,
+) {
+  if (
+    inspection.unavailableReasons.some((reason) =>
+      reason.code === "UNSUPPORTED_EVIDENCE_FORMAT"
+    )
+  ) {
+    return null;
+  }
+  const assessment = inspection.assessment;
+  if (assessment === null) {
+    return {
+      state: inspection.state,
+      checkpointRevision: inspection.checkpoint?.manifestRevision ?? null,
+      assessmentIdentity: null,
+      currentAssessmentIdentity: null,
+      items: [],
+      truncated: false,
+      unknownTitleImpact: null,
+      noTitleMissingSourceProved: false,
+      unavailableReasons: inspection.unavailableReasons,
+    };
+  }
+  const items = assessment.items.slice(0, 20);
+  return {
+    state: inspection.state,
+    checkpointRevision: assessment.checkpoint.manifestRevision,
+    assessmentIdentity: assessment.id,
+    currentAssessmentIdentity: inspection.currentAssessmentIdentity,
+    items,
+    truncated: items.length < assessment.items.length,
+    unknownTitleImpact: assessment.unknownTitleImpact,
+    noTitleMissingSourceProved: assessment.noTitleMissingSourceProved,
+    unavailableReasons: inspection.unavailableReasons,
+  };
+}
+
 export function serializeArchiveEvidence(
   archive: ReturnType<DataAccess["catalog"]["listOriginalDiscArchives"]>[number],
   discLabel: string | null,
@@ -230,6 +270,8 @@ export function readCatalogReview(
     );
     const titleIdentityReviewSet = snapshot.catalog
       .readDvdTitleIdentityReviewSet(id);
+    const titleDamageInspection = snapshot.dvdTitleDamageAssessments.inspect(id);
+    const titleDamage = serializeTitleDamage(titleDamageInspection);
     const archive = withAuthoritativeDvdArchiveIntegrity(
       persistedArchive,
       evidenceHeaders.get(id) ?? null,
@@ -460,6 +502,7 @@ export function readCatalogReview(
         evidenceHeaders.get(id) ?? null,
         titleIdentityReviewSet,
       ),
+      ...(titleDamage === null ? {} : { titleDamage }),
       coverage,
       reviewActionAvailability,
       ...(rearchiveProposal === null || rearchiveSourceDisc === undefined

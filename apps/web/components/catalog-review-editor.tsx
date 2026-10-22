@@ -15,6 +15,7 @@ import { CatalogReviewEvidence } from "./catalog-review-evidence";
 import { CatalogReviewMediaItems } from "./catalog-review-media-items";
 import { CatalogReviewRearchiveProposal } from "./catalog-review-rearchive-proposal";
 import { CatalogReviewTitleIdentity } from "./catalog-review-title-identity";
+import { CatalogReviewTitleDamageEvidence } from "./catalog-review-title-damage";
 import type {
   CatalogReviewLoadState,
   CatalogReviewRearchiveProposal as CatalogReviewRearchiveProposalDto,
@@ -189,6 +190,7 @@ export function CatalogReviewView({
       ) : null}
 
       <CatalogReviewTitleIdentity titleIdentity={review.titleIdentity} />
+      <CatalogReviewTitleDamageEvidence titleDamage={review.titleDamage} />
 
       {review.rearchiveProposal ? (
         <CatalogReviewRearchiveProposal

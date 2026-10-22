@@ -67,6 +67,9 @@ import type {
   DvdStructuralCheckAttempt,
   DvdStructuralFindingInput,
 } from "./dvd-structural-assessment.js";
+import type {
+  DvdTitleDamageAssessmentAccess,
+} from "./dvd-title-damage-assessment.js";
 
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
 export type ArchiveIntegrity = (typeof ARCHIVE_INTEGRITIES)[number];
@@ -2364,6 +2367,10 @@ export type SnapshotCatalogAccess = Pick<
 >;
 
 export interface ConsistentReadAccess {
+  readonly dvdTitleDamageAssessments: Pick<
+    DvdTitleDamageAssessmentAccess,
+    "inspect"
+  >;
   readonly dvdStructuralAssessments: Pick<
     DvdStructuralAssessmentAccess,
     "inspect"
@@ -2494,6 +2501,7 @@ export interface DataAccess {
     | null
   >;
   readonly dvdStructuralAssessments: DvdStructuralAssessmentAccess;
+  readonly dvdTitleDamageAssessments: DvdTitleDamageAssessmentAccess;
   readonly dvdRecoveryStorage: DvdRecoveryStorageAccess;
   readonly dvdRecoveryReconciliations: DvdRecoveryReconciliationAccess;
   readonly dvdDiscVerifications: DvdDiscVerificationAccess;

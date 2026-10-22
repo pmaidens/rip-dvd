@@ -69,6 +69,9 @@ import {
   type DvdStructuralValidity,
 } from "../dvd-structural-assessment.js";
 import type {
+  RecordDvdTitleDamageMappingInput,
+} from "../dvd-title-damage-assessment.js";
+import type {
   DvdDiscVerificationReasonCode,
   DvdDiscVerificationSampleFinding,
   DvdSourceSampleManifest,
@@ -1566,6 +1569,71 @@ export const dvdStructuralCheckAttempts = sqliteTable(
     check(
       "dvd_structural_check_attempts_shape_check",
       sql`(${table.outcome} = 'completed' and ${table.assessmentId} is not null and ${table.findings} is not null and json_valid(${table.findings}) and json_type(${table.findings}) = 'array' and json_array_length(${table.findings}) = 3 and ${table.failureCode} is null and ${table.failureMessage} is null) or (${table.outcome} = 'failed' and ${table.assessmentId} is null and ${table.findings} is null and typeof(${table.failureCode}) = 'text' and length(${table.failureCode}) between 1 and 128 and typeof(${table.failureMessage}) = 'text' and length(${table.failureMessage}) between 1 and 512)`,
+    ),
+  ],
+);
+
+export const dvdTitleDamageAssessments = sqliteTable(
+  "dvd_title_damage_assessments",
+  {
+    id: text("id").notNull().primaryKey(),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
+    manifestId: text("manifest_id")
+      .notNull()
+      .references(() => dvdArchiveEvidenceManifests.id, {
+        onDelete: "restrict",
+      }),
+    manifestRevision: integer("manifest_revision").notNull(),
+    manifestDigest: text("manifest_digest").notNull(),
+    acceptedEndLbaExclusive: integer("accepted_end_lba_exclusive")
+      .notNull(),
+    titleIdentityReviewSetIdentity: text(
+      "title_identity_review_set_identity",
+    ).notNull(),
+    structuralAssessmentIdentity: text("structural_assessment_identity")
+      .notNull()
+      .references(() => dvdStructuralAssessments.id, {
+        onDelete: "restrict",
+      }),
+    policyVersion: text("policy_version").notNull(),
+    titleMappings: text("title_mappings", { mode: "json" })
+      .$type<readonly RecordDvdTitleDamageMappingInput[]>()
+      .notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check(
+      "dvd_title_damage_assessments_id_not_null",
+      sql`${table.id} is not null`,
+    ),
+    index("dvd_title_damage_assessments_checkpoint_idx").on(
+      table.originalDiscArchiveId,
+      table.manifestRevision,
+      table.createdAt,
+      table.id,
+    ),
+    check(
+      "dvd_title_damage_assessments_identity_check",
+      sql`length(${table.id}) = 92 and substr(${table.id}, 1, 28) = 'dvd-title-damage-assessment:' and substr(${table.id}, 29) not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "dvd_title_damage_assessments_checkpoint_check",
+      sql`typeof(${table.manifestRevision}) = 'integer' and ${table.manifestRevision} > 0 and length(${table.manifestDigest}) = 64 and ${table.manifestDigest} not glob '*[^0-9a-f]*' and typeof(${table.acceptedEndLbaExclusive}) = 'integer' and ${table.acceptedEndLbaExclusive} > 0`,
+    ),
+    check(
+      "dvd_title_damage_assessments_dependency_check",
+      sql`length(${table.titleIdentityReviewSetIdentity}) = 64 and ${table.titleIdentityReviewSetIdentity} not glob '*[^0-9a-f]*' and length(${table.structuralAssessmentIdentity}) = 90 and substr(${table.structuralAssessmentIdentity}, 1, 26) = 'dvd-structural-assessment:' and substr(${table.structuralAssessmentIdentity}, 27) not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "dvd_title_damage_assessments_policy_check",
+      sql`${table.policyVersion} = 'dvd-title-damage-assessment-v1'`,
+    ),
+    check(
+      "dvd_title_damage_assessments_mappings_check",
+      sql`json_valid(${table.titleMappings}) and json_type(${table.titleMappings}) = 'array'`,
     ),
   ],
 );
