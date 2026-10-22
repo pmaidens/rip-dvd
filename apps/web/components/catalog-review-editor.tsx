@@ -14,6 +14,7 @@ import { CatalogReviewDiscSelections } from "./catalog-review-disc-selections";
 import { CatalogReviewEvidence } from "./catalog-review-evidence";
 import { CatalogReviewMediaItems } from "./catalog-review-media-items";
 import { CatalogReviewRearchiveProposal } from "./catalog-review-rearchive-proposal";
+import { CatalogReviewTitleIdentity } from "./catalog-review-title-identity";
 import type {
   CatalogReviewLoadState,
   CatalogReviewRearchiveProposal as CatalogReviewRearchiveProposalDto,
@@ -186,6 +187,8 @@ export function CatalogReviewView({
           {mutationNotice}
         </div>
       ) : null}
+
+      <CatalogReviewTitleIdentity titleIdentity={review.titleIdentity} />
 
       {review.rearchiveProposal ? (
         <CatalogReviewRearchiveProposal

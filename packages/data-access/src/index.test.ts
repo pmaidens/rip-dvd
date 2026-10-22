@@ -649,6 +649,172 @@ function removeDvdArchiveEvidenceHeaderForTest(
   }
 }
 
+function advanceDvdTitleIdentityCheckpointForTest(
+  databasePath: string,
+  originalDiscArchiveId: string,
+  revision: number,
+) {
+  const sqlite = new DatabaseSync(databasePath);
+  const guards = sqlite.prepare(`
+    SELECT name, sql
+    FROM sqlite_master
+    WHERE type = 'trigger'
+      AND tbl_name IN (
+        'dvd_archive_evidence_headers',
+        'dvd_archive_evidence_manifests',
+        'dvd_archive_recovery_reads'
+      )
+  `).all() as Array<{ name: string; sql: string }>;
+  const current = sqlite.prepare(`
+    SELECT current_manifest_id AS manifestId,
+           current_manifest_revision AS manifestRevision
+    FROM dvd_archive_evidence_headers
+    WHERE original_disc_archive_id = ?
+  `).get(originalDiscArchiveId) as {
+    manifestId: string;
+    manifestRevision: number;
+  } | undefined;
+  if (current === undefined || revision !== current.manifestRevision + 1) {
+    sqlite.close();
+    throw new Error("Expected the next synthetic DVD evidence revision");
+  }
+  const recoveryReadId = `synthetic-title-recovery-${revision}`;
+  const manifestId = `synthetic-title-manifest-${revision}`;
+  const manifestDigest = revision.toString(16).repeat(64);
+  try {
+    for (const guard of guards) sqlite.exec(`DROP TRIGGER "${guard.name}"`);
+    sqlite.prepare(`
+      INSERT INTO dvd_archive_recovery_reads (
+        id, original_disc_archive_id, from_manifest_id,
+        from_manifest_revision, start_lba, sector_count, outcome,
+        evidence_digest, created_at
+      ) VALUES (?, ?, ?, ?, 0, 1, 'recovered', ?, ?)
+    `).run(
+      recoveryReadId,
+      originalDiscArchiveId,
+      current.manifestId,
+      current.manifestRevision,
+      "e".repeat(64),
+      revision,
+    );
+    sqlite.prepare(`
+      INSERT INTO dvd_archive_evidence_manifests (
+        id, original_disc_archive_id, revision, previous_manifest_id,
+        recovery_read_id, evidence_format, image_fingerprint,
+        sector_size_bytes, accepted_end_lba_exclusive,
+        boundary_policy_version, boundary_reported_size_bytes,
+        boundary_published_size_bytes, boundary_evidence_digest,
+        unrecovered_source_ranges, unrecovered_source_ranges_digest,
+        manifest_digest, created_at
+      )
+      SELECT ?, original_disc_archive_id, ?, id, ?, evidence_format,
+        image_fingerprint, sector_size_bytes, accepted_end_lba_exclusive,
+        boundary_policy_version, boundary_reported_size_bytes,
+        boundary_published_size_bytes, boundary_evidence_digest,
+        unrecovered_source_ranges, unrecovered_source_ranges_digest, ?, ?
+      FROM dvd_archive_evidence_manifests
+      WHERE id = ?
+    `).run(
+      manifestId,
+      revision,
+      recoveryReadId,
+      manifestDigest,
+      revision,
+      current.manifestId,
+    );
+    sqlite.prepare(`
+      UPDATE dvd_archive_evidence_headers
+      SET current_manifest_id = ?, current_manifest_revision = ?,
+          current_manifest_digest = ?, updated_at = ?
+      WHERE original_disc_archive_id = ?
+    `).run(
+      manifestId,
+      revision,
+      manifestDigest,
+      revision,
+      originalDiscArchiveId,
+    );
+  } finally {
+    for (const guard of guards) sqlite.exec(guard.sql);
+    sqlite.close();
+  }
+  return { manifestId, manifestRevision: revision, manifestDigest };
+}
+
+function createDvdTitleIdentityArchiveFixture(fixtureId: string) {
+  const databasePath = createTestDatabasePath();
+  const access = openTestDatabase(databasePath);
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: `/dev/${fixtureId}`,
+    isPresent: true,
+  });
+  const contentId = `sha256:${"9".repeat(64)}`;
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint: contentId,
+    scanData: {
+      schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+      contentId,
+      titles: [{
+        number: 1,
+        durationSeconds: 4_000,
+        chapters: 8,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    },
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+  const archive = access.catalog.createOriginalDiscArchive({
+    detectedDiscId: disc.id,
+    discKind: "dvd",
+    archiveFormat: "iso",
+    archivePath: `/media/originals/${fixtureId}.iso`,
+    fingerprint: contentId,
+    sizeBytes: 2_048_000,
+  });
+  markArchiveWithDvdRecoveryEvidence(
+    databasePath,
+    archive.id,
+    fixtureId,
+  );
+  return { access, archive, databasePath };
+}
+
+function titleIdentityObservation(
+  displayTitleNumber: number,
+  options: {
+    angleNumber?: number;
+    angleCount?: number;
+    cellId?: number;
+    chapterStart?: number;
+    chapterEnd?: number;
+  } = {},
+) {
+  return {
+    displayTitleNumber,
+    navigation: {
+      videoTitleSetNumber: 1,
+      titleSetTitleNumber: 1,
+      programChainNumber: 1,
+    },
+    selectedPath: [{
+      programNumber: 1,
+      cellNumber: 1,
+      vobId: 1,
+      cellId: options.cellId ?? 1,
+    }],
+    angleNumber: options.angleNumber ?? 1,
+    angleCount: options.angleCount ?? 1,
+    chapterStart: options.chapterStart ?? 1,
+    chapterEnd: options.chapterEnd ?? 8,
+    chapterCount: 8,
+    sourceExtents: [{ startLba: 10, sectorCount: 100 }],
+  };
+}
+
 function completeDiscInspection(
   access: ReturnType<typeof openTestDatabase>,
   input: {
@@ -1055,6 +1221,10 @@ describe("data-access facade", () => {
         "dvd_structural_assessments",
         "dvd_structural_check_attempts",
         "dvd_recovery_storage_preflights",
+        "dvd_title_identities",
+        "dvd_title_identity_observations",
+        "dvd_title_identity_selection_bindings",
+        "dvd_title_identity_sets",
         "encode_job_failure_reports",
         "filesystem_verification_runs",
         "mutation_invocations",
@@ -1063,28 +1233,32 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(38);
+    expect(identifierTables).toHaveLength(42);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
           ? sql.includes("`scope` text PRIMARY KEY")
-          : name === "legacy_cutover_staged_sidecars"
-          ? sql.includes("PRIMARY KEY(`originals_library_path`, `sidecar_path`)")
-          : name === "dvd_archive_evidence_headers"
-            ? sql.includes("dvd_archive_evidence_headers_archive_id_not_null")
-            : name === "dvd_structural_assessments"
-              ? sql.includes("dvd_structural_assessments_identity_check")
-              : name === "dvd_structural_check_attempts"
-                ? sql.includes("dvd_structural_check_attempts_shape_check")
-            : name === "archive_audit_findings"
-              ? sql.includes("PRIMARY KEY(`archive_audit_run_id`, `sequence`)")
-              : name === "rearchive_mapping_proposal_items"
-                ? sql.includes("PRIMARY KEY(`target_archive_id`, `source_disc_selection_id`)")
-                : name === "rearchive_mapping_proposals"
-                  ? sql.includes("`target_archive_id` text PRIMARY KEY")
-                  : name === "mutation_invocations"
-                    ? sql.includes("mutation_invocations_key_not_null")
-                    : sql.includes(`${name}_id_not_null`),
+          : name === "dvd_title_identity_selection_bindings"
+            ? sql.includes("PRIMARY KEY(`title_identity_id`, `disc_selection_id`)")
+            : name === "dvd_title_identity_sets"
+              ? sql.includes("dvd_title_identity_sets_manifest_id_not_null")
+              : name === "legacy_cutover_staged_sidecars"
+                ? sql.includes("PRIMARY KEY(`originals_library_path`, `sidecar_path`)")
+                : name === "dvd_archive_evidence_headers"
+                  ? sql.includes("dvd_archive_evidence_headers_archive_id_not_null")
+                  : name === "dvd_structural_assessments"
+                    ? sql.includes("dvd_structural_assessments_identity_check")
+                    : name === "dvd_structural_check_attempts"
+                      ? sql.includes("dvd_structural_check_attempts_shape_check")
+                      : name === "archive_audit_findings"
+                        ? sql.includes("PRIMARY KEY(`archive_audit_run_id`, `sequence`)")
+                        : name === "rearchive_mapping_proposal_items"
+                          ? sql.includes("PRIMARY KEY(`target_archive_id`, `source_disc_selection_id`)")
+                          : name === "rearchive_mapping_proposals"
+                            ? sql.includes("`target_archive_id` text PRIMARY KEY")
+                            : name === "mutation_invocations"
+                              ? sql.includes("mutation_invocations_key_not_null")
+                              : sql.includes(`${name}_id_not_null`),
       ),
     ).toBe(true);
     expect(() =>
@@ -1621,7 +1795,8 @@ describe("data-access facade", () => {
           name !== "20261004053119_scsi-read-path-notice" &&
           name !== "20261019204228_dvd-initial-save" &&
           name !== "20261022044144_icy_barracuda" &&
-          name !== "20261022044512_parched_norrin_radd",
+          name !== "20261022044512_parched_norrin_radd" &&
+          name !== "20261022080829_dvd-title-identities",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8842,10 +9017,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 10",
+          "select name from __drizzle_migrations order by id desc limit 11",
         )
         .all(),
       ).toEqual([
+        {
+          name: "20261022080829_dvd-title-identities",
+        },
         {
           name: "20261022044512_parched_norrin_radd",
         },
@@ -14169,6 +14347,969 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       exclusionAccess.close();
     },
   );
+
+  it("preserves Title Identity through renumbering and flags changed selected content", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/synthetic-title-continuity",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"f".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 5_400,
+          chapters: 10,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/synthetic-title-continuity.iso",
+      fingerprint: contentId,
+      sizeBytes: 2_048_000,
+    });
+    const mediaItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic feature",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: mediaItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      archive.id,
+      "synthetic-title-continuity",
+    );
+    const firstHeader = access.catalog.findDvdArchiveEvidenceHeader(archive.id)!;
+    const titleObservation = (displayTitleNumber: number, cellId = 1) => ({
+      displayTitleNumber,
+      navigation: {
+        videoTitleSetNumber: 1,
+        titleSetTitleNumber: 1,
+        programChainNumber: 1,
+      },
+      selectedPath: [{
+        programNumber: 1,
+        cellNumber: 1,
+        vobId: 1,
+        cellId,
+      }, {
+        programNumber: 1,
+        cellNumber: 1,
+        vobId: 1,
+        cellId,
+      }],
+      angleNumber: 1,
+      angleCount: 1,
+      chapterStart: 1,
+      chapterEnd: 10,
+      chapterCount: 10,
+      sourceExtents: [{ startLba: 10, sectorCount: 100 }],
+    });
+
+    const first = access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: archive.id,
+      checkpoint: {
+        manifestId: firstHeader.currentManifestId,
+        manifestRevision: firstHeader.currentManifestRevision,
+        manifestDigest: firstHeader.currentManifestDigest,
+      },
+      observations: [titleObservation(1)],
+    });
+    expect(first.items).toEqual([
+      expect.objectContaining({
+        mappingState: "mapped",
+        discSelectionMappings: [{
+          discSelectionId: selection.id,
+          mappingState: "mapped",
+        }],
+        reviewContinuity: expect.objectContaining({ result: "initial" }),
+      }),
+    ]);
+    const stableTitleIdentityId = first.items[0]!.titleIdentityId;
+
+    const secondCheckpoint = advanceDvdTitleIdentityCheckpointForTest(
+      databasePath,
+      archive.id,
+      2,
+    );
+    const second = access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: archive.id,
+      checkpoint: secondCheckpoint,
+      observations: [titleObservation(3)],
+    });
+    expect(second.items).toEqual([
+      expect.objectContaining({
+        titleIdentityId: stableTitleIdentityId,
+        mappingState: "mapped",
+        discSelectionMappings: [{
+          discSelectionId: selection.id,
+          mappingState: "mapped",
+        }],
+        reviewContinuity: expect.objectContaining({ result: "proved" }),
+        observation: expect.objectContaining({ displayTitleNumber: 3 }),
+      }),
+    ]);
+    expect(second.reviewSetIdentity).not.toBe(first.reviewSetIdentity);
+
+    const thirdCheckpoint = advanceDvdTitleIdentityCheckpointForTest(
+      databasePath,
+      archive.id,
+      3,
+    );
+    const thirdInput = {
+      originalDiscArchiveId: archive.id,
+      checkpoint: thirdCheckpoint,
+      observations: [
+        titleObservation(3, 2),
+        {
+          ...titleObservation(7),
+          navigation: {
+            videoTitleSetNumber: 2,
+            titleSetTitleNumber: 1,
+            programChainNumber: 1,
+          },
+          sourceExtents: [{ startLba: 500, sectorCount: 20 }],
+        },
+      ],
+    };
+    const third = access.catalog.recordDvdTitleIdentityObservations(thirdInput);
+    expect(third.items).toEqual([
+      expect.objectContaining({
+        titleIdentityId: stableTitleIdentityId,
+        mappingState: "needs_mapping_review",
+        discSelectionMappings: [{
+          discSelectionId: selection.id,
+          mappingState: "needs_mapping_review",
+        }],
+        reviewContinuity: expect.objectContaining({ result: "uncertain" }),
+        observation: expect.objectContaining({ displayTitleNumber: 3 }),
+      }),
+      expect.objectContaining({
+        mappingState: "unmapped",
+        discSelectionMappings: [],
+        reviewContinuity: expect.objectContaining({ result: "new" }),
+        observation: expect.objectContaining({ displayTitleNumber: 7 }),
+      }),
+    ]);
+    expect(third.items[1]!.titleIdentityId).not.toBe(stableTitleIdentityId);
+    expect(
+      access.catalog.recordDvdTitleIdentityObservations(thirdInput)
+        .reviewSetIdentity,
+    ).toBe(third.reviewSetIdentity);
+    expect(() => access.catalog.recordDvdTitleIdentityObservations({
+      ...thirdInput,
+      observations: [titleObservation(3)],
+    })).toThrow(/immutable checkpoint record/i);
+
+    const fourthCheckpoint = advanceDvdTitleIdentityCheckpointForTest(
+      databasePath,
+      archive.id,
+      4,
+    );
+    const fourth = access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: archive.id,
+      checkpoint: fourthCheckpoint,
+      observations: [
+        titleObservation(3, 3),
+        titleObservation(9, 2),
+      ],
+    });
+    expect(fourth.items).toEqual([
+      expect.objectContaining({
+        mappingState: "unmapped",
+        reviewContinuity: expect.objectContaining({ result: "new" }),
+        observation: expect.objectContaining({ displayTitleNumber: 3 }),
+      }),
+      expect.objectContaining({
+        titleIdentityId: stableTitleIdentityId,
+        mappingState: "needs_mapping_review",
+        discSelectionMappings: [{
+          discSelectionId: selection.id,
+          mappingState: "needs_mapping_review",
+        }],
+        reviewContinuity: expect.objectContaining({ result: "proved" }),
+        observation: expect.objectContaining({ displayTitleNumber: 9 }),
+      }),
+      expect.objectContaining({
+        presentAtCurrentCheckpoint: false,
+        mappingState: "unmapped",
+        discSelectionMappings: [],
+        reviewContinuity: expect.objectContaining({ result: "uncertain" }),
+        observation: expect.objectContaining({ displayTitleNumber: 7 }),
+      }),
+    ]);
+    expect(fourth.items[0]!.titleIdentityId).not.toBe(
+      stableTitleIdentityId,
+    );
+    access.close();
+
+    const evidenceDatabase = new DatabaseSync(databasePath);
+    expect(() => evidenceDatabase.prepare(`
+      UPDATE dvd_title_identity_observations
+      SET display_title_number = display_title_number + 1
+      WHERE id = ?
+    `).run(first.items[0]!.observation.id)).toThrow(/immutable/i);
+    expect(() => evidenceDatabase.prepare(`
+      DELETE FROM dvd_title_identity_sets
+      WHERE manifest_id = ?
+    `).run(first.checkpoint.manifestId)).toThrow(/immutable/i);
+    expect(() => evidenceDatabase.prepare(`
+      UPDATE dvd_title_identities
+      SET created_at = created_at + 1
+      WHERE id = ?
+    `).run(stableTitleIdentityId)).toThrow(/immutable/i);
+    evidenceDatabase.exec(
+      "DROP TRIGGER dvd_title_identity_observation_update_guard",
+    );
+    evidenceDatabase.prepare(`
+      UPDATE dvd_title_identity_observations
+      SET navigation = ?
+      WHERE id = ?
+    `).run(JSON.stringify({
+      videoTitleSetNumber: 9,
+      titleSetTitleNumber: 1,
+      programChainNumber: 1,
+    }), fourth.items[0]!.observation.id);
+    evidenceDatabase.close();
+
+    const corruptedAccess = openTestDatabase(databasePath);
+    expect(() =>
+      corruptedAccess.catalog.readDvdTitleIdentityReviewSet(archive.id)
+    ).toThrow(/content digest does not match/i);
+    corruptedAccess.close();
+  });
+
+  it("keeps ambiguous same-number continuity independent of observation order", () => {
+    const recordOrder = (cellIds: readonly number[]) => {
+      const fixture = createDvdTitleIdentityArchiveFixture(
+        `title-order-${cellIds.join("-")}`,
+      );
+      const header = fixture.access.catalog.findDvdArchiveEvidenceHeader(
+        fixture.archive.id,
+      )!;
+      fixture.access.catalog.recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: fixture.archive.id,
+        checkpoint: {
+          manifestId: header.currentManifestId,
+          manifestRevision: header.currentManifestRevision,
+          manifestDigest: header.currentManifestDigest,
+        },
+        observations: [titleIdentityObservation(9)],
+      });
+      const checkpoint = advanceDvdTitleIdentityCheckpointForTest(
+        fixture.databasePath,
+        fixture.archive.id,
+        2,
+      );
+      const review = fixture.access.catalog.recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: fixture.archive.id,
+        checkpoint,
+        observations: cellIds.map((cellId) =>
+          titleIdentityObservation(9, { cellId })
+        ),
+      });
+      const summary = review.items.map((item) => ({
+        presentAtCurrentCheckpoint: item.presentAtCurrentCheckpoint,
+        continuityResult: item.reviewContinuity.result,
+        mappingState: item.mappingState,
+        contentDigest: item.observation.contentDigest,
+      })).sort((left, right) =>
+        left.contentDigest.localeCompare(right.contentDigest)
+      );
+      fixture.access.close();
+      return summary;
+    };
+
+    const forward = recordOrder([2, 3]);
+    const reversed = recordOrder([3, 2]);
+    expect(reversed).toEqual(forward);
+    expect(forward).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        presentAtCurrentCheckpoint: true,
+        continuityResult: "new",
+        mappingState: "unmapped",
+      }),
+      expect.objectContaining({
+        presentAtCurrentCheckpoint: true,
+        continuityResult: "new",
+        mappingState: "unmapped",
+      }),
+      expect.objectContaining({
+        presentAtCurrentCheckpoint: false,
+        continuityResult: "uncertain",
+        mappingState: "unmapped",
+      }),
+    ]));
+  });
+
+  it("does not auto-bind a later newly discovered title", () => {
+    const fixture = createDvdTitleIdentityArchiveFixture(
+      "title-later-discovery",
+    );
+    const mediaItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic later discovery",
+    });
+    const selection = fixture.access.catalog.createDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      mediaItemId: mediaItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    const header = fixture.access.catalog.findDvdArchiveEvidenceHeader(
+      fixture.archive.id,
+    )!;
+    fixture.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: fixture.archive.id,
+      checkpoint: {
+        manifestId: header.currentManifestId,
+        manifestRevision: header.currentManifestRevision,
+        manifestDigest: header.currentManifestDigest,
+      },
+      observations: [],
+    });
+    const checkpoint = advanceDvdTitleIdentityCheckpointForTest(
+      fixture.databasePath,
+      fixture.archive.id,
+      2,
+    );
+    const review = fixture.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: fixture.archive.id,
+      checkpoint,
+      observations: [titleIdentityObservation(1)],
+    });
+
+    expect(review.items).toEqual([
+      expect.objectContaining({
+        mappingState: "unmapped",
+        discSelectionMappings: [],
+        reviewContinuity: expect.objectContaining({ result: "new" }),
+      }),
+    ]);
+    expect(fixture.access.catalog.listDiscSelections({
+      ids: [selection.id],
+    })).toHaveLength(1);
+    fixture.access.close();
+  });
+
+  it("does not auto-bind when the first Title Identity set is recorded after the initial checkpoint", () => {
+    const fixture = createDvdTitleIdentityArchiveFixture(
+      "title-late-first-evidence",
+    );
+    const mediaItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic late first evidence",
+    });
+    const selection = fixture.access.catalog.createDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      mediaItemId: mediaItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    const checkpoint = advanceDvdTitleIdentityCheckpointForTest(
+      fixture.databasePath,
+      fixture.archive.id,
+      2,
+    );
+    const review = fixture.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: fixture.archive.id,
+      checkpoint,
+      observations: [titleIdentityObservation(1)],
+    });
+
+    expect(review.items).toEqual([
+      expect.objectContaining({
+        mappingState: "unmapped",
+        discSelectionMappings: [],
+        reviewContinuity: expect.objectContaining({ result: "initial" }),
+      }),
+    ]);
+    expect(fixture.access.catalog.listDiscSelections({
+      ids: [selection.id],
+    })).toHaveLength(1);
+    fixture.access.close();
+  });
+
+  it("recovers proved Title Identity after a missing checkpoint", () => {
+    const fixture = createDvdTitleIdentityArchiveFixture(
+      "title-gap-rediscovery",
+    );
+    const mediaItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic gap rediscovery",
+    });
+    const selection = fixture.access.catalog.createDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      mediaItemId: mediaItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    const header = fixture.access.catalog.findDvdArchiveEvidenceHeader(
+      fixture.archive.id,
+    )!;
+    const first = fixture.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: fixture.archive.id,
+      checkpoint: {
+        manifestId: header.currentManifestId,
+        manifestRevision: header.currentManifestRevision,
+        manifestDigest: header.currentManifestDigest,
+      },
+      observations: [titleIdentityObservation(1)],
+    });
+    const stableTitleIdentityId = first.items[0]!.titleIdentityId;
+    const missingCheckpoint = advanceDvdTitleIdentityCheckpointForTest(
+      fixture.databasePath,
+      fixture.archive.id,
+      2,
+    );
+    const missing = fixture.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: fixture.archive.id,
+      checkpoint: missingCheckpoint,
+      observations: [],
+    });
+    expect(missing.items).toEqual([
+      expect.objectContaining({
+        titleIdentityId: stableTitleIdentityId,
+        presentAtCurrentCheckpoint: false,
+        discSelectionMappings: [{
+          discSelectionId: selection.id,
+          mappingState: "needs_mapping_review",
+        }],
+      }),
+    ]);
+
+    const rediscoveredCheckpoint = advanceDvdTitleIdentityCheckpointForTest(
+      fixture.databasePath,
+      fixture.archive.id,
+      3,
+    );
+    const rediscovered = fixture.access.catalog
+      .recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: fixture.archive.id,
+        checkpoint: rediscoveredCheckpoint,
+        observations: [titleIdentityObservation(1)],
+      });
+
+    expect(rediscovered.items).toEqual([
+      expect.objectContaining({
+        titleIdentityId: stableTitleIdentityId,
+        presentAtCurrentCheckpoint: true,
+        reviewContinuity: expect.objectContaining({ result: "proved" }),
+        discSelectionMappings: [{
+          discSelectionId: selection.id,
+          mappingState: "needs_mapping_review",
+        }],
+      }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("rejects corrupted predecessor evidence and continuity links", () => {
+    const corruptedPredecessor = createDvdTitleIdentityArchiveFixture(
+      "title-corrupt-predecessor",
+    );
+    const predecessorHeader = corruptedPredecessor.access.catalog
+      .findDvdArchiveEvidenceHeader(corruptedPredecessor.archive.id)!;
+    const initial = corruptedPredecessor.access.catalog
+      .recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: corruptedPredecessor.archive.id,
+        checkpoint: {
+          manifestId: predecessorHeader.currentManifestId,
+          manifestRevision: predecessorHeader.currentManifestRevision,
+          manifestDigest: predecessorHeader.currentManifestDigest,
+        },
+        observations: [titleIdentityObservation(1)],
+      });
+    const predecessorDatabase = new DatabaseSync(
+      corruptedPredecessor.databasePath,
+    );
+    predecessorDatabase.exec(
+      "DROP TRIGGER dvd_title_identity_observation_update_guard",
+    );
+    predecessorDatabase.prepare(`
+      UPDATE dvd_title_identity_observations
+      SET navigation = ?
+      WHERE id = ?
+    `).run(JSON.stringify({
+      videoTitleSetNumber: 2,
+      titleSetTitleNumber: 1,
+      programChainNumber: 1,
+    }), initial.items[0]!.observation.id);
+    predecessorDatabase.close();
+    const predecessorCheckpoint = advanceDvdTitleIdentityCheckpointForTest(
+      corruptedPredecessor.databasePath,
+      corruptedPredecessor.archive.id,
+      2,
+    );
+    expect(() =>
+      corruptedPredecessor.access.catalog.recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: corruptedPredecessor.archive.id,
+        checkpoint: predecessorCheckpoint,
+        observations: [titleIdentityObservation(1)],
+      })
+    ).toThrow(/content digest does not match/i);
+    corruptedPredecessor.access.close();
+
+    const corruptedLink = createDvdTitleIdentityArchiveFixture(
+      "title-corrupt-link",
+    );
+    const linkHeader = corruptedLink.access.catalog
+      .findDvdArchiveEvidenceHeader(corruptedLink.archive.id)!;
+    const linkInitial = corruptedLink.access.catalog
+      .recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: corruptedLink.archive.id,
+        checkpoint: {
+          manifestId: linkHeader.currentManifestId,
+          manifestRevision: linkHeader.currentManifestRevision,
+          manifestDigest: linkHeader.currentManifestDigest,
+        },
+        observations: [
+          titleIdentityObservation(1),
+          titleIdentityObservation(2, { cellId: 2 }),
+        ],
+      });
+    const linkCheckpoint = advanceDvdTitleIdentityCheckpointForTest(
+      corruptedLink.databasePath,
+      corruptedLink.archive.id,
+      2,
+    );
+    const linkCurrent = corruptedLink.access.catalog
+      .recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: corruptedLink.archive.id,
+        checkpoint: linkCheckpoint,
+        observations: [titleIdentityObservation(1)],
+      });
+    const linkDatabase = new DatabaseSync(corruptedLink.databasePath);
+    linkDatabase.exec(
+      "DROP TRIGGER dvd_title_identity_observation_update_guard",
+    );
+    linkDatabase.prepare(`
+      UPDATE dvd_title_identity_observations
+      SET previous_observation_id = ?
+      WHERE id = ?
+    `).run(
+      linkInitial.items[1]!.observation.id,
+      linkCurrent.items[0]!.observation.id,
+    );
+    linkDatabase.close();
+    expect(() =>
+      corruptedLink.access.catalog.readDvdTitleIdentityReviewSet(
+        corruptedLink.archive.id,
+      )
+    ).toThrow(/predecessor does not belong to the same identity/i);
+    corruptedLink.access.close();
+  });
+
+  it("rejects persisted continuity claims that do not match the evidence", () => {
+    const wrongPredecessor = createDvdTitleIdentityArchiveFixture(
+      "title-wrong-same-identity-predecessor",
+    );
+    const predecessorHeader = wrongPredecessor.access.catalog
+      .findDvdArchiveEvidenceHeader(wrongPredecessor.archive.id)!;
+    const first = wrongPredecessor.access.catalog
+      .recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: wrongPredecessor.archive.id,
+        checkpoint: {
+          manifestId: predecessorHeader.currentManifestId,
+          manifestRevision: predecessorHeader.currentManifestRevision,
+          manifestDigest: predecessorHeader.currentManifestDigest,
+        },
+        observations: [titleIdentityObservation(1)],
+      });
+    const secondCheckpoint = advanceDvdTitleIdentityCheckpointForTest(
+      wrongPredecessor.databasePath,
+      wrongPredecessor.archive.id,
+      2,
+    );
+    wrongPredecessor.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: wrongPredecessor.archive.id,
+      checkpoint: secondCheckpoint,
+      observations: [titleIdentityObservation(1)],
+    });
+    const thirdCheckpoint = advanceDvdTitleIdentityCheckpointForTest(
+      wrongPredecessor.databasePath,
+      wrongPredecessor.archive.id,
+      3,
+    );
+    const third = wrongPredecessor.access.catalog
+      .recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: wrongPredecessor.archive.id,
+        checkpoint: thirdCheckpoint,
+        observations: [titleIdentityObservation(1)],
+      });
+    const predecessorDatabase = new DatabaseSync(
+      wrongPredecessor.databasePath,
+    );
+    predecessorDatabase.exec(
+      "DROP TRIGGER dvd_title_identity_observation_update_guard",
+    );
+    predecessorDatabase.prepare(`
+      UPDATE dvd_title_identity_observations
+      SET previous_observation_id = ?
+      WHERE id = ?
+    `).run(first.items[0]!.observation.id, third.items[0]!.observation.id);
+    predecessorDatabase.close();
+    expect(() =>
+      wrongPredecessor.access.catalog.readDvdTitleIdentityReviewSet(
+        wrongPredecessor.archive.id,
+      )
+    ).toThrow(/continuity claim does not match/i);
+    wrongPredecessor.access.close();
+
+    const falseProof = createDvdTitleIdentityArchiveFixture(
+      "title-false-proof",
+    );
+    const proofHeader = falseProof.access.catalog
+      .findDvdArchiveEvidenceHeader(falseProof.archive.id)!;
+    falseProof.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: falseProof.archive.id,
+      checkpoint: {
+        manifestId: proofHeader.currentManifestId,
+        manifestRevision: proofHeader.currentManifestRevision,
+        manifestDigest: proofHeader.currentManifestDigest,
+      },
+      observations: [titleIdentityObservation(1)],
+    });
+    const changedCheckpoint = advanceDvdTitleIdentityCheckpointForTest(
+      falseProof.databasePath,
+      falseProof.archive.id,
+      2,
+    );
+    const changed = falseProof.access.catalog
+      .recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: falseProof.archive.id,
+        checkpoint: changedCheckpoint,
+        observations: [titleIdentityObservation(1, { cellId: 2 })],
+      });
+    expect(changed.items[0]!.reviewContinuity.result).toBe("uncertain");
+    const proofDatabase = new DatabaseSync(falseProof.databasePath);
+    proofDatabase.exec(
+      "DROP TRIGGER dvd_title_identity_observation_update_guard",
+    );
+    proofDatabase.prepare(`
+      UPDATE dvd_title_identity_observations
+      SET continuity_result = 'proved'
+      WHERE id = ?
+    `).run(changed.items[0]!.observation.id);
+    proofDatabase.close();
+    expect(() =>
+      falseProof.access.catalog.readDvdTitleIdentityReviewSet(
+        falseProof.archive.id,
+      )
+    ).toThrow(/continuity claim does not match/i);
+    falseProof.access.close();
+  });
+
+  it("rejects Title Identity bindings outside their archive evidence", () => {
+    const crossArchive = createDvdTitleIdentityArchiveFixture(
+      "title-cross-archive-binding",
+    );
+    const crossMediaItem = crossArchive.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic cross archive binding",
+    });
+    const boundSelection = crossArchive.access.catalog.createDiscSelection({
+      originalDiscArchiveId: crossArchive.archive.id,
+      mediaItemId: crossMediaItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    const crossHeader = crossArchive.access.catalog
+      .findDvdArchiveEvidenceHeader(crossArchive.archive.id)!;
+    crossArchive.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: crossArchive.archive.id,
+      checkpoint: {
+        manifestId: crossHeader.currentManifestId,
+        manifestRevision: crossHeader.currentManifestRevision,
+        manifestDigest: crossHeader.currentManifestDigest,
+      },
+      observations: [titleIdentityObservation(1)],
+    });
+    const otherDrive = crossArchive.access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/title-binding-other-archive",
+      isPresent: true,
+    });
+    const otherContentId = `sha256:${"8".repeat(64)}`;
+    const otherDisc = crossArchive.access.catalog.registerDetectedDisc({
+      opticalDriveId: otherDrive.id,
+      discKind: "dvd",
+      fingerprint: otherContentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId: otherContentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 4_000,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    crossArchive.access.catalog.updateDetectedDiscStatus(
+      otherDisc.id,
+      "scanned",
+    );
+    crossArchive.access.catalog.updateDetectedDiscStatus(
+      otherDisc.id,
+      "approved",
+    );
+    const otherArchive = crossArchive.access.catalog.createOriginalDiscArchive({
+      detectedDiscId: otherDisc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/title-binding-other-archive.iso",
+      fingerprint: otherContentId,
+      sizeBytes: 2_048_000,
+    });
+    const otherMediaItem = crossArchive.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic other archive selection",
+    });
+    const otherSelection = crossArchive.access.catalog.createDiscSelection({
+      originalDiscArchiveId: otherArchive.id,
+      mediaItemId: otherMediaItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    const crossDatabase = new DatabaseSync(crossArchive.databasePath);
+    const corruptCrossArchiveBinding = crossDatabase.prepare(`
+      UPDATE dvd_title_identity_selection_bindings
+      SET disc_selection_id = ?
+      WHERE disc_selection_id = ?
+    `);
+    expect(() =>
+      corruptCrossArchiveBinding.run(otherSelection.id, boundSelection.id)
+    ).toThrow(/binding does not match its archive evidence/i);
+    crossDatabase.exec(
+      "DROP TRIGGER dvd_title_identity_binding_update_guard",
+    );
+    corruptCrossArchiveBinding.run(otherSelection.id, boundSelection.id);
+    crossDatabase.close();
+    expect(() =>
+      crossArchive.access.catalog.readDvdTitleIdentityReviewSet(
+        crossArchive.archive.id,
+      )
+    ).toThrow(/binding does not match its archive evidence/i);
+    crossArchive.access.close();
+
+    const wrongObservation = createDvdTitleIdentityArchiveFixture(
+      "title-wrong-binding-observation",
+    );
+    const wrongMediaItem = wrongObservation.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic wrong observation binding",
+    });
+    const wrongSelection = wrongObservation.access.catalog
+      .createDiscSelection({
+        originalDiscArchiveId: wrongObservation.archive.id,
+        mediaItemId: wrongMediaItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      });
+    const wrongHeader = wrongObservation.access.catalog
+      .findDvdArchiveEvidenceHeader(wrongObservation.archive.id)!;
+    const wrongReview = wrongObservation.access.catalog
+      .recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: wrongObservation.archive.id,
+        checkpoint: {
+          manifestId: wrongHeader.currentManifestId,
+          manifestRevision: wrongHeader.currentManifestRevision,
+          manifestDigest: wrongHeader.currentManifestDigest,
+        },
+        observations: [
+          titleIdentityObservation(1),
+          titleIdentityObservation(2, { cellId: 2 }),
+        ],
+      });
+    const wrongDatabase = new DatabaseSync(wrongObservation.databasePath);
+    const corruptObservationBinding = wrongDatabase.prepare(`
+      UPDATE dvd_title_identity_selection_bindings
+      SET last_observation_id = ?
+      WHERE disc_selection_id = ?
+    `);
+    expect(() =>
+      corruptObservationBinding.run(
+        wrongReview.items[1]!.observation.id,
+        wrongSelection.id,
+      )
+    ).toThrow(/binding does not match its archive evidence/i);
+    wrongDatabase.exec(
+      "DROP TRIGGER dvd_title_identity_binding_update_guard",
+    );
+    corruptObservationBinding.run(
+      wrongReview.items[1]!.observation.id,
+      wrongSelection.id,
+    );
+    wrongDatabase.close();
+    expect(() =>
+      wrongObservation.access.catalog.readDvdTitleIdentityReviewSet(
+        wrongObservation.archive.id,
+      )
+    ).toThrow(/binding does not match its archive evidence/i);
+    wrongObservation.access.close();
+  });
+
+  it("keeps full-title selections away from partial and non-default-angle observations", () => {
+    const mappingFor = (
+      fixtureId: string,
+      observation: ReturnType<typeof titleIdentityObservation>,
+    ) => {
+      const fixture = createDvdTitleIdentityArchiveFixture(fixtureId);
+      const mediaItem = fixture.access.catalog.createMediaItem({
+        kind: "movie",
+        title: `Synthetic ${fixtureId}`,
+      });
+      fixture.access.catalog.createDiscSelection({
+        originalDiscArchiveId: fixture.archive.id,
+        mediaItemId: mediaItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      });
+      const header = fixture.access.catalog.findDvdArchiveEvidenceHeader(
+        fixture.archive.id,
+      )!;
+      const review = fixture.access.catalog.recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: fixture.archive.id,
+        checkpoint: {
+          manifestId: header.currentManifestId,
+          manifestRevision: header.currentManifestRevision,
+          manifestDigest: header.currentManifestDigest,
+        },
+        observations: [observation],
+      });
+      fixture.access.close();
+      return review.items[0]!;
+    };
+
+    expect(mappingFor(
+      "title-partial-evidence",
+      titleIdentityObservation(1, { chapterStart: 2, chapterEnd: 5 }),
+    )).toMatchObject({
+      mappingState: "unmapped",
+      discSelectionMappings: [],
+    });
+    expect(mappingFor(
+      "title-angle-evidence",
+      titleIdentityObservation(1, { angleNumber: 2, angleCount: 2 }),
+    )).toMatchObject({
+      mappingState: "unmapped",
+      discSelectionMappings: [],
+    });
+  });
+
+  it("preserves mapping state for each retained Disc Selection", () => {
+    const fixture = createDvdTitleIdentityArchiveFixture(
+      "title-selection-state",
+    );
+    const firstItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic first mapping",
+    });
+    const secondItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic second mapping",
+    });
+    const firstSelection = fixture.access.catalog.createDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      mediaItemId: firstItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    const secondSelection = fixture.access.catalog.createDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      mediaItemId: secondItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    const header = fixture.access.catalog.findDvdArchiveEvidenceHeader(
+      fixture.archive.id,
+    )!;
+    fixture.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: fixture.archive.id,
+      checkpoint: {
+        manifestId: header.currentManifestId,
+        manifestRevision: header.currentManifestRevision,
+        manifestDigest: header.currentManifestDigest,
+      },
+      observations: [titleIdentityObservation(1)],
+    });
+    const preview = fixture.access.catalog.previewDiscSelectionMutation(
+      fixture.archive.id,
+      firstSelection.id,
+    );
+    const expectedCatalogRevision = new Date(preview.catalogRevision);
+    const previewMutation = {
+      action: "update" as const,
+      discSelectionId: firstSelection.id,
+      changes: {
+        originalDiscArchiveId: fixture.archive.id,
+        sourceIdentity: { kind: "dvd_title" as const, titleNumber: 1 },
+      },
+    };
+    fixture.access.catalog.previewDiscSelectionChange({
+      originalDiscArchiveId: fixture.archive.id,
+      expectedCatalogRevision,
+      mutation: previewMutation,
+    });
+    const previewToken =
+      "disc-selection-preview:00000000-0000-4000-8000-000000000399";
+    fixture.access.catalog.recordDiscSelectionPreviewDecision({
+      previewToken,
+      originalDiscArchiveId: fixture.archive.id,
+      expectedCatalogRevision,
+      expectedPreviewEvidenceHash: preview.evidenceHash,
+      mutation: previewMutation,
+    });
+    const checkpoint = advanceDvdTitleIdentityCheckpointForTest(
+      fixture.databasePath,
+      fixture.archive.id,
+      2,
+    );
+    const uncertain = fixture.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: fixture.archive.id,
+      checkpoint,
+      observations: [titleIdentityObservation(1, { cellId: 2 })],
+    });
+    expect(() => fixture.access.catalog.mutateDiscSelection({
+      mutationKey: "00000000-0000-4000-8000-000000000399",
+      originalDiscArchiveId: fixture.archive.id,
+      expectedCatalogRevision,
+      previewToken,
+      mutation: previewMutation,
+    })).toThrow(/Catalog review revision is stale/i);
+    fixture.access.catalog.updateDiscSelection(firstSelection.id, {
+      originalDiscArchiveId: fixture.archive.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    const reviewed = fixture.access.catalog.readDvdTitleIdentityReviewSet(
+      fixture.archive.id,
+    )!;
+
+    expect(reviewed.reviewSetIdentity).not.toBe(uncertain.reviewSetIdentity);
+    expect(reviewed.items[0]).toMatchObject({
+      mappingState: "needs_mapping_review",
+      discSelectionMappings: expect.arrayContaining([
+        {
+          discSelectionId: firstSelection.id,
+          mappingState: "mapped",
+        },
+        {
+          discSelectionId: secondSelection.id,
+          mappingState: "needs_mapping_review",
+        },
+      ]),
+    });
+    fixture.access.close();
+  });
 
   it("keeps marked DVD evidence work closed at scheduling and worker mutation boundaries", () => {
     const databasePath = createTestDatabasePath();

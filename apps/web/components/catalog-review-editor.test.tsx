@@ -2370,6 +2370,62 @@ describe("CatalogReviewView", () => {
       audioStreams: [],
       subtitles: [],
     }];
+    review.titleIdentity = {
+      available: true,
+      unavailableReason: null,
+      checkpoint: {
+        manifestId: "synthetic-manifest-2",
+        manifestRevision: 2,
+        manifestDigest: "b".repeat(64),
+      },
+      policyVersion: "dvd-title-identity-continuity-v1",
+      reviewSetIdentity: "c".repeat(64),
+      items: [{
+        titleIdentityId: "synthetic-new-title",
+        presentAtCurrentCheckpoint: true,
+        mappingState: "unmapped",
+        discSelectionMappings: [],
+        reviewContinuity: {
+          result: "new",
+          policyVersion: "dvd-title-identity-continuity-v1",
+          previousObservationId: null,
+        },
+        observation: {
+          id: "synthetic-new-observation",
+          titleIdentityId: "synthetic-new-title",
+          checkpoint: {
+            manifestId: "synthetic-manifest-2",
+            manifestRevision: 2,
+            manifestDigest: "b".repeat(64),
+          },
+          displayTitleNumber: 2,
+          navigation: {
+            videoTitleSetNumber: 1,
+            titleSetTitleNumber: 1,
+            programChainNumber: 1,
+          },
+          selectedPath: [{
+            programNumber: 1,
+            cellNumber: 1,
+            vobId: 1,
+            cellId: 1,
+          }],
+          angleNumber: 1,
+          angleCount: 1,
+          chapterStart: 1,
+          chapterEnd: 18,
+          chapterCount: 18,
+          sourceExtents: [{ startLba: 100, sectorCount: 200 }],
+          contentDigest: "d".repeat(64),
+          continuity: {
+            result: "new",
+            policyVersion: "dvd-title-identity-continuity-v1",
+            previousObservationId: null,
+          },
+          createdAt: "2026-08-11T06:00:00.000Z",
+        },
+      }],
+    };
     review.discSelections = [];
     review.rearchiveProposal = {
       state: "stale",
@@ -2487,6 +2543,8 @@ describe("CatalogReviewView", () => {
     expect(container.textContent).toContain(
       "Unreadable sectors by title: Title 1: 2",
     );
+    expect(container.textContent).toContain("Title identity across revisions");
+    expect(container.textContent).toContain("Newly discovered content. Unmapped.");
     expect(container.textContent).not.toContain("Manual catalog tools");
     expect(container.textContent).not.toContain("Complete review");
 

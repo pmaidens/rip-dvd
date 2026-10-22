@@ -188,6 +188,9 @@ export type ArchiveRecoveryId = DomainId<"ArchiveRecovery">;
 export type ArchiveRecoveryClaimToken = DomainId<"ArchiveRecoveryClaim">;
 export type MediaItemId = DomainId<"MediaItem">;
 export type DiscSelectionId = DomainId<"DiscSelection">;
+export type DvdTitleIdentityId = DomainId<"DvdTitleIdentity">;
+export type DvdTitleIdentityObservationId =
+  DomainId<"DvdTitleIdentityObservation">;
 export type EncodingProfileId = DomainId<"EncodingProfile">;
 export type ArchiveJobId = DomainId<"ArchiveJob">;
 export type EncodeJobId = DomainId<"EncodeJob">;
@@ -404,6 +407,101 @@ export interface DvdArchiveEvidenceHeader {
   unrecoveredSourceRanges: readonly DvdUnrecoveredSourceRange[];
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface DvdTitleIdentitySelectedPathEntry {
+  programNumber: number;
+  cellNumber: number;
+  vobId: number;
+  cellId: number;
+}
+
+export interface DvdTitleIdentityObservationInput {
+  displayTitleNumber: number;
+  navigation: {
+    videoTitleSetNumber: number;
+    titleSetTitleNumber: number;
+    programChainNumber: number;
+  };
+  selectedPath: readonly DvdTitleIdentitySelectedPathEntry[];
+  angleNumber: number;
+  angleCount: number;
+  chapterStart: number;
+  chapterEnd: number;
+  chapterCount: number;
+  sourceExtents: readonly UnreadableSectorRange[];
+}
+
+export type DvdTitleIdentityContinuityResult =
+  | "initial"
+  | "proved"
+  | "uncertain"
+  | "new";
+
+export interface DvdTitleIdentityObservation
+  extends DvdTitleIdentityObservationInput {
+  id: DvdTitleIdentityObservationId;
+  titleIdentityId: DvdTitleIdentityId;
+  checkpoint: {
+    manifestId: string;
+    manifestRevision: number;
+    manifestDigest: string;
+  };
+  contentDigest: string;
+  continuity: {
+    result: DvdTitleIdentityContinuityResult;
+    policyVersion: string;
+    previousObservationId: DvdTitleIdentityObservationId | null;
+  };
+  createdAt: Date;
+}
+
+export type DvdTitleIdentityMappingState =
+  | "mapped"
+  | "needs_mapping_review"
+  | "unmapped";
+
+export interface DvdTitleIdentitySelectionMapping {
+  discSelectionId: DiscSelectionId;
+  mappingState: Exclude<DvdTitleIdentityMappingState, "unmapped">;
+}
+
+export interface DvdTitleIdentityReviewSetItem {
+  titleIdentityId: DvdTitleIdentityId;
+  presentAtCurrentCheckpoint: boolean;
+  observation: DvdTitleIdentityObservation;
+  /** Continuity as evaluated for the current review set. Missing identities
+   * are uncertain here even though their last persisted observation records
+   * the relationship that was known at its own checkpoint. */
+  reviewContinuity: DvdTitleIdentityObservation["continuity"];
+  /** Only `mapped` may be consumed by a later decision. The decision and its
+   * mapping-review mutation belong to the later Catalog Review decision slice. */
+  mappingState: DvdTitleIdentityMappingState;
+  discSelectionMappings: readonly DvdTitleIdentitySelectionMapping[];
+}
+
+export interface DvdTitleIdentityReviewSet {
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  evidenceFormat: "dvd-recovery-evidence-v1";
+  checkpoint: {
+    manifestId: string;
+    manifestRevision: number;
+    manifestDigest: string;
+  };
+  policyVersion: string;
+  reviewSetIdentity: string;
+  items: readonly DvdTitleIdentityReviewSetItem[];
+  createdAt: Date;
+}
+
+export interface RecordDvdTitleIdentityObservationsInput {
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  checkpoint: {
+    manifestId: string;
+    manifestRevision: number;
+    manifestDigest: string;
+  };
+  observations: readonly DvdTitleIdentityObservationInput[];
 }
 
 export interface DvdUnrecoveredSourceRange extends UnreadableSectorRange {
@@ -1393,6 +1491,19 @@ export interface CatalogAccess {
   findDvdArchiveEvidenceHeaders(
     ids: readonly OriginalDiscArchiveId[],
   ): ReadonlyMap<OriginalDiscArchiveId, DvdArchiveEvidenceHeader>;
+  /**
+   * Worker persistence boundary for observations gathered while the archive
+   * image and supplied checkpoint were held under one shared consistent-read
+   * interval. Production image readers must call the archive worker's
+   * consistent-read recorder rather than invoke this persistence method
+   * directly.
+   */
+  recordDvdTitleIdentityObservations(
+    input: RecordDvdTitleIdentityObservationsInput,
+  ): DvdTitleIdentityReviewSet;
+  readDvdTitleIdentityReviewSet(
+    id: OriginalDiscArchiveId,
+  ): DvdTitleIdentityReviewSet | null;
   auditDvdArchiveEvidenceChains(
     ids: readonly OriginalDiscArchiveId[],
   ): void;
@@ -2011,6 +2122,7 @@ export type SnapshotCatalogAccess = Pick<
   | "listOriginalDiscArchives"
   | "findDvdArchiveEvidenceHeader"
   | "findDvdArchiveEvidenceHeaders"
+  | "readDvdTitleIdentityReviewSet"
   | "findArchiveRecovery"
   | "listCatalogReviewArchives"
   | "listMediaItems"

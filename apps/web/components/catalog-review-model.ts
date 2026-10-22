@@ -177,6 +177,7 @@ export interface CatalogReviewDto {
   archive: CatalogReviewArchiveEvidence;
   reviewOutcome: CatalogReviewOutcome;
   rawScan: { titles: DvdTitle[] };
+  titleIdentity?: CatalogReviewTitleIdentity;
   coverage: CatalogReviewCoverage;
   reviewActionAvailability: CatalogReviewActionAvailability;
   rearchiveProposal?: CatalogReviewRearchiveProposal;
@@ -210,6 +211,79 @@ export interface CatalogReviewDto {
     limit: number;
     hasPrevious: boolean;
     hasNext: boolean;
+  };
+}
+
+export type CatalogReviewTitleIdentity =
+  | {
+    available: false;
+    unavailableReason:
+      | "UNSUPPORTED_EVIDENCE_FORMAT"
+      | "TITLE_IDENTITY_NOT_RECORDED";
+    checkpoint: {
+      manifestId: string;
+      manifestRevision: number;
+      manifestDigest: string;
+    } | null;
+    policyVersion: null;
+    reviewSetIdentity: null;
+    items: [];
+  }
+  | {
+    available: true;
+    unavailableReason: null;
+    checkpoint: {
+      manifestId: string;
+      manifestRevision: number;
+      manifestDigest: string;
+    };
+    policyVersion: string;
+    reviewSetIdentity: string;
+    items: CatalogReviewTitleIdentityItem[];
+  };
+
+export interface CatalogReviewTitleIdentityItem {
+  titleIdentityId: string;
+  presentAtCurrentCheckpoint: boolean;
+  mappingState: "mapped" | "needs_mapping_review" | "unmapped";
+  discSelectionMappings: readonly {
+    discSelectionId: string;
+    mappingState: "mapped" | "needs_mapping_review";
+  }[];
+  reviewContinuity: {
+    result: "initial" | "proved" | "uncertain" | "new";
+    policyVersion: string;
+    previousObservationId: string | null;
+  };
+  observation: {
+    id: string;
+    titleIdentityId: string;
+    checkpoint: {
+      manifestId: string;
+      manifestRevision: number;
+      manifestDigest: string;
+    };
+    displayTitleNumber: number;
+    navigation: {
+      videoTitleSetNumber: number;
+      titleSetTitleNumber: number;
+      programChainNumber: number;
+    };
+    selectedPath: ReadonlyArray<{
+      programNumber: number;
+      cellNumber: number;
+      vobId: number;
+      cellId: number;
+    }>;
+    angleNumber: number;
+    angleCount: number;
+    chapterStart: number;
+    chapterEnd: number;
+    chapterCount: number;
+    sourceExtents: readonly UnreadableSectorRange[];
+    contentDigest: string;
+    continuity: CatalogReviewTitleIdentityItem["reviewContinuity"];
+    createdAt: string;
   };
 }
 
