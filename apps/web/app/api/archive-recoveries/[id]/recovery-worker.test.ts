@@ -1095,6 +1095,46 @@ it("preserves a Stop that wins the race with pass settlement", async () => {
   }
 });
 
+it("preserves a faulted Stop claim against stale pass settlement", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const authority = await completeVerification(fixture, seeded);
+  const access = fixture.openAccess();
+  try {
+    const claim = access.archiveRecoveryWork.claim(
+      access.archiveRecoveryWork.request(seeded.recoveryId).archiveRecoveryId,
+      "synthetic-faulted-stop-racing-recovery-worker",
+    );
+    access.archiveRecoveryWork.bindVerification(claim, authority);
+    const stop = access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000480",
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    });
+    access.archiveRecoveryWork.markStopFault({
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+      stopOperationId: stop.stopOperationId,
+      faultCode: "CONSISTENCY_FAULT",
+    });
+
+    access.archiveRecoveryWork.settlePass(claim);
+
+    expect(access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "faulted",
+        faultCode: "CONSISTENCY_FAULT",
+        work: expect.objectContaining({
+          claimToken: claim.claimToken,
+          status: "claimed",
+        }),
+      });
+  } finally {
+    access.close();
+  }
+});
+
 it("records a changed insertion separately without starting a source read", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);

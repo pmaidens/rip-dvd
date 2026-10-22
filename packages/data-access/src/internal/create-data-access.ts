@@ -10068,7 +10068,10 @@ export function createDataAccessInternal(
             transaction,
             claim,
           );
-          if (recovery.status === "stopping") {
+          if (
+            recovery.status !== "running" &&
+            recovery.status !== "completed"
+          ) {
             return recovery;
           }
           const settledStatus = settledArchiveRecoveryStatus(
