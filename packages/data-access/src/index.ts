@@ -166,7 +166,6 @@ export {
   canonicalPublicationJson,
   createDvdInitialPublicationDigest,
   DvdCheckpointReadFault,
-  readCommittedDvdCurrentCheckpoint,
 } from "./dvd-initial-checkpoint.js";
 export type {
   CommittedDvdCurrentCheckpoint,

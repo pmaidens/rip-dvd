@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { createDataAccess } from "@rip-dvd/data-access";
 
 import { seedDvdDiscVerificationFixture } from "./dvd-disc-verification.test-support.js";
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
@@ -16,7 +17,7 @@ it("inspects, submits, replays, and rejects stale inserted-disc verification", a
   const { recoveryId, inspection, sourceDisc } = seeded;
 
   const inspected = await fixture.run([
-    "inspect-verification", "--archive-recovery-id", recoveryId,
+    "archive-recovery", "inspect-verification", recoveryId,
   ]);
   expect(inspected).toMatchObject({ exitCode: 0, stderr: "" });
   expect(inspected.result).toMatchObject({
@@ -35,9 +36,8 @@ it("inspects, submits, replays, and rejects stale inserted-disc verification", a
 
   const key = "00000000-0000-4000-8000-000000000439";
   const command = [
-    "verify-disc",
+    "archive-recovery", "verify-disc", recoveryId,
     "--key", key,
-    "--archive-recovery-id", recoveryId,
     "--disc-inspection-id", inspection.id,
     "--checkpoint-revision", "1",
     "--checkpoint-digest", seeded.manifest.manifestDigest,
@@ -51,7 +51,7 @@ it("inspects, submits, replays, and rejects stale inserted-disc verification", a
   expect(replayed.result).toEqual(submitted.result);
 
   const after = await fixture.run([
-    "inspect-verification", "--archive-recovery-id", recoveryId,
+    "archive-recovery", "inspect-verification", recoveryId,
   ]);
   expect(after.result).toMatchObject({
     verification: {
@@ -95,7 +95,7 @@ it("inspects, submits, replays, and rejects stale inserted-disc verification", a
   });
   workerAccess.close();
   const matched = await fixture.run([
-    "inspect-verification", "--archive-recovery-id", recoveryId,
+    "archive-recovery", "inspect-verification", recoveryId,
   ]);
   expect(matched.result).toMatchObject({
     verification: {
@@ -117,7 +117,7 @@ it("inspects, submits, replays, and rejects stale inserted-disc verification", a
   });
   staleAccess.close();
   const invalidated = await fixture.run([
-    "inspect-verification", "--archive-recovery-id", recoveryId,
+    "archive-recovery", "inspect-verification", recoveryId,
   ]);
   expect(invalidated.result).toMatchObject({
     verification: { status: "completed", outcome: "match", current: false },
@@ -127,9 +127,8 @@ it("inspects, submits, replays, and rejects stale inserted-disc verification", a
     },
   });
   const stale = await fixture.run([
-    "verify-disc",
+    "archive-recovery", "verify-disc", recoveryId,
     "--key", "00000000-0000-4000-8000-000000000440",
-    "--archive-recovery-id", recoveryId,
     "--disc-inspection-id", inspection.id,
     "--checkpoint-revision", "1",
     "--checkpoint-digest", seeded.manifest.manifestDigest,
@@ -145,9 +144,8 @@ it("keeps a durable mismatch authoritative when a worker claim expires", async (
   fixtures.push(fixture);
   const seeded = await seedDvdDiscVerificationFixture(fixture);
   const submitted = await fixture.run([
-    "verify-disc",
+    "archive-recovery", "verify-disc", seeded.recoveryId,
     "--key", "00000000-0000-4000-8000-000000000443",
-    "--archive-recovery-id", seeded.recoveryId,
     "--disc-inspection-id", seeded.inspection.id,
     "--checkpoint-revision", "1",
     "--checkpoint-digest", seeded.manifest.manifestDigest,
@@ -184,4 +182,50 @@ it("keeps a durable mismatch authoritative when a worker claim expires", async (
   } finally {
     access.close();
   }
+});
+
+it("reports unavailable checkpoint storage as a stable action reason", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+
+  const inspected = await fixture.run([
+    "archive-recovery", "inspect-verification", seeded.recoveryId,
+  ], undefined, undefined, {
+    openAccess: () => createDataAccess({ databasePath: fixture.databasePath }),
+  });
+
+  expect(inspected).toMatchObject({
+    exitCode: 0,
+    result: {
+      checkpoint: null,
+      action: {
+        available: false,
+        blockingReasons: expect.arrayContaining([
+          expect.objectContaining({ code: "STORAGE_UNSUPPORTED" }),
+        ]),
+      },
+    },
+  });
+
+  const submitted = await fixture.run([
+    "archive-recovery", "verify-disc", seeded.recoveryId,
+    "--key", "00000000-0000-4000-8000-000000000445",
+    "--disc-inspection-id", seeded.inspection.id,
+    "--checkpoint-revision", "1",
+    "--checkpoint-digest", seeded.manifest.manifestDigest,
+  ], undefined, undefined, {
+    openAccess: () => createDataAccess({ databasePath: fixture.databasePath }),
+  });
+  expect(submitted).toMatchObject({
+    exitCode: 2,
+    result: {
+      error: {
+        code: "STORAGE_UNSUPPORTED",
+        blockingReasons: [
+          expect.objectContaining({ code: "STORAGE_UNSUPPORTED" }),
+        ],
+      },
+    },
+  });
 });

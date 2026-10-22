@@ -2,6 +2,7 @@ import { runNotifications } from "./notifications.js";
 import { StructuredInputError } from "./structured-input.js";
 import {
   createApplicationOperations,
+  DvdDiscVerificationUnavailableError,
   InvalidArchiveEvidenceInputError,
   InvalidNotificationInputError,
   NotificationsUnavailableError,
@@ -184,21 +185,14 @@ const commandDefinitions = [
     example: "rip-dvd archive-evidence <archive-id> --limit 20",
   },
   {
-    name: "inspect-verification",
-    description: "Inspect the current inserted-disc verification state for an Archive Recovery.",
-    usage: "rip-dvd inspect-verification --archive-recovery-id <id>",
-    inputs: { arguments: [], options: ["--archive-recovery-id"] },
-    example: "rip-dvd inspect-verification --archive-recovery-id <id>",
-  },
-  {
-    name: "verify-disc",
-    description: "Queue bounded source verification for the current disc insertion and recovery checkpoint.",
-    usage: "rip-dvd verify-disc --key <key> --archive-recovery-id <id> --disc-inspection-id <id> --checkpoint-revision <positive integer> --checkpoint-digest <sha256>",
+    name: "archive-recovery",
+    description: "Inspect or request bounded inserted-disc verification for an Archive Recovery.",
+    usage: "rip-dvd archive-recovery <inspect-verification|verify-disc> <archive-recovery-id> [options]",
     inputs: {
-      arguments: [],
-      options: ["--key", "--archive-recovery-id", "--disc-inspection-id", "--checkpoint-revision", "--checkpoint-digest"],
+      arguments: ["action: inspect-verification|verify-disc", "archive-recovery-id"],
+      options: ["--key", "--disc-inspection-id", "--checkpoint-revision", "--checkpoint-digest"],
     },
-    example: "rip-dvd verify-disc --key 00000000-0000-4000-8000-000000000001 --archive-recovery-id <id> --disc-inspection-id <id> --checkpoint-revision 1 --checkpoint-digest <sha256>",
+    example: "rip-dvd archive-recovery verify-disc <archive-recovery-id> --key 00000000-0000-4000-8000-000000000001 --disc-inspection-id <id> --checkpoint-revision 1 --checkpoint-digest <sha256>",
   },
   {
     name: "encode-output",
@@ -472,14 +466,14 @@ function runRecoveryCommand(name: RecoveryCommand, input: ReturnType<typeof reco
 }
 
 function verificationInspectionInputs(args: readonly string[]) {
-  if (args.length !== 2 || args[0] !== "--archive-recovery-id") {
+  if (args.length !== 1) {
     throw new CommandFailure(
       "INVALID_ARGUMENTS",
       "Archive Recovery ID is required.",
       2,
     );
   }
-  const archiveRecoveryId = args[1]?.trim();
+  const archiveRecoveryId = args[0]?.trim();
   if (!archiveRecoveryId || archiveRecoveryId.length > 256) {
     throw new CommandFailure(
       "INVALID_ARGUMENTS",
@@ -491,23 +485,22 @@ function verificationInspectionInputs(args: readonly string[]) {
 }
 
 function discVerificationInputs(args: readonly string[]) {
+  const archiveRecoveryId = args[0]?.trim();
   const { options, mutationKey } = mutationOptions(
-    args,
+    args.slice(1),
     [
       "--key",
-      "--archive-recovery-id",
       "--disc-inspection-id",
       "--checkpoint-revision",
       "--checkpoint-digest",
     ],
     "Invalid disc verification options.",
   );
-  const archiveRecoveryId = options.get("--archive-recovery-id")?.trim();
   const discInspectionId = options.get("--disc-inspection-id")?.trim();
   const revision = options.get("--checkpoint-revision");
   const checkpointDigest = options.get("--checkpoint-digest")?.trim();
   if (
-    options.size !== 5 ||
+    options.size !== 4 ||
     !archiveRecoveryId || archiveRecoveryId.length > 256 ||
     !discInspectionId || discInspectionId.length > 256 ||
     revision === undefined || !/^[1-9]\d*$/.test(revision) ||
@@ -550,6 +543,12 @@ async function runDvdDiscVerificationCommand(
     }
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("NOT_FOUND", "DVD disc verification target was not found.", 2);
+    }
+    if (error instanceof DvdDiscVerificationUnavailableError) {
+      throw new CommandFailure(error.code, error.message, 2, [{
+        code: error.code,
+        message: error.message,
+      }]);
     }
     if (
       error instanceof StaleDvdDiscVerificationError ||
@@ -1572,11 +1571,23 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
       emit(io.stdout, runRecoveryCommand(name, recoveryInputs(name, rest), io));
       return 0;
     }
-    if (name === "inspect-verification" || name === "verify-disc") {
+    if (name === "archive-recovery") {
       if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
         emit(io.stdout, help(name));
       } else {
-        emit(io.stdout, await runDvdDiscVerificationCommand(name, rest, io));
+        const [action, ...actionArgs] = rest;
+        if (action !== "inspect-verification" && action !== "verify-disc") {
+          throw new CommandFailure(
+            "INVALID_ARGUMENTS",
+            "Archive Recovery action must be inspect-verification or verify-disc.",
+            2,
+          );
+        }
+        emit(io.stdout, await runDvdDiscVerificationCommand(
+          action,
+          actionArgs,
+          io,
+        ));
       }
       return 0;
     }

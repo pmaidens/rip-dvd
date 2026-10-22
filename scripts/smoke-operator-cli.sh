@@ -54,8 +54,8 @@ printf '%s\n' "$help_output" | assert_json_fields \
   'schemaVersion=1' 'usage=rip-dvd <command>'
 
 set +e
-verification_output="$(invoke inspect-verification \
-  --archive-recovery-id synthetic-missing-recovery \
+verification_output="$(invoke archive-recovery inspect-verification \
+  synthetic-missing-recovery \
   2>"$temporary_directory/verification.stderr")"
 verification_status=$?
 set -e

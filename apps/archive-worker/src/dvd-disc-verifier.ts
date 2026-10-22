@@ -19,7 +19,10 @@ import {
   defaultArchiveImageOwnership,
   type ArchiveImageOwnership,
 } from "@rip-dvd/worker-runtime";
-import { requireSafeOpticalDevicePath } from "./optical-media-generation.js";
+import {
+  requireSafeOpticalDevicePath,
+  type MediaGenerationObserver,
+} from "./optical-media-generation.js";
 import {
   DVD_READ_FAILURE_RESULT_PREFIX,
   DVD_READ_FAILURE_CLASSIFIER_VERSION,
@@ -302,7 +305,7 @@ export async function verifyInsertedDvdAgainstSamples(input: {
   reader: DvdVerificationSourceReader;
   startedAtMs: number;
   now?(): number;
-  insertionIsCurrent(): boolean;
+  insertionIsCurrent(): boolean | Promise<boolean>;
   checkpointIsCurrent(): boolean;
   authorizeRead?(): boolean | Promise<boolean>;
   recordFinding?(
@@ -318,7 +321,7 @@ export async function verifyInsertedDvdAgainstSamples(input: {
   const findings: DvdDiscVerificationSampleFinding[] = [];
   let budgetExhausted = false;
   let interrupted = false;
-  let insertionChanged = !input.insertionIsCurrent();
+  let insertionChanged = !await input.insertionIsCurrent();
   let checkpointChanged = !input.checkpointIsCurrent();
   for (const sample of manifest?.samples ?? []) {
     if (insertionChanged || checkpointChanged) break;
@@ -344,7 +347,7 @@ export async function verifyInsertedDvdAgainstSamples(input: {
       sectorCount: sample.sectorCount,
       acceptedEndLbaExclusive: manifest!.acceptedEndLbaExclusive,
     });
-    insertionChanged = !input.insertionIsCurrent();
+    insertionChanged = !await input.insertionIsCurrent();
     checkpointChanged = !input.checkpointIsCurrent();
     if (insertionChanged || checkpointChanged) break;
     let finding: DvdDiscVerificationSampleFinding;
@@ -394,6 +397,8 @@ export async function pollDvdDiscVerification(input: {
   access: DataAccess;
   reader: DvdVerificationSourceReader;
   workerExecutionId: string;
+  mediaGenerationObserver: MediaGenerationObserver;
+  signal?: AbortSignal;
   archiveImageOwnership?: ArchiveImageOwnership;
 }): Promise<boolean> {
   input.access.dvdDiscVerifications.recoverExpiredClaims();
@@ -417,7 +422,8 @@ export async function pollDvdDiscVerification(input: {
       claim.originalDiscArchiveId,
       input.archiveImageOwnership ?? defaultArchiveImageOwnership,
       async ({ checkpoint, assertOwned }) => {
-        const inspectionIsCurrent = () => {
+        const insertionSignal = input.signal ?? new AbortController().signal;
+        const databaseInspectionIsCurrent = () => {
           const current = input.access.discInspections.list({
             ids: [claim.discInspectionId],
           })[0];
@@ -450,6 +456,19 @@ export async function pollDvdDiscVerification(input: {
         if (drive === undefined || claim.startedAt === null) {
           throw new Error("DVD verification insertion is unavailable");
         }
+        const inspectionIsCurrent = async () => {
+          if (!databaseInspectionIsCurrent()) return false;
+          try {
+            const liveGeneration = await input.mediaGenerationObserver.observe(
+              drive.devicePath,
+              insertionSignal,
+            );
+            return liveGeneration === claim.mediaGeneration &&
+              databaseInspectionIsCurrent();
+          } catch {
+            return false;
+          }
+        };
         const projectedManifest = input.access.catalog.findDvdSourceSampleManifest(
           claim.originalDiscArchiveId,
         );

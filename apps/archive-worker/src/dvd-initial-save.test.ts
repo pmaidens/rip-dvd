@@ -5,11 +5,12 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
+  createDvdArchiveEvidenceManifestDigests,
+  createDvdArchiveRecoveryReadEvidenceDigest,
   createDataAccess,
   dvdSourceSampleCandidates,
   DVD_SOURCE_SAMPLE_BAND_COUNT,
   DVD_SOURCE_SAMPLE_BYTE_COUNT,
-  readCommittedDvdCurrentCheckpoint,
   type RunningArchiveJob,
 } from "@rip-dvd/data-access";
 import { beginSettledDiscInspectionForTest } from "@rip-dvd/data-access/test-support";
@@ -134,7 +135,10 @@ async function jobFixture(
 ) {
   const f = await fixture(damaged, corrected, distributedSamples);
   const databasePath = join(f.identity.originalsLibraryPath, "..", "catalog.sqlite");
-  const access = createDataAccess({ databasePath });
+  const access = createDataAccess({
+    databasePath,
+    originalsLibraryPath: f.identity.originalsLibraryPath,
+  });
   const drive = access.catalog.upsertOpticalDrive({ devicePath: "/dev/synthetic-dvd", isPresent: true, isEnabled: true });
   const disc = access.catalog.registerDetectedDisc({ opticalDriveId: drive.id, fingerprint: f.identity.imageFingerprint, discKind: "dvd", volumeLabel: "SYNTHETIC", scanData: { schemaVersion: 2, contentId: f.identity.imageFingerprint, titles: [{ number: 1, durationSeconds: 60, chapters: 1, audioStreams: [], subtitles: [] }] } });
   const started = beginSettledDiscInspectionForTest(access, { opticalDriveId: drive.id, mediaGeneration: "synthetic-generation", mediaCapacityBytes: f.boundary.sizeBytes });
@@ -153,7 +157,10 @@ async function jobFixture(
   sqlite.prepare("UPDATE archive_jobs SET evidence_format = 'dvd-recovery-evidence-v1' WHERE id = ?").run(claim.id);
   for (const guard of guards) sqlite.exec(String(guard.sql));
   sqlite.close();
-  const reopened = createDataAccess({ databasePath });
+  const reopened = createDataAccess({
+    databasePath,
+    originalsLibraryPath: f.identity.originalsLibraryPath,
+  });
   return { ...f, access: reopened, claim: reopened.archiveJobs.find(claim.id) as RunningArchiveJob, databasePath, exclusion: createInProcessDvdRescueWorkspaceLock() };
 }
 
@@ -244,8 +251,8 @@ it("keeps the source-sample database projection immutable", async () => {
   }
 });
 
-it("resolves immutable revision-one samples beside a later current checkpoint", async () => {
-  const f = await jobFixture(false, false, true);
+it("resolves immutable revision-one samples beside a validated later checkpoint", async () => {
+  const f = await jobFixture(true, false, true);
   try {
     const saved = await saveDvdInitialArchiveForArchiveJob({
       access: f.access,
@@ -264,8 +271,100 @@ it("resolves immutable revision-one samples beside a later current checkpoint", 
     const pointer = JSON.parse(await readFile(pointerPath, "utf8")) as {
       publicationDigest: string;
     };
+    const archive = f.access.catalog.listOriginalDiscArchives({
+      ids: [archiveId],
+    })[0]!;
+    const initialHeader = f.access.catalog.findDvdArchiveEvidenceHeader(
+      archiveId,
+    )!;
+    const recoveryReadId = `${archiveId}:synthetic-read-2`;
+    const recoveryReadDigest = createDvdArchiveRecoveryReadEvidenceDigest({
+      originalDiscArchiveId: archiveId,
+      fromManifestId: initialHeader.currentManifestId,
+      fromManifestRevision: initialHeader.currentManifestRevision,
+      startLba: 32,
+      sectorCount: 1,
+      outcome: "recovered",
+    });
+    const currentRanges = initialHeader.unrecoveredSourceRanges.filter(
+      (range) => range.startLba !== 32,
+    );
     const currentManifestId = `${archiveId}:synthetic-revision-2`;
-    const currentManifestDigest = "c".repeat(64);
+    const currentManifest = createDvdArchiveEvidenceManifestDigests({
+      originalDiscArchiveId: archiveId,
+      revision: 2,
+      previousManifestId: initialHeader.currentManifestId,
+      previousManifestDigest: initialHeader.currentManifestDigest,
+      recoveryReadId,
+      recoveryReadEvidenceDigest: recoveryReadDigest,
+      evidenceFormat: initialHeader.evidenceFormat,
+      imageFingerprint: archive.fingerprint,
+      sectorSizeBytes: initialHeader.sectorSizeBytes,
+      acceptedEndLbaExclusive: initialHeader.acceptedEndLbaExclusive,
+      boundaryPolicyVersion: archive.boundaryPolicyVersion!,
+      boundaryReportedSizeBytes: archive.boundaryReportedSizeBytes!,
+      boundaryPublishedSizeBytes: archive.boundaryPublishedSizeBytes!,
+      boundaryEvidenceDigest: initialHeader.boundaryEvidenceDigest,
+      unrecoveredSourceRanges: currentRanges,
+    });
+    const currentManifestDigest = currentManifest.manifestDigest;
+    const sqlite = new DatabaseSync(f.databasePath);
+    try {
+      const guards = sqlite.prepare(`
+        SELECT name, sql FROM sqlite_master WHERE type = 'trigger'
+      `).all() as Array<{ name: string; sql: string }>;
+      for (const guard of guards) {
+        sqlite.exec(`DROP TRIGGER "${guard.name}"`);
+      }
+      sqlite.prepare(`
+        INSERT INTO dvd_archive_recovery_reads (
+          id, original_disc_archive_id, from_manifest_id,
+          from_manifest_revision, start_lba, sector_count, outcome,
+          evidence_digest, created_at
+        ) VALUES (?, ?, ?, 1, 32, 1, 'recovered', ?, 2)
+      `).run(
+        recoveryReadId,
+        archiveId,
+        initialHeader.currentManifestId,
+        recoveryReadDigest,
+      );
+      sqlite.prepare(`
+        INSERT INTO dvd_archive_evidence_manifests (
+          id, original_disc_archive_id, revision, previous_manifest_id,
+          recovery_read_id, evidence_format, image_fingerprint,
+          sector_size_bytes, accepted_end_lba_exclusive,
+          boundary_policy_version, boundary_reported_size_bytes,
+          boundary_published_size_bytes, boundary_evidence_digest,
+          unrecovered_source_ranges, unrecovered_source_ranges_digest,
+          manifest_digest, created_at
+        ) VALUES (?, ?, 2, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2)
+      `).run(
+        currentManifestId,
+        archiveId,
+        initialHeader.currentManifestId,
+        recoveryReadId,
+        initialHeader.evidenceFormat,
+        archive.fingerprint,
+        initialHeader.sectorSizeBytes,
+        initialHeader.acceptedEndLbaExclusive,
+        archive.boundaryPolicyVersion,
+        archive.boundaryReportedSizeBytes,
+        archive.boundaryPublishedSizeBytes,
+        initialHeader.boundaryEvidenceDigest,
+        JSON.stringify(currentRanges),
+        currentManifest.unrecoveredSourceRangesDigest,
+        currentManifestDigest,
+      );
+      sqlite.prepare(`
+        UPDATE dvd_archive_evidence_headers
+        SET current_manifest_id = ?, current_manifest_revision = 2,
+            current_manifest_digest = ?, updated_at = 2
+        WHERE original_disc_archive_id = ?
+      `).run(currentManifestId, currentManifestDigest, archiveId);
+      for (const guard of guards) sqlite.exec(guard.sql);
+    } finally {
+      sqlite.close();
+    }
     await writeFile(pointerPath, JSON.stringify({
       originalDiscArchiveId: archiveId,
       currentManifestId,
@@ -273,24 +372,11 @@ it("resolves immutable revision-one samples beside a later current checkpoint", 
       currentManifestDigest,
       publicationDigest: pointer.publicationDigest,
     }));
-    const archive = f.access.catalog.listOriginalDiscArchives({
-      ids: [archiveId],
-    })[0]!;
-    const initialHeader = f.access.catalog.findDvdArchiveEvidenceHeader(
+    const resolved = await f.access.withDvdCurrentCheckpoint(
       archiveId,
-    )!;
-    const resolved = await readCommittedDvdCurrentCheckpoint({
-      originalsLibraryPath: f.identity.originalsLibraryPath,
-      archive,
-      header: {
-        ...initialHeader,
-        currentManifestId,
-        currentManifestRevision: 2,
-        currentManifestDigest,
-      },
-      jobs: f.access.archiveJobs.listForArchive(archiveId),
-      assertImageOwnership() {},
-    });
+      createArchiveImageOwnership(),
+      async ({ checkpoint }) => checkpoint,
+    );
 
     expect(resolved).toMatchObject({
       currentManifestId,
@@ -301,6 +387,28 @@ it("resolves immutable revision-one samples beside a later current checkpoint", 
         sourceSampleManifest: { checkpointRevision: 1 },
       },
     });
+
+    const corrupt = new DatabaseSync(f.databasePath);
+    try {
+      corrupt.exec("PRAGMA foreign_keys = OFF");
+      const guard = corrupt.prepare(`
+        SELECT sql FROM sqlite_master
+        WHERE type = 'trigger'
+          AND name = 'dvd_evidence_manifest_delete_guard'
+      `).get() as { sql: string };
+      corrupt.exec("DROP TRIGGER dvd_evidence_manifest_delete_guard");
+      corrupt.prepare(`
+        DELETE FROM dvd_archive_evidence_manifests WHERE id = ?
+      `).run(currentManifestId);
+      corrupt.exec(guard.sql);
+    } finally {
+      corrupt.close();
+    }
+    await expect(f.access.withDvdCurrentCheckpoint(
+      archiveId,
+      createArchiveImageOwnership(),
+      async ({ checkpoint }) => checkpoint,
+    )).rejects.toThrow("authoritative links are incomplete");
   } finally {
     f.access.close();
   }

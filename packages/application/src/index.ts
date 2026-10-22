@@ -223,7 +223,11 @@ export {
   validOperationLimit,
   waitForOperation,
 } from "./operations.js";
-export { inspectDvdDiscVerification } from "./dvd-disc-verification.js";
+export {
+  DvdDiscVerificationUnavailableError,
+  inspectDvdDiscVerification,
+  type DvdDiscVerificationAvailabilityCode,
+} from "./dvd-disc-verification.js";
 export type {
   OperationInspectionOptions,
   OperationKind,

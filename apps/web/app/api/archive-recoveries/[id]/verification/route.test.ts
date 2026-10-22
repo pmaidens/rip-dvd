@@ -36,8 +36,8 @@ it("keeps web inspection and replayed submission equal to the JSON CLI", async (
       () => access,
     );
     const cliInspection = await fixture.run([
+      "archive-recovery",
       "inspect-verification",
-      "--archive-recovery-id",
       seeded.recoveryId,
     ]);
     expect(webInspection.status).toBe(200);
@@ -58,9 +58,10 @@ it("keeps web inspection and replayed submission equal to the JSON CLI", async (
       () => "http://localhost:3000",
     );
     const cliReplay = await fixture.run([
+      "archive-recovery",
       "verify-disc",
+      seeded.recoveryId,
       "--key", mutationKey,
-      "--archive-recovery-id", seeded.recoveryId,
       "--disc-inspection-id", seeded.inspection.id,
       "--checkpoint-revision", "1",
       "--checkpoint-digest", seeded.manifest.manifestDigest,
@@ -80,9 +81,10 @@ it("keeps web inspection and replayed submission equal to the JSON CLI", async (
       () => "http://localhost:3000",
     );
     const cliActive = await fixture.run([
+      "archive-recovery",
       "verify-disc",
+      seeded.recoveryId,
       "--key", activeMutationKey,
-      "--archive-recovery-id", seeded.recoveryId,
       "--disc-inspection-id", seeded.inspection.id,
       "--checkpoint-revision", "1",
       "--checkpoint-digest", seeded.manifest.manifestDigest,

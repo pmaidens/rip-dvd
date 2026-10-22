@@ -310,6 +310,39 @@ it("stops after removal and invalidates a previously readable sample", async () 
   expect(result.findings).toEqual([]);
 });
 
+it("discards a sample when the live media generation changes during its read", async () => {
+  const source = reader((index) => ({
+    outcome: "readable",
+    bytes: sampleBytes(index),
+  }));
+  const insertionIsCurrent = vi.fn()
+    .mockResolvedValueOnce(true)
+    .mockResolvedValueOnce(false);
+
+  const result = await verifyInsertedDvdAgainstSamples({
+    manifest: manifest(),
+    sourceMetadataFingerprint: metadataFingerprint,
+    observedMetadataFingerprint: metadataFingerprint,
+    devicePath: "/dev/synthetic-disc",
+    reader: source.reader,
+    startedAtMs: 0,
+    now: () => 1,
+    insertionIsCurrent,
+    checkpointIsCurrent: () => true,
+  });
+
+  expect(result).toMatchObject({
+    outcome: "inconclusive",
+    reasons: [
+      "DISC_SAMPLE_COVERAGE_INCOMPLETE",
+      "DISC_INSERTION_CHANGED",
+    ],
+    insertionChanged: true,
+  });
+  expect(source.run).toHaveBeenCalledOnce();
+  expect(result.findings).toEqual([]);
+});
+
 it("stops after a checkpoint change and makes the result stale", async () => {
   const source = reader((index) => ({
     outcome: "readable",

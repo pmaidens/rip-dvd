@@ -1,4 +1,8 @@
-import { createApplicationOperations, InvalidMutationKeyError } from "@rip-dvd/application";
+import {
+  createApplicationOperations,
+  DvdDiscVerificationUnavailableError,
+  InvalidMutationKeyError,
+} from "@rip-dvd/application";
 import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
@@ -83,6 +87,15 @@ export async function createDvdDiscVerificationRoute(
     }
     if (error instanceof MutationKeyConflictError) {
       return response({ error: error.message }, 409);
+    }
+    if (error instanceof DvdDiscVerificationUnavailableError) {
+      return response({
+        error: {
+          code: error.code,
+          message: error.message,
+          blockingReasons: [{ code: error.code, message: error.message }],
+        },
+      }, 409);
     }
     if (
       error instanceof StaleDvdDiscVerificationError ||

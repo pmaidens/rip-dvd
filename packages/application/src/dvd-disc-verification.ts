@@ -1,5 +1,7 @@
 import {
   assertDvdSourceSampleManifestProjection,
+  DomainInvariantError,
+  DvdCheckpointReadFault,
   RecordNotFoundError,
   StaleDvdDiscVerificationError,
   type ArchiveRecoveryId,
@@ -9,9 +11,50 @@ import {
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import {
+  ArchiveImageOwnershipError,
   defaultArchiveImageOwnership,
   type ArchiveImageOwnership,
 } from "@rip-dvd/worker-runtime";
+
+export type DvdDiscVerificationAvailabilityCode =
+  | "CONSISTENCY_FAULT"
+  | "STORAGE_UNSUPPORTED"
+  | "WRITER_NOT_QUIESCENT";
+
+export class DvdDiscVerificationUnavailableError extends Error {
+  constructor(
+    readonly code: DvdDiscVerificationAvailabilityCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "DvdDiscVerificationUnavailableError";
+  }
+}
+
+function checkpointAvailabilityFailure(error: unknown):
+  { code: DvdDiscVerificationAvailabilityCode; message: string } | null {
+  if (
+    !(error instanceof DvdCheckpointReadFault) &&
+    !(error instanceof ArchiveImageOwnershipError) &&
+    !(error instanceof DomainInvariantError &&
+      error.message.includes("source sample manifest projection conflicts"))
+  ) return null;
+  const code: DvdDiscVerificationAvailabilityCode =
+    error instanceof ArchiveImageOwnershipError
+      ? error.code
+      : error instanceof DvdCheckpointReadFault &&
+          error.code === "DVD_EVIDENCE_STORAGE_UNAVAILABLE"
+        ? "STORAGE_UNSUPPORTED"
+        : "CONSISTENCY_FAULT";
+  return {
+    code,
+    message: code === "STORAGE_UNSUPPORTED"
+      ? "The archive storage contract is unavailable for a stable checkpoint read."
+      : code === "WRITER_NOT_QUIESCENT"
+        ? "The archive writer is not quiescent."
+        : "The current archive checkpoint could not be validated consistently.",
+  };
+}
 
 function visibleVerification(
   verification: NonNullable<ReturnType<
@@ -71,8 +114,11 @@ export async function inspectDvdDiscVerification(
   const inspectAtCheckpoint = (checkpoint: {
     revision: number;
     digest: string;
-  } | null, sourceSampleManifest: DvdSourceSampleManifest | null) => {
-    const header = access.catalog.findDvdArchiveEvidenceHeader(archive.id);
+  } | null, sourceSampleManifest: DvdSourceSampleManifest | null,
+  checkpointFailure: { code: string; message: string } | null = null) => {
+    const header = checkpointFailure === null
+      ? access.catalog.findDvdArchiveEvidenceHeader(archive.id)
+      : null;
     const currentInspections = access.discInspections.list({
       currentOnly: true,
     }).filter((inspection) =>
@@ -121,7 +167,9 @@ export async function inspectDvdDiscVerification(
         message: "More than one current disc insertion is available.",
       });
     }
-    if (
+    if (checkpointFailure !== null) {
+      blockingReasons.push(checkpointFailure);
+    } else if (
       checkpoint === null ||
       header === null ||
       header.currentManifestRevision !== checkpoint.revision ||
@@ -196,19 +244,25 @@ export async function inspectDvdDiscVerification(
       },
     };
   };
-  const inspected = await access.withDvdCurrentCheckpoint(
-    archive.id,
-    archiveImageOwnership,
-    async ({ checkpoint }) => inspectAtCheckpoint({
-      revision: checkpoint.currentManifestRevision,
-      digest: checkpoint.currentManifestDigest,
-    }, authoritativeSourceSampleManifest(
-      access,
+  try {
+    const inspected = await access.withDvdCurrentCheckpoint(
       archive.id,
-      checkpoint.initialEvidence.sourceSampleManifest ?? null,
-    )),
-  );
-  return inspected ?? inspectAtCheckpoint(null, null);
+      archiveImageOwnership,
+      async ({ checkpoint }) => inspectAtCheckpoint({
+        revision: checkpoint.currentManifestRevision,
+        digest: checkpoint.currentManifestDigest,
+      }, authoritativeSourceSampleManifest(
+        access,
+        archive.id,
+        checkpoint.initialEvidence.sourceSampleManifest ?? null,
+      )),
+    );
+    return inspected ?? inspectAtCheckpoint(null, null);
+  } catch (error) {
+    const failure = checkpointAvailabilityFailure(error);
+    if (failure === null) throw error;
+    return inspectAtCheckpoint(null, null, failure);
+  }
 }
 
 export async function requestDvdDiscVerification(
@@ -228,31 +282,41 @@ export async function requestDvdDiscVerification(
   if (recovery === null) {
     throw new RecordNotFoundError("archive recovery", input.archiveRecoveryId);
   }
-  const submitted = await access.withDvdCurrentCheckpoint(
-    recovery.originalDiscArchiveId,
-    archiveImageOwnership,
-    async ({ checkpoint, assertOwned }) => {
-      if (
-        checkpoint.currentManifestRevision !== input.checkpointRevision ||
-        checkpoint.currentManifestDigest !== input.checkpointDigest
-      ) {
-        throw new StaleDvdDiscVerificationError(
-          "DISC_CHECKPOINT_CHANGED",
+  let submitted;
+  try {
+    submitted = await access.withDvdCurrentCheckpoint(
+      recovery.originalDiscArchiveId,
+      archiveImageOwnership,
+      async ({ checkpoint, assertOwned }) => {
+        if (
+          checkpoint.currentManifestRevision !== input.checkpointRevision ||
+          checkpoint.currentManifestDigest !== input.checkpointDigest
+        ) {
+          throw new StaleDvdDiscVerificationError(
+            "DISC_CHECKPOINT_CHANGED",
+          );
+        }
+        authoritativeSourceSampleManifest(
+          access,
+          recovery.originalDiscArchiveId,
+          checkpoint.initialEvidence.sourceSampleManifest ?? null,
         );
-      }
-      authoritativeSourceSampleManifest(
-        access,
-        recovery.originalDiscArchiveId,
-        checkpoint.initialEvidence.sourceSampleManifest ?? null,
-      );
-      assertOwned();
-      const verification = access.dvdDiscVerifications.submit(input);
-      assertOwned();
-      return {
-        verification: visibleVerification(verification, true),
-      };
-    },
-  );
+        assertOwned();
+        const verification = access.dvdDiscVerifications.submit(input);
+        assertOwned();
+        return {
+          verification: visibleVerification(verification, true),
+        };
+      },
+    );
+  } catch (error) {
+    const failure = checkpointAvailabilityFailure(error);
+    if (failure === null) throw error;
+    throw new DvdDiscVerificationUnavailableError(
+      failure.code,
+      failure.message,
+    );
+  }
   if (submitted === null) {
     throw new StaleDvdDiscVerificationError(
       "DISC_CHECKPOINT_CHANGED",
