@@ -615,6 +615,9 @@ it("finishes a durable Stop after a worker restart without another read", async 
       seeded.verificationDrive.devicePath,
       expect.any(Function),
     );
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+      releaseRecoveryWork: false,
+    }));
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({ status: "stopped", work: null });
   } finally {
@@ -790,6 +793,10 @@ it("keeps Stop pending until running disc verification settles", async () => {
     throw new Error("No recovery read is allowed while stopping");
   });
   const input = pollInput(fixture, source.reader);
+  const claimNext = vi.spyOn(
+    input.access.archiveRecoveryWork,
+    "claimNextVerifiedCandidate",
+  );
   const withDeviceInactive = vi.fn(async (
     _devicePath: string,
     mutation: () => void | Promise<void>,
@@ -819,6 +826,7 @@ it("keeps Stop pending until running disc verification settles", async () => {
       .toMatchObject({ status: "stopping" });
     expect(reconcile).not.toHaveBeenCalled();
     expect(withDeviceInactive).not.toHaveBeenCalled();
+    expect(claimNext).toHaveBeenCalledOnce();
 
     input.access.dvdDiscVerifications.fail(verificationClaim);
     expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(true);

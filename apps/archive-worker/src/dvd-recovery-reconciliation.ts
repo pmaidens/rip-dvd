@@ -62,6 +62,7 @@ export interface DvdRecoveryReconciliationOptions {
   archiveImageOwnership?: ArchiveImageOwnership;
   atomicWriter?: DvdRecoveryAtomicWriter;
   signal?: AbortSignal;
+  releaseRecoveryWork?: boolean;
   assertClaim?(): void;
   setPhase?(phase:
     | "examining"
@@ -590,34 +591,33 @@ export async function reconcileDvdRecoveryCheckpoint(
     if (archive === undefined) {
       throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT");
     }
-    return await ownership.withWriter({
+    const result = await ownership.withWriter({
       archiveId: archive.id,
       imagePath: archive.archivePath,
       originalsLibraryPath: options.originalsLibraryPath,
       signal: options.signal ?? new AbortController().signal,
-      task: async (handle) => {
-        const result = await runOwnedReconciliation(options, handle);
-        const recovery = options.access.catalog.findArchiveRecovery(
-          options.originalDiscArchiveId,
-        );
-        const staleWork = recovery?.work;
-        if (
-          staleWork?.status === "claimed" &&
-          staleWork.claimedBy !== null &&
-          staleWork.claimToken !== null &&
-          staleWork.claimedAt !== null
-        ) {
-          options.access.archiveRecoveryWork.release({
-            ...staleWork,
-            status: "claimed",
-            claimedBy: staleWork.claimedBy,
-            claimToken: staleWork.claimToken,
-            claimedAt: staleWork.claimedAt,
-          });
-        }
-        return result;
-      },
+      task: (handle) => runOwnedReconciliation(options, handle),
     });
+    const recovery = options.access.catalog.findArchiveRecovery(
+      options.originalDiscArchiveId,
+    );
+    const staleWork = recovery?.work;
+    if (
+      options.releaseRecoveryWork !== false &&
+      staleWork?.status === "claimed" &&
+      staleWork.claimedBy !== null &&
+      staleWork.claimToken !== null &&
+      staleWork.claimedAt !== null
+    ) {
+      options.access.archiveRecoveryWork.release({
+        ...staleWork,
+        status: "claimed",
+        claimedBy: staleWork.claimedBy,
+        claimToken: staleWork.claimToken,
+        claimedAt: staleWork.claimedAt,
+      });
+    }
+    return result;
   } catch (cause) {
     if (cause instanceof DvdRecoveryReconciliationFault) throw cause;
     if (cause instanceof ArchiveImageOwnershipError) {

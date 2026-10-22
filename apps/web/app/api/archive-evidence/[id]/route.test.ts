@@ -14,8 +14,11 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { expect, it } from "vitest";
-import { defaultArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import { expect, it, vi } from "vitest";
+import {
+  defaultArchiveImageOwnership,
+  type ArchiveImageOwnership,
+} from "@rip-dvd/worker-runtime";
 import {
   ENCODE_JOB_LEASE_DURATION_MS,
   type DvdDiscVerificationId,
@@ -1198,6 +1201,60 @@ it("fails while an archive writer remains active", async () => {
         })).rejects.toMatchObject({ code: "WRITER_NOT_QUIESCENT" });
       },
     });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+}, RECOVERY_TEST_TIMEOUT_MS);
+
+it("releases stale recovery work only after archive ownership exits", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const saved = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  prepareEligibleRecovery(fixture, saved.archive.id, [{
+    startLba: 10,
+    sectorCount: 1,
+  }]);
+  const access = fixture.openAccess();
+  try {
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
+    let ownershipActive = false;
+    const ownership: ArchiveImageOwnership = {
+      ...defaultArchiveImageOwnership,
+      async withWriter(request) {
+        ownershipActive = true;
+        const result = await defaultArchiveImageOwnership.withWriter({
+          ...request,
+          async task(handle) {
+            const reconciled = await request.task(handle);
+            expect(access.catalog.findArchiveRecovery(saved.archive.id))
+              .toMatchObject({
+                work: { claimToken: recoveryWorkClaim.claimToken },
+              });
+            return reconciled;
+          },
+        });
+        ownershipActive = false;
+        return result;
+      },
+    };
+    const release = vi.spyOn(access.archiveRecoveryWork, "release");
+
+    await expect(reconcileDvdRecoveryCheckpoint({
+      access,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      originalDiscArchiveId: saved.archive.id,
+      atomicWriter: syntheticAtomicWriter,
+      archiveImageOwnership: ownership,
+    })).resolves.toMatchObject({ outcome: "already_consistent" });
+
+    expect(ownershipActive).toBe(false);
+    expect(release).toHaveBeenCalledOnce();
+    expect(access.catalog.findArchiveRecovery(saved.archive.id))
+      .toMatchObject({ work: null });
   } finally {
     access.close();
     fixture.dispose();

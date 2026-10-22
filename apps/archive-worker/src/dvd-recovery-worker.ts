@@ -274,6 +274,7 @@ async function finalizeStop(input: {
           originalsLibraryPath: input.originalsLibraryPath,
           originalDiscArchiveId: input.recovery.originalDiscArchiveId,
           archiveImageOwnership: input.archiveImageOwnership,
+          releaseRecoveryWork: false,
           signal: input.signal,
         });
         input.access.archiveRecoveryWork.completeStop({
@@ -355,7 +356,7 @@ export async function pollDvdRecoveryPass(input: {
       recovery: stopping,
       signal,
     });
-    return outcome !== "deferred";
+    if (outcome !== "deferred") return true;
   }
 
   const candidate = input.access.archiveRecoveryWork
