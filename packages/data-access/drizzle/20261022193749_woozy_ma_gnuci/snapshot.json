@@ -1,9 +1,9 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "f22109d1-7e13-4056-a557-2db3d8ec061d",
+  "id": "c463781a-ef00-47cf-bde7-2efaa160c110",
   "prevIds": [
-    "dac0c4f8-cc6b-42f7-84c5-3be71f4ab10a"
+    "6a8580cc-1757-466b-b438-2e2fe4ec20e6"
   ],
   "ddl": [
     {
@@ -68,6 +68,10 @@
     },
     {
       "name": "dvd_disc_verifications",
+      "entityType": "tables"
+    },
+    {
+      "name": "dvd_recovery_reconciliations",
       "entityType": "tables"
     },
     {
@@ -2405,6 +2409,166 @@
       "name": "updated_at",
       "entityType": "columns",
       "table": "dvd_disc_verifications"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "archive_recovery_id",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "attempt_ordinal",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "original_disc_archive_id",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "status",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "phase",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "outcome",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "evidence",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "failure_code",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "worker_execution_id",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "claim_token",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "claimed_at",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "started_at",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "completed_at",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "table": "dvd_recovery_reconciliations"
     },
     {
       "type": "text",
@@ -5805,6 +5969,23 @@
     },
     {
       "columns": [
+        "archive_recovery_id",
+        "original_disc_archive_id"
+      ],
+      "tableTo": "archive_recoveries",
+      "columnsTo": [
+        "id",
+        "original_disc_archive_id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": true,
+      "name": "dvd_recovery_reconciliations_recovery_archive_fk",
+      "entityType": "fks",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "columns": [
         "original_disc_archive_id"
       ],
       "tableTo": "dvd_archive_evidence_headers",
@@ -6501,6 +6682,15 @@
       "nameExplicit": false,
       "name": "dvd_disc_verifications_pk",
       "table": "dvd_disc_verifications",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "dvd_recovery_reconciliations_pk",
+      "table": "dvd_recovery_reconciliations",
       "entityType": "pks"
     },
     {
@@ -7298,6 +7488,82 @@
       "name": "dvd_disc_verifications_status_created_idx",
       "entityType": "indexes",
       "table": "dvd_disc_verifications"
+    },
+    {
+      "columns": [
+        {
+          "value": "archive_recovery_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": "\"dvd_recovery_reconciliations\".\"status\" in ('queued', 'running')",
+      "origin": "manual",
+      "name": "dvd_recovery_reconciliations_active_unique",
+      "entityType": "indexes",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "columns": [
+        {
+          "value": "archive_recovery_id",
+          "isExpression": false
+        },
+        {
+          "value": "attempt_ordinal",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "dvd_recovery_reconciliations_attempt_unique",
+      "entityType": "indexes",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "columns": [
+        {
+          "value": "status",
+          "isExpression": false
+        },
+        {
+          "value": "created_at",
+          "isExpression": false
+        },
+        {
+          "value": "id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "dvd_recovery_reconciliations_status_created_idx",
+      "entityType": "indexes",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "columns": [
+        {
+          "value": "archive_recovery_id",
+          "isExpression": false
+        },
+        {
+          "value": "created_at",
+          "isExpression": false
+        },
+        {
+          "value": "id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "dvd_recovery_reconciliations_recovery_created_idx",
+      "entityType": "indexes",
+      "table": "dvd_recovery_reconciliations"
     },
     {
       "columns": [
@@ -8523,6 +8789,42 @@
       "table": "dvd_disc_verifications"
     },
     {
+      "value": "\"id\" is not null",
+      "name": "dvd_recovery_reconciliations_id_not_null",
+      "entityType": "checks",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "value": "typeof(\"attempt_ordinal\") = 'integer' and \"attempt_ordinal\" > 0",
+      "name": "dvd_recovery_reconciliations_attempt_ordinal_check",
+      "entityType": "checks",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "value": "\"status\" in ('queued', 'running', 'completed', 'failed')",
+      "name": "dvd_recovery_reconciliations_status_check",
+      "entityType": "checks",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "value": "\"phase\" in ('queued', 'examining', 'rolling_back', 'projecting', 'cleaning_up', 'completed')",
+      "name": "dvd_recovery_reconciliations_phase_check",
+      "entityType": "checks",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "value": "(\"status\" in ('queued', 'running') and \"outcome\" is null and \"evidence\" is null and \"failure_code\" is null and \"completed_at\" is null) or (\"status\" = 'completed' and \"phase\" = 'completed' and \"outcome\" in ('already_consistent', 'rolled_back', 'rolled_forward', 'cleaned_up') and \"evidence\" is not null and json_valid(\"evidence\") and json_type(\"evidence\") = 'object' and \"failure_code\" is null and \"completed_at\" is not null) or (\"status\" = 'failed' and \"phase\" = 'completed' and \"outcome\" is null and \"evidence\" is null and \"failure_code\" in ('CONSISTENCY_FAULT', 'WRITER_NOT_QUIESCENT', 'STORAGE_UNSUPPORTED') and \"completed_at\" is not null)",
+      "name": "dvd_recovery_reconciliations_result_check",
+      "entityType": "checks",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
+      "value": "(\"status\" = 'running' and \"worker_execution_id\" is not null and \"claim_token\" is not null and \"claimed_at\" is not null and \"started_at\" is not null and \"phase\" <> 'queued' and \"phase\" <> 'completed') or (\"status\" <> 'running' and \"claim_token\" is null and \"claimed_at\" is null)",
+      "name": "dvd_recovery_reconciliations_claim_check",
+      "entityType": "checks",
+      "table": "dvd_recovery_reconciliations"
+    },
+    {
       "value": "\"scope\" is not null and \"scope\" = 'originals_library'",
       "name": "dvd_recovery_storage_preflights_scope_check",
       "entityType": "checks",
@@ -8613,14 +8915,14 @@
       "table": "dvd_structural_check_attempts"
     },
     {
-      "value": "typeof(\"sequence\") = 'integer' and \"sequence\" > 0",
-      "name": "dvd_title_damage_assessments_sequence_check",
+      "value": "\"id\" is not null",
+      "name": "dvd_title_damage_assessments_id_not_null",
       "entityType": "checks",
       "table": "dvd_title_damage_assessments"
     },
     {
-      "value": "\"id\" is not null",
-      "name": "dvd_title_damage_assessments_id_not_null",
+      "value": "typeof(\"sequence\") = 'integer' and \"sequence\" > 0",
+      "name": "dvd_title_damage_assessments_sequence_check",
       "entityType": "checks",
       "table": "dvd_title_damage_assessments"
     },

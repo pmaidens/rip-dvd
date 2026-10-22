@@ -1237,7 +1237,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(45);
+    expect(identifierTables).toHaveLength(46);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -9028,10 +9028,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
-          name: "20261022185502_perfect_lily_hollister",
+          name: "20261022193749_woozy_ma_gnuci",
         },
         {
-          name: "20261022181444_mysterious_killer_shrike",
+          name: "20261022185502_perfect_lily_hollister",
         },
         {
           name: "20261022100044_futuristic_cannonball",
