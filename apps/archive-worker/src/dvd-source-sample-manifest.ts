@@ -20,6 +20,13 @@ import {
 
 const MAX_CANDIDATE_READS_PER_BAND = 64;
 
+export class DvdSourceSampleImageConflictError extends Error {
+  constructor() {
+    super("DVD source sample image differs from the proven image");
+    this.name = "DvdSourceSampleImageConflictError";
+  }
+}
+
 async function readExactSample(
   descriptor: Awaited<ReturnType<typeof open>>,
   startLba: number,
@@ -80,7 +87,7 @@ export async function createInitialDvdSourceSampleManifest(input: {
       named.size !== opened.size ||
       named.mtimeNs !== opened.mtimeNs
     ) {
-      throw new Error("DVD source sample image differs from the proven image");
+      throw new DvdSourceSampleImageConflictError();
     }
   };
   try {

@@ -7,7 +7,10 @@ import {
   canonicalPublicationJson, createDvdInitialManifest, validateDvdInitialManifest,
   type DvdInitialManifest,
 } from "./dvd-initial-manifest.js";
-import { createInitialDvdSourceSampleManifest } from "./dvd-source-sample-manifest.js";
+import {
+  createInitialDvdSourceSampleManifest,
+  DvdSourceSampleImageConflictError,
+} from "./dvd-source-sample-manifest.js";
 
 export type DvdInitialPublicationFaultCode =
   | "DVD_PUBLICATION_INTENT_CONFLICT" | "DVD_PUBLICATION_INTENT_MISSING"
@@ -341,20 +344,31 @@ export async function publishDvdInitialArchive(options: PublicationIdentity & Pu
     throw new DvdInitialPublicationFault("DVD_PUBLICATION_PATH_CONFLICT");
   }
   const baseManifest = createDvdInitialManifest(options);
-  const sourceSampleManifest = await createInitialDvdSourceSampleManifest({
-    imagePath: stagingPath,
-    image: {
-      filesystemIdentity: baseManifest.image.filesystemIdentity,
-      mtimeNs: baseManifest.image.mtimeNs,
-      sizeBytes: baseManifest.boundaryPublishedSizeBytes,
-    },
-    sourceMetadataFingerprint: options.imageFingerprint,
-    acceptedEndLbaExclusive: baseManifest.acceptedEndLbaExclusive,
-    checkpointRevision: baseManifest.revision,
-    checkpointDigest: baseManifest.manifestDigest,
-    unrecoveredSourceRanges: baseManifest.unrecoveredSourceRanges,
-    authorizeRead: () => authorize(options),
-  });
+  let sourceSampleManifest;
+  try {
+    sourceSampleManifest = await createInitialDvdSourceSampleManifest({
+      imagePath: stagingPath,
+      image: {
+        filesystemIdentity: baseManifest.image.filesystemIdentity,
+        mtimeNs: baseManifest.image.mtimeNs,
+        sizeBytes: baseManifest.boundaryPublishedSizeBytes,
+      },
+      sourceMetadataFingerprint: options.imageFingerprint,
+      acceptedEndLbaExclusive: baseManifest.acceptedEndLbaExclusive,
+      checkpointRevision: baseManifest.revision,
+      checkpointDigest: baseManifest.manifestDigest,
+      unrecoveredSourceRanges: baseManifest.unrecoveredSourceRanges,
+      authorizeRead: () => authorize(options),
+    });
+  } catch (error) {
+    if (error instanceof DvdSourceSampleImageConflictError) {
+      throw new DvdInitialPublicationFault(
+        "DVD_PUBLICATION_IMAGE_CONFLICT",
+        { cause: error },
+      );
+    }
+    throw error;
+  }
   const manifest = createDvdInitialManifest({
     ...options,
     sourceSampleManifest,

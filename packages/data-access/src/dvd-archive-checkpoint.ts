@@ -11,6 +11,7 @@ import {
   type DvdArchiveRecoveryReadEvidenceDigestInput,
 } from "./dvd-archive-evidence-digests.js";
 import { archiveBoundaryEvidenceFromRecord, type ArchiveBoundaryEvidence } from "./archive-boundary.js";
+import { canonicalJson } from "./canonical-json.js";
 import { assertDvdEvidenceRangeTransition } from "./dvd-evidence-transition.js";
 import { validateDvdSourceSampleManifest } from "./dvd-disc-verification.js";
 import type { ArchiveJob, DvdArchiveEvidenceHeader, DvdInitialArchiveSave, OriginalDiscArchive } from "./types.js";
@@ -53,18 +54,11 @@ interface DvdRecoveryManifestRecord extends
   };
 }
 
-export function canonicalPublicationJson(value: unknown): string {
-  return JSON.stringify(value, (_key, item: unknown) => {
-    if (item !== null && typeof item === "object" && !Array.isArray(item)) {
-      return Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
-    }
-    return item;
-  });
-}
+export { canonicalJson as canonicalPublicationJson };
 
 export function createDvdInitialPublicationDigest(value: unknown): string {
   return createHash("sha256").update("rip-dvd:dvd-initial-publication:v1\0")
-    .update(canonicalPublicationJson(value)).digest("hex");
+    .update(canonicalJson(value)).digest("hex");
 }
 
 async function readRecord(path: string, code: string): Promise<unknown> {
@@ -234,8 +228,8 @@ async function readCommittedDvdCheckpointRecords(input: {
       badSectorCount: unresolved, badAreaCount: manifest.unrecoveredSourceRanges.length,
       badSectorRanges: manifest.unrecoveredSourceRanges.map(({ startLba, sectorCount }) => ({ startLba, sectorCount })),
     };
-    if (canonicalPublicationJson(record.integrity) !== canonicalPublicationJson(integrity) ||
-      canonicalPublicationJson(record.initialCopy.unrecoveredSourceRanges) !== canonicalPublicationJson(manifest.unrecoveredSourceRanges) ||
+    if (canonicalJson(record.integrity) !== canonicalJson(integrity) ||
+      canonicalJson(record.initialCopy.unrecoveredSourceRanges) !== canonicalJson(manifest.unrecoveredSourceRanges) ||
       record.initialCopy.declaredByteCount !== manifest.boundaryReportedSizeBytes ||
       record.initialCopy.recoveredByteCount !== manifest.boundaryPublishedSizeBytes - unresolved * 2048 ||
       record.initialCopy.copyPolicyVersion !== "dvd-initial-copy-v1" ||
@@ -258,7 +252,7 @@ async function readCommittedDvdCheckpointRecords(input: {
       manifest.boundaryReportedSizeBytes !== manifest.boundaryEvidence.reportedSizeBytes ||
       manifest.boundaryPublishedSizeBytes !== manifest.boundaryEvidence.publishedSizeBytes ||
       manifest.boundaryPublishedSizeBytes !== archive.sizeBytes ||
-      canonicalPublicationJson(manifest.boundaryEvidence) !== canonicalPublicationJson(archiveBoundaryEvidenceFromRecord(archive)))
+      canonicalJson(manifest.boundaryEvidence) !== canonicalJson(archiveBoundaryEvidenceFromRecord(archive)))
       throw new Error("Manifest provenance differs");
   } catch { throw new DvdCheckpointReadFault("DVD_PUBLICATION_MANIFEST_CONFLICT"); }
   let checkpoint: DvdCheckpointPointer;
@@ -374,7 +368,7 @@ async function readCommittedDvdCheckpointRecords(input: {
   } catch { throw new DvdCheckpointReadFault("DVD_PUBLICATION_IMAGE_CONFLICT"); }
   finally { await image?.close(); }
   input.assertImageOwnership();
-  if (canonicalPublicationJson(await readRecord(pointerPath, "DVD_EVIDENCE_CHECKPOINT_UNAVAILABLE")) !== canonicalPublicationJson(pointer))
+  if (canonicalJson(await readRecord(pointerPath, "DVD_EVIDENCE_CHECKPOINT_UNAVAILABLE")) !== canonicalJson(pointer))
     throw new DvdCheckpointReadFault("DVD_EVIDENCE_CHANGED_DURING_READ");
   input.assertImageOwnership();
   return { initialEvidence: manifest, checkpoint };

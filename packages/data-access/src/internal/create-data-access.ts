@@ -285,6 +285,7 @@ import type {
   MediaItemKind,
   OpticalDriveId,
   OriginalDiscArchiveId,
+  OriginalDiscArchive,
   RearchiveMappingProposalMapping,
   RearchiveMappingProposalInput,
   RearchiveMappingProposalReview,
@@ -6921,6 +6922,72 @@ export function createDataAccessInternal(
     return completed;
   }
 
+  type DvdCheckpointReadSnapshot = {
+    archive: OriginalDiscArchive;
+    header: DvdArchiveEvidenceHeader | null;
+    jobs: readonly ArchiveJob[];
+  };
+
+  async function withStableDvdCheckpointRead<Checkpoint, Result>(input: {
+    id: OriginalDiscArchiveId;
+    ownership: Parameters<
+      LegacySidecarDataAccess["withDvdCurrentCheckpoint"]
+    >[1];
+    readSnapshot(): DvdCheckpointReadSnapshot;
+    readCheckpoint(input: DvdCheckpointReadSnapshot & {
+      assertImageOwnership(): void;
+      originalsLibraryPath: string;
+    }): Promise<Checkpoint | null>;
+    task(checkpoint: Checkpoint, assertOwned: () => void): Promise<Result>;
+  }): Promise<Result | null> {
+    const admissionSnapshot = input.readSnapshot();
+    if (dvdRecoveryEvidenceFormatForArchive(
+      admissionSnapshot.header,
+      admissionSnapshot.jobs,
+    ) === null) return null;
+    if (normalizedOriginalsLibraryPath === undefined) {
+      throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE");
+    }
+    return input.ownership.withConsistentRead({
+      archiveId: input.id,
+      imagePath: admissionSnapshot.archive.archivePath,
+      originalsLibraryPath: normalizedOriginalsLibraryPath,
+      signal: new AbortController().signal,
+      task: async ({ assertOwned }) => {
+        assertOwned();
+        const snapshot = input.readSnapshot();
+        if (
+          canonicalPublicationJson(snapshot) !==
+            canonicalPublicationJson(admissionSnapshot)
+        ) {
+          throw new DvdCheckpointReadFault(
+            "DVD_EVIDENCE_CHANGED_DURING_READ",
+          );
+        }
+        const checkpoint = await input.readCheckpoint({
+          originalsLibraryPath: normalizedOriginalsLibraryPath,
+          ...snapshot,
+          assertImageOwnership: assertOwned,
+        });
+        if (checkpoint === null) {
+          throw new DvdCheckpointReadFault("DVD_EVIDENCE_NOT_RECORDED");
+        }
+        assertOwned();
+        if (
+          canonicalPublicationJson(input.readSnapshot()) !==
+            canonicalPublicationJson(snapshot)
+        ) {
+          throw new DvdCheckpointReadFault(
+            "DVD_EVIDENCE_CHANGED_DURING_READ",
+          );
+        }
+        const result = await input.task(checkpoint, assertOwned);
+        assertOwned();
+        return result;
+      },
+    });
+  }
+
   const access: LegacySidecarDataAccess = {
     async readDvdInitialCheckpoint(id, ownership) {
       return access.withDvdInitialCheckpoint(
@@ -6935,51 +7002,12 @@ export function createDataAccessInternal(
         if (!archive) throw new RecordNotFoundError("Original Disc Archive", id);
         return { archive, header: reader.catalog.findDvdArchiveEvidenceHeader(id), jobs: reader.archiveJobs.listForArchive(id) };
       });
-      const admissionSnapshot = readSnapshot();
-      if (dvdRecoveryEvidenceFormatForArchive(
-        admissionSnapshot.header,
-        admissionSnapshot.jobs,
-      ) === null) return null;
-      if (normalizedOriginalsLibraryPath === undefined) {
-        throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE");
-      }
-      return ownership.withConsistentRead({
-        archiveId: id,
-        imagePath: admissionSnapshot.archive.archivePath,
-        originalsLibraryPath: normalizedOriginalsLibraryPath,
-        signal: new AbortController().signal,
-        task: async ({ assertOwned }) => {
-          assertOwned();
-          const snapshot = readSnapshot();
-          if (
-            canonicalPublicationJson(snapshot) !==
-              canonicalPublicationJson(admissionSnapshot)
-          ) {
-            throw new DvdCheckpointReadFault(
-              "DVD_EVIDENCE_CHANGED_DURING_READ",
-            );
-          }
-          const manifest = await readCommittedDvdInitialCheckpoint({
-            originalsLibraryPath: normalizedOriginalsLibraryPath,
-            ...snapshot,
-            assertImageOwnership: assertOwned,
-          });
-          if (manifest === null) {
-            throw new DvdCheckpointReadFault("DVD_EVIDENCE_NOT_RECORDED");
-          }
-          assertOwned();
-          if (
-            canonicalPublicationJson(readSnapshot()) !==
-              canonicalPublicationJson(snapshot)
-          ) {
-            throw new DvdCheckpointReadFault(
-              "DVD_EVIDENCE_CHANGED_DURING_READ",
-            );
-          }
-          const result = await task({ evidence: manifest, assertOwned });
-          assertOwned();
-          return result;
-        },
+      return withStableDvdCheckpointRead({
+        id,
+        ownership,
+        readSnapshot,
+        readCheckpoint: readCommittedDvdInitialCheckpoint,
+        task: (evidence, assertOwned) => task({ evidence, assertOwned }),
       });
     },
     async withDvdCurrentCheckpoint(id, ownership, task) {
@@ -7006,51 +7034,12 @@ export function createDataAccessInternal(
           throw error;
         }
       };
-      const admissionSnapshot = readSnapshot();
-      if (dvdRecoveryEvidenceFormatForArchive(
-        admissionSnapshot.header,
-        admissionSnapshot.jobs,
-      ) === null) return null;
-      if (normalizedOriginalsLibraryPath === undefined) {
-        throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE");
-      }
-      return ownership.withConsistentRead({
-        archiveId: id,
-        imagePath: admissionSnapshot.archive.archivePath,
-        originalsLibraryPath: normalizedOriginalsLibraryPath,
-        signal: new AbortController().signal,
-        task: async ({ assertOwned }) => {
-          assertOwned();
-          const snapshot = readSnapshot();
-          if (
-            canonicalPublicationJson(snapshot) !==
-              canonicalPublicationJson(admissionSnapshot)
-          ) {
-            throw new DvdCheckpointReadFault(
-              "DVD_EVIDENCE_CHANGED_DURING_READ",
-            );
-          }
-          const checkpoint = await readCommittedDvdCurrentCheckpoint({
-            originalsLibraryPath: normalizedOriginalsLibraryPath,
-            ...snapshot,
-            assertImageOwnership: assertOwned,
-          });
-          if (checkpoint === null) {
-            throw new DvdCheckpointReadFault("DVD_EVIDENCE_NOT_RECORDED");
-          }
-          assertOwned();
-          if (
-            canonicalPublicationJson(readSnapshot()) !==
-              canonicalPublicationJson(snapshot)
-          ) {
-            throw new DvdCheckpointReadFault(
-              "DVD_EVIDENCE_CHANGED_DURING_READ",
-            );
-          }
-          const result = await task({ checkpoint, assertOwned });
-          assertOwned();
-          return result;
-        },
+      return withStableDvdCheckpointRead({
+        id,
+        ownership,
+        readSnapshot,
+        readCheckpoint: readCommittedDvdCurrentCheckpoint,
+        task: (checkpoint, assertOwned) => task({ checkpoint, assertOwned }),
       });
     },
     notifications: createNotificationAccess(database, now),

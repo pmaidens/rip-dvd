@@ -5,6 +5,7 @@ import {
   isArchiveReadFailureEvidenceConsistent,
 } from "./archive-read-failure.js";
 import { DomainInvariantError } from "./errors.js";
+import { canonicalJson } from "./canonical-json.js";
 import type { DvdUnrecoveredSourceRange } from "./types.js";
 
 export const DVD_SOURCE_VERIFICATION_POLICY_VERSION =
@@ -375,19 +376,6 @@ export function validateDvdSourceSampleManifest(
   return manifest;
 }
 
-function canonicalSourceSampleJson(value: unknown): string {
-  return JSON.stringify(value, (_key, item: unknown) => {
-    if (item !== null && typeof item === "object" && !Array.isArray(item)) {
-      return Object.fromEntries(
-        Object.entries(item).sort(([left], [right]) =>
-          left < right ? -1 : left > right ? 1 : 0
-        ),
-      );
-    }
-    return item;
-  });
-}
-
 export function assertDvdSourceSampleManifestProjection(
   published: DvdSourceSampleManifest | null,
   projected: DvdSourceSampleManifest | null,
@@ -395,8 +383,7 @@ export function assertDvdSourceSampleManifestProjection(
   if (published !== null) validateDvdSourceSampleManifest(published);
   if (projected !== null) validateDvdSourceSampleManifest(projected);
   if (
-    canonicalSourceSampleJson(published) !==
-      canonicalSourceSampleJson(projected)
+    canonicalJson(published) !== canonicalJson(projected)
   ) {
     throw new DvdSourceSampleManifestProjectionError();
   }

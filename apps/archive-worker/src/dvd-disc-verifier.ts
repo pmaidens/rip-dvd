@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { closeSync, constants, fstatSync, lstatSync, openSync } from "node:fs";
 
 import {
@@ -29,7 +28,10 @@ import {
   DVD_READ_FAILURE_CLASSIFIER_VERSION,
   parseDvdReadFailureTerminalResultProtocol,
 } from "./dvd-recovery-contracts.js";
-import type { ActiveBoundedProcess } from "./bounded-child-process.js";
+import {
+  startNodeBoundedCommandProcess,
+  type ActiveBoundedProcess,
+} from "./bounded-child-process.js";
 
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 const MAX_DIAGNOSTIC_BYTES = 65_536;
@@ -49,10 +51,10 @@ export function parseDvdVerificationReadFailureProtocol(
   try {
     parsed = JSON.parse(payload);
   } catch {
-    throw new Error("DVD verification read failure result is malformed");
+    throw new Error("DVD Disc Verification read failure result is malformed");
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("DVD verification read failure result is malformed");
+    throw new Error("DVD Disc Verification read failure result is malformed");
   }
   const candidate = parsed as Record<string, unknown>;
   if (candidate.category === "out_of_range") {
@@ -65,7 +67,7 @@ export function parseDvdVerificationReadFailureProtocol(
       readFailure.requestedBlockCount !== expected.sectorCount ||
       readFailure.retryOrdinal !== 0
     ) {
-      throw new Error("DVD verification read failure result is malformed");
+      throw new Error("DVD Disc Verification read failure result is malformed");
     }
     return {
       category: readFailure.category,
@@ -90,7 +92,7 @@ export function parseDvdVerificationReadFailureProtocol(
     candidate.requestedBlockCount !== expected.sectorCount ||
     candidate.retryOrdinal !== 0
   ) {
-    throw new Error("DVD verification read failure result is malformed");
+    throw new Error("DVD Disc Verification read failure result is malformed");
   }
   try {
     return normalizeDvdDiscVerificationDiagnostic(
@@ -101,7 +103,7 @@ export function parseDvdVerificationReadFailureProtocol(
       "read_failure_protocol",
     );
   } catch {
-    throw new Error("DVD verification read failure result is malformed");
+    throw new Error("DVD Disc Verification read failure result is malformed");
   }
 }
 
@@ -121,19 +123,19 @@ export interface DvdVerificationSourceReader {
 
 class DvdVerificationReadDeadlineError extends Error {
   constructor() {
-    super("DVD verification source read exceeded its deadline");
+    super("DVD Disc Verification source read exceeded its deadline");
     this.name = "DvdVerificationReadDeadlineError";
   }
 }
 
 class DvdVerificationReadStoppedError extends Error {
   constructor(readonly reason: "deadline" | "interrupted") {
-    super(`DVD verification source read stopped: ${reason}`);
+    super(`DVD Disc Verification source read stopped: ${reason}`);
     this.name = "DvdVerificationReadStoppedError";
   }
 }
 
-function openDeviceLock(devicePath: string): number {
+function openOpticalDriveLock(devicePath: string): number {
   const descriptor = openSync(
     devicePath,
     constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
@@ -147,7 +149,7 @@ function openDeviceLock(devicePath: string): number {
       linked.isSymbolicLink() ||
       opened.dev !== linked.dev ||
       opened.ino !== linked.ino
-    ) throw new Error("DVD verification device lock is unsafe");
+    ) throw new Error("DVD Disc Verification Optical Drive lock is unsafe");
     return descriptor;
   } catch (error) {
     closeSync(descriptor);
@@ -169,139 +171,71 @@ export function createNodeDvdVerificationSourceReader():
         !Number.isSafeInteger(input.timeoutMs) ||
         input.timeoutMs <= 0 ||
         input.timeoutMs > DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS
-      ) throw new Error("DVD verification source read is invalid");
-      const lockDescriptor = openDeviceLock(devicePath);
-      const child = spawn("flock", [
-        "--exclusive",
-        "--nonblock",
-        "--no-fork",
-        "--conflict-exit-code",
-        String(FLOCK_CONFLICT_EXIT_CODE),
-        "/proc/self/fd/3",
-        "rip-dvd-dvdcss-reader",
-        "verify-sample-v1",
-        devicePath,
-        String(input.startLba),
-        String(input.sectorCount),
-        String(input.acceptedEndLbaExclusive),
-        String(Math.max(1, Math.ceil(input.timeoutMs / 1_000))),
-      ], {
-        shell: false,
-        stdio: ["ignore", "pipe", "pipe", lockDescriptor],
-      });
-      closeSync(lockDescriptor);
-      if (child.stdout === null || child.stderr === null) {
-        child.kill("SIGKILL");
-        throw new Error("DVD verification helper pipes are unavailable");
-      }
-      const childStdout = child.stdout;
-      const childStderr = child.stderr;
-      let resolveResult!: (value: DvdVerificationSourceRead) => void;
-      let rejectResult!: (reason: unknown) => void;
-      let resolveClosed!: () => void;
-      let processClosed = false;
-      let operationSettled = false;
-      let cancellationRequested = false;
-      const result = new Promise<DvdVerificationSourceRead>((resolve, reject) => {
-        resolveResult = resolve;
-        rejectResult = reject;
-      });
-      const closed = new Promise<void>((resolve) => {
-        resolveClosed = resolve;
-      });
-      const rejectOperation = (error: unknown) => {
-        if (!operationSettled) {
-          operationSettled = true;
-          rejectResult(error);
-        }
-      };
-      const resolveOperation = (value: DvdVerificationSourceRead) => {
-        if (!operationSettled) {
-          operationSettled = true;
-          resolveResult(value);
-        }
-      };
-      const confirmClosed = () => {
-        if (!processClosed) {
-          processClosed = true;
-          resolveClosed();
-        }
-      };
-      {
-        const stdout: Buffer[] = [];
-        let stdoutBytes = 0;
-        let stderr = "";
-        let overflow = false;
-        childStdout.on("data", (chunk: Buffer) => {
-          stdoutBytes += chunk.length;
-          if (stdoutBytes > DVD_SOURCE_SAMPLE_BYTE_COUNT) {
-            overflow = true;
-            child.kill("SIGKILL");
-            return;
-          }
-          stdout.push(chunk);
+      ) throw new Error("DVD Disc Verification source read is invalid");
+      const lockDescriptor = openOpticalDriveLock(devicePath);
+      let activeProcess;
+      try {
+        activeProcess = startNodeBoundedCommandProcess({
+          executable: "flock",
+          arguments_: [
+            "--exclusive",
+            "--nonblock",
+            "--no-fork",
+            "--conflict-exit-code",
+            String(FLOCK_CONFLICT_EXIT_CODE),
+            "/proc/self/fd/3",
+            "rip-dvd-dvdcss-reader",
+            "verify-sample-v1",
+            devicePath,
+            String(input.startLba),
+            String(input.sectorCount),
+            String(input.acceptedEndLbaExclusive),
+            String(Math.max(1, Math.ceil(input.timeoutMs / 1_000))),
+          ],
+          extraFileDescriptors: [lockDescriptor],
+          maxOutputBytes: Math.max(
+            DVD_SOURCE_SAMPLE_BYTE_COUNT,
+            MAX_DIAGNOSTIC_BYTES,
+          ),
+          operationName: "DVD Disc Verification source read",
         });
-        childStderr.on("data", (chunk: Buffer) => {
-          stderr = `${stderr}${chunk.toString("utf8")}`;
-          if (Buffer.byteLength(stderr) > MAX_DIAGNOSTIC_BYTES) {
-            overflow = true;
-            stderr = stderr.slice(-MAX_DIAGNOSTIC_BYTES);
-            child.kill("SIGKILL");
-          }
-        });
-        child.once("error", (error) => {
-          rejectOperation(error);
-          if (child.pid === undefined) confirmClosed();
-        });
-        child.once("close", (code, signal) => {
-          confirmClosed();
-          if (cancellationRequested) {
-            rejectOperation(new Error("DVD verification source read was cancelled"));
-            return;
-          }
-          if (signal === "SIGALRM") {
-            rejectOperation(new DvdVerificationReadDeadlineError());
-            return;
-          }
-          if (overflow || signal !== null) {
-            rejectOperation(new Error("DVD verification helper output is invalid"));
-            return;
-          }
-          if (code === 0) {
-            const bytes = Buffer.concat(stdout);
-            if (bytes.length !== DVD_SOURCE_SAMPLE_BYTE_COUNT) {
-              rejectOperation(new Error("DVD verification helper returned a short sample"));
-              return;
-            }
-            resolveOperation({ outcome: "readable", bytes });
-            return;
-          }
-          const line = stderr.split("\n")
-            .find((value) => value.startsWith(DVD_READ_FAILURE_RESULT_PREFIX));
-          if (code !== 3 || line === undefined) {
-            rejectOperation(new Error("DVD verification helper failed"));
-            return;
-          }
-          const diagnostic = parseDvdVerificationReadFailureProtocol(
-            line.slice(DVD_READ_FAILURE_RESULT_PREFIX.length),
-            input,
-          );
-          resolveOperation({
-            outcome: "unreadable",
-            diagnostic,
-          });
-        });
+      } finally {
+        closeSync(lockDescriptor);
       }
       return {
-        result,
-        closed,
-        cancel() {
-          if (cancellationRequested || processClosed) return;
-          cancellationRequested = true;
-          childStdout.destroy();
-          childStderr.destroy();
-          child.kill("SIGKILL");
-        },
+        ...activeProcess,
+        result: activeProcess.result.then(
+          ({ exitCode, signal, stderr, stdout }) => {
+            if (signal === "SIGALRM") {
+              throw new DvdVerificationReadDeadlineError();
+            }
+            if (signal !== null) {
+              throw new Error("DVD Disc Verification helper output is invalid");
+            }
+            if (exitCode === 0) {
+              if (stdout.length !== DVD_SOURCE_SAMPLE_BYTE_COUNT) {
+                throw new Error(
+                  "DVD Disc Verification helper returned a short sample",
+                );
+              }
+              return { outcome: "readable", bytes: stdout };
+            }
+            const line = stderr.toString("utf8").split("\n")
+              .find((value) =>
+                value.startsWith(DVD_READ_FAILURE_RESULT_PREFIX)
+              );
+            if (exitCode !== 3 || line === undefined) {
+              throw new Error("DVD Disc Verification helper failed");
+            }
+            return {
+              outcome: "unreadable",
+              diagnostic: parseDvdVerificationReadFailureProtocol(
+                line.slice(DVD_READ_FAILURE_RESULT_PREFIX.length),
+                input,
+              ),
+            };
+          },
+        ),
       };
     },
   };
@@ -523,7 +457,7 @@ export async function pollDvdDiscVerification(input: {
               ids: [inspection.opticalDriveId],
             })[0];
         if (drive === undefined || claim.startedAt === null) {
-          throw new Error("DVD verification insertion is unavailable");
+          throw new Error("DVD Disc Verification insertion is unavailable");
         }
         const inspectionIsCurrent = async () => {
           if (!databaseInspectionIsCurrent()) return false;
@@ -551,7 +485,7 @@ export async function pollDvdDiscVerification(input: {
             checkpoint.initialEvidence.acceptedEndLbaExclusive
         )) {
           throw new Error(
-            "DVD verification source manifest does not match the checkpoint",
+            "DVD Disc Verification source manifest does not match the checkpoint",
           );
         }
         const result = await verifyInsertedDvdAgainstSamples({
@@ -585,7 +519,7 @@ export async function pollDvdDiscVerification(input: {
       },
     );
     if (executed === null) {
-      throw new Error("DVD verification checkpoint is unavailable");
+      throw new Error("DVD Disc Verification checkpoint is unavailable");
     }
   } catch {
     input.access.dvdDiscVerifications.fail(claim);
