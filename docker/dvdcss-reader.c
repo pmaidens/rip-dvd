@@ -1907,6 +1907,24 @@ static int run_verification_sample(struct read_backend *backend,
     if (result.status == BACKEND_READ_SUCCESS &&
         result.blocks_read == block_count) {
         status = write_all(STDOUT_FILENO, buffer, byte_count, -1);
+    } else if (result.status == BACKEND_READ_SUCCESS ||
+               result.status == BACKEND_READ_END) {
+        char output[1024];
+        int length = snprintf(
+            output, sizeof(output), READ_FAILURE_RESULT_PREFIX
+            "{\"protocolVersion\":1,\"classifierVersion\":\""
+            READ_FAILURE_CLASSIFIER_VERSION
+            "\",\"category\":\"unknown\",\"scsiStatus\":null"
+            ",\"hostStatus\":null,\"driverStatus\":null"
+            ",\"senseResponseCode\":null,\"senseKey\":null"
+            ",\"asc\":null,\"ascq\":null,\"informationLba\":null"
+            ",\"requestedLba\":%" PRIu64
+            ",\"requestedBlockCount\":%d,\"retryOrdinal\":0}\n",
+            start_lba, block_count);
+        status = length <= 0 || (size_t)length >= sizeof(output) ||
+                write_terminal_output(output, (size_t)length) != 0
+            ? 1
+            : READ_FAILURE_EXIT_STATUS;
     } else if (result.status == BACKEND_READ_MEDIUM_ERROR ||
                backend_read_has_terminal_failure_result(result.status)) {
         status = emit_read_failure_result(
@@ -3407,6 +3425,39 @@ static int run_test_endpoint(int argc, char **argv)
         &backend, size_bytes / DVDCSS_BLOCK_SIZE);
     return close_test_backend(&backend, status);
 }
+
+static int run_test_verification_sample(int argc, char **argv)
+{
+    if (argc != 9) {
+        fprintf(stderr,
+                "usage: %s verify-sample-test SOURCE SIZE START COUNT FAULTS DELAY MODE\n",
+                argv[0]);
+        return 2;
+    }
+    uint64_t size_bytes = 0;
+    enum test_result_mode test_result_mode;
+    struct read_backend backend;
+    int setup_status = initialize_test_backend(
+        argv[2], argv[3], argv[6], argv[7], argv[8], 1, &size_bytes,
+        &test_result_mode, &backend);
+    if (setup_status != 0) {
+        return setup_status;
+    }
+    uint64_t start_lba = 0;
+    uint64_t block_count = 0;
+    if (test_result_mode != TEST_RESULT_VALID ||
+        parse_test_integer(argv[4], size_bytes / DVDCSS_BLOCK_SIZE,
+                           &start_lba) != 0 ||
+        parse_test_integer(argv[5], 32, &block_count) != 0 ||
+        block_count != 32 ||
+        start_lba + block_count > size_bytes / DVDCSS_BLOCK_SIZE) {
+        return close_test_backend(&backend, 2);
+    }
+    int status = run_verification_sample(
+        &backend, start_lba, (int)block_count,
+        size_bytes / DVDCSS_BLOCK_SIZE);
+    return close_test_backend(&backend, status);
+}
 #endif
 
 int main(int argc, char **argv)
@@ -3432,6 +3483,9 @@ int main(int argc, char **argv)
     }
     if (argc > 1 && strcmp(argv[1], "endpoint-test") == 0) {
         return run_test_endpoint(argc, argv);
+    }
+    if (argc > 1 && strcmp(argv[1], "verify-sample-test") == 0) {
+        return run_test_verification_sample(argc, argv);
     }
 #endif
     int verification_sample = argc > 1 &&

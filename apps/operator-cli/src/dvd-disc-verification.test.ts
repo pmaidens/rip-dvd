@@ -1,10 +1,13 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 
 import { seedDvdDiscVerificationFixture } from "./dvd-disc-verification.test-support.js";
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
-afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
+afterEach(() => {
+  vi.useRealTimers();
+  fixtures.splice(0).forEach((fixture) => fixture.dispose());
+});
 
 it("inspects, submits, replays, and rejects stale inserted-disc verification", async () => {
   const fixture = createOperatorWorkflowFixture();
@@ -66,17 +69,29 @@ it("inspects, submits, replays, and rejects stale inserted-disc verification", a
   const claim = workerAccess.dvdDiscVerifications.claimNext(
     "synthetic-verification-worker-execution",
   )!;
-  workerAccess.dvdDiscVerifications.complete(claim, {
-    outcome: "match",
-    reasons: [],
-    findings: seeded.sampleManifest.samples.map((sample) => ({
+  const findings = seeded.sampleManifest.samples.map((sample) => ({
       ...sample,
       outcome: "match" as const,
       referenceDigest: sample.digest,
       observedDigest: sample.digest,
       diagnostic: null,
-    })),
+    }));
+  for (const finding of findings) {
+    workerAccess.dvdDiscVerifications.appendFinding(claim, finding);
+  }
+  expect(() => workerAccess.dvdDiscVerifications.complete(claim, {
+    findings: findings.slice(0, -1),
     budgetExhausted: false,
+    interrupted: false,
+    insertionChanged: false,
+    checkpointChanged: false,
+  })).toThrow("findings were not durably recorded");
+  workerAccess.dvdDiscVerifications.complete(claim, {
+    findings,
+    budgetExhausted: false,
+    interrupted: false,
+    insertionChanged: false,
+    checkpointChanged: false,
   });
   workerAccess.close();
   const matched = await fixture.run([
@@ -123,4 +138,50 @@ it("inspects, submits, replays, and rejects stale inserted-disc verification", a
     exitCode: 2,
     result: { error: { code: "DISC_INSERTION_CHANGED" } },
   });
+});
+
+it("keeps a durable mismatch authoritative when a worker claim expires", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const submitted = await fixture.run([
+    "verify-disc",
+    "--key", "00000000-0000-4000-8000-000000000443",
+    "--archive-recovery-id", seeded.recoveryId,
+    "--disc-inspection-id", seeded.inspection.id,
+    "--checkpoint-revision", "1",
+    "--checkpoint-digest", seeded.manifest.manifestDigest,
+  ]);
+  expect(submitted.exitCode).toBe(0);
+
+  const access = fixture.openAccess();
+  try {
+    const claim = access.dvdDiscVerifications.claimNext(
+      "synthetic-expired-worker-execution",
+    )!;
+    const sample = seeded.sampleManifest.samples[0]!;
+    access.dvdDiscVerifications.appendFinding(claim, {
+      ...sample,
+      outcome: "mismatch",
+      referenceDigest: sample.digest,
+      observedDigest: "f".repeat(64),
+      diagnostic: null,
+    });
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 60_001);
+    expect(access.dvdDiscVerifications.recoverExpiredClaims()).toBe(1);
+    expect(access.dvdDiscVerifications.find(claim.id)).toMatchObject({
+      status: "completed",
+      outcome: "mismatch",
+      workerExecutionId: "synthetic-expired-worker-execution",
+      findings: [{ outcome: "mismatch" }],
+      reasons: [
+        "DISC_SAMPLE_MISMATCH",
+        "DISC_SAMPLE_COVERAGE_INCOMPLETE",
+        "DISC_VERIFICATION_INTERRUPTED",
+      ],
+    });
+  } finally {
+    access.close();
+  }
 });

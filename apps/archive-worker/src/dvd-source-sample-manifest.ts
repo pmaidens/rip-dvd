@@ -17,7 +17,7 @@ import {
   type DvdUnrecoveredSourceRange,
 } from "@rip-dvd/data-access";
 
-const MAX_CANDIDATE_READS_PER_BAND = 32;
+const MAX_CANDIDATE_READS_PER_BAND = 64;
 
 async function readExactSample(
   descriptor: Awaited<ReturnType<typeof open>>,

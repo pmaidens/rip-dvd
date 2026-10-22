@@ -2002,14 +2002,19 @@ export interface DvdDiscVerificationAccess {
   findLatestForRecovery(id: ArchiveRecoveryId): DvdDiscVerification | null;
   claimNext(workerExecutionId: string): DvdDiscVerification | null;
   renewClaim(claim: DvdDiscVerification): boolean;
+  appendFinding(
+    claim: DvdDiscVerification,
+    finding: DvdDiscVerificationSampleFinding,
+  ): DvdDiscVerification;
   recoverExpiredClaims(): number;
   complete(
     claim: DvdDiscVerification,
     result: {
-      outcome: DvdDiscVerificationOutcome;
-      reasons: readonly DvdDiscVerificationReasonCode[];
       findings: readonly DvdDiscVerificationSampleFinding[];
       budgetExhausted: boolean;
+      interrupted: boolean;
+      insertionChanged: boolean;
+      checkpointChanged: boolean;
     },
   ): DvdDiscVerification;
   fail(claim: DvdDiscVerification): DvdDiscVerification | null;
@@ -2093,6 +2098,26 @@ export interface EncodeOutputInspectionReadAccess
 }
 
 export interface DataAccess {
+  withDvdInitialCheckpoint<Result>(
+    id: OriginalDiscArchiveId,
+    ownership: {
+      withConsistentRead<ReadResult>(request: {
+        archiveId: string;
+        imagePath: string | null;
+        originalsLibraryPath: string;
+        signal: AbortSignal;
+        task(handle: {
+          descriptor: number;
+          signal: AbortSignal;
+          assertOwned(): void;
+        }): Promise<ReadResult>;
+      }): Promise<ReadResult>;
+    },
+    task: (input: {
+      evidence: import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence;
+      assertOwned(): void;
+    }) => Promise<Result>,
+  ): Promise<Result | null>;
   readDvdInitialCheckpoint(
     id: OriginalDiscArchiveId,
     ownership: {

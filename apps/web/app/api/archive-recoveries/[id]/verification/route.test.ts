@@ -31,7 +31,7 @@ it("keeps web inspection and replayed submission equal to the JSON CLI", async (
   const seeded = await seedDvdDiscVerificationFixture(fixture);
   const access = fixture.openAccess();
   try {
-    const webInspection = createDvdDiscVerificationInspectionRoute(
+    const webInspection = await createDvdDiscVerificationInspectionRoute(
       seeded.recoveryId,
       () => access,
     );
@@ -68,6 +68,28 @@ it("keeps web inspection and replayed submission equal to the JSON CLI", async (
     expect(webSubmission.status).toBe(201);
     expect(cliReplay.exitCode).toBe(0);
     expect(await webSubmission.json()).toEqual(cliReplay.result);
+
+    const activeMutationKey = "00000000-0000-4000-8000-000000000444";
+    const webActive = await createDvdDiscVerificationRoute(
+      request(seeded.recoveryId, {
+        ...body,
+        mutationKey: activeMutationKey,
+      }),
+      seeded.recoveryId,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const cliActive = await fixture.run([
+      "verify-disc",
+      "--key", activeMutationKey,
+      "--archive-recovery-id", seeded.recoveryId,
+      "--disc-inspection-id", seeded.inspection.id,
+      "--checkpoint-revision", "1",
+      "--checkpoint-digest", seeded.manifest.manifestDigest,
+    ]);
+    expect(webActive.status).toBe(409);
+    expect(cliActive.exitCode).toBe(2);
+    expect(await webActive.json()).toEqual(cliActive.result);
   } finally {
     access.close();
   }

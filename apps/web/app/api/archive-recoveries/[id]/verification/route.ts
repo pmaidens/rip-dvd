@@ -2,6 +2,7 @@ import { createApplicationOperations, InvalidMutationKeyError } from "@rip-dvd/a
 import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
+  InvalidStatusTransitionError,
   MutationKeyConflictError,
   RecordNotFoundError,
   StaleDvdDiscVerificationError,
@@ -27,13 +28,13 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-export function createDvdDiscVerificationInspectionRoute(
+export async function createDvdDiscVerificationInspectionRoute(
   id: string,
   getAccess: () => DataAccess = getDataAccess,
-): Response {
+): Promise<Response> {
   try {
     return response(
-      createApplicationOperations(getAccess()).inspectDvdDiscVerification(id),
+      await createApplicationOperations(getAccess()).inspectDvdDiscVerification(id),
     );
   } catch (error) {
     if (error instanceof RecordNotFoundError) {
@@ -66,7 +67,7 @@ export async function createDvdDiscVerificationRoute(
     if (body === null) {
       return response({ error: "Invalid DVD disc verification" }, 400);
     }
-    return response(createApplicationOperations(getAccess()).verifyDisc({
+    return response(await createApplicationOperations(getAccess()).verifyDisc({
       mutationKey: body.mutationKey,
       archiveRecoveryId: id,
       discInspectionId: body.discInspectionId,
@@ -94,6 +95,14 @@ export async function createDvdDiscVerificationRoute(
     if (error instanceof DomainInvariantError) {
       return response({ error: error.message }, 409);
     }
+    if (error instanceof InvalidStatusTransitionError) {
+      return response({
+        error: {
+          code: "DISC_VERIFICATION_REJECTED",
+          message: error.message,
+        },
+      }, 409);
+    }
     return response({ error: "DVD disc verification is unavailable" }, 503);
   }
 }
@@ -102,7 +111,7 @@ export async function GET(
   _request: Request,
   context: { params: Promise<{ id: string }> },
 ): Promise<Response> {
-  return createDvdDiscVerificationInspectionRoute((await context.params).id);
+  return await createDvdDiscVerificationInspectionRoute((await context.params).id);
 }
 
 export async function POST(

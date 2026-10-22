@@ -3,7 +3,14 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
-import { ARCHIVE_JOB_LEASE_DURATION_MS, createDataAccess, type RunningArchiveJob } from "@rip-dvd/data-access";
+import {
+  ARCHIVE_JOB_LEASE_DURATION_MS,
+  createDataAccess,
+  dvdSourceSampleCandidates,
+  DVD_SOURCE_SAMPLE_BAND_COUNT,
+  DVD_SOURCE_SAMPLE_BYTE_COUNT,
+  type RunningArchiveJob,
+} from "@rip-dvd/data-access";
 import { beginSettledDiscInspectionForTest } from "@rip-dvd/data-access/test-support";
 import {
   createArchiveImageOwnership,
@@ -20,14 +27,32 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-async function fixture(damaged = false, corrected = false) {
+async function fixture(
+  damaged = false,
+  corrected = false,
+  distributedSamples = false,
+) {
   const directory = await mkdtemp(join(tmpdir(), "dvd-initial-publication-"));
   directories.push(directory);
   const originalsLibraryPath = join(directory, "originals");
   const staging = join(directory, "request");
   await mkdir(originalsLibraryPath);
   await mkdir(staging);
-  const image = isoProfileImage();
+  const sectorCount = distributedSamples ? 1_024 : 64;
+  const image = distributedSamples
+    ? Buffer.alloc(sectorCount * 2_048)
+    : isoProfileImage();
+  if (distributedSamples) {
+    for (let bandIndex = 0; bandIndex < DVD_SOURCE_SAMPLE_BAND_COUNT; bandIndex += 1) {
+      const startLba = dvdSourceSampleCandidates({
+        acceptedEndLbaExclusive: sectorCount,
+        bandIndex,
+        unrecoveredSourceRanges: [],
+      })[0]!;
+      image[startLba * 2_048 + DVD_SOURCE_SAMPLE_BYTE_COUNT - 1] =
+        bandIndex + 1;
+    }
+  }
   if (damaged) {
     image.fill(0, 32 * 2048, 33 * 2048);
     image.fill(0, 41 * 2048, 42 * 2048);
@@ -40,7 +65,7 @@ async function fixture(damaged = false, corrected = false) {
     endpointProver: { async prove() {
       return {
         proofVersion: "dvd-normal-endpoint-proof-v1", confirmationCount: 2,
-        firstExcludedLba: 64,
+        firstExcludedLba: sectorCount,
         outOfRangeEvidence: {
           classifierVersion: "scsi-read-classifier-v2", scsiStatus: 2,
           hostStatus: 0, driverStatus: 8, senseResponseCode: 0x72,
@@ -49,6 +74,19 @@ async function fixture(damaged = false, corrected = false) {
       };
     } },
     expectedTitleMap: { schemaVersion: 2, contentId: `dvdmeta-sha256:${"0".repeat(64)}`, titles: [{ number: 1, durationSeconds: 60, chapters: 1, audioStreams: [], subtitles: [] }] },
+    ...(distributedSamples ? {
+      fullExtentMetadataValidator: {
+        async validate() {
+          return {
+            policyVersion: "dvd-full-extent-metadata-v1" as const,
+            decision: "publishable" as const,
+            impact: "listed_checks_agree" as const,
+            observations: [],
+            blockers: [],
+          };
+        },
+      },
+    } : {}),
     onProgress() {},
     outputPath: join(staging, "image.partial"),
     completenessProver: { async prove() { return { maximumReferencedLba: 63 }; } },
@@ -88,8 +126,12 @@ async function fixture(damaged = false, corrected = false) {
 }
 
 
-async function jobFixture(damaged = false, corrected = false) {
-  const f = await fixture(damaged, corrected);
+async function jobFixture(
+  damaged = false,
+  corrected = false,
+  distributedSamples = false,
+) {
+  const f = await fixture(damaged, corrected, distributedSamples);
   const databasePath = join(f.identity.originalsLibraryPath, "..", "catalog.sqlite");
   const access = createDataAccess({ databasePath });
   const drive = access.catalog.upsertOpticalDrive({ devicePath: "/dev/synthetic-dvd", isPresent: true, isEnabled: true });
@@ -133,6 +175,39 @@ it.each([false, true])("saves the initial image, full evidence, job, request and
     expect((await reconcileDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion })).originalDiscArchiveId).toBe(id);
     expect(f.access.catalog.listOriginalDiscArchives({})).toHaveLength(1);
   } finally { f.access.close(); }
+});
+
+it("publishes and persists all sixteen distributed source samples", async () => {
+  const f = await jobFixture(false, false, true);
+  const saved = await saveDvdInitialArchiveForArchiveJob({
+    access: f.access,
+    claim: f.claim,
+    originalsLibraryPath: f.identity.originalsLibraryPath,
+    exclusion: f.exclusion,
+    proven: f.proven,
+  });
+  const originalDiscArchiveId = saved.originalDiscArchiveId!;
+  const manifest = f.access.catalog.findDvdSourceSampleManifest(
+    originalDiscArchiveId,
+  );
+  expect(manifest).toMatchObject({
+    sourceMetadataFingerprint: f.identity.imageFingerprint,
+    acceptedEndLbaExclusive: 1_024,
+    checkpointRevision: 1,
+  });
+  expect(manifest?.samples).toHaveLength(DVD_SOURCE_SAMPLE_BAND_COUNT);
+  expect(new Set(manifest?.samples.map((sample) => sample.bandIndex)).size)
+    .toBe(DVD_SOURCE_SAMPLE_BAND_COUNT);
+  f.access.close();
+
+  const reopened = createDataAccess({ databasePath: f.databasePath });
+  try {
+    expect(reopened.catalog.findDvdSourceSampleManifest(
+      originalDiscArchiveId,
+    )).toEqual(manifest);
+  } finally {
+    reopened.close();
+  }
 });
 
 it("reasserts archive ownership after publication verification and before the database commit", async () => {

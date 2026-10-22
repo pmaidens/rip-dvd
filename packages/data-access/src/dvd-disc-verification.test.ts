@@ -12,9 +12,34 @@ import {
   DVD_SOURCE_VERIFICATION_MAX_BYTES,
   DVD_SOURCE_VERIFICATION_POLICY_VERSION,
   hasSuitableDvdSourceSampleContent,
+  validateDvdDiscVerificationFindings,
   validateDvdSourceSampleManifest,
   type DvdDiscVerificationSampleFinding,
+  type DvdSourceSampleManifest,
 } from "./dvd-disc-verification.js";
+
+function sourceManifest(): DvdSourceSampleManifest {
+  const bytes = Buffer.alloc(DVD_SOURCE_SAMPLE_BYTE_COUNT);
+  bytes[bytes.length - 1] = 1;
+  const payload = {
+    policyVersion: DVD_SOURCE_VERIFICATION_POLICY_VERSION,
+    byteRepresentation: DVD_SOURCE_SAMPLE_BYTE_REPRESENTATION,
+    sourceMetadataFingerprint: "synthetic-source",
+    acceptedEndLbaExclusive: 16_000,
+    checkpointRevision: 3,
+    checkpointDigest: "a".repeat(64),
+    samples: [{
+      bandIndex: 0,
+      startLba: 484,
+      sectorCount: DVD_SOURCE_SAMPLE_SECTOR_COUNT,
+      digest: createDvdSourceSampleDigest(bytes),
+    }],
+  } as const;
+  return {
+    ...payload,
+    manifestDigest: createDvdSourceSampleManifestDigest(payload),
+  };
+}
 
 it("selects deterministic 32-sector windows near sixteen equal-band midpoints", () => {
   const extent = 16_000;
@@ -83,6 +108,31 @@ it("rejects uniform filler and binds valid references to their provenance", () =
   })).toThrow("does not match its contents");
 });
 
+it("rejects a source sample whose advertised band does not contain it", () => {
+  const manifest = sourceManifest();
+  const payload = {
+    ...manifest,
+    samples: [{ ...manifest.samples[0]!, startLba: 2_000 }],
+  };
+  const { manifestDigest: _manifestDigest, ...unsigned } = payload;
+  expect(() => validateDvdSourceSampleManifest({
+    ...payload,
+    manifestDigest: createDvdSourceSampleManifestDigest(unsigned),
+  })).toThrow("source sample reference is invalid");
+});
+
+it("requires every durable finding to bind to the next manifest reference", () => {
+  const manifest = sourceManifest();
+  expect(() => validateDvdDiscVerificationFindings(manifest, [{
+    ...manifest.samples[0]!,
+    startLba: manifest.samples[0]!.startLba + 1,
+    outcome: "match",
+    referenceDigest: manifest.samples[0]!.digest,
+    observedDigest: manifest.samples[0]!.digest,
+    diagnostic: null,
+  }])).toThrow("does not match its source reference");
+});
+
 it("lets known mismatch evidence outrank unreadable transport evidence", () => {
   const findings: DvdDiscVerificationSampleFinding[] = [
     {
@@ -117,8 +167,10 @@ it("lets known mismatch evidence outrank unreadable transport evidence", () => {
   ];
   expect(dvdDiscVerificationOutcome({
     metadataMatches: true,
+    manifestUnavailable: false,
     coverageComplete: false,
     budgetExhausted: false,
+    interrupted: false,
     insertionChanged: false,
     checkpointChanged: false,
     findings,

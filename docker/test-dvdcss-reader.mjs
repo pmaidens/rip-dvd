@@ -536,6 +536,23 @@ function runEndpointTest(firstExcludedLba, faults = "none", mode = "valid") {
   );
 }
 
+function runVerificationSampleTest(faults = "none") {
+  return spawnSync(
+    testExecutable,
+    [
+      "verify-sample-test",
+      sourcePath,
+      String(content.byteLength),
+      "0",
+      "32",
+      faults,
+      "0",
+      "valid",
+    ],
+    { encoding: "buffer" },
+  );
+}
+
 function runTestResume(outputPath, faults, bitmapHex, mode = "valid") {
   const output = statSync(outputPath);
   const result = spawnSync(
@@ -637,6 +654,34 @@ const expectedHash = createHash("sha256")
   .update(String(content.byteLength))
   .update(content)
   .digest("hex");
+const verificationSample = runVerificationSampleTest();
+if (
+  verificationSample.status !== 0 ||
+  !verificationSample.stdout.equals(content.subarray(0, 32 * 2_048))
+) {
+  throw new Error(
+    `libdvdcss verification sample check failed: ${verificationSample.stderr.toString("utf8")}`,
+  );
+}
+const verificationMediumError = runVerificationSampleTest(
+  rawRequestCompletionFault(0, "always", fixedMediumSense(5)),
+);
+const verificationMediumResult = readFailureResult(
+  verificationMediumError.stderr.toString("utf8"),
+);
+if (
+  verificationMediumError.status !== 3 ||
+  verificationMediumResult.category !== "unknown" ||
+  verificationMediumResult.senseKey !== 0x03 ||
+  verificationMediumResult.informationLba !== 5 ||
+  verificationMediumResult.requestedLba !== 0 ||
+  verificationMediumResult.requestedBlockCount !== 32 ||
+  verificationMediumResult.retryOrdinal !== 0
+) {
+  throw new Error(
+    `libdvdcss verification medium-error check failed: ${verificationMediumError.stderr.toString("utf8")}`,
+  );
+}
 const hash = spawnSync(
   executable,
   ["hash", sourcePath, String(content.byteLength)],

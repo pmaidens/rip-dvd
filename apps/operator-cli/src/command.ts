@@ -529,13 +529,13 @@ function discVerificationInputs(args: readonly string[]) {
   };
 }
 
-function runDvdDiscVerificationCommand(
+async function runDvdDiscVerificationCommand(
   name: "inspect-verification" | "verify-disc",
   args: readonly string[],
   io: CommandIO,
 ) {
   try {
-    return withAccess(io.openAccess, (access) => {
+    return await withAccessAsync<unknown>(io.openAccess, (access) => {
       const operations = createApplicationOperations(access);
       return name === "inspect-verification"
         ? operations.inspectDvdDiscVerification(
@@ -1036,6 +1036,18 @@ function withAccess<T>(openAccess: CommandIO["openAccess"], read: (access: DataA
   const access = openAccess();
   try {
     return read(access);
+  } finally {
+    access.close();
+  }
+}
+
+async function withAccessAsync<T>(
+  openAccess: CommandIO["openAccess"],
+  read: (access: DataAccess) => Promise<T>,
+): Promise<T> {
+  const access = openAccess();
+  try {
+    return await read(access);
   } finally {
     access.close();
   }
@@ -1564,7 +1576,7 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
       if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
         emit(io.stdout, help(name));
       } else {
-        emit(io.stdout, runDvdDiscVerificationCommand(name, rest, io));
+        emit(io.stdout, await runDvdDiscVerificationCommand(name, rest, io));
       }
       return 0;
     }

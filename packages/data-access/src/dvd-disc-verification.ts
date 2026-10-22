@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 
+import {
+  classifyArchiveReadFailureEvidence,
+  isArchiveReadFailureEvidenceConsistent,
+} from "./archive-read-failure.js";
 import { DomainInvariantError } from "./errors.js";
 import type { DvdUnrecoveredSourceRange } from "./types.js";
 
@@ -48,6 +52,7 @@ export type DvdDiscVerificationReasonCode =
   | "DISC_SAMPLE_COVERAGE_INCOMPLETE"
   | "DISC_SAMPLE_UNREADABLE"
   | "DISC_VERIFICATION_TIMEOUT"
+  | "DISC_VERIFICATION_INTERRUPTED"
   | "DISC_INSERTION_CHANGED"
   | "DISC_CHECKPOINT_CHANGED"
   | "DISC_SAMPLE_MANIFEST_UNAVAILABLE";
@@ -55,6 +60,7 @@ export type DvdDiscVerificationReasonCode =
 export interface DvdDiscVerificationDiagnostic {
   category:
     | "unknown"
+    | "medium_error"
     | "not_ready"
     | "unit_attention"
     | "hardware_error"
@@ -170,22 +176,36 @@ export function validateDvdSourceSampleManifest(
   }
   requireDigest(manifest.checkpointDigest, "DVD source checkpoint digest");
   const bands = new Set<number>();
+  const addresses = new Set<number>();
   for (const sample of manifest.samples) {
+    const bandStart = Math.floor(
+      manifest.acceptedEndLbaExclusive * sample.bandIndex /
+        DVD_SOURCE_SAMPLE_BAND_COUNT,
+    );
+    const bandEnd = Math.floor(
+      manifest.acceptedEndLbaExclusive * (sample.bandIndex + 1) /
+        DVD_SOURCE_SAMPLE_BAND_COUNT,
+    );
+    const midpointLba = sample.startLba +
+      DVD_SOURCE_SAMPLE_SECTOR_COUNT / 2;
     if (
       !Number.isSafeInteger(sample.bandIndex) ||
       sample.bandIndex < 0 ||
       sample.bandIndex >= DVD_SOURCE_SAMPLE_BAND_COUNT ||
       bands.has(sample.bandIndex) ||
+      addresses.has(sample.startLba) ||
       !Number.isSafeInteger(sample.startLba) ||
       sample.startLba < 0 ||
       sample.sectorCount !== DVD_SOURCE_SAMPLE_SECTOR_COUNT ||
       sample.startLba + sample.sectorCount >
-        manifest.acceptedEndLbaExclusive
+        manifest.acceptedEndLbaExclusive ||
+      midpointLba < bandStart || midpointLba >= bandEnd
     ) {
       throw new DomainInvariantError("DVD source sample reference is invalid");
     }
     requireDigest(sample.digest, "DVD source sample digest");
     bands.add(sample.bandIndex);
+    addresses.add(sample.startLba);
   }
   requireDigest(manifest.manifestDigest, "DVD source sample manifest digest");
   const { manifestDigest, ...payload } = manifest;
@@ -269,10 +289,127 @@ export function dvdSourceSampleCandidates(input: {
   return candidates;
 }
 
+export function validateDvdDiscVerificationFindings(
+  manifest: DvdSourceSampleManifest | null,
+  findings: readonly DvdDiscVerificationSampleFinding[],
+): void {
+  if (manifest === null) {
+    if (findings.length !== 0) {
+      throw new DomainInvariantError(
+        "DVD disc verification findings require a source manifest",
+      );
+    }
+    return;
+  }
+  if (findings.length > manifest.samples.length) {
+    throw new DomainInvariantError("DVD disc verification findings are invalid");
+  }
+  const diagnosticCategories = new Set([
+    "unknown",
+    "medium_error",
+    "not_ready",
+    "unit_attention",
+    "hardware_error",
+    "transport_error",
+    "protection_error",
+    "out_of_range",
+  ]);
+  const optionalInteger = (value: number | null, maximum: number) =>
+    value === null ||
+    Number.isSafeInteger(value) && value >= 0 && value <= maximum;
+  for (const [index, finding] of findings.entries()) {
+    const reference = manifest.samples[index];
+    if (
+      reference === undefined ||
+      finding.bandIndex !== reference.bandIndex ||
+      finding.startLba !== reference.startLba ||
+      finding.sectorCount !== reference.sectorCount ||
+      finding.referenceDigest !== reference.digest
+    ) {
+      throw new DomainInvariantError(
+        "DVD disc verification finding does not match its source reference",
+      );
+    }
+    if (finding.outcome === "unreadable") {
+      const diagnostic = finding.diagnostic;
+      const classification = diagnostic === null
+        ? null
+        : classifyArchiveReadFailureEvidence(diagnostic);
+      const expectedCategory = classification === "recognized_medium_error"
+        ? "medium_error"
+        : classification;
+      if (
+        finding.observedDigest !== null ||
+        diagnostic === null ||
+        !diagnosticCategories.has(diagnostic.category) ||
+        diagnostic.classifierVersion.length === 0 ||
+        diagnostic.classifierVersion.length > 128 ||
+        !optionalInteger(diagnostic.scsiStatus, 0xff) ||
+        !optionalInteger(diagnostic.hostStatus, 0xffff) ||
+        !optionalInteger(diagnostic.driverStatus, 0xffff) ||
+        !optionalInteger(diagnostic.senseResponseCode, 0xff) ||
+        !optionalInteger(diagnostic.senseKey, 0x0f) ||
+        !optionalInteger(diagnostic.asc, 0xff) ||
+        !optionalInteger(diagnostic.ascq, 0xff) ||
+        !optionalInteger(diagnostic.informationLba, Number.MAX_SAFE_INTEGER) ||
+        ((diagnostic.scsiStatus === null ||
+          diagnostic.hostStatus === null ||
+          diagnostic.driverStatus === null) &&
+          (diagnostic.scsiStatus !== null ||
+            diagnostic.hostStatus !== null ||
+            diagnostic.driverStatus !== null)) ||
+        (diagnostic.senseResponseCode === null &&
+          (diagnostic.senseKey !== null || diagnostic.asc !== null ||
+            diagnostic.ascq !== null ||
+            diagnostic.informationLba !== null)) ||
+        (diagnostic.senseResponseCode !== null &&
+          diagnostic.senseResponseCode !== 0x70 &&
+          diagnostic.senseResponseCode !== 0x72) ||
+        (diagnostic.asc === null) !== (diagnostic.ascq === null) ||
+        (diagnostic.informationLba !== null &&
+          (diagnostic.informationLba < finding.startLba ||
+            diagnostic.informationLba >=
+              finding.startLba + finding.sectorCount)) ||
+        (diagnostic.category !== "out_of_range" &&
+          isArchiveReadFailureEvidenceConsistent({
+            ...diagnostic,
+            category: "out_of_range",
+          })) ||
+        (diagnostic.category === "out_of_range"
+          ? !isArchiveReadFailureEvidenceConsistent({
+              ...diagnostic,
+              category: "out_of_range",
+            })
+          : diagnostic.category !== expectedCategory)
+      ) {
+        throw new DomainInvariantError(
+          "DVD disc verification unreadable finding is invalid",
+        );
+      }
+      continue;
+    }
+    requireDigest(
+      finding.observedDigest,
+      "DVD disc verification observed sample digest",
+    );
+    if (
+      finding.diagnostic !== null ||
+      (finding.observedDigest === finding.referenceDigest) !==
+        (finding.outcome === "match")
+    ) {
+      throw new DomainInvariantError(
+        "DVD disc verification readable finding is invalid",
+      );
+    }
+  }
+}
+
 export function dvdDiscVerificationOutcome(input: {
   metadataMatches: boolean;
+  manifestUnavailable: boolean;
   coverageComplete: boolean;
   budgetExhausted: boolean;
+  interrupted: boolean;
   insertionChanged: boolean;
   checkpointChanged: boolean;
   findings: readonly DvdDiscVerificationSampleFinding[];
@@ -285,13 +422,16 @@ export function dvdDiscVerificationOutcome(input: {
   if (input.findings.some((finding) => finding.outcome === "mismatch")) {
     reasons.push("DISC_SAMPLE_MISMATCH");
   }
-  if (!input.coverageComplete) {
+  if (input.manifestUnavailable) {
+    reasons.push("DISC_SAMPLE_MANIFEST_UNAVAILABLE");
+  } else if (!input.coverageComplete) {
     reasons.push("DISC_SAMPLE_COVERAGE_INCOMPLETE");
   }
   if (input.findings.some((finding) => finding.outcome === "unreadable")) {
     reasons.push("DISC_SAMPLE_UNREADABLE");
   }
   if (input.budgetExhausted) reasons.push("DISC_VERIFICATION_TIMEOUT");
+  if (input.interrupted) reasons.push("DISC_VERIFICATION_INTERRUPTED");
   if (input.insertionChanged) reasons.push("DISC_INSERTION_CHANGED");
   if (input.checkpointChanged) reasons.push("DISC_CHECKPOINT_CHANGED");
   if (

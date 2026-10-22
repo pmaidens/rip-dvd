@@ -78,6 +78,7 @@ it("matches all sixteen bounded raw-sector samples", async () => {
   }));
   const result = await verifyInsertedDvdAgainstSamples({
     manifest: manifest(),
+    sourceMetadataFingerprint: metadataFingerprint,
     observedMetadataFingerprint: metadataFingerprint,
     devicePath: "/dev/synthetic-disc",
     reader: source.reader,
@@ -104,7 +105,8 @@ it("detects changed bytes despite equal metadata", async () => {
     bytes: index === 5 ? sampleBytes(55) : sampleBytes(index),
   }));
   const result = await verifyInsertedDvdAgainstSamples({
-    manifest: manifest(), observedMetadataFingerprint: metadataFingerprint,
+    manifest: manifest(), sourceMetadataFingerprint: metadataFingerprint,
+    observedMetadataFingerprint: metadataFingerprint,
     devicePath: "/dev/synthetic-disc", reader: source.reader,
     startedAtMs: 0, now: () => 1, insertionIsCurrent: () => true,
     checkpointIsCurrent: () => true,
@@ -123,7 +125,8 @@ it("keeps incomplete sampling coverage inconclusive", async () => {
     bytes: sampleBytes(index),
   }));
   const result = await verifyInsertedDvdAgainstSamples({
-    manifest: manifest(15), observedMetadataFingerprint: metadataFingerprint,
+    manifest: manifest(15), sourceMetadataFingerprint: metadataFingerprint,
+    observedMetadataFingerprint: metadataFingerprint,
     devicePath: "/dev/synthetic-disc", reader: source.reader,
     startedAtMs: 0, now: () => 1, insertionIsCurrent: () => true,
     checkpointIsCurrent: () => true,
@@ -135,12 +138,39 @@ it("keeps incomplete sampling coverage inconclusive", async () => {
   });
 });
 
+it("keeps a metadata mismatch visible when the sample manifest is missing", async () => {
+  const source = reader(() => {
+    throw new Error("no source read expected");
+  });
+  const result = await verifyInsertedDvdAgainstSamples({
+    manifest: null,
+    sourceMetadataFingerprint: metadataFingerprint,
+    observedMetadataFingerprint: `dvdmeta-sha256:${"b".repeat(64)}`,
+    devicePath: "/dev/synthetic-disc",
+    reader: source.reader,
+    startedAtMs: 0,
+    now: () => 1,
+    insertionIsCurrent: () => true,
+    checkpointIsCurrent: () => true,
+  });
+
+  expect(result).toMatchObject({
+    outcome: "mismatch",
+    reasons: [
+      "DISC_METADATA_MISMATCH",
+      "DISC_SAMPLE_MANIFEST_UNAVAILABLE",
+    ],
+  });
+  expect(source.run).not.toHaveBeenCalled();
+});
+
 it("retains structured transport diagnostics as inconclusive evidence", async () => {
   const source = reader((index) => index === 2
     ? { outcome: "unreadable", diagnostic }
     : { outcome: "readable", bytes: sampleBytes(index) });
   const result = await verifyInsertedDvdAgainstSamples({
-    manifest: manifest(), observedMetadataFingerprint: metadataFingerprint,
+    manifest: manifest(), sourceMetadataFingerprint: metadataFingerprint,
+    observedMetadataFingerprint: metadataFingerprint,
     devicePath: "/dev/synthetic-disc", reader: source.reader,
     startedAtMs: 0, now: () => 1, insertionIsCurrent: () => true,
     checkpointIsCurrent: () => true,
@@ -163,7 +193,8 @@ it("starts no new source read once the sixty-second budget is exhausted", async 
   }));
   let clock = 0;
   const result = await verifyInsertedDvdAgainstSamples({
-    manifest: manifest(), observedMetadataFingerprint: metadataFingerprint,
+    manifest: manifest(), sourceMetadataFingerprint: metadataFingerprint,
+    observedMetadataFingerprint: metadataFingerprint,
     devicePath: "/dev/synthetic-disc", reader: source.reader,
     startedAtMs: 0,
     now: () => {
@@ -176,7 +207,10 @@ it("starts no new source read once the sixty-second budget is exhausted", async 
 
   expect(result).toMatchObject({
     outcome: "inconclusive",
-    reasons: ["DISC_VERIFICATION_TIMEOUT"],
+    reasons: [
+      "DISC_SAMPLE_COVERAGE_INCOMPLETE",
+      "DISC_VERIFICATION_TIMEOUT",
+    ],
     budgetExhausted: true,
   });
   expect(source.run).toHaveBeenCalledTimes(1);
@@ -189,7 +223,8 @@ it("stops after removal and invalidates a previously readable sample", async () 
   }));
   let checks = 0;
   const result = await verifyInsertedDvdAgainstSamples({
-    manifest: manifest(), observedMetadataFingerprint: metadataFingerprint,
+    manifest: manifest(), sourceMetadataFingerprint: metadataFingerprint,
+    observedMetadataFingerprint: metadataFingerprint,
     devicePath: "/dev/synthetic-disc", reader: source.reader,
     startedAtMs: 0, now: () => 1,
     insertionIsCurrent: () => {
@@ -201,9 +236,13 @@ it("stops after removal and invalidates a previously readable sample", async () 
 
   expect(result).toMatchObject({
     outcome: "inconclusive",
-    reasons: ["DISC_INSERTION_CHANGED"],
+    reasons: [
+      "DISC_SAMPLE_COVERAGE_INCOMPLETE",
+      "DISC_INSERTION_CHANGED",
+    ],
   });
   expect(source.run).toHaveBeenCalledTimes(1);
+  expect(result.findings).toEqual([]);
 });
 
 it("stops after a checkpoint change and makes the result stale", async () => {
@@ -213,7 +252,8 @@ it("stops after a checkpoint change and makes the result stale", async () => {
   }));
   let checks = 0;
   const result = await verifyInsertedDvdAgainstSamples({
-    manifest: manifest(), observedMetadataFingerprint: metadataFingerprint,
+    manifest: manifest(), sourceMetadataFingerprint: metadataFingerprint,
+    observedMetadataFingerprint: metadataFingerprint,
     devicePath: "/dev/synthetic-disc", reader: source.reader,
     startedAtMs: 0, now: () => 1,
     insertionIsCurrent: () => true,
@@ -225,7 +265,47 @@ it("stops after a checkpoint change and makes the result stale", async () => {
 
   expect(result).toMatchObject({
     outcome: "inconclusive",
-    reasons: ["DISC_CHECKPOINT_CHANGED"],
+    reasons: [
+      "DISC_SAMPLE_COVERAGE_INCOMPLETE",
+      "DISC_CHECKPOINT_CHANGED",
+    ],
   });
   expect(source.run).toHaveBeenCalledTimes(1);
+  expect(result.findings).toEqual([]);
+});
+
+it("persists each completed finding and starts no read after interruption", async () => {
+  const source = reader((index) => ({
+    outcome: "readable",
+    bytes: sampleBytes(index),
+  }));
+  const authorizeRead = vi.fn()
+    .mockReturnValueOnce(true)
+    .mockReturnValue(false);
+  const recordFinding = vi.fn();
+  const result = await verifyInsertedDvdAgainstSamples({
+    manifest: manifest(),
+    sourceMetadataFingerprint: metadataFingerprint,
+    observedMetadataFingerprint: metadataFingerprint,
+    devicePath: "/dev/synthetic-disc",
+    reader: source.reader,
+    startedAtMs: 0,
+    now: () => 1,
+    insertionIsCurrent: () => true,
+    checkpointIsCurrent: () => true,
+    authorizeRead,
+    recordFinding,
+  });
+
+  expect(result).toMatchObject({
+    outcome: "inconclusive",
+    reasons: [
+      "DISC_SAMPLE_COVERAGE_INCOMPLETE",
+      "DISC_VERIFICATION_INTERRUPTED",
+    ],
+    interrupted: true,
+  });
+  expect(source.run).toHaveBeenCalledTimes(1);
+  expect(recordFinding).toHaveBeenCalledOnce();
+  expect(recordFinding).toHaveBeenCalledWith(result.findings[0]);
 });
