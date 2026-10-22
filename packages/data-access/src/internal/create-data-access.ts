@@ -735,6 +735,10 @@ const previousDvdArchiveEvidenceManifests = alias(
   dvdArchiveEvidenceManifests,
   "previous_dvd_archive_evidence_manifests",
 );
+const laterDvdDiscVerificationRecords = alias(
+  dvdDiscVerifications,
+  "later_dvd_disc_verifications",
+);
 const COMPLETED_ENCODE_HISTORY_SQL = `(
   (
     history_job.status = 'completed'
@@ -9214,6 +9218,92 @@ export function createDataAccessInternal(
       },
     },
     archiveRecoveryWork: {
+      findNextStopping() {
+        const candidate = database.select({ id: archiveRecoveries.id })
+          .from(archiveRecoveries)
+          .where(eq(archiveRecoveries.status, "stopping"))
+          .orderBy(
+            asc(archiveRecoveries.updatedAt),
+            asc(archiveRecoveries.id),
+          )
+          .limit(1)
+          .get();
+        return candidate === undefined
+          ? null
+          : findArchiveRecoveryRecord(database, {
+              archiveRecoveryId: candidate.id,
+            });
+      },
+      findNextVerifiedCandidate() {
+        const candidate = database.select({
+          recoveryId: archiveRecoveries.id,
+          verificationId: dvdDiscVerifications.id,
+        }).from(archiveRecoveries)
+          .innerJoin(
+            dvdDiscVerifications,
+            eq(
+              dvdDiscVerifications.archiveRecoveryId,
+              archiveRecoveries.id,
+            ),
+          )
+          .innerJoin(
+            dvdArchiveEvidenceHeaders,
+            eq(
+              dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+              archiveRecoveries.originalDiscArchiveId,
+            ),
+          )
+          .where(and(
+            eq(archiveRecoveries.status, "eligible"),
+            eq(dvdDiscVerifications.status, "completed"),
+            eq(dvdDiscVerifications.outcome, "match"),
+            isNotNull(dvdDiscVerifications.workerExecutionId),
+            eq(
+              dvdArchiveEvidenceHeaders.currentManifestRevision,
+              dvdDiscVerifications.checkpointRevision,
+            ),
+            eq(
+              dvdArchiveEvidenceHeaders.currentManifestDigest,
+              dvdDiscVerifications.checkpointDigest,
+            ),
+            notExists(
+              database.select({ id: laterDvdDiscVerificationRecords.id })
+                .from(laterDvdDiscVerificationRecords)
+                .where(and(
+                  eq(
+                    laterDvdDiscVerificationRecords.archiveRecoveryId,
+                    archiveRecoveries.id,
+                  ),
+                  gt(
+                    laterDvdDiscVerificationRecords.attemptOrdinal,
+                    dvdDiscVerifications.attemptOrdinal,
+                  ),
+                )),
+            ),
+          ))
+          .orderBy(
+            asc(archiveRecoveries.updatedAt),
+            asc(archiveRecoveries.id),
+          )
+          .limit(1)
+          .get();
+        if (candidate === undefined) return null;
+        const recovery = findArchiveRecoveryRecord(database, {
+          archiveRecoveryId: candidate.recoveryId,
+        });
+        const verification = database.select().from(dvdDiscVerifications)
+          .where(eq(dvdDiscVerifications.id, candidate.verificationId))
+          .get();
+        if (recovery === null || verification === undefined) {
+          throw new DomainInvariantError(
+            "DVD Recovery candidate disappeared during selection",
+          );
+        }
+        return {
+          recovery,
+          verification: toDvdDiscVerification(verification),
+        };
+      },
       request(id) {
         return database.transaction((transaction) => {
           const recovery = findArchiveRecoveryRecord(transaction, {
@@ -9336,6 +9426,23 @@ export function createDataAccessInternal(
       assertClaim(claim) {
         return requireCurrentArchiveRecoveryClaim(database, claim);
       },
+      admitSourceRead(claim, start) {
+        return database.transaction((transaction) => {
+          const recovery = requireCurrentArchiveRecoveryClaim(
+            transaction,
+            claim,
+          );
+          if (recovery.status !== "running") {
+            throw new InvalidStatusTransitionError(
+              "Archive Recovery",
+              recovery.status,
+              "source_read",
+            );
+          }
+          start();
+          return recovery;
+        }, { behavior: "immediate" });
+      },
       bindVerification(claim, authority) {
         return database.transaction((transaction) => {
           const recovery = requireCurrentArchiveRecoveryClaim(
@@ -9346,6 +9453,12 @@ export function createDataAccessInternal(
             .from(dvdDiscVerifications)
             .where(eq(dvdDiscVerifications.id, authority.verificationId))
             .get();
+          const latestVerification = transaction.select({
+            id: dvdDiscVerifications.id,
+          }).from(dvdDiscVerifications).where(eq(
+            dvdDiscVerifications.archiveRecoveryId,
+            recovery.id,
+          )).orderBy(desc(dvdDiscVerifications.attemptOrdinal)).limit(1).get();
           const header = transaction.select()
             .from(dvdArchiveEvidenceHeaders)
             .where(eq(
@@ -9356,6 +9469,7 @@ export function createDataAccessInternal(
           if (
             recovery.status !== "eligible" ||
             verification === undefined ||
+            latestVerification?.id !== verification.id ||
             verification.status !== "completed" ||
             verification.outcome !== "match" ||
             verification.archiveRecoveryId !== recovery.id ||

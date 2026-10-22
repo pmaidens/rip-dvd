@@ -107,18 +107,27 @@ export function parseDvdVerificationReadFailureProtocol(
   }
 }
 
-export type DvdVerificationSourceRead =
+export type DvdSourceRead =
   | { outcome: "readable"; bytes: Buffer }
   | { outcome: "unreadable"; diagnostic: DvdDiscVerificationDiagnostic };
 
+interface DvdSourceReadRange {
+  devicePath: string;
+  startLba: number;
+  sectorCount: number;
+  acceptedEndLbaExclusive: number;
+}
+
 export interface DvdVerificationSourceReader {
-  start(input: {
-    devicePath: string;
-    startLba: number;
-    sectorCount: number;
-    acceptedEndLbaExclusive: number;
-    timeoutMs?: number;
-  }): ActiveBoundedProcess<DvdVerificationSourceRead>;
+  start(
+    input: DvdSourceReadRange & { timeoutMs: number },
+  ): ActiveBoundedProcess<DvdSourceRead>;
+}
+
+export interface DvdRecoverySourceReader {
+  start(
+    input: DvdSourceReadRange & { timeoutMs?: never },
+  ): ActiveBoundedProcess<DvdSourceRead>;
 }
 
 class DvdVerificationReadDeadlineError extends Error {
@@ -157,12 +166,16 @@ function openOpticalDriveLock(devicePath: string): number {
   }
 }
 
-function createNodeDvdSourceReader(options: {
+function createNodeDvdSourceReader<Input extends DvdSourceReadRange & {
+  timeoutMs?: number;
+}>(options: {
   boundedLifetime: boolean;
   command: "verify-sample-v1" | "recover-sector-v1";
   operationName: string;
   requiredSectorCount: number;
-}): DvdVerificationSourceReader {
+}): {
+  start(input: Input): ActiveBoundedProcess<DvdSourceRead>;
+} {
   return {
     start(input) {
       const devicePath = requireSafeOpticalDevicePath(input.devicePath);
@@ -179,7 +192,7 @@ function createNodeDvdSourceReader(options: {
           input.timeoutMs > DVD_DISC_VERIFICATION_READ_DEADLINE_MS
         ) ||
         !options.boundedLifetime && input.timeoutMs !== undefined
-      ) throw new Error("DVD Disc Verification source read is invalid");
+      ) throw new Error(`${options.operationName} is invalid`);
       const lockDescriptor = openOpticalDriveLock(devicePath);
       let activeProcess;
       try {
@@ -253,7 +266,9 @@ function createNodeDvdSourceReader(options: {
 
 export function createNodeDvdVerificationSourceReader():
   DvdVerificationSourceReader {
-  return createNodeDvdSourceReader({
+  return createNodeDvdSourceReader<DvdSourceReadRange & {
+    timeoutMs: number;
+  }>({
     boundedLifetime: true,
     command: "verify-sample-v1",
     operationName: "DVD Disc Verification source read",
@@ -262,8 +277,10 @@ export function createNodeDvdVerificationSourceReader():
 }
 
 export function createNodeDvdRecoverySourceReader():
-  DvdVerificationSourceReader {
-  return createNodeDvdSourceReader({
+  DvdRecoverySourceReader {
+  return createNodeDvdSourceReader<DvdSourceReadRange & {
+    timeoutMs?: never;
+  }>({
     boundedLifetime: false,
     command: "recover-sector-v1",
     operationName: "DVD Recovery source read",
@@ -272,11 +289,11 @@ export function createNodeDvdRecoverySourceReader():
 }
 
 async function runBoundedDvdVerificationSourceRead(input: {
-  active: ActiveBoundedProcess<DvdVerificationSourceRead>;
+  active: ActiveBoundedProcess<DvdSourceRead>;
   signal?: AbortSignal;
   timeoutMs: number;
 }): Promise<
-  | { outcome: "completed"; read: DvdVerificationSourceRead }
+  | { outcome: "completed"; read: DvdSourceRead }
   | { outcome: "stopped"; reason: "deadline" | "interrupted" }
 > {
   let timeout: NodeJS.Timeout | undefined;

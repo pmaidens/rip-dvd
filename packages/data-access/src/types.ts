@@ -616,12 +616,21 @@ export type ClaimedArchiveRecoveryWork = ArchiveRecoveryWork & {
 };
 
 export interface ArchiveRecoveryWorkAccess {
+  findNextStopping(): ArchiveRecovery | null;
+  findNextVerifiedCandidate(): {
+    recovery: ArchiveRecovery;
+    verification: DvdDiscVerification;
+  } | null;
   request(id: ArchiveRecoveryId): ArchiveRecoveryWork;
   claim(
     id: ArchiveRecoveryId,
     workerId: string,
   ): ClaimedArchiveRecoveryWork;
   assertClaim(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
+  admitSourceRead(
+    claim: ClaimedArchiveRecoveryWork,
+    start: () => void,
+  ): ArchiveRecovery;
   bindVerification(
     claim: ClaimedArchiveRecoveryWork,
     authority: DvdRecoveryWriteAuthority,

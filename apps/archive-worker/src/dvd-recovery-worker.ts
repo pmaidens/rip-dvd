@@ -14,8 +14,8 @@ import {
 import type { ActiveBoundedProcess } from "./bounded-child-process.js";
 import {
   createNodeDvdRecoverySourceReader,
-  type DvdVerificationSourceRead,
-  type DvdVerificationSourceReader,
+  type DvdRecoverySourceReader,
+  type DvdSourceRead,
 } from "./dvd-disc-verifier.js";
 import {
   commitDvdRecoveryBatch,
@@ -78,7 +78,7 @@ function writeAuthority(
 
 function sourceFaultCode(
   diagnostic: Extract<
-    DvdVerificationSourceRead,
+    DvdSourceRead,
     { outcome: "unreadable" }
   >["diagnostic"],
 ): DvdRecoveryPassFaultCode {
@@ -165,13 +165,13 @@ function devicePathForAuthority(
 }
 
 async function waitForRead(input: {
-  active: ActiveBoundedProcess<DvdVerificationSourceRead>;
+  active: ActiveBoundedProcess<DvdSourceRead>;
   access: DataAccess;
   recovery: Pick<ArchiveRecovery, "id" | "attemptId">;
   signal: AbortSignal;
   stopPollIntervalMs: number;
 }): Promise<
-  | { outcome: "completed"; read: DvdVerificationSourceRead }
+  | { outcome: "completed"; read: DvdSourceRead }
   | { outcome: "stopped" }
 > {
   let interval: NodeJS.Timeout | undefined;
@@ -227,19 +227,38 @@ async function finalizeStop(input: {
   if (input.recovery.stopOperationId === null) {
     throw new Error("Archive Recovery Stop has no operation identity");
   }
-  const archive = input.access.catalog.listOriginalDiscArchives({
-    ids: [input.recovery.originalDiscArchiveId],
-  })[0];
+  const verificationId = input.recovery.work?.verificationId;
+  const verification = verificationId === null || verificationId === undefined
+    ? null
+    : input.access.dvdDiscVerifications.find(verificationId);
+  if (
+    verificationId !== null && verificationId !== undefined &&
+    (verification === null ||
+      verification.archiveRecoveryId !== input.recovery.id ||
+      verification.originalDiscArchiveId !==
+        input.recovery.originalDiscArchiveId)
+  ) {
+    throw new DvdRecoveryPassFault("SOURCE_CHANGED");
+  }
+  const inspection = verification === null
+    ? undefined
+    : input.access.discInspections.list({
+        ids: [verification.discInspectionId],
+      })[0];
+  const archive = verification !== null
+    ? undefined
+    : input.access.catalog.listOriginalDiscArchives({
+        ids: [input.recovery.originalDiscArchiveId],
+      })[0];
   const source = archive === undefined
     ? undefined
     : input.access.catalog.listDetectedDiscs(undefined, {
         ids: [archive.detectedDiscId],
       })[0];
-  const drive = source === undefined
+  const opticalDriveId = inspection?.opticalDriveId ?? source?.opticalDriveId;
+  const drive = opticalDriveId === undefined
     ? undefined
-    : input.access.catalog.listOpticalDrives({
-        ids: [source.opticalDriveId],
-      })[0];
+    : input.access.catalog.listOpticalDrives({ ids: [opticalDriveId] })[0];
   if (drive === undefined) {
     throw new DvdRecoveryPassFault("SOURCE_CHANGED");
   }
@@ -266,7 +285,7 @@ export async function pollDvdRecoveryPass(input: {
   deviceInactivity: Pick<DvdCopyRunner, "withDeviceInactive">;
   mediaGenerationObserver: MediaGenerationObserver;
   originalsLibraryPath: string;
-  reader: DvdVerificationSourceReader;
+  reader: DvdRecoverySourceReader;
   reconcile?: typeof reconcileDvdRecoveryCheckpoint;
   signal?: AbortSignal;
   stopPollIntervalMs?: number;
@@ -276,9 +295,8 @@ export async function pollDvdRecoveryPass(input: {
   const archiveImageOwnership = input.archiveImageOwnership ??
     defaultArchiveImageOwnership;
   const reconcile = input.reconcile ?? reconcileDvdRecoveryCheckpoint;
-  const stopping = input.access.catalog.listArchiveRecoveries({ limit: 100 })
-    .find((recovery) => recovery.status === "stopping");
-  if (stopping !== undefined) {
+  const stopping = input.access.archiveRecoveryWork.findNextStopping();
+  if (stopping !== null) {
     await finalizeStop({
       ...input,
       archiveImageOwnership,
@@ -289,25 +307,13 @@ export async function pollDvdRecoveryPass(input: {
     return true;
   }
 
-  const candidate = input.access.catalog.listArchiveRecoveries({ limit: 100 })
-    .map((recovery) => ({
-      recovery,
-      verification: input.access.dvdDiscVerifications
-        .findLatestForRecovery(recovery.id),
-      checkpoint: input.access.catalog.findDvdArchiveEvidenceHeader(
-        recovery.originalDiscArchiveId,
-      ),
-    }))
-    .find(({ recovery, verification, checkpoint }) =>
-      recovery.status === "eligible" &&
-      verification !== null &&
-      writeAuthority(verification) !== null &&
-      checkpoint !== null &&
-      checkpoint.currentManifestRevision === verification.checkpointRevision &&
-      checkpoint.currentManifestDigest === verification.checkpointDigest
-    );
-  if (candidate === undefined || candidate.verification === null) return false;
-  const authority = writeAuthority(candidate.verification)!;
+  const candidate = input.access.archiveRecoveryWork
+    .findNextVerifiedCandidate();
+  if (candidate === null) return false;
+  const authority = writeAuthority(candidate.verification);
+  if (authority === null) {
+    throw new Error("DVD Recovery candidate lacks write authority");
+  }
   const requested = input.access.archiveRecoveryWork.request(
     candidate.recovery.id,
   );
@@ -357,29 +363,28 @@ export async function pollDvdRecoveryPass(input: {
         })) {
           throw new DvdRecoveryPassFault("SOURCE_CHANGED");
         }
-        const admitted = currentRecovery(input.access, candidate.recovery);
-        if (admitted.status === "stopping") {
-          await finalizeStop({
-            ...input,
-            archiveImageOwnership,
-            reconcile,
-            recovery: admitted,
-            signal,
+        let admittedRead: ActiveBoundedProcess<DvdSourceRead> | undefined;
+        try {
+          input.access.archiveRecoveryWork.admitSourceRead(claim, () => {
+            admittedRead = input.reader.start({
+              devicePath,
+              startLba,
+              sectorCount: 1,
+              acceptedEndLbaExclusive: checkpoint.acceptedEndLbaExclusive,
+            });
           });
-          return true;
+        } catch (error) {
+          if (admittedRead !== undefined) {
+            admittedRead.cancel();
+            await admittedRead.closed;
+          }
+          throw error;
         }
-        if (admitted.status !== "running") {
-          throw new DvdRecoveryPassFault("SOURCE_CHANGED");
+        if (admittedRead === undefined) {
+          throw new DvdRecoveryPassFault("SOURCE_READ_FAILED");
         }
-        input.access.archiveRecoveryWork.assertClaim(claim);
-        const active = input.reader.start({
-          devicePath,
-          startLba,
-          sectorCount: 1,
-          acceptedEndLbaExclusive: checkpoint.acceptedEndLbaExclusive,
-        });
         const completed = await waitForRead({
-          active,
+          active: admittedRead,
           access: input.access,
           recovery: candidate.recovery,
           signal,
@@ -450,7 +455,16 @@ export async function pollDvdRecoveryPass(input: {
   } catch (error) {
     if (signal.aborted) throw error;
     const recovery = currentRecovery(input.access, candidate.recovery);
-    if (recovery.status === "stopping") return true;
+    if (recovery.status === "stopping") {
+      await finalizeStop({
+        ...input,
+        archiveImageOwnership,
+        reconcile,
+        recovery,
+        signal,
+      });
+      return true;
+    }
     input.access.archiveRecoveryWork.markFault({
       claim,
       faultCode: error instanceof DvdRecoveryPassFault ||
@@ -472,7 +486,7 @@ export async function runDvdRecoveryWorker(input: {
   originalsLibraryPath: string;
   signal: AbortSignal;
   workerExecutionId: string;
-  reader?: DvdVerificationSourceReader;
+  reader?: DvdRecoverySourceReader;
   mediaGenerationObserver?: MediaGenerationObserver;
 }): Promise<void> {
   const reader = input.reader ?? createNodeDvdRecoverySourceReader();

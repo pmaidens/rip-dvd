@@ -21,7 +21,7 @@ import {
 import { seedDvdDiscVerificationFixture } from "../../../../../operator-cli/src/dvd-disc-verification.test-support.js";
 import { createOperatorWorkflowFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
 import type { DvdRecoveryAtomicWriter } from "../../../../../archive-worker/src/dvd-recovery-batch.js";
-import type { DvdVerificationSourceReader } from "../../../../../archive-worker/src/dvd-disc-verifier.js";
+import type { DvdRecoverySourceReader } from "../../../../../archive-worker/src/dvd-disc-verifier.js";
 import { pollDvdRecoveryPass } from "../../../../../archive-worker/src/dvd-recovery-worker.js";
 import type { reconcileDvdRecoveryCheckpoint } from "../../../../../archive-worker/src/dvd-recovery-reconciliation.js";
 
@@ -151,7 +151,7 @@ function immediateReader(
     | { outcome: "unreadable"; diagnostic: DvdDiscVerificationDiagnostic },
 ) {
   const start = vi.fn((input:
-    Parameters<DvdVerificationSourceReader["start"]>[0]) => ({
+    Parameters<DvdRecoverySourceReader["start"]>[0]) => ({
       result: Promise.resolve(read(input.startLba)),
       closed: Promise.resolve(),
       cancel: vi.fn(),
@@ -161,7 +161,7 @@ function immediateReader(
 
 function pollInput(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
-  reader: DvdVerificationSourceReader,
+  reader: DvdRecoverySourceReader,
 ) {
   return {
     access: fixture.openAccess(),
@@ -387,12 +387,23 @@ it("keeps Stop durable until a blocked source command is reaped", async () => {
 it("finishes a durable Stop after a worker restart without another read", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
-  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 900,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }], "/dev/synthetic-recovery-drive");
   const authority = await completeVerification(fixture, seeded);
   const source = immediateReader(() => {
     throw new Error("No source read is allowed while stopping");
   });
   const input = pollInput(fixture, source.reader);
+  const withDeviceInactive = vi.fn(async (
+    _devicePath: string,
+    mutation: () => void | Promise<void>,
+  ) => {
+    await mutation();
+  });
+  input.deviceInactivity.withDeviceInactive = withDeviceInactive;
   const reconcile = vi.fn(async () => ({
     outcome: "already_consistent",
     evidence: {},
@@ -414,10 +425,41 @@ it("finishes a durable Stop after a worker restart without another read", async 
 
     expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(true);
     expect(source.start).not.toHaveBeenCalled();
+    expect(withDeviceInactive).toHaveBeenCalledWith(
+      seeded.verificationDrive.devicePath,
+      expect.any(Function),
+    );
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({ status: "stopped", work: null });
   } finally {
     input.access.close();
+  }
+});
+
+it("rejects source-read admission after Stop commits", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const authority = await completeVerification(fixture, seeded);
+  const access = fixture.openAccess();
+  const start = vi.fn();
+  try {
+    const claim = access.archiveRecoveryWork.claim(
+      access.archiveRecoveryWork.request(seeded.recoveryId).archiveRecoveryId,
+      "synthetic-stopped-recovery-worker",
+    );
+    access.archiveRecoveryWork.bindVerification(claim, authority);
+    access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000455",
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    });
+
+    expect(() => access.archiveRecoveryWork.admitSourceRead(claim, start))
+      .toThrow();
+    expect(start).not.toHaveBeenCalled();
+  } finally {
+    access.close();
   }
 });
 

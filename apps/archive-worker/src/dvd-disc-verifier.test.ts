@@ -15,8 +15,8 @@ import {
 import {
   parseDvdVerificationReadFailureProtocol,
   verifyInsertedDvdAgainstSamples,
+  type DvdSourceRead,
   type DvdVerificationSourceReader,
-  type DvdVerificationSourceRead,
 } from "./dvd-disc-verifier.js";
 
 const metadataFingerprint = `dvdmeta-sha256:${"a".repeat(64)}`;
@@ -64,7 +64,7 @@ function manifest(count = DVD_SOURCE_SAMPLE_BAND_COUNT): DvdSourceSampleManifest
 }
 
 function reader(
-  read: (index: number) => DvdVerificationSourceRead,
+  read: (index: number) => DvdSourceRead,
 ) {
   const run = vi.fn(({ startLba }:
     Parameters<DvdVerificationSourceReader["start"]>[0]) => ({
@@ -325,7 +325,7 @@ it("cancels a hung read at the deadline and waits for quiescence", async () => {
     });
     const source: DvdVerificationSourceReader = {
       start: vi.fn(() => ({
-        result: new Promise<DvdVerificationSourceRead>(() => {}),
+        result: new Promise<DvdSourceRead>(() => {}),
         closed: new Promise<void>((resolve) => {
           closeRead = resolve;
         }),
@@ -371,7 +371,7 @@ it("cancels a hung read on worker shutdown and waits for quiescence", async () =
   });
   const source: DvdVerificationSourceReader = {
     start: vi.fn(() => ({
-      result: new Promise<DvdVerificationSourceRead>(() => {}),
+      result: new Promise<DvdSourceRead>(() => {}),
       closed: new Promise<void>((resolve) => {
         closeRead = resolve;
       }),

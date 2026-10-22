@@ -35,6 +35,7 @@ export async function seedDvdDiscVerificationFixture(
   }[] = [
     { startLba: 900, sectorCount: 1, classification: "skipped_untested" },
   ],
+  verificationDevicePath?: string,
 ) {
   const seeded = await seedCommittedArchiveEvidence(fixture, ranges);
   const recoveryId = "synthetic-verification-recovery" as ArchiveRecoveryId;
@@ -70,16 +71,25 @@ export async function seedDvdDiscVerificationFixture(
   const sourceDisc = access.catalog.listDetectedDiscs(undefined, {
     ids: [seeded.archive.detectedDiscId],
   })[0]!;
-  const drive = access.catalog.listOpticalDrives({
+  const sourceDrive = access.catalog.listOpticalDrives({
     ids: [sourceDisc.opticalDriveId],
   })[0]!;
-  access.catalog.upsertOpticalDrive({
-    devicePath: drive.devicePath,
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: verificationDevicePath ?? sourceDrive.devicePath,
     isEnabled: true,
     isPresent: true,
   });
+  const verificationDisc = drive.id === sourceDisc.opticalDriveId
+    ? sourceDisc
+    : access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: sourceDisc.discKind,
+        fingerprint: sourceDisc.fingerprint,
+        volumeLabel: sourceDisc.volumeLabel ?? undefined,
+        scanData: sourceDisc.scanData,
+      });
   const started = beginSettledDiscInspectionForTest(access, {
-    opticalDriveId: sourceDisc.opticalDriveId,
+    opticalDriveId: drive.id,
     mediaGeneration: "synthetic-verification-generation",
     mediaCapacityBytes: 1_024 * 2_048,
   });
@@ -94,7 +104,7 @@ export async function seedDvdDiscVerificationFixture(
   });
   const inspection = access.discInspections.record(started.claim, {
     type: "complete",
-    detectedDiscId: sourceDisc.id,
+    detectedDiscId: verificationDisc.id,
   });
   started.restoreSystemTime();
   access.close();
@@ -178,6 +188,8 @@ export async function seedDvdDiscVerificationFixture(
     recoveryId,
     attemptId,
     sourceDisc,
+    verificationDisc,
+    verificationDrive: drive,
     inspection,
     sampleManifest,
   };
