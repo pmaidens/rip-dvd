@@ -329,8 +329,8 @@ export async function verifyInsertedDvdAgainstSamples(input: {
       interrupted = true;
       break;
     }
-    let timeoutMs = remainingBudgetMs();
-    if (timeoutMs <= 0) {
+    let remainingMs = remainingBudgetMs();
+    if (remainingMs <= 0) {
       budgetExhausted = true;
       break;
     }
@@ -339,11 +339,16 @@ export async function verifyInsertedDvdAgainstSamples(input: {
         interrupted = true;
         break;
       }
-      timeoutMs = remainingBudgetMs();
-      if (timeoutMs <= 0) {
+      remainingMs = remainingBudgetMs();
+      if (remainingMs <= 0) {
         budgetExhausted = true;
         break;
       }
+    }
+    const timeoutMs = Math.floor(remainingMs);
+    if (timeoutMs <= 0) {
+      budgetExhausted = true;
+      break;
     }
     const activeRead = input.reader.start({
       devicePath: input.devicePath,

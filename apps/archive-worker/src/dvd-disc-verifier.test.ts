@@ -253,6 +253,32 @@ it("rechecks the deadline after asynchronous read authorization", async () => {
   expect(source.run).not.toHaveBeenCalled();
 });
 
+it("passes an integer timeout when the monotonic clock is fractional", async () => {
+  const source = reader((index) => ({
+    outcome: "readable",
+    bytes: sampleBytes(index),
+  }));
+  const monotonicNow = vi.fn()
+    .mockReturnValueOnce(0.25)
+    .mockReturnValue(0.75);
+
+  await verifyInsertedDvdAgainstSamples({
+    manifest: manifest(1),
+    sourceMetadataFingerprint: metadataFingerprint,
+    observedMetadataFingerprint: metadataFingerprint,
+    devicePath: "/dev/synthetic-disc",
+    reader: source.reader,
+    startedAtMs: 0,
+    now: () => 0,
+    monotonicNow,
+    insertionIsCurrent: () => true,
+    checkpointIsCurrent: () => true,
+  });
+
+  expect(source.run).toHaveBeenCalledOnce();
+  expect(source.run.mock.calls[0]?.[0].timeoutMs).toBe(59_999);
+});
+
 it("does not extend the read budget when wall time moves backward", async () => {
   let wallClock = 30_000;
   let monotonicClock = 0;
