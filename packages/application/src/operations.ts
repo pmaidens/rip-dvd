@@ -1,4 +1,5 @@
 import {
+  activeEncodeWorkIdentities,
   DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
   ENCODE_WORK_CONFLICT,
   DVD_RECOVERY_EVIDENCE_ADMISSION,
@@ -735,13 +736,7 @@ function readDetail(
       const encodeJobs = discSelections.flatMap((selection) =>
         access.encodeJobs.listForDiscSelection(selection.id)
       );
-      const conflictingEncodeJobs = encodeJobs
-        .filter((job) => [
-          "queued",
-          "running",
-          "cancellation_requested",
-        ].includes(job.status))
-        .map(({ id, status }) => ({ id, status }));
+      const conflictingEncodeJobs = activeEncodeWorkIdentities(encodeJobs);
       const rearchiveEligible = archive.discKind === "dvd";
       const rearchiveReason = rearchiveEligible
         ? null

@@ -33,10 +33,15 @@ export {
   dvdRecoveryEvidenceFormatForArchive,
 } from "./dvd-recovery-evidence.js";
 export {
+  ACTIVE_ENCODE_WORK_STATUSES,
   ENCODE_WORK_CONFLICT,
   EncodeWorkConflictError,
+  activeEncodeWorkIdentities,
+  createEncodeWorkConflictCurrent,
+  isActiveEncodeWorkStatus,
 } from "./archive-recovery-work.js";
 export type {
+  ActiveEncodeWorkStatus,
   EncodeWorkConflictCurrent,
 } from "./archive-recovery-work.js";
 export * from "./dvd-recovery-storage-preflight.js";

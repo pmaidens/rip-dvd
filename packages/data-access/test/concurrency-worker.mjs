@@ -8,15 +8,23 @@ import {
   InvalidStatusTransitionError,
 } from "../dist/index.js";
 import { createLegacySidecarDataAccess } from "../dist/legacy-sidecars.js";
+import { createDataAccessInternal } from "../dist/internal/create-data-access.js";
+import { createLegacySidecarImportAccess } from "../dist/internal/legacy-sidecar-migration.js";
 
 const barrier = new Int32Array(workerData.barrier);
 let access;
 
 try {
   if (workerData.mode !== "open") {
-    access = createLegacySidecarDataAccess({
-      databasePath: workerData.databasePath,
-    });
+    access = workerData.allowDvdRecoveryEvidenceEncodingForExclusionTest
+      ? createDataAccessInternal(
+        { databasePath: workerData.databasePath },
+        { createAccess: createLegacySidecarImportAccess },
+        { allowDvdRecoveryEvidenceEncodingForExclusionTest: true },
+      )
+      : createLegacySidecarDataAccess({
+        databasePath: workerData.databasePath,
+      });
   }
 
   parentPort.postMessage({ type: "ready" });
@@ -100,7 +108,7 @@ try {
       }
       parentPort.postMessage({
         type: "result",
-        value: { outcome: "rejected" },
+        value: { outcome: "rejected", code: error.code },
       });
     }
   } else if (workerData.operation === "requeue-encode") {
@@ -119,7 +127,7 @@ try {
       }
       parentPort.postMessage({
         type: "result",
-        value: { outcome: "rejected" },
+        value: { outcome: "rejected", code: error.code },
       });
     }
   } else if (workerData.operation === "cancel-encode") {
@@ -175,7 +183,7 @@ try {
       if (!(error instanceof EncodeWorkConflictError)) throw error;
       parentPort.postMessage({
         type: "result",
-        value: { outcome: "rejected" },
+        value: { outcome: "rejected", code: error.code },
       });
     }
   } else if (workerData.operation === "complete-catalog-review") {

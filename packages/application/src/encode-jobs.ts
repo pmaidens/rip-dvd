@@ -1,4 +1,5 @@
 import {
+  createEncodeWorkConflictCurrent,
   discSelectionSourceDescription,
   dvdRecoveryEvidenceFormatForArchive,
   encodingProfileQueueBlockingReasons,
@@ -42,25 +43,10 @@ function requireEvidenceEncodingAvailable(
       const encodeJobs = snapshot.catalog.listDiscSelections({
         originalDiscArchiveId: recovery.originalDiscArchiveId,
         includeHistorical: true,
-      }).flatMap(({ id }) => snapshot.encodeJobs.listForDiscSelection(id))
-        .filter(({ status }) => [
-          "queued",
-          "running",
-          "cancellation_requested",
-        ].includes(status))
-        .sort((left, right) =>
-          left.createdAt.getTime() - right.createdAt.getTime() ||
-          left.id.localeCompare(right.id)
-        )
-        .map(({ id, status }) => ({ id, status }));
-      throw new EncodeWorkConflictError({
-        archiveRecovery: {
-          id: recovery.id,
-          originalDiscArchiveId: recovery.originalDiscArchiveId,
-          work: recovery.work,
-        },
-        encodeJobs,
-      });
+      }).flatMap(({ id }) => snapshot.encodeJobs.listForDiscSelection(id));
+      throw new EncodeWorkConflictError(
+        createEncodeWorkConflictCurrent(recovery, encodeJobs),
+      );
     }
     if (
       selection !== undefined &&

@@ -134,7 +134,9 @@ import {
   DvdRecoveryEvidenceEncodingUnavailableError,
 } from "../dvd-recovery-evidence.js";
 import {
+  ACTIVE_ENCODE_WORK_STATUSES,
   EncodeWorkConflictError,
+  createEncodeWorkConflictCurrent,
   type EncodeWorkConflictCurrent,
 } from "../archive-recovery-work.js";
 import {
@@ -1063,6 +1065,7 @@ export function createDataAccessInternal(
 export function createDataAccessInternal(
   options: CreateDataAccessOptions,
   legacySidecarMigration: LegacySidecarMigrationAdapter,
+  testOptions?: { allowDvdRecoveryEvidenceEncodingForExclusionTest?: boolean },
 ): LegacySidecarDataAccess;
 export function createDataAccessInternal(
   {
@@ -1074,6 +1077,7 @@ export function createDataAccessInternal(
     filesystemPathProbe = createBoundedFilesystemPathProbe(),
   }: CreateDataAccessOptions,
   legacySidecarMigration?: LegacySidecarMigrationAdapter,
+  testOptions?: { allowDvdRecoveryEvidenceEncodingForExclusionTest?: boolean },
 ): DataAccess | LegacySidecarDataAccess {
   const normalizedDatabasePath = requireNonEmpty(databasePath, "databasePath");
   const normalizedOriginalsLibraryPath =
@@ -1175,6 +1179,9 @@ export function createDataAccessInternal(
     from sqlite_schema
     where type = 'table' and name = 'dvd_archive_evidence_headers'
   `).get() !== undefined;
+  const dvdRecoveryEvidenceEncodingGateClosed =
+    hasDvdRecoveryEvidenceSchema &&
+    testOptions?.allowDvdRecoveryEvidenceEncodingForExclusionTest !== true;
   const dvdRecoveryEvidenceMarkerCondition = (
     querySource: Pick<typeof database, "select">,
     archiveId: AnySQLiteColumn,
@@ -1198,11 +1205,6 @@ export function createDataAccessInternal(
         )),
     ),
   );
-  const activeEncodeWorkStatuses = [
-    "queued",
-    "running",
-    "cancellation_requested",
-  ] as const satisfies readonly EncodeJobStatus[];
   const findArchiveRecoveryRecord = (
     querySource: Pick<typeof database, "select">,
     options: {
@@ -1238,7 +1240,11 @@ export function createDataAccessInternal(
     querySource: Pick<typeof database, "select">,
     originalDiscArchiveId: OriginalDiscArchiveId,
   ) => querySource
-    .select({ id: encodeJobs.id, status: encodeJobs.status })
+    .select({
+      id: encodeJobs.id,
+      status: encodeJobs.status,
+      createdAt: encodeJobs.createdAt,
+    })
     .from(encodeJobs)
     .innerJoin(
       discSelections,
@@ -1246,24 +1252,20 @@ export function createDataAccessInternal(
     )
     .where(and(
       eq(discSelections.originalDiscArchiveId, originalDiscArchiveId),
-      inArray(encodeJobs.status, activeEncodeWorkStatuses),
+      inArray(encodeJobs.status, ACTIVE_ENCODE_WORK_STATUSES),
     ))
     .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
     .all();
   const encodeWorkConflictCurrent = (
     querySource: Pick<typeof database, "select">,
     recovery: ArchiveRecovery,
-  ): EncodeWorkConflictCurrent => ({
-    archiveRecovery: {
-      id: recovery.id,
-      originalDiscArchiveId: recovery.originalDiscArchiveId,
-      work: recovery.work,
-    },
-    encodeJobs: listActiveEncodeWorkForArchive(
+  ): EncodeWorkConflictCurrent => createEncodeWorkConflictCurrent(
+    recovery,
+    listActiveEncodeWorkForArchive(
       querySource,
       recovery.originalDiscArchiveId,
     ),
-  });
+  );
   const requireNoActiveEncodeWork = (
     querySource: Pick<typeof database, "select">,
     recovery: ArchiveRecovery,
@@ -1299,7 +1301,7 @@ export function createDataAccessInternal(
       )),
   );
   const dvdRecoveryEvidenceEncodeExclusion = {
-    rawSql: !hasDvdRecoveryEvidenceSchema
+    rawSql: !dvdRecoveryEvidenceEncodingGateClosed
       ? ""
       : `and not exists (
           select 1
@@ -1315,7 +1317,7 @@ export function createDataAccessInternal(
               '${DVD_RECOVERY_EVIDENCE_FORMAT}'
         )`,
     forArchive: (querySource: Pick<typeof database, "select">) =>
-      hasDvdRecoveryEvidenceSchema
+      dvdRecoveryEvidenceEncodingGateClosed
         ? sql`not ${dvdRecoveryEvidenceMarkerCondition(
             querySource,
             originalDiscArchives.id,
@@ -1340,6 +1342,7 @@ export function createDataAccessInternal(
     if (targetArchive !== undefined) {
       requireNoArchiveRecoveryWork(querySource, targetArchive.id);
     }
+    if (!dvdRecoveryEvidenceEncodingGateClosed) return;
     const evidenceArchive = querySource
       .select({ id: discSelections.originalDiscArchiveId })
       .from(encodeJobs)
@@ -1364,7 +1367,7 @@ export function createDataAccessInternal(
     querySource: Pick<typeof database, "select">,
     discSelectionIds: readonly DiscSelectionId[],
   ): void => {
-    if (!hasDvdRecoveryEvidenceSchema || discSelectionIds.length === 0) return;
+    if (!dvdRecoveryEvidenceEncodingGateClosed || discSelectionIds.length === 0) return;
     const evidenceArchive = querySource
       .select({ id: discSelections.originalDiscArchiveId })
       .from(discSelections)
@@ -4894,7 +4897,7 @@ export function createDataAccessInternal(
     originalDiscArchiveId: OriginalDiscArchiveId,
   ): DvdEvidenceReplacementEncodingCapability {
     requireNoArchiveRecoveryWork(reader, originalDiscArchiveId);
-    if (hasDvdRecoveryEvidenceSchema) {
+    if (dvdRecoveryEvidenceEncodingGateClosed) {
       const markedArchive = reader
         .select({ id: originalDiscArchives.id })
         .from(originalDiscArchives)
@@ -14133,7 +14136,10 @@ export function createDataAccessInternal(
               transaction,
               selectionReview.originalDiscArchiveId,
             );
-            if (selectionReview.evidenceFormat !== null) {
+            if (
+              dvdRecoveryEvidenceEncodingGateClosed &&
+              selectionReview.evidenceFormat !== null
+            ) {
               throw new DvdRecoveryEvidenceEncodingUnavailableError();
             }
             requireCompletedReview(selectionReview);
@@ -14156,7 +14162,10 @@ export function createDataAccessInternal(
               transaction,
               selectionReview.originalDiscArchiveId,
             );
-            if (selectionReview.evidenceFormat !== null) {
+            if (
+              dvdRecoveryEvidenceEncodingGateClosed &&
+              selectionReview.evidenceFormat !== null
+            ) {
               throw new DvdRecoveryEvidenceEncodingUnavailableError();
             }
             requireCompletedReview(selectionReview);

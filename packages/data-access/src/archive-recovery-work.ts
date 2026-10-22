@@ -1,6 +1,8 @@
 import type {
+  ArchiveRecovery,
   ArchiveRecoveryId,
   ArchiveRecoveryWork,
+  EncodeJob,
   EncodeJobId,
   EncodeJobStatus,
   OriginalDiscArchiveId,
@@ -13,6 +15,35 @@ export const ENCODE_WORK_CONFLICT = {
     "Archive Recovery and queued or running Encode Jobs cannot use the same Original Disc Archive.",
 } as const;
 
+export const ACTIVE_ENCODE_WORK_STATUSES = [
+  "queued",
+  "running",
+  "cancellation_requested",
+] as const satisfies readonly EncodeJobStatus[];
+
+export type ActiveEncodeWorkStatus =
+  (typeof ACTIVE_ENCODE_WORK_STATUSES)[number];
+
+export function isActiveEncodeWorkStatus(
+  status: EncodeJobStatus,
+): status is ActiveEncodeWorkStatus {
+  return ACTIVE_ENCODE_WORK_STATUSES.some((active) => active === status);
+}
+
+export function activeEncodeWorkIdentities(
+  jobs: readonly Pick<EncodeJob, "id" | "status" | "createdAt">[],
+): Array<{ id: EncodeJobId; status: ActiveEncodeWorkStatus }> {
+  return jobs
+    .filter((job): job is typeof job & { status: ActiveEncodeWorkStatus } =>
+      isActiveEncodeWorkStatus(job.status)
+    )
+    .sort((left, right) =>
+      left.createdAt.getTime() - right.createdAt.getTime() ||
+      left.id.localeCompare(right.id)
+    )
+    .map(({ id, status }) => ({ id, status }));
+}
+
 export interface EncodeWorkConflictCurrent {
   archiveRecovery: {
     id: ArchiveRecoveryId;
@@ -21,8 +52,22 @@ export interface EncodeWorkConflictCurrent {
   };
   encodeJobs: readonly {
     id: EncodeJobId;
-    status: EncodeJobStatus;
+    status: ActiveEncodeWorkStatus;
   }[];
+}
+
+export function createEncodeWorkConflictCurrent(
+  recovery: ArchiveRecovery,
+  jobs: readonly Pick<EncodeJob, "id" | "status" | "createdAt">[],
+): EncodeWorkConflictCurrent {
+  return {
+    archiveRecovery: {
+      id: recovery.id,
+      originalDiscArchiveId: recovery.originalDiscArchiveId,
+      work: recovery.work,
+    },
+    encodeJobs: activeEncodeWorkIdentities(jobs),
+  };
 }
 
 export class EncodeWorkConflictError extends DomainInvariantError {

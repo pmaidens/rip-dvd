@@ -70,6 +70,8 @@ import type {
 } from "./index.js";
 import type { EncodingProfileId } from "./index.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
+import { createDataAccessInternal } from "./internal/create-data-access.js";
+import { createLegacySidecarImportAccess } from "./internal/legacy-sidecar-migration.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -130,6 +132,7 @@ type ConcurrentWorkerResult =
         | "started"
         | "versioned";
       id?: string;
+      code?: string;
       version?: number;
     }
   | null;
@@ -212,6 +215,7 @@ type ConcurrentOperation = (
 
 type BarrierWorkerOptions = {
   databasePath: string;
+  allowDvdRecoveryEvidenceEncodingForExclusionTest?: boolean;
 } & (
   | { mode: "open"; count: number }
   | { mode: "operation"; operations: readonly ConcurrentOperation[] }
@@ -242,6 +246,8 @@ async function runBarrierWorkers(
             databasePath,
             mode,
             workerId: `${mode}-worker-${index}`,
+            allowDvdRecoveryEvidenceEncodingForExclusionTest:
+              options.allowDvdRecoveryEvidenceEncodingForExclusionTest,
             ...operation,
           },
         },
@@ -327,6 +333,16 @@ function createTestMigrationsFolder(): string {
 
 function openTestDatabase(databasePath = createTestDatabasePath()) {
   return createLegacySidecarDataAccess({ databasePath });
+}
+
+function openEncodeExclusionTestDatabase(databasePath: string) {
+  // Production admission remains closed. This internal-only seam exercises
+  // the exclusion that must still hold when later encoding gates open.
+  return createDataAccessInternal(
+    { databasePath },
+    { createAccess: createLegacySidecarImportAccess },
+    { allowDvdRecoveryEvidenceEncodingForExclusionTest: true },
+  );
 }
 
 function markArchiveWithDvdRecoveryEvidence(
@@ -13869,44 +13885,74 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
   });
 
   it.each([
-    ["recovery-first", 0, 150],
-    ["encode-attempts-first", 150, 0],
+    ["enqueue", "recovery-first", 0, 150],
+    ["enqueue", "encode-first", 150, 0],
+    ["requeue", "recovery-first", 0, 150],
+    ["requeue", "encode-first", 150, 0],
+    ["claim", "recovery-first", 0, 150],
+    ["claim", "encode-first", 150, 0],
   ] as const)(
-    "atomically resolves the %s recovery versus enqueue and requeue race",
-    async (ordering, recoveryDelayMs, encodeDelayMs) => {
+    "atomically resolves the %s race with %s ordering",
+    async (operation, ordering, recoveryDelayMs, encodeDelayMs) => {
       const databasePath = createTestDatabasePath();
       const { access, archive, mistakenSelection } =
         createDiscSelectionCorrectionFixture({
           databasePath,
-          key: `recovery-encode-race-${ordering}`,
+          key: `recovery-${operation}-race-${ordering}`,
         });
       const profile = access.encodingProfiles.create({
-        key: `recovery-encode-race-${ordering}`,
-        displayName: `Recovery encode race ${ordering}`,
+        key: `recovery-${operation}-race-${ordering}`,
+        displayName: `Recovery ${operation} race ${ordering}`,
         mediaDomain: "dvd_video",
         settings: { preset: "Fast 480p30" },
       });
-      const failed = access.encodeJobs.enqueue({
-        discSelectionId: mistakenSelection.id,
-        encodingProfileId: profile.id,
-        outputPath: `/media/movies/Recovery Encode Race ${ordering}.mkv`,
-      });
-      const claim = access.encodeJobs.claimNext(
-        `recovery-encode-race-${ordering}`,
-      );
-      if (claim === null) throw new Error("Expected Encode Job claim");
-      access.encodeJobs.fail(claim, "Synthetic race predecessor failure");
       const recoveryId =
-        `recovery-encode-race-${ordering}` as ArchiveRecoveryId;
+        `recovery-${operation}-race-${ordering}` as ArchiveRecoveryId;
+      const existingJob = operation === "enqueue"
+        ? null
+        : access.encodeJobs.enqueue({
+          discSelectionId: mistakenSelection.id,
+          encodingProfileId: profile.id,
+          outputPath:
+            `/media/movies/Recovery ${operation} Race ${ordering}.mkv`,
+        });
+      if (operation === "requeue") {
+        const claim = access.encodeJobs.claimNext(
+          `recovery-${operation}-race-preparation-${ordering}`,
+        );
+        if (claim === null) throw new Error("Expected Encode Job claim");
+        access.encodeJobs.fail(claim, "Synthetic race predecessor failure");
+      }
       markArchiveWithDvdRecoveryEvidence(
         databasePath,
         archive.id,
-        `recovery-encode-race-${ordering}`,
+        `recovery-${operation}-race-${ordering}`,
         { archiveRecoveryId: recoveryId },
       );
+      access.close();
+      const exclusionAccess = openEncodeExclusionTestDatabase(databasePath);
+
+      const encodeOperation: ConcurrentOperation = operation === "enqueue"
+        ? {
+          operation: "enqueue-encode",
+          discSelectionId: mistakenSelection.id,
+          encodingProfileId: profile.id,
+          outputPath:
+            `/media/movies/Recovery Enqueue Race Fresh ${ordering}.mkv`,
+          delayMs: encodeDelayMs,
+        }
+        : operation === "requeue"
+        ? {
+          operation: "requeue-encode",
+          encodeJobId: existingJob!.id,
+          mutationKey: `recovery-requeue-race-${ordering}`,
+          delayMs: encodeDelayMs,
+        }
+        : { operation: "claim-encode", delayMs: encodeDelayMs };
 
       const results = await runBarrierWorkers({
         databasePath,
+        allowDvdRecoveryEvidenceEncodingForExclusionTest: true,
         mode: "operation",
         operations: [
           {
@@ -13914,36 +13960,62 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
             archiveRecoveryId: recoveryId,
             delayMs: recoveryDelayMs,
           },
-          {
-            operation: "enqueue-encode",
-            discSelectionId: mistakenSelection.id,
-            encodingProfileId: profile.id,
-            outputPath:
-              `/media/movies/Recovery Encode Race Fresh ${ordering}.mkv`,
-            delayMs: encodeDelayMs,
-          },
-          {
-            operation: "requeue-encode",
-            encodeJobId: failed.id,
-            mutationKey: `recovery-encode-race-requeue-${ordering}`,
-            delayMs: encodeDelayMs,
-          },
+          encodeOperation,
         ],
       });
 
-      expect(results).toEqual([
-        { outcome: "requested", id: recoveryId },
-        { outcome: "rejected" },
-        { outcome: "rejected" },
-      ]);
-      expect(access.catalog.findArchiveRecovery(archive.id)).toMatchObject({
-        id: recoveryId,
-        work: expect.objectContaining({ status: "requested" }),
-      });
-      expect(access.encodeJobs.list()).toEqual([
-        expect.objectContaining({ id: failed.id, status: "failed" }),
-      ]);
-      access.close();
+      if (operation === "claim") {
+        expect(results[0]).toEqual({
+          outcome: "rejected",
+          code: "ENCODE_WORK_CONFLICT",
+        });
+        expect(results[1]).toMatchObject({ outcome: "claimed" });
+        expect(
+          exclusionAccess.catalog.findArchiveRecovery(archive.id),
+        ).toMatchObject({ id: recoveryId, work: null });
+        expect(exclusionAccess.encodeJobs.list()).toEqual([
+          expect.objectContaining({
+            id: existingJob!.id,
+            status: "running",
+          }),
+        ]);
+      } else if (ordering === "recovery-first") {
+        expect(results[0]).toEqual({ outcome: "requested", id: recoveryId });
+        expect(results[1]).toEqual({
+          outcome: "rejected",
+          code: "ENCODE_WORK_CONFLICT",
+        });
+        expect(
+          exclusionAccess.catalog.findArchiveRecovery(archive.id),
+        ).toMatchObject({
+          id: recoveryId,
+          work: expect.objectContaining({ status: "requested" }),
+        });
+        expect(exclusionAccess.encodeJobs.list()).toEqual(operation === "enqueue"
+          ? []
+          : [expect.objectContaining({
+            id: existingJob!.id,
+            status: "failed",
+          })]);
+      } else {
+        expect(results[0]).toEqual({
+          outcome: "rejected",
+          code: "ENCODE_WORK_CONFLICT",
+        });
+        expect(results[1]).toMatchObject({
+          outcome: "enqueued",
+        });
+        expect(
+          exclusionAccess.catalog.findArchiveRecovery(archive.id),
+        ).toMatchObject({ id: recoveryId, work: null });
+        expect(exclusionAccess.encodeJobs.list()).toEqual([
+          expect.objectContaining({
+            ...(existingJob === null ? {} : { id: existingJob.id }),
+            status: "queued",
+          }),
+        ]);
+      }
+      exclusionAccess.close();
     },
   );
 
