@@ -6,7 +6,10 @@ import type {
   DvdStructuralCheckAttempt,
   OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
-import type { ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import {
+  ArchiveImageOwnershipError,
+  type ArchiveImageOwnership,
+} from "@rip-dvd/worker-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -289,13 +292,10 @@ describe("DVD structural check execution", () => {
           signal: new AbortController().signal,
           assertOwned() {},
         }, "/synthetic/archive.iso");
-        if (prepared?.outcome === "failed") {
-          return {
-            outcome: "failed",
-            attempt: failedAttempt(checkpoint, prepared.reason),
-          };
+        if (prepared?.outcome !== "completed") {
+          throw new Error("Expected a completed structural check preparation");
         }
-        throw new Error("Expected a failed structural check preparation");
+        throw new ArchiveImageOwnershipError("WRITER_NOT_QUIESCENT");
       },
       dvdStructuralAssessments: {
         recordFailed({
@@ -315,8 +315,25 @@ describe("DVD structural check execution", () => {
       archiveImageOwnership: {} as ArchiveImageOwnership,
       originalDiscArchiveId: checkpoint.originalDiscArchiveId,
       checker: {
-        async check() {
-          throw new Error("synthetic checker failure");
+        async check({ checkpoint: attemptedCheckpoint }) {
+          return ([
+            "filesystem_structure",
+            "dvd_navigation",
+            "title_enumeration",
+          ] as const).map((checkKind) => ({
+            checkKind,
+            policyVersion: "synthetic-structural-check-v1",
+            testedExtent: {
+              startLba: 0,
+              endLbaExclusive:
+                attemptedCheckpoint.acceptedEndLbaExclusive,
+              observedSectorCount:
+                attemptedCheckpoint.acceptedEndLbaExclusive,
+            },
+            outcome: "valid" as const,
+            reason: null,
+            evidenceReference: `synthetic-evidence:${checkKind}`,
+          }));
         },
       },
     });

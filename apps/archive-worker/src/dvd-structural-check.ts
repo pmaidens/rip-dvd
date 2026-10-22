@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   canonicalPublicationJson,
+  createDvdStructuralAssessment,
   DVD_STRUCTURAL_CHECK_KINDS,
   DvdCheckpointReadFault,
   type DataAccess,
@@ -205,6 +206,7 @@ export async function runDvdStructuralCheck({
   originalDiscArchiveId: OriginalDiscArchiveId;
 }) {
   checkpointFromHeader(access, originalDiscArchiveId);
+  let attemptedCheckpoint: DvdStructuralCheckpoint | null = null;
   try {
     const checked = await access.assessDvdStructure(
       originalDiscArchiveId,
@@ -217,6 +219,7 @@ export async function runDvdStructuralCheck({
           manifestDigest: manifest.manifestDigest,
           acceptedEndLbaExclusive: manifest.acceptedEndLbaExclusive,
         };
+        attemptedCheckpoint = checkpoint;
         try {
           const findings = await checker.check({
             checkpoint,
@@ -227,6 +230,7 @@ export async function runDvdStructuralCheck({
             signal: handle.signal,
             assertStable: () => handle.assertOwned(),
           });
+          createDvdStructuralAssessment({ checkpoint, findings });
           handle.assertOwned();
           return { outcome: "completed" as const, findings };
         } catch (error) {
@@ -246,9 +250,20 @@ export async function runDvdStructuralCheck({
     return checked.outcome === "failed" ? checked.attempt : checked;
   } catch (error) {
     if (error instanceof DvdStructuralCheckUnavailableError) throw error;
+    const reason = failureReason(error);
+    if (attemptedCheckpoint !== null) {
+      try {
+        return access.dvdStructuralAssessments.recordFailed({
+          checkpoint: attemptedCheckpoint,
+          reason,
+        });
+      } catch {
+        // A concurrently advanced checkpoint must not inherit this failure.
+      }
+    }
     return {
       outcome: "unavailable" as const,
-      reason: failureReason(error),
+      reason,
     };
   }
 }

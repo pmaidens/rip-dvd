@@ -28,19 +28,23 @@ erase a completed assessment for the same checkpoint.
 
 Image-reading checks run while shared Archive Image Ownership is held across
 checkpoint validation, checker execution, final checkpoint revalidation, and
-assessment persistence. Persistence is the ownership operation's synchronous
-terminal commit: it runs only after final ownership validation, and it checks
-the current database checkpoint in the same transaction. A failed interval
-therefore cannot leave a completed assessment behind. The completed-assessment
-persistence operation is not available outside that owned interval. The
-initial concrete checker reuses the bounded full-extent metadata profile while
+completed-assessment persistence. That persistence is the ownership operation's
+synchronous terminal commit: it runs only after final ownership validation,
+and it checks the current database checkpoint in the same transaction. A
+failed interval therefore cannot leave a completed assessment behind. The
+completed-assessment persistence operation is not available outside that owned
+interval. The initial concrete checker reuses the bounded full-extent metadata profile while
 tracking filesystem, title-enumeration, and navigation execution separately;
 unproved physical dependencies remain indeterminate and later checks remain
 `not_run` after an earlier interruption.
 If the committed image cannot be read consistently, the attempt records a
-stable failure reason. The last completed assessment remains visible as
-outdated after the checkpoint advances until a check completes for the new
-checkpoint.
+stable failure reason against the checkpoint that was actually read. A failure
+detected after final ownership validation retains that attempted checkpoint;
+the database records it only when the checkpoint still matches, and never
+rebinds it to a newer revision. If recovery advanced first, the failed interval
+is returned as unavailable without creating a revision-bound attempt. The last
+completed assessment remains visible as outdated after the checkpoint advances
+until a check completes for the new checkpoint.
 
 Original Disc Archive inspection exposes the same structural state through
 the web operations route and public JSON CLI. Historical archives retain their

@@ -456,12 +456,40 @@ it("records structural checks from one consistent checkpoint read", async () => 
         outcome: "failed",
       },
     });
+
+    const invalid = await runDvdStructuralCheck({
+      access: f.access,
+      originalDiscArchiveId,
+      checker: {
+        async check() {
+          return [];
+        },
+      },
+    });
+    if (invalid.outcome !== "failed") {
+      throw new Error("Expected an invalid structural result to be recorded");
+    }
+    expect(invalid).toMatchObject({
+      outcome: "failed",
+      reason: { code: "STRUCTURAL_CHECK_RESULT_INVALID" },
+    });
+    expect(
+      f.access.dvdStructuralAssessments.inspect(originalDiscArchiveId),
+    ).toMatchObject({
+      state: "current",
+      currentAssessmentIdentity: completed.assessment.id,
+      latestAttempt: {
+        sequence: invalid.sequence,
+        outcome: "failed",
+        reason: { code: "STRUCTURAL_CHECK_RESULT_INVALID" },
+      },
+    });
   } finally {
     f.access.close();
   }
 });
 
-it("does not persist a structural attempt when final ownership validation fails", async () => {
+it("records a consistency failure against the retained checkpoint when final ownership validation fails", async () => {
   const f = await jobFixture(true);
   try {
     const saved = await saveDvdInitialArchiveForArchiveJob({
@@ -504,7 +532,7 @@ it("does not persist a structural attempt when final ownership validation fails"
     });
 
     expect(failed).toMatchObject({
-      outcome: "unavailable",
+      outcome: "failed",
       reason: { code: "CONSISTENCY_FAULT" },
     });
     expect(
@@ -513,9 +541,13 @@ it("does not persist a structural attempt when final ownership validation fails"
       state: "pending",
       currentAssessmentIdentity: null,
       assessment: null,
-      latestAttempt: null,
+      latestAttempt: {
+        outcome: "failed",
+        reason: { code: "CONSISTENCY_FAULT" },
+      },
       unavailableReasons: [
         { code: "ASSESSMENT_PENDING" },
+        { code: "CONSISTENCY_FAULT" },
       ],
     });
   } finally {
