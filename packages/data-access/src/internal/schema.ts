@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   type AnySQLiteColumn,
   check,
+  foreignKey,
   index,
   integer,
   primaryKey,
@@ -1329,6 +1330,8 @@ export const archiveRecoveries = sqliteTable(
     check("archive_recoveries_id_not_null", sql`${table.id} is not null`),
     uniqueIndex("archive_recoveries_archive_unique")
       .on(table.originalDiscArchiveId),
+    uniqueIndex("archive_recoveries_identity_unique")
+      .on(table.id, table.originalDiscArchiveId),
     check(
       "archive_recoveries_status_check",
       sql`${table.status} in (${sqliteStringLiterals(ARCHIVE_RECOVERY_STATUSES)})`,
@@ -1342,8 +1345,7 @@ export const archiveRecoveryWork = sqliteTable(
     archiveRecoveryId: text("archive_recovery_id")
       .$type<ArchiveRecoveryId>()
       .notNull()
-      .primaryKey()
-      .references(() => archiveRecoveries.id, { onDelete: "restrict" }),
+      .primaryKey(),
     originalDiscArchiveId: text("original_disc_archive_id")
       .$type<OriginalDiscArchiveId>()
       .notNull()
@@ -1362,6 +1364,14 @@ export const archiveRecoveryWork = sqliteTable(
     updatedAt: updatedAt(),
   },
   (table) => [
+    foreignKey({
+      columns: [table.archiveRecoveryId, table.originalDiscArchiveId],
+      foreignColumns: [
+        archiveRecoveries.id,
+        archiveRecoveries.originalDiscArchiveId,
+      ],
+      name: "archive_recovery_work_recovery_archive_fk",
+    }).onDelete("restrict"),
     index("archive_recovery_work_queue_idx")
       .on(table.status, table.requestedAt, table.createdAt),
     check(

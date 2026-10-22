@@ -13663,6 +13663,51 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     replayCheck.close();
   });
 
+  it("rejects an Archive Recovery work reservation for a different archive", () => {
+    const databasePath = createTestDatabasePath();
+    const first = createDiscSelectionCorrectionFixture({
+      databasePath,
+      key: "recovery-work-pair-first",
+      contentIdFill: "a",
+    });
+    first.access.close();
+    const second = createDiscSelectionCorrectionFixture({
+      databasePath,
+      key: "recovery-work-pair-second",
+      contentIdFill: "b",
+    });
+    second.access.close();
+    const firstRecoveryId =
+      "recovery-work-pair-first" as ArchiveRecoveryId;
+    const secondRecoveryId =
+      "recovery-work-pair-second" as ArchiveRecoveryId;
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      first.archive.id,
+      "recovery-work-pair-first",
+      { archiveRecoveryId: firstRecoveryId },
+    );
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      second.archive.id,
+      "recovery-work-pair-second",
+      { archiveRecoveryId: secondRecoveryId },
+    );
+
+    const sqlite = new DatabaseSync(databasePath);
+    expect(() => sqlite.prepare(`
+      INSERT INTO archive_recovery_work (
+        archive_recovery_id, original_disc_archive_id, status, requested_at,
+        created_at, updated_at
+      ) VALUES (?, ?, 'requested', 1, 1, 1)
+    `).run(firstRecoveryId, second.archive.id)).toThrow(/foreign key/i);
+    expect(sqlite.prepare(`
+      SELECT archive_recovery_id
+      FROM archive_recovery_work
+    `).all()).toEqual([]);
+    sqlite.close();
+  });
+
   it("blocks recovery request and claim when Encode Job work already owns the archive", () => {
     const databasePath = createTestDatabasePath();
     const { access, archive, mistakenSelection } =

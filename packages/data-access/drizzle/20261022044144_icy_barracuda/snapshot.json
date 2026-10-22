@@ -4452,16 +4452,18 @@
     },
     {
       "columns": [
-        "archive_recovery_id"
+        "archive_recovery_id",
+        "original_disc_archive_id"
       ],
       "tableTo": "archive_recoveries",
       "columnsTo": [
-        "id"
+        "id",
+        "original_disc_archive_id"
       ],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
-      "nameExplicit": false,
-      "name": "fk_archive_recovery_work_archive_recovery_id_archive_recoveries_id_fk",
+      "nameExplicit": true,
+      "name": "archive_recovery_work_recovery_archive_fk",
       "entityType": "fks",
       "table": "archive_recovery_work"
     },
@@ -5496,6 +5498,24 @@
       "where": null,
       "origin": "manual",
       "name": "archive_recoveries_archive_unique",
+      "entityType": "indexes",
+      "table": "archive_recoveries"
+    },
+    {
+      "columns": [
+        {
+          "value": "id",
+          "isExpression": false
+        },
+        {
+          "value": "original_disc_archive_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "archive_recoveries_identity_unique",
       "entityType": "indexes",
       "table": "archive_recoveries"
     },

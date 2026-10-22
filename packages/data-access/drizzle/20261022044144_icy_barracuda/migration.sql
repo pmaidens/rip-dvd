@@ -1,3 +1,5 @@
+CREATE UNIQUE INDEX `archive_recoveries_identity_unique` ON `archive_recoveries` (`id`,`original_disc_archive_id`);
+--> statement-breakpoint
 CREATE TABLE `archive_recovery_work` (
 	`archive_recovery_id` text PRIMARY KEY,
 	`original_disc_archive_id` text NOT NULL UNIQUE,
@@ -8,7 +10,7 @@ CREATE TABLE `archive_recovery_work` (
 	`claimed_at` integer,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
-	CONSTRAINT `fk_archive_recovery_work_archive_recovery_id_archive_recoveries_id_fk` FOREIGN KEY (`archive_recovery_id`) REFERENCES `archive_recoveries`(`id`) ON DELETE RESTRICT,
+	CONSTRAINT `archive_recovery_work_recovery_archive_fk` FOREIGN KEY (`archive_recovery_id`,`original_disc_archive_id`) REFERENCES `archive_recoveries`(`id`,`original_disc_archive_id`) ON DELETE RESTRICT,
 	CONSTRAINT `fk_archive_recovery_work_original_disc_archive_id_dvd_archive_evidence_headers_original_disc_archive_id_fk` FOREIGN KEY (`original_disc_archive_id`) REFERENCES `dvd_archive_evidence_headers`(`original_disc_archive_id`) ON DELETE RESTRICT,
 	CONSTRAINT "archive_recovery_work_id_not_null" CHECK("archive_recovery_id" is not null),
 	CONSTRAINT "archive_recovery_work_status_check" CHECK("status" in ('requested', 'claimed')),
