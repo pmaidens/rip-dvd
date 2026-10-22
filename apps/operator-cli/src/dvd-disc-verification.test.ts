@@ -134,7 +134,24 @@ it("inspects, submits, replays, and rejects stale DVD Disc Verification", async 
         expect.objectContaining({ bandIndex: 0, outcome: "match" }),
       ]),
     },
-    writeAuthority: { available: true, blockingReasons: [] },
+    writeAuthority: {
+      available: true,
+      blockingReasons: [],
+      authority: {
+        verificationId: (submitted.result as {
+          verification: { id: string };
+        }).verification.id,
+        archiveRecoveryId: recoveryId,
+        originalDiscArchiveId: seeded.archive.id,
+        discInspectionId: inspection.id,
+        detectedDiscId: sourceDisc.id,
+        mediaGeneration: "synthetic-verification-generation",
+        verificationWorkerExecutionId:
+          "synthetic-verification-worker-execution",
+        checkpointRevision: 1,
+        checkpointDigest: seeded.manifest.manifestDigest,
+      },
+    },
   });
 
   const storageAccess = fixture.openAccess();

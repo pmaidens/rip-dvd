@@ -559,6 +559,23 @@ export interface DvdDiscVerification {
   updatedAt: Date;
 }
 
+/**
+ * Durable identities a recovery writer must revalidate before it mutates an
+ * archive. The values are a snapshot, not proof by themselves; the writer
+ * must compare them with the persisted verification and current insertion.
+ */
+export interface DvdRecoveryWriteAuthority {
+  verificationId: DvdDiscVerificationId;
+  archiveRecoveryId: ArchiveRecoveryId;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  discInspectionId: DiscInspectionId;
+  detectedDiscId: DetectedDiscId;
+  mediaGeneration: string;
+  verificationWorkerExecutionId: string;
+  checkpointRevision: number;
+  checkpointDigest: string;
+}
+
 export interface ArchiveRecoveryWork {
   archiveRecoveryId: ArchiveRecoveryId;
   originalDiscArchiveId: OriginalDiscArchiveId;
