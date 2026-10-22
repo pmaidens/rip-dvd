@@ -12,7 +12,10 @@ bound to one committed evidence manifest. Its checkpoint includes the archive,
 manifest identity and revision, manifest digest, and accepted end LBA. The
 required findings cover filesystem structure, DVD navigation, and title
 enumeration. Each finding records its check policy, tested extent, outcome,
-reason, and evidence reference. Outcomes are `valid`, `invalid`,
+reason, and evidence reference. The tested extent is derived from the physical
+dependencies actually observed by that check. Its bounds and observed-sector
+count make sparse reads explicit; it does not claim that every sector between
+the bounds was examined. Outcomes are `valid`, `invalid`,
 `indeterminate`, or `not_run`. Overall validity is invalid when any finding
 proves a contradiction, valid only when every required finding is valid, and
 unknown otherwise.
@@ -24,11 +27,16 @@ immutable attempt record. A failed later attempt remains visible but does not
 erase a completed assessment for the same checkpoint.
 
 Image-reading checks run while shared Archive Image Ownership is held across
-checkpoint validation, checker execution, assessment persistence, and final
-checkpoint revalidation. The completed-assessment persistence operation is not
-available outside that owned interval. The initial concrete checker reuses the
-bounded full-extent metadata profile for filesystem, navigation, and title
-enumeration evidence; unproved source coverage remains indeterminate.
+checkpoint validation, checker execution, final checkpoint revalidation, and
+assessment persistence. Persistence is the ownership operation's synchronous
+terminal commit: it runs only after final ownership validation, and it checks
+the current database checkpoint in the same transaction. A failed interval
+therefore cannot leave a completed assessment behind. The completed-assessment
+persistence operation is not available outside that owned interval. The
+initial concrete checker reuses the bounded full-extent metadata profile while
+tracking filesystem, title-enumeration, and navigation execution separately;
+unproved physical dependencies remain indeterminate and later checks remain
+`not_run` after an earlier interruption.
 If the committed image cannot be read consistently, the attempt records a
 stable failure reason. The last completed assessment remains visible as
 outdated after the checkpoint advances until a check completes for the new

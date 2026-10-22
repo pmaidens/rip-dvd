@@ -1,6 +1,11 @@
 import { constants, type BigIntStats } from "node:fs";
 import { lstat, open } from "node:fs/promises";
-import type { DvdUnrecoveredSourceRange } from "@rip-dvd/data-access";
+import {
+  DVD_STRUCTURAL_CHECK_KINDS,
+  type DvdStructuralCheckKind,
+  type DvdStructuralFindingInput,
+  type DvdUnrecoveredSourceRange,
+} from "@rip-dvd/data-access";
 import {
   ProfileFailure,
   ProfileReader,
@@ -30,6 +35,13 @@ export interface DvdFullExtentMetadataDecision {
   impact: "unknown" | "listed_checks_agree";
   observations: MetadataObservation[];
   blockers: MetadataBlocker[];
+  blockedCheckKind: DvdStructuralCheckKind | null;
+  structuralChecks: readonly {
+    checkKind: DvdStructuralCheckKind;
+    execution: "completed" | "interrupted" | "not_run";
+    testedExtent: DvdStructuralFindingInput["testedExtent"];
+    hasUnprovedDependencies: boolean;
+  }[];
 }
 export interface DvdFullExtentMetadataValidator {
   validate(
@@ -45,6 +57,42 @@ function same(a: BigIntStats, b: BigIntStats) {
     a.ctimeNs === b.ctimeNs
   );
 }
+
+function testedExtent(
+  observations: readonly MetadataObservation[],
+): DvdStructuralFindingInput["testedExtent"] {
+  const ranges = observations.flatMap(({ dependencies }) =>
+    dependencies.map(({ startLba, sectorCount }) => ({
+      startLba,
+      endLbaExclusive: startLba + sectorCount,
+    }))
+  ).sort((left, right) =>
+    left.startLba - right.startLba ||
+    left.endLbaExclusive - right.endLbaExclusive
+  );
+  const merged: typeof ranges = [];
+  for (const range of ranges) {
+    const prior = merged.at(-1);
+    if (prior !== undefined && range.startLba <= prior.endLbaExclusive) {
+      prior.endLbaExclusive = Math.max(
+        prior.endLbaExclusive,
+        range.endLbaExclusive,
+      );
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  if (merged.length === 0) return null;
+  return {
+    startLba: merged[0]!.startLba,
+    endLbaExclusive: merged.at(-1)!.endLbaExclusive,
+    observedSectorCount: merged.reduce(
+      (total, range) =>
+        total + range.endLbaExclusive - range.startLba,
+      0,
+    ),
+  };
+}
 export function createNodeDvdFullExtentMetadataValidator(): DvdFullExtentMetadataValidator {
   return {
     async validate(request) {
@@ -52,6 +100,7 @@ export function createNodeDvdFullExtentMetadataValidator(): DvdFullExtentMetadat
       let unrecoveredSourceRanges: readonly DvdUnrecoveredSourceRange[] = [];
       const blockers: MetadataBlocker[] = [];
       let reader: ProfileReader | undefined;
+      let blockedCheckKind: DvdStructuralCheckKind | null = null;
       try {
         signal.throwIfAborted();
         if (
@@ -64,13 +113,6 @@ export function createNodeDvdFullExtentMetadataValidator(): DvdFullExtentMetadat
             reason: "local_failure",
             message: "Invalid accepted extent",
           });
-        validateSourceRanges(
-          request.unrecoveredSourceRanges,
-          expectedByteCount / SECTOR,
-        );
-        unrecoveredSourceRanges = request.unrecoveredSourceRanges.map(
-          (range) => ({ ...range }),
-        );
         const file = await open(
           imagePath,
           constants.O_RDONLY | constants.O_NOFOLLOW,
@@ -92,8 +134,16 @@ export function createNodeDvdFullExtentMetadataValidator(): DvdFullExtentMetadat
           reader = new ProfileReader(
             file,
             expectedByteCount / SECTOR,
-            unrecoveredSourceRanges,
+            request.unrecoveredSourceRanges,
             signal,
+          );
+          reader.beginStructuralCheck("filesystem_structure");
+          validateSourceRanges(
+            request.unrecoveredSourceRanges,
+            expectedByteCount / SECTOR,
+          );
+          unrecoveredSourceRanges = request.unrecoveredSourceRanges.map(
+            (range) => ({ ...range }),
           );
           try {
             await inspectIsoProfile(reader);
@@ -113,6 +163,7 @@ export function createNodeDvdFullExtentMetadataValidator(): DvdFullExtentMetadat
                   volume * SECTOR,
                 );
             reconcileFiles(reader);
+            reader.completeStructuralCheck("filesystem_structure");
             await inspectDvdProfile(reader);
           } finally {
             if (
@@ -130,6 +181,7 @@ export function createNodeDvdFullExtentMetadataValidator(): DvdFullExtentMetadat
         }
       } catch (error) {
         signal.throwIfAborted();
+        blockedCheckKind = reader?.currentStructuralCheckKind() ?? null;
         blockers.push(
           error instanceof ProfileFailure
             ? error.blocker
@@ -169,6 +221,7 @@ export function createNodeDvdFullExtentMetadataValidator(): DvdFullExtentMetadat
               ]),
             ).values(),
           ];
+      const observations = reader?.observations ?? [];
       return {
         policyVersion: DVD_FULL_EXTENT_METADATA_POLICY_VERSION,
         decision: blockers.length ? "blocked" : "publishable",
@@ -176,8 +229,26 @@ export function createNodeDvdFullExtentMetadataValidator(): DvdFullExtentMetadat
           blockers.length || unrecoveredSourceRanges.length || reader?.unknown
             ? "unknown"
             : "listed_checks_agree",
-        observations: reader?.observations ?? [],
+        observations,
         blockers,
+        blockedCheckKind,
+        structuralChecks: DVD_STRUCTURAL_CHECK_KINDS.map((checkKind) => {
+          const execution = reader?.structuralCheckExecution.get(checkKind) ??
+            "not_run";
+          const relevant = observations.filter(
+            (observation) => observation.checkKind === checkKind,
+          );
+          return {
+            checkKind,
+            execution: execution === "running"
+              ? "interrupted" as const
+              : execution,
+            testedExtent: testedExtent(relevant),
+            hasUnprovedDependencies: relevant.some(
+              ({ status }) => status !== "known",
+            ),
+          };
+        }),
       };
     },
   };

@@ -38,6 +38,7 @@ export interface DvdStructuralFindingInput {
   testedExtent: {
     startLba: number;
     endLbaExclusive: number;
+    observedSectorCount: number;
   } | null;
   outcome: DvdStructuralFindingOutcome;
   reason: { code: string; message: string } | null;
@@ -143,7 +144,11 @@ function validateFinding(
     extent.startLba >= 0 &&
     Number.isSafeInteger(extent.endLbaExclusive) &&
     extent.endLbaExclusive > extent.startLba &&
-    extent.endLbaExclusive <= acceptedEndLbaExclusive;
+    extent.endLbaExclusive <= acceptedEndLbaExclusive &&
+    Number.isSafeInteger(extent.observedSectorCount) &&
+    extent.observedSectorCount > 0 &&
+    extent.observedSectorCount <=
+      extent.endLbaExclusive - extent.startLba;
   const reason = finding.reason;
   if (reason !== null) {
     validateDvdStructuralFailureReason(reason);
@@ -153,7 +158,10 @@ function validateFinding(
     !DVD_STRUCTURAL_FINDING_OUTCOMES.includes(finding.outcome) ||
     !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(finding.policyVersion) ||
     !boundedText(finding.evidenceReference, 512) ||
-    (finding.outcome === "not_run" ? extent !== null : !validExtent) ||
+    (finding.outcome === "not_run"
+      ? extent !== null
+      : extent !== null && !validExtent) ||
+    (finding.outcome === "valid" && extent === null) ||
     (finding.outcome === "valid" ? reason !== null : reason === null)
   ) {
     throw new TypeError("Invalid DVD structural finding");

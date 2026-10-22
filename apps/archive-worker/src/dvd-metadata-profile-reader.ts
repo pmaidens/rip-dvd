@@ -1,5 +1,9 @@
 import type { FileHandle } from "node:fs/promises";
-import type { DvdUnrecoveredSourceRange } from "@rip-dvd/data-access";
+import {
+  DVD_STRUCTURAL_CHECK_KINDS,
+  type DvdStructuralCheckKind,
+  type DvdUnrecoveredSourceRange,
+} from "@rip-dvd/data-access";
 
 export const SECTOR = 2048;
 export interface PhysicalDependency {
@@ -8,6 +12,7 @@ export interface PhysicalDependency {
 }
 export interface MetadataObservation {
   field: string;
+  checkKind?: DvdStructuralCheckKind;
   view?: string;
   status: "known" | "source_unavailable" | "dependent_unknown";
   dependencies: PhysicalDependency[];
@@ -103,12 +108,45 @@ export class ProfileReader {
   bootstrap = false;
   geometry = false;
   unknown = false;
+  readonly structuralCheckExecution = new Map<
+    DvdStructuralCheckKind,
+    "not_run" | "running" | "completed"
+  >(DVD_STRUCTURAL_CHECK_KINDS.map((kind) => [kind, "not_run"]));
+  private currentStructuralCheck: DvdStructuralCheckKind | null = null;
   constructor(
     readonly file: FileHandle,
     readonly sectors: number,
     readonly ranges: readonly DvdUnrecoveredSourceRange[],
     readonly signal: AbortSignal,
   ) {}
+  beginStructuralCheck(checkKind: DvdStructuralCheckKind) {
+    if (
+      this.currentStructuralCheck !== null ||
+      this.structuralCheckExecution.get(checkKind) !== "not_run"
+    ) {
+      throw new Error("DVD structural check execution order is invalid");
+    }
+    this.currentStructuralCheck = checkKind;
+    this.structuralCheckExecution.set(checkKind, "running");
+  }
+  completeStructuralCheck(checkKind: DvdStructuralCheckKind) {
+    if (this.currentStructuralCheck !== checkKind) {
+      throw new Error("DVD structural check execution order is invalid");
+    }
+    this.structuralCheckExecution.set(checkKind, "completed");
+    this.currentStructuralCheck = null;
+  }
+  currentStructuralCheckKind() {
+    return this.currentStructuralCheck;
+  }
+  recordObservation(observation: MetadataObservation) {
+    this.observations.push({
+      ...observation,
+      ...(this.currentStructuralCheck === null
+        ? {}
+        : { checkKind: this.currentStructuralCheck }),
+    });
+  }
   fail(
     field: string,
     message: string,
@@ -162,7 +200,7 @@ export class ProfileReader {
   }
   dependent(field: string, prerequisites: string[]): undefined {
     this.unknown = true;
-    this.observations.push({
+    this.recordObservation({
       field,
       status: "dependent_unknown",
       dependencies: [],
@@ -172,7 +210,7 @@ export class ProfileReader {
   }
   derived(field: string, value: unknown, prerequisites: string[]) {
     if (value === undefined) return this.dependent(field, prerequisites);
-    this.observations.push({
+    this.recordObservation({
       field,
       view: this.currentView,
       status: "known",
@@ -192,7 +230,7 @@ export class ProfileReader {
       return;
     }
     const agrees = JSON.stringify(left) === JSON.stringify(right);
-    this.observations.push({
+    this.recordObservation({
       field,
       view: this.currentView,
       status: "known",
@@ -292,7 +330,7 @@ export class ProfileRecord {
     const sourceRanges = this.reader.intersections(start, bytes);
     if (sourceRanges.length) {
       this.reader.unknown = true;
-      this.reader.observations.push({
+      this.reader.recordObservation({
         field,
         view: this.reader.currentView,
         status: "source_unavailable",
@@ -302,7 +340,7 @@ export class ProfileRecord {
       return undefined;
     }
     const value = decode(this.buffer, offset);
-    this.reader.observations.push({
+    this.reader.recordObservation({
       field,
       view: this.reader.currentView,
       status: "known",

@@ -6418,6 +6418,18 @@ export function createDataAccessInternal(
     querySource: Pick<typeof database, "select">,
     checkpoint: DvdStructuralCheckpoint,
   ) {
+    const header = querySource.select({
+      evidenceFormat: dvdArchiveEvidenceHeaders.evidenceFormat,
+      currentManifestId: dvdArchiveEvidenceHeaders.currentManifestId,
+      currentManifestRevision:
+        dvdArchiveEvidenceHeaders.currentManifestRevision,
+      currentManifestDigest: dvdArchiveEvidenceHeaders.currentManifestDigest,
+      acceptedEndLbaExclusive:
+        dvdArchiveEvidenceHeaders.acceptedEndLbaExclusive,
+    }).from(dvdArchiveEvidenceHeaders).where(eq(
+      dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+      checkpoint.originalDiscArchiveId,
+    )).get();
     const manifest = querySource.select({
       id: dvdArchiveEvidenceManifests.id,
       originalDiscArchiveId:
@@ -6432,6 +6444,13 @@ export function createDataAccessInternal(
       checkpoint.manifestId,
     )).get();
     if (
+      header === undefined ||
+      header.evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT ||
+      header.currentManifestId !== checkpoint.manifestId ||
+      header.currentManifestRevision !== checkpoint.manifestRevision ||
+      header.currentManifestDigest !== checkpoint.manifestDigest ||
+      header.acceptedEndLbaExclusive !==
+        checkpoint.acceptedEndLbaExclusive ||
       manifest === undefined ||
       manifest.originalDiscArchiveId !== checkpoint.originalDiscArchiveId ||
       manifest.revision !== checkpoint.manifestRevision ||
@@ -7222,11 +7241,23 @@ export function createDataAccessInternal(
     checkpoint: DvdStructuralCheckpoint;
     findings: readonly import("../dvd-structural-assessment.js")
       .DvdStructuralFindingInput[];
+    imagePath: string;
   }) {
     const assessment = createDvdStructuralAssessment(input);
     const timestamp = now();
     return database.transaction((transaction) => {
       requireDvdStructuralCheckpoint(transaction, assessment.checkpoint);
+      const archive = transaction.select({
+        archivePath: originalDiscArchives.archivePath,
+      }).from(originalDiscArchives).where(eq(
+        originalDiscArchives.id,
+        assessment.checkpoint.originalDiscArchiveId,
+      )).get();
+      if (archive?.archivePath !== input.imagePath) {
+        throw new DvdCheckpointReadFault(
+          "DVD_EVIDENCE_CHANGED_DURING_READ",
+        );
+      }
       transaction.insert(dvdStructuralAssessments).values({
         id: assessment.id,
         originalDiscArchiveId: assessment.checkpoint.originalDiscArchiveId,
@@ -7279,19 +7310,38 @@ export function createDataAccessInternal(
     });
   }
 
-  async function withDvdInitialCheckpointRead<Result>(
+  async function withDvdInitialCheckpointRead<Prepared, Result>(
     id: OriginalDiscArchiveId,
     ownership: import("../types.js").DvdCheckpointReadOwnership,
     inspect: (
       checkpoint: import("../dvd-initial-checkpoint.js")
         .CommittedDvdInitialEvidence,
       handle: import("../types.js").DvdCheckpointReadHandle,
-    ) => Promise<Result>,
+      imagePath: string,
+    ) => Promise<Prepared>,
+    commit: (
+      checkpoint: import("../dvd-initial-checkpoint.js")
+        .CommittedDvdInitialEvidence,
+      prepared: Prepared,
+      imagePath: string,
+    ) => Result,
   ): Promise<{
     checkpoint: import("../dvd-initial-checkpoint.js")
       .CommittedDvdInitialEvidence;
     result: Result;
   } | null> {
+    type Checkpoint = import("../dvd-initial-checkpoint.js")
+      .CommittedDvdInitialEvidence;
+    type OwnedReadState = null | {
+      state: "prepared";
+      checkpoint: Checkpoint;
+      imagePath: string;
+      prepared: Prepared;
+    } | {
+      state: "committed";
+      checkpoint: Checkpoint;
+      result: Result;
+    };
     const readSnapshot = () => access.readConsistentSnapshot((reader) => {
       const archive = reader.catalog.listOriginalDiscArchives({ ids: [id] })[0];
       if (!archive) throw new RecordNotFoundError("Original Disc Archive", id);
@@ -7309,7 +7359,7 @@ export function createDataAccessInternal(
     if (normalizedOriginalsLibraryPath === undefined) {
       throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE");
     }
-    return ownership.withConsistentRead({
+    const owned = await ownership.withConsistentRead<OwnedReadState>({
       archiveId: id,
       imagePath: admissionSnapshot.archive.archivePath,
       originalsLibraryPath: normalizedOriginalsLibraryPath,
@@ -7331,8 +7381,14 @@ export function createDataAccessInternal(
           assertImageOwnership: handle.assertOwned,
         });
         if (checkpoint === null) return null;
+        const imagePath = snapshot.archive.archivePath;
+        if (imagePath === null) {
+          throw new DvdCheckpointReadFault(
+            "DVD_EVIDENCE_CHECKPOINT_UNAVAILABLE",
+          );
+        }
         handle.assertOwned();
-        const result = await inspect(checkpoint, handle) as Result;
+        const prepared = await inspect(checkpoint, handle, imagePath);
         handle.assertOwned();
         if (
           canonicalPublicationJson(readSnapshot()) !==
@@ -7342,9 +7398,35 @@ export function createDataAccessInternal(
             "DVD_EVIDENCE_CHANGED_DURING_READ",
           );
         }
-        return { checkpoint, result };
+        return {
+          state: "prepared" as const,
+          checkpoint,
+          imagePath,
+          prepared,
+        };
+      },
+      commit: (prepared, handle) => {
+        if (prepared === null) return null;
+        if (prepared.state !== "prepared") {
+          throw new DvdCheckpointReadFault("CONSISTENCY_FAULT");
+        }
+        handle.assertOwned();
+        return {
+          state: "committed" as const,
+          checkpoint: prepared.checkpoint,
+          result: commit(
+            prepared.checkpoint,
+            prepared.prepared,
+            prepared.imagePath,
+          ),
+        };
       },
     });
+    if (owned === null) return null;
+    if (owned.state !== "committed") {
+      throw new DvdCheckpointReadFault("CONSISTENCY_FAULT");
+    }
+    return { checkpoint: owned.checkpoint, result: owned.result };
   }
 
   const access: LegacySidecarDataAccess = {
@@ -7581,10 +7663,10 @@ export function createDataAccessInternal(
       const read = await withDvdInitialCheckpointRead(
         id,
         ownership,
-        async (manifest, handle) => {
-          const findings = await assess(manifest, handle);
-          handle.assertOwned();
-          return recordCompletedDvdStructuralAssessment({
+        async (manifest, handle, imagePath) =>
+          assess(manifest, handle, imagePath),
+        (manifest, findings, imagePath) =>
+          recordCompletedDvdStructuralAssessment({
             checkpoint: {
               originalDiscArchiveId: id,
               manifestId: manifest.id,
@@ -7593,8 +7675,8 @@ export function createDataAccessInternal(
               acceptedEndLbaExclusive: manifest.acceptedEndLbaExclusive,
             },
             findings,
-          });
-        },
+            imagePath,
+          }),
       );
       return read?.result ?? null;
     },
@@ -7603,6 +7685,7 @@ export function createDataAccessInternal(
         id,
         ownership,
         async () => undefined,
+        () => undefined,
       );
       return read?.checkpoint ?? null;
     },

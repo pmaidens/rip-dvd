@@ -2096,6 +2096,7 @@ export interface DvdCheckpointReadOwnership {
     originalsLibraryPath: string;
     signal: AbortSignal;
     task(handle: DvdCheckpointReadHandle): Promise<Result>;
+    commit?: (prepared: Result, handle: DvdCheckpointReadHandle) => Result;
   }): Promise<Result>;
 }
 
@@ -2124,6 +2125,7 @@ export interface DataAccess {
     assess: (
       checkpoint: import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence,
       handle: DvdCheckpointReadHandle,
+      imagePath: string,
     ) => Promise<readonly DvdStructuralFindingInput[]>,
   ): Promise<{
     attempt: DvdStructuralCheckAttempt & { outcome: "completed" };

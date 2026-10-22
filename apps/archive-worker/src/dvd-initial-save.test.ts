@@ -6,8 +6,10 @@ import { afterEach, expect, it, vi } from "vitest";
 import { ARCHIVE_JOB_LEASE_DURATION_MS, createDataAccess, type RunningArchiveJob } from "@rip-dvd/data-access";
 import { beginSettledDiscInspectionForTest } from "@rip-dvd/data-access/test-support";
 import {
+  ArchiveImageOwnershipError,
   createArchiveImageOwnership,
   type ArchiveImageOwnership,
+  type ArchiveImageOwnershipHandle,
 } from "@rip-dvd/worker-runtime";
 import { runDvdInitialArchiveBoundaryForArchiveJob } from "./dvd-initial-boundary.js";
 import { isoProfileImage } from "./dvd-metadata-profile-fixtures.js";
@@ -36,6 +38,7 @@ const passingStructuralChecker: DvdStructuralChecker = {
       testedExtent: {
         startLba: 0,
         endLbaExclusive: checkpoint.acceptedEndLbaExclusive,
+        observedSectorCount: checkpoint.acceptedEndLbaExclusive,
       },
       outcome: "valid" as const,
       reason: null,
@@ -386,13 +389,17 @@ it("records structural checks from one consistent checkpoint read", async () => 
       proven: f.proven,
     });
     const originalDiscArchiveId = saved.originalDiscArchiveId!;
+    const guardedArchivePath = f.access.catalog.listOriginalDiscArchives({
+      ids: [originalDiscArchiveId],
+    })[0]!.archivePath;
     const completed = await runDvdStructuralCheck({
       access: f.access,
       originalDiscArchiveId,
       checker: {
-        async check({ checkpoint, descriptor, assertStable }) {
+        async check({ checkpoint, descriptor, imagePath, assertStable }) {
           expect(descriptor).toBeGreaterThanOrEqual(0);
           expect(checkpoint.manifestRevision).toBe(1);
+          expect(imagePath).toBe(guardedArchivePath);
           assertStable();
           return ([
             "filesystem_structure",
@@ -404,6 +411,7 @@ it("records structural checks from one consistent checkpoint read", async () => 
             testedExtent: {
               startLba: 0,
               endLbaExclusive: checkpoint.acceptedEndLbaExclusive,
+              observedSectorCount: checkpoint.acceptedEndLbaExclusive,
             },
             outcome: "valid" as const,
             reason: null,
@@ -413,7 +421,9 @@ it("records structural checks from one consistent checkpoint read", async () => 
       },
     });
     if (completed.outcome !== "completed") {
-      throw new Error("Expected a completed structural check");
+      throw new Error(
+        `Expected a completed structural check: ${JSON.stringify(completed)}`,
+      );
     }
     expect(completed).toMatchObject({
       outcome: "completed",
@@ -445,6 +455,72 @@ it("records structural checks from one consistent checkpoint read", async () => 
         sequence: failed.sequence,
         outcome: "failed",
       },
+    });
+  } finally {
+    f.access.close();
+  }
+});
+
+it("does not persist completed structural evidence when final ownership validation fails", async () => {
+  const f = await jobFixture(true);
+  try {
+    const saved = await saveDvdInitialArchiveForArchiveJob({
+      access: f.access,
+      claim: f.claim,
+      originalsLibraryPath: f.identity.originalsLibraryPath,
+      exclusion: f.exclusion,
+      proven: f.proven,
+    });
+    const originalDiscArchiveId = saved.originalDiscArchiveId!;
+    const unstableOwnership: ArchiveImageOwnership = {
+      ...createArchiveImageOwnership({
+        authorityRootPath: f.identity.originalsLibraryPath,
+      }),
+      async withConsistentRead<Result>(request: {
+        archiveId: string;
+        imagePath: string | null;
+        originalsLibraryPath: string;
+        signal: AbortSignal;
+        task(handle: ArchiveImageOwnershipHandle): Promise<Result>;
+        commit?: (
+          prepared: Result,
+          handle: ArchiveImageOwnershipHandle,
+        ) => Result;
+      }) {
+        await request.task({
+          descriptor: 17,
+          signal: request.signal,
+          assertOwned() {},
+        });
+        throw new ArchiveImageOwnershipError("WRITER_NOT_QUIESCENT");
+      },
+    };
+
+    const failed = await runDvdStructuralCheck({
+      access: f.access,
+      archiveImageOwnership: unstableOwnership,
+      originalDiscArchiveId,
+      checker: passingStructuralChecker,
+    });
+
+    expect(failed).toMatchObject({
+      outcome: "failed",
+      reason: { code: "CONSISTENCY_FAULT" },
+    });
+    expect(
+      f.access.dvdStructuralAssessments.inspect(originalDiscArchiveId),
+    ).toMatchObject({
+      state: "pending",
+      currentAssessmentIdentity: null,
+      assessment: null,
+      latestAttempt: {
+        outcome: "failed",
+        reason: { code: "CONSISTENCY_FAULT" },
+      },
+      unavailableReasons: [
+        { code: "ASSESSMENT_PENDING" },
+        { code: "CONSISTENCY_FAULT" },
+      ],
     });
   } finally {
     f.access.close();

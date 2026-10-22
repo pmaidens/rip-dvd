@@ -25,7 +25,11 @@ function structuralFindings(
     .map((checkKind) => ({
       checkKind,
       policyVersion: "synthetic-structural-check-v1",
-      testedExtent: { startLba: 0, endLbaExclusive: 1024 },
+      testedExtent: {
+        startLba: 0,
+        endLbaExclusive: 1024,
+        observedSectorCount: 1024,
+      },
       outcome: checkKind === "dvd_navigation" ? outcome : "valid",
       reason: checkKind === "dvd_navigation" && outcome === "invalid"
         ? {
@@ -167,7 +171,11 @@ it("keeps a current structural assessment when a later attempt fails", async () 
             {
               checkKind: "filesystem_structure",
               policyVersion: "synthetic-structural-check-v1",
-              testedExtent: { startLba: 0, endLbaExclusive: 1024 },
+              testedExtent: {
+                startLba: 0,
+                endLbaExclusive: 1024,
+                observedSectorCount: 1024,
+              },
               outcome: "valid",
               reason: null,
               evidenceReference:

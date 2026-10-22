@@ -44,6 +44,14 @@ CREATE INDEX `dvd_structural_check_attempts_checkpoint_idx` ON `dvd_structural_c
 CREATE TRIGGER `dvd_structural_assessment_insert_guard`
 BEFORE INSERT ON `dvd_structural_assessments`
 WHEN NOT EXISTS (
+  SELECT 1 FROM `dvd_archive_evidence_headers` AS header
+  WHERE header.`original_disc_archive_id` = NEW.`original_disc_archive_id`
+    AND header.`evidence_format` = 'dvd-recovery-evidence-v1'
+    AND header.`current_manifest_id` = NEW.`manifest_id`
+    AND header.`current_manifest_revision` = NEW.`manifest_revision`
+    AND header.`current_manifest_digest` = NEW.`manifest_digest`
+    AND header.`accepted_end_lba_exclusive` = NEW.`accepted_end_lba_exclusive`
+) OR NOT EXISTS (
   SELECT 1 FROM `dvd_archive_evidence_manifests` AS manifest
   WHERE manifest.`id` = NEW.`manifest_id`
     AND manifest.`original_disc_archive_id` = NEW.`original_disc_archive_id`
@@ -68,6 +76,14 @@ END;--> statement-breakpoint
 CREATE TRIGGER `dvd_structural_check_attempt_insert_guard`
 BEFORE INSERT ON `dvd_structural_check_attempts`
 WHEN NOT EXISTS (
+  SELECT 1 FROM `dvd_archive_evidence_headers` AS header
+  WHERE header.`original_disc_archive_id` = NEW.`original_disc_archive_id`
+    AND header.`evidence_format` = 'dvd-recovery-evidence-v1'
+    AND header.`current_manifest_id` = NEW.`manifest_id`
+    AND header.`current_manifest_revision` = NEW.`manifest_revision`
+    AND header.`current_manifest_digest` = NEW.`manifest_digest`
+    AND header.`accepted_end_lba_exclusive` = NEW.`accepted_end_lba_exclusive`
+) OR NOT EXISTS (
   SELECT 1 FROM `dvd_archive_evidence_manifests` AS manifest
   WHERE manifest.`id` = NEW.`manifest_id`
     AND manifest.`original_disc_archive_id` = NEW.`original_disc_archive_id`

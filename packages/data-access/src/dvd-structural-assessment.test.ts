@@ -23,7 +23,11 @@ function finding(
     policyVersion: "synthetic-check-v1",
     testedExtent: outcome === "not_run"
       ? null
-      : { startLba: 0, endLbaExclusive: 400 },
+      : {
+        startLba: 0,
+        endLbaExclusive: 400,
+        observedSectorCount: 400,
+      },
     outcome,
     reason: outcome === "valid"
       ? null
@@ -83,6 +87,7 @@ describe("DVD structural assessment", () => {
           ? null
           : {
             endLbaExclusive: item.testedExtent.endLbaExclusive,
+            observedSectorCount: item.testedExtent.observedSectorCount,
             startLba: item.testedExtent.startLba,
           },
         policyVersion: item.policyVersion,

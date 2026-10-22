@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import {
+  canonicalPublicationJson,
+  DVD_STRUCTURAL_CHECK_KINDS,
   DvdCheckpointReadFault,
   type DataAccess,
   type DvdStructuralCheckpoint,
-  type DvdStructuralCheckKind,
   type DvdStructuralFindingInput,
   type DvdUnrecoveredSourceRange,
   type OriginalDiscArchiveId,
@@ -57,16 +59,6 @@ function checkpointFromHeader(
   };
 }
 
-function blockerCheckKind(field: string): DvdStructuralCheckKind {
-  if (/(?:NAV|PCI|DSI|VOBU|PGC|cell|domain)/i.test(field)) {
-    return "dvd_navigation";
-  }
-  if (/(?:title|VTS)/i.test(field)) {
-    return "title_enumeration";
-  }
-  return "filesystem_structure";
-}
-
 function findingsFromDecision(
   checkpoint: DvdStructuralCheckpoint,
   decision: DvdFullExtentMetadataDecision,
@@ -75,62 +67,70 @@ function findingsFromDecision(
   if (blocker?.reason === "local_failure") {
     throw new Error("DVD structural metadata check failed locally");
   }
-  const blockedKind = blocker === undefined
-    ? null
-    : blockerCheckKind(blocker.field);
-  return ([
-    "filesystem_structure",
-    "dvd_navigation",
-    "title_enumeration",
-  ] as const).map((checkKind) => {
-    const outcome = blocker === undefined
-      ? decision.impact === "listed_checks_agree"
-        ? "valid" as const
-        : "indeterminate" as const
-      : checkKind === blockedKind
-        ? blocker.reason === "contradiction"
-          ? "invalid" as const
-          : "indeterminate" as const
-        : "not_run" as const;
+  return DVD_STRUCTURAL_CHECK_KINDS.map((checkKind) => {
+    const evidence = decision.structuralChecks.find(
+      (item) => item.checkKind === checkKind,
+    );
+    const blocked = blocker !== undefined &&
+      decision.blockedCheckKind === checkKind;
+    const outcome = evidence === undefined || evidence.execution === "not_run"
+      ? "not_run" as const
+      : blocked && blocker.reason === "contradiction"
+        ? "invalid" as const
+        : blocked || evidence.execution === "interrupted" ||
+            evidence.testedExtent === null || evidence.hasUnprovedDependencies
+          ? "indeterminate" as const
+          : "valid" as const;
     const reason = outcome === "valid"
       ? null
-      : blocker === undefined
+      : outcome === "not_run"
         ? {
-          code: "UNPROVED_STRUCTURAL_EXTENT",
-          message: "Source evidence leaves structural coverage unresolved.",
+          code: "STRUCTURAL_CHECK_NOT_RUN",
+          message: "The structural check did not run.",
         }
-        : outcome === "not_run"
+        : blocked && blocker.reason === "contradiction"
           ? {
-            code: "PREREQUISITE_STRUCTURAL_CHECK_FAILED",
-            message: "A prerequisite structural check did not complete.",
+            code: "STRUCTURAL_CONTRADICTION",
+            message: "Readable structural claims disagree.",
           }
-          : blocker.reason === "contradiction"
+          : blocked && blocker.reason === "work_bound"
             ? {
-              code: "STRUCTURAL_CONTRADICTION",
-              message: "Readable structural claims disagree.",
+              code: "STRUCTURAL_CHECK_LIMIT_REACHED",
+              message: "The structural check reached its work limit.",
             }
-            : blocker.reason === "work_bound"
+            : blocked && blocker.reason === "unsupported_layout"
               ? {
-                code: "STRUCTURAL_CHECK_LIMIT_REACHED",
-                message: "The structural check reached its work limit.",
-              }
-              : {
                 code: "STRUCTURAL_LAYOUT_UNSUPPORTED",
                 message: "The structural layout is not supported.",
-              };
+              }
+              : evidence?.testedExtent === null
+                ? {
+                  code: "STRUCTURAL_EXTENT_NOT_OBSERVED",
+                  message: "The check produced no physical extent evidence.",
+                }
+                : {
+                  code: "UNPROVED_STRUCTURAL_EXTENT",
+                  message: "Source evidence leaves structural coverage unresolved.",
+                };
+    const evidenceDigest = createHash("sha256").update(canonicalPublicationJson({
+      checkKind,
+      execution: evidence?.execution ?? "not_run",
+      testedExtent: evidence?.testedExtent ?? null,
+      observations: decision.observations.filter(
+        (observation) => observation.checkKind === checkKind,
+      ),
+      blocker: blocked ? blocker : null,
+    })).digest("hex");
     return {
       checkKind,
       policyVersion: decision.policyVersion,
       testedExtent: outcome === "not_run"
         ? null
-        : {
-          startLba: 0,
-          endLbaExclusive: checkpoint.acceptedEndLbaExclusive,
-        },
+        : evidence?.testedExtent ?? null,
       outcome,
       reason,
       evidenceReference:
-        `dvd-structural-profile:${checkpoint.manifestDigest}:${checkKind}`,
+        `dvd-structural-profile:${checkpoint.manifestDigest}:${checkKind}:${evidenceDigest}`,
     };
   });
 }
@@ -169,7 +169,7 @@ function failureReason(error: unknown) {
     error instanceof ArchiveImageOwnershipError
   ) {
     return {
-      code: error.code,
+      code: "CONSISTENCY_FAULT",
       message: "The committed DVD checkpoint could not be read consistently.",
     };
   }
@@ -204,18 +204,10 @@ export async function runDvdStructuralCheck({
 }) {
   let checkpoint = checkpointFromHeader(access, originalDiscArchiveId);
   try {
-    const archive = access.catalog.listOriginalDiscArchives({
-      ids: [originalDiscArchiveId],
-    })[0];
-    if (archive === undefined || archive.archivePath === null) {
-      throw new DvdStructuralCheckUnavailableError(
-        "STRUCTURAL_ARCHIVE_UNAVAILABLE",
-      );
-    }
     const checked = await access.assessDvdStructure(
       originalDiscArchiveId,
       archiveImageOwnership,
-      async (manifest, handle) => {
+      async (manifest, handle, imagePath) => {
         checkpoint = {
           originalDiscArchiveId,
           manifestId: manifest.id,
@@ -227,7 +219,7 @@ export async function runDvdStructuralCheck({
           checkpoint,
           descriptor: handle.descriptor,
           imageFilesystemIdentity: manifest.image.filesystemIdentity,
-          imagePath: archive.archivePath!,
+          imagePath,
           unrecoveredSourceRanges: manifest.unrecoveredSourceRanges,
           signal: handle.signal,
           assertStable: () => handle.assertOwned(),
@@ -244,6 +236,7 @@ export async function runDvdStructuralCheck({
     return { outcome: "completed" as const, ...checked };
   } catch (error) {
     if (error instanceof DvdStructuralCheckUnavailableError) throw error;
+    checkpoint = checkpointFromHeader(access, originalDiscArchiveId);
     return access.dvdStructuralAssessments.recordFailed({
       checkpoint,
       reason: failureReason(error),
