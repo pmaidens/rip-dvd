@@ -157,6 +157,10 @@ function nonnegativeSafeInteger(value: unknown, label: string): number {
   return value;
 }
 
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function validateCheckpoint(
   checkpoint: DvdTitleDamageAssessmentInput["checkpoint"],
 ): DvdTitleDamageAssessmentInput["checkpoint"] {
@@ -193,8 +197,8 @@ function validateUnknownReasons(
     `${reason.code}\0${reason.message}`,
     reason,
   ])).values()].sort((left, right) =>
-    left.code.localeCompare(right.code) ||
-    left.message.localeCompare(right.message)
+    compareCodeUnits(left.code, right.code) ||
+    compareCodeUnits(left.message, right.message)
   );
 }
 
@@ -479,7 +483,8 @@ export function createDvdTitleDamageAssessment(
     } satisfies DvdTitleDamageAssessmentItem;
   }).sort((left, right) =>
     left.displayTitleNumber - right.displayTitleNumber ||
-    left.titleIdentityObservationId.localeCompare(
+    compareCodeUnits(
+      left.titleIdentityObservationId,
       right.titleIdentityObservationId,
     )
   );

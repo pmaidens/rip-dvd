@@ -212,4 +212,43 @@ describe("createDvdTitleDamageAssessment", () => {
 
     expect(second.id).toBe(first.id);
   });
+
+  it("uses locale-independent ordering for identity-bearing text", () => {
+    const firstInput = assessmentInput();
+    firstInput.titles = firstInput.titles.slice(0, 2).map((title, index) => ({
+      ...title,
+      titleIdentityObservationId: (
+        index === 0 ? "synthetic-observation-ä" : "synthetic-observation-z"
+      ) as DvdTitleIdentityObservationId,
+      displayTitleNumber: 1,
+      mappingCoverage: {
+        state: "partial" as const,
+        policyVersion: title.mappingCoverage.policyVersion,
+        unknownReasons: [
+          { code: "SYNTHETIC_REASON", message: "ä reason" },
+          { code: "SYNTHETIC_REASON", message: "z reason" },
+        ],
+      },
+    }));
+    const secondInput = structuredClone(firstInput);
+    secondInput.titles.reverse();
+    for (const title of secondInput.titles) {
+      title.mappingCoverage.unknownReasons = [
+        ...title.mappingCoverage.unknownReasons,
+      ].reverse();
+    }
+
+    const first = createDvdTitleDamageAssessment(firstInput);
+    const second = createDvdTitleDamageAssessment(secondInput);
+
+    expect(first.items.map((item) => item.titleIdentityObservationId)).toEqual([
+      "synthetic-observation-z",
+      "synthetic-observation-ä",
+    ]);
+    expect(first.items[0]?.mappingCoverage.unknownReasons).toEqual([
+      { code: "SYNTHETIC_REASON", message: "z reason" },
+      { code: "SYNTHETIC_REASON", message: "ä reason" },
+    ]);
+    expect(second.id).toBe(first.id);
+  });
 });
