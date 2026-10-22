@@ -1,4 +1,5 @@
-import { open } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 
 import {
   createDvdSourceSampleDigest,
@@ -47,6 +48,11 @@ async function readExactSample(
  */
 export async function createInitialDvdSourceSampleManifest(input: {
   imagePath: string;
+  image: {
+    filesystemIdentity: string;
+    mtimeNs: string;
+    sizeBytes: number;
+  };
   sourceMetadataFingerprint: string;
   acceptedEndLbaExclusive: number;
   checkpointRevision: number;
@@ -55,8 +61,30 @@ export async function createInitialDvdSourceSampleManifest(input: {
   authorizeRead(): void | Promise<void>;
 }): Promise<DvdSourceSampleManifest> {
   const samples: DvdSourceSampleReference[] = [];
-  const image = await open(input.imagePath, "r");
+  const image = await open(
+    input.imagePath,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  const assertProvenImage = async () => {
+    const opened = await image.stat({ bigint: true });
+    const named = await lstat(input.imagePath, { bigint: true });
+    if (
+      !opened.isFile() ||
+      named.isSymbolicLink() ||
+      !named.isFile() ||
+      opened.dev !== named.dev ||
+      opened.ino !== named.ino ||
+      `${opened.dev}:${opened.ino}` !== input.image.filesystemIdentity ||
+      opened.size !== BigInt(input.image.sizeBytes) ||
+      opened.mtimeNs.toString() !== input.image.mtimeNs ||
+      named.size !== opened.size ||
+      named.mtimeNs !== opened.mtimeNs
+    ) {
+      throw new Error("DVD source sample image differs from the proven image");
+    }
+  };
   try {
+    await assertProvenImage();
     for (
       let bandIndex = 0;
       bandIndex < DVD_SOURCE_SAMPLE_BAND_COUNT;
@@ -81,6 +109,7 @@ export async function createInitialDvdSourceSampleManifest(input: {
         break;
       }
     }
+    await assertProvenImage();
   } finally {
     await image.close();
   }

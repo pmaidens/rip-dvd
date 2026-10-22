@@ -2098,6 +2098,26 @@ export interface EncodeOutputInspectionReadAccess
 }
 
 export interface DataAccess {
+  withDvdCurrentCheckpoint<Result>(
+    id: OriginalDiscArchiveId,
+    ownership: {
+      withConsistentRead<ReadResult>(request: {
+        archiveId: string;
+        imagePath: string | null;
+        originalsLibraryPath: string;
+        signal: AbortSignal;
+        task(handle: {
+          descriptor: number;
+          signal: AbortSignal;
+          assertOwned(): void;
+        }): Promise<ReadResult>;
+      }): Promise<ReadResult>;
+    },
+    task: (input: {
+      checkpoint: import("./dvd-initial-checkpoint.js").CommittedDvdCurrentCheckpoint;
+      assertOwned(): void;
+    }) => Promise<Result>,
+  ): Promise<Result | null>;
   withDvdInitialCheckpoint<Result>(
     id: OriginalDiscArchiveId,
     ownership: {

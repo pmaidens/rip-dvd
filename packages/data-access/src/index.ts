@@ -162,4 +162,13 @@ export { createNotificationEventWriter, type NotificationTransaction } from "./i
 export { formatNotification, recordNotificationOutcome } from "./notification-policy.js";
 export type { NotificationOutcome } from "./notification-policy.js";
 
-export { canonicalPublicationJson, createDvdInitialPublicationDigest, DvdCheckpointReadFault } from "./dvd-initial-checkpoint.js";
+export {
+  canonicalPublicationJson,
+  createDvdInitialPublicationDigest,
+  DvdCheckpointReadFault,
+  readCommittedDvdCurrentCheckpoint,
+} from "./dvd-initial-checkpoint.js";
+export type {
+  CommittedDvdCurrentCheckpoint,
+  CommittedDvdInitialEvidence,
+} from "./dvd-initial-checkpoint.js";

@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 
 import {
+  assertDvdSourceSampleManifestProjection,
   createDvdSourceSampleDigest,
   createDvdSourceSampleManifestDigest,
   dvdDiscVerificationOutcome,
@@ -121,6 +122,27 @@ it("rejects a source sample whose advertised band does not contain it", () => {
   })).toThrow("source sample reference is invalid");
 });
 
+it("rejects a valid but different source-sample database projection", () => {
+  const published = sourceManifest();
+  const changedPayload = {
+    ...published,
+    samples: [{
+      ...published.samples[0]!,
+      digest: "b".repeat(64),
+    }],
+  };
+  const { manifestDigest: _manifestDigest, ...unsigned } = changedPayload;
+  const projected = {
+    ...changedPayload,
+    manifestDigest: createDvdSourceSampleManifestDigest(unsigned),
+  };
+
+  expect(() => assertDvdSourceSampleManifestProjection(
+    published,
+    projected,
+  )).toThrow("conflicts with publication evidence");
+});
+
 it("requires every durable finding to bind to the next manifest reference", () => {
   const manifest = sourceManifest();
   expect(() => validateDvdDiscVerificationFindings(manifest, [{
@@ -132,6 +154,31 @@ it("requires every durable finding to bind to the next manifest reference", () =
     diagnostic: null,
   }])).toThrow("does not match its source reference");
 });
+
+it.each([0x71, 0x73])(
+  "accepts deferred sense response %#x as durable unknown evidence",
+  (senseResponseCode) => {
+    const manifest = sourceManifest();
+    expect(() => validateDvdDiscVerificationFindings(manifest, [{
+      ...manifest.samples[0]!,
+      outcome: "unreadable",
+      referenceDigest: manifest.samples[0]!.digest,
+      observedDigest: null,
+      diagnostic: {
+        category: "unknown",
+        classifierVersion: "scsi-read-classifier-v2",
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseResponseCode,
+        senseKey: 3,
+        asc: 0x11,
+        ascq: 0,
+        informationLba: manifest.samples[0]!.startLba,
+      },
+    }])).not.toThrow();
+  },
+);
 
 it("lets known mismatch evidence outrank unreadable transport evidence", () => {
   const findings: DvdDiscVerificationSampleFinding[] = [

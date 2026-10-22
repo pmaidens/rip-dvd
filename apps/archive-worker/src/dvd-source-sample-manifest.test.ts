@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -45,10 +45,16 @@ it("searches past uniform midpoint windows for suitable content in every band", 
   }
   const imagePath = join(directory, "image.iso");
   await writeFile(imagePath, image);
+  const imageStat = await stat(imagePath, { bigint: true });
   const authorizeRead = vi.fn();
 
   const manifest = await createInitialDvdSourceSampleManifest({
     imagePath,
+    image: {
+      filesystemIdentity: `${imageStat.dev}:${imageStat.ino}`,
+      mtimeNs: imageStat.mtimeNs.toString(),
+      sizeBytes: image.length,
+    },
     sourceMetadataFingerprint: `dvdmeta-sha256:${"a".repeat(64)}`,
     acceptedEndLbaExclusive,
     checkpointRevision: 1,
@@ -63,4 +69,30 @@ it("searches past uniform midpoint windows for suitable content in every band", 
   expect(authorizeRead).toHaveBeenCalledTimes(
     DVD_SOURCE_SAMPLE_BAND_COUNT * 33 * 2,
   );
+});
+
+it("rejects a symlink instead of sampling a different local file", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dvd-source-samples-"));
+  directories.push(directory);
+  const targetPath = join(directory, "target.iso");
+  const imagePath = join(directory, "image.iso");
+  const image = Buffer.alloc(1_024 * DVD_SOURCE_SAMPLE_SECTOR_BYTES, 1);
+  await writeFile(targetPath, image);
+  await symlink(targetPath, imagePath);
+  const imageStat = await stat(targetPath, { bigint: true });
+
+  await expect(createInitialDvdSourceSampleManifest({
+    imagePath,
+    image: {
+      filesystemIdentity: `${imageStat.dev}:${imageStat.ino}`,
+      mtimeNs: imageStat.mtimeNs.toString(),
+      sizeBytes: image.length,
+    },
+    sourceMetadataFingerprint: `dvdmeta-sha256:${"a".repeat(64)}`,
+    acceptedEndLbaExclusive: 1_024,
+    checkpointRevision: 1,
+    checkpointDigest: "b".repeat(64),
+    unrecoveredSourceRanges: [],
+    authorizeRead() {},
+  })).rejects.toThrow();
 });

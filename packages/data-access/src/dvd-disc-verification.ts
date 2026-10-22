@@ -217,6 +217,35 @@ export function validateDvdSourceSampleManifest(
   return manifest;
 }
 
+function canonicalSourceSampleJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) => {
+    if (item !== null && typeof item === "object" && !Array.isArray(item)) {
+      return Object.fromEntries(
+        Object.entries(item).sort(([left], [right]) =>
+          left < right ? -1 : left > right ? 1 : 0
+        ),
+      );
+    }
+    return item;
+  });
+}
+
+export function assertDvdSourceSampleManifestProjection(
+  published: DvdSourceSampleManifest | null,
+  projected: DvdSourceSampleManifest | null,
+): void {
+  if (published !== null) validateDvdSourceSampleManifest(published);
+  if (projected !== null) validateDvdSourceSampleManifest(projected);
+  if (
+    canonicalSourceSampleJson(published) !==
+      canonicalSourceSampleJson(projected)
+  ) {
+    throw new DomainInvariantError(
+      "DVD source sample manifest projection conflicts with publication evidence",
+    );
+  }
+}
+
 function overlapsUnrecoveredSource(
   startLba: number,
   sectorCount: number,
@@ -364,13 +393,17 @@ export function validateDvdDiscVerificationFindings(
             diagnostic.informationLba !== null)) ||
         (diagnostic.senseResponseCode !== null &&
           diagnostic.senseResponseCode !== 0x70 &&
-          diagnostic.senseResponseCode !== 0x72) ||
+          diagnostic.senseResponseCode !== 0x71 &&
+          diagnostic.senseResponseCode !== 0x72 &&
+          diagnostic.senseResponseCode !== 0x73) ||
         (diagnostic.asc === null) !== (diagnostic.ascq === null) ||
         (diagnostic.informationLba !== null &&
           (diagnostic.informationLba < finding.startLba ||
             diagnostic.informationLba >=
               finding.startLba + finding.sectorCount)) ||
         (diagnostic.category !== "out_of_range" &&
+          (diagnostic.senseResponseCode === 0x70 ||
+            diagnostic.senseResponseCode === 0x72) &&
           isArchiveReadFailureEvidenceConsistent({
             ...diagnostic,
             category: "out_of_range",
@@ -380,7 +413,14 @@ export function validateDvdDiscVerificationFindings(
               ...diagnostic,
               category: "out_of_range",
             })
-          : diagnostic.category !== expectedCategory)
+          : diagnostic.category !== (
+              classification === "transport_error"
+                ? "transport_error"
+                : diagnostic.senseResponseCode === 0x70 ||
+                    diagnostic.senseResponseCode === 0x72
+                  ? expectedCategory
+                  : "unknown"
+            ))
       ) {
         throw new DomainInvariantError(
           "DVD disc verification unreadable finding is invalid",

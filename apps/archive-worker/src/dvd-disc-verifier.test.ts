@@ -13,6 +13,7 @@ import {
 } from "@rip-dvd/data-access";
 
 import {
+  parseDvdVerificationReadFailureProtocol,
   verifyInsertedDvdAgainstSamples,
   type DvdVerificationSourceReader,
   type DvdVerificationSourceRead,
@@ -215,6 +216,70 @@ it("starts no new source read once the sixty-second budget is exhausted", async 
   });
   expect(source.run).toHaveBeenCalledTimes(1);
 });
+
+it("rechecks the deadline after asynchronous read authorization", async () => {
+  const source = reader((index) => ({
+    outcome: "readable",
+    bytes: sampleBytes(index),
+  }));
+  let clock = 59_999;
+  const result = await verifyInsertedDvdAgainstSamples({
+    manifest: manifest(), sourceMetadataFingerprint: metadataFingerprint,
+    observedMetadataFingerprint: metadataFingerprint,
+    devicePath: "/dev/synthetic-disc", reader: source.reader,
+    startedAtMs: 0, now: () => clock,
+    insertionIsCurrent: () => true,
+    checkpointIsCurrent: () => true,
+    async authorizeRead() {
+      clock = 60_000;
+      return true;
+    },
+  });
+
+  expect(result).toMatchObject({
+    outcome: "inconclusive",
+    reasons: [
+      "DISC_SAMPLE_COVERAGE_INCOMPLETE",
+      "DISC_VERIFICATION_TIMEOUT",
+    ],
+    budgetExhausted: true,
+  });
+  expect(source.run).not.toHaveBeenCalled();
+});
+
+it.each([0x71, 0x73])(
+  "retains deferred sense response %#x as an unknown diagnostic",
+  (senseResponseCode) => {
+    const parsed = parseDvdVerificationReadFailureProtocol(JSON.stringify({
+      protocolVersion: 1,
+      category: "unknown",
+      classifierVersion: "scsi-read-classifier-v2",
+      scsiStatus: 2,
+      hostStatus: 0,
+      driverStatus: 8,
+      senseResponseCode,
+      senseKey: 3,
+      asc: 0x11,
+      ascq: 0,
+      informationLba: 64,
+      requestedLba: 64,
+      requestedBlockCount: 32,
+      retryOrdinal: 0,
+    }), {
+      startLba: 64,
+      sectorCount: 32,
+      acceptedEndLbaExclusive: 1_024,
+    });
+
+    expect(parsed).toMatchObject({
+      category: "unknown",
+      senseResponseCode,
+      senseKey: 3,
+      asc: 0x11,
+      ascq: 0,
+    });
+  },
+);
 
 it("stops after removal and invalidates a previously readable sample", async () => {
   const source = reader((index) => ({

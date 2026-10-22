@@ -1,9 +1,12 @@
 import {
+  assertDvdSourceSampleManifestProjection,
   RecordNotFoundError,
   StaleDvdDiscVerificationError,
   type ArchiveRecoveryId,
   type DataAccess,
   type DiscInspectionId,
+  type DvdSourceSampleManifest,
+  type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import {
   defaultArchiveImageOwnership,
@@ -29,6 +32,16 @@ function visibleVerification(
     createdAt: verification.createdAt.toISOString(),
     updatedAt: verification.updatedAt.toISOString(),
   };
+}
+
+function authoritativeSourceSampleManifest(
+  access: DataAccess,
+  archiveId: OriginalDiscArchiveId,
+  published: DvdSourceSampleManifest | null,
+): DvdSourceSampleManifest | null {
+  const projected = access.catalog.findDvdSourceSampleManifest(archiveId);
+  assertDvdSourceSampleManifestProjection(published, projected);
+  return published;
 }
 
 export async function inspectDvdDiscVerification(
@@ -58,7 +71,7 @@ export async function inspectDvdDiscVerification(
   const inspectAtCheckpoint = (checkpoint: {
     revision: number;
     digest: string;
-  } | null) => {
+  } | null, sourceSampleManifest: DvdSourceSampleManifest | null) => {
     const header = access.catalog.findDvdArchiveEvidenceHeader(archive.id);
     const currentInspections = access.discInspections.list({
       currentOnly: true,
@@ -140,9 +153,7 @@ export async function inspectDvdDiscVerification(
         detectedDiscId: inspection.detectedDiscId,
         mediaGeneration: inspection.mediaGeneration,
       })),
-      sourceSampleManifest: access.catalog.findDvdSourceSampleManifest(
-        archive.id,
-      ),
+      sourceSampleManifest,
       verification: latest === null
         ? null
         : visibleVerification(latest, latestCurrent),
@@ -185,15 +196,19 @@ export async function inspectDvdDiscVerification(
       },
     };
   };
-  const inspected = await access.withDvdInitialCheckpoint(
+  const inspected = await access.withDvdCurrentCheckpoint(
     archive.id,
     archiveImageOwnership,
-    async ({ evidence }) => inspectAtCheckpoint({
-      revision: evidence.revision,
-      digest: evidence.manifestDigest,
-    }),
+    async ({ checkpoint }) => inspectAtCheckpoint({
+      revision: checkpoint.currentManifestRevision,
+      digest: checkpoint.currentManifestDigest,
+    }, authoritativeSourceSampleManifest(
+      access,
+      archive.id,
+      checkpoint.initialEvidence.sourceSampleManifest ?? null,
+    )),
   );
-  return inspected ?? inspectAtCheckpoint(null);
+  return inspected ?? inspectAtCheckpoint(null, null);
 }
 
 export async function requestDvdDiscVerification(
@@ -213,18 +228,23 @@ export async function requestDvdDiscVerification(
   if (recovery === null) {
     throw new RecordNotFoundError("archive recovery", input.archiveRecoveryId);
   }
-  const submitted = await access.withDvdInitialCheckpoint(
+  const submitted = await access.withDvdCurrentCheckpoint(
     recovery.originalDiscArchiveId,
     archiveImageOwnership,
-    async ({ evidence, assertOwned }) => {
+    async ({ checkpoint, assertOwned }) => {
       if (
-        evidence.revision !== input.checkpointRevision ||
-        evidence.manifestDigest !== input.checkpointDigest
+        checkpoint.currentManifestRevision !== input.checkpointRevision ||
+        checkpoint.currentManifestDigest !== input.checkpointDigest
       ) {
         throw new StaleDvdDiscVerificationError(
           "DISC_CHECKPOINT_CHANGED",
         );
       }
+      authoritativeSourceSampleManifest(
+        access,
+        recovery.originalDiscArchiveId,
+        checkpoint.initialEvidence.sourceSampleManifest ?? null,
+      );
       assertOwned();
       const verification = access.dvdDiscVerifications.submit(input);
       assertOwned();

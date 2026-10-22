@@ -9,6 +9,7 @@ import {
   dvdSourceSampleCandidates,
   DVD_SOURCE_SAMPLE_BAND_COUNT,
   DVD_SOURCE_SAMPLE_BYTE_COUNT,
+  readCommittedDvdCurrentCheckpoint,
   type RunningArchiveJob,
 } from "@rip-dvd/data-access";
 import { beginSettledDiscInspectionForTest } from "@rip-dvd/data-access/test-support";
@@ -207,6 +208,101 @@ it("publishes and persists all sixteen distributed source samples", async () => 
     )).toEqual(manifest);
   } finally {
     reopened.close();
+  }
+});
+
+it("keeps the source-sample database projection immutable", async () => {
+  const f = await jobFixture(false, false, true);
+  try {
+    const saved = await saveDvdInitialArchiveForArchiveJob({
+      access: f.access,
+      claim: f.claim,
+      originalsLibraryPath: f.identity.originalsLibraryPath,
+      exclusion: f.exclusion,
+      proven: f.proven,
+    });
+    const sqlite = new DatabaseSync(f.databasePath);
+    try {
+      expect(() => sqlite.prepare(`
+        UPDATE dvd_source_sample_manifests
+        SET manifest = manifest
+        WHERE original_disc_archive_id = ?
+      `).run(saved.originalDiscArchiveId)).toThrow(
+        "DVD source sample manifests are immutable",
+      );
+      expect(() => sqlite.prepare(`
+        DELETE FROM dvd_source_sample_manifests
+        WHERE original_disc_archive_id = ?
+      `).run(saved.originalDiscArchiveId)).toThrow(
+        "DVD source sample manifests are immutable",
+      );
+    } finally {
+      sqlite.close();
+    }
+  } finally {
+    f.access.close();
+  }
+});
+
+it("resolves immutable revision-one samples beside a later current checkpoint", async () => {
+  const f = await jobFixture(false, false, true);
+  try {
+    const saved = await saveDvdInitialArchiveForArchiveJob({
+      access: f.access,
+      claim: f.claim,
+      originalsLibraryPath: f.identity.originalsLibraryPath,
+      exclusion: f.exclusion,
+      proven: f.proven,
+    });
+    const archiveId = saved.originalDiscArchiveId!;
+    const pointerPath = join(
+      f.identity.originalsLibraryPath,
+      ".dvd-evidence",
+      archiveId,
+      "checkpoint.json",
+    );
+    const pointer = JSON.parse(await readFile(pointerPath, "utf8")) as {
+      publicationDigest: string;
+    };
+    const currentManifestId = `${archiveId}:synthetic-revision-2`;
+    const currentManifestDigest = "c".repeat(64);
+    await writeFile(pointerPath, JSON.stringify({
+      originalDiscArchiveId: archiveId,
+      currentManifestId,
+      currentManifestRevision: 2,
+      currentManifestDigest,
+      publicationDigest: pointer.publicationDigest,
+    }));
+    const archive = f.access.catalog.listOriginalDiscArchives({
+      ids: [archiveId],
+    })[0]!;
+    const initialHeader = f.access.catalog.findDvdArchiveEvidenceHeader(
+      archiveId,
+    )!;
+    const resolved = await readCommittedDvdCurrentCheckpoint({
+      originalsLibraryPath: f.identity.originalsLibraryPath,
+      archive,
+      header: {
+        ...initialHeader,
+        currentManifestId,
+        currentManifestRevision: 2,
+        currentManifestDigest,
+      },
+      jobs: f.access.archiveJobs.listForArchive(archiveId),
+      assertImageOwnership() {},
+    });
+
+    expect(resolved).toMatchObject({
+      currentManifestId,
+      currentManifestRevision: 2,
+      currentManifestDigest,
+      initialEvidence: {
+        revision: 1,
+        sourceSampleManifest: { checkpointRevision: 1 },
+      },
+    });
+  } finally {
+    f.access.close();
   }
 });
 

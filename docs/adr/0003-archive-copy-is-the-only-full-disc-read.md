@@ -104,6 +104,17 @@ rediscovered, its new metadata fingerprint is derived from the title map and
 size already stored in the catalog; compatibility does not require rereading
 the disc or ISO.
 
+Source verification is a second, strictly bounded optical-read exception. The
+initial publication selects at most one suitable 32-sector window from each of
+16 equal address bands by reading the already durable local image; it never
+reads an unresolved placeholder. It saves the raw-sector digest, address,
+representation, policy, initial checkpoint, and source metadata fingerprint in
+the publication-digest-protected manifest and an immutable database projection.
+A later verification reads each saved window from the inserted disc at most
+once, with at most 16 reads, 512 sectors, and 1 MiB total. No new read starts
+after 60 seconds. These samples establish only bounded recovery-source identity;
+they are not a whole-disc hash, a completeness proof, or a filesystem audit.
+
 This deliberately trades sector-level duplicate detection and general
 post-copy raw-image hash verification for materially less optical-drive wear
 and shorter archive time.

@@ -43,5 +43,13 @@ CREATE TABLE `dvd_source_sample_manifests` (
 	CONSTRAINT "dvd_source_sample_manifests_json_check" CHECK(json_valid("manifest") and json_type("manifest") = 'object')
 );
 --> statement-breakpoint
+CREATE TRIGGER `dvd_source_sample_manifests_update_guard`
+BEFORE UPDATE ON `dvd_source_sample_manifests`
+BEGIN SELECT RAISE(ABORT, 'DVD source sample manifests are immutable'); END;
+--> statement-breakpoint
+CREATE TRIGGER `dvd_source_sample_manifests_delete_guard`
+BEFORE DELETE ON `dvd_source_sample_manifests`
+BEGIN SELECT RAISE(ABORT, 'DVD source sample manifests are immutable'); END;
+--> statement-breakpoint
 CREATE INDEX `dvd_disc_verifications_recovery_created_idx` ON `dvd_disc_verifications` (`archive_recovery_id`,`created_at`,`id`);--> statement-breakpoint
 CREATE INDEX `dvd_disc_verifications_status_created_idx` ON `dvd_disc_verifications` (`status`,`created_at`,`id`);

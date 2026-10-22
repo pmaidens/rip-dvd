@@ -343,6 +343,11 @@ export async function publishDvdInitialArchive(options: PublicationIdentity & Pu
   const baseManifest = createDvdInitialManifest(options);
   const sourceSampleManifest = await createInitialDvdSourceSampleManifest({
     imagePath: stagingPath,
+    image: {
+      filesystemIdentity: baseManifest.image.filesystemIdentity,
+      mtimeNs: baseManifest.image.mtimeNs,
+      sizeBytes: baseManifest.boundaryPublishedSizeBytes,
+    },
     sourceMetadataFingerprint: options.imageFingerprint,
     acceptedEndLbaExclusive: baseManifest.acceptedEndLbaExclusive,
     checkpointRevision: baseManifest.revision,

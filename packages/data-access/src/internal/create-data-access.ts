@@ -1,4 +1,9 @@
-import { canonicalPublicationJson, DvdCheckpointReadFault, readCommittedDvdInitialCheckpoint } from "../dvd-initial-checkpoint.js";
+import {
+  canonicalPublicationJson,
+  DvdCheckpointReadFault,
+  readCommittedDvdCurrentCheckpoint,
+  readCommittedDvdInitialCheckpoint,
+} from "../dvd-initial-checkpoint.js";
 import { DvdInitialSaveFault } from "../errors.js";
 import { createNotificationAccess, createNotificationEventWriter } from "./notifications.js";
 import { recordNotificationOutcome } from "../notification-policy.js";
@@ -1126,14 +1131,10 @@ function validateDvdDiscVerificationManifestBinding(
   manifest: DvdSourceSampleManifest | null,
   verification: {
     sourceMetadataFingerprint: string;
-    checkpointRevision: number;
-    checkpointDigest: string;
   },
   header: Pick<
     DvdArchiveEvidenceHeader,
-    | "acceptedEndLbaExclusive"
-    | "currentManifestRevision"
-    | "currentManifestDigest"
+    "acceptedEndLbaExclusive"
   > | undefined,
 ): void {
   if (manifest === null) return;
@@ -1141,14 +1142,10 @@ function validateDvdDiscVerificationManifestBinding(
     header === undefined ||
     manifest.sourceMetadataFingerprint !==
       verification.sourceMetadataFingerprint ||
-    manifest.checkpointRevision !== verification.checkpointRevision ||
-    manifest.checkpointDigest !== verification.checkpointDigest ||
-    manifest.acceptedEndLbaExclusive !== header.acceptedEndLbaExclusive ||
-    header.currentManifestRevision !== verification.checkpointRevision ||
-    header.currentManifestDigest !== verification.checkpointDigest
+    manifest.acceptedEndLbaExclusive !== header.acceptedEndLbaExclusive
   ) {
     throw new DomainInvariantError(
-      "DVD source sample manifest does not match the verification checkpoint",
+      "DVD source sample manifest does not match its initial publication",
     );
   }
 }
@@ -7000,6 +6997,63 @@ export function createDataAccessInternal(
         },
       });
     },
+    async withDvdCurrentCheckpoint(id, ownership, task) {
+      const readSnapshot = () => access.readConsistentSnapshot(reader => {
+        const archive = reader.catalog.listOriginalDiscArchives({ ids: [id] })[0];
+        if (!archive) throw new RecordNotFoundError("Original Disc Archive", id);
+        return {
+          archive,
+          header: reader.catalog.findDvdArchiveEvidenceHeader(id),
+          jobs: reader.archiveJobs.listForArchive(id),
+        };
+      });
+      const admissionSnapshot = readSnapshot();
+      if (dvdRecoveryEvidenceFormatForArchive(
+        admissionSnapshot.header,
+        admissionSnapshot.jobs,
+      ) === null) return null;
+      if (normalizedOriginalsLibraryPath === undefined) {
+        throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE");
+      }
+      return ownership.withConsistentRead({
+        archiveId: id,
+        imagePath: admissionSnapshot.archive.archivePath,
+        originalsLibraryPath: normalizedOriginalsLibraryPath,
+        signal: new AbortController().signal,
+        task: async ({ assertOwned }) => {
+          assertOwned();
+          const snapshot = readSnapshot();
+          if (
+            canonicalPublicationJson(snapshot) !==
+              canonicalPublicationJson(admissionSnapshot)
+          ) {
+            throw new DvdCheckpointReadFault(
+              "DVD_EVIDENCE_CHANGED_DURING_READ",
+            );
+          }
+          const checkpoint = await readCommittedDvdCurrentCheckpoint({
+            originalsLibraryPath: normalizedOriginalsLibraryPath,
+            ...snapshot,
+            assertImageOwnership: assertOwned,
+          });
+          if (checkpoint === null) {
+            throw new DvdCheckpointReadFault("DVD_EVIDENCE_NOT_RECORDED");
+          }
+          assertOwned();
+          if (
+            canonicalPublicationJson(readSnapshot()) !==
+              canonicalPublicationJson(snapshot)
+          ) {
+            throw new DvdCheckpointReadFault(
+              "DVD_EVIDENCE_CHANGED_DURING_READ",
+            );
+          }
+          const result = await task({ checkpoint, assertOwned });
+          assertOwned();
+          return result;
+        },
+      });
+    },
     notifications: createNotificationAccess(database, now),
     dvdRecoveryStorage: {
       readCurrent: readCurrentDvdRecoveryStoragePreflight,
@@ -7154,8 +7208,6 @@ export function createDataAccessInternal(
             : validateDvdSourceSampleManifest(storedSourceManifest);
           validateDvdDiscVerificationManifestBinding(sourceManifest, {
             sourceMetadataFingerprint: archive.fingerprint,
-            checkpointRevision: header.currentManifestRevision,
-            checkpointDigest: header.currentManifestDigest,
           }, header);
           const row = requireRow(
             transaction.insert(dvdDiscVerifications).values({

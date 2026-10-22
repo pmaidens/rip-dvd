@@ -1,5 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
+  canonicalPublicationJson,
+  createDvdInitialPublicationDigest,
   createDvdSourceSampleDigest,
   createDvdSourceSampleManifestDigest,
   DVD_SOURCE_SAMPLE_BAND_COUNT,
@@ -82,6 +86,29 @@ export async function seedDvdDiscVerificationFixture(
     ...samplePayload,
     manifestDigest: createDvdSourceSampleManifestDigest(samplePayload),
   };
+  const {
+    publicationDigest: _publicationDigest,
+    ...publicationPayload
+  } = seeded.manifest;
+  const manifest = {
+    ...publicationPayload,
+    sourceSampleManifest: sampleManifest,
+    publicationDigest: createDvdInitialPublicationDigest({
+      ...publicationPayload,
+      sourceSampleManifest: sampleManifest,
+    }),
+  };
+  writeFileSync(
+    join(seeded.directory, "initial-manifest.json"),
+    canonicalPublicationJson(manifest),
+  );
+  writeFileSync(
+    join(seeded.directory, "checkpoint.json"),
+    canonicalPublicationJson({
+      ...seeded.pointer,
+      publicationDigest: manifest.publicationDigest,
+    }),
+  );
   const sqlite = new DatabaseSync(fixture.databasePath);
   sqlite.prepare(`INSERT INTO archive_recoveries
     (id, original_disc_archive_id, status, created_at, updated_at)
@@ -90,5 +117,16 @@ export async function seedDvdDiscVerificationFixture(
     (original_disc_archive_id, manifest, created_at) VALUES (?, ?, 1)`)
     .run(seeded.archive.id, JSON.stringify(sampleManifest));
   sqlite.close();
-  return { ...seeded, recoveryId, sourceDisc, inspection, sampleManifest };
+  return {
+    ...seeded,
+    manifest,
+    pointer: {
+      ...seeded.pointer,
+      publicationDigest: manifest.publicationDigest,
+    },
+    recoveryId,
+    sourceDisc,
+    inspection,
+    sampleManifest,
+  };
 }

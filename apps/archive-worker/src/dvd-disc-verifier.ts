@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { closeSync, constants, fstatSync, lstatSync, openSync } from "node:fs";
 
 import {
+  assertDvdSourceSampleManifestProjection,
   createDvdSourceSampleDigest,
   classifyArchiveReadFailureEvidence,
   isArchiveReadFailureEvidenceConsistent,
@@ -43,7 +44,7 @@ function optionalInteger(
     Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= maximum;
 }
 
-function parseVerificationReadFailure(
+export function parseDvdVerificationReadFailureProtocol(
   payload: string,
   expected: { startLba: number; sectorCount: number; acceptedEndLbaExclusive: number },
 ): DvdDiscVerificationDiagnostic {
@@ -108,7 +109,9 @@ function parseVerificationReadFailure(
         candidate.ascq !== null || candidate.informationLba !== null)) ||
     (candidate.senseResponseCode !== null &&
       candidate.senseResponseCode !== 0x70 &&
-      candidate.senseResponseCode !== 0x72) ||
+      candidate.senseResponseCode !== 0x71 &&
+      candidate.senseResponseCode !== 0x72 &&
+      candidate.senseResponseCode !== 0x73) ||
     (candidate.asc === null) !== (candidate.ascq === null) ||
     (candidate.informationLba !== null &&
       (candidate.informationLba < expected.startLba ||
@@ -125,9 +128,15 @@ function parseVerificationReadFailure(
     asc: candidate.asc,
     ascq: candidate.ascq,
   } as Parameters<typeof classifyArchiveReadFailureEvidence>[0]);
-  const category = classified === "recognized_medium_error"
-    ? "medium_error"
-    : classified;
+  const currentSense = candidate.senseResponseCode === 0x70 ||
+    candidate.senseResponseCode === 0x72;
+  const category = classified === "transport_error"
+    ? "transport_error"
+    : currentSense
+      ? classified === "recognized_medium_error"
+        ? "medium_error"
+        : classified
+      : "unknown";
   const hasOutOfRangeEvidence = isArchiveReadFailureEvidenceConsistent({
     scsiStatus: candidate.scsiStatus as number | null,
     hostStatus: candidate.hostStatus as number | null,
@@ -140,7 +149,7 @@ function parseVerificationReadFailure(
   if (
     candidate.category !==
       (category === "medium_error" ? "unknown" : category) ||
-    hasOutOfRangeEvidence
+    currentSense && hasOutOfRangeEvidence
   ) {
     throw new Error("DVD verification read failure result is malformed");
   }
@@ -271,7 +280,7 @@ export function createNodeDvdVerificationSourceReader():
             reject(new Error("DVD verification helper failed"));
             return;
           }
-          const diagnostic = parseVerificationReadFailure(
+          const diagnostic = parseDvdVerificationReadFailureProtocol(
             line.slice(DVD_READ_FAILURE_RESULT_PREFIX.length),
             input,
           );
@@ -318,9 +327,16 @@ export async function verifyInsertedDvdAgainstSamples(input: {
       budgetExhausted = true;
       break;
     }
-    if (input.authorizeRead !== undefined && !await input.authorizeRead()) {
-      interrupted = true;
-      break;
+    if (input.authorizeRead !== undefined) {
+      if (!await input.authorizeRead()) {
+        interrupted = true;
+        break;
+      }
+      if (now() - input.startedAtMs >=
+        DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS) {
+        budgetExhausted = true;
+        break;
+      }
     }
     const read = await input.reader.read({
       devicePath: input.devicePath,
@@ -397,10 +413,10 @@ export async function pollDvdDiscVerification(input: {
     }
   }, 5_000);
   try {
-    const executed = await input.access.withDvdInitialCheckpoint(
+    const executed = await input.access.withDvdCurrentCheckpoint(
       claim.originalDiscArchiveId,
       input.archiveImageOwnership ?? defaultArchiveImageOwnership,
-      async ({ evidence, assertOwned }) => {
+      async ({ checkpoint, assertOwned }) => {
         const inspectionIsCurrent = () => {
           const current = input.access.discInspections.list({
             ids: [claim.discInspectionId],
@@ -416,8 +432,9 @@ export async function pollDvdDiscVerification(input: {
           const header = input.access.catalog.findDvdArchiveEvidenceHeader(
             claim.originalDiscArchiveId,
           );
-          return evidence.revision === claim.checkpointRevision &&
-            evidence.manifestDigest === claim.checkpointDigest &&
+          return checkpoint.currentManifestRevision ===
+              claim.checkpointRevision &&
+            checkpoint.currentManifestDigest === claim.checkpointDigest &&
             header !== null &&
             header.currentManifestRevision === claim.checkpointRevision &&
             header.currentManifestDigest === claim.checkpointDigest;
@@ -433,16 +450,17 @@ export async function pollDvdDiscVerification(input: {
         if (drive === undefined || claim.startedAt === null) {
           throw new Error("DVD verification insertion is unavailable");
         }
-        const manifest = input.access.catalog.findDvdSourceSampleManifest(
+        const projectedManifest = input.access.catalog.findDvdSourceSampleManifest(
           claim.originalDiscArchiveId,
         );
+        const manifest = checkpoint.initialEvidence.sourceSampleManifest ??
+          null;
+        assertDvdSourceSampleManifestProjection(manifest, projectedManifest);
         if (manifest !== null && (
           manifest.sourceMetadataFingerprint !==
             claim.sourceMetadataFingerprint ||
-          manifest.checkpointRevision !== claim.checkpointRevision ||
-          manifest.checkpointDigest !== claim.checkpointDigest ||
           manifest.acceptedEndLbaExclusive !==
-            evidence.acceptedEndLbaExclusive
+            checkpoint.initialEvidence.acceptedEndLbaExclusive
         )) {
           throw new Error(
             "DVD verification source manifest does not match the checkpoint",
