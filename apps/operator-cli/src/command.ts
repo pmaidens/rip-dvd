@@ -31,6 +31,7 @@ import {
 import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
+  EncodeWorkConflictError,
   DvdRecoveryEvidenceAdmissionClosedError,
   DvdRecoveryEvidenceEncodingUnavailableError,
   InvalidStatusTransitionError,
@@ -1342,6 +1343,15 @@ function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) 
     });
   } catch (error) {
     if (error instanceof CommandFailure) throw error;
+    if (error instanceof EncodeWorkConflictError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+        { current: error.current },
+      );
+    }
     if (error instanceof DvdRecoveryEvidenceEncodingUnavailableError) {
       throw new CommandFailure(
         error.code,

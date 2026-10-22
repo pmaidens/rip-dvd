@@ -3,6 +3,7 @@ import {
   dvdRecoveryEvidenceFormatForArchive,
   encodingProfileQueueBlockingReasons,
   DvdRecoveryEvidenceEncodingUnavailableError,
+  EncodeWorkConflictError,
   type ConsistentReadAccess,
   type DataAccess,
   type DiscSelection,
@@ -32,6 +33,35 @@ function requireEvidenceEncodingAvailable(
       ids: [discSelectionId],
       includeHistorical: true,
     })[0];
+    const recovery = selection === undefined
+      ? null
+      : snapshot.catalog.findArchiveRecovery(
+        selection.originalDiscArchiveId,
+      );
+    if (recovery !== null && recovery.work !== null) {
+      const encodeJobs = snapshot.catalog.listDiscSelections({
+        originalDiscArchiveId: recovery.originalDiscArchiveId,
+        includeHistorical: true,
+      }).flatMap(({ id }) => snapshot.encodeJobs.listForDiscSelection(id))
+        .filter(({ status }) => [
+          "queued",
+          "running",
+          "cancellation_requested",
+        ].includes(status))
+        .sort((left, right) =>
+          left.createdAt.getTime() - right.createdAt.getTime() ||
+          left.id.localeCompare(right.id)
+        )
+        .map(({ id, status }) => ({ id, status }));
+      throw new EncodeWorkConflictError({
+        archiveRecovery: {
+          id: recovery.id,
+          originalDiscArchiveId: recovery.originalDiscArchiveId,
+          work: recovery.work,
+        },
+        encodeJobs,
+      });
+    }
     if (
       selection !== undefined &&
       dvdRecoveryEvidenceFormatForArchive(

@@ -1,5 +1,6 @@
 import {
   DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
+  ENCODE_WORK_CONFLICT,
   DVD_RECOVERY_EVIDENCE_ADMISSION,
   DVD_RECOVERY_EVIDENCE_ENCODING,
   dvdRecoveryEvidenceFormatForArchive,
@@ -734,6 +735,13 @@ function readDetail(
       const encodeJobs = discSelections.flatMap((selection) =>
         access.encodeJobs.listForDiscSelection(selection.id)
       );
+      const conflictingEncodeJobs = encodeJobs
+        .filter((job) => [
+          "queued",
+          "running",
+          "cancellation_requested",
+        ].includes(job.status))
+        .map(({ id, status }) => ({ id, status }));
       const rearchiveEligible = archive.discKind === "dvd";
       const rearchiveReason = rearchiveEligible
         ? null
@@ -757,22 +765,37 @@ function readDetail(
             imagePath: archive.archivePath,
             originalsLibraryPath: options.originalsLibraryPath,
           });
+      const recovery = evidenceFormat === null
+        ? null
+        : access.catalog.findArchiveRecovery(archive.id);
+      const encodeWorkConflict = conflictingEncodeJobs.length === 0
+        ? null
+        : {
+          code: ENCODE_WORK_CONFLICT.code,
+          message: ENCODE_WORK_CONFLICT.message,
+          current: { encodeJobs: conflictingEncodeJobs },
+        };
       return {
         ...visibleArchive(archive, evidenceHeaders),
         ...(recoveryStorage === null
           ? {}
           : {
             archiveRecovery: {
-              record: access.catalog.findArchiveRecovery(archive.id),
+              record: recovery,
               available: false,
               blockingReasons: [
+                ...(ownership?.stableRead.blockingReasons ?? []),
+                ...(encodeWorkConflict === null ? [] : [encodeWorkConflict]),
                 {
                   code: DVD_RECOVERY_EVIDENCE_ADMISSION.code,
                   message: DVD_RECOVERY_EVIDENCE_ADMISSION.message,
                 },
                 ...recoveryStorage.blockingReasons,
-                ...(ownership?.stableRead.blockingReasons ?? []),
               ],
+              currentWork: {
+                recovery: recovery?.work ?? null,
+                encodeJobs: conflictingEncodeJobs,
+              },
               storage: recoveryStorage,
               ...(ownership === null ? {} : { ownership }),
             },
@@ -833,11 +856,17 @@ function readDetail(
           evidenceHeaders.get(selection.originalDiscArchiveId),
           access.archiveJobs.listForArchive(selection.originalDiscArchiveId),
         ) !== null;
+      const recovery = selection === undefined
+        ? null
+        : access.catalog.findArchiveRecovery(selection.originalDiscArchiveId);
+      const recoveryWork = recovery?.work ?? null;
       const requeue = encodeRequeueAvailability(
         access,
         job,
         requeueSelectionEligible,
-        evidenceBlocked
+        recoveryWork !== null
+          ? ENCODE_WORK_CONFLICT
+          : evidenceBlocked
           ? DVD_RECOVERY_EVIDENCE_ENCODING
           : undefined,
       );
@@ -919,6 +948,17 @@ function readDetail(
           ...output,
           artifactIdentity: retainedEncodeOutputArtifactIdentity(output.id),
         })),
+        ...(recovery === null
+          ? {}
+          : {
+            currentWork: {
+              recovery: {
+                id: recovery.id,
+                originalDiscArchiveId: recovery.originalDiscArchiveId,
+                work: recovery.work,
+              },
+            },
+          }),
         availableActions: encodeActions(job, requeue),
       };
     }

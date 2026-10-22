@@ -3,6 +3,8 @@ import { parentPort, workerData } from "node:worker_threads";
 import {
   createDataAccess,
   DomainInvariantError,
+  DvdRecoveryEvidenceEncodingUnavailableError,
+  EncodeWorkConflictError,
   InvalidStatusTransitionError,
 } from "../dist/index.js";
 import { createLegacySidecarDataAccess } from "../dist/legacy-sidecars.js";
@@ -92,7 +94,27 @@ try {
         value: { outcome: "enqueued", id: job.id },
       });
     } catch (error) {
-      if (!(error instanceof DomainInvariantError)) {
+      if (!(error instanceof DomainInvariantError) &&
+        !(error instanceof DvdRecoveryEvidenceEncodingUnavailableError)) {
+        throw error;
+      }
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "rejected" },
+      });
+    }
+  } else if (workerData.operation === "requeue-encode") {
+    try {
+      const job = access.encodeJobs.requeue(workerData.encodeJobId, {
+        mutationKey: workerData.mutationKey,
+      });
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "enqueued", id: job.id },
+      });
+    } catch (error) {
+      if (!(error instanceof DomainInvariantError) &&
+        !(error instanceof DvdRecoveryEvidenceEncodingUnavailableError)) {
         throw error;
       }
       parentPort.postMessage({
@@ -140,6 +162,22 @@ try {
         ? { outcome: "claimed", id: claim.id }
         : { outcome: "rejected" },
     });
+  } else if (workerData.operation === "request-archive-recovery") {
+    try {
+      const work = access.archiveRecoveryWork.request(
+        workerData.archiveRecoveryId,
+      );
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "requested", id: work.archiveRecoveryId },
+      });
+    } catch (error) {
+      if (!(error instanceof EncodeWorkConflictError)) throw error;
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "rejected" },
+      });
+    }
   } else if (workerData.operation === "complete-catalog-review") {
     try {
       const archive = access.catalog.completeCatalogReview(

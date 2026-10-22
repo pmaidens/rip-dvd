@@ -802,6 +802,196 @@ it("shares Encode Job validation and keyed outcomes across web and CLI", async (
   }
 });
 
+it("reports Archive Recovery conflicts identically through Encode web and CLI operations", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive, correctedSelection, predecessor } =
+    seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    access.catalog.completeCatalogReview(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+    );
+    const profile = access.encodingProfiles.list({
+      mediaDomain: "dvd_video",
+      activeOnly: true,
+    })[0]!;
+    const recoveryId = "synthetic-encode-conflict-recovery";
+    markArchiveWithDvdRecoveryEvidence(
+      fixture.databasePath,
+      archive.id,
+      "encode-conflict-parity",
+      {
+        archiveRecovery: {
+          id: recoveryId,
+          workStatus: "claimed",
+        },
+      },
+    );
+    const mutationKey = "synthetic-encode-conflict-enqueue";
+    const outputPath = join(
+      fixture.mediaLibraryPath,
+      "encode-conflict-parity.mkv",
+    );
+    const config = () => ({
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      webTrustedOrigin: trustedOrigin,
+    });
+    const webPreview = await createEncodeJobsRoute(new Request(
+      `${trustedOrigin}/api/encode-jobs`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+        },
+        body: JSON.stringify({
+          action: "preview_requeue",
+          encodeJobId: predecessor.id,
+        }),
+      },
+    ), () => access, config);
+    const cliPreview = await fixture.run([
+      "encode-requeue-preview",
+      "--encode-job-id",
+      predecessor.id,
+    ]);
+    expect(webPreview.status).toBe(409);
+    expect(cliPreview.exitCode).toBe(2);
+    expect(cliPreview.result).toEqual(await webPreview.json());
+    expect(cliPreview.result).toMatchObject({
+      error: {
+        code: "ENCODE_WORK_CONFLICT",
+        current: {
+          archiveRecovery: { id: recoveryId },
+        },
+      },
+    });
+
+    const web = await createEncodeJobsRoute(new Request(
+      `${trustedOrigin}/api/encode-jobs`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+        },
+        body: JSON.stringify({
+          mutationKey,
+          discSelectionId: correctedSelection.id,
+          encodingProfileId: profile.id,
+          outputPath,
+        }),
+      },
+    ), () => access, config);
+    const cli = await fixture.run([
+      "encode-enqueue",
+      "--key",
+      mutationKey,
+      "--disc-selection-id",
+      correctedSelection.id,
+      "--encoding-profile-id",
+      profile.id,
+      "--output-path",
+      outputPath,
+    ]);
+
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toMatchObject({
+      error: {
+        code: "ENCODE_WORK_CONFLICT",
+        blockingReasons: [{ code: "ENCODE_WORK_CONFLICT" }],
+        current: {
+          archiveRecovery: {
+            id: recoveryId,
+            originalDiscArchiveId: archive.id,
+            work: {
+              status: "claimed",
+              claimedBy: "synthetic-recovery-worker",
+              claimToken: "synthetic-recovery-claim",
+            },
+          },
+          encodeJobs: [],
+        },
+      },
+    });
+    expect(access.encodeJobs.list()).toHaveLength(1);
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    expect(sqlite.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE key = ?
+    `).get(mutationKey)).toEqual({ count: 0 });
+    sqlite.close();
+
+    const archiveWeb = createOperationsResponse(
+      access,
+      new Request(
+        `${trustedOrigin}/api/operations?kind=original-disc-archives&id=${archive.id}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    const archiveCli = await fixture.run([
+      "inspect",
+      "original-disc-archives",
+      archive.id,
+    ]);
+    expect(archiveCli.result).toEqual(await archiveWeb.json());
+    expect(archiveCli.result).toMatchObject({
+      item: {
+        archiveRecovery: {
+          currentWork: {
+            recovery: expect.objectContaining({ status: "claimed" }),
+            encodeJobs: [],
+          },
+        },
+      },
+    });
+
+    const encodeWeb = createOperationsResponse(
+      access,
+      new Request(
+        `${trustedOrigin}/api/operations?kind=encode-jobs&id=${predecessor.id}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    const encodeCli = await fixture.run([
+      "inspect",
+      "encode-jobs",
+      predecessor.id,
+    ]);
+    expect(encodeCli.result).toEqual(await encodeWeb.json());
+    expect(encodeCli.result).toMatchObject({
+      item: {
+        currentWork: {
+          recovery: {
+            id: recoveryId,
+            work: expect.objectContaining({ status: "claimed" }),
+          },
+        },
+        availableActions: expect.arrayContaining([
+          expect.objectContaining({
+            name: "requeue",
+            eligible: false,
+            blockingReasons: [expect.objectContaining({
+              code: "ENCODE_WORK_CONFLICT",
+            })],
+          }),
+        ]),
+      },
+    });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
 it("replays persisted Encode enqueue outcomes before DVD evidence blocking", async () => {
   const fixture = createOperatorWorkflowFixture();
   const { archive, correctedSelection } = seedCatalogReviewForReadFixture(fixture);

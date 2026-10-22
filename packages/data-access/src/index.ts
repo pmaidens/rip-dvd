@@ -32,6 +32,13 @@ export {
   assertDvdRecoveryEvidenceAdmissionAvailable,
   dvdRecoveryEvidenceFormatForArchive,
 } from "./dvd-recovery-evidence.js";
+export {
+  ENCODE_WORK_CONFLICT,
+  EncodeWorkConflictError,
+} from "./archive-recovery-work.js";
+export type {
+  EncodeWorkConflictCurrent,
+} from "./archive-recovery-work.js";
 export * from "./dvd-recovery-storage-preflight.js";
 export {
   assertDvdArchiveBoundaryEvidenceDigest,
@@ -118,6 +125,7 @@ export {
   ARCHIVE_FAILURE_DETAIL_VERSIONS,
   ARCHIVE_INTEGRITIES,
   ARCHIVE_RECOVERY_STATUSES,
+  ARCHIVE_RECOVERY_WORK_STATUSES,
   ARCHIVE_READ_FAILURE_CATEGORIES,
   ARCHIVE_READ_FAILURE_STAGES,
   CATALOG_REVIEW_OUTCOMES,
