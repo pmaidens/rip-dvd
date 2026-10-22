@@ -10068,6 +10068,9 @@ export function createDataAccessInternal(
             transaction,
             claim,
           );
+          if (recovery.status === "stopping") {
+            return recovery;
+          }
           const settledStatus = settledArchiveRecoveryStatus(
             transaction,
             recovery.originalDiscArchiveId,
