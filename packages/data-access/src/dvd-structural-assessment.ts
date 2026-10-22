@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import type { OriginalDiscArchiveId } from "./types.js";
+
 export const DVD_STRUCTURAL_ASSESSMENT_POLICY_VERSION =
   "dvd-structural-assessment-v1" as const;
 
@@ -23,7 +25,7 @@ export type DvdStructuralFindingOutcome =
 export type DvdStructuralValidity = "valid" | "invalid" | "unknown";
 
 export interface DvdStructuralCheckpoint {
-  originalDiscArchiveId: string;
+  originalDiscArchiveId: OriginalDiscArchiveId;
   manifestId: string;
   manifestRevision: number;
   manifestDigest: string;
@@ -77,7 +79,7 @@ export type DvdStructuralCheckAttempt = {
 export interface DvdStructuralAssessmentInspection {
   schemaVersion: 1;
   policyVersion: typeof DVD_STRUCTURAL_ASSESSMENT_POLICY_VERSION;
-  originalDiscArchiveId: string;
+  originalDiscArchiveId: OriginalDiscArchiveId;
   state: "unavailable" | "pending" | "current" | "outdated";
   checkpoint: DvdStructuralCheckpoint | null;
   currentAssessmentIdentity: string | null;
@@ -87,19 +89,12 @@ export interface DvdStructuralAssessmentInspection {
 }
 
 export interface DvdStructuralAssessmentAccess {
-  recordCompleted(input: {
-    checkpoint: DvdStructuralCheckpoint;
-    findings: readonly DvdStructuralFindingInput[];
-  }): {
-    attempt: DvdStructuralCheckAttempt & { outcome: "completed" };
-    assessment: DvdStructuralAssessmentRecord;
-  };
   recordFailed(input: {
     checkpoint: DvdStructuralCheckpoint;
     reason: { code: string; message: string };
   }): DvdStructuralCheckAttempt & { outcome: "failed" };
   inspect(
-    originalDiscArchiveId: string,
+    originalDiscArchiveId: OriginalDiscArchiveId,
   ): DvdStructuralAssessmentInspection;
 }
 
@@ -199,16 +194,25 @@ export function createDvdStructuralAssessment(input: {
     : findings.every(({ outcome }) => outcome === "valid")
       ? "valid"
       : "unknown";
+  const semanticInput = JSON.stringify([
+    checkpoint.originalDiscArchiveId,
+    checkpoint.manifestId,
+    checkpoint.manifestRevision,
+    checkpoint.manifestDigest,
+    checkpoint.acceptedEndLbaExclusive,
+    findings,
+  ], (_key, value: unknown) =>
+    value !== null && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(
+        Object.entries(value).sort(([left], [right]) =>
+          left < right ? -1 : left > right ? 1 : 0
+        ),
+      )
+      : value
+  );
   const digest = createHash("sha256")
     .update("rip-dvd:dvd-structural-assessment:v1\0")
-    .update(JSON.stringify([
-      checkpoint.originalDiscArchiveId,
-      checkpoint.manifestId,
-      checkpoint.manifestRevision,
-      checkpoint.manifestDigest,
-      checkpoint.acceptedEndLbaExclusive,
-      findings,
-    ]))
+    .update(semanticInput)
     .digest("hex");
   return {
     id: `dvd-structural-assessment:${digest}`,

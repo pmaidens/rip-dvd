@@ -4,9 +4,10 @@ import {
   createDvdStructuralAssessment,
   type DvdStructuralFindingInput,
 } from "./dvd-structural-assessment.js";
+import type { OriginalDiscArchiveId } from "./types.js";
 
 const checkpoint = {
-  originalDiscArchiveId: "synthetic-archive",
+  originalDiscArchiveId: "synthetic-archive" as OriginalDiscArchiveId,
   manifestId: "synthetic-manifest",
   manifestRevision: 2,
   manifestDigest: "a".repeat(64),
@@ -72,7 +73,21 @@ describe("DVD structural assessment", () => {
     const original = createDvdStructuralAssessment({ checkpoint, findings });
     const retried = createDvdStructuralAssessment({
       checkpoint,
-      findings: [...findings].reverse(),
+      findings: [...findings].reverse().map((item) => ({
+        evidenceReference: item.evidenceReference,
+        reason: item.reason === null
+          ? null
+          : { message: item.reason.message, code: item.reason.code },
+        outcome: item.outcome,
+        testedExtent: item.testedExtent === null
+          ? null
+          : {
+            endLbaExclusive: item.testedExtent.endLbaExclusive,
+            startLba: item.testedExtent.startLba,
+          },
+        policyVersion: item.policyVersion,
+        checkKind: item.checkKind,
+      })),
     });
     const contradicted = createDvdStructuralAssessment({
       checkpoint,

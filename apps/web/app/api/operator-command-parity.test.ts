@@ -7,6 +7,7 @@ import {
   createCleanReadArchiveIntegrityEvidence,
   createDvdArchiveBoundaryEvidenceDigest,
   createDvdArchiveEvidenceManifestDigests,
+  createDvdStructuralAssessment,
   DVD_RECOVERY_EVIDENCE_ADMISSION,
   DVD_RECOVERY_EVIDENCE_ENCODING,
   DVD_RECOVERY_EVIDENCE_FORMAT,
@@ -1965,8 +1966,8 @@ it("returns the same operational records and evidence through web and CLI", asyn
         },
       },
     });
-    const structuralAssessment =
-      access.dvdStructuralAssessments.recordCompleted({
+    const structuralAssessment = {
+      assessment: createDvdStructuralAssessment({
         checkpoint: {
           originalDiscArchiveId: archiveId,
           manifestId,
@@ -1986,7 +1987,38 @@ it("returns the same operational records and evidence through web and CLI", asyn
           reason: null,
           evidenceReference: `synthetic-evidence:${checkKind}`,
         })),
-      });
+      }),
+    };
+    const structuralFixture = new DatabaseSync(fixture.databasePath);
+    structuralFixture.prepare(`
+      INSERT INTO dvd_structural_assessments (
+        id, original_disc_archive_id, manifest_id, manifest_revision,
+        manifest_digest, accepted_end_lba_exclusive, policy_version,
+        validity, findings, created_at
+      ) VALUES (?, ?, ?, 1, ?, 1, ?, ?, ?, 2)
+    `).run(
+      structuralAssessment.assessment.id,
+      archiveId,
+      manifestId,
+      manifestDigest,
+      structuralAssessment.assessment.policyVersion,
+      structuralAssessment.assessment.validity,
+      JSON.stringify(structuralAssessment.assessment.findings),
+    );
+    structuralFixture.prepare(`
+      INSERT INTO dvd_structural_check_attempts (
+        original_disc_archive_id, manifest_id, manifest_revision,
+        manifest_digest, accepted_end_lba_exclusive, outcome,
+        assessment_id, findings, created_at
+      ) VALUES (?, ?, 1, ?, 1, 'completed', ?, ?, 2)
+    `).run(
+      archiveId,
+      manifestId,
+      manifestDigest,
+      structuralAssessment.assessment.id,
+      JSON.stringify(structuralAssessment.assessment.findings),
+    );
+    structuralFixture.close();
     const catalogReviewResponse = await createCatalogReviewRoute(
       new Request(`http://localhost/api/catalog-reviews/${archiveId}`),
       archiveId,

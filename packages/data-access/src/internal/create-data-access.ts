@@ -6575,9 +6575,9 @@ export function createDataAccessInternal(
   }
 
   function inspectDvdStructuralAssessment(
-    originalDiscArchiveId: string,
+    originalDiscArchiveId: OriginalDiscArchiveId,
   ) {
-    const id = originalDiscArchiveId as OriginalDiscArchiveId;
+    const id = originalDiscArchiveId;
     const archive = access.catalog.listOriginalDiscArchives({ ids: [id] })[0];
     if (archive === undefined) {
       throw new RecordNotFoundError(
@@ -7218,14 +7218,75 @@ export function createDataAccessInternal(
     return completed;
   }
 
+  function recordCompletedDvdStructuralAssessment(input: {
+    checkpoint: DvdStructuralCheckpoint;
+    findings: readonly import("../dvd-structural-assessment.js")
+      .DvdStructuralFindingInput[];
+  }) {
+    const assessment = createDvdStructuralAssessment(input);
+    const timestamp = now();
+    return database.transaction((transaction) => {
+      requireDvdStructuralCheckpoint(transaction, assessment.checkpoint);
+      transaction.insert(dvdStructuralAssessments).values({
+        id: assessment.id,
+        originalDiscArchiveId: assessment.checkpoint.originalDiscArchiveId,
+        manifestId: assessment.checkpoint.manifestId,
+        manifestRevision: assessment.checkpoint.manifestRevision,
+        manifestDigest: assessment.checkpoint.manifestDigest,
+        acceptedEndLbaExclusive:
+          assessment.checkpoint.acceptedEndLbaExclusive,
+        policyVersion: assessment.policyVersion,
+        validity: assessment.validity,
+        findings: assessment.findings,
+        createdAt: timestamp,
+      }).onConflictDoNothing().run();
+      const persistedRow = transaction.select()
+        .from(dvdStructuralAssessments)
+        .where(eq(dvdStructuralAssessments.id, assessment.id)).get();
+      if (persistedRow === undefined) {
+        throw new DomainInvariantError(
+          "DVD structural assessment was not recorded",
+        );
+      }
+      const persisted = toDvdStructuralAssessment(persistedRow);
+      const attemptRow = transaction.insert(dvdStructuralCheckAttempts)
+        .values({
+          originalDiscArchiveId: assessment.checkpoint.originalDiscArchiveId,
+          manifestId: assessment.checkpoint.manifestId,
+          manifestRevision: assessment.checkpoint.manifestRevision,
+          manifestDigest: assessment.checkpoint.manifestDigest,
+          acceptedEndLbaExclusive:
+            assessment.checkpoint.acceptedEndLbaExclusive,
+          outcome: "completed",
+          assessmentId: assessment.id,
+          findings: assessment.findings,
+          failureCode: null,
+          failureMessage: null,
+          createdAt: timestamp,
+        }).returning().get();
+      if (attemptRow === undefined) {
+        throw new DomainInvariantError(
+          "DVD structural check attempt was not recorded",
+        );
+      }
+      const attempt = toDvdStructuralCheckAttempt(attemptRow);
+      if (attempt.outcome !== "completed") {
+        throw new DomainInvariantError(
+          "DVD structural check attempt outcome is invalid",
+        );
+      }
+      return { attempt, assessment: persisted };
+    });
+  }
+
   async function withDvdInitialCheckpointRead<Result>(
     id: OriginalDiscArchiveId,
-    ownership: Parameters<
-      DataAccess["withDvdInitialCheckpointRead"]
-    >[1],
-    inspect: Parameters<
-      DataAccess["withDvdInitialCheckpointRead"]
-    >[2],
+    ownership: import("../types.js").DvdCheckpointReadOwnership,
+    inspect: (
+      checkpoint: import("../dvd-initial-checkpoint.js")
+        .CommittedDvdInitialEvidence,
+      handle: import("../types.js").DvdCheckpointReadHandle,
+    ) => Promise<Result>,
   ): Promise<{
     checkpoint: import("../dvd-initial-checkpoint.js")
       .CommittedDvdInitialEvidence;
@@ -7516,7 +7577,27 @@ export function createDataAccessInternal(
         return projected;
       },
     },
-    withDvdInitialCheckpointRead,
+    async assessDvdStructure(id, ownership, assess) {
+      const read = await withDvdInitialCheckpointRead(
+        id,
+        ownership,
+        async (manifest, handle) => {
+          const findings = await assess(manifest, handle);
+          handle.assertOwned();
+          return recordCompletedDvdStructuralAssessment({
+            checkpoint: {
+              originalDiscArchiveId: id,
+              manifestId: manifest.id,
+              manifestRevision: manifest.revision,
+              manifestDigest: manifest.manifestDigest,
+              acceptedEndLbaExclusive: manifest.acceptedEndLbaExclusive,
+            },
+            findings,
+          });
+        },
+      );
+      return read?.result ?? null;
+    },
     async readDvdInitialCheckpoint(id, ownership) {
       const read = await withDvdInitialCheckpointRead(
         id,
@@ -7526,74 +7607,13 @@ export function createDataAccessInternal(
       return read?.checkpoint ?? null;
     },
     dvdStructuralAssessments: {
-      recordCompleted(input) {
-        const assessment = createDvdStructuralAssessment(input);
-        const timestamp = now();
-        return database.transaction((transaction) => {
-          requireDvdStructuralCheckpoint(transaction, assessment.checkpoint);
-          transaction.insert(dvdStructuralAssessments).values({
-            id: assessment.id,
-            originalDiscArchiveId:
-              assessment.checkpoint.originalDiscArchiveId as
-                OriginalDiscArchiveId,
-            manifestId: assessment.checkpoint.manifestId,
-            manifestRevision: assessment.checkpoint.manifestRevision,
-            manifestDigest: assessment.checkpoint.manifestDigest,
-            acceptedEndLbaExclusive:
-              assessment.checkpoint.acceptedEndLbaExclusive,
-            policyVersion: assessment.policyVersion,
-            validity: assessment.validity,
-            findings: assessment.findings,
-            createdAt: timestamp,
-          }).onConflictDoNothing().run();
-          const persistedRow = transaction.select()
-            .from(dvdStructuralAssessments)
-            .where(eq(dvdStructuralAssessments.id, assessment.id)).get();
-          if (persistedRow === undefined) {
-            throw new DomainInvariantError(
-              "DVD structural assessment was not recorded",
-            );
-          }
-          const persisted = toDvdStructuralAssessment(persistedRow);
-          const attemptRow = transaction.insert(dvdStructuralCheckAttempts)
-            .values({
-              originalDiscArchiveId:
-                assessment.checkpoint.originalDiscArchiveId as
-                  OriginalDiscArchiveId,
-              manifestId: assessment.checkpoint.manifestId,
-              manifestRevision: assessment.checkpoint.manifestRevision,
-              manifestDigest: assessment.checkpoint.manifestDigest,
-              acceptedEndLbaExclusive:
-                assessment.checkpoint.acceptedEndLbaExclusive,
-              outcome: "completed",
-              assessmentId: assessment.id,
-              findings: assessment.findings,
-              failureCode: null,
-              failureMessage: null,
-              createdAt: timestamp,
-            }).returning().get();
-          if (attemptRow === undefined) {
-            throw new DomainInvariantError(
-              "DVD structural check attempt was not recorded",
-            );
-          }
-          const attempt = toDvdStructuralCheckAttempt(attemptRow);
-          if (attempt.outcome !== "completed") {
-            throw new DomainInvariantError(
-              "DVD structural check attempt outcome is invalid",
-            );
-          }
-          return { attempt, assessment: persisted };
-        });
-      },
       recordFailed(input) {
         const reason = validateDvdStructuralFailureReason(input.reason);
         const timestamp = now();
         return database.transaction((transaction) => {
           requireDvdStructuralCheckpoint(transaction, input.checkpoint);
           const row = transaction.insert(dvdStructuralCheckAttempts).values({
-            originalDiscArchiveId:
-              input.checkpoint.originalDiscArchiveId as OriginalDiscArchiveId,
+            originalDiscArchiveId: input.checkpoint.originalDiscArchiveId,
             manifestId: input.checkpoint.manifestId,
             manifestRevision: input.checkpoint.manifestRevision,
             manifestDigest: input.checkpoint.manifestDigest,

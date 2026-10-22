@@ -14,12 +14,35 @@ import { isoProfileImage } from "./dvd-metadata-profile-fixtures.js";
 import { createInProcessDvdRescueWorkspaceLock } from "./dvd-rescue-workspace-lock.js";
 import { DvdInitialCopyBoundaryError } from "./dvd-initial-copy.js";
 import { saveDvdInitialArchiveForArchiveJob, reconcileDvdInitialArchiveForArchiveJob, runDvdInitialArchiveJob } from "./dvd-initial-save.js";
-import { runDvdStructuralCheck } from "./dvd-structural-check.js";
+import {
+  runDvdStructuralCheck,
+  type DvdStructuralChecker,
+} from "./dvd-structural-check.js";
 const directories: string[] = [];
 afterEach(async () => {
   vi.useRealTimers();
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
+
+const passingStructuralChecker: DvdStructuralChecker = {
+  async check({ checkpoint }) {
+    return ([
+      "filesystem_structure",
+      "dvd_navigation",
+      "title_enumeration",
+    ] as const).map((checkKind) => ({
+      checkKind,
+      policyVersion: "synthetic-structural-check-v1",
+      testedExtent: {
+        startLba: 0,
+        endLbaExclusive: checkpoint.acceptedEndLbaExclusive,
+      },
+      outcome: "valid" as const,
+      reason: null,
+      evidenceReference: `synthetic-evidence:${checkKind}`,
+    }));
+  },
+};
 
 async function fixture(damaged = false, corrected = false) {
   const directory = await mkdtemp(join(tmpdir(), "dvd-initial-publication-"));
@@ -498,6 +521,7 @@ it("holds exclusion and waits for the initial helper to close before transferrin
       } });
     } },
     authorizeMutation() { expect(excluded).toBe(true); },
+    structuralChecker: passingStructuralChecker,
     boundary: { ...f.boundary, runner: {
       copyInitial: f.boundary.runner.copyInitial,
       async waitForInactive() { reportWaiting(); await writerClosed; },
@@ -509,7 +533,13 @@ it("holds exclusion and waits for the initial helper to close before transferrin
     expect(f.access.catalog.listOriginalDiscArchives()).toEqual([]);
     expect(f.access.archiveJobs.find(f.claim.id)?.status).toBe("running");
     releaseWriter();
-    expect((await saving).status).toBe("completed");
+    const saved = await saving;
+    expect(saved.status).toBe("completed");
+    expect(
+      f.access.dvdStructuralAssessments.inspect(
+        saved.originalDiscArchiveId!,
+      ),
+    ).toMatchObject({ state: "current" });
     expect(excluded).toBe(false);
   } finally { releaseWriter(); await saving.catch(() => {}); f.access.close(); }
 });
@@ -569,7 +599,7 @@ it("renews a marked initial copy through several claim leases without opening ad
   const f = await jobFixture();
   vi.useFakeTimers();
   try {
-    const saved = await runDvdInitialArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: createInProcessDvdRescueWorkspaceLock(), boundary: { ...f.boundary,
+    const saved = await runDvdInitialArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: createInProcessDvdRescueWorkspaceLock(), structuralChecker: passingStructuralChecker, boundary: { ...f.boundary,
         runner: { ...f.boundary.runner, async copyInitial(input) {
           await vi.advanceTimersByTimeAsync(3 * ARCHIVE_JOB_LEASE_DURATION_MS);
           return f.boundary.runner.copyInitial(input);

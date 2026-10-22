@@ -1,7 +1,12 @@
 import { unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { DvdStructuralFindingInput } from "@rip-dvd/data-access";
+import type {
+  DataAccess,
+  DvdStructuralFindingInput,
+  OriginalDiscArchiveId,
+} from "@rip-dvd/data-access";
+import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import {
   advanceCommittedArchiveEvidence,
   seedCommittedArchiveEvidence,
@@ -30,6 +35,25 @@ function structuralFindings(
         : null,
       evidenceReference: `synthetic-structural-evidence:${checkKind}:${outcome}`,
     })) as DvdStructuralFindingInput[];
+}
+
+async function recordStructuralAssessment(
+  fixture: ReturnType<typeof createOperatorWorkflowFixture>,
+  access: DataAccess,
+  originalDiscArchiveId: OriginalDiscArchiveId,
+  findings: readonly DvdStructuralFindingInput[],
+) {
+  const recorded = await access.assessDvdStructure(
+    originalDiscArchiveId,
+    createArchiveImageOwnership({
+      authorityRootPath: fixture.originalsLibraryPath,
+    }),
+    async () => findings,
+  );
+  if (recorded === null) {
+    throw new Error("Expected structural assessment support");
+  }
+  return recorded;
 }
 
 it("keeps historical integrity and unknown evidence distinct from zero damage", async () => {
@@ -109,10 +133,12 @@ it("keeps a current structural assessment when a later attempt fails", async () 
   });
 
   const access = fixture.openAccess();
-  const completed = access.dvdStructuralAssessments.recordCompleted({
-    checkpoint,
-    findings: structuralFindings(),
-  });
+  const completed = await recordStructuralAssessment(
+    fixture,
+    access,
+    archive.id,
+    structuralFindings(),
+  );
   const failed = access.dvdStructuralAssessments.recordFailed({
     checkpoint,
     reason: {
@@ -165,27 +191,26 @@ it("keeps a current structural assessment when a later attempt fails", async () 
 it("reuses semantic assessment identity and keeps persisted evidence immutable", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
-  const { archive, manifest } = await seedCommittedArchiveEvidence(fixture);
-  const checkpoint = {
-    originalDiscArchiveId: archive.id,
-    manifestId: manifest.id,
-    manifestRevision: manifest.revision,
-    manifestDigest: manifest.manifestDigest,
-    acceptedEndLbaExclusive: manifest.acceptedEndLbaExclusive,
-  };
+  const { archive } = await seedCommittedArchiveEvidence(fixture);
   const access = fixture.openAccess();
-  const first = access.dvdStructuralAssessments.recordCompleted({
-    checkpoint,
-    findings: structuralFindings(),
-  });
-  const noOpRetry = access.dvdStructuralAssessments.recordCompleted({
-    checkpoint,
-    findings: structuralFindings().reverse(),
-  });
-  const contradiction = access.dvdStructuralAssessments.recordCompleted({
-    checkpoint,
-    findings: structuralFindings("invalid"),
-  });
+  const first = await recordStructuralAssessment(
+    fixture,
+    access,
+    archive.id,
+    structuralFindings(),
+  );
+  const noOpRetry = await recordStructuralAssessment(
+    fixture,
+    access,
+    archive.id,
+    structuralFindings().reverse(),
+  );
+  const contradiction = await recordStructuralAssessment(
+    fixture,
+    access,
+    archive.id,
+    structuralFindings("invalid"),
+  );
   access.close();
 
   expect(noOpRetry.assessment.id).toBe(first.assessment.id);
@@ -239,16 +264,12 @@ it("marks the last structural assessment outdated when the checkpoint advances",
     classification: "skipped_untested",
   }]);
   const access = fixture.openAccess();
-  const completed = access.dvdStructuralAssessments.recordCompleted({
-    checkpoint: {
-      originalDiscArchiveId: archive.id,
-      manifestId: manifest.id,
-      manifestRevision: manifest.revision,
-      manifestDigest: manifest.manifestDigest,
-      acceptedEndLbaExclusive: manifest.acceptedEndLbaExclusive,
-    },
-    findings: structuralFindings(),
-  });
+  const completed = await recordStructuralAssessment(
+    fixture,
+    access,
+    archive.id,
+    structuralFindings(),
+  );
   access.close();
   const current = advanceCommittedArchiveEvidence(fixture, manifest);
   const currentAccess = fixture.openAccess();

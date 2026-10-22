@@ -57,6 +57,9 @@ import type {
 } from "./dvd-recovery-storage-preflight.js";
 import type {
   DvdStructuralAssessmentAccess,
+  DvdStructuralAssessmentRecord,
+  DvdStructuralCheckAttempt,
+  DvdStructuralFindingInput,
 } from "./dvd-structural-assessment.js";
 
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
@@ -2115,16 +2118,16 @@ export interface DataAccess {
   ): Promise<import("./dvd-initial-checkpoint.js").CommittedDvdCheckpointEvidence | null>;
   readonly notifications: import("./notification-types.js").NotificationAccess;
   readonly dvdRecovery: DvdRecoveryAccess;
-  withDvdInitialCheckpointRead<Result>(
+  assessDvdStructure(
     id: OriginalDiscArchiveId,
     ownership: DvdCheckpointReadOwnership,
-    inspect: (
+    assess: (
       checkpoint: import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence,
       handle: DvdCheckpointReadHandle,
-    ) => Promise<Result>,
+    ) => Promise<readonly DvdStructuralFindingInput[]>,
   ): Promise<{
-    checkpoint: import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence;
-    result: Result;
+    attempt: DvdStructuralCheckAttempt & { outcome: "completed" };
+    assessment: DvdStructuralAssessmentRecord;
   } | null>;
   readDvdInitialCheckpoint(
     id: OriginalDiscArchiveId,

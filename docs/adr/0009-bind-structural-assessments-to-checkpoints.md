@@ -24,7 +24,11 @@ immutable attempt record. A failed later attempt remains visible but does not
 erase a completed assessment for the same checkpoint.
 
 Image-reading checks run while shared Archive Image Ownership is held across
-checkpoint validation, checker execution, and final checkpoint revalidation.
+checkpoint validation, checker execution, assessment persistence, and final
+checkpoint revalidation. The completed-assessment persistence operation is not
+available outside that owned interval. The initial concrete checker reuses the
+bounded full-extent metadata profile for filesystem, navigation, and title
+enumeration evidence; unproved source coverage remains indeterminate.
 If the committed image cannot be read consistently, the attempt records a
 stable failure reason. The last completed assessment remains visible as
 outdated after the checkpoint advances until a check completes for the new
