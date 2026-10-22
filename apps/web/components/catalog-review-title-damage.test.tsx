@@ -111,6 +111,26 @@ it("shows proved percentages, partial-map unknowns, and source outside known tit
   expect(html).not.toContain("no title damage found");
 });
 
+it("does not render a positive missing-source percentage as zero", () => {
+  const html = renderToStaticMarkup(
+    <CatalogReviewTitleDamageEvidence
+      originalDiscArchiveId="synthetic-archive"
+      titleDamage={{
+        ...titleDamage,
+        items: [{
+          ...titleDamage.items[0]!,
+          uniqueSourceSectorCount: 30_000,
+          unrecoveredUniqueSourceSectorCount: 1,
+          titleMissingSourcePercentage: 1 / 30_000 * 100,
+        }],
+      }}
+    />,
+  );
+
+  expect(html).toContain("Title Missing-Source Percentage: &lt;0.01%");
+  expect(html).not.toContain("Title Missing-Source Percentage: 0%");
+});
+
 it("loads the complete current evidence through the paging route", async () => {
   const thirdItem = {
     ...titleDamage.items[0]!,

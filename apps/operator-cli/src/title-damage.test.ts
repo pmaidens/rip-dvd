@@ -1,5 +1,6 @@
 import { afterEach, expect, it } from "vitest";
 
+import type { DvdCheckpointReadOwnership } from "@rip-dvd/data-access";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 
 import {
@@ -242,7 +243,6 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     })),
   );
   expect(repeated?.id).toBe(recorded.id);
-  access.close();
 
   const review = await fixture.run(["catalog-review", "show", archive.id]);
   expect(review).toMatchObject({
@@ -315,7 +315,70 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     },
   });
 
+  let newerStructuralAssessmentIdentity: string | null = null;
+  const racingOwnership: DvdCheckpointReadOwnership = {
+    async withConsistentRead(request) {
+      return ownership.withConsistentRead({
+        ...request,
+        task: async (handle) => {
+          const prepared = await request.task(handle);
+          const newerStructural = await access.assessDvdStructure(
+            archive.id,
+            ownership,
+            async () => ({
+              outcome: "completed" as const,
+              findings: structuralResult.assessment.findings.map(
+                (finding, index) => ({
+                  ...finding,
+                  evidenceReference: `synthetic:replacement-${index}`,
+                }),
+              ),
+            }),
+          );
+          if (newerStructural?.outcome !== "completed") {
+            throw new Error("Expected a replacement Structural Assessment");
+          }
+          newerStructuralAssessmentIdentity = newerStructural.assessment.id;
+          return prepared;
+        },
+      });
+    },
+  };
+  await expect(access.assessDvdTitleDamage(
+    archive.id,
+    racingOwnership,
+    async () => mappings,
+  )).rejects.toThrow(
+    "Title Damage Assessment evidence changed before persistence",
+  );
+  expect(newerStructuralAssessmentIdentity).not.toBe(
+    structuralResult.assessment.id,
+  );
+  expect(access.dvdTitleDamageAssessments.inspect(archive.id)).toMatchObject({
+    state: "outdated",
+    currentAssessmentIdentity: null,
+    assessment: { id: recorded.id },
+  });
+  access.close();
+
   advanceCommittedArchiveEvidence(fixture, manifest);
+  const outdatedReview = await fixture.run([
+    "catalog-review",
+    "show",
+    archive.id,
+  ]);
+  expect(outdatedReview).toMatchObject({
+    exitCode: 0,
+    result: {
+      titleDamage: {
+        state: "outdated",
+        assessmentIdentity: recorded.id,
+        currentAssessmentIdentity: null,
+        items: [],
+        truncated: false,
+      },
+    },
+  });
   const outdated = await fixture.run([
     "catalog-review",
     "damage",

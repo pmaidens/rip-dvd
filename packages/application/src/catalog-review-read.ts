@@ -145,14 +145,17 @@ function serializeTitleDamage(
       unavailableReasons: inspection.unavailableReasons,
     };
   }
-  const items = assessment.items.slice(0, 20);
+  const items = inspection.state === "current"
+    ? assessment.items.slice(0, 20)
+    : [];
   return {
     state: inspection.state,
     checkpointRevision: assessment.checkpoint.manifestRevision,
     assessmentIdentity: assessment.id,
     currentAssessmentIdentity: inspection.currentAssessmentIdentity,
     items,
-    truncated: items.length < assessment.items.length,
+    truncated: inspection.state === "current" &&
+      items.length < assessment.items.length,
     unknownTitleImpact: assessment.unknownTitleImpact,
     noTitleMissingSourceProved: assessment.noTitleMissingSourceProved,
     unavailableReasons: inspection.unavailableReasons,

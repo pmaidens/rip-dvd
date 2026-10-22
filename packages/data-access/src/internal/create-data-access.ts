@@ -8861,17 +8861,19 @@ export function createDataAccessInternal(
         "Title Damage Assessment does not match the current Title Identity review set",
       );
     }
-    const structural = inspectDvdStructuralAssessment(
-      input.originalDiscArchiveId,
+    const structural = findDvdStructuralAssessment(
+      input.structuralAssessmentIdentity,
     );
     if (
-      structural.state !== "current" ||
-      structural.assessment === null ||
-      structural.currentAssessmentIdentity !==
-        input.structuralAssessmentIdentity
+      structural.checkpoint.originalDiscArchiveId !==
+        input.originalDiscArchiveId ||
+      structural.checkpoint.manifestId !== input.checkpoint.manifestId ||
+      structural.checkpoint.manifestRevision !==
+        input.checkpoint.manifestRevision ||
+      structural.checkpoint.manifestDigest !== input.checkpoint.manifestDigest
     ) {
       throw new DomainInvariantError(
-        "Title Damage Assessment requires the current Structural Assessment",
+        "Title Damage Assessment does not match its Structural Assessment",
       );
     }
     const sourceExtentsByObservation = new Map(
@@ -8890,9 +8892,9 @@ export function createDataAccessInternal(
         acceptedEndLbaExclusive: header.acceptedEndLbaExclusive,
       },
       titleIdentityReviewSetIdentity: reviewSet.reviewSetIdentity,
-      structuralAssessmentIdentity: structural.assessment.id,
+      structuralAssessmentIdentity: structural.id,
       structuralFindings: titleDamageStructuralFindings(
-        structural.assessment,
+        structural,
       ),
       unrecoveredSourceRanges: header.unrecoveredSourceRanges,
       titles: titleDamageMappings(
