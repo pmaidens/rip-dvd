@@ -10153,6 +10153,13 @@ export function createDataAccessInternal(
       },
       release(claim) {
         return database.transaction((transaction) => {
+          const recoveryBeforeRelease = requireCurrentArchiveRecoveryClaim(
+            transaction,
+            claim,
+          );
+          if (recoveryBeforeRelease.status === "stopping") {
+            return recoveryBeforeRelease;
+          }
           const removed = transaction
             .delete(archiveRecoveryWork)
             .where(and(
@@ -10168,15 +10175,6 @@ export function createDataAccessInternal(
           if (removed === undefined) {
             throw new StaleJobAttemptError(
               "Archive Recovery work",
-              claim.archiveRecoveryId,
-            );
-          }
-          const recoveryBeforeRelease = findArchiveRecoveryRecord(transaction, {
-            archiveRecoveryId: claim.archiveRecoveryId,
-          });
-          if (recoveryBeforeRelease === null) {
-            throw new RecordNotFoundError(
-              "Archive Recovery",
               claim.archiveRecoveryId,
             );
           }

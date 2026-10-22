@@ -1261,6 +1261,52 @@ it("releases stale recovery work only after archive ownership exits", async () =
   }
 }, RECOVERY_TEST_TIMEOUT_MS);
 
+it("preserves recovery work when Stop wins the reconciliation release race", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const saved = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  prepareEligibleRecovery(fixture, saved.archive.id, [{
+    startLba: 10,
+    sectorCount: 1,
+  }]);
+  const access = fixture.openAccess();
+  try {
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
+    const ownership: ArchiveImageOwnership = {
+      ...defaultArchiveImageOwnership,
+      async withWriter(request) {
+        const result = await defaultArchiveImageOwnership.withWriter(request);
+        access.archiveRecoveryWork.requestStop({
+          mutationKey: "00000000-0000-4000-8000-000000000478",
+          archiveRecoveryId: recoveryWorkClaim.archiveRecoveryId,
+          attemptId: recoveryWorkClaim.attemptId,
+        });
+        return result;
+      },
+    };
+
+    await expect(reconcileDvdRecoveryCheckpoint({
+      access,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      originalDiscArchiveId: saved.archive.id,
+      atomicWriter: syntheticAtomicWriter,
+      archiveImageOwnership: ownership,
+    })).resolves.toMatchObject({ outcome: "already_consistent" });
+
+    expect(access.catalog.findArchiveRecovery(saved.archive.id))
+      .toMatchObject({
+        status: "stopping",
+        work: { claimToken: recoveryWorkClaim.claimToken },
+      });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+}, RECOVERY_TEST_TIMEOUT_MS);
+
 it.each(["limit=0", "limit=101", "cursor=bad", "offset=1", "limit=1&limit=2"])("rejects invalid paging %s", async (query) => {
   const fixture = createOperatorWorkflowFixture();
   const access = fixture.openAccess();
