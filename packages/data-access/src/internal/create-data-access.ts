@@ -8731,11 +8731,7 @@ export function createDataAccessInternal(
         dvdTitleDamageAssessments.originalDiscArchiveId,
         originalDiscArchiveId,
       ))
-      .orderBy(
-        desc(dvdTitleDamageAssessments.manifestRevision),
-        desc(dvdTitleDamageAssessments.createdAt),
-        desc(dvdTitleDamageAssessments.id),
-      ).limit(1).get();
+      .orderBy(desc(dvdTitleDamageAssessments.sequence)).limit(1).get();
     const currentRow = reviewSet === null ||
         structural.state !== "current" ||
         structural.currentAssessmentIdentity === null
@@ -8762,10 +8758,7 @@ export function createDataAccessInternal(
           dvdTitleDamageAssessments.structuralAssessmentIdentity,
           structural.currentAssessmentIdentity,
         ),
-      )).orderBy(
-        desc(dvdTitleDamageAssessments.createdAt),
-        desc(dvdTitleDamageAssessments.id),
-      ).limit(1).get();
+      )).orderBy(desc(dvdTitleDamageAssessments.sequence)).limit(1).get();
     const assessmentRow = currentRow ?? latestRow;
     const reasons = [] as Array<{ code: string; message: string }>;
     if (reviewSet === null) {
@@ -8966,6 +8959,8 @@ export function createDataAccessInternal(
         );
       }
       transaction.insert(dvdTitleDamageAssessments).values({
+        sequence:
+          sql<number>`coalesce((select max(${dvdTitleDamageAssessments.sequence}) from ${dvdTitleDamageAssessments}), 0) + 1`,
         id: assessment.id,
         originalDiscArchiveId: input.originalDiscArchiveId,
         manifestId: input.checkpoint.manifestId,

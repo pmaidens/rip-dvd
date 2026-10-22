@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 
 import type { DvdCheckpointReadOwnership } from "@rip-dvd/data-access";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
@@ -13,9 +13,14 @@ import {
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 
-afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
+afterEach(() => {
+  vi.useRealTimers();
+  fixtures.splice(0).forEach((fixture) => fixture.dispose());
+});
 
 it("pages revision-bound Title Damage evidence through the public JSON CLI", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-10-22T12:00:00.000Z"));
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const { archive, manifest } = await seedCommittedArchiveEvidence(fixture, [
@@ -315,6 +320,33 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     },
   });
 
+  const laterRecorded = await access.assessDvdTitleDamage(
+    archive.id,
+    ownership,
+    async () => mappings.map((mapping, index) => index === 0
+      ? {
+        ...mapping,
+        mappingCoverage: {
+          ...mapping.mappingCoverage,
+          policyVersion: "synthetic-title-map-v2",
+        },
+      }
+      : mapping),
+  );
+  if (laterRecorded === null) {
+    throw new Error("Expected a later Title Damage Assessment");
+  }
+  expect(laterRecorded.createdAt).toEqual(recorded.createdAt);
+  expect(
+    laterRecorded.id.localeCompare(recorded.id),
+    `${laterRecorded.id} must sort before ${recorded.id}`,
+  ).toBeLessThan(0);
+  expect(access.dvdTitleDamageAssessments.inspect(archive.id)).toMatchObject({
+    state: "current",
+    currentAssessmentIdentity: laterRecorded.id,
+    assessment: { id: laterRecorded.id },
+  });
+
   let newerStructuralAssessmentIdentity: string | null = null;
   const racingOwnership: DvdCheckpointReadOwnership = {
     async withConsistentRead(request) {
@@ -357,7 +389,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   expect(access.dvdTitleDamageAssessments.inspect(archive.id)).toMatchObject({
     state: "outdated",
     currentAssessmentIdentity: null,
-    assessment: { id: recorded.id },
+    assessment: { id: laterRecorded.id },
   });
   access.close();
 
@@ -372,7 +404,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     result: {
       titleDamage: {
         state: "outdated",
-        assessmentIdentity: recorded.id,
+        assessmentIdentity: laterRecorded.id,
         currentAssessmentIdentity: null,
         items: [],
         truncated: false,
@@ -390,7 +422,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     exitCode: 0,
     result: {
       state: "outdated",
-      assessmentIdentity: recorded.id,
+      assessmentIdentity: laterRecorded.id,
       currentAssessmentIdentity: null,
       items: [],
       truncated: false,

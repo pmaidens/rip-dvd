@@ -2717,6 +2717,16 @@
       "table": "dvd_structural_check_attempts"
     },
     {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "sequence",
+      "entityType": "columns",
+      "table": "dvd_title_damage_assessments"
+    },
+    {
       "type": "text",
       "notNull": false,
       "autoincrement": false,
@@ -7348,11 +7358,7 @@
           "isExpression": false
         },
         {
-          "value": "created_at",
-          "isExpression": false
-        },
-        {
-          "value": "id",
+          "value": "sequence",
           "isExpression": false
         }
       ],
@@ -7360,6 +7366,20 @@
       "where": null,
       "origin": "manual",
       "name": "dvd_title_damage_assessments_checkpoint_idx",
+      "entityType": "indexes",
+      "table": "dvd_title_damage_assessments"
+    },
+    {
+      "columns": [
+        {
+          "value": "sequence",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "dvd_title_damage_assessments_sequence_unique",
       "entityType": "indexes",
       "table": "dvd_title_damage_assessments"
     },
@@ -8591,6 +8611,12 @@
       "name": "dvd_structural_check_attempts_shape_check",
       "entityType": "checks",
       "table": "dvd_structural_check_attempts"
+    },
+    {
+      "value": "typeof(\"sequence\") = 'integer' and \"sequence\" > 0",
+      "name": "dvd_title_damage_assessments_sequence_check",
+      "entityType": "checks",
+      "table": "dvd_title_damage_assessments"
     },
     {
       "value": "\"id\" is not null",

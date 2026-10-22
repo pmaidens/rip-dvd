@@ -1576,6 +1576,7 @@ export const dvdStructuralCheckAttempts = sqliteTable(
 export const dvdTitleDamageAssessments = sqliteTable(
   "dvd_title_damage_assessments",
   {
+    sequence: integer("sequence").notNull(),
     id: text("id").notNull().primaryKey(),
     originalDiscArchiveId: text("original_disc_archive_id")
       .$type<OriginalDiscArchiveId>()
@@ -1612,8 +1613,14 @@ export const dvdTitleDamageAssessments = sqliteTable(
     index("dvd_title_damage_assessments_checkpoint_idx").on(
       table.originalDiscArchiveId,
       table.manifestRevision,
-      table.createdAt,
-      table.id,
+      table.sequence,
+    ),
+    uniqueIndex("dvd_title_damage_assessments_sequence_unique").on(
+      table.sequence,
+    ),
+    check(
+      "dvd_title_damage_assessments_sequence_check",
+      sql`typeof(${table.sequence}) = 'integer' and ${table.sequence} > 0`,
     ),
     check(
       "dvd_title_damage_assessments_identity_check",

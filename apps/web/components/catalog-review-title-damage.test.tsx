@@ -207,7 +207,25 @@ it("ignores a page response after the assessment evidence changes", async () => 
   const pendingResponse = new Promise<Response>((resolve) => {
     resolveResponse = resolve;
   });
-  vi.stubGlobal("fetch", vi.fn(() => pendingResponse));
+  const fetcher = vi.fn()
+    .mockReturnValueOnce(pendingResponse)
+    .mockResolvedValueOnce(Response.json({
+      schemaVersion: 1,
+      originalDiscArchiveId: "synthetic-archive",
+      state: "current",
+      checkpointRevision: 4,
+      assessmentIdentity: "synthetic-assessment",
+      currentAssessmentIdentity: "synthetic-assessment",
+      createdAt: "2026-10-22T12:00:00.000Z",
+      items: titleDamage.items,
+      itemOffset: 0,
+      truncated: false,
+      nextCursor: null,
+      unknownTitleImpact: titleDamage.unknownTitleImpact,
+      noTitleMissingSourceProved: false,
+      unavailableReasons: [],
+    }));
+  vi.stubGlobal("fetch", fetcher);
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -269,6 +287,21 @@ it("ignores a page response after the assessment evidence changes", async () => 
 
   expect(container.textContent).toContain("DVD title 99");
   expect(container.textContent).not.toContain("DVD title 77");
+
+  await act(async () => root.render(
+    <CatalogReviewTitleDamageEvidence
+      originalDiscArchiveId="synthetic-archive"
+      titleDamage={{ ...titleDamage, truncated: true }}
+    />,
+  ));
+  const restoredButton = container.querySelector("button");
+  expect(restoredButton).not.toBeNull();
+  expect(restoredButton?.hasAttribute("disabled")).toBe(false);
+
+  await act(async () => restoredButton?.click());
+
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(container.querySelector("button")).toBeNull();
 
   await act(async () => root.unmount());
 });
