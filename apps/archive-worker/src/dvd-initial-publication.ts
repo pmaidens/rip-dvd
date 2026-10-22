@@ -7,6 +7,10 @@ import {
   canonicalPublicationJson, createDvdInitialManifest, validateDvdInitialManifest,
   type DvdInitialManifest,
 } from "./dvd-initial-manifest.js";
+import {
+  createInitialDvdSourceSampleManifest,
+  DvdSourceSampleImageConflictError,
+} from "./dvd-source-sample-manifest.js";
 
 export type DvdInitialPublicationFaultCode =
   | "DVD_PUBLICATION_INTENT_CONFLICT" | "DVD_PUBLICATION_INTENT_MISSING"
@@ -329,7 +333,6 @@ export async function publishDvdInitialArchive(options: PublicationIdentity & Pu
   proven: ProvenDvdInitialArchiveBoundary;
 }) {
   await authorize(options);
-  const manifest = createDvdInitialManifest(options);
   const paths = await pathsFor(options);
   const sourcePath = resolve(options.proven.initialCopy.imagePath);
   const stagingPath = join(await realpath(dirname(sourcePath)), basename(sourcePath));
@@ -340,6 +343,36 @@ export async function publishDvdInitialArchive(options: PublicationIdentity & Pu
   ) {
     throw new DvdInitialPublicationFault("DVD_PUBLICATION_PATH_CONFLICT");
   }
+  const baseManifest = createDvdInitialManifest(options);
+  let sourceSampleManifest;
+  try {
+    sourceSampleManifest = await createInitialDvdSourceSampleManifest({
+      imagePath: stagingPath,
+      image: {
+        filesystemIdentity: baseManifest.image.filesystemIdentity,
+        mtimeNs: baseManifest.image.mtimeNs,
+        sizeBytes: baseManifest.boundaryPublishedSizeBytes,
+      },
+      sourceMetadataFingerprint: options.imageFingerprint,
+      acceptedEndLbaExclusive: baseManifest.acceptedEndLbaExclusive,
+      checkpointRevision: baseManifest.revision,
+      checkpointDigest: baseManifest.manifestDigest,
+      unrecoveredSourceRanges: baseManifest.unrecoveredSourceRanges,
+      authorizeRead: () => authorize(options),
+    });
+  } catch (error) {
+    if (error instanceof DvdSourceSampleImageConflictError) {
+      throw new DvdInitialPublicationFault(
+        "DVD_PUBLICATION_IMAGE_CONFLICT",
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+  const manifest = createDvdInitialManifest({
+    ...options,
+    sourceSampleManifest,
+  });
   const intent: PublicationIntent = { version: "dvd-initial-publication-v1", stagingPath, manifest };
   // Never create intent around a foreign existing artifact or checkpoint.
   if (await readRecord(paths.intent, "DVD_PUBLICATION_INTENT_CONFLICT") === undefined &&

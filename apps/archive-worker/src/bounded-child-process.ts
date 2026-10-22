@@ -24,6 +24,22 @@ export interface BoundedCommandProcessCompletion {
   stdout: string;
 }
 
+export interface BoundedRawCommandProcessCompletion {
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  stderr: Buffer;
+  stdout: Buffer;
+}
+
+export interface StartNodeBoundedCommandProcessOptions {
+  arguments_: readonly string[];
+  executable: string;
+  extraFileDescriptors?: readonly number[];
+  maxOutputBytes: number;
+  operationName: string;
+  terminateProcess?: (child: { kill(signal: NodeJS.Signals): boolean }) => void;
+}
+
 export interface ActiveBoundedCommandProcess
   extends ActiveBoundedProcess<BoundedCommandProcessCompletion> {}
 
@@ -45,6 +61,7 @@ interface NodeBoundedChildProcessLauncherOptions {
 interface StartNodeBoundedChildProcessOptions {
   arguments_: readonly string[];
   executable: string;
+  extraFileDescriptors?: readonly number[];
   maxOutputBytes: number;
   operationName: string;
   terminateProcess: (child: { kill(signal: NodeJS.Signals): boolean }) => void;
@@ -181,17 +198,26 @@ export function createBoundedSingleFlightCoordinator<Request, Result>({
 function startNodeBoundedChildProcess({
   arguments_,
   executable,
+  extraFileDescriptors = [],
   maxOutputBytes,
   operationName,
   terminateProcess,
-}: StartNodeBoundedChildProcessOptions): ActiveBoundedCommandProcess {
+}: StartNodeBoundedChildProcessOptions): ActiveBoundedProcess<
+  BoundedRawCommandProcessCompletion
+> {
   if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) {
     throw new Error(`${operationName} output bound is invalid`);
   }
   const child = spawn(executable, [...arguments_], {
     shell: false,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe", ...extraFileDescriptors],
   });
+  if (child.stdout === null || child.stderr === null) {
+    child.kill("SIGKILL");
+    throw new Error(`${operationName} pipes are unavailable`);
+  }
+  const childStdout = child.stdout;
+  const childStderr = child.stderr;
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
   let stdoutBytes = 0;
@@ -199,10 +225,10 @@ function startNodeBoundedChildProcess({
   let operationSettled = false;
   let processClosed = false;
   let cancellationRequested = false;
-  let resolveResult!: (value: BoundedCommandProcessCompletion) => void;
+  let resolveResult!: (value: BoundedRawCommandProcessCompletion) => void;
   let rejectResult!: (reason: unknown) => void;
   let resolveClosed!: () => void;
-  const result = new Promise<BoundedCommandProcessCompletion>((resolve, reject) => {
+  const result = new Promise<BoundedRawCommandProcessCompletion>((resolve, reject) => {
     resolveResult = resolve;
     rejectResult = reject;
   });
@@ -215,7 +241,7 @@ function startNodeBoundedChildProcess({
       rejectResult(error);
     }
   };
-  const resolveOperation = (value: BoundedCommandProcessCompletion) => {
+  const resolveOperation = (value: BoundedRawCommandProcessCompletion) => {
     if (!operationSettled) {
       operationSettled = true;
       resolveResult(value);
@@ -239,13 +265,13 @@ function startNodeBoundedChildProcess({
     }
     return Math.min(maxOutputBytes + 1, currentBytes + chunk.byteLength);
   };
-  child.stdout.on("data", (chunk: Buffer) => {
+  childStdout.on("data", (chunk: Buffer) => {
     stdoutBytes = capture(stdoutChunks, stdoutBytes, chunk);
     if (stdoutBytes > maxOutputBytes) {
       child.kill("SIGKILL");
     }
   });
-  child.stderr.on("data", (chunk: Buffer) => {
+  childStderr.on("data", (chunk: Buffer) => {
     stderrBytes = capture(stderrChunks, stderrBytes, chunk);
     if (stderrBytes > maxOutputBytes) {
       child.kill("SIGKILL");
@@ -272,8 +298,8 @@ function startNodeBoundedChildProcess({
     resolveOperation({
       exitCode: code,
       signal,
-      stderr: Buffer.concat(stderrChunks, stderrBytes).toString("utf8"),
-      stdout: Buffer.concat(stdoutChunks, stdoutBytes).toString("utf8"),
+      stderr: Buffer.concat(stderrChunks, stderrBytes),
+      stdout: Buffer.concat(stdoutChunks, stdoutBytes),
     });
   });
 
@@ -285,8 +311,8 @@ function startNodeBoundedChildProcess({
         return;
       }
       cancellationRequested = true;
-      child.stdout.destroy();
-      child.stderr.destroy();
+      childStdout.destroy();
+      childStderr.destroy();
       try {
         terminateProcess(child);
       } finally {
@@ -296,6 +322,15 @@ function startNodeBoundedChildProcess({
       }
     },
   };
+}
+
+export function startNodeBoundedCommandProcess({
+  terminateProcess = (child) => void child.kill("SIGKILL"),
+  ...options
+}: StartNodeBoundedCommandProcessOptions): ActiveBoundedProcess<
+  BoundedRawCommandProcessCompletion
+> {
+  return startNodeBoundedChildProcess({ ...options, terminateProcess });
 }
 
 export function createNodeBoundedChildProcessLauncher({
@@ -318,9 +353,9 @@ export function createNodeBoundedChildProcessLauncher({
         result: activeProcess.result.then(
           ({ exitCode, signal, stderr, stdout }) => {
             if (exitCode === 0) {
-              return stdout;
+              return stdout.toString("utf8");
             }
-            const detail = optionalBoundedText(stderr, 500);
+            const detail = optionalBoundedText(stderr.toString("utf8"), 500);
             throw new Error(
               `${operationName} failed${detail ? `: ${detail}` : ` with ${signal ?? `status ${exitCode}`}`}`,
             );
@@ -338,13 +373,24 @@ export function createNodeBoundedCommandProcessLauncher(
     options.terminateProcess ?? ((child) => void child.kill("SIGKILL"));
   return {
     start(executable, arguments_, maxOutputBytes) {
-      return startNodeBoundedChildProcess({
+      const activeProcess = startNodeBoundedCommandProcess({
         executable,
         arguments_,
         maxOutputBytes,
         operationName: "device command",
         terminateProcess,
       });
+      return {
+        ...activeProcess,
+        result: activeProcess.result.then(
+          ({ exitCode, signal, stderr, stdout }) => ({
+            exitCode,
+            signal,
+            stderr: stderr.toString("utf8"),
+            stdout: stdout.toString("utf8"),
+          }),
+        ),
+      };
     },
   };
 }

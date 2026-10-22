@@ -104,6 +104,20 @@ rediscovered, its new metadata fingerprint is derived from the title map and
 size already stored in the catalog; compatibility does not require rereading
 the disc or ISO.
 
+DVD Disc Verification is a second, strictly bounded optical-read exception. The
+initial publication selects at most one suitable 32-sector window from each of
+16 equal address bands by reading the already durable local image; it never
+reads an unresolved placeholder. It saves the raw-sector digest, address,
+representation, policy, initial checkpoint, and source metadata fingerprint in
+the publication-digest-protected manifest and an immutable database projection.
+A later verification reads each saved window from the inserted disc at most
+once, with at most 16 reads, 512 sectors, and 1 MiB total. No new read starts
+after 60 seconds. An in-flight helper has the same bounded lifetime, terminates
+if its worker exits, and must be reaped before verification completes. These
+samples establish only bounded recovery-source identity;
+they are not a whole-disc hash or a completeness proof. DVD Disc Verification
+is neither Filesystem Verification nor an Archive Audit.
+
 This deliberately trades sector-level duplicate detection and general
 post-copy raw-image hash verification for materially less optical-drive wear
 and shorter archive time.
@@ -134,7 +148,12 @@ predecessor digest, exact recovery-read digest when present, image and extent,
 boundary digest, and normalized source-map digest. Data-access constructors
 compute these values before a writer persists them, and authoritative reads
 validate the current manifest, its immediate transition, and the marked
-source-job provenance. The
+source-job provenance without loading the complete recovery history. Revision
+2 and later are represented by immutable
+`recovery-manifest-<revision>.json` records beside the initial publication
+manifest; an authoritative current-checkpoint read validates the current record
+and its immediate filesystem predecessor before accepting the durable pointer
+and matching database projection. The
 current digest is the authenticated checkpoint for that bounded projection;
 a separately bounded evidence-chain audit validates every predecessor,
 recovery read, transition, and stored digest. Operator evidence supplies

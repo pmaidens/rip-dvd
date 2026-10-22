@@ -75,10 +75,7 @@ export function dvdEvidenceRangesAfterRecoveryRead(
 export function assertDvdEvidenceRangeTransition(
   previous: readonly DvdUnrecoveredSourceRange[],
   current: readonly DvdUnrecoveredSourceRange[],
-  recoveryRead: {
-    startLba: number;
-    outcome: DvdArchiveRecoveryReadOutcome;
-  },
+  recoveryRead: { startLba: number; outcome: DvdArchiveRecoveryReadOutcome },
 ): void {
   const expected = dvdEvidenceRangesAfterRecoveryRead(
     previous,

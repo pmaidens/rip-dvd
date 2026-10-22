@@ -22,6 +22,8 @@ archive-owned `.dvd-evidence/<archive-id>/` directory containing:
   staging path. It contains the complete expected manifest so interrupted
   publication can finish without regenerating evidence from a damaged source.
 - `initial-manifest.json`, the immutable revision 1 manifest.
+- `recovery-manifest-<revision>.json`, each immutable revision 2 or later
+  manifest with its one-sector recovery-read evidence.
 - `checkpoint.json`, the authoritative committed checkpoint pointer.
 
 These files are runtime operator evidence. They must never be committed to the
@@ -31,7 +33,12 @@ The manifest binds the archive and source Archive Job, the existing image
 fingerprint, filesystem device/inode and validated modification time, accepted
 extent, full Archive Boundary Evidence and digest, complete normalized source
 map and digest, initial-copy diagnostics, metadata decision, integrity
-projection, and applicable publication/copy/metadata/boundary/integrity policies.
+projection, applicable publication/copy/metadata/boundary/integrity policies,
+and the versioned distributed source-sample manifest when suitable windows are
+available. The sample manifest binds its raw-byte representation, source
+metadata fingerprint, accepted extent, initial checkpoint, exact sample
+addresses and lengths, and digests. Samples are selected from the proven local
+image and never from unresolved placeholder ranges.
 The filesystem identity is an inode identity, not a raw-content fingerprint.
 It requires the same filesystem and a quiescent writer. The boundary workflow
 captures the modification time while checking that the proof's image remained
@@ -47,12 +54,26 @@ level. Arrays retain their order. The `publicationDigest` field itself is
 excluded from that payload. The pointer contains both digests and the manifest
 identity and revision. An initial manifest has no predecessor or recovery read.
 Publication creates no earlier image revision or recovery history.
+The database stores an exact projection of the publication's source-sample
+manifest. Update and deletion triggers make that projection immutable; readers
+compare it canonically with the publication-digest-protected manifest before it
+can authorize verification.
+
+For revision 2 or later, a current-checkpoint read also loads the immutable
+current recovery manifest and its immediate predecessor from this directory.
+It validates both manifest digests, the current recovery-read digest, the exact
+one-sector source-map transition, and the archive, image, extent, boundary,
+predecessor, revision, and pointer bindings before the database projection can
+authorize an operator action. Revision 2 names `initial-manifest.json` as its
+predecessor; later revisions name the preceding recovery-manifest file.
 
 ## Durability order
 
 1. Create and synchronize archive-owned evidence directories and their parents.
    Persist the complete publication intent and synchronize its directory.
-2. Verify and synchronize the proven image through an `O_NOFOLLOW` descriptor.
+2. Verify the proven image through an `O_NOFOLLOW` descriptor, derive bounded
+   distributed samples from that same inode, then verify and synchronize it
+   again.
 3. Write and synchronize the manifest, atomically install it without overwrite,
    and synchronize its containing directory.
 4. Hard-link the image into the Originals Library without overwrite. Verify

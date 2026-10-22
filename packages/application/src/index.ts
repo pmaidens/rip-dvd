@@ -11,6 +11,7 @@ import type {
   DataAccess,
   ArchiveAuditBounds,
   ArchiveRequestId,
+  ArchiveRecoveryId,
   DetectedDiscId,
   EncodingProfile,
   EncodingProfileId,
@@ -34,6 +35,10 @@ import {
 import type { CatalogReviewRearchiveMappingInput } from "./catalog-review-command.js";
 import { suggestCatalogReview } from "./catalog-suggestion.js";
 import { generateMutationKey, InvalidMutationKeyError, parseMutationKey } from "./mutation-key.js";
+import {
+  inspectDvdDiscVerification,
+  requestDvdDiscVerification,
+} from "./dvd-disc-verification.js";
 import {
   mutateMediaItem,
   previewMediaItemChange,
@@ -218,6 +223,11 @@ export {
   validOperationLimit,
   waitForOperation,
 } from "./operations.js";
+export {
+  DvdDiscVerificationUnavailableError,
+  inspectDvdDiscVerification,
+  type DvdDiscVerificationAvailabilityCode,
+} from "./dvd-disc-verification.js";
 export type {
   OperationInspectionOptions,
   OperationKind,
@@ -464,6 +474,48 @@ export function createApplicationOperations(
         mutationKey, id: input.discInspectionId as DiscInspectionId,
       });
       return { inspection };
+    },
+    inspectDvdDiscVerification: (archiveRecoveryId: string) => {
+      const id = requiredString(
+        archiveRecoveryId,
+        "Archive Recovery ID",
+      );
+      if (id.length > 256) throw new RangeError("Invalid Archive Recovery ID.");
+      return inspectDvdDiscVerification(access, id as ArchiveRecoveryId);
+    },
+    verifyDisc: (input: {
+      mutationKey: unknown;
+      archiveRecoveryId: unknown;
+      discInspectionId: unknown;
+      checkpointRevision: unknown;
+      checkpointDigest: unknown;
+    }) => {
+      const archiveRecoveryId = requiredString(
+        input.archiveRecoveryId,
+        "Archive Recovery ID",
+      );
+      const discInspectionId = requiredString(
+        input.discInspectionId,
+        "Disc Inspection ID",
+      );
+      const checkpointDigest = requiredString(
+        input.checkpointDigest,
+        "checkpoint digest",
+      );
+      if (
+        archiveRecoveryId.length > 256 ||
+        discInspectionId.length > 256 ||
+        !Number.isSafeInteger(input.checkpointRevision) ||
+        Number(input.checkpointRevision) <= 0 ||
+        !/^[0-9a-f]{64}$/.test(checkpointDigest)
+      ) throw new RangeError("Invalid DVD Disc Verification input.");
+      return requestDvdDiscVerification(access, {
+        mutationKey: parseMutationKey(input.mutationKey),
+        archiveRecoveryId: archiveRecoveryId as ArchiveRecoveryId,
+        discInspectionId: discInspectionId as DiscInspectionId,
+        checkpointRevision: Number(input.checkpointRevision),
+        checkpointDigest,
+      });
     },
     submitFilesystemVerification: (input: {
       mutationKey: unknown;

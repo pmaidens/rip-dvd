@@ -6,6 +6,8 @@ import {
   type DvdArchiveEvidenceManifestDigests,
   type CleanReadArchiveIntegrityEvidence,
   type IncompleteReadArchiveIntegrityEvidence,
+  type DvdSourceSampleManifest,
+  validateDvdSourceSampleManifest,
 } from "@rip-dvd/data-access";
 import type { ProvenDvdInitialArchiveBoundary } from "./dvd-initial-boundary.js";
 import { validateDvdInitialCopyResult, type DvdInitialCopyResult } from "./dvd-initial-copy.js";
@@ -26,17 +28,20 @@ export interface DvdInitialManifest extends DvdArchiveEvidenceManifestDigestInpu
     metadata: "dvd-full-extent-metadata-v1" | null;
   };
   publicationDigest: string;
+  sourceSampleManifest?: DvdSourceSampleManifest;
 }
 
 export { canonicalPublicationJson } from "@rip-dvd/data-access";
 
 export function createDvdInitialManifest({
   originalDiscArchiveId, sourceArchiveJobId, imageFingerprint, proven,
+  sourceSampleManifest,
 }: {
   originalDiscArchiveId: string;
   sourceArchiveJobId: string;
   imageFingerprint: string;
   proven: ProvenDvdInitialArchiveBoundary;
+  sourceSampleManifest?: DvdSourceSampleManifest;
 }): DvdInitialManifest {
   const { boundaryEvidence, initialCopy, metadataDecision } = proven;
   if (!sourceArchiveJobId || !/^\d+:\d+$/.test(initialCopy.imageFilesystemIdentity) || !/^\d+$/.test(proven.imageMtimeNs))
@@ -79,7 +84,22 @@ export function createDvdInitialManifest({
     },
     metadataDecision, integrity,
     policies: { publication: DVD_INITIAL_PUBLICATION_POLICY_VERSION, copy: initialCopy.copyPolicyVersion, metadata: metadataDecision?.policyVersion ?? null },
+    ...(sourceSampleManifest === undefined ? {} : {
+      sourceSampleManifest: validateDvdSourceSampleManifest(
+        sourceSampleManifest,
+      ),
+    }),
   };
+  if (sourceSampleManifest !== undefined && (
+    sourceSampleManifest.sourceMetadataFingerprint !== imageFingerprint ||
+    sourceSampleManifest.acceptedEndLbaExclusive !==
+      input.acceptedEndLbaExclusive ||
+    sourceSampleManifest.checkpointRevision !== input.revision ||
+    sourceSampleManifest.checkpointDigest !==
+      createDvdArchiveEvidenceManifestDigests(input).manifestDigest
+  )) {
+    throw new Error("DVD source sample manifest provenance is invalid");
+  }
   // Clone at the ownership boundary. Caller mutations cannot change this save.
   return JSON.parse(canonicalPublicationJson({ ...manifest,
     publicationDigest: createDvdInitialPublicationDigest(manifest),
@@ -92,6 +112,9 @@ export function validateDvdInitialManifest(value: unknown): DvdInitialManifest {
     originalDiscArchiveId: candidate.originalDiscArchiveId,
     sourceArchiveJobId: candidate.sourceArchiveJobId,
     imageFingerprint: candidate.imageFingerprint,
+    ...(Object.hasOwn(candidate, "sourceSampleManifest")
+      ? { sourceSampleManifest: candidate.sourceSampleManifest }
+      : {}),
     proven: {
       boundaryEvidence: candidate.boundaryEvidence, metadataDecision: candidate.metadataDecision,
       imageMtimeNs: candidate.image.mtimeNs,

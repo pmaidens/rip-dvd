@@ -13,8 +13,11 @@ import { expect, it } from "vitest";
 import { defaultArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import {
   ENCODE_JOB_LEASE_DURATION_MS,
+  type DvdDiscVerificationId,
+  type DvdRecoveryWriteAuthority,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
+import { beginSettledDiscInspectionForTest } from "@rip-dvd/data-access/test-support";
 import {
   commitDvdRecoveryBatch,
   type DvdRecoveryAtomicWriter,
@@ -87,12 +90,12 @@ function prepareEligibleRecovery(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   archiveId: string,
   ranges: readonly { startLba: number; sectorCount: number }[],
-) {
+): DvdRecoveryWriteAuthority {
   const badSectorCount = ranges.reduce(
     (count, range) => count + range.sectorCount,
     0,
   );
-  const database = new DatabaseSync(fixture.databasePath);
+  let database = new DatabaseSync(fixture.databasePath);
   try {
     database.prepare(`UPDATE original_disc_archives SET
       integrity = 'incomplete_read', integrity_evidence_revision = 1,
@@ -113,6 +116,83 @@ function prepareEligibleRecovery(
   } finally {
     database.close();
   }
+  const access = fixture.openAccess();
+  const archive = access.catalog.listOriginalDiscArchives({
+    ids: [archiveId as OriginalDiscArchiveId],
+  })[0]!;
+  const recovery = access.catalog.findArchiveRecovery(archive.id)!;
+  const sourceDisc = access.catalog.listDetectedDiscs(undefined, {
+    ids: [archive.detectedDiscId],
+  })[0]!;
+  const drive = access.catalog.listOpticalDrives({
+    ids: [sourceDisc.opticalDriveId],
+  })[0]!;
+  access.catalog.upsertOpticalDrive({
+    devicePath: drive.devicePath,
+    isEnabled: true,
+    isPresent: true,
+  });
+  const started = beginSettledDiscInspectionForTest(access, {
+    opticalDriveId: sourceDisc.opticalDriveId,
+    mediaGeneration: "synthetic-recovery-generation",
+    mediaCapacityBytes: 1_024 * 2_048,
+  });
+  access.discInspections.record(started.claim, {
+    type: "metadata",
+    volumeLabel: "SYNTHETIC_RECOVERY",
+    titleCount: 1,
+    chapterCount: 1,
+    audioStreamCount: 1,
+    subtitleStreamCount: 0,
+    totalBytes: 1_024 * 2_048,
+  });
+  const inspection = access.discInspections.record(started.claim, {
+    type: "complete",
+    detectedDiscId: sourceDisc.id,
+  });
+  started.restoreSystemTime();
+  const header = access.catalog.findDvdArchiveEvidenceHeader(archive.id)!;
+  access.close();
+
+  const verificationId = `${archiveId}:verification` as DvdDiscVerificationId;
+  const workerExecutionId = "synthetic-verification-worker-execution";
+  database = new DatabaseSync(fixture.databasePath);
+  try {
+    database.prepare(`INSERT INTO dvd_disc_verifications (
+      id, archive_recovery_id, attempt_ordinal, original_disc_archive_id,
+      disc_inspection_id, detected_disc_id, media_generation,
+      source_metadata_fingerprint, observed_metadata_fingerprint,
+      checkpoint_revision, checkpoint_digest, status, outcome, reasons,
+      findings, budget_exhausted, worker_execution_id, claim_token,
+      claimed_at, started_at, completed_at, failure_code, created_at, updated_at
+    ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', 'match', '[]',
+      '[]', 0, ?, NULL, NULL, 1, 1, NULL, 1, 1)`).run(
+      verificationId,
+      recovery.id,
+      archive.id,
+      inspection.id,
+      sourceDisc.id,
+      inspection.mediaGeneration,
+      archive.fingerprint,
+      archive.fingerprint,
+      header.currentManifestRevision,
+      header.currentManifestDigest,
+      workerExecutionId,
+    );
+  } finally {
+    database.close();
+  }
+  return {
+    verificationId,
+    archiveRecoveryId: recovery.id,
+    originalDiscArchiveId: archive.id,
+    discInspectionId: inspection.id,
+    detectedDiscId: sourceDisc.id,
+    mediaGeneration: inspection.mediaGeneration,
+    verificationWorkerExecutionId: workerExecutionId,
+    checkpointRevision: header.currentManifestRevision,
+    checkpointDigest: header.currentManifestDigest,
+  };
 }
 
 function claimRecovery(
@@ -192,7 +272,7 @@ it("rejects a recovery batch without a current durable work claim", async () => 
     sectorCount: 1,
     classification: "skipped_untested",
   }]);
-  prepareEligibleRecovery(fixture, saved.archive.id, [{
+  const writeAuthority = prepareEligibleRecovery(fixture, saved.archive.id, [{
     startLba: 10,
     sectorCount: 1,
   }]);
@@ -206,6 +286,7 @@ it("rejects a recovery batch without a current durable work claim", async () => 
       originalsLibraryPath: fixture.originalsLibraryPath,
       originalDiscArchiveId: saved.archive.id,
       recoveryWorkClaim: staleClaim,
+      writeAuthority,
       observation: {
         startLba: 10,
         outcome: "recovered",
@@ -231,7 +312,7 @@ it("rejects a recovery batch whose durable claim is released before mutation", a
     sectorCount: 1,
     classification: "skipped_untested",
   }]);
-  prepareEligibleRecovery(fixture, saved.archive.id, [{
+  const writeAuthority = prepareEligibleRecovery(fixture, saved.archive.id, [{
     startLba: 10,
     sectorCount: 1,
   }]);
@@ -245,6 +326,7 @@ it("rejects a recovery batch whose durable claim is released before mutation", a
       originalsLibraryPath: fixture.originalsLibraryPath,
       originalDiscArchiveId: saved.archive.id,
       recoveryWorkClaim,
+      writeAuthority,
       observation: {
         startLba: 10,
         outcome: "recovered",
@@ -265,6 +347,81 @@ it("rejects a recovery batch whose durable claim is released before mutation", a
   }
 }, RECOVERY_TEST_TIMEOUT_MS);
 
+it.each(["removed", "replaced"] as const)(
+  "rejects a recovery batch when the verified source is %s before mutation",
+  async (change) => {
+    const fixture = createOperatorWorkflowFixture();
+    const saved = await seedCommittedArchiveEvidence(fixture, [{
+      startLba: 10,
+      sectorCount: 1,
+      classification: "skipped_untested",
+    }]);
+    const writeAuthority = prepareEligibleRecovery(fixture, saved.archive.id, [{
+      startLba: 10,
+      sectorCount: 1,
+    }]);
+    const access = fixture.openAccess();
+    const imageBefore = readFileSync(saved.archive.archivePath);
+    try {
+      recordSupportedRecoveryStorage(access);
+      const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
+      await expect(commitDvdRecoveryBatch({
+        access,
+        originalsLibraryPath: fixture.originalsLibraryPath,
+        originalDiscArchiveId: saved.archive.id,
+        recoveryWorkClaim,
+        writeAuthority,
+        observation: {
+          startLba: 10,
+          outcome: "recovered",
+          bytes: Buffer.alloc(2_048, 0x63),
+        },
+        atomicWriter: syntheticAtomicWriter,
+        fault(point) {
+          if (point !== "before:journal") return;
+          const inspection = access.discInspections.list({
+            ids: [writeAuthority.discInspectionId],
+          })[0]!;
+          access.discInspections.clearCurrent({
+            opticalDriveId: inspection.opticalDriveId,
+            ...(change === "replaced"
+              ? { mediaGeneration: "synthetic-replacement-generation" }
+              : {}),
+          });
+          if (change === "replaced") {
+            const replacement = beginSettledDiscInspectionForTest(access, {
+              opticalDriveId: inspection.opticalDriveId,
+              mediaGeneration: "synthetic-replacement-generation",
+              mediaCapacityBytes: 1_024 * 2_048,
+            });
+            access.discInspections.record(replacement.claim, {
+              type: "metadata",
+              volumeLabel: "SYNTHETIC_REPLACEMENT",
+              titleCount: 1,
+              chapterCount: 1,
+              audioStreamCount: 1,
+              subtitleStreamCount: 0,
+              totalBytes: 1_024 * 2_048,
+            });
+            access.discInspections.record(replacement.claim, {
+              type: "complete",
+              detectedDiscId: writeAuthority.detectedDiscId,
+            });
+            replacement.restoreSystemTime();
+          }
+        },
+      })).rejects.toMatchObject({ code: "DISC_VERIFICATION_STALE" });
+      expect(readFileSync(saved.archive.archivePath)).toEqual(imageBefore);
+      expect(existsSync(join(saved.directory, "recovery-journal.bin")))
+        .toBe(false);
+    } finally {
+      access.close();
+      fixture.dispose();
+    }
+  },
+  RECOVERY_TEST_TIMEOUT_MS,
+);
+
 it("commits one recovered sector through the worker and shared web/CLI evidence read", async () => {
   const fixture = createOperatorWorkflowFixture();
   const saved = await seedCommittedArchiveEvidence(fixture, [{
@@ -272,7 +429,7 @@ it("commits one recovered sector through the worker and shared web/CLI evidence 
     sectorCount: 2,
     classification: "skipped_untested",
   }]);
-  prepareEligibleRecovery(fixture, saved.archive.id, [{
+  const writeAuthority = prepareEligibleRecovery(fixture, saved.archive.id, [{
     startLba: 10,
     sectorCount: 2,
   }]);
@@ -297,6 +454,7 @@ it("commits one recovered sector through the worker and shared web/CLI evidence 
       originalsLibraryPath: fixture.originalsLibraryPath,
       originalDiscArchiveId: saved.archive.id,
       recoveryWorkClaim,
+      writeAuthority,
       observation: { startLba: 10, outcome: "recovered", bytes: recovered },
       atomicWriter: syntheticAtomicWriter,
     });
@@ -351,7 +509,7 @@ it("records a failed source read without mutating the archive image", async () =
     sectorCount: 2,
     classification: "skipped_untested",
   }]);
-  prepareEligibleRecovery(fixture, saved.archive.id, [{
+  const writeAuthority = prepareEligibleRecovery(fixture, saved.archive.id, [{
     startLba: 10,
     sectorCount: 2,
   }]);
@@ -365,6 +523,7 @@ it("records a failed source read without mutating the archive image", async () =
       originalsLibraryPath: fixture.originalsLibraryPath,
       originalDiscArchiveId: saved.archive.id,
       recoveryWorkClaim,
+      writeAuthority,
       observation: { startLba: 10, outcome: "failed" },
       atomicWriter: {
         inspect() { throw new Error("A failed source read must not inspect mutation support"); },
@@ -400,7 +559,7 @@ it("writes every atomic unit needed to cover one recovered sector", async () => 
     sectorCount: 1,
     classification: "skipped_untested",
   }]);
-  prepareEligibleRecovery(fixture, saved.archive.id, [{
+  const writeAuthority = prepareEligibleRecovery(fixture, saved.archive.id, [{
     startLba: 10,
     sectorCount: 1,
   }]);
@@ -414,6 +573,7 @@ it("writes every atomic unit needed to cover one recovered sector", async () => 
       originalsLibraryPath: fixture.originalsLibraryPath,
       originalDiscArchiveId: saved.archive.id,
       recoveryWorkClaim,
+      writeAuthority,
       observation: {
         startLba: 10,
         outcome: "recovered",
@@ -449,13 +609,24 @@ it("rejects a batch at the final readable checkpoint before mutation", async () 
     sectorCount: 1,
     classification: "skipped_untested",
   }]);
-  prepareEligibleRecovery(fixture, saved.archive.id, [{
+  const writeAuthority = prepareEligibleRecovery(fixture, saved.archive.id, [{
     startLba: 10,
     sectorCount: 1,
   }]);
   const access = fixture.openAccess();
   const imageBefore = readFileSync(saved.archive.archivePath);
   const header = access.catalog.findDvdArchiveEvidenceHeader(saved.archive.id)!;
+  const capacityDatabase = new DatabaseSync(fixture.databasePath);
+  capacityDatabase.prepare(`
+    UPDATE dvd_disc_verifications
+    SET checkpoint_revision = 10000
+    WHERE id = ?
+  `).run(writeAuthority.verificationId);
+  capacityDatabase.close();
+  const capacityWriteAuthority = {
+    ...writeAuthority,
+    checkpointRevision: 10_000,
+  };
   const cappedAccess = {
     ...access,
     catalog: {
@@ -472,6 +643,7 @@ it("rejects a batch at the final readable checkpoint before mutation", async () 
       originalsLibraryPath: fixture.originalsLibraryPath,
       originalDiscArchiveId: saved.archive.id,
       recoveryWorkClaim,
+      writeAuthority: capacityWriteAuthority,
       observation: {
         startLba: 10,
         outcome: "recovered",
@@ -497,7 +669,7 @@ it("rejects a partial protected-unit write without projecting recovery", async (
     sectorCount: 1,
     classification: "skipped_untested",
   }]);
-  prepareEligibleRecovery(fixture, saved.archive.id, [{
+  const writeAuthority = prepareEligibleRecovery(fixture, saved.archive.id, [{
     startLba: 10,
     sectorCount: 1,
   }]);
@@ -510,6 +682,7 @@ it("rejects a partial protected-unit write without projecting recovery", async (
       originalsLibraryPath: fixture.originalsLibraryPath,
       originalDiscArchiveId: saved.archive.id,
       recoveryWorkClaim,
+      writeAuthority,
       observation: {
         startLba: 10,
         outcome: "recovered",
@@ -544,7 +717,7 @@ it.each([
     sectorCount: 1,
     classification: "skipped_untested",
   }]);
-  prepareEligibleRecovery(fixture, saved.archive.id, [{
+  const writeAuthority = prepareEligibleRecovery(fixture, saved.archive.id, [{
     startLba: 10,
     sectorCount: 1,
   }]);
@@ -557,6 +730,7 @@ it.each([
       originalsLibraryPath: fixture.originalsLibraryPath,
       originalDiscArchiveId: saved.archive.id,
       recoveryWorkClaim,
+      writeAuthority,
       observation: {
         startLba: 10,
         outcome: "recovered",

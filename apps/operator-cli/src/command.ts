@@ -2,6 +2,7 @@ import { runNotifications } from "./notifications.js";
 import { StructuredInputError } from "./structured-input.js";
 import {
   createApplicationOperations,
+  DvdDiscVerificationUnavailableError,
   InvalidArchiveEvidenceInputError,
   InvalidNotificationInputError,
   NotificationsUnavailableError,
@@ -37,6 +38,7 @@ import {
   InvalidStatusTransitionError,
   MutationKeyConflictError,
   RecordNotFoundError,
+  StaleDvdDiscVerificationError,
   validateEncodeQueueSearchQuery,
   type OriginalDiscArchiveId,
   type FilesystemVerificationTarget,
@@ -182,6 +184,16 @@ const commandDefinitions = [
     usage: "rip-dvd archive-evidence <archive-id> [--limit 1..100] [--cursor <cursor>]",
     inputs: { arguments: ["archive-id"], options: ["--limit", "--cursor"] },
     example: "rip-dvd archive-evidence <archive-id> --limit 20",
+  },
+  {
+    name: "archive-recovery",
+    description: "Inspect or request bounded DVD Disc Verification for an Archive Recovery.",
+    usage: "rip-dvd archive-recovery <inspect-verification|verify-disc> <archive-recovery-id> [options]",
+    inputs: {
+      arguments: ["action: inspect-verification|verify-disc", "archive-recovery-id"],
+      options: ["--key", "--disc-inspection-id", "--checkpoint-revision", "--checkpoint-digest"],
+    },
+    example: "rip-dvd archive-recovery verify-disc <archive-recovery-id> --key 00000000-0000-4000-8000-000000000001 --disc-inspection-id <id> --checkpoint-revision 1 --checkpoint-digest <sha256>",
   },
   {
     name: "encode-output",
@@ -451,6 +463,114 @@ function runRecoveryCommand(name: RecoveryCommand, input: ReturnType<typeof reco
         [{ code: "INVALID_TRANSITION", message: error.message }]);
     }
     throw new CommandFailure("RECOVERY_UNAVAILABLE", "Recovery action is unavailable.", 1);
+  }
+}
+
+function verificationInspectionInputs(args: readonly string[]) {
+  if (args.length !== 1) {
+    throw new CommandFailure(
+      "INVALID_ARGUMENTS",
+      "Archive Recovery ID is required.",
+      2,
+    );
+  }
+  const archiveRecoveryId = args[0]?.trim();
+  if (!archiveRecoveryId || archiveRecoveryId.length > 256) {
+    throw new CommandFailure(
+      "INVALID_ARGUMENTS",
+      "Archive Recovery ID is required.",
+      2,
+    );
+  }
+  return { archiveRecoveryId };
+}
+
+function discVerificationInputs(args: readonly string[]) {
+  const archiveRecoveryId = args[0]?.trim();
+  const { options, mutationKey } = mutationOptions(
+    args.slice(1),
+    [
+      "--key",
+      "--disc-inspection-id",
+      "--checkpoint-revision",
+      "--checkpoint-digest",
+    ],
+    "Invalid DVD Disc Verification options.",
+  );
+  const discInspectionId = options.get("--disc-inspection-id")?.trim();
+  const revision = options.get("--checkpoint-revision");
+  const checkpointDigest = options.get("--checkpoint-digest")?.trim();
+  if (
+    options.size !== 4 ||
+    !archiveRecoveryId || archiveRecoveryId.length > 256 ||
+    !discInspectionId || discInspectionId.length > 256 ||
+    revision === undefined || !/^[1-9]\d*$/.test(revision) ||
+    !Number.isSafeInteger(Number(revision)) ||
+    checkpointDigest === undefined || !/^[0-9a-f]{64}$/.test(checkpointDigest)
+  ) {
+    throw new CommandFailure(
+      "INVALID_ARGUMENTS",
+      "DVD Disc Verification requires the current insertion and checkpoint binding.",
+      2,
+    );
+  }
+  return {
+    mutationKey,
+    archiveRecoveryId,
+    discInspectionId,
+    checkpointRevision: Number(revision),
+    checkpointDigest,
+  };
+}
+
+async function runDvdDiscVerificationCommand(
+  name: "inspect-verification" | "verify-disc",
+  args: readonly string[],
+  io: CommandIO,
+) {
+  try {
+    return await withAccessAsync<unknown>(io.openAccess, (access) => {
+      const operations = createApplicationOperations(access);
+      return name === "inspect-verification"
+        ? operations.inspectDvdDiscVerification(
+            verificationInspectionInputs(args).archiveRecoveryId,
+          )
+        : operations.verifyDisc(discVerificationInputs(args));
+    });
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    if (error instanceof MutationKeyConflictError) {
+      throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    if (error instanceof RecordNotFoundError) {
+      throw new CommandFailure("NOT_FOUND", "DVD Disc Verification target was not found.", 2);
+    }
+    if (error instanceof DvdDiscVerificationUnavailableError) {
+      throw new CommandFailure(error.code, error.message, 2, [{
+        code: error.code,
+        message: error.message,
+      }]);
+    }
+    if (error instanceof StaleDvdDiscVerificationError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        undefined,
+        {
+          reasons: error.reasons,
+          currentIdentities: error.currentIdentities,
+        },
+      );
+    }
+    if (error instanceof DomainInvariantError || error instanceof InvalidStatusTransitionError) {
+      throw new CommandFailure("DISC_VERIFICATION_REJECTED", error.message, 2);
+    }
+    throw new CommandFailure(
+      "DISC_VERIFICATION_UNAVAILABLE",
+      "DVD Disc Verification is unavailable.",
+      1,
+    );
   }
 }
 
@@ -920,6 +1040,18 @@ function withAccess<T>(openAccess: CommandIO["openAccess"], read: (access: DataA
   const access = openAccess();
   try {
     return read(access);
+  } finally {
+    access.close();
+  }
+}
+
+async function withAccessAsync<T>(
+  openAccess: CommandIO["openAccess"],
+  read: (access: DataAccess) => Promise<T>,
+): Promise<T> {
+  const access = openAccess();
+  try {
+    return await read(access);
   } finally {
     access.close();
   }
@@ -1451,6 +1583,26 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         return 0;
       }
       emit(io.stdout, runRecoveryCommand(name, recoveryInputs(name, rest), io));
+      return 0;
+    }
+    if (name === "archive-recovery") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+        emit(io.stdout, help(name));
+      } else {
+        const [action, ...actionArgs] = rest;
+        if (action !== "inspect-verification" && action !== "verify-disc") {
+          throw new CommandFailure(
+            "INVALID_ARGUMENTS",
+            "Archive Recovery action must be inspect-verification or verify-disc.",
+            2,
+          );
+        }
+        emit(io.stdout, await runDvdDiscVerificationCommand(
+          action,
+          actionArgs,
+          io,
+        ));
+      }
       return 0;
     }
     if (name === "submit-filesystem-verification") {

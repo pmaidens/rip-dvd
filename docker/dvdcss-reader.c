@@ -12,12 +12,14 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <sys/prctl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -39,6 +41,8 @@
 #define BOUNDARY_CONFIRMATION_READS 2
 #define ENDPOINT_PROOF_VERSION "dvd-normal-endpoint-proof-v1"
 #define ENDPOINT_PROOF_PREFIX "rip-dvd-endpoint-proof "
+#define VERIFICATION_MAX_LIFETIME_SECONDS 60U
+#define VERIFICATION_LIFETIME_ARMED "rip-dvd-verification-lifetime-armed\n"
 
 #ifdef RIP_DVD_READER_TESTING
 #define MAX_TEST_FAULTS 64
@@ -313,6 +317,41 @@ static int parse_endpoint_lba(const char *text, uint64_t *lba)
         return 1;
     }
     *lba = (uint64_t)value;
+    return 0;
+}
+
+static int parse_sample_lba(const char *text, uint64_t *lba)
+{
+    char *end = NULL;
+    errno = 0;
+    unsigned long long value = strtoull(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' ||
+        value > MAX_DVD_CONTENT_BYTES / DVDCSS_BLOCK_SIZE) {
+        fprintf(stderr, "DVD Disc Verification sample LBA is invalid\n");
+        return 1;
+    }
+    *lba = (uint64_t)value;
+    return 0;
+}
+
+static int arm_verification_lifetime(const char *text)
+{
+    char *end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' || value == 0 ||
+        value > VERIFICATION_MAX_LIFETIME_SECONDS) {
+        fprintf(stderr, "DVD Disc Verification lifetime is invalid\n");
+        return 1;
+    }
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0) {
+        return fail_errno("DVD Disc Verification parent-death guard failed");
+    }
+    if (getppid() == 1) {
+        fprintf(stderr, "DVD Disc Verification parent exited during startup\n");
+        return 1;
+    }
+    alarm((unsigned int)value);
     return 0;
 }
 
@@ -1877,6 +1916,53 @@ static int run_hash(struct read_backend *backend, uint64_t size_bytes)
         fail_errno("DVD content hash output failed");
 }
 
+static int run_verification_sample(struct read_backend *backend,
+                                   uint64_t start_lba, int block_count,
+                                   uint64_t accepted_end_lba_exclusive)
+{
+    size_t byte_count = (size_t)block_count * DVDCSS_BLOCK_SIZE;
+    unsigned char *buffer = NULL;
+    if (posix_memalign((void **)&buffer, DVDCSS_BLOCK_SIZE, byte_count) != 0) {
+        fprintf(stderr, "DVD Disc Verification sample allocation failed\n");
+        return 1;
+    }
+    struct backend_read_result result = backend_read(
+        backend, buffer, start_lba, block_count, 1, 0);
+    int status = 0;
+    if (result.status == BACKEND_READ_SUCCESS &&
+        result.blocks_read == block_count) {
+        status = write_all(STDOUT_FILENO, buffer, byte_count, -1);
+    } else if (result.status == BACKEND_READ_SUCCESS ||
+               result.status == BACKEND_READ_END) {
+        char output[1024];
+        int length = snprintf(
+            output, sizeof(output), READ_FAILURE_RESULT_PREFIX
+            "{\"protocolVersion\":1,\"classifierVersion\":\""
+            READ_FAILURE_CLASSIFIER_VERSION
+            "\",\"category\":\"unknown\",\"scsiStatus\":null"
+            ",\"hostStatus\":null,\"driverStatus\":null"
+            ",\"senseResponseCode\":null,\"senseKey\":null"
+            ",\"asc\":null,\"ascq\":null,\"informationLba\":null"
+            ",\"requestedLba\":%" PRIu64
+            ",\"requestedBlockCount\":%d,\"retryOrdinal\":0}\n",
+            start_lba, block_count);
+        status = length <= 0 || (size_t)length >= sizeof(output) ||
+                write_terminal_output(output, (size_t)length) != 0
+            ? 1
+            : READ_FAILURE_EXIT_STATUS;
+    } else if (result.status == BACKEND_READ_MEDIUM_ERROR ||
+               backend_read_has_terminal_failure_result(result.status)) {
+        status = emit_read_failure_result(
+            &result.failure, NULL,
+            accepted_end_lba_exclusive * DVDCSS_BLOCK_SIZE, 0);
+    } else {
+        fprintf(stderr, "DVD Disc Verification sample read failed\n");
+        status = 1;
+    }
+    free(buffer);
+    return status;
+}
+
 static int emit_recovery_result(uint64_t size_bytes,
                                 const struct recovery_state *recovery)
 {
@@ -3364,6 +3450,57 @@ static int run_test_endpoint(int argc, char **argv)
         &backend, size_bytes / DVDCSS_BLOCK_SIZE);
     return close_test_backend(&backend, status);
 }
+
+static int run_test_verification_sample(int argc, char **argv)
+{
+    if (argc != 9) {
+        fprintf(stderr,
+                "usage: %s verify-sample-test SOURCE SIZE START COUNT FAULTS DELAY MODE\n",
+                argv[0]);
+        return 2;
+    }
+    uint64_t size_bytes = 0;
+    enum test_result_mode test_result_mode;
+    struct read_backend backend;
+    int setup_status = initialize_test_backend(
+        argv[2], argv[3], argv[6], argv[7], argv[8], 1, &size_bytes,
+        &test_result_mode, &backend);
+    if (setup_status != 0) {
+        return setup_status;
+    }
+    uint64_t start_lba = 0;
+    uint64_t block_count = 0;
+    if (test_result_mode != TEST_RESULT_VALID ||
+        parse_test_integer(argv[4], size_bytes / DVDCSS_BLOCK_SIZE,
+                           &start_lba) != 0 ||
+        parse_test_integer(argv[5], 32, &block_count) != 0 ||
+        block_count != 32 ||
+        start_lba + block_count > size_bytes / DVDCSS_BLOCK_SIZE) {
+        return close_test_backend(&backend, 2);
+    }
+    int status = run_verification_sample(
+        &backend, start_lba, (int)block_count,
+        size_bytes / DVDCSS_BLOCK_SIZE);
+    return close_test_backend(&backend, status);
+}
+
+static int run_test_verification_lifetime(int argc, char **argv)
+{
+    uint64_t delay_seconds = 0;
+    if (argc != 4 || arm_verification_lifetime(argv[2]) != 0 ||
+        parse_test_integer(argv[3], 120, &delay_seconds) != 0) {
+        fprintf(stderr,
+                "usage: %s verification-lifetime-test TIMEOUT DELAY\n",
+                argv[0]);
+        return 2;
+    }
+    if (fputs(VERIFICATION_LIFETIME_ARMED, stdout) == EOF ||
+        fflush(stdout) != 0) {
+        return fail_errno("DVD Disc Verification lifetime test output failed");
+    }
+    sleep((unsigned int)delay_seconds);
+    return 0;
+}
 #endif
 
 int main(int argc, char **argv)
@@ -3390,7 +3527,50 @@ int main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "endpoint-test") == 0) {
         return run_test_endpoint(argc, argv);
     }
+    if (argc > 1 && strcmp(argv[1], "verify-sample-test") == 0) {
+        return run_test_verification_sample(argc, argv);
+    }
+    if (argc > 1 && strcmp(argv[1], "verification-lifetime-test") == 0) {
+        return run_test_verification_lifetime(argc, argv);
+    }
 #endif
+    int verification_sample = argc > 1 &&
+        strcmp(argv[1], "verify-sample-v1") == 0;
+    if (verification_sample) {
+        if (argc != 7) {
+            fprintf(stderr, "DVD Disc Verification sample arguments are invalid\n");
+            return 2;
+        }
+        uint64_t start_lba = 0;
+        uint64_t block_count = 0;
+        uint64_t accepted_end_lba_exclusive = 0;
+        if (parse_sample_lba(argv[3], &start_lba) != 0 ||
+            parse_sample_lba(argv[4], &block_count) != 0 ||
+            parse_sample_lba(argv[5], &accepted_end_lba_exclusive) != 0 ||
+            arm_verification_lifetime(argv[6]) != 0 ||
+            block_count != 32 ||
+            accepted_end_lba_exclusive == 0 ||
+            start_lba + block_count > accepted_end_lba_exclusive ||
+            start_lba > MAX_DVD_CONTENT_BYTES / DVDCSS_BLOCK_SIZE -
+                block_count) {
+            fprintf(stderr, "DVD Disc Verification sample range is invalid\n");
+            return 2;
+        }
+        dvdcss_t dvdcss = dvdcss_open(argv[2]);
+        if (dvdcss == NULL) {
+            fprintf(stderr, "DVD content open failed\n");
+            return 1;
+        }
+        struct read_backend backend = { .dvdcss = dvdcss };
+        int status = run_verification_sample(
+            &backend, start_lba, (int)block_count,
+            accepted_end_lba_exclusive);
+        if (dvdcss_close(dvdcss) != 0 && status == 0) {
+            fprintf(stderr, "DVD content close failed\n");
+            status = 1;
+        }
+        return status;
+    }
     int authorized_endpoint = argc > 1 &&
         strcmp(argv[1], "probe-endpoint-authorized") == 0;
     if (authorized_endpoint) {

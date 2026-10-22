@@ -47,6 +47,7 @@ export type {
   EncodeWorkConflictCurrent,
 } from "./archive-recovery-work.js";
 export * from "./dvd-recovery-storage-preflight.js";
+export * from "./dvd-disc-verification.js";
 export * from "./dvd-structural-assessment.js";
 export {
   assertDvdArchiveBoundaryEvidenceDigest,
@@ -61,8 +62,8 @@ export {
 export {
   assertDvdEvidenceRangeTransition,
   dvdEvidenceRangesAfterRecoveryRead,
-} from "./dvd-recovery-transition.js";
-export type { DvdArchiveRecoveryReadOutcome } from "./dvd-recovery-transition.js";
+} from "./dvd-evidence-transition.js";
+export type { DvdArchiveRecoveryReadOutcome } from "./dvd-evidence-transition.js";
 export type {
   DvdArchiveEvidenceManifestDigestInput,
   DvdArchiveEvidenceManifestDigests,
@@ -189,10 +190,11 @@ export {
   DVD_RECOVERY_MAX_CHECKPOINT_REVISION,
   DvdCheckpointReadFault,
   readCommittedDvdCheckpoint,
-} from "./dvd-initial-checkpoint.js";
+} from "./dvd-archive-checkpoint.js";
 export type {
   CommittedDvdCheckpointEvidence,
+  CommittedDvdCurrentCheckpoint,
   CommittedDvdInitialEvidence,
   CommittedDvdRecoveryEvidence,
   DvdRecoveryProtectedRange,
-} from "./dvd-initial-checkpoint.js";
+} from "./dvd-archive-checkpoint.js";

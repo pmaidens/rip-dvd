@@ -1218,9 +1218,11 @@ describe("data-access facade", () => {
         "dvd_archive_evidence_headers",
         "dvd_archive_evidence_manifests",
         "dvd_archive_recovery_reads",
+        "dvd_disc_verifications",
         "dvd_structural_assessments",
         "dvd_structural_check_attempts",
         "dvd_recovery_storage_preflights",
+        "dvd_source_sample_manifests",
         "dvd_title_identities",
         "dvd_title_identity_observations",
         "dvd_title_identity_selection_bindings",
@@ -1233,7 +1235,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(42);
+    expect(identifierTables).toHaveLength(44);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -1796,7 +1798,9 @@ describe("data-access facade", () => {
           name !== "20261019204228_dvd-initial-save" &&
           name !== "20261022044144_icy_barracuda" &&
           name !== "20261022044512_parched_norrin_radd" &&
-          name !== "20261022080829_dvd-title-identities",
+          name !== "20261022044526_chilly_madame_hydra" &&
+          name !== "20261022080829_dvd-title-identities" &&
+          name !== "20261022100044_futuristic_cannonball",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -9022,6 +9026,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261022100044_futuristic_cannonball",
+        },
+        {
           name: "20261022080829_dvd-title-identities",
         },
         {
@@ -9050,9 +9057,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20260930003106_dvd-evidence-authority",
-        },
-        {
-          name: "20260930002706_dvd-evidence-compatibility",
         },
       ]);
     expect(
