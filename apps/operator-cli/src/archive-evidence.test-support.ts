@@ -5,6 +5,7 @@ import {
   archiveBoundaryEvidenceFromRecord, createDvdArchiveEvidenceManifestDigests,
   createDvdArchiveRecoveryReadEvidenceDigest,
   canonicalPublicationJson, createDvdInitialPublicationDigest,
+  createDvdRecoveryCheckpointPublicationDigest,
   type DvdUnrecoveredSourceRange,
 } from "@rip-dvd/data-access";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
@@ -96,12 +97,13 @@ export async function seedCommittedArchiveEvidence(
 export function advanceCommittedArchiveEvidence(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   manifest: Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>["manifest"],
+  options: { publishFilesystemCheckpoint?: boolean } = {},
 ) {
   const sourceRange = manifest.unrecoveredSourceRanges[0];
   if (sourceRange === undefined) {
     throw new Error("A synthetic Unrecovered Source range is required");
   }
-  const recoveryRead = {
+  const recoveryReadInput = {
     originalDiscArchiveId: manifest.originalDiscArchiveId,
     fromManifestId: manifest.id,
     fromManifestRevision: manifest.revision,
@@ -110,7 +112,12 @@ export function advanceCommittedArchiveEvidence(
     outcome: "failed" as const,
   };
   const recoveryReadEvidenceDigest =
-    createDvdArchiveRecoveryReadEvidenceDigest(recoveryRead);
+    createDvdArchiveRecoveryReadEvidenceDigest(recoveryReadInput);
+  const recoveryRead = {
+    id: "synthetic-structural-recovery-read",
+    ...recoveryReadInput,
+    evidenceDigest: recoveryReadEvidenceDigest,
+  };
   const remainingRange = sourceRange.sectorCount === 1
     ? []
     : [{
@@ -144,10 +151,27 @@ export function advanceCommittedArchiveEvidence(
     boundaryEvidenceDigest: manifest.boundaryEvidenceDigest,
     unrecoveredSourceRanges,
   };
-  const next = {
+  const digestFields = {
     ...input,
     ...createDvdArchiveEvidenceManifestDigests(input),
-    id: "synthetic-structural-manifest-2",
+    id: `${manifest.originalDiscArchiveId}:recovery:${input.revision}`,
+  };
+  const publicationPayload = {
+    ...digestFields,
+    checkpointFormat: "dvd-recovery-batch-v1" as const,
+    sourceArchiveJobId: manifest.sourceArchiveJobId,
+    rootPublicationDigest: manifest.publicationDigest,
+    previousPublicationDigest: manifest.publicationDigest,
+    image: manifest.image,
+    previousImage: manifest.image,
+    boundaryEvidence: manifest.boundaryEvidence,
+    recoveryRead,
+    journalDigest: null,
+    protectedRanges: [],
+  };
+  const next = {
+    ...publicationPayload,
+    publicationDigest: createDvdRecoveryCheckpointPublicationDigest(publicationPayload),
   };
   withEvidenceGuardsDisabled(fixture.databasePath, (db) => {
     db.prepare(`
@@ -204,6 +228,28 @@ export function advanceCommittedArchiveEvidence(
       next.originalDiscArchiveId,
     );
   });
+  if (options.publishFilesystemCheckpoint) {
+    const directory = join(
+      fixture.originalsLibraryPath,
+      ".dvd-evidence",
+      manifest.originalDiscArchiveId,
+    );
+    const pointer = {
+      originalDiscArchiveId: manifest.originalDiscArchiveId,
+      currentManifestId: next.id,
+      currentManifestRevision: next.revision,
+      currentManifestDigest: next.manifestDigest,
+      publicationDigest: next.publicationDigest,
+    };
+    writeFileSync(
+      join(directory, `recovery-manifest-${next.revision}.json`),
+      canonicalPublicationJson(next),
+    );
+    writeFileSync(
+      join(directory, "checkpoint.json"),
+      canonicalPublicationJson(pointer),
+    );
+  }
   return next;
 }
 

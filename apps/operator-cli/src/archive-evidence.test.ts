@@ -324,6 +324,49 @@ it("marks the last structural assessment outdated when the checkpoint advances",
   });
 });
 
+it("records a structural assessment against the current recovery checkpoint", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const { archive, manifest } = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  const current = advanceCommittedArchiveEvidence(fixture, manifest, {
+    publishFilesystemCheckpoint: true,
+  });
+  const access = fixture.openAccess();
+  const completed = await recordStructuralAssessment(
+    fixture,
+    access,
+    archive.id,
+    structuralFindings(),
+  );
+  access.close();
+
+  expect(completed.assessment.checkpoint).toMatchObject({
+    manifestId: current.id,
+    manifestRevision: current.revision,
+    manifestDigest: current.manifestDigest,
+  });
+  expect((await fixture.run([
+    "inspect",
+    "original-disc-archives",
+    archive.id,
+  ])).result).toMatchObject({
+    item: {
+      structuralAssessment: {
+        state: "current",
+        currentAssessmentIdentity: completed.assessment.id,
+        checkpoint: {
+          manifestId: current.id,
+          manifestRevision: current.revision,
+        },
+      },
+    },
+  });
+});
+
 it("pages every compact range without omission and reuses stable cursors", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);

@@ -2103,19 +2103,7 @@ export interface DvdCheckpointReadOwnership {
 export interface DataAccess {
   readDvdCheckpoint(
     id: OriginalDiscArchiveId,
-    ownership: {
-      withConsistentRead<Result>(request: {
-        archiveId: string;
-        imagePath: string | null;
-        originalsLibraryPath: string;
-        signal: AbortSignal;
-        task(handle: {
-          descriptor: number;
-          signal: AbortSignal;
-          assertOwned(): void;
-        }): Promise<Result>;
-      }): Promise<Result>;
-    },
+    ownership: DvdCheckpointReadOwnership,
   ): Promise<import("./dvd-initial-checkpoint.js").CommittedDvdCheckpointEvidence | null>;
   readonly notifications: import("./notification-types.js").NotificationAccess;
   readonly dvdRecovery: DvdRecoveryAccess;
@@ -2123,7 +2111,7 @@ export interface DataAccess {
     id: OriginalDiscArchiveId,
     ownership: DvdCheckpointReadOwnership,
     assess: (
-      checkpoint: import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence,
+      checkpoint: import("./dvd-initial-checkpoint.js").CommittedDvdCheckpointEvidence,
       handle: DvdCheckpointReadHandle,
       imagePath: string,
     ) => Promise<readonly DvdStructuralFindingInput[]>,
@@ -2131,10 +2119,6 @@ export interface DataAccess {
     attempt: DvdStructuralCheckAttempt & { outcome: "completed" };
     assessment: DvdStructuralAssessmentRecord;
   } | null>;
-  readDvdInitialCheckpoint(
-    id: OriginalDiscArchiveId,
-    ownership: DvdCheckpointReadOwnership,
-  ): Promise<import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence | null>;
   readonly dvdStructuralAssessments: DvdStructuralAssessmentAccess;
   readonly dvdRecoveryStorage: DvdRecoveryStorageAccess;
   readonly catalog: CatalogAccess;
