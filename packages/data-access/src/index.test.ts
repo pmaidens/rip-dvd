@@ -1795,7 +1795,8 @@ describe("data-access facade", () => {
           name !== "20261004053119_scsi-read-path-notice" &&
           name !== "20261019204228_dvd-initial-save" &&
           name !== "20261022044144_icy_barracuda" &&
-          name !== "20261022044512_parched_norrin_radd",
+          name !== "20261022044512_parched_norrin_radd" &&
+          name !== "20261022080829_dvd-title-identities",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -9016,15 +9017,15 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 10",
+          "select name from __drizzle_migrations order by id desc limit 11",
         )
         .all(),
       ).toEqual([
         {
-          name: "20261022044512_parched_norrin_radd",
+          name: "20261022080829_dvd-title-identities",
         },
         {
-          name: "20261022044443_dvd-title-identities",
+          name: "20261022044512_parched_norrin_radd",
         },
         {
           name: "20261022044144_icy_barracuda",
@@ -9049,6 +9050,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20260930003106_dvd-evidence-authority",
+        },
+        {
+          name: "20260930002706_dvd-evidence-compatibility",
         },
       ]);
     expect(

@@ -188,6 +188,8 @@ export function CatalogReviewView({
         </div>
       ) : null}
 
+      <CatalogReviewTitleIdentity titleIdentity={review.titleIdentity} />
+
       {review.rearchiveProposal ? (
         <CatalogReviewRearchiveProposal
           proposal={review.rearchiveProposal}
@@ -227,7 +229,6 @@ export function CatalogReviewView({
           <small>Use these for ambiguous discs, extras, and corrections.</small>
         </summary>
         <div className="catalog-editor-grid">
-          <CatalogReviewTitleIdentity titleIdentity={review.titleIdentity} />
           <CatalogReviewEvidence
             coverage={review.coverage}
             volumeLabel={review.archive.discLabel}
