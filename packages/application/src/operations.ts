@@ -1,5 +1,7 @@
 import {
   activeEncodeWorkIdentities,
+  archiveRecoveryWorkIdentity,
+  createEncodeWorkConflictCurrent,
   DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
   ENCODE_WORK_CONFLICT,
   DVD_RECOVERY_EVIDENCE_ADMISSION,
@@ -11,6 +13,7 @@ import {
   withAuthoritativeDvdArchiveIntegrity,
   type ArchiveJob,
   type ArchiveJobId,
+  type ArchiveRecovery,
   type ArchiveAuditRun,
   type ArchiveAuditRunId,
   type ArchiveAuditRunSummary,
@@ -24,6 +27,7 @@ import {
   type DiscInspectionId,
   type EncodeJob,
   type EncodeJobId,
+  type EncodeWorkConflictCurrent,
   type FilesystemVerificationRun,
   type FilesystemVerificationRunId,
   type OriginalDiscArchive,
@@ -108,6 +112,15 @@ function visibleInspection({ claimToken: _claimToken, ...inspection }: DiscInspe
 
 function visibleArchiveJob({ claimToken: _claimToken, claimedBy: _claimedBy, ...job }: ArchiveJob) {
   return job;
+}
+
+function visibleArchiveRecovery(recovery: ArchiveRecovery) {
+  return {
+    ...recovery,
+    work: recovery.work === null
+      ? null
+      : archiveRecoveryWorkIdentity(recovery.work),
+  };
 }
 
 function presentEncodeJob(
@@ -412,6 +425,7 @@ export function encodeRequeueAvailability(
   selectionBlockingReason: {
     code: string;
     message: string;
+    current?: EncodeWorkConflictCurrent;
   } = {
     code: "INVALID_TRANSITION",
     message: "Requires an active Disc Selection with completed Catalog Review.",
@@ -434,10 +448,12 @@ export function encodeRequeueAvailability(
     return blocked(`Encode Job is ${job.status}.`);
   }
   if (!selectionEligible) {
-    return blocked(
-      selectionBlockingReason.message,
-      selectionBlockingReason.code,
-    );
+    return {
+      eligible: false,
+      requiredInputs,
+      reason: selectionBlockingReason.message,
+      blockingReasons: [selectionBlockingReason],
+    };
   }
   if (job.partialCleanupOutputPath !== null ||
     job.partialCleanupClaimToken !== null || job.partialCleanupLeaseToken !== null) {
@@ -776,7 +792,9 @@ function readDetail(
           ? {}
           : {
             archiveRecovery: {
-              record: recovery,
+              record: recovery === null
+                ? null
+                : visibleArchiveRecovery(recovery),
               available: false,
               blockingReasons: [
                 ...(ownership?.stableRead.blockingReasons ?? []),
@@ -788,7 +806,9 @@ function readDetail(
                 ...recoveryStorage.blockingReasons,
               ],
               currentWork: {
-                recovery: recovery?.work ?? null,
+                recovery: recovery?.work === undefined || recovery.work === null
+                  ? null
+                  : archiveRecoveryWorkIdentity(recovery.work),
                 encodeJobs: conflictingEncodeJobs,
               },
               storage: recoveryStorage,
@@ -855,12 +875,24 @@ function readDetail(
         ? null
         : access.catalog.findArchiveRecovery(selection.originalDiscArchiveId);
       const recoveryWork = recovery?.work ?? null;
+      const recoveryConflict = recoveryWork === null || recovery === null
+        ? null
+        : {
+          ...ENCODE_WORK_CONFLICT,
+          current: createEncodeWorkConflictCurrent(
+            recovery,
+            access.catalog.listDiscSelections({
+              originalDiscArchiveId: recovery.originalDiscArchiveId,
+              includeHistorical: true,
+            }).flatMap(({ id }) => access.encodeJobs.listForDiscSelection(id)),
+          ),
+        };
       const requeue = encodeRequeueAvailability(
         access,
         job,
-        requeueSelectionEligible,
-        recoveryWork !== null
-          ? ENCODE_WORK_CONFLICT
+        requeueSelectionEligible && recoveryConflict === null,
+        recoveryConflict !== null
+          ? recoveryConflict
           : evidenceBlocked
           ? DVD_RECOVERY_EVIDENCE_ENCODING
           : undefined,
@@ -950,7 +982,9 @@ function readDetail(
               recovery: {
                 id: recovery.id,
                 originalDiscArchiveId: recovery.originalDiscArchiveId,
-                work: recovery.work,
+                work: recovery.work === null
+                  ? null
+                  : archiveRecoveryWorkIdentity(recovery.work),
               },
             },
           }),

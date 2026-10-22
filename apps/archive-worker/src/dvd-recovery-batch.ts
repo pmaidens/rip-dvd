@@ -26,6 +26,7 @@ import {
   readCommittedDvdCheckpoint,
   type CommittedDvdCheckpointEvidence,
   type CommittedDvdRecoveryEvidence,
+  type ClaimedArchiveRecoveryWork,
   type DataAccess,
   type DvdArchiveEvidenceHeader,
   type DvdRecoveryProtectedRange,
@@ -190,11 +191,22 @@ export interface DvdRecoveryBatchOptions {
   access: DataAccess;
   originalsLibraryPath: string;
   originalDiscArchiveId: OriginalDiscArchiveId;
+  recoveryWorkClaim: ClaimedArchiveRecoveryWork;
   observation: DvdRecoveryReadObservation;
   archiveImageOwnership?: ArchiveImageOwnership;
   atomicWriter?: DvdRecoveryAtomicWriter;
   signal?: AbortSignal;
   fault?(point: `before:${DvdRecoveryBatchStep}` | `after:${DvdRecoveryBatchStep}`): void | Promise<void>;
+}
+
+function assertRecoveryWorkClaim(options: DvdRecoveryBatchOptions): void {
+  if (
+    options.recoveryWorkClaim.originalDiscArchiveId !==
+      options.originalDiscArchiveId
+  ) {
+    throw new Error("Archive Recovery work claim targets another archive");
+  }
+  options.access.archiveRecoveryWork.assertClaim(options.recoveryWorkClaim);
 }
 
 function sha256(bytes: Buffer | string): string {
@@ -232,13 +244,17 @@ async function step(
   name: DvdRecoveryBatchStep,
   work: () => Promise<void>,
 ): Promise<void> {
+  assertRecoveryWorkClaim(options);
   options.signal?.throwIfAborted();
   ownership.assertOwned();
   await options.fault?.(`before:${name}`);
+  assertRecoveryWorkClaim(options);
   options.signal?.throwIfAborted();
   ownership.assertOwned();
   await work();
+  assertRecoveryWorkClaim(options);
   await options.fault?.(`after:${name}`);
+  assertRecoveryWorkClaim(options);
   options.signal?.throwIfAborted();
   ownership.assertOwned();
 }
@@ -455,6 +471,7 @@ async function runOwnedBatch(
   ownership: ArchiveImageOwnershipHandle,
   paths: RecoveryPaths,
 ): Promise<{ manifest: CommittedDvdRecoveryEvidence; header: DvdArchiveEvidenceHeader }> {
+  assertRecoveryWorkClaim(options);
   const archive = options.access.catalog.listOriginalDiscArchives({ ids: [options.originalDiscArchiveId] })[0];
   const header = options.access.catalog.findDvdArchiveEvidenceHeader(options.originalDiscArchiveId);
   const recovery = options.access.catalog.findArchiveRecovery(options.originalDiscArchiveId);
@@ -669,7 +686,11 @@ async function runOwnedBatch(
   });
   let projected = header;
   await step(options, ownership, "database", async () => {
-    projected = options.access.dvdRecovery.projectCheckpoint({ recoveryRead, manifest });
+    projected = options.access.dvdRecovery.projectCheckpoint({
+      claim: options.recoveryWorkClaim,
+      recoveryRead,
+      manifest,
+    });
   });
   if (options.observation.outcome === "recovered") {
     await step(options, ownership, "cleanup", async () => {
@@ -689,10 +710,11 @@ async function runOwnedBatch(
 export async function commitDvdRecoveryBatch(
   options: DvdRecoveryBatchOptions,
 ): Promise<{ manifest: CommittedDvdRecoveryEvidence; header: DvdArchiveEvidenceHeader }> {
-  const paths = await pathsFor(options);
-  const signal = options.signal ?? new AbortController().signal;
-  const ownership = options.archiveImageOwnership ?? defaultArchiveImageOwnership;
   try {
+    assertRecoveryWorkClaim(options);
+    const paths = await pathsFor(options);
+    const signal = options.signal ?? new AbortController().signal;
+    const ownership = options.archiveImageOwnership ?? defaultArchiveImageOwnership;
     return await ownership.withWriter({
       archiveId: options.originalDiscArchiveId,
       imagePath: paths.image,

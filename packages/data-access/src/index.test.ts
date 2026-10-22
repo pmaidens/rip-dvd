@@ -13910,10 +13910,19 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         claimToken: recoveryClaim.claimToken,
       }),
     });
+    expect(restarted.archiveRecoveryWork.assertClaim(recoveryClaim))
+      .toMatchObject({
+        id: recoveryId,
+        work: expect.objectContaining({
+          claimToken: recoveryClaim.claimToken,
+        }),
+      });
     expect(restarted.archiveRecoveryWork.release(recoveryClaim)).toMatchObject({
       id: recoveryId,
       work: null,
     });
+    expect(() => restarted.archiveRecoveryWork.assertClaim(recoveryClaim))
+      .toThrow(StaleJobAttemptError);
     expect(() => restarted.encodeJobs.requeue(failed.id, {
       mutationKey: "00000000-0000-4000-8000-000000000439",
     })).toThrow(DvdRecoveryEvidenceEncodingUnavailableError);

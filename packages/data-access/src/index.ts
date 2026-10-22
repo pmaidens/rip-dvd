@@ -37,11 +37,13 @@ export {
   ENCODE_WORK_CONFLICT,
   EncodeWorkConflictError,
   activeEncodeWorkIdentities,
+  archiveRecoveryWorkIdentity,
   createEncodeWorkConflictCurrent,
   isActiveEncodeWorkStatus,
 } from "./archive-recovery-work.js";
 export type {
   ActiveEncodeWorkStatus,
+  ArchiveRecoveryWorkIdentity,
   EncodeWorkConflictCurrent,
 } from "./archive-recovery-work.js";
 export * from "./dvd-recovery-storage-preflight.js";

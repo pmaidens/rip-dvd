@@ -6,9 +6,12 @@ sector per recovery read, so one batch covers exactly one 2,048-byte sector.
 A later recovery pass may call the operation repeatedly; this operation does
 not schedule reads or reopen new-format admission.
 
-The caller must hold an eligible Archive Recovery with a current committed
-checkpoint. The latest storage preflight must be supported, and a recovered
-observation must re-prove the actual archive inode's
+The caller must hold an eligible Archive Recovery, its current claimed durable
+work reservation, and a current committed checkpoint. The batch validates the
+reservation before filesystem I/O, at each commit boundary, and inside the
+database projection transaction. The claim does not expire with an Encode Job
+lease and is released only after the writer is quiescent. The latest storage
+preflight must be supported, and a recovered observation must re-prove the actual archive inode's
 `linux-rwf-atomic-v1` unit and alignment. All filesystem work and the database
 projection run under the archive's exclusive image-ownership interval.
 

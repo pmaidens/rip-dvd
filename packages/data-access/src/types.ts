@@ -438,6 +438,7 @@ export interface ArchiveRecoveryWorkAccess {
     id: ArchiveRecoveryId,
     workerId: string,
   ): ClaimedArchiveRecoveryWork;
+  assertClaim(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
   release(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
 }
 
@@ -1616,6 +1617,7 @@ export interface DvdInitialArchiveSave {
 }
 
 export interface DvdRecoveryCheckpointProjection {
+  claim: ClaimedArchiveRecoveryWork;
   recoveryRead: import("./dvd-archive-evidence-digests.js").DvdArchiveRecoveryReadEvidenceDigestInput & {
     id: string;
     evidenceDigest: string;

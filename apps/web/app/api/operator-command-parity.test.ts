@@ -561,6 +561,106 @@ it("blocks Catalog Review replacement previews consistently through web and CLI"
   }
 });
 
+it("reports Archive Recovery conflicts for replacement previews through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const seeded = seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    const review = await fixture.run([
+      "catalog-review",
+      "show",
+      seeded.archive.id,
+    ]);
+    const catalogRevision = (review.result as { catalogRevision: string })
+      .catalogRevision;
+    const command = {
+      action: "complete_review" as const,
+      catalogRevision,
+      outcome: "reviewed_with_selections" as const,
+      replacementEncodes: [{
+        predecessorEncodeJobId: seeded.predecessor.id,
+        encodingProfileId: seeded.predecessor.encodingProfileId,
+        outputPath: seeded.predecessor.outputPath,
+      }],
+    };
+    const recoveryId = "synthetic-replacement-conflict-recovery";
+    markArchiveWithDvdRecoveryEvidence(
+      fixture.databasePath,
+      seeded.archive.id,
+      "catalog-review-recovery-conflict",
+      {
+        archiveRecovery: {
+          id: recoveryId,
+          workStatus: "claimed",
+        },
+      },
+    );
+    expect(access.catalog.findArchiveRecovery(seeded.archive.id))
+      .toMatchObject({
+        id: recoveryId,
+        work: expect.objectContaining({ status: "claimed" }),
+      });
+    const web = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(seeded.archive.id, {
+        ...command,
+        preview: true,
+      }),
+      seeded.archive.id,
+      () => access,
+      () => trustedOrigin,
+      () => fixture.mediaLibraryPath,
+    );
+    const cli = await fixture.run([
+      "catalog-review",
+      "preview-completion",
+      seeded.archive.id,
+      "--json",
+      JSON.stringify(command),
+    ]);
+
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toMatchObject({
+      error: {
+        code: "ENCODE_WORK_CONFLICT",
+        blockingReasons: [{ code: "ENCODE_WORK_CONFLICT" }],
+        current: {
+          archiveRecovery: {
+            id: recoveryId,
+            originalDiscArchiveId: seeded.archive.id,
+            work: { status: "claimed" },
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(cli.result)).not.toContain("claimToken");
+    expect(JSON.stringify(cli.result)).not.toContain("claimedBy");
+    expect(access.catalog.listOriginalDiscArchives({
+      ids: [seeded.archive.id],
+    })[0]).toMatchObject({
+      catalogReviewOutcome: "needs_review",
+      catalogReviewedAt: null,
+    });
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: seeded.predecessor.id,
+        predecessorEncodeJobId: null,
+      }),
+    ]);
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    expect(sqlite.prepare(`
+      SELECT count(*) AS count
+      FROM mutation_invocations
+      WHERE operation = 'catalog_review.complete.preview'
+    `).get()).toEqual({ count: 0 });
+    sqlite.close();
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
 it("blocks Encode queue resolution consistently through web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
   const seeded = seedCatalogReviewForReadFixture(fixture);
@@ -913,14 +1013,14 @@ it("reports Archive Recovery conflicts identically through Encode web and CLI op
             originalDiscArchiveId: archive.id,
             work: {
               status: "claimed",
-              claimedBy: "synthetic-recovery-worker",
-              claimToken: "synthetic-recovery-claim",
             },
           },
           encodeJobs: [],
         },
       },
     });
+    expect(JSON.stringify(cli.result)).not.toContain("claimToken");
+    expect(JSON.stringify(cli.result)).not.toContain("claimedBy");
     expect(access.encodeJobs.list()).toHaveLength(1);
     const sqlite = new DatabaseSync(fixture.databasePath);
     expect(sqlite.prepare(`
@@ -953,6 +1053,8 @@ it("reports Archive Recovery conflicts identically through Encode web and CLI op
         },
       },
     });
+    expect(JSON.stringify(archiveCli.result)).not.toContain("claimToken");
+    expect(JSON.stringify(archiveCli.result)).not.toContain("claimedBy");
 
     const encodeWeb = createOperationsResponse(
       access,
@@ -986,6 +1088,8 @@ it("reports Archive Recovery conflicts identically through Encode web and CLI op
         ]),
       },
     });
+    expect(JSON.stringify(encodeCli.result)).not.toContain("claimToken");
+    expect(JSON.stringify(encodeCli.result)).not.toContain("claimedBy");
   } finally {
     access.close();
     fixture.dispose();

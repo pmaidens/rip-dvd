@@ -24,6 +24,21 @@ export const ACTIVE_ENCODE_WORK_STATUSES = [
 export type ActiveEncodeWorkStatus =
   (typeof ACTIVE_ENCODE_WORK_STATUSES)[number];
 
+export type ArchiveRecoveryWorkIdentity = Pick<
+  ArchiveRecoveryWork,
+  "archiveRecoveryId" | "originalDiscArchiveId" | "status"
+>;
+
+export function archiveRecoveryWorkIdentity(
+  work: ArchiveRecoveryWork,
+): ArchiveRecoveryWorkIdentity {
+  return {
+    archiveRecoveryId: work.archiveRecoveryId,
+    originalDiscArchiveId: work.originalDiscArchiveId,
+    status: work.status,
+  };
+}
+
 export function isActiveEncodeWorkStatus(
   status: EncodeJobStatus,
 ): status is ActiveEncodeWorkStatus {
@@ -48,7 +63,7 @@ export interface EncodeWorkConflictCurrent {
   archiveRecovery: {
     id: ArchiveRecoveryId;
     originalDiscArchiveId: OriginalDiscArchiveId;
-    work: ArchiveRecoveryWork | null;
+    work: ArchiveRecoveryWorkIdentity | null;
   };
   encodeJobs: readonly {
     id: EncodeJobId;
@@ -64,7 +79,9 @@ export function createEncodeWorkConflictCurrent(
     archiveRecovery: {
       id: recovery.id,
       originalDiscArchiveId: recovery.originalDiscArchiveId,
-      work: recovery.work,
+      work: recovery.work === null
+        ? null
+        : archiveRecoveryWorkIdentity(recovery.work),
     },
     encodeJobs: activeEncodeWorkIdentities(jobs),
   };

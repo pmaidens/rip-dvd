@@ -1288,6 +1288,26 @@ export function createDataAccessInternal(
       );
     }
   };
+  const requireCurrentArchiveRecoveryClaim = (
+    querySource: Pick<typeof database, "select">,
+    claim: ClaimedArchiveRecoveryWork,
+  ): ArchiveRecovery => {
+    const recovery = findArchiveRecoveryRecord(querySource, {
+      archiveRecoveryId: claim.archiveRecoveryId,
+      originalDiscArchiveId: claim.originalDiscArchiveId,
+    });
+    if (
+      recovery?.work?.status !== "claimed" ||
+      recovery.work.claimToken !== claim.claimToken ||
+      recovery.work.claimedBy !== claim.claimedBy
+    ) {
+      throw new StaleJobAttemptError(
+        "Archive Recovery work",
+        claim.archiveRecoveryId,
+      );
+    }
+    return recovery;
+  };
   const noArchiveRecoveryWorkCondition = (
     querySource: Pick<typeof database, "select">,
     originalDiscArchiveId: AnySQLiteColumn,
@@ -6962,7 +6982,7 @@ export function createDataAccessInternal(
     notifications: createNotificationAccess(database, now),
     dvdRecovery: {
       projectCheckpoint(input) {
-        const { manifest, recoveryRead } = input;
+        const { claim, manifest, recoveryRead } = input;
         assertDvdArchiveRecoveryReadEvidenceDigest(
           recoveryRead,
           recoveryRead.evidenceDigest,
@@ -6971,6 +6991,7 @@ export function createDataAccessInternal(
         if (
           manifest.originalDiscArchiveId !==
             recoveryRead.originalDiscArchiveId ||
+          claim.originalDiscArchiveId !== manifest.originalDiscArchiveId ||
           manifest.revision !== recoveryRead.fromManifestRevision + 1 ||
           manifest.previousManifestId !== recoveryRead.fromManifestId ||
           manifest.recoveryReadId !== recoveryRead.id ||
@@ -6984,6 +7005,7 @@ export function createDataAccessInternal(
 
         const archiveId = manifest.originalDiscArchiveId as OriginalDiscArchiveId;
         database.transaction((transaction) => {
+          requireCurrentArchiveRecoveryClaim(transaction, claim);
           const current = requireRow(
             transaction
               .select({
@@ -7274,6 +7296,9 @@ export function createDataAccessInternal(
           }
           return claimed as ClaimedArchiveRecoveryWork;
         }, { behavior: "immediate" });
+      },
+      assertClaim(claim) {
+        return requireCurrentArchiveRecoveryClaim(database, claim);
       },
       release(claim) {
         return database.transaction((transaction) => {
