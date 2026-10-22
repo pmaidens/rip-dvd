@@ -63,6 +63,8 @@ it("replays a lost Stop response after process restart and attempt rotation", as
   });
 
   const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`DELETE FROM archive_recovery_work
+    WHERE archive_recovery_id = ?`).run(seeded.recoveryId);
   database.prepare(`UPDATE archive_recoveries SET
     attempt_id = ?, attempt_ordinal = 2, status = 'eligible',
     stop_operation_id = NULL, stop_requested_at = NULL, stopped_at = NULL,
