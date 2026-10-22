@@ -1515,7 +1515,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       sectorCount: 1,
       outcome: "failed",
     });
-  const rejectedRepeatedManifest =
+  const repeatedFailureManifest =
     createDvdArchiveEvidenceManifestDigests({
       originalDiscArchiveId: "evidence-new-format-archive",
       revision: 3,
@@ -1679,6 +1679,7 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     FROM dvd_archive_evidence_headers
     WHERE original_disc_archive_id = 'evidence-new-format-archive'
   `).get()).toEqual({ revision: 2 });
+  evidenceFixture.exec("SAVEPOINT repeated_failure_manifest");
   expect(() => evidenceFixture.prepare(`
     INSERT INTO dvd_archive_evidence_manifests (
       id, original_disc_archive_id, revision, previous_manifest_id,
@@ -1694,11 +1695,12 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
       'evidence-new-format-manifest-2', 'evidence-new-format-read-repeat',
       'dvd-recovery-evidence-v1', '${continuationFingerprint}', 2048, 2,
       'dvd-archive-boundary-v2', 4096, 4096, '${boundaryDigest}', ?,
-      '${rejectedRepeatedManifest.unrecoveredSourceRangesDigest}',
-      '${rejectedRepeatedManifest.manifestDigest}', 3
+      '${repeatedFailureManifest.unrecoveredSourceRangesDigest}',
+      '${repeatedFailureManifest.manifestDigest}', 3
     )
-  `).run(JSON.stringify(authoritativeRanges))).toThrow(
-    /manifest transition requires its one-sector recovery read/i,
+  `).run(JSON.stringify(authoritativeRanges))).not.toThrow();
+  evidenceFixture.exec(
+    "ROLLBACK TO repeated_failure_manifest; RELEASE repeated_failure_manifest",
   );
   expect(evidenceFixture.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   evidenceFixture.close();

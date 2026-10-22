@@ -59,11 +59,13 @@ export function dvdRecoveryWriteAuthority(
   if (
     verification.status !== "completed" ||
     verification.outcome !== "match" ||
+    verification.archiveRecoveryAttemptId === null ||
     verification.workerExecutionId === null
   ) return null;
   return {
     verificationId: verification.id,
     archiveRecoveryId: verification.archiveRecoveryId,
+    archiveRecoveryAttemptId: verification.archiveRecoveryAttemptId,
     originalDiscArchiveId: verification.originalDiscArchiveId,
     discInspectionId: verification.discInspectionId,
     detectedDiscId: verification.detectedDiscId,

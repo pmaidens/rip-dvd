@@ -191,6 +191,62 @@ it("keeps web and JSON CLI submission, progress, replay, and evidence equal", as
   }
 });
 
+it("rejects reconciliation while a Recovery pass owns the attempt", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedRecovery(fixture);
+  const access = fixture.openAccess();
+  const recoveryId = seeded.recoveryId as ArchiveRecoveryId;
+  try {
+    access.archiveRecoveryWork.claim(
+      recoveryId,
+      "synthetic-active-recovery-worker",
+    );
+    const database = new DatabaseSync(fixture.databasePath);
+    database.prepare(`UPDATE archive_recoveries
+      SET status = 'running', updated_at = updated_at + 1
+      WHERE id = ?`).run(recoveryId);
+    database.close();
+
+    const inspection = await createDvdRecoveryReconciliationInspectionRoute(
+      seeded.recoveryId,
+      () => access,
+    );
+    expect(await inspection.json()).toMatchObject({
+      action: {
+        available: false,
+        blockingReasons: [{ code: "RECOVERY_PASS_ACTIVE" }],
+      },
+    });
+    const web = await createDvdRecoveryReconciliationRoute(
+      request(
+        seeded.recoveryId,
+        "00000000-0000-4000-8000-000000000464",
+      ),
+      seeded.recoveryId,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const cli = await fixture.run([
+      "archive-recovery",
+      "reconcile",
+      seeded.recoveryId,
+      "--key",
+      "00000000-0000-4000-8000-000000000465",
+    ]);
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toMatchObject({
+      error: { code: "RECONCILIATION_REJECTED" },
+    });
+    expect(access.dvdRecoveryReconciliations.findLatestForRecovery(recoveryId))
+      .toBeNull();
+  } finally {
+    access.close();
+  }
+});
+
 it.each([
   "rolling_back",
   "projecting",

@@ -562,6 +562,7 @@ export type DvdDiscVerificationStatus =
 export interface DvdDiscVerification {
   id: DvdDiscVerificationId;
   archiveRecoveryId: ArchiveRecoveryId;
+  archiveRecoveryAttemptId: ArchiveRecoveryAttemptId | null;
   attemptOrdinal: number;
   originalDiscArchiveId: OriginalDiscArchiveId;
   discInspectionId: DiscInspectionId;
@@ -594,6 +595,7 @@ export interface DvdDiscVerification {
 export interface DvdRecoveryWriteAuthority {
   verificationId: DvdDiscVerificationId;
   archiveRecoveryId: ArchiveRecoveryId;
+  archiveRecoveryAttemptId: ArchiveRecoveryAttemptId;
   originalDiscArchiveId: OriginalDiscArchiveId;
   discInspectionId: DiscInspectionId;
   detectedDiscId: DetectedDiscId;
@@ -626,9 +628,10 @@ export type ClaimedArchiveRecoveryWork = ArchiveRecoveryWork & {
 
 export interface ArchiveRecoveryWorkAccess {
   findNextStopping(): ArchiveRecovery | null;
-  findNextVerifiedCandidate(): {
+  claimNextVerifiedCandidate(workerId: string): {
     recovery: ArchiveRecovery;
     verification: DvdDiscVerification;
+    claim: ClaimedArchiveRecoveryWork;
   } | null;
   request(id: ArchiveRecoveryId): ArchiveRecoveryWork;
   claim(

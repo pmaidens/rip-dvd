@@ -1811,7 +1811,8 @@ describe("data-access facade", () => {
           name !== "20261022044526_chilly_madame_hydra" &&
           name !== "20261022080829_dvd-title-identities" &&
           name !== "20261022100044_futuristic_cannonball" &&
-          name !== "20261022205917_burly_shard",
+          name !== "20261022205917_burly_shard" &&
+          name !== "20261022222723_awesome_cyclops",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -9037,6 +9038,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261022222723_awesome_cyclops",
+        },
+        {
           name: "20261022205917_burly_shard",
         },
         {
@@ -9068,9 +9072,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20261019154548_notifications",
-        },
-        {
-          name: "20261004053119_scsi-read-path-notice",
         },
       ]);
     expect(
@@ -13916,6 +13917,40 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       FROM archive_recovery_work
     `).all()).toEqual([]);
     sqlite.close();
+  });
+
+  it("rejects invalid Archive Recovery fault and Stop persistence shapes", () => {
+    const databasePath = createTestDatabasePath();
+    const fixture = createDiscSelectionCorrectionFixture({
+      databasePath,
+      key: "recovery-persistence-shape",
+    });
+    const recoveryId = "recovery-persistence-shape" as ArchiveRecoveryId;
+    fixture.access.close();
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      fixture.archive.id,
+      "recovery-persistence-shape",
+      { archiveRecoveryId: recoveryId },
+    );
+
+    const sqlite = new DatabaseSync(databasePath);
+    try {
+      expect(() => sqlite.prepare(`UPDATE archive_recoveries
+        SET status = 'faulted', fault_code = 'UNKNOWN_FAULT'
+        WHERE id = ?`).run(recoveryId)).toThrow(/check constraint/i);
+      expect(() => sqlite.prepare(`UPDATE archive_recoveries
+        SET stop_operation_id = 'synthetic-stop', stop_requested_at = 1
+        WHERE id = ?`).run(recoveryId)).toThrow(/check constraint/i);
+      expect(sqlite.prepare(`SELECT status, stop_operation_id, fault_code
+        FROM archive_recoveries WHERE id = ?`).get(recoveryId)).toEqual({
+          status: "eligible",
+          stop_operation_id: null,
+          fault_code: null,
+        });
+    } finally {
+      sqlite.close();
+    }
   });
 
   it("blocks recovery request and claim when Encode Job work already owns the archive", () => {

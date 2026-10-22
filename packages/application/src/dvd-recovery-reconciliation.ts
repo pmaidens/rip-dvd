@@ -41,12 +41,18 @@ export function inspectDvdRecoveryReconciliation(
     recovery.id,
   );
   const active = latest?.status === "queued" || latest?.status === "running";
-  const blockingReasons = active
-    ? [{
+  const recoveryPassActive = recovery.status === "running" ||
+    recovery.status === "stopping";
+  const blockingReasons = [
+    ...(active ? [{
         code: "RECONCILIATION_ACTIVE",
         message: "A DVD recovery reconciliation is already active.",
-      }]
-    : [];
+      }] : []),
+    ...(recoveryPassActive ? [{
+      code: "RECOVERY_PASS_ACTIVE",
+      message: "The active DVD recovery pass must quiesce first.",
+    }] : []),
+  ];
   return {
     archiveRecovery: visibleArchiveRecovery(recovery),
     checkpoint: access.catalog.findDvdArchiveEvidenceHeader(
@@ -55,7 +61,7 @@ export function inspectDvdRecoveryReconciliation(
     reconciliation: latest === null ? null : visibleReconciliation(latest),
     action: {
       name: "reconcile",
-      available: !active,
+      available: blockingReasons.length === 0,
       blockingReasons,
       expectedInputs: {
         archiveRecoveryId: recovery.id,

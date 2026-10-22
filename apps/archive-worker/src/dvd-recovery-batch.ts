@@ -248,6 +248,8 @@ function sameWriteAuthority(
 ): boolean {
   return verification.id === authority.verificationId &&
     verification.archiveRecoveryId === authority.archiveRecoveryId &&
+    verification.archiveRecoveryAttemptId ===
+      authority.archiveRecoveryAttemptId &&
     verification.originalDiscArchiveId === authority.originalDiscArchiveId &&
     verification.discInspectionId === authority.discInspectionId &&
     verification.detectedDiscId === authority.detectedDiscId &&
@@ -294,6 +296,9 @@ function assertRecoveryWriteAuthority(
     authority.originalDiscArchiveId !== options.originalDiscArchiveId ||
     authority.archiveRecoveryId !==
       options.recoveryWorkClaim.archiveRecoveryId ||
+    authority.archiveRecoveryAttemptId !==
+      options.recoveryWorkClaim.attemptId ||
+    recovery.attemptId !== authority.archiveRecoveryAttemptId ||
     verification === null ||
     latest?.id !== verification.id ||
     verification.status !== "completed" ||
@@ -642,9 +647,7 @@ async function runOwnedBatch(
     options.observation.startLba >= range.startLba &&
     options.observation.startLba < range.startLba + range.sectorCount
   );
-  if (targetedRange === undefined ||
-    (options.observation.outcome === "failed" &&
-      targetedRange.classification === "individually_failed")) {
+  if (targetedRange === undefined) {
     throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT");
   }
   const recoveryRead = recoveryReadFor(options.originalDiscArchiveId, current, options.observation);

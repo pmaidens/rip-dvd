@@ -20,11 +20,6 @@ export function dvdEvidenceRangesAfterRecoveryRead(
   }
 
   const containing = ranges[containingIndex]!;
-  if (outcome === "failed" && containing.classification === "individually_failed") {
-    throw new DomainInvariantError(
-      "Persisted DVD Archive Evidence contains a redundant failed recovery transition",
-    );
-  }
   const replacements: DvdUnrecoveredSourceRange[] = [];
   if (startLba > containing.startLba) {
     replacements.push({

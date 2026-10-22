@@ -21,6 +21,7 @@ import {
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
   ARCHIVE_INTEGRITIES,
+  ARCHIVE_RECOVERY_FAULT_CODES,
   ARCHIVE_RECOVERY_STATUSES,
   ARCHIVE_RECOVERY_WORK_STATUSES,
   CATALOG_REVIEW_OUTCOMES,
@@ -1744,11 +1745,11 @@ export const archiveRecoveries = sqliteTable(
     ),
     check(
       "archive_recoveries_stop_check",
-      sql`(${table.status} = 'stopping' and ${table.stopOperationId} is not null and ${table.stopRequestedAt} is not null and ${table.stoppedAt} is null) or (${table.status} = 'stopped' and ${table.stopOperationId} is not null and ${table.stopRequestedAt} is not null and ${table.stoppedAt} is not null) or (${table.status} not in ('stopping', 'stopped') and ${table.stoppedAt} is null)`,
+      sql`(${table.status} = 'stopping' and ${table.stopOperationId} is not null and ${table.stopRequestedAt} is not null and ${table.stoppedAt} is null) or (${table.status} = 'stopped' and ${table.stopOperationId} is not null and ${table.stopRequestedAt} is not null and ${table.stoppedAt} is not null) or (${table.status} not in ('stopping', 'stopped') and ${table.stopOperationId} is null and ${table.stopRequestedAt} is null and ${table.stoppedAt} is null)`,
     ),
     check(
       "archive_recoveries_fault_check",
-      sql`(${table.status} = 'faulted' and ${table.faultCode} is not null) or (${table.status} <> 'faulted' and ${table.faultCode} is null)`,
+      sql`(${table.status} = 'faulted' and ${table.faultCode} in (${sqliteStringLiterals(ARCHIVE_RECOVERY_FAULT_CODES)})) or (${table.status} <> 'faulted' and ${table.faultCode} is null)`,
     ),
   ],
 );
@@ -1923,6 +1924,8 @@ export const dvdDiscVerifications = sqliteTable(
       .$type<ArchiveRecoveryId>()
       .notNull()
       .references(() => archiveRecoveries.id, { onDelete: "restrict" }),
+    archiveRecoveryAttemptId: text("archive_recovery_attempt_id")
+      .$type<ArchiveRecoveryAttemptId>(),
     attemptOrdinal: integer("attempt_ordinal").notNull(),
     originalDiscArchiveId: text("original_disc_archive_id")
       .$type<OriginalDiscArchiveId>()
@@ -1987,7 +1990,7 @@ export const dvdDiscVerifications = sqliteTable(
     ),
     check(
       "dvd_disc_verifications_attempt_check",
-      sql`typeof(${table.attemptOrdinal}) = 'integer' and ${table.attemptOrdinal} > 0`,
+      sql`typeof(${table.attemptOrdinal}) = 'integer' and ${table.attemptOrdinal} > 0 and (${table.archiveRecoveryAttemptId} is null or length(${table.archiveRecoveryAttemptId}) > 0)`,
     ),
     check(
       "dvd_disc_verifications_json_check",

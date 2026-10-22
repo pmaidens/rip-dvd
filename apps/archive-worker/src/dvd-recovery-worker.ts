@@ -214,6 +214,7 @@ async function finalizeStop(input: {
     verificationId !== null && verificationId !== undefined &&
     (verification === null ||
       verification.archiveRecoveryId !== input.recovery.id ||
+      verification.archiveRecoveryAttemptId !== input.recovery.attemptId ||
       verification.originalDiscArchiveId !==
         input.recovery.originalDiscArchiveId)
   ) {
@@ -287,19 +288,14 @@ export async function pollDvdRecoveryPass(input: {
   }
 
   const candidate = input.access.archiveRecoveryWork
-    .findNextVerifiedCandidate();
+    .claimNextVerifiedCandidate(input.workerExecutionId);
   if (candidate === null) return false;
-  const authority = dvdRecoveryWriteAuthority(candidate.verification);
-  if (authority === null) {
-    throw new Error("DVD Recovery candidate lacks write authority");
-  }
-  const requested = input.access.archiveRecoveryWork.request(
-    candidate.recovery.id,
-  );
-  let claim: ClaimedArchiveRecoveryWork = input.access.archiveRecoveryWork
-    .claim(requested.archiveRecoveryId, input.workerExecutionId);
+  const claim: ClaimedArchiveRecoveryWork = candidate.claim;
   try {
-    claim = input.access.archiveRecoveryWork.bindVerification(claim, authority);
+    const authority = dvdRecoveryWriteAuthority(candidate.verification);
+    if (authority === null) {
+      throw new Error("DVD Recovery candidate lacks write authority");
+    }
     const checkpoint = await input.access.readDvdCheckpoint(
       candidate.recovery.originalDiscArchiveId,
       archiveImageOwnership,
