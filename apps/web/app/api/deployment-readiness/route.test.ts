@@ -7,6 +7,7 @@ const listArchiveJobs = vi.fn();
 const listEncodeJobs = vi.fn();
 const listVerificationRuns = vi.fn();
 const listArchiveAudits = vi.fn();
+const listDvdRecoveryReconciliations = vi.fn();
 const readDvdRecoveryStoragePreflight = vi.fn();
 const readConsistentSnapshot = vi.fn((read: (access: unknown) => unknown) =>
   read({
@@ -17,6 +18,9 @@ const readConsistentSnapshot = vi.fn((read: (access: unknown) => unknown) =>
     encodeJobs: { list: listEncodeJobs },
     filesystemVerification: { listActive: listVerificationRuns },
     archiveAudits: { listActive: listArchiveAudits },
+    dvdRecoveryReconciliations: {
+      listActive: listDvdRecoveryReconciliations,
+    },
     dvdRecoveryStorage: { readCurrent: readDvdRecoveryStoragePreflight },
   }),
 );
@@ -45,6 +49,7 @@ describe("GET /api/deployment-readiness", () => {
     listEncodeJobs.mockReturnValue([]);
     listVerificationRuns.mockReturnValue([]);
     listArchiveAudits.mockReturnValue([]);
+    listDvdRecoveryReconciliations.mockReturnValue([]);
     readDvdRecoveryStoragePreflight.mockReturnValue(null);
   });
 
@@ -53,6 +58,10 @@ describe("GET /api/deployment-readiness", () => {
       { id: "waiting-for-reinsertion", status: "pending" },
     ]);
     listEncodeJobs.mockReturnValue([{ id: "encode-1", status: "running" }]);
+    listDvdRecoveryReconciliations.mockReturnValue([{
+      id: "reconciliation-1",
+      status: "queued",
+    }]);
 
     const response = GET();
 
@@ -84,6 +93,11 @@ describe("GET /api/deployment-readiness", () => {
           status: "pending",
         },
         { kind: "encode_job", id: "encode-1", status: "running" },
+        {
+          kind: "dvd_recovery_reconciliation",
+          id: "reconciliation-1",
+          status: "queued",
+        },
       ],
       opticalDrives: [
         {
@@ -100,6 +114,7 @@ describe("GET /api/deployment-readiness", () => {
       "running",
       "cancellation_requested",
     ]);
+    expect(listDvdRecoveryReconciliations).toHaveBeenCalledWith();
   });
 
   it("fails closed when any readiness query fails", async () => {

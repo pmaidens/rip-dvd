@@ -1,4 +1,10 @@
-import { lstatSync, realpathSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  realpathSync,
+  mkdirSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -20,6 +26,7 @@ export async function seedCommittedArchiveEvidence(
   const archivePath = join(realpathSync(fixture.originalsLibraryPath), `${archive.id}.iso`);
   const acceptedSectors = 1024;
   writeFileSync(archivePath, Buffer.alloc(acceptedSectors * 2048));
+  utimesSync(archivePath, 1_700_000_000, 1_700_000_000);
   const sqlite = new DatabaseSync(fixture.databasePath);
   sqlite.prepare(`UPDATE original_disc_archives SET archive_path = ?, size_bytes = ?,
     boundary_policy_version = ?, boundary_reported_size_bytes = ?,

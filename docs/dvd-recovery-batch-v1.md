@@ -91,3 +91,31 @@ revision-bound paging contract.
 
 Runtime journals, manifests, pointers, and images are private operator data.
 They are not repository fixtures or public issue attachments.
+
+## Interrupted checkpoint reconciliation
+
+`rip-dvd archive-recovery reconcile <archive-recovery-id>` queues a durable
+reconciliation operation. The archive worker takes exclusive image ownership
+before examining the filesystem pointer, evidence records, journal, image, and
+SQLite projection. The operation never resumes source reads and does not open
+new-format admission.
+
+The synchronized checkpoint pointer is authoritative. When it still names the
+base revision, a valid journal proves an uncommitted batch. The worker verifies
+that every protected unit is either wholly before-image or wholly after-image,
+restores the retained original units, synchronizes the image, restores the
+checkpoint-bound modification time, verifies the prior checkpoint, and only
+then removes an uncommitted next manifest and the journal. When the pointer
+names the next valid revision and SQLite is one revision behind, the worker
+projects that exact checkpoint and then removes the journal. A valid journal
+left after an already-projected commit is cleanup-only. Repeating any completed
+case is a no-op.
+
+Missing or malformed evidence, a conflicting pointer or manifest, a missing
+journal for an unprojected recovered checkpoint, changed protected bytes,
+image identity or extent changes, rollback failure, unavailable mutation
+protection, or uncertain writer ownership never advances the checkpoint. The
+durable operation ends with `CONSISTENCY_FAULT`, `STORAGE_UNSUPPORTED`, or
+`WRITER_NOT_QUIESCENT`; retained evidence remains in place for diagnosis.
+Public web and JSON CLI adapters expose the same operation identity, phase,
+terminal evidence, replay behavior, and machine-readable failure code.

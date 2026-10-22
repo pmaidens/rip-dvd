@@ -40,9 +40,13 @@ import {
   type ArchiveImageOwnership,
   type ArchiveImageOwnershipHandle,
 } from "@rip-dvd/worker-runtime";
+import {
+  createDvdRecoveryJournalDigest,
+  DVD_RECOVERY_JOURNAL_MAGIC,
+  DVD_RECOVERY_JOURNAL_NAME,
+  type DvdRecoveryJournalMetadata,
+} from "./dvd-recovery-journal.js";
 
-const JOURNAL_NAME = "recovery-journal.bin";
-const JOURNAL_MAGIC = "rip-dvd-recovery-journal-v1\n";
 const NATIVE_WRITER = "/usr/local/bin/rip-dvd-recovery-atomic-write";
 
 export type DvdRecoveryBatchStep =
@@ -105,6 +109,12 @@ export interface DvdRecoveryAtomicWriter {
     bytes: Buffer;
     unitBytes: number;
   }): { bytesWritten: number; unitBytes: number };
+  restoreVersion?(input: {
+    imagePath: string;
+    filesystemIdentity: string;
+    ownershipDescriptor: number;
+    mtimeNs: string;
+  }): { mtimeNs: string };
 }
 
 function nativeImageIdentityArgs(filesystemIdentity: string): [string, string] {
@@ -159,6 +169,26 @@ export const nodeDvdRecoveryAtomicWriter: DvdRecoveryAtomicWriter = {
       unitBytes: Number(result.unitBytes),
     };
   },
+  restoreVersion({
+    imagePath,
+    filesystemIdentity,
+    ownershipDescriptor,
+    mtimeNs,
+  }) {
+    const identity = nativeImageIdentityArgs(filesystemIdentity);
+    const result = parseNativeResult(spawnSync(
+      NATIVE_WRITER,
+      ["restore-version", imagePath, mtimeNs, ...identity],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe", ownershipDescriptor],
+      },
+    ));
+    if (result.status !== "restored" || result.mtimeNs !== mtimeNs) {
+      throw new Error("Atomic recovery helper did not restore image version");
+    }
+    return { mtimeNs };
+  },
 };
 
 interface RecoveryPaths {
@@ -167,28 +197,6 @@ interface RecoveryPaths {
   image: string;
   journal: string;
   pointer: string;
-}
-
-interface JournalMetadata {
-  version: "dvd-recovery-journal-v1";
-  originalDiscArchiveId: string;
-  image: { filesystemIdentity: string; mtimeNs: string; sizeBytes: number };
-  base: {
-    manifestId: string;
-    revision: number;
-    manifestDigest: string;
-    publicationDigest: string;
-    unrecoveredSourceRanges: CommittedDvdCheckpointEvidence["unrecoveredSourceRanges"];
-  };
-  recoveryRead: {
-    id: string;
-    startLba: number;
-    sectorCount: 1;
-    outcome: "recovered";
-    sourceBytesDigest: string;
-  };
-  protectedRanges: readonly (DvdRecoveryProtectedRange & { payloadOffset: number })[];
-  journalDigest: string;
 }
 
 export interface DvdRecoveryBatchOptions {
@@ -312,7 +320,13 @@ async function pathsFor(options: DvdRecoveryBatchOptions): Promise<RecoveryPaths
     const directory = join(root, ".dvd-evidence", id);
     const image = join(root, `${id}.iso`);
     if (await realpath(directory) !== directory) throw new Error("Evidence path changed");
-    return { root, directory, image, journal: join(directory, JOURNAL_NAME), pointer: join(directory, "checkpoint.json") };
+    return {
+      root,
+      directory,
+      image,
+      journal: join(directory, DVD_RECOVERY_JOURNAL_NAME),
+      pointer: join(directory, "checkpoint.json"),
+    };
   } catch (cause) {
     throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT", { cause });
   }
@@ -365,17 +379,16 @@ async function readImageVersion(
 
 async function reserveJournal(
   path: string,
-  metadata: Omit<JournalMetadata, "journalDigest">,
+  metadata: Omit<DvdRecoveryJournalMetadata, "journalDigest">,
   originalBytes: Buffer,
 ): Promise<string> {
-  const journalDigest = sha256(Buffer.concat([
-    Buffer.from("rip-dvd:recovery-journal:v1\0"),
-    Buffer.from(canonicalPublicationJson(metadata)),
+  const journalDigest = createDvdRecoveryJournalDigest(
+    metadata,
     originalBytes,
-  ]));
-  const complete: JournalMetadata = { ...metadata, journalDigest };
+  );
+  const complete: DvdRecoveryJournalMetadata = { ...metadata, journalDigest };
   const metadataBytes = Buffer.from(canonicalPublicationJson(complete));
-  const magic = Buffer.from(JOURNAL_MAGIC);
+  const magic = Buffer.from(DVD_RECOVERY_JOURNAL_MAGIC);
   const headerPrefixBytes = magic.length + 4 + 32;
   if (headerPrefixBytes + metadataBytes.length > DVD_RECOVERY_JOURNAL_METADATA_BYTES ||
     originalBytes.length > DVD_RECOVERY_JOURNAL_PAYLOAD_BYTES) {
@@ -562,6 +575,11 @@ async function runOwnedBatch(
   if (!archive || !header || recovery?.status !== "eligible" || resolve(archive.archivePath) !== paths.image) {
     throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT");
   }
+  const reconciliation = options.access.dvdRecoveryReconciliations
+    .findLatestForRecovery(recovery.id);
+  if (reconciliation !== null && reconciliation.status !== "completed") {
+    throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT");
+  }
   if (header.currentManifestRevision >= DVD_RECOVERY_MAX_CHECKPOINT_REVISION) {
     throw new DvdRecoveryBatchFault("CHECKPOINT_CAPACITY_EXHAUSTED");
   }
@@ -658,7 +676,10 @@ async function runOwnedBatch(
         };
       },
     );
-    const journalWithoutDigest: Omit<JournalMetadata, "journalDigest"> = {
+    const journalWithoutDigest: Omit<
+      DvdRecoveryJournalMetadata,
+      "journalDigest"
+    > = {
       version: "dvd-recovery-journal-v1",
       originalDiscArchiveId: options.originalDiscArchiveId,
       image: {

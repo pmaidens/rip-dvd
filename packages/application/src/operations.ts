@@ -14,6 +14,8 @@ import {
   type ArchiveJob,
   type ArchiveJobId,
   type ArchiveRecovery,
+  type ArchiveRecoveryId,
+  type DvdRecoveryReconciliation,
   type ArchiveAuditRun,
   type ArchiveAuditRunId,
   type ArchiveAuditRunSummary,
@@ -54,6 +56,7 @@ export const OPERATION_KINDS = [
   "disc-inspections",
   "archive-requests",
   "archive-jobs",
+  "archive-recoveries",
   "original-disc-archives",
   "encode-jobs",
   "archive-audits",
@@ -64,7 +67,7 @@ export const OPERATION_KINDS = [
 
 export type OperationKind = (typeof OPERATION_KINDS)[number];
 export type WaitableKind = Extract<OperationKind,
-  "disc-inspections" | "archive-requests" | "archive-jobs" | "encode-jobs" | "archive-audits" | "filesystem-verifications"
+  "disc-inspections" | "archive-requests" | "archive-jobs" | "archive-recoveries" | "encode-jobs" | "archive-audits" | "filesystem-verifications"
 >;
 
 export interface OperationInspectionOptions {
@@ -88,7 +91,8 @@ export function isOperationKind(value: string): value is OperationKind {
 
 export function isWaitableKind(value: string): value is WaitableKind {
   return value === "disc-inspections" || value === "archive-requests" ||
-    value === "archive-jobs" || value === "encode-jobs" || value === "archive-audits" ||
+    value === "archive-jobs" || value === "archive-recoveries" ||
+    value === "encode-jobs" || value === "archive-audits" ||
     value === "filesystem-verifications";
 }
 
@@ -120,6 +124,44 @@ function visibleArchiveRecovery(recovery: ArchiveRecovery) {
     work: recovery.work === null
       ? null
       : archiveRecoveryWorkIdentity(recovery.work),
+  };
+}
+
+function visibleDvdRecoveryReconciliation(
+  reconciliation: DvdRecoveryReconciliation | null,
+) {
+  if (reconciliation === null) return null;
+  const { claimToken: _claimToken, ...visible } = reconciliation;
+  return visible;
+}
+
+function archiveRecoveryOperation(
+  access: ConsistentReadAccess,
+  recovery: ArchiveRecovery,
+) {
+  const reconciliation = access.dvdRecoveryReconciliations
+    .findLatestForRecovery(recovery.id);
+  const active = reconciliation?.status === "queued" ||
+    reconciliation?.status === "running";
+  return {
+    ...visibleArchiveRecovery(recovery),
+    recoveryStatus: recovery.status,
+    status: reconciliation?.status ?? "idle",
+    reconciliation: visibleDvdRecoveryReconciliation(reconciliation),
+    checkpoint: access.catalog.findDvdArchiveEvidenceHeader(
+      recovery.originalDiscArchiveId,
+    ),
+    availableActions: [{
+      name: "reconcile",
+      eligible: !active,
+      requiredInputs: ["mutationKey", "archiveRecoveryId"],
+      reason: active
+        ? "A DVD recovery reconciliation is already active."
+        : null,
+      blockingReasons: active
+        ? ["A DVD recovery reconciliation is already active."]
+        : [],
+    }],
   };
 }
 
@@ -598,6 +640,9 @@ function readList(access: ConsistentReadAccess, kind: OperationKind, limit: numb
       return recentWork(access.archiveJobs.list(undefined, {
         policy: boundedPolicy(limit),
       }), ["running"], limit).map(visibleArchiveJob);
+    case "archive-recoveries":
+      return access.catalog.listArchiveRecoveries({ limit })
+        .map((recovery) => archiveRecoveryOperation(access, recovery));
     case "original-disc-archives": {
       const archives = access.catalog.listOriginalDiscArchives({ limit });
       const evidenceHeaders = evidenceHeadersForArchives(access, archives);
@@ -719,6 +764,14 @@ function readDetail(
           visibleArchive(archive, evidenceHeaders)
         )[0] ?? null,
       };
+    }
+    case "archive-recoveries": {
+      const recovery = access.catalog.findArchiveRecoveryById(
+        id as ArchiveRecoveryId,
+      );
+      return recovery === null
+        ? null
+        : archiveRecoveryOperation(access, recovery);
     }
     case "original-disc-archives": {
       const archive = access.catalog.listOriginalDiscArchives({ ids: [id as OriginalDiscArchiveId] })[0];
@@ -1054,6 +1107,7 @@ const TERMINAL_STATUSES: Record<WaitableKind, readonly string[]> = {
   "disc-inspections": ["completed", "failed", "aborted"],
   "archive-requests": ["fulfilled", "cancelled", "needs_attention"],
   "archive-jobs": ["completed", "failed", "cancelled", "aborted"],
+  "archive-recoveries": ["completed", "failed"],
   "encode-jobs": ["completed", "failed", "cancelled"],
   "archive-audits": ["completed", "failed"],
   "filesystem-verifications": ["completed", "failed"],

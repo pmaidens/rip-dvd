@@ -145,6 +145,30 @@ static int parse_u64(const char *text, uint64_t *value) {
     return 0;
 }
 
+static int nanoseconds_to_timespec(uint64_t value, struct timespec *time) {
+    uint64_t seconds = value / 1000000000ULL;
+    if (seconds > (uint64_t)INT64_MAX) return 1;
+    time->tv_sec = (time_t)seconds;
+    time->tv_nsec = (long)(value % 1000000000ULL);
+    return 0;
+}
+
+static int restore_version(int fd, uint64_t mtime_ns) {
+    struct timespec times[2] = {
+        { .tv_sec = 0, .tv_nsec = UTIME_OMIT },
+        {0},
+    };
+    if (nanoseconds_to_timespec(mtime_ns, &times[1]) != 0 ||
+        futimens(fd, times) != 0 || fsync(fd) != 0) return 1;
+    struct stat metadata;
+    if (fstat(fd, &metadata) != 0 ||
+        (uint64_t)metadata.st_mtim.tv_sec != mtime_ns / 1000000000ULL ||
+        (uint64_t)metadata.st_mtim.tv_nsec != mtime_ns % 1000000000ULL) {
+        return 1;
+    }
+    return 0;
+}
+
 static int read_exact_stdin(void *buffer, size_t length) {
     size_t offset = 0;
     while (offset < length) {
@@ -163,14 +187,18 @@ static int read_exact_stdin(void *buffer, size_t length) {
 int main(int argc, char **argv) {
     if (argc < 2 ||
         (strcmp(argv[1], "inspect") == 0 ? argc != 5 :
-         strcmp(argv[1], "write") == 0 ? argc != 7 : 1) ||
+         strcmp(argv[1], "write") == 0 ? argc != 7 :
+         strcmp(argv[1], "restore-version") == 0 ? argc != 6 : 1) ||
         !descriptor_holds_exclusive_flock(3)) return 2;
     uint64_t expected_device, expected_inode;
-    int identity_index = strcmp(argv[1], "inspect") == 0 ? 3 : 5;
+    int identity_index = strcmp(argv[1], "inspect") == 0 ? 3 :
+        strcmp(argv[1], "write") == 0 ? 5 : 4;
     if (parse_u64(argv[identity_index], &expected_device) != 0 ||
         parse_u64(argv[identity_index + 1], &expected_inode) != 0) return 2;
-    int fd = open(argv[2], O_RDWR | O_DIRECT | O_SYNC | O_NOFOLLOW |
-                            O_CLOEXEC | O_NONBLOCK);
+    int direct_operation = strcmp(argv[1], "restore-version") != 0;
+    int flags = O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK;
+    if (direct_operation) flags |= O_DIRECT | O_SYNC;
+    int fd = open(argv[2], flags);
     if (fd < 0) return 1;
     struct stat metadata;
     if (fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
@@ -179,6 +207,19 @@ int main(int argc, char **argv) {
         (uint64_t)metadata.st_ino != expected_inode) {
         close(fd);
         return 1;
+    }
+    if (strcmp(argv[1], "restore-version") == 0) {
+        uint64_t mtime_ns;
+        if (parse_u64(argv[3], &mtime_ns) != 0 ||
+            restore_version(fd, mtime_ns) != 0 ||
+            !descriptor_holds_exclusive_flock(3)) {
+            close(fd);
+            return 1;
+        }
+        int status = close(fd);
+        printf("{\"status\":\"restored\",\"mtimeNs\":\"%" PRIu64 "\"}\n",
+               mtime_ns);
+        return status == 0 ? 0 : 1;
     }
     const struct writer_operations operations = {
         .query = query_atomic,

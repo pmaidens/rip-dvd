@@ -40,6 +40,10 @@ import {
   requestDvdDiscVerification,
 } from "./dvd-disc-verification.js";
 import {
+  inspectDvdRecoveryReconciliation,
+  requestDvdRecoveryReconciliation,
+} from "./dvd-recovery-reconciliation.js";
+import {
   mutateMediaItem,
   previewMediaItemChange,
   searchMediaItems,
@@ -252,6 +256,13 @@ function readDeploymentReadiness(access: ConsistentReadAccess) {
     .map(({ id, status }) => ({ kind: "filesystem_verification", id, status }));
   const archiveAudits = access.archiveAudits.listActive()
     .map(({ id, status }) => ({ kind: "archive_audit", id, status }));
+  const recoveryReconciliations = access.dvdRecoveryReconciliations
+    .listActive()
+    .map(({ id, status }) => ({
+      kind: "dvd_recovery_reconciliation",
+      id,
+      status,
+    }));
   const opticalDrives = access.catalog.listOpticalDrives().map((drive) => ({
     id: drive.id,
     devicePath: drive.devicePath,
@@ -271,6 +282,7 @@ function readDeploymentReadiness(access: ConsistentReadAccess) {
       ...archiveJobs,
       ...encodeJobs,
       ...archiveAudits,
+      ...recoveryReconciliations,
       ...verificationRuns,
     ],
     opticalDrives,
@@ -483,6 +495,33 @@ export function createApplicationOperations(
       if (id.length > 256) throw new RangeError("Invalid Archive Recovery ID.");
       return inspectDvdDiscVerification(access, id as ArchiveRecoveryId);
     },
+    inspectDvdRecoveryReconciliation: (archiveRecoveryId: string) => {
+      const id = requiredString(
+        archiveRecoveryId,
+        "Archive Recovery ID",
+      );
+      if (id.length > 256) throw new RangeError("Invalid Archive Recovery ID.");
+      return inspectDvdRecoveryReconciliation(
+        access,
+        id as ArchiveRecoveryId,
+      );
+    },
+    reconcileDvdRecovery: (input: {
+      mutationKey: unknown;
+      archiveRecoveryId: unknown;
+    }) => {
+      const archiveRecoveryId = requiredString(
+        input.archiveRecoveryId,
+        "Archive Recovery ID",
+      );
+      if (archiveRecoveryId.length > 256) {
+        throw new RangeError("Invalid Archive Recovery ID.");
+      }
+      return requestDvdRecoveryReconciliation(access, {
+        mutationKey: parseMutationKey(input.mutationKey),
+        archiveRecoveryId: archiveRecoveryId as ArchiveRecoveryId,
+      });
+    },
     verifyDisc: (input: {
       mutationKey: unknown;
       archiveRecoveryId: unknown;
@@ -645,6 +684,10 @@ export function createApplicationOperations(
 
 export { formatVolumeLabel } from "./catalog-label.js";
 export { describeDvdRecoveryStorage } from "./dvd-recovery-storage.js";
+export {
+  inspectDvdRecoveryReconciliation,
+  requestDvdRecoveryReconciliation,
+} from "./dvd-recovery-reconciliation.js";
 export {
   FILESYSTEM_VERIFICATION_INVENTORY_PAGE_LIMIT,
   readFilesystemVerificationInventory,

@@ -64,6 +64,20 @@ printf '%s\n' "$verification_output" | assert_json_fields \
   'error.code=NOT_FOUND'
 
 set +e
+reconciliation_output="$(invoke archive-recovery inspect-reconciliation \
+  synthetic-missing-recovery \
+  2>"$temporary_directory/reconciliation.stderr")"
+reconciliation_status=$?
+set -e
+[ "$reconciliation_status" -eq 2 ]
+printf '%s\n' "$reconciliation_output" | assert_json_fields \
+  'error.code=NOT_FOUND'
+
+recovery_inventory="$(invoke inspect archive-recoveries)"
+printf '%s\n' "$recovery_inventory" | assert_json_fields \
+  'schemaVersion=1' 'kind=archive-recoveries'
+
+set +e
 missing_key_output="$(invoke submit-archive-audit 2>"$temporary_directory/missing-key.stderr")"
 missing_key_status=$?
 set -e
