@@ -47,14 +47,14 @@ const [boundedLifetimeReady] = await once(boundedLifetime.stdout, "data");
 if (!boundedLifetimeReady.toString("utf8").includes(
   "rip-dvd-verification-lifetime-armed",
 )) {
-  throw new Error("DVD verification lifetime guard did not arm");
+  throw new Error("DVD Disc Verification lifetime guard did not arm");
 }
 const [boundedLifetimeStatus, boundedLifetimeSignal] = await once(
   boundedLifetime,
   "close",
 );
 if (boundedLifetimeStatus !== null || boundedLifetimeSignal !== "SIGALRM") {
-  throw new Error("DVD verification lifetime guard did not stop its helper");
+  throw new Error("DVD Disc Verification lifetime guard did not stop its helper");
 }
 
 const parentLossHarness = `
@@ -78,7 +78,7 @@ const parentLossParent = spawn(
 const [orphanedPidOutput] = await once(parentLossParent.stdout, "data");
 const orphanedPid = Number(orphanedPidOutput.toString("utf8").trim());
 if (!Number.isSafeInteger(orphanedPid) || orphanedPid <= 0) {
-  throw new Error("DVD verification parent-loss fixture returned no helper PID");
+  throw new Error("DVD Disc Verification parent-loss fixture returned no helper PID");
 }
 await once(parentLossParent, "close");
 const parentLossDeadline = Date.now() + 2_000;
@@ -93,7 +93,7 @@ for (;;) {
   if (!alive) break;
   if (Date.now() >= parentLossDeadline) {
     process.kill(orphanedPid, "SIGKILL");
-    throw new Error("DVD verification helper survived parent loss");
+    throw new Error("DVD Disc Verification helper survived parent loss");
   }
   await new Promise((resolve) => setTimeout(resolve, 10));
 }

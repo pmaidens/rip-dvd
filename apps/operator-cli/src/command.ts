@@ -494,7 +494,7 @@ function discVerificationInputs(args: readonly string[]) {
       "--checkpoint-revision",
       "--checkpoint-digest",
     ],
-    "Invalid disc verification options.",
+    "Invalid DVD Disc Verification options.",
   );
   const discInspectionId = options.get("--disc-inspection-id")?.trim();
   const revision = options.get("--checkpoint-revision");
@@ -509,7 +509,7 @@ function discVerificationInputs(args: readonly string[]) {
   ) {
     throw new CommandFailure(
       "INVALID_ARGUMENTS",
-      "Disc verification requires the current insertion and checkpoint binding.",
+      "DVD Disc Verification requires the current insertion and checkpoint binding.",
       2,
     );
   }
@@ -542,7 +542,7 @@ async function runDvdDiscVerificationCommand(
       throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
     }
     if (error instanceof RecordNotFoundError) {
-      throw new CommandFailure("NOT_FOUND", "DVD disc verification target was not found.", 2);
+      throw new CommandFailure("NOT_FOUND", "DVD Disc Verification target was not found.", 2);
     }
     if (error instanceof DvdDiscVerificationUnavailableError) {
       throw new CommandFailure(error.code, error.message, 2, [{
@@ -567,7 +567,7 @@ async function runDvdDiscVerificationCommand(
     }
     throw new CommandFailure(
       "DISC_VERIFICATION_UNAVAILABLE",
-      "DVD disc verification is unavailable.",
+      "DVD Disc Verification is unavailable.",
       1,
     );
   }

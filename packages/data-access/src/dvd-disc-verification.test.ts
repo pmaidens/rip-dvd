@@ -10,8 +10,8 @@ import {
   DVD_SOURCE_SAMPLE_BYTE_COUNT,
   DVD_SOURCE_SAMPLE_BYTE_REPRESENTATION,
   DVD_SOURCE_SAMPLE_SECTOR_COUNT,
-  DVD_SOURCE_VERIFICATION_MAX_BYTES,
-  DVD_SOURCE_VERIFICATION_POLICY_VERSION,
+  DVD_DISC_VERIFICATION_MAX_BYTES,
+  DVD_DISC_VERIFICATION_POLICY_VERSION,
   hasSuitableDvdSourceSampleContent,
   validateDvdDiscVerificationFindings,
   validateDvdSourceSampleManifest,
@@ -23,7 +23,7 @@ function sourceManifest(): DvdSourceSampleManifest {
   const bytes = Buffer.alloc(DVD_SOURCE_SAMPLE_BYTE_COUNT);
   bytes[bytes.length - 1] = 1;
   const payload = {
-    policyVersion: DVD_SOURCE_VERIFICATION_POLICY_VERSION,
+    policyVersion: DVD_DISC_VERIFICATION_POLICY_VERSION,
     byteRepresentation: DVD_SOURCE_SAMPLE_BYTE_REPRESENTATION,
     sourceMetadataFingerprint: "synthetic-source",
     acceptedEndLbaExclusive: 16_000,
@@ -59,7 +59,7 @@ it("selects deterministic 32-sector windows near sixteen equal-band midpoints", 
   }
   expect(
     DVD_SOURCE_SAMPLE_BAND_COUNT * DVD_SOURCE_SAMPLE_BYTE_COUNT,
-  ).toBe(DVD_SOURCE_VERIFICATION_MAX_BYTES);
+  ).toBe(DVD_DISC_VERIFICATION_MAX_BYTES);
 });
 
 it("never selects a reference window crossing unresolved source sectors", () => {
@@ -85,7 +85,7 @@ it("rejects uniform filler and binds valid references to their provenance", () =
   expect(hasSuitableDvdSourceSampleContent(uniform)).toBe(false);
   expect(hasSuitableDvdSourceSampleContent(suitable)).toBe(true);
   const payload = {
-    policyVersion: DVD_SOURCE_VERIFICATION_POLICY_VERSION,
+    policyVersion: DVD_DISC_VERIFICATION_POLICY_VERSION,
     byteRepresentation: DVD_SOURCE_SAMPLE_BYTE_REPRESENTATION,
     sourceMetadataFingerprint: "synthetic-source",
     acceptedEndLbaExclusive: 16_000,

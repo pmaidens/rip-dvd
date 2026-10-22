@@ -49,13 +49,13 @@ export async function createDvdDiscVerificationInspectionRoute(
     if (error instanceof RecordNotFoundError) {
       return errorResponse(
         "NOT_FOUND",
-        "DVD disc verification target was not found.",
+        "DVD Disc Verification target was not found.",
         404,
       );
     }
     return errorResponse(
       "DISC_VERIFICATION_UNAVAILABLE",
-      "DVD disc verification is unavailable.",
+      "DVD Disc Verification is unavailable.",
       503,
     );
   }
@@ -76,7 +76,7 @@ export async function createDvdDiscVerificationRoute(
   } catch {
     return errorResponse(
       "DISC_VERIFICATION_UNAVAILABLE",
-      "DVD disc verification is unavailable.",
+      "DVD Disc Verification is unavailable.",
       503,
     );
   }
@@ -100,7 +100,7 @@ export async function createDvdDiscVerificationRoute(
     if (body === null) {
       return errorResponse(
         "INVALID_ARGUMENTS",
-        "Disc verification requires the current insertion and checkpoint binding.",
+        "DVD Disc Verification requires the current insertion and checkpoint binding.",
         400,
       );
     }
@@ -118,14 +118,14 @@ export async function createDvdDiscVerificationRoute(
     if (error instanceof InvalidProfileInputError || error instanceof RangeError) {
       return errorResponse(
         "INVALID_ARGUMENTS",
-        "Disc verification requires the current insertion and checkpoint binding.",
+        "DVD Disc Verification requires the current insertion and checkpoint binding.",
         400,
       );
     }
     if (error instanceof RecordNotFoundError) {
       return errorResponse(
         "NOT_FOUND",
-        "DVD disc verification target was not found.",
+        "DVD Disc Verification target was not found.",
         404,
       );
     }
@@ -169,7 +169,7 @@ export async function createDvdDiscVerificationRoute(
     }
     return errorResponse(
       "DISC_VERIFICATION_UNAVAILABLE",
-      "DVD disc verification is unavailable.",
+      "DVD Disc Verification is unavailable.",
       503,
     );
   }

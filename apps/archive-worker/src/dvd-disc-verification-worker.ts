@@ -34,7 +34,7 @@ export async function runDvdDiscVerificationWorker(input: {
       mediaGenerationObserver,
       signal: input.signal,
     }),
-    pollFailureMessage: "DVD disc verification worker poll failed.",
-    waitFailureMessage: "DVD disc verification worker wait failed",
+    pollFailureMessage: "DVD Disc Verification worker poll failed.",
+    waitFailureMessage: "DVD Disc Verification worker wait failed",
   });
 }

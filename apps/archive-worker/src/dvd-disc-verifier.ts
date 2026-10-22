@@ -9,7 +9,7 @@ import {
   normalizeDvdDiscVerificationDiagnostic,
   DVD_SOURCE_SAMPLE_BAND_COUNT,
   DVD_SOURCE_SAMPLE_BYTE_COUNT,
-  DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS,
+  DVD_DISC_VERIFICATION_READ_DEADLINE_MS,
   type DataAccess,
   type DvdDiscVerificationDiagnostic,
   type DvdDiscVerificationSampleFinding,
@@ -170,7 +170,7 @@ export function createNodeDvdVerificationSourceReader():
         input.startLba + input.sectorCount > input.acceptedEndLbaExclusive ||
         !Number.isSafeInteger(input.timeoutMs) ||
         input.timeoutMs <= 0 ||
-        input.timeoutMs > DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS
+        input.timeoutMs > DVD_DISC_VERIFICATION_READ_DEADLINE_MS
       ) throw new Error("DVD Disc Verification source read is invalid");
       const lockDescriptor = openOpticalDriveLock(devicePath);
       let activeProcess;
@@ -318,7 +318,7 @@ export async function verifyInsertedDvdAgainstSamples(input: {
       break;
     }
     let elapsedMs = now() - input.startedAtMs;
-    if (elapsedMs >= DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS) {
+    if (elapsedMs >= DVD_DISC_VERIFICATION_READ_DEADLINE_MS) {
       budgetExhausted = true;
       break;
     }
@@ -328,12 +328,12 @@ export async function verifyInsertedDvdAgainstSamples(input: {
         break;
       }
       elapsedMs = now() - input.startedAtMs;
-      if (elapsedMs >= DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS) {
+      if (elapsedMs >= DVD_DISC_VERIFICATION_READ_DEADLINE_MS) {
         budgetExhausted = true;
         break;
       }
     }
-    const timeoutMs = DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS - elapsedMs;
+    const timeoutMs = DVD_DISC_VERIFICATION_READ_DEADLINE_MS - elapsedMs;
     const activeRead = input.reader.start({
       devicePath: input.devicePath,
       startLba: sample.startLba,
@@ -415,7 +415,7 @@ export async function pollDvdDiscVerification(input: {
   const heartbeat = setInterval(() => {
     try {
       if (!input.access.dvdDiscVerifications.renewClaim(claim)) {
-        throw new Error("DVD disc verification claim expired");
+        throw new Error("DVD Disc Verification claim expired");
       }
     } catch (error) {
       heartbeatError = error;
@@ -503,7 +503,7 @@ export async function pollDvdDiscVerification(input: {
             if (heartbeatError !== undefined) return false;
             const active = input.access.dvdDiscVerifications.renewClaim(claim);
             if (!active) {
-              heartbeatError = new Error("DVD disc verification claim expired");
+              heartbeatError = new Error("DVD Disc Verification claim expired");
             }
             return active;
           },

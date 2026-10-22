@@ -9,7 +9,7 @@ import {
   DVD_SOURCE_SAMPLE_BYTE_REPRESENTATION,
   DVD_SOURCE_SAMPLE_SECTOR_BYTES,
   DVD_SOURCE_SAMPLE_SECTOR_COUNT,
-  DVD_SOURCE_VERIFICATION_POLICY_VERSION,
+  DVD_DISC_VERIFICATION_POLICY_VERSION,
   dvdSourceSampleCandidates,
   hasSuitableDvdSourceSampleContent,
   validateDvdSourceSampleManifest,
@@ -121,7 +121,7 @@ export async function createInitialDvdSourceSampleManifest(input: {
     await image.close();
   }
   const payload = {
-    policyVersion: DVD_SOURCE_VERIFICATION_POLICY_VERSION,
+    policyVersion: DVD_DISC_VERIFICATION_POLICY_VERSION,
     byteRepresentation: DVD_SOURCE_SAMPLE_BYTE_REPRESENTATION,
     sourceMetadataFingerprint: input.sourceMetadataFingerprint,
     acceptedEndLbaExclusive: input.acceptedEndLbaExclusive,

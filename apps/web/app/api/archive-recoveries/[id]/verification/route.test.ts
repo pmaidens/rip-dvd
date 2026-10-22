@@ -147,7 +147,7 @@ it("keeps validation, not-found, and unavailable failures structured", async () 
     expect(await invalid.json()).toEqual({
       error: {
         code: "INVALID_ARGUMENTS",
-        message: "Disc verification requires the current insertion and checkpoint binding.",
+        message: "DVD Disc Verification requires the current insertion and checkpoint binding.",
       },
     });
 
@@ -230,7 +230,7 @@ it("keeps validation, not-found, and unavailable failures structured", async () 
     expect(await unavailable.json()).toEqual({
       error: {
         code: "DISC_VERIFICATION_UNAVAILABLE",
-        message: "DVD disc verification is unavailable.",
+        message: "DVD Disc Verification is unavailable.",
       },
     });
   } finally {

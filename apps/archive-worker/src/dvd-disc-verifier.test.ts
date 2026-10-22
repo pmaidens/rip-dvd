@@ -6,7 +6,7 @@ import {
   DVD_SOURCE_SAMPLE_BYTE_COUNT,
   DVD_SOURCE_SAMPLE_BYTE_REPRESENTATION,
   DVD_SOURCE_SAMPLE_SECTOR_COUNT,
-  DVD_SOURCE_VERIFICATION_POLICY_VERSION,
+  DVD_DISC_VERIFICATION_POLICY_VERSION,
   type DvdDiscVerificationDiagnostic,
   type DvdSourceSampleManifest,
   type DvdSourceSampleReference,
@@ -49,7 +49,7 @@ function manifest(count = DVD_SOURCE_SAMPLE_BAND_COUNT): DvdSourceSampleManifest
     }),
   );
   const payload = {
-    policyVersion: DVD_SOURCE_VERIFICATION_POLICY_VERSION,
+    policyVersion: DVD_DISC_VERIFICATION_POLICY_VERSION,
     byteRepresentation: DVD_SOURCE_SAMPLE_BYTE_REPRESENTATION,
     sourceMetadataFingerprint: metadataFingerprint,
     acceptedEndLbaExclusive: 1_024,

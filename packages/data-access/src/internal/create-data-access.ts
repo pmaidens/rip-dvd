@@ -7099,7 +7099,7 @@ export function createDataAccessInternal(
             throw new InvalidStatusTransitionError(
               "archive recovery",
               recovery.status,
-              "disc verification",
+              "DVD Disc Verification",
             );
           }
           const header = requireRow(
@@ -7160,7 +7160,7 @@ export function createDataAccessInternal(
             .get();
           if (active !== undefined) {
             throw new InvalidStatusTransitionError(
-              "disc verification",
+              "DVD Disc Verification",
               "active",
               "queued",
             );
@@ -7174,7 +7174,7 @@ export function createDataAccessInternal(
               dvdDiscVerifications.archiveRecoveryId,
               recovery.id,
             )).get(),
-            "DVD disc verification attempt sequence",
+            "DVD Disc Verification attempt sequence",
             recovery.id,
           ).value;
           const storedSourceManifest = transaction
@@ -7212,7 +7212,7 @@ export function createDataAccessInternal(
               createdAt: timestamp,
               updatedAt: timestamp,
             }).returning().get(),
-            "DVD disc verification",
+            "DVD Disc Verification",
             id,
           );
           recordMutationInvocation(
@@ -7254,7 +7254,7 @@ export function createDataAccessInternal(
             const claimToken = verification.claimToken;
             if (claimToken === null) {
               throw new DomainInvariantError(
-                "Running DVD disc verification has no claim token",
+                "Running DVD Disc Verification has no claim token",
               );
             }
             const inspection = transaction.select().from(discInspections)
@@ -7314,11 +7314,11 @@ export function createDataAccessInternal(
       claimNext(workerExecutionId) {
         const execution = requireNonEmpty(
           workerExecutionId.trim(),
-          "DVD disc verification worker execution ID",
+          "DVD Disc Verification worker execution ID",
         );
         if (execution.length > 256) {
           throw new DomainInvariantError(
-            "DVD disc verification worker execution ID is too long",
+            "DVD Disc Verification worker execution ID is too long",
           );
         }
         return database.transaction((transaction) => {
@@ -7360,7 +7360,7 @@ export function createDataAccessInternal(
       },
       appendFinding(claim, finding) {
         if (claim.claimToken === null || claim.status !== "running") {
-          throw new StaleJobAttemptError("DVD disc verification", claim.id);
+          throw new StaleJobAttemptError("DVD Disc Verification", claim.id);
         }
         const claimToken = claim.claimToken;
         return database.transaction((transaction) => {
@@ -7371,7 +7371,7 @@ export function createDataAccessInternal(
             current.claimToken !== claimToken
           ) {
             throw new StaleJobAttemptError(
-              "DVD disc verification",
+              "DVD Disc Verification",
               claim.id,
             );
           }
@@ -7392,14 +7392,14 @@ export function createDataAccessInternal(
               eq(dvdDiscVerifications.status, "running"),
               eq(dvdDiscVerifications.claimToken, claimToken),
             )).returning().get(),
-            "DVD disc verification",
+            "DVD Disc Verification",
             claim.id,
           ));
         }, { behavior: "immediate" });
       },
       complete(claim, result) {
         if (claim.claimToken === null || claim.status !== "running") {
-          throw new StaleJobAttemptError("DVD disc verification", claim.id);
+          throw new StaleJobAttemptError("DVD Disc Verification", claim.id);
         }
         const claimToken = claim.claimToken;
         return database.transaction((transaction) => {
@@ -7410,7 +7410,7 @@ export function createDataAccessInternal(
             current.claimToken !== claimToken
           ) {
             throw new StaleJobAttemptError(
-              "DVD disc verification",
+              "DVD Disc Verification",
               claim.id,
             );
           }
@@ -7426,7 +7426,7 @@ export function createDataAccessInternal(
               canonicalPublicationJson(result.findings)
           ) {
             throw new DomainInvariantError(
-              "DVD disc verification findings were not durably recorded",
+              "DVD Disc Verification findings were not durably recorded",
             );
           }
           const insertionChanged = result.insertionChanged ||
@@ -7471,7 +7471,7 @@ export function createDataAccessInternal(
               eq(dvdDiscVerifications.status, "running"),
               eq(dvdDiscVerifications.claimToken, claimToken),
             )).returning().get(),
-            "DVD disc verification",
+            "DVD Disc Verification",
             claim.id,
           ));
         }, { behavior: "immediate" });

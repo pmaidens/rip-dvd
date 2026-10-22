@@ -8,8 +8,8 @@ import { DomainInvariantError } from "./errors.js";
 import { canonicalJson } from "./canonical-json.js";
 import type { DvdUnrecoveredSourceRange } from "./types.js";
 
-export const DVD_SOURCE_VERIFICATION_POLICY_VERSION =
-  "dvd-source-verification-v1" as const;
+export const DVD_DISC_VERIFICATION_POLICY_VERSION =
+  "dvd-disc-verification-v1" as const;
 export const DVD_SOURCE_SAMPLE_BYTE_REPRESENTATION =
   "dvdcss-noflags-raw-sector-v1" as const;
 export const DVD_SOURCE_SAMPLE_BAND_COUNT = 16;
@@ -17,10 +17,10 @@ export const DVD_SOURCE_SAMPLE_SECTOR_COUNT = 32;
 export const DVD_SOURCE_SAMPLE_SECTOR_BYTES = 2_048;
 export const DVD_SOURCE_SAMPLE_BYTE_COUNT =
   DVD_SOURCE_SAMPLE_SECTOR_COUNT * DVD_SOURCE_SAMPLE_SECTOR_BYTES;
-export const DVD_SOURCE_VERIFICATION_MAX_BYTES = 1_048_576;
-export const DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS = 60_000;
+export const DVD_DISC_VERIFICATION_MAX_BYTES = 1_048_576;
+export const DVD_DISC_VERIFICATION_READ_DEADLINE_MS = 60_000;
 export const DVD_DISC_VERIFICATION_CLAIM_LEASE_MS =
-  DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS + 5_000;
+  DVD_DISC_VERIFICATION_READ_DEADLINE_MS + 5_000;
 
 const SAMPLE_DIGEST_DOMAIN = "rip-dvd:dvd-source-sample:v1\0";
 const SAMPLE_MANIFEST_DIGEST_DOMAIN =
@@ -34,7 +34,7 @@ export interface DvdSourceSampleReference {
 }
 
 export interface DvdSourceSampleManifest {
-  policyVersion: typeof DVD_SOURCE_VERIFICATION_POLICY_VERSION;
+  policyVersion: typeof DVD_DISC_VERIFICATION_POLICY_VERSION;
   byteRepresentation: typeof DVD_SOURCE_SAMPLE_BYTE_REPRESENTATION;
   sourceMetadataFingerprint: string;
   acceptedEndLbaExclusive: number;
@@ -220,7 +220,7 @@ export function normalizeDvdDiscVerificationDiagnostic(
           expected.startLba + expected.sectorCount))
   ) {
     throw new DomainInvariantError(
-      "DVD disc verification diagnostic is invalid",
+      "DVD Disc Verification diagnostic is invalid",
     );
   }
   const diagnostic = candidate as DvdDiscVerificationDiagnostic;
@@ -251,7 +251,7 @@ export function normalizeDvdDiscVerificationDiagnostic(
       normalizedCategory === "out_of_range"
   ) {
     throw new DomainInvariantError(
-      "DVD disc verification diagnostic category is invalid",
+      "DVD Disc Verification diagnostic category is invalid",
     );
   }
   return { ...diagnostic, category: normalizedCategory };
@@ -321,7 +321,7 @@ export function validateDvdSourceSampleManifest(
   manifest: DvdSourceSampleManifest,
 ): DvdSourceSampleManifest {
   if (
-    manifest.policyVersion !== DVD_SOURCE_VERIFICATION_POLICY_VERSION ||
+    manifest.policyVersion !== DVD_DISC_VERIFICATION_POLICY_VERSION ||
     manifest.byteRepresentation !== DVD_SOURCE_SAMPLE_BYTE_REPRESENTATION ||
     manifest.sourceMetadataFingerprint.length === 0 ||
     manifest.sourceMetadataFingerprint.length > 512 ||
@@ -468,13 +468,13 @@ export function validateDvdDiscVerificationFindings(
   if (manifest === null) {
     if (findings.length !== 0) {
       throw new DomainInvariantError(
-        "DVD disc verification findings require a source manifest",
+        "DVD Disc Verification findings require a source manifest",
       );
     }
     return;
   }
   if (findings.length > manifest.samples.length) {
-    throw new DomainInvariantError("DVD disc verification findings are invalid");
+    throw new DomainInvariantError("DVD Disc Verification findings are invalid");
   }
   for (const [index, finding] of findings.entries()) {
     const reference = manifest.samples[index];
@@ -486,7 +486,7 @@ export function validateDvdDiscVerificationFindings(
       finding.referenceDigest !== reference.digest
     ) {
       throw new DomainInvariantError(
-        "DVD disc verification finding does not match its source reference",
+        "DVD Disc Verification finding does not match its source reference",
       );
     }
     if (finding.outcome === "unreadable") {
@@ -496,7 +496,7 @@ export function validateDvdDiscVerificationFindings(
         diagnostic === null
       ) {
         throw new DomainInvariantError(
-          "DVD disc verification unreadable finding is invalid",
+          "DVD Disc Verification unreadable finding is invalid",
         );
       }
       normalizeDvdDiscVerificationDiagnostic(diagnostic, finding);
@@ -504,7 +504,7 @@ export function validateDvdDiscVerificationFindings(
     }
     requireDigest(
       finding.observedDigest,
-      "DVD disc verification observed sample digest",
+      "DVD Disc Verification observed sample digest",
     );
     if (
       finding.diagnostic !== null ||
@@ -512,7 +512,7 @@ export function validateDvdDiscVerificationFindings(
         (finding.outcome === "match")
     ) {
       throw new DomainInvariantError(
-        "DVD disc verification readable finding is invalid",
+        "DVD Disc Verification readable finding is invalid",
       );
     }
   }

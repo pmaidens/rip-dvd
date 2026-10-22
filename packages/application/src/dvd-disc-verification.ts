@@ -249,7 +249,7 @@ export async function inspectDvdDiscVerification(
     if (active) {
       blockingReasons.push({
         code: "DISC_VERIFICATION_ACTIVE",
-        message: "A disc verification is already active.",
+        message: "A DVD Disc Verification is already active.",
       });
     }
     return {

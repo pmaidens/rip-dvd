@@ -508,7 +508,7 @@ export function createApplicationOperations(
         !Number.isSafeInteger(input.checkpointRevision) ||
         Number(input.checkpointRevision) <= 0 ||
         !/^[0-9a-f]{64}$/.test(checkpointDigest)
-      ) throw new RangeError("Invalid DVD disc verification input.");
+      ) throw new RangeError("Invalid DVD Disc Verification input.");
       return requestDvdDiscVerification(access, {
         mutationKey: parseMutationKey(input.mutationKey),
         archiveRecoveryId: archiveRecoveryId as ArchiveRecoveryId,

@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   createDataAccess,
   DVD_DISC_VERIFICATION_CLAIM_LEASE_MS,
-  DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS,
+  DVD_DISC_VERIFICATION_READ_DEADLINE_MS,
   type ArchiveRecoveryId,
 } from "@rip-dvd/data-access";
 
@@ -36,7 +36,7 @@ it("inspects, submits, replays, and rejects stale DVD Disc Verification", async 
       detectedDiscId: sourceDisc.id,
       mediaGeneration: "synthetic-verification-generation",
     },
-    sourceSampleManifest: { policyVersion: "dvd-source-verification-v1" },
+    sourceSampleManifest: { policyVersion: "dvd-disc-verification-v1" },
     verification: null,
     writeAuthority: { available: false },
     action: { name: "verify-disc", available: true },
@@ -235,7 +235,7 @@ it("keeps a durable mismatch authoritative when a worker claim expires", async (
     const claimTime = Date.now();
     vi.useFakeTimers();
     vi.setSystemTime(
-      claimTime + DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS + 1,
+      claimTime + DVD_DISC_VERIFICATION_READ_DEADLINE_MS + 1,
     );
     expect(access.dvdDiscVerifications.recoverExpiredClaims()).toBe(0);
     vi.setSystemTime(

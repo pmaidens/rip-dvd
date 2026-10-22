@@ -10,7 +10,7 @@ import {
   DVD_SOURCE_SAMPLE_BYTE_COUNT,
   DVD_SOURCE_SAMPLE_BYTE_REPRESENTATION,
   DVD_SOURCE_SAMPLE_SECTOR_COUNT,
-  DVD_SOURCE_VERIFICATION_POLICY_VERSION,
+  DVD_DISC_VERIFICATION_POLICY_VERSION,
   type DvdSourceSampleReference,
 } from "@rip-dvd/data-access";
 import { beginSettledDiscInspectionForTest } from "@rip-dvd/data-access/test-support";
@@ -100,7 +100,7 @@ export async function seedDvdDiscVerificationFixture(
     }),
   );
   const samplePayload = {
-    policyVersion: DVD_SOURCE_VERIFICATION_POLICY_VERSION,
+    policyVersion: DVD_DISC_VERIFICATION_POLICY_VERSION,
     byteRepresentation: DVD_SOURCE_SAMPLE_BYTE_REPRESENTATION,
     sourceMetadataFingerprint: seeded.archive.fingerprint,
     acceptedEndLbaExclusive: 1_024,
