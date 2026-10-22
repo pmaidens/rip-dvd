@@ -66,10 +66,13 @@ function manifest(count = DVD_SOURCE_SAMPLE_BAND_COUNT): DvdSourceSampleManifest
 function reader(
   read: (index: number) => DvdVerificationSourceRead,
 ) {
-  const run = vi.fn(async ({ startLba }:
-    Parameters<DvdVerificationSourceReader["read"]>[0]) =>
-      read(startLba / 64));
-  return { reader: { read: run }, run };
+  const run = vi.fn(({ startLba }:
+    Parameters<DvdVerificationSourceReader["start"]>[0]) => ({
+      result: Promise.resolve(read(startLba / 64)),
+      closed: Promise.resolve(),
+      cancel: vi.fn(),
+    }));
+  return { reader: { start: run }, run };
 }
 
 it("matches all sixteen bounded raw-sector samples", async () => {
@@ -245,6 +248,99 @@ it("rechecks the deadline after asynchronous read authorization", async () => {
     budgetExhausted: true,
   });
   expect(source.run).not.toHaveBeenCalled();
+});
+
+it("cancels a hung read at the deadline and waits for quiescence", async () => {
+  vi.useFakeTimers();
+  try {
+    let closeRead!: () => void;
+    let quiescent = false;
+    const cancel = vi.fn(() => {
+      quiescent = true;
+      closeRead();
+    });
+    const source: DvdVerificationSourceReader = {
+      start: vi.fn(() => ({
+        result: new Promise<DvdVerificationSourceRead>(() => {}),
+        closed: new Promise<void>((resolve) => {
+          closeRead = resolve;
+        }),
+        cancel,
+      })),
+    };
+    const verification = verifyInsertedDvdAgainstSamples({
+      manifest: manifest(),
+      sourceMetadataFingerprint: metadataFingerprint,
+      observedMetadataFingerprint: metadataFingerprint,
+      devicePath: "/dev/synthetic-disc",
+      reader: source,
+      startedAtMs: 0,
+      now: () => 0,
+      insertionIsCurrent: () => true,
+      checkpointIsCurrent: () => true,
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    const result = await verification;
+
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(quiescent).toBe(true);
+    expect(result).toMatchObject({
+      outcome: "inconclusive",
+      budgetExhausted: true,
+      reasons: [
+        "DISC_SAMPLE_COVERAGE_INCOMPLETE",
+        "DISC_VERIFICATION_TIMEOUT",
+      ],
+    });
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("cancels a hung read on worker shutdown and waits for quiescence", async () => {
+  let closeRead!: () => void;
+  let quiescent = false;
+  const cancel = vi.fn(() => {
+    quiescent = true;
+    closeRead();
+  });
+  const source: DvdVerificationSourceReader = {
+    start: vi.fn(() => ({
+      result: new Promise<DvdVerificationSourceRead>(() => {}),
+      closed: new Promise<void>((resolve) => {
+        closeRead = resolve;
+      }),
+      cancel,
+    })),
+  };
+  const controller = new AbortController();
+  const verification = verifyInsertedDvdAgainstSamples({
+    manifest: manifest(),
+    sourceMetadataFingerprint: metadataFingerprint,
+    observedMetadataFingerprint: metadataFingerprint,
+    devicePath: "/dev/synthetic-disc",
+    reader: source,
+    startedAtMs: 0,
+    now: () => 0,
+    signal: controller.signal,
+    insertionIsCurrent: () => true,
+    checkpointIsCurrent: () => true,
+  });
+  await Promise.resolve();
+  controller.abort(new Error("synthetic worker shutdown"));
+  const result = await verification;
+
+  expect(cancel).toHaveBeenCalledOnce();
+  expect(quiescent).toBe(true);
+  expect(result).toMatchObject({
+    outcome: "inconclusive",
+    interrupted: true,
+    reasons: [
+      "DISC_SAMPLE_COVERAGE_INCOMPLETE",
+      "DISC_VERIFICATION_INTERRUPTED",
+    ],
+  });
 });
 
 it.each([0x71, 0x73])(

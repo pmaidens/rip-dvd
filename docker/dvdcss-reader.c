@@ -12,12 +12,14 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <sys/prctl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -39,6 +41,8 @@
 #define BOUNDARY_CONFIRMATION_READS 2
 #define ENDPOINT_PROOF_VERSION "dvd-normal-endpoint-proof-v1"
 #define ENDPOINT_PROOF_PREFIX "rip-dvd-endpoint-proof "
+#define VERIFICATION_MAX_LIFETIME_SECONDS 60U
+#define VERIFICATION_LIFETIME_ARMED "rip-dvd-verification-lifetime-armed\n"
 
 #ifdef RIP_DVD_READER_TESTING
 #define MAX_TEST_FAULTS 64
@@ -327,6 +331,27 @@ static int parse_sample_lba(const char *text, uint64_t *lba)
         return 1;
     }
     *lba = (uint64_t)value;
+    return 0;
+}
+
+static int arm_verification_lifetime(const char *text)
+{
+    char *end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' || value == 0 ||
+        value > VERIFICATION_MAX_LIFETIME_SECONDS) {
+        fprintf(stderr, "DVD verification lifetime is invalid\n");
+        return 1;
+    }
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0) {
+        return fail_errno("DVD verification parent-death guard failed");
+    }
+    if (getppid() == 1) {
+        fprintf(stderr, "DVD verification parent exited during startup\n");
+        return 1;
+    }
+    alarm((unsigned int)value);
     return 0;
 }
 
@@ -3458,6 +3483,24 @@ static int run_test_verification_sample(int argc, char **argv)
         size_bytes / DVDCSS_BLOCK_SIZE);
     return close_test_backend(&backend, status);
 }
+
+static int run_test_verification_lifetime(int argc, char **argv)
+{
+    uint64_t delay_seconds = 0;
+    if (argc != 4 || arm_verification_lifetime(argv[2]) != 0 ||
+        parse_test_integer(argv[3], 120, &delay_seconds) != 0) {
+        fprintf(stderr,
+                "usage: %s verification-lifetime-test TIMEOUT DELAY\n",
+                argv[0]);
+        return 2;
+    }
+    if (fputs(VERIFICATION_LIFETIME_ARMED, stdout) == EOF ||
+        fflush(stdout) != 0) {
+        return fail_errno("DVD verification lifetime test output failed");
+    }
+    sleep((unsigned int)delay_seconds);
+    return 0;
+}
 #endif
 
 int main(int argc, char **argv)
@@ -3487,11 +3530,14 @@ int main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "verify-sample-test") == 0) {
         return run_test_verification_sample(argc, argv);
     }
+    if (argc > 1 && strcmp(argv[1], "verification-lifetime-test") == 0) {
+        return run_test_verification_lifetime(argc, argv);
+    }
 #endif
     int verification_sample = argc > 1 &&
         strcmp(argv[1], "verify-sample-v1") == 0;
     if (verification_sample) {
-        if (argc != 6) {
+        if (argc != 7) {
             fprintf(stderr, "DVD verification sample arguments are invalid\n");
             return 2;
         }
@@ -3501,6 +3547,7 @@ int main(int argc, char **argv)
         if (parse_sample_lba(argv[3], &start_lba) != 0 ||
             parse_sample_lba(argv[4], &block_count) != 0 ||
             parse_sample_lba(argv[5], &accepted_end_lba_exclusive) != 0 ||
+            arm_verification_lifetime(argv[6]) != 0 ||
             block_count != 32 ||
             accepted_end_lba_exclusive == 0 ||
             start_lba + block_count > accepted_end_lba_exclusive ||

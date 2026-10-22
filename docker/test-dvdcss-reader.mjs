@@ -38,6 +38,66 @@ for (let index = 0; index < content.length; index += 1) {
 writeFileSync(sourcePath, content);
 writeFileSync(replacementSourcePath, Buffer.alloc(content.byteLength, 173));
 
+const boundedLifetime = spawn(
+  testExecutable,
+  ["verification-lifetime-test", "1", "10"],
+  { stdio: ["ignore", "pipe", "inherit"] },
+);
+const [boundedLifetimeReady] = await once(boundedLifetime.stdout, "data");
+if (!boundedLifetimeReady.toString("utf8").includes(
+  "rip-dvd-verification-lifetime-armed",
+)) {
+  throw new Error("DVD verification lifetime guard did not arm");
+}
+const [boundedLifetimeStatus, boundedLifetimeSignal] = await once(
+  boundedLifetime,
+  "close",
+);
+if (boundedLifetimeStatus !== null || boundedLifetimeSignal !== "SIGALRM") {
+  throw new Error("DVD verification lifetime guard did not stop its helper");
+}
+
+const parentLossHarness = `
+  const { spawn } = require("node:child_process");
+  const child = spawn(${JSON.stringify(testExecutable)},
+    ["verification-lifetime-test", "60", "10"],
+    { stdio: ["ignore", "pipe", "ignore"] });
+  child.stdout.once("data", () => {
+    process.stdout.write(String(child.pid) + "\\n", () => {
+      child.stdout.destroy();
+      child.unref();
+      process.exit(0);
+    });
+  });
+`;
+const parentLossParent = spawn(
+  process.execPath,
+  ["-e", parentLossHarness],
+  { stdio: ["ignore", "pipe", "inherit"] },
+);
+const [orphanedPidOutput] = await once(parentLossParent.stdout, "data");
+const orphanedPid = Number(orphanedPidOutput.toString("utf8").trim());
+if (!Number.isSafeInteger(orphanedPid) || orphanedPid <= 0) {
+  throw new Error("DVD verification parent-loss fixture returned no helper PID");
+}
+await once(parentLossParent, "close");
+const parentLossDeadline = Date.now() + 2_000;
+for (;;) {
+  let alive = true;
+  try {
+    process.kill(orphanedPid, 0);
+  } catch (error) {
+    if (error?.code === "ESRCH") alive = false;
+    else throw error;
+  }
+  if (!alive) break;
+  if (Date.now() >= parentLossDeadline) {
+    process.kill(orphanedPid, "SIGKILL");
+    throw new Error("DVD verification helper survived parent loss");
+  }
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
 function fixedSense(lba, senseKey, asc, ascq = 0) {
   const sense = Buffer.alloc(18);
   sense[0] = 0xf0;

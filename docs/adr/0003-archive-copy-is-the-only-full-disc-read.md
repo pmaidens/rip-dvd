@@ -112,8 +112,11 @@ representation, policy, initial checkpoint, and source metadata fingerprint in
 the publication-digest-protected manifest and an immutable database projection.
 A later verification reads each saved window from the inserted disc at most
 once, with at most 16 reads, 512 sectors, and 1 MiB total. No new read starts
-after 60 seconds. These samples establish only bounded recovery-source identity;
-they are not a whole-disc hash, a completeness proof, or a filesystem audit.
+after 60 seconds. An in-flight helper has the same bounded lifetime, terminates
+if its worker exits, and must be reaped before verification completes. These
+samples establish only bounded recovery-source identity;
+they are not a whole-disc hash or a completeness proof. DVD Disc Verification
+is neither Filesystem Verification nor an Archive Audit.
 
 This deliberately trades sector-level duplicate detection and general
 post-copy raw-image hash verification for materially less optical-drive wear

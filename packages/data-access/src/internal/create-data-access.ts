@@ -145,6 +145,7 @@ import {
   dvdDiscVerificationCheckpointIsCurrent,
   dvdDiscVerificationInsertionIsCurrent,
   dvdDiscVerificationOutcome,
+  DVD_DISC_VERIFICATION_CLAIM_LEASE_MS,
   DVD_SOURCE_SAMPLE_BAND_COUNT,
   validateDvdDiscVerificationFindings,
   validateDvdSourceSampleManifest,
@@ -1188,6 +1189,36 @@ export function createDataAccessInternal(
 
   function now(): Date {
     return new Date();
+  }
+
+  function readDvdDiscVerificationEvidence(
+    transaction: MutationTransaction,
+    verification: Pick<
+      DvdDiscVerification,
+      "originalDiscArchiveId" | "sourceMetadataFingerprint" |
+        "checkpointRevision" | "checkpointDigest"
+    >,
+  ) {
+    const header = transaction.select().from(dvdArchiveEvidenceHeaders)
+      .where(eq(
+        dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+        verification.originalDiscArchiveId,
+      )).get();
+    const storedManifest = transaction.select({
+      manifest: dvdSourceSampleManifests.manifest,
+    }).from(dvdSourceSampleManifests).where(eq(
+      dvdSourceSampleManifests.originalDiscArchiveId,
+      verification.originalDiscArchiveId,
+    )).get()?.manifest;
+    const manifest = storedManifest === undefined
+      ? null
+      : validateDvdSourceSampleManifest(storedManifest);
+    validateDvdDiscVerificationManifestBinding(
+      manifest,
+      verification,
+      header,
+    );
+    return { header, manifest };
   }
 
   let activeDiscSelectionTransaction: CatalogTransaction | null = null;
@@ -7221,7 +7252,9 @@ export function createDataAccessInternal(
       },
       recoverExpiredClaims() {
         const timestamp = now();
-        const expiredBefore = new Date(timestamp.getTime() - 60_000);
+        const expiredBefore = new Date(
+          timestamp.getTime() - DVD_DISC_VERIFICATION_CLAIM_LEASE_MS,
+        );
         return database.transaction((transaction) => {
           const expired = transaction.select().from(dvdDiscVerifications)
             .where(and(
@@ -7240,24 +7273,9 @@ export function createDataAccessInternal(
                 discInspections.id,
                 verification.discInspectionId,
               )).get();
-            const header = transaction.select().from(dvdArchiveEvidenceHeaders)
-              .where(eq(
-                dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-                verification.originalDiscArchiveId,
-              )).get();
-            const storedManifest = transaction.select({
-              manifest: dvdSourceSampleManifests.manifest,
-            }).from(dvdSourceSampleManifests).where(eq(
-              dvdSourceSampleManifests.originalDiscArchiveId,
-              verification.originalDiscArchiveId,
-            )).get()?.manifest;
-            const manifest = storedManifest === undefined
-              ? null
-              : validateDvdSourceSampleManifest(storedManifest);
-            validateDvdDiscVerificationManifestBinding(
-              manifest,
+            const { header, manifest } = readDvdDiscVerificationEvidence(
+              transaction,
               verification,
-              header,
             );
             validateDvdDiscVerificationFindings(
               manifest,
@@ -7368,24 +7386,9 @@ export function createDataAccessInternal(
               claim.id,
             );
           }
-          const storedManifest = transaction.select({
-            manifest: dvdSourceSampleManifests.manifest,
-          }).from(dvdSourceSampleManifests).where(eq(
-            dvdSourceSampleManifests.originalDiscArchiveId,
-            current.originalDiscArchiveId,
-          )).get()?.manifest;
-          const manifest = storedManifest === undefined
-            ? null
-            : validateDvdSourceSampleManifest(storedManifest);
-          const header = transaction.select().from(dvdArchiveEvidenceHeaders)
-            .where(eq(
-              dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-              current.originalDiscArchiveId,
-            )).get();
-          validateDvdDiscVerificationManifestBinding(
-            manifest,
+          const { manifest } = readDvdDiscVerificationEvidence(
+            transaction,
             current,
-            header,
           );
           const findings = [...current.findings, finding];
           validateDvdDiscVerificationFindings(manifest, findings);
@@ -7424,24 +7427,9 @@ export function createDataAccessInternal(
           }
           const inspection = transaction.select().from(discInspections)
             .where(eq(discInspections.id, current.discInspectionId)).get();
-          const header = transaction.select().from(dvdArchiveEvidenceHeaders)
-            .where(eq(
-              dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-              current.originalDiscArchiveId,
-            )).get();
-          const storedManifest = transaction.select({
-            manifest: dvdSourceSampleManifests.manifest,
-          }).from(dvdSourceSampleManifests).where(eq(
-            dvdSourceSampleManifests.originalDiscArchiveId,
-            current.originalDiscArchiveId,
-          )).get()?.manifest;
-          const manifest = storedManifest === undefined
-            ? null
-            : validateDvdSourceSampleManifest(storedManifest);
-          validateDvdDiscVerificationManifestBinding(
-            manifest,
+          const { header, manifest } = readDvdDiscVerificationEvidence(
+            transaction,
             current,
-            header,
           );
           validateDvdDiscVerificationFindings(manifest, result.findings);
           if (

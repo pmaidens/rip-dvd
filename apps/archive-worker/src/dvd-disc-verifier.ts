@@ -29,6 +29,7 @@ import {
   DVD_READ_FAILURE_CLASSIFIER_VERSION,
   parseDvdReadFailureTerminalResultProtocol,
 } from "./dvd-recovery-contracts.js";
+import type { ActiveBoundedProcess } from "./bounded-child-process.js";
 
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 const MAX_DIAGNOSTIC_BYTES = 65_536;
@@ -109,12 +110,27 @@ export type DvdVerificationSourceRead =
   | { outcome: "unreadable"; diagnostic: DvdDiscVerificationDiagnostic };
 
 export interface DvdVerificationSourceReader {
-  read(input: {
+  start(input: {
     devicePath: string;
     startLba: number;
     sectorCount: number;
     acceptedEndLbaExclusive: number;
-  }): Promise<DvdVerificationSourceRead>;
+    timeoutMs: number;
+  }): ActiveBoundedProcess<DvdVerificationSourceRead>;
+}
+
+class DvdVerificationReadDeadlineError extends Error {
+  constructor() {
+    super("DVD verification source read exceeded its deadline");
+    this.name = "DvdVerificationReadDeadlineError";
+  }
+}
+
+class DvdVerificationReadStoppedError extends Error {
+  constructor(readonly reason: "deadline" | "interrupted") {
+    super(`DVD verification source read stopped: ${reason}`);
+    this.name = "DvdVerificationReadStoppedError";
+  }
 }
 
 function openDeviceLock(devicePath: string): number {
@@ -142,14 +158,17 @@ function openDeviceLock(devicePath: string): number {
 export function createNodeDvdVerificationSourceReader():
   DvdVerificationSourceReader {
   return {
-    read(input) {
+    start(input) {
       const devicePath = requireSafeOpticalDevicePath(input.devicePath);
       if (
         !Number.isSafeInteger(input.startLba) ||
         input.startLba < 0 ||
         !Number.isSafeInteger(input.sectorCount) ||
         input.sectorCount <= 0 ||
-        input.startLba + input.sectorCount > input.acceptedEndLbaExclusive
+        input.startLba + input.sectorCount > input.acceptedEndLbaExclusive ||
+        !Number.isSafeInteger(input.timeoutMs) ||
+        input.timeoutMs <= 0 ||
+        input.timeoutMs > DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS
       ) throw new Error("DVD verification source read is invalid");
       const lockDescriptor = openDeviceLock(devicePath);
       const child = spawn("flock", [
@@ -165,18 +184,50 @@ export function createNodeDvdVerificationSourceReader():
         String(input.startLba),
         String(input.sectorCount),
         String(input.acceptedEndLbaExclusive),
+        String(Math.max(1, Math.ceil(input.timeoutMs / 1_000))),
       ], {
         shell: false,
         stdio: ["ignore", "pipe", "pipe", lockDescriptor],
       });
       closeSync(lockDescriptor);
       if (child.stdout === null || child.stderr === null) {
-        child.kill();
+        child.kill("SIGKILL");
         throw new Error("DVD verification helper pipes are unavailable");
       }
       const childStdout = child.stdout;
       const childStderr = child.stderr;
-      return new Promise<DvdVerificationSourceRead>((resolve, reject) => {
+      let resolveResult!: (value: DvdVerificationSourceRead) => void;
+      let rejectResult!: (reason: unknown) => void;
+      let resolveClosed!: () => void;
+      let processClosed = false;
+      let operationSettled = false;
+      let cancellationRequested = false;
+      const result = new Promise<DvdVerificationSourceRead>((resolve, reject) => {
+        resolveResult = resolve;
+        rejectResult = reject;
+      });
+      const closed = new Promise<void>((resolve) => {
+        resolveClosed = resolve;
+      });
+      const rejectOperation = (error: unknown) => {
+        if (!operationSettled) {
+          operationSettled = true;
+          rejectResult(error);
+        }
+      };
+      const resolveOperation = (value: DvdVerificationSourceRead) => {
+        if (!operationSettled) {
+          operationSettled = true;
+          resolveResult(value);
+        }
+      };
+      const confirmClosed = () => {
+        if (!processClosed) {
+          processClosed = true;
+          resolveClosed();
+        }
+      };
+      {
         const stdout: Buffer[] = [];
         let stdoutBytes = 0;
         let stderr = "";
@@ -185,6 +236,7 @@ export function createNodeDvdVerificationSourceReader():
           stdoutBytes += chunk.length;
           if (stdoutBytes > DVD_SOURCE_SAMPLE_BYTE_COUNT) {
             overflow = true;
+            child.kill("SIGKILL");
             return;
           }
           stdout.push(chunk);
@@ -194,41 +246,108 @@ export function createNodeDvdVerificationSourceReader():
           if (Buffer.byteLength(stderr) > MAX_DIAGNOSTIC_BYTES) {
             overflow = true;
             stderr = stderr.slice(-MAX_DIAGNOSTIC_BYTES);
+            child.kill("SIGKILL");
           }
         });
-        child.once("error", reject);
+        child.once("error", (error) => {
+          rejectOperation(error);
+          if (child.pid === undefined) confirmClosed();
+        });
         child.once("close", (code, signal) => {
+          confirmClosed();
+          if (cancellationRequested) {
+            rejectOperation(new Error("DVD verification source read was cancelled"));
+            return;
+          }
+          if (signal === "SIGALRM") {
+            rejectOperation(new DvdVerificationReadDeadlineError());
+            return;
+          }
           if (overflow || signal !== null) {
-            reject(new Error("DVD verification helper output is invalid"));
+            rejectOperation(new Error("DVD verification helper output is invalid"));
             return;
           }
           if (code === 0) {
             const bytes = Buffer.concat(stdout);
             if (bytes.length !== DVD_SOURCE_SAMPLE_BYTE_COUNT) {
-              reject(new Error("DVD verification helper returned a short sample"));
+              rejectOperation(new Error("DVD verification helper returned a short sample"));
               return;
             }
-            resolve({ outcome: "readable", bytes });
+            resolveOperation({ outcome: "readable", bytes });
             return;
           }
           const line = stderr.split("\n")
             .find((value) => value.startsWith(DVD_READ_FAILURE_RESULT_PREFIX));
           if (code !== 3 || line === undefined) {
-            reject(new Error("DVD verification helper failed"));
+            rejectOperation(new Error("DVD verification helper failed"));
             return;
           }
           const diagnostic = parseDvdVerificationReadFailureProtocol(
             line.slice(DVD_READ_FAILURE_RESULT_PREFIX.length),
             input,
           );
-          resolve({
+          resolveOperation({
             outcome: "unreadable",
             diagnostic,
           });
         });
-      });
+      }
+      return {
+        result,
+        closed,
+        cancel() {
+          if (cancellationRequested || processClosed) return;
+          cancellationRequested = true;
+          childStdout.destroy();
+          childStderr.destroy();
+          child.kill("SIGKILL");
+        },
+      };
     },
   };
+}
+
+async function runBoundedDvdVerificationSourceRead(input: {
+  active: ActiveBoundedProcess<DvdVerificationSourceRead>;
+  signal?: AbortSignal;
+  timeoutMs: number;
+}): Promise<
+  | { outcome: "completed"; read: DvdVerificationSourceRead }
+  | { outcome: "stopped"; reason: "deadline" | "interrupted" }
+> {
+  let timeout: NodeJS.Timeout | undefined;
+  let removeAbortListener = () => {};
+  const stopped = new Promise<never>((_resolve, reject) => {
+    const onAbort = () => reject(
+      new DvdVerificationReadStoppedError("interrupted"),
+    );
+    input.signal?.addEventListener("abort", onAbort, { once: true });
+    if (input.signal?.aborted) onAbort();
+    removeAbortListener = () =>
+      input.signal?.removeEventListener("abort", onAbort);
+    timeout = setTimeout(() => reject(
+      new DvdVerificationReadStoppedError("deadline"),
+    ), input.timeoutMs);
+    timeout.unref();
+  });
+  try {
+    const read = await Promise.race([input.active.result, stopped]);
+    await input.active.closed;
+    return { outcome: "completed", read };
+  } catch (error) {
+    input.active.cancel();
+    await input.active.closed;
+    if (error instanceof DvdVerificationReadStoppedError) {
+      return { outcome: "stopped", reason: error.reason };
+    }
+    if (error instanceof DvdVerificationReadDeadlineError) {
+      return { outcome: "stopped", reason: "deadline" };
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    removeAbortListener();
+  }
 }
 
 export async function verifyInsertedDvdAgainstSamples(input: {
@@ -239,6 +358,7 @@ export async function verifyInsertedDvdAgainstSamples(input: {
   reader: DvdVerificationSourceReader;
   startedAtMs: number;
   now?(): number;
+  signal?: AbortSignal;
   insertionIsCurrent(): boolean | Promise<boolean>;
   checkpointIsCurrent(): boolean;
   authorizeRead?(): boolean | Promise<boolean>;
@@ -259,8 +379,12 @@ export async function verifyInsertedDvdAgainstSamples(input: {
   let checkpointChanged = !input.checkpointIsCurrent();
   for (const sample of manifest?.samples ?? []) {
     if (insertionChanged || checkpointChanged) break;
-    if (now() - input.startedAtMs >=
-      DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS) {
+    if (input.signal?.aborted) {
+      interrupted = true;
+      break;
+    }
+    let elapsedMs = now() - input.startedAtMs;
+    if (elapsedMs >= DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS) {
       budgetExhausted = true;
       break;
     }
@@ -269,18 +393,31 @@ export async function verifyInsertedDvdAgainstSamples(input: {
         interrupted = true;
         break;
       }
-      if (now() - input.startedAtMs >=
-        DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS) {
+      elapsedMs = now() - input.startedAtMs;
+      if (elapsedMs >= DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS) {
         budgetExhausted = true;
         break;
       }
     }
-    const read = await input.reader.read({
+    const timeoutMs = DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS - elapsedMs;
+    const activeRead = input.reader.start({
       devicePath: input.devicePath,
       startLba: sample.startLba,
       sectorCount: sample.sectorCount,
       acceptedEndLbaExclusive: manifest!.acceptedEndLbaExclusive,
+      timeoutMs,
     });
+    const boundedRead = await runBoundedDvdVerificationSourceRead({
+      active: activeRead,
+      signal: input.signal,
+      timeoutMs,
+    });
+    if (boundedRead.outcome === "stopped") {
+      if (boundedRead.reason === "deadline") budgetExhausted = true;
+      else interrupted = true;
+      break;
+    }
+    const read = boundedRead.read;
     insertionChanged = !await input.insertionIsCurrent();
     checkpointChanged = !input.checkpointIsCurrent();
     if (insertionChanged || checkpointChanged) break;
@@ -424,6 +561,7 @@ export async function pollDvdDiscVerification(input: {
           devicePath: drive.devicePath,
           reader: input.reader,
           startedAtMs: claim.startedAt.getTime(),
+          signal: input.signal,
           insertionIsCurrent: inspectionIsCurrent,
           checkpointIsCurrent,
           authorizeRead: () => {

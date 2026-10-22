@@ -4,6 +4,8 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   createDataAccess,
+  DVD_DISC_VERIFICATION_CLAIM_LEASE_MS,
+  DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS,
   type ArchiveRecoveryId,
 } from "@rip-dvd/data-access";
 
@@ -230,8 +232,15 @@ it("keeps a durable mismatch authoritative when a worker claim expires", async (
       observedDigest: "f".repeat(64),
       diagnostic: null,
     });
+    const claimTime = Date.now();
     vi.useFakeTimers();
-    vi.setSystemTime(Date.now() + 60_001);
+    vi.setSystemTime(
+      claimTime + DVD_SOURCE_VERIFICATION_READ_DEADLINE_MS + 1,
+    );
+    expect(access.dvdDiscVerifications.recoverExpiredClaims()).toBe(0);
+    vi.setSystemTime(
+      claimTime + DVD_DISC_VERIFICATION_CLAIM_LEASE_MS + 1,
+    );
     expect(access.dvdDiscVerifications.recoverExpiredClaims()).toBe(1);
     expect(access.dvdDiscVerifications.find(claim.id)).toMatchObject({
       status: "completed",
