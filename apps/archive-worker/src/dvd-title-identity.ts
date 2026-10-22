@@ -45,6 +45,13 @@ function sameCheckpoint(
     left.currentManifestDigest === right.currentManifestDigest;
 }
 
+/**
+ * Runs a title-evidence producer inside the archive-wide stable-read interval,
+ * revalidates the committed checkpoint after image I/O, and only then records
+ * the immutable observation set. The producer and its scheduling belong to
+ * the structural/title assessment slices that consume this boundary; new
+ * evidence-format Archive Job admission remains closed.
+ */
 export async function observeDvdTitleIdentitiesAtCheckpoint(
   input: DvdTitleIdentityObservationRequest,
 ): Promise<DvdTitleIdentityReviewSet> {

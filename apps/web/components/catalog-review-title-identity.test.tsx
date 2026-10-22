@@ -22,8 +22,11 @@ describe("CatalogReviewTitleIdentity", () => {
               titleIdentityId: "synthetic-title-1",
               presentAtCurrentCheckpoint: true,
               mappingState: "needs_mapping_review",
-              discSelectionIds: ["synthetic-selection-1"],
-              continuity: {
+              discSelectionMappings: [{
+                discSelectionId: "synthetic-selection-1",
+                mappingState: "needs_mapping_review",
+              }],
+              reviewContinuity: {
                 result: "uncertain",
                 policyVersion: "dvd-title-identity-continuity-v1",
                 previousObservationId: "synthetic-observation-1",
@@ -67,8 +70,8 @@ describe("CatalogReviewTitleIdentity", () => {
               titleIdentityId: "synthetic-title-2",
               presentAtCurrentCheckpoint: true,
               mappingState: "unmapped",
-              discSelectionIds: [],
-              continuity: {
+              discSelectionMappings: [],
+              reviewContinuity: {
                 result: "new",
                 policyVersion: "dvd-title-identity-continuity-v1",
                 previousObservationId: null,
@@ -115,6 +118,9 @@ describe("CatalogReviewTitleIdentity", () => {
     expect(html).toContain("Title identity across revisions");
     expect(html).toContain("DVD title 3");
     expect(html).toContain("Continuity uncertain. Needs mapping review.");
+    expect(html).toContain(
+      "Retained Disc Selection ID: synthetic-selection-1.",
+    );
     expect(html).toContain("DVD title 7");
     expect(html).toContain("Newly discovered content. Unmapped.");
   });

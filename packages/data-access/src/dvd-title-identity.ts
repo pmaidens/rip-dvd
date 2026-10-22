@@ -2,13 +2,23 @@ import { createHash } from "node:crypto";
 
 import { DomainInvariantError } from "./errors.js";
 import type {
+  DvdTitleIdentityReviewSet,
+  DvdTitleIdentityReviewSetItem,
   DvdTitleIdentityObservationInput,
+  DvdTitleIdentityContinuityResult,
   DvdTitleIdentitySelectedPathEntry,
   UnreadableSectorRange,
 } from "./types.js";
 
 export const DVD_TITLE_IDENTITY_CONTINUITY_VERSION =
   "dvd-title-identity-continuity-v1";
+
+const TITLE_IDENTITY_CONTENT_DOMAIN =
+  "rip-dvd:dvd-title-identity-content:v1\0";
+const TITLE_IDENTITY_OBSERVATION_SET_DOMAIN =
+  "rip-dvd:dvd-title-identity-observation-set:v1\0";
+const TITLE_IDENTITY_REVIEW_SET_DOMAIN =
+  "rip-dvd:dvd-title-identity-review-set:v1\0";
 
 export interface NormalizedDvdTitleIdentityObservation
   extends DvdTitleIdentityObservationInput {
@@ -19,6 +29,98 @@ export interface NormalizedDvdTitleIdentityObservation
   };
   readonly selectedPath: readonly DvdTitleIdentitySelectedPathEntry[];
   readonly sourceExtents: readonly UnreadableSectorRange[];
+}
+
+export interface DvdTitleIdentityContinuityPlan {
+  readonly previousIndex: number | null;
+  readonly result: DvdTitleIdentityContinuityResult;
+}
+
+interface DvdTitleIdentityContinuityEvidence {
+  readonly displayTitleNumber: number;
+  readonly contentDigest: string;
+}
+
+export function planDvdTitleIdentityContinuity(
+  current: readonly DvdTitleIdentityContinuityEvidence[],
+  previous: readonly DvdTitleIdentityContinuityEvidence[],
+  hasPreviousCheckpoint: boolean,
+): readonly DvdTitleIdentityContinuityPlan[] {
+  const currentDigestCounts = new Map<string, number>();
+  const previousIndexesByDigest = new Map<string, number[]>();
+  for (const observation of current) {
+    currentDigestCounts.set(
+      observation.contentDigest,
+      (currentDigestCounts.get(observation.contentDigest) ?? 0) + 1,
+    );
+  }
+  for (const [index, observation] of previous.entries()) {
+    const indexes = previousIndexesByDigest.get(observation.contentDigest) ?? [];
+    indexes.push(index);
+    previousIndexesByDigest.set(observation.contentDigest, indexes);
+  }
+
+  // Reserve every unambiguous content match before considering title
+  // numbers. Changed content that kept an old number must not consume the
+  // predecessor of unchanged content that was renumbered.
+  const exactMatches = new Map<number, number>();
+  const usedPreviousIndexes = new Set<number>();
+  for (const [index, observation] of current.entries()) {
+    const candidates = previousIndexesByDigest.get(observation.contentDigest) ??
+      [];
+    if (
+      currentDigestCounts.get(observation.contentDigest) === 1 &&
+      candidates.length === 1
+    ) {
+      exactMatches.set(index, candidates[0]!);
+      usedPreviousIndexes.add(candidates[0]!);
+    }
+  }
+
+  // Title number is only uncertain fallback evidence when it identifies one
+  // unmatched observation on each side. Grouping before assignment makes the
+  // result independent of worker reporting order for paths and angles.
+  const currentIndexesByDisplayNumber = new Map<number, number[]>();
+  for (const [index, observation] of current.entries()) {
+    if (exactMatches.has(index)) continue;
+    const indexes = currentIndexesByDisplayNumber.get(
+      observation.displayTitleNumber,
+    ) ?? [];
+    indexes.push(index);
+    currentIndexesByDisplayNumber.set(observation.displayTitleNumber, indexes);
+  }
+  const previousIndexesByDisplayNumber = new Map<number, number[]>();
+  for (const [index, observation] of previous.entries()) {
+    if (usedPreviousIndexes.has(index)) continue;
+    const indexes = previousIndexesByDisplayNumber.get(
+      observation.displayTitleNumber,
+    ) ?? [];
+    indexes.push(index);
+    previousIndexesByDisplayNumber.set(observation.displayTitleNumber, indexes);
+  }
+  const uncertainMatches = new Map<number, number>();
+  for (const [displayTitleNumber, indexes] of currentIndexesByDisplayNumber) {
+    const candidates = previousIndexesByDisplayNumber.get(displayTitleNumber) ??
+      [];
+    if (indexes.length === 1 && candidates.length === 1) {
+      uncertainMatches.set(indexes[0]!, candidates[0]!);
+    }
+  }
+
+  return current.map((_observation, index) => {
+    const exactMatch = exactMatches.get(index);
+    const uncertainMatch = uncertainMatches.get(index);
+    if (exactMatch !== undefined) {
+      return { previousIndex: exactMatch, result: "proved" };
+    }
+    if (uncertainMatch !== undefined) {
+      return { previousIndex: uncertainMatch, result: "uncertain" };
+    }
+    return {
+      previousIndex: null,
+      result: hasPreviousCheckpoint ? "new" : "initial",
+    };
+  });
 }
 
 function positiveSafeInteger(value: unknown, label: string): number {
@@ -168,11 +270,10 @@ export function normalizeDvdTitleIdentityObservation(
 export function dvdTitleIdentityContentDigest(
   observation: NormalizedDvdTitleIdentityObservation,
 ): string {
-  const { displayTitleNumber: _displayTitleNumber, ...continuityEvidence } =
-    observation;
-  return createHash("sha256")
-    .update(JSON.stringify(continuityEvidence))
-    .digest("hex");
+  return digest(
+    TITLE_IDENTITY_CONTENT_DOMAIN,
+    canonicalTitleIdentityContent(observation),
+  );
 }
 
 export function dvdTitleIdentityObservationSetDigest(
@@ -180,12 +281,87 @@ export function dvdTitleIdentityObservationSetDigest(
     readonly contentDigest: string;
   })[],
 ): string {
+  const ordered = [...observations].sort((left, right) =>
+    left.displayTitleNumber - right.displayTitleNumber ||
+    left.contentDigest.localeCompare(right.contentDigest)
+  );
+  return digest(
+    TITLE_IDENTITY_OBSERVATION_SET_DOMAIN,
+    ordered.map((observation) => [
+      observation.displayTitleNumber,
+      observation.contentDigest,
+      canonicalTitleIdentityContent(observation),
+    ]),
+  );
+}
+
+export function dvdTitleIdentityReviewSetDigest(
+  checkpoint: DvdTitleIdentityReviewSet["checkpoint"],
+  items: readonly DvdTitleIdentityReviewSetItem[],
+): string {
+  const ordered = [...items].sort((left, right) =>
+    left.titleIdentityId.localeCompare(right.titleIdentityId)
+  );
+  return digest(TITLE_IDENTITY_REVIEW_SET_DOMAIN, [
+    checkpoint.manifestId,
+    checkpoint.manifestRevision,
+    checkpoint.manifestDigest,
+    ordered.map((item) => [
+      item.titleIdentityId,
+      item.presentAtCurrentCheckpoint,
+      [
+        item.observation.id,
+        item.observation.checkpoint.manifestId,
+        item.observation.checkpoint.manifestRevision,
+        item.observation.checkpoint.manifestDigest,
+        item.observation.contentDigest,
+      ],
+      [
+        item.reviewContinuity.result,
+        item.reviewContinuity.policyVersion,
+        item.reviewContinuity.previousObservationId,
+      ],
+      item.mappingState,
+      [...item.discSelectionMappings]
+        .sort((left, right) =>
+          left.discSelectionId.localeCompare(right.discSelectionId)
+        )
+        .map((mapping) => [
+          mapping.discSelectionId,
+          mapping.mappingState,
+        ]),
+    ]),
+  ]);
+}
+
+function canonicalTitleIdentityContent(
+  observation: NormalizedDvdTitleIdentityObservation,
+): unknown {
+  return [
+    observation.navigation.videoTitleSetNumber,
+    observation.navigation.titleSetTitleNumber,
+    observation.navigation.programChainNumber,
+    observation.selectedPath.map((entry) => [
+      entry.programNumber,
+      entry.cellNumber,
+      entry.vobId,
+      entry.cellId,
+    ]),
+    observation.angleNumber,
+    observation.angleCount,
+    observation.chapterStart,
+    observation.chapterEnd,
+    observation.chapterCount,
+    observation.sourceExtents.map((extent) => [
+      extent.startLba,
+      extent.sectorCount,
+    ]),
+  ];
+}
+
+function digest(domain: string, payload: unknown): string {
   return createHash("sha256")
-    .update(JSON.stringify(observations.map((observation) => ({
-      ...observation,
-    })).sort((left, right) =>
-      left.displayTitleNumber - right.displayTitleNumber ||
-      left.contentDigest.localeCompare(right.contentDigest)
-    )))
+    .update(domain)
+    .update(JSON.stringify(payload))
     .digest("hex");
 }

@@ -66,4 +66,72 @@ CREATE INDEX `dvd_title_identities_archive_idx` ON `dvd_title_identities` (`orig
 CREATE UNIQUE INDEX `dvd_title_identity_observations_set_identity_unique` ON `dvd_title_identity_observations` (`manifest_id`,`title_identity_id`);--> statement-breakpoint
 CREATE INDEX `dvd_title_identity_observations_content_idx` ON `dvd_title_identity_observations` (`manifest_id`,`content_digest`);--> statement-breakpoint
 CREATE UNIQUE INDEX `dvd_title_identity_selection_bindings_selection_unique` ON `dvd_title_identity_selection_bindings` (`disc_selection_id`);--> statement-breakpoint
-CREATE UNIQUE INDEX `dvd_title_identity_sets_archive_revision_unique` ON `dvd_title_identity_sets` (`original_disc_archive_id`,`manifest_revision`);
+CREATE UNIQUE INDEX `dvd_title_identity_sets_archive_revision_unique` ON `dvd_title_identity_sets` (`original_disc_archive_id`,`manifest_revision`);--> statement-breakpoint
+CREATE TRIGGER `dvd_title_identity_identity_update_guard`
+BEFORE UPDATE ON `dvd_title_identities`
+BEGIN SELECT RAISE(ABORT, 'DVD Title Identity is immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `dvd_title_identity_identity_delete_guard`
+BEFORE DELETE ON `dvd_title_identities`
+BEGIN SELECT RAISE(ABORT, 'DVD Title Identity is immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `dvd_title_identity_set_update_guard`
+BEFORE UPDATE ON `dvd_title_identity_sets`
+BEGIN SELECT RAISE(ABORT, 'DVD Title Identity checkpoint set is immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `dvd_title_identity_set_delete_guard`
+BEFORE DELETE ON `dvd_title_identity_sets`
+BEGIN SELECT RAISE(ABORT, 'DVD Title Identity checkpoint set is immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `dvd_title_identity_observation_update_guard`
+BEFORE UPDATE ON `dvd_title_identity_observations`
+BEGIN SELECT RAISE(ABORT, 'DVD Title Identity observation is immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `dvd_title_identity_observation_delete_guard`
+BEFORE DELETE ON `dvd_title_identity_observations`
+BEGIN SELECT RAISE(ABORT, 'DVD Title Identity observation is immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `dvd_title_identity_binding_insert_guard`
+BEFORE INSERT ON `dvd_title_identity_selection_bindings`
+WHEN NOT EXISTS (
+	SELECT 1
+	FROM `dvd_title_identities` AS identity_record
+	JOIN `disc_selections` AS selection_record
+		ON selection_record.`id` = NEW.`disc_selection_id`
+	JOIN `dvd_title_identity_observations` AS observation_record
+		ON observation_record.`id` = NEW.`last_observation_id`
+	JOIN `dvd_title_identity_sets` AS observation_set
+		ON observation_set.`manifest_id` = observation_record.`manifest_id`
+	WHERE identity_record.`id` = NEW.`title_identity_id`
+		AND observation_record.`title_identity_id` = identity_record.`id`
+		AND selection_record.`original_disc_archive_id` = identity_record.`original_disc_archive_id`
+		AND observation_set.`original_disc_archive_id` = identity_record.`original_disc_archive_id`
+		AND NOT EXISTS (
+			SELECT 1
+			FROM `dvd_title_identity_observations` AS newer_observation
+			JOIN `dvd_title_identity_sets` AS newer_set
+				ON newer_set.`manifest_id` = newer_observation.`manifest_id`
+			WHERE newer_observation.`title_identity_id` = identity_record.`id`
+				AND newer_set.`manifest_revision` > observation_set.`manifest_revision`
+		)
+)
+BEGIN SELECT RAISE(ABORT, 'DVD Title Identity binding does not match its archive evidence'); END;--> statement-breakpoint
+CREATE TRIGGER `dvd_title_identity_binding_update_guard`
+BEFORE UPDATE ON `dvd_title_identity_selection_bindings`
+WHEN NOT EXISTS (
+	SELECT 1
+	FROM `dvd_title_identities` AS identity_record
+	JOIN `disc_selections` AS selection_record
+		ON selection_record.`id` = NEW.`disc_selection_id`
+	JOIN `dvd_title_identity_observations` AS observation_record
+		ON observation_record.`id` = NEW.`last_observation_id`
+	JOIN `dvd_title_identity_sets` AS observation_set
+		ON observation_set.`manifest_id` = observation_record.`manifest_id`
+	WHERE identity_record.`id` = NEW.`title_identity_id`
+		AND observation_record.`title_identity_id` = identity_record.`id`
+		AND selection_record.`original_disc_archive_id` = identity_record.`original_disc_archive_id`
+		AND observation_set.`original_disc_archive_id` = identity_record.`original_disc_archive_id`
+		AND NOT EXISTS (
+			SELECT 1
+			FROM `dvd_title_identity_observations` AS newer_observation
+			JOIN `dvd_title_identity_sets` AS newer_set
+				ON newer_set.`manifest_id` = newer_observation.`manifest_id`
+			WHERE newer_observation.`title_identity_id` = identity_record.`id`
+				AND newer_set.`manifest_revision` > observation_set.`manifest_revision`
+		)
+)
+BEGIN SELECT RAISE(ABORT, 'DVD Title Identity binding does not match its archive evidence'); END;

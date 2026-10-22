@@ -706,8 +706,8 @@ describe("Catalog Review API", () => {
         titleIdentityId: "synthetic-title-id",
         presentAtCurrentCheckpoint: true,
         mappingState: "unmapped",
-        discSelectionIds: [],
-        continuity: {
+        discSelectionMappings: [],
+        reviewContinuity: {
           result: "initial",
           policyVersion: "dvd-title-identity-continuity-v1",
           previousObservationId: null,

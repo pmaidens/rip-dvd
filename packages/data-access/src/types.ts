@@ -461,13 +461,23 @@ export type DvdTitleIdentityMappingState =
   | "needs_mapping_review"
   | "unmapped";
 
+export interface DvdTitleIdentitySelectionMapping {
+  discSelectionId: DiscSelectionId;
+  mappingState: Exclude<DvdTitleIdentityMappingState, "unmapped">;
+}
+
 export interface DvdTitleIdentityReviewSetItem {
   titleIdentityId: DvdTitleIdentityId;
   presentAtCurrentCheckpoint: boolean;
   observation: DvdTitleIdentityObservation;
-  continuity: DvdTitleIdentityObservation["continuity"];
+  /** Continuity as evaluated for the current review set. Missing identities
+   * are uncertain here even though their last persisted observation records
+   * the relationship that was known at its own checkpoint. */
+  reviewContinuity: DvdTitleIdentityObservation["continuity"];
+  /** Only `mapped` may be consumed by a later decision. The decision and its
+   * mapping-review mutation belong to the later Catalog Review decision slice. */
   mappingState: DvdTitleIdentityMappingState;
-  discSelectionIds: readonly DiscSelectionId[];
+  discSelectionMappings: readonly DvdTitleIdentitySelectionMapping[];
 }
 
 export interface DvdTitleIdentityReviewSet {
@@ -1482,8 +1492,11 @@ export interface CatalogAccess {
     ids: readonly OriginalDiscArchiveId[],
   ): ReadonlyMap<OriginalDiscArchiveId, DvdArchiveEvidenceHeader>;
   /**
-   * Persists observations that were gathered while the archive image and the
-   * supplied checkpoint were held under one shared consistent-read interval.
+   * Worker persistence boundary for observations gathered while the archive
+   * image and supplied checkpoint were held under one shared consistent-read
+   * interval. Production image readers must call the archive worker's
+   * consistent-read recorder rather than invoke this persistence method
+   * directly.
    */
   recordDvdTitleIdentityObservations(
     input: RecordDvdTitleIdentityObservationsInput,

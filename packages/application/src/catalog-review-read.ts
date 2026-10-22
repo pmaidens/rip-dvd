@@ -109,8 +109,8 @@ function serializeTitleIdentity(
       titleIdentityId: item.titleIdentityId,
       presentAtCurrentCheckpoint: item.presentAtCurrentCheckpoint,
       mappingState: item.mappingState,
-      discSelectionIds: item.discSelectionIds,
-      continuity: item.continuity,
+      discSelectionMappings: item.discSelectionMappings,
+      reviewContinuity: item.reviewContinuity,
       observation: {
         ...item.observation,
         createdAt: item.observation.createdAt.toISOString(),

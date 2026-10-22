@@ -68,12 +68,25 @@ export function CatalogReviewTitleIdentity({
                   DVD title {item.observation.displayTitleNumber}
                 </strong>
                 <span>
-                  {continuityLabel(item.continuity.result)}. {
+                  {continuityLabel(item.reviewContinuity.result)}. {
                     mappingLabel(item.mappingState)
                   }.
                 </span>
                 {!item.presentAtCurrentCheckpoint
                   ? <span>Not observed at the current checkpoint.</span>
+                  : null}
+                {item.discSelectionMappings.length > 0
+                  ? (
+                    <ul>
+                      {item.discSelectionMappings.map((mapping) => (
+                        <li key={mapping.discSelectionId}>
+                          Retained Disc Selection ID: {
+                            mapping.discSelectionId
+                          }. {mappingLabel(mapping.mappingState)}.
+                        </li>
+                      ))}
+                    </ul>
+                  )
                   : null}
                 <span>
                   VTS {item.observation.navigation.videoTitleSetNumber}, VTS

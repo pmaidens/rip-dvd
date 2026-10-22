@@ -246,8 +246,11 @@ export interface CatalogReviewTitleIdentityItem {
   titleIdentityId: string;
   presentAtCurrentCheckpoint: boolean;
   mappingState: "mapped" | "needs_mapping_review" | "unmapped";
-  discSelectionIds: readonly string[];
-  continuity: {
+  discSelectionMappings: readonly {
+    discSelectionId: string;
+    mappingState: "mapped" | "needs_mapping_review";
+  }[];
+  reviewContinuity: {
     result: "initial" | "proved" | "uncertain" | "new";
     policyVersion: string;
     previousObservationId: string | null;
@@ -279,7 +282,7 @@ export interface CatalogReviewTitleIdentityItem {
     chapterCount: number;
     sourceExtents: readonly UnreadableSectorRange[];
     contentDigest: string;
-    continuity: CatalogReviewTitleIdentityItem["continuity"];
+    continuity: CatalogReviewTitleIdentityItem["reviewContinuity"];
     createdAt: string;
   };
 }
