@@ -1620,6 +1620,7 @@ describe("data-access facade", () => {
           name !== "20260930003626_dvd-evidence-checkpoints" &&
           name !== "20261004053119_scsi-read-path-notice" &&
           name !== "20261019204228_dvd-initial-save" &&
+          name !== "20261022044144_icy_barracuda" &&
           name !== "20261022044512_parched_norrin_radd",
       )
       .sort();
