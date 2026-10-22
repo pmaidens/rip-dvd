@@ -562,13 +562,6 @@ async function runDvdDiscVerificationCommand(
         },
       );
     }
-    if (
-      error instanceof DomainInvariantError &&
-        (error.message === "DISC_INSERTION_CHANGED" ||
-          error.message === "DISC_CHECKPOINT_CHANGED")
-    ) {
-      throw new CommandFailure(error.message, error.message, 2);
-    }
     if (error instanceof DomainInvariantError || error instanceof InvalidStatusTransitionError) {
       throw new CommandFailure("DISC_VERIFICATION_REJECTED", error.message, 2);
     }

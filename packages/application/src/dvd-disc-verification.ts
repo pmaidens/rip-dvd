@@ -1,12 +1,12 @@
 import {
   assertDvdSourceSampleManifestProjection,
-  DomainInvariantError,
   DvdCheckpointReadFault,
   DVD_RECOVERY_STORAGE_REASON_MESSAGES,
   dvdDiscVerificationCheckpointIsCurrent,
   dvdDiscVerificationInsertionIsCurrent,
   RecordNotFoundError,
   StaleDvdDiscVerificationError,
+  DvdSourceSampleManifestProjectionError,
   type ArchiveRecoveryId,
   type DataAccess,
   type DiscInspectionId,
@@ -39,8 +39,7 @@ function checkpointAvailabilityFailure(error: unknown):
   if (
     !(error instanceof DvdCheckpointReadFault) &&
     !(error instanceof ArchiveImageOwnershipError) &&
-    !(error instanceof DomainInvariantError &&
-      error.message.includes("source sample manifest projection conflicts"))
+    !(error instanceof DvdSourceSampleManifestProjectionError)
   ) return null;
   const code: DvdDiscVerificationAvailabilityCode =
     error instanceof ArchiveImageOwnershipError

@@ -2,6 +2,7 @@ import {
   createApplicationOperations,
   DvdDiscVerificationUnavailableError,
   InvalidMutationKeyError,
+  InvalidProfileInputError,
 } from "@rip-dvd/application";
 import { loadConfig } from "@rip-dvd/config";
 import {
@@ -26,6 +27,10 @@ function response(body: unknown, status = 200): Response {
   });
 }
 
+function errorResponse(code: string, message: string, status: number): Response {
+  return response({ error: { code, message } }, status);
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -42,9 +47,17 @@ export async function createDvdDiscVerificationInspectionRoute(
     );
   } catch (error) {
     if (error instanceof RecordNotFoundError) {
-      return response({ error: "Archive Recovery not found" }, 404);
+      return errorResponse(
+        "NOT_FOUND",
+        "DVD disc verification target was not found.",
+        404,
+      );
     }
-    return response({ error: "DVD disc verification is unavailable" }, 503);
+    return errorResponse(
+      "DISC_VERIFICATION_UNAVAILABLE",
+      "DVD disc verification is unavailable.",
+      503,
+    );
   }
 }
 
@@ -55,21 +68,41 @@ export async function createDvdDiscVerificationRoute(
   getTrustedOrigin: () => string = () => loadConfig().webTrustedOrigin,
 ): Promise<Response> {
   if (request.method !== "POST") {
-    return response({ error: "Method not allowed" }, 405);
+    return errorResponse("METHOD_NOT_ALLOWED", "Method not allowed.", 405);
   }
   let trustedOrigin: string;
   try {
     trustedOrigin = getTrustedOrigin();
   } catch {
-    return response({ error: "DVD disc verification is unavailable" }, 503);
+    return errorResponse(
+      "DISC_VERIFICATION_UNAVAILABLE",
+      "DVD disc verification is unavailable.",
+      503,
+    );
   }
   const problem = trustedMutationRequestProblem(request, trustedOrigin);
-  if (problem) return problem;
+  if (problem) {
+    return problem.status === 415
+      ? errorResponse(
+          "JSON_CONTENT_TYPE_REQUIRED",
+          "JSON content type required.",
+          problem.status,
+        )
+      : errorResponse(
+          "CROSS_ORIGIN_MUTATION_REJECTED",
+          "Cross-origin mutation rejected.",
+          problem.status,
+        );
+  }
 
   try {
     const body = asRecord(await request.json().catch(() => null));
     if (body === null) {
-      return response({ error: "Invalid DVD disc verification" }, 400);
+      return errorResponse(
+        "INVALID_ARGUMENTS",
+        "Disc verification requires the current insertion and checkpoint binding.",
+        400,
+      );
     }
     return response(await createApplicationOperations(getAccess()).verifyDisc({
       mutationKey: body.mutationKey,
@@ -79,11 +112,22 @@ export async function createDvdDiscVerificationRoute(
       checkpointDigest: body.checkpointDigest,
     }), 201);
   } catch (error) {
-    if (error instanceof InvalidMutationKeyError || error instanceof RangeError) {
-      return response({ error: "Invalid DVD disc verification" }, 400);
+    if (error instanceof InvalidMutationKeyError) {
+      return errorResponse("INVALID_MUTATION_KEY", error.message, 400);
+    }
+    if (error instanceof InvalidProfileInputError || error instanceof RangeError) {
+      return errorResponse(
+        "INVALID_ARGUMENTS",
+        "Disc verification requires the current insertion and checkpoint binding.",
+        400,
+      );
     }
     if (error instanceof RecordNotFoundError) {
-      return response({ error: "DVD disc verification target not found" }, 404);
+      return errorResponse(
+        "NOT_FOUND",
+        "DVD disc verification target was not found.",
+        404,
+      );
     }
     if (error instanceof MutationKeyConflictError) {
       return response({
@@ -113,16 +157,9 @@ export async function createDvdDiscVerificationRoute(
       }, 409);
     }
     if (
-      error instanceof DomainInvariantError &&
-        (error.message === "DISC_INSERTION_CHANGED" ||
-          error.message === "DISC_CHECKPOINT_CHANGED")
+      error instanceof DomainInvariantError ||
+      error instanceof InvalidStatusTransitionError
     ) {
-      return response({ error: { code: error.message, message: error.message } }, 409);
-    }
-    if (error instanceof DomainInvariantError) {
-      return response({ error: error.message }, 409);
-    }
-    if (error instanceof InvalidStatusTransitionError) {
       return response({
         error: {
           code: "DISC_VERIFICATION_REJECTED",
@@ -130,7 +167,11 @@ export async function createDvdDiscVerificationRoute(
         },
       }, 409);
     }
-    return response({ error: "DVD disc verification is unavailable" }, 503);
+    return errorResponse(
+      "DISC_VERIFICATION_UNAVAILABLE",
+      "DVD disc verification is unavailable.",
+      503,
+    );
   }
 }
 

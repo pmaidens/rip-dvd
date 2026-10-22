@@ -98,6 +98,18 @@ export type DvdDiscVerificationSampleFinding =
       diagnostic: DvdDiscVerificationDiagnostic;
     };
 
+export class DvdSourceSampleManifestProjectionError
+  extends DomainInvariantError {
+  readonly code = "DVD_SOURCE_SAMPLE_MANIFEST_PROJECTION_CONFLICT" as const;
+
+  constructor() {
+    super(
+      "DVD source sample manifest projection conflicts with publication evidence",
+    );
+    this.name = "DvdSourceSampleManifestProjectionError";
+  }
+}
+
 export function dvdDiscVerificationInsertionIsCurrent(
   verification: {
     discInspectionId: string;
@@ -384,9 +396,7 @@ export function assertDvdSourceSampleManifestProjection(
     canonicalSourceSampleJson(published) !==
       canonicalSourceSampleJson(projected)
   ) {
-    throw new DomainInvariantError(
-      "DVD source sample manifest projection conflicts with publication evidence",
-    );
+    throw new DvdSourceSampleManifestProjectionError();
   }
 }
 

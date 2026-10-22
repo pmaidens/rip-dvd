@@ -120,6 +120,124 @@ it("keeps web inspection and replayed submission equal to the JSON CLI", async (
   }
 });
 
+it("keeps validation, not-found, and unavailable failures structured", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const access = fixture.openAccess();
+  try {
+    const missingWeb = await createDvdDiscVerificationInspectionRoute(
+      "missing-recovery",
+      () => access,
+    );
+    const missingCli = await fixture.run([
+      "archive-recovery",
+      "inspect-verification",
+      "missing-recovery",
+    ]);
+    expect(missingWeb.status).toBe(404);
+    expect(await missingWeb.json()).toEqual(missingCli.result);
+
+    const invalid = await createDvdDiscVerificationRoute(
+      request("missing-recovery", null),
+      "missing-recovery",
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({
+      error: {
+        code: "INVALID_ARGUMENTS",
+        message: "Disc verification requires the current insertion and checkpoint binding.",
+      },
+    });
+
+    const missingIdentityWeb = await createDvdDiscVerificationRoute(
+      request("missing-recovery", {
+        mutationKey: "00000000-0000-4000-8000-000000000449",
+        checkpointRevision: 1,
+        checkpointDigest: "f".repeat(64),
+      }),
+      "missing-recovery",
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const missingIdentityCli = await fixture.run([
+      "archive-recovery",
+      "verify-disc",
+      "missing-recovery",
+      "--key", "00000000-0000-4000-8000-000000000449",
+      "--checkpoint-revision", "1",
+      "--checkpoint-digest", "f".repeat(64),
+    ]);
+    expect(missingIdentityWeb.status).toBe(400);
+    expect(await missingIdentityWeb.json()).toEqual(missingIdentityCli.result);
+
+    const invalidKeyWeb = await createDvdDiscVerificationRoute(
+      request("missing-recovery", {
+        mutationKey: "bad",
+        discInspectionId: "missing-inspection",
+        checkpointRevision: 1,
+        checkpointDigest: "f".repeat(64),
+      }),
+      "missing-recovery",
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const invalidKeyCli = await fixture.run([
+      "archive-recovery",
+      "verify-disc",
+      "missing-recovery",
+      "--key", "bad",
+      "--disc-inspection-id", "missing-inspection",
+      "--checkpoint-revision", "1",
+      "--checkpoint-digest", "f".repeat(64),
+    ]);
+    expect(invalidKeyWeb.status).toBe(400);
+    expect(await invalidKeyWeb.json()).toEqual(invalidKeyCli.result);
+
+    const wrongContentType = await createDvdDiscVerificationRoute(
+      new Request(
+        "http://localhost:3000/api/archive-recoveries/missing-recovery/verification",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "text/plain",
+            Host: "localhost:3000",
+            Origin: "http://localhost:3000",
+          },
+          body: "{}",
+        },
+      ),
+      "missing-recovery",
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(wrongContentType.status).toBe(415);
+    expect(await wrongContentType.json()).toEqual({
+      error: {
+        code: "JSON_CONTENT_TYPE_REQUIRED",
+        message: "JSON content type required.",
+      },
+    });
+
+    const unavailable = await createDvdDiscVerificationInspectionRoute(
+      "unavailable-recovery",
+      () => {
+        throw new Error("synthetic service failure");
+      },
+    );
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toEqual({
+      error: {
+        code: "DISC_VERIFICATION_UNAVAILABLE",
+        message: "DVD disc verification is unavailable.",
+      },
+    });
+  } finally {
+    access.close();
+  }
+});
+
 it("rejects a stale checkpoint with a stable machine-readable reason", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);

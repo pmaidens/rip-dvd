@@ -16,7 +16,7 @@ afterEach(() => {
   fixtures.splice(0).forEach((fixture) => fixture.dispose());
 });
 
-it("inspects, submits, replays, and rejects stale inserted-disc verification", async () => {
+it("inspects, submits, replays, and rejects stale DVD Disc Verification", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const seeded = await seedDvdDiscVerificationFixture(fixture);
