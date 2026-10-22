@@ -54,6 +54,12 @@ import type {
   DvdRecoveryStoragePreflight,
   DvdRecoveryStoragePreflightInput,
 } from "./dvd-recovery-storage-preflight.js";
+import type {
+  DvdDiscVerificationOutcome,
+  DvdDiscVerificationReasonCode,
+  DvdDiscVerificationSampleFinding,
+  DvdSourceSampleManifest,
+} from "./dvd-disc-verification.js";
 
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
 export type ArchiveIntegrity = (typeof ARCHIVE_INTEGRITIES)[number];
@@ -176,6 +182,9 @@ export type DetectedDiscId = DomainId<"DetectedDisc">;
 export type ArchiveRequestId = DomainId<"ArchiveRequest">;
 export type OriginalDiscArchiveId = DomainId<"OriginalDiscArchive">;
 export type ArchiveRecoveryId = DomainId<"ArchiveRecovery">;
+export type DvdDiscVerificationId = DomainId<"DvdDiscVerification">;
+export type DvdDiscVerificationClaimToken =
+  DomainId<"DvdDiscVerificationClaim">;
 export type MediaItemId = DomainId<"MediaItem">;
 export type DiscSelectionId = DomainId<"DiscSelection">;
 export type EncodingProfileId = DomainId<"EncodingProfile">;
@@ -404,6 +413,38 @@ export interface ArchiveRecovery {
   id: ArchiveRecoveryId;
   originalDiscArchiveId: OriginalDiscArchiveId;
   status: ArchiveRecoveryStatus;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type DvdDiscVerificationStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed";
+
+export interface DvdDiscVerification {
+  id: DvdDiscVerificationId;
+  archiveRecoveryId: ArchiveRecoveryId;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  discInspectionId: DiscInspectionId;
+  detectedDiscId: DetectedDiscId;
+  mediaGeneration: string;
+  sourceMetadataFingerprint: string;
+  observedMetadataFingerprint: string;
+  checkpointRevision: number;
+  checkpointDigest: string;
+  status: DvdDiscVerificationStatus;
+  outcome: DvdDiscVerificationOutcome | null;
+  reasons: readonly DvdDiscVerificationReasonCode[];
+  findings: readonly DvdDiscVerificationSampleFinding[];
+  budgetExhausted: boolean;
+  workerExecutionId: string | null;
+  claimToken: DvdDiscVerificationClaimToken | null;
+  claimedAt: Date | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  failureCode: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -1357,6 +1398,10 @@ export interface CatalogAccess {
     ids: readonly OriginalDiscArchiveId[],
   ): void;
   findArchiveRecovery(id: OriginalDiscArchiveId): ArchiveRecovery | null;
+  findArchiveRecoveryById(id: ArchiveRecoveryId): ArchiveRecovery | null;
+  findDvdSourceSampleManifest(
+    id: OriginalDiscArchiveId,
+  ): DvdSourceSampleManifest | null;
   listCatalogReviewArchives(options: {
     view: CatalogReviewArchiveView;
     cursor?: CatalogReviewArchiveListCursor;
@@ -1579,6 +1624,7 @@ export interface DvdInitialArchiveSave {
     import("./dvd-archive-evidence-digests.js").DvdArchiveEvidenceManifestDigests & {
       id: string;
       sourceArchiveJobId: string;
+      sourceSampleManifest?: DvdSourceSampleManifest;
     };
 }
 
@@ -1944,6 +1990,31 @@ export interface DvdRecoveryStorageAccess {
   ): DvdRecoveryStoragePreflight;
 }
 
+export interface DvdDiscVerificationAccess {
+  submit(input: {
+    mutationKey: string;
+    archiveRecoveryId: ArchiveRecoveryId;
+    discInspectionId: DiscInspectionId;
+    checkpointRevision: number;
+    checkpointDigest: string;
+  }): DvdDiscVerification;
+  find(id: DvdDiscVerificationId): DvdDiscVerification | null;
+  findLatestForRecovery(id: ArchiveRecoveryId): DvdDiscVerification | null;
+  claimNext(workerExecutionId: string): DvdDiscVerification | null;
+  renewClaim(claim: DvdDiscVerification): boolean;
+  recoverExpiredClaims(): number;
+  complete(
+    claim: DvdDiscVerification,
+    result: {
+      outcome: DvdDiscVerificationOutcome;
+      reasons: readonly DvdDiscVerificationReasonCode[];
+      findings: readonly DvdDiscVerificationSampleFinding[];
+      budgetExhausted: boolean;
+    },
+  ): DvdDiscVerification;
+  fail(claim: DvdDiscVerification): DvdDiscVerification | null;
+}
+
 export type SnapshotCatalogAccess = Pick<
   CatalogAccess,
   | "listOpticalDrives"
@@ -1952,6 +2023,8 @@ export type SnapshotCatalogAccess = Pick<
   | "findDvdArchiveEvidenceHeader"
   | "findDvdArchiveEvidenceHeaders"
   | "findArchiveRecovery"
+  | "findArchiveRecoveryById"
+  | "findDvdSourceSampleManifest"
   | "listCatalogReviewArchives"
   | "listMediaItems"
   | "listMediaItemMaintenance"
@@ -2038,6 +2111,7 @@ export interface DataAccess {
   ): Promise<import("./dvd-initial-checkpoint.js").CommittedDvdInitialEvidence | null>;
   readonly notifications: import("./notification-types.js").NotificationAccess;
   readonly dvdRecoveryStorage: DvdRecoveryStorageAccess;
+  readonly dvdDiscVerifications: DvdDiscVerificationAccess;
   readonly catalog: CatalogAccess;
   readonly encodingProfiles: EncodingProfileAccess;
   readonly discInspections: DiscInspectionAccess;

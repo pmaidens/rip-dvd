@@ -4,6 +4,7 @@ import { lstat, open, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { assertDvdArchiveBoundaryEvidenceDigest, assertDvdArchiveEvidenceManifestDigests } from "./dvd-archive-evidence-digests.js";
 import { archiveBoundaryEvidenceFromRecord, type ArchiveBoundaryEvidence } from "./archive-boundary.js";
+import { validateDvdSourceSampleManifest } from "./dvd-disc-verification.js";
 import type { ArchiveJob, DvdArchiveEvidenceHeader, DvdInitialArchiveSave, OriginalDiscArchive } from "./types.js";
 
 export type CommittedDvdInitialEvidence = DvdInitialArchiveSave["manifest"] & {
@@ -88,6 +89,19 @@ export async function readCommittedDvdInitialCheckpoint(input: {
       metadataDecision: { policyVersion: string; decision: string; blockers: unknown[]; observations: unknown[] } | null;
     };
     const unresolved = manifest.unrecoveredSourceRanges.reduce((count, range) => count + range.sectorCount, 0);
+    if (Object.hasOwn(manifest, "sourceSampleManifest")) {
+      const sourceSampleManifest = validateDvdSourceSampleManifest(
+        manifest.sourceSampleManifest!,
+      );
+      if (
+        sourceSampleManifest.sourceMetadataFingerprint !==
+          manifest.imageFingerprint ||
+        sourceSampleManifest.acceptedEndLbaExclusive !==
+          manifest.acceptedEndLbaExclusive ||
+        sourceSampleManifest.checkpointRevision !== manifest.revision ||
+        sourceSampleManifest.checkpointDigest !== manifest.manifestDigest
+      ) throw new Error("Source sample manifest provenance differs");
+    }
     const integrity = {
       integrity: unresolved === 0 ? "clean_read" : "incomplete_read", policyVersion: "dvd-recovery-evidence-v1",
       badSectorCount: unresolved, badAreaCount: manifest.unrecoveredSourceRanges.length,

@@ -54,6 +54,16 @@ printf '%s\n' "$help_output" | assert_json_fields \
   'schemaVersion=1' 'usage=rip-dvd <command>'
 
 set +e
+verification_output="$(invoke inspect-verification \
+  --archive-recovery-id synthetic-missing-recovery \
+  2>"$temporary_directory/verification.stderr")"
+verification_status=$?
+set -e
+[ "$verification_status" -eq 2 ]
+printf '%s\n' "$verification_output" | assert_json_fields \
+  'error.code=NOT_FOUND'
+
+set +e
 missing_key_output="$(invoke submit-archive-audit 2>"$temporary_directory/missing-key.stderr")"
 missing_key_status=$?
 set -e

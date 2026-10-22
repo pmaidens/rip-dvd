@@ -13,6 +13,7 @@ import { createLinuxOpticalDriveHardware } from "./optical-drive-hardware.js";
 import { runFilesystemVerificationWorker } from "./filesystem-verification-worker.js";
 import { createNodeDvdSalvageValidator } from "./dvd-salvage-validator.js";
 import { recordDvdRecoveryStoragePreflight } from "./dvd-recovery-storage-preflight.js";
+import { runDvdDiscVerificationWorker } from "./dvd-disc-verification-worker.js";
 
 await runConfiguredAsyncWorker(
   {
@@ -29,6 +30,8 @@ await runConfiguredAsyncWorker(
     const copyRunner = createNodeDvdCopyRunner({
       maxActiveCopies: config.archiveWorkerConcurrency,
     });
+    const workerExecutionId =
+      `archive-worker:${process.pid}:${randomUUID()}`;
     const storagePreflight = recordDvdRecoveryStoragePreflight(
       access,
       config.originalsLibraryPath,
@@ -65,13 +68,19 @@ await runConfiguredAsyncWorker(
         salvageValidator: createNodeDvdSalvageValidator(),
         pollIntervalMs: config.workerPollIntervalMs,
         signal: workers.signal,
-        workerId: `archive-worker:${process.pid}:${randomUUID()}`,
+        workerId: workerExecutionId,
       })), stopOnFailure(runFilesystemVerificationWorker({
         access,
         intervalMs: config.workerPollIntervalMs,
         log,
         originalsLibraryPath: config.originalsLibraryPath,
         signal: workers.signal,
+      })), stopOnFailure(runDvdDiscVerificationWorker({
+        access,
+        intervalMs: config.workerPollIntervalMs,
+        log,
+        signal: workers.signal,
+        workerExecutionId,
       })), stopOnFailure(runArchiveAuditWorker({
         access,
         databasePath: config.databasePath,

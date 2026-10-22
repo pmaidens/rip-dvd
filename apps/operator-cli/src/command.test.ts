@@ -2003,6 +2003,8 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       "submit-filesystem-verification",
       "submit-archive-audit",
       "archive-evidence",
+      "inspect-verification",
+      "verify-disc",
       "encode-output",
       "encode-queue",
       "encode-resolve",

@@ -63,6 +63,11 @@ import {
   type DvdRecoveryStoragePreflightFacts,
 } from "../dvd-recovery-storage-preflight.js";
 import type {
+  DvdDiscVerificationReasonCode,
+  DvdDiscVerificationSampleFinding,
+  DvdSourceSampleManifest,
+} from "../dvd-disc-verification.js";
+import type {
   ArchiveRequestId,
   ArchiveAuditRunId,
   ArchiveAuditClaimToken,
@@ -84,6 +89,9 @@ import type {
   DvdTitleBadSectorCount,
   DvdArchiveEvidenceFormat,
   DvdUnrecoveredSourceRange,
+  DvdDiscVerificationClaimToken,
+  DvdDiscVerificationId,
+  DvdDiscVerificationStatus,
   EncodeJobCleanupClaimToken,
   EncodeJobId,
   EncodeJobFailureReportId,
@@ -1329,6 +1337,118 @@ export const archiveRecoveries = sqliteTable(
     check(
       "archive_recoveries_status_check",
       sql`${table.status} in (${sqliteStringLiterals(ARCHIVE_RECOVERY_STATUSES)})`,
+    ),
+  ],
+);
+
+export const dvdSourceSampleManifests = sqliteTable(
+  "dvd_source_sample_manifests",
+  {
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .primaryKey()
+      .references(() => dvdArchiveEvidenceHeaders.originalDiscArchiveId, {
+        onDelete: "restrict",
+      }),
+    manifest: text("manifest", { mode: "json" })
+      .$type<DvdSourceSampleManifest>()
+      .notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check(
+      "dvd_source_sample_manifests_id_not_null",
+      sql`${table.originalDiscArchiveId} is not null`,
+    ),
+    check(
+      "dvd_source_sample_manifests_json_check",
+      sql`json_valid(${table.manifest}) and json_type(${table.manifest}) = 'object'`,
+    ),
+  ],
+);
+
+export const dvdDiscVerifications = sqliteTable(
+  "dvd_disc_verifications",
+  {
+    id: text("id").$type<DvdDiscVerificationId>().notNull().primaryKey(),
+    archiveRecoveryId: text("archive_recovery_id")
+      .$type<ArchiveRecoveryId>()
+      .notNull()
+      .references(() => archiveRecoveries.id, { onDelete: "restrict" }),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .references(() => dvdArchiveEvidenceHeaders.originalDiscArchiveId, {
+        onDelete: "restrict",
+      }),
+    discInspectionId: text("disc_inspection_id")
+      .$type<DiscInspectionId>()
+      .notNull()
+      .references(() => discInspections.id, { onDelete: "restrict" }),
+    detectedDiscId: text("detected_disc_id")
+      .$type<DetectedDiscId>()
+      .notNull()
+      .references(() => detectedDiscs.id, { onDelete: "restrict" }),
+    mediaGeneration: text("media_generation").notNull(),
+    sourceMetadataFingerprint: text("source_metadata_fingerprint").notNull(),
+    observedMetadataFingerprint: text("observed_metadata_fingerprint").notNull(),
+    checkpointRevision: integer("checkpoint_revision").notNull(),
+    checkpointDigest: text("checkpoint_digest").notNull(),
+    status: text("status")
+      .$type<DvdDiscVerificationStatus>()
+      .notNull(),
+    outcome: text("outcome")
+      .$type<"match" | "mismatch" | "inconclusive">(),
+    reasons: text("reasons", { mode: "json" })
+      .$type<readonly DvdDiscVerificationReasonCode[]>()
+      .notNull(),
+    findings: text("findings", { mode: "json" })
+      .$type<readonly DvdDiscVerificationSampleFinding[]>()
+      .notNull(),
+    budgetExhausted: integer("budget_exhausted", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    workerExecutionId: text("worker_execution_id"),
+    claimToken: text("claim_token").$type<DvdDiscVerificationClaimToken>(),
+    claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
+    startedAt: integer("started_at", { mode: "timestamp_ms" }),
+    completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+    failureCode: text("failure_code"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    check("dvd_disc_verifications_id_not_null", sql`${table.id} is not null`),
+    index("dvd_disc_verifications_recovery_created_idx").on(
+      table.archiveRecoveryId,
+      table.createdAt,
+      table.id,
+    ),
+    index("dvd_disc_verifications_status_created_idx").on(
+      table.status,
+      table.createdAt,
+      table.id,
+    ),
+    check(
+      "dvd_disc_verifications_status_check",
+      sql`${table.status} in ('queued', 'running', 'completed', 'failed')`,
+    ),
+    check(
+      "dvd_disc_verifications_checkpoint_check",
+      sql`typeof(${table.checkpointRevision}) = 'integer' and ${table.checkpointRevision} > 0 and length(${table.checkpointDigest}) = 64 and ${table.checkpointDigest} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "dvd_disc_verifications_json_check",
+      sql`json_valid(${table.reasons}) and json_type(${table.reasons}) = 'array' and json_valid(${table.findings}) and json_type(${table.findings}) = 'array'`,
+    ),
+    check(
+      "dvd_disc_verifications_result_check",
+      sql`(${table.status} in ('queued', 'running') and ${table.outcome} is null and ${table.completedAt} is null and ${table.failureCode} is null) or (${table.status} = 'completed' and ${table.outcome} in ('match', 'mismatch', 'inconclusive') and ${table.completedAt} is not null and ${table.failureCode} is null) or (${table.status} = 'failed' and ${table.outcome} is null and ${table.completedAt} is not null and ${table.failureCode} = 'DISC_VERIFICATION_UNAVAILABLE')`,
+    ),
+    check(
+      "dvd_disc_verifications_claim_check",
+      sql`(${table.status} = 'running' and ${table.claimToken} is not null and ${table.claimedAt} is not null and ${table.workerExecutionId} is not null and ${table.startedAt} is not null) or (${table.status} <> 'running' and ${table.claimToken} is null and ${table.claimedAt} is null)`,
     ),
   ],
 );

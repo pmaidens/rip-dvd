@@ -975,7 +975,9 @@ describe("data-access facade", () => {
         "dvd_archive_evidence_headers",
         "dvd_archive_evidence_manifests",
         "dvd_archive_recovery_reads",
+        "dvd_disc_verifications",
         "dvd_recovery_storage_preflights",
+        "dvd_source_sample_manifests",
         "encode_job_failure_reports",
         "filesystem_verification_runs",
         "mutation_invocations",
@@ -984,7 +986,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(35);
+    expect(identifierTables).toHaveLength(37);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -8762,6 +8764,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261022044526_chilly_madame_hydra",
+        },
+        {
           name: "20261019204228_dvd-initial-save",
         },
         {
@@ -8787,9 +8792,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20260930002622_wandering_micromax",
-        },
-        {
-          name: "20260929225801_lonely_microchip",
         },
       ]);
     expect(

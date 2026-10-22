@@ -33,6 +33,7 @@ export {
   dvdRecoveryEvidenceFormatForArchive,
 } from "./dvd-recovery-evidence.js";
 export * from "./dvd-recovery-storage-preflight.js";
+export * from "./dvd-disc-verification.js";
 export {
   assertDvdArchiveBoundaryEvidenceDigest,
   assertDvdArchiveEvidenceManifestDigests,

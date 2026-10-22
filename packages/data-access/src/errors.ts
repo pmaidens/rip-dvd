@@ -40,6 +40,17 @@ export class StaleJobAttemptError extends Error {
   }
 }
 
+export class StaleDvdDiscVerificationError extends DomainInvariantError {
+  constructor(
+    readonly code:
+      | "DISC_INSERTION_CHANGED"
+      | "DISC_CHECKPOINT_CHANGED",
+  ) {
+    super(code);
+    this.name = "StaleDvdDiscVerificationError";
+  }
+}
+
 /** A marked initial save cannot be reconciled with its durable lifecycle. */
 export class DvdInitialSaveFault extends DomainInvariantError {
   constructor(

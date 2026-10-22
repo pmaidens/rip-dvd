@@ -72,7 +72,9 @@ import {
   dvdArchiveEvidenceHeaders,
   dvdArchiveEvidenceManifests,
   dvdArchiveRecoveryReads,
+  dvdDiscVerifications,
   dvdRecoveryStoragePreflights,
+  dvdSourceSampleManifests,
   encodeJobFailureReports,
   encodeJobs,
   encodingProfiles,
@@ -134,6 +136,12 @@ import {
   DVD_RECOVERY_STORAGE_PREFLIGHT_VERSION,
   type DvdRecoveryStoragePreflight,
 } from "../dvd-recovery-storage-preflight.js";
+import {
+  DVD_SOURCE_SAMPLE_BAND_COUNT,
+  validateDvdSourceSampleManifest,
+  type DvdDiscVerificationReasonCode,
+  type DvdDiscVerificationSampleFinding,
+} from "../dvd-disc-verification.js";
 import { encodingProfileQueueBlockingReasons } from "../encoding-profile-eligibility.js";
 import {
   archiveBoundaryEvidenceFromRecord,
@@ -177,6 +185,7 @@ import {
   MutationKeyConflictError,
   RecordNotFoundError,
   StaleCatalogRevisionError,
+  StaleDvdDiscVerificationError,
   StaleJobAttemptError,
 } from "../errors.js";
 import type { LegacySidecarDataAccess } from "../legacy-sidecar-types.js";
@@ -235,6 +244,9 @@ import type {
   DvdArchiveEvidenceHeader,
   DvdArchiveEvidenceFormat,
   DvdUnrecoveredSourceRange,
+  DvdDiscVerification,
+  DvdDiscVerificationClaimToken,
+  DvdDiscVerificationId,
   EncodeJobClaimToken,
   EncodeJobCleanupClaimToken,
   EncodeJobId,
@@ -1094,6 +1106,18 @@ function openMigratedDatabase(
 }
 
 type FilesystemVerificationRow = typeof filesystemVerificationRuns.$inferSelect;
+
+type DvdDiscVerificationRow = typeof dvdDiscVerifications.$inferSelect;
+
+function toDvdDiscVerification(
+  row: DvdDiscVerificationRow,
+): DvdDiscVerification {
+  return {
+    ...row,
+    reasons: row.reasons,
+    findings: row.findings,
+  };
+}
 
 function toFilesystemVerificationRun(
   row: FilesystemVerificationRow,
@@ -6835,6 +6859,28 @@ export function createDataAccessInternal(
           currentManifestDigest: initial.manifestDigest,
           createdAt: timestamp, updatedAt: timestamp,
         }).run();
+        if (initial.sourceSampleManifest !== undefined) {
+          const sourceSampleManifest = validateDvdSourceSampleManifest(
+            initial.sourceSampleManifest,
+          );
+          if (
+            sourceSampleManifest.sourceMetadataFingerprint !==
+              initial.imageFingerprint ||
+            sourceSampleManifest.acceptedEndLbaExclusive !==
+              initial.acceptedEndLbaExclusive ||
+            sourceSampleManifest.checkpointRevision !== 1 ||
+            sourceSampleManifest.checkpointDigest !== initial.manifestDigest
+          ) {
+            throw new DomainInvariantError(
+              "DVD source sample manifest does not match the initial checkpoint",
+            );
+          }
+          transaction.insert(dvdSourceSampleManifests).values({
+            originalDiscArchiveId: archive.id,
+            manifest: sourceSampleManifest,
+            createdAt: timestamp,
+          }).run();
+        }
         transaction.update(originalDiscArchives).set({
           integrity: integrityEvidence.integrity, integrityEvidenceRevision: 1,
           integrityPolicyVersion, badSectorCount: integrityEvidence.badSectorCount,
@@ -6931,6 +6977,334 @@ export function createDataAccessInternal(
         return recorded;
       },
     },
+    dvdDiscVerifications: {
+      submit(input) {
+        const semanticInput = JSON.stringify({
+          archiveRecoveryId: input.archiveRecoveryId,
+          discInspectionId: input.discInspectionId,
+          checkpointRevision: input.checkpointRevision,
+          checkpointDigest: input.checkpointDigest,
+        });
+        return database.transaction((transaction) => {
+          const operation = "dvd_disc_verification.submit";
+          const previous = readMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            (stored) => {
+              const outcome = JSON.parse(stored) as DvdDiscVerificationRow & {
+                claimedAt: string | null;
+                startedAt: string | null;
+                completedAt: string | null;
+                createdAt: string;
+                updatedAt: string;
+              };
+              return toDvdDiscVerification({
+                ...outcome,
+                claimedAt: outcome.claimedAt === null
+                  ? null
+                  : new Date(outcome.claimedAt),
+                startedAt: outcome.startedAt === null
+                  ? null
+                  : new Date(outcome.startedAt),
+                completedAt: outcome.completedAt === null
+                  ? null
+                  : new Date(outcome.completedAt),
+                createdAt: new Date(outcome.createdAt),
+                updatedAt: new Date(outcome.updatedAt),
+              });
+            },
+          );
+          if (previous !== undefined) return previous;
+          const recovery = requireRow(
+            transaction.select().from(archiveRecoveries)
+              .where(eq(archiveRecoveries.id, input.archiveRecoveryId)).get(),
+            "archive recovery",
+            input.archiveRecoveryId,
+          );
+          if (recovery.status === "completed") {
+            throw new InvalidStatusTransitionError(
+              "archive recovery",
+              recovery.status,
+              "disc verification",
+            );
+          }
+          const header = requireRow(
+            transaction.select().from(dvdArchiveEvidenceHeaders)
+              .where(eq(
+                dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+                recovery.originalDiscArchiveId,
+              )).get(),
+            "DVD Archive Evidence",
+            recovery.originalDiscArchiveId,
+          );
+          if (
+            header.currentManifestRevision !== input.checkpointRevision ||
+            header.currentManifestDigest !== input.checkpointDigest
+          ) {
+            throw new StaleDvdDiscVerificationError(
+              "DISC_CHECKPOINT_CHANGED",
+            );
+          }
+          const archive = requireRow(
+            transaction.select().from(originalDiscArchives)
+              .where(eq(originalDiscArchives.id, recovery.originalDiscArchiveId))
+              .get(),
+            "original disc archive",
+            recovery.originalDiscArchiveId,
+          );
+          const inspection = requireRow(
+            transaction.select().from(discInspections)
+              .where(eq(discInspections.id, input.discInspectionId)).get(),
+            "disc inspection",
+            input.discInspectionId,
+          );
+          if (
+            !inspection.isCurrent ||
+            inspection.status !== "completed" ||
+            inspection.detectedDiscId === null
+          ) {
+            throw new StaleDvdDiscVerificationError(
+              "DISC_INSERTION_CHANGED",
+            );
+          }
+          const observedDisc = requireRow(
+            transaction.select().from(detectedDiscs)
+              .where(eq(detectedDiscs.id, inspection.detectedDiscId)).get(),
+            "detected disc",
+            inspection.detectedDiscId,
+          );
+          const active = transaction
+            .select({ id: dvdDiscVerifications.id })
+            .from(dvdDiscVerifications)
+            .where(and(
+              eq(
+                dvdDiscVerifications.archiveRecoveryId,
+                recovery.id,
+              ),
+              inArray(dvdDiscVerifications.status, ["queued", "running"]),
+            ))
+            .get();
+          if (active !== undefined) {
+            throw new InvalidStatusTransitionError(
+              "disc verification",
+              "active",
+              "queued",
+            );
+          }
+          const id = newId<DvdDiscVerificationId>();
+          const timestamp = now();
+          const sourceManifest = transaction
+            .select({ manifest: dvdSourceSampleManifests.manifest })
+            .from(dvdSourceSampleManifests)
+            .where(eq(
+              dvdSourceSampleManifests.originalDiscArchiveId,
+              recovery.originalDiscArchiveId,
+            ))
+            .get()?.manifest;
+          const row = requireRow(
+            transaction.insert(dvdDiscVerifications).values({
+              id,
+              archiveRecoveryId: recovery.id,
+              originalDiscArchiveId: recovery.originalDiscArchiveId,
+              discInspectionId: inspection.id,
+              detectedDiscId: observedDisc.id,
+              mediaGeneration: inspection.mediaGeneration,
+              sourceMetadataFingerprint:
+                sourceManifest?.sourceMetadataFingerprint ?? archive.fingerprint,
+              observedMetadataFingerprint: observedDisc.fingerprint,
+              checkpointRevision: header.currentManifestRevision,
+              checkpointDigest: header.currentManifestDigest,
+              status: "queued",
+              reasons: [],
+              findings: [],
+              budgetExhausted: false,
+              createdAt: timestamp,
+              updatedAt: timestamp,
+            }).returning().get(),
+            "DVD disc verification",
+            id,
+          );
+          recordMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            row,
+            timestamp,
+          );
+          return toDvdDiscVerification(row);
+        }, { behavior: "immediate" });
+      },
+      find(id) {
+        const row = database.select().from(dvdDiscVerifications)
+          .where(eq(dvdDiscVerifications.id, id)).get();
+        return row === undefined ? null : toDvdDiscVerification(row);
+      },
+      findLatestForRecovery(id) {
+        const row = database.select().from(dvdDiscVerifications)
+          .where(eq(dvdDiscVerifications.archiveRecoveryId, id))
+          .orderBy(
+            desc(dvdDiscVerifications.createdAt),
+            desc(dvdDiscVerifications.id),
+          ).limit(1).get();
+        return row === undefined ? null : toDvdDiscVerification(row);
+      },
+      recoverExpiredClaims() {
+        const timestamp = now();
+        const expiredBefore = new Date(timestamp.getTime() - 60_000);
+        return database.update(dvdDiscVerifications).set({
+          status: "queued",
+          workerExecutionId: null,
+          claimToken: null,
+          claimedAt: null,
+          startedAt: null,
+          updatedAt: timestamp,
+        }).where(and(
+          eq(dvdDiscVerifications.status, "running"),
+          lt(dvdDiscVerifications.claimedAt, expiredBefore),
+        )).returning({ id: dvdDiscVerifications.id }).all().length;
+      },
+      claimNext(workerExecutionId) {
+        const execution = requireNonEmpty(
+          workerExecutionId.trim(),
+          "DVD disc verification worker execution ID",
+        );
+        if (execution.length > 256) {
+          throw new DomainInvariantError(
+            "DVD disc verification worker execution ID is too long",
+          );
+        }
+        return database.transaction((transaction) => {
+          const next = transaction.select().from(dvdDiscVerifications)
+            .where(eq(dvdDiscVerifications.status, "queued"))
+            .orderBy(
+              asc(dvdDiscVerifications.createdAt),
+              asc(dvdDiscVerifications.id),
+            ).limit(1).get();
+          if (next === undefined) return null;
+          const timestamp = now();
+          const claimed = transaction.update(dvdDiscVerifications).set({
+            status: "running",
+            workerExecutionId: execution,
+            claimToken: newId<DvdDiscVerificationClaimToken>(),
+            claimedAt: timestamp,
+            startedAt: timestamp,
+            updatedAt: timestamp,
+          }).where(and(
+            eq(dvdDiscVerifications.id, next.id),
+            eq(dvdDiscVerifications.status, "queued"),
+          )).returning().get();
+          return claimed === undefined
+            ? null
+            : toDvdDiscVerification(claimed);
+        }, { behavior: "immediate" });
+      },
+      renewClaim(claim) {
+        if (claim.claimToken === null) return false;
+        const timestamp = now();
+        return database.update(dvdDiscVerifications).set({
+          claimedAt: timestamp,
+          updatedAt: timestamp,
+        }).where(and(
+          eq(dvdDiscVerifications.id, claim.id),
+          eq(dvdDiscVerifications.status, "running"),
+          eq(dvdDiscVerifications.claimToken, claim.claimToken),
+        )).returning({ id: dvdDiscVerifications.id }).get() !== undefined;
+      },
+      complete(claim, result) {
+        if (claim.claimToken === null || claim.status !== "running") {
+          throw new StaleJobAttemptError("DVD disc verification", claim.id);
+        }
+        const claimToken = claim.claimToken;
+        const reasons = [...new Set(result.reasons)];
+        if (reasons.length !== result.reasons.length ||
+          result.findings.length > DVD_SOURCE_SAMPLE_BAND_COUNT ||
+          !["match", "mismatch", "inconclusive"].includes(result.outcome)) {
+          throw new DomainInvariantError(
+            "DVD disc verification result is invalid",
+          );
+        }
+        return database.transaction((transaction) => {
+          const current = transaction.select().from(dvdDiscVerifications)
+            .where(eq(dvdDiscVerifications.id, claim.id)).get();
+          if (
+            current?.status !== "running" ||
+            current.claimToken !== claimToken
+          ) {
+            throw new StaleJobAttemptError(
+              "DVD disc verification",
+              claim.id,
+            );
+          }
+          const inspection = transaction.select().from(discInspections)
+            .where(eq(discInspections.id, current.discInspectionId)).get();
+          const header = transaction.select().from(dvdArchiveEvidenceHeaders)
+            .where(eq(
+              dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+              current.originalDiscArchiveId,
+            )).get();
+          const insertionChanged = inspection === undefined ||
+            !inspection.isCurrent ||
+            inspection.status !== "completed" ||
+            inspection.detectedDiscId !== current.detectedDiscId ||
+            inspection.mediaGeneration !== current.mediaGeneration;
+          const checkpointChanged = header === undefined ||
+            header.currentManifestRevision !== current.checkpointRevision ||
+            header.currentManifestDigest !== current.checkpointDigest;
+          if (insertionChanged && !reasons.includes("DISC_INSERTION_CHANGED")) {
+            reasons.push("DISC_INSERTION_CHANGED");
+          }
+          if (checkpointChanged && !reasons.includes("DISC_CHECKPOINT_CHANGED")) {
+            reasons.push("DISC_CHECKPOINT_CHANGED");
+          }
+          const mismatch = result.outcome === "mismatch";
+          const outcome = mismatch
+            ? "mismatch"
+            : insertionChanged || checkpointChanged
+              ? "inconclusive"
+              : result.outcome;
+          const timestamp = now();
+          return toDvdDiscVerification(requireRow(
+            transaction.update(dvdDiscVerifications).set({
+              status: "completed",
+              outcome,
+              reasons,
+              findings: result.findings,
+              budgetExhausted: result.budgetExhausted,
+              claimToken: null,
+              claimedAt: null,
+              completedAt: timestamp,
+              updatedAt: timestamp,
+            }).where(and(
+              eq(dvdDiscVerifications.id, claim.id),
+              eq(dvdDiscVerifications.status, "running"),
+              eq(dvdDiscVerifications.claimToken, claimToken),
+            )).returning().get(),
+            "DVD disc verification",
+            claim.id,
+          ));
+        }, { behavior: "immediate" });
+      },
+      fail(claim) {
+        if (claim.claimToken === null) return null;
+        const timestamp = now();
+        const row = database.update(dvdDiscVerifications).set({
+          status: "failed",
+          claimToken: null,
+          claimedAt: null,
+          completedAt: timestamp,
+          failureCode: "DISC_VERIFICATION_UNAVAILABLE",
+          updatedAt: timestamp,
+        }).where(and(
+          eq(dvdDiscVerifications.id, claim.id),
+          eq(dvdDiscVerifications.status, "running"),
+          eq(dvdDiscVerifications.claimToken, claim.claimToken),
+        )).returning().get();
+        return row === undefined ? null : toDvdDiscVerification(row);
+      },
+    },
     readConsistentSnapshot(read) {
       const snapshotAccess: ConsistentReadAccess = {
         dvdRecoveryStorage: {
@@ -6949,6 +7323,10 @@ export function createDataAccessInternal(
             access.catalog.findDvdArchiveEvidenceHeaders(ids),
           findArchiveRecovery: (id) =>
             access.catalog.findArchiveRecovery(id),
+          findArchiveRecoveryById: (id) =>
+            access.catalog.findArchiveRecoveryById(id),
+          findDvdSourceSampleManifest: (id) =>
+            access.catalog.findDvdSourceSampleManifest(id),
           listCatalogReviewArchives: (options) =>
             access.catalog.listCatalogReviewArchives(options),
           listMediaItems: (options) => access.catalog.listMediaItems(options),
@@ -8563,6 +8941,27 @@ export function createDataAccessInternal(
           .from(archiveRecoveries)
           .where(eq(archiveRecoveries.originalDiscArchiveId, id))
           .get() ?? null;
+      },
+
+      findArchiveRecoveryById(id) {
+        if (!hasDvdRecoveryEvidenceSchema) return null;
+        return database
+          .select()
+          .from(archiveRecoveries)
+          .where(eq(archiveRecoveries.id, id))
+          .get() ?? null;
+      },
+
+      findDvdSourceSampleManifest(id) {
+        if (!hasDvdRecoveryEvidenceSchema) return null;
+        const row = database
+          .select({ manifest: dvdSourceSampleManifests.manifest })
+          .from(dvdSourceSampleManifests)
+          .where(eq(dvdSourceSampleManifests.originalDiscArchiveId, id))
+          .get();
+        return row === undefined
+          ? null
+          : validateDvdSourceSampleManifest(row.manifest);
       },
 
       listCatalogReviewArchives(options) {
