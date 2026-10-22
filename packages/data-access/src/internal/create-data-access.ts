@@ -7309,6 +7309,43 @@ export function createDataAccessInternal(
     });
   }
 
+  function recordFailedDvdStructuralAttempt(input: {
+    checkpoint: DvdStructuralCheckpoint;
+    reason: { code: string; message: string };
+  }) {
+    const reason = validateDvdStructuralFailureReason(input.reason);
+    const timestamp = now();
+    return database.transaction((transaction) => {
+      requireDvdStructuralCheckpoint(transaction, input.checkpoint);
+      const row = transaction.insert(dvdStructuralCheckAttempts).values({
+        originalDiscArchiveId: input.checkpoint.originalDiscArchiveId,
+        manifestId: input.checkpoint.manifestId,
+        manifestRevision: input.checkpoint.manifestRevision,
+        manifestDigest: input.checkpoint.manifestDigest,
+        acceptedEndLbaExclusive:
+          input.checkpoint.acceptedEndLbaExclusive,
+        outcome: "failed",
+        assessmentId: null,
+        findings: null,
+        failureCode: reason.code,
+        failureMessage: reason.message,
+        createdAt: timestamp,
+      }).returning().get();
+      if (row === undefined) {
+        throw new DomainInvariantError(
+          "DVD structural check failure was not recorded",
+        );
+      }
+      const attempt = toDvdStructuralCheckAttempt(row);
+      if (attempt.outcome !== "failed") {
+        throw new DomainInvariantError(
+          "DVD structural check failure outcome is invalid",
+        );
+      }
+      return attempt;
+    });
+  }
+
   async function withDvdCheckpointRead<Prepared, Result>(
     id: OriginalDiscArchiveId,
     ownership: import("../types.js").DvdCheckpointReadOwnership,
@@ -7625,54 +7662,38 @@ export function createDataAccessInternal(
         ownership,
         async (manifest, handle, imagePath) =>
           assess(manifest, handle, imagePath),
-        (manifest, findings, imagePath) =>
-          recordCompletedDvdStructuralAssessment({
+        (manifest, prepared, imagePath) => {
+          const checkpoint = {
+            originalDiscArchiveId: id,
+            manifestId: manifest.id,
+            manifestRevision: manifest.revision,
+            manifestDigest: manifest.manifestDigest,
+            acceptedEndLbaExclusive: manifest.acceptedEndLbaExclusive,
+          };
+          if (prepared.outcome === "failed") {
+            return {
+              outcome: "failed" as const,
+              attempt: recordFailedDvdStructuralAttempt({
+                checkpoint,
+                reason: prepared.reason,
+              }),
+            };
+          }
+          const completed = recordCompletedDvdStructuralAssessment({
             checkpoint: {
-              originalDiscArchiveId: id,
-              manifestId: manifest.id,
-              manifestRevision: manifest.revision,
-              manifestDigest: manifest.manifestDigest,
-              acceptedEndLbaExclusive: manifest.acceptedEndLbaExclusive,
+              ...checkpoint,
             },
-            findings,
+            findings: prepared.findings,
             imagePath,
-          }),
+          });
+          return { outcome: "completed" as const, ...completed };
+        },
       );
       return read?.result ?? null;
     },
     dvdStructuralAssessments: {
       recordFailed(input) {
-        const reason = validateDvdStructuralFailureReason(input.reason);
-        const timestamp = now();
-        return database.transaction((transaction) => {
-          requireDvdStructuralCheckpoint(transaction, input.checkpoint);
-          const row = transaction.insert(dvdStructuralCheckAttempts).values({
-            originalDiscArchiveId: input.checkpoint.originalDiscArchiveId,
-            manifestId: input.checkpoint.manifestId,
-            manifestRevision: input.checkpoint.manifestRevision,
-            manifestDigest: input.checkpoint.manifestDigest,
-            acceptedEndLbaExclusive:
-              input.checkpoint.acceptedEndLbaExclusive,
-            outcome: "failed",
-            assessmentId: null,
-            findings: null,
-            failureCode: reason.code,
-            failureMessage: reason.message,
-            createdAt: timestamp,
-          }).returning().get();
-          if (row === undefined) {
-            throw new DomainInvariantError(
-              "DVD structural check failure was not recorded",
-            );
-          }
-          const attempt = toDvdStructuralCheckAttempt(row);
-          if (attempt.outcome !== "failed") {
-            throw new DomainInvariantError(
-              "DVD structural check failure outcome is invalid",
-            );
-          }
-          return attempt;
-        });
+        return recordFailedDvdStructuralAttempt(input);
       },
       inspect: inspectDvdStructuralAssessment,
     },

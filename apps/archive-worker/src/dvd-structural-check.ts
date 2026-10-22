@@ -204,30 +204,38 @@ export async function runDvdStructuralCheck({
   checker?: DvdStructuralChecker;
   originalDiscArchiveId: OriginalDiscArchiveId;
 }) {
-  let checkpoint = checkpointFromHeader(access, originalDiscArchiveId);
+  checkpointFromHeader(access, originalDiscArchiveId);
   try {
     const checked = await access.assessDvdStructure(
       originalDiscArchiveId,
       archiveImageOwnership,
       async (manifest, handle, imagePath) => {
-        checkpoint = {
+        const checkpoint = {
           originalDiscArchiveId,
           manifestId: manifest.id,
           manifestRevision: manifest.revision,
           manifestDigest: manifest.manifestDigest,
           acceptedEndLbaExclusive: manifest.acceptedEndLbaExclusive,
         };
-        const findings = await checker.check({
-          checkpoint,
-          descriptor: handle.descriptor,
-          imageFilesystemIdentity: manifest.image.filesystemIdentity,
-          imagePath,
-          unrecoveredSourceRanges: manifest.unrecoveredSourceRanges,
-          signal: handle.signal,
-          assertStable: () => handle.assertOwned(),
-        });
-        handle.assertOwned();
-        return findings;
+        try {
+          const findings = await checker.check({
+            checkpoint,
+            descriptor: handle.descriptor,
+            imageFilesystemIdentity: manifest.image.filesystemIdentity,
+            imagePath,
+            unrecoveredSourceRanges: manifest.unrecoveredSourceRanges,
+            signal: handle.signal,
+            assertStable: () => handle.assertOwned(),
+          });
+          handle.assertOwned();
+          return { outcome: "completed" as const, findings };
+        } catch (error) {
+          handle.assertOwned();
+          return {
+            outcome: "failed" as const,
+            reason: failureReason(error),
+          };
+        }
       },
     );
     if (checked === null) {
@@ -235,13 +243,12 @@ export async function runDvdStructuralCheck({
         "UNSUPPORTED_EVIDENCE_FORMAT",
       );
     }
-    return { outcome: "completed" as const, ...checked };
+    return checked.outcome === "failed" ? checked.attempt : checked;
   } catch (error) {
     if (error instanceof DvdStructuralCheckUnavailableError) throw error;
-    checkpoint = checkpointFromHeader(access, originalDiscArchiveId);
-    return access.dvdStructuralAssessments.recordFailed({
-      checkpoint,
+    return {
+      outcome: "unavailable" as const,
       reason: failureReason(error),
-    });
+    };
   }
 }

@@ -52,9 +52,9 @@ async function recordStructuralAssessment(
     createArchiveImageOwnership({
       authorityRootPath: fixture.originalsLibraryPath,
     }),
-    async () => findings,
+    async () => ({ outcome: "completed", findings }),
   );
-  if (recorded === null) {
+  if (recorded === null || recorded.outcome !== "completed") {
     throw new Error("Expected structural assessment support");
   }
   return recorded;

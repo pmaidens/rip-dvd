@@ -1,13 +1,21 @@
 import { lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { OriginalDiscArchiveId } from "@rip-dvd/data-access";
+import type {
+  DataAccess,
+  DvdStructuralCheckAttempt,
+  OriginalDiscArchiveId,
+} from "@rip-dvd/data-access";
+import type { ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   DvdFullExtentMetadataDecision,
 } from "./dvd-full-extent-validator.js";
-import { createNodeDvdStructuralChecker } from "./dvd-structural-check.js";
+import {
+  createNodeDvdStructuralChecker,
+  runDvdStructuralCheck,
+} from "./dvd-structural-check.js";
 import { isoProfileImage } from "./dvd-metadata-profile-fixtures.js";
 
 const directories: string[] = [];
@@ -226,5 +234,99 @@ describe("node DVD structural checker", () => {
       blockedCheckKind: "filesystem_structure",
       structuralChecks: structuralChecks({ blocked: "filesystem_structure" }),
     })).rejects.toThrow("failed locally");
+  });
+});
+
+describe("DVD structural check execution", () => {
+  it("does not bind a failed attempt to a checkpoint that advanced after the check", async () => {
+    const nextCheckpoint = {
+      ...checkpoint,
+      manifestId: "synthetic-manifest-2",
+      manifestRevision: 2,
+      manifestDigest: "b".repeat(64),
+    };
+    let headerReadCount = 0;
+    const failedAttempt = (
+      attemptedCheckpoint: typeof checkpoint,
+      reason: { code: string; message: string },
+    ): DvdStructuralCheckAttempt & { outcome: "failed" } => ({
+      sequence: 1,
+      checkpoint: attemptedCheckpoint,
+      outcome: "failed",
+      assessmentIdentity: null,
+      findings: null,
+      reason,
+      createdAt: new Date(0),
+    });
+    const access = {
+      catalog: {
+        findDvdArchiveEvidenceHeader() {
+          const current = headerReadCount === 0 ? checkpoint : nextCheckpoint;
+          headerReadCount += 1;
+          return {
+            currentManifestId: current.manifestId,
+            currentManifestRevision: current.manifestRevision,
+            currentManifestDigest: current.manifestDigest,
+            acceptedEndLbaExclusive: current.acceptedEndLbaExclusive,
+          };
+        },
+      },
+      async assessDvdStructure(
+        _id: OriginalDiscArchiveId,
+        _ownership: ArchiveImageOwnership,
+        assess: Parameters<DataAccess["assessDvdStructure"]>[2],
+      ) {
+        const committedCheckpoint = {
+          id: checkpoint.manifestId,
+          revision: checkpoint.manifestRevision,
+          manifestDigest: checkpoint.manifestDigest,
+          acceptedEndLbaExclusive: checkpoint.acceptedEndLbaExclusive,
+          image: { filesystemIdentity: "1:2", mtimeNs: "0" },
+          unrecoveredSourceRanges: [],
+        } as unknown as Parameters<typeof assess>[0];
+        const prepared = await assess(committedCheckpoint, {
+          descriptor: 17,
+          signal: new AbortController().signal,
+          assertOwned() {},
+        }, "/synthetic/archive.iso");
+        if (prepared?.outcome === "failed") {
+          return {
+            outcome: "failed",
+            attempt: failedAttempt(checkpoint, prepared.reason),
+          };
+        }
+        throw new Error("Expected a failed structural check preparation");
+      },
+      dvdStructuralAssessments: {
+        recordFailed({
+          checkpoint: attemptedCheckpoint,
+          reason,
+        }: {
+          checkpoint: typeof checkpoint;
+          reason: { code: string; message: string };
+        }) {
+          return failedAttempt(attemptedCheckpoint, reason);
+        },
+      },
+    } as unknown as DataAccess;
+
+    const failed = await runDvdStructuralCheck({
+      access,
+      archiveImageOwnership: {} as ArchiveImageOwnership,
+      originalDiscArchiveId: checkpoint.originalDiscArchiveId,
+      checker: {
+        async check() {
+          throw new Error("synthetic checker failure");
+        },
+      },
+    });
+
+    expect(failed).toMatchObject({
+      outcome: "failed",
+      checkpoint: {
+        manifestId: checkpoint.manifestId,
+        manifestRevision: checkpoint.manifestRevision,
+      },
+    });
   });
 });

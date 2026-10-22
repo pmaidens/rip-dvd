@@ -461,7 +461,7 @@ it("records structural checks from one consistent checkpoint read", async () => 
   }
 });
 
-it("does not persist completed structural evidence when final ownership validation fails", async () => {
+it("does not persist a structural attempt when final ownership validation fails", async () => {
   const f = await jobFixture(true);
   try {
     const saved = await saveDvdInitialArchiveForArchiveJob({
@@ -504,7 +504,7 @@ it("does not persist completed structural evidence when final ownership validati
     });
 
     expect(failed).toMatchObject({
-      outcome: "failed",
+      outcome: "unavailable",
       reason: { code: "CONSISTENCY_FAULT" },
     });
     expect(
@@ -513,13 +513,9 @@ it("does not persist completed structural evidence when final ownership validati
       state: "pending",
       currentAssessmentIdentity: null,
       assessment: null,
-      latestAttempt: {
-        outcome: "failed",
-        reason: { code: "CONSISTENCY_FAULT" },
-      },
+      latestAttempt: null,
       unavailableReasons: [
         { code: "ASSESSMENT_PENDING" },
-        { code: "CONSISTENCY_FAULT" },
       ],
     });
   } finally {

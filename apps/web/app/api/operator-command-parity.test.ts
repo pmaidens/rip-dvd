@@ -131,24 +131,29 @@ it("keeps every structural assessment state identical through web and CLI", asyn
       createArchiveImageOwnership({
         authorityRootPath: fixture.originalsLibraryPath,
       }),
-      async () => ([
-        "filesystem_structure",
-        "dvd_navigation",
-        "title_enumeration",
-      ] as const).map((checkKind) => ({
-        checkKind,
-        policyVersion: "synthetic-structural-check-v1",
-        testedExtent: {
-          startLba: 0,
-          endLbaExclusive: 1024,
-          observedSectorCount: 32,
-        },
-        outcome: "valid" as const,
-        reason: null,
-        evidenceReference: `synthetic-parity-evidence:${checkKind}`,
-      })),
+      async () => ({
+        outcome: "completed",
+        findings: ([
+          "filesystem_structure",
+          "dvd_navigation",
+          "title_enumeration",
+        ] as const).map((checkKind) => ({
+          checkKind,
+          policyVersion: "synthetic-structural-check-v1",
+          testedExtent: {
+            startLba: 0,
+            endLbaExclusive: 1024,
+            observedSectorCount: 32,
+          },
+          outcome: "valid" as const,
+          reason: null,
+          evidenceReference: `synthetic-parity-evidence:${checkKind}`,
+        })),
+      }),
     );
-    if (completed === null) throw new Error("Expected structural support");
+    if (completed === null || completed.outcome !== "completed") {
+      throw new Error("Expected structural support");
+    }
     expect((await inspectBoth()).item.structuralAssessment).toMatchObject({
       state: "current",
       currentAssessmentIdentity: completed.assessment.id,

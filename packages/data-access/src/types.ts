@@ -2114,11 +2114,28 @@ export interface DataAccess {
       checkpoint: import("./dvd-initial-checkpoint.js").CommittedDvdCheckpointEvidence,
       handle: DvdCheckpointReadHandle,
       imagePath: string,
-    ) => Promise<readonly DvdStructuralFindingInput[]>,
-  ): Promise<{
-    attempt: DvdStructuralCheckAttempt & { outcome: "completed" };
-    assessment: DvdStructuralAssessmentRecord;
-  } | null>;
+    ) => Promise<
+      | {
+        outcome: "completed";
+        findings: readonly DvdStructuralFindingInput[];
+      }
+      | {
+        outcome: "failed";
+        reason: { code: string; message: string };
+      }
+    >,
+  ): Promise<
+    | {
+      outcome: "completed";
+      attempt: DvdStructuralCheckAttempt & { outcome: "completed" };
+      assessment: DvdStructuralAssessmentRecord;
+    }
+    | {
+      outcome: "failed";
+      attempt: DvdStructuralCheckAttempt & { outcome: "failed" };
+    }
+    | null
+  >;
   readonly dvdStructuralAssessments: DvdStructuralAssessmentAccess;
   readonly dvdRecoveryStorage: DvdRecoveryStorageAccess;
   readonly catalog: CatalogAccess;
