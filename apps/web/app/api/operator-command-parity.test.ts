@@ -38,8 +38,12 @@ import {
 import {
   advanceCommittedArchiveEvidence,
   seedCommittedArchiveEvidence,
+  withEvidenceGuardsDisabled,
 } from "../../../operator-cli/src/archive-evidence.test-support.js";
 import { createCatalogReviewRoute } from "./catalog-reviews/[id]/route";
+import {
+  createCatalogTitleDamageRoute,
+} from "./catalog-reviews/[id]/damage/route";
 import { createCatalogSuggestionRoute } from "./catalog-reviews/[id]/suggestion/route";
 import { createDeploymentReadinessResponse } from "./deployment-readiness/route";
 import { createHealthResponse } from "./health/route";
@@ -64,6 +68,46 @@ import {
 import { readDashboardSnapshot } from "../../lib/dashboard";
 
 const trustedOrigin = "http://localhost:3000";
+
+it("reports a missing marked Title Damage checkpoint through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive } = await seedCommittedArchiveEvidence(fixture);
+  withEvidenceGuardsDisabled(fixture.databasePath, (database) => {
+    database.prepare(`
+      DELETE FROM dvd_archive_evidence_headers
+      WHERE original_disc_archive_id = ?
+    `).run(archive.id);
+  });
+  const access = fixture.openAccess();
+  try {
+    const cli = await fixture.run([
+      "catalog-review",
+      "damage",
+      archive.id,
+    ]);
+    const web = createCatalogTitleDamageRoute(
+      new Request(
+        `${trustedOrigin}/api/catalog-reviews/${archive.id}/damage`,
+      ),
+      archive.id,
+      () => access,
+    );
+    expect(web.status).toBe(200);
+    expect(cli.exitCode, JSON.stringify(cli.result)).toBe(0);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toMatchObject({
+      state: "unavailable",
+      checkpointRevision: null,
+      assessmentIdentity: null,
+      currentAssessmentIdentity: null,
+      items: [],
+      unavailableReasons: [{ code: "CONSISTENCY_FAULT" }],
+    });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
 
 it("keeps every structural assessment state identical through web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();

@@ -8698,6 +8698,15 @@ export function createDataAccessInternal(
   function inspectDvdTitleDamageAssessment(
     originalDiscArchiveId: OriginalDiscArchiveId,
   ) {
+    const archive = access.catalog.listOriginalDiscArchives({
+      ids: [originalDiscArchiveId],
+    })[0];
+    if (archive === undefined) {
+      throw new RecordNotFoundError(
+        "Original Disc Archive",
+        originalDiscArchiveId,
+      );
+    }
     const header = database.select().from(dvdArchiveEvidenceHeaders).where(eq(
       dvdArchiveEvidenceHeaders.originalDiscArchiveId,
       originalDiscArchiveId,
@@ -8712,10 +8721,20 @@ export function createDataAccessInternal(
       assessment: null,
       unavailableReasons: [{ code, message }],
     });
-    if (header === undefined) {
+    const marked = dvdRecoveryEvidenceFormatForArchive(
+      header,
+      access.archiveJobs.listForArchive(originalDiscArchiveId),
+    );
+    if (marked === null) {
       return unavailable(
         "UNSUPPORTED_EVIDENCE_FORMAT",
         "Title Damage Assessment requires dvd-recovery-evidence-v1.",
+      );
+    }
+    if (header === undefined) {
+      return unavailable(
+        "CONSISTENCY_FAULT",
+        "The committed DVD checkpoint is unavailable.",
       );
     }
     const checkpoint = {
@@ -8742,42 +8761,22 @@ export function createDataAccessInternal(
       ))
       .orderBy(desc(dvdTitleDamageAssessmentAttempts.sequence)).limit(1)
       .get()?.assessment;
-    const currentRow = reviewSet === null ||
-        structural.state !== "current" ||
-        structural.currentAssessmentIdentity === null
-      ? undefined
-      : database.select({ assessment: dvdTitleDamageAssessments })
-        .from(dvdTitleDamageAssessmentAttempts)
-        .innerJoin(
-          dvdTitleDamageAssessments,
-          eq(
-            dvdTitleDamageAssessments.id,
-            dvdTitleDamageAssessmentAttempts.assessmentId,
-          ),
-        ).where(and(
-        eq(
-          dvdTitleDamageAssessmentAttempts.originalDiscArchiveId,
-          originalDiscArchiveId,
-        ),
-        eq(dvdTitleDamageAssessments.manifestId, header.currentManifestId),
-        eq(
-          dvdTitleDamageAssessments.manifestRevision,
-          header.currentManifestRevision,
-        ),
-        eq(
-          dvdTitleDamageAssessments.manifestDigest,
-          header.currentManifestDigest,
-        ),
-        eq(
-          dvdTitleDamageAssessments.titleIdentityReviewSetIdentity,
-          reviewSet.reviewSetIdentity,
-        ),
-        eq(
-          dvdTitleDamageAssessments.structuralAssessmentIdentity,
-          structural.currentAssessmentIdentity,
-        ),
-      )).orderBy(desc(dvdTitleDamageAssessmentAttempts.sequence)).limit(1)
-        .get()?.assessment;
+    const currentRow = latestRow !== undefined &&
+        reviewSet !== null &&
+        structural.state === "current" &&
+        structural.currentAssessmentIdentity !== null &&
+        latestRow.originalDiscArchiveId === originalDiscArchiveId &&
+        latestRow.manifestId === header.currentManifestId &&
+        latestRow.manifestRevision === header.currentManifestRevision &&
+        latestRow.manifestDigest === header.currentManifestDigest &&
+        latestRow.acceptedEndLbaExclusive ===
+          header.acceptedEndLbaExclusive &&
+        latestRow.titleIdentityReviewSetIdentity ===
+          reviewSet.reviewSetIdentity &&
+        latestRow.structuralAssessmentIdentity ===
+          structural.currentAssessmentIdentity
+      ? latestRow
+      : undefined;
     const assessmentRow = currentRow ?? latestRow;
     const reasons = [] as Array<{ code: string; message: string }>;
     if (reviewSet === null) {

@@ -419,6 +419,40 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     currentAssessmentIdentity: null,
     assessment: { id: recorded.id },
   });
+  const dependencyCycleLatest = await access.assessDvdTitleDamage(
+    archive.id,
+    ownership,
+    async () => mappings,
+  );
+  if (dependencyCycleLatest === null) {
+    throw new Error(
+      "Expected Title Damage Assessment for replacement structure",
+    );
+  }
+  expect(access.dvdTitleDamageAssessments.inspect(archive.id)).toMatchObject({
+    state: "current",
+    currentAssessmentIdentity: dependencyCycleLatest.id,
+    assessment: { id: dependencyCycleLatest.id },
+  });
+  const restoredStructural = await access.assessDvdStructure(
+    archive.id,
+    ownership,
+    async () => ({
+      outcome: "completed" as const,
+      findings: structuralResult.assessment.findings,
+    }),
+  );
+  if (restoredStructural?.outcome !== "completed") {
+    throw new Error("Expected the original Structural Assessment to recur");
+  }
+  expect(restoredStructural.assessment.id).toBe(
+    structuralResult.assessment.id,
+  );
+  expect(access.dvdTitleDamageAssessments.inspect(archive.id)).toMatchObject({
+    state: "outdated",
+    currentAssessmentIdentity: null,
+    assessment: { id: dependencyCycleLatest.id },
+  });
   access.close();
 
   advanceCommittedArchiveEvidence(fixture, manifest);
@@ -432,7 +466,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     result: {
       titleDamage: {
         state: "outdated",
-        assessmentIdentity: recorded.id,
+        assessmentIdentity: dependencyCycleLatest.id,
         currentAssessmentIdentity: null,
         items: [],
         truncated: false,
@@ -450,7 +484,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     exitCode: 0,
     result: {
       state: "outdated",
-      assessmentIdentity: recorded.id,
+      assessmentIdentity: dependencyCycleLatest.id,
       currentAssessmentIdentity: null,
       items: [],
       truncated: false,

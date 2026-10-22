@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { canonicalJson } from "./canonical-json.js";
 import type { DvdStructuralFindingOutcome } from "./dvd-structural-assessment.js";
 import type {
   DvdTitleIdentityId,
@@ -333,16 +334,6 @@ function subtractRanges(
 
 function sectorCount(ranges: readonly UnreadableSectorRange[]): number {
   return ranges.reduce((total, range) => total + range.sectorCount, 0);
-}
-
-function canonicalJson(value: unknown): string {
-  return JSON.stringify(value, (_key, nested: unknown) =>
-    nested !== null && typeof nested === "object" && !Array.isArray(nested)
-      ? Object.fromEntries(Object.entries(nested).sort(([left], [right]) =>
-        left.localeCompare(right)
-      ))
-      : nested
-  );
 }
 
 export function createDvdTitleDamageAssessment(
