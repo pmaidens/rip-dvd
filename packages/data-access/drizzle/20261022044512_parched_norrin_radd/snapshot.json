@@ -1,7 +1,7 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "32c7aa28-e8d6-4c7c-811a-46225c3521da",
+  "id": "0c4df76e-89c1-4c20-993b-2df41da0e6d7",
   "prevIds": [
     "a3f02be2-4777-46e7-9fc8-345727d7ea0f"
   ],
@@ -63,15 +63,15 @@
       "entityType": "tables"
     },
     {
-      "name": "dvd_disc_verifications",
-      "entityType": "tables"
-    },
-    {
       "name": "dvd_recovery_storage_preflights",
       "entityType": "tables"
     },
     {
-      "name": "dvd_source_sample_manifests",
+      "name": "dvd_structural_assessments",
+      "entityType": "tables"
+    },
+    {
+      "name": "dvd_structural_check_attempts",
       "entityType": "tables"
     },
     {
@@ -2050,246 +2050,6 @@
       "autoincrement": false,
       "default": null,
       "generated": null,
-      "name": "id",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "archive_recovery_id",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "attempt_ordinal",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "original_disc_archive_id",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "disc_inspection_id",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "detected_disc_id",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "media_generation",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "source_metadata_fingerprint",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "observed_metadata_fingerprint",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "checkpoint_revision",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "checkpoint_digest",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "status",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": false,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "outcome",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "reasons",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "findings",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": "false",
-      "generated": null,
-      "name": "budget_exhausted",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": false,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "worker_execution_id",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": false,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "claim_token",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "integer",
-      "notNull": false,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "claimed_at",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "integer",
-      "notNull": false,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "started_at",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "integer",
-      "notNull": false,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "completed_at",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": false,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "failure_code",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "created_at",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "updated_at",
-      "entityType": "columns",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "type": "text",
-      "notNull": false,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
       "name": "scope",
       "entityType": "columns",
       "table": "dvd_recovery_storage_preflights"
@@ -2350,9 +2110,9 @@
       "autoincrement": false,
       "default": null,
       "generated": null,
-      "name": "original_disc_archive_id",
+      "name": "id",
       "entityType": "columns",
-      "table": "dvd_source_sample_manifests"
+      "table": "dvd_structural_assessments"
     },
     {
       "type": "text",
@@ -2360,9 +2120,79 @@
       "autoincrement": false,
       "default": null,
       "generated": null,
-      "name": "manifest",
+      "name": "original_disc_archive_id",
       "entityType": "columns",
-      "table": "dvd_source_sample_manifests"
+      "table": "dvd_structural_assessments"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "manifest_id",
+      "entityType": "columns",
+      "table": "dvd_structural_assessments"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "manifest_revision",
+      "entityType": "columns",
+      "table": "dvd_structural_assessments"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "manifest_digest",
+      "entityType": "columns",
+      "table": "dvd_structural_assessments"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "accepted_end_lba_exclusive",
+      "entityType": "columns",
+      "table": "dvd_structural_assessments"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "policy_version",
+      "entityType": "columns",
+      "table": "dvd_structural_assessments"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "validity",
+      "entityType": "columns",
+      "table": "dvd_structural_assessments"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "findings",
+      "entityType": "columns",
+      "table": "dvd_structural_assessments"
     },
     {
       "type": "integer",
@@ -2372,7 +2202,127 @@
       "generated": null,
       "name": "created_at",
       "entityType": "columns",
-      "table": "dvd_source_sample_manifests"
+      "table": "dvd_structural_assessments"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "sequence",
+      "entityType": "columns",
+      "table": "dvd_structural_check_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "original_disc_archive_id",
+      "entityType": "columns",
+      "table": "dvd_structural_check_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "manifest_id",
+      "entityType": "columns",
+      "table": "dvd_structural_check_attempts"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "manifest_revision",
+      "entityType": "columns",
+      "table": "dvd_structural_check_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "manifest_digest",
+      "entityType": "columns",
+      "table": "dvd_structural_check_attempts"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "accepted_end_lba_exclusive",
+      "entityType": "columns",
+      "table": "dvd_structural_check_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "outcome",
+      "entityType": "columns",
+      "table": "dvd_structural_check_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "assessment_id",
+      "entityType": "columns",
+      "table": "dvd_structural_check_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "findings",
+      "entityType": "columns",
+      "table": "dvd_structural_check_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "failure_code",
+      "entityType": "columns",
+      "table": "dvd_structural_check_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "failure_message",
+      "entityType": "columns",
+      "table": "dvd_structural_check_attempts"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "dvd_structural_check_attempts"
     },
     {
       "type": "text",
@@ -4921,78 +4871,78 @@
     },
     {
       "columns": [
-        "archive_recovery_id"
+        "original_disc_archive_id"
       ],
-      "tableTo": "archive_recoveries",
+      "tableTo": "original_disc_archives",
       "columnsTo": [
         "id"
       ],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "nameExplicit": false,
-      "name": "fk_dvd_disc_verifications_archive_recovery_id_archive_recoveries_id_fk",
+      "name": "fk_dvd_structural_assessments_original_disc_archive_id_original_disc_archives_id_fk",
       "entityType": "fks",
-      "table": "dvd_disc_verifications"
+      "table": "dvd_structural_assessments"
     },
     {
       "columns": [
-        "original_disc_archive_id"
+        "manifest_id"
       ],
-      "tableTo": "dvd_archive_evidence_headers",
-      "columnsTo": [
-        "original_disc_archive_id"
-      ],
-      "onUpdate": "NO ACTION",
-      "onDelete": "RESTRICT",
-      "nameExplicit": false,
-      "name": "fk_dvd_disc_verifications_original_disc_archive_id_dvd_archive_evidence_headers_original_disc_archive_id_fk",
-      "entityType": "fks",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "columns": [
-        "disc_inspection_id"
-      ],
-      "tableTo": "disc_inspections",
+      "tableTo": "dvd_archive_evidence_manifests",
       "columnsTo": [
         "id"
       ],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "nameExplicit": false,
-      "name": "fk_dvd_disc_verifications_disc_inspection_id_disc_inspections_id_fk",
+      "name": "fk_dvd_structural_assessments_manifest_id_dvd_archive_evidence_manifests_id_fk",
       "entityType": "fks",
-      "table": "dvd_disc_verifications"
+      "table": "dvd_structural_assessments"
     },
     {
       "columns": [
-        "detected_disc_id"
+        "original_disc_archive_id"
       ],
-      "tableTo": "detected_discs",
+      "tableTo": "original_disc_archives",
       "columnsTo": [
         "id"
       ],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "nameExplicit": false,
-      "name": "fk_dvd_disc_verifications_detected_disc_id_detected_discs_id_fk",
+      "name": "fk_dvd_structural_check_attempts_original_disc_archive_id_original_disc_archives_id_fk",
       "entityType": "fks",
-      "table": "dvd_disc_verifications"
+      "table": "dvd_structural_check_attempts"
     },
     {
       "columns": [
-        "original_disc_archive_id"
+        "manifest_id"
       ],
-      "tableTo": "dvd_archive_evidence_headers",
+      "tableTo": "dvd_archive_evidence_manifests",
       "columnsTo": [
-        "original_disc_archive_id"
+        "id"
       ],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "nameExplicit": false,
-      "name": "fk_dvd_source_sample_manifests_original_disc_archive_id_dvd_archive_evidence_headers_original_disc_archive_id_fk",
+      "name": "fk_dvd_structural_check_attempts_manifest_id_dvd_archive_evidence_manifests_id_fk",
       "entityType": "fks",
-      "table": "dvd_source_sample_manifests"
+      "table": "dvd_structural_check_attempts"
+    },
+    {
+      "columns": [
+        "assessment_id"
+      ],
+      "tableTo": "dvd_structural_assessments",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_dvd_structural_check_attempts_assessment_id_dvd_structural_assessments_id_fk",
+      "entityType": "fks",
+      "table": "dvd_structural_check_attempts"
     },
     {
       "columns": [
@@ -5398,15 +5348,6 @@
     },
     {
       "columns": [
-        "id"
-      ],
-      "nameExplicit": false,
-      "name": "dvd_disc_verifications_pk",
-      "table": "dvd_disc_verifications",
-      "entityType": "pks"
-    },
-    {
-      "columns": [
         "scope"
       ],
       "nameExplicit": false,
@@ -5416,11 +5357,20 @@
     },
     {
       "columns": [
-        "original_disc_archive_id"
+        "id"
       ],
       "nameExplicit": false,
-      "name": "dvd_source_sample_manifests_pk",
-      "table": "dvd_source_sample_manifests",
+      "name": "dvd_structural_assessments_pk",
+      "table": "dvd_structural_assessments",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "sequence"
+      ],
+      "nameExplicit": false,
+      "name": "dvd_structural_check_attempts_pk",
+      "table": "dvd_structural_check_attempts",
       "entityType": "pks"
     },
     {
@@ -6070,25 +6020,11 @@
     {
       "columns": [
         {
-          "value": "archive_recovery_id",
+          "value": "original_disc_archive_id",
           "isExpression": false
         },
         {
-          "value": "attempt_ordinal",
-          "isExpression": false
-        }
-      ],
-      "isUnique": true,
-      "where": null,
-      "origin": "manual",
-      "name": "dvd_disc_verifications_recovery_attempt_unique",
-      "entityType": "indexes",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "columns": [
-        {
-          "value": "status",
+          "value": "manifest_revision",
           "isExpression": false
         },
         {
@@ -6103,9 +6039,31 @@
       "isUnique": false,
       "where": null,
       "origin": "manual",
-      "name": "dvd_disc_verifications_status_created_idx",
+      "name": "dvd_structural_assessments_checkpoint_idx",
       "entityType": "indexes",
-      "table": "dvd_disc_verifications"
+      "table": "dvd_structural_assessments"
+    },
+    {
+      "columns": [
+        {
+          "value": "original_disc_archive_id",
+          "isExpression": false
+        },
+        {
+          "value": "manifest_revision",
+          "isExpression": false
+        },
+        {
+          "value": "sequence",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "dvd_structural_check_attempts_checkpoint_idx",
+      "entityType": "indexes",
+      "table": "dvd_structural_check_attempts"
     },
     {
       "columns": [
@@ -7088,48 +7046,6 @@
       "table": "dvd_archive_recovery_reads"
     },
     {
-      "value": "\"id\" is not null",
-      "name": "dvd_disc_verifications_id_not_null",
-      "entityType": "checks",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "value": "\"status\" in ('queued', 'running', 'completed', 'failed')",
-      "name": "dvd_disc_verifications_status_check",
-      "entityType": "checks",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "value": "typeof(\"checkpoint_revision\") = 'integer' and \"checkpoint_revision\" > 0 and length(\"checkpoint_digest\") = 64 and \"checkpoint_digest\" not glob '*[^0-9a-f]*'",
-      "name": "dvd_disc_verifications_checkpoint_check",
-      "entityType": "checks",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "value": "typeof(\"attempt_ordinal\") = 'integer' and \"attempt_ordinal\" > 0",
-      "name": "dvd_disc_verifications_attempt_check",
-      "entityType": "checks",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "value": "json_valid(\"reasons\") and json_type(\"reasons\") = 'array' and json_valid(\"findings\") and json_type(\"findings\") = 'array'",
-      "name": "dvd_disc_verifications_json_check",
-      "entityType": "checks",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "value": "(\"status\" in ('queued', 'running') and \"outcome\" is null and \"completed_at\" is null and \"failure_code\" is null) or (\"status\" = 'completed' and \"outcome\" in ('match', 'mismatch', 'inconclusive') and \"completed_at\" is not null and \"failure_code\" is null) or (\"status\" = 'failed' and \"outcome\" is null and \"completed_at\" is not null and \"failure_code\" = 'DISC_VERIFICATION_UNAVAILABLE')",
-      "name": "dvd_disc_verifications_result_check",
-      "entityType": "checks",
-      "table": "dvd_disc_verifications"
-    },
-    {
-      "value": "(\"status\" = 'running' and \"claim_token\" is not null and \"claimed_at\" is not null and \"worker_execution_id\" is not null and \"started_at\" is not null) or (\"status\" <> 'running' and \"claim_token\" is null and \"claimed_at\" is null)",
-      "name": "dvd_disc_verifications_claim_check",
-      "entityType": "checks",
-      "table": "dvd_disc_verifications"
-    },
-    {
       "value": "\"scope\" is not null and \"scope\" = 'originals_library'",
       "name": "dvd_recovery_storage_preflights_scope_check",
       "entityType": "checks",
@@ -7160,16 +7076,52 @@
       "table": "dvd_recovery_storage_preflights"
     },
     {
-      "value": "\"original_disc_archive_id\" is not null",
-      "name": "dvd_source_sample_manifests_id_not_null",
+      "value": "length(\"id\") = 90 and substr(\"id\", 1, 26) = 'dvd-structural-assessment:' and substr(\"id\", 27) not glob '*[^0-9a-f]*'",
+      "name": "dvd_structural_assessments_identity_check",
       "entityType": "checks",
-      "table": "dvd_source_sample_manifests"
+      "table": "dvd_structural_assessments"
     },
     {
-      "value": "json_valid(\"manifest\") and json_type(\"manifest\") = 'object'",
-      "name": "dvd_source_sample_manifests_json_check",
+      "value": "typeof(\"manifest_revision\") = 'integer' and \"manifest_revision\" > 0 and length(\"manifest_digest\") = 64 and \"manifest_digest\" not glob '*[^0-9a-f]*' and typeof(\"accepted_end_lba_exclusive\") = 'integer' and \"accepted_end_lba_exclusive\" > 0",
+      "name": "dvd_structural_assessments_checkpoint_check",
       "entityType": "checks",
-      "table": "dvd_source_sample_manifests"
+      "table": "dvd_structural_assessments"
+    },
+    {
+      "value": "\"policy_version\" = 'dvd-structural-assessment-v1'",
+      "name": "dvd_structural_assessments_policy_check",
+      "entityType": "checks",
+      "table": "dvd_structural_assessments"
+    },
+    {
+      "value": "\"validity\" in ('valid', 'invalid', 'unknown')",
+      "name": "dvd_structural_assessments_validity_check",
+      "entityType": "checks",
+      "table": "dvd_structural_assessments"
+    },
+    {
+      "value": "json_valid(\"findings\") and json_type(\"findings\") = 'array' and json_array_length(\"findings\") = 3",
+      "name": "dvd_structural_assessments_findings_check",
+      "entityType": "checks",
+      "table": "dvd_structural_assessments"
+    },
+    {
+      "value": "typeof(\"manifest_revision\") = 'integer' and \"manifest_revision\" > 0 and length(\"manifest_digest\") = 64 and \"manifest_digest\" not glob '*[^0-9a-f]*' and typeof(\"accepted_end_lba_exclusive\") = 'integer' and \"accepted_end_lba_exclusive\" > 0",
+      "name": "dvd_structural_check_attempts_checkpoint_check",
+      "entityType": "checks",
+      "table": "dvd_structural_check_attempts"
+    },
+    {
+      "value": "\"outcome\" in ('completed', 'failed')",
+      "name": "dvd_structural_check_attempts_outcome_check",
+      "entityType": "checks",
+      "table": "dvd_structural_check_attempts"
+    },
+    {
+      "value": "(\"outcome\" = 'completed' and \"assessment_id\" is not null and \"findings\" is not null and json_valid(\"findings\") and json_type(\"findings\") = 'array' and json_array_length(\"findings\") = 3 and \"failure_code\" is null and \"failure_message\" is null) or (\"outcome\" = 'failed' and \"assessment_id\" is null and \"findings\" is null and typeof(\"failure_code\") = 'text' and length(\"failure_code\") between 1 and 128 and typeof(\"failure_message\") = 'text' and length(\"failure_message\") between 1 and 512)",
+      "name": "dvd_structural_check_attempts_shape_check",
+      "entityType": "checks",
+      "table": "dvd_structural_check_attempts"
     },
     {
       "value": "\"id\" is not null",

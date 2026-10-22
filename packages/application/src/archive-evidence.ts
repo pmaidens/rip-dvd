@@ -52,7 +52,7 @@ export async function inspectArchiveEvidence(
   });
   let manifest;
   try {
-    manifest = await access.readDvdInitialCheckpoint(
+    manifest = await access.readDvdCheckpoint(
       archiveId as OriginalDiscArchiveId,
       archiveImageOwnership,
     );

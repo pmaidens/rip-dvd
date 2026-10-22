@@ -32,8 +32,23 @@ export {
   assertDvdRecoveryEvidenceAdmissionAvailable,
   dvdRecoveryEvidenceFormatForArchive,
 } from "./dvd-recovery-evidence.js";
+export {
+  ACTIVE_ENCODE_WORK_STATUSES,
+  ENCODE_WORK_CONFLICT,
+  EncodeWorkConflictError,
+  activeEncodeWorkIdentities,
+  archiveRecoveryWorkIdentity,
+  createEncodeWorkConflictCurrent,
+  isActiveEncodeWorkStatus,
+} from "./archive-recovery-work.js";
+export type {
+  ActiveEncodeWorkStatus,
+  ArchiveRecoveryWorkIdentity,
+  EncodeWorkConflictCurrent,
+} from "./archive-recovery-work.js";
 export * from "./dvd-recovery-storage-preflight.js";
 export * from "./dvd-disc-verification.js";
+export * from "./dvd-structural-assessment.js";
 export {
   assertDvdArchiveBoundaryEvidenceDigest,
   assertDvdArchiveEvidenceManifestDigests,
@@ -44,6 +59,11 @@ export {
   createDvdArchiveRecoveryReadEvidenceDigest,
   createDvdUnrecoveredSourceRangesDigest,
 } from "./dvd-archive-evidence-digests.js";
+export {
+  assertDvdEvidenceRangeTransition,
+  dvdEvidenceRangesAfterRecoveryRead,
+} from "./dvd-evidence-transition.js";
+export type { DvdArchiveRecoveryReadOutcome } from "./dvd-evidence-transition.js";
 export type {
   DvdArchiveEvidenceManifestDigestInput,
   DvdArchiveEvidenceManifestDigests,
@@ -114,6 +134,7 @@ export {
   ARCHIVE_FAILURE_DETAIL_VERSIONS,
   ARCHIVE_INTEGRITIES,
   ARCHIVE_RECOVERY_STATUSES,
+  ARCHIVE_RECOVERY_WORK_STATUSES,
   ARCHIVE_READ_FAILURE_CATEGORIES,
   ARCHIVE_READ_FAILURE_STAGES,
   CATALOG_REVIEW_OUTCOMES,
@@ -165,9 +186,15 @@ export type { NotificationOutcome } from "./notification-policy.js";
 export {
   canonicalPublicationJson,
   createDvdInitialPublicationDigest,
+  createDvdRecoveryCheckpointPublicationDigest,
+  DVD_RECOVERY_MAX_CHECKPOINT_REVISION,
   DvdCheckpointReadFault,
+  readCommittedDvdCheckpoint,
 } from "./dvd-archive-checkpoint.js";
 export type {
+  CommittedDvdCheckpointEvidence,
   CommittedDvdCurrentCheckpoint,
   CommittedDvdInitialEvidence,
+  CommittedDvdRecoveryEvidence,
+  DvdRecoveryProtectedRange,
 } from "./dvd-archive-checkpoint.js";

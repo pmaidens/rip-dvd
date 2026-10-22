@@ -42,12 +42,22 @@ function createArchiveImageOwnership(
   const keyFor = (request: { archiveId: string; originalsLibraryPath: string }) =>
     `${request.originalsLibraryPath}\0${request.archiveId}`;
   const initialize = async (
-    request: Parameters<typeof ownership.withConsistentRead>[0],
+    request: {
+      archiveId: string;
+      additionalImagePaths?: readonly string[];
+      imagePath: string | null;
+      originalsLibraryPath: string;
+      signal: AbortSignal;
+    },
   ) => {
     const key = keyFor(request);
     if (initialized.has(key)) return;
     await ownership.withInitialPublicationWriter({
-      ...request,
+      archiveId: request.archiveId,
+      additionalImagePaths: request.additionalImagePaths,
+      imagePath: request.imagePath,
+      originalsLibraryPath: request.originalsLibraryPath,
+      signal: request.signal,
       async task() {},
     });
     initialized.add(key);

@@ -6,14 +6,12 @@ import {
   assertDvdArchiveBoundaryEvidenceDigest,
   assertDvdArchiveEvidenceManifestDigests,
   assertDvdArchiveRecoveryReadEvidenceDigest,
-  type DvdArchiveEvidenceManifestDigestInput,
-  type DvdArchiveEvidenceManifestDigests,
-  type DvdArchiveRecoveryReadEvidenceDigestInput,
 } from "./dvd-archive-evidence-digests.js";
 import { archiveBoundaryEvidenceFromRecord, type ArchiveBoundaryEvidence } from "./archive-boundary.js";
 import { canonicalJson } from "./canonical-json.js";
 import { assertDvdEvidenceRangeTransition } from "./dvd-evidence-transition.js";
 import { validateDvdSourceSampleManifest } from "./dvd-disc-verification.js";
+import { DVD_RECOVERY_JOURNAL_PAYLOAD_BYTES } from "./dvd-recovery-storage-preflight.js";
 import type { ArchiveJob, DvdArchiveEvidenceHeader, DvdInitialArchiveSave, OriginalDiscArchive } from "./types.js";
 
 export type CommittedDvdInitialEvidence = DvdInitialArchiveSave["manifest"] & {
@@ -28,6 +26,38 @@ export interface CommittedDvdCurrentCheckpoint {
   currentManifestRevision: number;
   currentManifestDigest: string;
 }
+
+export interface DvdRecoveryProtectedRange {
+  startByte: number;
+  byteCount: number;
+  unitBytes: number;
+  beforeDigest: string;
+  afterDigest: string;
+}
+
+export type CommittedDvdRecoveryEvidence = DvdInitialArchiveSave["manifest"] & {
+  checkpointFormat: "dvd-recovery-batch-v1";
+  sourceArchiveJobId: string;
+  publicationDigest: string;
+  rootPublicationDigest: string;
+  previousPublicationDigest: string;
+  image: { filesystemIdentity: string; mtimeNs: string };
+  previousImage: { filesystemIdentity: string; mtimeNs: string };
+  boundaryEvidence: ArchiveBoundaryEvidence;
+  recoveryRead: import("./dvd-archive-evidence-digests.js")
+    .DvdArchiveRecoveryReadEvidenceDigestInput & {
+      id: string;
+      evidenceDigest: string;
+    };
+  journalDigest: string | null;
+  protectedRanges: readonly DvdRecoveryProtectedRange[];
+};
+
+export type CommittedDvdCheckpointEvidence =
+  | CommittedDvdInitialEvidence
+  | CommittedDvdRecoveryEvidence;
+
+export const DVD_RECOVERY_MAX_CHECKPOINT_REVISION = 10_000;
 
 export class DvdCheckpointReadFault extends Error {
   constructor(readonly code: string, options?: ErrorOptions) {
@@ -44,20 +74,17 @@ interface DvdCheckpointPointer {
   publicationDigest: string;
 }
 
-interface DvdRecoveryManifestRecord extends
-  DvdArchiveEvidenceManifestDigestInput,
-  DvdArchiveEvidenceManifestDigests {
-  id: string;
-  recoveryRead: DvdArchiveRecoveryReadEvidenceDigestInput & {
-    id: string;
-    evidenceDigest: string;
-  };
-}
-
 export { canonicalJson as canonicalPublicationJson };
 
 export function createDvdInitialPublicationDigest(value: unknown): string {
   return createHash("sha256").update("rip-dvd:dvd-initial-publication:v1\0")
+    .update(canonicalJson(value)).digest("hex");
+}
+
+export function createDvdRecoveryCheckpointPublicationDigest(
+  value: unknown,
+): string {
+  return createHash("sha256").update("rip-dvd:dvd-recovery-checkpoint:v1\0")
     .update(canonicalJson(value)).digest("hex");
 }
 
@@ -78,8 +105,20 @@ async function readRecord(path: string, code: string): Promise<unknown> {
   finally { await file?.close(); }
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
 function assertRecoveryManifestStaticProvenance(
-  manifest: DvdRecoveryManifestRecord,
+  manifest: CommittedDvdRecoveryEvidence,
   initial: CommittedDvdInitialEvidence,
 ): void {
   if (
@@ -91,7 +130,11 @@ function assertRecoveryManifestStaticProvenance(
     manifest.boundaryPolicyVersion !== initial.boundaryPolicyVersion ||
     manifest.boundaryReportedSizeBytes !== initial.boundaryReportedSizeBytes ||
     manifest.boundaryPublishedSizeBytes !== initial.boundaryPublishedSizeBytes ||
-    manifest.boundaryEvidenceDigest !== initial.boundaryEvidenceDigest
+    manifest.boundaryEvidenceDigest !== initial.boundaryEvidenceDigest ||
+    canonicalJson(manifest.boundaryEvidence) !==
+      canonicalJson(initial.boundaryEvidence) ||
+    manifest.sourceArchiveJobId !== initial.sourceArchiveJobId ||
+    manifest.rootPublicationDigest !== initial.publicationDigest
   ) {
     throw new Error("Recovery manifest provenance differs");
   }
@@ -100,62 +143,71 @@ function assertRecoveryManifestStaticProvenance(
 function assertRecoveryManifestRecord(
   raw: unknown,
   initial: CommittedDvdInitialEvidence,
-): asserts raw is DvdRecoveryManifestRecord {
-  const manifest = raw as DvdRecoveryManifestRecord;
-  const expectedKeys = [
-    "acceptedEndLbaExclusive",
-    "boundaryEvidenceDigest",
-    "boundaryPolicyVersion",
-    "boundaryPublishedSizeBytes",
-    "boundaryReportedSizeBytes",
-    "evidenceFormat",
-    "id",
-    "imageFingerprint",
-    "manifestDigest",
-    "originalDiscArchiveId",
-    "previousManifestDigest",
-    "previousManifestId",
-    "recoveryRead",
-    "recoveryReadEvidenceDigest",
-    "recoveryReadId",
-    "revision",
-    "sectorSizeBytes",
-    "unrecoveredSourceRanges",
-    "unrecoveredSourceRangesDigest",
-  ];
-  const keys = Object.keys(manifest).sort();
-  const recoveryReadKeys = Object.keys(manifest.recoveryRead ?? {}).sort();
-  const expectedRecoveryReadKeys = [
-    "evidenceDigest",
-    "fromManifestId",
-    "fromManifestRevision",
-    "id",
-    "originalDiscArchiveId",
-    "outcome",
-    "sectorCount",
-    "startLba",
-  ];
+): asserts raw is CommittedDvdRecoveryEvidence {
+  const manifest = raw as CommittedDvdRecoveryEvidence;
+  const { publicationDigest, ...payload } = manifest;
+  const recovered = manifest.recoveryRead?.outcome === "recovered";
+  const protectedByteCount = manifest.protectedRanges?.reduce(
+    (count, range) => count + range.byteCount,
+    0,
+  );
+  const protectedUnitBytes = manifest.protectedRanges?.[0]?.unitBytes;
+  const recoveredStartByte = manifest.recoveryRead?.startLba *
+    manifest.sectorSizeBytes;
+  const expectedProtectedStart = protectedUnitBytes === undefined
+    ? null
+    : Math.floor(recoveredStartByte / protectedUnitBytes) * protectedUnitBytes;
+  const expectedProtectedEnd = protectedUnitBytes === undefined
+    ? null
+    : Math.ceil(
+      (recoveredStartByte + manifest.sectorSizeBytes) / protectedUnitBytes,
+    ) * protectedUnitBytes;
   if (
-    keys.length !== expectedKeys.length ||
-    keys.some((key, index) => key !== expectedKeys[index]) ||
+    publicationDigest !==
+      createDvdRecoveryCheckpointPublicationDigest(payload) ||
+    manifest.checkpointFormat !== "dvd-recovery-batch-v1" ||
     typeof manifest.id !== "string" ||
     manifest.id.length === 0 ||
     manifest.id.length > 256 ||
     !Number.isSafeInteger(manifest.revision) ||
     manifest.revision < 2 ||
+    manifest.revision > DVD_RECOVERY_MAX_CHECKPOINT_REVISION ||
+    manifest.id !==
+      `${initial.originalDiscArchiveId}:recovery:${manifest.revision}` ||
     manifest.previousManifestId === null ||
     manifest.previousManifestDigest === null ||
     manifest.recoveryReadId === null ||
     manifest.recoveryReadEvidenceDigest === null ||
     manifest.recoveryRead === null ||
     typeof manifest.recoveryRead !== "object" ||
-    recoveryReadKeys.length !== expectedRecoveryReadKeys.length ||
-    recoveryReadKeys.some((key, index) =>
-      key !== expectedRecoveryReadKeys[index]
-    ) ||
     manifest.recoveryRead.id !== manifest.recoveryReadId ||
     manifest.recoveryRead.evidenceDigest !==
-      manifest.recoveryReadEvidenceDigest
+      manifest.recoveryReadEvidenceDigest ||
+    manifest.recoveryRead.originalDiscArchiveId !==
+      initial.originalDiscArchiveId ||
+    (recovered
+      ? !/^[0-9a-f]{64}$/.test(manifest.journalDigest ?? "") ||
+        manifest.protectedRanges.length < 1
+      : manifest.journalDigest !== null ||
+        manifest.protectedRanges.length !== 0) ||
+    protectedByteCount > DVD_RECOVERY_JOURNAL_PAYLOAD_BYTES ||
+    (recovered && manifest.protectedRanges.some((range, index) =>
+      range.unitBytes !== protectedUnitBytes ||
+      range.byteCount !== protectedUnitBytes ||
+      range.startByte !== expectedProtectedStart! + index * protectedUnitBytes
+    )) ||
+    (recovered &&
+      expectedProtectedEnd !== expectedProtectedStart! + protectedByteCount) ||
+    manifest.protectedRanges.some((range) =>
+      !Number.isSafeInteger(range.startByte) || range.startByte < 0 ||
+      !Number.isSafeInteger(range.byteCount) || range.byteCount < 1 ||
+      !Number.isSafeInteger(range.unitBytes) || range.unitBytes < 1 ||
+      range.startByte % range.unitBytes !== 0 ||
+      range.byteCount % range.unitBytes !== 0 ||
+      range.startByte + range.byteCount > manifest.boundaryPublishedSizeBytes ||
+      !/^[0-9a-f]{64}$/.test(range.beforeDigest) ||
+      !/^[0-9a-f]{64}$/.test(range.afterDigest)
+    )
   ) {
     throw new Error("Recovery manifest shape differs");
   }
@@ -167,6 +219,76 @@ function assertRecoveryManifestRecord(
   assertRecoveryManifestStaticProvenance(manifest, initial);
 }
 
+function assertRecoveryManifestTransition(
+  manifest: CommittedDvdRecoveryEvidence,
+  previous: CommittedDvdCheckpointEvidence,
+): void {
+  if (
+    manifest.revision !== previous.revision + 1 ||
+    manifest.previousManifestId !== previous.id ||
+    manifest.previousManifestDigest !== previous.manifestDigest ||
+    manifest.previousPublicationDigest !== previous.publicationDigest ||
+    manifest.previousImage.filesystemIdentity !==
+      previous.image.filesystemIdentity ||
+    manifest.previousImage.mtimeNs !== previous.image.mtimeNs ||
+    manifest.recoveryRead.fromManifestId !== previous.id ||
+    manifest.recoveryRead.fromManifestRevision !== previous.revision
+  ) {
+    throw new Error("Recovery manifest transition differs");
+  }
+  assertDvdEvidenceRangeTransition(
+    previous.unrecoveredSourceRanges,
+    manifest.unrecoveredSourceRanges,
+    manifest.recoveryRead,
+  );
+}
+
+async function verifyImage(
+  archive: OriginalDiscArchive,
+  manifest: CommittedDvdCheckpointEvidence,
+): Promise<void> {
+  let image;
+  try {
+    image = await open(
+      archive.archivePath,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const stat = await image.stat({ bigint: true });
+    const named = await lstat(archive.archivePath, { bigint: true });
+    if (
+      !stat.isFile() || named.isSymbolicLink() || stat.ino !== named.ino ||
+      stat.dev !== named.dev ||
+      `${stat.dev}:${stat.ino}` !== manifest.image.filesystemIdentity ||
+      stat.size !== BigInt(manifest.boundaryPublishedSizeBytes) ||
+      stat.mtimeNs.toString() !== manifest.image.mtimeNs ||
+      named.size !== stat.size || named.mtimeNs !== stat.mtimeNs
+    ) {
+      throw new Error("Image differs from checkpoint");
+    }
+    if ("protectedRanges" in manifest) {
+      for (const range of manifest.protectedRanges) {
+        const bytes = Buffer.alloc(range.byteCount);
+        const read = await image.read(
+          bytes,
+          0,
+          bytes.length,
+          range.startByte,
+        );
+        if (
+          read.bytesRead !== bytes.length ||
+          createHash("sha256").update(bytes).digest("hex") !== range.afterDigest
+        ) {
+          throw new Error("Committed protected bytes differ");
+        }
+      }
+    }
+  } catch {
+    throw new DvdCheckpointReadFault("DVD_PUBLICATION_IMAGE_CONFLICT");
+  } finally {
+    await image?.close();
+  }
+}
+
 async function readCommittedDvdCheckpointRecords(input: {
   originalsLibraryPath?: string;
   archive: OriginalDiscArchive;
@@ -175,6 +297,7 @@ async function readCommittedDvdCheckpointRecords(input: {
   assertImageOwnership(): void;
 }, requireInitialPointer: boolean): Promise<{
   initialEvidence: CommittedDvdInitialEvidence;
+  currentEvidence: CommittedDvdCheckpointEvidence;
   checkpoint: DvdCheckpointPointer;
 } | null> {
   const { archive, header, jobs } = input;
@@ -191,6 +314,10 @@ async function readCommittedDvdCheckpointRecords(input: {
     if (await realpath(directory) !== directory || resolve(archive.archivePath) !== join(root, `${archive.id}.iso`))
       throw new Error("Evidence path conflict");
   } catch { throw new DvdCheckpointReadFault("DVD_PUBLICATION_PATH_CONFLICT"); }
+  const journalPath = join(directory, "recovery-journal.bin");
+  if (await pathExists(journalPath)) {
+    throw new DvdCheckpointReadFault("CONSISTENCY_FAULT");
+  }
   const pointerPath = join(directory, "checkpoint.json");
   const pointer = await readRecord(pointerPath, "DVD_EVIDENCE_CHECKPOINT_UNAVAILABLE");
   input.assertImageOwnership();
@@ -276,15 +403,16 @@ async function readCommittedDvdCheckpointRecords(input: {
       !Number.isSafeInteger(checkpoint.currentManifestRevision) ||
       checkpoint.currentManifestRevision < 1 ||
       !/^[0-9a-f]{64}$/.test(checkpoint.currentManifestDigest) ||
-      checkpoint.publicationDigest !== manifest.publicationDigest ||
       (checkpoint.currentManifestRevision === 1 &&
         (checkpoint.currentManifestId !== manifest.id ||
-          checkpoint.currentManifestDigest !== manifest.manifestDigest)) ||
+          checkpoint.currentManifestDigest !== manifest.manifestDigest ||
+          checkpoint.publicationDigest !== manifest.publicationDigest)) ||
       (requireInitialPointer && checkpoint.currentManifestRevision !== 1)
     ) throw new Error("Checkpoint differs");
   } catch {
     throw new DvdCheckpointReadFault("DVD_PUBLICATION_CHECKPOINT_CONFLICT");
   }
+  let currentEvidence: CommittedDvdCheckpointEvidence = manifest;
   if (checkpoint.currentManifestRevision > 1) {
     try {
       const currentRaw = await readRecord(
@@ -310,30 +438,17 @@ async function readCommittedDvdCheckpointRecords(input: {
       if (checkpoint.currentManifestRevision > 2) {
         assertRecoveryManifestRecord(previous, manifest);
       }
-      const predecessor = previous as {
-        id: string;
-        revision: number;
-        manifestDigest: string;
-        unrecoveredSourceRanges: CommittedDvdInitialEvidence["unrecoveredSourceRanges"];
-      };
+      const predecessor = previous as CommittedDvdCheckpointEvidence;
+      assertRecoveryManifestTransition(current, predecessor);
       if (
         current.id !== checkpoint.currentManifestId ||
         current.revision !== checkpoint.currentManifestRevision ||
         current.manifestDigest !== checkpoint.currentManifestDigest ||
-        predecessor.revision !== current.revision - 1 ||
-        current.previousManifestId !== predecessor.id ||
-        current.previousManifestDigest !== predecessor.manifestDigest ||
-        current.recoveryRead.originalDiscArchiveId !== archive.id ||
-        current.recoveryRead.fromManifestId !== predecessor.id ||
-        current.recoveryRead.fromManifestRevision !== predecessor.revision
+        current.publicationDigest !== checkpoint.publicationDigest
       ) {
-        throw new Error("Recovery manifest transition differs");
+        throw new Error("Recovery checkpoint pointer differs");
       }
-      assertDvdEvidenceRangeTransition(
-        predecessor.unrecoveredSourceRanges,
-        current.unrecoveredSourceRanges,
-        current.recoveryRead,
-      );
+      currentEvidence = current;
     } catch (error) {
       if (error instanceof DvdCheckpointReadFault) throw error;
       throw new DvdCheckpointReadFault(
@@ -346,32 +461,25 @@ async function readCommittedDvdCheckpointRecords(input: {
     if (header.currentManifestRevision > checkpoint.currentManifestRevision)
       throw new DvdCheckpointReadFault("DVD_PUBLICATION_PROJECTION_AHEAD");
     if (header.sourceArchiveJobId !== manifest.sourceArchiveJobId ||
-      header.acceptedEndLbaExclusive !== manifest.acceptedEndLbaExclusive ||
-      header.boundaryEvidenceDigest !== manifest.boundaryEvidenceDigest ||
+      header.acceptedEndLbaExclusive !== currentEvidence.acceptedEndLbaExclusive ||
+      header.boundaryEvidenceDigest !== currentEvidence.boundaryEvidenceDigest ||
       (header.currentManifestRevision === checkpoint.currentManifestRevision &&
         (header.currentManifestId !== checkpoint.currentManifestId ||
           header.currentManifestDigest !== checkpoint.currentManifestDigest)))
       throw new DvdCheckpointReadFault("DVD_PUBLICATION_CHECKPOINT_CONFLICT");
   }
-  let image;
-  try {
-    image = await open(archive.archivePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    const stat = await image.stat({ bigint: true });
-    const named = await lstat(archive.archivePath, { bigint: true });
-    if (!stat.isFile() || named.isSymbolicLink() || stat.ino !== named.ino || stat.dev !== named.dev ||
-      `${stat.dev}:${stat.ino}` !== manifest.image.filesystemIdentity ||
-      stat.size !== BigInt(manifest.boundaryPublishedSizeBytes) ||
-      (checkpoint.currentManifestRevision === 1 &&
-        stat.mtimeNs.toString() !== manifest.image.mtimeNs) ||
-      named.size !== stat.size || named.mtimeNs !== stat.mtimeNs)
-      throw new Error("Image differs from checkpoint");
-  } catch { throw new DvdCheckpointReadFault("DVD_PUBLICATION_IMAGE_CONFLICT"); }
-  finally { await image?.close(); }
+  await verifyImage(archive, currentEvidence);
   input.assertImageOwnership();
-  if (canonicalJson(await readRecord(pointerPath, "DVD_EVIDENCE_CHECKPOINT_UNAVAILABLE")) !== canonicalJson(pointer))
+  if (
+    await pathExists(journalPath) ||
+    canonicalJson(
+      await readRecord(pointerPath, "DVD_EVIDENCE_CHECKPOINT_UNAVAILABLE"),
+    ) !== canonicalJson(pointer)
+  ) {
     throw new DvdCheckpointReadFault("DVD_EVIDENCE_CHANGED_DURING_READ");
+  }
   input.assertImageOwnership();
-  return { initialEvidence: manifest, checkpoint };
+  return { initialEvidence: manifest, currentEvidence, checkpoint };
 }
 
 /** Read only. Never reconcile, install a pointer, or synchronize an operator read. */
@@ -384,6 +492,35 @@ export async function readCommittedDvdInitialCheckpoint(input: {
 }): Promise<CommittedDvdInitialEvidence | null> {
   return (await readCommittedDvdCheckpointRecords(input, true))
     ?.initialEvidence ?? null;
+}
+
+/** Read the current committed checkpoint evidence without traversing history. */
+export async function readCommittedDvdCheckpoint(input: {
+  originalsLibraryPath?: string;
+  archive: OriginalDiscArchive;
+  header: DvdArchiveEvidenceHeader | null;
+  jobs: readonly ArchiveJob[];
+  assertImageOwnership(): void;
+}): Promise<CommittedDvdCheckpointEvidence | null> {
+  const records = await readCommittedDvdCheckpointRecords(input, false);
+  if (records === null) return null;
+  const header = input.header;
+  if (header !== null) {
+    if (
+      header.currentManifestId !== records.checkpoint.currentManifestId ||
+      header.currentManifestRevision !== records.checkpoint.currentManifestRevision ||
+      header.currentManifestDigest !== records.checkpoint.currentManifestDigest
+    ) {
+      throw new DvdCheckpointReadFault(
+        records.checkpoint.currentManifestRevision === 1
+          ? "DVD_PUBLICATION_CHECKPOINT_CONFLICT"
+          : "CONSISTENCY_FAULT",
+      );
+    }
+  } else if (records.checkpoint.currentManifestRevision > 1) {
+    throw new DvdCheckpointReadFault("CONSISTENCY_FAULT");
+  }
+  return records.currentEvidence;
 }
 
 /** Read the immutable publication evidence and the current durable pointer. */

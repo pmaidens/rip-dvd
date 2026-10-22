@@ -1,10 +1,13 @@
 import { DomainInvariantError } from "./errors.js";
 import type { DvdUnrecoveredSourceRange } from "./types.js";
 
-export function expectedDvdEvidenceRangesAfterRecoveryRead(
+export type DvdArchiveRecoveryReadOutcome = "recovered" | "failed";
+
+/** Apply one persisted one-sector observation to the normalized current map. */
+export function dvdEvidenceRangesAfterRecoveryRead(
   ranges: readonly DvdUnrecoveredSourceRange[],
   startLba: number,
-  outcome: "recovered" | "failed",
+  outcome: DvdArchiveRecoveryReadOutcome,
 ): DvdUnrecoveredSourceRange[] {
   const containingIndex = ranges.findIndex((range) =>
     startLba >= range.startLba &&
@@ -47,12 +50,11 @@ export function expectedDvdEvidenceRangesAfterRecoveryRead(
     });
   }
 
-  const next = [
+  return [
     ...ranges.slice(0, containingIndex),
     ...replacements,
     ...ranges.slice(containingIndex + 1),
-  ];
-  return next.reduce<DvdUnrecoveredSourceRange[]>((normalized, range) => {
+  ].reduce<DvdUnrecoveredSourceRange[]>((normalized, range) => {
     const previous = normalized.at(-1);
     if (
       previous !== undefined &&
@@ -73,14 +75,23 @@ export function expectedDvdEvidenceRangesAfterRecoveryRead(
 export function assertDvdEvidenceRangeTransition(
   previous: readonly DvdUnrecoveredSourceRange[],
   current: readonly DvdUnrecoveredSourceRange[],
-  recoveryRead: { startLba: number; outcome: "recovered" | "failed" },
+  recoveryRead: { startLba: number; outcome: DvdArchiveRecoveryReadOutcome },
 ): void {
-  const expected = expectedDvdEvidenceRangesAfterRecoveryRead(
+  const expected = dvdEvidenceRangesAfterRecoveryRead(
     previous,
     recoveryRead.startLba,
     recoveryRead.outcome,
   );
-  if (JSON.stringify(expected) !== JSON.stringify(current)) {
+  if (
+    expected.length !== current.length ||
+    expected.some((range, index) => {
+      const actual = current[index];
+      return actual === undefined ||
+        actual.startLba !== range.startLba ||
+        actual.sectorCount !== range.sectorCount ||
+        actual.classification !== range.classification;
+    })
+  ) {
     throw new DomainInvariantError(
       "Persisted DVD Archive Evidence ranges do not match their recovery read",
     );

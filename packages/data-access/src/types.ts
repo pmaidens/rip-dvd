@@ -8,6 +8,7 @@ import type {
   ARCHIVE_FORMATS,
   ARCHIVE_INTEGRITIES,
   ARCHIVE_RECOVERY_STATUSES,
+  ARCHIVE_RECOVERY_WORK_STATUSES,
   CATALOG_REVIEW_OUTCOMES,
   DETECTED_DISC_STATUSES,
   DISC_KINDS,
@@ -60,6 +61,12 @@ import type {
   DvdDiscVerificationSampleFinding,
   DvdSourceSampleManifest,
 } from "./dvd-disc-verification.js";
+import type {
+  DvdStructuralAssessmentAccess,
+  DvdStructuralAssessmentRecord,
+  DvdStructuralCheckAttempt,
+  DvdStructuralFindingInput,
+} from "./dvd-structural-assessment.js";
 
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
 export type ArchiveIntegrity = (typeof ARCHIVE_INTEGRITIES)[number];
@@ -69,6 +76,8 @@ export type DvdUnrecoveredSourceClassification =
   (typeof DVD_UNRECOVERED_SOURCE_CLASSIFICATIONS)[number];
 export type ArchiveRecoveryStatus =
   (typeof ARCHIVE_RECOVERY_STATUSES)[number];
+export type ArchiveRecoveryWorkStatus =
+  (typeof ARCHIVE_RECOVERY_WORK_STATUSES)[number];
 export type CatalogReviewOutcome = (typeof CATALOG_REVIEW_OUTCOMES)[number];
 export type CompletedCatalogReviewOutcome = Exclude<
   CatalogReviewOutcome,
@@ -182,11 +191,15 @@ export type DetectedDiscId = DomainId<"DetectedDisc">;
 export type ArchiveRequestId = DomainId<"ArchiveRequest">;
 export type OriginalDiscArchiveId = DomainId<"OriginalDiscArchive">;
 export type ArchiveRecoveryId = DomainId<"ArchiveRecovery">;
+export type ArchiveRecoveryClaimToken = DomainId<"ArchiveRecoveryClaim">;
 export type DvdDiscVerificationId = DomainId<"DvdDiscVerification">;
 export type DvdDiscVerificationClaimToken =
   DomainId<"DvdDiscVerificationClaim">;
 export type MediaItemId = DomainId<"MediaItem">;
 export type DiscSelectionId = DomainId<"DiscSelection">;
+export type DvdTitleIdentityId = DomainId<"DvdTitleIdentity">;
+export type DvdTitleIdentityObservationId =
+  DomainId<"DvdTitleIdentityObservation">;
 export type EncodingProfileId = DomainId<"EncodingProfile">;
 export type ArchiveJobId = DomainId<"ArchiveJob">;
 export type EncodeJobId = DomainId<"EncodeJob">;
@@ -405,6 +418,101 @@ export interface DvdArchiveEvidenceHeader {
   updatedAt: Date;
 }
 
+export interface DvdTitleIdentitySelectedPathEntry {
+  programNumber: number;
+  cellNumber: number;
+  vobId: number;
+  cellId: number;
+}
+
+export interface DvdTitleIdentityObservationInput {
+  displayTitleNumber: number;
+  navigation: {
+    videoTitleSetNumber: number;
+    titleSetTitleNumber: number;
+    programChainNumber: number;
+  };
+  selectedPath: readonly DvdTitleIdentitySelectedPathEntry[];
+  angleNumber: number;
+  angleCount: number;
+  chapterStart: number;
+  chapterEnd: number;
+  chapterCount: number;
+  sourceExtents: readonly UnreadableSectorRange[];
+}
+
+export type DvdTitleIdentityContinuityResult =
+  | "initial"
+  | "proved"
+  | "uncertain"
+  | "new";
+
+export interface DvdTitleIdentityObservation
+  extends DvdTitleIdentityObservationInput {
+  id: DvdTitleIdentityObservationId;
+  titleIdentityId: DvdTitleIdentityId;
+  checkpoint: {
+    manifestId: string;
+    manifestRevision: number;
+    manifestDigest: string;
+  };
+  contentDigest: string;
+  continuity: {
+    result: DvdTitleIdentityContinuityResult;
+    policyVersion: string;
+    previousObservationId: DvdTitleIdentityObservationId | null;
+  };
+  createdAt: Date;
+}
+
+export type DvdTitleIdentityMappingState =
+  | "mapped"
+  | "needs_mapping_review"
+  | "unmapped";
+
+export interface DvdTitleIdentitySelectionMapping {
+  discSelectionId: DiscSelectionId;
+  mappingState: Exclude<DvdTitleIdentityMappingState, "unmapped">;
+}
+
+export interface DvdTitleIdentityReviewSetItem {
+  titleIdentityId: DvdTitleIdentityId;
+  presentAtCurrentCheckpoint: boolean;
+  observation: DvdTitleIdentityObservation;
+  /** Continuity as evaluated for the current review set. Missing identities
+   * are uncertain here even though their last persisted observation records
+   * the relationship that was known at its own checkpoint. */
+  reviewContinuity: DvdTitleIdentityObservation["continuity"];
+  /** Only `mapped` may be consumed by a later decision. The decision and its
+   * mapping-review mutation belong to the later Catalog Review decision slice. */
+  mappingState: DvdTitleIdentityMappingState;
+  discSelectionMappings: readonly DvdTitleIdentitySelectionMapping[];
+}
+
+export interface DvdTitleIdentityReviewSet {
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  evidenceFormat: "dvd-recovery-evidence-v1";
+  checkpoint: {
+    manifestId: string;
+    manifestRevision: number;
+    manifestDigest: string;
+  };
+  policyVersion: string;
+  reviewSetIdentity: string;
+  items: readonly DvdTitleIdentityReviewSetItem[];
+  createdAt: Date;
+}
+
+export interface RecordDvdTitleIdentityObservationsInput {
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  checkpoint: {
+    manifestId: string;
+    manifestRevision: number;
+    manifestDigest: string;
+  };
+  observations: readonly DvdTitleIdentityObservationInput[];
+}
+
 export interface DvdUnrecoveredSourceRange extends UnreadableSectorRange {
   classification: DvdUnrecoveredSourceClassification;
 }
@@ -413,6 +521,7 @@ export interface ArchiveRecovery {
   id: ArchiveRecoveryId;
   originalDiscArchiveId: OriginalDiscArchiveId;
   status: ArchiveRecoveryStatus;
+  work: ArchiveRecoveryWork | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -448,6 +557,35 @@ export interface DvdDiscVerification {
   failureCode: string | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface ArchiveRecoveryWork {
+  archiveRecoveryId: ArchiveRecoveryId;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  status: ArchiveRecoveryWorkStatus;
+  requestedAt: Date | null;
+  claimedBy: string | null;
+  claimToken: ArchiveRecoveryClaimToken | null;
+  claimedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type ClaimedArchiveRecoveryWork = ArchiveRecoveryWork & {
+  status: "claimed";
+  claimedBy: string;
+  claimToken: ArchiveRecoveryClaimToken;
+  claimedAt: Date;
+};
+
+export interface ArchiveRecoveryWorkAccess {
+  request(id: ArchiveRecoveryId): ArchiveRecoveryWork;
+  claim(
+    id: ArchiveRecoveryId,
+    workerId: string,
+  ): ClaimedArchiveRecoveryWork;
+  assertClaim(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
+  release(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
 }
 
 export interface UnreadableSectorRange {
@@ -1395,6 +1533,19 @@ export interface CatalogAccess {
   findDvdArchiveEvidenceHeaders(
     ids: readonly OriginalDiscArchiveId[],
   ): ReadonlyMap<OriginalDiscArchiveId, DvdArchiveEvidenceHeader>;
+  /**
+   * Worker persistence boundary for observations gathered while the archive
+   * image and supplied checkpoint were held under one shared consistent-read
+   * interval. Production image readers must call the archive worker's
+   * consistent-read recorder rather than invoke this persistence method
+   * directly.
+   */
+  recordDvdTitleIdentityObservations(
+    input: RecordDvdTitleIdentityObservationsInput,
+  ): DvdTitleIdentityReviewSet;
+  readDvdTitleIdentityReviewSet(
+    id: OriginalDiscArchiveId,
+  ): DvdTitleIdentityReviewSet | null;
   auditDvdArchiveEvidenceChains(
     ids: readonly OriginalDiscArchiveId[],
   ): void;
@@ -1627,6 +1778,26 @@ export interface DvdInitialArchiveSave {
       sourceArchiveJobId: string;
       sourceSampleManifest?: DvdSourceSampleManifest;
     };
+}
+
+export interface DvdRecoveryCheckpointProjection {
+  claim: ClaimedArchiveRecoveryWork;
+  recoveryRead: import("./dvd-archive-evidence-digests.js").DvdArchiveRecoveryReadEvidenceDigestInput & {
+    id: string;
+    evidenceDigest: string;
+  };
+  manifest: import("./dvd-archive-evidence-digests.js").DvdArchiveEvidenceManifestDigestInput &
+    import("./dvd-archive-evidence-digests.js").DvdArchiveEvidenceManifestDigests & {
+      id: string;
+    };
+}
+
+export interface DvdRecoveryAccess {
+  /** Project a filesystem-committed next checkpoint. The caller must install
+   * and synchronize the authoritative pointer before invoking this method. */
+  projectCheckpoint(
+    input: DvdRecoveryCheckpointProjection,
+  ): DvdArchiveEvidenceHeader;
 }
 
 export interface ArchiveJobAccess {
@@ -2035,6 +2206,7 @@ export type SnapshotCatalogAccess = Pick<
   | "listOriginalDiscArchives"
   | "findDvdArchiveEvidenceHeader"
   | "findDvdArchiveEvidenceHeaders"
+  | "readDvdTitleIdentityReviewSet"
   | "findArchiveRecovery"
   | "findArchiveRecoveryById"
   | "findDvdSourceSampleManifest"
@@ -2057,6 +2229,10 @@ export type SnapshotCatalogAccess = Pick<
 >;
 
 export interface ConsistentReadAccess {
+  readonly dvdStructuralAssessments: Pick<
+    DvdStructuralAssessmentAccess,
+    "inspect"
+  >;
   readonly dvdRecoveryStorage: Pick<
     DvdRecoveryStorageAccess,
     "readCurrent"
@@ -2105,22 +2281,27 @@ export interface EncodeOutputInspectionReadAccess
     Pick<EncodeJobAccess, "findRetainedOutput">;
 }
 
+export interface DvdCheckpointReadHandle {
+  descriptor: number;
+  signal: AbortSignal;
+  assertOwned(): void;
+}
+
+export interface DvdCheckpointReadOwnership {
+  withConsistentRead<Result>(request: {
+    archiveId: string;
+    imagePath: string | null;
+    originalsLibraryPath: string;
+    signal: AbortSignal;
+    task(handle: DvdCheckpointReadHandle): Promise<Result>;
+    commit?: (prepared: Result, handle: DvdCheckpointReadHandle) => Result;
+  }): Promise<Result>;
+}
+
 export interface DataAccess {
   withDvdCurrentCheckpoint<Result>(
     id: OriginalDiscArchiveId,
-    ownership: {
-      withConsistentRead<ReadResult>(request: {
-        archiveId: string;
-        imagePath: string | null;
-        originalsLibraryPath: string;
-        signal: AbortSignal;
-        task(handle: {
-          descriptor: number;
-          signal: AbortSignal;
-          assertOwned(): void;
-        }): Promise<ReadResult>;
-      }): Promise<ReadResult>;
-    },
+    ownership: DvdCheckpointReadOwnership,
     task: (input: {
       checkpoint: import("./dvd-archive-checkpoint.js").CommittedDvdCurrentCheckpoint;
       assertOwned(): void;
@@ -2128,19 +2309,7 @@ export interface DataAccess {
   ): Promise<Result | null>;
   withDvdInitialCheckpoint<Result>(
     id: OriginalDiscArchiveId,
-    ownership: {
-      withConsistentRead<ReadResult>(request: {
-        archiveId: string;
-        imagePath: string | null;
-        originalsLibraryPath: string;
-        signal: AbortSignal;
-        task(handle: {
-          descriptor: number;
-          signal: AbortSignal;
-          assertOwned(): void;
-        }): Promise<ReadResult>;
-      }): Promise<ReadResult>;
-    },
+    ownership: DvdCheckpointReadOwnership,
     task: (input: {
       evidence: import("./dvd-archive-checkpoint.js").CommittedDvdInitialEvidence;
       assertOwned(): void;
@@ -2148,21 +2317,44 @@ export interface DataAccess {
   ): Promise<Result | null>;
   readDvdInitialCheckpoint(
     id: OriginalDiscArchiveId,
-    ownership: {
-      withConsistentRead<Result>(request: {
-        archiveId: string;
-        imagePath: string | null;
-        originalsLibraryPath: string;
-        signal: AbortSignal;
-        task(handle: {
-          descriptor: number;
-          signal: AbortSignal;
-          assertOwned(): void;
-        }): Promise<Result>;
-      }): Promise<Result>;
-    },
+    ownership: DvdCheckpointReadOwnership,
   ): Promise<import("./dvd-archive-checkpoint.js").CommittedDvdInitialEvidence | null>;
+  readDvdCheckpoint(
+    id: OriginalDiscArchiveId,
+    ownership: DvdCheckpointReadOwnership,
+  ): Promise<import("./dvd-archive-checkpoint.js").CommittedDvdCheckpointEvidence | null>;
   readonly notifications: import("./notification-types.js").NotificationAccess;
+  readonly dvdRecovery: DvdRecoveryAccess;
+  assessDvdStructure(
+    id: OriginalDiscArchiveId,
+    ownership: DvdCheckpointReadOwnership,
+    assess: (
+      checkpoint: import("./dvd-archive-checkpoint.js").CommittedDvdCheckpointEvidence,
+      handle: DvdCheckpointReadHandle,
+      imagePath: string,
+    ) => Promise<
+      | {
+        outcome: "completed";
+        findings: readonly DvdStructuralFindingInput[];
+      }
+      | {
+        outcome: "failed";
+        reason: { code: string; message: string };
+      }
+    >,
+  ): Promise<
+    | {
+      outcome: "completed";
+      attempt: DvdStructuralCheckAttempt & { outcome: "completed" };
+      assessment: DvdStructuralAssessmentRecord;
+    }
+    | {
+      outcome: "failed";
+      attempt: DvdStructuralCheckAttempt & { outcome: "failed" };
+    }
+    | null
+  >;
+  readonly dvdStructuralAssessments: DvdStructuralAssessmentAccess;
   readonly dvdRecoveryStorage: DvdRecoveryStorageAccess;
   readonly dvdDiscVerifications: DvdDiscVerificationAccess;
   readonly catalog: CatalogAccess;
@@ -2170,6 +2362,7 @@ export interface DataAccess {
   readonly discInspections: DiscInspectionAccess;
   readonly archiveRequests: ArchiveRequestAccess;
   readonly archiveJobs: ArchiveJobAccess;
+  readonly archiveRecoveryWork: ArchiveRecoveryWorkAccess;
   readonly encodeJobs: EncodeJobAccess;
   readonly workerIncidents: WorkerIncidentAccess;
   readonly filesystemVerification: FilesystemVerificationAccess;

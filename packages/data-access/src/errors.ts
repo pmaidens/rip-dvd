@@ -40,6 +40,13 @@ export class StaleJobAttemptError extends Error {
   }
 }
 
+export class StaleDvdStructuralCheckpointError extends DomainInvariantError {
+  constructor() {
+    super("DVD structural check checkpoint is no longer current");
+    this.name = "StaleDvdStructuralCheckpointError";
+  }
+}
+
 export class StaleDvdDiscVerificationError extends DomainInvariantError {
   constructor(
     readonly code:

@@ -43,6 +43,32 @@ keeps the operating-system lock alive if the worker process dies while its
 helper continues. A worker lease or heartbeat is not ownership and cannot
 override a live lock.
 
+Application admission adds a separate durable reservation before either kind
+of I/O starts. Requesting or claiming Archive Recovery and enqueueing,
+requeueing, or claiming an Encode Job serialize in immediate database
+transactions for the Original Disc Archive. Recovery work is represented by a
+single `requested` or `claimed` reservation. Encode work in `queued`,
+`running`, or `cancellation_requested` state blocks that reservation, and the
+reservation blocks new Encode work. A worker claim rechecks the reservation so
+an older queue entry cannot cross the boundary. Neither side cancels the
+other; the losing operation reports `ENCODE_WORK_CONFLICT` with the current
+work identities.
+
+A claimed recovery reservation does not expire with an ordinary worker lease.
+Only the holder's explicit release clears it. This is conservative on purpose:
+lease expiry cannot prove that a recovery helper stopped writing, just as a
+lease cannot override a live operating-system lock. Later recovery lifecycle
+work must release the reservation only after the writer is proven quiescent.
+
+The DVD recovery commit path holds the same exclusive ownership across journal
+reservation, protected-unit mutation, filesystem checkpoint publication,
+database projection, and journal cleanup. Its native atomic writer inherits
+the held descriptor on file descriptor 3, proves that descriptor still owns
+the exclusive `flock` before and after mutation, and never reacquires the lock
+or falls back to an unowned write. The commit path also requires the current
+durable recovery claim, revalidates it at each boundary, and verifies it again
+inside the checkpoint projection transaction.
+
 Writers also publish a private, versioned worker claim with creation,
 heartbeat, lease-expiry, and lock device and inode values. This claim is
 diagnostic evidence only. A claim for a different lock inode blocks readers

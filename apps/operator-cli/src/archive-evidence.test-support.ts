@@ -3,7 +3,9 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   archiveBoundaryEvidenceFromRecord, createDvdArchiveEvidenceManifestDigests,
+  createDvdArchiveRecoveryReadEvidenceDigest,
   canonicalPublicationJson, createDvdInitialPublicationDigest,
+  createDvdRecoveryCheckpointPublicationDigest,
   type DvdUnrecoveredSourceRange,
 } from "@rip-dvd/data-access";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
@@ -90,6 +92,165 @@ export async function seedCommittedArchiveEvidence(
     async task() {},
   });
   return { archive: recorded, manifest, pointer, directory };
+}
+
+export function advanceCommittedArchiveEvidence(
+  fixture: ReturnType<typeof createOperatorWorkflowFixture>,
+  manifest: Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>["manifest"],
+  options: { publishFilesystemCheckpoint?: boolean } = {},
+) {
+  const sourceRange = manifest.unrecoveredSourceRanges[0];
+  if (sourceRange === undefined) {
+    throw new Error("A synthetic Unrecovered Source range is required");
+  }
+  const recoveryReadInput = {
+    originalDiscArchiveId: manifest.originalDiscArchiveId,
+    fromManifestId: manifest.id,
+    fromManifestRevision: manifest.revision,
+    startLba: sourceRange.startLba,
+    sectorCount: 1,
+    outcome: "failed" as const,
+  };
+  const recoveryReadEvidenceDigest =
+    createDvdArchiveRecoveryReadEvidenceDigest(recoveryReadInput);
+  const recoveryRead = {
+    id: "synthetic-structural-recovery-read",
+    ...recoveryReadInput,
+    evidenceDigest: recoveryReadEvidenceDigest,
+  };
+  const remainingRange = sourceRange.sectorCount === 1
+    ? []
+    : [{
+      ...sourceRange,
+      startLba: sourceRange.startLba + 1,
+      sectorCount: sourceRange.sectorCount - 1,
+    }];
+  const unrecoveredSourceRanges = [
+    {
+      startLba: sourceRange.startLba,
+      sectorCount: 1,
+      classification: "individually_failed" as const,
+    },
+    ...remainingRange,
+    ...manifest.unrecoveredSourceRanges.slice(1),
+  ];
+  const input = {
+    originalDiscArchiveId: manifest.originalDiscArchiveId,
+    revision: manifest.revision + 1,
+    previousManifestId: manifest.id,
+    previousManifestDigest: manifest.manifestDigest,
+    recoveryReadId: "synthetic-structural-recovery-read",
+    recoveryReadEvidenceDigest,
+    evidenceFormat: manifest.evidenceFormat,
+    imageFingerprint: manifest.imageFingerprint,
+    sectorSizeBytes: manifest.sectorSizeBytes,
+    acceptedEndLbaExclusive: manifest.acceptedEndLbaExclusive,
+    boundaryPolicyVersion: manifest.boundaryPolicyVersion,
+    boundaryReportedSizeBytes: manifest.boundaryReportedSizeBytes,
+    boundaryPublishedSizeBytes: manifest.boundaryPublishedSizeBytes,
+    boundaryEvidenceDigest: manifest.boundaryEvidenceDigest,
+    unrecoveredSourceRanges,
+  };
+  const digestFields = {
+    ...input,
+    ...createDvdArchiveEvidenceManifestDigests(input),
+    id: `${manifest.originalDiscArchiveId}:recovery:${input.revision}`,
+  };
+  const publicationPayload = {
+    ...digestFields,
+    checkpointFormat: "dvd-recovery-batch-v1" as const,
+    sourceArchiveJobId: manifest.sourceArchiveJobId,
+    rootPublicationDigest: manifest.publicationDigest,
+    previousPublicationDigest: manifest.publicationDigest,
+    image: manifest.image,
+    previousImage: manifest.image,
+    boundaryEvidence: manifest.boundaryEvidence,
+    recoveryRead,
+    journalDigest: null,
+    protectedRanges: [],
+  };
+  const next = {
+    ...publicationPayload,
+    publicationDigest: createDvdRecoveryCheckpointPublicationDigest(publicationPayload),
+  };
+  withEvidenceGuardsDisabled(fixture.databasePath, (db) => {
+    db.prepare(`
+      INSERT INTO dvd_archive_recovery_reads (
+        id, original_disc_archive_id, from_manifest_id,
+        from_manifest_revision, start_lba, sector_count, outcome,
+        evidence_digest, created_at
+      ) VALUES (?, ?, ?, ?, ?, 1, 'failed', ?, 2)
+    `).run(
+      input.recoveryReadId,
+      recoveryRead.originalDiscArchiveId,
+      recoveryRead.fromManifestId,
+      recoveryRead.fromManifestRevision,
+      recoveryRead.startLba,
+      recoveryReadEvidenceDigest,
+    );
+    db.prepare(`
+      INSERT INTO dvd_archive_evidence_manifests (
+        id, original_disc_archive_id, revision, previous_manifest_id,
+        recovery_read_id, evidence_format, image_fingerprint,
+        sector_size_bytes, accepted_end_lba_exclusive,
+        boundary_policy_version, boundary_reported_size_bytes,
+        boundary_published_size_bytes, boundary_evidence_digest,
+        unrecovered_source_ranges, unrecovered_source_ranges_digest,
+        manifest_digest, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2)
+    `).run(
+      next.id,
+      next.originalDiscArchiveId,
+      next.revision,
+      next.previousManifestId,
+      next.recoveryReadId,
+      next.evidenceFormat,
+      next.imageFingerprint,
+      next.sectorSizeBytes,
+      next.acceptedEndLbaExclusive,
+      next.boundaryPolicyVersion,
+      next.boundaryReportedSizeBytes,
+      next.boundaryPublishedSizeBytes,
+      next.boundaryEvidenceDigest,
+      JSON.stringify(next.unrecoveredSourceRanges),
+      next.unrecoveredSourceRangesDigest,
+      next.manifestDigest,
+    );
+    db.prepare(`
+      UPDATE dvd_archive_evidence_headers
+      SET current_manifest_id = ?, current_manifest_revision = ?,
+          current_manifest_digest = ?, updated_at = 2
+      WHERE original_disc_archive_id = ?
+    `).run(
+      next.id,
+      next.revision,
+      next.manifestDigest,
+      next.originalDiscArchiveId,
+    );
+  });
+  if (options.publishFilesystemCheckpoint) {
+    const directory = join(
+      fixture.originalsLibraryPath,
+      ".dvd-evidence",
+      manifest.originalDiscArchiveId,
+    );
+    const pointer = {
+      originalDiscArchiveId: manifest.originalDiscArchiveId,
+      currentManifestId: next.id,
+      currentManifestRevision: next.revision,
+      currentManifestDigest: next.manifestDigest,
+      publicationDigest: next.publicationDigest,
+    };
+    writeFileSync(
+      join(directory, `recovery-manifest-${next.revision}.json`),
+      canonicalPublicationJson(next),
+    );
+    writeFileSync(
+      join(directory, "checkpoint.json"),
+      canonicalPublicationJson(pointer),
+    );
+  }
+  return next;
 }
 
 export function withEvidenceGuardsDisabled(databasePath: string, change: (db: DatabaseSync) => void) {

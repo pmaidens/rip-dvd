@@ -6,6 +6,7 @@ import {
 import {
   DomainInvariantError,
   DvdRecoveryEvidenceEncodingUnavailableError,
+  EncodeWorkConflictError,
   MEDIA_ITEM_KINDS,
   MutationKeyConflictError,
   RecordNotFoundError,
@@ -185,6 +186,15 @@ export function runPreviewAcknowledgedCatalogCommand<
       : workflow.apply(input);
   } catch (error) {
     if (error instanceof CommandFailure) throw error;
+    if (error instanceof EncodeWorkConflictError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+        { current: error.current },
+      );
+    }
     if (error instanceof DvdRecoveryEvidenceEncodingUnavailableError) {
       throw new CommandFailure(
         error.code,

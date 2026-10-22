@@ -28,6 +28,11 @@ export const ARCHIVE_RECOVERY_STATUSES = [
   "completed",
 ] as const;
 
+export const ARCHIVE_RECOVERY_WORK_STATUSES = [
+  "requested",
+  "claimed",
+] as const;
+
 export const DVD_SALVAGE_REJECTION_DESCRIPTIONS = {
   filesystem_metadata: "filesystem metadata",
   directory_data: "filesystem directory data",

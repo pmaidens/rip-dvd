@@ -91,6 +91,10 @@ interface OwnershipRequest<Result> {
   originalsLibraryPath: string;
   signal: AbortSignal;
   task(handle: ArchiveImageOwnershipHandle): Promise<Result>;
+  commit?: (
+    prepared: Result,
+    handle: ArchiveImageOwnershipHandle,
+  ) => Result;
 }
 
 export interface ArchiveImageOwnership {
@@ -102,8 +106,12 @@ export interface ArchiveImageOwnership {
   withInitialPublicationWriter<Result>(
     request: OwnershipRequest<Result>,
   ): Promise<Result>;
-  withConsistentRead<Result>(request: OwnershipRequest<Result>): Promise<Result>;
-  withWriter<Result>(request: OwnershipRequest<Result>): Promise<Result>;
+  withConsistentRead<Result>(
+    request: OwnershipRequest<Result>,
+  ): Promise<Result>;
+  withWriter<Result>(
+    request: OwnershipRequest<Result>,
+  ): Promise<Result>;
 }
 
 interface WriterClaimRecord {
@@ -1580,15 +1588,18 @@ export function createArchiveImageOwnership({
         }
       }, ownershipCheckIntervalMs);
       monitor.unref();
-      const result = await request.task({
+      const handle = {
         descriptor,
         signal,
         assertOwned: assertCurrentOwnership,
-      });
+      };
+      const prepared = await request.task(handle);
       await stopHeartbeat();
       signal.throwIfAborted();
       assertCurrentOwnership();
-      return result;
+      return request.commit === undefined
+        ? prepared
+        : request.commit(prepared, handle);
     } catch (caught) {
       let cause = caught;
       try {

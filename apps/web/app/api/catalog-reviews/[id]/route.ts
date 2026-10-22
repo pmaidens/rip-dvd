@@ -1,6 +1,7 @@
 import {
   DomainInvariantError,
   DvdRecoveryEvidenceEncodingUnavailableError,
+  EncodeWorkConflictError,
   MEDIA_ITEM_KINDS,
   MutationKeyConflictError,
   RecordNotFoundError,
@@ -350,6 +351,14 @@ export async function createCatalogReviewRoute(
         throw new Error("Unhandled catalog review command");
     }
   } catch (error) {
+    if (error instanceof EncodeWorkConflictError) {
+      return response({ error: {
+        code: error.code,
+        message: error.message,
+        blockingReasons: error.blockingReasons,
+        current: error.current,
+      } }, 409);
+    }
     if (error instanceof DvdRecoveryEvidenceEncodingUnavailableError) {
       return response({ error: {
         code: error.code,

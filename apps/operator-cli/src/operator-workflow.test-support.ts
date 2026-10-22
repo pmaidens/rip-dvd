@@ -88,6 +88,12 @@ export function markArchiveWithDvdRecoveryEvidence(
   databasePath: string,
   originalDiscArchiveId: string,
   fixtureId: string,
+  options: {
+    archiveRecovery?: {
+      id: string;
+      workStatus?: "requested" | "claimed";
+    };
+  } = {},
 ): void {
   const sqlite = new DatabaseSync(databasePath);
   try {
@@ -202,6 +208,13 @@ export function markArchiveWithDvdRecoveryEvidence(
     }
     const boundaryDigest =
       createDvdArchiveBoundaryEvidenceDigest(boundaryEvidence);
+    const unrecoveredSourceRanges = options.archiveRecovery === undefined
+      ? []
+      : [{
+        startLba: 0,
+        sectorCount: 1,
+        classification: "skipped_untested" as const,
+      }];
     const {
       unrecoveredSourceRangesDigest: sourceRangesDigest,
       manifestDigest,
@@ -220,7 +233,7 @@ export function markArchiveWithDvdRecoveryEvidence(
       boundaryReportedSizeBytes: archive.boundary_reported_size_bytes,
       boundaryPublishedSizeBytes: archive.boundary_published_size_bytes,
       boundaryEvidenceDigest: boundaryDigest,
-      unrecoveredSourceRanges: [],
+      unrecoveredSourceRanges,
     });
     sqlite.prepare(`
       INSERT INTO disc_inspections (
@@ -273,7 +286,7 @@ export function markArchiveWithDvdRecoveryEvidence(
         boundary_published_size_bytes, boundary_evidence_digest,
         unrecovered_source_ranges, unrecovered_source_ranges_digest,
         manifest_digest, created_at
-      ) VALUES (?, ?, 1, ?, ?, 2048, ?, ?, ?, ?, ?, '[]', ?, ?, 1)
+      ) VALUES (?, ?, 1, ?, ?, 2048, ?, ?, ?, ?, ?, ?, ?, ?, 1)
     `).run(
       manifestId,
       originalDiscArchiveId,
@@ -284,6 +297,7 @@ export function markArchiveWithDvdRecoveryEvidence(
       archive.boundary_reported_size_bytes,
       archive.boundary_published_size_bytes,
       boundaryDigest,
+      JSON.stringify(unrecoveredSourceRanges),
       sourceRangesDigest,
       manifestDigest,
     );
@@ -308,6 +322,42 @@ export function markArchiveWithDvdRecoveryEvidence(
       manifestId,
       manifestDigest,
     );
+    if (options.archiveRecovery !== undefined) {
+      sqlite.prepare(`
+        UPDATE original_disc_archives
+        SET integrity = 'incomplete_read',
+            integrity_evidence_revision = 1,
+            integrity_policy_version = ?,
+            bad_sector_count = 1,
+            bad_area_count = 1,
+            bad_sector_ranges = '[{"startLba":0,"sectorCount":1}]',
+            bad_sector_counts_by_title = NULL
+        WHERE id = ?
+      `).run(DVD_RECOVERY_EVIDENCE_FORMAT, originalDiscArchiveId);
+      sqlite.prepare(`
+        INSERT INTO archive_recoveries (
+          id, original_disc_archive_id, status, created_at, updated_at
+        ) VALUES (?, ?, 'eligible', 1, 1)
+      `).run(options.archiveRecovery.id, originalDiscArchiveId);
+      if (options.archiveRecovery.workStatus !== undefined) {
+        const claimed = options.archiveRecovery.workStatus === "claimed";
+        sqlite.prepare(`
+          INSERT INTO archive_recovery_work (
+            archive_recovery_id, original_disc_archive_id, status,
+            requested_at, claimed_by, claim_token, claimed_at,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)
+        `).run(
+          options.archiveRecovery.id,
+          originalDiscArchiveId,
+          options.archiveRecovery.workStatus,
+          claimed ? null : 1,
+          claimed ? "synthetic-recovery-worker" : null,
+          claimed ? "synthetic-recovery-claim" : null,
+          claimed ? 1 : null,
+        );
+      }
+    }
   } finally {
     sqlite.close();
   }
