@@ -16,10 +16,10 @@ The provider chooses a power-of-two unit within the returned atomic bounds,
 large enough for direct-I/O offset and read alignment. Units start at file
 offset zero and each write must cover a complete naturally aligned unit.
 The one-mebibyte journal reservation leaves 64 KiB for framing, checksums,
-prior evidence, and metadata, so at least one unit must fit within the remaining
-960 KiB. The future writer must enforce that metadata bound and journal all
-affected units, including previously successful neighboring bytes. It must
-recheck the actual archive inode's capabilities before each mutation. An EOF
+prior evidence, and metadata, so all units affected by one sector must fit within
+the remaining 960 KiB. The recovery writer enforces that metadata bound and
+journals every affected unit, including previously successful neighboring bytes. It
+rechecks the actual archive inode's capabilities before each mutation. An EOF
 tail that cannot form a complete unit is unavailable under this contract.
 
 The preflight reserves and writes a one-mebibyte undo-journal probe, synchronizes that
@@ -56,6 +56,7 @@ do not gain recovery fields.
 Journal reservation and synchronization use a private preflight workspace.
 They never open or modify an Original Disc Archive. Failures therefore leave
 the published image unchanged and remain storage failures rather than
-Unrecovered Source evidence. The future recovery writer must run this contract
-before opening an archive for mutation and must still treat any later storage
-or synchronization failure as a storage fault.
+Unrecovered Source evidence. The recovery writer requires a current supported
+result before opening an archive for mutation and still treats any later
+storage or synchronization failure as a storage fault. Its commit order is
+specified in [DVD recovery batch v1](../dvd-recovery-batch-v1.md).

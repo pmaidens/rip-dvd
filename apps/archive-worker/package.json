@@ -4,6 +4,12 @@
   "private": true,
   "type": "module",
   "files": ["dist"],
+  "exports": {
+    "./dvd-recovery-batch": {
+      "types": "./src/dvd-recovery-batch.ts",
+      "default": "./dist/dvd-recovery-batch.js"
+    }
+  },
   "scripts": {
     "audit:archives": "node dist/archive-audit-entry.js",
     "build": "tsc -p tsconfig.build.json",

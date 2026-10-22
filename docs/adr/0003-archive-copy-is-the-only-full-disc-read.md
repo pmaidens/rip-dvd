@@ -132,14 +132,13 @@ one-sector recovery digest binds the archive, source manifest and revision,
 sector, and outcome. A manifest digest binds its archive and revision, exact
 predecessor digest, exact recovery-read digest when present, image and extent,
 boundary digest, and normalized source-map digest. Data-access constructors
-compute these values before a future writer persists them, and authoritative
-reads validate the current manifest, its immediate transition, and the marked
-source-job provenance without loading the complete recovery history. The
+compute these values before a writer persists them, and authoritative reads
+validate the current manifest, its immediate transition, and the marked
+source-job provenance. The
 current digest is the authenticated checkpoint for that bounded projection;
 a separately bounded evidence-chain audit validates every predecessor,
-recovery read, transition, and stored digest. This digest contract does not
-publish range paging or install filesystem checkpoints; those remain separate
-workflow capabilities.
+recovery read, transition, and stored digest. Operator evidence supplies
+revision-bound range paging over the current checkpoint.
 
 The dormant initial publication workflow now implements the filesystem
 checkpoint contract in [DVD initial publication v1](../dvd-initial-publication-v1.md).
@@ -157,3 +156,14 @@ uses the same Job-bound archive identity and durable intent, including after a
 lost commit response. It preserves archive-owned evidence and never sends this
 artifact through legacy quarantine or failure handling. Operator exposure remains
 a separate slice, and this workflow does not open new-format admission.
+
+The dormant recovery commit workflow now installs one journaled sector
+observation per revision as described in
+[DVD recovery batch v1](../dvd-recovery-batch-v1.md). A recovered observation
+protects every complete aligned storage unit it intersects before writing each
+unit exactly once, then
+publishes and synchronizes the next filesystem checkpoint before projecting
+that exact revision into SQLite. A failed observation advances evidence
+without mutating the image. Retained journals and mismatched projections fail
+operator reads closed; this commit operation does not perform reconciliation
+or open new-format admission.

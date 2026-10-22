@@ -43,6 +43,11 @@ export {
   createDvdArchiveRecoveryReadEvidenceDigest,
   createDvdUnrecoveredSourceRangesDigest,
 } from "./dvd-archive-evidence-digests.js";
+export {
+  assertDvdEvidenceRangeTransition,
+  dvdEvidenceRangesAfterRecoveryRead,
+} from "./dvd-recovery-transition.js";
+export type { DvdArchiveRecoveryReadOutcome } from "./dvd-recovery-transition.js";
 export type {
   DvdArchiveEvidenceManifestDigestInput,
   DvdArchiveEvidenceManifestDigests,
@@ -161,4 +166,17 @@ export { createNotificationEventWriter, type NotificationTransaction } from "./i
 export { formatNotification, recordNotificationOutcome } from "./notification-policy.js";
 export type { NotificationOutcome } from "./notification-policy.js";
 
-export { canonicalPublicationJson, createDvdInitialPublicationDigest, DvdCheckpointReadFault } from "./dvd-initial-checkpoint.js";
+export {
+  canonicalPublicationJson,
+  createDvdInitialPublicationDigest,
+  createDvdRecoveryCheckpointPublicationDigest,
+  DVD_RECOVERY_MAX_CHECKPOINT_REVISION,
+  DvdCheckpointReadFault,
+  readCommittedDvdCheckpoint,
+} from "./dvd-initial-checkpoint.js";
+export type {
+  CommittedDvdCheckpointEvidence,
+  CommittedDvdInitialEvidence,
+  CommittedDvdRecoveryEvidence,
+  DvdRecoveryProtectedRange,
+} from "./dvd-initial-checkpoint.js";

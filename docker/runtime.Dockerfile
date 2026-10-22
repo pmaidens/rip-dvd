@@ -44,13 +44,20 @@ FROM build-base AS recovery-atomic-probe-builder
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends gcc libc6-dev \
   && rm -rf /var/lib/apt/lists/*
-COPY docker/recovery-atomic-probe.c docker/test-recovery-atomic-probe.c /tmp/
+COPY docker/recovery-atomic-probe.c docker/test-recovery-atomic-probe.c \
+  docker/recovery-atomic-write.c docker/test-recovery-atomic-write.c /tmp/
 RUN gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
     -Wall -Wextra -Werror -Wformat=2 /tmp/recovery-atomic-probe.c \
     --output /usr/local/bin/rip-dvd-recovery-atomic-probe \
   && gcc -std=c17 -O2 -Wall -Wextra -Werror /tmp/test-recovery-atomic-probe.c \
     --output /tmp/test-recovery-atomic-probe \
-  && /tmp/test-recovery-atomic-probe
+  && /tmp/test-recovery-atomic-probe \
+  && gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
+    -Wall -Wextra -Werror -Wformat=2 /tmp/recovery-atomic-write.c \
+    --output /usr/local/bin/rip-dvd-recovery-atomic-write \
+  && gcc -std=c17 -O2 -Wall -Wextra -Werror /tmp/test-recovery-atomic-write.c \
+    --output /tmp/test-recovery-atomic-write \
+  && /tmp/test-recovery-atomic-write
 
 FROM build-base AS dvdcss-reader-builder
 ARG LIBDVDCSS_VERSION=1.6.0
@@ -235,6 +242,7 @@ COPY --from=worker-runtime-base --chown=node:node /app /app
 
 FROM worker-runtime-base AS archive-worker
 COPY --from=recovery-atomic-probe-builder /usr/local/bin/rip-dvd-recovery-atomic-probe /usr/local/bin/rip-dvd-recovery-atomic-probe
+COPY --from=recovery-atomic-probe-builder /usr/local/bin/rip-dvd-recovery-atomic-write /usr/local/bin/rip-dvd-recovery-atomic-write
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends handbrake-cli libssl3 lsdvd sg3-utils util-linux \
   && rm -rf /var/lib/apt/lists/* \
@@ -305,6 +313,7 @@ RUN node /tmp/test-handbrake-dvd-label.mjs \
 
 FROM dependencies AS validation
 COPY --from=recovery-atomic-probe-builder /usr/local/bin/rip-dvd-recovery-atomic-probe /usr/local/bin/rip-dvd-recovery-atomic-probe
+COPY --from=recovery-atomic-probe-builder /usr/local/bin/rip-dvd-recovery-atomic-write /usr/local/bin/rip-dvd-recovery-atomic-write
 COPY --from=handbrake-dvd-scan-test /tmp/handbrake-dvd-scan-passed /tmp/handbrake-dvd-scan-passed
 COPY --from=dvdcss-reader-builder /usr/local/bin/rip-dvd-dvdcss-reader /usr/local/bin/rip-dvd-dvdcss-reader
 COPY --from=dvdcss-reader-builder /tmp/rip-dvd-dvdcss-reader-test /tmp/rip-dvd-dvdcss-reader-test

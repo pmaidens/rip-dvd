@@ -43,6 +43,13 @@ keeps the operating-system lock alive if the worker process dies while its
 helper continues. A worker lease or heartbeat is not ownership and cannot
 override a live lock.
 
+The DVD recovery commit path holds the same exclusive ownership across journal
+reservation, protected-unit mutation, filesystem checkpoint publication,
+database projection, and journal cleanup. Its native atomic writer inherits
+the held descriptor on file descriptor 3, proves that descriptor still owns
+the exclusive `flock` before and after mutation, and never reacquires the lock
+or falls back to an unowned write.
+
 Writers also publish a private, versioned worker claim with creation,
 heartbeat, lease-expiry, and lock device and inode values. This claim is
 diagnostic evidence only. A claim for a different lock inode blocks readers
