@@ -64,6 +64,16 @@ printf '%s\n' "$verification_output" | assert_json_fields \
   'error.code=NOT_FOUND'
 
 set +e
+confirmation_output="$(invoke archive-recovery preview-disc-confirmation \
+  synthetic-missing-recovery \
+  2>"$temporary_directory/confirmation.stderr")"
+confirmation_status=$?
+set -e
+[ "$confirmation_status" -eq 2 ]
+printf '%s\n' "$confirmation_output" | assert_json_fields \
+  'error.code=NOT_FOUND'
+
+set +e
 reconciliation_output="$(invoke archive-recovery inspect-reconciliation \
   synthetic-missing-recovery \
   2>"$temporary_directory/reconciliation.stderr")"

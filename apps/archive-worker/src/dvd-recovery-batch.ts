@@ -17,6 +17,7 @@ import {
   createDvdArchiveEvidenceManifestDigests,
   createDvdArchiveRecoveryReadEvidenceDigest,
   createDvdRecoveryCheckpointPublicationDigest,
+  dvdConfirmedRecoveryWriteAuthority,
   dvdDiscVerificationInsertionIsCurrent,
   dvdEvidenceRangesAfterRecoveryRead,
   DVD_RECOVERY_ATOMIC_WRITE_CONTRACT,
@@ -274,6 +275,13 @@ function assertRecoveryWriteAuthority(
   const latest = options.access.dvdDiscVerifications.findLatestForRecovery(
     options.recoveryWorkClaim.archiveRecoveryId,
   );
+  const confirmationId = authority.discConfirmationId ?? null;
+  const confirmation = confirmationId === null
+    ? null
+    : options.access.dvdDiscConfirmations.find(confirmationId);
+  const confirmedAuthority = confirmation === null || verification === null
+    ? null
+    : dvdConfirmedRecoveryWriteAuthority(verification, confirmation);
   const inspection = verification === null
     ? null
     : options.access.discInspections.list({
@@ -302,15 +310,22 @@ function assertRecoveryWriteAuthority(
     verification === null ||
     latest?.id !== verification.id ||
     verification.status !== "completed" ||
-    verification.outcome !== "match" ||
     recovery.work?.verificationId !== verification.id ||
     archive === undefined ||
     detectedDisc === undefined ||
-    verification.sourceMetadataFingerprint !==
-      verification.observedMetadataFingerprint ||
-    verification.sourceMetadataFingerprint !== archive.fingerprint ||
-    verification.observedMetadataFingerprint !== detectedDisc.fingerprint ||
     !sameWriteAuthority(authority, verification) ||
+    (confirmationId === null
+      ? verification.outcome !== "match" ||
+        recovery.work?.discConfirmationId != null ||
+        verification.sourceMetadataFingerprint !==
+          verification.observedMetadataFingerprint ||
+        verification.sourceMetadataFingerprint !== archive.fingerprint ||
+        verification.observedMetadataFingerprint !== detectedDisc.fingerprint
+      : confirmedAuthority === null ||
+        confirmedAuthority.discConfirmationId !== confirmationId ||
+        recovery.work?.discConfirmationId !== confirmationId ||
+        recovery.work?.claimedBy !==
+          confirmation?.verificationWorkerExecutionId) ||
     !dvdDiscVerificationInsertionIsCurrent(verification, inspection) ||
     requireBaseCheckpoint && (
       header === null ||
@@ -522,6 +537,7 @@ function recoveryReadFor(
   archiveId: OriginalDiscArchiveId,
   current: CommittedDvdCheckpointEvidence,
   observation: DvdRecoveryReadObservation,
+  authority: DvdRecoveryWriteAuthority,
 ) {
   const input = {
     originalDiscArchiveId: archiveId,
@@ -530,6 +546,8 @@ function recoveryReadFor(
     startLba: observation.startLba,
     sectorCount: 1,
     outcome: observation.outcome,
+    verificationId: authority.verificationId,
+    discConfirmationId: authority.discConfirmationId ?? null,
   } as const;
   return {
     id: `${archiveId}:recovery-read:${current.revision + 1}`,
@@ -650,7 +668,12 @@ async function runOwnedBatch(
   if (targetedRange === undefined) {
     throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT");
   }
-  const recoveryRead = recoveryReadFor(options.originalDiscArchiveId, current, options.observation);
+  const recoveryRead = recoveryReadFor(
+    options.originalDiscArchiveId,
+    current,
+    options.observation,
+    options.writeAuthority,
+  );
   let image = current.image;
   let journalDigest: string | null = null;
   let protectedRanges: readonly DvdRecoveryProtectedRange[] = [];
@@ -856,22 +879,27 @@ export async function commitDvdRecoveryBatch(
     const recovery = options.access.archiveRecoveryWork.assertClaim(
       options.recoveryWorkClaim,
     );
-    if (recovery.work?.verificationId === null) {
-      options.access.archiveRecoveryWork.bindVerification(
+    if (recovery.work?.status !== "claimed") {
+      throw new Error("Archive Recovery work is not claimed");
+    }
+    const recoveryWorkClaim = recovery.work.verificationId === null
+      ? options.access.archiveRecoveryWork.bindVerification(
         options.recoveryWorkClaim,
         options.writeAuthority,
-      );
-    }
-    assertRecoveryWriteAuthority(options, true);
-    const paths = await pathsFor(options);
-    const signal = options.signal ?? new AbortController().signal;
-    const ownership = options.archiveImageOwnership ?? defaultArchiveImageOwnership;
+      )
+      : recovery.work as ClaimedArchiveRecoveryWork;
+    const currentOptions = { ...options, recoveryWorkClaim };
+    assertRecoveryWriteAuthority(currentOptions, true);
+    const paths = await pathsFor(currentOptions);
+    const signal = currentOptions.signal ?? new AbortController().signal;
+    const ownership = currentOptions.archiveImageOwnership ??
+      defaultArchiveImageOwnership;
     return await ownership.withWriter({
-      archiveId: options.originalDiscArchiveId,
+      archiveId: currentOptions.originalDiscArchiveId,
       imagePath: paths.image,
       originalsLibraryPath: paths.root,
       signal,
-      task: (handle) => runOwnedBatch(options, handle, paths),
+      task: (handle) => runOwnedBatch(currentOptions, handle, paths),
     });
   } catch (cause) {
     if (cause instanceof DvdRecoveryBatchFault) throw cause;

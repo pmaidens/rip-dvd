@@ -123,6 +123,8 @@ import type {
   DvdDiscVerificationClaimToken,
   DvdDiscVerificationId,
   DvdDiscVerificationStatus,
+  DvdDiscConfirmationExpiryReason,
+  DvdDiscConfirmationId,
   EncodeJobCleanupClaimToken,
   EncodeJobId,
   EncodeJobFailureReportId,
@@ -1687,10 +1689,21 @@ export const dvdArchiveRecoveryReads = sqliteTable(
     startLba: integer("start_lba").notNull(),
     sectorCount: integer("sector_count").notNull(),
     outcome: text("outcome", { enum: ["recovered", "failed"] }).notNull(),
+    verificationId: text("verification_id")
+      .$type<DvdDiscVerificationId>()
+      .references(() => dvdDiscVerifications.id, { onDelete: "restrict" }),
+    discConfirmationId: text("disc_confirmation_id")
+      .$type<DvdDiscConfirmationId>()
+      .references(() => dvdDiscConfirmations.id, { onDelete: "restrict" }),
     evidenceDigest: text("evidence_digest").notNull(),
     createdAt: createdAt(),
   },
   (table) => [
+    index("dvd_archive_recovery_reads_confirmation_outcome_lba_idx").on(
+      table.discConfirmationId,
+      table.outcome,
+      table.startLba,
+    ),
     check("dvd_archive_recovery_reads_id_not_null", sql`${table.id} is not null`),
     check(
       "dvd_archive_recovery_reads_revision_check",
@@ -1796,6 +1809,9 @@ export const archiveRecoveryWork = sqliteTable(
       .notNull(),
     verificationId: text("verification_id")
       .$type<DvdDiscVerificationId>(),
+    discConfirmationId: text("disc_confirmation_id")
+      .$type<DvdDiscConfirmationId>()
+      .references(() => dvdDiscConfirmations.id, { onDelete: "restrict" }),
     requestedAt: integer("requested_at", { mode: "timestamp_ms" }),
     claimedBy: text("claimed_by"),
     claimToken: text("claim_token").$type<ArchiveRecoveryClaimToken>(),
@@ -2057,6 +2073,85 @@ export const dvdDiscVerifications = sqliteTable(
     check(
       "dvd_disc_verifications_device_identity_check",
       sql`(${table.admittedDevicePath} is null and ${table.admittedDeviceId} is null and ${table.admittedDeviceInode} is null) or (${table.admittedDevicePath} is not null and length(${table.admittedDevicePath}) > 0 and ${table.admittedDeviceId} is not null and length(${table.admittedDeviceId}) > 0 and ${table.admittedDeviceInode} is not null and length(${table.admittedDeviceInode}) > 0)`,
+    ),
+  ],
+);
+
+export const dvdDiscConfirmations = sqliteTable(
+  "dvd_disc_confirmations",
+  {
+    id: text("id").$type<DvdDiscConfirmationId>().notNull().primaryKey(),
+    archiveRecoveryId: text("archive_recovery_id")
+      .$type<ArchiveRecoveryId>()
+      .notNull()
+      .references(() => archiveRecoveries.id, { onDelete: "restrict" }),
+    archiveRecoveryAttemptId: text("archive_recovery_attempt_id")
+      .$type<ArchiveRecoveryAttemptId>()
+      .notNull(),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .references(() => dvdArchiveEvidenceHeaders.originalDiscArchiveId, {
+        onDelete: "restrict",
+      }),
+    verificationId: text("verification_id")
+      .$type<DvdDiscVerificationId>()
+      .notNull()
+      .references(() => dvdDiscVerifications.id, { onDelete: "restrict" }),
+    discInspectionId: text("disc_inspection_id")
+      .$type<DiscInspectionId>()
+      .notNull()
+      .references(() => discInspections.id, { onDelete: "restrict" }),
+    detectedDiscId: text("detected_disc_id")
+      .$type<DetectedDiscId>()
+      .notNull()
+      .references(() => detectedDiscs.id, { onDelete: "restrict" }),
+    mediaGeneration: text("media_generation").notNull(),
+    verificationWorkerExecutionId: text("verification_worker_execution_id")
+      .notNull(),
+    verificationOutcome: text("verification_outcome", {
+      enum: ["mismatch", "inconclusive"],
+    }).notNull(),
+    verificationResultDigest: text("verification_result_digest").notNull(),
+    checkpointRevision: integer("checkpoint_revision").notNull(),
+    checkpointDigest: text("checkpoint_digest").notNull(),
+    acknowledgedMixedSource: integer("acknowledged_mixed_source", {
+      mode: "boolean",
+    }).$type<true>().notNull(),
+    expiredAt: integer("expired_at", { mode: "timestamp_ms" }),
+    expiryReason: text("expiry_reason").$type<
+      DvdDiscConfirmationExpiryReason
+    >(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check(
+      "dvd_disc_confirmations_id_not_null",
+      sql`${table.id} is not null`,
+    ),
+    uniqueIndex("dvd_disc_confirmations_verification_unique")
+      .on(table.verificationId),
+    index("dvd_disc_confirmations_recovery_created_idx")
+      .on(table.archiveRecoveryId, table.createdAt, table.id),
+    check(
+      "dvd_disc_confirmations_identity_check",
+      sql`${table.archiveRecoveryAttemptId} is not null and length(${table.archiveRecoveryAttemptId}) > 0 and length(${table.mediaGeneration}) > 0 and length(${table.verificationWorkerExecutionId}) > 0`,
+    ),
+    check(
+      "dvd_disc_confirmations_result_check",
+      sql`${table.verificationOutcome} in ('mismatch', 'inconclusive') and length(${table.verificationResultDigest}) = 64 and ${table.verificationResultDigest} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "dvd_disc_confirmations_checkpoint_check",
+      sql`typeof(${table.checkpointRevision}) = 'integer' and ${table.checkpointRevision} > 0 and length(${table.checkpointDigest}) = 64 and ${table.checkpointDigest} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "dvd_disc_confirmations_acknowledgement_check",
+      sql`${table.acknowledgedMixedSource} = true`,
+    ),
+    check(
+      "dvd_disc_confirmations_expiry_check",
+      sql`(${table.expiredAt} is null and ${table.expiryReason} is null) or (${table.expiredAt} is not null and ${table.expiryReason} in ('RECOVERY_ATTEMPT_CHANGED', 'DISC_INSERTION_CHANGED', 'WORKER_EXECUTION_CHANGED', 'DISC_CHECKPOINT_CHANGED', 'DISC_VERIFICATION_CHANGED', 'DISC_VERIFICATION_RESULT_CHANGED', 'DISC_SOURCE_CHANGED'))`,
     ),
   ],
 );

@@ -1,4 +1,5 @@
 import {
+  dvdConfirmedRecoveryWriteAuthority,
   dvdDiscVerificationInsertionIsCurrent,
   dvdRecoveryWriteAuthority,
   DVD_RECOVERY_PASS_CLAIM_LEASE_MS,
@@ -583,7 +584,12 @@ export async function pollDvdRecoveryPass(input: {
     if (renewalFault !== undefined) throw renewalFault;
   };
   try {
-    const authority = dvdRecoveryWriteAuthority(candidate.verification);
+    const authority = candidate.confirmation === null
+      ? dvdRecoveryWriteAuthority(candidate.verification)
+      : dvdConfirmedRecoveryWriteAuthority(
+          candidate.verification,
+          candidate.confirmation,
+        );
     if (authority === null) {
       throw new Error("DVD Recovery candidate lacks write authority");
     }
@@ -734,6 +740,25 @@ export async function pollDvdRecoveryPass(input: {
     }
     input.access.archiveRecoveryWork.settlePass(claim);
   } catch (error) {
+    if (
+      error instanceof DvdRecoveryPassFault &&
+      error.code === "SOURCE_CHANGED" &&
+      candidate.confirmation !== null
+    ) {
+      input.access.dvdDiscConfirmations.expire(
+        candidate.confirmation.id,
+        "DISC_SOURCE_CHANGED",
+      );
+    } else if (
+      error instanceof DvdRecoveryBatchFault &&
+      error.code === "DISC_VERIFICATION_STALE" &&
+      candidate.confirmation !== null
+    ) {
+      input.access.dvdDiscConfirmations.expireForWorkerExecution(
+        input.workerExecutionId,
+        candidate.confirmation.id,
+      );
+    }
     if (signal.aborted) {
       const recovery = currentRecovery(input.access, candidate.recovery);
       if (recovery.status !== "stopping") {
@@ -799,6 +824,9 @@ export async function runDvdRecoveryWorker(input: {
   reader?: DvdRecoverySourceReader;
   mediaGenerationObserver?: MediaGenerationObserver;
 }): Promise<void> {
+  input.access.dvdDiscConfirmations.expireForWorkerExecution(
+    input.workerExecutionId,
+  );
   const reader = input.reader ?? createNodeDvdRecoverySourceReader();
   const mediaGenerationObserver = input.mediaGenerationObserver ??
     createNodeMediaGenerationObserver();

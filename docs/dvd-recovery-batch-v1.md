@@ -9,7 +9,19 @@ not schedule reads or reopen new-format admission.
 The caller must hold an Archive Recovery that has been transitioned to
 `running`, its current claimed durable work reservation, and a completed
 matching DVD Disc Verification bound at the exact checkpoint where that pass
-started. Source-read admission is serialized with Stop in the same immediate
+started. A mismatch or inconclusive verification may supply that authority
+only after an operator explicitly acknowledges the mixed-source risk through
+a DVD Disc Confirmation bound to the exact recovery attempt, insertion,
+verification result, worker execution, and checkpoint. A restart, insertion
+change, removal, observed source change, attempt change, verification change,
+or incompatible checkpoint expires that confirmation. A fresh verification is
+required before the operator can confirm again. A live claimed writer retains its confirmation
+until its claim reaches the existing quiescence/takeover boundary; normal
+projection nevertheless rejects authority that has expired. Reconciliation
+may use an expired confirmation only as historical evidence for a checkpoint
+that was already made durable.
+
+Source-read admission is serialized with Stop in the same immediate
 database transaction; `stopping` is accepted only while an already-admitted
 read or batch settles. The same Stop boundary invalidates queued DVD Disc
 Verification, prevents claim renewal and new verification reads, and waits for
@@ -100,8 +112,19 @@ Recovery manifests form a revision chain from `initial-manifest.json`. Each
 manifest binds its predecessor, recovery read, immutable boundary evidence,
 current normalized source map, prior and current image versions, protected
 ranges, journal digest, and a complete publication digest. Operator evidence
-reads validate every filesystem revision through the current pointer, the
-current database header, and the protected bytes of the current image. Web and
+retains the verification identity for every recovery read and the confirmation
+identity for every read authorized from an uncertain source. Confirmation
+history remains visible even when no bytes were written. Bounded detail output
+reports per-confirmation counts and exact recovered ranges, while the
+image-level mixed-source indicator covers the complete persisted history,
+including confirmations omitted from the bounded page. Range details have an
+independent bound and expose truncation without changing their exact aggregate
+counts. A later `clean_read` integrity result does not erase this source
+provenance.
+
+Operator evidence reads validate every filesystem revision through the current
+pointer, the current database header, and the protected bytes of the current
+image. Web and
 JSON CLI adapters continue to call the same read operation and expose the same
 revision-bound paging contract.
 

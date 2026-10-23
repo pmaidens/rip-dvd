@@ -51,6 +51,7 @@ import type {
   DiscSelectionSourceIdentityInput,
 } from "./disc-selection-source-identity.js";
 import type { ArchiveBoundaryEvidence } from "./archive-boundary.js";
+import type { EncodeWorkConflictCurrent } from "./archive-recovery-work.js";
 import type {
   ArchiveAuditCounts,
   ArchiveAuditFinding,
@@ -219,6 +220,7 @@ export type DvdRecoveryReconciliationClaimToken =
 export type DvdDiscVerificationId = DomainId<"DvdDiscVerification">;
 export type DvdDiscVerificationClaimToken =
   DomainId<"DvdDiscVerificationClaim">;
+export type DvdDiscConfirmationId = DomainId<"DvdDiscConfirmation">;
 export type MediaItemId = DomainId<"MediaItem">;
 export type DiscSelectionId = DomainId<"DiscSelection">;
 export type DvdTitleIdentityId = DomainId<"DvdTitleIdentity">;
@@ -614,6 +616,35 @@ export interface DvdDiscVerification {
   updatedAt: Date;
 }
 
+export type DvdDiscConfirmationExpiryReason =
+  | "RECOVERY_ATTEMPT_CHANGED"
+  | "DISC_INSERTION_CHANGED"
+  | "WORKER_EXECUTION_CHANGED"
+  | "DISC_CHECKPOINT_CHANGED"
+  | "DISC_VERIFICATION_CHANGED"
+  | "DISC_VERIFICATION_RESULT_CHANGED"
+  | "DISC_SOURCE_CHANGED";
+
+export interface DvdDiscConfirmation {
+  id: DvdDiscConfirmationId;
+  archiveRecoveryId: ArchiveRecoveryId;
+  archiveRecoveryAttemptId: ArchiveRecoveryAttemptId;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  verificationId: DvdDiscVerificationId;
+  discInspectionId: DiscInspectionId;
+  detectedDiscId: DetectedDiscId;
+  mediaGeneration: string;
+  verificationWorkerExecutionId: string;
+  verificationOutcome: Exclude<DvdDiscVerificationOutcome, "match">;
+  verificationResultDigest: string;
+  checkpointRevision: number;
+  checkpointDigest: string;
+  acknowledgedMixedSource: true;
+  expiredAt: Date | null;
+  expiryReason: DvdDiscConfirmationExpiryReason | null;
+  createdAt: Date;
+}
+
 /**
  * Durable identities a recovery writer must revalidate before it mutates an
  * archive. The values are a snapshot, not proof by themselves; the writer
@@ -630,6 +661,7 @@ export interface DvdRecoveryWriteAuthority {
   verificationWorkerExecutionId: string;
   checkpointRevision: number;
   checkpointDigest: string;
+  discConfirmationId?: DvdDiscConfirmationId | null;
 }
 
 export interface OpticalDeviceIdentity {
@@ -639,6 +671,8 @@ export interface OpticalDeviceIdentity {
 }
 
 export const DVD_RECOVERY_PASS_CLAIM_LEASE_MS = 65_000;
+export const DVD_DISC_CONFIRMATION_PROVENANCE_LIMIT = 100;
+export const DVD_DISC_CONFIRMATION_RECOVERED_RANGE_LIMIT = 100;
 
 export interface ArchiveRecoveryWork {
   archiveRecoveryId: ArchiveRecoveryId;
@@ -646,6 +680,7 @@ export interface ArchiveRecoveryWork {
   attemptId: ArchiveRecoveryAttemptId;
   status: ArchiveRecoveryWorkStatus;
   verificationId: DvdDiscVerificationId | null;
+  discConfirmationId?: DvdDiscConfirmationId | null;
   requestedAt: Date | null;
   claimedBy: string | null;
   claimToken: ArchiveRecoveryClaimToken | null;
@@ -673,9 +708,11 @@ export type ClaimedArchiveRecoveryWork = ArchiveRecoveryWork & {
 export interface ArchiveRecoveryWorkAccess {
   findNextStopping(): ArchiveRecovery | null;
   findNextInterrupted(workerId: string): ArchiveRecovery | null;
+  findEncodeWorkConflict(id: ArchiveRecoveryId): EncodeWorkConflictCurrent | null;
   claimNextVerifiedCandidate(workerId: string): {
     recovery: ArchiveRecovery;
     verification: DvdDiscVerification;
+    confirmation: DvdDiscConfirmation | null;
     claim: ClaimedArchiveRecoveryWork;
   } | null;
   request(id: ArchiveRecoveryId): ArchiveRecoveryWork;
@@ -2472,6 +2509,61 @@ export interface DvdDiscVerificationAccess {
   fail(claim: DvdDiscVerification): DvdDiscVerification | null;
 }
 
+export interface DvdDiscConfirmationAccess {
+  replaySubmission(input: RecordDvdDiscConfirmationInput):
+    DvdDiscConfirmation | null;
+  record(input: RecordDvdDiscConfirmationInput): DvdDiscConfirmation;
+  find(id: DvdDiscConfirmationId): DvdDiscConfirmation | null;
+  findLatestForRecovery(id: ArchiveRecoveryId): DvdDiscConfirmation | null;
+  listForRecovery(id: ArchiveRecoveryId): DvdDiscConfirmation[];
+  listProvenanceForRecovery(id: ArchiveRecoveryId):
+    DvdDiscConfirmationProvenancePage;
+  expire(
+    id: DvdDiscConfirmationId,
+    reason: DvdDiscConfirmationExpiryReason,
+  ): boolean;
+  expireForWorkerExecution(
+    workerExecutionId: string,
+    confirmationId?: DvdDiscConfirmationId,
+  ): number;
+}
+
+export interface DvdDiscConfirmationProvenance {
+  confirmation: DvdDiscConfirmation;
+  recoveredSectorCount: number;
+  failedReadCount: number;
+  firstRecoveredLba: number | null;
+  lastRecoveredLba: number | null;
+  recoveredRanges: readonly {
+    startLba: number;
+    sectorCount: number;
+  }[];
+  recoveredRangesTruncated: boolean;
+}
+
+export interface DvdDiscConfirmationProvenancePage {
+  items: DvdDiscConfirmationProvenance[];
+  imageUsesConfirmedSource: boolean;
+  truncated: boolean;
+}
+
+export interface RecordDvdDiscConfirmationInput {
+  mutationKey: string;
+  archiveRecoveryId: ArchiveRecoveryId;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  archiveRecoveryAttemptId: ArchiveRecoveryAttemptId;
+  discInspectionId: DiscInspectionId;
+  detectedDiscId: DetectedDiscId;
+  mediaGeneration: string;
+  verificationId: DvdDiscVerificationId;
+  verificationWorkerExecutionId: string;
+  verificationOutcome: Exclude<DvdDiscVerificationOutcome, "match">;
+  verificationResultDigest: string;
+  checkpointRevision: number;
+  checkpointDigest: string;
+  acknowledgeMixedSource: true;
+}
+
 export type SnapshotCatalogAccess = Pick<
   CatalogAccess,
   | "listOpticalDrives"
@@ -2653,6 +2745,7 @@ export interface DataAccess {
   readonly dvdRecoveryStorage: DvdRecoveryStorageAccess;
   readonly dvdRecoveryReconciliations: DvdRecoveryReconciliationAccess;
   readonly dvdDiscVerifications: DvdDiscVerificationAccess;
+  readonly dvdDiscConfirmations: DvdDiscConfirmationAccess;
   readonly catalog: CatalogAccess;
   readonly encodingProfiles: EncodingProfileAccess;
   readonly discInspections: DiscInspectionAccess;

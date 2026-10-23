@@ -73,6 +73,7 @@ export function dvdRecoveryWriteAuthority(
     verificationWorkerExecutionId: verification.workerExecutionId,
     checkpointRevision: verification.checkpointRevision,
     checkpointDigest: verification.checkpointDigest,
+    discConfirmationId: null,
   };
 }
 
