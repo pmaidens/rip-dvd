@@ -1,4 +1,5 @@
 import {
+  CatalogMappingCapacityExceededError,
   CatalogMappingRevisionRequiredError,
   CurrentCatalogMappingSourceError,
   DomainInvariantError,
@@ -398,7 +399,8 @@ export async function createCatalogReviewRoute(
     if (error instanceof RecordNotFoundError) {
       return response({ error: error.message }, 404);
     }
-    if (error instanceof CatalogMappingRevisionRequiredError ||
+    if (error instanceof CatalogMappingCapacityExceededError ||
+        error instanceof CatalogMappingRevisionRequiredError ||
         error instanceof UnsupportedCatalogMappingSourceError ||
         error instanceof CurrentCatalogMappingSourceError) {
       return response({ error: {

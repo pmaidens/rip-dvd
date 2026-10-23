@@ -2450,7 +2450,8 @@ describe("data-access facade", () => {
           name !== "20261023021122_fearless_morg" &&
           name !== "20261023052549_simple_harry_osborn" &&
           name !== "20261023075807_quick_mentor" &&
-          name !== "20261023134137_cynical_leopardon",
+          name !== "20261023134137_cynical_leopardon" &&
+          name !== "20261023141501_even_enchantress",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -9678,6 +9679,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261023141501_even_enchantress",
+        },
+        {
           name: "20261023134137_cynical_leopardon",
         },
         {
@@ -9709,9 +9713,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20261022080829_dvd-title-identities",
-        },
-        {
-          name: "20261022044512_parched_norrin_radd",
         },
       ]);
     expect(
@@ -16364,6 +16365,332 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
+  it("keeps vanished unbound identities out of bounded damage currency checks", () => {
+    const fixture = createDvdTitleIdentityArchiveFixture(
+      "title-damage-vanished-unbound",
+    );
+    const firstHeader = fixture.access.catalog.findDvdArchiveEvidenceHeader(
+      fixture.archive.id,
+    )!;
+    fixture.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: fixture.archive.id,
+      checkpoint: {
+        manifestId: firstHeader.currentManifestId,
+        manifestRevision: firstHeader.currentManifestRevision,
+        manifestDigest: firstHeader.currentManifestDigest,
+      },
+      observations: [
+        titleIdentityObservation(1),
+        titleIdentityObservation(2, { cellId: 2 }),
+      ],
+    });
+    const checkpoint = advanceDvdTitleIdentityCheckpointForTest(
+      fixture.databasePath,
+      fixture.archive.id,
+      2,
+    );
+    const reviewSet = fixture.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: fixture.archive.id,
+      checkpoint,
+      observations: [titleIdentityObservation(2, { cellId: 2 })],
+    });
+    expect(reviewSet.items).toEqual([
+      expect.objectContaining({
+        presentAtCurrentCheckpoint: true,
+        mappingState: "unmapped",
+      }),
+      expect.objectContaining({
+        presentAtCurrentCheckpoint: false,
+        mappingState: "unmapped",
+        discSelectionMappings: [],
+      }),
+    ]);
+    const header = fixture.access.catalog.findDvdArchiveEvidenceHeader(
+      fixture.archive.id,
+    )!;
+    const findings = ([
+      "filesystem_structure",
+      "dvd_navigation",
+      "title_enumeration",
+    ] as const).map((checkKind) => ({
+      checkKind,
+      policyVersion: "synthetic-structure-v1",
+      testedExtent: {
+        startLba: 0,
+        endLbaExclusive: header.acceptedEndLbaExclusive,
+        observedSectorCount: 100,
+      },
+      outcome: "valid" as const,
+      reason: null,
+      evidenceReference: `synthetic:${checkKind}`,
+    }));
+    const structural = createDvdStructuralAssessment({
+      checkpoint: {
+        originalDiscArchiveId: fixture.archive.id,
+        manifestId: checkpoint.manifestId,
+        manifestRevision: checkpoint.manifestRevision,
+        manifestDigest: checkpoint.manifestDigest,
+        acceptedEndLbaExclusive: header.acceptedEndLbaExclusive,
+      },
+      findings,
+    });
+    const currentItem = reviewSet.items.find((item) =>
+      item.presentAtCurrentCheckpoint
+    )!;
+    const titleMappings = [{
+      titleIdentityObservationId: currentItem.observation.id,
+      sourceReferences: [{
+        kind: "multiplexed_content" as const,
+        startLba: 10,
+        sectorCount: 100,
+      }],
+      mappingCoverage: {
+        state: "complete" as const,
+        policyVersion: "synthetic-title-map-v1",
+        unknownReasons: [],
+      },
+    }];
+    const damage = createDvdTitleDamageAssessment({
+      checkpoint: structural.checkpoint,
+      titleIdentityReviewSetIdentity: reviewSet.reviewSetIdentity,
+      structuralAssessmentIdentity: structural.id,
+      structuralFindings: {
+        dvdNavigation: "valid",
+        titleEnumeration: "valid",
+      },
+      unrecoveredSourceRanges: header.unrecoveredSourceRanges,
+      titles: [{
+        titleIdentityId: currentItem.titleIdentityId,
+        displayTitleNumber: currentItem.observation.displayTitleNumber,
+        selection: {
+          selectedPath: currentItem.observation.selectedPath,
+          angleNumber: currentItem.observation.angleNumber,
+          chapterStart: currentItem.observation.chapterStart,
+          chapterEnd: currentItem.observation.chapterEnd,
+        },
+        ...titleMappings[0]!,
+      }],
+    });
+    const catalogMappingProjectionId =
+      dvdTitleIdentityCatalogMappingProjectionDigest(
+        reviewSet.checkpoint,
+        reviewSet.items,
+      );
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    sqlite.prepare(`
+      INSERT INTO dvd_structural_assessments (
+        id, original_disc_archive_id, manifest_id, manifest_revision,
+        manifest_digest, accepted_end_lba_exclusive, policy_version,
+        validity, findings, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 2)
+    `).run(
+      structural.id,
+      fixture.archive.id,
+      checkpoint.manifestId,
+      checkpoint.manifestRevision,
+      checkpoint.manifestDigest,
+      header.acceptedEndLbaExclusive,
+      structural.policyVersion,
+      structural.validity,
+      JSON.stringify(structural.findings),
+    );
+    sqlite.prepare(`
+      INSERT INTO dvd_structural_check_attempts (
+        original_disc_archive_id, manifest_id, manifest_revision,
+        manifest_digest, accepted_end_lba_exclusive, outcome,
+        assessment_id, findings, created_at
+      ) VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, 2)
+    `).run(
+      fixture.archive.id,
+      checkpoint.manifestId,
+      checkpoint.manifestRevision,
+      checkpoint.manifestDigest,
+      header.acceptedEndLbaExclusive,
+      structural.id,
+      JSON.stringify(structural.findings),
+    );
+    sqlite.prepare(`
+      INSERT INTO dvd_title_damage_assessments (
+        id, original_disc_archive_id, manifest_id, manifest_revision,
+        manifest_digest, accepted_end_lba_exclusive,
+        title_identity_review_set_identity,
+        catalog_mapping_projection_id, structural_assessment_identity,
+        policy_version, title_mappings, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2)
+    `).run(
+      damage.id,
+      fixture.archive.id,
+      checkpoint.manifestId,
+      checkpoint.manifestRevision,
+      checkpoint.manifestDigest,
+      header.acceptedEndLbaExclusive,
+      reviewSet.reviewSetIdentity,
+      catalogMappingProjectionId,
+      structural.id,
+      damage.policyVersion,
+      JSON.stringify(titleMappings),
+    );
+    sqlite.prepare(`
+      INSERT INTO dvd_title_damage_assessment_attempts (
+        original_disc_archive_id, assessment_id, created_at
+      ) VALUES (?, ?, 2)
+    `).run(fixture.archive.id, damage.id);
+    sqlite.close();
+
+    const workflow = () =>
+      fixture.access.catalog.readDvdCatalogReviewWorkflowEvidence([{
+        originalDiscArchiveId: fixture.archive.id,
+        evidenceHeader: header,
+      }]).get(fixture.archive.id)?.titleDamage;
+    expect(workflow()).toEqual({
+      state: "current",
+      currentAssessmentIdentity: damage.id,
+      acceptanceRequired: !damage.noTitleMissingSourceProved,
+    });
+    expect(fixture.access.dvdTitleDamageAssessments.inspect(
+      fixture.archive.id,
+    )).toMatchObject({
+      state: "current",
+      currentAssessmentIdentity: damage.id,
+    });
+
+    const legacyProjection = new DatabaseSync(fixture.databasePath);
+    const damageGuards = legacyProjection.prepare(`
+      SELECT name, sql
+      FROM sqlite_master
+      WHERE type = 'trigger'
+        AND tbl_name = 'dvd_title_damage_assessments'
+    `).all() as Array<{ name: string; sql: string }>;
+    try {
+      for (const guard of damageGuards) {
+        legacyProjection.exec(`DROP TRIGGER "${guard.name}"`);
+      }
+      legacyProjection.prepare(`
+        UPDATE dvd_title_damage_assessments
+        SET catalog_mapping_projection_id = NULL
+        WHERE id = ?
+      `).run(damage.id);
+    } finally {
+      for (const guard of damageGuards) legacyProjection.exec(guard.sql);
+    }
+    legacyProjection.close();
+    expect(workflow()).toMatchObject({
+      state: "outdated",
+      currentAssessmentIdentity: null,
+    });
+    expect(fixture.access.dvdTitleDamageAssessments.inspect(
+      fixture.archive.id,
+    )).toMatchObject({
+      state: "outdated",
+      currentAssessmentIdentity: null,
+    });
+    fixture.access.close();
+  });
+
+  it("keeps workflow polling linear across distinct predecessor checkpoints", () => {
+    const fixture = createDvdTitleIdentityArchiveFixture(
+      "title-workflow-distinct-predecessors",
+    );
+    const mediaItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic bounded predecessor mappings",
+    });
+    const revisionCount = 16;
+    const titlesPerRevision = 16;
+    const scanDatabase = new DatabaseSync(fixture.databasePath);
+    scanDatabase.prepare(`
+      UPDATE detected_discs
+      SET scan_data = ?
+      WHERE id = ?
+    `).run(
+      JSON.stringify({
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId: fixture.archive.fingerprint,
+        titles: Array.from(
+          { length: revisionCount * titlesPerRevision },
+          (_value, index) => ({
+            number: index + 1,
+            durationSeconds: 4_000,
+            chapters: 8,
+            audioStreams: [],
+            subtitles: [],
+          }),
+        ),
+      }),
+      fixture.archive.detectedDiscId,
+    );
+    scanDatabase.close();
+    const initialHeader = fixture.access.catalog.findDvdArchiveEvidenceHeader(
+      fixture.archive.id,
+    )!;
+    let checkpoint = {
+      manifestId: initialHeader.currentManifestId,
+      manifestRevision: initialHeader.currentManifestRevision,
+      manifestDigest: initialHeader.currentManifestDigest,
+    };
+    for (let revision = 1; revision <= revisionCount; revision += 1) {
+      if (revision > 1) {
+        checkpoint = advanceDvdTitleIdentityCheckpointForTest(
+          fixture.databasePath,
+          fixture.archive.id,
+          revision,
+        );
+      }
+      const firstTitleNumber = (revision - 1) * titlesPerRevision + 1;
+      fixture.access.catalog.recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: fixture.archive.id,
+        checkpoint,
+        observations: Array.from(
+          { length: titlesPerRevision },
+          (_value, offset) => {
+            const titleNumber = firstTitleNumber + offset;
+            return titleIdentityObservation(titleNumber, {
+              cellId: titleNumber,
+            });
+          },
+        ),
+      });
+      fixture.access.catalog.createDiscSelection({
+        originalDiscArchiveId: fixture.archive.id,
+        mediaItemId: mediaItem.id,
+        sourceIdentity: {
+          kind: "dvd_title",
+          titleNumber: firstTitleNumber,
+        },
+      });
+    }
+    const header = fixture.access.catalog.findDvdArchiveEvidenceHeader(
+      fixture.archive.id,
+    )!;
+    const statementAll = vi.spyOn(StatementSync.prototype, "all");
+    const statementGet = vi.spyOn(StatementSync.prototype, "get");
+    try {
+      const evidence = fixture.access.catalog
+        .readDvdCatalogReviewWorkflowEvidence([{
+          originalDiscArchiveId: fixture.archive.id,
+          evidenceHeader: header,
+        }]).get(fixture.archive.id);
+      const projectedTitleCount =
+        evidence?.titleIdentity?.currentMappingStates.length ?? 0;
+      const projectedRowCount = statementAll.mock.results.reduce(
+        (total, result) => total +
+          (Array.isArray(result.value) ? result.value.length : 0),
+        0,
+      );
+      expect(projectedTitleCount).toBe(
+        titlesPerRevision + revisionCount - 1,
+      );
+      expect(projectedRowCount).toBeLessThan(projectedTitleCount * 5);
+      expect(
+        statementAll.mock.calls.length + statementGet.mock.calls.length,
+      ).toBeLessThan(20);
+    } finally {
+      statementAll.mockRestore();
+      statementGet.mockRestore();
+      fixture.access.close();
+    }
+  });
+
   it("batches Title Damage workflow evidence across archives and titles", () => {
     const databasePath = createTestDatabasePath();
     const workspace = mkdtempSync(join(tmpdir(), "rip-dvd-damage-batch-"));
@@ -16476,6 +16803,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           ...titleMappings[index]!,
         })),
       });
+      const catalogMappingProjectionId =
+        dvdTitleIdentityCatalogMappingProjectionDigest(
+          reviewSet.checkpoint,
+          reviewSet.items,
+        );
       const sqlite = new DatabaseSync(first.databasePath);
       sqlite.prepare(`
         INSERT INTO dvd_structural_assessments (
@@ -16514,9 +16846,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           id, original_disc_archive_id, manifest_id, manifest_revision,
           manifest_digest, accepted_end_lba_exclusive,
           title_identity_review_set_identity,
+          catalog_mapping_projection_id,
           structural_assessment_identity, policy_version, title_mappings,
           created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
       `).run(
         damage.id,
         fixture.archive.id,
@@ -16525,6 +16858,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         header.currentManifestDigest,
         header.acceptedEndLbaExclusive,
         reviewSet.reviewSetIdentity,
+        catalogMappingProjectionId,
         structural.id,
         damage.policyVersion,
         JSON.stringify(titleMappings),

@@ -1610,6 +1610,7 @@ export const dvdTitleDamageAssessments = sqliteTable(
     titleIdentityReviewSetIdentity: text(
       "title_identity_review_set_identity",
     ).notNull(),
+    catalogMappingProjectionId: text("catalog_mapping_projection_id"),
     structuralAssessmentIdentity: text("structural_assessment_identity")
       .notNull()
       .references(() => dvdStructuralAssessments.id, {

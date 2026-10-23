@@ -9,6 +9,7 @@ import {
   createDvdArchiveEvidenceManifestDigests,
   createDvdStructuralAssessment,
   createDvdTitleDamageAssessment,
+  dvdTitleIdentityCatalogMappingProjectionDigest,
   DVD_RECOVERY_EVIDENCE_FORMAT,
 } from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
@@ -427,6 +428,11 @@ function seedTitleDamagePaging(variant, fingerprintFill) {
       ...storedMappings[index],
     })),
   });
+  const catalogMappingProjectionId =
+    dvdTitleIdentityCatalogMappingProjectionDigest(
+      reviewSet.checkpoint,
+      reviewSet.items,
+    );
   const evidenceSqlite = new DatabaseSync(databasePath);
   evidenceSqlite.prepare(`
     INSERT INTO dvd_structural_assessments (
@@ -462,9 +468,10 @@ function seedTitleDamagePaging(variant, fingerprintFill) {
     INSERT INTO dvd_title_damage_assessments (
       id, original_disc_archive_id, manifest_id, manifest_revision,
       manifest_digest, accepted_end_lba_exclusive,
-      title_identity_review_set_identity, structural_assessment_identity,
-      policy_version, title_mappings, created_at
-    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 1)
+      title_identity_review_set_identity, catalog_mapping_projection_id,
+      structural_assessment_identity, policy_version, title_mappings,
+      created_at
+    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 1)
   `).run(
     assessment.id,
     archive.id,
@@ -472,6 +479,7 @@ function seedTitleDamagePaging(variant, fingerprintFill) {
     manifestDigests.manifestDigest,
     acceptedEndLbaExclusive,
     reviewSet.reviewSetIdentity,
+    catalogMappingProjectionId,
     structural.id,
     assessment.policyVersion,
     JSON.stringify(storedMappings),

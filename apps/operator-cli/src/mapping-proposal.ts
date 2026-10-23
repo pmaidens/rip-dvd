@@ -9,6 +9,7 @@ import {
 } from "@rip-dvd/application";
 import { parseCatalogReviewCommand } from "@rip-dvd/application/catalog-review-command";
 import {
+  CatalogMappingCapacityExceededError,
   CurrentCatalogMappingSourceError,
   DomainInvariantError,
   MEDIA_ITEM_KINDS,
@@ -121,7 +122,8 @@ export function runMappingProposal(rest: readonly string[], io: MappingProposalI
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("PROPOSAL_REJECTED", error.message, 2);
     }
-    if (error instanceof UnsupportedCatalogMappingSourceError ||
+    if (error instanceof CatalogMappingCapacityExceededError ||
+        error instanceof UnsupportedCatalogMappingSourceError ||
         error instanceof CurrentCatalogMappingSourceError) {
       throw new CommandFailure(error.code, error.message, 2);
     }

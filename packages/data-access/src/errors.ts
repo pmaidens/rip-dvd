@@ -92,6 +92,18 @@ export class CatalogMappingRevisionRequiredError
   }
 }
 
+export class CatalogMappingCapacityExceededError
+  extends DomainInvariantError {
+  readonly code = "CATALOG_MAPPING_CAPACITY_EXCEEDED" as const;
+
+  constructor(readonly maximumActiveSelections: number) {
+    super(
+      `New-format DVD archives are limited to ${maximumActiveSelections} active Disc Selections`,
+    );
+    this.name = "CatalogMappingCapacityExceededError";
+  }
+}
+
 export class StaleJobAttemptError extends Error {
   constructor(recordType: string, id: string) {
     super(`Stale ${recordType} attempt: ${id}`);

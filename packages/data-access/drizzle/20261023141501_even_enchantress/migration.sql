@@ -1,0 +1,1 @@
+ALTER TABLE `dvd_title_damage_assessments` ADD `catalog_mapping_projection_id` text;

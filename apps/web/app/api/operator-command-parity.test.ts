@@ -12,6 +12,7 @@ import {
   DVD_RECOVERY_EVIDENCE_ADMISSION,
   DVD_RECOVERY_EVIDENCE_ENCODING,
   DVD_RECOVERY_EVIDENCE_FORMAT,
+  MAX_DVD_TITLES,
 } from "@rip-dvd/data-access";
 import {
   beginSettledDiscInspectionForTest,
@@ -1246,6 +1247,153 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
     }).find(({ id }) => id === firstSelectionId)?.label).toBe(
       "Synthetic current feature",
     );
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("returns the same stable new-format mapping capacity failure through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive } = await seedCommittedArchiveEvidence(
+    fixture,
+    [],
+    false,
+    true,
+  );
+  const access = fixture.openAccess();
+  try {
+    const checkpoint = access.catalog.findDvdArchiveEvidenceHeader(
+      archive.id,
+    )!;
+    access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: archive.id,
+      checkpoint: {
+        manifestId: checkpoint.currentManifestId,
+        manifestRevision: checkpoint.currentManifestRevision,
+        manifestDigest: checkpoint.currentManifestDigest,
+      },
+      observations: [{
+        displayTitleNumber: 1,
+        navigation: {
+          videoTitleSetNumber: 1,
+          titleSetTitleNumber: 1,
+          programChainNumber: 1,
+        },
+        selectedPath: [{
+          programNumber: 1,
+          cellNumber: 1,
+          vobId: 1,
+          cellId: 1,
+        }],
+        angleNumber: 1,
+        angleCount: 1,
+        chapterStart: 1,
+        chapterEnd: 12,
+        chapterCount: 12,
+        sourceExtents: [{ startLba: 0, sectorCount: 1 }],
+      }],
+    });
+    const seedSelection = access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })[0]!;
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    const clone = sqlite.prepare(`
+      INSERT INTO disc_selections (
+        id, original_disc_archive_id, media_item_id, source_key, kind,
+        title_number, chapter_start, chapter_end, label, is_catalog_active,
+        created_at, updated_at
+      )
+      SELECT ?, original_disc_archive_id, media_item_id, source_key, kind,
+        title_number, chapter_start, chapter_end, label, is_catalog_active,
+        created_at, updated_at
+      FROM disc_selections
+      WHERE id = ?
+    `);
+    sqlite.exec("BEGIN IMMEDIATE");
+    for (let index = 1; index < MAX_DVD_TITLES; index += 1) {
+      clone.run(`synthetic-capacity-selection-${index}`, seedSelection.id);
+    }
+    sqlite.exec("COMMIT");
+    sqlite.close();
+
+    const catalogRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt.toISOString();
+    const expected = {
+      error: {
+        code: "CATALOG_MAPPING_CAPACITY_EXCEEDED",
+        message:
+          `New-format DVD archives are limited to ${MAX_DVD_TITLES} active Disc Selections`,
+      },
+    };
+    const webSelection = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "create_disc_selection",
+        catalogRevision,
+        mutationKey: "00000000-0000-4000-8000-000000000421",
+        selection: {
+          mediaItemId: seedSelection.mediaItemId,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        },
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const cliSelection = await fixture.run([
+      "disc-selection",
+      "create",
+      archive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000422",
+      "--revision",
+      catalogRevision,
+      "--media-item-id",
+      seedSelection.mediaItemId,
+      "--source-kind",
+      "dvd_title",
+      "--title-number",
+      "1",
+    ]);
+    expect(webSelection.status).toBe(409);
+    expect(cliSelection.exitCode).toBe(2);
+    expect(cliSelection.result).toEqual(await webSelection.json());
+    expect(cliSelection.result).toEqual(expected);
+
+    const proposal = {
+      action: "create_mapping_proposal" as const,
+      catalogRevision,
+      target: {
+        choice: "use_existing" as const,
+        mediaItemId: seedSelection.mediaItemId,
+      },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title" as const, titleNumber: 1 },
+      },
+    };
+    const webProposal = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        ...proposal,
+        mutationKey: "00000000-0000-4000-8000-000000000423",
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const cliProposal = await fixture.run([
+      "catalog-review",
+      "apply-proposal",
+      archive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000424",
+      "--json",
+      JSON.stringify(proposal),
+    ]);
+    expect(webProposal.status).toBe(409);
+    expect(cliProposal.exitCode).toBe(2);
+    expect(cliProposal.result).toEqual(await webProposal.json());
+    expect(cliProposal.result).toEqual(expected);
   } finally {
     access.close();
     fixture.dispose();

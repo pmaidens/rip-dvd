@@ -14,6 +14,7 @@ import {
 } from "@rip-dvd/application/catalog-review-command";
 import { isDiscSelectionPreviewToken } from "@rip-dvd/application/disc-selection-preview-token";
 import {
+  CatalogMappingCapacityExceededError,
   CatalogMappingRevisionRequiredError,
   CurrentCatalogMappingSourceError,
   DomainInvariantError,
@@ -191,7 +192,8 @@ function withSelectionAccess<T>(io: SelectionIO, operation: (access: DataAccess)
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("SELECTION_NOT_FOUND", "Disc Selection or its source was not found.", 2);
     }
-    if (error instanceof CatalogMappingRevisionRequiredError ||
+    if (error instanceof CatalogMappingCapacityExceededError ||
+        error instanceof CatalogMappingRevisionRequiredError ||
         error instanceof UnsupportedCatalogMappingSourceError ||
         error instanceof CurrentCatalogMappingSourceError) {
       throw new CommandFailure(error.code, error.message, 2);
