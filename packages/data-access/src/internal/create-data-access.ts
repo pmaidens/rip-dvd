@@ -9634,132 +9634,9 @@ export function createDataAccessInternal(
         [set.manifestId, set] as const
       ),
     ]);
-    const continuityAudit = sqlite.prepare(`
-      with
-      input_archive(archive_id) as (
-        select distinct json_extract(value, '$.archiveId')
-        from json_each(?)
-      ),
-      first_set as (
-        select
-          identity_set.original_disc_archive_id as archive_id,
-          min(identity_set.manifest_revision) as manifest_revision
-        from dvd_title_identity_sets as identity_set
-        inner join input_archive
-          on input_archive.archive_id =
-            identity_set.original_disc_archive_id
-        group by identity_set.original_disc_archive_id
-      ),
-      ordered as (
-        select
-          observation.*,
-          identity_set.original_disc_archive_id as archive_id,
-          identity_set.manifest_revision,
-          identity_set.manifest_digest as set_manifest_digest,
-          identity_set.policy_version as set_policy_version,
-          identity.original_disc_archive_id as identity_archive_id,
-          manifest.original_disc_archive_id as manifest_archive_id,
-          manifest.revision as evidence_manifest_revision,
-          manifest.manifest_digest as evidence_manifest_digest,
-          first_set.manifest_revision as first_manifest_revision,
-          count(*) over (
-            partition by observation.manifest_id, observation.content_digest
-          ) as current_digest_count,
-          lag(observation.id) over (
-            partition by
-              identity_set.original_disc_archive_id,
-              observation.title_identity_id
-            order by identity_set.manifest_revision, observation.id
-          ) as expected_previous_id,
-          lag(observation.content_digest) over (
-            partition by
-              identity_set.original_disc_archive_id,
-              observation.title_identity_id
-            order by identity_set.manifest_revision, observation.id
-          ) as previous_content_digest,
-          lag(observation.display_title_number) over (
-            partition by
-              identity_set.original_disc_archive_id,
-              observation.title_identity_id
-            order by identity_set.manifest_revision, observation.id
-          ) as previous_display_title_number
-        from dvd_title_identity_observations as observation
-        inner join dvd_title_identity_sets as identity_set
-          on identity_set.manifest_id = observation.manifest_id
-        inner join dvd_title_identities as identity
-          on identity.id = observation.title_identity_id
-        inner join dvd_archive_evidence_manifests as manifest
-          on manifest.id = identity_set.manifest_id
-        inner join input_archive
-          on input_archive.archive_id =
-            identity_set.original_disc_archive_id
-        inner join first_set
-          on first_set.archive_id = identity_set.original_disc_archive_id
-      ),
-      digest_identities as (
-        select
-          archive_id,
-          content_digest,
-          count(distinct title_identity_id) as identity_count
-        from ordered
-        group by archive_id, content_digest
-      )
-      select
-        count(*) as audited_observation_count,
-        coalesce(sum(case
-          when ordered.set_policy_version != ?
-            or ordered.continuity_policy_version !=
-              ordered.set_policy_version
-            or ordered.identity_archive_id != ordered.archive_id
-            or ordered.manifest_archive_id != ordered.archive_id
-            or ordered.evidence_manifest_revision !=
-              ordered.manifest_revision
-            or ordered.evidence_manifest_digest !=
-              ordered.set_manifest_digest
-            or ordered.previous_observation_id is not
-              ordered.expected_previous_id
-            or (
-              ordered.expected_previous_id is null
-              and ordered.continuity_result != case
-                when ordered.manifest_revision =
-                  ordered.first_manifest_revision then 'initial'
-                else 'new'
-              end
-            )
-            or (
-              ordered.expected_previous_id is not null
-              and ordered.continuity_result not in ('proved', 'uncertain')
-            )
-            or (
-              ordered.continuity_result = 'proved'
-              and (
-                ordered.content_digest != ordered.previous_content_digest
-                or ordered.current_digest_count != 1
-              )
-            )
-            or (
-              ordered.continuity_result = 'uncertain'
-              and (
-                ordered.display_title_number !=
-                  ordered.previous_display_title_number
-                or (
-                  ordered.content_digest = ordered.previous_content_digest
-                  and ordered.current_digest_count = 1
-                  and digest_identities.identity_count = 1
-                )
-              )
-            )
-          then 1 else 0 end), 0) as invalid_count
-      from ordered
-      inner join digest_identities
-        on digest_identities.archive_id = ordered.archive_id
-        and digest_identities.content_digest = ordered.content_digest
-    `);
-    const continuityAuditTargets: Array<{
-      manifestId: string;
-      archiveId: OriginalDiscArchiveId;
-      manifestRevision: number;
-    }> = [];
+    // Polling validates only the bounded projection window. Writes establish
+    // immutable continuity evidence, while readDvdTitleIdentityReviewSetDeepAudit
+    // remains the canonical full-history integrity check.
     for (const [manifestId, set] of relevantSets) {
       const header = archiveById.get(set.originalDiscArchiveId)
         ?.evidenceHeader;
@@ -9786,20 +9663,6 @@ export function createDataAccessInternal(
           "Title Identity observation-set digest does not match its evidence",
         );
       }
-      continuityAuditTargets.push({
-        manifestId: set.manifestId,
-        archiveId: set.originalDiscArchiveId,
-        manifestRevision: set.manifestRevision,
-      });
-    }
-    const continuity = continuityAudit.get(
-      JSON.stringify(continuityAuditTargets),
-      DVD_TITLE_IDENTITY_CONTINUITY_VERSION,
-    ) as { audited_observation_count: number; invalid_count: number };
-    if (continuity.invalid_count !== 0) {
-      throw new DomainInvariantError(
-        "Title Identity continuity claim does not match its evidence",
-      );
     }
 
     const titleIdentityByArchiveId = new Map<

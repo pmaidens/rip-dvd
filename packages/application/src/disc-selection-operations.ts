@@ -252,18 +252,33 @@ export function executeDiscSelectionCommand(
   const mutation = discSelectionMutation(archiveId, command);
   const mutationKey = parseMutationKey(options.mutationKey);
   const requiresPreview = discSelectionCommandRequiresPreview(command);
+  const commandCatalogRevision = command.action === "create_disc_selection" ||
+      command.action === "update_disc_selection" ||
+      command.action === "repair_disc_selection" ||
+      command.action === "correct_disc_selection"
+    ? command.catalogRevision
+    : undefined;
   const expectedCatalogRevision = options.expectedCatalogRevision ??
-    (command.action === "create_disc_selection" && command.catalogRevision
-      ? new Date(command.catalogRevision)
+    (commandCatalogRevision
+      ? new Date(commandCatalogRevision)
       : undefined);
   if (requiresPreview && (options.acknowledged !== true || !options.expectedCatalogRevision ||
       !options.previewToken)) {
     throw new DomainInvariantError("Disc Selection preview acknowledgement is required");
   }
   if (!requiresPreview && (options.acknowledged === true ||
-      (expectedCatalogRevision !== undefined &&
-        command.action !== "create_disc_selection") || options.previewToken)) {
+      (options.expectedCatalogRevision !== undefined &&
+        command.action !== "create_disc_selection" &&
+        command.action !== "update_disc_selection") ||
+      options.previewToken)) {
     throw new DomainInvariantError("This Disc Selection change does not require a preview");
+  }
+  if (
+    !requiresPreview && command.action === "update_disc_selection" &&
+    expectedCatalogRevision === undefined &&
+    describeCatalogReviewWorkflow(access, archiveId) !== null
+  ) {
+    throw new CatalogMappingRevisionRequiredError();
   }
   if (options.previewToken !== undefined) {
     if (!options.expectedCatalogRevision || mutation.action === "create") {

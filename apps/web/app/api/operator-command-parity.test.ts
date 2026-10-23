@@ -715,6 +715,62 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
     expect(missingPreviewRevisionCli.result).toEqual(
       missingRevisionCli.result,
     );
+    const missingLabelRevisionWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "update_disc_selection",
+        discSelectionId: firstSelectionId,
+        mutationKey: "00000000-0000-4000-8000-000000000415",
+        changes: { label: "Synthetic feature" },
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const missingLabelRevisionCli = await fixture.run([
+      "disc-selection",
+      "update",
+      archive.id,
+      firstSelectionId,
+      "--key",
+      "00000000-0000-4000-8000-000000000416",
+      "--label",
+      "Synthetic feature",
+    ]);
+    expect(missingLabelRevisionWeb.status).toBe(409);
+    expect(missingLabelRevisionCli.exitCode).toBe(2);
+    expect(missingLabelRevisionCli.result).toEqual(
+      await missingLabelRevisionWeb.json(),
+    );
+    expect(missingLabelRevisionCli.result).toEqual(
+      missingRevisionCli.result,
+    );
+    const staleLabelWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "update_disc_selection",
+        discSelectionId: firstSelectionId,
+        catalogRevision: before.catalogRevision,
+        mutationKey: "00000000-0000-4000-8000-000000000417",
+        changes: { label: "Synthetic feature" },
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const staleLabelCli = await fixture.run([
+      "disc-selection",
+      "update",
+      archive.id,
+      firstSelectionId,
+      "--key",
+      "00000000-0000-4000-8000-000000000418",
+      "--revision",
+      before.catalogRevision,
+      "--label",
+      "Synthetic feature",
+    ]);
+    expect(staleLabelWeb.status).toBe(409);
+    expect(staleLabelCli.exitCode).toBe(2);
+    expect(staleLabelCli.result).toEqual(await staleLabelWeb.json());
     const staleWeb = await createCatalogReviewRoute(
       catalogReviewMutationRequest(archive.id, {
         action: "create_disc_selection",
@@ -747,6 +803,7 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
     expect(staleWeb.status).toBe(409);
     expect(staleCli.exitCode).toBe(2);
     expect(staleCli.result).toEqual(await staleWeb.json());
+    expect(staleLabelCli.result).toEqual(staleCli.result);
     expect(staleCli.result).toMatchObject({
       error: {
         code: "STALE_CATALOG_REVISION",

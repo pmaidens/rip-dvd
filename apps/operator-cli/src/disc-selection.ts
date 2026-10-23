@@ -285,7 +285,8 @@ export function runDiscSelection(rest: readonly string[], io: SelectionIO): unkn
     invalid("Acknowledgement of a Disc Selection preview is required.");
   }
   if (!consequential && ["--acknowledge", "--preview-token"].some((name) => options.has(name)) ||
-      !consequential && action !== "create" && options.has("--revision")) {
+      !consequential && action !== "create" && action !== "update" &&
+        options.has("--revision")) {
     invalid("This Disc Selection change does not require a preview.");
   }
   const expectedCatalogRevision = consequential ? revision(options.get("--revision")) : undefined;
