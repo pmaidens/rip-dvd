@@ -223,6 +223,43 @@ it("inspects, submits, replays, and rejects stale DVD Disc Verification", async 
   });
 });
 
+it("redacts Recovery claim and device identity from verification inspection", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const access = fixture.openAccess();
+  access.archiveRecoveryWork.claim(
+    seeded.recoveryId,
+    "synthetic-private-recovery-worker",
+  );
+  access.close();
+  const sqlite = new DatabaseSync(fixture.databasePath);
+  sqlite.prepare(`UPDATE archive_recovery_work SET
+    admitted_device_path = ?, admitted_device_id = ?, admitted_device_inode = ?
+    WHERE archive_recovery_id = ?`).run(
+      "/dev/synthetic-private-recovery",
+      "synthetic-private-device",
+      "synthetic-private-inode",
+      seeded.recoveryId,
+    );
+  sqlite.close();
+
+  const inspected = await fixture.run([
+    "archive-recovery",
+    "inspect-verification",
+    seeded.recoveryId,
+  ]);
+  expect(inspected.exitCode).toBe(0);
+  expect((inspected.result as {
+    archiveRecovery: { work: unknown };
+  }).archiveRecovery.work).toEqual({
+    archiveRecoveryId: seeded.recoveryId,
+    originalDiscArchiveId: seeded.archive.id,
+    attemptId: seeded.attemptId,
+    status: "claimed",
+  });
+});
+
 it("keeps a durable mismatch authoritative when a worker claim expires", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);

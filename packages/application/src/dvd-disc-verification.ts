@@ -19,6 +19,7 @@ import {
   defaultArchiveImageOwnership,
   type ArchiveImageOwnership,
 } from "@rip-dvd/worker-runtime";
+import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 
 export type DvdDiscVerificationAvailabilityCode =
   | "CONSISTENCY_FAULT"
@@ -269,7 +270,7 @@ export async function inspectDvdDiscVerification(
       });
     }
     return {
-      archiveRecovery: recovery,
+      archiveRecovery: visibleArchiveRecovery(recovery),
       checkpoint,
       insertion: currentInspection === null ? null : {
         discInspectionId: currentInspection.discInspectionId,
