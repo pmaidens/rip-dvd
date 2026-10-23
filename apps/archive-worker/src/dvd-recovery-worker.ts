@@ -75,7 +75,7 @@ class DvdRecoveryStopDeferred extends Error {
 }
 
 function admittedDeviceIdentity(
-  recovery: ArchiveRecovery,
+  recovery: Pick<ArchiveRecovery, "work">,
 ): OpticalDeviceIdentity | null {
   const work = recovery.work;
   if (work === null || work.admittedDevicePath === null) return null;
@@ -402,7 +402,7 @@ async function reclaimInterruptedPass(input: {
   };
   let quiescenceEntered = false;
   try {
-    const deviceIdentity = admittedDeviceIdentity(input.recovery);
+    const deviceIdentity = admittedDeviceIdentity({ work: claim });
     if (deviceIdentity === null) {
       quiescenceEntered = true;
       await reconcileAndRequeue();

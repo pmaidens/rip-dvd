@@ -1002,6 +1002,19 @@ it("reclaims a crashed worker claim before a restarted worker resumes", async ()
   }));
   const input = pollInput(fixture, source.reader);
   input.workerExecutionId = "synthetic-restarted-after-crash-worker";
+  const racedIdentity = { ...crashedIdentity, inode: "8" };
+  const beginInterruptedTakeover = input.access.archiveRecoveryWork
+    .beginInterruptedTakeover.bind(input.access.archiveRecoveryWork);
+  vi.spyOn(input.access.archiveRecoveryWork, "beginInterruptedTakeover")
+    .mockImplementationOnce((claim, workerId) => {
+      input.access.archiveRecoveryWork.admitSourceRead(
+        claim,
+        seeded.verificationDrive.devicePath,
+        () => racedIdentity,
+      );
+      return beginInterruptedTakeover(claim, workerId);
+    })
+    .mockImplementation(beginInterruptedTakeover);
   const withDeviceIdentityInactive = vi.fn(async (
     _identity: ReturnType<typeof syntheticDeviceIdentity>,
     mutation: () => void | Promise<void>,
@@ -1025,7 +1038,7 @@ it("reclaims a crashed worker claim before a restarted worker resumes", async ()
   try {
     expect(await pollDvdRecoveryPass(input)).toBe(false);
     expect(withDeviceIdentityInactive).toHaveBeenCalledWith(
-      crashedIdentity,
+      racedIdentity,
       expect.any(Function),
     );
     expect(source.start).not.toHaveBeenCalled();
@@ -1037,7 +1050,8 @@ it("reclaims a crashed worker claim before a restarted worker resumes", async ()
       work: {
         status: "claimed",
         claimedBy: "synthetic-restarted-after-crash-worker",
-        admittedDevicePath: crashedIdentity.devicePath,
+        admittedDevicePath: racedIdentity.devicePath,
+        admittedDeviceInode: racedIdentity.inode,
       },
     });
     expect(fenced?.work?.claimToken).not.toBe(crashed.claim.claimToken);
