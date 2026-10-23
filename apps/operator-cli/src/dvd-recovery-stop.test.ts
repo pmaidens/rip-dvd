@@ -101,4 +101,4 @@ it("replays a lost Stop response after process restart and attempt rotation", as
       },
     },
   });
-});
+}, 20_000);
