@@ -5,6 +5,7 @@ import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
 import { DISC_SELECTION_KINDS } from "@rip-dvd/data-access/catalog-kinds";
 
 import { integerFormValue } from "./catalog-review-form";
+import { CatalogReviewDraftEvidenceNotice } from "./catalog-review-draft-evidence";
 import { orderMediaItemHierarchy } from "./catalog-review-hierarchy";
 import {
   type CatalogReviewDiscSelection,
@@ -36,6 +37,7 @@ interface CatalogReviewDiscSelectionsProps {
   allowMainFeature?: boolean;
   selectionKind: DiscSelectionKind;
   isSaving: boolean;
+  mappingAvailable?: boolean;
   onPage(offset: number): void;
   onCorrectionHistoryPage(offset: number): void;
   onCorrectionEncodeHistoryPage(offset: number): void;
@@ -124,6 +126,7 @@ export function CatalogReviewDiscSelections({
   allowMainFeature = true,
   selectionKind,
   isSaving,
+  mappingAvailable = true,
   onPage,
   onCorrectionHistoryPage,
   onCorrectionEncodeHistoryPage,
@@ -339,7 +342,7 @@ export function CatalogReviewDiscSelections({
                 {hasAction(selection, "remove") ? (
                   <button
                     type="button"
-                    disabled={isSaving}
+                    disabled={isSaving || !mappingAvailable}
                     onClick={() => onDelete(selection.id)}
                   >
                     Remove Disc Selection
@@ -480,20 +483,13 @@ export function CatalogReviewDiscSelections({
         onSubmit={submitSelection}
       >
         <h3>{editingSelection ? "Edit Disc Selection" : "Add Disc Selection"}</h3>
-        {draftUsesStaleEvidence ? (
-          <div className="section-message" role="status">
-            <span>
-              Catalog evidence changed while this draft was open. Your values
-              are preserved; review the refreshed evidence before continuing.
-            </span>{" "}
-            <button
-              type="button"
-              onClick={() => setDraftCatalogRevision(catalogRevision)}
-            >
-              Use refreshed evidence
-            </button>
-          </div>
-        ) : null}
+        <CatalogReviewDraftEvidenceNotice
+          usesStaleEvidence={draftUsesStaleEvidence}
+          mappingAvailable={mappingAvailable}
+          isSaving={isSaving}
+          onUseRefreshedEvidence={() =>
+            setDraftCatalogRevision(catalogRevision)}
+        />
         {hasSupersessionCorrection ? (
           <p>
             A job-backed Disc Selection Correction creates a new identity and
@@ -651,7 +647,7 @@ export function CatalogReviewDiscSelections({
         </div>
         <button
           type="submit"
-          disabled={isSaving || mediaItems.length === 0 ||
+          disabled={isSaving || !mappingAvailable || mediaItems.length === 0 ||
             draftUsesStaleEvidence}
         >
           {editingSelection ? "Save Disc Selection" : "Add Disc Selection"}

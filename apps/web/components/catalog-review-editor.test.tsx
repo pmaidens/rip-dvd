@@ -1437,7 +1437,113 @@ describe("CatalogReviewEditor", () => {
     );
   });
 
-  it("keeps a failed Mapping Proposal editable and refreshes the exact-source mapping after success", async () => {
+  it("preserves an open draft and disables mapping when Recovery faults", async () => {
+    const initialReview = activeRecoveryCatalogReview(catalogReview({
+      archiveId: "archive-a",
+      discLabel: "RECOVERY_MAPPING_FAULT",
+    }), 1);
+    initialReview.mediaItems.push({
+      id: "episode-2",
+      parentId: null,
+      kind: "episode",
+      title: "Episode Two",
+      year: null,
+      seasonNumber: null,
+      episodeNumber: 2,
+    });
+    const initialWorkflow = initialReview.reviewWorkflow!;
+    const faultedReview: CatalogReviewDto = {
+      ...initialReview,
+      reviewWorkflow: {
+        ...initialWorkflow,
+        facts: { ...initialWorkflow.facts, recovering: false },
+        current: {
+          ...initialWorkflow.current,
+          recovery: {
+            ...initialWorkflow.current.recovery!,
+            state: "faulted",
+          },
+        },
+        actions: initialWorkflow.actions.map((action) =>
+          action.action === "catalog_mapping"
+            ? {
+                ...action,
+                available: false,
+                reasons: [{
+                  code: "CONSISTENCY_FAULT" as const,
+                  message: "Current catalog mapping evidence is inconsistent.",
+                  details: {},
+                }],
+              }
+            : action
+        ),
+      },
+    };
+    const postedCommands: unknown[] = [];
+    let getCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (init?.method === "POST") {
+        postedCommands.push(JSON.parse(String(init.body)) as unknown);
+        return Response.json({}, { status: 201 });
+      }
+      getCount += 1;
+      return Response.json(getCount === 1 ? initialReview : faultedReview);
+    }));
+    const render = (activityRevision: string) => root.render(
+      <CatalogReviewEditor
+        archiveId="archive-a"
+        activityRevision={activityRevision}
+        onClose={() => undefined}
+        onCompleted={() => undefined}
+      />,
+    );
+
+    await act(async () => render("activity-1"));
+    const action = container.querySelector<HTMLSelectElement>(
+      'select[name="replacesDiscSelectionId"]',
+    );
+    if (!action) throw new Error("Expected the Catalog action control");
+    await act(async () => {
+      action.value = initialReview.discSelections[0]!.id;
+      action.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const mediaItem = container.querySelector<HTMLSelectElement>(
+      'select[name="mediaItemId"]',
+    );
+    const submit = container.querySelector<HTMLButtonElement>(
+      'button[type="submit"]',
+    );
+    if (!mediaItem || !submit) {
+      throw new Error("Expected editable Disc Selection controls");
+    }
+    await act(async () => {
+      mediaItem.value = "episode-2";
+      mediaItem.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    await act(async () => render("activity-2"));
+    expect(mediaItem.value).toBe("episode-2");
+    expect(submit.disabled).toBe(true);
+    expect(container.textContent).toContain("CONSISTENCY_FAULT");
+    expect(container.textContent).toContain(
+      "Current catalog mapping evidence is inconsistent.",
+    );
+    const remove = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Remove Disc Selection",
+    );
+    const mapMovie = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Map as movie",
+    );
+    expect(remove?.disabled).toBe(true);
+    expect(mapMovie?.disabled).toBe(true);
+    await act(async () => submit.click());
+    expect(postedCommands).toEqual([]);
+  });
+
+  it("rebinds a preserved Mapping Proposal after Recovery advances", async () => {
     const initialReview = catalogReview({
       archiveId: "archive-a",
       discLabel: "MAPPING_PROPOSAL_DISC_2",
@@ -1498,7 +1604,15 @@ describe("CatalogReviewEditor", () => {
       );
     }));
 
-    await act(async () => renderCatalogReviewEditor("archive-a"));
+    const render = (activityRevision: string) => root.render(
+      <CatalogReviewEditor
+        archiveId="archive-a"
+        activityRevision={activityRevision}
+        onClose={() => undefined}
+        onCompleted={() => undefined}
+      />,
+    );
+    await act(async () => render("activity-1"));
     const mapMovie = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "Map as movie",
     );
@@ -1532,6 +1646,16 @@ describe("CatalogReviewEditor", () => {
       '.catalog-mapping-proposal input[name="title"]',
     )?.value).toBe("Corrected Proposal Title");
 
+    await act(async () => render("activity-2"));
+    expect(titleInput.value).toBe("Corrected Proposal Title");
+    expect(submit.disabled).toBe(true);
+    const useRefreshedEvidence = [...(proposal?.querySelectorAll("button") ?? [])]
+      .find((button) => button.textContent === "Use refreshed evidence");
+    if (!useRefreshedEvidence) {
+      throw new Error("Expected the refreshed-evidence proposal action");
+    }
+    await act(async () => useRefreshedEvidence.click());
+    expect(titleInput.value).toBe("Corrected Proposal Title");
     await act(async () => submit.click());
     expect(container.querySelector(".catalog-mapping-proposal")).toBeNull();
     expect(container.textContent).toContain("Corrected Proposal Title");
@@ -1560,7 +1684,7 @@ describe("CatalogReviewEditor", () => {
       },
       {
         action: "create_mapping_proposal",
-        catalogRevision: initialReview.catalogRevision,
+        catalogRevision: refreshedReview.catalogRevision,
         target: {
           choice: "create_new",
           mediaItem: {
@@ -1579,7 +1703,7 @@ describe("CatalogReviewEditor", () => {
     ]);
   });
 
-  it("orders selected titles into an editable episodic proposal and preserves it across validation errors", async () => {
+  it("rebinds a preserved episodic proposal after Recovery advances", async () => {
     const initialReview = catalogReview({
       archiveId: "archive-a",
       discLabel: "EXAMPLE_SHOW_DISC_2",
@@ -1642,7 +1766,15 @@ describe("CatalogReviewEditor", () => {
       );
     }));
 
-    await act(async () => renderCatalogReviewEditor("archive-a"));
+    const render = (activityRevision: string) => root.render(
+      <CatalogReviewEditor
+        archiveId="archive-a"
+        activityRevision={activityRevision}
+        onClose={() => undefined}
+        onCompleted={() => undefined}
+      />,
+    );
+    await act(async () => render("activity-1"));
     const selectTitle = (titleNumber: number) => container.querySelector<
       HTMLInputElement
     >(`input[name="episodicTitleNumbers"][value="${titleNumber}"]`);
@@ -1733,14 +1865,24 @@ describe("CatalogReviewEditor", () => {
       'input[name="episodeNumber-5"]',
     )?.value).toBe("12");
 
+    await act(async () => render("activity-2"));
+    expect(editedEpisodeTitle.value).toBe("A Different Fifth Episode");
+    expect(editedEpisodeNumber.value).toBe("12");
+    expect(submit.disabled).toBe(true);
+    const useRefreshedEvidence = [...(proposal?.querySelectorAll("button") ?? [])]
+      .find((button) => button.textContent === "Use refreshed evidence");
+    if (!useRefreshedEvidence) {
+      throw new Error("Expected the refreshed-evidence episodic action");
+    }
+    await act(async () => useRefreshedEvidence.click());
+    expect(editedEpisodeTitle.value).toBe("A Different Fifth Episode");
     await act(async () => submit.click());
     expect(container.querySelector(
       ".catalog-episodic-mapping-proposal",
     )).toBeNull();
     expect(container.textContent).toContain("0 selected titles");
-    expect(withoutProposalKeys(postedCommands)).toEqual(Array(2).fill({
+    const expectedProposal = {
       action: "create_episodic_mapping_proposal",
-      catalogRevision: initialReview.catalogRevision,
       tvShow: {
         choice: "create_new",
         title: "Edited Show",
@@ -1761,7 +1903,11 @@ describe("CatalogReviewEditor", () => {
         },
         { titleNumber: 8, title: "Episode 6", episodeNumber: 6 },
       ],
-    }));
+    };
+    expect(withoutProposalKeys(postedCommands)).toEqual([
+      { ...expectedProposal, catalogRevision: initialReview.catalogRevision },
+      { ...expectedProposal, catalogRevision: refreshedReview.catalogRevision },
+    ]);
   });
 
   it("explicitly reuses a searched TV Show and its Season in an episodic proposal", async () => {

@@ -180,8 +180,10 @@ export function useCatalogReviewState({
   const [mappingProposalError, setMappingProposalError] = useState<
     string | null
   >(null);
-  const activeMappingProposalRevision = useRef<string | null>(null);
-  const activeEpisodicMappingProposalRevision = useRef<string | null>(null);
+  const [activeMappingProposalRevision, setActiveMappingProposalRevision] =
+    useState<string | null>(null);
+  const [activeEpisodicMappingProposalRevision,
+    setActiveEpisodicMappingProposalRevision] = useState<string | null>(null);
   const requestScope = useRef<
     ReturnType<typeof createCatalogReviewRequestScope> | null
   >(null);
@@ -259,8 +261,8 @@ export function useCatalogReviewState({
   useEffect(() => {
     setActiveMappingProposal(null);
     setActiveEpisodicMappingProposal(null);
-    activeMappingProposalRevision.current = null;
-    activeEpisodicMappingProposalRevision.current = null;
+    setActiveMappingProposalRevision(null);
+    setActiveEpisodicMappingProposalRevision(null);
   }, [archiveId]);
 
   useEffect(() => setArchiveOnlySelected(false), [archiveId]);
@@ -548,7 +550,7 @@ export function useCatalogReviewState({
     void mutate(
       {
         action: "create_mapping_proposal",
-        catalogRevision: activeMappingProposalRevision.current ??
+        catalogRevision: activeMappingProposalRevision ??
           state.review.catalogRevision,
         ...input,
       },
@@ -556,7 +558,7 @@ export function useCatalogReviewState({
         afterMutation: () => {
           setMappingProposalError(null);
           setActiveMappingProposal(null);
-          activeMappingProposalRevision.current = null;
+          setActiveMappingProposalRevision(null);
         },
         errorTarget: "mapping_proposal",
       },
@@ -572,7 +574,7 @@ export function useCatalogReviewState({
     void mutate(
       {
         action: "create_episodic_mapping_proposal",
-        catalogRevision: activeEpisodicMappingProposalRevision.current ??
+        catalogRevision: activeEpisodicMappingProposalRevision ??
           state.review.catalogRevision,
         ...input,
       },
@@ -580,7 +582,7 @@ export function useCatalogReviewState({
         afterMutation: () => {
           setMappingProposalError(null);
           setActiveEpisodicMappingProposal(null);
-          activeEpisodicMappingProposalRevision.current = null;
+          setActiveEpisodicMappingProposalRevision(null);
         },
         errorTarget: "mapping_proposal",
       },
@@ -688,7 +690,9 @@ export function useCatalogReviewState({
   return {
     state,
     activeMappingProposal,
+    activeMappingProposalRevision,
     activeEpisodicMappingProposal,
+    activeEpisodicMappingProposalRevision,
     archiveOnlySelected,
     editingMediaItemId,
     isSaving,
@@ -711,33 +715,43 @@ export function useCatalogReviewState({
       setRequestError(null);
       setMappingProposalError(null);
       setActiveEpisodicMappingProposal(null);
-      activeEpisodicMappingProposalRevision.current = null;
-      activeMappingProposalRevision.current = state.status === "loaded"
+      setActiveEpisodicMappingProposalRevision(null);
+      setActiveMappingProposalRevision(state.status === "loaded"
         ? state.review.catalogRevision
-        : null;
+        : null);
       setActiveMappingProposal(proposal);
     },
     cancelMappingProposal: () => {
       setRequestError(null);
       setMappingProposalError(null);
       setActiveMappingProposal(null);
-      activeMappingProposalRevision.current = null;
+      setActiveMappingProposalRevision(null);
     },
     startEpisodicMappingProposal: (proposal: EpisodicMappingProposal) => {
       setRequestError(null);
       setMappingProposalError(null);
       setActiveMappingProposal(null);
-      activeMappingProposalRevision.current = null;
-      activeEpisodicMappingProposalRevision.current = state.status === "loaded"
+      setActiveMappingProposalRevision(null);
+      setActiveEpisodicMappingProposalRevision(state.status === "loaded"
         ? state.review.catalogRevision
-        : null;
+        : null);
       setActiveEpisodicMappingProposal(proposal);
     },
     cancelEpisodicMappingProposal: () => {
       setRequestError(null);
       setMappingProposalError(null);
       setActiveEpisodicMappingProposal(null);
-      activeEpisodicMappingProposalRevision.current = null;
+      setActiveEpisodicMappingProposalRevision(null);
+    },
+    useRefreshedMappingProposalEvidence: () => {
+      if (state.status !== "loaded") return;
+      setMappingProposalError(null);
+      setActiveMappingProposalRevision(state.review.catalogRevision);
+    },
+    useRefreshedEpisodicMappingProposalEvidence: () => {
+      if (state.status !== "loaded") return;
+      setMappingProposalError(null);
+      setActiveEpisodicMappingProposalRevision(state.review.catalogRevision);
     },
     createEpisodicMappingProposal,
     createMappingProposal,

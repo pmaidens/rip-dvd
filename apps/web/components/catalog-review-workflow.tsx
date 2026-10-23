@@ -137,6 +137,38 @@ export function CatalogReviewRecoveryStep({
   );
 }
 
+export function CatalogReviewMappingStatus({
+  workflow,
+}: {
+  workflow: CatalogReviewWorkflow;
+}) {
+  const action = actionFor(workflow, "catalog_mapping");
+  if (action.available) return null;
+
+  return (
+    <section
+      className="catalog-pane catalog-mapping-status"
+      aria-labelledby="catalog-mapping-status-heading"
+    >
+      <h3 id="catalog-mapping-status-heading">
+        Catalog mapping availability
+      </h3>
+      <p className="catalog-help">
+        Catalog mapping is unavailable for the current workflow evidence.
+        Draft values are preserved.
+      </p>
+      <ul className="catalog-workflow-reasons">
+        {action.reasons.map((reason) => (
+          <li key={reason.code}>
+            <code>{reason.code}</code>
+            <span>{reason.message}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 function actionFor(
   workflow: CatalogReviewWorkflow,
   action: CatalogReviewWorkflowAction["action"],

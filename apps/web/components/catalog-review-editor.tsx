@@ -19,6 +19,7 @@ import { CatalogReviewTitleIdentity } from "./catalog-review-title-identity";
 import { CatalogReviewTitleDamageEvidence } from "./catalog-review-title-damage";
 import {
   CatalogReviewDamageDecisionStatus,
+  CatalogReviewMappingStatus,
   CatalogReviewRecoveryStep,
 } from "./catalog-review-workflow";
 import type {
@@ -46,7 +47,9 @@ interface CatalogReviewViewProps {
   mappingProposalError: string | null;
   selectionKind: DiscSelectionKind;
   activeMappingProposal: MappingProposal | null;
+  activeMappingProposalRevision?: string | null;
   activeEpisodicMappingProposal?: EpisodicMappingProposal | null;
+  activeEpisodicMappingProposalRevision?: string | null;
   archiveOnlySelected: boolean;
   onClose(): void;
   onRetry(): void;
@@ -62,9 +65,11 @@ interface CatalogReviewViewProps {
   onArchiveOnlyChange(selected: boolean): void;
   onStartMappingProposal(proposal: MappingProposal): void;
   onCancelMappingProposal(): void;
+  onUseRefreshedMappingProposalEvidence?(): void;
   onCreateMappingProposal(input: CreateMappingProposalInput): void;
   onStartEpisodicMappingProposal?(proposal: EpisodicMappingProposal): void;
   onCancelEpisodicMappingProposal?(): void;
+  onUseRefreshedEpisodicMappingProposalEvidence?(): void;
   onCreateEpisodicMappingProposal?(
     input: CreateEpisodicMappingProposalInput,
   ): void;
@@ -145,7 +150,9 @@ export function CatalogReviewView({
   mappingProposalError,
   selectionKind,
   activeMappingProposal,
+  activeMappingProposalRevision = null,
   activeEpisodicMappingProposal = null,
+  activeEpisodicMappingProposalRevision = null,
   archiveOnlySelected,
   onClose,
   onRetry,
@@ -161,9 +168,11 @@ export function CatalogReviewView({
   onArchiveOnlyChange,
   onStartMappingProposal,
   onCancelMappingProposal,
+  onUseRefreshedMappingProposalEvidence = () => undefined,
   onCreateMappingProposal,
   onStartEpisodicMappingProposal,
   onCancelEpisodicMappingProposal,
+  onUseRefreshedEpisodicMappingProposalEvidence = () => undefined,
   onCreateEpisodicMappingProposal,
   onAcceptAutomaticCatalogProposal = () => undefined,
   onPreviewRearchiveMappingProposal = async () => {
@@ -203,8 +212,22 @@ export function CatalogReviewView({
   }
 
   const { review } = state;
+  const catalogMappingAction = review.reviewWorkflow?.actions.find(
+    ({ action }) => action === "catalog_mapping",
+  );
+  const mappingAvailable = catalogMappingAction?.available ?? true;
+  const mappingProposalUsesStaleEvidence = activeMappingProposal !== null &&
+    activeMappingProposalRevision !== null &&
+    activeMappingProposalRevision !== review.catalogRevision;
+  const episodicMappingProposalUsesStaleEvidence =
+    activeEpisodicMappingProposal !== null &&
+    activeEpisodicMappingProposalRevision !== null &&
+    activeEpisodicMappingProposalRevision !== review.catalogRevision;
   const mappingContent = (
     <>
+      {review.reviewWorkflow === undefined
+        ? null
+        : <CatalogReviewMappingStatus workflow={review.reviewWorkflow} />}
       {review.rearchiveProposal ? (
         <CatalogReviewRearchiveProposal
           proposal={review.rearchiveProposal}
@@ -256,6 +279,13 @@ export function CatalogReviewView({
             activeEpisodicMappingProposal={activeEpisodicMappingProposal}
             allowMainFeatureProposal={review.reviewWorkflow === undefined}
             isSaving={isSaving}
+            mappingAvailable={mappingAvailable}
+            mappingProposalUsesStaleEvidence={
+              mappingProposalUsesStaleEvidence
+            }
+            episodicMappingProposalUsesStaleEvidence={
+              episodicMappingProposalUsesStaleEvidence
+            }
             mappingProposalError={mappingProposalError}
             onStartMappingProposal={onStartMappingProposal}
             onCancelMappingProposal={onCancelMappingProposal}
@@ -263,6 +293,12 @@ export function CatalogReviewView({
             onStartEpisodicMappingProposal={onStartEpisodicMappingProposal}
             onCancelEpisodicMappingProposal={onCancelEpisodicMappingProposal}
             onCreateEpisodicMappingProposal={onCreateEpisodicMappingProposal}
+            onUseRefreshedMappingProposalEvidence={
+              onUseRefreshedMappingProposalEvidence
+            }
+            onUseRefreshedEpisodicMappingProposalEvidence={
+              onUseRefreshedEpisodicMappingProposalEvidence
+            }
           />
 
           <CatalogReviewMediaItems
@@ -272,7 +308,7 @@ export function CatalogReviewView({
               (selection) => selection.mediaItemId,
             )}
             editingMediaItemId={editingMediaItemId}
-            isSaving={isSaving}
+            isSaving={isSaving || !mappingAvailable}
             onEdit={onEditMediaItem}
             onCancelEdit={onCancelEdit}
             onSave={onSaveMediaItem}
@@ -314,6 +350,7 @@ export function CatalogReviewView({
               allowMainFeature={review.reviewWorkflow === undefined}
               selectionKind={selectionKind}
               isSaving={isSaving}
+              mappingAvailable={mappingAvailable}
               onPage={onDiscSelectionsPage}
               onCorrectionHistoryPage={onCorrectionHistoryPage}
               onCorrectionEncodeHistoryPage={onCorrectionEncodeHistoryPage}
@@ -511,7 +548,11 @@ export function CatalogReviewEditor({
       mappingProposalError={review.mappingProposalError}
       selectionKind={review.selectionKind}
       activeMappingProposal={review.activeMappingProposal}
+      activeMappingProposalRevision={review.activeMappingProposalRevision}
       activeEpisodicMappingProposal={review.activeEpisodicMappingProposal}
+      activeEpisodicMappingProposalRevision={
+        review.activeEpisodicMappingProposalRevision
+      }
       archiveOnlySelected={review.archiveOnlySelected}
       onClose={onClose}
       onRetry={review.retry}
@@ -531,9 +572,15 @@ export function CatalogReviewEditor({
       onArchiveOnlyChange={review.changeArchiveOnlySelected}
       onStartMappingProposal={review.startMappingProposal}
       onCancelMappingProposal={review.cancelMappingProposal}
+      onUseRefreshedMappingProposalEvidence={
+        review.useRefreshedMappingProposalEvidence
+      }
       onCreateMappingProposal={review.createMappingProposal}
       onStartEpisodicMappingProposal={review.startEpisodicMappingProposal}
       onCancelEpisodicMappingProposal={review.cancelEpisodicMappingProposal}
+      onUseRefreshedEpisodicMappingProposalEvidence={
+        review.useRefreshedEpisodicMappingProposalEvidence
+      }
       onCreateEpisodicMappingProposal={review.createEpisodicMappingProposal}
       onAcceptAutomaticCatalogProposal={review.acceptAutomaticCatalogProposal}
       onPreviewRearchiveMappingProposal={

@@ -3,6 +3,7 @@
 import React, { useState } from "react";
 
 import { displayTerm } from "../lib/display-term";
+import { CatalogReviewDraftEvidenceNotice } from "./catalog-review-draft-evidence";
 import { integerFormValue } from "./catalog-review-form";
 import { requestMediaItemSearch } from "./catalog-review-media-item-search";
 import type {
@@ -132,16 +133,22 @@ export function CatalogReviewEpisodicMappingProposal({
   proposal,
   proposedTitle,
   isSaving,
+  mappingAvailable = true,
+  usesStaleEvidence = false,
   error,
   onCancel,
   onCreate,
+  onUseRefreshedEvidence = () => undefined,
 }: {
   proposal: EpisodicMappingProposal;
   proposedTitle: string;
   isSaving: boolean;
+  mappingAvailable?: boolean;
+  usesStaleEvidence?: boolean;
   error: string | null;
   onCancel(): void;
   onCreate(input: CreateEpisodicMappingProposalInput): void;
+  onUseRefreshedEvidence?(): void;
 }) {
   const [tvShowChoice, setTvShowChoice] = useState<
     "create_new" | "use_existing"
@@ -230,6 +237,12 @@ export function CatalogReviewEpisodicMappingProposal({
           {visibleError}
         </div>
       ) : null}
+      <CatalogReviewDraftEvidenceNotice
+        usesStaleEvidence={usesStaleEvidence}
+        mappingAvailable={mappingAvailable}
+        isSaving={isSaving}
+        onUseRefreshedEvidence={onUseRefreshedEvidence}
+      />
       <form
         className="catalog-form"
         aria-describedby={visibleError ? errorId : undefined}
@@ -390,7 +403,10 @@ export function CatalogReviewEpisodicMappingProposal({
             ))}
           </ol>
         </fieldset>
-        <button type="submit" disabled={isSaving}>
+        <button
+          type="submit"
+          disabled={isSaving || !mappingAvailable || usesStaleEvidence}
+        >
           Create episodic hierarchy and Disc Selections
         </button>
       </form>
