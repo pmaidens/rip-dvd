@@ -12,7 +12,12 @@ afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
 it("shows every checkpoint-bound Title Identity through the public JSON CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
-  const { archive } = await seedCommittedArchiveEvidence(fixture);
+  const { archive } = await seedCommittedArchiveEvidence(
+    fixture,
+    [],
+    false,
+    true,
+  );
   const access = fixture.openAccess();
   const header = access.catalog.findDvdArchiveEvidenceHeader(archive.id)!;
   const mediaItem = access.catalog.createMediaItem({

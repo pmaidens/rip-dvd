@@ -1,5 +1,7 @@
 import {
   executeDiscSelectionCommand,
+  CatalogReviewMappingUnavailableError,
+  CatalogReviewRevisionStaleError,
   parseMutationKey,
   previewDiscSelection,
   previewDiscSelectionChange,
@@ -168,6 +170,16 @@ function withSelectionAccess<T>(io: SelectionIO, operation: (access: DataAccess)
     access = io.openAccess();
     return operation(access);
   } catch (error) {
+    if (error instanceof CatalogReviewMappingUnavailableError ||
+        error instanceof CatalogReviewRevisionStaleError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        undefined,
+        { reasons: error.blockingReasons, current: error.current },
+      );
+    }
     if (error instanceof MutationKeyConflictError) {
       throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
     }

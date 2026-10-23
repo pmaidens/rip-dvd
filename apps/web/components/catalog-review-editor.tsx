@@ -90,7 +90,7 @@ interface CatalogReviewViewProps {
 export function catalogReviewSelectionTitles(
   review: Pick<
     Extract<CatalogReviewLoadState, { status: "loaded" }>["review"],
-    "rawScan" | "titleIdentity"
+    "rawScan" | "titleIdentity" | "reviewWorkflow"
   >,
 ) {
   return review.titleIdentity?.available
@@ -102,7 +102,29 @@ export function catalogReviewSelectionTitles(
         number: observation.displayTitleNumber,
         chapters: observation.chapterCount,
       }))
-    : review.rawScan.titles;
+    : review.reviewWorkflow === undefined
+    ? review.rawScan.titles
+    : [];
+}
+
+function catalogReviewEvidenceTitles(
+  review: Pick<
+    Extract<CatalogReviewLoadState, { status: "loaded" }>["review"],
+    "rawScan" | "titleIdentity" | "reviewWorkflow"
+  >,
+) {
+  if (review.reviewWorkflow === undefined) return review.rawScan.titles;
+  if (review.titleIdentity?.available !== true) return [];
+  const currentTitleNumbers = new Set(
+    review.titleIdentity.items
+      .filter(({ presentAtCurrentCheckpoint, observation }) =>
+        presentAtCurrentCheckpoint && observation.angleNumber === 1
+      )
+      .map(({ observation }) => observation.displayTitleNumber),
+  );
+  return review.rawScan.titles.filter(({ number }) =>
+    currentTitleNumbers.has(number)
+  );
 }
 
 export function CatalogReviewView({
@@ -217,7 +239,7 @@ export function CatalogReviewView({
           <CatalogReviewEvidence
             coverage={review.coverage}
             volumeLabel={review.archive.discLabel}
-            titles={review.rawScan.titles}
+            titles={catalogReviewEvidenceTitles(review)}
             mediaItems={review.mediaItems}
             activeMappingProposal={activeMappingProposal}
             activeEpisodicMappingProposal={activeEpisodicMappingProposal}

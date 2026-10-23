@@ -20,6 +20,8 @@ export type CatalogReviewWorkflowReasonCode =
   | "MAPPING_REVIEW_REQUIRED"
   | "SELECTION_UNIDENTIFIED"
   | "ACCEPTANCE_REQUIRED"
+  | "CATALOG_DAMAGE_DECISION_UNAVAILABLE"
+  | "STALE_CATALOG_REVISION"
   | "CATALOG_REVIEW_COMPLETION_UNAVAILABLE"
   | typeof DVD_RECOVERY_EVIDENCE_ENCODING.code;
 
@@ -93,6 +95,49 @@ export class CatalogReviewCompletionUnavailableError
         evidenceFormat: workflow.evidenceFormat,
         replacementAction: decision.action,
       },
+    }];
+    this.current = workflow.current;
+  }
+}
+
+export class CatalogReviewMappingUnavailableError
+  extends DomainInvariantError {
+  readonly code = "CATALOG_MAPPING_UNAVAILABLE" as const;
+  readonly blockingReasons: readonly CatalogReviewWorkflowReason[];
+  readonly current: CatalogReviewWorkflow["current"];
+
+  constructor(workflow: CatalogReviewWorkflow) {
+    const mapping = workflow.actions.find(({ action }) =>
+      action === "catalog_mapping"
+    );
+    if (mapping === undefined || mapping.available) {
+      throw new DomainInvariantError(
+        "Catalog Review workflow is missing mapping unavailability",
+      );
+    }
+    super("Catalog mapping is unavailable for the current workflow evidence.");
+    this.name = "CatalogReviewMappingUnavailableError";
+    this.blockingReasons = mapping.reasons;
+    this.current = workflow.current;
+  }
+}
+
+export class CatalogReviewRevisionStaleError extends DomainInvariantError {
+  readonly code = "STALE_CATALOG_REVISION" as const;
+  readonly blockingReasons: readonly CatalogReviewWorkflowReason[];
+  readonly current: CatalogReviewWorkflow["current"];
+
+  constructor(
+    workflow: CatalogReviewWorkflow,
+    expectedCatalogRevision: string,
+    currentCatalogRevision: string,
+  ) {
+    super("Catalog review revision is stale");
+    this.name = "CatalogReviewRevisionStaleError";
+    this.blockingReasons = [{
+      code: "STALE_CATALOG_REVISION",
+      message: "Catalog Review evidence changed; reload before mapping.",
+      details: { expectedCatalogRevision, currentCatalogRevision },
     }];
     this.current = workflow.current;
   }
@@ -222,7 +267,8 @@ export function describeCatalogReviewWorkflow(
     }];
   const recoveryReasons: CatalogReviewWorkflowReason[] = recovery === null
     ? []
-    : recovery.status === "eligible" || recovery.status === "running"
+    : recovery.status === "eligible" || recovery.status === "running" ||
+        recovery.status === "paused"
     ? [{
       code: "RECOVERY_ACTIVE",
       message:
@@ -295,6 +341,19 @@ export function describeCatalogReviewWorkflow(
     ...mappingReasons,
   ]);
   const damageDecisionAvailable = damageReasons.length === 0;
+  const mappingActionReasons = uniqueReasons([
+    ...consistencyReasons,
+    ...(mappingState === "pending" ? mappingReasons : []),
+  ]);
+  const damageDecisionReasons = uniqueReasons([
+    ...damageReasons,
+    {
+      code: "CATALOG_DAMAGE_DECISION_UNAVAILABLE",
+      message:
+        "Damage decision operations are unavailable until web and JSON CLI support is complete.",
+      details: { evidenceFormat: "dvd-recovery-evidence-v1" },
+    },
+  ]);
   const encodeReasons = uniqueReasons([
     ...damageReasons,
     ...(titleDamage.acceptanceRequired
@@ -321,6 +380,7 @@ export function describeCatalogReviewWorkflow(
     facts: {
       saved: archiveJob?.status === "completed",
       recovering: recovery?.status === "running" ||
+        recovery?.status === "paused" ||
         recovery?.status === "stopping",
       mapped: mappingState === "mapped",
       mappingState,
@@ -352,14 +412,14 @@ export function describeCatalogReviewWorkflow(
     actions: [
       {
         action: "catalog_mapping",
-        available: true,
-        reasons: [],
+        available: mappingActionReasons.length === 0,
+        reasons: mappingActionReasons,
         expectedInputs: ["catalogRevision", "mutationKey"],
       },
       {
         action: "damage_decision",
-        available: damageDecisionAvailable,
-        reasons: damageReasons,
+        available: false,
+        reasons: damageDecisionReasons,
         expectedInputs: [
           "checkpointRevision",
           "assessmentIdentity",

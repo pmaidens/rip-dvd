@@ -242,6 +242,7 @@ import {
   type ValidatedEncodeJobFailureReportInput,
 } from "../encode-job-failure-report.js";
 import {
+  CatalogMappingEvidenceUnavailableError,
   DomainInvariantError,
   DvdRecoveryStorageUnavailableError,
   InvalidStatusTransitionError,
@@ -3469,10 +3470,16 @@ export function createDataAccessInternal(
         dvdArchiveEvidenceHeaders.originalDiscArchiveId,
         originalDiscArchiveId,
       )).get();
-    if (
-      header === undefined ||
-      header.evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT
-    ) {
+    const evidenceFormat = dvdRecoveryEvidenceFormatForArchive(
+      header,
+      transaction.select({ evidenceFormat: archiveJobs.evidenceFormat })
+        .from(archiveJobs)
+        .where(eq(
+          archiveJobs.originalDiscArchiveId,
+          originalDiscArchiveId,
+        )).all(),
+    );
+    if (evidenceFormat === null) {
       return createArchivedDvdSelectionValidator(scanData).validate(
         sourceIdentityInput,
       );
@@ -3480,7 +3487,21 @@ export function createDataAccessInternal(
     const sourceIdentity = createDiscSelectionSourceIdentity(
       sourceIdentityInput,
     );
-    if (sourceIdentity.kind === "main_feature") return sourceIdentity;
+    if (header === undefined) {
+      throw new CatalogMappingEvidenceUnavailableError();
+    }
+    const archiveJob = transaction.select({ status: archiveJobs.status })
+      .from(archiveJobs)
+      .where(eq(archiveJobs.id, header.sourceArchiveJobId)).get();
+    const recovery = transaction.select({ id: archiveRecoveries.id })
+      .from(archiveRecoveries)
+      .where(eq(
+        archiveRecoveries.originalDiscArchiveId,
+        originalDiscArchiveId,
+      )).get();
+    if (archiveJob?.status !== "completed" || recovery === undefined) {
+      throw new CatalogMappingEvidenceUnavailableError();
+    }
     const set = transaction.select().from(dvdTitleIdentitySets).where(and(
       eq(dvdTitleIdentitySets.originalDiscArchiveId, originalDiscArchiveId),
       eq(dvdTitleIdentitySets.manifestId, header.currentManifestId),
@@ -3491,9 +3512,7 @@ export function createDataAccessInternal(
       eq(dvdTitleIdentitySets.manifestDigest, header.currentManifestDigest),
     )).get();
     if (set === undefined) {
-      throw new DomainInvariantError(
-        "DVD title selections require current Title Identity evidence",
-      );
+      throw new CatalogMappingEvidenceUnavailableError();
     }
     const currentRows = transaction.select().from(dvdTitleIdentityObservations)
       .where(eq(dvdTitleIdentityObservations.manifestId, set.manifestId))
@@ -3503,6 +3522,10 @@ export function createDataAccessInternal(
       currentRows,
       header.acceptedEndLbaExclusive,
     );
+    if (currentRows.length === 0) {
+      throw new CatalogMappingEvidenceUnavailableError();
+    }
+    if (sourceIdentity.kind === "main_feature") return sourceIdentity;
     const matches = currentRows.filter((row) =>
       row.displayTitleNumber === sourceIdentity.titleNumber &&
       row.angleNumber === 1 &&
@@ -7140,7 +7163,7 @@ export function createDataAccessInternal(
         }
         const archive = requireRow(transaction.select({
           updatedAt: originalDiscArchives.updatedAt,
-          evidenceFormat: dvdArchiveEvidenceHeaders.evidenceFormat,
+          headerEvidenceFormat: dvdArchiveEvidenceHeaders.evidenceFormat,
         })
           .from(originalDiscArchives)
           .leftJoin(
@@ -7152,9 +7175,20 @@ export function createDataAccessInternal(
           )
           .where(eq(originalDiscArchives.id, originalDiscArchiveId)).get(),
         "original disc archive", originalDiscArchiveId);
+        const evidenceFormat = dvdRecoveryEvidenceFormatForArchive(
+          archive.headerEvidenceFormat === null
+            ? null
+            : { evidenceFormat: archive.headerEvidenceFormat },
+          transaction.select({ evidenceFormat: archiveJobs.evidenceFormat })
+            .from(archiveJobs)
+            .where(eq(
+              archiveJobs.originalDiscArchiveId,
+              originalDiscArchiveId,
+            )).all(),
+        );
         if (
           mutation.action === "create" &&
-          archive.evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT &&
+          evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT &&
           expectedCatalogRevision === undefined
         ) {
           throw new DomainInvariantError(
@@ -7163,7 +7197,9 @@ export function createDataAccessInternal(
         }
         if (expectedCatalogRevision !== undefined &&
             archive.updatedAt.getTime() !== expectedCatalogRevision.getTime()) {
-          throw new DomainInvariantError("Catalog review revision is stale");
+          throw new StaleCatalogRevisionError(
+            "Catalog review revision is stale",
+          );
         }
         if (mutation.action === "create" || mutation.action === "repair" ||
             mutation.action === "correct") {
@@ -7215,7 +7251,7 @@ export function createDataAccessInternal(
           activeDiscSelectionUsesCurrentTitleIdentity;
         activeDiscSelectionTransaction = transaction;
         activeDiscSelectionUsesCurrentTitleIdentity =
-          archive.evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT;
+          evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT;
         try {
           const result = (() => {
             switch (mutation.action) {

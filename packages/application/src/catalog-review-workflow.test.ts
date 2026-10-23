@@ -78,8 +78,12 @@ it("rejects legacy completion without inventing a damage acceptance requirement"
       expectedInputs: ["catalogRevision", "mutationKey"],
     }, {
       action: "damage_decision",
-      available: true,
-      reasons: [],
+      available: false,
+      reasons: [{
+        code: "CATALOG_DAMAGE_DECISION_UNAVAILABLE",
+        message: "Synthetic rollout fence",
+        details: { evidenceFormat: "dvd-recovery-evidence-v1" },
+      }],
       expectedInputs: [
         "checkpointRevision",
         "assessmentIdentity",
@@ -125,6 +129,14 @@ it("requires acceptance only when the current damage assessment proves it is nee
     decisionReadyEvidence(true),
   );
 
+  expect(cleanWorkflow?.facts.readyForDamageDecision).toBe(true);
+  expect(cleanWorkflow?.actions.find(({ action }) =>
+    action === "damage_decision"
+  )).toMatchObject({
+    available: false,
+    reasons: [{ code: "CATALOG_DAMAGE_DECISION_UNAVAILABLE" }],
+  });
+
   expect(cleanWorkflow?.actions.find(({ action }) => action === "encode")
     ?.reasons.map(({ code }) => code)).toEqual([
       "DVD_RECOVERY_EVIDENCE_ENCODING_UNAVAILABLE",
@@ -161,6 +173,46 @@ it("blocks a damage decision while an absent retained title needs mapping review
       reasons: [{
         code: "MAPPING_REVIEW_REQUIRED",
         details: { affectedTitleCount: 1 },
-      }],
+      }, { code: "CATALOG_DAMAGE_DECISION_UNAVAILABLE" }],
     });
+});
+
+it("keeps a no-progress Recovery pause active and decision-blocking", () => {
+  const evidence = decisionReadyEvidence(false);
+  const workflow = describeCatalogReviewWorkflow(
+    {} as ConsistentReadAccess,
+    archiveId,
+    {
+      ...evidence,
+      recovery: { ...evidence.recovery!, status: "paused" },
+    },
+  );
+
+  expect(workflow?.facts).toMatchObject({
+    recovering: true,
+    readyForDamageDecision: false,
+  });
+  expect(workflow?.actions.find(({ action }) =>
+    action === "damage_decision"
+  )?.reasons.map(({ code }) => code)).toEqual([
+    "RECOVERY_ACTIVE",
+    "CATALOG_DAMAGE_DECISION_UNAVAILABLE",
+  ]);
+});
+
+it("does not advertise mapping before current Title Identity evidence exists", () => {
+  const evidence = decisionReadyEvidence(false);
+  const workflow = describeCatalogReviewWorkflow(
+    {} as ConsistentReadAccess,
+    archiveId,
+    { ...evidence, titleIdentity: null },
+  );
+
+  expect(workflow?.facts.mappingState).toBe("pending");
+  expect(workflow?.actions.find(({ action }) =>
+    action === "catalog_mapping"
+  )).toMatchObject({
+    available: false,
+    reasons: [{ code: "SELECTION_UNIDENTIFIED" }],
+  });
 });

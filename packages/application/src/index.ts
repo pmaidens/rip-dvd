@@ -868,7 +868,9 @@ export { readCatalogReview, serializeDiscSelection, serializeMediaItem } from ".
 export type { CatalogReviewPageCoordinates } from "./catalog-review-read.js";
 export {
   assertLegacyCatalogReviewCompletionAvailable,
+  CatalogReviewMappingUnavailableError,
   CatalogReviewCompletionUnavailableError,
+  CatalogReviewRevisionStaleError,
   describeCatalogReviewWorkflow,
 } from "./catalog-review-workflow.js";
 export type {

@@ -49,6 +49,16 @@ export class StaleCatalogRevisionError extends DomainInvariantError {
   }
 }
 
+export class CatalogMappingEvidenceUnavailableError
+  extends DomainInvariantError {
+  constructor() {
+    super(
+      "Catalog mapping requires current Title Identity evidence and a consistent workflow",
+    );
+    this.name = "CatalogMappingEvidenceUnavailableError";
+  }
+}
+
 export class StaleJobAttemptError extends Error {
   constructor(recordType: string, id: string) {
     super(`Stale ${recordType} attempt: ${id}`);

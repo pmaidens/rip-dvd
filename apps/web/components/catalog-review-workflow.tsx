@@ -24,6 +24,8 @@ function recoveryLabel(
       return "Eligible for recovery";
     case "running":
       return "Recovering";
+    case "paused":
+      return "Paused after no progress";
     case "stopping":
       return "Stopping";
     case "stopped":
@@ -167,7 +169,9 @@ export function CatalogReviewDamageDecisionStatus({
       ) : (
         <>
           <p className="catalog-help">
-            Damage decisions remain unavailable. Catalog mapping can continue.
+            {workflow.facts.readyForDamageDecision
+              ? "Recovery, assessment, and mapping prerequisites are current, but the damage decision operation is not available yet."
+              : "Damage decisions remain unavailable. Catalog mapping can continue."}
           </p>
           <ul className="catalog-workflow-reasons">
             {action.reasons.map((reason) => (

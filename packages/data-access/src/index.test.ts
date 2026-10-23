@@ -794,6 +794,7 @@ function createDvdTitleIdentityArchiveFixture(fixtureId: string) {
     databasePath,
     archive.id,
     fixtureId,
+    { archiveRecoveryId: `${fixtureId}-recovery` },
   );
   return { access, archive, databasePath };
 }
@@ -15703,6 +15704,41 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         mappingState: "mapped",
       }],
     });
+    fixture.access.close();
+  });
+
+  it("does not treat a headerless marked archive as a legacy mapping source", () => {
+    const fixture = createDvdTitleIdentityArchiveFixture(
+      "title-headerless-current-mapping",
+    );
+    removeDvdArchiveEvidenceHeaderForTest(
+      fixture.databasePath,
+      fixture.archive.id,
+    );
+    const mediaItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic headerless mapping",
+    });
+    const catalogRevision = fixture.access.catalog.listOriginalDiscArchives({
+      ids: [fixture.archive.id],
+    })[0]!.updatedAt;
+
+    expect(() => fixture.access.catalog.mutateDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      expectedCatalogRevision: catalogRevision,
+      mutationKey: "synthetic-headerless-current-mapping",
+      mutation: {
+        action: "create",
+        selection: {
+          originalDiscArchiveId: fixture.archive.id,
+          mediaItemId: mediaItem.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        },
+      },
+    })).toThrow(/current Title Identity evidence/i);
+    expect(fixture.access.catalog.listDiscSelections({
+      originalDiscArchiveId: fixture.archive.id,
+    })).toEqual([]);
     fixture.access.close();
   });
 

@@ -149,6 +149,74 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
 
   const access = fixture.openAccess();
   const checkpoint = access.catalog.findDvdArchiveEvidenceHeader(archive.id)!;
+  const pendingWebReview = await createCatalogReviewRoute(
+    new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`),
+    archive.id,
+    () => access,
+    () => trustedOrigin,
+  );
+  const pendingCliReview = await fixture.run([
+    "catalog-review",
+    "show",
+    archive.id,
+  ]);
+  expect(pendingWebReview.status).toBe(200);
+  expect(pendingCliReview.result).toEqual(await pendingWebReview.json());
+  const pending = pendingCliReview.result as {
+    catalogRevision: string;
+    reviewWorkflow: {
+      actions: Array<{
+        action: string;
+        available: boolean;
+        reasons: Array<{ code: string }>;
+      }>;
+    };
+  };
+  expect(pending.reviewWorkflow.actions.find(({ action }) =>
+    action === "catalog_mapping"
+  )).toMatchObject({
+    available: false,
+    reasons: [{ code: "SELECTION_UNIDENTIFIED" }],
+  });
+  const pendingWebMapping = await createCatalogReviewRoute(
+    catalogReviewMutationRequest(archive.id, {
+      action: "create_disc_selection",
+      catalogRevision: pending.catalogRevision,
+      mutationKey: "00000000-0000-4000-8000-000000000395",
+      selection: {
+        mediaItemId: mediaItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    }),
+    archive.id,
+    () => access,
+    () => trustedOrigin,
+  );
+  const pendingCliMapping = await fixture.run([
+    "disc-selection",
+    "create",
+    archive.id,
+    "--key",
+    "00000000-0000-4000-8000-000000000396",
+    "--revision",
+    pending.catalogRevision,
+    "--media-item-id",
+    mediaItem.id,
+    "--source-kind",
+    "dvd_title",
+    "--title-number",
+    "1",
+  ]);
+  expect(pendingWebMapping.status).toBe(409);
+  expect(pendingCliMapping.exitCode).toBe(2);
+  expect(pendingCliMapping.result).toEqual(await pendingWebMapping.json());
+  expect(pendingCliMapping.result).toMatchObject({
+    error: {
+      code: "CATALOG_MAPPING_UNAVAILABLE",
+      reasons: [{ code: "SELECTION_UNIDENTIFIED" }],
+      current: { titleIdentityReviewSetId: null },
+    },
+  });
   const reviewSet = access.catalog.recordDvdTitleIdentityObservations({
     originalDiscArchiveId: archive.id,
     checkpoint: {
@@ -255,6 +323,7 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
             { code: "ASSESSMENT_PENDING" },
             { code: "RECOVERY_ACTIVE" },
             { code: "SELECTION_UNIDENTIFIED" },
+            { code: "CATALOG_DAMAGE_DECISION_UNAVAILABLE" },
           ],
         },
         { action: "encode", available: false },
@@ -309,6 +378,7 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       "RECOVERY_ACTIVE",
       "MAPPING_REVIEW_REQUIRED",
       "SELECTION_UNIDENTIFIED",
+      "CATALOG_DAMAGE_DECISION_UNAVAILABLE",
     ]);
 
     const firstMutationKey = "00000000-0000-4000-8000-000000000397";
@@ -348,6 +418,55 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
     expect(mappedFirst.exitCode, JSON.stringify(mappedFirst.result)).toBe(0);
     expect(mappedFirst.result).toEqual(await mappedFirstWeb.json());
     const afterFirst = await readBoth();
+    const staleWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "create_disc_selection",
+        catalogRevision: before.catalogRevision,
+        mutationKey: "00000000-0000-4000-8000-000000000399",
+        selection: {
+          mediaItemId: secondMediaItem.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
+        },
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const staleCli = await fixture.run([
+      "disc-selection",
+      "create",
+      archive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000400",
+      "--revision",
+      before.catalogRevision,
+      "--media-item-id",
+      secondMediaItem.id,
+      "--source-kind",
+      "dvd_title",
+      "--title-number",
+      "3",
+    ]);
+    expect(staleWeb.status).toBe(409);
+    expect(staleCli.exitCode).toBe(2);
+    expect(staleCli.result).toEqual(await staleWeb.json());
+    expect(staleCli.result).toMatchObject({
+      error: {
+        code: "STALE_CATALOG_REVISION",
+        reasons: [{
+          code: "STALE_CATALOG_REVISION",
+          details: {
+            expectedCatalogRevision: before.catalogRevision,
+            currentCatalogRevision: afterFirst.catalogRevision,
+          },
+        }],
+        current: {
+          checkpoint: { revision: 1 },
+          titleIdentityReviewSetId:
+            afterFirst.reviewWorkflow.current.titleIdentityReviewSetId,
+        },
+      },
+    });
     const mappedSecond = await fixture.run([
       "disc-selection",
       "create",
@@ -380,6 +499,9 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
     ).toEqual([
       expect.objectContaining({ code: "ASSESSMENT_PENDING" }),
       expect.objectContaining({ code: "RECOVERY_ACTIVE" }),
+      expect.objectContaining({
+        code: "CATALOG_DAMAGE_DECISION_UNAVAILABLE",
+      }),
     ]);
 
     const completionCommand = {

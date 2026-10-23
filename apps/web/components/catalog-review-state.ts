@@ -34,6 +34,22 @@ export {
   resumePendingCatalogReviewMutation,
 } from "./catalog-review-mutation";
 
+export function createDiscSelectionCommand(
+  selection: Omit<
+    CreateDiscSelectionInput,
+    "replacesDiscSelectionId" | "correctionReason"
+  >,
+  options: { catalogRevision: string; currentEvidence: boolean },
+): Extract<CatalogReviewCommand, { action: "create_disc_selection" }> {
+  return {
+    action: "create_disc_selection",
+    ...(options.currentEvidence
+      ? { catalogRevision: options.catalogRevision }
+      : {}),
+    selection,
+  };
+}
+
 type CatalogReviewFetch = (
   input: RequestInfo | URL,
   init?: RequestInit,
@@ -452,11 +468,10 @@ export function useCatalogReviewState({
     const { replacesDiscSelectionId, correctionReason, ...values } = selection;
     if (!replacesDiscSelectionId) {
       if (state.status !== "loaded") return;
-      void mutate({
-        action: "create_disc_selection",
+      void mutate(createDiscSelectionCommand(values, {
         catalogRevision: state.review.catalogRevision,
-        selection: values,
-      });
+        currentEvidence: state.review.reviewWorkflow !== undefined,
+      }));
       return;
     }
     if (state.status !== "loaded") return;

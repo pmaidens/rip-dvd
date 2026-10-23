@@ -2360,6 +2360,35 @@ describe("CatalogReviewView", () => {
     );
   });
 
+  it("does not fall back to raw titles while current identity evidence is pending", () => {
+    const review = catalogReview({
+      archiveId: "pending-identity-archive",
+      discLabel: "PENDING_IDENTITY",
+    });
+    review.rawScan.titles = [{
+      number: 1,
+      durationSeconds: 3_600,
+      chapters: 10,
+      audioStreams: [],
+      subtitles: [],
+    }];
+    review.titleIdentity = {
+      available: false,
+      unavailableReason: "TITLE_IDENTITY_NOT_RECORDED",
+      checkpoint: null,
+      policyVersion: null,
+      reviewSetIdentity: null,
+      items: [],
+    };
+    review.reviewWorkflow = {} as never;
+
+    expect(catalogReviewSelectionTitles(review)).toEqual([]);
+    delete review.reviewWorkflow;
+    expect(catalogReviewSelectionTitles(review)).toEqual(
+      review.rawScan.titles,
+    );
+  });
+
   it("reviews and saves fresh re-archive mappings before acceptance", async () => {
     const review = catalogReview({
       archiveId: "fresh-archive",

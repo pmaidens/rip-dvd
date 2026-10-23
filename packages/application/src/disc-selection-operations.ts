@@ -1,5 +1,7 @@
 import {
   DomainInvariantError,
+  CatalogMappingEvidenceUnavailableError,
+  StaleCatalogRevisionError,
   type DataAccess,
   type DiscSelectionAction,
   type DiscSelectionId,
@@ -19,6 +21,11 @@ import {
   isDiscSelectionPreviewToken,
 } from "./disc-selection-preview-token.js";
 import { parseMutationKey } from "./mutation-key.js";
+import {
+  CatalogReviewMappingUnavailableError,
+  CatalogReviewRevisionStaleError,
+  describeCatalogReviewWorkflow,
+} from "./catalog-review-workflow.js";
 
 type SelectionCommand = DiscSelectionCommand;
 
@@ -227,13 +234,41 @@ export function executeDiscSelectionCommand(
       throw new DomainInvariantError("Disc Selection preview does not match the proposed change");
     }
   }
-  const result = access.catalog.mutateDiscSelection({
-    originalDiscArchiveId: archiveId,
-    mutation,
-    mutationKey,
-    ...(expectedCatalogRevision ? { expectedCatalogRevision } : {}),
-    ...(options.previewToken ? { previewToken: options.previewToken } : {}),
-  });
+  const currentWorkflow = () => describeCatalogReviewWorkflow(access, archiveId);
+  const staleError = (expected: Date) => {
+    const workflow = currentWorkflow();
+    const archive = access.catalog.listOriginalDiscArchives({ ids: [archiveId] })[0];
+    return workflow === null || archive === undefined
+      ? new StaleCatalogRevisionError("Catalog review revision is stale")
+      : new CatalogReviewRevisionStaleError(
+        workflow,
+        expected.toISOString(),
+        archive.updatedAt.toISOString(),
+      );
+  };
+  const result = (() => {
+    try {
+      return access.catalog.mutateDiscSelection({
+        originalDiscArchiveId: archiveId,
+        mutation,
+        mutationKey,
+        ...(expectedCatalogRevision ? { expectedCatalogRevision } : {}),
+        ...(options.previewToken ? { previewToken: options.previewToken } : {}),
+      });
+    } catch (error) {
+      if (error instanceof StaleCatalogRevisionError &&
+          expectedCatalogRevision !== undefined) {
+        throw staleError(expectedCatalogRevision);
+      }
+      if (error instanceof CatalogMappingEvidenceUnavailableError) {
+        const workflow = currentWorkflow();
+        if (workflow !== null) {
+          throw new CatalogReviewMappingUnavailableError(workflow);
+        }
+      }
+      throw error;
+    }
+  })();
   return {
     message: "Mapping changed; review required",
     discSelection: serializeDiscSelection(result.discSelection),

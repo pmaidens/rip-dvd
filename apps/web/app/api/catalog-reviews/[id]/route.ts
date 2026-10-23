@@ -13,6 +13,8 @@ import { loadConfig } from "@rip-dvd/config";
 import {
   applyMappingProposal,
   CatalogReviewCompletionUnavailableError,
+  CatalogReviewMappingUnavailableError,
+  CatalogReviewRevisionStaleError,
   createApplicationOperations,
   executeDiscSelectionCommand,
   InvalidMutationKeyError,
@@ -352,6 +354,15 @@ export async function createCatalogReviewRoute(
         throw new Error("Unhandled catalog review command");
     }
   } catch (error) {
+    if (error instanceof CatalogReviewMappingUnavailableError ||
+        error instanceof CatalogReviewRevisionStaleError) {
+      return response({ error: {
+        code: error.code,
+        message: error.message,
+        reasons: error.blockingReasons,
+        current: error.current,
+      } }, 409);
+    }
     if (error instanceof CatalogReviewCompletionUnavailableError) {
       return response({ error: {
         code: error.code,
