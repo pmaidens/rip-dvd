@@ -100,55 +100,50 @@ function currentRecovery(
   return recovery;
 }
 
-async function insertionIsCurrent(input: {
+async function currentInsertionDevicePath(input: {
   access: DataAccess;
   authority: DvdRecoveryWriteAuthority;
   mediaGenerationObserver: MediaGenerationObserver;
   signal: AbortSignal;
-}): Promise<boolean> {
+}): Promise<string | null> {
   const inspection = input.access.discInspections.list({
     ids: [input.authority.discInspectionId],
   })[0];
   if (!dvdDiscVerificationInsertionIsCurrent(input.authority, inspection)) {
-    return false;
+    return null;
   }
   const drive = input.access.catalog.listOpticalDrives({
     ids: [inspection.opticalDriveId],
   })[0];
-  if (drive === undefined) return false;
+  if (drive === undefined || !drive.isPresent || !drive.isEnabled) return null;
+  const devicePath = drive.devicePath;
   try {
-    return await input.mediaGenerationObserver.observe(
-      drive.devicePath,
+    const mediaGeneration = await input.mediaGenerationObserver.observe(
+      devicePath,
       input.signal,
-    ) === input.authority.mediaGeneration &&
-      dvdDiscVerificationInsertionIsCurrent(
-        input.authority,
-        input.access.discInspections.list({
-          ids: [input.authority.discInspectionId],
-        })[0],
-      );
+    );
+    const currentInspection = input.access.discInspections.list({
+      ids: [input.authority.discInspectionId],
+    })[0];
+    const currentDrive = currentInspection === undefined
+      ? undefined
+      : input.access.catalog.listOpticalDrives({
+          ids: [currentInspection.opticalDriveId],
+        })[0];
+    return mediaGeneration === input.authority.mediaGeneration &&
+        dvdDiscVerificationInsertionIsCurrent(
+          input.authority,
+          currentInspection,
+        ) &&
+        currentDrive?.isPresent === true &&
+        currentDrive.isEnabled &&
+        currentDrive.devicePath === devicePath
+      ? devicePath
+      : null;
   } catch (cause) {
     if (input.signal.aborted) throw cause;
     throw new DvdRecoveryPassFault("SOURCE_OBSERVATION_FAILED", { cause });
   }
-}
-
-function devicePathForAuthority(
-  access: DataAccess,
-  authority: DvdRecoveryWriteAuthority,
-): string {
-  const inspection = access.discInspections.list({
-    ids: [authority.discInspectionId],
-  })[0];
-  const drive = inspection === undefined
-    ? undefined
-    : access.catalog.listOpticalDrives({
-        ids: [inspection.opticalDriveId],
-      })[0];
-  if (drive === undefined) {
-    throw new DvdRecoveryPassFault("SOURCE_CHANGED");
-  }
-  return drive.devicePath;
 }
 
 async function waitForRead(input: {
@@ -386,7 +381,6 @@ export async function pollDvdRecoveryPass(input: {
       startLba: range.startLba,
       sectorCount: range.sectorCount,
     }));
-    const devicePath = devicePathForAuthority(input.access, authority);
     for (const range of ranges) {
       for (
         let startLba = range.startLba;
@@ -409,28 +403,39 @@ export async function pollDvdRecoveryPass(input: {
           throw new DvdRecoveryPassFault("SOURCE_CHANGED");
         }
         input.access.archiveRecoveryWork.assertClaim(claim);
-        if (!await insertionIsCurrent({
+        const devicePath = await currentInsertionDevicePath({
           access: input.access,
           authority,
           mediaGenerationObserver: input.mediaGenerationObserver,
           signal,
-        })) {
+        });
+        if (devicePath === null) {
           throw new DvdRecoveryPassFault("SOURCE_CHANGED");
         }
         let admittedRead: ActiveBoundedProcess<DvdSourceRead> | undefined;
         try {
-          input.access.archiveRecoveryWork.admitSourceRead(claim, () => {
-            try {
-              admittedRead = input.reader.start({
-                devicePath,
-                startLba,
-                sectorCount: 1,
-                acceptedEndLbaExclusive: checkpoint.acceptedEndLbaExclusive,
-              });
-            } catch (cause) {
-              throw new DvdRecoveryPassFault("SOURCE_READ_FAILED", { cause });
-            }
-          });
+          const admitted = input.access.archiveRecoveryWork.admitSourceRead(
+            claim,
+            devicePath,
+            (admittedDevicePath) => {
+              try {
+                admittedRead = input.reader.start({
+                  devicePath: admittedDevicePath,
+                  startLba,
+                  sectorCount: 1,
+                  acceptedEndLbaExclusive:
+                    checkpoint.acceptedEndLbaExclusive,
+                });
+              } catch (cause) {
+                throw new DvdRecoveryPassFault("SOURCE_READ_FAILED", {
+                  cause,
+                });
+              }
+            },
+          );
+          if (admitted === null) {
+            throw new DvdRecoveryPassFault("SOURCE_CHANGED");
+          }
         } catch (error) {
           if (admittedRead !== undefined) {
             admittedRead.cancel();
@@ -460,12 +465,12 @@ export async function pollDvdRecoveryPass(input: {
           });
           return outcome !== "deferred";
         }
-        if (!await insertionIsCurrent({
+        if (await currentInsertionDevicePath({
           access: input.access,
           authority,
           mediaGenerationObserver: input.mediaGenerationObserver,
           signal,
-        })) {
+        }) !== devicePath) {
           throw new DvdRecoveryPassFault("SOURCE_CHANGED");
         }
         const observation = completed.read.outcome === "readable"

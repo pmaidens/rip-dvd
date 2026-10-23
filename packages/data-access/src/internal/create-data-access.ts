@@ -9615,7 +9615,7 @@ export function createDataAccessInternal(
       assertClaim(claim) {
         return requireCurrentArchiveRecoveryClaim(database, claim);
       },
-      admitSourceRead(claim, start) {
+      admitSourceRead(claim, expectedDevicePath, start) {
         return database.transaction((transaction) => {
           const recovery = requireCurrentArchiveRecoveryClaim(
             transaction,
@@ -9632,7 +9632,40 @@ export function createDataAccessInternal(
             transaction,
             recovery.id,
           );
-          start();
+          const verificationId = recovery.work?.verificationId;
+          const verification = verificationId === null ||
+              verificationId === undefined
+            ? undefined
+            : transaction.select().from(dvdDiscVerifications).where(eq(
+                dvdDiscVerifications.id,
+                verificationId,
+              )).get();
+          const inspection = verification === undefined
+            ? undefined
+            : transaction.select().from(discInspections).where(eq(
+                discInspections.id,
+                verification.discInspectionId,
+              )).get();
+          const drive = inspection === undefined
+            ? undefined
+            : transaction.select().from(opticalDrives).where(eq(
+                opticalDrives.id,
+                inspection.opticalDriveId,
+              )).get();
+          if (
+            verification === undefined ||
+            !dvdDiscVerificationInsertionIsCurrent(
+              verification,
+              inspection,
+            ) ||
+            drive === undefined ||
+            !drive.isPresent ||
+            !drive.isEnabled ||
+            drive.devicePath !== expectedDevicePath
+          ) {
+            return null;
+          }
+          start(drive.devicePath);
           return recovery;
         }, { behavior: "immediate" });
       },

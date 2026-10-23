@@ -641,8 +641,9 @@ export interface ArchiveRecoveryWorkAccess {
   assertClaim(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
   admitSourceRead(
     claim: ClaimedArchiveRecoveryWork,
-    start: () => void,
-  ): ArchiveRecovery;
+    expectedDevicePath: string,
+    start: (devicePath: string) => void,
+  ): ArchiveRecovery | null;
   bindVerification(
     claim: ClaimedArchiveRecoveryWork,
     authority: DvdRecoveryWriteAuthority,

@@ -185,7 +185,7 @@ function pollInput(
       },
     },
     mediaGenerationObserver: {
-      async observe() {
+      async observe(_devicePath: string, _signal: AbortSignal) {
         return "synthetic-verification-generation";
       },
     },
@@ -462,6 +462,121 @@ it("does not start a source read when Stop commits during insertion observation"
     expect(reconcile).toHaveBeenCalledTimes(1);
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({ status: "stopped", work: null });
+  } finally {
+    input.access.close();
+  }
+});
+
+it("follows a serial-proven drive renumber between admitted sector reads", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const originalDevicePath = "/dev/synthetic-recovery-before-renumber";
+  const renumberedDevicePath = "/dev/synthetic-recovery-after-renumber";
+  const serialNumber = "synthetic-recovery-renumber-serial";
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 180,
+    sectorCount: 2,
+    classification: "skipped_untested",
+  }], originalDevicePath);
+  const setupAccess = fixture.openAccess();
+  try {
+    expect(setupAccess.catalog.upsertOpticalDrive({
+      devicePath: originalDevicePath,
+      serialNumber,
+      isEnabled: true,
+      isPresent: true,
+    }).id).toBe(seeded.verificationDrive.id);
+  } finally {
+    setupAccess.close();
+  }
+  await completeVerification(fixture, seeded);
+  const source = immediateReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(2_048, 0x64),
+  }));
+  const input = pollInput(fixture, source.reader);
+  let committedSectors = 0;
+  const commit = vi.fn(async (
+    batch: Parameters<typeof commitDvdRecoveryBatch>[0],
+  ) => {
+    const result = await commitDvdRecoveryBatch(batch);
+    committedSectors += 1;
+    if (committedSectors === 1) {
+      const renumbered = input.access.catalog.reconcileOpticalDrives([{
+        devicePath: renumberedDevicePath,
+        serialNumber,
+        isConfiguredDevice: false,
+      }]).find((drive) => drive.serialNumber === serialNumber);
+      expect(renumbered?.id).toBe(seeded.verificationDrive.id);
+    }
+    return result;
+  });
+  try {
+    expect(await pollDvdRecoveryPass({ ...input, commit })).toBe(true);
+    expect(source.start.mock.calls.map(([read]) => read.devicePath)).toEqual([
+      originalDevicePath,
+      renumberedDevicePath,
+    ]);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "completed", work: null });
+  } finally {
+    input.access.close();
+  }
+});
+
+it("rejects a source read when the observed drive path changes before admission", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const originalDevicePath = "/dev/synthetic-observed-recovery-drive";
+  const renumberedDevicePath = "/dev/synthetic-renumbered-recovery-drive";
+  const serialNumber = "synthetic-observed-renumber-serial";
+  const seeded = await seedDvdDiscVerificationFixture(
+    fixture,
+    undefined,
+    originalDevicePath,
+  );
+  const setupAccess = fixture.openAccess();
+  try {
+    expect(setupAccess.catalog.upsertOpticalDrive({
+      devicePath: originalDevicePath,
+      serialNumber,
+      isEnabled: true,
+      isPresent: true,
+    }).id).toBe(seeded.verificationDrive.id);
+  } finally {
+    setupAccess.close();
+  }
+  await completeVerification(fixture, seeded);
+  const source = immediateReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(2_048, 0x65),
+  }));
+  const input = pollInput(fixture, source.reader);
+  input.mediaGenerationObserver.observe = async (devicePath) => {
+    expect(devicePath).toBe(originalDevicePath);
+    return "synthetic-verification-generation";
+  };
+  const admitSourceRead = input.access.archiveRecoveryWork.admitSourceRead
+    .bind(input.access.archiveRecoveryWork);
+  vi.spyOn(input.access.archiveRecoveryWork, "admitSourceRead")
+    .mockImplementation((claim, expectedDevicePath, start) => {
+      const renumbered = input.access.catalog.reconcileOpticalDrives([{
+        devicePath: renumberedDevicePath,
+        serialNumber,
+        isConfiguredDevice: false,
+      }]).find((drive) => drive.serialNumber === serialNumber);
+      expect(renumbered?.id).toBe(seeded.verificationDrive.id);
+      return admitSourceRead(claim, expectedDevicePath, start);
+    });
+  try {
+    expect(await pollDvdRecoveryPass(input)).toBe(true);
+    expect(source.start).not.toHaveBeenCalled();
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "faulted",
+        faultCode: "SOURCE_CHANGED",
+        work: null,
+      });
   } finally {
     input.access.close();
   }
@@ -1143,7 +1258,11 @@ it("rejects source-read admission after Stop commits", async () => {
       attemptId: seeded.attemptId,
     });
 
-    expect(() => access.archiveRecoveryWork.admitSourceRead(claim, start))
+    expect(() => access.archiveRecoveryWork.admitSourceRead(
+      claim,
+      seeded.verificationDrive.devicePath,
+      start,
+    ))
       .toThrow();
     expect(start).not.toHaveBeenCalled();
   } finally {
