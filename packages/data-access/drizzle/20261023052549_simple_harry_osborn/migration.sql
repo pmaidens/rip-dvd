@@ -104,6 +104,56 @@ INSERT INTO `__new_archive_recovery_work`(
 FROM `archive_recovery_work`;--> statement-breakpoint
 DROP TABLE `archive_recovery_work`;--> statement-breakpoint
 ALTER TABLE `__new_archive_recovery_work` RENAME TO `archive_recovery_work`;--> statement-breakpoint
+UPDATE `mutation_invocations` AS `invocation`
+SET `outcome` = json_set(
+	`invocation`.`outcome`,
+	'$.pauseReason', NULL,
+	'$.passHistory', json('[]'),
+	'$.work.passNumber', (
+		SELECT `work`.`pass_number`
+		FROM `archive_recovery_work` AS `work`
+		WHERE `work`.`archive_recovery_id` =
+			json_extract(`invocation`.`outcome`, '$.id')
+	),
+	'$.work.passDirection', (
+		SELECT `work`.`pass_direction`
+		FROM `archive_recovery_work` AS `work`
+		WHERE `work`.`archive_recovery_id` =
+			json_extract(`invocation`.`outcome`, '$.id')
+	),
+	'$.work.passStartedAt', (
+		SELECT CASE WHEN `work`.`pass_started_at` IS NULL THEN NULL ELSE
+			strftime(
+				'%Y-%m-%dT%H:%M:%fZ',
+				`work`.`pass_started_at` / 1000.0,
+				'unixepoch'
+			)
+		END
+		FROM `archive_recovery_work` AS `work`
+		WHERE `work`.`archive_recovery_id` =
+			json_extract(`invocation`.`outcome`, '$.id')
+	),
+	'$.work.passInitialUnrecoveredSectorCount', (
+		SELECT `work`.`pass_initial_unrecovered_sector_count`
+		FROM `archive_recovery_work` AS `work`
+		WHERE `work`.`archive_recovery_id` =
+			json_extract(`invocation`.`outcome`, '$.id')
+	),
+	'$.work.passRecoveredSectorCount', (
+		SELECT `work`.`pass_recovered_sector_count`
+		FROM `archive_recovery_work` AS `work`
+		WHERE `work`.`archive_recovery_id` =
+			json_extract(`invocation`.`outcome`, '$.id')
+	)
+)
+WHERE `invocation`.`operation` = 'archive_recovery.stop'
+	AND json_type(`invocation`.`outcome`, '$.work') = 'object'
+	AND EXISTS (
+		SELECT 1
+		FROM `archive_recovery_work` AS `work`
+		WHERE `work`.`archive_recovery_id` =
+			json_extract(`invocation`.`outcome`, '$.id')
+	);--> statement-breakpoint
 PRAGMA foreign_keys=ON;--> statement-breakpoint
 CREATE UNIQUE INDEX `archive_recoveries_archive_unique` ON `archive_recoveries` (`original_disc_archive_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `archive_recoveries_identity_unique` ON `archive_recoveries` (`id`,`original_disc_archive_id`);--> statement-breakpoint

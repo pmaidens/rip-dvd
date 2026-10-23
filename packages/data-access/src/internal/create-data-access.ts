@@ -5434,7 +5434,7 @@ export function createDataAccessInternal(
         ? new Date(value)
         : value) as ArchiveRecoveryStopReceipt;
     const legacyWork = outcome.work;
-    const recoveredSectorCount = legacyWork?.passRecoveredSectorCount ?? 0;
+    const storedRecoveredSectorCount = legacyWork?.passRecoveredSectorCount;
     const passStarted = legacyWork !== null && (
       legacyWork.status === "claimed" ||
       (legacyWork.passCursorLba !== null &&
@@ -5443,8 +5443,28 @@ export function createDataAccessInternal(
         legacyWork.passStartedAt !== undefined) ||
       (legacyWork.passInitialUnrecoveredSectorCount !== null &&
         legacyWork.passInitialUnrecoveredSectorCount !== undefined) ||
-      recoveredSectorCount > 0
+      (storedRecoveredSectorCount ?? 0) > 0
     );
+    const recoveredSectorCount = storedRecoveredSectorCount ??
+      (passStarted && legacyWork !== null
+        ? database.select({
+            value:
+              sql<number>`coalesce(sum(${dvdArchiveRecoveryReads.sectorCount}), 0)`,
+          }).from(dvdArchiveRecoveryReads).where(and(
+            eq(
+              dvdArchiveRecoveryReads.originalDiscArchiveId,
+              outcome.originalDiscArchiveId,
+            ),
+            eq(dvdArchiveRecoveryReads.outcome, "recovered"),
+            gte(dvdArchiveRecoveryReads.createdAt, legacyWork.createdAt),
+          )).get()?.value ?? 0
+        : 0);
+    const initialUnrecoveredSectorCount =
+      legacyWork?.passInitialUnrecoveredSectorCount ??
+      (passStarted
+        ? unrecoveredSectorCount(database, outcome.originalDiscArchiveId) +
+          recoveredSectorCount
+        : null);
     return {
       ...outcome,
       pauseReason: outcome.pauseReason ?? null,
@@ -5458,8 +5478,7 @@ export function createDataAccessInternal(
             passStartedAt: legacyWork.passStartedAt ??
               (passStarted ? legacyWork.createdAt : null),
             passInitialUnrecoveredSectorCount:
-              legacyWork.passInitialUnrecoveredSectorCount ??
-                (passStarted ? Math.max(1, recoveredSectorCount) : null),
+              initialUnrecoveredSectorCount,
             passRecoveredSectorCount: recoveredSectorCount,
           },
     };

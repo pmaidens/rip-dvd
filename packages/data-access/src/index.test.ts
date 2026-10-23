@@ -25,6 +25,7 @@ import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   archiveBoundaryEvidenceFromRecord,
+  canonicalPublicationJson,
   DISC_INSPECTION_LEASE_DURATION_MS,
   createCorrectedDvdArchiveBoundaryEvidence,
   createDataAccess,
@@ -1597,10 +1598,74 @@ describe("data-access facade", () => {
           WHERE id = ?
         `).run(`${prefix}-recovery`);
       }
+      sqlite.prepare(`
+        INSERT INTO mutation_invocations (
+          key, operation, semantic_input, outcome, created_at
+        ) VALUES (?, 'archive_recovery.stop', ?, ?, 12)
+      `).run(
+        `${prefix}-stop-key`,
+        canonicalPublicationJson({
+          archiveRecoveryId: `${prefix}-recovery`,
+          attemptId: `${prefix}-attempt`,
+        }),
+        JSON.stringify({
+          id: `${prefix}-recovery`,
+          originalDiscArchiveId: `${prefix}-archive`,
+          attemptId: `${prefix}-attempt`,
+          attemptOrdinal: 1,
+          status: "stopping",
+          stopOperationId: `${prefix}-stop-operation`,
+          stopRequestedAt: new Date(12).toISOString(),
+          stoppedAt: null,
+          faultCode: null,
+          work: {
+            archiveRecoveryId: `${prefix}-recovery`,
+            originalDiscArchiveId: `${prefix}-archive`,
+            attemptId: `${prefix}-attempt`,
+            status: state,
+            verificationId: null,
+            requestedAt: new Date(10).toISOString(),
+            claimedBy: state === "claimed" ? "migration-worker" : null,
+            claimToken: state === "claimed" ? "migration-token" : null,
+            claimedAt: state === "claimed"
+              ? new Date(11).toISOString()
+              : null,
+            passCursorLba: 0,
+            admittedDevicePath: state === "claimed"
+              ? "/dev/synthetic-dvd"
+              : null,
+            admittedDeviceId: state === "claimed" ? "1" : null,
+            admittedDeviceInode: state === "claimed" ? "2" : null,
+            createdAt: new Date(5).toISOString(),
+            updatedAt: new Date(10).toISOString(),
+          },
+          createdAt: new Date(1).toISOString(),
+          updatedAt: new Date(12).toISOString(),
+        }),
+      );
     }
     sqlite.close();
 
     const migrated = openTestDatabase(databasePath);
+    for (const state of ["requested", "claimed"] as const) {
+      const prefix = `migration-${state}`;
+      expect(migrated.archiveRecoveryWork.requestStop({
+        mutationKey: `${prefix}-stop-key`,
+        archiveRecoveryId: `${prefix}-recovery` as ArchiveRecoveryId,
+        attemptId: `${prefix}-attempt` as ArchiveRecoveryAttemptId,
+      })).toMatchObject({
+        pauseReason: null,
+        passHistory: [],
+        work: {
+          passNumber: 1,
+          passDirection: "forward",
+          passStartedAt: new Date(5),
+          passInitialUnrecoveredSectorCount: 2,
+          passRecoveredSectorCount: 1,
+          passCursorLba: 0,
+        },
+      });
+    }
     migrated.close();
     const verified = new DatabaseSync(databasePath);
     try {
