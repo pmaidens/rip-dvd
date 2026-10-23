@@ -189,11 +189,13 @@ function ProposalDetails({ proposal }: { proposal: AutomaticCatalogProposal }) {
 export function CatalogReviewAutomation({
   review,
   isSaving,
+  completionEnabled = true,
   onAcceptProposal,
   onCompleteReview,
 }: {
   review: CatalogReviewDto;
   isSaving: boolean;
+  completionEnabled?: boolean;
   onAcceptProposal(proposal: AutomaticCatalogProposal): void;
   onCompleteReview(
     outcome: "reviewed_with_selections",
@@ -306,7 +308,7 @@ export function CatalogReviewAutomation({
             } mapped. Unselected menus and extras do not block completion.
           </p>
         </div>
-        {replacementCount === 0 ? (
+        {replacementCount === 0 && completionEnabled ? (
           <button
             type="button"
             disabled={isSaving}
@@ -314,9 +316,13 @@ export function CatalogReviewAutomation({
           >
             Finish cataloging
           </button>
-        ) : (
+        ) : replacementCount > 0 ? (
           <p>
             Review the corrected replacement choices below before finishing.
+          </p>
+        ) : (
+          <p>
+            Mapping is saved separately from recovery and the damage decision.
           </p>
         )}
       </section>
@@ -439,10 +445,16 @@ export function CatalogReviewAutomation({
           onClick={() => onAcceptProposal(proposal)}
         >
           {proposal.kind === "movie"
-            ? "Use this and continue"
-            : "Use these episodes and continue"}
+            ? completionEnabled ? "Use this and continue" : "Use this mapping"
+            : completionEnabled
+            ? "Use these episodes and continue"
+            : "Use these episode mappings"}
         </button>
-        <span>This saves the mapping and finishes the review.</span>
+        <span>
+          {completionEnabled
+            ? "This saves the mapping and finishes the review."
+            : "This saves the mapping without changing Recovery or damage readiness."}
+        </span>
       </div>
       <TmdbAttribution />
     </section>

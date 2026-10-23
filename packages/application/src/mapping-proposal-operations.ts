@@ -8,6 +8,9 @@ import type { CatalogReviewCommand } from "./catalog-review-command.js";
 import { serializeDiscSelection, serializeMediaItem } from "./catalog-review-read.js";
 import { catalogReviewMediaItemInput } from "./media-item-operations.js";
 import { parseMutationKey } from "./mutation-key.js";
+import {
+  assertLegacyCatalogReviewCompletionAvailable,
+} from "./catalog-review-workflow.js";
 
 export type MappingProposalCommand = Extract<CatalogReviewCommand, {
   action: "create_mapping_proposal" | "create_episodic_mapping_proposal";
@@ -20,6 +23,11 @@ export function applyMappingProposal(
   mutationKey: string,
 ) {
   const key = parseMutationKey(mutationKey);
+  if (command.completeReview === true) {
+    access.readConsistentSnapshot((snapshot) =>
+      assertLegacyCatalogReviewCompletionAvailable(snapshot, archiveId)
+    );
+  }
   if (command.action === "create_mapping_proposal") {
     const proposal = access.catalog.createMappingProposal({
       originalDiscArchiveId: archiveId,

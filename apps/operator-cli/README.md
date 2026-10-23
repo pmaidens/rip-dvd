@@ -102,6 +102,11 @@ rip-dvd catalog-review suggest <archive-id> --tmdb-id 42 --media-type movie
 `show` returns the current catalog revision, archive and scan provenance,
 coverage, Media Items, Disc Selections with structured action availability,
 correction history, and corrected Encode Job and retained-output history.
+For a `dvd-recovery-evidence-v1` archive, `reviewWorkflow` also reports the
+initial save, current recovery, mapping state, damage-decision readiness,
+current workflow identities, and stable reasons for unavailable actions.
+Mapping remains available while recovery is active. Legacy archives keep the
+legacy response and completion behavior.
 `reviewActionAvailability` reports whether completion with selections or
 Archive-only completion is currently allowed, with a reason when blocked.
 Each paginated section includes its offset, limit, and next/previous flags.

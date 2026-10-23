@@ -15,6 +15,7 @@ import {
   type RearchiveMappingProposalReview,
 } from "@rip-dvd/data-access";
 import { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
+import { describeCatalogReviewWorkflow } from "./catalog-review-workflow.js";
 
 const CATALOG_REVIEW_SELECTION_PAGE_SIZE = 100;
 const CATALOG_REVIEW_DISC_SELECTION_LOOKUP_BATCH_SIZE = 100;
@@ -316,6 +317,11 @@ export function readCatalogReview(
       );
     }
     const coverage = snapshot.catalog.getCatalogReviewCoverage(id);
+    const reviewWorkflow = describeCatalogReviewWorkflow(snapshot, id, {
+      evidenceHeader: evidenceHeaders.get(id) ?? null,
+      titleIdentityReviewSet,
+      titleDamageInspection,
+    });
     const reviewActionAvailability = snapshot.catalog.getCatalogReviewActionAvailability(id);
     const discSelectionRows = snapshot.catalog.listDiscSelections({
       originalDiscArchiveId: id,
@@ -498,6 +504,7 @@ export function readCatalogReview(
       },
       archive: serializeArchiveEvidence(archive, disc.volumeLabel),
       reviewOutcome: archive.catalogReviewOutcome,
+      ...(reviewWorkflow === null ? {} : { reviewWorkflow }),
       rawScan: {
         titles: rawTitles,
       },

@@ -1,4 +1,5 @@
 import {
+  CatalogReviewDecisionUnavailableError,
   InvalidMutationKeyError,
   parseCatalogReviewCommand,
   type CatalogReviewCommand,
@@ -186,6 +187,15 @@ export function runPreviewAcknowledgedCatalogCommand<
       : workflow.apply(input);
   } catch (error) {
     if (error instanceof CommandFailure) throw error;
+    if (error instanceof CatalogReviewDecisionUnavailableError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+        { current: error.current },
+      );
+    }
     if (error instanceof EncodeWorkConflictError) {
       throw new CommandFailure(
         error.code,

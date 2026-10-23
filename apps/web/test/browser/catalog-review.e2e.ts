@@ -209,12 +209,76 @@ test("keyboard mapping and job-free correction announce their results", async ({
   await expectNoPageOverflow(page);
 });
 
+test("Review Steps preserve mapping drafts and explain an unavailable damage decision", async ({ page }, testInfo) => {
+  const variant = fixtureVariant(testInfo.project.name);
+  const discLabel = `CATALOG_BROWSER_DAMAGE_${variant.toUpperCase()}`;
+  await page.goto("/catalog");
+  const archive = page.getByRole("article").filter({
+    has: page.getByRole("heading", { name: discLabel, exact: true }),
+  });
+  await expect(archive.getByText("Initial Archive Job", { exact: true }))
+    .toBeVisible();
+  await expect(archive.getByText("Saved", { exact: true })).toBeVisible();
+  await expect(archive.getByText("Archive Recovery", { exact: true }))
+    .toBeVisible();
+  await expect(archive.getByText("Recovering", { exact: true })).toBeVisible();
+  await expect(archive.getByText("Unmapped content remains", { exact: true }))
+    .toBeVisible();
+  await expect(archive.getByText("Not ready", { exact: true })).toBeVisible();
+
+  await openCatalogReview(page, discLabel);
+  const steps = page.getByRole("tablist", { name: "Review Steps" });
+  const mapping = steps.getByRole("tab", { name: "Catalog mapping" });
+  const recovery = steps.getByRole("tab", { name: "Recovery" });
+  const damage = steps.getByRole("tab", { name: "Damage decision" });
+  await expect(mapping).toHaveAttribute("aria-selected", "true");
+
+  await titleEvidence(page, 1).getByRole("button", {
+    name: "Map as movie",
+  }).click();
+  const title = page.getByLabel("Title", { exact: true });
+  const draftTitle = `Draft recovery mapping ${variant}`;
+  await title.fill(draftTitle);
+
+  await recovery.click();
+  await expect(recovery).toHaveAttribute("aria-selected", "true");
+  const recoveryPanel = page.getByRole("tabpanel", { name: "Recovery" });
+  await expect(recoveryPanel.getByText("Saved", { exact: true }))
+    .toBeVisible();
+  await expect(recoveryPanel.getByText("Recovering", { exact: true }))
+    .toBeVisible();
+  await expect(recoveryPanel.getByText("Unmapped content remains", {
+    exact: true,
+  })).toBeVisible();
+
+  await recovery.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(mapping).toHaveAttribute("aria-selected", "true");
+  await expect(title).toHaveValue(draftTitle);
+  await page.keyboard.press("ArrowRight");
+  await expect(damage).toHaveAttribute("aria-selected", "true");
+  const damagePanel = page.getByRole("tabpanel", { name: "Damage decision" });
+  await expect(damagePanel.getByRole("heading", {
+    name: "Damage decision readiness",
+  })).toBeVisible();
+  await expect(damagePanel.getByText("RECOVERY_ACTIVE", { exact: true }))
+    .toBeVisible();
+  await expect(damagePanel.getByText("SELECTION_UNIDENTIFIED", {
+    exact: true,
+  })).toBeVisible();
+
+  await mapping.click();
+  await expect(title).toHaveValue(draftTitle);
+  await expectNoPageOverflow(page);
+});
+
 test("Title Damage paging retrieves evidence beyond the review summary", async ({ page }, testInfo) => {
   const variant = fixtureVariant(testInfo.project.name);
   await openCatalogReview(
     page,
     `CATALOG_BROWSER_DAMAGE_${variant.toUpperCase()}`,
   );
+  await page.getByRole("tab", { name: "Damage decision" }).click();
 
   const titleDamage = page.getByRole("heading", {
     name: "Title missing source",

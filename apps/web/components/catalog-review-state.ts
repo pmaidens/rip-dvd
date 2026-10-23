@@ -541,15 +541,21 @@ export function useCatalogReviewState({
         action: "create_mapping_proposal",
         catalogRevision: state.review.catalogRevision,
         ...proposal.input,
-        completeReview: true,
+        ...(state.review.reviewWorkflow === undefined
+          ? { completeReview: true as const }
+          : {}),
       }
       : {
         action: "create_episodic_mapping_proposal",
         catalogRevision: state.review.catalogRevision,
         ...proposal.input,
-        completeReview: true,
+        ...(state.review.reviewWorkflow === undefined
+          ? { completeReview: true as const }
+          : {}),
       };
-    void mutate(command, { closeAfterMutation: true });
+    void mutate(command, {
+      closeAfterMutation: state.review.reviewWorkflow === undefined,
+    });
   }
 
   async function previewRearchiveMappingProposal(

@@ -1,10 +1,12 @@
 import {
+  describeCatalogReviewWorkflow,
   describeArchiveRequestWaitingStatus,
   encodeOutputArtifactReferences,
   encodeRequeueAvailability,
 } from "@rip-dvd/application";
 import { createHash } from "node:crypto";
 import type { PresentedArchiveRequestWaitingStatus } from "@rip-dvd/application";
+import type { CatalogReviewWorkflow } from "@rip-dvd/application";
 import type {
   ArchiveBoundaryEvidence,
   ArchiveFormat,
@@ -227,6 +229,7 @@ export interface DashboardCatalogReviewItem {
   archivedAt: string;
   catalogReviewedAt: string | null;
   catalogReviewOutcome: "needs_review" | CompletedCatalogReviewOutcome;
+  reviewWorkflow?: CatalogReviewWorkflow;
   mappedMediaItemCount: number;
   mappedMediaItemTitles: readonly string[];
   verificationStatus?: FilesystemVerificationStatus | null;
@@ -2124,6 +2127,10 @@ function readDashboardSnapshotRecords(
       : {
           status: "loaded" as const,
           items: catalogReviewArchives.map((archive) => {
+            const reviewWorkflow = describeCatalogReviewWorkflow(
+              access,
+              archive.id,
+            );
             const boundaryEvidence =
               archiveBoundaryEvidenceFromRecord(archive);
             const rearchiveRequest = rearchiveRequestSource.value
@@ -2150,7 +2157,18 @@ function readDashboardSnapshotRecords(
                 );
             return {
               id: archive.id,
-              activityRevision: archive.updatedAt.toISOString(),
+              activityRevision: reviewWorkflow === null
+                ? archive.updatedAt.toISOString()
+                : [
+                  archive.updatedAt.toISOString(),
+                  reviewWorkflow.current.checkpoint?.revision ?? "checkpoint",
+                  reviewWorkflow.current.recovery?.state ?? "recovery",
+                  reviewWorkflow.current.recovery?.work?.status ?? "work",
+                  reviewWorkflow.current.titleIdentityReviewSetId ??
+                    "review-set",
+                  reviewWorkflow.current.titleDamageAssessmentId ??
+                    "assessment",
+                ].join(":"),
               discLabel: archive.discLabel,
               discKind: archive.discKind,
               archiveFormat: archive.archiveFormat,
@@ -2163,6 +2181,7 @@ function readDashboardSnapshotRecords(
               catalogReviewedAt:
                 archive.catalogReviewedAt?.toISOString() ?? null,
               catalogReviewOutcome: archive.catalogReviewOutcome,
+              ...(reviewWorkflow === null ? {} : { reviewWorkflow }),
               mappedMediaItemCount: archive.mappedMediaItemCount,
               mappedMediaItemTitles: archive.mappedMediaItemTitles,
               verificationStatus: archive.verificationStatus,

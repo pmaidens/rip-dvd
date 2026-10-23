@@ -1,5 +1,6 @@
 import {
   applyMappingProposal,
+  CatalogReviewDecisionUnavailableError,
   InvalidMutationKeyError,
   parseMutationKey,
   type MappingProposalCommand,
@@ -92,6 +93,15 @@ export function runMappingProposal(rest: readonly string[], io: MappingProposalI
     if (error instanceof CommandFailure) throw error;
     if (error instanceof MutationKeyConflictError) {
       throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    if (error instanceof CatalogReviewDecisionUnavailableError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+        { current: error.current },
+      );
     }
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("PROPOSAL_REJECTED", error.message, 2);

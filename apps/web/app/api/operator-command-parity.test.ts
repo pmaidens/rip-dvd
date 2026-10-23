@@ -17,13 +17,17 @@ import {
   createDvdRecoveryEvidenceEncodingTestAccess,
   createNormalDvdArchiveBoundaryEvidenceForTest,
 } from "@rip-dvd/data-access/test-support";
+import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import {
   createApplicationOperations,
   encodeOutputArtifactIdentity,
   type CatalogMetadataLookup,
   type EncodeOutputMediaProbe,
 } from "@rip-dvd/application";
-import type { ArchiveRequestId, MediaItemId } from "@rip-dvd/data-access";
+import type {
+  ArchiveRequestId,
+  MediaItemId,
+} from "@rip-dvd/data-access";
 import {
   createArchiveImageOwnership,
   defaultArchiveImageOwnership,
@@ -68,6 +72,228 @@ import {
 import { readDashboardSnapshot } from "../../lib/dashboard";
 
 const trustedOrigin = "http://localhost:3000";
+
+it("keeps recovering Catalog Review facts and mapping identical through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const seedAccess = createLegacySidecarDataAccess({
+    databasePath: fixture.databasePath,
+    mediaLibraryPath: fixture.mediaLibraryPath,
+    originalsLibraryPath: fixture.originalsLibraryPath,
+  });
+  const drive = seedAccess.catalog.upsertOpticalDrive({
+    devicePath: "/dev/synthetic-review-recovery",
+    isPresent: true,
+  });
+  const fingerprint = `sha256:${"7".repeat(64)}`;
+  const disc = seedAccess.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint,
+    volumeLabel: "SYNTHETIC_REVIEW_RECOVERY",
+    scanData: {
+      schemaVersion: 2,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 5_400,
+        chapters: 12,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    },
+  });
+  seedAccess.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  seedAccess.catalog.updateDetectedDiscStatus(disc.id, "approved");
+  const archive = seedAccess.catalog.createOriginalDiscArchive({
+    detectedDiscId: disc.id,
+    discKind: "dvd",
+    archiveFormat: "iso",
+    archivePath: "/media/originals/synthetic-review-recovery.iso",
+    fingerprint,
+  });
+  const mediaItem = seedAccess.catalog.createMediaItem({
+    kind: "movie",
+    title: "Synthetic recovery mapping",
+  });
+  seedAccess.close();
+  markArchiveWithDvdRecoveryEvidence(
+    fixture.databasePath,
+    archive.id,
+    "synthetic-review-recovery",
+    {
+      archiveRecovery: {
+        id: "synthetic-review-recovery-id",
+        workStatus: "claimed",
+      },
+    },
+  );
+  const sqlite = new DatabaseSync(fixture.databasePath);
+  sqlite.prepare(`
+    UPDATE archive_recoveries
+    SET status = 'running', updated_at = 2
+    WHERE original_disc_archive_id = ?
+  `).run(archive.id);
+  sqlite.close();
+
+  const access = fixture.openAccess();
+  const checkpoint = access.catalog.findDvdArchiveEvidenceHeader(archive.id)!;
+  const reviewSet = access.catalog.recordDvdTitleIdentityObservations({
+    originalDiscArchiveId: archive.id,
+    checkpoint: {
+      manifestId: checkpoint.currentManifestId,
+      manifestRevision: checkpoint.currentManifestRevision,
+      manifestDigest: checkpoint.currentManifestDigest,
+    },
+    observations: [{
+      displayTitleNumber: 1,
+      navigation: {
+        videoTitleSetNumber: 1,
+        titleSetTitleNumber: 1,
+        programChainNumber: 1,
+      },
+      selectedPath: [{
+        programNumber: 1,
+        cellNumber: 1,
+        vobId: 1,
+        cellId: 1,
+      }],
+      angleNumber: 1,
+      angleCount: 1,
+      chapterStart: 1,
+      chapterEnd: 12,
+      chapterCount: 12,
+      sourceExtents: [{ startLba: 0, sectorCount: 1 }],
+    }],
+  });
+
+  const readBoth = async () => {
+    const web = await createCatalogReviewRoute(
+      new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const cli = await fixture.run(["catalog-review", "show", archive.id]);
+    expect(web.status).toBe(200);
+    expect(cli.exitCode, JSON.stringify(cli.result)).toBe(0);
+    expect(cli.result).toEqual(await web.json());
+    return cli.result as {
+      catalogRevision: string;
+      reviewOutcome: string;
+      reviewWorkflow: {
+        facts: Record<string, unknown>;
+        current: Record<string, unknown>;
+        actions: Array<{
+          action: string;
+          available: boolean;
+          reasons: Array<{ code: string }>;
+        }>;
+      };
+    };
+  };
+
+  try {
+    const before = await readBoth();
+    expect(before.reviewWorkflow).toMatchObject({
+      facts: {
+        saved: true,
+        recovering: true,
+        mapped: false,
+        mappingState: "unmapped",
+        readyForDamageDecision: false,
+        readyForEncoding: false,
+      },
+      current: {
+        originalDiscArchiveId: archive.id,
+        archiveJob: { status: "completed" },
+        checkpoint: { revision: 1 },
+        recovery: {
+          id: "synthetic-review-recovery-id",
+          state: "running",
+          work: { status: "claimed" },
+        },
+        titleIdentityReviewSetId: reviewSet.reviewSetIdentity,
+        titleDamageAssessmentId: null,
+      },
+      actions: [
+        { action: "catalog_mapping", available: true, reasons: [] },
+        {
+          action: "damage_decision",
+          available: false,
+          reasons: [
+            { code: "ASSESSMENT_PENDING" },
+            { code: "RECOVERY_ACTIVE" },
+            { code: "SELECTION_UNIDENTIFIED" },
+          ],
+        },
+        { action: "encode", available: false },
+      ],
+    });
+
+    const mapped = await fixture.run([
+      "disc-selection",
+      "create",
+      archive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000397",
+      "--media-item-id",
+      mediaItem.id,
+      "--source-kind",
+      "dvd_title",
+      "--title-number",
+      "1",
+    ]);
+    expect(mapped.exitCode, JSON.stringify(mapped.result)).toBe(0);
+    const after = await readBoth();
+    expect(after.reviewOutcome).toBe("needs_review");
+    expect(after.reviewWorkflow.facts).toMatchObject({
+      recovering: true,
+      mapped: true,
+      mappingState: "mapped",
+      readyForDamageDecision: false,
+      readyForEncoding: false,
+    });
+    expect(
+      after.reviewWorkflow.actions.find(({ action }) =>
+        action === "damage_decision"
+      )?.reasons,
+    ).toEqual([
+      expect.objectContaining({ code: "ASSESSMENT_PENDING" }),
+      expect.objectContaining({ code: "RECOVERY_ACTIVE" }),
+    ]);
+
+    const completion = await fixture.run([
+      "catalog-review",
+      "preview-completion",
+      archive.id,
+      "--json",
+      JSON.stringify({
+        action: "complete_review",
+        catalogRevision: after.catalogRevision,
+        outcome: "reviewed_with_selections",
+        replacementEncodes: [],
+      }),
+    ]);
+    expect(completion.exitCode).toBe(2);
+    expect(completion.result).toMatchObject({
+      error: {
+        code: "DAMAGE_DECISION_UNAVAILABLE",
+        blockingReasons: [
+          { code: "ASSESSMENT_PENDING" },
+          { code: "RECOVERY_ACTIVE" },
+        ],
+        current: {
+          recovery: { state: "running" },
+          titleIdentityReviewSetId:
+            after.reviewWorkflow.current.titleIdentityReviewSetId,
+        },
+      },
+    });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
 
 it("reports a missing marked Title Damage checkpoint through web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();

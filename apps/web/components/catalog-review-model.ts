@@ -15,6 +15,7 @@ import type {
   EncodeJobStatus,
   MediaItemKind,
 } from "@rip-dvd/data-access";
+import type { CatalogReviewWorkflow } from "@rip-dvd/application";
 import { MEDIA_ITEM_KINDS } from "@rip-dvd/data-access/catalog-kinds";
 
 import type {
@@ -179,6 +180,7 @@ export interface CatalogReviewDto {
   };
   archive: CatalogReviewArchiveEvidence;
   reviewOutcome: CatalogReviewOutcome;
+  reviewWorkflow?: CatalogReviewWorkflow;
   rawScan: { titles: DvdTitle[] };
   titleIdentity?: CatalogReviewTitleIdentity;
   titleDamage?: CatalogReviewTitleDamage;

@@ -1,6 +1,7 @@
 "use client";
 
 import type { CompletedCatalogReviewOutcome } from "@rip-dvd/data-access";
+import { useRef, useState, type KeyboardEvent } from "react";
 
 import { archiveIntegrityLabel } from "../lib/archive-integrity";
 import type { AutomaticCatalogProposal } from "../lib/catalog-automation";
@@ -16,6 +17,10 @@ import { CatalogReviewMediaItems } from "./catalog-review-media-items";
 import { CatalogReviewRearchiveProposal } from "./catalog-review-rearchive-proposal";
 import { CatalogReviewTitleIdentity } from "./catalog-review-title-identity";
 import { CatalogReviewTitleDamageEvidence } from "./catalog-review-title-damage";
+import {
+  CatalogReviewDamageDecisionStatus,
+  CatalogReviewRecoveryStep,
+} from "./catalog-review-workflow";
 import type {
   CatalogReviewLoadState,
   CatalogReviewRearchiveProposal as CatalogReviewRearchiveProposalDto,
@@ -124,6 +129,11 @@ export function CatalogReviewView({
   onDeleteDiscSelection,
   onCompleteReview,
 }: CatalogReviewViewProps) {
+  const [activeStep, setActiveStep] = useState<
+    "recovery" | "mapping" | "damage"
+  >("mapping");
+  const stepRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
   if (state.status === "loading") {
     return (
       <section className="catalog-editor" aria-live="polite">
@@ -144,57 +154,8 @@ export function CatalogReviewView({
   }
 
   const { review } = state;
-  return (
-    <section className="catalog-editor" aria-labelledby="catalog-editor-title">
-      <header className="catalog-editor-header">
-        <div>
-          <p className="section-eyebrow">Archived disc review</p>
-          <h2 id="catalog-editor-title">
-            Catalog {formatVolumeLabel(review.archive.discLabel) ||
-              "Unlabeled disc"}
-          </h2>
-          <p>
-            {displayTerm(review.archive.discKind)} · {
-              review.archive.archiveFormat.toUpperCase()
-            }
-          </p>
-          <p>
-            Archive integrity: {archiveIntegrityLabel(review.archive.integrity)}
-          </p>
-          <ArchiveIntegrityDescription {...review.archive} />
-          <ArchiveBoundaryDescription
-            boundaryEvidence={review.archive.boundaryEvidence}
-          />
-        </div>
-        <div className="profile-actions">
-          <span className="attention-mark">
-            {review.reviewOutcome === "reviewed_with_selections"
-              ? "Reviewed with selections"
-              : review.reviewOutcome === "archive_only"
-              ? "Archive only"
-              : "Needs review"}
-          </span>
-          <button type="button" onClick={onClose}>Close review</button>
-        </div>
-      </header>
-
-      {requestError ? (
-        <div className="section-message section-error" role="alert">
-          {requestError}
-        </div>
-      ) : null}
-      {mutationNotice ? (
-        <div className="section-message" role="status" aria-live="polite">
-          {mutationNotice}
-        </div>
-      ) : null}
-
-      <CatalogReviewTitleIdentity titleIdentity={review.titleIdentity} />
-      <CatalogReviewTitleDamageEvidence
-        originalDiscArchiveId={review.archive.id}
-        titleDamage={review.titleDamage}
-      />
-
+  const mappingContent = (
+    <>
       {review.rearchiveProposal ? (
         <CatalogReviewRearchiveProposal
           proposal={review.rearchiveProposal}
@@ -215,6 +176,7 @@ export function CatalogReviewView({
         <CatalogReviewAutomation
           review={review}
           isSaving={isSaving}
+          completionEnabled={review.reviewWorkflow === undefined}
           onAcceptProposal={onAcceptAutomaticCatalogProposal}
           onCompleteReview={onCompleteReview}
         />
@@ -304,6 +266,7 @@ export function CatalogReviewView({
               reviewOutcome={review.reviewOutcome}
               archiveOnlySelected={archiveOnlySelected}
               replacementPlan={review.replacementPlan}
+              completionEnabled={review.reviewWorkflow === undefined}
               onArchiveOnlyChange={onArchiveOnlyChange}
               onReplacementJobsPage={onReplacementJobsPage}
               onReplacementProfilesPage={onReplacementProfilesPage}
@@ -312,6 +275,145 @@ export function CatalogReviewView({
           </section>
         </div>
       </details>}
+    </>
+  );
+  const steps = [
+    { id: "recovery" as const, label: "Recovery" },
+    { id: "mapping" as const, label: "Catalog mapping" },
+    { id: "damage" as const, label: "Damage decision" },
+  ];
+  const moveStepFocus = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    const direction = event.key === "ArrowRight" || event.key === "ArrowDown"
+      ? 1
+      : event.key === "ArrowLeft" || event.key === "ArrowUp"
+      ? -1
+      : 0;
+    if (direction === 0) return;
+    event.preventDefault();
+    const next = (index + direction + steps.length) % steps.length;
+    setActiveStep(steps[next]!.id);
+    stepRefs.current[next]?.focus();
+  };
+
+  return (
+    <section className="catalog-editor" aria-labelledby="catalog-editor-title">
+      <header className="catalog-editor-header">
+        <div>
+          <p className="section-eyebrow">Archived disc review</p>
+          <h2 id="catalog-editor-title">
+            Catalog {formatVolumeLabel(review.archive.discLabel) ||
+              "Unlabeled disc"}
+          </h2>
+          <p>
+            {displayTerm(review.archive.discKind)} · {
+              review.archive.archiveFormat.toUpperCase()
+            }
+          </p>
+          <p>
+            Archive integrity: {archiveIntegrityLabel(review.archive.integrity)}
+          </p>
+          <ArchiveIntegrityDescription {...review.archive} />
+          <ArchiveBoundaryDescription
+            boundaryEvidence={review.archive.boundaryEvidence}
+          />
+        </div>
+        <div className="profile-actions">
+          <span className="attention-mark">
+            {review.reviewOutcome === "reviewed_with_selections"
+              ? "Reviewed with selections"
+              : review.reviewOutcome === "archive_only"
+              ? "Archive only"
+              : "Needs review"}
+          </span>
+          <button type="button" onClick={onClose}>Close review</button>
+        </div>
+      </header>
+
+      {requestError ? (
+        <div className="section-message section-error" role="alert">
+          {requestError}
+        </div>
+      ) : null}
+      {mutationNotice ? (
+        <div className="section-message" role="status" aria-live="polite">
+          {mutationNotice}
+        </div>
+      ) : null}
+
+      {review.reviewWorkflow === undefined ? (
+        <>
+          <CatalogReviewTitleIdentity titleIdentity={review.titleIdentity} />
+          <CatalogReviewTitleDamageEvidence
+            originalDiscArchiveId={review.archive.id}
+            titleDamage={review.titleDamage}
+          />
+          {mappingContent}
+        </>
+      ) : (
+        <>
+          <div
+            className="catalog-review-steps"
+            role="tablist"
+            aria-label="Review Steps"
+          >
+            {steps.map((step, index) => (
+              <button
+                key={step.id}
+                id={`catalog-review-step-${step.id}`}
+                ref={(element) => {
+                  stepRefs.current[index] = element;
+                }}
+                type="button"
+                role="tab"
+                aria-selected={activeStep === step.id}
+                aria-controls={`catalog-review-panel-${step.id}`}
+                tabIndex={activeStep === step.id ? 0 : -1}
+                onClick={() => setActiveStep(step.id)}
+                onKeyDown={(event) => moveStepFocus(event, index)}
+              >
+                {step.label}
+              </button>
+            ))}
+          </div>
+          <section
+            id="catalog-review-panel-recovery"
+            className="catalog-review-step-panel"
+            role="tabpanel"
+            aria-labelledby="catalog-review-step-recovery"
+            hidden={activeStep !== "recovery"}
+          >
+            <CatalogReviewRecoveryStep workflow={review.reviewWorkflow} />
+          </section>
+          <section
+            id="catalog-review-panel-mapping"
+            className="catalog-review-step-panel"
+            role="tabpanel"
+            aria-labelledby="catalog-review-step-mapping"
+            hidden={activeStep !== "mapping"}
+          >
+            <CatalogReviewTitleIdentity titleIdentity={review.titleIdentity} />
+            {mappingContent}
+          </section>
+          <section
+            id="catalog-review-panel-damage"
+            className="catalog-review-step-panel catalog-review-damage-panel"
+            role="tabpanel"
+            aria-labelledby="catalog-review-step-damage"
+            hidden={activeStep !== "damage"}
+          >
+            <CatalogReviewTitleDamageEvidence
+              originalDiscArchiveId={review.archive.id}
+              titleDamage={review.titleDamage}
+            />
+            <CatalogReviewDamageDecisionStatus
+              workflow={review.reviewWorkflow}
+            />
+          </section>
+        </>
+      )}
     </section>
   );
 }

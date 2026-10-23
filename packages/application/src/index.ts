@@ -866,6 +866,17 @@ export type {
 export { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
 export { readCatalogReview, serializeDiscSelection, serializeMediaItem } from "./catalog-review-read.js";
 export type { CatalogReviewPageCoordinates } from "./catalog-review-read.js";
+export {
+  assertLegacyCatalogReviewCompletionAvailable,
+  CatalogReviewDecisionUnavailableError,
+  describeCatalogReviewWorkflow,
+} from "./catalog-review-workflow.js";
+export type {
+  CatalogReviewWorkflow,
+  CatalogReviewWorkflowAction,
+  CatalogReviewWorkflowReason,
+  CatalogReviewWorkflowReasonCode,
+} from "./catalog-review-workflow.js";
 export * from "./catalog-review-types.js";
 export * from "./catalog-review-command.js";
 export * from "./catalog-review-completion.js";

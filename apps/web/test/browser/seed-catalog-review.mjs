@@ -160,6 +160,8 @@ function seedTitleDamagePaging(variant, fingerprintFill) {
   const jobId = `${fixtureId}-job`;
   const inspectionId = `${fixtureId}-inspection`;
   const manifestId = `${fixtureId}-manifest`;
+  const recoveryId = `${fixtureId}-recovery`;
+  const recoveryAttemptId = `${recoveryId}:attempt:1`;
   const unrecoveredSourceRanges = [{
     startLba: 10,
     sectorCount: 1,
@@ -311,6 +313,30 @@ function seedTitleDamagePaging(variant, fingerprintFill) {
     manifestId,
     manifestDigests.manifestDigest,
   );
+  sqlite.prepare(`
+    INSERT INTO archive_recoveries (
+      id, original_disc_archive_id, attempt_id, attempt_ordinal, status,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, 1, 'eligible', 1, 1)
+  `).run(recoveryId, archive.id, recoveryAttemptId);
+  sqlite.prepare(`
+    INSERT INTO archive_recovery_work (
+      archive_recovery_id, original_disc_archive_id, attempt_id, status,
+      requested_at, claimed_by, claim_token, claimed_at, created_at,
+      updated_at
+    ) VALUES (?, ?, ?, 'claimed', NULL, ?, ?, 1, 1, 1)
+  `).run(
+    recoveryId,
+    archive.id,
+    recoveryAttemptId,
+    "synthetic-browser-recovery-worker",
+    "synthetic-browser-recovery-claim",
+  );
+  sqlite.prepare(`
+    UPDATE archive_recoveries
+    SET status = 'running', updated_at = 2
+    WHERE id = ?
+  `).run(recoveryId);
   sqlite.close();
 
   const checkpoint = {
