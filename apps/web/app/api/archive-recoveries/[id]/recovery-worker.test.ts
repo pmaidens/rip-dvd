@@ -724,7 +724,14 @@ it("releases a quiesced read on shutdown so a restarted worker can resume", asyn
     expect(cancel).toHaveBeenCalledOnce();
     expect(firstInput.access.catalog.findArchiveRecoveryById(
       seeded.recoveryId,
-    )).toMatchObject({ status: "eligible", work: null });
+    )).toMatchObject({
+      status: "eligible",
+      work: {
+        status: "requested",
+        claimToken: null,
+        verificationId: expect.any(String),
+      },
+    });
   } finally {
     firstInput.access.close();
   }
@@ -738,6 +745,76 @@ it("releases a quiesced read on shutdown so a restarted worker can resume", asyn
   try {
     expect(await pollDvdRecoveryPass(restartedInput)).toBe(true);
     expect(restartedSource.start).toHaveBeenCalledOnce();
+    expect(restartedInput.access.catalog.findArchiveRecoveryById(
+      seeded.recoveryId,
+    )).toMatchObject({ status: "completed", work: null });
+  } finally {
+    restartedInput.access.close();
+  }
+}, 20_000);
+
+it("resumes the remaining sectors after shutdown follows a committed batch", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 203,
+    sectorCount: 2,
+    classification: "skipped_untested",
+  }]);
+  await completeVerification(fixture, seeded);
+  const controller = new AbortController();
+  const firstSource = immediateReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(2_048, 0x67),
+  }));
+  const firstInput = pollInput(fixture, firstSource.reader);
+  const commit = vi.fn(async (
+    batch: Parameters<typeof commitDvdRecoveryBatch>[0],
+  ) => {
+    const result = await commitDvdRecoveryBatch(batch);
+    controller.abort(new Error("Synthetic post-commit shutdown"));
+    return result;
+  });
+  try {
+    await expect(pollDvdRecoveryPass({
+      ...firstInput,
+      commit,
+      signal: controller.signal,
+    })).rejects.toThrow("Synthetic post-commit shutdown");
+    expect(firstSource.start).toHaveBeenCalledOnce();
+    expect(firstSource.start.mock.calls[0]?.[0].startLba).toBe(203);
+    expect(firstInput.access.catalog.findArchiveRecoveryById(
+      seeded.recoveryId,
+    )).toMatchObject({
+      status: "eligible",
+      work: {
+        status: "requested",
+        claimToken: null,
+        verificationId: expect.any(String),
+      },
+    });
+    expect((await firstInput.access.readDvdCheckpoint(
+      seeded.archive.id,
+      defaultArchiveImageOwnership,
+    ))?.unrecoveredSourceRanges).toEqual([{
+      startLba: 204,
+      sectorCount: 1,
+      classification: "skipped_untested",
+    }]);
+  } finally {
+    firstInput.access.close();
+  }
+
+  const restartedSource = immediateReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(2_048, 0x68),
+  }));
+  const restartedInput = pollInput(fixture, restartedSource.reader);
+  restartedInput.workerExecutionId = "synthetic-post-commit-restart-worker";
+  try {
+    expect(await pollDvdRecoveryPass(restartedInput)).toBe(true);
+    expect(restartedSource.start).toHaveBeenCalledOnce();
+    expect(restartedSource.start.mock.calls[0]?.[0].startLba).toBe(204);
     expect(restartedInput.access.catalog.findArchiveRecoveryById(
       seeded.recoveryId,
     )).toMatchObject({ status: "completed", work: null });
@@ -782,7 +859,14 @@ it("reconciles an interrupted batch before restart reclaims the pass", async () 
     }));
     expect(firstInput.access.catalog.findArchiveRecoveryById(
       seeded.recoveryId,
-    )).toMatchObject({ status: "eligible", work: null });
+    )).toMatchObject({
+      status: "eligible",
+      work: {
+        status: "requested",
+        claimToken: null,
+        verificationId: expect.any(String),
+      },
+    });
   } finally {
     firstInput.access.close();
   }
@@ -1155,7 +1239,10 @@ it("keeps Stop pending until running disc verification settles", async () => {
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({ status: "stopped", work: null });
     expect(reconcile).toHaveBeenCalledOnce();
-    expect(withDeviceInactive).not.toHaveBeenCalled();
+    expect(withDeviceInactive).toHaveBeenCalledWith(
+      seeded.verificationDrive.devicePath,
+      expect.any(Function),
+    );
     expect(source.start).not.toHaveBeenCalled();
   } finally {
     input.access.close();

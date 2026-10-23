@@ -220,6 +220,17 @@ async function finalizeStop(input: {
     );
   }
   const verificationId = input.recovery.work?.verificationId;
+  const latestVerification = verificationId === null ||
+      verificationId === undefined
+    ? input.access.dvdDiscVerifications.findLatestForRecovery(
+        input.recovery.id,
+      )
+    : null;
+  const verification = verificationId === null || verificationId === undefined
+    ? latestVerification?.archiveRecoveryAttemptId === input.recovery.attemptId
+      ? latestVerification
+      : null
+    : input.access.dvdDiscVerifications.find(verificationId);
   const reconcileAndComplete = async () => {
     await input.reconcile({
       access: input.access,
@@ -235,7 +246,7 @@ async function finalizeStop(input: {
       stopOperationId,
     });
   };
-  if (verificationId === null || verificationId === undefined) {
+  if (verification === null) {
     try {
       await reconcileAndComplete();
     } catch (cause) {
@@ -252,9 +263,7 @@ async function finalizeStop(input: {
     }
     return;
   }
-  const verification = input.access.dvdDiscVerifications.find(verificationId);
   if (
-    verification === null ||
     verification.archiveRecoveryId !== input.recovery.id ||
     verification.archiveRecoveryAttemptId !== input.recovery.attemptId ||
     verification.originalDiscArchiveId !==
@@ -528,10 +537,7 @@ export async function pollDvdRecoveryPass(input: {
               atomicWriter: input.atomicWriter,
               releaseRecoveryWork: false,
             });
-            input.access.archiveRecoveryWork.releaseAfterReconciliation({
-              archiveRecoveryId: recovery.id,
-              attemptId: recovery.attemptId,
-            });
+            input.access.archiveRecoveryWork.requeue(claim);
           } catch (reconciliationError) {
             input.access.archiveRecoveryWork.markFault({
               claim,
@@ -540,7 +546,7 @@ export async function pollDvdRecoveryPass(input: {
             });
           }
         } else {
-          input.access.archiveRecoveryWork.release(claim);
+          input.access.archiveRecoveryWork.requeue(claim);
         }
       }
       throw error;

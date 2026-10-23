@@ -9327,13 +9327,43 @@ export function createDataAccessInternal(
               eq(dvdDiscVerifications.status, "completed"),
               eq(dvdDiscVerifications.outcome, "match"),
               isNotNull(dvdDiscVerifications.workerExecutionId),
-              eq(
-                dvdArchiveEvidenceHeaders.currentManifestRevision,
-                dvdDiscVerifications.checkpointRevision,
-              ),
-              eq(
-                dvdArchiveEvidenceHeaders.currentManifestDigest,
-                dvdDiscVerifications.checkpointDigest,
+              or(
+                and(
+                  eq(
+                    dvdArchiveEvidenceHeaders.currentManifestRevision,
+                    dvdDiscVerifications.checkpointRevision,
+                  ),
+                  eq(
+                    dvdArchiveEvidenceHeaders.currentManifestDigest,
+                    dvdDiscVerifications.checkpointDigest,
+                  ),
+                ),
+                and(
+                  gt(
+                    dvdArchiveEvidenceHeaders.currentManifestRevision,
+                    dvdDiscVerifications.checkpointRevision,
+                  ),
+                  exists(
+                    transaction.select({
+                      archiveRecoveryId:
+                        archiveRecoveryWork.archiveRecoveryId,
+                    }).from(archiveRecoveryWork).where(and(
+                      eq(
+                        archiveRecoveryWork.archiveRecoveryId,
+                        archiveRecoveries.id,
+                      ),
+                      eq(
+                        archiveRecoveryWork.attemptId,
+                        archiveRecoveries.attemptId,
+                      ),
+                      eq(archiveRecoveryWork.status, "requested"),
+                      eq(
+                        archiveRecoveryWork.verificationId,
+                        dvdDiscVerifications.id,
+                      ),
+                    )),
+                  ),
+                ),
               ),
               notExists(
                 transaction.select({ id: laterDvdDiscVerificationRecords.id })
@@ -10281,6 +10311,84 @@ export function createDataAccessInternal(
             }) ?? undefined,
             "Archive Recovery",
             input.archiveRecoveryId,
+          );
+        }, { behavior: "immediate" });
+      },
+      requeue(claim) {
+        return database.transaction((transaction) => {
+          const recovery = requireCurrentArchiveRecoveryClaim(
+            transaction,
+            claim,
+          );
+          if (recovery.status === "stopping") return recovery;
+          if (recovery.status !== "running") {
+            throw new InvalidStatusTransitionError(
+              "Archive Recovery",
+              recovery.status,
+              "eligible",
+            );
+          }
+          const settledStatus = settledArchiveRecoveryStatus(
+            transaction,
+            recovery.originalDiscArchiveId,
+          );
+          const timestamp = now();
+          if (settledStatus === "completed") {
+            requireRow(
+              transaction.delete(archiveRecoveryWork).where(and(
+                eq(
+                  archiveRecoveryWork.archiveRecoveryId,
+                  claim.archiveRecoveryId,
+                ),
+                eq(archiveRecoveryWork.status, "claimed"),
+                eq(archiveRecoveryWork.claimToken, claim.claimToken),
+              )).returning({
+                archiveRecoveryId: archiveRecoveryWork.archiveRecoveryId,
+              }).get(),
+              "Archive Recovery work",
+              claim.archiveRecoveryId,
+            );
+          } else {
+            requireRow(
+              transaction.update(archiveRecoveryWork).set({
+                status: "requested",
+                requestedAt: timestamp,
+                claimedBy: null,
+                claimToken: null,
+                claimedAt: null,
+                updatedAt: timestamp,
+              }).where(and(
+                eq(
+                  archiveRecoveryWork.archiveRecoveryId,
+                  claim.archiveRecoveryId,
+                ),
+                eq(archiveRecoveryWork.status, "claimed"),
+                eq(archiveRecoveryWork.claimToken, claim.claimToken),
+              )).returning({
+                archiveRecoveryId: archiveRecoveryWork.archiveRecoveryId,
+              }).get(),
+              "Archive Recovery work",
+              claim.archiveRecoveryId,
+            );
+          }
+          requireRow(
+            transaction.update(archiveRecoveries).set({
+              status: settledStatus,
+              updatedAt: timestamp,
+            }).where(and(
+              eq(archiveRecoveries.id, recovery.id),
+              eq(archiveRecoveries.attemptId, recovery.attemptId),
+              eq(archiveRecoveries.status, "running"),
+            )).returning({ id: archiveRecoveries.id }).get(),
+            "Archive Recovery",
+            recovery.id,
+          );
+          return requireRow(
+            findArchiveRecoveryRecord(transaction, {
+              archiveRecoveryId: recovery.id,
+            }) ?? undefined,
+            "Archive Recovery",
+            recovery.id,
           );
         }, { behavior: "immediate" });
       },

@@ -684,6 +684,7 @@ export interface ArchiveRecoveryWorkAccess {
     archiveRecoveryId: ArchiveRecoveryId;
     attemptId: ArchiveRecoveryAttemptId;
   }): ArchiveRecovery;
+  requeue(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
   release(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
 }
 
