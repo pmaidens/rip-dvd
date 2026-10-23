@@ -692,6 +692,15 @@ function runDvdRecoveryStopCommand(args: readonly string[], io: CommandIO) {
         { currentIdentities: error.currentIdentities },
       );
     }
+    if (error instanceof EncodeWorkConflictError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+        { current: error.current },
+      );
+    }
     if (
       error instanceof DomainInvariantError ||
       error instanceof InvalidStatusTransitionError

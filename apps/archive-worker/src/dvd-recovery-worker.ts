@@ -360,6 +360,12 @@ export async function pollDvdRecoveryPass(input: {
     if (outcome !== "deferred") return true;
   }
 
+  const storage = input.access.dvdRecoveryStorage.readCurrent();
+  if (
+    storage?.status !== "supported" ||
+    storage.facts.mutationProtection.status !== "verified"
+  ) return false;
+
   const candidate = input.access.archiveRecoveryWork
     .claimNextVerifiedCandidate(input.workerExecutionId);
   if (candidate === null) return false;

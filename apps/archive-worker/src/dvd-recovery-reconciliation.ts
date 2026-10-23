@@ -601,20 +601,11 @@ export async function reconcileDvdRecoveryCheckpoint(
     const recovery = options.access.catalog.findArchiveRecovery(
       options.originalDiscArchiveId,
     );
-    const staleWork = recovery?.work;
-    if (
-      options.releaseRecoveryWork !== false &&
-      staleWork?.status === "claimed" &&
-      staleWork.claimedBy !== null &&
-      staleWork.claimToken !== null &&
-      staleWork.claimedAt !== null
-    ) {
-      options.access.archiveRecoveryWork.release({
-        ...staleWork,
-        status: "claimed",
-        claimedBy: staleWork.claimedBy,
-        claimToken: staleWork.claimToken,
-        claimedAt: staleWork.claimedAt,
+    if (options.releaseRecoveryWork !== false && recovery?.work !== null &&
+      recovery?.work !== undefined) {
+      options.access.archiveRecoveryWork.releaseAfterReconciliation({
+        archiveRecoveryId: recovery.id,
+        attemptId: recovery.work.attemptId,
       });
     }
     return result;

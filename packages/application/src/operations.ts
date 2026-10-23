@@ -142,6 +142,10 @@ function archiveRecoveryOperation(
   const recoveryOwnsStatus = recovery.status === "running" ||
     recovery.status === "stopping" || recovery.status === "stopped" ||
     recovery.status === "faulted" || recovery.status === "completed";
+  const encodeJobs = access.catalog.listDiscSelections({
+    originalDiscArchiveId: recovery.originalDiscArchiveId,
+    includeHistorical: true,
+  }).flatMap(({ id }) => access.encodeJobs.listForDiscSelection(id));
   return {
     ...visibleArchiveRecovery(recovery),
     recoveryStatus: recovery.status,
@@ -162,7 +166,7 @@ function archiveRecoveryOperation(
           message
         ),
       },
-      dvdRecoveryStopAction(recovery),
+      dvdRecoveryStopAction(recovery, encodeJobs),
     ],
   };
 }

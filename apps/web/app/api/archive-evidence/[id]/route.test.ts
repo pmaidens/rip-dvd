@@ -1241,7 +1241,10 @@ it("releases stale recovery work only after archive ownership exits", async () =
         return result;
       },
     };
-    const release = vi.spyOn(access.archiveRecoveryWork, "release");
+    const release = vi.spyOn(
+      access.archiveRecoveryWork,
+      "releaseAfterReconciliation",
+    );
 
     await expect(reconcileDvdRecoveryCheckpoint({
       access,

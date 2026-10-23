@@ -668,6 +668,47 @@ it("faults an unreconcilable Stop so it cannot poison the stopping queue", async
   }
 });
 
+it("releases a faulted Stop reservation after successful reconciliation", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    const stop = access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000489",
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    });
+    access.archiveRecoveryWork.markStopFault({
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+      stopOperationId: stop.stopOperationId,
+      faultCode: "STORAGE_UNSUPPORTED",
+    });
+    expect(access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "faulted",
+        work: expect.objectContaining({ status: "requested" }),
+      });
+
+    await expect(reconcileDvdRecoveryCheckpoint({
+      access,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      originalDiscArchiveId: seeded.archive.id,
+      atomicWriter: syntheticAtomicWriter,
+    })).resolves.toMatchObject({ outcome: "already_consistent" });
+
+    expect(access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "faulted",
+        faultCode: "STORAGE_UNSUPPORTED",
+        work: null,
+      });
+  } finally {
+    access.close();
+  }
+});
+
 it("keeps Stop pending while archive ownership is not quiescent", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
@@ -1268,6 +1309,42 @@ it("records a changed insertion separately without starting a source read", asyn
         faultCode: "SOURCE_CHANGED",
         work: null,
       });
+  } finally {
+    input.access.close();
+  }
+});
+
+it("leaves eligible Recovery work dormant on unsupported storage", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  await completeVerification(fixture, seeded);
+  const source = immediateReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(2_048),
+  }));
+  const input = pollInput(fixture, source.reader);
+  const supported = input.access.dvdRecoveryStorage.readCurrent();
+  if (supported === null) throw new Error("Expected storage preflight");
+  input.access.dvdRecoveryStorage.record({
+    contractVersion: supported.contractVersion,
+    status: "unsupported",
+    reasonCode: "STORAGE_UNSUPPORTED",
+    facts: {
+      ...supported.facts,
+      mutationProtection: {
+        status: "unproven",
+        contract: null,
+        unitBytes: null,
+        memoryAlignmentBytes: null,
+      },
+    },
+  });
+  try {
+    expect(await pollDvdRecoveryPass(input)).toBe(false);
+    expect(source.start).not.toHaveBeenCalled();
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "eligible", faultCode: null, work: null });
   } finally {
     input.access.close();
   }

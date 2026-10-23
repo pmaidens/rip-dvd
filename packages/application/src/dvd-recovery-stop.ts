@@ -1,14 +1,20 @@
 import {
+  createEncodeWorkConflictCurrent,
+  ENCODE_WORK_CONFLICT,
   RecordNotFoundError,
   type ArchiveRecovery,
   type ArchiveRecoveryAttemptId,
   type ArchiveRecoveryId,
   type DataAccess,
+  type EncodeJob,
 } from "@rip-dvd/data-access";
 import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 
-export function dvdRecoveryStopAction(recovery: ArchiveRecovery) {
-  const reason = recovery.status === "completed"
+export function dvdRecoveryStopAction(
+  recovery: ArchiveRecovery,
+  encodeJobs: readonly Pick<EncodeJob, "id" | "status" | "createdAt">[],
+) {
+  const statusReason = recovery.status === "completed"
     ? {
         code: "RECOVERY_COMPLETED",
         message: "Archive Recovery has no unresolved source to stop.",
@@ -29,13 +35,20 @@ export function dvdRecoveryStopAction(recovery: ArchiveRecovery) {
               message: "Archive Recovery is already stopping.",
             }
           : null;
+  const encodeConflict = createEncodeWorkConflictCurrent(recovery, encodeJobs);
+  const encodeReason = encodeConflict.encodeJobs.length === 0
+    ? null
+    : { ...ENCODE_WORK_CONFLICT, current: encodeConflict };
+  const blockingReasons = [statusReason, encodeReason].filter((reason) =>
+    reason !== null
+  );
   return {
     name: "stop",
-    eligible: reason === null,
-    available: reason === null,
-    reason: reason?.message ?? null,
+    eligible: blockingReasons.length === 0,
+    available: blockingReasons.length === 0,
+    reason: blockingReasons[0]?.message ?? null,
     requiredInputs: ["mutationKey", "archiveRecoveryId", "attemptId"],
-    blockingReasons: reason === null ? [] : [reason],
+    blockingReasons,
     expectedInputs: {
       archiveRecoveryId: recovery.id,
       attemptId: recovery.attemptId,

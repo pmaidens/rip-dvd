@@ -10181,6 +10181,60 @@ export function createDataAccessInternal(
           );
         }, { behavior: "immediate" });
       },
+      releaseAfterReconciliation(input) {
+        return database.transaction((transaction) => {
+          const recovery = requireRow(
+            findArchiveRecoveryRecord(transaction, {
+              archiveRecoveryId: input.archiveRecoveryId,
+            }) ?? undefined,
+            "Archive Recovery",
+            input.archiveRecoveryId,
+          );
+          if (recovery.attemptId !== input.attemptId) {
+            throw new StaleJobAttemptError(
+              "Archive Recovery work",
+              input.archiveRecoveryId,
+            );
+          }
+          if (recovery.status === "stopping" || recovery.work === null) {
+            return recovery;
+          }
+          const removed = transaction.delete(archiveRecoveryWork).where(and(
+            eq(
+              archiveRecoveryWork.archiveRecoveryId,
+              input.archiveRecoveryId,
+            ),
+            eq(archiveRecoveryWork.attemptId, input.attemptId),
+            inArray(archiveRecoveryWork.status, ["requested", "claimed"]),
+          )).returning().get();
+          if (removed === undefined) {
+            throw new StaleJobAttemptError(
+              "Archive Recovery work",
+              input.archiveRecoveryId,
+            );
+          }
+          if (recovery.status === "running") {
+            transaction.update(archiveRecoveries).set({
+              status: settledArchiveRecoveryStatus(
+                transaction,
+                recovery.originalDiscArchiveId,
+              ),
+              updatedAt: now(),
+            }).where(and(
+              eq(archiveRecoveries.id, recovery.id),
+              eq(archiveRecoveries.attemptId, recovery.attemptId),
+              eq(archiveRecoveries.status, "running"),
+            )).run();
+          }
+          return requireRow(
+            findArchiveRecoveryRecord(transaction, {
+              archiveRecoveryId: input.archiveRecoveryId,
+            }) ?? undefined,
+            "Archive Recovery",
+            input.archiveRecoveryId,
+          );
+        }, { behavior: "immediate" });
+      },
       release(claim) {
         return database.transaction((transaction) => {
           const recoveryAfterCompletion = findArchiveRecoveryRecord(

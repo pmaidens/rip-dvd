@@ -679,6 +679,10 @@ export interface ArchiveRecoveryWorkAccess {
     faultCode: ArchiveRecoveryFaultCode;
     retainWork: boolean;
   }): ArchiveRecovery;
+  releaseAfterReconciliation(input: {
+    archiveRecoveryId: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+  }): ArchiveRecovery;
   release(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
 }
 

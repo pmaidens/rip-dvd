@@ -6,6 +6,7 @@ import {
 import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
+  EncodeWorkConflictError,
   InvalidStatusTransitionError,
   MutationKeyConflictError,
   RecordNotFoundError,
@@ -111,6 +112,16 @@ export async function createDvdRecoveryStopRoute(
           code: error.code,
           message: error.message,
           currentIdentities: error.currentIdentities,
+        },
+      }, 409);
+    }
+    if (error instanceof EncodeWorkConflictError) {
+      return response({
+        error: {
+          code: error.code,
+          message: error.message,
+          blockingReasons: error.blockingReasons,
+          current: error.current,
         },
       }, 409);
     }

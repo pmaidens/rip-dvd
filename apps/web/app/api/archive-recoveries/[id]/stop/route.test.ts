@@ -1,6 +1,11 @@
 import { afterEach, expect, it } from "vitest";
+import { join } from "node:path";
 
-import { createOperatorWorkflowFixture } from "../../../../../../operator-cli/src/operator-workflow.test-support.js";
+import {
+  createOperatorWorkflowFixture,
+  markArchiveWithDvdRecoveryEvidence,
+  seedCatalogReviewForReadFixture,
+} from "../../../../../../operator-cli/src/operator-workflow.test-support.js";
 import { seedDvdDiscVerificationFixture } from "../../../../../../operator-cli/src/dvd-disc-verification.test-support.js";
 import {
   createDvdRecoveryStopRoute,
@@ -154,6 +159,108 @@ it("offers the same attempt-bound durable Stop through web and CLI", async () =>
     expect(stoppedWeb.status).toBe(409);
     expect(stoppedCli.exitCode).toBe(2);
     expect(stoppedCli.result).toEqual(await stoppedWeb.json());
+  } finally {
+    access.close();
+  }
+});
+
+it("reports queued Encode ownership through Stop web, CLI, and availability", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const catalog = seedCatalogReviewForReadFixture(fixture);
+  const preparation = fixture.openAccess();
+  preparation.catalog.completeCatalogReview(
+    catalog.archive.id,
+    preparation.catalog.listOriginalDiscArchives({
+      ids: [catalog.archive.id],
+    })[0]!.updatedAt,
+    "reviewed_with_selections",
+  );
+  const profile = preparation.encodingProfiles.list({
+    mediaDomain: "dvd_video",
+    activeOnly: true,
+  })[0]!;
+  const queued = preparation.encodeJobs.enqueue({
+    discSelectionId: catalog.correctedSelection.id,
+    encodingProfileId: profile.id,
+    outputPath: join(fixture.mediaLibraryPath, "stop-conflict.mkv"),
+  });
+  preparation.close();
+  const recoveryId = "synthetic-stop-encode-conflict";
+  const attemptId = `${recoveryId}:attempt:1`;
+  markArchiveWithDvdRecoveryEvidence(
+    fixture.databasePath,
+    catalog.archive.id,
+    "synthetic-stop-encode-conflict",
+    { archiveRecovery: { id: recoveryId } },
+  );
+
+  const access = fixture.openAccess();
+  try {
+    const mutationKey = "00000000-0000-4000-8000-000000000488";
+    const web = await createDvdRecoveryStopRoute(
+      request(recoveryId, mutationKey, attemptId),
+      recoveryId,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const cli = await fixture.run([
+      "archive-recovery",
+      "stop",
+      recoveryId,
+      "--key",
+      mutationKey,
+      "--attempt-id",
+      attemptId,
+    ]);
+
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toMatchObject({
+      error: {
+        code: "ENCODE_WORK_CONFLICT",
+        blockingReasons: [{ code: "ENCODE_WORK_CONFLICT" }],
+        current: {
+          archiveRecovery: {
+            id: recoveryId,
+            originalDiscArchiveId: catalog.archive.id,
+            work: null,
+          },
+          encodeJobs: [{ id: queued.id, status: "queued" }],
+        },
+      },
+    });
+
+    const webStatus = createOperationsResponse(
+      access,
+      new Request(
+        `http://localhost:3000/api/operations?kind=archive-recoveries&id=${recoveryId}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    const cliStatus = await fixture.run([
+      "inspect",
+      "archive-recoveries",
+      recoveryId,
+    ]);
+    expect(cliStatus.result).toEqual(await webStatus.json());
+    expect(cliStatus.result).toMatchObject({
+      item: {
+        availableActions: expect.arrayContaining([
+          expect.objectContaining({
+            name: "stop",
+            available: false,
+            blockingReasons: [expect.objectContaining({
+              code: "ENCODE_WORK_CONFLICT",
+              current: expect.objectContaining({
+                encodeJobs: [{ id: queued.id, status: "queued" }],
+              }),
+            })],
+          }),
+        ]),
+      },
+    });
   } finally {
     access.close();
   }
