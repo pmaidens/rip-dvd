@@ -36,6 +36,7 @@ import { isTerminalEncodeJobStatus } from "../lib/encode-job-status";
 import { ArchiveIntegrityDescription } from "./archive-integrity-description";
 import { ArchiveBoundaryDescription } from "./archive-boundary-description";
 import { CatalogReviewEditor } from "./catalog-review-editor";
+import { CatalogReviewWorkflowFacts } from "./catalog-review-workflow";
 import { InvestigationPanel } from "./investigation-panel";
 import {
   cancelEncodeJob,
@@ -2095,6 +2096,12 @@ export function DashboardView({
                 <ArchiveBoundaryDescription
                   boundaryEvidence={archive.boundaryEvidence}
                 />
+                {archive.reviewWorkflow === undefined ? null : (
+                  <CatalogReviewWorkflowFacts
+                    workflow={archive.reviewWorkflow}
+                    compact
+                  />
+                )}
               </div>
               <span
                 className="attention-mark"

@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import type { DiscSelectionAction } from "@rip-dvd/data-access";
 import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
 import { DISC_SELECTION_KINDS } from "@rip-dvd/data-access/catalog-kinds";
 
 import { integerFormValue } from "./catalog-review-form";
+import { CatalogReviewDraftEvidenceNotice } from "./catalog-review-draft-evidence";
 import { orderMediaItemHierarchy } from "./catalog-review-hierarchy";
 import {
   type CatalogReviewDiscSelection,
@@ -18,6 +19,7 @@ import { CatalogReviewPagination } from "./catalog-review-pagination";
 import { displayTerm } from "../lib/display-term";
 
 interface CatalogReviewDiscSelectionsProps {
+  catalogRevision: string;
   discSelections: CatalogReviewDiscSelection[];
   page: CatalogReviewDto["discSelectionsPage"];
   correctionHistory: CatalogReviewDto["correctionHistory"];
@@ -30,16 +32,28 @@ interface CatalogReviewDiscSelectionsProps {
   correctionRetainedOutputHistoryPage:
     CatalogReviewDto["correctionRetainedOutputHistoryPage"];
   mediaItems: CatalogReviewMediaItem[];
-  rawTitles: DvdTitle[];
+  rawTitles: Array<DvdTitle | Pick<DvdTitle, "number" | "chapters">>;
+  mappingReviewSelectionIds?: ReadonlySet<string>;
+  allowMainFeature?: boolean;
   selectionKind: DiscSelectionKind;
   isSaving: boolean;
+  mappingAvailable?: boolean;
   onPage(offset: number): void;
   onCorrectionHistoryPage(offset: number): void;
   onCorrectionEncodeHistoryPage(offset: number): void;
   onCorrectionRetainedOutputHistoryPage(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
-  onCreate(input: CreateDiscSelectionInput): void;
-  onUpdate(id: string, changes: UpdateDiscSelectionInput): void;
+  onCreate(
+    input: CreateDiscSelectionInput,
+    catalogRevision: string,
+    onCommitted: () => void,
+  ): void;
+  onUpdate(
+    id: string,
+    changes: UpdateDiscSelectionInput,
+    catalogRevision: string,
+    onCommitted: () => void,
+  ): void;
   onDelete(id: string): void;
 }
 
@@ -97,6 +111,7 @@ function sameSourceIdentity(
 }
 
 export function CatalogReviewDiscSelections({
+  catalogRevision,
   discSelections,
   page,
   correctionHistory,
@@ -107,8 +122,11 @@ export function CatalogReviewDiscSelections({
   correctionRetainedOutputHistoryPage,
   mediaItems,
   rawTitles,
+  mappingReviewSelectionIds = new Set(),
+  allowMainFeature = true,
   selectionKind,
   isSaving,
+  mappingAvailable = true,
   onPage,
   onCorrectionHistoryPage,
   onCorrectionEncodeHistoryPage,
@@ -118,6 +136,13 @@ export function CatalogReviewDiscSelections({
   onUpdate,
   onDelete,
 }: CatalogReviewDiscSelectionsProps) {
+  const availableSelectionKinds = allowMainFeature
+    ? DISC_SELECTION_KINDS
+    : DISC_SELECTION_KINDS.filter((kind) => kind !== "main_feature");
+  const effectiveSelectionKind = !allowMainFeature &&
+      selectionKind === "main_feature"
+    ? "dvd_title"
+    : selectionKind;
   const hierarchy = orderMediaItemHierarchy(mediaItems);
   const itemsById = new Map(mediaItems.map((item) => [item.id, item]));
   const [editingSelectionId, setEditingSelectionId] = useState<string | null>(
@@ -129,14 +154,36 @@ export function CatalogReviewDiscSelections({
   const [chapterEnd, setChapterEnd] = useState("");
   const [label, setLabel] = useState("");
   const [clearLabel, setClearLabel] = useState(false);
+  const [draftCatalogRevision, setDraftCatalogRevision] = useState<
+    string | null
+  >(null);
+  const draftUsesStaleEvidence = draftCatalogRevision !== null &&
+    draftCatalogRevision !== catalogRevision;
+  const hydratedSelectionId = useRef<string | null>(null);
   const editingSelection = editingSelectionId === null
     ? null
     : discSelections.find((selection) => selection.id === editingSelectionId) ??
       null;
 
   useEffect(() => {
+    if (!allowMainFeature && selectionKind === "main_feature") {
+      onSelectionKindChange("dvd_title");
+    }
+  }, [allowMainFeature, onSelectionKindChange, selectionKind]);
+
+  useEffect(() => {
     const selection = editingSelection;
-    if (selection === null) return;
+    if (selection === null) {
+      hydratedSelectionId.current = null;
+      return;
+    }
+    if (
+      hydratedSelectionId.current === selection.id &&
+      draftCatalogRevision !== null
+    ) {
+      return;
+    }
+    hydratedSelectionId.current = selection.id;
     setMediaItemId(selection.mediaItemId);
     setLabel(selection.label ?? "");
     setClearLabel(false);
@@ -155,7 +202,7 @@ export function CatalogReviewDiscSelections({
       setChapterStart("");
       setChapterEnd("");
     }
-  }, [editingSelection, onSelectionKindChange]);
+  }, [draftCatalogRevision, editingSelection, onSelectionKindChange]);
 
   function selectCatalogAction(event: React.ChangeEvent<HTMLSelectElement>) {
     const selection = discSelections.find(
@@ -179,6 +226,8 @@ export function CatalogReviewDiscSelections({
 
   function submitSelection(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const reviewedCatalogRevision = draftCatalogRevision ?? catalogRevision;
+    const onCommitted = () => setDraftCatalogRevision(null);
     const form = new FormData(event.currentTarget);
     const nextLabel = String(form.get("label") ?? "").trim();
     const replacesDiscSelectionId = String(
@@ -194,14 +243,14 @@ export function CatalogReviewDiscSelections({
       ...(nextLabel ? { label: nextLabel } : {}),
     };
     let sourceIdentity: CatalogReviewDiscSelection["sourceIdentity"];
-    if (selectionKind === "main_feature") {
-      sourceIdentity = { kind: selectionKind };
+    if (effectiveSelectionKind === "main_feature") {
+      sourceIdentity = { kind: effectiveSelectionKind };
     } else {
       const selectedTitleNumber = integerFormValue(form, "titleNumber");
       if (selectedTitleNumber === undefined) return;
-      if (selectionKind === "dvd_title") {
+      if (effectiveSelectionKind === "dvd_title") {
         sourceIdentity = {
-          kind: selectionKind,
+          kind: effectiveSelectionKind,
           titleNumber: selectedTitleNumber,
         };
       } else {
@@ -211,7 +260,7 @@ export function CatalogReviewDiscSelections({
           selectedChapterStart === undefined || selectedChapterEnd === undefined
         ) return;
         sourceIdentity = {
-          kind: selectionKind,
+          kind: effectiveSelectionKind,
           titleNumber: selectedTitleNumber,
           chapterStart: selectedChapterStart,
           chapterEnd: selectedChapterEnd,
@@ -227,7 +276,10 @@ export function CatalogReviewDiscSelections({
       if (common.mediaItemId !== target.mediaItemId) {
         changes.mediaItemId = common.mediaItemId;
       }
-      if (!sameSourceIdentity(sourceIdentity, target.sourceIdentity)) {
+      if (
+        !sameSourceIdentity(sourceIdentity, target.sourceIdentity) ||
+        mappingReviewSelectionIds.has(target.id)
+      ) {
         changes.sourceIdentity = sourceIdentity;
       }
       if (form.get("clearLabel") === "on") {
@@ -238,12 +290,21 @@ export function CatalogReviewDiscSelections({
         changes.label = nextLabel;
       }
       if (Object.keys(changes).length > 0) {
-        onUpdate(target.id, changes as UpdateDiscSelectionInput);
+        onUpdate(
+          target.id,
+          changes as UpdateDiscSelectionInput,
+          reviewedCatalogRevision,
+          onCommitted,
+        );
       }
       return;
     }
 
-    onCreate({ ...common, sourceIdentity });
+    onCreate(
+      { ...common, sourceIdentity },
+      reviewedCatalogRevision,
+      onCommitted,
+    );
   }
 
   const hasSupersessionCorrection = discSelections.some(
@@ -281,7 +342,7 @@ export function CatalogReviewDiscSelections({
                 {hasAction(selection, "remove") ? (
                   <button
                     type="button"
-                    disabled={isSaving}
+                    disabled={isSaving || !mappingAvailable}
                     onClick={() => onDelete(selection.id)}
                   >
                     Remove Disc Selection
@@ -414,8 +475,21 @@ export function CatalogReviewDiscSelections({
         onPage={onCorrectionRetainedOutputHistoryPage}
       />
 
-      <form className="catalog-form" onSubmit={submitSelection}>
+      <form
+        className="catalog-form"
+        onChange={() => setDraftCatalogRevision((current) =>
+          current ?? catalogRevision
+        )}
+        onSubmit={submitSelection}
+      >
         <h3>{editingSelection ? "Edit Disc Selection" : "Add Disc Selection"}</h3>
+        <CatalogReviewDraftEvidenceNotice
+          usesStaleEvidence={draftUsesStaleEvidence}
+          mappingAvailable={mappingAvailable}
+          isSaving={isSaving}
+          onUseRefreshedEvidence={() =>
+            setDraftCatalogRevision(catalogRevision)}
+        />
         {hasSupersessionCorrection ? (
           <p>
             A job-backed Disc Selection Correction creates a new identity and
@@ -470,21 +544,21 @@ export function CatalogReviewDiscSelections({
             Source
             <select
               name="selectionKind"
-              value={selectionKind}
+              value={effectiveSelectionKind}
               onChange={(event) => {
                 onSelectionKindChange(
                   event.currentTarget.value as DiscSelectionKind,
                 );
               }}
             >
-              {DISC_SELECTION_KINDS.map((kind) => (
+              {availableSelectionKinds.map((kind) => (
                 <option key={kind} value={kind}>
                   {discSelectionLabels[kind]}
                 </option>
               ))}
             </select>
           </label>
-          {selectionKind !== "main_feature" ? (
+          {effectiveSelectionKind !== "main_feature" ? (
             <label>
               DVD title
               <select
@@ -502,7 +576,7 @@ export function CatalogReviewDiscSelections({
               </select>
             </label>
           ) : null}
-          {selectionKind === "dvd_chapters" ? (
+          {effectiveSelectionKind === "dvd_chapters" ? (
             <>
               <label>
                 First chapter
@@ -573,7 +647,8 @@ export function CatalogReviewDiscSelections({
         </div>
         <button
           type="submit"
-          disabled={isSaving || mediaItems.length === 0}
+          disabled={isSaving || !mappingAvailable || mediaItems.length === 0 ||
+            draftUsesStaleEvidence}
         >
           {editingSelection ? "Save Disc Selection" : "Add Disc Selection"}
         </button>

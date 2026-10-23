@@ -124,6 +124,7 @@ const validCommands = {
   },
   create_disc_selection: {
     action: "create_disc_selection",
+    catalogRevision: "2026-08-11T06:00:00.000Z",
     selection: {
       mediaItemId: "media-item-1",
       sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
@@ -408,6 +409,17 @@ describe("catalog review command contract", () => {
         selection: {
           mediaItemId: "media-item-1",
           sourceIdentity: { kind: "dvd_title" },
+        },
+      },
+      "Invalid Disc Selection",
+    ],
+    [
+      {
+        action: "create_disc_selection",
+        catalogRevision: "not-a-revision",
+        selection: {
+          mediaItemId: "media-item-1",
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
         },
       },
       "Invalid Disc Selection",

@@ -1569,6 +1569,12 @@ export const dvdStructuralCheckAttempts = sqliteTable(
       table.manifestRevision,
       table.sequence,
     ),
+    index("dvd_structural_check_attempts_current_completed_idx").on(
+      table.originalDiscArchiveId,
+      table.manifestId,
+      table.outcome,
+      table.sequence,
+    ),
     check(
       "dvd_structural_check_attempts_checkpoint_check",
       sql`typeof(${table.manifestRevision}) = 'integer' and ${table.manifestRevision} > 0 and length(${table.manifestDigest}) = 64 and ${table.manifestDigest} not glob '*[^0-9a-f]*' and typeof(${table.acceptedEndLbaExclusive}) = 'integer' and ${table.acceptedEndLbaExclusive} > 0`,
@@ -1604,6 +1610,7 @@ export const dvdTitleDamageAssessments = sqliteTable(
     titleIdentityReviewSetIdentity: text(
       "title_identity_review_set_identity",
     ).notNull(),
+    catalogMappingProjectionId: text("catalog_mapping_projection_id"),
     structuralAssessmentIdentity: text("structural_assessment_identity")
       .notNull()
       .references(() => dvdStructuralAssessments.id, {
@@ -1631,6 +1638,10 @@ export const dvdTitleDamageAssessments = sqliteTable(
     check(
       "dvd_title_damage_assessments_dependency_check",
       sql`length(${table.titleIdentityReviewSetIdentity}) = 64 and ${table.titleIdentityReviewSetIdentity} not glob '*[^0-9a-f]*' and length(${table.structuralAssessmentIdentity}) = 90 and substr(${table.structuralAssessmentIdentity}, 1, 26) = 'dvd-structural-assessment:' and substr(${table.structuralAssessmentIdentity}, 27) not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "dvd_title_damage_assessments_catalog_mapping_projection_check",
+      sql`${table.catalogMappingProjectionId} is null or (length(${table.catalogMappingProjectionId}) = 64 and ${table.catalogMappingProjectionId} not glob '*[^0-9a-f]*')`,
     ),
     check(
       "dvd_title_damage_assessments_policy_check",

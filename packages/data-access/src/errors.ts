@@ -49,6 +49,61 @@ export class StaleCatalogRevisionError extends DomainInvariantError {
   }
 }
 
+export class CatalogMappingEvidenceUnavailableError
+  extends DomainInvariantError {
+  constructor() {
+    super(
+      "Catalog mapping requires current Title Identity evidence and a consistent workflow",
+    );
+    this.name = "CatalogMappingEvidenceUnavailableError";
+  }
+}
+
+export class UnsupportedCatalogMappingSourceError
+  extends DomainInvariantError {
+  readonly code = "CATALOG_MAPPING_SOURCE_UNSUPPORTED" as const;
+
+  constructor() {
+    super(
+      "Current-evidence mapping requires an exact DVD title or chapter range",
+    );
+    this.name = "UnsupportedCatalogMappingSourceError";
+  }
+}
+
+export class CurrentCatalogMappingSourceError extends DomainInvariantError {
+  readonly code = "CATALOG_MAPPING_SOURCE_NOT_CURRENT" as const;
+
+  constructor() {
+    super(
+      "Catalog mapping source is not present in current Title Identity evidence",
+    );
+    this.name = "CurrentCatalogMappingSourceError";
+  }
+}
+
+export class CatalogMappingRevisionRequiredError
+  extends DomainInvariantError {
+  readonly code = "CATALOG_MAPPING_REVISION_REQUIRED" as const;
+
+  constructor() {
+    super("Catalog mapping requires the reviewed Catalog Review revision");
+    this.name = "CatalogMappingRevisionRequiredError";
+  }
+}
+
+export class CatalogMappingCapacityExceededError
+  extends DomainInvariantError {
+  readonly code = "CATALOG_MAPPING_CAPACITY_EXCEEDED" as const;
+
+  constructor(readonly maximumActiveSelections: number) {
+    super(
+      `New-format DVD archives are limited to ${maximumActiveSelections} active Disc Selections`,
+    );
+    this.name = "CatalogMappingCapacityExceededError";
+  }
+}
+
 export class StaleJobAttemptError extends Error {
   constructor(recordType: string, id: string) {
     super(`Stale ${recordType} attempt: ${id}`);

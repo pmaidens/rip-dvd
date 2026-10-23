@@ -15,6 +15,18 @@ references while shared Archive Image Ownership is held, rechecks the
 checkpoint and both dependency identities, and persists the assessment before
 the read interval ends.
 
+Routine status projections establish the same Title Identity dependency
+without traversing historical observations by comparing the assessment's
+stored Catalog mapping projection identity at the same exact checkpoint. That
+bounded projection covers each active selection's identity, Media Item target,
+DVD title or chapter source range, and mapping-review state; the remaining
+review-set evidence is immutable within the checkpoint. An older
+assessment without that projection identity is outdated rather than assumed
+current. Current assessment identities include the projection identity, so a
+reassessment after a mapping change creates a distinct immutable row. A
+migrated assessment without the projection retains its legacy identity and is
+replaced by a current row on reassessment.
+
 The assessment intersects each title's deduplicated source set with current
 Unrecovered Source. Complete maps expose the unique numerator, denominator,
 and percentage. Partial maps expose known intersections but omit the

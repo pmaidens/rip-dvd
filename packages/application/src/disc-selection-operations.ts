@@ -1,4 +1,5 @@
 import {
+  CatalogMappingRevisionRequiredError,
   DomainInvariantError,
   type DataAccess,
   type DiscSelectionAction,
@@ -19,6 +20,11 @@ import {
   isDiscSelectionPreviewToken,
 } from "./disc-selection-preview-token.js";
 import { parseMutationKey } from "./mutation-key.js";
+import {
+  CatalogReviewRevisionStaleError,
+  describeCatalogReviewWorkflow,
+  rethrowCatalogMappingOperationError,
+} from "./catalog-review-workflow.js";
 
 type SelectionCommand = DiscSelectionCommand;
 
@@ -143,16 +149,56 @@ export function previewDiscSelectionChange(
     };
   }
   const mutation = discSelectionMutation(archiveId, command);
-  const catalogRevision = new Date(current.catalogRevision);
-  if (mutation.action === "correct" &&
-      mutation.selection.catalogRevision.getTime() !== catalogRevision.getTime()) {
-    throw new DomainInvariantError("Catalog review revision is stale");
+  const currentCatalogRevision = new Date(current.catalogRevision);
+  const reviewedCatalogRevision = command.action === "update_disc_selection" ||
+      command.action === "repair_disc_selection" ||
+      command.action === "correct_disc_selection"
+    ? command.catalogRevision
+    : undefined;
+  let workflow: ReturnType<typeof describeCatalogReviewWorkflow> | undefined;
+  const currentWorkflow = () => {
+    workflow ??= describeCatalogReviewWorkflow(access, archiveId);
+    return workflow;
+  };
+  if (
+    (command.action === "update_disc_selection" ||
+      command.action === "repair_disc_selection") &&
+    reviewedCatalogRevision === undefined &&
+    currentWorkflow() !== null
+  ) {
+    throw new CatalogMappingRevisionRequiredError();
   }
-  const proposed = access.catalog.previewDiscSelectionChange({
-    originalDiscArchiveId: archiveId,
-    expectedCatalogRevision: catalogRevision,
-    mutation,
-  });
+  if (
+    reviewedCatalogRevision !== undefined &&
+    new Date(reviewedCatalogRevision).getTime() !==
+      currentCatalogRevision.getTime()
+  ) {
+    throw new CatalogReviewRevisionStaleError(
+      currentWorkflow(),
+      reviewedCatalogRevision,
+      current.catalogRevision,
+    );
+  }
+  const catalogRevision = reviewedCatalogRevision === undefined
+    ? currentCatalogRevision
+    : new Date(reviewedCatalogRevision);
+  let proposed: ReturnType<
+    DataAccess["catalog"]["previewDiscSelectionChange"]
+  >;
+  try {
+    proposed = access.catalog.previewDiscSelectionChange({
+      originalDiscArchiveId: archiveId,
+      expectedCatalogRevision: catalogRevision,
+      mutation,
+    });
+  } catch (error) {
+    rethrowCatalogMappingOperationError(
+      access,
+      archiveId,
+      catalogRevision,
+      error,
+    );
+  }
   const previewToken = createDiscSelectionPreviewToken();
   access.catalog.recordDiscSelectionPreviewDecision({
     previewToken,
@@ -206,13 +252,33 @@ export function executeDiscSelectionCommand(
   const mutation = discSelectionMutation(archiveId, command);
   const mutationKey = parseMutationKey(options.mutationKey);
   const requiresPreview = discSelectionCommandRequiresPreview(command);
+  const commandCatalogRevision = command.action === "create_disc_selection" ||
+      command.action === "update_disc_selection" ||
+      command.action === "repair_disc_selection" ||
+      command.action === "correct_disc_selection"
+    ? command.catalogRevision
+    : undefined;
+  const expectedCatalogRevision = options.expectedCatalogRevision ??
+    (commandCatalogRevision
+      ? new Date(commandCatalogRevision)
+      : undefined);
   if (requiresPreview && (options.acknowledged !== true || !options.expectedCatalogRevision ||
       !options.previewToken)) {
     throw new DomainInvariantError("Disc Selection preview acknowledgement is required");
   }
-  if (!requiresPreview && (options.acknowledged === true || options.expectedCatalogRevision ||
+  if (!requiresPreview && (options.acknowledged === true ||
+      (options.expectedCatalogRevision !== undefined &&
+        command.action !== "create_disc_selection" &&
+        command.action !== "update_disc_selection") ||
       options.previewToken)) {
     throw new DomainInvariantError("This Disc Selection change does not require a preview");
+  }
+  if (
+    !requiresPreview && command.action === "update_disc_selection" &&
+    expectedCatalogRevision === undefined &&
+    describeCatalogReviewWorkflow(access, archiveId) !== null
+  ) {
+    throw new CatalogMappingRevisionRequiredError();
   }
   if (options.previewToken !== undefined) {
     if (!options.expectedCatalogRevision || mutation.action === "create") {
@@ -222,13 +288,24 @@ export function executeDiscSelectionCommand(
       throw new DomainInvariantError("Disc Selection preview does not match the proposed change");
     }
   }
-  const result = access.catalog.mutateDiscSelection({
-    originalDiscArchiveId: archiveId,
-    mutation,
-    mutationKey,
-    ...(options.expectedCatalogRevision ? { expectedCatalogRevision: options.expectedCatalogRevision } : {}),
-    ...(options.previewToken ? { previewToken: options.previewToken } : {}),
-  });
+  const result = (() => {
+    try {
+      return access.catalog.mutateDiscSelection({
+        originalDiscArchiveId: archiveId,
+        mutation,
+        mutationKey,
+        ...(expectedCatalogRevision ? { expectedCatalogRevision } : {}),
+        ...(options.previewToken ? { previewToken: options.previewToken } : {}),
+      });
+    } catch (error) {
+      rethrowCatalogMappingOperationError(
+        access,
+        archiveId,
+        expectedCatalogRevision,
+        error,
+      );
+    }
+  })();
   return {
     message: "Mapping changed; review required",
     discSelection: serializeDiscSelection(result.discSelection),

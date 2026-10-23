@@ -21,6 +21,7 @@ export async function seedCommittedArchiveEvidence(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   ranges: readonly DvdUnrecoveredSourceRange[] = [],
   corrected = false,
+  withRecovery = false,
 ) {
   const { archive } = seedCatalogReviewForReadFixture(fixture);
   const archivePath = join(realpathSync(fixture.originalsLibraryPath), `${archive.id}.iso`);
@@ -39,7 +40,14 @@ export async function seedCommittedArchiveEvidence(
     WHERE id = ?`).run(archivePath, acceptedSectors * 2048, corrected ? "dvd-archive-boundary-v1" : "dvd-archive-boundary-v2", (corrected ? 1280 : acceptedSectors) * 2048,
       acceptedSectors * 2048, corrected ? 256 : 0, acceptedSectors, corrected ? 1023 : null, archive.id);
   sqlite.close();
-  markArchiveWithDvdRecoveryEvidence(fixture.databasePath, archive.id, "synthetic-committed");
+  markArchiveWithDvdRecoveryEvidence(
+    fixture.databasePath,
+    archive.id,
+    "synthetic-committed",
+    withRecovery
+      ? { archiveRecovery: { id: "synthetic-committed-recovery" } }
+      : {},
+  );
   const access = fixture.openAccess();
   const recorded = access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!;
   const header = access.catalog.findDvdArchiveEvidenceHeader(archive.id)!;

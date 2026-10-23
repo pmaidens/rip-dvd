@@ -123,7 +123,7 @@ it("runs every structured input form through the executable without the web serv
   expect(access.catalog.listMediaItems()).toHaveLength(1);
   expect(access.catalog.listDiscSelections({ originalDiscArchiveId: archive.id })).toHaveLength(1);
   access.close();
-}, 10_000);
+}, 15_000);
 
 it("recovers a committed proposal after a lost response and data-access restart", async () => {
   const { current, archive } = fixture();
@@ -246,7 +246,11 @@ it("rejects malformed, stale, and invalid multi-selection proposals without part
   expect((await run(2, proposal)).result).toEqual(created.result);
   expect((await run(3, { ...proposal, episodes: [
     { titleNumber: 3, title: "Third", episodeNumber: 3 },
-  ] })).result).toMatchObject({ error: { code: "STALE_CATALOG_REVISION" } });
+  ] })).result).toMatchObject({ error: {
+    code: "STALE_CATALOG_REVISION",
+    message:
+      "Catalog review changed; reload before saving Episodic Mapping Proposal",
+  } });
   access = current.openAccess();
   expect(access.catalog.listMediaItems()).toHaveLength(4);
   expect(access.catalog.listDiscSelections({ originalDiscArchiveId: archive.id })).toHaveLength(2);

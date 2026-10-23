@@ -1,15 +1,22 @@
 import {
   applyMappingProposal,
+  CatalogReviewCompletionUnavailableError,
+  CatalogReviewMappingUnavailableError,
+  CatalogReviewRevisionStaleError,
   InvalidMutationKeyError,
   parseMutationKey,
   type MappingProposalCommand,
 } from "@rip-dvd/application";
 import { parseCatalogReviewCommand } from "@rip-dvd/application/catalog-review-command";
 import {
+  CatalogMappingCapacityExceededError,
+  CurrentCatalogMappingSourceError,
   DomainInvariantError,
   MEDIA_ITEM_KINDS,
   MutationKeyConflictError,
   RecordNotFoundError,
+  StaleCatalogRevisionError,
+  UnsupportedCatalogMappingSourceError,
   type DataAccess,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
@@ -93,16 +100,38 @@ export function runMappingProposal(rest: readonly string[], io: MappingProposalI
     if (error instanceof MutationKeyConflictError) {
       throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
     }
+    if (error instanceof CatalogReviewCompletionUnavailableError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        undefined,
+        { reasons: error.blockingReasons, current: error.current },
+      );
+    }
+    if (error instanceof CatalogReviewMappingUnavailableError ||
+        error instanceof CatalogReviewRevisionStaleError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        undefined,
+        { reasons: error.blockingReasons, current: error.current },
+      );
+    }
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("PROPOSAL_REJECTED", error.message, 2);
     }
+    if (error instanceof CatalogMappingCapacityExceededError ||
+        error instanceof UnsupportedCatalogMappingSourceError ||
+        error instanceof CurrentCatalogMappingSourceError) {
+      throw new CommandFailure(error.code, error.message, 2);
+    }
+    if (error instanceof StaleCatalogRevisionError) {
+      throw new CommandFailure("STALE_CATALOG_REVISION", error.message, 2);
+    }
     if (error instanceof DomainInvariantError) {
-      throw new CommandFailure(
-        error.message.includes("Catalog review changed;")
-          ? "STALE_CATALOG_REVISION" : "PROPOSAL_REJECTED",
-        error.message,
-        2,
-      );
+      throw new CommandFailure("PROPOSAL_REJECTED", error.message, 2);
     }
     throw new CommandFailure("PROPOSAL_UNAVAILABLE", "Mapping Proposal is unavailable.", 1);
   } finally {

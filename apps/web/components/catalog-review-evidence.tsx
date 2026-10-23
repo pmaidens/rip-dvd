@@ -161,7 +161,11 @@ export function CatalogReviewEvidence({
   mediaItems = [],
   activeMappingProposal = null,
   activeEpisodicMappingProposal = null,
+  allowMainFeatureProposal = true,
   isSaving = false,
+  mappingAvailable = true,
+  mappingProposalUsesStaleEvidence = false,
+  episodicMappingProposalUsesStaleEvidence = false,
   mappingProposalError = null,
   onStartMappingProposal,
   onCancelMappingProposal = () => undefined,
@@ -169,6 +173,8 @@ export function CatalogReviewEvidence({
   onStartEpisodicMappingProposal,
   onCancelEpisodicMappingProposal = () => undefined,
   onCreateEpisodicMappingProposal = () => undefined,
+  onUseRefreshedMappingProposalEvidence = () => undefined,
+  onUseRefreshedEpisodicMappingProposalEvidence = () => undefined,
 }: {
   coverage: CatalogReviewCoverage;
   volumeLabel: string;
@@ -176,7 +182,11 @@ export function CatalogReviewEvidence({
   mediaItems?: CatalogReviewMediaItem[];
   activeMappingProposal?: MappingProposal | null;
   activeEpisodicMappingProposal?: EpisodicMappingProposal | null;
+  allowMainFeatureProposal?: boolean;
   isSaving?: boolean;
+  mappingAvailable?: boolean;
+  mappingProposalUsesStaleEvidence?: boolean;
+  episodicMappingProposalUsesStaleEvidence?: boolean;
   mappingProposalError?: string | null;
   onStartMappingProposal?(proposal: MappingProposal): void;
   onCancelMappingProposal?(): void;
@@ -186,6 +196,8 @@ export function CatalogReviewEvidence({
   onCreateEpisodicMappingProposal?(
     input: CreateEpisodicMappingProposalInput,
   ): void;
+  onUseRefreshedMappingProposalEvidence?(): void;
+  onUseRefreshedEpisodicMappingProposalEvidence?(): void;
 }) {
   const [filter, setFilter] = useState<CoverageFilter>("all");
   const [selectedEpisodicTitleNumbers, setSelectedEpisodicTitleNumbers] =
@@ -326,7 +338,8 @@ export function CatalogReviewEvidence({
     };
     const activeTitleProposal = isActiveProposalTitle(title);
     const hasExistingCoverage = titleCoverage.status !== "unmapped";
-    const assistedMappingDisabled = isSaving || hasExistingCoverage ||
+    const assistedMappingDisabled = isSaving || !mappingAvailable ||
+      hasExistingCoverage ||
       activeEpisodicMappingProposal !== null;
     return (
       <li
@@ -379,7 +392,8 @@ export function CatalogReviewEvidence({
                 name="episodicTitleNumbers"
                 value={title.number}
                 checked={selectedEpisodicTitleNumbers.has(title.number)}
-                disabled={isSaving || activeEpisodicMappingProposal !== null}
+                disabled={isSaving || !mappingAvailable ||
+                  activeEpisodicMappingProposal !== null}
                 onChange={() => toggleEpisodicTitle(title.number)}
               />
               Select Title {title.number} for episodic mapping
@@ -465,9 +479,12 @@ export function CatalogReviewEvidence({
             proposedTitle={proposedTitle}
             mediaItems={mediaItems}
             isSaving={isSaving}
+            mappingAvailable={mappingAvailable}
+            usesStaleEvidence={mappingProposalUsesStaleEvidence}
             error={mappingProposalError}
             onCancel={onCancelMappingProposal}
             onCreate={onCreateMappingProposal}
+            onUseRefreshedEvidence={onUseRefreshedMappingProposalEvidence}
           />
         ) : null}
       </li>
@@ -504,11 +521,12 @@ export function CatalogReviewEvidence({
           </span>
         </p>
       ) : null}
-      {onStartMappingProposal ? (
+      {onStartMappingProposal && allowMainFeatureProposal ? (
         <div className="catalog-archive-mapping-action">
           <button
             type="button"
-            disabled={isSaving || mainFeatureAssistedMappingUnavailable}
+            disabled={isSaving || !mappingAvailable ||
+              mainFeatureAssistedMappingUnavailable}
             onClick={() => onStartMappingProposal({
               action: "main_feature",
               sourceIdentity: { kind: "main_feature" },
@@ -523,16 +541,20 @@ export function CatalogReviewEvidence({
           </span>
         </div>
       ) : null}
-      {activeMappingProposal?.sourceIdentity.kind === "main_feature" ? (
+      {allowMainFeatureProposal &&
+          activeMappingProposal?.sourceIdentity.kind === "main_feature" ? (
         <CatalogReviewMappingProposal
           key={mappingProposalIdentity(activeMappingProposal)}
           proposal={activeMappingProposal}
           proposedTitle={proposedTitle}
           mediaItems={mediaItems}
           isSaving={isSaving}
+          mappingAvailable={mappingAvailable}
+          usesStaleEvidence={mappingProposalUsesStaleEvidence}
           error={mappingProposalError}
           onCancel={onCancelMappingProposal}
           onCreate={onCreateMappingProposal}
+          onUseRefreshedEvidence={onUseRefreshedMappingProposalEvidence}
         />
       ) : null}
       <p className="catalog-suggestion-help">
@@ -560,13 +582,15 @@ export function CatalogReviewEvidence({
               required
               defaultValue="1"
               ref={startingEpisodeNumberInput}
-              disabled={isSaving || activeEpisodicMappingProposal !== null}
+              disabled={isSaving || !mappingAvailable ||
+                activeEpisodicMappingProposal !== null}
             />
           </label>
           <button
             type="button"
             disabled={
               isSaving ||
+              !mappingAvailable ||
               activeMappingProposal !== null ||
               activeEpisodicMappingProposal !== null ||
               selectedEpisodicTitleNumbers.size === 0
@@ -621,9 +645,14 @@ export function CatalogReviewEvidence({
                 proposal={activeEpisodicMappingProposal}
                 proposedTitle={proposedTitle}
                 isSaving={isSaving}
+                mappingAvailable={mappingAvailable}
+                usesStaleEvidence={episodicMappingProposalUsesStaleEvidence}
                 error={mappingProposalError}
                 onCancel={onCancelEpisodicMappingProposal}
                 onCreate={onCreateEpisodicMappingProposal}
+                onUseRefreshedEvidence={
+                  onUseRefreshedEpisodicMappingProposalEvidence
+                }
               />
             </div>
           ) : null}

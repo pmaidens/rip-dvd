@@ -2032,6 +2032,20 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
   expect(JSON.parse(stdout.pop()!)).toMatchObject({
     command: { name: "health", usage: "rip-dvd health" },
   });
+  expect(await runCommand(["disc-selection", "--help"], io)).toBe(0);
+  expect(JSON.parse(stdout.pop()!)).toMatchObject({
+    command: {
+      name: "disc-selection",
+      inputs: {
+        options: expect.arrayContaining([
+          "dvd-recovery-evidence-v1 create and update/repair/correction previews: --revision <catalog-revision>",
+        ]),
+      },
+      example: expect.stringContaining(
+        "--revision <catalog-revision> --media-item-id <id> --source-kind dvd_title",
+      ),
+    },
+  });
   expect(await runCommand(["health", "--unexpected"], io)).toBe(2);
   expect(JSON.parse(stdout.pop()!)).toEqual({
     error: { code: "INVALID_ARGUMENTS", message: "health takes no arguments." },

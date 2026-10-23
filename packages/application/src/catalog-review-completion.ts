@@ -19,6 +19,9 @@ import {
   createCatalogReviewCompletionPreviewToken,
   isCatalogReviewCompletionPreviewToken,
 } from "./catalog-review-completion-preview-token.js";
+import {
+  assertLegacyCatalogReviewCompletionAvailable,
+} from "./catalog-review-workflow.js";
 
 export type CatalogReviewCompletionCommand = Extract<
   CatalogReviewCommand,
@@ -48,6 +51,7 @@ function planCatalogReviewCompletion(
   command: CatalogReviewCompletionCommand,
   mediaLibraryPath: string,
 ) {
+  assertLegacyCatalogReviewCompletionAvailable(access, archiveId);
   const archive = access.catalog.listOriginalDiscArchives({
     ids: [archiveId],
   })[0];
@@ -253,6 +257,9 @@ export function completeCatalogReview(
   const normalizedReplacements = normalizeCorrectedEncodeReplacements(
     command.replacementEncodes,
     input.mediaLibraryPath,
+  );
+  access.readConsistentSnapshot((snapshot) =>
+    assertLegacyCatalogReviewCompletionAvailable(snapshot, archiveId)
   );
   const completion = access.catalog.completeCatalogReviewWithReplacements(
     archiveId,

@@ -18,6 +18,7 @@ interface CatalogReviewCompletionProps {
   reviewOutcome: CatalogReviewOutcome;
   archiveOnlySelected: boolean;
   replacementPlan?: CatalogReviewReplacementPlan;
+  completionEnabled?: boolean;
   onArchiveOnlyChange(selected: boolean): void;
   onReplacementJobsPage?(offset: number): void;
   onReplacementProfilesPage?(offset: number): void;
@@ -34,6 +35,7 @@ export function CatalogReviewCompletion({
   reviewOutcome,
   archiveOnlySelected,
   replacementPlan,
+  completionEnabled = true,
   onArchiveOnlyChange,
   onReplacementJobsPage = () => undefined,
   onReplacementProfilesPage = () => undefined,
@@ -110,7 +112,7 @@ export function CatalogReviewCompletion({
         </div>
       </dl>
 
-      <form className="catalog-complete-action" onSubmit={submit}>
+      {completionEnabled ? <form className="catalog-complete-action" onSubmit={submit}>
         {replacementPlan ? (
           <CatalogReviewReplacementEncodes
             isSaving={isSaving}
@@ -172,7 +174,12 @@ export function CatalogReviewCompletion({
               : "Complete review"}
           </button>
         </div>
-      </form>
+      </form> : (
+        <p className="catalog-help catalog-mapping-only-notice">
+          Mapping is saved independently. Use the Damage decision step to see
+          why a decision and encoding are not ready.
+        </p>
+      )}
     </section>
   );
 }

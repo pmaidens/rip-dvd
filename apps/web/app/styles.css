@@ -598,6 +598,135 @@ h1 {
   line-height: 1.5;
 }
 
+.catalog-review-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+  padding: 0.8rem 1.4rem;
+  border-bottom: 1px solid #29483f;
+  background: #10231e;
+}
+
+.catalog-review-steps button {
+  min-height: 2.6rem;
+  padding: 0.55rem 0.75rem;
+}
+
+.catalog-review-steps button[aria-selected="true"] {
+  border-color: #d2a14b;
+  background: #d2a14b;
+  color: #10211c;
+}
+
+.catalog-review-steps button:focus-visible {
+  outline: 3px solid #eef4f1;
+  outline-offset: 2px;
+}
+
+.catalog-review-step-panel[hidden] {
+  display: none;
+}
+
+.catalog-review-step-content {
+  padding: 1.35rem 1.4rem;
+}
+
+.catalog-review-step-content > h3,
+.catalog-damage-decision > h3 {
+  margin-top: 0;
+}
+
+.catalog-workflow-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.catalog-workflow-facts > div {
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid #29483f;
+  border-radius: 0.6rem;
+  background: #0c1b18;
+}
+
+.catalog-workflow-facts dt {
+  color: #829790;
+  font-size: 0.68rem;
+}
+
+.catalog-workflow-facts dd {
+  margin: 0.25rem 0 0;
+  overflow-wrap: anywhere;
+  color: #eef4f1;
+  font-weight: 800;
+}
+
+.catalog-workflow-facts-compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 0;
+}
+
+.catalog-workflow-identities {
+  margin-top: 1rem;
+}
+
+.catalog-workflow-identities summary {
+  color: #d2a14b;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.catalog-workflow-identities dd {
+  overflow-wrap: anywhere;
+}
+
+.catalog-review-damage-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.catalog-damage-decision {
+  border-right: 0;
+}
+
+.catalog-workflow-reasons {
+  display: grid;
+  gap: 0.65rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.catalog-workflow-reasons li {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.7rem;
+  border: 1px solid #5f4d28;
+  border-radius: 0.55rem;
+  background: #1d2119;
+}
+
+.catalog-workflow-reasons code {
+  color: #e3bd72;
+  font-size: 0.7rem;
+  overflow-wrap: anywhere;
+}
+
+.catalog-workflow-reasons span {
+  color: #c7d2ce;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.catalog-mapping-only-notice {
+  padding: 0.75rem;
+  border: 1px solid #29483f;
+  border-radius: 0.55rem;
+  background: #10231e;
+}
+
 .catalog-automation {
   padding: 1.25rem 1.4rem;
   border-bottom: 1px solid #29483f;
@@ -3407,6 +3536,11 @@ h3 {
   }
 
   .catalog-coverage-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .catalog-workflow-facts,
+  .catalog-review-damage-panel {
     grid-template-columns: 1fr;
   }
 

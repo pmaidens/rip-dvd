@@ -207,7 +207,10 @@ describe("Catalog Review API", () => {
     );
     expect(incompleteResponse.status).toBe(409);
     await expect(incompleteResponse.json()).resolves.toMatchObject({
-      error: "Re-archive Mapping Proposal is incomplete",
+      error: {
+        code: "REARCHIVE_PROPOSAL_INCOMPLETE",
+        message: "Re-archive Mapping Proposal is incomplete",
+      },
     });
     const incompatibleResponse = await postCatalogReview(
       access,

@@ -1,10 +1,14 @@
 import {
+  CatalogMappingCapacityExceededError,
+  CatalogMappingRevisionRequiredError,
+  CurrentCatalogMappingSourceError,
   DomainInvariantError,
   DvdRecoveryEvidenceEncodingUnavailableError,
   EncodeWorkConflictError,
   MEDIA_ITEM_KINDS,
   MutationKeyConflictError,
   RecordNotFoundError,
+  UnsupportedCatalogMappingSourceError,
   type DataAccess,
   type DiscSelectionId,
   type OriginalDiscArchiveId,
@@ -12,6 +16,9 @@ import {
 import { loadConfig } from "@rip-dvd/config";
 import {
   applyMappingProposal,
+  CatalogReviewCompletionUnavailableError,
+  CatalogReviewMappingUnavailableError,
+  CatalogReviewRevisionStaleError,
   createApplicationOperations,
   executeDiscSelectionCommand,
   InvalidMutationKeyError,
@@ -351,6 +358,23 @@ export async function createCatalogReviewRoute(
         throw new Error("Unhandled catalog review command");
     }
   } catch (error) {
+    if (error instanceof CatalogReviewMappingUnavailableError ||
+        error instanceof CatalogReviewRevisionStaleError) {
+      return response({ error: {
+        code: error.code,
+        message: error.message,
+        reasons: error.blockingReasons,
+        current: error.current,
+      } }, 409);
+    }
+    if (error instanceof CatalogReviewCompletionUnavailableError) {
+      return response({ error: {
+        code: error.code,
+        message: error.message,
+        reasons: error.blockingReasons,
+        current: error.current,
+      } }, 409);
+    }
     if (error instanceof EncodeWorkConflictError) {
       return response({ error: {
         code: error.code,
@@ -375,7 +399,30 @@ export async function createCatalogReviewRoute(
     if (error instanceof RecordNotFoundError) {
       return response({ error: error.message }, 404);
     }
+    if (error instanceof CatalogMappingCapacityExceededError ||
+        error instanceof CatalogMappingRevisionRequiredError ||
+        error instanceof UnsupportedCatalogMappingSourceError ||
+        error instanceof CurrentCatalogMappingSourceError) {
+      return response({ error: {
+        code: error.code,
+        message: error.message,
+      } }, 409);
+    }
     if (error instanceof DomainInvariantError) {
+      const proposalState = ["stale", "incomplete", "incompatible"].find(
+        (candidate) =>
+          error.message === `Re-archive Mapping Proposal is ${candidate}`,
+      );
+      if (proposalState !== undefined) {
+        return response({ error: {
+          code: proposalState === "stale"
+            ? "STALE_CATALOG_REVISION"
+            : proposalState === "incomplete"
+              ? "REARCHIVE_PROPOSAL_INCOMPLETE"
+              : "REARCHIVE_PROPOSAL_INCOMPATIBLE",
+          message: error.message,
+        } }, 409);
+      }
       return response({ error: error.message }, 409);
     }
     return response({ error: "Catalog review is unavailable" }, 503);

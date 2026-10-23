@@ -3,6 +3,7 @@
 import React, { useState } from "react";
 
 import { displayTerm } from "../lib/display-term";
+import { CatalogReviewDraftEvidenceNotice } from "./catalog-review-draft-evidence";
 import { integerFormValue } from "./catalog-review-form";
 import { orderMediaItemHierarchy } from "./catalog-review-hierarchy";
 import { CatalogReviewMediaItemSearchPicker } from "./catalog-review-media-item-search-picker";
@@ -40,17 +41,23 @@ export function CatalogReviewMappingProposal({
   proposedTitle,
   mediaItems,
   isSaving,
+  mappingAvailable = true,
+  usesStaleEvidence = false,
   error,
   onCancel,
   onCreate,
+  onUseRefreshedEvidence = () => undefined,
 }: {
   proposal: MappingProposal;
   proposedTitle: string;
   mediaItems: CatalogReviewMediaItem[];
   isSaving: boolean;
+  mappingAvailable?: boolean;
+  usesStaleEvidence?: boolean;
   error: string | null;
   onCancel(): void;
   onCreate(input: CreateMappingProposalInput): void;
+  onUseRefreshedEvidence?(): void;
 }) {
   const hierarchy = orderMediaItemHierarchy(mediaItems);
   const source = proposal.sourceIdentity;
@@ -134,6 +141,12 @@ export function CatalogReviewMappingProposal({
           {error}
         </div>
       ) : null}
+      <CatalogReviewDraftEvidenceNotice
+        usesStaleEvidence={usesStaleEvidence}
+        mappingAvailable={mappingAvailable}
+        isSaving={isSaving}
+        onUseRefreshedEvidence={onUseRefreshedEvidence}
+      />
       <form className="catalog-form" onSubmit={createProposal}>
         <fieldset>
           <legend>Media Item choice</legend>
@@ -278,7 +291,10 @@ export function CatalogReviewMappingProposal({
             </label>
           </div>
         </fieldset>
-        <button type="submit" disabled={isSaving}>
+        <button
+          type="submit"
+          disabled={isSaving || !mappingAvailable || usesStaleEvidence}
+        >
           {targetChoice === "create_new"
             ? "Create Media Item and Disc Selection"
             : "Use existing Media Item and create Disc Selection"}

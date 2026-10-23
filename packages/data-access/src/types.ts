@@ -74,6 +74,7 @@ import type {
 } from "./dvd-structural-assessment.js";
 import type {
   DvdTitleDamageAssessmentAccess,
+  DvdTitleDamageAssessmentInspection,
   DvdTitleDamageAssessmentRecord,
   RecordDvdTitleDamageMappingInput,
 } from "./dvd-title-damage-assessment.js";
@@ -498,6 +499,7 @@ export type DvdTitleIdentityMappingState =
 
 export interface DvdTitleIdentitySelectionMapping {
   discSelectionId: DiscSelectionId;
+  discSelectionIdentity: string;
   mappingState: Exclude<DvdTitleIdentityMappingState, "unmapped">;
 }
 
@@ -527,6 +529,22 @@ export interface DvdTitleIdentityReviewSet {
   reviewSetIdentity: string;
   items: readonly DvdTitleIdentityReviewSetItem[];
   createdAt: Date;
+}
+
+export interface DvdCatalogReviewWorkflowEvidence {
+  archiveJobs: readonly ArchiveJob[];
+  evidenceHeader: DvdArchiveEvidenceHeader | null;
+  recovery: ArchiveRecovery | null;
+  titleIdentity: {
+    catalogMappingProjectionId: string;
+    currentMappingStates: readonly DvdTitleIdentityMappingState[];
+    currentDefaultAngleTitleCount: number;
+  } | null;
+  titleDamage: {
+    state: DvdTitleDamageAssessmentInspection["state"];
+    currentAssessmentIdentity: string | null;
+    acceptanceRequired: boolean;
+  };
 }
 
 export interface RecordDvdTitleIdentityObservationsInput {
@@ -1842,6 +1860,12 @@ export interface CatalogAccess {
   readDvdTitleIdentityReviewSet(
     id: OriginalDiscArchiveId,
   ): DvdTitleIdentityReviewSet | null;
+  readDvdCatalogReviewWorkflowEvidence(
+    archives: readonly {
+      originalDiscArchiveId: OriginalDiscArchiveId;
+      evidenceHeader: DvdArchiveEvidenceHeader | null;
+    }[],
+  ): ReadonlyMap<OriginalDiscArchiveId, DvdCatalogReviewWorkflowEvidence>;
   auditDvdArchiveEvidenceChains(
     ids: readonly OriginalDiscArchiveId[],
   ): void;
@@ -2572,6 +2596,7 @@ export type SnapshotCatalogAccess = Pick<
   | "findDvdArchiveEvidenceHeader"
   | "findDvdArchiveEvidenceHeaders"
   | "readDvdTitleIdentityReviewSet"
+  | "readDvdCatalogReviewWorkflowEvidence"
   | "findArchiveRecovery"
   | "findArchiveRecoveryById"
   | "listArchiveRecoveries"
@@ -2585,6 +2610,7 @@ export type SnapshotCatalogAccess = Pick<
   | "searchMediaItems"
   | "listDiscSelections"
   | "readRearchiveMappingProposal"
+  | "previewRearchiveMappingProposal"
   | "planRearchiveAcceptance"
   | "listRearchiveEncodeReplacementPlans"
   | "getCatalogReviewCoverage"

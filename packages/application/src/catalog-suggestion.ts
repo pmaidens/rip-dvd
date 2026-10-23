@@ -1,12 +1,19 @@
 import {
   decodeArchivedDvdTitles,
+  dvdRecoveryEvidenceFormatForArchive,
   normalizeMediaItemSearchTitle,
   type DataAccess,
   type MediaItem,
   type OriginalDiscArchiveId,
   type TmdbIdentity,
 } from "@rip-dvd/data-access";
-import { suggestCatalog, type AutomaticCatalogSuggestion, type CatalogMetadataLookup, type CatalogMetadataSelection } from "./catalog-automation.js";
+import {
+  catalogDiscHints,
+  suggestCatalog,
+  type AutomaticCatalogSuggestion,
+  type CatalogMetadataLookup,
+  type CatalogMetadataSelection,
+} from "./catalog-automation.js";
 
 const CATALOG_PAGE_SIZE = 100;
 
@@ -235,9 +242,25 @@ export async function suggestCatalogReview(
     if (!archive) return null;
     const disc = snapshot.catalog.listDetectedDiscs(undefined, { ids: [archive.detectedDiscId] })[0];
     if (!disc) return null;
-    return { discLabel: disc.volumeLabel ?? "", titles: decodeArchivedDvdTitles(disc.scanData) ?? [] };
+    return {
+      discLabel: disc.volumeLabel ?? "",
+      titles: decodeArchivedDvdTitles(disc.scanData) ?? [],
+      requiresManualMapping: dvdRecoveryEvidenceFormatForArchive(
+        snapshot.catalog.findDvdArchiveEvidenceHeader(archiveId),
+        snapshot.archiveJobs.listForArchive(archiveId),
+      ) !== null,
+    };
   });
   if (evidence === null) return null;
+  if (evidence.requiresManualMapping) {
+    return {
+      status: "needs_review",
+      hints: catalogDiscHints(evidence.discLabel, evidence.titles),
+      reason: "manual_mapping_required",
+      message:
+        "This evidence format requires manual mapping against current Title Identity evidence.",
+    };
+  }
   const suggestion = await suggestCatalog(evidence.discLabel, evidence.titles, lookup, metadataSelection);
   return reuseExistingCatalogItems(access, suggestion);
 }

@@ -1,5 +1,8 @@
 import {
   executeDiscSelectionCommand,
+  CatalogReviewMappingUnavailableError,
+  CatalogReviewRevisionStaleError,
+  describeCatalogReviewWorkflow,
   parseMutationKey,
   previewDiscSelection,
   previewDiscSelectionChange,
@@ -11,9 +14,13 @@ import {
 } from "@rip-dvd/application/catalog-review-command";
 import { isDiscSelectionPreviewToken } from "@rip-dvd/application/disc-selection-preview-token";
 import {
+  CatalogMappingCapacityExceededError,
+  CatalogMappingRevisionRequiredError,
+  CurrentCatalogMappingSourceError,
   DomainInvariantError,
   MutationKeyConflictError,
   RecordNotFoundError,
+  UnsupportedCatalogMappingSourceError,
   MEDIA_ITEM_KINDS,
   type DataAccess,
   type DiscSelectionId,
@@ -147,6 +154,10 @@ function parsedCommand(
     ...(action === "update" ? { changes: input } : {}),
     ...(action === "create" || action === "repair" || action === "correct"
       ? { selection: input } : {}),
+    ...((action === "create" || action === "update" || action === "repair") &&
+        catalogRevision
+      ? { catalogRevision }
+      : {}),
     ...(action === "correct" ? { catalogRevision, ...(correctionReason ? { correctionReason } : {}) } : {}),
   };
   const parsed = parseCatalogReviewCommand(body, { mediaItemKinds: MEDIA_ITEM_KINDS });
@@ -165,11 +176,27 @@ function withSelectionAccess<T>(io: SelectionIO, operation: (access: DataAccess)
     access = io.openAccess();
     return operation(access);
   } catch (error) {
+    if (error instanceof CatalogReviewMappingUnavailableError ||
+        error instanceof CatalogReviewRevisionStaleError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        undefined,
+        { reasons: error.blockingReasons, current: error.current },
+      );
+    }
     if (error instanceof MutationKeyConflictError) {
       throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
     }
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("SELECTION_NOT_FOUND", "Disc Selection or its source was not found.", 2);
+    }
+    if (error instanceof CatalogMappingCapacityExceededError ||
+        error instanceof CatalogMappingRevisionRequiredError ||
+        error instanceof UnsupportedCatalogMappingSourceError ||
+        error instanceof CurrentCatalogMappingSourceError) {
+      throw new CommandFailure(error.code, error.message, 2);
     }
     if (error instanceof DomainInvariantError) {
       throw new CommandFailure(
@@ -211,8 +238,14 @@ export function runDiscSelection(rest: readonly string[], io: SelectionIO): unkn
   }
   let mutationKey: string | undefined;
   if (isPreview) {
-    if (["--key", "--revision", "--preview-token", "--acknowledge"].some((name) => options.has(name))) {
+    if (["--key", "--preview-token", "--acknowledge"].some((name) => options.has(name))) {
       invalid("Preview takes proposal input without a key or acknowledgement.");
+    }
+    if (
+      options.has("--revision") &&
+      action !== "update" && action !== "repair" && action !== "correct"
+    ) {
+      invalid("A preview revision applies only to update, repair, or correction.");
     }
   } else {
     try {
@@ -227,8 +260,22 @@ export function runDiscSelection(rest: readonly string[], io: SelectionIO): unkn
   const input = payload(action, options, io);
   if (isPreview) {
     return withSelectionAccess(io, (access) => {
-      const current = previewDiscSelection(access, archiveId, selectionId!);
-      const command = parsedCommand(action, selectionId, input, current.catalogRevision, options.get("--reason"));
+      let catalogRevision = options.get("--revision");
+      if (
+        action === "correct" &&
+        catalogRevision === undefined &&
+        describeCatalogReviewWorkflow(access, archiveId) === null
+      ) {
+        const current = previewDiscSelection(access, archiveId, selectionId!);
+        catalogRevision = current.catalogRevision;
+      }
+      const command = parsedCommand(
+        action,
+        selectionId,
+        input,
+        catalogRevision,
+        options.get("--reason"),
+      );
       return previewDiscSelectionChange(access, archiveId, command);
     });
   }
@@ -239,7 +286,9 @@ export function runDiscSelection(rest: readonly string[], io: SelectionIO): unkn
   if (consequential && !options.has("--acknowledge")) {
     invalid("Acknowledgement of a Disc Selection preview is required.");
   }
-  if (!consequential && ["--acknowledge", "--revision", "--preview-token"].some((name) => options.has(name))) {
+  if (!consequential && ["--acknowledge", "--preview-token"].some((name) => options.has(name)) ||
+      !consequential && action !== "create" && action !== "update" &&
+        options.has("--revision")) {
     invalid("This Disc Selection change does not require a preview.");
   }
   const expectedCatalogRevision = consequential ? revision(options.get("--revision")) : undefined;

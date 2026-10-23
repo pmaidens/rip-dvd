@@ -2,6 +2,8 @@ import {
   archiveBoundaryEvidenceFromRecord,
   decodeArchivedDvdTitles,
   DomainInvariantError,
+  dvdTitleIdentityCatalogMappingItems,
+  dvdTitleIdentityCatalogMappingProjectionDigest,
   withAuthoritativeDvdArchiveIntegrity,
   type DataAccess,
   type DiscSelection,
@@ -15,6 +17,7 @@ import {
   type RearchiveMappingProposalReview,
 } from "@rip-dvd/data-access";
 import { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
+import { describeCatalogReviewWorkflow } from "./catalog-review-workflow.js";
 
 const CATALOG_REVIEW_SELECTION_PAGE_SIZE = 100;
 const CATALOG_REVIEW_DISC_SELECTION_LOOKUP_BATCH_SIZE = 100;
@@ -316,6 +319,37 @@ export function readCatalogReview(
       );
     }
     const coverage = snapshot.catalog.getCatalogReviewCoverage(id);
+    const reviewWorkflow = describeCatalogReviewWorkflow(snapshot, id, {
+      archiveJobs: snapshot.archiveJobs.listForArchive(id),
+      evidenceHeader: evidenceHeaders.get(id) ?? null,
+      recovery: snapshot.catalog.findArchiveRecovery(id),
+      titleIdentity: titleIdentityReviewSet === null
+        ? null
+        : {
+          catalogMappingProjectionId:
+            dvdTitleIdentityCatalogMappingProjectionDigest(
+              titleIdentityReviewSet.checkpoint,
+              titleIdentityReviewSet.items,
+            ),
+          currentMappingStates: dvdTitleIdentityCatalogMappingItems(
+            titleIdentityReviewSet.items,
+          )
+            .map(({ mappingState }) => mappingState),
+          currentDefaultAngleTitleCount: titleIdentityReviewSet.items.filter(
+            (item) =>
+              item.presentAtCurrentCheckpoint &&
+              item.observation.angleNumber === 1,
+          ).length,
+        },
+      titleDamage: {
+        state: titleDamageInspection.state,
+        currentAssessmentIdentity:
+          titleDamageInspection.currentAssessmentIdentity,
+        acceptanceRequired: titleDamageInspection.state === "current" &&
+          titleDamageInspection.assessment !== null &&
+          !titleDamageInspection.assessment.noTitleMissingSourceProved,
+      },
+    });
     const reviewActionAvailability = snapshot.catalog.getCatalogReviewActionAvailability(id);
     const discSelectionRows = snapshot.catalog.listDiscSelections({
       originalDiscArchiveId: id,
@@ -494,10 +528,11 @@ export function readCatalogReview(
     return {
       catalogRevision: archive.updatedAt.toISOString(),
       automaticCataloging: {
-        configured: automaticCatalogingConfigured,
+        configured: reviewWorkflow === null && automaticCatalogingConfigured,
       },
       archive: serializeArchiveEvidence(archive, disc.volumeLabel),
       reviewOutcome: archive.catalogReviewOutcome,
+      ...(reviewWorkflow === null ? {} : { reviewWorkflow }),
       rawScan: {
         titles: rawTitles,
       },

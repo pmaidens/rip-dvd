@@ -37,14 +37,26 @@ const editableSelection: CatalogReviewDiscSelection = {
 function InteractiveDiscSelections({
   onUpdate,
   selection = editableSelection,
+  mappingReviewSelectionIds,
+  allowMainFeature,
+  catalogRevision = "2026-01-01T00:00:00.000Z",
 }: {
-  onUpdate(id: string, changes: UpdateDiscSelectionInput): void;
+  onUpdate(
+    id: string,
+    changes: UpdateDiscSelectionInput,
+    catalogRevision: string,
+    onCommitted: () => void,
+  ): void;
   selection?: CatalogReviewDiscSelection;
+  mappingReviewSelectionIds?: ReadonlySet<string>;
+  allowMainFeature?: boolean;
+  catalogRevision?: string;
 }) {
   const [selectionKind, setSelectionKind] =
     useState<DiscSelectionKind>("main_feature");
   return (
     <CatalogReviewDiscSelections
+      catalogRevision={catalogRevision}
       discSelections={[selection]}
       page={{
         offset: 0,
@@ -100,6 +112,8 @@ function InteractiveDiscSelections({
         audioStreams: [],
         subtitles: [],
       }]}
+      mappingReviewSelectionIds={mappingReviewSelectionIds}
+      allowMainFeature={allowMainFeature}
       selectionKind={selectionKind}
       isSaving={false}
       onPage={() => undefined}
@@ -115,9 +129,37 @@ function InteractiveDiscSelections({
 }
 
 describe("CatalogReviewDiscSelections", () => {
+  it("uses exact title mapping when main-feature is unavailable", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <InteractiveDiscSelections
+          onUpdate={() => undefined}
+          allowMainFeature={false}
+        />,
+      );
+    });
+
+    const source = container.querySelector<HTMLSelectElement>(
+      'select[name="selectionKind"]',
+    );
+    expect(source?.value).toBe("dvd_title");
+    expect(Array.from(source?.options ?? []).map(({ value }) => value)).toEqual([
+      "dvd_title",
+      "dvd_chapters",
+    ]);
+    expect(container.querySelector('select[name="titleNumber"]')).not.toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it("renders reviewed mappings, repair choices, and pagination", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewDiscSelections
+        catalogRevision="2026-01-01T00:00:00.000Z"
         discSelections={[{
           id: "selection-1",
           mediaItemId: "episode-1",
@@ -203,6 +245,7 @@ describe("CatalogReviewDiscSelections", () => {
   it("offers supersession for a running dependency without direct mutation actions", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewDiscSelections
+        catalogRevision="2026-01-01T00:00:00.000Z"
         discSelections={[{
           id: "selection-1",
           mediaItemId: "movie-1",
@@ -278,6 +321,7 @@ describe("CatalogReviewDiscSelections", () => {
   it("shows every superseded source and human correction note", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewDiscSelections
+        catalogRevision="2026-01-01T00:00:00.000Z"
         discSelections={[{
           id: "selection-corrected",
           mediaItemId: "movie-corrected",
@@ -450,6 +494,7 @@ describe("CatalogReviewDiscSelections", () => {
   it("marks unsafe legacy selections as Needs repair with only recovery actions", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewDiscSelections
+        catalogRevision="2026-01-01T00:00:00.000Z"
         discSelections={[
           {
             id: "selection-1",
@@ -558,6 +603,7 @@ describe("CatalogReviewDiscSelections", () => {
   it("explains the archive cutover fence without rendering mutation actions", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewDiscSelections
+        catalogRevision="2026-01-01T00:00:00.000Z"
         discSelections={[{
           id: "selection-1",
           mediaItemId: "movie-1",
@@ -683,7 +729,133 @@ describe("CatalogReviewDiscSelections", () => {
 
     expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
       mediaItemId: "episode-2",
+    }, "2026-01-01T00:00:00.000Z", expect.any(Function));
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("preserves a stale draft until the operator binds it to refreshed evidence", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onUpdate = vi.fn((
+      _id: string,
+      _changes: UpdateDiscSelectionInput,
+      _catalogRevision: string,
+      onCommitted: () => void,
+    ) => onCommitted());
+    const render = (
+      catalogRevision: string,
+      selection: CatalogReviewDiscSelection = editableSelection,
+    ) => root.render(
+      <InteractiveDiscSelections
+        catalogRevision={catalogRevision}
+        onUpdate={onUpdate}
+        selection={selection}
+      />,
+    );
+    await act(async () => render("2026-01-01T00:00:00.000Z"));
+    const action = container.querySelector<HTMLSelectElement>(
+      'select[name="replacesDiscSelectionId"]',
+    );
+    if (!action) throw new Error("Expected the Catalog action control");
+    await act(async () => {
+      action.value = editableSelection.id;
+      action.dispatchEvent(new Event("change", { bubbles: true }));
     });
+
+    const mediaItem = container.querySelector<HTMLSelectElement>(
+      'select[name="mediaItemId"]',
+    );
+    const submit = container.querySelector<HTMLButtonElement>(
+      'button[type="submit"]',
+    );
+    if (!mediaItem || !submit) {
+      throw new Error("Expected editable Disc Selection controls");
+    }
+    await act(async () => {
+      mediaItem.value = "episode-2";
+      mediaItem.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => render(
+      "2026-01-01T00:00:01.000Z",
+      { ...editableSelection, sourceIdentity: {
+        ...editableSelection.sourceIdentity,
+      } },
+    ));
+    expect(mediaItem.value).toBe("episode-2");
+    expect(submit.disabled).toBe(true);
+    expect(container.textContent).toContain(
+      "Catalog evidence changed while this draft was open",
+    );
+    await act(async () => submit.click());
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    const useRefreshedEvidence = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Use refreshed evidence");
+    if (!useRefreshedEvidence) {
+      throw new Error("Expected the refreshed-evidence draft action");
+    }
+    await act(async () => useRefreshedEvidence.click());
+    expect(mediaItem.value).toBe("episode-2");
+    expect(submit.disabled).toBe(false);
+    await act(async () => submit.click());
+
+    expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
+      mediaItemId: "episode-2",
+    }, "2026-01-01T00:00:01.000Z", expect.any(Function));
+    await act(async () => render(
+      "2026-01-01T00:00:02.000Z",
+      { ...editableSelection, mediaItemId: "episode-2" },
+    ));
+    const label = container.querySelector<HTMLInputElement>(
+      'input[name="label"]',
+    );
+    if (!label) throw new Error("Expected editable label control");
+    await act(async () => {
+      label.value = "Updated label";
+      label.dispatchEvent(new Event("input", { bubbles: true }));
+      submit.click();
+    });
+    expect(onUpdate).toHaveBeenLastCalledWith(editableSelection.id, {
+      label: "Updated label",
+    }, "2026-01-01T00:00:02.000Z", expect.any(Function));
+    expect(onUpdate).toHaveBeenCalledTimes(2);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("submits the unchanged source when confirming a mapping review", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onUpdate = vi.fn();
+    await act(async () => {
+      root.render(
+        <InteractiveDiscSelections
+          onUpdate={onUpdate}
+          mappingReviewSelectionIds={new Set([editableSelection.id])}
+        />,
+      );
+    });
+    const action = container.querySelector<HTMLSelectElement>(
+      'select[name="replacesDiscSelectionId"]',
+    );
+    const submit = container.querySelector<HTMLButtonElement>(
+      'button[type="submit"]',
+    );
+    if (!action || !submit) {
+      throw new Error("Expected editable Disc Selection controls");
+    }
+    await act(async () => {
+      action.value = editableSelection.id;
+      action.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => submit.click());
+
+    expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
+      sourceIdentity: editableSelection.sourceIdentity,
+    }, "2026-01-01T00:00:00.000Z", expect.any(Function));
     await act(async () => root.unmount());
     container.remove();
   });
@@ -692,7 +864,12 @@ describe("CatalogReviewDiscSelections", () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
-    const onUpdate = vi.fn();
+    const onUpdate = vi.fn((
+      _id: string,
+      _changes: UpdateDiscSelectionInput,
+      _catalogRevision: string,
+      onCommitted: () => void,
+    ) => onCommitted());
     await act(async () => {
       root.render(<InteractiveDiscSelections onUpdate={onUpdate} />);
     });
@@ -731,7 +908,7 @@ describe("CatalogReviewDiscSelections", () => {
     await act(async () => submit.click());
     expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
       label: null,
-    });
+    }, "2026-01-01T00:00:00.000Z", expect.any(Function));
 
     await act(async () => {
       root.render(

@@ -1,4 +1,5 @@
 import {
+  CatalogReviewMappingUnavailableError,
   createApplicationOperations,
   InvalidMutationKeyError,
   parseMutationKey,
@@ -125,6 +126,15 @@ export function runRearchiveMappingProposal(
         });
   } catch (error) {
     if (error instanceof CommandFailure) throw error;
+    if (error instanceof CatalogReviewMappingUnavailableError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        undefined,
+        { reasons: error.blockingReasons, current: error.current },
+      );
+    }
     if (error instanceof MutationKeyConflictError) {
       throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
     }

@@ -145,16 +145,19 @@ export type CatalogReviewCommand =
     }
   | {
       action: "create_disc_selection";
+      catalogRevision?: string;
       selection: CatalogReviewDiscSelectionInput;
     }
   | {
       action: "update_disc_selection";
       discSelectionId: string;
+      catalogRevision?: string;
       changes: CatalogReviewDiscSelectionChanges;
     }
   | {
       action: "repair_disc_selection";
       discSelectionId: string;
+      catalogRevision?: string;
       selection: CatalogReviewDiscSelectionInput;
     }
   | {
@@ -964,21 +967,36 @@ export function parseCatalogReviewCommand(
         : invalid("Invalid Media Item");
     }
     case "create_disc_selection": {
+      const revision = body.catalogRevision === undefined
+        ? undefined
+        : catalogRevision(body.catalogRevision);
       const parsedSelection = parseDiscSelectionInput(body.selection);
-      return parsedSelection.ok
-        ? {
-            ok: true,
-            command: { action, selection: parsedSelection.selection },
-          }
-        : invalid(parsedSelection.error);
+      if (!parsedSelection.ok) return invalid(parsedSelection.error);
+      if (revision === null) return invalid("Invalid Disc Selection");
+      return {
+        ok: true,
+        command: {
+          action,
+          ...(revision === undefined ? {} : { catalogRevision: revision }),
+          selection: parsedSelection.selection,
+        },
+      };
     }
     case "update_disc_selection": {
       const discSelectionId = boundedString(body.discSelectionId);
+      const revision = body.catalogRevision === undefined
+        ? undefined
+        : catalogRevision(body.catalogRevision);
       const changes = parseDiscSelectionChanges(body.changes);
-      return discSelectionId && changes
+      return discSelectionId && changes && revision !== null
         ? {
             ok: true,
-            command: { action, discSelectionId, changes },
+            command: {
+              action,
+              discSelectionId,
+              ...(revision === undefined ? {} : { catalogRevision: revision }),
+              changes,
+            },
           }
         : invalid(
           "Invalid Disc Selection update",
@@ -987,16 +1005,21 @@ export function parseCatalogReviewCommand(
     }
     case "repair_disc_selection": {
       const discSelectionId = boundedString(body.discSelectionId);
+      const revision = body.catalogRevision === undefined
+        ? undefined
+        : catalogRevision(body.catalogRevision);
       if (!discSelectionId) {
         return invalid("Invalid Disc Selection");
       }
       const parsedSelection = parseDiscSelectionInput(body.selection);
+      if (revision === null) return invalid("Invalid Disc Selection");
       return parsedSelection.ok
         ? {
             ok: true,
             command: {
               action,
               discSelectionId,
+              ...(revision === undefined ? {} : { catalogRevision: revision }),
               selection: parsedSelection.selection,
             },
           }

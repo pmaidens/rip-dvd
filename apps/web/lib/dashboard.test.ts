@@ -2,8 +2,11 @@ import {
   createCleanReadArchiveIntegrityEvidence,
   createCorrectedDvdArchiveBoundaryEvidence,
   createDataAccess,
+  type ArchiveRecoveryAttemptId,
+  type ArchiveRecoveryId,
   type DataAccess,
   type EncodeOutputFilesystemIdentity,
+  type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import {
   createNormalDvdArchiveBoundaryEvidenceForTest,
@@ -12,7 +15,10 @@ import {
   createLegacySidecarDataAccess,
   type LegacySidecarDataAccess,
 } from "@rip-dvd/data-access/legacy-sidecars";
-import { retainedEncodeOutputArtifactIdentity } from "@rip-dvd/application";
+import {
+  retainedEncodeOutputArtifactIdentity,
+  type CatalogReviewWorkflow,
+} from "@rip-dvd/application";
 import {
   mkdirSync,
   mkdtempSync,
@@ -29,8 +35,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createNodeDvdCopyRunner } from "../../archive-worker/src/dvd-archiver";
 import { DVD_READ_FAILURE_RESULT_PREFIX } from "../../archive-worker/src/dvd-recovery-contracts";
+import { markArchiveWithDvdRecoveryEvidence } from "../../operator-cli/src/operator-workflow.test-support";
 
-import { readDashboardSnapshot } from "./dashboard";
+import {
+  catalogReviewActivityRevision,
+  readDashboardSnapshot,
+} from "./dashboard";
 import { DASHBOARD_ACTIVE_DISC_LIMIT } from "./dashboard-bounds";
 import { investigationReport } from "./investigation";
 import {
@@ -50,6 +60,66 @@ const dataAccessFixture = useDataAccessFixture();
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+it("changes Catalog Review activity when Recovery identities change", () => {
+  const archive = { updatedAt: new Date("2026-10-23T12:00:00.000Z") };
+  const originalDiscArchiveId = "archive-1" as OriginalDiscArchiveId;
+  const recoveryId = "recovery-1" as ArchiveRecoveryId;
+  const recoveryAttemptId = "attempt-1" as ArchiveRecoveryAttemptId;
+  const workflow = {
+    schemaVersion: 1,
+    evidenceFormat: "dvd-recovery-evidence-v1",
+    facts: {
+      saved: true,
+      recovering: true,
+      mapped: false,
+      mappingState: "unmapped",
+      readyForDamageDecision: false,
+      readyForEncoding: false,
+    },
+    current: {
+      originalDiscArchiveId,
+      archiveJob: { id: "archive-job-1", status: "completed" },
+      checkpoint: { revision: 1, manifestDigest: "a".repeat(64) },
+      recovery: {
+        id: recoveryId,
+        attemptId: recoveryAttemptId,
+        state: "running",
+        work: {
+          archiveRecoveryId: recoveryId,
+          originalDiscArchiveId,
+          attemptId: recoveryAttemptId,
+          status: "claimed",
+        },
+      },
+      catalogMappingProjectionId: null,
+      titleDamageAssessmentId: null,
+    },
+    actions: [],
+  } satisfies CatalogReviewWorkflow;
+  const replacementRecoveryId = "recovery-2" as ArchiveRecoveryId;
+  const replacementAttemptId = "attempt-2" as ArchiveRecoveryAttemptId;
+  const replacement = {
+    ...workflow,
+    current: {
+      ...workflow.current,
+      recovery: {
+        ...workflow.current.recovery,
+        id: replacementRecoveryId,
+        attemptId: replacementAttemptId,
+        work: {
+          ...workflow.current.recovery.work,
+          archiveRecoveryId: replacementRecoveryId,
+          attemptId: replacementAttemptId,
+        },
+      },
+    },
+  } satisfies CatalogReviewWorkflow;
+
+  expect(catalogReviewActivityRevision(archive, replacement)).not.toBe(
+    catalogReviewActivityRevision(archive, workflow),
+  );
 });
 
 function seedEncodeJob(
@@ -101,6 +171,107 @@ function seedEncodeJob(
 }
 
 describe("readDashboardSnapshot", () => {
+  it("uses one bounded workflow-evidence read as Catalog Review rows grow", () => {
+    const { access, databasePath } = dataAccessFixture.createWithDatabasePath();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/synthetic-dashboard-batch",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const archiveIds = Array.from({ length: 3 }, (_, index) => {
+      const fingerprint = `synthetic-dashboard-batch-${index}`;
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+        volumeLabel: `SYNTHETIC_BATCH_${index}`,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      return access.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: `/media/originals/synthetic-batch-${index}.iso`,
+        fingerprint,
+      }).id;
+    });
+    archiveIds.forEach((id, index) =>
+      markArchiveWithDvdRecoveryEvidence(
+        databasePath,
+        id,
+        `synthetic-dashboard-batch-${index}`,
+      )
+    );
+    const evidenceHeaders = access.catalog.findDvdArchiveEvidenceHeaders(
+      archiveIds,
+    );
+    const workflowEvidenceInputs = archiveIds.map((id) => ({
+      originalDiscArchiveId: id,
+      evidenceHeader: evidenceHeaders.get(id) ?? null,
+    }));
+    const workflowEvidenceReads = vi.fn();
+    const batchedAccess: DataAccess = {
+      ...access,
+      readConsistentSnapshot(read) {
+        return access.readConsistentSnapshot((snapshot) =>
+          read({
+            ...snapshot,
+            catalog: {
+              ...snapshot.catalog,
+              readDvdCatalogReviewWorkflowEvidence(ids) {
+                workflowEvidenceReads(ids);
+                return snapshot.catalog
+                  .readDvdCatalogReviewWorkflowEvidence(ids);
+              },
+              findDvdArchiveEvidenceHeader() {
+                throw new Error("Dashboard workflow read fanned out by row");
+              },
+              readDvdTitleIdentityReviewSet() {
+                throw new Error("Dashboard workflow read fanned out by row");
+              },
+              findArchiveRecovery() {
+                throw new Error("Dashboard workflow read fanned out by row");
+              },
+            },
+          })
+        );
+      },
+    };
+
+    const dashboard = readDashboardSnapshot(batchedAccess, {
+      activityLimit: 20,
+    });
+
+    expect(dashboard.catalogReview).toMatchObject({
+      status: "loaded",
+      items: archiveIds.map((id) => ({ id })),
+    });
+    expect(workflowEvidenceReads).toHaveBeenCalledOnce();
+    expect(workflowEvidenceReads).toHaveBeenCalledWith(
+      workflowEvidenceInputs,
+    );
+
+    const prepare = vi.spyOn(DatabaseSync.prototype, "prepare");
+    access.readConsistentSnapshot((snapshot) =>
+      snapshot.catalog.readDvdCatalogReviewWorkflowEvidence([
+        workflowEvidenceInputs[0]!,
+      ])
+    );
+    const singleArchiveQueryCount = prepare.mock.calls.length;
+    prepare.mockClear();
+    access.readConsistentSnapshot((snapshot) =>
+      snapshot.catalog.readDvdCatalogReviewWorkflowEvidence(
+        workflowEvidenceInputs,
+      )
+    );
+    const multipleArchiveQueryCount = prepare.mock.calls.length;
+    prepare.mockRestore();
+
+    expect(singleArchiveQueryCount).toBeGreaterThan(0);
+    expect(multipleArchiveQueryCount).toBe(singleArchiveQueryCount);
+  });
+
   it("maps every structured Encode failure reason without exposing diagnostics", () => {
     const access = dataAccessFixture.create();
     const { job } = seedEncodeJob(access);
@@ -1943,6 +2114,45 @@ describe("readDashboardSnapshot", () => {
     expect(dashboard.archiveJobs).toEqual({ status: "loaded", items: [] });
     expect(dashboard.encodeJobs).toEqual({ status: "error" });
     expect(dashboard.catalogReview).toEqual({ status: "loaded", items: [] });
+  });
+
+  it("isolates Catalog Review workflow evidence failures to that section", () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/synthetic-workflow-evidence",
+      displayName: "Synthetic workflow drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "synthetic-workflow-evidence",
+      volumeLabel: "SYNTHETIC_WORKFLOW_EVIDENCE",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/synthetic-workflow-evidence.iso",
+      fingerprint: "synthetic-workflow-evidence",
+    });
+
+    const dashboard = readDashboardSnapshot(withSnapshotOverrides(access, {
+      catalog: {
+        readDvdCatalogReviewWorkflowEvidence() {
+          throw new Error("workflow evidence unavailable");
+        },
+      },
+    }));
+
+    expect(dashboard.catalogReview).toEqual({ status: "error" });
+    expect(dashboard.opticalDrives).toMatchObject({ status: "loaded" });
+    expect(dashboard.detectedDiscs).toMatchObject({ status: "loaded" });
+    expect(dashboard.archiveJobs).toMatchObject({ status: "loaded" });
+    expect(dashboard.encodeJobs).toMatchObject({ status: "loaded" });
   });
 
   it("keeps activity relationship reads bounded when Encode Jobs fail", () => {

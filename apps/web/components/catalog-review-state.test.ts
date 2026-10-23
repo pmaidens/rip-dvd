@@ -1,10 +1,30 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  createDiscSelectionCommand,
   mutateCatalogReview,
   requestCatalogReview,
   resumePendingCatalogReviewMutation,
 } from "./catalog-review-state";
+
+it("binds only current-evidence selection creation to a Catalog revision", () => {
+  const selection = {
+    mediaItemId: "synthetic-media-item",
+    sourceIdentity: { kind: "dvd_title" as const, titleNumber: 1 },
+  };
+  expect(createDiscSelectionCommand(selection, {
+    catalogRevision: "2026-08-11T06:00:00.000Z",
+    currentEvidence: false,
+  })).toEqual({ action: "create_disc_selection", selection });
+  expect(createDiscSelectionCommand(selection, {
+    catalogRevision: "2026-08-11T06:00:00.000Z",
+    currentEvidence: true,
+  })).toEqual({
+    action: "create_disc_selection",
+    catalogRevision: "2026-08-11T06:00:00.000Z",
+    selection,
+  });
+});
 
 const previewToken = "disc-selection-preview:00000000-0000-4000-8000-000000000001";
 

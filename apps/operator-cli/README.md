@@ -102,6 +102,11 @@ rip-dvd catalog-review suggest <archive-id> --tmdb-id 42 --media-type movie
 `show` returns the current catalog revision, archive and scan provenance,
 coverage, Media Items, Disc Selections with structured action availability,
 correction history, and corrected Encode Job and retained-output history.
+For a `dvd-recovery-evidence-v1` archive, `reviewWorkflow` also reports the
+initial save, current recovery, mapping state, damage-decision readiness,
+current workflow identities, and stable reasons for unavailable actions.
+Mapping remains available while recovery is active. Legacy archives keep the
+legacy response and completion behavior.
 `reviewActionAvailability` reports whether completion with selections or
 Archive-only completion is currently allowed, with a reason when blocked.
 Each paginated section includes its offset, limit, and next/previous flags.
@@ -254,7 +259,9 @@ For an existing Media Item, use
 The optional `discSelection.label` names the selected source. Source kinds are
 `main_feature`, `dvd_title`, and `dvd_chapters`. A chapter source also needs
 `titleNumber`, `chapterStart`, and `chapterEnd`. Omit `completeReview` to leave
-Catalog Review open.
+Catalog Review open. A `dvd-recovery-evidence-v1` archive accepts exact
+`dvd_title` and `dvd_chapters` sources only; `main_feature` remains available
+for legacy evidence.
 
 Episodic proposal schema:
 
@@ -290,7 +297,8 @@ rip-dvd catalog-review apply-proposal <archive-id> --key <key> \
 The command writes one JSON result and exits 0 on success. Invalid JSON or
 proposal shape exits 2 with `INVALID_ARGUMENTS` or `INVALID_PROPOSAL`.
 Rejected members, stale revisions, and key conflicts exit 2 with
-`PROPOSAL_REJECTED`, `STALE_CATALOG_REVISION`, or `MUTATION_KEY_CONFLICT`.
+`PROPOSAL_REJECTED`, `CATALOG_MAPPING_SOURCE_UNSUPPORTED`,
+`STALE_CATALOG_REVISION`, or `MUTATION_KEY_CONFLICT`.
 Database unavailability exits 1 with `PROPOSAL_UNAVAILABLE`.
 
 ## Complete Catalog Review
@@ -359,10 +367,13 @@ Job. A blocked preview has no token and cannot be acknowledged.
 ```sh
 rip-dvd disc-selection show <archive-id> <selection-id>
 rip-dvd disc-selection create <archive-id> --key <key> \
+  --revision <catalog-revision-from-show> \
   --media-item-id <media-item-id> --source-kind dvd_title --title-number 1
 rip-dvd disc-selection update <archive-id> <selection-id> --key <key> \
+  --revision <catalog-revision-from-show> \
   --label "Main feature"
 rip-dvd disc-selection preview correct <archive-id> <selection-id> \
+  --revision <catalog-revision-from-show> \
   --media-item-id <media-item-id> --source-kind main_feature
 rip-dvd disc-selection correct <archive-id> <selection-id> --key <key> \
   --revision <catalog-revision-from-preview> --preview-token <token-from-preview> \
@@ -372,6 +383,7 @@ rip-dvd disc-selection delete <archive-id> <selection-id> --key <key> \
   --revision <catalog-revision-from-preview> --preview-token <token-from-preview> \
   --acknowledge
 rip-dvd disc-selection preview repair <archive-id> <selection-id> \
+  --revision <catalog-revision-from-show> \
   --media-item-id <media-item-id> --source-kind dvd_title --title-number 1
 rip-dvd disc-selection repair <archive-id> <selection-id> --key <key> \
   --revision <catalog-revision-from-preview> --preview-token <token-from-preview> \
@@ -380,13 +392,24 @@ rip-dvd disc-selection repair <archive-id> <selection-id> --key <key> \
 
 `create`, `update`, `repair`, `correct`, and `delete` require a previously
 chosen mutation key. Repeating an identical invocation returns its original
-result. Reusing the key with different inputs fails. An `update` that changes
+result. Reusing the key with different inputs fails. For a
+`dvd-recovery-evidence-v1` archive, `create` and every `update` also require
+the Catalog Review revision returned by `catalog-review show`; the mutation
+validates the source against current Title Identity evidence and rejects a
+stale revision rather than retargeting a title number. New-format repair and
+correction previews also require that reviewed revision. Legacy correction
+previews keep their established automatic current-revision lookup. Only exact default-angle `dvd_title` and
+`dvd_chapters` sources are accepted for this format. Legacy creation remains
+revision-optional and continues to accept `main_feature`.
+An `update` that changes
 the Media Item or source, plus every `repair`, `correct`, and `delete`, requires
 an action-specific preview. Pass the returned revision and token with
 `--acknowledge`. A changed Catalog Review revision or different proposal
 rejects the decision. Label-only updates execute directly. The catalog uses
 the same archive binding, source validation, and Encode Job provenance rules
-as the web editor.
+as the web editor. Every new-format mutation, including label or Media Item
+updates and deletion, is rejected if current Title Identity evidence or a
+consistent Recovery state is unavailable.
 For an unsafe legacy selection, `delete` quarantines the selection when its
 Encode Job history must remain. Inspect the affected job with
 `inspect encode-jobs <job-id>` and the current mappings and correction history
@@ -407,6 +430,7 @@ and acknowledgement stay as command options for every input form.
 
 ```sh
 rip-dvd disc-selection create <archive-id> --key <key> \
+  --revision <catalog-revision-from-show> \
   --json '{"mediaItemId":"<media-item-id>","sourceIdentity":{"kind":"dvd_title","titleNumber":1}}'
 printf '%s\n' '{"label":"Featurette"}' |
   rip-dvd disc-selection update <archive-id> <selection-id> --key <key> --stdin

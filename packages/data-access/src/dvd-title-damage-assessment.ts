@@ -56,6 +56,7 @@ export interface DvdTitleDamageAssessmentInput {
     acceptedEndLbaExclusive: number;
   };
   titleIdentityReviewSetIdentity: string;
+  catalogMappingProjectionId: string | null;
   structuralAssessmentIdentity: string;
   structuralFindings: {
     dvdNavigation: DvdStructuralFindingOutcome;
@@ -346,6 +347,8 @@ export function createDvdTitleDamageAssessment(
   const checkpoint = validateCheckpoint(input.checkpoint);
   if (
     !/^[a-f0-9]{64}$/.test(input.titleIdentityReviewSetIdentity) ||
+    (input.catalogMappingProjectionId !== null &&
+      !/^[a-f0-9]{64}$/.test(input.catalogMappingProjectionId)) ||
     !/^dvd-structural-assessment:[a-f0-9]{64}$/.test(
       input.structuralAssessmentIdentity,
     )
@@ -541,9 +544,19 @@ export function createDvdTitleDamageAssessment(
     unknownTitleImpact,
     noTitleMissingSourceProved,
   };
+  // Rows written before the Catalog mapping dependency was persisted retain
+  // their original identity so they remain readable as outdated evidence.
+  // Current rows bind the projection into their immutable identity, allowing
+  // the same damage evidence to be recorded again after a mapping change.
+  const identityEvidence = input.catalogMappingProjectionId === null
+    ? semanticEvidence
+    : {
+      ...semanticEvidence,
+      catalogMappingProjectionId: input.catalogMappingProjectionId,
+    };
   const digest = createHash("sha256")
     .update(ASSESSMENT_ID_DOMAIN)
-    .update(canonicalJson(semanticEvidence))
+    .update(canonicalJson(identityEvidence))
     .digest("hex");
   return {
     id: `dvd-title-damage-assessment:${digest}`,

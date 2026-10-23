@@ -1,6 +1,7 @@
 "use client";
 
 import type { CompletedCatalogReviewOutcome } from "@rip-dvd/data-access";
+import { useRef, useState, type KeyboardEvent } from "react";
 
 import { archiveIntegrityLabel } from "../lib/archive-integrity";
 import type { AutomaticCatalogProposal } from "../lib/catalog-automation";
@@ -16,6 +17,11 @@ import { CatalogReviewMediaItems } from "./catalog-review-media-items";
 import { CatalogReviewRearchiveProposal } from "./catalog-review-rearchive-proposal";
 import { CatalogReviewTitleIdentity } from "./catalog-review-title-identity";
 import { CatalogReviewTitleDamageEvidence } from "./catalog-review-title-damage";
+import {
+  CatalogReviewDamageDecisionStatus,
+  CatalogReviewMappingStatus,
+  CatalogReviewRecoveryStep,
+} from "./catalog-review-workflow";
 import type {
   CatalogReviewLoadState,
   CatalogReviewRearchiveProposal as CatalogReviewRearchiveProposalDto,
@@ -41,7 +47,9 @@ interface CatalogReviewViewProps {
   mappingProposalError: string | null;
   selectionKind: DiscSelectionKind;
   activeMappingProposal: MappingProposal | null;
+  activeMappingProposalRevision?: string | null;
   activeEpisodicMappingProposal?: EpisodicMappingProposal | null;
+  activeEpisodicMappingProposalRevision?: string | null;
   archiveOnlySelected: boolean;
   onClose(): void;
   onRetry(): void;
@@ -57,9 +65,11 @@ interface CatalogReviewViewProps {
   onArchiveOnlyChange(selected: boolean): void;
   onStartMappingProposal(proposal: MappingProposal): void;
   onCancelMappingProposal(): void;
+  onUseRefreshedMappingProposalEvidence?(): void;
   onCreateMappingProposal(input: CreateMappingProposalInput): void;
   onStartEpisodicMappingProposal?(proposal: EpisodicMappingProposal): void;
   onCancelEpisodicMappingProposal?(): void;
+  onUseRefreshedEpisodicMappingProposalEvidence?(): void;
   onCreateEpisodicMappingProposal?(
     input: CreateEpisodicMappingProposalInput,
   ): void;
@@ -73,13 +83,62 @@ interface CatalogReviewViewProps {
   ): void;
   onSaveMediaItem(input: SaveMediaItemInput): void;
   onDeleteMediaItem(id: string): void;
-  onCreateDiscSelection(input: CreateDiscSelectionInput): void;
-  onUpdateDiscSelection(id: string, changes: UpdateDiscSelectionInput): void;
+  onCreateDiscSelection(
+    input: CreateDiscSelectionInput,
+    catalogRevision: string,
+    onCommitted: () => void,
+  ): void;
+  onUpdateDiscSelection(
+    id: string,
+    changes: UpdateDiscSelectionInput,
+    catalogRevision: string,
+    onCommitted: () => void,
+  ): void;
   onDeleteDiscSelection(id: string): void;
   onCompleteReview(
     outcome: CompletedCatalogReviewOutcome,
     replacements: CatalogReviewReplacementEncodeInput[],
   ): void;
+}
+
+export function catalogReviewSelectionTitles(
+  review: Pick<
+    Extract<CatalogReviewLoadState, { status: "loaded" }>["review"],
+    "rawScan" | "titleIdentity" | "reviewWorkflow"
+  >,
+) {
+  return review.titleIdentity?.available
+    ? review.titleIdentity.items
+      .filter(({ presentAtCurrentCheckpoint, observation }) =>
+        presentAtCurrentCheckpoint && observation.angleNumber === 1
+      )
+      .map(({ observation }) => ({
+        number: observation.displayTitleNumber,
+        chapters: observation.chapterCount,
+      }))
+    : review.reviewWorkflow === undefined
+    ? review.rawScan.titles
+    : [];
+}
+
+function catalogReviewEvidenceTitles(
+  review: Pick<
+    Extract<CatalogReviewLoadState, { status: "loaded" }>["review"],
+    "rawScan" | "titleIdentity" | "reviewWorkflow"
+  >,
+) {
+  if (review.reviewWorkflow === undefined) return review.rawScan.titles;
+  if (review.titleIdentity?.available !== true) return [];
+  const currentTitleNumbers = new Set(
+    review.titleIdentity.items
+      .filter(({ presentAtCurrentCheckpoint, observation }) =>
+        presentAtCurrentCheckpoint && observation.angleNumber === 1
+      )
+      .map(({ observation }) => observation.displayTitleNumber),
+  );
+  return review.rawScan.titles.filter(({ number }) =>
+    currentTitleNumbers.has(number)
+  );
 }
 
 export function CatalogReviewView({
@@ -91,7 +150,9 @@ export function CatalogReviewView({
   mappingProposalError,
   selectionKind,
   activeMappingProposal,
+  activeMappingProposalRevision = null,
   activeEpisodicMappingProposal = null,
+  activeEpisodicMappingProposalRevision = null,
   archiveOnlySelected,
   onClose,
   onRetry,
@@ -107,9 +168,11 @@ export function CatalogReviewView({
   onArchiveOnlyChange,
   onStartMappingProposal,
   onCancelMappingProposal,
+  onUseRefreshedMappingProposalEvidence = () => undefined,
   onCreateMappingProposal,
   onStartEpisodicMappingProposal,
   onCancelEpisodicMappingProposal,
+  onUseRefreshedEpisodicMappingProposalEvidence = () => undefined,
   onCreateEpisodicMappingProposal,
   onAcceptAutomaticCatalogProposal = () => undefined,
   onPreviewRearchiveMappingProposal = async () => {
@@ -124,6 +187,11 @@ export function CatalogReviewView({
   onDeleteDiscSelection,
   onCompleteReview,
 }: CatalogReviewViewProps) {
+  const [activeStep, setActiveStep] = useState<
+    "recovery" | "mapping" | "damage"
+  >("mapping");
+  const stepRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
   if (state.status === "loading") {
     return (
       <section className="catalog-editor" aria-live="polite">
@@ -144,6 +212,207 @@ export function CatalogReviewView({
   }
 
   const { review } = state;
+  const catalogMappingAction = review.reviewWorkflow?.actions.find(
+    ({ action }) => action === "catalog_mapping",
+  );
+  const mappingAvailable = catalogMappingAction?.available ?? true;
+  const rearchiveAcceptanceAvailable = review.reviewWorkflow === undefined;
+  const rearchiveAcceptanceUnavailableReason = rearchiveAcceptanceAvailable
+    ? null
+    : {
+        code: "CATALOG_REVIEW_COMPLETION_UNAVAILABLE",
+        message:
+          "Re-archive Acceptance is unavailable for dvd-recovery-evidence-v1; use the separate damage decision workflow.",
+      };
+  const mappingProposalUsesStaleEvidence = activeMappingProposal !== null &&
+    activeMappingProposalRevision !== null &&
+    activeMappingProposalRevision !== review.catalogRevision;
+  const episodicMappingProposalUsesStaleEvidence =
+    activeEpisodicMappingProposal !== null &&
+    activeEpisodicMappingProposalRevision !== null &&
+    activeEpisodicMappingProposalRevision !== review.catalogRevision;
+  const mappingContent = (
+    <>
+      {review.reviewWorkflow === undefined
+        ? null
+        : <CatalogReviewMappingStatus workflow={review.reviewWorkflow} />}
+      {review.rearchiveProposal ? (
+        <CatalogReviewRearchiveProposal
+          proposal={review.rearchiveProposal}
+          mediaItems={review.mediaItems}
+          replacementPlan={review.replacementPlan}
+          isSaving={isSaving}
+          mappingAvailable={mappingAvailable}
+          allowMainFeature={review.reviewWorkflow === undefined}
+          acceptanceAvailable={rearchiveAcceptanceAvailable}
+          acceptanceUnavailableReason={rearchiveAcceptanceUnavailableReason}
+          onPreview={onPreviewRearchiveMappingProposal}
+          onSave={onSaveRearchiveMappingProposal}
+          onAccept={onAcceptRearchive}
+          onReplacementJobsPage={onReplacementJobsPage ?? (() => undefined)}
+          onReplacementProfilesPage={
+            onReplacementProfilesPage ?? (() => undefined)
+          }
+        />
+      ) : null}
+
+      {review.rearchiveProposal || review.reviewWorkflow !== undefined
+        ? null
+        : (
+        <CatalogReviewAutomation
+          review={review}
+          isSaving={isSaving}
+          completionEnabled
+          onAcceptProposal={onAcceptAutomaticCatalogProposal}
+          onCompleteReview={onCompleteReview}
+        />
+      )}
+
+      {review.rearchiveProposal ? null : <details
+        className="catalog-manual-workbench"
+        open={
+          review.reviewOutcome !== "needs_review" ||
+            review.automaticCataloging?.configured !== true
+            ? true
+            : undefined
+        }
+      >
+        <summary>
+          <span>Manual catalog tools</span>
+          <small>Use these for ambiguous discs, extras, and corrections.</small>
+        </summary>
+        <div className="catalog-editor-grid">
+          <CatalogReviewEvidence
+            coverage={review.coverage}
+            volumeLabel={review.archive.discLabel}
+            titles={catalogReviewEvidenceTitles(review)}
+            mediaItems={review.mediaItems}
+            activeMappingProposal={activeMappingProposal}
+            activeEpisodicMappingProposal={activeEpisodicMappingProposal}
+            allowMainFeatureProposal={review.reviewWorkflow === undefined}
+            isSaving={isSaving}
+            mappingAvailable={mappingAvailable}
+            mappingProposalUsesStaleEvidence={
+              mappingProposalUsesStaleEvidence
+            }
+            episodicMappingProposalUsesStaleEvidence={
+              episodicMappingProposalUsesStaleEvidence
+            }
+            mappingProposalError={mappingProposalError}
+            onStartMappingProposal={onStartMappingProposal}
+            onCancelMappingProposal={onCancelMappingProposal}
+            onCreateMappingProposal={onCreateMappingProposal}
+            onStartEpisodicMappingProposal={onStartEpisodicMappingProposal}
+            onCancelEpisodicMappingProposal={onCancelEpisodicMappingProposal}
+            onCreateEpisodicMappingProposal={onCreateEpisodicMappingProposal}
+            onUseRefreshedMappingProposalEvidence={
+              onUseRefreshedMappingProposalEvidence
+            }
+            onUseRefreshedEpisodicMappingProposalEvidence={
+              onUseRefreshedEpisodicMappingProposalEvidence
+            }
+          />
+
+          <CatalogReviewMediaItems
+            archiveId={review.archive.id}
+            mediaItems={review.mediaItems}
+            mappedMediaItemIds={review.discSelections.map(
+              (selection) => selection.mediaItemId,
+            )}
+            editingMediaItemId={editingMediaItemId}
+            isSaving={isSaving}
+            onEdit={onEditMediaItem}
+            onCancelEdit={onCancelEdit}
+            onSave={onSaveMediaItem}
+            onDelete={onDeleteMediaItem}
+          />
+
+          <section
+            className="catalog-pane catalog-selections"
+            aria-labelledby="reviewed-selections"
+          >
+            <CatalogReviewDiscSelections
+              key={review.archive.id}
+              catalogRevision={review.catalogRevision}
+              discSelections={review.discSelections}
+              page={review.discSelectionsPage}
+              correctionHistory={review.correctionHistory}
+              correctionHistoryPage={review.correctionHistoryPage}
+              correctionEncodeHistory={review.correctionEncodeHistory}
+              correctionEncodeHistoryPage={review.correctionEncodeHistoryPage}
+              correctionRetainedOutputHistory={
+                review.correctionRetainedOutputHistory
+              }
+              correctionRetainedOutputHistoryPage={
+                review.correctionRetainedOutputHistoryPage
+              }
+              mediaItems={review.mediaItems}
+              rawTitles={catalogReviewSelectionTitles(review)}
+              mappingReviewSelectionIds={new Set(
+                review.titleIdentity?.available
+                  ? review.titleIdentity.items.flatMap((item) =>
+                    item.discSelectionMappings
+                      .filter(({ mappingState }) =>
+                        mappingState === "needs_mapping_review"
+                      )
+                      .map(({ discSelectionId }) => discSelectionId)
+                  )
+                  : [],
+              )}
+              allowMainFeature={review.reviewWorkflow === undefined}
+              selectionKind={selectionKind}
+              isSaving={isSaving}
+              mappingAvailable={mappingAvailable}
+              onPage={onDiscSelectionsPage}
+              onCorrectionHistoryPage={onCorrectionHistoryPage}
+              onCorrectionEncodeHistoryPage={onCorrectionEncodeHistoryPage}
+              onCorrectionRetainedOutputHistoryPage={
+                onCorrectionRetainedOutputHistoryPage
+              }
+              onSelectionKindChange={onSelectionKindChange}
+              onCreate={onCreateDiscSelection}
+              onUpdate={onUpdateDiscSelection}
+              onDelete={onDeleteDiscSelection}
+            />
+            <CatalogReviewCompletion
+              isSaving={isSaving}
+              coverage={review.coverage}
+              actionAvailability={review.reviewActionAvailability}
+              reviewOutcome={review.reviewOutcome}
+              archiveOnlySelected={archiveOnlySelected}
+              replacementPlan={review.replacementPlan}
+              completionEnabled={review.reviewWorkflow === undefined}
+              onArchiveOnlyChange={onArchiveOnlyChange}
+              onReplacementJobsPage={onReplacementJobsPage}
+              onReplacementProfilesPage={onReplacementProfilesPage}
+              onComplete={onCompleteReview}
+            />
+          </section>
+        </div>
+      </details>}
+    </>
+  );
+  const steps = [
+    { id: "recovery" as const, label: "Recovery" },
+    { id: "mapping" as const, label: "Catalog mapping" },
+    { id: "damage" as const, label: "Damage decision" },
+  ];
+  const moveStepFocus = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    const direction = event.key === "ArrowRight" || event.key === "ArrowDown"
+      ? 1
+      : event.key === "ArrowLeft" || event.key === "ArrowUp"
+      ? -1
+      : 0;
+    if (direction === 0) return;
+    event.preventDefault();
+    const next = (index + direction + steps.length) % steps.length;
+    setActiveStep(steps[next]!.id);
+    stepRefs.current[next]?.focus();
+  };
+
   return (
     <section className="catalog-editor" aria-labelledby="catalog-editor-title">
       <header className="catalog-editor-header">
@@ -189,129 +458,77 @@ export function CatalogReviewView({
         </div>
       ) : null}
 
-      <CatalogReviewTitleIdentity titleIdentity={review.titleIdentity} />
-      <CatalogReviewTitleDamageEvidence
-        originalDiscArchiveId={review.archive.id}
-        titleDamage={review.titleDamage}
-      />
-
-      {review.rearchiveProposal ? (
-        <CatalogReviewRearchiveProposal
-          proposal={review.rearchiveProposal}
-          mediaItems={review.mediaItems}
-          replacementPlan={review.replacementPlan}
-          isSaving={isSaving}
-          onPreview={onPreviewRearchiveMappingProposal}
-          onSave={onSaveRearchiveMappingProposal}
-          onAccept={onAcceptRearchive}
-          onReplacementJobsPage={onReplacementJobsPage ?? (() => undefined)}
-          onReplacementProfilesPage={
-            onReplacementProfilesPage ?? (() => undefined)
-          }
-        />
-      ) : null}
-
-      {review.rearchiveProposal ? null : (
-        <CatalogReviewAutomation
-          review={review}
-          isSaving={isSaving}
-          onAcceptProposal={onAcceptAutomaticCatalogProposal}
-          onCompleteReview={onCompleteReview}
-        />
-      )}
-
-      {review.rearchiveProposal ? null : <details
-        className="catalog-manual-workbench"
-        open={
-          review.reviewOutcome !== "needs_review" ||
-            review.automaticCataloging?.configured !== true
-            ? true
-            : undefined
-        }
-      >
-        <summary>
-          <span>Manual catalog tools</span>
-          <small>Use these for ambiguous discs, extras, and corrections.</small>
-        </summary>
-        <div className="catalog-editor-grid">
-          <CatalogReviewEvidence
-            coverage={review.coverage}
-            volumeLabel={review.archive.discLabel}
-            titles={review.rawScan.titles}
-            mediaItems={review.mediaItems}
-            activeMappingProposal={activeMappingProposal}
-            activeEpisodicMappingProposal={activeEpisodicMappingProposal}
-            isSaving={isSaving}
-            mappingProposalError={mappingProposalError}
-            onStartMappingProposal={onStartMappingProposal}
-            onCancelMappingProposal={onCancelMappingProposal}
-            onCreateMappingProposal={onCreateMappingProposal}
-            onStartEpisodicMappingProposal={onStartEpisodicMappingProposal}
-            onCancelEpisodicMappingProposal={onCancelEpisodicMappingProposal}
-            onCreateEpisodicMappingProposal={onCreateEpisodicMappingProposal}
+      {review.reviewWorkflow === undefined ? (
+        <>
+          <CatalogReviewTitleIdentity titleIdentity={review.titleIdentity} />
+          <CatalogReviewTitleDamageEvidence
+            originalDiscArchiveId={review.archive.id}
+            titleDamage={review.titleDamage}
           />
-
-          <CatalogReviewMediaItems
-            archiveId={review.archive.id}
-            mediaItems={review.mediaItems}
-            mappedMediaItemIds={review.discSelections.map(
-              (selection) => selection.mediaItemId,
-            )}
-            editingMediaItemId={editingMediaItemId}
-            isSaving={isSaving}
-            onEdit={onEditMediaItem}
-            onCancelEdit={onCancelEdit}
-            onSave={onSaveMediaItem}
-            onDelete={onDeleteMediaItem}
-          />
-
-          <section
-            className="catalog-pane catalog-selections"
-            aria-labelledby="reviewed-selections"
+          {mappingContent}
+        </>
+      ) : (
+        <>
+          <div
+            className="catalog-review-steps"
+            role="tablist"
+            aria-label="Review Steps"
           >
-            <CatalogReviewDiscSelections
-              discSelections={review.discSelections}
-              page={review.discSelectionsPage}
-              correctionHistory={review.correctionHistory}
-              correctionHistoryPage={review.correctionHistoryPage}
-              correctionEncodeHistory={review.correctionEncodeHistory}
-              correctionEncodeHistoryPage={review.correctionEncodeHistoryPage}
-              correctionRetainedOutputHistory={
-                review.correctionRetainedOutputHistory
-              }
-              correctionRetainedOutputHistoryPage={
-                review.correctionRetainedOutputHistoryPage
-              }
-              mediaItems={review.mediaItems}
-              rawTitles={review.rawScan.titles}
-              selectionKind={selectionKind}
-              isSaving={isSaving}
-              onPage={onDiscSelectionsPage}
-              onCorrectionHistoryPage={onCorrectionHistoryPage}
-              onCorrectionEncodeHistoryPage={onCorrectionEncodeHistoryPage}
-              onCorrectionRetainedOutputHistoryPage={
-                onCorrectionRetainedOutputHistoryPage
-              }
-              onSelectionKindChange={onSelectionKindChange}
-              onCreate={onCreateDiscSelection}
-              onUpdate={onUpdateDiscSelection}
-              onDelete={onDeleteDiscSelection}
+            {steps.map((step, index) => (
+              <button
+                key={step.id}
+                id={`catalog-review-step-${step.id}`}
+                ref={(element) => {
+                  stepRefs.current[index] = element;
+                }}
+                type="button"
+                role="tab"
+                aria-selected={activeStep === step.id}
+                aria-controls={`catalog-review-panel-${step.id}`}
+                tabIndex={activeStep === step.id ? 0 : -1}
+                onClick={() => setActiveStep(step.id)}
+                onKeyDown={(event) => moveStepFocus(event, index)}
+              >
+                {step.label}
+              </button>
+            ))}
+          </div>
+          <section
+            id="catalog-review-panel-recovery"
+            className="catalog-review-step-panel"
+            role="tabpanel"
+            aria-labelledby="catalog-review-step-recovery"
+            hidden={activeStep !== "recovery"}
+          >
+            <CatalogReviewRecoveryStep workflow={review.reviewWorkflow} />
+          </section>
+          <section
+            id="catalog-review-panel-mapping"
+            className="catalog-review-step-panel"
+            role="tabpanel"
+            aria-labelledby="catalog-review-step-mapping"
+            hidden={activeStep !== "mapping"}
+          >
+            <CatalogReviewTitleIdentity titleIdentity={review.titleIdentity} />
+            {mappingContent}
+          </section>
+          <section
+            id="catalog-review-panel-damage"
+            className="catalog-review-step-panel catalog-review-damage-panel"
+            role="tabpanel"
+            aria-labelledby="catalog-review-step-damage"
+            hidden={activeStep !== "damage"}
+          >
+            <CatalogReviewTitleDamageEvidence
+              originalDiscArchiveId={review.archive.id}
+              titleDamage={review.titleDamage}
             />
-            <CatalogReviewCompletion
-              isSaving={isSaving}
-              coverage={review.coverage}
-              actionAvailability={review.reviewActionAvailability}
-              reviewOutcome={review.reviewOutcome}
-              archiveOnlySelected={archiveOnlySelected}
-              replacementPlan={review.replacementPlan}
-              onArchiveOnlyChange={onArchiveOnlyChange}
-              onReplacementJobsPage={onReplacementJobsPage}
-              onReplacementProfilesPage={onReplacementProfilesPage}
-              onComplete={onCompleteReview}
+            <CatalogReviewDamageDecisionStatus
+              workflow={review.reviewWorkflow}
             />
           </section>
-        </div>
-      </details>}
+        </>
+      )}
     </section>
   );
 }
@@ -343,7 +560,11 @@ export function CatalogReviewEditor({
       mappingProposalError={review.mappingProposalError}
       selectionKind={review.selectionKind}
       activeMappingProposal={review.activeMappingProposal}
+      activeMappingProposalRevision={review.activeMappingProposalRevision}
       activeEpisodicMappingProposal={review.activeEpisodicMappingProposal}
+      activeEpisodicMappingProposalRevision={
+        review.activeEpisodicMappingProposalRevision
+      }
       archiveOnlySelected={review.archiveOnlySelected}
       onClose={onClose}
       onRetry={review.retry}
@@ -363,9 +584,15 @@ export function CatalogReviewEditor({
       onArchiveOnlyChange={review.changeArchiveOnlySelected}
       onStartMappingProposal={review.startMappingProposal}
       onCancelMappingProposal={review.cancelMappingProposal}
+      onUseRefreshedMappingProposalEvidence={
+        review.useRefreshedMappingProposalEvidence
+      }
       onCreateMappingProposal={review.createMappingProposal}
       onStartEpisodicMappingProposal={review.startEpisodicMappingProposal}
       onCancelEpisodicMappingProposal={review.cancelEpisodicMappingProposal}
+      onUseRefreshedEpisodicMappingProposalEvidence={
+        review.useRefreshedEpisodicMappingProposalEvidence
+      }
       onCreateEpisodicMappingProposal={review.createEpisodicMappingProposal}
       onAcceptAutomaticCatalogProposal={review.acceptAutomaticCatalogProposal}
       onPreviewRearchiveMappingProposal={
