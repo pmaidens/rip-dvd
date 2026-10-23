@@ -9344,6 +9344,12 @@
       "table": "dvd_title_damage_assessments"
     },
     {
+      "value": "\"catalog_mapping_projection_id\" is null or (length(\"catalog_mapping_projection_id\") = 64 and \"catalog_mapping_projection_id\" not glob '*[^0-9a-f]*')",
+      "name": "dvd_title_damage_assessments_catalog_mapping_projection_check",
+      "entityType": "checks",
+      "table": "dvd_title_damage_assessments"
+    },
+    {
       "value": "\"policy_version\" = 'dvd-title-damage-assessment-v1'",
       "name": "dvd_title_damage_assessments_policy_check",
       "entityType": "checks",

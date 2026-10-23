@@ -1,17 +1,23 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  dvdTitleIdentityCatalogMappingProjectionDigest,
   dvdTitleIdentityCatalogMappingItems,
   dvdTitleIdentityContentDigest,
+  dvdTitleIdentityDiscSelectionDigest,
   dvdTitleIdentityObservationSetDigest,
   dvdTitleIdentityReviewSetDigest,
   normalizeDvdTitleIdentityObservation,
 } from "./dvd-title-identity.js";
+import {
+  createDiscSelectionSourceIdentity,
+} from "./disc-selection-source-identity.js";
 import type {
   DiscSelectionId,
   DvdTitleIdentityId,
   DvdTitleIdentityObservationId,
   DvdTitleIdentityReviewSetItem,
+  MediaItemId,
 } from "./types.js";
 
 describe("DVD Title Identity digests", () => {
@@ -46,6 +52,14 @@ describe("DVD Title Identity digests", () => {
       manifestRevision: 2,
       manifestDigest: "a".repeat(64),
     };
+    const discSelectionIdentity = dvdTitleIdentityDiscSelectionDigest({
+      discSelectionId: "selection-1" as DiscSelectionId,
+      mediaItemId: "media-item-1" as MediaItemId,
+      sourceIdentity: createDiscSelectionSourceIdentity({
+        kind: "dvd_title",
+        titleNumber: 7,
+      }),
+    });
     const items: DvdTitleIdentityReviewSetItem[] = [{
       titleIdentityId: "title-identity-1" as DvdTitleIdentityId,
       presentAtCurrentCheckpoint: true,
@@ -72,6 +86,7 @@ describe("DVD Title Identity digests", () => {
       mappingState: "mapped",
       discSelectionMappings: [{
         discSelectionId: "selection-1" as DiscSelectionId,
+        discSelectionIdentity,
         mappingState: "mapped",
       }],
     }];
@@ -84,6 +99,32 @@ describe("DVD Title Identity digests", () => {
     );
     expect(dvdTitleIdentityReviewSetDigest(checkpoint, items)).toBe(
       "fe9665b3f060fa2db6f1dca0bb19906dcd9c8dea8db7ba15305bd156219f168d",
+    );
+    const changedSelectionItems = [{
+      ...items[0]!,
+      discSelectionMappings: [{
+        ...items[0]!.discSelectionMappings[0]!,
+        discSelectionIdentity: dvdTitleIdentityDiscSelectionDigest({
+          discSelectionId: "selection-1" as DiscSelectionId,
+          mediaItemId: "media-item-1" as MediaItemId,
+          sourceIdentity: createDiscSelectionSourceIdentity({
+            kind: "dvd_chapters",
+            titleNumber: 7,
+            chapterStart: 2,
+            chapterEnd: 5,
+          }),
+        }),
+      }],
+    }];
+    expect(dvdTitleIdentityReviewSetDigest(checkpoint, changedSelectionItems))
+      .toBe(dvdTitleIdentityReviewSetDigest(checkpoint, items));
+    expect(
+      dvdTitleIdentityCatalogMappingProjectionDigest(
+        checkpoint,
+        changedSelectionItems,
+      ),
+    ).not.toBe(
+      dvdTitleIdentityCatalogMappingProjectionDigest(checkpoint, items),
     );
     expect(dvdTitleIdentityContentDigest({
       ...observation,
@@ -109,6 +150,7 @@ describe("DVD Title Identity digests", () => {
         ...alternateAngle,
         discSelectionMappings: [{
           discSelectionId: "selection-2" as DiscSelectionId,
+          discSelectionIdentity: "b".repeat(64),
           mappingState: "needs_mapping_review",
         }],
       },

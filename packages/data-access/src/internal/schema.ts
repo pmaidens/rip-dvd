@@ -1640,6 +1640,10 @@ export const dvdTitleDamageAssessments = sqliteTable(
       sql`length(${table.titleIdentityReviewSetIdentity}) = 64 and ${table.titleIdentityReviewSetIdentity} not glob '*[^0-9a-f]*' and length(${table.structuralAssessmentIdentity}) = 90 and substr(${table.structuralAssessmentIdentity}, 1, 26) = 'dvd-structural-assessment:' and substr(${table.structuralAssessmentIdentity}, 27) not glob '*[^0-9a-f]*'`,
     ),
     check(
+      "dvd_title_damage_assessments_catalog_mapping_projection_check",
+      sql`${table.catalogMappingProjectionId} is null or (length(${table.catalogMappingProjectionId}) = 64 and ${table.catalogMappingProjectionId} not glob '*[^0-9a-f]*')`,
+    ),
+    check(
       "dvd_title_damage_assessments_policy_check",
       sql`${table.policyVersion} = 'dvd-title-damage-assessment-v1'`,
     ),

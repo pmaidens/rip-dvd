@@ -204,6 +204,7 @@ import {
   dvdTitleIdentityCatalogMappingItems,
   dvdTitleIdentityCatalogMappingProjectionDigest,
   dvdTitleIdentityContentDigest,
+  dvdTitleIdentityDiscSelectionDigest,
   dvdTitleIdentityObservationSetDigest,
   dvdTitleIdentityReviewSetDigest,
   normalizeDvdTitleIdentityObservation,
@@ -8835,6 +8836,11 @@ export function createDataAccessInternal(
       discSelectionId: dvdTitleIdentitySelectionBindings.discSelectionId,
       selectionOriginalDiscArchiveId:
         discSelections.originalDiscArchiveId,
+      selectionMediaItemId: discSelections.mediaItemId,
+      selectionKind: discSelections.kind,
+      selectionTitleNumber: discSelections.titleNumber,
+      selectionChapterStart: discSelections.chapterStart,
+      selectionChapterEnd: discSelections.chapterEnd,
       lastObservationId:
         dvdTitleIdentitySelectionBindings.lastObservationId,
       lastObservationTitleIdentityId:
@@ -8985,6 +8991,16 @@ export function createDataAccessInternal(
           : "unmapped",
         discSelectionMappings: bindings.map((binding) => ({
           discSelectionId: binding.discSelectionId,
+          discSelectionIdentity: dvdTitleIdentityDiscSelectionDigest({
+            discSelectionId: binding.discSelectionId,
+            mediaItemId: binding.selectionMediaItemId,
+            sourceIdentity: deserializeDiscSelectionSourceIdentity({
+              kind: binding.selectionKind,
+              titleNumber: binding.selectionTitleNumber,
+              chapterStart: binding.selectionChapterStart,
+              chapterEnd: binding.selectionChapterEnd,
+            }),
+          }),
           mappingState: binding.state,
         })),
       };
@@ -9029,6 +9045,16 @@ export function createDataAccessInternal(
           : "unmapped",
         discSelectionMappings: bindings.map((binding) => ({
           discSelectionId: binding.discSelectionId,
+          discSelectionIdentity: dvdTitleIdentityDiscSelectionDigest({
+            discSelectionId: binding.discSelectionId,
+            mediaItemId: binding.selectionMediaItemId,
+            sourceIdentity: deserializeDiscSelectionSourceIdentity({
+              kind: binding.selectionKind,
+              titleNumber: binding.selectionTitleNumber,
+              chapterStart: binding.selectionChapterStart,
+              chapterEnd: binding.selectionChapterEnd,
+            }),
+          }),
           mappingState: "needs_mapping_review" as const,
         })),
       });
@@ -9245,6 +9271,11 @@ export function createDataAccessInternal(
       discSelectionId: dvdTitleIdentitySelectionBindings.discSelectionId,
       selectionOriginalDiscArchiveId:
         discSelections.originalDiscArchiveId,
+      selectionMediaItemId: discSelections.mediaItemId,
+      selectionKind: discSelections.kind,
+      selectionTitleNumber: discSelections.titleNumber,
+      selectionChapterStart: discSelections.chapterStart,
+      selectionChapterEnd: discSelections.chapterEnd,
       lastObservationId:
         dvdTitleIdentitySelectionBindings.lastObservationId,
       lastObservationTitleIdentityId:
@@ -9583,6 +9614,16 @@ export function createDataAccessInternal(
             : "unmapped",
           discSelectionMappings: bindings.map((binding) => ({
             discSelectionId: binding.discSelectionId,
+            discSelectionIdentity: dvdTitleIdentityDiscSelectionDigest({
+              discSelectionId: binding.discSelectionId,
+              mediaItemId: binding.selectionMediaItemId,
+              sourceIdentity: deserializeDiscSelectionSourceIdentity({
+                kind: binding.selectionKind,
+                titleNumber: binding.selectionTitleNumber,
+                chapterStart: binding.selectionChapterStart,
+                chapterEnd: binding.selectionChapterEnd,
+              }),
+            }),
             mappingState: presentAtCurrentCheckpoint
               ? binding.state
               : "needs_mapping_review" as const,
@@ -9745,12 +9786,44 @@ export function createDataAccessInternal(
         dvdTitleDamageAssessmentAttempts.sequence,
         damageSequences,
       )).all();
-    const damageManifestIds = [...new Set(damageRows.map(({ assessment }) =>
-      assessment.manifestId
+    const latestDamageArchiveIds = new Set(damageRows.map(({ attempt }) =>
+      attempt.originalDiscArchiveId
+    ));
+    const potentiallyCurrentDamageRows = damageRows.filter(({
+      attempt,
+      assessment,
+    }) => {
+      const header = archiveById.get(
+        attempt.originalDiscArchiveId,
+      )?.evidenceHeader;
+      const titleIdentity = titleIdentityByArchiveId.get(
+        attempt.originalDiscArchiveId,
+      );
+      const structural = currentStructuralByArchiveId.get(
+        attempt.originalDiscArchiveId,
+      );
+      return header !== null && header !== undefined &&
+        titleIdentity !== null && titleIdentity !== undefined &&
+        structural !== undefined &&
+        assessment.originalDiscArchiveId === attempt.originalDiscArchiveId &&
+        assessment.manifestId === header.currentManifestId &&
+        assessment.manifestRevision === header.currentManifestRevision &&
+        assessment.manifestDigest === header.currentManifestDigest &&
+        assessment.acceptedEndLbaExclusive ===
+          header.acceptedEndLbaExclusive &&
+        assessment.catalogMappingProjectionId !== null &&
+        assessment.catalogMappingProjectionId ===
+          titleIdentity.catalogMappingProjectionId &&
+        assessment.structuralAssessmentIdentity === structural.id;
+    });
+    const damageManifestIds = [...new Set(potentiallyCurrentDamageRows.map(
+      ({ assessment }) => assessment.manifestId,
     ))];
-    const damageStructuralAssessmentIds = [...new Set(damageRows.map(
-      ({ assessment }) => assessment.structuralAssessmentIdentity,
-    ))];
+    const damageStructuralAssessmentIds = [...new Set(
+      potentiallyCurrentDamageRows.map(
+        ({ assessment }) => assessment.structuralAssessmentIdentity,
+      ),
+    )];
     const damageManifests = damageManifestIds.length === 0
       ? []
       : database.select().from(dvdArchiveEvidenceManifests).where(inArray(
@@ -9764,22 +9837,31 @@ export function createDataAccessInternal(
           dvdStructuralAssessments.id,
           damageStructuralAssessmentIds,
         )).all();
-    const damageObservationRows = damageManifestIds.length === 0
-      ? []
-      : database.select({
-        observation: dvdTitleIdentityObservations,
-        titleIdentityOriginalDiscArchiveId:
-          dvdTitleIdentities.originalDiscArchiveId,
-      }).from(dvdTitleIdentityObservations).innerJoin(
-        dvdTitleIdentities,
-        eq(
-          dvdTitleIdentities.id,
-          dvdTitleIdentityObservations.titleIdentityId,
-        ),
-      ).where(inArray(
-        dvdTitleIdentityObservations.manifestId,
-        damageManifestIds,
-      )).all();
+    const damageManifestIdSet = new Set(damageManifestIds);
+    const damageObservationRows = latestObservationRows.filter(({
+      observation,
+    }) => damageManifestIdSet.has(observation.manifestId)).map(({
+      observation,
+      identityOriginalDiscArchiveId,
+    }) => ({
+      observation,
+      titleIdentityOriginalDiscArchiveId: identityOriginalDiscArchiveId,
+    }));
+    const damageObservationCountByManifestId = new Map<string, number>();
+    for (const { observation } of damageObservationRows) {
+      damageObservationCountByManifestId.set(
+        observation.manifestId,
+        (damageObservationCountByManifestId.get(observation.manifestId) ?? 0) +
+          1,
+      );
+    }
+    if ([...damageObservationCountByManifestId.values()].some((count) =>
+      count > MAX_DVD_TITLES
+    )) {
+      throw new DomainInvariantError(
+        `Title Damage observations exceed the ${MAX_DVD_TITLES}-title checkpoint limit`,
+      );
+    }
     const damageManifestById = new Map(damageManifests.map((manifest) => [
       manifest.id,
       manifest,
@@ -9821,7 +9903,7 @@ export function createDataAccessInternal(
         catalogMappingProjectionId: string | null;
       }
     >();
-    for (const { attempt, assessment } of damageRows) {
+    for (const { attempt, assessment } of potentiallyCurrentDamageRows) {
       if (!latestDamageByArchiveId.has(attempt.originalDiscArchiveId)) {
         latestDamageByArchiveId.set(
           attempt.originalDiscArchiveId,
@@ -9871,7 +9953,7 @@ export function createDataAccessInternal(
           ? "unavailable"
           : isCurrent
           ? "current"
-          : latestDamage === undefined
+          : !latestDamageArchiveIds.has(id)
           ? "pending"
           : "outdated",
         currentAssessmentIdentity: isCurrent ? latestDamage.record.id : null,

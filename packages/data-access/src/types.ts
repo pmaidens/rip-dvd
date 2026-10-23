@@ -499,6 +499,7 @@ export type DvdTitleIdentityMappingState =
 
 export interface DvdTitleIdentitySelectionMapping {
   discSelectionId: DiscSelectionId;
+  discSelectionIdentity: string;
   mappingState: Exclude<DvdTitleIdentityMappingState, "unmapped">;
 }
 

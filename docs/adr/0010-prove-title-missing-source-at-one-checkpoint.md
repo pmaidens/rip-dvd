@@ -18,8 +18,9 @@ the read interval ends.
 Routine status projections establish the same Title Identity dependency
 without traversing historical observations by comparing the assessment's
 stored Catalog mapping projection identity at the same exact checkpoint. That
-bounded projection contains every mutable mapping input to the review set; the
-remaining review-set evidence is immutable within the checkpoint. An older
+bounded projection covers each active selection's identity, Media Item target,
+DVD title or chapter source range, and mapping-review state; the remaining
+review-set evidence is immutable within the checkpoint. An older
 assessment without that projection identity is outdated rather than assumed
 current. Current assessment identities include the projection identity, so a
 reassessment after a mapping change creates a distinct immutable row. A

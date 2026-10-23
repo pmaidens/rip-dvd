@@ -385,7 +385,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   const catalogRevision = access.catalog.listOriginalDiscArchives({
     ids: [archive.id],
   })[0]!.updatedAt;
-  access.catalog.mutateDiscSelection({
+  const mappedSelection = access.catalog.mutateDiscSelection({
     originalDiscArchiveId: archive.id,
     expectedCatalogRevision: catalogRevision,
     mutationKey: "synthetic-title-damage-remapping",
@@ -397,7 +397,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
         sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
       },
     },
-  });
+  }).discSelection;
   expect(access.dvdTitleDamageAssessments.inspect(archive.id)).toMatchObject({
     state: "outdated",
     currentAssessmentIdentity: null,
@@ -416,6 +416,69 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     state: "current",
     currentAssessmentIdentity: remapped.id,
     assessment: { id: remapped.id },
+  });
+  const remappedProjection = access.catalog
+    .readDvdCatalogReviewWorkflowEvidence([{
+      originalDiscArchiveId: archive.id,
+      evidenceHeader: header,
+    }]).get(archive.id)!.titleIdentity!.catalogMappingProjectionId;
+  const remappedRevision = access.catalog.listOriginalDiscArchives({
+    ids: [archive.id],
+  })[0]!.updatedAt;
+  const chapterMappedSelection = access.catalog.mutateDiscSelection({
+    originalDiscArchiveId: archive.id,
+    expectedCatalogRevision: remappedRevision,
+    mutationKey: "synthetic-title-damage-chapter-remapping",
+    mutation: {
+      action: "update",
+      discSelectionId: mappedSelection.id,
+      changes: {
+        originalDiscArchiveId: archive.id,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 2,
+        },
+      },
+    },
+  }).discSelection;
+  expect(chapterMappedSelection.sourceIdentity).toEqual({
+    kind: "dvd_chapters",
+    titleNumber: 1,
+    chapterStart: 1,
+    chapterEnd: 2,
+  });
+  const chapterRemappedWorkflow = access.catalog
+    .readDvdCatalogReviewWorkflowEvidence([{
+      originalDiscArchiveId: archive.id,
+      evidenceHeader: header,
+    }]).get(archive.id)!;
+  expect(chapterRemappedWorkflow.titleIdentity?.catalogMappingProjectionId)
+    .not.toBe(remappedProjection);
+  expect(chapterRemappedWorkflow.titleDamage).toEqual({
+    state: "outdated",
+    currentAssessmentIdentity: null,
+    acceptanceRequired: false,
+  });
+  expect(access.dvdTitleDamageAssessments.inspect(archive.id)).toMatchObject({
+    state: "outdated",
+    currentAssessmentIdentity: null,
+    assessment: { id: remapped.id },
+  });
+  const chapterRemapped = await access.assessDvdTitleDamage(
+    archive.id,
+    ownership,
+    async () => mappings,
+  );
+  if (chapterRemapped === null) {
+    throw new Error("Expected Title Damage Assessment after chapter remapping");
+  }
+  expect(chapterRemapped.id).not.toBe(remapped.id);
+  expect(access.dvdTitleDamageAssessments.inspect(archive.id)).toMatchObject({
+    state: "current",
+    currentAssessmentIdentity: chapterRemapped.id,
+    assessment: { id: chapterRemapped.id },
   });
 
   const laterRecorded = await access.assessDvdTitleDamage(
@@ -449,11 +512,11 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   if (restored === null) {
     throw new Error("Expected a restored Title Damage Assessment");
   }
-  expect(restored.id).toBe(remapped.id);
+  expect(restored.id).toBe(chapterRemapped.id);
   expect(access.dvdTitleDamageAssessments.inspect(archive.id)).toMatchObject({
     state: "current",
-    currentAssessmentIdentity: remapped.id,
-    assessment: { id: remapped.id },
+    currentAssessmentIdentity: chapterRemapped.id,
+    assessment: { id: chapterRemapped.id },
   });
   const sqlite = new DatabaseSync(fixture.databasePath);
   expect(sqlite.prepare(`
@@ -465,13 +528,14 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     { assessmentId: migratedAssessment.id },
     { assessmentId: recorded.id },
     { assessmentId: remapped.id },
+    { assessmentId: chapterRemapped.id },
     { assessmentId: laterRecorded.id },
-    { assessmentId: remapped.id },
+    { assessmentId: chapterRemapped.id },
   ]);
   expect(sqlite.prepare(`
     SELECT count(*) AS count
     FROM dvd_title_damage_assessments
-  `).get()).toEqual({ count: 4 });
+  `).get()).toEqual({ count: 5 });
   sqlite.close();
 
   let newerStructuralAssessmentIdentity: string | null = null;
@@ -516,7 +580,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   expect(access.dvdTitleDamageAssessments.inspect(archive.id)).toMatchObject({
     state: "outdated",
     currentAssessmentIdentity: null,
-    assessment: { id: remapped.id },
+    assessment: { id: chapterRemapped.id },
   });
   const dependencyCycleLatest = await access.assessDvdTitleDamage(
     archive.id,

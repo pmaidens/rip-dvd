@@ -1,1 +1,1 @@
-ALTER TABLE `dvd_title_damage_assessments` ADD `catalog_mapping_projection_id` text;
+ALTER TABLE `dvd_title_damage_assessments` ADD `catalog_mapping_projection_id` text CONSTRAINT `dvd_title_damage_assessments_catalog_mapping_projection_check` CHECK (`catalog_mapping_projection_id` IS NULL OR (length(`catalog_mapping_projection_id`) = 64 AND `catalog_mapping_projection_id` NOT GLOB '*[^0-9a-f]*'));

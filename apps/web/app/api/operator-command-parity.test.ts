@@ -1527,10 +1527,12 @@ it("keeps absent retained mapping blockers identical through web, CLI, and dashb
         sourceExtents: [{ startLba: 0, sectorCount: 1 }],
       }],
     });
-    expect(firstReviewSet.items[0]?.discSelectionMappings).toEqual([{
-      discSelectionId: selection.id,
-      mappingState: "mapped",
-    }]);
+    expect(firstReviewSet.items[0]?.discSelectionMappings).toEqual([
+      expect.objectContaining({
+        discSelectionId: selection.id,
+        mappingState: "mapped",
+      }),
+    ]);
 
     const nextManifest = advanceCommittedArchiveEvidence(fixture, manifest);
     const missingReviewSet = access.catalog.recordDvdTitleIdentityObservations({

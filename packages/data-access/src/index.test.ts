@@ -23,6 +23,11 @@ import { createRawDvdContentIdHasher } from "./dvd-content-id.js";
 import { createDvdMetadataFingerprint } from "./dvd-metadata-fingerprint.js";
 import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
+  dvdTitleIdentityContentDigest,
+  dvdTitleIdentityObservationSetDigest,
+  normalizeDvdTitleIdentityObservation,
+} from "./dvd-title-identity.js";
+import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   archiveBoundaryEvidenceFromRecord,
   canonicalPublicationJson,
@@ -15388,10 +15393,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(first.items).toEqual([
       expect.objectContaining({
         mappingState: "mapped",
-        discSelectionMappings: [{
+        discSelectionMappings: [expect.objectContaining({
           discSelectionId: selection.id,
           mappingState: "mapped",
-        }],
+        })],
         reviewContinuity: expect.objectContaining({ result: "initial" }),
       }),
     ]);
@@ -15411,10 +15416,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       expect.objectContaining({
         titleIdentityId: stableTitleIdentityId,
         mappingState: "mapped",
-        discSelectionMappings: [{
+        discSelectionMappings: [expect.objectContaining({
           discSelectionId: selection.id,
           mappingState: "mapped",
-        }],
+        })],
         reviewContinuity: expect.objectContaining({ result: "proved" }),
         observation: expect.objectContaining({ displayTitleNumber: 3 }),
       }),
@@ -15447,10 +15452,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       expect.objectContaining({
         titleIdentityId: stableTitleIdentityId,
         mappingState: "needs_mapping_review",
-        discSelectionMappings: [{
+        discSelectionMappings: [expect.objectContaining({
           discSelectionId: selection.id,
           mappingState: "needs_mapping_review",
-        }],
+        })],
         reviewContinuity: expect.objectContaining({ result: "uncertain" }),
         observation: expect.objectContaining({ displayTitleNumber: 3 }),
       }),
@@ -15493,10 +15498,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       expect.objectContaining({
         titleIdentityId: stableTitleIdentityId,
         mappingState: "needs_mapping_review",
-        discSelectionMappings: [{
+        discSelectionMappings: [expect.objectContaining({
           discSelectionId: selection.id,
           mappingState: "needs_mapping_review",
-        }],
+        })],
         reviewContinuity: expect.objectContaining({ result: "proved" }),
         observation: expect.objectContaining({ displayTitleNumber: 9 }),
       }),
@@ -16531,6 +16536,25 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       damage.policyVersion,
       JSON.stringify(titleMappings),
     );
+    expect(() => sqlite.prepare(`
+      INSERT INTO dvd_title_damage_assessments (
+        id, original_disc_archive_id, manifest_id, manifest_revision,
+        manifest_digest, accepted_end_lba_exclusive,
+        title_identity_review_set_identity,
+        catalog_mapping_projection_id, structural_assessment_identity,
+        policy_version, title_mappings, created_at
+      )
+      SELECT ?, original_disc_archive_id, manifest_id, manifest_revision,
+        manifest_digest, accepted_end_lba_exclusive,
+        title_identity_review_set_identity, 'invalid',
+        structural_assessment_identity, policy_version, title_mappings,
+        created_at
+      FROM dvd_title_damage_assessments
+      WHERE id = ?
+    `).run(
+      `dvd-title-damage-assessment:${"f".repeat(64)}`,
+      damage.id,
+    )).toThrow(/catalog_mapping_projection/i);
     sqlite.prepare(`
       INSERT INTO dvd_title_damage_assessment_attempts (
         original_disc_archive_id, assessment_id, created_at
@@ -16842,6 +16866,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       `).run(fixture.archive.id, damage.id);
       sqlite.close();
     }
+    const legacyDamageManifestId =
+      headers[0]!.evidenceHeader.currentManifestId;
     const advanceFirstArchive = (revision: number) => {
       const checkpoint = advanceDvdTitleIdentityCheckpointForTest(
         first.databasePath,
@@ -16927,6 +16953,137 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       for (let revision = 3; revision <= 24; revision += 1) {
         advanceFirstArchive(revision);
       }
+      expect(first.access.dvdTitleDamageAssessments.inspect(
+        first.archive.id,
+      ).state).toBe("outdated");
+      const legacySqlite = new DatabaseSync(first.databasePath);
+      const insertLegacyIdentity = legacySqlite.prepare(`
+        INSERT INTO dvd_title_identities (
+          id, original_disc_archive_id, created_at
+        ) VALUES (?, ?, 1)
+      `);
+      const insertLegacyObservation = legacySqlite.prepare(`
+        INSERT INTO dvd_title_identity_observations (
+          id, manifest_id, title_identity_id, previous_observation_id,
+          display_title_number, navigation, selected_path, angle_number,
+          angle_count, chapter_start, chapter_end, chapter_count,
+          source_extents, content_digest, continuity_result,
+          continuity_policy_version, created_at
+        ) VALUES (?, ?, ?, NULL, ?, ?, ?, 1, 1, 1, 1, 1, ?, ?, 'initial', ?, 1)
+      `);
+      const legacyObservation = normalizeDvdTitleIdentityObservation({
+        displayTitleNumber: 1,
+        navigation: {
+          videoTitleSetNumber: 1,
+          titleSetTitleNumber: 1,
+          programChainNumber: 1,
+        },
+        selectedPath: [{
+          programNumber: 1,
+          cellNumber: 1,
+          vobId: 1,
+          cellId: 1,
+        }],
+        angleNumber: 1,
+        angleCount: 1,
+        chapterStart: 1,
+        chapterEnd: 1,
+        chapterCount: 1,
+        sourceExtents: [{ startLba: 1, sectorCount: 1 }],
+      }, headers[0]!.evidenceHeader.acceptedEndLbaExclusive);
+      const legacyContentDigest = dvdTitleIdentityContentDigest(
+        legacyObservation,
+      );
+      for (let index = 0; index < 600; index += 1) {
+        const titleIdentityId = `synthetic-legacy-title-identity-${index}`;
+        insertLegacyIdentity.run(
+          titleIdentityId,
+          first.archive.id,
+        );
+        insertLegacyObservation.run(
+          `synthetic-legacy-title-observation-${index}`,
+          legacyDamageManifestId,
+          titleIdentityId,
+          1_000 + index,
+          JSON.stringify({
+            videoTitleSetNumber: 1,
+            titleSetTitleNumber: 1,
+            programChainNumber: 1,
+          }),
+          JSON.stringify([{
+            programNumber: 1,
+            cellNumber: 1,
+            vobId: 1,
+            cellId: 1,
+          }]),
+          JSON.stringify([{ startLba: 1, sectorCount: 1 }]),
+          legacyContentDigest,
+          "dvd-title-identity-continuity-v1",
+        );
+      }
+      const storedLegacyRows = legacySqlite.prepare(`
+        SELECT
+          display_title_number AS displayTitleNumber,
+          navigation,
+          selected_path AS selectedPath,
+          angle_number AS angleNumber,
+          angle_count AS angleCount,
+          chapter_start AS chapterStart,
+          chapter_end AS chapterEnd,
+          chapter_count AS chapterCount,
+          source_extents AS sourceExtents,
+          content_digest AS contentDigest
+        FROM dvd_title_identity_observations
+        WHERE manifest_id = ?
+      `).all(legacyDamageManifestId) as Array<{
+        displayTitleNumber: number;
+        navigation: string;
+        selectedPath: string;
+        angleNumber: number;
+        angleCount: number;
+        chapterStart: number;
+        chapterEnd: number;
+        chapterCount: number;
+        sourceExtents: string;
+        contentDigest: string;
+      }>;
+      const legacyObservationSetDigest = dvdTitleIdentityObservationSetDigest(
+        storedLegacyRows.map((row) => ({
+          ...normalizeDvdTitleIdentityObservation({
+            displayTitleNumber: row.displayTitleNumber,
+            navigation: JSON.parse(row.navigation),
+            selectedPath: JSON.parse(row.selectedPath),
+            angleNumber: row.angleNumber,
+            angleCount: row.angleCount,
+            chapterStart: row.chapterStart,
+            chapterEnd: row.chapterEnd,
+            chapterCount: row.chapterCount,
+            sourceExtents: JSON.parse(row.sourceExtents),
+          }, headers[0]!.evidenceHeader.acceptedEndLbaExclusive),
+          contentDigest: row.contentDigest,
+        })),
+      );
+      // Simulate a checkpoint created before the current title cap while
+      // restoring the immutable-set guard before exercising application code.
+      legacySqlite.exec(
+        "DROP TRIGGER dvd_title_identity_set_update_guard",
+      );
+      legacySqlite.prepare(`
+        UPDATE dvd_title_identity_sets
+        SET observation_set_digest = ?
+        WHERE manifest_id = ?
+      `).run(legacyObservationSetDigest, legacyDamageManifestId);
+      legacySqlite.exec(`
+        CREATE TRIGGER dvd_title_identity_set_update_guard
+        BEFORE UPDATE ON dvd_title_identity_sets
+        BEGIN
+          SELECT RAISE(
+            ABORT,
+            'DVD Title Identity checkpoint set is immutable'
+          );
+        END
+      `);
+      legacySqlite.close();
 
       statementAll.mockClear();
       statementGet.mockClear();
@@ -16955,9 +17112,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         batch.get(archive.id)?.titleDamage.state
       )).toEqual(["outdated", "current"]);
       expect(queryCount()).toBe(currentArchiveQueryCount);
-      expect(fixtures.map(({ archive }) =>
-        first.access.dvdTitleDamageAssessments.inspect(archive.id).state
-      )).toEqual(["outdated", "current"]);
+      expect(first.access.dvdTitleDamageAssessments.inspect(
+        second.archive.id,
+      ).state).toBe("current");
 
       const mappedMediaItem = first.access.catalog.createMediaItem({
         kind: "movie",
@@ -17021,10 +17178,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       expect.objectContaining({
         titleIdentityId: stableTitleIdentityId,
         presentAtCurrentCheckpoint: false,
-        discSelectionMappings: [{
+        discSelectionMappings: [expect.objectContaining({
           discSelectionId: selection.id,
           mappingState: "needs_mapping_review",
-        }],
+        })],
       }),
     ]);
     const missingHeader = {
@@ -17065,10 +17222,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         titleIdentityId: stableTitleIdentityId,
         presentAtCurrentCheckpoint: true,
         reviewContinuity: expect.objectContaining({ result: "proved" }),
-        discSelectionMappings: [{
+        discSelectionMappings: [expect.objectContaining({
           discSelectionId: selection.id,
           mappingState: "needs_mapping_review",
-        }],
+        })],
       }),
     ]);
     fixture.access.close();
@@ -17645,14 +17802,14 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(reviewed.items[0]).toMatchObject({
       mappingState: "needs_mapping_review",
       discSelectionMappings: expect.arrayContaining([
-        {
+        expect.objectContaining({
           discSelectionId: firstSelection.id,
           mappingState: "mapped",
-        },
-        {
+        }),
+        expect.objectContaining({
           discSelectionId: secondSelection.id,
           mappingState: "needs_mapping_review",
-        },
+        }),
       ]),
     });
     fixture.access.close();

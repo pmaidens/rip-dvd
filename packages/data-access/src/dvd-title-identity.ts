@@ -2,13 +2,18 @@ import { createHash } from "node:crypto";
 
 import { DomainInvariantError } from "./errors.js";
 import type {
+  DiscSelectionId,
   DvdTitleIdentityReviewSet,
   DvdTitleIdentityReviewSetItem,
   DvdTitleIdentityObservationInput,
   DvdTitleIdentityContinuityResult,
   DvdTitleIdentitySelectedPathEntry,
+  MediaItemId,
   UnreadableSectorRange,
 } from "./types.js";
+import type {
+  DiscSelectionSourceIdentity,
+} from "./disc-selection-source-identity.js";
 
 export const DVD_TITLE_IDENTITY_CONTINUITY_VERSION =
   "dvd-title-identity-continuity-v1";
@@ -21,6 +26,8 @@ const TITLE_IDENTITY_REVIEW_SET_DOMAIN =
   "rip-dvd:dvd-title-identity-review-set:v1\0";
 const TITLE_IDENTITY_CATALOG_MAPPING_PROJECTION_DOMAIN =
   "rip-dvd:dvd-title-identity-catalog-mapping-projection:v1\0";
+const TITLE_IDENTITY_DISC_SELECTION_DOMAIN =
+  "rip-dvd:dvd-title-identity-disc-selection:v1\0";
 
 export interface NormalizedDvdTitleIdentityObservation
   extends DvdTitleIdentityObservationInput {
@@ -303,8 +310,26 @@ export function dvdTitleIdentityReviewSetDigest(
 ): string {
   return digest(
     TITLE_IDENTITY_REVIEW_SET_DOMAIN,
-    dvdTitleIdentityReviewSetDigestPayload(checkpoint, items),
+    dvdTitleIdentityReviewSetDigestPayload(checkpoint, items, false),
   );
+}
+
+export function dvdTitleIdentityDiscSelectionDigest(input: {
+  discSelectionId: DiscSelectionId;
+  mediaItemId: MediaItemId;
+  sourceIdentity: DiscSelectionSourceIdentity;
+}): string {
+  const sourceIdentity = input.sourceIdentity;
+  return digest(TITLE_IDENTITY_DISC_SELECTION_DOMAIN, [
+    input.discSelectionId,
+    input.mediaItemId,
+    sourceIdentity.kind,
+    sourceIdentity.kind === "main_feature" ? null : sourceIdentity.titleNumber,
+    sourceIdentity.kind === "dvd_chapters"
+      ? sourceIdentity.chapterStart
+      : null,
+    sourceIdentity.kind === "dvd_chapters" ? sourceIdentity.chapterEnd : null,
+  ]);
 }
 
 export function dvdTitleIdentityCatalogMappingProjectionDigest(
@@ -316,6 +341,7 @@ export function dvdTitleIdentityCatalogMappingProjectionDigest(
     dvdTitleIdentityReviewSetDigestPayload(
       checkpoint,
       dvdTitleIdentityCatalogMappingItems(items),
+      true,
     ),
   );
 }
@@ -323,6 +349,7 @@ export function dvdTitleIdentityCatalogMappingProjectionDigest(
 function dvdTitleIdentityReviewSetDigestPayload(
   checkpoint: DvdTitleIdentityReviewSet["checkpoint"],
   items: readonly DvdTitleIdentityReviewSetItem[],
+  includeDiscSelectionIdentity: boolean,
 ): unknown {
   const ordered = [...items].sort((left, right) =>
     left.titleIdentityId.localeCompare(right.titleIdentityId)
@@ -354,6 +381,9 @@ function dvdTitleIdentityReviewSetDigestPayload(
         .map((mapping) => [
           mapping.discSelectionId,
           mapping.mappingState,
+          ...(includeDiscSelectionIdentity
+            ? [mapping.discSelectionIdentity]
+            : []),
         ]),
     ]),
   ];
