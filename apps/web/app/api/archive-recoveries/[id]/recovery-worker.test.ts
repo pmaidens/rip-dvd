@@ -31,6 +31,7 @@ import {
 import {
   pollDvdDiscVerification,
   type DvdRecoverySourceReader,
+  type DvdVerificationSourceReader,
 } from "../../../../../archive-worker/src/dvd-disc-verifier.js";
 import { pollDvdRecoveryPass } from "../../../../../archive-worker/src/dvd-recovery-worker.js";
 import {
@@ -210,6 +211,23 @@ function immediateReader(
   return { reader: { start }, start };
 }
 
+function immediateVerificationReader(
+  read: (startLba: number) =>
+    | { outcome: "readable"; bytes: Buffer }
+    | { outcome: "unreadable"; diagnostic: DvdDiscVerificationDiagnostic },
+) {
+  const start = vi.fn((input:
+    Parameters<DvdVerificationSourceReader["start"]>[0]) => ({
+      result: Promise.resolve(read(input.startLba)),
+      closed: Promise.resolve(),
+      cancel: vi.fn(),
+      deviceIdentity: syntheticDeviceIdentity(input.devicePath),
+      ready: Promise.resolve(),
+      authorize: vi.fn(),
+    }));
+  return { reader: { start }, start };
+}
+
 function pollInput(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   reader: DvdRecoverySourceReader,
@@ -379,6 +397,148 @@ it("continues a productive pass in reverse and pauses after no progress", async 
           passCursorLba: 101,
         },
       });
+  } finally {
+    input.access.close();
+  }
+}, 20_000);
+
+it("retries an interrupted between-pass verification after restart", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 200,
+    sectorCount: 3,
+    classification: "skipped_untested",
+  }]);
+  await completeVerification(fixture, seeded);
+  const firstPassSource = immediateReader((startLba) => startLba === 201
+    ? { outcome: "unreadable", diagnostic: mediumError }
+    : { outcome: "readable", bytes: Buffer.alloc(2_048, startLba) });
+  const firstRun = pollInput(fixture, firstPassSource.reader);
+  expect(await pollDvdRecoveryPass(firstRun)).toBe(true);
+  const interrupted = firstRun.access.dvdDiscVerifications.claimNext(
+    "synthetic-interrupted-continuation-verifier",
+  );
+  if (interrupted === null) {
+    throw new Error("Expected between-pass verification claim");
+  }
+  const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`UPDATE dvd_disc_verifications SET claimed_at = 0
+    WHERE id = ?`).run(interrupted.id);
+  database.close();
+  firstRun.access.close();
+
+  const restarted = fixture.openAccess();
+  expect(restarted.dvdDiscVerifications.recoverExpiredClaims()).toBe(1);
+  expect(restarted.dvdDiscVerifications.listForRecoveryAttempt(
+    seeded.recoveryId,
+    seeded.attemptId,
+  )).toMatchObject([
+    { attemptOrdinal: 1, status: "completed", outcome: "match" },
+    {
+      attemptOrdinal: 2,
+      status: "completed",
+      outcome: "inconclusive",
+      reasons: expect.arrayContaining(["DISC_VERIFICATION_INTERRUPTED"]),
+    },
+    { attemptOrdinal: 3, status: "queued", outcome: null },
+  ]);
+  expect(restarted.catalog.findArchiveRecoveryById(seeded.recoveryId))
+    .toMatchObject({
+      status: "eligible",
+      faultCode: null,
+      work: { status: "requested", passNumber: 2 },
+    });
+  restarted.close();
+
+  completeQueuedVerification(fixture, seeded);
+  const resumedSource = immediateReader(() => ({
+    outcome: "unreadable",
+    diagnostic: mediumError,
+  }));
+  const resumed = pollInput(fixture, resumedSource.reader);
+  try {
+    expect(await pollDvdRecoveryPass(resumed)).toBe(true);
+    expect(resumed.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "paused",
+        pauseReason: "no_progress",
+        work: { passNumber: 2, passDirection: "reverse" },
+      });
+  } finally {
+    resumed.access.close();
+  }
+}, 20_000);
+
+it("faults a continuation when its source is removed between passes", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 210,
+    sectorCount: 3,
+    classification: "skipped_untested",
+  }]);
+  await completeVerification(fixture, seeded);
+  const firstPassSource = immediateReader((startLba) => startLba === 211
+    ? { outcome: "unreadable", diagnostic: mediumError }
+    : { outcome: "readable", bytes: Buffer.alloc(2_048, startLba) });
+  const input = pollInput(fixture, firstPassSource.reader);
+  try {
+    expect(await pollDvdRecoveryPass(input)).toBe(true);
+    const verificationSource = immediateVerificationReader(() => ({
+      outcome: "readable",
+      bytes: Buffer.alloc(2_048),
+    }));
+    expect(await pollDvdDiscVerification({
+      access: input.access,
+      reader: verificationSource.reader,
+      workerExecutionId: "synthetic-removed-continuation-verifier",
+      mediaGenerationObserver: {
+        async observe() {
+          return "synthetic-removed-generation";
+        },
+      },
+    })).toBe(true);
+    expect(verificationSource.start).not.toHaveBeenCalled();
+    expect(input.access.dvdDiscVerifications.findLatestForRecovery(
+      seeded.recoveryId,
+    )).toMatchObject({
+      status: "completed",
+      outcome: "inconclusive",
+      reasons: expect.arrayContaining(["DISC_INSERTION_CHANGED"]),
+    });
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "faulted",
+        faultCode: "DISC_VERIFICATION_STALE",
+        work: { status: "requested", passNumber: 2 },
+      });
+    const inspected = await fixture.run([
+      "inspect",
+      "archive-recoveries",
+      seeded.recoveryId,
+    ]);
+    expect(inspected.result).toMatchObject({
+      item: {
+        status: "faulted",
+        recoveryStatus: "faulted",
+        faultCode: "DISC_VERIFICATION_STALE",
+      },
+    });
+    const waited = await fixture.run([
+      "wait",
+      "archive-recoveries",
+      seeded.recoveryId,
+      "--timeout-ms",
+      "0",
+    ]);
+    expect(waited.result).toMatchObject({
+      outcome: "settled",
+      current: {
+        status: "faulted",
+        faultCode: "DISC_VERIFICATION_STALE",
+      },
+    });
   } finally {
     input.access.close();
   }

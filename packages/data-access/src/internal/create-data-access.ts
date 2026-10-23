@@ -1818,6 +1818,65 @@ export function createDataAccessInternal(
       checkpointDigest: header.currentManifestDigest,
     }, timestamp);
   };
+  const settleGeneratedContinuationVerification = (
+    transaction: CatalogTransaction,
+    verification: typeof dvdDiscVerifications.$inferSelect,
+    evaluated: {
+      outcome: "match" | "mismatch" | "inconclusive";
+      reasons: readonly DvdDiscVerificationReasonCode[];
+    } | null,
+    timestamp: Date,
+  ): void => {
+    const recovery = findArchiveRecoveryRecord(transaction, {
+      archiveRecoveryId: verification.archiveRecoveryId,
+    });
+    const lastPass = recovery?.passHistory.at(-1);
+    if (
+      recovery?.status !== "eligible" ||
+      recovery.attemptId !== verification.archiveRecoveryAttemptId ||
+      recovery.work?.status !== "requested" ||
+      recovery.work.verificationId !== null ||
+      recovery.work.passStartedAt !== null ||
+      lastPass?.outcome !== "productive" ||
+      recovery.work.passNumber !== lastPass.passNumber + 1
+    ) return;
+    if (evaluated?.outcome === "match") return;
+    const retryableInterruption = evaluated?.outcome === "inconclusive" &&
+      evaluated.reasons.includes("DISC_VERIFICATION_INTERRUPTED") &&
+      evaluated.reasons.every((reason) =>
+        reason === "DISC_SAMPLE_COVERAGE_INCOMPLETE" ||
+        reason === "DISC_VERIFICATION_INTERRUPTED"
+      );
+    if (retryableInterruption) {
+      insertQueuedDvdDiscVerification(transaction, {
+        archiveRecoveryId: verification.archiveRecoveryId,
+        archiveRecoveryAttemptId: verification.archiveRecoveryAttemptId,
+        originalDiscArchiveId: verification.originalDiscArchiveId,
+        discInspectionId: verification.discInspectionId,
+        detectedDiscId: verification.detectedDiscId,
+        mediaGeneration: verification.mediaGeneration,
+        sourceMetadataFingerprint: verification.sourceMetadataFingerprint,
+        observedMetadataFingerprint: verification.observedMetadataFingerprint,
+        checkpointRevision: verification.checkpointRevision,
+        checkpointDigest: verification.checkpointDigest,
+      }, timestamp);
+      return;
+    }
+    requireRow(
+      transaction.update(archiveRecoveries).set({
+        status: "faulted",
+        faultCode: "DISC_VERIFICATION_STALE",
+        pauseReason: null,
+        updatedAt: timestamp,
+      }).where(and(
+        eq(archiveRecoveries.id, recovery.id),
+        eq(archiveRecoveries.attemptId, recovery.attemptId),
+        eq(archiveRecoveries.status, "eligible"),
+      )).returning({ id: archiveRecoveries.id }).get(),
+      "Archive Recovery",
+      recovery.id,
+    );
+  };
   const archiveRecoveryCompletionAfterInterruption = (
     transaction: CatalogTransaction,
     recovery: ArchiveRecovery,
@@ -10792,6 +10851,13 @@ export function createDataAccessInternal(
           if (recovery.status === "stopping" || recovery.work === null) {
             return recovery;
           }
+          if (recovery.status === "paused") {
+            throw new InvalidStatusTransitionError(
+              "Archive Recovery",
+              recovery.status,
+              "DVD recovery reconciliation release",
+            );
+          }
           const timestamp = now();
           const settlement = recovery.status === "running"
             ? archiveRecoveryCompletionAfterInterruption(
@@ -11025,7 +11091,8 @@ export function createDataAccessInternal(
           );
           if (
             recovery.status === "running" || recovery.status === "stopping" ||
-            (recovery.status === "eligible" &&
+            ((recovery.status === "eligible" ||
+                recovery.status === "paused") &&
               recovery.work?.status === "requested")
           ) {
             throw new InvalidStatusTransitionError(
@@ -11468,7 +11535,7 @@ export function createDataAccessInternal(
                 interrupted: true,
               },
             );
-            transaction.update(dvdDiscVerifications).set({
+            const completed = transaction.update(dvdDiscVerifications).set({
               status: "completed",
               outcome: evaluated.outcome,
               reasons: evaluated.reasons,
@@ -11480,7 +11547,15 @@ export function createDataAccessInternal(
               eq(dvdDiscVerifications.id, verification.id),
               eq(dvdDiscVerifications.status, "running"),
               eq(dvdDiscVerifications.claimToken, claimToken),
-            )).run();
+            )).returning().get();
+            if (completed !== undefined) {
+              settleGeneratedContinuationVerification(
+                transaction,
+                completed,
+                evaluated,
+                timestamp,
+              );
+            }
           }
           return expired.length;
         }, { behavior: "immediate" });
@@ -11731,7 +11806,7 @@ export function createDataAccessInternal(
             },
           );
           const timestamp = now();
-          return toDvdDiscVerification(requireRow(
+          const completed = requireRow(
             transaction.update(dvdDiscVerifications).set({
               status: "completed",
               outcome: evaluated.outcome,
@@ -11749,25 +11824,42 @@ export function createDataAccessInternal(
             )).returning().get(),
             "DVD Disc Verification",
             claim.id,
-          ));
+          );
+          settleGeneratedContinuationVerification(
+            transaction,
+            completed,
+            evaluated,
+            timestamp,
+          );
+          return toDvdDiscVerification(completed);
         }, { behavior: "immediate" });
       },
       fail(claim) {
         if (claim.claimToken === null) return null;
-        const timestamp = now();
-        const row = database.update(dvdDiscVerifications).set({
-          status: "failed",
-          claimToken: null,
-          claimedAt: null,
-          completedAt: timestamp,
-          failureCode: "DISC_VERIFICATION_UNAVAILABLE",
-          updatedAt: timestamp,
-        }).where(and(
-          eq(dvdDiscVerifications.id, claim.id),
-          eq(dvdDiscVerifications.status, "running"),
-          eq(dvdDiscVerifications.claimToken, claim.claimToken),
-        )).returning().get();
-        return row === undefined ? null : toDvdDiscVerification(row);
+        const claimToken = claim.claimToken;
+        return database.transaction((transaction) => {
+          const timestamp = now();
+          const row = transaction.update(dvdDiscVerifications).set({
+            status: "failed",
+            claimToken: null,
+            claimedAt: null,
+            completedAt: timestamp,
+            failureCode: "DISC_VERIFICATION_UNAVAILABLE",
+            updatedAt: timestamp,
+          }).where(and(
+            eq(dvdDiscVerifications.id, claim.id),
+            eq(dvdDiscVerifications.status, "running"),
+            eq(dvdDiscVerifications.claimToken, claimToken),
+          )).returning().get();
+          if (row === undefined) return null;
+          settleGeneratedContinuationVerification(
+            transaction,
+            row,
+            null,
+            timestamp,
+          );
+          return toDvdDiscVerification(row);
+        }, { behavior: "immediate" });
       },
     },
     readConsistentSnapshot(read) {

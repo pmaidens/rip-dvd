@@ -38,17 +38,19 @@ export function dvdRecoveryReconciliationBlockingReasons(
   latest: Pick<DvdRecoveryReconciliation, "status"> | null,
 ) {
   const active = latest?.status === "queued" || latest?.status === "running";
-  const recoveryPassActive = recovery.status === "running" ||
+  const recoveryPassReserved = recovery.status === "running" ||
     recovery.status === "stopping" ||
-    (recovery.status === "eligible" && recovery.work?.status === "requested");
+    ((recovery.status === "eligible" || recovery.status === "paused") &&
+      recovery.work?.status === "requested");
   return [
     ...(active ? [{
         code: "RECONCILIATION_ACTIVE",
         message: "A DVD recovery reconciliation is already active.",
       }] : []),
-    ...(recoveryPassActive ? [{
+    ...(recoveryPassReserved ? [{
       code: "RECOVERY_PASS_ACTIVE",
-      message: "The active DVD recovery pass must quiesce first.",
+      message:
+        "The retained DVD recovery pass must be stopped before reconciliation.",
     }] : []),
   ];
 }

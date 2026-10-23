@@ -1644,6 +1644,55 @@ describe("data-access facade", () => {
         }),
       );
     }
+    const settledReadDigest = createDvdArchiveRecoveryReadEvidenceDigest({
+      originalDiscArchiveId: "migration-requested-archive",
+      fromManifestId: "migration-requested-manifest-2",
+      fromManifestRevision: 2,
+      startLba: 1,
+      sectorCount: 1,
+      outcome: "recovered",
+    });
+    sqlite.prepare(`
+      INSERT INTO mutation_invocations (
+        key, operation, semantic_input, outcome, created_at
+      ) VALUES (?, 'archive_recovery.stop', ?, ?, 12)
+    `).run(
+      "migration-settled-stop-key",
+      canonicalPublicationJson({
+        archiveRecoveryId: "migration-settled-recovery",
+        attemptId: "migration-settled-attempt",
+      }),
+      JSON.stringify({
+        id: "migration-settled-recovery",
+        originalDiscArchiveId: "migration-requested-archive",
+        attemptId: "migration-settled-attempt",
+        attemptOrdinal: 1,
+        status: "stopping",
+        stopOperationId: "migration-settled-stop-operation",
+        stopRequestedAt: new Date(12).toISOString(),
+        stoppedAt: null,
+        faultCode: null,
+        work: {
+          archiveRecoveryId: "migration-settled-recovery",
+          originalDiscArchiveId: "migration-requested-archive",
+          attemptId: "migration-settled-attempt",
+          status: "claimed",
+          verificationId: null,
+          requestedAt: null,
+          claimedBy: "migration-settled-worker",
+          claimToken: "migration-settled-token",
+          claimedAt: new Date(11).toISOString(),
+          passCursorLba: 0,
+          admittedDevicePath: "/dev/synthetic-dvd",
+          admittedDeviceId: "1",
+          admittedDeviceInode: "2",
+          createdAt: new Date(5).toISOString(),
+          updatedAt: new Date(12).toISOString(),
+        },
+        createdAt: new Date(1).toISOString(),
+        updatedAt: new Date(12).toISOString(),
+      }),
+    );
     sqlite.close();
 
     const migrated = openTestDatabase(databasePath);
@@ -1666,6 +1715,43 @@ describe("data-access facade", () => {
         },
       });
     }
+    const settledStopInput = {
+      mutationKey: "migration-settled-stop-key",
+      archiveRecoveryId:
+        "migration-settled-recovery" as ArchiveRecoveryId,
+      attemptId: "migration-settled-attempt" as ArchiveRecoveryAttemptId,
+    };
+    const settledReceipt = migrated.archiveRecoveryWork.requestStop(
+      settledStopInput,
+    );
+    expect(settledReceipt).toMatchObject({
+      pauseReason: null,
+      passHistory: [],
+      work: {
+        passNumber: 1,
+        passDirection: "forward",
+        passStartedAt: new Date(5),
+        passInitialUnrecoveredSectorCount: 2,
+        passRecoveredSectorCount: 1,
+        passCursorLba: 0,
+      },
+    });
+    const laterEvidence = new DatabaseSync(databasePath);
+    laterEvidence.prepare(`
+      INSERT INTO dvd_archive_recovery_reads (
+        id, original_disc_archive_id, from_manifest_id,
+        from_manifest_revision, start_lba, sector_count, outcome,
+        evidence_digest, created_at
+      ) VALUES (?, ?, ?, 2, 1, 1, 'recovered', ?, 13)
+    `).run(
+      "migration-requested-later-read",
+      "migration-requested-archive",
+      "migration-requested-manifest-2",
+      settledReadDigest,
+    );
+    laterEvidence.close();
+    expect(migrated.archiveRecoveryWork.requestStop(settledStopInput))
+      .toEqual(settledReceipt);
     migrated.close();
     const verified = new DatabaseSync(databasePath);
     try {

@@ -266,7 +266,9 @@ it("keeps wait pending for reconciliation after a faulted Stop", async () => {
   }
 });
 
-it("rejects reconciliation while a productive continuation is queued", async () => {
+async function expectReconciliationBlockedWhileWorkRetained(
+  recoveryStatus: "eligible" | "paused",
+) {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const seeded = await seedRecovery(fixture);
@@ -275,9 +277,19 @@ it("rejects reconciliation while a productive continuation is queued", async () 
   try {
     access.archiveRecoveryWork.request(recoveryId);
     const database = new DatabaseSync(fixture.databasePath);
-    database.prepare(`UPDATE archive_recovery_work
-      SET pass_number = 2, pass_direction = 'reverse'
-      WHERE archive_recovery_id = ?`).run(recoveryId);
+    if (recoveryStatus === "paused") {
+      database.prepare(`UPDATE archive_recovery_work SET
+        pass_started_at = 1, pass_initial_unrecovered_sector_count = 1,
+        pass_cursor_lba = 10
+        WHERE archive_recovery_id = ?`).run(recoveryId);
+      database.prepare(`UPDATE archive_recoveries SET
+        status = 'paused', pause_reason = 'no_progress'
+        WHERE id = ?`).run(recoveryId);
+    } else {
+      database.prepare(`UPDATE archive_recovery_work
+        SET pass_number = 2, pass_direction = 'reverse'
+        WHERE archive_recovery_id = ?`).run(recoveryId);
+    }
     database.close();
 
     const inspection = await createDvdRecoveryReconciliationInspectionRoute(
@@ -302,7 +314,7 @@ it("rejects reconciliation while a productive continuation is queued", async () 
             name: "reconcile",
             eligible: false,
             blockingReasons: [
-              "The active DVD recovery pass must quiesce first.",
+              "The retained DVD recovery pass must be stopped before reconciliation.",
             ],
           }),
         ]),
@@ -311,7 +323,9 @@ it("rejects reconciliation while a productive continuation is queued", async () 
     const web = await createDvdRecoveryReconciliationRoute(
       request(
         seeded.recoveryId,
-        "00000000-0000-4000-8000-000000000464",
+        recoveryStatus === "paused"
+          ? "00000000-0000-4000-8000-000000000468"
+          : "00000000-0000-4000-8000-000000000464",
       ),
       seeded.recoveryId,
       () => access,
@@ -322,7 +336,9 @@ it("rejects reconciliation while a productive continuation is queued", async () 
       "reconcile",
       seeded.recoveryId,
       "--key",
-      "00000000-0000-4000-8000-000000000465",
+      recoveryStatus === "paused"
+        ? "00000000-0000-4000-8000-000000000469"
+        : "00000000-0000-4000-8000-000000000465",
     ]);
     expect(web.status).toBe(409);
     expect(cli.exitCode).toBe(2);
@@ -335,7 +351,12 @@ it("rejects reconciliation while a productive continuation is queued", async () 
   } finally {
     access.close();
   }
-});
+}
+
+it.each(["eligible", "paused"] as const)(
+  "rejects reconciliation while %s Recovery work is retained",
+  expectReconciliationBlockedWhileWorkRetained,
+);
 
 it("keeps requested Recovery work in a bounded active listing", () => {
   const fixture = createOperatorWorkflowFixture();

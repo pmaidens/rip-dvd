@@ -154,6 +154,63 @@ WHERE `invocation`.`operation` = 'archive_recovery.stop'
 		WHERE `work`.`archive_recovery_id` =
 			json_extract(`invocation`.`outcome`, '$.id')
 	);--> statement-breakpoint
+UPDATE `mutation_invocations` AS `invocation`
+SET `outcome` = json_set(
+	`invocation`.`outcome`,
+	'$.pauseReason', NULL,
+	'$.passHistory', json('[]'),
+	'$.work.passNumber', 1,
+	'$.work.passDirection', 'forward',
+	'$.work.passStartedAt', CASE WHEN
+		json_extract(`invocation`.`outcome`, '$.work.status') = 'claimed'
+		OR json_type(`invocation`.`outcome`, '$.work.passCursorLba') = 'integer'
+	THEN json_extract(`invocation`.`outcome`, '$.work.createdAt') ELSE NULL END,
+	'$.work.passInitialUnrecoveredSectorCount', CASE WHEN
+		json_extract(`invocation`.`outcome`, '$.work.status') = 'claimed'
+		OR json_type(`invocation`.`outcome`, '$.work.passCursorLba') = 'integer'
+	THEN
+		(SELECT COALESCE(SUM(CAST(json_extract(`range`.`value`, '$.sectorCount') AS integer)), 0)
+		 FROM `dvd_archive_evidence_headers` AS `header`
+		 JOIN `dvd_archive_evidence_manifests` AS `manifest`
+		   ON `manifest`.`id` = `header`.`current_manifest_id`
+		 JOIN json_each(`manifest`.`unrecovered_source_ranges`) AS `range`
+		 WHERE `header`.`original_disc_archive_id` =
+			json_extract(`invocation`.`outcome`, '$.originalDiscArchiveId'))
+		+
+		(SELECT COALESCE(SUM(`read`.`sector_count`), 0)
+		 FROM `dvd_archive_recovery_reads` AS `read`
+		 WHERE `read`.`original_disc_archive_id` =
+			json_extract(`invocation`.`outcome`, '$.originalDiscArchiveId')
+		   AND `read`.`outcome` = 'recovered'
+		   AND `read`.`created_at` >= CAST(ROUND(
+			(julianday(json_extract(`invocation`.`outcome`, '$.work.createdAt')) - 2440587.5)
+			* 86400000
+		   ) AS integer))
+	ELSE NULL END,
+	'$.work.passRecoveredSectorCount', CASE WHEN
+		json_extract(`invocation`.`outcome`, '$.work.status') = 'claimed'
+		OR json_type(`invocation`.`outcome`, '$.work.passCursorLba') = 'integer'
+	THEN
+		(SELECT COALESCE(SUM(`read`.`sector_count`), 0)
+		 FROM `dvd_archive_recovery_reads` AS `read`
+		 WHERE `read`.`original_disc_archive_id` =
+			json_extract(`invocation`.`outcome`, '$.originalDiscArchiveId')
+		   AND `read`.`outcome` = 'recovered'
+		   AND `read`.`created_at` >= CAST(ROUND(
+			(julianday(json_extract(`invocation`.`outcome`, '$.work.createdAt')) - 2440587.5)
+			* 86400000
+		   ) AS integer))
+	ELSE 0 END
+)
+WHERE `invocation`.`operation` = 'archive_recovery.stop'
+	AND json_type(`invocation`.`outcome`, '$.work') = 'object'
+	AND json_type(`invocation`.`outcome`, '$.work.passNumber') IS NULL
+	AND NOT EXISTS (
+		SELECT 1
+		FROM `archive_recovery_work` AS `work`
+		WHERE `work`.`archive_recovery_id` =
+			json_extract(`invocation`.`outcome`, '$.id')
+	);--> statement-breakpoint
 PRAGMA foreign_keys=ON;--> statement-breakpoint
 CREATE UNIQUE INDEX `archive_recoveries_archive_unique` ON `archive_recoveries` (`original_disc_archive_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `archive_recoveries_identity_unique` ON `archive_recoveries` (`id`,`original_disc_archive_id`);--> statement-breakpoint
