@@ -11087,6 +11087,14 @@ export function createDataAccessInternal(
           ).limit(1).get();
         return row === undefined ? null : toDvdDiscVerification(row);
       },
+      listForRecoveryAttempt(id, attemptId) {
+        return database.select().from(dvdDiscVerifications).where(and(
+          eq(dvdDiscVerifications.archiveRecoveryId, id),
+          eq(dvdDiscVerifications.archiveRecoveryAttemptId, attemptId),
+        )).orderBy(
+          asc(dvdDiscVerifications.attemptOrdinal),
+        ).all().map(toDvdDiscVerification);
+      },
       recoverExpiredClaims() {
         const timestamp = now();
         const expiredBefore = new Date(

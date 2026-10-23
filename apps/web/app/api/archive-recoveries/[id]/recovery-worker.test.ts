@@ -1731,6 +1731,124 @@ it("keeps Stop pending while an expired verification helper is still active", as
   }
 });
 
+it("quiesces every admitted verification identity for the stopped attempt", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const devicePath = "/dev/synthetic-reused-verification-drive";
+  const seeded = await seedDvdDiscVerificationFixture(
+    fixture,
+    undefined,
+    devicePath,
+  );
+  const submitVerification = (key: string) => fixture.run([
+    "archive-recovery", "verify-disc", seeded.recoveryId,
+    "--key", key,
+    "--disc-inspection-id", seeded.inspection.id,
+    "--checkpoint-revision", "1",
+    "--checkpoint-digest", seeded.manifest.manifestDigest,
+  ]);
+  expect((await submitVerification(
+    "00000000-0000-4000-8000-000000000493",
+  )).exitCode).toBe(0);
+  const source = immediateReader(() => {
+    throw new Error("No recovery read is allowed while stopping");
+  });
+  const input = pollInput(fixture, source.reader);
+  const firstClaim = input.access.dvdDiscVerifications.claimNext(
+    "synthetic-first-expired-verification-worker",
+  );
+  if (firstClaim === null) throw new Error("Expected first verification claim");
+  const firstIdentity = {
+    devicePath,
+    deviceId: "2049",
+    inode: "17",
+  };
+  expect(input.access.dvdDiscVerifications.admitSourceRead(
+    firstClaim,
+    () => firstIdentity,
+  )).toBe(true);
+  const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`UPDATE dvd_disc_verifications
+    SET claimed_at = 0
+    WHERE id = ?`).run(firstClaim.id);
+  database.close();
+  expect(input.access.dvdDiscVerifications.recoverExpiredClaims()).toBe(1);
+
+  expect((await submitVerification(
+    "00000000-0000-4000-8000-000000000494",
+  )).exitCode).toBe(0);
+  const secondClaim = input.access.dvdDiscVerifications.claimNext(
+    "synthetic-second-expired-verification-worker",
+  );
+  if (secondClaim === null) {
+    throw new Error("Expected second verification claim");
+  }
+  const secondIdentity = {
+    devicePath,
+    deviceId: "2049",
+    inode: "18",
+  };
+  expect(input.access.dvdDiscVerifications.admitSourceRead(
+    secondClaim,
+    () => secondIdentity,
+  )).toBe(true);
+  input.access.archiveRecoveryWork.requestStop({
+    mutationKey: "00000000-0000-4000-8000-000000000495",
+    archiveRecoveryId: seeded.recoveryId,
+    attemptId: seeded.attemptId,
+  });
+  const secondDatabase = new DatabaseSync(fixture.databasePath);
+  secondDatabase.prepare(`UPDATE dvd_disc_verifications
+    SET claimed_at = 0
+    WHERE id = ?`).run(secondClaim.id);
+  secondDatabase.close();
+
+  let firstBlocked = true;
+  let secondBlocked = true;
+  const inspectedIdentities: Array<typeof firstIdentity> = [];
+  input.deviceInactivity.withDeviceIdentityInactive = async (
+    identity,
+    mutation,
+  ) => {
+    inspectedIdentities.push(identity);
+    if (identity.inode === firstIdentity.inode && firstBlocked) {
+      firstBlocked = false;
+      throw new Error("Synthetic first verification helper remains active");
+    }
+    if (identity.inode === secondIdentity.inode && secondBlocked) {
+      secondBlocked = false;
+      throw new Error("Synthetic second verification helper remains active");
+    }
+    await mutation();
+  };
+  const reconcile = vi.fn(async () => ({
+    outcome: "already_consistent",
+    evidence: {},
+  })) as unknown as typeof reconcileDvdRecoveryCheckpoint;
+  try {
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(false);
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(false);
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "stopping" });
+
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(true);
+    expect(inspectedIdentities).toEqual([
+      firstIdentity,
+      firstIdentity,
+      secondIdentity,
+      firstIdentity,
+      secondIdentity,
+    ]);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "stopped", work: null });
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(source.start).not.toHaveBeenCalled();
+  } finally {
+    input.access.close();
+  }
+});
+
 it("starts no further verification read after Stop commits", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);

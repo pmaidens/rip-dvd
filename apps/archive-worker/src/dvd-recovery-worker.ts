@@ -312,11 +312,14 @@ async function finalizeStop(input: {
   };
   const deviceIdentities = [
     admittedDeviceIdentity(input.recovery),
-    admittedVerificationDeviceIdentity(
-      input.access.dvdDiscVerifications.findLatestForRecovery(
-        input.recovery.id,
-      ),
+    ...input.access.dvdDiscVerifications.listForRecoveryAttempt(
+      input.recovery.id,
       input.recovery.attemptId,
+    ).map((verification) =>
+      admittedVerificationDeviceIdentity(
+        verification,
+        input.recovery.attemptId,
+      ),
     ),
   ].filter((identity) => identity !== null);
   if (deviceIdentities.length === 0) {

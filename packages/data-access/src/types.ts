@@ -2414,6 +2414,10 @@ export interface DvdDiscVerificationAccess {
   }): DvdDiscVerification;
   find(id: DvdDiscVerificationId): DvdDiscVerification | null;
   findLatestForRecovery(id: ArchiveRecoveryId): DvdDiscVerification | null;
+  listForRecoveryAttempt(
+    id: ArchiveRecoveryId,
+    attemptId: ArchiveRecoveryAttemptId,
+  ): DvdDiscVerification[];
   claimNext(workerExecutionId: string): DvdDiscVerification | null;
   renewClaim(claim: DvdDiscVerification): boolean;
   admitSourceRead(
