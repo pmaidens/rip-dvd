@@ -283,31 +283,31 @@ it("preserves a transactional mapping rejection if the latest workflow recovered
   }
 });
 
-it("normalizes stale legacy mapping failures at the shared boundary", () => {
+it("preserves stale legacy mapping failures at the shared boundary", () => {
   const access = {
     readConsistentSnapshot: () => ({
       workflow: null,
       archive: { updatedAt: new Date("2026-10-23T12:00:00.000Z") },
     }),
   } as unknown as Pick<DataAccess, "readConsistentSnapshot">;
+  const stale = new StaleCatalogRevisionError(
+    "Catalog review revision is stale",
+  );
 
   expect(() => rethrowCatalogMappingOperationError(
     access,
     archiveId,
     new Date("2026-10-23T11:00:00.000Z"),
-    new StaleCatalogRevisionError("Catalog review revision is stale"),
-  )).toThrowError(CatalogReviewRevisionStaleError);
+    stale,
+  )).toThrowError(StaleCatalogRevisionError);
   try {
     rethrowCatalogMappingOperationError(
       access,
       archiveId,
       new Date("2026-10-23T11:00:00.000Z"),
-      new StaleCatalogRevisionError("Catalog review revision is stale"),
+      stale,
     );
   } catch (error) {
-    expect(error).toMatchObject({
-      code: "STALE_CATALOG_REVISION",
-      current: null,
-    });
+    expect(error).toBe(stale);
   }
 });

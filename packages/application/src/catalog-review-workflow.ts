@@ -185,7 +185,8 @@ export function rethrowCatalogMappingOperationError(
   if (
     error instanceof StaleCatalogRevisionError &&
     expectedCatalogRevision !== undefined &&
-    current.archive !== null
+    current.archive !== null &&
+    current.workflow !== null
   ) {
     throw new CatalogReviewRevisionStaleError(
       current.workflow,

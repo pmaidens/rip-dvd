@@ -245,6 +245,7 @@ import {
 } from "../encode-job-failure-report.js";
 import {
   CatalogMappingEvidenceUnavailableError,
+  CurrentCatalogMappingSourceError,
   DomainInvariantError,
   DvdRecoveryStorageUnavailableError,
   InvalidStatusTransitionError,
@@ -3566,9 +3567,7 @@ export function createDataAccessInternal(
           sourceIdentity.chapterEnd <= row.chapterEnd)
     );
     if (matches.length !== 1) {
-      throw new DomainInvariantError(
-        `DVD title ${sourceIdentity.titleNumber} is not present in current Title Identity evidence`,
-      );
+      throw new CurrentCatalogMappingSourceError();
     }
     return sourceIdentity;
   }
@@ -9421,62 +9420,29 @@ export function createDataAccessInternal(
         ).all();
       },
     );
-    const referencedPreviousObservationIds = [...new Set(
-      latestObservationRows.flatMap(({ observation }) =>
-        observation.previousObservationId === null
-          ? []
-          : [observation.previousObservationId]
-      ),
-    )];
-    const referencedPreviousObservationRows =
-      referencedPreviousObservationIds.flatMap((_id, offset) => {
-        if (offset % 400 !== 0) return [];
-        return database.select({
-          observation: dvdTitleIdentityObservations,
-          set: dvdTitleIdentitySets,
-          identityOriginalDiscArchiveId:
-            dvdTitleIdentities.originalDiscArchiveId,
-          manifestOriginalDiscArchiveId:
-            dvdArchiveEvidenceManifests.originalDiscArchiveId,
-          manifestRevision: dvdArchiveEvidenceManifests.revision,
-          manifestDigest: dvdArchiveEvidenceManifests.manifestDigest,
-        }).from(dvdTitleIdentityObservations).innerJoin(
-          dvdTitleIdentitySets,
-          eq(
-            dvdTitleIdentitySets.manifestId,
-            dvdTitleIdentityObservations.manifestId,
-          ),
-        ).innerJoin(
-          dvdTitleIdentities,
-          eq(
-            dvdTitleIdentities.id,
-            dvdTitleIdentityObservations.titleIdentityId,
-          ),
-        ).innerJoin(
-          dvdArchiveEvidenceManifests,
-          eq(
-            dvdArchiveEvidenceManifests.id,
-            dvdTitleIdentitySets.manifestId,
-          ),
-        ).where(inArray(
-          dvdTitleIdentityObservations.id,
-          referencedPreviousObservationIds.slice(offset, offset + 400),
-        )).all();
-      });
-    const previousObservationRows = [...new Map([
-      ...latestPreviousObservationRows,
-      ...referencedPreviousObservationRows,
-    ].map((row) => [row.observation.id, row] as const)).values()];
-    const relevantSetIds = [...new Set([
+    const previousObservationRowsById = new Map(
+      latestPreviousObservationRows.map((row) => [
+        row.observation.id,
+        row,
+      ] as const),
+    );
+    const relevantSetIds = new Set([
       ...currentSetRows.map(({ manifestId }) => manifestId),
       ...latestObservationRows.map(({ set }) => set.manifestId),
-      ...previousObservationRows.map(({ set }) => set.manifestId),
-    ])];
-    const relevantSetObservationRows: Array<
+      ...latestPreviousObservationRows.map(({ set }) => set.manifestId),
+    ]);
+    const pendingSetIds = [...relevantSetIds];
+    const relevantSetObservationRowsById = new Map<
+      string,
       (typeof latestObservationRows)[number]
-    > = [];
-    for (let offset = 0; offset < relevantSetIds.length; offset += 400) {
-      relevantSetObservationRows.push(...database.select({
+    >();
+    const knownObservationIds = new Set([
+      ...latestObservationRows.map(({ observation }) => observation.id),
+      ...previousObservationRowsById.keys(),
+    ]);
+    while (pendingSetIds.length > 0) {
+      const setIds = pendingSetIds.splice(0, 400);
+      const setRows = database.select({
         observation: dvdTitleIdentityObservations,
         set: dvdTitleIdentitySets,
         identityOriginalDiscArchiveId:
@@ -9505,9 +9471,66 @@ export function createDataAccessInternal(
         ),
       ).where(inArray(
         dvdTitleIdentitySets.manifestId,
-        relevantSetIds.slice(offset, offset + 400),
-      )).all());
+        setIds,
+      )).all();
+      const missingPreviousIds = new Set<DvdTitleIdentityObservationId>();
+      for (const row of setRows) {
+        relevantSetObservationRowsById.set(row.observation.id, row);
+        knownObservationIds.add(row.observation.id);
+        if (
+          row.observation.previousObservationId !== null &&
+          !knownObservationIds.has(row.observation.previousObservationId)
+        ) {
+          missingPreviousIds.add(row.observation.previousObservationId);
+        }
+      }
+      const ids = [...missingPreviousIds];
+      for (let offset = 0; offset < ids.length; offset += 400) {
+        const predecessorRows = database.select({
+          observation: dvdTitleIdentityObservations,
+          set: dvdTitleIdentitySets,
+          identityOriginalDiscArchiveId:
+            dvdTitleIdentities.originalDiscArchiveId,
+          manifestOriginalDiscArchiveId:
+            dvdArchiveEvidenceManifests.originalDiscArchiveId,
+          manifestRevision: dvdArchiveEvidenceManifests.revision,
+          manifestDigest: dvdArchiveEvidenceManifests.manifestDigest,
+        }).from(dvdTitleIdentityObservations).innerJoin(
+          dvdTitleIdentitySets,
+          eq(
+            dvdTitleIdentitySets.manifestId,
+            dvdTitleIdentityObservations.manifestId,
+          ),
+        ).innerJoin(
+          dvdTitleIdentities,
+          eq(
+            dvdTitleIdentities.id,
+            dvdTitleIdentityObservations.titleIdentityId,
+          ),
+        ).innerJoin(
+          dvdArchiveEvidenceManifests,
+          eq(
+            dvdArchiveEvidenceManifests.id,
+            dvdTitleIdentitySets.manifestId,
+          ),
+        ).where(inArray(
+          dvdTitleIdentityObservations.id,
+          ids.slice(offset, offset + 400),
+        )).all();
+        for (const row of predecessorRows) {
+          previousObservationRowsById.set(row.observation.id, row);
+          knownObservationIds.add(row.observation.id);
+          if (!relevantSetIds.has(row.set.manifestId)) {
+            relevantSetIds.add(row.set.manifestId);
+            pendingSetIds.push(row.set.manifestId);
+          }
+        }
+      }
     }
+    const previousObservationRows = [...previousObservationRowsById.values()];
+    const relevantSetObservationRows = [
+      ...relevantSetObservationRowsById.values(),
+    ];
     const bindingRows = database.select({
       originalDiscArchiveId: dvdTitleIdentities.originalDiscArchiveId,
       titleIdentityId: dvdTitleIdentitySelectionBindings.titleIdentityId,
@@ -9629,10 +9652,182 @@ export function createDataAccessInternal(
     const relevantSets = new Map([
       ...currentSetRows.map((set) => [set.manifestId, set] as const),
       ...latestObservationRows.map(({ set }) => [set.manifestId, set] as const),
+      ...relevantSetObservationRows.map(({ set }) =>
+        [set.manifestId, set] as const
+      ),
       ...previousObservationRows.map(({ set }) =>
         [set.manifestId, set] as const
       ),
     ]);
+    const continuityAudit = sqlite.prepare(`
+      with
+      target(manifest_id, archive_id, manifest_revision) as (
+        select
+          json_extract(value, '$.manifestId'),
+          json_extract(value, '$.archiveId'),
+          cast(json_extract(value, '$.manifestRevision') as integer)
+        from json_each(?)
+      ),
+      current_rows as (
+        select
+          target.manifest_id as target_manifest_id,
+          observation.*,
+          count(*) over (
+            partition by target.manifest_id, observation.content_digest
+          ) as current_digest_count
+        from dvd_title_identity_observations as observation
+        inner join target on target.manifest_id = observation.manifest_id
+      ),
+      prior_ranked as (
+        select
+          target.manifest_id as target_manifest_id,
+          observation.*,
+          row_number() over (
+            partition by target.manifest_id, observation.title_identity_id
+            order by identity_set.manifest_revision desc, observation.id asc
+          ) as identity_rank
+        from dvd_title_identity_observations as observation
+        inner join dvd_title_identity_sets as identity_set
+          on identity_set.manifest_id = observation.manifest_id
+        inner join target
+          on target.archive_id = identity_set.original_disc_archive_id
+          and identity_set.manifest_revision < target.manifest_revision
+      ),
+      prior_latest as (
+        select * from prior_ranked where identity_rank = 1
+      ),
+      prior_rows as (
+        select
+          prior_latest.*,
+          count(*) over (
+            partition by
+              prior_latest.target_manifest_id,
+              prior_latest.content_digest
+          ) as prior_digest_count
+        from prior_latest
+      ),
+      exact_matches as (
+        select
+          current.target_manifest_id,
+          current.id as current_id,
+          prior.id as previous_id,
+          prior.title_identity_id as previous_identity_id
+        from current_rows as current
+        inner join prior_rows as prior
+          on prior.target_manifest_id = current.target_manifest_id
+          and prior.content_digest = current.content_digest
+        where current.current_digest_count = 1
+          and prior.prior_digest_count = 1
+      ),
+      current_unmatched as (
+        select current.*
+        from current_rows as current
+        where not exists (
+          select 1 from exact_matches
+          where exact_matches.target_manifest_id = current.target_manifest_id
+            and exact_matches.current_id = current.id
+        )
+      ),
+      prior_unmatched as (
+        select prior.*
+        from prior_rows as prior
+        where not exists (
+          select 1 from exact_matches
+          where exact_matches.target_manifest_id = prior.target_manifest_id
+            and exact_matches.previous_id = prior.id
+        )
+      ),
+      current_title_counts as (
+        select
+          target_manifest_id,
+          display_title_number,
+          count(*) as title_count
+        from current_unmatched
+        group by target_manifest_id, display_title_number
+      ),
+      prior_title_counts as (
+        select
+          target_manifest_id,
+          display_title_number,
+          count(*) as title_count
+        from prior_unmatched
+        group by target_manifest_id, display_title_number
+      ),
+      uncertain_matches as (
+        select
+          current.target_manifest_id,
+          current.id as current_id,
+          prior.id as previous_id,
+          prior.title_identity_id as previous_identity_id
+        from current_unmatched as current
+        inner join current_title_counts as current_count
+          on current_count.target_manifest_id = current.target_manifest_id
+          and current_count.display_title_number = current.display_title_number
+          and current_count.title_count = 1
+        inner join prior_unmatched as prior
+          on prior.target_manifest_id = current.target_manifest_id
+          and prior.display_title_number = current.display_title_number
+        inner join prior_title_counts as prior_count
+          on prior_count.target_manifest_id = prior.target_manifest_id
+          and prior_count.display_title_number = prior.display_title_number
+          and prior_count.title_count = 1
+      ),
+      expected as (
+        select
+          current.target_manifest_id,
+          current.id as current_id,
+          coalesce(exact.previous_id, uncertain.previous_id)
+            as previous_id,
+          coalesce(
+            exact.previous_identity_id,
+            uncertain.previous_identity_id
+          ) as previous_identity_id,
+          case
+            when exact.previous_id is not null then 'proved'
+            when uncertain.previous_id is not null then 'uncertain'
+            when exists (
+              select 1
+              from dvd_title_identity_sets as prior_set
+              inner join target
+                on target.manifest_id = current.target_manifest_id
+                and target.archive_id = prior_set.original_disc_archive_id
+                and prior_set.manifest_revision < target.manifest_revision
+            ) then 'new'
+            else 'initial'
+          end as continuity_result
+        from current_rows as current
+        left join exact_matches as exact
+          on exact.target_manifest_id = current.target_manifest_id
+          and exact.current_id = current.id
+        left join uncertain_matches as uncertain
+          on uncertain.target_manifest_id = current.target_manifest_id
+          and uncertain.current_id = current.id
+      )
+      select count(*) as invalid_count
+      from current_rows as current
+      inner join expected
+        on expected.target_manifest_id = current.target_manifest_id
+        and expected.current_id = current.id
+      where current.continuity_result != expected.continuity_result
+        or current.previous_observation_id is not expected.previous_id
+        or (
+          expected.previous_identity_id is not null
+          and current.title_identity_id != expected.previous_identity_id
+        )
+        or (
+          expected.previous_id is null
+          and exists (
+            select 1 from prior_rows as prior
+            where prior.target_manifest_id = current.target_manifest_id
+              and prior.title_identity_id = current.title_identity_id
+          )
+        )
+    `);
+    const continuityAuditTargets: Array<{
+      manifestId: string;
+      archiveId: OriginalDiscArchiveId;
+      manifestRevision: number;
+    }> = [];
     for (const [manifestId, set] of relevantSets) {
       const header = archiveById.get(set.originalDiscArchiveId)
         ?.evidenceHeader;
@@ -9659,6 +9854,19 @@ export function createDataAccessInternal(
           "Title Identity observation-set digest does not match its evidence",
         );
       }
+      continuityAuditTargets.push({
+        manifestId: set.manifestId,
+        archiveId: set.originalDiscArchiveId,
+        manifestRevision: set.manifestRevision,
+      });
+    }
+    const continuity = continuityAudit.get(
+      JSON.stringify(continuityAuditTargets),
+    ) as { invalid_count: number };
+    if (continuity.invalid_count !== 0) {
+      throw new DomainInvariantError(
+        "Title Identity continuity claim does not match its evidence",
+      );
     }
 
     const titleIdentityByArchiveId = new Map<
@@ -9713,7 +9921,13 @@ export function createDataAccessInternal(
         right.set.manifestRevision - left.set.manifestRevision ||
         left.observation.id.localeCompare(right.observation.id)
       );
-      const normalizedPrevious = previousRows.map((row) =>
+      const previousProjectionRows = latestPreviousObservationRows.filter(
+        ({ set }) => set.originalDiscArchiveId === id,
+      ).sort((left, right) =>
+        right.set.manifestRevision - left.set.manifestRevision ||
+        left.observation.id.localeCompare(right.observation.id)
+      );
+      const normalizedPrevious = previousProjectionRows.map((row) =>
         validateWorkflowObservation(row, header)
       );
       const previousById = new Map(previousRows.map((row) => [
@@ -9746,14 +9960,14 @@ export function createDataAccessInternal(
         normalizedPrevious,
         archiveIdsWithPreviousSets.has(id),
       );
-      const previousIdentityIds = new Set(previousRows.map(({ observation }) =>
-        observation.titleIdentityId
+      const previousIdentityIds = new Set(previousProjectionRows.map(
+        ({ observation }) => observation.titleIdentityId,
       ));
       for (const [index, row] of currentRows.entries()) {
         const plan = continuityPlans[index]!;
         const expectedPrevious = plan.previousIndex === null
           ? undefined
-          : previousRows[plan.previousIndex]?.observation;
+          : previousProjectionRows[plan.previousIndex]?.observation;
         if (
           row.observation.continuityResult !== plan.result ||
           row.observation.previousObservationId !==

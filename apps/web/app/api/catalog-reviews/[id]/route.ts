@@ -1,4 +1,5 @@
 import {
+  CurrentCatalogMappingSourceError,
   DomainInvariantError,
   DvdRecoveryEvidenceEncodingUnavailableError,
   EncodeWorkConflictError,
@@ -396,7 +397,8 @@ export async function createCatalogReviewRoute(
     if (error instanceof RecordNotFoundError) {
       return response({ error: error.message }, 404);
     }
-    if (error instanceof UnsupportedCatalogMappingSourceError) {
+    if (error instanceof UnsupportedCatalogMappingSourceError ||
+        error instanceof CurrentCatalogMappingSourceError) {
       return response({ error: {
         code: error.code,
         message: error.message,

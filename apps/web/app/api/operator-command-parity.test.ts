@@ -522,6 +522,85 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       },
     });
 
+    const absentTitleWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "create_disc_selection",
+        catalogRevision: before.catalogRevision,
+        mutationKey: "00000000-0000-4000-8000-000000000409",
+        selection: {
+          mediaItemId: mediaItem.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+        },
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const absentTitleCli = await fixture.run([
+      "disc-selection",
+      "create",
+      archive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000410",
+      "--revision",
+      before.catalogRevision,
+      "--media-item-id",
+      mediaItem.id,
+      "--source-kind",
+      "dvd_title",
+      "--title-number",
+      "2",
+    ]);
+    expect(absentTitleWeb.status).toBe(409);
+    expect(absentTitleCli.exitCode).toBe(2);
+    expect(absentTitleCli.result).toEqual(await absentTitleWeb.json());
+    expect(absentTitleCli.result).toEqual({
+      error: {
+        code: "CATALOG_MAPPING_SOURCE_NOT_CURRENT",
+        message:
+          "Catalog mapping source is not present in current Title Identity evidence",
+      },
+    });
+
+    const outOfRangeProposal = {
+      action: "create_mapping_proposal" as const,
+      catalogRevision: before.catalogRevision,
+      target: {
+        choice: "create_new" as const,
+        mediaItem: { kind: "movie" as const, title: "Synthetic chapter target" },
+      },
+      discSelection: {
+        sourceIdentity: {
+          kind: "dvd_chapters" as const,
+          titleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 13,
+        },
+      },
+    };
+    const outOfRangeWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        ...outOfRangeProposal,
+        mutationKey: "00000000-0000-4000-8000-000000000411",
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const outOfRangeCli = await fixture.run([
+      "catalog-review",
+      "apply-proposal",
+      archive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000412",
+      "--json",
+      JSON.stringify(outOfRangeProposal),
+    ]);
+    expect(outOfRangeWeb.status).toBe(409);
+    expect(outOfRangeCli.exitCode).toBe(2);
+    expect(outOfRangeCli.result).toEqual(await outOfRangeWeb.json());
+    expect(outOfRangeCli.result).toEqual(absentTitleCli.result);
+
     const firstMutationKey = "00000000-0000-4000-8000-000000000397";
     const firstSelectionCommand = {
       action: "create_disc_selection" as const,
@@ -1799,7 +1878,7 @@ const dvdEvidenceEncodingUnavailableError = {
   },
 };
 
-it("normalizes stale legacy Mapping Proposals through web and CLI", async () => {
+it("preserves stale legacy Mapping Proposal adapter responses", async () => {
   const fixture = createOperatorWorkflowFixture();
   const seeded = seedCatalogReviewForReadFixture(fixture);
   const access = fixture.openAccess();
@@ -1850,12 +1929,13 @@ it("normalizes stale legacy Mapping Proposals through web and CLI", async () => 
 
     expect(web.status).toBe(409);
     expect(cli.exitCode).toBe(2);
-    expect(cli.result).toEqual(await web.json());
-    expect(cli.result).toMatchObject({
+    expect(await web.json()).toEqual({
+      error: "Catalog review revision is stale",
+    });
+    expect(cli.result).toEqual({
       error: {
         code: "STALE_CATALOG_REVISION",
-        reasons: [{ code: "STALE_CATALOG_REVISION" }],
-        current: null,
+        message: "Catalog review revision is stale",
       },
     });
   } finally {

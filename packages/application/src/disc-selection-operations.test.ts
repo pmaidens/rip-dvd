@@ -145,7 +145,7 @@ describe("Disc Selection preview policy", () => {
     expect(mutateDiscSelection).not.toHaveBeenCalled();
   });
 
-  it("translates a revision race during preview at the application boundary", () => {
+  it("preserves a legacy revision race during preview", () => {
     const previewRevision = "2026-01-01T00:00:00.000Z";
     const currentRevision = new Date("2026-01-01T00:00:01.000Z");
     const access = {
@@ -187,7 +187,7 @@ describe("Disc Selection preview policy", () => {
     expect(() => previewDiscSelectionChange(access, archiveId, {
       action: "delete_disc_selection",
       discSelectionId: "selection-1",
-    })).toThrowError(CatalogReviewRevisionStaleError);
+    })).toThrowError(StaleCatalogRevisionError);
     try {
       previewDiscSelectionChange(access, archiveId, {
         action: "delete_disc_selection",
@@ -195,15 +195,8 @@ describe("Disc Selection preview policy", () => {
       });
     } catch (error) {
       expect(error).toMatchObject({
-        code: "STALE_CATALOG_REVISION",
-        current: null,
-        blockingReasons: [{
-          code: "STALE_CATALOG_REVISION",
-          details: {
-            expectedCatalogRevision: previewRevision,
-            currentCatalogRevision: currentRevision.toISOString(),
-          },
-        }],
+        name: "StaleCatalogRevisionError",
+        message: "Catalog review revision is stale",
       });
     }
   });

@@ -16658,6 +16658,70 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ).toThrow(/continuity claim does not match/i);
     wrongPredecessor.access.close();
 
+    const corruptedChain = createDvdTitleIdentityArchiveFixture(
+      "title-corrupt-continuity-chain",
+    );
+    const chainHeader = corruptedChain.access.catalog
+      .findDvdArchiveEvidenceHeader(corruptedChain.archive.id)!;
+    corruptedChain.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: corruptedChain.archive.id,
+      checkpoint: {
+        manifestId: chainHeader.currentManifestId,
+        manifestRevision: chainHeader.currentManifestRevision,
+        manifestDigest: chainHeader.currentManifestDigest,
+      },
+      observations: [titleIdentityObservation(1)],
+    });
+    const chainSecondCheckpoint = advanceDvdTitleIdentityCheckpointForTest(
+      corruptedChain.databasePath,
+      corruptedChain.archive.id,
+      2,
+    );
+    const chainSecond = corruptedChain.access.catalog
+      .recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: corruptedChain.archive.id,
+        checkpoint: chainSecondCheckpoint,
+        observations: [titleIdentityObservation(1)],
+      });
+    const chainThirdCheckpoint = advanceDvdTitleIdentityCheckpointForTest(
+      corruptedChain.databasePath,
+      corruptedChain.archive.id,
+      3,
+    );
+    corruptedChain.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: corruptedChain.archive.id,
+      checkpoint: chainThirdCheckpoint,
+      observations: [titleIdentityObservation(1)],
+    });
+    const chainDatabase = new DatabaseSync(corruptedChain.databasePath);
+    chainDatabase.exec(
+      "DROP TRIGGER dvd_title_identity_observation_update_guard",
+    );
+    chainDatabase.prepare(`
+      UPDATE dvd_title_identity_observations
+      SET continuity_result = 'uncertain'
+      WHERE id = ?
+    `).run(chainSecond.items[0]!.observation.id);
+    chainDatabase.close();
+    expect(() =>
+      corruptedChain.access.catalog.readDvdTitleIdentityReviewSet(
+        corruptedChain.archive.id,
+      )
+    ).toThrow(/continuity claim does not match/i);
+    expect(() =>
+      corruptedChain.access.catalog
+        .readDvdCatalogReviewWorkflowEvidence([{
+          originalDiscArchiveId: corruptedChain.archive.id,
+          evidenceHeader: {
+            ...chainHeader,
+            currentManifestId: chainThirdCheckpoint.manifestId,
+            currentManifestRevision: chainThirdCheckpoint.manifestRevision,
+            currentManifestDigest: chainThirdCheckpoint.manifestDigest,
+          },
+        }])
+    ).toThrow(/continuity claim does not match/i);
+    corruptedChain.access.close();
+
     const falseProof = createDvdTitleIdentityArchiveFixture(
       "title-false-proof",
     );

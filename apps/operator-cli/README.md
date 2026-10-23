@@ -395,9 +395,9 @@ result. Reusing the key with different inputs fails. For a
 `dvd-recovery-evidence-v1` archive, `create` also requires the Catalog Review
 revision returned by `catalog-review show`; the mutation validates the source
 against current Title Identity evidence and rejects a stale revision rather
-than retargeting a title number. New-format update and repair previews also
-require that reviewed revision; correction previews require it for every
-format. Only exact default-angle `dvd_title` and
+than retargeting a title number. New-format update, repair, and correction
+previews also require that reviewed revision. Legacy correction previews keep
+their established automatic current-revision lookup. Only exact default-angle `dvd_title` and
 `dvd_chapters` sources are accepted for this format. Legacy creation remains
 revision-optional and continues to accept `main_feature`.
 An `update` that changes

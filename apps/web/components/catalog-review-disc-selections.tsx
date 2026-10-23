@@ -18,6 +18,7 @@ import { CatalogReviewPagination } from "./catalog-review-pagination";
 import { displayTerm } from "../lib/display-term";
 
 interface CatalogReviewDiscSelectionsProps {
+  catalogRevision: string;
   discSelections: CatalogReviewDiscSelection[];
   page: CatalogReviewDto["discSelectionsPage"];
   correctionHistory: CatalogReviewDto["correctionHistory"];
@@ -40,8 +41,12 @@ interface CatalogReviewDiscSelectionsProps {
   onCorrectionEncodeHistoryPage(offset: number): void;
   onCorrectionRetainedOutputHistoryPage(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
-  onCreate(input: CreateDiscSelectionInput): void;
-  onUpdate(id: string, changes: UpdateDiscSelectionInput): void;
+  onCreate(input: CreateDiscSelectionInput, catalogRevision: string): void;
+  onUpdate(
+    id: string,
+    changes: UpdateDiscSelectionInput,
+    catalogRevision: string,
+  ): void;
   onDelete(id: string): void;
 }
 
@@ -99,6 +104,7 @@ function sameSourceIdentity(
 }
 
 export function CatalogReviewDiscSelections({
+  catalogRevision,
   discSelections,
   page,
   correctionHistory,
@@ -140,6 +146,9 @@ export function CatalogReviewDiscSelections({
   const [chapterEnd, setChapterEnd] = useState("");
   const [label, setLabel] = useState("");
   const [clearLabel, setClearLabel] = useState(false);
+  const [draftCatalogRevision, setDraftCatalogRevision] = useState<
+    string | null
+  >(null);
   const editingSelection = editingSelectionId === null
     ? null
     : discSelections.find((selection) => selection.id === editingSelectionId) ??
@@ -196,6 +205,7 @@ export function CatalogReviewDiscSelections({
 
   function submitSelection(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const reviewedCatalogRevision = draftCatalogRevision ?? catalogRevision;
     const form = new FormData(event.currentTarget);
     const nextLabel = String(form.get("label") ?? "").trim();
     const replacesDiscSelectionId = String(
@@ -258,12 +268,16 @@ export function CatalogReviewDiscSelections({
         changes.label = nextLabel;
       }
       if (Object.keys(changes).length > 0) {
-        onUpdate(target.id, changes as UpdateDiscSelectionInput);
+        onUpdate(
+          target.id,
+          changes as UpdateDiscSelectionInput,
+          reviewedCatalogRevision,
+        );
       }
       return;
     }
 
-    onCreate({ ...common, sourceIdentity });
+    onCreate({ ...common, sourceIdentity }, reviewedCatalogRevision);
   }
 
   const hasSupersessionCorrection = discSelections.some(
@@ -434,7 +448,13 @@ export function CatalogReviewDiscSelections({
         onPage={onCorrectionRetainedOutputHistoryPage}
       />
 
-      <form className="catalog-form" onSubmit={submitSelection}>
+      <form
+        className="catalog-form"
+        onChange={() => setDraftCatalogRevision((current) =>
+          current ?? catalogRevision
+        )}
+        onSubmit={submitSelection}
+      >
         <h3>{editingSelection ? "Edit Disc Selection" : "Add Disc Selection"}</h3>
         {hasSupersessionCorrection ? (
           <p>

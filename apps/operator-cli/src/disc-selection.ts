@@ -2,6 +2,7 @@ import {
   executeDiscSelectionCommand,
   CatalogReviewMappingUnavailableError,
   CatalogReviewRevisionStaleError,
+  describeCatalogReviewWorkflow,
   parseMutationKey,
   previewDiscSelection,
   previewDiscSelectionChange,
@@ -13,6 +14,7 @@ import {
 } from "@rip-dvd/application/catalog-review-command";
 import { isDiscSelectionPreviewToken } from "@rip-dvd/application/disc-selection-preview-token";
 import {
+  CurrentCatalogMappingSourceError,
   DomainInvariantError,
   MutationKeyConflictError,
   RecordNotFoundError,
@@ -188,7 +190,8 @@ function withSelectionAccess<T>(io: SelectionIO, operation: (access: DataAccess)
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("SELECTION_NOT_FOUND", "Disc Selection or its source was not found.", 2);
     }
-    if (error instanceof UnsupportedCatalogMappingSourceError) {
+    if (error instanceof UnsupportedCatalogMappingSourceError ||
+        error instanceof CurrentCatalogMappingSourceError) {
       throw new CommandFailure(error.code, error.message, 2);
     }
     if (error instanceof DomainInvariantError) {
@@ -252,14 +255,23 @@ export function runDiscSelection(rest: readonly string[], io: SelectionIO): unkn
   }
   const input = payload(action, options, io);
   if (isPreview) {
-    const command = parsedCommand(
-      action,
-      selectionId,
-      input,
-      options.get("--revision"),
-      options.get("--reason"),
-    );
     return withSelectionAccess(io, (access) => {
+      let catalogRevision = options.get("--revision");
+      if (
+        action === "correct" &&
+        catalogRevision === undefined &&
+        describeCatalogReviewWorkflow(access, archiveId) === null
+      ) {
+        const current = previewDiscSelection(access, archiveId, selectionId!);
+        catalogRevision = current.catalogRevision;
+      }
+      const command = parsedCommand(
+        action,
+        selectionId,
+        input,
+        catalogRevision,
+        options.get("--reason"),
+      );
       return previewDiscSelectionChange(access, archiveId, command);
     });
   }

@@ -2038,8 +2038,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
       name: "disc-selection",
       inputs: {
         options: expect.arrayContaining([
-          "dvd-recovery-evidence-v1 create and update/repair previews: --revision <catalog-revision>",
-          "correction previews: --revision <catalog-revision>",
+          "dvd-recovery-evidence-v1 create and update/repair/correction previews: --revision <catalog-revision>",
         ]),
       },
       example: expect.stringContaining(

@@ -78,8 +78,15 @@ interface CatalogReviewViewProps {
   ): void;
   onSaveMediaItem(input: SaveMediaItemInput): void;
   onDeleteMediaItem(id: string): void;
-  onCreateDiscSelection(input: CreateDiscSelectionInput): void;
-  onUpdateDiscSelection(id: string, changes: UpdateDiscSelectionInput): void;
+  onCreateDiscSelection(
+    input: CreateDiscSelectionInput,
+    catalogRevision: string,
+  ): void;
+  onUpdateDiscSelection(
+    id: string,
+    changes: UpdateDiscSelectionInput,
+    catalogRevision: string,
+  ): void;
   onDeleteDiscSelection(id: string): void;
   onCompleteReview(
     outcome: CompletedCatalogReviewOutcome,
@@ -275,6 +282,8 @@ export function CatalogReviewView({
             aria-labelledby="reviewed-selections"
           >
             <CatalogReviewDiscSelections
+              key={review.archive.id}
+              catalogRevision={review.catalogRevision}
               discSelections={review.discSelections}
               page={review.discSelectionsPage}
               correctionHistory={review.correctionHistory}

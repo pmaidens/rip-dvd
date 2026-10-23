@@ -71,6 +71,17 @@ export class UnsupportedCatalogMappingSourceError
   }
 }
 
+export class CurrentCatalogMappingSourceError extends DomainInvariantError {
+  readonly code = "CATALOG_MAPPING_SOURCE_NOT_CURRENT" as const;
+
+  constructor() {
+    super(
+      "Catalog mapping source is not present in current Title Identity evidence",
+    );
+    this.name = "CurrentCatalogMappingSourceError";
+  }
+}
+
 export class StaleJobAttemptError extends Error {
   constructor(recordType: string, id: string) {
     super(`Stale ${recordType} attempt: ${id}`);

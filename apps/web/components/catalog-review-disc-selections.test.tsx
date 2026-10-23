@@ -39,16 +39,23 @@ function InteractiveDiscSelections({
   selection = editableSelection,
   mappingReviewSelectionIds,
   allowMainFeature,
+  catalogRevision = "2026-01-01T00:00:00.000Z",
 }: {
-  onUpdate(id: string, changes: UpdateDiscSelectionInput): void;
+  onUpdate(
+    id: string,
+    changes: UpdateDiscSelectionInput,
+    catalogRevision: string,
+  ): void;
   selection?: CatalogReviewDiscSelection;
   mappingReviewSelectionIds?: ReadonlySet<string>;
   allowMainFeature?: boolean;
+  catalogRevision?: string;
 }) {
   const [selectionKind, setSelectionKind] =
     useState<DiscSelectionKind>("main_feature");
   return (
     <CatalogReviewDiscSelections
+      catalogRevision={catalogRevision}
       discSelections={[selection]}
       page={{
         offset: 0,
@@ -151,6 +158,7 @@ describe("CatalogReviewDiscSelections", () => {
   it("renders reviewed mappings, repair choices, and pagination", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewDiscSelections
+        catalogRevision="2026-01-01T00:00:00.000Z"
         discSelections={[{
           id: "selection-1",
           mediaItemId: "episode-1",
@@ -236,6 +244,7 @@ describe("CatalogReviewDiscSelections", () => {
   it("offers supersession for a running dependency without direct mutation actions", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewDiscSelections
+        catalogRevision="2026-01-01T00:00:00.000Z"
         discSelections={[{
           id: "selection-1",
           mediaItemId: "movie-1",
@@ -311,6 +320,7 @@ describe("CatalogReviewDiscSelections", () => {
   it("shows every superseded source and human correction note", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewDiscSelections
+        catalogRevision="2026-01-01T00:00:00.000Z"
         discSelections={[{
           id: "selection-corrected",
           mediaItemId: "movie-corrected",
@@ -483,6 +493,7 @@ describe("CatalogReviewDiscSelections", () => {
   it("marks unsafe legacy selections as Needs repair with only recovery actions", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewDiscSelections
+        catalogRevision="2026-01-01T00:00:00.000Z"
         discSelections={[
           {
             id: "selection-1",
@@ -591,6 +602,7 @@ describe("CatalogReviewDiscSelections", () => {
   it("explains the archive cutover fence without rendering mutation actions", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewDiscSelections
+        catalogRevision="2026-01-01T00:00:00.000Z"
         discSelections={[{
           id: "selection-1",
           mediaItemId: "movie-1",
@@ -716,7 +728,51 @@ describe("CatalogReviewDiscSelections", () => {
 
     expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
       mediaItemId: "episode-2",
+    }, "2026-01-01T00:00:00.000Z");
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("binds a preserved mapping draft to the revision first reviewed", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onUpdate = vi.fn();
+    const render = (catalogRevision: string) => root.render(
+      <InteractiveDiscSelections
+        catalogRevision={catalogRevision}
+        onUpdate={onUpdate}
+      />,
+    );
+    await act(async () => render("2026-01-01T00:00:00.000Z"));
+    const action = container.querySelector<HTMLSelectElement>(
+      'select[name="replacesDiscSelectionId"]',
+    );
+    if (!action) throw new Error("Expected the Catalog action control");
+    await act(async () => {
+      action.value = editableSelection.id;
+      action.dispatchEvent(new Event("change", { bubbles: true }));
     });
+
+    await act(async () => render("2026-01-01T00:00:01.000Z"));
+    const mediaItem = container.querySelector<HTMLSelectElement>(
+      'select[name="mediaItemId"]',
+    );
+    const submit = container.querySelector<HTMLButtonElement>(
+      'button[type="submit"]',
+    );
+    if (!mediaItem || !submit) {
+      throw new Error("Expected editable Disc Selection controls");
+    }
+    await act(async () => {
+      mediaItem.value = "episode-2";
+      mediaItem.dispatchEvent(new Event("change", { bubbles: true }));
+      submit.click();
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
+      mediaItemId: "episode-2",
+    }, "2026-01-01T00:00:00.000Z");
     await act(async () => root.unmount());
     container.remove();
   });
@@ -751,7 +807,7 @@ describe("CatalogReviewDiscSelections", () => {
 
     expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
       sourceIdentity: editableSelection.sourceIdentity,
-    });
+    }, "2026-01-01T00:00:00.000Z");
     await act(async () => root.unmount());
     container.remove();
   });
@@ -799,7 +855,7 @@ describe("CatalogReviewDiscSelections", () => {
     await act(async () => submit.click());
     expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
       label: null,
-    });
+    }, "2026-01-01T00:00:00.000Z");
 
     await act(async () => {
       root.render(
