@@ -9690,6 +9690,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           name: "20261023134137_cynical_leopardon",
         },
         {
+          name: "20261023075807_quick_mentor",
+        },
+        {
           name: "20261023052549_simple_harry_osborn",
         },
         {
@@ -9715,9 +9718,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20261022100044_futuristic_cannonball",
-        },
-        {
-          name: "20261022080829_dvd-title-identities",
         },
       ]);
     expect(
