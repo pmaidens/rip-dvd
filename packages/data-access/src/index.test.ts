@@ -32,6 +32,8 @@ import {
   createDvdArchiveBoundaryEvidenceDigest,
   createDvdArchiveEvidenceManifestDigests,
   createDvdArchiveRecoveryReadEvidenceDigest,
+  createDvdStructuralAssessment,
+  createDvdTitleDamageAssessment,
   createCleanReadArchiveIntegrityEvidence,
   createDiscSelectionSourceIdentity,
   createUnknownArchiveIntegrityEvidence,
@@ -756,14 +758,23 @@ function advanceDvdTitleIdentityCheckpointForTest(
   return { manifestId, manifestRevision: revision, manifestDigest };
 }
 
-function createDvdTitleIdentityArchiveFixture(fixtureId: string) {
-  const databasePath = createTestDatabasePath();
-  const access = openTestDatabase(databasePath);
+function createDvdTitleIdentityArchiveFixture(
+  fixtureId: string,
+  options: {
+    access?: ReturnType<typeof openTestDatabase>;
+    databasePath?: string;
+    fingerprintCharacter?: string;
+    markEvidence?: boolean;
+    originalsLibraryPath?: string;
+  } = {},
+) {
+  const databasePath = options.databasePath ?? createTestDatabasePath();
+  const access = options.access ?? openTestDatabase(databasePath);
   const drive = access.catalog.upsertOpticalDrive({
     devicePath: `/dev/${fixtureId}`,
     isPresent: true,
   });
-  const contentId = `sha256:${"9".repeat(64)}`;
+  const contentId = `sha256:${(options.fingerprintCharacter ?? "9").repeat(64)}`;
   const disc = access.catalog.registerDetectedDisc({
     opticalDriveId: drive.id,
     discKind: "dvd",
@@ -786,16 +797,18 @@ function createDvdTitleIdentityArchiveFixture(fixtureId: string) {
     detectedDiscId: disc.id,
     discKind: "dvd",
     archiveFormat: "iso",
-    archivePath: `/media/originals/${fixtureId}.iso`,
+    archivePath: `${options.originalsLibraryPath ?? "/media/originals"}/${fixtureId}.iso`,
     fingerprint: contentId,
     sizeBytes: 2_048_000,
   });
-  markArchiveWithDvdRecoveryEvidence(
-    databasePath,
-    archive.id,
-    fixtureId,
-    { archiveRecoveryId: `${fixtureId}-recovery` },
-  );
+  if (options.markEvidence !== false) {
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      archive.id,
+      fixtureId,
+      { archiveRecoveryId: `${fixtureId}-recovery` },
+    );
+  }
   return { access, archive, databasePath };
 }
 
@@ -2750,7 +2763,7 @@ describe("data-access facade", () => {
           sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
         },
       })
-    ).toThrow("Catalog review changed; reload before saving Mapping Proposal");
+    ).toThrow("Catalog review revision is stale");
     expect(access.catalog.listMediaItems()).toEqual(mediaItemsBeforeFailure);
     expect(access.catalog.listDiscSelections({
       originalDiscArchiveId: archive.id,
@@ -15742,6 +15755,98 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     fixture.access.close();
   });
 
+  it("rejects mapping atomically when Archive Recovery has faulted", () => {
+    const fixture = createDvdTitleIdentityArchiveFixture(
+      "title-faulted-recovery-mapping",
+    );
+    const header = fixture.access.catalog.findDvdArchiveEvidenceHeader(
+      fixture.archive.id,
+    )!;
+    fixture.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: fixture.archive.id,
+      checkpoint: {
+        manifestId: header.currentManifestId,
+        manifestRevision: header.currentManifestRevision,
+        manifestDigest: header.currentManifestDigest,
+      },
+      observations: [titleIdentityObservation(1)],
+    });
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    sqlite.prepare(`
+      UPDATE archive_recoveries
+      SET status = 'faulted', fault_code = 'CONSISTENCY_FAULT'
+      WHERE original_disc_archive_id = ?
+    `).run(fixture.archive.id);
+    sqlite.close();
+    const mediaItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic faulted recovery mapping",
+    });
+    const catalogRevision = fixture.access.catalog.listOriginalDiscArchives({
+      ids: [fixture.archive.id],
+    })[0]!.updatedAt;
+
+    expect(() => fixture.access.catalog.mutateDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      expectedCatalogRevision: catalogRevision,
+      mutationKey: "synthetic-faulted-recovery-mapping",
+      mutation: {
+        action: "create",
+        selection: {
+          originalDiscArchiveId: fixture.archive.id,
+          mediaItemId: mediaItem.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        },
+      },
+    })).toThrow(/current Title Identity evidence/i);
+    expect(fixture.access.catalog.listDiscSelections({
+      originalDiscArchiveId: fixture.archive.id,
+    })).toEqual([]);
+    fixture.access.close();
+  });
+
+  it("does not repair a headerless marked archive from raw scan evidence", () => {
+    const fixture = createDvdTitleIdentityArchiveFixture(
+      "title-headerless-current-repair",
+      { markEvidence: false },
+    );
+    const mediaItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic headerless repair",
+    });
+    const selection = fixture.access.catalog.createDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      mediaItemId: mediaItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    sqlite.prepare(`
+      UPDATE disc_selections
+      SET source_key = 'caller:title-one'
+      WHERE id = ?
+    `).run(selection.id);
+    sqlite.close();
+    markArchiveWithDvdRecoveryEvidence(
+      fixture.databasePath,
+      fixture.archive.id,
+      "title-headerless-current-repair",
+      { archiveRecoveryId: "title-headerless-current-repair-recovery" },
+    );
+    removeDvdArchiveEvidenceHeaderForTest(
+      fixture.databasePath,
+      fixture.archive.id,
+    );
+
+    expect(() => fixture.access.catalog.repairDiscSelection(selection.id, {
+      originalDiscArchiveId: fixture.archive.id,
+      mediaItemId: mediaItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    })).toThrow(/current Title Identity evidence/i);
+    expect(fixture.access.catalog.listDiscSelections({ ids: [selection.id] }))
+      .toEqual([expect.objectContaining({ id: selection.id })]);
+    fixture.access.close();
+  });
+
   it("keeps Catalog Review projection row volume bounded as Title Identity history grows", () => {
     const fixture = createDvdTitleIdentityArchiveFixture(
       "title-history-volume",
@@ -15807,6 +15912,201 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(shortHistoryRows).toBeGreaterThan(0);
     expect(longHistoryRows).toBe(shortHistoryRows);
     fixture.access.close();
+  });
+
+  it("batches Title Damage workflow evidence across archives and titles", () => {
+    const databasePath = createTestDatabasePath();
+    const workspace = mkdtempSync(join(tmpdir(), "rip-dvd-damage-batch-"));
+    temporaryDirectories.push(workspace);
+    const originalsLibraryPath = join(workspace, "originals");
+    mkdirSync(originalsLibraryPath);
+    const batchAccess = createLegacySidecarDataAccess({
+      databasePath,
+      originalsLibraryPath,
+    });
+    const first = createDvdTitleIdentityArchiveFixture(
+      "title-damage-batch-first",
+      { access: batchAccess, databasePath, originalsLibraryPath },
+    );
+    const second = createDvdTitleIdentityArchiveFixture(
+      "title-damage-batch-second",
+      {
+        access: first.access,
+        databasePath: first.databasePath,
+        fingerprintCharacter: "8",
+        originalsLibraryPath,
+      },
+    );
+    const fixtures = [first, second];
+    for (const fixture of fixtures) {
+      const header = first.access.catalog.findDvdArchiveEvidenceHeader(
+        fixture.archive.id,
+      )!;
+      const reviewSet = first.access.catalog.recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: fixture.archive.id,
+        checkpoint: {
+          manifestId: header.currentManifestId,
+          manifestRevision: header.currentManifestRevision,
+          manifestDigest: header.currentManifestDigest,
+        },
+        observations: [
+          titleIdentityObservation(1),
+          titleIdentityObservation(2, { cellId: 2 }),
+        ],
+      });
+      const currentItems = reviewSet.items.filter(
+        ({ presentAtCurrentCheckpoint }) => presentAtCurrentCheckpoint,
+      );
+      const findings = ([
+        "filesystem_structure",
+        "dvd_navigation",
+        "title_enumeration",
+      ] as const).map((checkKind) => ({
+        checkKind,
+        policyVersion: "synthetic-structure-v1",
+        testedExtent: {
+          startLba: 0,
+          endLbaExclusive: header.acceptedEndLbaExclusive,
+          observedSectorCount: 100,
+        },
+        outcome: "valid" as const,
+        reason: null,
+        evidenceReference: `synthetic:${checkKind}`,
+      }));
+      const structural = createDvdStructuralAssessment({
+        checkpoint: {
+          originalDiscArchiveId: fixture.archive.id,
+          manifestId: header.currentManifestId,
+          manifestRevision: header.currentManifestRevision,
+          manifestDigest: header.currentManifestDigest,
+          acceptedEndLbaExclusive: header.acceptedEndLbaExclusive,
+        },
+        findings,
+      });
+      const titleMappings = currentItems.map((item) => ({
+          titleIdentityObservationId: item.observation.id,
+          sourceReferences: [{
+            kind: "multiplexed_content" as const,
+            startLba: 10,
+            sectorCount: 100,
+          }],
+          mappingCoverage: {
+            state: "complete" as const,
+            policyVersion: "synthetic-title-map-v1",
+            unknownReasons: [],
+          },
+        }));
+      const damage = createDvdTitleDamageAssessment({
+        checkpoint: structural.checkpoint,
+        titleIdentityReviewSetIdentity: reviewSet.reviewSetIdentity,
+        structuralAssessmentIdentity: structural.id,
+        structuralFindings: {
+          dvdNavigation: "valid",
+          titleEnumeration: "valid",
+        },
+        unrecoveredSourceRanges: header.unrecoveredSourceRanges,
+        titles: currentItems.map((item, index) => ({
+          titleIdentityId: item.titleIdentityId,
+          displayTitleNumber: item.observation.displayTitleNumber,
+          selection: {
+            selectedPath: item.observation.selectedPath,
+            angleNumber: item.observation.angleNumber,
+            chapterStart: item.observation.chapterStart,
+            chapterEnd: item.observation.chapterEnd,
+          },
+          ...titleMappings[index]!,
+        })),
+      });
+      const sqlite = new DatabaseSync(first.databasePath);
+      sqlite.prepare(`
+        INSERT INTO dvd_structural_assessments (
+          id, original_disc_archive_id, manifest_id, manifest_revision,
+          manifest_digest, accepted_end_lba_exclusive, policy_version,
+          validity, findings, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+      `).run(
+        structural.id,
+        fixture.archive.id,
+        header.currentManifestId,
+        header.currentManifestRevision,
+        header.currentManifestDigest,
+        header.acceptedEndLbaExclusive,
+        structural.policyVersion,
+        structural.validity,
+        JSON.stringify(structural.findings),
+      );
+      sqlite.prepare(`
+        INSERT INTO dvd_structural_check_attempts (
+          original_disc_archive_id, manifest_id, manifest_revision,
+          manifest_digest, accepted_end_lba_exclusive, outcome,
+          assessment_id, findings, created_at
+        ) VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, 1)
+      `).run(
+        fixture.archive.id,
+        header.currentManifestId,
+        header.currentManifestRevision,
+        header.currentManifestDigest,
+        header.acceptedEndLbaExclusive,
+        structural.id,
+        JSON.stringify(structural.findings),
+      );
+      sqlite.prepare(`
+        INSERT INTO dvd_title_damage_assessments (
+          id, original_disc_archive_id, manifest_id, manifest_revision,
+          manifest_digest, accepted_end_lba_exclusive,
+          title_identity_review_set_identity,
+          structural_assessment_identity, policy_version, title_mappings,
+          created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+      `).run(
+        damage.id,
+        fixture.archive.id,
+        header.currentManifestId,
+        header.currentManifestRevision,
+        header.currentManifestDigest,
+        header.acceptedEndLbaExclusive,
+        reviewSet.reviewSetIdentity,
+        structural.id,
+        damage.policyVersion,
+        JSON.stringify(titleMappings),
+      );
+      sqlite.prepare(`
+        INSERT INTO dvd_title_damage_assessment_attempts (
+          original_disc_archive_id, assessment_id, created_at
+        ) VALUES (?, ?, 1)
+      `).run(fixture.archive.id, damage.id);
+      sqlite.close();
+    }
+    const headers = fixtures.map((fixture) => ({
+      originalDiscArchiveId: fixture.archive.id,
+      evidenceHeader: first.access.catalog.findDvdArchiveEvidenceHeader(
+        fixture.archive.id,
+      ),
+    }));
+    const statementAll = vi.spyOn(StatementSync.prototype, "all");
+    const statementGet = vi.spyOn(StatementSync.prototype, "get");
+    const queryCount = () =>
+      statementAll.mock.calls.length + statementGet.mock.calls.length;
+    try {
+      expect(first.access.catalog.readDvdCatalogReviewWorkflowEvidence([
+        headers[0]!,
+      ]).get(first.archive.id)?.titleDamage.state).toBe("current");
+      const singleArchiveQueryCount = queryCount();
+
+      statementAll.mockClear();
+      statementGet.mockClear();
+      const batch = first.access.catalog.readDvdCatalogReviewWorkflowEvidence(
+        headers,
+      );
+      expect(fixtures.map(({ archive }) =>
+        batch.get(archive.id)?.titleDamage.state
+      )).toEqual(["current", "current"]);
+      expect(queryCount()).toBe(singleArchiveQueryCount);
+    } finally {
+      statementAll.mockRestore();
+      statementGet.mockRestore();
+      first.access.close();
+    }
   });
 
   it("recovers proved Title Identity after a missing checkpoint", () => {

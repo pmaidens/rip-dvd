@@ -37,9 +37,11 @@ const editableSelection: CatalogReviewDiscSelection = {
 function InteractiveDiscSelections({
   onUpdate,
   selection = editableSelection,
+  mappingReviewSelectionIds,
 }: {
   onUpdate(id: string, changes: UpdateDiscSelectionInput): void;
   selection?: CatalogReviewDiscSelection;
+  mappingReviewSelectionIds?: ReadonlySet<string>;
 }) {
   const [selectionKind, setSelectionKind] =
     useState<DiscSelectionKind>("main_feature");
@@ -100,6 +102,7 @@ function InteractiveDiscSelections({
         audioStreams: [],
         subtitles: [],
       }]}
+      mappingReviewSelectionIds={mappingReviewSelectionIds}
       selectionKind={selectionKind}
       isSaving={false}
       onPage={() => undefined}
@@ -683,6 +686,41 @@ describe("CatalogReviewDiscSelections", () => {
 
     expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
       mediaItemId: "episode-2",
+    });
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("submits the unchanged source when confirming a mapping review", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onUpdate = vi.fn();
+    await act(async () => {
+      root.render(
+        <InteractiveDiscSelections
+          onUpdate={onUpdate}
+          mappingReviewSelectionIds={new Set([editableSelection.id])}
+        />,
+      );
+    });
+    const action = container.querySelector<HTMLSelectElement>(
+      'select[name="replacesDiscSelectionId"]',
+    );
+    const submit = container.querySelector<HTMLButtonElement>(
+      'button[type="submit"]',
+    );
+    if (!action || !submit) {
+      throw new Error("Expected editable Disc Selection controls");
+    }
+    await act(async () => {
+      action.value = editableSelection.id;
+      action.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => submit.click());
+
+    expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
+      sourceIdentity: editableSelection.sourceIdentity,
     });
     await act(async () => root.unmount());
     container.remove();

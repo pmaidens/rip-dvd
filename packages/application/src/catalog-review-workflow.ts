@@ -1,13 +1,16 @@
 import {
   archiveRecoveryWorkIdentity,
+  CatalogMappingEvidenceUnavailableError,
   dvdRecoveryEvidenceFormatForArchive,
   DVD_RECOVERY_EVIDENCE_ENCODING,
   DomainInvariantError,
   type ArchiveJobStatus,
   type ArchiveRecoveryStatus,
   type ConsistentReadAccess,
+  type DataAccess,
   type DvdCatalogReviewWorkflowEvidence,
   type OriginalDiscArchiveId,
+  StaleCatalogRevisionError,
 } from "@rip-dvd/data-access";
 
 export type CatalogReviewWorkflowReasonCode =
@@ -141,6 +144,48 @@ export class CatalogReviewRevisionStaleError extends DomainInvariantError {
     }];
     this.current = workflow.current;
   }
+}
+
+export function rethrowCatalogMappingOperationError(
+  access: Pick<DataAccess, "readConsistentSnapshot">,
+  originalDiscArchiveId: OriginalDiscArchiveId,
+  expectedCatalogRevision: Date | undefined,
+  error: unknown,
+): never {
+  if (
+    !(error instanceof CatalogMappingEvidenceUnavailableError) &&
+    !(error instanceof StaleCatalogRevisionError)
+  ) {
+    throw error;
+  }
+  const current = access.readConsistentSnapshot((snapshot) => ({
+    workflow: describeCatalogReviewWorkflow(
+      snapshot,
+      originalDiscArchiveId,
+    ),
+    archive: snapshot.catalog.listOriginalDiscArchives({
+      ids: [originalDiscArchiveId],
+    })[0] ?? null,
+  }));
+  if (
+    error instanceof StaleCatalogRevisionError &&
+    expectedCatalogRevision !== undefined &&
+    current.workflow !== null &&
+    current.archive !== null
+  ) {
+    throw new CatalogReviewRevisionStaleError(
+      current.workflow,
+      expectedCatalogRevision.toISOString(),
+      current.archive.updatedAt.toISOString(),
+    );
+  }
+  if (
+    error instanceof CatalogMappingEvidenceUnavailableError &&
+    current.workflow !== null
+  ) {
+    throw new CatalogReviewMappingUnavailableError(current.workflow);
+  }
+  throw error;
 }
 
 function uniqueReasons(
@@ -343,6 +388,7 @@ export function describeCatalogReviewWorkflow(
   const damageDecisionAvailable = damageReasons.length === 0;
   const mappingActionReasons = uniqueReasons([
     ...consistencyReasons,
+    ...recoveryReasons.filter(({ code }) => code === "CONSISTENCY_FAULT"),
     ...(mappingState === "pending" ? mappingReasons : []),
   ]);
   const damageDecisionReasons = uniqueReasons([

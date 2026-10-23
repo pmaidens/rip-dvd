@@ -217,6 +217,45 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       current: { titleIdentityReviewSetId: null },
     },
   });
+  const pendingProposal = {
+    action: "create_mapping_proposal" as const,
+    catalogRevision: pending.catalogRevision,
+    target: {
+      choice: "create_new" as const,
+      mediaItem: { kind: "movie" as const, title: "Pending proposal" },
+    },
+    discSelection: {
+      sourceIdentity: { kind: "dvd_title" as const, titleNumber: 1 },
+    },
+  };
+  const pendingWebProposal = await createCatalogReviewRoute(
+    catalogReviewMutationRequest(archive.id, {
+      ...pendingProposal,
+      mutationKey: "00000000-0000-4000-8000-000000000401",
+    }),
+    archive.id,
+    () => access,
+    () => trustedOrigin,
+  );
+  const pendingCliProposal = await fixture.run([
+    "catalog-review",
+    "apply-proposal",
+    archive.id,
+    "--key",
+    "00000000-0000-4000-8000-000000000402",
+    "--json",
+    JSON.stringify(pendingProposal),
+  ]);
+  expect(pendingWebProposal.status).toBe(409);
+  expect(pendingCliProposal.exitCode).toBe(2);
+  expect(pendingCliProposal.result).toEqual(await pendingWebProposal.json());
+  expect(pendingCliProposal.result).toMatchObject({
+    error: {
+      code: "CATALOG_MAPPING_UNAVAILABLE",
+      reasons: [{ code: "SELECTION_UNIDENTIFIED" }],
+      current: { titleIdentityReviewSetId: null },
+    },
+  });
   const reviewSet = access.catalog.recordDvdTitleIdentityObservations({
     originalDiscArchiveId: archive.id,
     checkpoint: {
@@ -451,6 +490,59 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
     expect(staleCli.exitCode).toBe(2);
     expect(staleCli.result).toEqual(await staleWeb.json());
     expect(staleCli.result).toMatchObject({
+      error: {
+        code: "STALE_CATALOG_REVISION",
+        reasons: [{
+          code: "STALE_CATALOG_REVISION",
+          details: {
+            expectedCatalogRevision: before.catalogRevision,
+            currentCatalogRevision: afterFirst.catalogRevision,
+          },
+        }],
+        current: {
+          checkpoint: { revision: 1 },
+          titleIdentityReviewSetId:
+            afterFirst.reviewWorkflow.current.titleIdentityReviewSetId,
+        },
+      },
+    });
+    const staleEpisodicProposal = {
+      action: "create_episodic_mapping_proposal" as const,
+      catalogRevision: before.catalogRevision,
+      tvShow: { choice: "create_new" as const, title: "Stale show" },
+      season: {
+        choice: "create_new" as const,
+        title: "Season One",
+        seasonNumber: 1,
+      },
+      episodes: [{
+        titleNumber: 3,
+        title: "Stale episode",
+        episodeNumber: 1,
+      }],
+    };
+    const staleWebProposal = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        ...staleEpisodicProposal,
+        mutationKey: "00000000-0000-4000-8000-000000000403",
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const staleCliProposal = await fixture.run([
+      "catalog-review",
+      "apply-proposal",
+      archive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000404",
+      "--json",
+      JSON.stringify(staleEpisodicProposal),
+    ]);
+    expect(staleWebProposal.status).toBe(409);
+    expect(staleCliProposal.exitCode).toBe(2);
+    expect(staleCliProposal.result).toEqual(await staleWebProposal.json());
+    expect(staleCliProposal.result).toMatchObject({
       error: {
         code: "STALE_CATALOG_REVISION",
         reasons: [{

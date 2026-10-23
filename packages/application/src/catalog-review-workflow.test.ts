@@ -200,6 +200,26 @@ it("keeps a no-progress Recovery pause active and decision-blocking", () => {
   ]);
 });
 
+it("blocks mapping when Archive Recovery has faulted", () => {
+  const evidence = decisionReadyEvidence(false);
+  const workflow = describeCatalogReviewWorkflow(
+    {} as ConsistentReadAccess,
+    archiveId,
+    {
+      ...evidence,
+      recovery: { ...evidence.recovery!, status: "faulted" },
+    },
+  );
+
+  expect(workflow?.actions.find(({ action }) =>
+    action === "catalog_mapping"
+  )).toMatchObject({
+    available: false,
+    reasons: [{ code: "CONSISTENCY_FAULT" }],
+  });
+  expect(workflow?.facts.readyForDamageDecision).toBe(false);
+});
+
 it("does not advertise mapping before current Title Identity evidence exists", () => {
   const evidence = decisionReadyEvidence(false);
   const workflow = describeCatalogReviewWorkflow(

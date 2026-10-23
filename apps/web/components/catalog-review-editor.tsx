@@ -286,6 +286,17 @@ export function CatalogReviewView({
               }
               mediaItems={review.mediaItems}
               rawTitles={catalogReviewSelectionTitles(review)}
+              mappingReviewSelectionIds={new Set(
+                review.titleIdentity?.available
+                  ? review.titleIdentity.items.flatMap((item) =>
+                    item.discSelectionMappings
+                      .filter(({ mappingState }) =>
+                        mappingState === "needs_mapping_review"
+                      )
+                      .map(({ discSelectionId }) => discSelectionId)
+                  )
+                  : [],
+              )}
               selectionKind={selectionKind}
               isSaving={isSaving}
               onPage={onDiscSelectionsPage}

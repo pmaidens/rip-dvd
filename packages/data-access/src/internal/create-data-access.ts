@@ -3493,13 +3493,20 @@ export function createDataAccessInternal(
     const archiveJob = transaction.select({ status: archiveJobs.status })
       .from(archiveJobs)
       .where(eq(archiveJobs.id, header.sourceArchiveJobId)).get();
-    const recovery = transaction.select({ id: archiveRecoveries.id })
+    const recovery = transaction.select({
+      id: archiveRecoveries.id,
+      status: archiveRecoveries.status,
+    })
       .from(archiveRecoveries)
       .where(eq(
         archiveRecoveries.originalDiscArchiveId,
         originalDiscArchiveId,
       )).get();
-    if (archiveJob?.status !== "completed" || recovery === undefined) {
+    if (
+      archiveJob?.status !== "completed" ||
+      recovery === undefined ||
+      recovery.status === "faulted"
+    ) {
       throw new CatalogMappingEvidenceUnavailableError();
     }
     const set = transaction.select().from(dvdTitleIdentitySets).where(and(
@@ -9862,6 +9869,75 @@ export function createDataAccessInternal(
         ),
       ),
     ).all();
+    const damageManifestIds = [...new Set(damageRows.map(({ assessment }) =>
+      assessment.manifestId
+    ))];
+    const damageStructuralAssessmentIds = [...new Set(damageRows.map(
+      ({ assessment }) => assessment.structuralAssessmentIdentity,
+    ))];
+    const damageManifests = damageManifestIds.length === 0
+      ? []
+      : database.select().from(dvdArchiveEvidenceManifests).where(inArray(
+        dvdArchiveEvidenceManifests.id,
+        damageManifestIds,
+      )).all();
+    const damageStructuralAssessments =
+      damageStructuralAssessmentIds.length === 0
+        ? []
+        : database.select().from(dvdStructuralAssessments).where(inArray(
+          dvdStructuralAssessments.id,
+          damageStructuralAssessmentIds,
+        )).all();
+    const damageObservationRows = damageManifestIds.length === 0
+      ? []
+      : database.select({
+        observation: dvdTitleIdentityObservations,
+        titleIdentityOriginalDiscArchiveId:
+          dvdTitleIdentities.originalDiscArchiveId,
+      }).from(dvdTitleIdentityObservations).innerJoin(
+        dvdTitleIdentities,
+        eq(
+          dvdTitleIdentities.id,
+          dvdTitleIdentityObservations.titleIdentityId,
+        ),
+      ).where(inArray(
+        dvdTitleIdentityObservations.manifestId,
+        damageManifestIds,
+      )).all();
+    const damageManifestById = new Map(damageManifests.map((manifest) => [
+      manifest.id,
+      manifest,
+    ] as const));
+    const damageStructuralAssessmentById = new Map(
+      damageStructuralAssessments.map((assessment) => [
+        assessment.id,
+        assessment,
+      ] as const),
+    );
+    const damageObservationsByManifestId = new Map<
+      string,
+      Array<typeof dvdTitleIdentityObservations.$inferSelect>
+    >();
+    const damageTitleIdentityArchiveIds = new Map<
+      string,
+      OriginalDiscArchiveId
+    >();
+    for (
+      const {
+        observation,
+        titleIdentityOriginalDiscArchiveId,
+      } of damageObservationRows
+    ) {
+      const observations = damageObservationsByManifestId.get(
+        observation.manifestId,
+      ) ?? [];
+      observations.push(observation);
+      damageObservationsByManifestId.set(observation.manifestId, observations);
+      damageTitleIdentityArchiveIds.set(
+        observation.titleIdentityId,
+        titleIdentityOriginalDiscArchiveId,
+      );
+    }
     const latestDamageByArchiveId = new Map<
       OriginalDiscArchiveId,
       DvdTitleDamageAssessmentRecord
@@ -9870,7 +9946,16 @@ export function createDataAccessInternal(
       if (!latestDamageByArchiveId.has(attempt.originalDiscArchiveId)) {
         latestDamageByArchiveId.set(
           attempt.originalDiscArchiveId,
-          toDvdTitleDamageAssessment(assessment),
+          toDvdTitleDamageAssessment(assessment, {
+            manifest: damageManifestById.get(assessment.manifestId),
+            structuralAssessment: damageStructuralAssessmentById.get(
+              assessment.structuralAssessmentIdentity,
+            ),
+            observations: damageObservationsByManifestId.get(
+              assessment.manifestId,
+            ) ?? [],
+            titleIdentityArchiveIds: damageTitleIdentityArchiveIds,
+          }),
         );
       }
     }
@@ -10220,12 +10305,25 @@ export function createDataAccessInternal(
     };
   }
 
+  type DvdTitleDamageDecodeEvidence = {
+    manifest: typeof dvdArchiveEvidenceManifests.$inferSelect | undefined;
+    structuralAssessment:
+      | typeof dvdStructuralAssessments.$inferSelect
+      | undefined;
+    observations: readonly (typeof dvdTitleIdentityObservations.$inferSelect)[];
+    titleIdentityArchiveIds: ReadonlyMap<string, OriginalDiscArchiveId>;
+  };
+
   function titleDamageMappings(
     originalDiscArchiveId: OriginalDiscArchiveId,
     manifestId: string,
     mappings: RecordDvdTitleDamageAssessmentInput["titles"],
+    evidence?: Pick<
+      DvdTitleDamageDecodeEvidence,
+      "observations" | "titleIdentityArchiveIds"
+    >,
   ): DvdTitleDamageMappingInput[] {
-    const observations = database.select()
+    const observations = evidence?.observations ?? database.select()
       .from(dvdTitleIdentityObservations)
       .where(eq(dvdTitleIdentityObservations.manifestId, manifestId))
       .all();
@@ -10252,13 +10350,15 @@ export function createDataAccessInternal(
           "Title Damage Assessment references a different checkpoint observation",
         );
       }
-      const identity = database.select({
-        originalDiscArchiveId: dvdTitleIdentities.originalDiscArchiveId,
-      }).from(dvdTitleIdentities).where(eq(
-        dvdTitleIdentities.id,
-        observation.titleIdentityId,
-      )).get();
-      if (identity?.originalDiscArchiveId !== originalDiscArchiveId) {
+      const identityArchiveId = evidence === undefined
+        ? database.select({
+          originalDiscArchiveId: dvdTitleIdentities.originalDiscArchiveId,
+        }).from(dvdTitleIdentities).where(eq(
+          dvdTitleIdentities.id,
+          observation.titleIdentityId,
+        )).get()?.originalDiscArchiveId
+        : evidence.titleIdentityArchiveIds.get(observation.titleIdentityId);
+      if (identityArchiveId !== originalDiscArchiveId) {
         throw new DomainInvariantError(
           "Title Damage Assessment references another archive's Title Identity",
         );
@@ -10306,9 +10406,13 @@ export function createDataAccessInternal(
 
   function toDvdTitleDamageAssessment(
     row: typeof dvdTitleDamageAssessments.$inferSelect,
+    evidence?: DvdTitleDamageDecodeEvidence,
   ): DvdTitleDamageAssessmentRecord {
-    const manifest = database.select().from(dvdArchiveEvidenceManifests)
-      .where(eq(dvdArchiveEvidenceManifests.id, row.manifestId)).get();
+    const manifest = evidence?.manifest ??
+      (evidence === undefined
+        ? database.select().from(dvdArchiveEvidenceManifests)
+          .where(eq(dvdArchiveEvidenceManifests.id, row.manifestId)).get()
+        : undefined);
     if (
       manifest === undefined ||
       manifest.originalDiscArchiveId !== row.originalDiscArchiveId ||
@@ -10321,9 +10425,16 @@ export function createDataAccessInternal(
         "Title Damage Assessment checkpoint evidence is inconsistent",
       );
     }
-    const structuralAssessment = findDvdStructuralAssessment(
-      row.structuralAssessmentIdentity,
-    );
+    const structuralAssessment = evidence === undefined
+      ? findDvdStructuralAssessment(row.structuralAssessmentIdentity)
+      : evidence.structuralAssessment === undefined
+      ? null
+      : toDvdStructuralAssessment(evidence.structuralAssessment);
+    if (structuralAssessment === null) {
+      throw new DomainInvariantError(
+        "DVD structural check attempt has no assessment",
+      );
+    }
     if (
       structuralAssessment.checkpoint.originalDiscArchiveId !==
         row.originalDiscArchiveId ||
@@ -10338,13 +10449,11 @@ export function createDataAccessInternal(
         "Title Damage Assessment structural evidence is inconsistent",
       );
     }
-    const observations = database.select({
-      id: dvdTitleIdentityObservations.id,
-      sourceExtents: dvdTitleIdentityObservations.sourceExtents,
-    }).from(dvdTitleIdentityObservations).where(eq(
-      dvdTitleIdentityObservations.manifestId,
-      row.manifestId,
-    )).all();
+    const observations = evidence?.observations ?? database.select()
+      .from(dvdTitleIdentityObservations).where(eq(
+        dvdTitleIdentityObservations.manifestId,
+        row.manifestId,
+      )).all();
     const sourceExtentsById = new Map(observations.map((observation) => [
       observation.id,
       observation.sourceExtents,
@@ -10365,6 +10474,7 @@ export function createDataAccessInternal(
         row.originalDiscArchiveId,
         row.manifestId,
         row.titleMappings,
+        evidence,
       ),
     }, sourceExtentsById);
     if (
@@ -16269,8 +16379,8 @@ export function createDataAccessInternal(
             currentArchive.updatedAt.getTime() !==
               input.catalogRevision.getTime()
           ) {
-            throw new DomainInvariantError(
-              "Catalog review changed; reload before saving Mapping Proposal",
+            throw new StaleCatalogRevisionError(
+              "Catalog review revision is stale",
             );
           }
 
@@ -16386,8 +16496,8 @@ export function createDataAccessInternal(
             currentArchive.updatedAt.getTime() !==
               input.catalogRevision.getTime()
           ) {
-            throw new DomainInvariantError(
-              "Catalog review changed; reload before saving Episodic Mapping Proposal",
+            throw new StaleCatalogRevisionError(
+              "Catalog review revision is stale",
             );
           }
 
@@ -17168,7 +17278,10 @@ export function createDataAccessInternal(
             const validator = createArchivedDvdSelectionValidator(
               source.scanData,
             );
-            const sourceIdentity = validator.validate(
+            const sourceIdentity = validateDiscSelectionSourceIdentity(
+              transaction,
+              input.originalDiscArchiveId,
+              source.scanData,
               input.sourceIdentity,
             );
             const sourcePersistence =

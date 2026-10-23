@@ -31,6 +31,7 @@ interface CatalogReviewDiscSelectionsProps {
     CatalogReviewDto["correctionRetainedOutputHistoryPage"];
   mediaItems: CatalogReviewMediaItem[];
   rawTitles: Array<DvdTitle | Pick<DvdTitle, "number" | "chapters">>;
+  mappingReviewSelectionIds?: ReadonlySet<string>;
   selectionKind: DiscSelectionKind;
   isSaving: boolean;
   onPage(offset: number): void;
@@ -107,6 +108,7 @@ export function CatalogReviewDiscSelections({
   correctionRetainedOutputHistoryPage,
   mediaItems,
   rawTitles,
+  mappingReviewSelectionIds = new Set(),
   selectionKind,
   isSaving,
   onPage,
@@ -227,7 +229,10 @@ export function CatalogReviewDiscSelections({
       if (common.mediaItemId !== target.mediaItemId) {
         changes.mediaItemId = common.mediaItemId;
       }
-      if (!sameSourceIdentity(sourceIdentity, target.sourceIdentity)) {
+      if (
+        !sameSourceIdentity(sourceIdentity, target.sourceIdentity) ||
+        mappingReviewSelectionIds.has(target.id)
+      ) {
         changes.sourceIdentity = sourceIdentity;
       }
       if (form.get("clearLabel") === "on") {

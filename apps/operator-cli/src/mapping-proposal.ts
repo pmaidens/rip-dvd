@@ -1,6 +1,8 @@
 import {
   applyMappingProposal,
   CatalogReviewCompletionUnavailableError,
+  CatalogReviewMappingUnavailableError,
+  CatalogReviewRevisionStaleError,
   InvalidMutationKeyError,
   parseMutationKey,
   type MappingProposalCommand,
@@ -11,6 +13,7 @@ import {
   MEDIA_ITEM_KINDS,
   MutationKeyConflictError,
   RecordNotFoundError,
+  StaleCatalogRevisionError,
   type DataAccess,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
@@ -103,16 +106,24 @@ export function runMappingProposal(rest: readonly string[], io: MappingProposalI
         { reasons: error.blockingReasons, current: error.current },
       );
     }
+    if (error instanceof CatalogReviewMappingUnavailableError ||
+        error instanceof CatalogReviewRevisionStaleError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        undefined,
+        { reasons: error.blockingReasons, current: error.current },
+      );
+    }
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("PROPOSAL_REJECTED", error.message, 2);
     }
+    if (error instanceof StaleCatalogRevisionError) {
+      throw new CommandFailure("STALE_CATALOG_REVISION", error.message, 2);
+    }
     if (error instanceof DomainInvariantError) {
-      throw new CommandFailure(
-        error.message.includes("Catalog review changed;")
-          ? "STALE_CATALOG_REVISION" : "PROPOSAL_REJECTED",
-        error.message,
-        2,
-      );
+      throw new CommandFailure("PROPOSAL_REJECTED", error.message, 2);
     }
     throw new CommandFailure("PROPOSAL_UNAVAILABLE", "Mapping Proposal is unavailable.", 1);
   } finally {
