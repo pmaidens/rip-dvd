@@ -32,10 +32,12 @@ import {
 import {
   startNodeBoundedCommandProcess,
   type ActiveBoundedProcess,
+  type StartNodeBoundedCommandProcessOptions,
 } from "./bounded-child-process.js";
 
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 const MAX_DIAGNOSTIC_BYTES = 65_536;
+const OPTICAL_DEVICE_DESCRIPTOR_PATH = "/proc/self/fd/3";
 
 const VERIFICATION_FAILURE_KEYS = [
   "asc", "ascq", "category", "classifierVersion", "driverStatus",
@@ -119,6 +121,14 @@ interface DvdSourceReadRange {
   acceptedEndLbaExclusive: number;
 }
 
+type DvdSourceReadProcessLauncher = (
+  input: StartNodeBoundedCommandProcessOptions,
+) => ReturnType<typeof startNodeBoundedCommandProcess>;
+
+interface NodeDvdSourceReaderDependencies {
+  startProcess?: DvdSourceReadProcessLauncher;
+}
+
 export interface DvdVerificationSourceReader {
   start(
     input: DvdSourceReadRange & { timeoutMs: number },
@@ -188,6 +198,7 @@ function createNodeDvdSourceReader<Input extends DvdSourceReadRange & {
   command: "verify-sample-v1" | "recover-sector-v1";
   operationName: string;
   requiredSectorCount: number;
+  startProcess?: DvdSourceReadProcessLauncher;
 }): {
   start(input: Input): ActiveBoundedProcess<DvdSourceRead> & {
     deviceIdentity: OpticalDeviceIdentity;
@@ -210,11 +221,13 @@ function createNodeDvdSourceReader<Input extends DvdSourceReadRange & {
         ) ||
         !options.boundedLifetime && input.timeoutMs !== undefined
       ) throw new Error(`${options.operationName} is invalid`);
+      const startProcess = options.startProcess ??
+        startNodeBoundedCommandProcess;
       const { descriptor: lockDescriptor, deviceIdentity } =
         openOpticalDriveLock(devicePath);
       let activeProcess;
       try {
-        activeProcess = startNodeBoundedCommandProcess({
+        activeProcess = startProcess({
           executable: "flock",
           arguments_: [
             "--exclusive",
@@ -222,10 +235,10 @@ function createNodeDvdSourceReader<Input extends DvdSourceReadRange & {
             "--no-fork",
             "--conflict-exit-code",
             String(FLOCK_CONFLICT_EXIT_CODE),
-            "/proc/self/fd/3",
+            OPTICAL_DEVICE_DESCRIPTOR_PATH,
             "rip-dvd-dvdcss-reader",
             options.command,
-            devicePath,
+            OPTICAL_DEVICE_DESCRIPTOR_PATH,
             String(input.startLba),
             String(input.sectorCount),
             String(input.acceptedEndLbaExclusive),
@@ -283,7 +296,9 @@ function createNodeDvdSourceReader<Input extends DvdSourceReadRange & {
   };
 }
 
-export function createNodeDvdVerificationSourceReader():
+export function createNodeDvdVerificationSourceReader(
+  dependencies: NodeDvdSourceReaderDependencies = {},
+):
   DvdVerificationSourceReader {
   return createNodeDvdSourceReader<DvdSourceReadRange & {
     timeoutMs: number;
@@ -292,10 +307,13 @@ export function createNodeDvdVerificationSourceReader():
     command: "verify-sample-v1",
     operationName: "DVD Disc Verification source read",
     requiredSectorCount: DVD_SOURCE_SAMPLE_BYTE_COUNT / 2_048,
+    startProcess: dependencies.startProcess,
   });
 }
 
-export function createNodeDvdRecoverySourceReader():
+export function createNodeDvdRecoverySourceReader(
+  dependencies: NodeDvdSourceReaderDependencies = {},
+):
   DvdRecoverySourceReader {
   return createNodeDvdSourceReader<DvdSourceReadRange & {
     timeoutMs?: never;
@@ -304,6 +322,7 @@ export function createNodeDvdRecoverySourceReader():
     command: "recover-sector-v1",
     operationName: "DVD Recovery source read",
     requiredSectorCount: 1,
+    startProcess: dependencies.startProcess,
   });
 }
 

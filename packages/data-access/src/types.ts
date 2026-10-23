@@ -679,6 +679,7 @@ export interface ArchiveRecoveryWorkAccess {
     archiveRecoveryId: ArchiveRecoveryId;
     attemptId: ArchiveRecoveryAttemptId;
     stopOperationId: ArchiveRecoveryStopOperationId;
+    quiescedClaim?: ClaimedArchiveRecoveryWork;
   }): boolean;
   completeStop(input: {
     archiveRecoveryId: ArchiveRecoveryId;

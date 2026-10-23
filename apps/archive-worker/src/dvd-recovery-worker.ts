@@ -276,6 +276,7 @@ async function waitForRead(input: {
 async function finalizeStop(input: {
   access: DataAccess;
   archiveImageOwnership: ArchiveImageOwnership;
+  claim?: ClaimedArchiveRecoveryWork;
   deviceInactivity: DvdRecoveryDeviceInactivity;
   originalsLibraryPath: string;
   recovery: ArchiveRecovery;
@@ -290,6 +291,7 @@ async function finalizeStop(input: {
     archiveRecoveryId: input.recovery.id,
     attemptId: input.recovery.attemptId,
     stopOperationId,
+    quiescedClaim: input.claim,
   })) {
     throw new DvdRecoveryStopDeferred(
       "Stop is waiting for DVD Disc Verification to settle",
@@ -572,6 +574,7 @@ export async function pollDvdRecoveryPass(input: {
           const outcome = await finalizeStopSafely({
             ...input,
             archiveImageOwnership,
+            claim,
             reconcile,
             recovery: before,
             signal,
@@ -642,6 +645,7 @@ export async function pollDvdRecoveryPass(input: {
           const outcome = await finalizeStopSafely({
             ...input,
             archiveImageOwnership,
+            claim,
             reconcile,
             recovery: afterRead,
             signal,
@@ -686,6 +690,7 @@ export async function pollDvdRecoveryPass(input: {
           const outcome = await finalizeStopSafely({
             ...input,
             archiveImageOwnership,
+            claim,
             reconcile,
             recovery: afterBatch,
             signal,
@@ -728,6 +733,7 @@ export async function pollDvdRecoveryPass(input: {
       const outcome = await finalizeStopSafely({
         ...input,
         archiveImageOwnership,
+        claim,
         reconcile,
         recovery,
         signal,

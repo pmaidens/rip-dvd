@@ -11,6 +11,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   dvdRecoveryWriteAuthority,
+  DVD_RECOVERY_PASS_CLAIM_LEASE_MS,
   type ArchiveRecoveryAttemptId,
   type DvdDiscVerificationDiagnostic,
 } from "@rip-dvd/data-access";
@@ -593,7 +594,7 @@ it("rejects a source read when the observed drive path changes before admission"
   }
 });
 
-it("observes and quiesces a recovery read when admission fails after start", async () => {
+it("keeps Stop pending while a rejected recovery admission is quiesced", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const seeded = await seedDvdDiscVerificationFixture(fixture, [{
@@ -628,17 +629,51 @@ it("observes and quiesces a recovery read when admission fails after start", asy
       startRead(expectedDevicePath);
       throw new Error("Synthetic recovery admission commit failure");
     });
+  const stopInput = pollInput(
+    fixture,
+    immediateReader(() => {
+      throw new Error("Stop must not start another recovery read");
+    }).reader,
+  );
   try {
     const polling = pollDvdRecoveryPass(input);
     await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
-    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
-      .toMatchObject({ status: "running" });
+    const stopAccess = fixture.openAccess();
+    const stopOperationId = (() => {
+      try {
+        return stopAccess.archiveRecoveryWork.requestStop({
+          mutationKey: "00000000-0000-4000-8000-000000000489",
+          archiveRecoveryId: seeded.recoveryId,
+          attemptId: seeded.attemptId,
+        }).stopOperationId;
+      } finally {
+        stopAccess.close();
+      }
+    })();
+    const stopping = stopInput.access.catalog.findArchiveRecoveryById(
+      seeded.recoveryId,
+    );
+    expect(stopping).toMatchObject({
+      status: "stopping",
+      work: { status: "claimed", claimedAt: expect.any(Date) },
+    });
+    expect(Date.now() - stopping!.work!.claimedAt!.getTime())
+      .toBeLessThan(DVD_RECOVERY_PASS_CLAIM_LEASE_MS);
+    expect(stopInput.access.archiveRecoveryWork.prepareStop({
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+      stopOperationId,
+    })).toBe(false);
+    expect(await pollDvdRecoveryPass(stopInput)).toBe(false);
+    expect(stopInput.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "stopping" });
 
     closeRead();
     await expect(polling).resolves.toBe(true);
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
-      .toMatchObject({ status: "faulted", faultCode: "CONSISTENCY_FAULT" });
+      .toMatchObject({ status: "stopped", faultCode: null });
   } finally {
+    stopInput.access.close();
     input.access.close();
   }
 });
@@ -1326,6 +1361,11 @@ it("finishes a durable Stop after a worker restart without another read", async 
       archiveRecoveryId: seeded.recoveryId,
       attemptId: seeded.attemptId,
     });
+    const crashedDatabase = new DatabaseSync(fixture.databasePath);
+    crashedDatabase.prepare(`UPDATE archive_recovery_work
+      SET claimed_at = 0
+      WHERE archive_recovery_id = ?`).run(seeded.recoveryId);
+    crashedDatabase.close();
 
     expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(true);
     expect(source.start).not.toHaveBeenCalled();
@@ -1607,6 +1647,11 @@ it("keeps Stop pending until admitted device inactivity can be acquired", async 
       archiveRecoveryId: seeded.recoveryId,
       attemptId: seeded.attemptId,
     });
+    const crashedDatabase = new DatabaseSync(fixture.databasePath);
+    crashedDatabase.prepare(`UPDATE archive_recovery_work
+      SET claimed_at = 0
+      WHERE archive_recovery_id = ?`).run(seeded.recoveryId);
+    crashedDatabase.close();
 
     expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(false);
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))

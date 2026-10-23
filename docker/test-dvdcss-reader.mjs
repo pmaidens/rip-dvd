@@ -38,6 +38,45 @@ for (let index = 0; index < content.length; index += 1) {
 writeFileSync(sourcePath, content);
 writeFileSync(replacementSourcePath, Buffer.alloc(content.byteLength, 173));
 
+const descriptorBoundSourcePath = "/tmp/rip-dvd-reader-descriptor-source.img";
+const descriptorReplacementPath =
+  "/tmp/rip-dvd-reader-descriptor-replacement.img";
+writeFileSync(descriptorBoundSourcePath, content);
+writeFileSync(
+  descriptorReplacementPath,
+  Buffer.alloc(content.byteLength, 173),
+);
+const descriptorBoundSource = openSync(
+  descriptorBoundSourcePath,
+  constants.O_RDONLY | constants.O_NOFOLLOW,
+);
+renameSync(descriptorReplacementPath, descriptorBoundSourcePath);
+let descriptorBoundRead;
+try {
+  descriptorBoundRead = spawnSync(
+    testExecutable,
+    [
+      "recover-sector-v1",
+      "/proc/self/fd/3",
+      "0",
+      "1",
+      String(content.byteLength / 2_048),
+    ],
+    {
+      encoding: "buffer",
+      stdio: ["ignore", "pipe", "pipe", descriptorBoundSource],
+    },
+  );
+} finally {
+  closeSync(descriptorBoundSource);
+}
+if (
+  descriptorBoundRead.status !== 0 ||
+  !descriptorBoundRead.stdout.equals(content.subarray(0, 2_048))
+) {
+  throw new Error("descriptor-bound DVD source read check failed");
+}
+
 const boundedLifetime = spawn(
   testExecutable,
   ["verification-lifetime-test", "1", "10"],

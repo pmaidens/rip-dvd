@@ -13,11 +13,15 @@ import {
 } from "@rip-dvd/data-access";
 
 import {
+  createNodeDvdRecoverySourceReader,
   parseDvdVerificationReadFailureProtocol,
   verifyInsertedDvdAgainstSamples,
   type DvdSourceRead,
   type DvdVerificationSourceReader,
 } from "./dvd-disc-verifier.js";
+import type {
+  StartNodeBoundedCommandProcessOptions,
+} from "./bounded-child-process.js";
 
 const metadataFingerprint = `dvdmeta-sha256:${"a".repeat(64)}`;
 const diagnostic: DvdDiscVerificationDiagnostic = {
@@ -80,6 +84,41 @@ function reader(
     }));
   return { reader: { start: run }, run };
 }
+
+it("binds a recovery helper read to the inherited device descriptor", async () => {
+  let launched: StartNodeBoundedCommandProcessOptions | undefined;
+  const bytes = Buffer.alloc(2_048, 0x4f);
+  const startProcess = vi.fn((
+    options: StartNodeBoundedCommandProcessOptions,
+  ) => {
+    launched = options;
+    return {
+      result: Promise.resolve({
+        exitCode: 0,
+        signal: null,
+        stderr: Buffer.alloc(0),
+        stdout: bytes,
+      }),
+      closed: Promise.resolve(),
+      cancel: vi.fn(),
+    };
+  });
+  const active = createNodeDvdRecoverySourceReader({ startProcess }).start({
+    devicePath: "/dev/null",
+    startLba: 0,
+    sectorCount: 1,
+    acceptedEndLbaExclusive: 1,
+  });
+
+  expect(launched?.arguments_.slice(5, 9)).toEqual([
+    "/proc/self/fd/3",
+    "rip-dvd-dvdcss-reader",
+    "recover-sector-v1",
+    "/proc/self/fd/3",
+  ]);
+  expect(launched?.extraFileDescriptors).toEqual([expect.any(Number)]);
+  await expect(active.result).resolves.toEqual({ outcome: "readable", bytes });
+});
 
 it("matches all sixteen bounded raw-sector samples", async () => {
   const source = reader((index) => ({

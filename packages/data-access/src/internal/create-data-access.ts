@@ -10090,6 +10090,18 @@ export function createDataAccessInternal(
             );
           }
           const timestamp = now();
+          if (
+            recovery.work?.status === "claimed" &&
+            recovery.work.claimedAt !== null &&
+            recovery.work.claimedAt.getTime() >=
+              timestamp.getTime() - DVD_RECOVERY_PASS_CLAIM_LEASE_MS &&
+            (
+              input.quiescedClaim === undefined ||
+              input.quiescedClaim.archiveRecoveryId !== recovery.id ||
+              input.quiescedClaim.attemptId !== recovery.attemptId ||
+              input.quiescedClaim.claimToken !== recovery.work.claimToken
+            )
+          ) return false;
           transaction.update(dvdDiscVerifications).set({
             status: "failed",
             completedAt: timestamp,

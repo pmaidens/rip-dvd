@@ -127,7 +127,11 @@ expired verification lease is settled first. A queued verification has no
 device handle to quiesce. Recovery source helpers retain the same exact device
 path, device identity, and inode with their claim; Stop proves that identity
 inactive before reconciliation rather than trusting a path that may have been
-renumbered or reused.
+renumbered or reused. The helper reads through the inherited descriptor used
+to capture and lock that identity, so it cannot reopen a reused path onto a
+different device. While a non-expired Recovery claim remains live, only that
+claim's worker may report its reads quiescent and advance Stop; another worker
+must wait for the handoff or lease expiry.
 
 This deliberately trades sector-level duplicate detection and general
 post-copy raw-image hash verification for materially less optical-drive wear
