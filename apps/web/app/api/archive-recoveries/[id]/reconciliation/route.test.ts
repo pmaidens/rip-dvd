@@ -191,6 +191,81 @@ it("keeps web and JSON CLI submission, progress, replay, and evidence equal", as
   }
 });
 
+it("keeps wait pending for reconciliation after a faulted Stop", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedRecovery(fixture);
+  const access = fixture.openAccess();
+  const recoveryId = seeded.recoveryId as ArchiveRecoveryId;
+  try {
+    const recovery = access.catalog.findArchiveRecoveryById(recoveryId)!;
+    const stop = access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000490",
+      archiveRecoveryId: recoveryId,
+      attemptId: recovery.attemptId,
+    });
+    access.archiveRecoveryWork.markStopFault({
+      archiveRecoveryId: recoveryId,
+      attemptId: recovery.attemptId,
+      stopOperationId: stop.stopOperationId,
+      faultCode: "STORAGE_UNSUPPORTED",
+    });
+
+    const submitted = await fixture.run([
+      "archive-recovery",
+      "reconcile",
+      recoveryId,
+      "--key",
+      "00000000-0000-4000-8000-000000000491",
+    ]);
+    expect(submitted.result).toMatchObject({
+      reconciliation: { status: "queued" },
+    });
+    const queued = await fixture.run([
+      "wait",
+      "archive-recoveries",
+      recoveryId,
+      "--timeout-ms",
+      "0",
+    ]);
+    expect(queued).toMatchObject({
+      exitCode: 3,
+      result: {
+        outcome: "timeout",
+        current: {
+          status: "queued",
+          recoveryStatus: "faulted",
+          reconciliation: { status: "queued" },
+        },
+      },
+    });
+
+    expect(access.dvdRecoveryReconciliations.claimNext(
+      "synthetic-faulted-stop-reconciliation-worker",
+    )).toMatchObject({ status: "running" });
+    const running = await fixture.run([
+      "wait",
+      "archive-recoveries",
+      recoveryId,
+      "--timeout-ms",
+      "0",
+    ]);
+    expect(running).toMatchObject({
+      exitCode: 3,
+      result: {
+        outcome: "timeout",
+        current: {
+          status: "running",
+          recoveryStatus: "faulted",
+          reconciliation: { status: "running" },
+        },
+      },
+    });
+  } finally {
+    access.close();
+  }
+});
+
 it("rejects reconciliation while a Recovery pass owns the attempt", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);

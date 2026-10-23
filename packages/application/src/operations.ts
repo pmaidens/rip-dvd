@@ -139,9 +139,12 @@ function archiveRecoveryOperation(
     .findLatestForRecovery(recovery.id);
   const reconciliationBlockingReasons =
     dvdRecoveryReconciliationBlockingReasons(recovery, reconciliation);
+  const reconciliationIsActive = reconciliation?.status === "queued" ||
+    reconciliation?.status === "running";
   const recoveryOwnsStatus = recovery.status === "running" ||
-    recovery.status === "stopping" || recovery.status === "stopped" ||
-    recovery.status === "faulted" || recovery.status === "completed";
+    recovery.status === "stopping" || !reconciliationIsActive &&
+      (recovery.status === "stopped" || recovery.status === "faulted" ||
+        recovery.status === "completed");
   const encodeJobs = access.catalog.listDiscSelections({
     originalDiscArchiveId: recovery.originalDiscArchiveId,
     includeHistorical: true,
