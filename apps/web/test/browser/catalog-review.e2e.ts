@@ -1,4 +1,10 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import {
+  expect,
+  type Locator,
+  type Page,
+  type Response,
+  test,
+} from "@playwright/test";
 
 function fixtureVariant(projectName: string): "desktop" | "mobile" {
   return projectName === "desktop" ? "desktop" : "mobile";
@@ -80,6 +86,26 @@ function titleEvidence(page: Page, titleNumber: number): Locator {
   }).filter({ hasText: "Title Suggestion" }).first();
 }
 
+function waitForCatalogReviewReloads(page: Page, count: number): Promise<void> {
+  return new Promise((resolve) => {
+    let observed = 0;
+    const observe = (response: Response) => {
+      if (
+        !response.url().includes("/api/catalog-reviews/") ||
+        response.request().method() !== "GET"
+      ) {
+        return;
+      }
+      observed += 1;
+      if (observed === count) {
+        page.off("response", observe);
+        resolve();
+      }
+    };
+    page.on("response", observe);
+  });
+}
+
 test("keyboard mapping and job-free correction announce their results", async ({ page }, testInfo) => {
   const variant = fixtureVariant(testInfo.project.name);
   await openCatalogReview(
@@ -106,12 +132,15 @@ test("keyboard mapping and job-free correction announce their results", async ({
   await page.keyboard.type(`Keyboard mapped movie ${variant}`);
   const create = page.getByRole("button", { name: "Create Media Item and Disc Selection" });
   await tabTo(page, create);
+  // The mutation reloads the editor, then its dashboard activity event reloads it again.
+  const reviewReloads = waitForCatalogReviewReloads(page, 2);
   const mappingResponse = page.waitForResponse((response) =>
     response.url().includes("/api/catalog-reviews/") &&
     response.request().method() === "POST"
   );
   await page.keyboard.press("Enter");
   expect((await mappingResponse).status()).toBe(201);
+  await reviewReloads;
   await expect(page.getByRole("status").filter({
     hasText: "Mapping changed; review required",
   })).toBeVisible();
