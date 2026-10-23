@@ -2,8 +2,11 @@ import {
   createCleanReadArchiveIntegrityEvidence,
   createCorrectedDvdArchiveBoundaryEvidence,
   createDataAccess,
+  type ArchiveRecoveryAttemptId,
+  type ArchiveRecoveryId,
   type DataAccess,
   type EncodeOutputFilesystemIdentity,
+  type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import {
   createNormalDvdArchiveBoundaryEvidenceForTest,
@@ -12,7 +15,10 @@ import {
   createLegacySidecarDataAccess,
   type LegacySidecarDataAccess,
 } from "@rip-dvd/data-access/legacy-sidecars";
-import { retainedEncodeOutputArtifactIdentity } from "@rip-dvd/application";
+import {
+  retainedEncodeOutputArtifactIdentity,
+  type CatalogReviewWorkflow,
+} from "@rip-dvd/application";
 import {
   mkdirSync,
   mkdtempSync,
@@ -31,7 +37,10 @@ import { createNodeDvdCopyRunner } from "../../archive-worker/src/dvd-archiver";
 import { DVD_READ_FAILURE_RESULT_PREFIX } from "../../archive-worker/src/dvd-recovery-contracts";
 import { markArchiveWithDvdRecoveryEvidence } from "../../operator-cli/src/operator-workflow.test-support";
 
-import { readDashboardSnapshot } from "./dashboard";
+import {
+  catalogReviewActivityRevision,
+  readDashboardSnapshot,
+} from "./dashboard";
 import { DASHBOARD_ACTIVE_DISC_LIMIT } from "./dashboard-bounds";
 import { investigationReport } from "./investigation";
 import {
@@ -51,6 +60,66 @@ const dataAccessFixture = useDataAccessFixture();
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+it("changes Catalog Review activity when Recovery identities change", () => {
+  const archive = { updatedAt: new Date("2026-10-23T12:00:00.000Z") };
+  const originalDiscArchiveId = "archive-1" as OriginalDiscArchiveId;
+  const recoveryId = "recovery-1" as ArchiveRecoveryId;
+  const recoveryAttemptId = "attempt-1" as ArchiveRecoveryAttemptId;
+  const workflow = {
+    schemaVersion: 1,
+    evidenceFormat: "dvd-recovery-evidence-v1",
+    facts: {
+      saved: true,
+      recovering: true,
+      mapped: false,
+      mappingState: "unmapped",
+      readyForDamageDecision: false,
+      readyForEncoding: false,
+    },
+    current: {
+      originalDiscArchiveId,
+      archiveJob: { id: "archive-job-1", status: "completed" },
+      checkpoint: { revision: 1, manifestDigest: "a".repeat(64) },
+      recovery: {
+        id: recoveryId,
+        attemptId: recoveryAttemptId,
+        state: "running",
+        work: {
+          archiveRecoveryId: recoveryId,
+          originalDiscArchiveId,
+          attemptId: recoveryAttemptId,
+          status: "claimed",
+        },
+      },
+      catalogMappingProjectionId: null,
+      titleDamageAssessmentId: null,
+    },
+    actions: [],
+  } satisfies CatalogReviewWorkflow;
+  const replacementRecoveryId = "recovery-2" as ArchiveRecoveryId;
+  const replacementAttemptId = "attempt-2" as ArchiveRecoveryAttemptId;
+  const replacement = {
+    ...workflow,
+    current: {
+      ...workflow.current,
+      recovery: {
+        ...workflow.current.recovery,
+        id: replacementRecoveryId,
+        attemptId: replacementAttemptId,
+        work: {
+          ...workflow.current.recovery.work,
+          archiveRecoveryId: replacementRecoveryId,
+          attemptId: replacementAttemptId,
+        },
+      },
+    },
+  } satisfies CatalogReviewWorkflow;
+
+  expect(catalogReviewActivityRevision(archive, replacement)).not.toBe(
+    catalogReviewActivityRevision(archive, workflow),
+  );
 });
 
 function seedEncodeJob(

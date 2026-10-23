@@ -45,6 +45,7 @@ function InteractiveDiscSelections({
     id: string,
     changes: UpdateDiscSelectionInput,
     catalogRevision: string,
+    onCommitted: () => void,
   ): void;
   selection?: CatalogReviewDiscSelection;
   mappingReviewSelectionIds?: ReadonlySet<string>;
@@ -728,16 +729,21 @@ describe("CatalogReviewDiscSelections", () => {
 
     expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
       mediaItemId: "episode-2",
-    }, "2026-01-01T00:00:00.000Z");
+    }, "2026-01-01T00:00:00.000Z", expect.any(Function));
     await act(async () => root.unmount());
     container.remove();
   });
 
-  it("binds a preserved mapping draft to the revision first reviewed", async () => {
+  it("binds a preserved draft and resets it after a committed mapping", async () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
-    const onUpdate = vi.fn();
+    const onUpdate = vi.fn((
+      _id: string,
+      _changes: UpdateDiscSelectionInput,
+      _catalogRevision: string,
+      onCommitted: () => void,
+    ) => onCommitted());
     const render = (catalogRevision: string) => root.render(
       <InteractiveDiscSelections
         catalogRevision={catalogRevision}
@@ -772,7 +778,12 @@ describe("CatalogReviewDiscSelections", () => {
 
     expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
       mediaItemId: "episode-2",
-    }, "2026-01-01T00:00:00.000Z");
+    }, "2026-01-01T00:00:00.000Z", expect.any(Function));
+    await act(async () => submit.click());
+    expect(onUpdate).toHaveBeenLastCalledWith(editableSelection.id, {
+      mediaItemId: "episode-2",
+    }, "2026-01-01T00:00:01.000Z", expect.any(Function));
+    expect(onUpdate).toHaveBeenCalledTimes(2);
     await act(async () => root.unmount());
     container.remove();
   });
@@ -807,7 +818,7 @@ describe("CatalogReviewDiscSelections", () => {
 
     expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
       sourceIdentity: editableSelection.sourceIdentity,
-    }, "2026-01-01T00:00:00.000Z");
+    }, "2026-01-01T00:00:00.000Z", expect.any(Function));
     await act(async () => root.unmount());
     container.remove();
   });
@@ -855,7 +866,7 @@ describe("CatalogReviewDiscSelections", () => {
     await act(async () => submit.click());
     expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
       label: null,
-    }, "2026-01-01T00:00:00.000Z");
+    }, "2026-01-01T00:00:00.000Z", expect.any(Function));
 
     await act(async () => {
       root.render(

@@ -1,4 +1,5 @@
 import {
+  CatalogMappingRevisionRequiredError,
   DomainInvariantError,
   type DataAccess,
   type DiscSelectionAction,
@@ -165,9 +166,7 @@ export function previewDiscSelectionChange(
     reviewedCatalogRevision === undefined &&
     currentWorkflow() !== null
   ) {
-    throw new DomainInvariantError(
-      "Current-evidence Disc Selection preview requires the reviewed Catalog Review revision",
-    );
+    throw new CatalogMappingRevisionRequiredError();
   }
   if (
     reviewedCatalogRevision !== undefined &&

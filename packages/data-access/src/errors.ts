@@ -82,6 +82,16 @@ export class CurrentCatalogMappingSourceError extends DomainInvariantError {
   }
 }
 
+export class CatalogMappingRevisionRequiredError
+  extends DomainInvariantError {
+  readonly code = "CATALOG_MAPPING_REVISION_REQUIRED" as const;
+
+  constructor() {
+    super("Catalog mapping requires the reviewed Catalog Review revision");
+    this.name = "CatalogMappingRevisionRequiredError";
+  }
+}
+
 export class StaleJobAttemptError extends Error {
   constructor(recordType: string, id: string) {
     super(`Stale ${recordType} attempt: ${id}`);

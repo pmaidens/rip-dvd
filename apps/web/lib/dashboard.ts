@@ -77,6 +77,28 @@ export interface DashboardOpticalDrive {
   currentInspection?: DashboardDiscInspection | null;
 }
 
+export function catalogReviewActivityRevision(
+  archive: Pick<OriginalDiscArchive, "updatedAt">,
+  workflow: CatalogReviewWorkflow | null,
+): string {
+  if (workflow === null) return archive.updatedAt.toISOString();
+  const recovery = workflow.current.recovery;
+  const work = recovery?.work;
+  return [
+    archive.updatedAt.toISOString(),
+    workflow.current.checkpoint?.revision ?? "checkpoint",
+    recovery?.id ?? "recovery-id",
+    recovery?.attemptId ?? "recovery-attempt",
+    recovery?.state ?? "recovery-state",
+    work?.archiveRecoveryId ?? "work-recovery-id",
+    work?.originalDiscArchiveId ?? "work-archive-id",
+    work?.attemptId ?? "work-attempt-id",
+    work?.status ?? "work-status",
+    workflow.current.catalogMappingProjectionId ?? "review-set",
+    workflow.current.titleDamageAssessmentId ?? "assessment",
+  ].join(":");
+}
+
 export interface DashboardDiscInspection {
   id: string;
   readPathNotice?: DiscInspectionReadPathNotice | null;
@@ -2174,18 +2196,10 @@ function readDashboardSnapshotRecords(
                 );
             return {
               id: archive.id,
-              activityRevision: reviewWorkflow === null
-                ? archive.updatedAt.toISOString()
-                : [
-                  archive.updatedAt.toISOString(),
-                  reviewWorkflow.current.checkpoint?.revision ?? "checkpoint",
-                  reviewWorkflow.current.recovery?.state ?? "recovery",
-                  reviewWorkflow.current.recovery?.work?.status ?? "work",
-                  reviewWorkflow.current.catalogMappingProjectionId ??
-                    "review-set",
-                  reviewWorkflow.current.titleDamageAssessmentId ??
-                    "assessment",
-                ].join(":"),
+              activityRevision: catalogReviewActivityRevision(
+                archive,
+                reviewWorkflow,
+              ),
               discLabel: archive.discLabel,
               discKind: archive.discKind,
               archiveFormat: archive.archiveFormat,

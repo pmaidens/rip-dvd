@@ -81,11 +81,13 @@ interface CatalogReviewViewProps {
   onCreateDiscSelection(
     input: CreateDiscSelectionInput,
     catalogRevision: string,
+    onCommitted: () => void,
   ): void;
   onUpdateDiscSelection(
     id: string,
     changes: UpdateDiscSelectionInput,
     catalogRevision: string,
+    onCommitted: () => void,
   ): void;
   onDeleteDiscSelection(id: string): void;
   onCompleteReview(

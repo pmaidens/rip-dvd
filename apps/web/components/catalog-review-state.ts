@@ -471,14 +471,18 @@ export function useCatalogReviewState({
   function createDiscSelection(
     selection: CreateDiscSelectionInput,
     reviewedCatalogRevision: string,
+    onCommitted: () => void,
   ) {
     const { replacesDiscSelectionId, correctionReason, ...values } = selection;
     if (!replacesDiscSelectionId) {
       if (state.status !== "loaded") return;
-      void mutate(createDiscSelectionCommand(values, {
-        catalogRevision: reviewedCatalogRevision,
-        currentEvidence: state.review.reviewWorkflow !== undefined,
-      }));
+      void mutate(
+        createDiscSelectionCommand(values, {
+          catalogRevision: reviewedCatalogRevision,
+          currentEvidence: state.review.reviewWorkflow !== undefined,
+        }),
+        { afterMutation: onCommitted },
+      );
       return;
     }
     if (state.status !== "loaded") return;
@@ -490,24 +494,30 @@ export function useCatalogReviewState({
       target.actionAvailability.state === "locked_provenance" ||
       target.actionAvailability.state === "correction_lineage"
     ) {
-      void mutate({
-        action: "correct_disc_selection",
-        discSelectionId: replacesDiscSelectionId,
-        catalogRevision: reviewedCatalogRevision,
-        ...(correctionReason ? { correctionReason } : {}),
-        selection: values,
-      });
+      void mutate(
+        {
+          action: "correct_disc_selection",
+          discSelectionId: replacesDiscSelectionId,
+          catalogRevision: reviewedCatalogRevision,
+          ...(correctionReason ? { correctionReason } : {}),
+          selection: values,
+        },
+        { afterMutation: onCommitted },
+      );
       return;
     }
     if (target.actionAvailability.state === "needs_repair") {
-      void mutate({
-        action: "repair_disc_selection",
-        discSelectionId: replacesDiscSelectionId,
-        ...(state.review.reviewWorkflow !== undefined
-          ? { catalogRevision: reviewedCatalogRevision }
-          : {}),
-        selection: values,
-      });
+      void mutate(
+        {
+          action: "repair_disc_selection",
+          discSelectionId: replacesDiscSelectionId,
+          ...(state.review.reviewWorkflow !== undefined
+            ? { catalogRevision: reviewedCatalogRevision }
+            : {}),
+          selection: values,
+        },
+        { afterMutation: onCommitted },
+      );
     }
   }
 
@@ -515,15 +525,20 @@ export function useCatalogReviewState({
     discSelectionId: string,
     changes: UpdateDiscSelectionInput,
     reviewedCatalogRevision: string,
+    onCommitted: () => void,
   ) {
-    void mutate({
-      action: "update_disc_selection",
-      discSelectionId,
-      ...(state.status === "loaded" && state.review.reviewWorkflow !== undefined
-        ? { catalogRevision: reviewedCatalogRevision }
-        : {}),
-      changes,
-    });
+    void mutate(
+      {
+        action: "update_disc_selection",
+        discSelectionId,
+        ...(state.status === "loaded" &&
+            state.review.reviewWorkflow !== undefined
+          ? { catalogRevision: reviewedCatalogRevision }
+          : {}),
+        changes,
+      },
+      { afterMutation: onCommitted },
+    );
   }
 
   function createMappingProposal(input: CreateMappingProposalInput) {

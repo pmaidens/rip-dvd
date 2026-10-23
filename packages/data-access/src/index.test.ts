@@ -2764,7 +2764,9 @@ describe("data-access facade", () => {
           sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
         },
       })
-    ).toThrow("Catalog review revision is stale");
+    ).toThrow(
+      "Catalog review changed; reload before saving Mapping Proposal",
+    );
     expect(access.catalog.listMediaItems()).toEqual(mediaItemsBeforeFailure);
     expect(access.catalog.listDiscSelections({
       originalDiscArchiveId: archive.id,
@@ -16077,8 +16079,20 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     fixture.access.catalog.recordDvdTitleIdentityObservations({
       originalDiscArchiveId: fixture.archive.id,
       checkpoint,
-      observations: [titleIdentityObservation(2, { cellId: 2 })],
+      observations: [titleIdentityObservation(1)],
     });
+    for (let revision = 3; revision <= 4; revision += 1) {
+      checkpoint = advanceDvdTitleIdentityCheckpointForTest(
+        fixture.databasePath,
+        fixture.archive.id,
+        revision,
+      );
+      fixture.access.catalog.recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: fixture.archive.id,
+        checkpoint,
+        observations: [titleIdentityObservation(1)],
+      });
+    }
     const statementAll = vi.spyOn(StatementSync.prototype, "all");
     const projectedRowCount = () => statementAll.mock.results.reduce(
       (total, result) => total +
@@ -16097,11 +16111,12 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       }]).get(fixture.archive.id);
     expect(readProjection()?.titleIdentity).not.toBeNull();
     const shortHistoryRows = projectedRowCount();
+    const shortHistoryQueries = statementAll.mock.calls.length;
 
     let deepAuditReview: ReturnType<
       typeof fixture.access.catalog.recordDvdTitleIdentityObservations
     > | undefined;
-    for (let revision = 3; revision <= 24; revision += 1) {
+    for (let revision = 5; revision <= 24; revision += 1) {
       checkpoint = advanceDvdTitleIdentityCheckpointForTest(
         fixture.databasePath,
         fixture.archive.id,
@@ -16110,19 +16125,19 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       deepAuditReview = fixture.access.catalog.recordDvdTitleIdentityObservations({
         originalDiscArchiveId: fixture.archive.id,
         checkpoint,
-        observations: [titleIdentityObservation(revision, {
-          cellId: revision,
-        })],
+        observations: [titleIdentityObservation(1)],
       });
     }
     statementAll.mockClear();
     const longProjection = readProjection();
     expect(longProjection?.titleIdentity).not.toBeNull();
     const longHistoryRows = projectedRowCount();
+    const longHistoryQueries = statementAll.mock.calls.length;
     statementAll.mockRestore();
 
     expect(shortHistoryRows).toBeGreaterThan(0);
     expect(longHistoryRows).toBe(shortHistoryRows);
+    expect(longHistoryQueries).toBe(shortHistoryQueries);
     expect(longProjection?.titleIdentity?.catalogMappingProjectionId).toBe(
       deepAuditReview === undefined
         ? undefined

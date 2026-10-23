@@ -41,11 +41,16 @@ interface CatalogReviewDiscSelectionsProps {
   onCorrectionEncodeHistoryPage(offset: number): void;
   onCorrectionRetainedOutputHistoryPage(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
-  onCreate(input: CreateDiscSelectionInput, catalogRevision: string): void;
+  onCreate(
+    input: CreateDiscSelectionInput,
+    catalogRevision: string,
+    onCommitted: () => void,
+  ): void;
   onUpdate(
     id: string,
     changes: UpdateDiscSelectionInput,
     catalogRevision: string,
+    onCommitted: () => void,
   ): void;
   onDelete(id: string): void;
 }
@@ -206,6 +211,7 @@ export function CatalogReviewDiscSelections({
   function submitSelection(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const reviewedCatalogRevision = draftCatalogRevision ?? catalogRevision;
+    const onCommitted = () => setDraftCatalogRevision(null);
     const form = new FormData(event.currentTarget);
     const nextLabel = String(form.get("label") ?? "").trim();
     const replacesDiscSelectionId = String(
@@ -272,12 +278,17 @@ export function CatalogReviewDiscSelections({
           target.id,
           changes as UpdateDiscSelectionInput,
           reviewedCatalogRevision,
+          onCommitted,
         );
       }
       return;
     }
 
-    onCreate({ ...common, sourceIdentity }, reviewedCatalogRevision);
+    onCreate(
+      { ...common, sourceIdentity },
+      reviewedCatalogRevision,
+      onCommitted,
+    );
   }
 
   const hasSupersessionCorrection = discSelections.some(

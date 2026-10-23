@@ -484,6 +484,45 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       "CATALOG_DAMAGE_DECISION_UNAVAILABLE",
     ]);
 
+    const missingRevisionWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "create_disc_selection",
+        mutationKey: "00000000-0000-4000-8000-000000000413",
+        selection: {
+          mediaItemId: mediaItem.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        },
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const missingRevisionCli = await fixture.run([
+      "disc-selection",
+      "create",
+      archive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000414",
+      "--media-item-id",
+      mediaItem.id,
+      "--source-kind",
+      "dvd_title",
+      "--title-number",
+      "1",
+    ]);
+    expect(missingRevisionWeb.status).toBe(409);
+    expect(missingRevisionCli.exitCode).toBe(2);
+    expect(missingRevisionCli.result).toEqual(
+      await missingRevisionWeb.json(),
+    );
+    expect(missingRevisionCli.result).toEqual({
+      error: {
+        code: "CATALOG_MAPPING_REVISION_REQUIRED",
+        message:
+          "Catalog mapping requires the reviewed Catalog Review revision",
+      },
+    });
+
     const unsupportedWeb = await createCatalogReviewRoute(
       catalogReviewMutationRequest(archive.id, {
         action: "create_disc_selection",
@@ -641,6 +680,41 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       discSelection: { id: string };
     }).discSelection.id;
     const afterFirst = await readBoth();
+    const missingPreviewRevisionCommand = {
+      action: "update_disc_selection" as const,
+      discSelectionId: firstSelectionId,
+      changes: {
+        sourceIdentity: { kind: "dvd_title" as const, titleNumber: 1 },
+      },
+    };
+    const missingPreviewRevisionWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        ...missingPreviewRevisionCommand,
+        preview: true,
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const missingPreviewRevisionCli = await fixture.run([
+      "disc-selection",
+      "preview",
+      "update",
+      archive.id,
+      firstSelectionId,
+      "--source-kind",
+      "dvd_title",
+      "--title-number",
+      "1",
+    ]);
+    expect(missingPreviewRevisionWeb.status).toBe(409);
+    expect(missingPreviewRevisionCli.exitCode).toBe(2);
+    expect(missingPreviewRevisionCli.result).toEqual(
+      await missingPreviewRevisionWeb.json(),
+    );
+    expect(missingPreviewRevisionCli.result).toEqual(
+      missingRevisionCli.result,
+    );
     const staleWeb = await createCatalogReviewRoute(
       catalogReviewMutationRequest(archive.id, {
         action: "create_disc_selection",
@@ -1930,12 +2004,13 @@ it("preserves stale legacy Mapping Proposal adapter responses", async () => {
     expect(web.status).toBe(409);
     expect(cli.exitCode).toBe(2);
     expect(await web.json()).toEqual({
-      error: "Catalog review revision is stale",
+      error: "Catalog review changed; reload before saving Mapping Proposal",
     });
     expect(cli.result).toEqual({
       error: {
         code: "STALE_CATALOG_REVISION",
-        message: "Catalog review revision is stale",
+        message:
+          "Catalog review changed; reload before saving Mapping Proposal",
       },
     });
   } finally {

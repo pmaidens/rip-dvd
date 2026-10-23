@@ -245,6 +245,7 @@ import {
 } from "../encode-job-failure-report.js";
 import {
   CatalogMappingEvidenceUnavailableError,
+  CatalogMappingRevisionRequiredError,
   CurrentCatalogMappingSourceError,
   DomainInvariantError,
   DvdRecoveryStorageUnavailableError,
@@ -7221,9 +7222,7 @@ export function createDataAccessInternal(
           evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT &&
           expectedCatalogRevision === undefined
         ) {
-          throw new DomainInvariantError(
-            "Current-evidence Disc Selection creation requires a Catalog Review revision",
-          );
+          throw new CatalogMappingRevisionRequiredError();
         }
         if (expectedCatalogRevision !== undefined &&
             archive.updatedAt.getTime() !== expectedCatalogRevision.getTime()) {
@@ -9420,73 +9419,17 @@ export function createDataAccessInternal(
         ).all();
       },
     );
-    const previousObservationRowsById = new Map(
-      latestPreviousObservationRows.map((row) => [
-        row.observation.id,
-        row,
-      ] as const),
-    );
-    const relevantSetIds = new Set([
-      ...currentSetRows.map(({ manifestId }) => manifestId),
-      ...latestObservationRows.map(({ set }) => set.manifestId),
-      ...latestPreviousObservationRows.map(({ set }) => set.manifestId),
-    ]);
-    const pendingSetIds = [...relevantSetIds];
-    const relevantSetObservationRowsById = new Map<
-      string,
-      (typeof latestObservationRows)[number]
-    >();
-    const knownObservationIds = new Set([
-      ...latestObservationRows.map(({ observation }) => observation.id),
-      ...previousObservationRowsById.keys(),
-    ]);
-    while (pendingSetIds.length > 0) {
-      const setIds = pendingSetIds.splice(0, 400);
-      const setRows = database.select({
-        observation: dvdTitleIdentityObservations,
-        set: dvdTitleIdentitySets,
-        identityOriginalDiscArchiveId:
-          dvdTitleIdentities.originalDiscArchiveId,
-        manifestOriginalDiscArchiveId:
-          dvdArchiveEvidenceManifests.originalDiscArchiveId,
-        manifestRevision: dvdArchiveEvidenceManifests.revision,
-        manifestDigest: dvdArchiveEvidenceManifests.manifestDigest,
-      }).from(dvdTitleIdentityObservations).innerJoin(
-        dvdTitleIdentitySets,
-        eq(
-          dvdTitleIdentitySets.manifestId,
-          dvdTitleIdentityObservations.manifestId,
-        ),
-      ).innerJoin(
-        dvdTitleIdentities,
-        eq(
-          dvdTitleIdentities.id,
-          dvdTitleIdentityObservations.titleIdentityId,
-        ),
-      ).innerJoin(
-        dvdArchiveEvidenceManifests,
-        eq(
-          dvdArchiveEvidenceManifests.id,
-          dvdTitleIdentitySets.manifestId,
-        ),
-      ).where(inArray(
-        dvdTitleIdentitySets.manifestId,
-        setIds,
-      )).all();
-      const missingPreviousIds = new Set<DvdTitleIdentityObservationId>();
-      for (const row of setRows) {
-        relevantSetObservationRowsById.set(row.observation.id, row);
-        knownObservationIds.add(row.observation.id);
-        if (
-          row.observation.previousObservationId !== null &&
-          !knownObservationIds.has(row.observation.previousObservationId)
-        ) {
-          missingPreviousIds.add(row.observation.previousObservationId);
-        }
-      }
-      const ids = [...missingPreviousIds];
-      for (let offset = 0; offset < ids.length; offset += 400) {
-        const predecessorRows = database.select({
+    const referencedPreviousObservationIds = [...new Set(
+      latestObservationRows.flatMap(({ observation }) =>
+        observation.previousObservationId === null
+          ? []
+          : [observation.previousObservationId]
+      ),
+    )];
+    const referencedPreviousObservationRows =
+      referencedPreviousObservationIds.flatMap((_id, offset) => {
+        if (offset % 400 !== 0) return [];
+        return database.select({
           observation: dvdTitleIdentityObservations,
           set: dvdTitleIdentitySets,
           identityOriginalDiscArchiveId:
@@ -9515,22 +9458,54 @@ export function createDataAccessInternal(
           ),
         ).where(inArray(
           dvdTitleIdentityObservations.id,
-          ids.slice(offset, offset + 400),
+          referencedPreviousObservationIds.slice(offset, offset + 400),
         )).all();
-        for (const row of predecessorRows) {
-          previousObservationRowsById.set(row.observation.id, row);
-          knownObservationIds.add(row.observation.id);
-          if (!relevantSetIds.has(row.set.manifestId)) {
-            relevantSetIds.add(row.set.manifestId);
-            pendingSetIds.push(row.set.manifestId);
-          }
-        }
-      }
+      });
+    const previousObservationRows = [...new Map([
+      ...latestPreviousObservationRows,
+      ...referencedPreviousObservationRows,
+    ].map((row) => [row.observation.id, row] as const)).values()];
+    const relevantSetIds = [...new Set([
+      ...currentSetRows.map(({ manifestId }) => manifestId),
+      ...latestObservationRows.map(({ set }) => set.manifestId),
+      ...previousObservationRows.map(({ set }) => set.manifestId),
+    ])];
+    const relevantSetObservationRows: Array<
+      (typeof latestObservationRows)[number]
+    > = [];
+    for (let offset = 0; offset < relevantSetIds.length; offset += 400) {
+      relevantSetObservationRows.push(...database.select({
+        observation: dvdTitleIdentityObservations,
+        set: dvdTitleIdentitySets,
+        identityOriginalDiscArchiveId:
+          dvdTitleIdentities.originalDiscArchiveId,
+        manifestOriginalDiscArchiveId:
+          dvdArchiveEvidenceManifests.originalDiscArchiveId,
+        manifestRevision: dvdArchiveEvidenceManifests.revision,
+        manifestDigest: dvdArchiveEvidenceManifests.manifestDigest,
+      }).from(dvdTitleIdentityObservations).innerJoin(
+        dvdTitleIdentitySets,
+        eq(
+          dvdTitleIdentitySets.manifestId,
+          dvdTitleIdentityObservations.manifestId,
+        ),
+      ).innerJoin(
+        dvdTitleIdentities,
+        eq(
+          dvdTitleIdentities.id,
+          dvdTitleIdentityObservations.titleIdentityId,
+        ),
+      ).innerJoin(
+        dvdArchiveEvidenceManifests,
+        eq(
+          dvdArchiveEvidenceManifests.id,
+          dvdTitleIdentitySets.manifestId,
+        ),
+      ).where(inArray(
+        dvdTitleIdentitySets.manifestId,
+        relevantSetIds.slice(offset, offset + 400),
+      )).all());
     }
-    const previousObservationRows = [...previousObservationRowsById.values()];
-    const relevantSetObservationRows = [
-      ...relevantSetObservationRowsById.values(),
-    ];
     const bindingRows = database.select({
       originalDiscArchiveId: dvdTitleIdentities.originalDiscArchiveId,
       titleIdentityId: dvdTitleIdentitySelectionBindings.titleIdentityId,
@@ -9660,13 +9635,29 @@ export function createDataAccessInternal(
       ),
     ]);
     const continuityAudit = sqlite.prepare(`
-      with
-      target(manifest_id, archive_id, manifest_revision) as (
+      with recursive
+      input_target(manifest_id, archive_id, manifest_revision) as (
         select
           json_extract(value, '$.manifestId'),
           json_extract(value, '$.archiveId'),
           cast(json_extract(value, '$.manifestRevision') as integer)
         from json_each(?)
+      ),
+      target(manifest_id, archive_id, manifest_revision) as (
+        select manifest_id, archive_id, manifest_revision
+        from input_target
+        union
+        select
+          predecessor_set.manifest_id,
+          predecessor_set.original_disc_archive_id,
+          predecessor_set.manifest_revision
+        from target
+        inner join dvd_title_identity_observations as current
+          on current.manifest_id = target.manifest_id
+        inner join dvd_title_identity_observations as predecessor
+          on predecessor.id = current.previous_observation_id
+        inner join dvd_title_identity_sets as predecessor_set
+          on predecessor_set.manifest_id = predecessor.manifest_id
       ),
       current_rows as (
         select
@@ -16693,7 +16684,7 @@ export function createDataAccessInternal(
               input.catalogRevision.getTime()
           ) {
             throw new StaleCatalogRevisionError(
-              "Catalog review revision is stale",
+              "Catalog review changed; reload before saving Mapping Proposal",
             );
           }
 
@@ -16810,7 +16801,7 @@ export function createDataAccessInternal(
               input.catalogRevision.getTime()
           ) {
             throw new StaleCatalogRevisionError(
-              "Catalog review revision is stale",
+              "Catalog review changed; reload before saving Episodic Mapping Proposal",
             );
           }
 
