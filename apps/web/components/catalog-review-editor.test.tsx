@@ -1626,6 +1626,81 @@ describe("CatalogReviewEditor", () => {
     expect(postedCommands).toEqual([]);
   });
 
+  it("keeps new-format Re-archive Acceptance unavailable after a proposal is ready", async () => {
+    const review = activeRecoveryCatalogReview(catalogReview({
+      archiveId: "fresh-ready-rearchive",
+      discLabel: "FRESH_READY_REARCHIVE",
+    }), 1);
+    review.rearchiveProposal = {
+      state: "ready",
+      persisted: true,
+      catalogRevision: review.catalogRevision,
+      sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+      sourceArchive: {
+        ...review.archive,
+        id: "prior-ready-archive",
+        detectedDiscId: "prior-ready-disc",
+        discLabel: "PRIOR_READY_DISC",
+        archivedAt: "2026-08-10T06:00:00.000Z",
+        catalogReviewedAt: "2026-08-10T07:00:00.000Z",
+        catalogReviewOutcome: "reviewed_with_selections",
+      },
+      targetArchive: review.archive,
+      mappings: [{
+        state: "valid",
+        reason: null,
+        sourceDiscSelectionId: "source-selection-1",
+        priorMapping: {
+          mediaItemId: review.mediaItems[0]!.id,
+          sourceIdentity: { kind: "main_feature" },
+          label: null,
+        },
+        proposedMapping: {
+          mediaItemId: review.mediaItems[0]!.id,
+          sourceIdentity: { kind: "main_feature" },
+          label: null,
+        },
+      }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => init?.method === "POST"
+      ? Response.json({
+        error: {
+          code: "CATALOG_MAPPING_UNAVAILABLE",
+          message: "Catalog mapping changed while the preview was open.",
+          reasons: [{ code: "CONSISTENCY_FAULT" }],
+        },
+      }, { status: 409 })
+      : Response.json(review)));
+
+    await act(async () => renderCatalogReviewEditor(review.archive.id));
+    const accept = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Accept re-archive",
+    );
+    const preview = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Preview proposal",
+    );
+    const mainFeature = container.querySelector<HTMLOptionElement>(
+      '.rearchive-mapping-proposal option[value="main_feature"]',
+    );
+    expect(accept?.disabled).toBe(true);
+    expect(preview?.disabled).toBe(false);
+    expect(mainFeature?.disabled).toBe(true);
+    expect(container.textContent).toContain(
+      "CATALOG_REVIEW_COMPLETION_UNAVAILABLE",
+    );
+    expect(container.textContent).toContain(
+      "use the separate damage decision workflow",
+    );
+
+    await act(async () => preview?.click());
+    expect(container.textContent).toContain(
+      "Catalog mapping changed while the preview was open.",
+    );
+  });
+
   it("rebinds a preserved Mapping Proposal after Recovery advances", async () => {
     const initialReview = catalogReview({
       archiveId: "archive-a",

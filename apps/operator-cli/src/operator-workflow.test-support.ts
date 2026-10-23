@@ -93,6 +93,7 @@ export function markArchiveWithDvdRecoveryEvidence(
       id: string;
       workStatus?: "requested" | "claimed";
     };
+    omitEvidenceHeader?: boolean;
   } = {},
 ): void {
   const sqlite = new DatabaseSync(databasePath);
@@ -301,27 +302,29 @@ export function markArchiveWithDvdRecoveryEvidence(
       sourceRangesDigest,
       manifestDigest,
     );
-    sqlite.prepare(`
-      INSERT INTO dvd_archive_evidence_headers (
-        original_disc_archive_id, source_archive_job_id, evidence_format,
-        boundary_policy_version, boundary_reported_size_bytes,
-        boundary_published_size_bytes, boundary_evidence_digest,
-        sector_size_bytes, accepted_end_lba_exclusive, current_manifest_id,
-        current_manifest_revision, current_manifest_digest, created_at,
-        updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 2048, ?, ?, 1, ?, 1, 1)
-    `).run(
-      originalDiscArchiveId,
-      jobId,
-      DVD_RECOVERY_EVIDENCE_FORMAT,
-      archive.boundary_policy_version,
-      archive.boundary_reported_size_bytes,
-      archive.boundary_published_size_bytes,
-      boundaryDigest,
-      archive.size_bytes / 2048,
-      manifestId,
-      manifestDigest,
-    );
+    if (options.omitEvidenceHeader !== true) {
+      sqlite.prepare(`
+        INSERT INTO dvd_archive_evidence_headers (
+          original_disc_archive_id, source_archive_job_id, evidence_format,
+          boundary_policy_version, boundary_reported_size_bytes,
+          boundary_published_size_bytes, boundary_evidence_digest,
+          sector_size_bytes, accepted_end_lba_exclusive, current_manifest_id,
+          current_manifest_revision, current_manifest_digest, created_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 2048, ?, ?, 1, ?, 1, 1)
+      `).run(
+        originalDiscArchiveId,
+        jobId,
+        DVD_RECOVERY_EVIDENCE_FORMAT,
+        archive.boundary_policy_version,
+        archive.boundary_reported_size_bytes,
+        archive.boundary_published_size_bytes,
+        boundaryDigest,
+        archive.size_bytes / 2048,
+        manifestId,
+        manifestDigest,
+      );
+    }
     if (options.archiveRecovery !== undefined) {
       sqlite.prepare(`
         UPDATE original_disc_archives

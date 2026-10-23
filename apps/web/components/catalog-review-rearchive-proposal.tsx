@@ -87,6 +87,9 @@ export function CatalogReviewRearchiveProposal({
   replacementPlan,
   isSaving,
   mappingAvailable = true,
+  allowMainFeature = true,
+  acceptanceAvailable = true,
+  acceptanceUnavailableReason = null,
   onPreview,
   onSave,
   onAccept,
@@ -98,6 +101,9 @@ export function CatalogReviewRearchiveProposal({
   replacementPlan?: CatalogReviewReplacementPlan;
   isSaving: boolean;
   mappingAvailable?: boolean;
+  allowMainFeature?: boolean;
+  acceptanceAvailable?: boolean;
+  acceptanceUnavailableReason?: { code: string; message: string } | null;
   onPreview(input: SaveRearchiveMappingProposalInput): Promise<
     CatalogReviewRearchiveProposal
   >;
@@ -311,7 +317,16 @@ export function CatalogReviewRearchiveProposal({
                   }),
                 )}
               >
-                <option value="main_feature">Main feature</option>
+                {allowMainFeature || source.kind === "main_feature"
+                  ? (
+                    <option
+                      value="main_feature"
+                      disabled={!allowMainFeature}
+                    >
+                      Main feature{allowMainFeature ? "" : " (unavailable)"}
+                    </option>
+                  )
+                  : null}
                 <option value="dvd_title">DVD title</option>
                 <option value="dvd_chapters">DVD chapters</option>
               </select>
@@ -439,7 +454,8 @@ export function CatalogReviewRearchiveProposal({
         <CatalogReviewReplacementEncodes
           isSaving={isSaving}
           isAvailable={
-            proposal.persisted && isSavedCurrent && isPreviewCurrent &&
+            acceptanceAvailable && proposal.persisted && isSavedCurrent &&
+            isPreviewCurrent &&
             preview.state === "ready"
           }
           replacementPlan={replacementPlan}
@@ -448,6 +464,12 @@ export function CatalogReviewRearchiveProposal({
           onJobsPage={onReplacementJobsPage}
           onProfilesPage={onReplacementProfilesPage}
         />
+      ) : null}
+      {!acceptanceAvailable && acceptanceUnavailableReason !== null ? (
+        <div className="section-message section-error" role="status">
+          <code>{acceptanceUnavailableReason.code}</code>{" "}
+          {acceptanceUnavailableReason.message}
+        </div>
       ) : null}
       <div className="profile-actions">
         <button
@@ -483,8 +505,8 @@ export function CatalogReviewRearchiveProposal({
         </button>
         <button
           type="button"
-          disabled={isSaving || !proposal.persisted || !isSavedCurrent ||
-            !isPreviewCurrent || preview.state !== "ready"}
+          disabled={isSaving || !acceptanceAvailable || !proposal.persisted ||
+            !isSavedCurrent || !isPreviewCurrent || preview.state !== "ready"}
           onClick={() => onAccept([...selectedReplacements.values()])}
         >
           Accept re-archive

@@ -216,6 +216,14 @@ export function CatalogReviewView({
     ({ action }) => action === "catalog_mapping",
   );
   const mappingAvailable = catalogMappingAction?.available ?? true;
+  const rearchiveAcceptanceAvailable = review.reviewWorkflow === undefined;
+  const rearchiveAcceptanceUnavailableReason = rearchiveAcceptanceAvailable
+    ? null
+    : {
+        code: "CATALOG_REVIEW_COMPLETION_UNAVAILABLE",
+        message:
+          "Re-archive Acceptance is unavailable for dvd-recovery-evidence-v1; use the separate damage decision workflow.",
+      };
   const mappingProposalUsesStaleEvidence = activeMappingProposal !== null &&
     activeMappingProposalRevision !== null &&
     activeMappingProposalRevision !== review.catalogRevision;
@@ -235,6 +243,9 @@ export function CatalogReviewView({
           replacementPlan={review.replacementPlan}
           isSaving={isSaving}
           mappingAvailable={mappingAvailable}
+          allowMainFeature={review.reviewWorkflow === undefined}
+          acceptanceAvailable={rearchiveAcceptanceAvailable}
+          acceptanceUnavailableReason={rearchiveAcceptanceUnavailableReason}
           onPreview={onPreviewRearchiveMappingProposal}
           onSave={onSaveRearchiveMappingProposal}
           onAccept={onAcceptRearchive}

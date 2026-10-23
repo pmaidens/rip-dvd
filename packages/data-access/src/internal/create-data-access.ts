@@ -2509,6 +2509,7 @@ export function createDataAccessInternal(
   type CatalogTransaction = Parameters<
     Parameters<typeof database.transaction>[0]
   >[0];
+  type CatalogReader = CatalogTransaction | typeof database;
 
   function appendEncodeJobFailureReports(
     transaction: CatalogTransaction,
@@ -3467,10 +3468,10 @@ export function createDataAccessInternal(
   }
 
   function requireCurrentCatalogMappingEvidence(
-    transaction: CatalogTransaction,
+    reader: CatalogReader,
     originalDiscArchiveId: OriginalDiscArchiveId,
   ) {
-    const header = transaction.select().from(dvdArchiveEvidenceHeaders)
+    const header = reader.select().from(dvdArchiveEvidenceHeaders)
       .where(eq(
         dvdArchiveEvidenceHeaders.originalDiscArchiveId,
         originalDiscArchiveId,
@@ -3478,10 +3479,10 @@ export function createDataAccessInternal(
     if (header === undefined) {
       throw new CatalogMappingEvidenceUnavailableError();
     }
-    const archiveJob = transaction.select({ status: archiveJobs.status })
+    const archiveJob = reader.select({ status: archiveJobs.status })
       .from(archiveJobs)
       .where(eq(archiveJobs.id, header.sourceArchiveJobId)).get();
-    const recovery = transaction.select({
+    const recovery = reader.select({
       id: archiveRecoveries.id,
       status: archiveRecoveries.status,
     })
@@ -3497,7 +3498,7 @@ export function createDataAccessInternal(
     ) {
       throw new CatalogMappingEvidenceUnavailableError();
     }
-    const set = transaction.select().from(dvdTitleIdentitySets).where(and(
+    const set = reader.select().from(dvdTitleIdentitySets).where(and(
       eq(dvdTitleIdentitySets.originalDiscArchiveId, originalDiscArchiveId),
       eq(dvdTitleIdentitySets.manifestId, header.currentManifestId),
       eq(
@@ -3509,7 +3510,7 @@ export function createDataAccessInternal(
     if (set === undefined) {
       throw new CatalogMappingEvidenceUnavailableError();
     }
-    const currentRows = transaction.select().from(dvdTitleIdentityObservations)
+    const currentRows = reader.select().from(dvdTitleIdentityObservations)
       .where(eq(dvdTitleIdentityObservations.manifestId, set.manifestId))
       .all();
     assertPersistedDvdTitleIdentitySet(
@@ -3526,37 +3527,33 @@ export function createDataAccessInternal(
     return currentMappingRows;
   }
 
-  function validateDiscSelectionSourceIdentity(
-    transaction: CatalogTransaction,
+  function catalogMappingEvidenceFormat(
+    reader: CatalogReader,
     originalDiscArchiveId: OriginalDiscArchiveId,
-    scanData: unknown,
-    sourceIdentityInput: CreateDiscSelectionInput["sourceIdentity"],
   ) {
-    const header = transaction.select().from(dvdArchiveEvidenceHeaders)
-      .where(eq(
-        dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-        originalDiscArchiveId,
-      )).get();
-    const evidenceFormat = dvdRecoveryEvidenceFormatForArchive(
+    const header = reader.select({
+      evidenceFormat: dvdArchiveEvidenceHeaders.evidenceFormat,
+    }).from(dvdArchiveEvidenceHeaders).where(eq(
+      dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+      originalDiscArchiveId,
+    )).get();
+    return dvdRecoveryEvidenceFormatForArchive(
       header,
-      transaction.select({ evidenceFormat: archiveJobs.evidenceFormat })
+      reader.select({ evidenceFormat: archiveJobs.evidenceFormat })
         .from(archiveJobs)
         .where(eq(
           archiveJobs.originalDiscArchiveId,
           originalDiscArchiveId,
         )).all(),
     );
-    if (evidenceFormat === null) {
-      return createArchivedDvdSelectionValidator(scanData).validate(
-        sourceIdentityInput,
-      );
-    }
+  }
+
+  function validateCurrentCatalogMappingSourceIdentity(
+    sourceIdentityInput: CreateDiscSelectionInput["sourceIdentity"],
+    currentRows: ReturnType<typeof requireCurrentCatalogMappingEvidence>,
+  ) {
     const sourceIdentity = createDiscSelectionSourceIdentity(
       sourceIdentityInput,
-    );
-    const currentRows = requireCurrentCatalogMappingEvidence(
-      transaction,
-      originalDiscArchiveId,
     );
     if (sourceIdentity.kind === "main_feature") {
       throw new UnsupportedCatalogMappingSourceError();
@@ -3573,6 +3570,27 @@ export function createDataAccessInternal(
       throw new CurrentCatalogMappingSourceError();
     }
     return sourceIdentity;
+  }
+
+  function validateDiscSelectionSourceIdentity(
+    reader: CatalogReader,
+    originalDiscArchiveId: OriginalDiscArchiveId,
+    scanData: unknown,
+    sourceIdentityInput: CreateDiscSelectionInput["sourceIdentity"],
+  ) {
+    const evidenceFormat = catalogMappingEvidenceFormat(
+      reader,
+      originalDiscArchiveId,
+    );
+    if (evidenceFormat === null) {
+      return createArchivedDvdSelectionValidator(scanData).validate(
+        sourceIdentityInput,
+      );
+    }
+    return validateCurrentCatalogMappingSourceIdentity(
+      sourceIdentityInput,
+      requireCurrentCatalogMappingEvidence(reader, originalDiscArchiveId),
+    );
   }
 
   function insertDiscSelection(
@@ -5884,7 +5902,7 @@ export function createDataAccessInternal(
         : value) as CompletedRearchiveAcceptance;
   }
 
-  type RearchiveProposalReader = CatalogTransaction | typeof database;
+  type RearchiveProposalReader = CatalogReader;
 
   interface ValidatedCorrectedEncodeReplacement {
     input: CorrectedEncodeReplacementInput;
@@ -6060,7 +6078,10 @@ export function createDataAccessInternal(
     reader: RearchiveProposalReader,
     input: RearchiveMappingProposalInput,
     persisted: boolean,
-    providedSourceSelections?: ReturnType<typeof toDiscSelection>[],
+    options: {
+      allowUnavailableCurrentEvidence?: boolean;
+      providedSourceSelections?: ReturnType<typeof toDiscSelection>[];
+    } = {},
   ): RearchiveMappingProposalReview {
     const targetArchive = requireRow(
       reader
@@ -6100,10 +6121,31 @@ export function createDataAccessInternal(
       "detected disc",
       targetArchive.detectedDiscId,
     );
-    const validator = createArchivedDvdSelectionValidator(
+    const legacyValidator = createArchivedDvdSelectionValidator(
       targetDisc.scanData,
     );
-    const sourceSelections = providedSourceSelections ??
+    let currentMappingRows: ReturnType<
+      typeof requireCurrentCatalogMappingEvidence
+    > | null = null;
+    if (
+      catalogMappingEvidenceFormat(reader, targetArchive.id) ===
+        DVD_RECOVERY_EVIDENCE_FORMAT
+    ) {
+      try {
+        currentMappingRows = requireCurrentCatalogMappingEvidence(
+          reader,
+          targetArchive.id,
+        );
+      } catch (error) {
+        if (
+          options.allowUnavailableCurrentEvidence !== true ||
+          !(error instanceof CatalogMappingEvidenceUnavailableError)
+        ) {
+          throw error;
+        }
+      }
+    }
+    const sourceSelections = options.providedSourceSelections ??
       listActiveRearchiveSourceSelections(reader, sourceArchive.id);
     const proposedMappingsById = new Map<
       DiscSelectionId,
@@ -6186,9 +6228,12 @@ export function createDataAccessInternal(
         reason = "The proposed label must not be empty";
       } else {
         try {
-          const validatedSourceIdentity = validator.validate(
-            proposed.sourceIdentity,
-          );
+          const validatedSourceIdentity = currentMappingRows === null
+            ? legacyValidator.validate(proposed.sourceIdentity)
+            : validateCurrentCatalogMappingSourceIdentity(
+              proposed.sourceIdentity,
+              currentMappingRows,
+            );
           sourceIdentity = validatedSourceIdentity;
         } catch (error) {
           reason = error instanceof Error
@@ -6295,7 +6340,10 @@ export function createDataAccessInternal(
           sourceIdentity: selection.sourceIdentity,
           label: selection.label,
         })),
-      }, false, sourceSelections);
+      }, false, {
+        allowUnavailableCurrentEvidence: true,
+        providedSourceSelections: sourceSelections,
+      });
     }
     const mappings = reader
       .select()
@@ -6317,7 +6365,7 @@ export function createDataAccessInternal(
       catalogRevision: saved.updatedAt,
       sourceCatalogRevision: saved.sourceCatalogRevision,
       mappings,
-    }, true);
+    }, true, { allowUnavailableCurrentEvidence: true });
   }
 
   function planRearchiveAcceptance(
@@ -17614,20 +17662,6 @@ export function createDataAccessInternal(
             decodeRearchiveMappingProposalReview,
           );
           if (replay !== undefined) return replay;
-          const evidenceHeader = transaction.select({
-            evidenceFormat: dvdArchiveEvidenceHeaders.evidenceFormat,
-          }).from(dvdArchiveEvidenceHeaders).where(eq(
-            dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-            input.originalDiscArchiveId,
-          )).get();
-          if (
-            evidenceHeader?.evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT
-          ) {
-            requireCurrentCatalogMappingEvidence(
-              transaction,
-              input.originalDiscArchiveId,
-            );
-          }
           const preview = evaluateRearchiveMappingProposal(
             transaction,
             semanticFields,

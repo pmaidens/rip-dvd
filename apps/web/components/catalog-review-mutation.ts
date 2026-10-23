@@ -987,7 +987,9 @@ export function rearchiveAcceptancePreviewConfirmation(
   ].join("\n");
 }
 
-async function catalogReviewMutationError(response: Response): Promise<Error> {
+export async function catalogReviewMutationError(
+  response: Response,
+): Promise<Error> {
   let message = "Catalog review mutation failed";
   try {
     const body: unknown = await response.json();

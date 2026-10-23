@@ -9,6 +9,7 @@ import type { AutomaticCatalogProposal } from "../lib/catalog-automation";
 import type { CatalogReviewCommand } from "../lib/catalog-review-command";
 import type { CatalogReviewReplacementEncodeInput } from "../lib/catalog-review-command";
 import {
+  catalogReviewMutationError,
   discSelectionPreviewConfirmation,
   mutateCatalogReview,
   rearchiveAcceptancePreviewConfirmation,
@@ -637,16 +638,7 @@ export function useCatalogReviewState({
       },
     );
     if (!response.ok) {
-      let message = "Re-archive Mapping Proposal preview failed";
-      try {
-        const body = await response.json() as { error?: unknown };
-        if (typeof body.error === "string" && body.error.trim() !== "") {
-          message = body.error.trim().slice(0, 512);
-        }
-      } catch {
-        // Keep the bounded generic message for a non-JSON response.
-      }
-      throw new Error(message);
+      throw await catalogReviewMutationError(response);
     }
     return response.json() as Promise<CatalogReviewRearchiveProposal>;
   }

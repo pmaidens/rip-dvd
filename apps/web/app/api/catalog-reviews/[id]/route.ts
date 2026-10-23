@@ -409,6 +409,20 @@ export async function createCatalogReviewRoute(
       } }, 409);
     }
     if (error instanceof DomainInvariantError) {
+      const proposalState = ["stale", "incomplete", "incompatible"].find(
+        (candidate) =>
+          error.message === `Re-archive Mapping Proposal is ${candidate}`,
+      );
+      if (proposalState !== undefined) {
+        return response({ error: {
+          code: proposalState === "stale"
+            ? "STALE_CATALOG_REVISION"
+            : proposalState === "incomplete"
+              ? "REARCHIVE_PROPOSAL_INCOMPLETE"
+              : "REARCHIVE_PROPOSAL_INCOMPATIBLE",
+          message: error.message,
+        } }, 409);
+      }
       return response({ error: error.message }, 409);
     }
     return response({ error: "Catalog review is unavailable" }, 503);

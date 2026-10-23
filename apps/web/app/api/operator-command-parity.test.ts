@@ -2801,6 +2801,261 @@ it("blocks unavailable Re-archive mapping consistently through web and CLI", asy
     expect(access.catalog.readRearchiveMappingProposal(
       seeded.targetArchive.id,
     )).toMatchObject({ persisted: false });
+
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("blocks headerless marked Re-archive mapping through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const seeded = seedRearchiveCatalogReviewFixture(fixture);
+  const shown = await fixture.run([
+    "catalog-review",
+    "show",
+    seeded.targetArchive.id,
+  ]);
+  const initial = (shown.result as {
+    rearchiveProposal: {
+      catalogRevision: string;
+      sourceCatalogRevision: string;
+    };
+  }).rearchiveProposal;
+  markArchiveWithDvdRecoveryEvidence(
+    fixture.databasePath,
+    seeded.targetArchive.id,
+    "rearchive-headerless-parity",
+    { omitEvidenceHeader: true },
+  );
+  const access = fixture.openAccess();
+  try {
+    const previewCommand = {
+      action: "preview_rearchive_mapping_proposal" as const,
+      catalogRevision: initial.catalogRevision,
+      sourceCatalogRevision: initial.sourceCatalogRevision,
+      mappings: [],
+    };
+    const previewWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(seeded.targetArchive.id, previewCommand),
+      seeded.targetArchive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const previewCli = await fixture.run([
+      "catalog-review",
+      "preview-rearchive-proposal",
+      seeded.targetArchive.id,
+      "--json",
+      JSON.stringify(previewCommand),
+    ]);
+    expect(previewWeb.status).toBe(409);
+    expect(previewCli.exitCode).toBe(2);
+    expect(previewCli.result).toEqual(await previewWeb.json());
+    expect(previewCli.result).toMatchObject({
+      error: { code: "CATALOG_MAPPING_UNAVAILABLE" },
+    });
+
+    const saveCommand = {
+      ...previewCommand,
+      action: "save_rearchive_mapping_proposal" as const,
+      mutationKey: "00000000-0000-4000-8000-000000000413",
+    };
+    const saveWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(seeded.targetArchive.id, saveCommand),
+      seeded.targetArchive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const saveCli = await fixture.run([
+      "catalog-review",
+      "save-rearchive-proposal",
+      seeded.targetArchive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000414",
+      "--json",
+      JSON.stringify(saveCommand),
+    ]);
+    expect(saveWeb.status).toBe(409);
+    expect(saveCli.exitCode).toBe(2);
+    expect(saveCli.result).toEqual(await saveWeb.json());
+    expect(saveCli.result).toMatchObject({
+      error: { code: "CATALOG_MAPPING_UNAVAILABLE" },
+    });
+    expect(access.catalog.readRearchiveMappingProposal(
+      seeded.targetArchive.id,
+    )).toMatchObject({ persisted: false });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("validates Re-archive mapping sources against current evidence through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const seeded = seedRearchiveCatalogReviewFixture(fixture);
+  const shown = await fixture.run([
+    "catalog-review",
+    "show",
+    seeded.targetArchive.id,
+  ]);
+  const initial = (shown.result as {
+    rearchiveProposal: {
+      catalogRevision: string;
+      sourceCatalogRevision: string;
+      mappings: Array<{
+        sourceDiscSelectionId: string;
+        proposedMapping: {
+          mediaItemId: string;
+          label: string | null;
+        };
+      }>;
+    };
+  }).rearchiveProposal;
+  markArchiveWithDvdRecoveryEvidence(
+    fixture.databasePath,
+    seeded.targetArchive.id,
+    "rearchive-current-source-parity",
+    { archiveRecovery: { id: "rearchive-current-source-recovery" } },
+  );
+  const access = fixture.openAccess();
+  try {
+    const checkpoint = access.catalog.findDvdArchiveEvidenceHeader(
+      seeded.targetArchive.id,
+    )!;
+    access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: seeded.targetArchive.id,
+      checkpoint: {
+        manifestId: checkpoint.currentManifestId,
+        manifestRevision: checkpoint.currentManifestRevision,
+        manifestDigest: checkpoint.currentManifestDigest,
+      },
+      observations: [{
+        displayTitleNumber: 1,
+        navigation: {
+          videoTitleSetNumber: 1,
+          titleSetTitleNumber: 1,
+          programChainNumber: 1,
+        },
+        selectedPath: [{
+          programNumber: 1,
+          cellNumber: 1,
+          vobId: 1,
+          cellId: 1,
+        }],
+        angleNumber: 1,
+        angleCount: 1,
+        chapterStart: 1,
+        chapterEnd: 1,
+        chapterCount: 1,
+        sourceExtents: [{ startLba: 0, sectorCount: 1 }],
+      }],
+    });
+    const refreshed = await fixture.run([
+      "catalog-review",
+      "show",
+      seeded.targetArchive.id,
+    ]);
+    const current = (refreshed.result as { rearchiveProposal: typeof initial })
+      .rearchiveProposal;
+    const proposedMapping = current.mappings[0]!;
+    const baseCommand = {
+      action: "preview_rearchive_mapping_proposal" as const,
+      catalogRevision: current.catalogRevision,
+      sourceCatalogRevision: current.sourceCatalogRevision,
+      mappings: [{
+        sourceDiscSelectionId: proposedMapping.sourceDiscSelectionId,
+        mediaItemId: proposedMapping.proposedMapping.mediaItemId,
+        sourceIdentity: { kind: "main_feature" as const },
+        label: proposedMapping.proposedMapping.label,
+      }],
+    };
+    const unsupportedWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(seeded.targetArchive.id, baseCommand),
+      seeded.targetArchive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const unsupportedCli = await fixture.run([
+      "catalog-review",
+      "preview-rearchive-proposal",
+      seeded.targetArchive.id,
+      "--json",
+      JSON.stringify(baseCommand),
+    ]);
+    expect(unsupportedWeb.status).toBe(200);
+    expect(unsupportedCli.exitCode).toBe(0);
+    expect(unsupportedCli.result).toEqual(await unsupportedWeb.json());
+    expect(unsupportedCli.result).toMatchObject({
+      state: "incompatible",
+      mappings: [{
+        state: "incompatible",
+        reason:
+          "Current-evidence mapping requires an exact DVD title or chapter range",
+      }],
+    });
+
+    const absentCommand = {
+      ...baseCommand,
+      mappings: [{
+        ...baseCommand.mappings[0],
+        sourceIdentity: { kind: "dvd_title" as const, titleNumber: 2 },
+      }],
+    };
+    const absentWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(seeded.targetArchive.id, absentCommand),
+      seeded.targetArchive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const absentCli = await fixture.run([
+      "catalog-review",
+      "preview-rearchive-proposal",
+      seeded.targetArchive.id,
+      "--json",
+      JSON.stringify(absentCommand),
+    ]);
+    expect(absentWeb.status).toBe(200);
+    expect(absentCli.exitCode).toBe(0);
+    expect(absentCli.result).toEqual(await absentWeb.json());
+    expect(absentCli.result).toMatchObject({
+      state: "incompatible",
+      mappings: [{
+        state: "incompatible",
+        reason:
+          "Catalog mapping source is not present in current Title Identity evidence",
+      }],
+    });
+
+    const saveCommand = {
+      ...absentCommand,
+      action: "save_rearchive_mapping_proposal" as const,
+      mutationKey: "00000000-0000-4000-8000-000000000415",
+    };
+    const saveWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(seeded.targetArchive.id, saveCommand),
+      seeded.targetArchive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const saveCli = await fixture.run([
+      "catalog-review",
+      "save-rearchive-proposal",
+      seeded.targetArchive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000416",
+      "--json",
+      JSON.stringify(saveCommand),
+    ]);
+    expect(saveWeb.status).toBe(409);
+    expect(saveCli.exitCode).toBe(2);
+    expect(saveCli.result).toEqual(await saveWeb.json());
+    expect(saveCli.result).toMatchObject({
+      error: { code: "REARCHIVE_PROPOSAL_INCOMPATIBLE" },
+    });
+    expect(access.catalog.readRearchiveMappingProposal(
+      seeded.targetArchive.id,
+    )).toMatchObject({ persisted: false });
   } finally {
     access.close();
     fixture.dispose();
