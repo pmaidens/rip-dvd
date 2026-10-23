@@ -206,55 +206,70 @@ async function finalizeStop(input: {
   reconcile: typeof reconcileDvdRecoveryCheckpoint;
   signal: AbortSignal;
 }): Promise<void> {
-  if (input.recovery.stopOperationId === null) {
+  const stopOperationId = input.recovery.stopOperationId;
+  if (stopOperationId === null) {
     throw new Error("Archive Recovery Stop has no operation identity");
   }
   if (!input.access.archiveRecoveryWork.prepareStop({
     archiveRecoveryId: input.recovery.id,
     attemptId: input.recovery.attemptId,
-    stopOperationId: input.recovery.stopOperationId,
+    stopOperationId,
   })) {
     throw new DvdRecoveryStopDeferred(
       "Stop is waiting for DVD Disc Verification to settle",
     );
   }
   const verificationId = input.recovery.work?.verificationId;
-  const latestVerification = input.access.dvdDiscVerifications
-    .findLatestForRecovery(input.recovery.id);
-  const verification = verificationId === null || verificationId === undefined
-    ? latestVerification?.archiveRecoveryAttemptId === input.recovery.attemptId
-      ? latestVerification
-      : null
-    : input.access.dvdDiscVerifications.find(verificationId);
+  const reconcileAndComplete = async () => {
+    await input.reconcile({
+      access: input.access,
+      originalsLibraryPath: input.originalsLibraryPath,
+      originalDiscArchiveId: input.recovery.originalDiscArchiveId,
+      archiveImageOwnership: input.archiveImageOwnership,
+      releaseRecoveryWork: false,
+      signal: input.signal,
+    });
+    input.access.archiveRecoveryWork.completeStop({
+      archiveRecoveryId: input.recovery.id,
+      attemptId: input.recovery.attemptId,
+      stopOperationId,
+    });
+  };
+  if (verificationId === null || verificationId === undefined) {
+    try {
+      await reconcileAndComplete();
+    } catch (cause) {
+      if (
+        cause instanceof DvdRecoveryReconciliationFault &&
+        cause.code === "WRITER_NOT_QUIESCENT"
+      ) {
+        throw new DvdRecoveryStopDeferred(
+          "Stop is waiting for quiescence",
+          { cause },
+        );
+      }
+      throw cause;
+    }
+    return;
+  }
+  const verification = input.access.dvdDiscVerifications.find(verificationId);
   if (
-    verificationId !== null && verificationId !== undefined &&
-    (verification === null ||
-      verification.archiveRecoveryId !== input.recovery.id ||
-      verification.archiveRecoveryAttemptId !== input.recovery.attemptId ||
-      verification.originalDiscArchiveId !==
-        input.recovery.originalDiscArchiveId)
+    verification === null ||
+    verification.archiveRecoveryId !== input.recovery.id ||
+    verification.archiveRecoveryAttemptId !== input.recovery.attemptId ||
+    verification.originalDiscArchiveId !==
+      input.recovery.originalDiscArchiveId
   ) {
     throw new DvdRecoveryPassFault("SOURCE_CHANGED");
   }
-  const inspection = verification === null
+  const inspection = input.access.discInspections.list({
+    ids: [verification.discInspectionId],
+  })[0];
+  const drive = inspection === undefined
     ? undefined
-    : input.access.discInspections.list({
-        ids: [verification.discInspectionId],
+    : input.access.catalog.listOpticalDrives({
+        ids: [inspection.opticalDriveId],
       })[0];
-  const archive = verification !== null
-    ? undefined
-    : input.access.catalog.listOriginalDiscArchives({
-        ids: [input.recovery.originalDiscArchiveId],
-      })[0];
-  const source = archive === undefined
-    ? undefined
-    : input.access.catalog.listDetectedDiscs(undefined, {
-        ids: [archive.detectedDiscId],
-      })[0];
-  const opticalDriveId = inspection?.opticalDriveId ?? source?.opticalDriveId;
-  const drive = opticalDriveId === undefined
-    ? undefined
-    : input.access.catalog.listOpticalDrives({ ids: [opticalDriveId] })[0];
   if (drive === undefined) {
     throw new DvdRecoveryPassFault("SOURCE_CHANGED");
   }
@@ -264,19 +279,7 @@ async function finalizeStop(input: {
       drive.devicePath,
       async () => {
         deviceInactive = true;
-        await input.reconcile({
-          access: input.access,
-          originalsLibraryPath: input.originalsLibraryPath,
-          originalDiscArchiveId: input.recovery.originalDiscArchiveId,
-          archiveImageOwnership: input.archiveImageOwnership,
-          releaseRecoveryWork: false,
-          signal: input.signal,
-        });
-        input.access.archiveRecoveryWork.completeStop({
-          archiveRecoveryId: input.recovery.id,
-          attemptId: input.recovery.attemptId,
-          stopOperationId: input.recovery.stopOperationId!,
-        });
+        await reconcileAndComplete();
       },
     );
   } catch (cause) {

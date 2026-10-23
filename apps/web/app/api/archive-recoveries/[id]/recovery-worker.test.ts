@@ -858,6 +858,45 @@ it("finishes a durable Stop after a worker restart without another read", async 
   }
 });
 
+it("stops an idle eligible Recovery after its source drive disappears", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 900,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }], "/dev/synthetic-missing-stop-drive");
+  const source = immediateReader(() => {
+    throw new Error("No source read is allowed while stopping");
+  });
+  const input = pollInput(fixture, source.reader);
+  input.access.catalog.reconcileOpticalDrives([]);
+  const withDeviceInactive = vi.fn(async () => {
+    throw new Error("Synthetic missing device path");
+  });
+  input.deviceInactivity.withDeviceInactive = withDeviceInactive;
+  const reconcile = vi.fn(async () => ({
+    outcome: "already_consistent",
+    evidence: {},
+  })) as unknown as typeof reconcileDvdRecoveryCheckpoint;
+  try {
+    input.access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000490",
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    });
+
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(true);
+    expect(withDeviceInactive).not.toHaveBeenCalled();
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(source.start).not.toHaveBeenCalled();
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "stopped", work: null });
+  } finally {
+    input.access.close();
+  }
+});
+
 it("faults an unreconcilable Stop so it cannot poison the stopping queue", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
@@ -1002,6 +1041,7 @@ it("keeps Stop pending until device inactivity can be acquired", async () => {
     sectorCount: 1,
     classification: "skipped_untested",
   }], "/dev/synthetic-recovery-drive");
+  const authority = await completeVerification(fixture, seeded);
   const source = immediateReader(() => {
     throw new Error("No source read is allowed while stopping");
   });
@@ -1019,6 +1059,12 @@ it("keeps Stop pending until device inactivity can be acquired", async () => {
     evidence: {},
   })) as unknown as typeof reconcileDvdRecoveryCheckpoint;
   try {
+    const work = input.access.archiveRecoveryWork.request(seeded.recoveryId);
+    const claim = input.access.archiveRecoveryWork.claim(
+      work.archiveRecoveryId,
+      "synthetic-device-inactivity-worker",
+    );
+    input.access.archiveRecoveryWork.bindVerification(claim, authority);
     const requested = input.access.archiveRecoveryWork.requestStop({
       mutationKey: "00000000-0000-4000-8000-000000000469",
       archiveRecoveryId: seeded.recoveryId,
@@ -1109,10 +1155,7 @@ it("keeps Stop pending until running disc verification settles", async () => {
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({ status: "stopped", work: null });
     expect(reconcile).toHaveBeenCalledOnce();
-    expect(withDeviceInactive).toHaveBeenCalledWith(
-      seeded.verificationDrive.devicePath,
-      expect.any(Function),
-    );
+    expect(withDeviceInactive).not.toHaveBeenCalled();
     expect(source.start).not.toHaveBeenCalled();
   } finally {
     input.access.close();
