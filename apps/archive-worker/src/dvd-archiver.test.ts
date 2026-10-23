@@ -2326,6 +2326,25 @@ describe("DVD archive publication", () => {
     expect(sameDeviceMutation).toHaveBeenCalledOnce();
   });
 
+  it.runIf(supportsLinuxWriterOwnership)(
+    "proves an admitted inode inactive after its recorded path is reused",
+    async () => {
+      const displaced = lstatSync("/dev/zero");
+      const spawnLockProcess = vi.fn();
+      const mutation = vi.fn();
+      const runner = createNodeDvdCopyRunner({ spawnLockProcess });
+
+      await expect(runner.withDeviceIdentityInactive({
+        devicePath: "/dev/null",
+        deviceId: String(displaced.dev),
+        inode: String(displaced.ino),
+      }, mutation)).resolves.toBeUndefined();
+
+      expect(mutation).toHaveBeenCalledOnce();
+      expect(spawnLockProcess).not.toHaveBeenCalled();
+    },
+  );
+
   it("rejects invalid native reader capacity", () => {
     expect(() =>
       createNodeDvdCopyRunner({ maxActiveCopies: 0 }),

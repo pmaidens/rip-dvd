@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import type { Readable, Writable } from "node:stream";
 
 import { optionalBoundedText } from "./bounded-text.js";
 
@@ -40,6 +41,20 @@ export interface StartNodeBoundedCommandProcessOptions {
   terminateProcess?: (child: { kill(signal: NodeJS.Signals): boolean }) => void;
 }
 
+export interface StartNodeAuthorizedBoundedCommandProcessOptions
+  extends StartNodeBoundedCommandProcessOptions {
+  authorizationPayload: string;
+  authorizationReadyMessage: string;
+}
+
+export interface ActiveAuthorizedBoundedCommandProcess
+  extends ActiveBoundedProcess<BoundedRawCommandProcessCompletion> {
+  /** Resolves only after the helper holds its inherited resources and is gated. */
+  ready: Promise<void>;
+  /** Releases the helper to begin the operation after durable admission. */
+  authorize(): void;
+}
+
 export interface ActiveBoundedCommandProcess
   extends ActiveBoundedProcess<BoundedCommandProcessCompletion> {}
 
@@ -65,6 +80,10 @@ interface StartNodeBoundedChildProcessOptions {
   maxOutputBytes: number;
   operationName: string;
   terminateProcess: (child: { kill(signal: NodeJS.Signals): boolean }) => void;
+  authorization?: {
+    payload: string;
+    readyMessage: string;
+  };
 }
 
 interface NodeBoundedCommandProcessLauncherOptions {
@@ -196,6 +215,7 @@ export function createBoundedSingleFlightCoordinator<Request, Result>({
 }
 
 function startNodeBoundedChildProcess({
+  authorization,
   arguments_,
   executable,
   extraFileDescriptors = [],
@@ -204,13 +224,19 @@ function startNodeBoundedChildProcess({
   terminateProcess,
 }: StartNodeBoundedChildProcessOptions): ActiveBoundedProcess<
   BoundedRawCommandProcessCompletion
-> {
+> & Partial<Pick<ActiveAuthorizedBoundedCommandProcess, "authorize" | "ready">> {
   if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) {
     throw new Error(`${operationName} output bound is invalid`);
   }
   const child = spawn(executable, [...arguments_], {
     shell: false,
-    stdio: ["ignore", "pipe", "pipe", ...extraFileDescriptors],
+    stdio: [
+      "ignore",
+      "pipe",
+      "pipe",
+      ...extraFileDescriptors,
+      ...(authorization === undefined ? [] : ["pipe", "pipe"] as const),
+    ],
   });
   if (child.stdout === null || child.stderr === null) {
     child.kill("SIGKILL");
@@ -218,6 +244,19 @@ function startNodeBoundedChildProcess({
   }
   const childStdout = child.stdout;
   const childStderr = child.stderr;
+  const authorizationReadyPipe = authorization === undefined
+    ? undefined
+    : child.stdio[3 + extraFileDescriptors.length] as Readable | null;
+  const authorizationInputPipe = authorization === undefined
+    ? undefined
+    : child.stdio[4 + extraFileDescriptors.length] as Writable | null;
+  if (
+    authorization !== undefined &&
+    (authorizationReadyPipe == null || authorizationInputPipe == null)
+  ) {
+    child.kill("SIGKILL");
+    throw new Error(`${operationName} authorization pipes are unavailable`);
+  }
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
   let stdoutBytes = 0;
@@ -225,6 +264,10 @@ function startNodeBoundedChildProcess({
   let operationSettled = false;
   let processClosed = false;
   let cancellationRequested = false;
+  let authorizationGranted = false;
+  let authorizationReadySettled = false;
+  let authorizationReadyAccepted = false;
+  let authorizationReadyBuffer = "";
   let resolveResult!: (value: BoundedRawCommandProcessCompletion) => void;
   let rejectResult!: (reason: unknown) => void;
   let resolveClosed!: () => void;
@@ -235,6 +278,20 @@ function startNodeBoundedChildProcess({
   const closed = new Promise<void>((resolve) => {
     resolveClosed = resolve;
   });
+  let resolveReady!: () => void;
+  let rejectReady!: (reason: unknown) => void;
+  const ready = authorization === undefined
+    ? undefined
+    : new Promise<void>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+  const rejectAuthorizationReady = (error: unknown) => {
+    if (authorization !== undefined && !authorizationReadySettled) {
+      authorizationReadySettled = true;
+      rejectReady(error);
+    }
+  };
   const rejectOperation = (error: unknown) => {
     if (!operationSettled) {
       operationSettled = true;
@@ -252,6 +309,11 @@ function startNodeBoundedChildProcess({
       processClosed = true;
       resolveClosed();
     }
+  };
+  const rejectAuthorization = (error: unknown) => {
+    rejectAuthorizationReady(error);
+    rejectOperation(error);
+    if (!processClosed) child.kill("SIGKILL");
   };
 
   const capture = (
@@ -277,8 +339,30 @@ function startNodeBoundedChildProcess({
       child.kill("SIGKILL");
     }
   });
+  authorizationReadyPipe?.on("data", (chunk: Buffer) => {
+    if (authorizationReadySettled) return;
+    authorizationReadyBuffer += chunk.toString("utf8");
+    if (
+      authorizationReadyBuffer.length > authorization!.readyMessage.length ||
+      !authorization!.readyMessage.startsWith(authorizationReadyBuffer)
+    ) {
+      rejectAuthorizationReady(
+        new Error(`${operationName} authorization readiness is malformed`),
+      );
+      child.kill("SIGKILL");
+      return;
+    }
+    if (authorizationReadyBuffer === authorization!.readyMessage) {
+      authorizationReadySettled = true;
+      authorizationReadyAccepted = true;
+      resolveReady();
+    }
+  });
+  authorizationReadyPipe?.on("error", rejectAuthorization);
+  authorizationInputPipe?.on("error", rejectAuthorization);
   child.once("error", (error) => {
     rejectOperation(error);
+    rejectAuthorizationReady(error);
     // Only a spawn failure proves there is no child to reap. A later process
     // error can coexist with a still-live PID.
     if (child.pid === undefined) {
@@ -287,6 +371,9 @@ function startNodeBoundedChildProcess({
   });
   child.once("close", (code, signal) => {
     confirmClosed();
+    rejectAuthorizationReady(
+      new Error(`${operationName} closed before authorization`),
+    );
     if (cancellationRequested) {
       rejectOperation(new Error(`${operationName} was cancelled`));
       return;
@@ -303,7 +390,8 @@ function startNodeBoundedChildProcess({
     });
   });
 
-  return {
+  const active: ActiveBoundedProcess<BoundedRawCommandProcessCompletion> &
+    Partial<Pick<ActiveAuthorizedBoundedCommandProcess, "authorize" | "ready">> = {
     result,
     closed,
     cancel() {
@@ -313,6 +401,11 @@ function startNodeBoundedChildProcess({
       cancellationRequested = true;
       childStdout.destroy();
       childStderr.destroy();
+      authorizationReadyPipe?.destroy();
+      authorizationInputPipe?.destroy();
+      rejectAuthorizationReady(
+        new Error(`${operationName} was cancelled before authorization`),
+      );
       try {
         terminateProcess(child);
       } finally {
@@ -322,6 +415,23 @@ function startNodeBoundedChildProcess({
       }
     },
   };
+  if (authorization !== undefined && ready !== undefined) {
+    active.ready = ready;
+    active.authorize = () => {
+      if (
+        !authorizationReadySettled ||
+        !authorizationReadyAccepted ||
+        authorizationGranted ||
+        cancellationRequested ||
+        processClosed
+      ) {
+        throw new Error(`${operationName} authorization is unavailable`);
+      }
+      authorizationGranted = true;
+      authorizationInputPipe!.end(authorization.payload);
+    };
+  }
+  return active;
 }
 
 export function startNodeBoundedCommandProcess({
@@ -331,6 +441,30 @@ export function startNodeBoundedCommandProcess({
   BoundedRawCommandProcessCompletion
 > {
   return startNodeBoundedChildProcess({ ...options, terminateProcess });
+}
+
+export function startNodeAuthorizedBoundedCommandProcess({
+  authorizationPayload,
+  authorizationReadyMessage,
+  terminateProcess = (child) => void child.kill("SIGKILL"),
+  ...options
+}: StartNodeAuthorizedBoundedCommandProcessOptions):
+  ActiveAuthorizedBoundedCommandProcess {
+  if (authorizationReadyMessage.length === 0) {
+    throw new Error(`${options.operationName} authorization message is invalid`);
+  }
+  const active = startNodeBoundedChildProcess({
+    ...options,
+    authorization: {
+      payload: authorizationPayload,
+      readyMessage: authorizationReadyMessage,
+    },
+    terminateProcess,
+  });
+  if (active.ready === undefined || active.authorize === undefined) {
+    throw new Error(`${options.operationName} authorization is unavailable`);
+  }
+  return active as ActiveAuthorizedBoundedCommandProcess;
 }
 
 export function createNodeBoundedChildProcessLauncher({

@@ -13,11 +13,16 @@ import {
 } from "@rip-dvd/data-access";
 
 import {
+  createNodeDvdRecoverySourceReader,
   parseDvdVerificationReadFailureProtocol,
   verifyInsertedDvdAgainstSamples,
+  type DvdSourceRead,
   type DvdVerificationSourceReader,
-  type DvdVerificationSourceRead,
 } from "./dvd-disc-verifier.js";
+import type {
+  BoundedRawCommandProcessCompletion,
+  StartNodeAuthorizedBoundedCommandProcessOptions,
+} from "./bounded-child-process.js";
 
 const metadataFingerprint = `dvdmeta-sha256:${"a".repeat(64)}`;
 const diagnostic: DvdDiscVerificationDiagnostic = {
@@ -31,6 +36,11 @@ const diagnostic: DvdDiscVerificationDiagnostic = {
   asc: null,
   ascq: null,
   informationLba: null,
+};
+const deviceIdentity = {
+  devicePath: "/dev/synthetic-disc",
+  deviceId: "1",
+  inode: "2",
 };
 
 function sampleBytes(index: number): Buffer {
@@ -64,16 +74,70 @@ function manifest(count = DVD_SOURCE_SAMPLE_BAND_COUNT): DvdSourceSampleManifest
 }
 
 function reader(
-  read: (index: number) => DvdVerificationSourceRead,
+  read: (index: number) => DvdSourceRead,
 ) {
   const run = vi.fn(({ startLba }:
     Parameters<DvdVerificationSourceReader["start"]>[0]) => ({
       result: Promise.resolve(read(startLba / 64)),
       closed: Promise.resolve(),
       cancel: vi.fn(),
+      deviceIdentity,
+      ready: Promise.resolve(),
+      authorize: vi.fn(),
     }));
   return { reader: { start: run }, run };
 }
+
+it("binds a recovery helper read to the inherited device descriptor", async () => {
+  let launched: StartNodeAuthorizedBoundedCommandProcessOptions | undefined;
+  const bytes = Buffer.alloc(2_048, 0x4f);
+  const startProcess = vi.fn((
+    options: StartNodeAuthorizedBoundedCommandProcessOptions,
+  ) => {
+    launched = options;
+    let resolveResult!: (value: {
+      exitCode: number;
+      signal: null;
+      stderr: Buffer;
+      stdout: Buffer;
+    }) => void;
+    return {
+      result: new Promise<BoundedRawCommandProcessCompletion>((resolve) => {
+        resolveResult = resolve;
+      }),
+      closed: Promise.resolve(),
+      cancel: vi.fn(),
+      ready: Promise.resolve(),
+      authorize: vi.fn(() => resolveResult({
+        exitCode: 0,
+        signal: null,
+        stderr: Buffer.alloc(0),
+        stdout: bytes,
+      })),
+    };
+  });
+  const active = createNodeDvdRecoverySourceReader({ startProcess }).start({
+    devicePath: "/dev/null",
+    startLba: 0,
+    sectorCount: 1,
+    acceptedEndLbaExclusive: 1,
+  });
+
+  expect(launched?.arguments_.slice(5, 9)).toEqual([
+    "/proc/self/fd/3",
+    "rip-dvd-dvdcss-reader",
+    "recover-sector-v1",
+    "/proc/self/fd/3",
+  ]);
+  expect(launched?.extraFileDescriptors).toEqual([expect.any(Number)]);
+  expect(launched).toMatchObject({
+    authorizationPayload: "1",
+    authorizationReadyMessage: "rip-dvd-source-read-authorization-ready\n",
+  });
+  await active.ready;
+  active.authorize();
+  await expect(active.result).resolves.toEqual({ outcome: "readable", bytes });
+});
 
 it("matches all sixteen bounded raw-sector samples", async () => {
   const source = reader((index) => ({
@@ -325,11 +389,14 @@ it("cancels a hung read at the deadline and waits for quiescence", async () => {
     });
     const source: DvdVerificationSourceReader = {
       start: vi.fn(() => ({
-        result: new Promise<DvdVerificationSourceRead>(() => {}),
+        result: new Promise<DvdSourceRead>(() => {}),
         closed: new Promise<void>((resolve) => {
           closeRead = resolve;
         }),
         cancel,
+        deviceIdentity,
+        ready: Promise.resolve(),
+        authorize: vi.fn(),
       })),
     };
     const verification = verifyInsertedDvdAgainstSamples({
@@ -371,11 +438,14 @@ it("cancels a hung read on worker shutdown and waits for quiescence", async () =
   });
   const source: DvdVerificationSourceReader = {
     start: vi.fn(() => ({
-      result: new Promise<DvdVerificationSourceRead>(() => {}),
+      result: new Promise<DvdSourceRead>(() => {}),
       closed: new Promise<void>((resolve) => {
         closeRead = resolve;
       }),
       cancel,
+      deviceIdentity,
+      ready: Promise.resolve(),
+      authorize: vi.fn(),
     })),
   };
   const controller = new AbortController();

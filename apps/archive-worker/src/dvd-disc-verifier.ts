@@ -13,6 +13,7 @@ import {
   type DataAccess,
   type DvdDiscVerificationDiagnostic,
   type DvdDiscVerificationSampleFinding,
+  type OpticalDeviceIdentity,
   type DvdSourceSampleManifest,
 } from "@rip-dvd/data-access";
 import {
@@ -29,12 +30,17 @@ import {
   parseDvdReadFailureTerminalResultProtocol,
 } from "./dvd-recovery-contracts.js";
 import {
-  startNodeBoundedCommandProcess,
+  startNodeAuthorizedBoundedCommandProcess,
+  type ActiveAuthorizedBoundedCommandProcess,
   type ActiveBoundedProcess,
+  type StartNodeAuthorizedBoundedCommandProcessOptions,
 } from "./bounded-child-process.js";
 
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 const MAX_DIAGNOSTIC_BYTES = 65_536;
+const OPTICAL_DEVICE_DESCRIPTOR_PATH = "/proc/self/fd/3";
+const SOURCE_READ_AUTHORIZATION_READY =
+  "rip-dvd-source-read-authorization-ready\n";
 
 const VERIFICATION_FAILURE_KEYS = [
   "asc", "ascq", "category", "classifierVersion", "driverStatus",
@@ -107,18 +113,76 @@ export function parseDvdVerificationReadFailureProtocol(
   }
 }
 
-export type DvdVerificationSourceRead =
+export type DvdSourceRead =
   | { outcome: "readable"; bytes: Buffer }
   | { outcome: "unreadable"; diagnostic: DvdDiscVerificationDiagnostic };
 
+export interface ActiveDvdSourceRead
+  extends ActiveBoundedProcess<DvdSourceRead> {
+  deviceIdentity: OpticalDeviceIdentity;
+  /** Resolves after the helper holds its descriptor but before it may read. */
+  ready: Promise<void>;
+  /** Releases the helper only after its exact identity is durably admitted. */
+  authorize(): void;
+}
+
+export async function awaitDvdSourceReadReady(
+  active: ActiveDvdSourceRead,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal === undefined) {
+    await active.ready;
+    return;
+  }
+  let removeAbortListener = () => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const onAbort = () => {
+      try {
+        signal.throwIfAborted();
+      } catch (error) {
+        reject(error);
+      }
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+  });
+  try {
+    await Promise.race([active.ready, aborted]);
+  } finally {
+    removeAbortListener();
+  }
+}
+
+export function authorizeDvdSourceRead(active: ActiveDvdSourceRead): void {
+  active.authorize();
+}
+
+interface DvdSourceReadRange {
+  devicePath: string;
+  startLba: number;
+  sectorCount: number;
+  acceptedEndLbaExclusive: number;
+}
+
+type DvdSourceReadProcessLauncher = (
+  input: StartNodeAuthorizedBoundedCommandProcessOptions,
+) => ActiveAuthorizedBoundedCommandProcess;
+
+interface NodeDvdSourceReaderDependencies {
+  startProcess?: DvdSourceReadProcessLauncher;
+}
+
 export interface DvdVerificationSourceReader {
-  start(input: {
-    devicePath: string;
-    startLba: number;
-    sectorCount: number;
-    acceptedEndLbaExclusive: number;
-    timeoutMs: number;
-  }): ActiveBoundedProcess<DvdVerificationSourceRead>;
+  start(
+    input: DvdSourceReadRange & { timeoutMs: number },
+  ): ActiveDvdSourceRead;
+}
+
+export interface DvdRecoverySourceReader {
+  start(
+    input: DvdSourceReadRange & { timeoutMs?: never },
+  ): ActiveDvdSourceRead;
 }
 
 class DvdVerificationReadDeadlineError extends Error {
@@ -135,14 +199,17 @@ class DvdVerificationReadStoppedError extends Error {
   }
 }
 
-function openOpticalDriveLock(devicePath: string): number {
+function openOpticalDriveLock(devicePath: string): {
+  descriptor: number;
+  deviceIdentity: OpticalDeviceIdentity;
+} {
   const descriptor = openSync(
     devicePath,
     constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
   );
   try {
-    const opened = fstatSync(descriptor);
-    const linked = lstatSync(devicePath);
+    const opened = fstatSync(descriptor, { bigint: true });
+    const linked = lstatSync(devicePath, { bigint: true });
     if (
       (!opened.isBlockDevice() && !opened.isCharacterDevice()) ||
       (!linked.isBlockDevice() && !linked.isCharacterDevice()) ||
@@ -150,15 +217,31 @@ function openOpticalDriveLock(devicePath: string): number {
       opened.dev !== linked.dev ||
       opened.ino !== linked.ino
     ) throw new Error("DVD Disc Verification Optical Drive lock is unsafe");
-    return descriptor;
+    return {
+      descriptor,
+      deviceIdentity: {
+        devicePath,
+        deviceId: String(opened.dev),
+        inode: String(opened.ino),
+      },
+    };
   } catch (error) {
     closeSync(descriptor);
     throw error;
   }
 }
 
-export function createNodeDvdVerificationSourceReader():
-  DvdVerificationSourceReader {
+function createNodeDvdSourceReader<Input extends DvdSourceReadRange & {
+  timeoutMs?: number;
+}>(options: {
+  boundedLifetime: boolean;
+  command: "verify-sample-v1" | "recover-sector-v1";
+  operationName: string;
+  requiredSectorCount: number;
+  startProcess?: DvdSourceReadProcessLauncher;
+}): {
+  start(input: Input): ActiveDvdSourceRead;
+} {
   return {
     start(input) {
       const devicePath = requireSafeOpticalDevicePath(input.devicePath);
@@ -166,16 +249,23 @@ export function createNodeDvdVerificationSourceReader():
         !Number.isSafeInteger(input.startLba) ||
         input.startLba < 0 ||
         !Number.isSafeInteger(input.sectorCount) ||
-        input.sectorCount <= 0 ||
+        input.sectorCount !== options.requiredSectorCount ||
         input.startLba + input.sectorCount > input.acceptedEndLbaExclusive ||
-        !Number.isSafeInteger(input.timeoutMs) ||
-        input.timeoutMs <= 0 ||
-        input.timeoutMs > DVD_DISC_VERIFICATION_READ_DEADLINE_MS
-      ) throw new Error("DVD Disc Verification source read is invalid");
-      const lockDescriptor = openOpticalDriveLock(devicePath);
+        options.boundedLifetime && (
+          !Number.isSafeInteger(input.timeoutMs) ||
+          input.timeoutMs === undefined ||
+          input.timeoutMs <= 0 ||
+          input.timeoutMs > DVD_DISC_VERIFICATION_READ_DEADLINE_MS
+        ) ||
+        !options.boundedLifetime && input.timeoutMs !== undefined
+      ) throw new Error(`${options.operationName} is invalid`);
+      const startProcess = options.startProcess ??
+        startNodeAuthorizedBoundedCommandProcess;
+      const { descriptor: lockDescriptor, deviceIdentity } =
+        openOpticalDriveLock(devicePath);
       let activeProcess;
       try {
-        activeProcess = startNodeBoundedCommandProcess({
+        activeProcess = startProcess({
           executable: "flock",
           arguments_: [
             "--exclusive",
@@ -183,39 +273,44 @@ export function createNodeDvdVerificationSourceReader():
             "--no-fork",
             "--conflict-exit-code",
             String(FLOCK_CONFLICT_EXIT_CODE),
-            "/proc/self/fd/3",
+            OPTICAL_DEVICE_DESCRIPTOR_PATH,
             "rip-dvd-dvdcss-reader",
-            "verify-sample-v1",
-            devicePath,
+            options.command,
+            OPTICAL_DEVICE_DESCRIPTOR_PATH,
             String(input.startLba),
             String(input.sectorCount),
             String(input.acceptedEndLbaExclusive),
-            String(Math.max(1, Math.ceil(input.timeoutMs / 1_000))),
+            ...(input.timeoutMs === undefined
+              ? []
+              : [String(Math.max(1, Math.ceil(input.timeoutMs / 1_000)))]),
           ],
           extraFileDescriptors: [lockDescriptor],
+          authorizationPayload: "1",
+          authorizationReadyMessage: SOURCE_READ_AUTHORIZATION_READY,
           maxOutputBytes: Math.max(
-            DVD_SOURCE_SAMPLE_BYTE_COUNT,
+            options.requiredSectorCount * 2_048,
             MAX_DIAGNOSTIC_BYTES,
           ),
-          operationName: "DVD Disc Verification source read",
+          operationName: options.operationName,
         });
       } finally {
         closeSync(lockDescriptor);
       }
       return {
         ...activeProcess,
+        deviceIdentity,
         result: activeProcess.result.then(
           ({ exitCode, signal, stderr, stdout }) => {
             if (signal === "SIGALRM") {
               throw new DvdVerificationReadDeadlineError();
             }
             if (signal !== null) {
-              throw new Error("DVD Disc Verification helper output is invalid");
+              throw new Error(`${options.operationName} helper output is invalid`);
             }
             if (exitCode === 0) {
-              if (stdout.length !== DVD_SOURCE_SAMPLE_BYTE_COUNT) {
+              if (stdout.length !== input.sectorCount * 2_048) {
                 throw new Error(
-                  "DVD Disc Verification helper returned a short sample",
+                  `${options.operationName} helper returned a short read`,
                 );
               }
               return { outcome: "readable", bytes: stdout };
@@ -225,7 +320,7 @@ export function createNodeDvdVerificationSourceReader():
                 value.startsWith(DVD_READ_FAILURE_RESULT_PREFIX)
               );
             if (exitCode !== 3 || line === undefined) {
-              throw new Error("DVD Disc Verification helper failed");
+              throw new Error(`${options.operationName} helper failed`);
             }
             return {
               outcome: "unreadable",
@@ -241,12 +336,42 @@ export function createNodeDvdVerificationSourceReader():
   };
 }
 
+export function createNodeDvdVerificationSourceReader(
+  dependencies: NodeDvdSourceReaderDependencies = {},
+):
+  DvdVerificationSourceReader {
+  return createNodeDvdSourceReader<DvdSourceReadRange & {
+    timeoutMs: number;
+  }>({
+    boundedLifetime: true,
+    command: "verify-sample-v1",
+    operationName: "DVD Disc Verification source read",
+    requiredSectorCount: DVD_SOURCE_SAMPLE_BYTE_COUNT / 2_048,
+    startProcess: dependencies.startProcess,
+  });
+}
+
+export function createNodeDvdRecoverySourceReader(
+  dependencies: NodeDvdSourceReaderDependencies = {},
+):
+  DvdRecoverySourceReader {
+  return createNodeDvdSourceReader<DvdSourceReadRange & {
+    timeoutMs?: never;
+  }>({
+    boundedLifetime: false,
+    command: "recover-sector-v1",
+    operationName: "DVD Recovery source read",
+    requiredSectorCount: 1,
+    startProcess: dependencies.startProcess,
+  });
+}
+
 async function runBoundedDvdVerificationSourceRead(input: {
-  active: ActiveBoundedProcess<DvdVerificationSourceRead>;
+  active: ActiveBoundedProcess<DvdSourceRead>;
   signal?: AbortSignal;
   timeoutMs: number;
 }): Promise<
-  | { outcome: "completed"; read: DvdVerificationSourceRead }
+  | { outcome: "completed"; read: DvdSourceRead }
   | { outcome: "stopped"; reason: "deadline" | "interrupted" }
 > {
   let timeout: NodeJS.Timeout | undefined;
@@ -509,7 +634,34 @@ export async function pollDvdDiscVerification(input: {
           sourceMetadataFingerprint: claim.sourceMetadataFingerprint,
           observedMetadataFingerprint: claim.observedMetadataFingerprint,
           devicePath: drive.devicePath,
-          reader: input.reader,
+          reader: {
+            start(request) {
+              const active = input.reader.start(request);
+              return {
+                ...active,
+                result: (async () => {
+                  try {
+                    await awaitDvdSourceReadReady(active);
+                    assertOwned();
+                    const admitted = input.access.dvdDiscVerifications
+                      .admitSourceRead(claim, active.deviceIdentity);
+                    if (!admitted) {
+                      throw new Error(
+                        "DVD Disc Verification claim expired",
+                      );
+                    }
+                    authorizeDvdSourceRead(active);
+                    return await active.result;
+                  } catch (error) {
+                    void active.result.catch(() => undefined);
+                    active.cancel();
+                    await active.closed;
+                    throw error;
+                  }
+                })(),
+              };
+            },
+          },
           startedAtMs: claim.startedAt.getTime(),
           signal: input.signal,
           insertionIsCurrent: inspectionIsCurrent,
@@ -517,9 +669,13 @@ export async function pollDvdDiscVerification(input: {
           authorizeRead: () => {
             assertOwned();
             if (heartbeatError !== undefined) return false;
-            const active = input.access.dvdDiscVerifications.renewClaim(claim);
+            const active = input.access.dvdDiscVerifications.renewClaim(
+              claim,
+            );
             if (!active) {
-              heartbeatError = new Error("DVD Disc Verification claim expired");
+              heartbeatError = new Error(
+                "DVD Disc Verification claim expired",
+              );
             }
             return active;
           },

@@ -336,20 +336,26 @@ export function markArchiveWithDvdRecoveryEvidence(
       `).run(DVD_RECOVERY_EVIDENCE_FORMAT, originalDiscArchiveId);
       sqlite.prepare(`
         INSERT INTO archive_recoveries (
-          id, original_disc_archive_id, status, created_at, updated_at
-        ) VALUES (?, ?, 'eligible', 1, 1)
-      `).run(options.archiveRecovery.id, originalDiscArchiveId);
+          id, original_disc_archive_id, attempt_id, attempt_ordinal, status,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, 1, 'eligible', 1, 1)
+      `).run(
+        options.archiveRecovery.id,
+        originalDiscArchiveId,
+        `${options.archiveRecovery.id}:attempt:1`,
+      );
       if (options.archiveRecovery.workStatus !== undefined) {
         const claimed = options.archiveRecovery.workStatus === "claimed";
         sqlite.prepare(`
           INSERT INTO archive_recovery_work (
-            archive_recovery_id, original_disc_archive_id, status,
+            archive_recovery_id, original_disc_archive_id, attempt_id, status,
             requested_at, claimed_by, claim_token, claimed_at,
             created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
         `).run(
           options.archiveRecovery.id,
           originalDiscArchiveId,
+          `${options.archiveRecovery.id}:attempt:1`,
           options.archiveRecovery.workStatus,
           claimed ? null : 1,
           claimed ? "synthetic-recovery-worker" : null,

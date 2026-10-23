@@ -38,6 +38,63 @@ for (let index = 0; index < content.length; index += 1) {
 writeFileSync(sourcePath, content);
 writeFileSync(replacementSourcePath, Buffer.alloc(content.byteLength, 173));
 
+const descriptorBoundSourcePath = "/tmp/rip-dvd-reader-descriptor-source.img";
+const descriptorReplacementPath =
+  "/tmp/rip-dvd-reader-descriptor-replacement.img";
+const descriptorAuthorizationPath =
+  "/tmp/rip-dvd-reader-descriptor-authorization";
+writeFileSync(descriptorBoundSourcePath, content);
+writeFileSync(
+  descriptorReplacementPath,
+  Buffer.alloc(content.byteLength, 173),
+);
+const descriptorBoundSource = openSync(
+  descriptorBoundSourcePath,
+  constants.O_RDONLY | constants.O_NOFOLLOW,
+);
+renameSync(descriptorReplacementPath, descriptorBoundSourcePath);
+writeFileSync(descriptorAuthorizationPath, "1");
+const descriptorAuthorization = openSync(
+  descriptorAuthorizationPath,
+  constants.O_RDONLY | constants.O_NOFOLLOW,
+);
+let descriptorBoundRead;
+try {
+  descriptorBoundRead = spawnSync(
+    testExecutable,
+    [
+      "recover-sector-v1",
+      "/proc/self/fd/3",
+      "0",
+      "1",
+      String(content.byteLength / 2_048),
+    ],
+    {
+      encoding: "buffer",
+      stdio: [
+        "ignore",
+        "pipe",
+        "pipe",
+        descriptorBoundSource,
+        "pipe",
+        descriptorAuthorization,
+      ],
+    },
+  );
+} finally {
+  closeSync(descriptorBoundSource);
+  closeSync(descriptorAuthorization);
+}
+if (
+  descriptorBoundRead.status !== 0 ||
+  !descriptorBoundRead.output[4]?.equals(
+    Buffer.from("rip-dvd-source-read-authorization-ready\n"),
+  ) ||
+  !descriptorBoundRead.stdout.equals(content.subarray(0, 2_048))
+) {
+  throw new Error("descriptor-bound DVD source read check failed");
+}
+
 const boundedLifetime = spawn(
   testExecutable,
   ["verification-lifetime-test", "1", "10"],
@@ -613,6 +670,23 @@ function runVerificationSampleTest(faults = "none") {
   );
 }
 
+function runRecoverySectorTest(startLba, faults = "none") {
+  return spawnSync(
+    testExecutable,
+    [
+      "recover-sector-test",
+      sourcePath,
+      String(content.byteLength),
+      String(startLba),
+      "1",
+      faults,
+      "0",
+      "valid",
+    ],
+    { encoding: "buffer" },
+  );
+}
+
 function runTestResume(outputPath, faults, bitmapHex, mode = "valid") {
   const output = statSync(outputPath);
   const result = spawnSync(
@@ -721,6 +795,15 @@ if (
 ) {
   throw new Error(
     `libdvdcss verification sample check failed: ${verificationSample.stderr.toString("utf8")}`,
+  );
+}
+const recoverySector = runRecoverySectorTest(7);
+if (
+  recoverySector.status !== 0 ||
+  !recoverySector.stdout.equals(content.subarray(7 * 2_048, 8 * 2_048))
+) {
+  throw new Error(
+    `libdvdcss recovery sector check failed: ${recoverySector.stderr.toString("utf8")}`,
   );
 }
 const verificationMediumError = runVerificationSampleTest(

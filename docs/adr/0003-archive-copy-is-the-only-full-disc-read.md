@@ -118,6 +118,26 @@ samples establish only bounded recovery-source identity;
 they are not a whole-disc hash or a completeness proof. DVD Disc Verification
 is neither Filesystem Verification nor an Archive Audit.
 
+Each verification claim and source-read admission is also bound to the current
+eligible Recovery attempt. Recovery Stop invalidates queued verification,
+denies claim renewal and further read admission, and remains `stopping` until
+verification work has settled and every admitted verification helper's exact
+device identity is proven inactive. The identity remains durable even if an
+expired verification lease is settled first. A queued verification has no
+device handle to quiesce. Recovery source helpers retain the same exact device
+path, device identity, and inode with their claim; Stop proves that identity
+inactive before reconciliation rather than trusting a path that may have been
+renumbered or reused. The helper reads through the inherited descriptor used
+to capture and lock that identity, so it cannot reopen a reused path onto a
+different device. While a non-expired Recovery claim remains live, only that
+claim's worker may report its reads quiescent and advance Stop; another worker
+must wait for the handoff or lease expiry. Both verification and Recovery
+helpers first acquire the inherited descriptor and wait behind an authorization
+gate. The worker commits that descriptor's exact identity before authorizing
+DVD I/O. If admission rolls back or the worker exits first, the helper cannot
+begin a read; after a successful commit, Stop has the durable identity needed
+to fence the helper even if the worker then crashes.
+
 This deliberately trades sector-level duplicate detection and general
 post-copy raw-image hash verification for materially less optical-drive wear
 and shorter archive time.
@@ -186,3 +206,24 @@ that exact revision into SQLite. A failed observation advances evidence
 without mutating the image. Retained journals and mismatched projections fail
 operator reads closed; this commit operation does not perform reconciliation
 or open new-format admission.
+
+A recovery pass binds a completed matching DVD Disc Verification only when its
+revision and digest are the exact current checkpoint. That binding belongs to
+the claimed Recovery attempt. It remains valid across only the monotonic
+one-sector checkpoint descendants committed by that same claim during the
+pass; it cannot authorize another attempt or a pass that starts from a later
+checkpoint. Once a partial pass settles, another pass requires a new
+checkpoint-current verification. This pass-scoped rule lets one verified pass
+narrow several sectors without treating its own first committed sector as an
+unrelated checkpoint change.
+
+The same durable work record advances a pass cursor in the transaction that
+projects each one-sector checkpoint. Graceful restart and post-crash takeover
+therefore resume strictly after the last attempted sector, including a sector
+that retained individually-failed evidence. Workers renew the pass claim
+independently of sector progress. Before inspecting an expired claim's admitted
+device identity, takeover atomically rotates the claim token so the prior
+worker can neither renew nor admit another read. It then proves that exact
+device identity and the archive writer quiescent, reconciles any published
+checkpoint while retaining the claimed `running` state, requeues the pass,
+clears the now-inactive identity, and preserves the cursor.

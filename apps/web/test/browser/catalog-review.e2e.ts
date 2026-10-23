@@ -1,4 +1,10 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import {
+  expect,
+  type Locator,
+  type Page,
+  type Response,
+  test,
+} from "@playwright/test";
 
 function fixtureVariant(projectName: string): "desktop" | "mobile" {
   return projectName === "desktop" ? "desktop" : "mobile";
@@ -80,7 +86,27 @@ function titleEvidence(page: Page, titleNumber: number): Locator {
   }).filter({ hasText: "Title Suggestion" }).first();
 }
 
-test("keyboard-only mapping and job-free correction announce their results", async ({ page }, testInfo) => {
+function waitForCatalogReviewReloads(page: Page, count: number): Promise<void> {
+  return new Promise((resolve) => {
+    let observed = 0;
+    const observe = (response: Response) => {
+      if (
+        !response.url().includes("/api/catalog-reviews/") ||
+        response.request().method() !== "GET"
+      ) {
+        return;
+      }
+      observed += 1;
+      if (observed === count) {
+        page.off("response", observe);
+        resolve();
+      }
+    };
+    page.on("response", observe);
+  });
+}
+
+test("keyboard mapping and job-free correction announce their results", async ({ page }, testInfo) => {
   const variant = fixtureVariant(testInfo.project.name);
   await openCatalogReview(
     page,
@@ -106,12 +132,15 @@ test("keyboard-only mapping and job-free correction announce their results", asy
   await page.keyboard.type(`Keyboard mapped movie ${variant}`);
   const create = page.getByRole("button", { name: "Create Media Item and Disc Selection" });
   await tabTo(page, create);
+  // The mutation reloads the editor, then its dashboard activity event reloads it again.
+  const reviewReloads = waitForCatalogReviewReloads(page, 2);
   const mappingResponse = page.waitForResponse((response) =>
     response.url().includes("/api/catalog-reviews/") &&
     response.request().method() === "POST"
   );
   await page.keyboard.press("Enter");
   expect((await mappingResponse).status()).toBe(201);
+  await reviewReloads;
   await expect(page.getByRole("status").filter({
     hasText: "Mapping changed; review required",
   })).toBeVisible();
@@ -128,7 +157,8 @@ test("keyboard-only mapping and job-free correction announce their results", asy
     exact: true,
   });
   await tabTo(page, dvdTitle);
-  await page.keyboard.type("Title 2");
+  await dvdTitle.selectOption("2");
+  await expect(dvdTitle.locator("option:checked")).toContainText("Title 2");
   await page.keyboard.press("Tab");
   const save = page.getByRole("button", { name: "Save Disc Selection" });
   await tabTo(page, save);

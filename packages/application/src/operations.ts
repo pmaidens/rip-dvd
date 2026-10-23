@@ -49,6 +49,11 @@ import {
   retainedEncodeOutputArtifactIdentity,
 } from "./encode-output-inspection.js";
 import { describeDvdRecoveryStorage } from "./dvd-recovery-storage.js";
+import {
+  dvdRecoveryReconciliationBlockingReasons,
+} from "./dvd-recovery-reconciliation.js";
+import { dvdRecoveryStopAction } from "./dvd-recovery-stop.js";
+import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 
 export const OPERATION_KINDS = [
   "optical-drives",
@@ -118,15 +123,6 @@ function visibleArchiveJob({ claimToken: _claimToken, claimedBy: _claimedBy, ...
   return job;
 }
 
-function visibleArchiveRecovery(recovery: ArchiveRecovery) {
-  return {
-    ...recovery,
-    work: recovery.work === null
-      ? null
-      : archiveRecoveryWorkIdentity(recovery.work),
-  };
-}
-
 function visibleDvdRecoveryReconciliation(
   reconciliation: DvdRecoveryReconciliation | null,
 ) {
@@ -141,27 +137,40 @@ function archiveRecoveryOperation(
 ) {
   const reconciliation = access.dvdRecoveryReconciliations
     .findLatestForRecovery(recovery.id);
-  const active = reconciliation?.status === "queued" ||
+  const reconciliationBlockingReasons =
+    dvdRecoveryReconciliationBlockingReasons(recovery, reconciliation);
+  const reconciliationIsActive = reconciliation?.status === "queued" ||
     reconciliation?.status === "running";
+  const recoveryOwnsStatus = recovery.status === "running" ||
+    recovery.status === "stopping" || !reconciliationIsActive &&
+      (recovery.status === "stopped" || recovery.status === "faulted" ||
+        recovery.status === "completed");
+  const encodeJobs = access.catalog.listDiscSelections({
+    originalDiscArchiveId: recovery.originalDiscArchiveId,
+    includeHistorical: true,
+  }).flatMap(({ id }) => access.encodeJobs.listForDiscSelection(id));
   return {
     ...visibleArchiveRecovery(recovery),
     recoveryStatus: recovery.status,
-    status: reconciliation?.status ?? "idle",
+    status: recoveryOwnsStatus
+      ? recovery.status
+      : reconciliation?.status ?? "idle",
     reconciliation: visibleDvdRecoveryReconciliation(reconciliation),
     checkpoint: access.catalog.findDvdArchiveEvidenceHeader(
       recovery.originalDiscArchiveId,
     ),
-    availableActions: [{
-      name: "reconcile",
-      eligible: !active,
-      requiredInputs: ["mutationKey", "archiveRecoveryId"],
-      reason: active
-        ? "A DVD recovery reconciliation is already active."
-        : null,
-      blockingReasons: active
-        ? ["A DVD recovery reconciliation is already active."]
-        : [],
-    }],
+    availableActions: [
+      {
+        name: "reconcile",
+        eligible: reconciliationBlockingReasons.length === 0,
+        requiredInputs: ["mutationKey", "archiveRecoveryId"],
+        reason: reconciliationBlockingReasons[0]?.message ?? null,
+        blockingReasons: reconciliationBlockingReasons.map(({ message }) =>
+          message
+        ),
+      },
+      dvdRecoveryStopAction(recovery, encodeJobs),
+    ],
   };
 }
 
@@ -1107,7 +1116,7 @@ const TERMINAL_STATUSES: Record<WaitableKind, readonly string[]> = {
   "disc-inspections": ["completed", "failed", "aborted"],
   "archive-requests": ["fulfilled", "cancelled", "needs_attention"],
   "archive-jobs": ["completed", "failed", "cancelled", "aborted"],
-  "archive-recoveries": ["completed", "failed"],
+  "archive-recoveries": ["completed", "failed", "stopped", "faulted"],
   "encode-jobs": ["completed", "failed", "cancelled"],
   "archive-audits": ["completed", "failed"],
   "filesystem-verifications": ["completed", "failed"],

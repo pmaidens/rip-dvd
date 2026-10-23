@@ -1,21 +1,11 @@
 import {
-  archiveRecoveryWorkIdentity,
   RecordNotFoundError,
+  type ArchiveRecovery,
   type ArchiveRecoveryId,
   type DataAccess,
   type DvdRecoveryReconciliation,
 } from "@rip-dvd/data-access";
-
-function visibleArchiveRecovery(
-  recovery: ReturnType<typeof reconciliationContext>,
-) {
-  return {
-    ...recovery,
-    work: recovery.work === null
-      ? null
-      : archiveRecoveryWorkIdentity(recovery.work),
-  };
-}
+import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 
 function visibleReconciliation(record: DvdRecoveryReconciliation) {
   const {
@@ -43,6 +33,25 @@ function reconciliationContext(
   return recovery;
 }
 
+export function dvdRecoveryReconciliationBlockingReasons(
+  recovery: Pick<ArchiveRecovery, "status">,
+  latest: Pick<DvdRecoveryReconciliation, "status"> | null,
+) {
+  const active = latest?.status === "queued" || latest?.status === "running";
+  const recoveryPassActive = recovery.status === "running" ||
+    recovery.status === "stopping";
+  return [
+    ...(active ? [{
+        code: "RECONCILIATION_ACTIVE",
+        message: "A DVD recovery reconciliation is already active.",
+      }] : []),
+    ...(recoveryPassActive ? [{
+      code: "RECOVERY_PASS_ACTIVE",
+      message: "The active DVD recovery pass must quiesce first.",
+    }] : []),
+  ];
+}
+
 export function inspectDvdRecoveryReconciliation(
   access: DataAccess,
   archiveRecoveryId: ArchiveRecoveryId,
@@ -51,13 +60,10 @@ export function inspectDvdRecoveryReconciliation(
   const latest = access.dvdRecoveryReconciliations.findLatestForRecovery(
     recovery.id,
   );
-  const active = latest?.status === "queued" || latest?.status === "running";
-  const blockingReasons = active
-    ? [{
-        code: "RECONCILIATION_ACTIVE",
-        message: "A DVD recovery reconciliation is already active.",
-      }]
-    : [];
+  const blockingReasons = dvdRecoveryReconciliationBlockingReasons(
+    recovery,
+    latest,
+  );
   return {
     archiveRecovery: visibleArchiveRecovery(recovery),
     checkpoint: access.catalog.findDvdArchiveEvidenceHeader(
@@ -66,7 +72,7 @@ export function inspectDvdRecoveryReconciliation(
     reconciliation: latest === null ? null : visibleReconciliation(latest),
     action: {
       name: "reconcile",
-      available: !active,
+      available: blockingReasons.length === 0,
       blockingReasons,
       expectedInputs: {
         archiveRecoveryId: recovery.id,

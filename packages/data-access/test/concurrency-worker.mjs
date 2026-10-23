@@ -215,6 +215,24 @@ try {
         value: { outcome: "rejected", code: error.code },
       });
     }
+  } else if (workerData.operation === "stop-archive-recovery") {
+    try {
+      const recovery = access.archiveRecoveryWork.requestStop({
+        mutationKey: workerData.mutationKey,
+        archiveRecoveryId: workerData.archiveRecoveryId,
+        attemptId: workerData.attemptId,
+      });
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "stopping", id: recovery.id },
+      });
+    } catch (error) {
+      if (!(error instanceof EncodeWorkConflictError)) throw error;
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "rejected", code: error.code },
+      });
+    }
   } else if (workerData.operation === "complete-catalog-review") {
     try {
       const archive = access.catalog.completeCatalogReview(

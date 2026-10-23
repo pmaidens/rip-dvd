@@ -7,6 +7,7 @@ import type {
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
   ARCHIVE_INTEGRITIES,
+  ARCHIVE_RECOVERY_FAULT_CODES,
   ARCHIVE_RECOVERY_STATUSES,
   ARCHIVE_RECOVERY_WORK_STATUSES,
   CATALOG_REVIEW_OUTCOMES,
@@ -81,6 +82,8 @@ export type DvdUnrecoveredSourceClassification =
   (typeof DVD_UNRECOVERED_SOURCE_CLASSIFICATIONS)[number];
 export type ArchiveRecoveryStatus =
   (typeof ARCHIVE_RECOVERY_STATUSES)[number];
+export type ArchiveRecoveryFaultCode =
+  (typeof ARCHIVE_RECOVERY_FAULT_CODES)[number];
 export type ArchiveRecoveryWorkStatus =
   (typeof ARCHIVE_RECOVERY_WORK_STATUSES)[number];
 export type CatalogReviewOutcome = (typeof CATALOG_REVIEW_OUTCOMES)[number];
@@ -196,6 +199,9 @@ export type DetectedDiscId = DomainId<"DetectedDisc">;
 export type ArchiveRequestId = DomainId<"ArchiveRequest">;
 export type OriginalDiscArchiveId = DomainId<"OriginalDiscArchive">;
 export type ArchiveRecoveryId = DomainId<"ArchiveRecovery">;
+export type ArchiveRecoveryAttemptId = DomainId<"ArchiveRecoveryAttempt">;
+export type ArchiveRecoveryStopOperationId =
+  DomainId<"ArchiveRecoveryStopOperation">;
 export type ArchiveRecoveryClaimToken = DomainId<"ArchiveRecoveryClaim">;
 export type DvdRecoveryReconciliationId =
   DomainId<"DvdRecoveryReconciliation">;
@@ -529,10 +535,22 @@ export interface DvdUnrecoveredSourceRange extends UnreadableSectorRange {
 export interface ArchiveRecovery {
   id: ArchiveRecoveryId;
   originalDiscArchiveId: OriginalDiscArchiveId;
+  attemptId: ArchiveRecoveryAttemptId;
+  attemptOrdinal: number;
   status: ArchiveRecoveryStatus;
+  stopOperationId: ArchiveRecoveryStopOperationId | null;
+  stopRequestedAt: Date | null;
+  stoppedAt: Date | null;
+  faultCode: ArchiveRecoveryFaultCode | null;
   work: ArchiveRecoveryWork | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface ArchiveRecoveryStopReceipt extends ArchiveRecovery {
+  status: "stopping";
+  stopOperationId: ArchiveRecoveryStopOperationId;
+  stopRequestedAt: Date;
 }
 
 export type DvdDiscVerificationStatus =
@@ -544,6 +562,7 @@ export type DvdDiscVerificationStatus =
 export interface DvdDiscVerification {
   id: DvdDiscVerificationId;
   archiveRecoveryId: ArchiveRecoveryId;
+  archiveRecoveryAttemptId: ArchiveRecoveryAttemptId | null;
   attemptOrdinal: number;
   originalDiscArchiveId: OriginalDiscArchiveId;
   discInspectionId: DiscInspectionId;
@@ -561,6 +580,9 @@ export interface DvdDiscVerification {
   workerExecutionId: string | null;
   claimToken: DvdDiscVerificationClaimToken | null;
   claimedAt: Date | null;
+  admittedDevicePath: string | null;
+  admittedDeviceId: string | null;
+  admittedDeviceInode: string | null;
   startedAt: Date | null;
   completedAt: Date | null;
   failureCode: string | null;
@@ -576,6 +598,7 @@ export interface DvdDiscVerification {
 export interface DvdRecoveryWriteAuthority {
   verificationId: DvdDiscVerificationId;
   archiveRecoveryId: ArchiveRecoveryId;
+  archiveRecoveryAttemptId: ArchiveRecoveryAttemptId;
   originalDiscArchiveId: OriginalDiscArchiveId;
   discInspectionId: DiscInspectionId;
   detectedDiscId: DetectedDiscId;
@@ -585,14 +608,28 @@ export interface DvdRecoveryWriteAuthority {
   checkpointDigest: string;
 }
 
+export interface OpticalDeviceIdentity {
+  devicePath: string;
+  deviceId: string;
+  inode: string;
+}
+
+export const DVD_RECOVERY_PASS_CLAIM_LEASE_MS = 65_000;
+
 export interface ArchiveRecoveryWork {
   archiveRecoveryId: ArchiveRecoveryId;
   originalDiscArchiveId: OriginalDiscArchiveId;
+  attemptId: ArchiveRecoveryAttemptId;
   status: ArchiveRecoveryWorkStatus;
+  verificationId: DvdDiscVerificationId | null;
   requestedAt: Date | null;
   claimedBy: string | null;
   claimToken: ArchiveRecoveryClaimToken | null;
   claimedAt: Date | null;
+  passCursorLba: number | null;
+  admittedDevicePath: string | null;
+  admittedDeviceId: string | null;
+  admittedDeviceInode: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -605,12 +642,72 @@ export type ClaimedArchiveRecoveryWork = ArchiveRecoveryWork & {
 };
 
 export interface ArchiveRecoveryWorkAccess {
+  findNextStopping(): ArchiveRecovery | null;
+  findNextInterrupted(workerId: string): ArchiveRecovery | null;
+  claimNextVerifiedCandidate(workerId: string): {
+    recovery: ArchiveRecovery;
+    verification: DvdDiscVerification;
+    claim: ClaimedArchiveRecoveryWork;
+  } | null;
   request(id: ArchiveRecoveryId): ArchiveRecoveryWork;
   claim(
     id: ArchiveRecoveryId,
     workerId: string,
   ): ClaimedArchiveRecoveryWork;
   assertClaim(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
+  beginInterruptedTakeover(
+    claim: ClaimedArchiveRecoveryWork,
+    workerId: string,
+  ): ClaimedArchiveRecoveryWork | null;
+  deferInterruptedTakeover(claim: ClaimedArchiveRecoveryWork): boolean;
+  renewClaim(claim: ClaimedArchiveRecoveryWork): boolean;
+  admitSourceRead(
+    claim: ClaimedArchiveRecoveryWork,
+    expectedDevicePath: string,
+    identity: OpticalDeviceIdentity,
+  ): ArchiveRecovery | null;
+  bindVerification(
+    claim: ClaimedArchiveRecoveryWork,
+    authority: DvdRecoveryWriteAuthority,
+  ): ClaimedArchiveRecoveryWork;
+  requestStop(input: {
+    mutationKey: string;
+    archiveRecoveryId: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+  }): ArchiveRecoveryStopReceipt;
+  prepareStop(input: {
+    archiveRecoveryId: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+    stopOperationId: ArchiveRecoveryStopOperationId;
+    quiescedClaim?: ClaimedArchiveRecoveryWork;
+  }): boolean;
+  completeStop(input: {
+    archiveRecoveryId: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+    stopOperationId: ArchiveRecoveryStopOperationId;
+  }): ArchiveRecovery;
+  deferStop(input: {
+    archiveRecoveryId: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+    stopOperationId: ArchiveRecoveryStopOperationId;
+  }): ArchiveRecovery;
+  markStopFault(input: {
+    archiveRecoveryId: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+    stopOperationId: ArchiveRecoveryStopOperationId;
+    faultCode: ArchiveRecoveryFaultCode;
+  }): ArchiveRecovery;
+  settlePass(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
+  markFault(input: {
+    claim: ClaimedArchiveRecoveryWork;
+    faultCode: ArchiveRecoveryFaultCode;
+    retainWork: boolean;
+  }): ArchiveRecovery;
+  releaseAfterReconciliation(input: {
+    archiveRecoveryId: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+  }): ArchiveRecovery;
+  requeue(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
   release(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
 }
 
@@ -2318,8 +2415,16 @@ export interface DvdDiscVerificationAccess {
   }): DvdDiscVerification;
   find(id: DvdDiscVerificationId): DvdDiscVerification | null;
   findLatestForRecovery(id: ArchiveRecoveryId): DvdDiscVerification | null;
+  listForRecoveryAttempt(
+    id: ArchiveRecoveryId,
+    attemptId: ArchiveRecoveryAttemptId,
+  ): DvdDiscVerification[];
   claimNext(workerExecutionId: string): DvdDiscVerification | null;
   renewClaim(claim: DvdDiscVerification): boolean;
+  admitSourceRead(
+    claim: DvdDiscVerification,
+    identity: OpticalDeviceIdentity,
+  ): boolean;
   appendFinding(
     claim: DvdDiscVerification,
     finding: DvdDiscVerificationSampleFinding,

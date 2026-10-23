@@ -4,13 +4,13 @@ import {
   DVD_RECOVERY_STORAGE_REASON_MESSAGES,
   dvdDiscVerificationCheckpointIsCurrent,
   dvdDiscVerificationInsertionIsCurrent,
+  dvdRecoveryWriteAuthority,
   RecordNotFoundError,
   StaleDvdDiscVerificationError,
   DvdSourceSampleManifestProjectionError,
   type ArchiveRecoveryId,
   type DataAccess,
   type DiscInspectionId,
-  type DvdRecoveryWriteAuthority,
   type DvdSourceSampleManifest,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
@@ -19,6 +19,7 @@ import {
   defaultArchiveImageOwnership,
   type ArchiveImageOwnership,
 } from "@rip-dvd/worker-runtime";
+import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 
 export type DvdDiscVerificationAvailabilityCode =
   | "CONSISTENCY_FAULT"
@@ -67,6 +68,9 @@ function visibleVerification(
 ) {
   const {
     claimToken: _claimToken,
+    admittedDevicePath: _admittedDevicePath,
+    admittedDeviceId: _admittedDeviceId,
+    admittedDeviceInode: _admittedDeviceInode,
     ...visible
   } = verification;
   return {
@@ -77,29 +81,6 @@ function visibleVerification(
     completedAt: verification.completedAt?.toISOString() ?? null,
     createdAt: verification.createdAt.toISOString(),
     updatedAt: verification.updatedAt.toISOString(),
-  };
-}
-
-function recoveryWriteAuthority(
-  verification: NonNullable<ReturnType<
-    DataAccess["dvdDiscVerifications"]["findLatestForRecovery"]
-  >>,
-): DvdRecoveryWriteAuthority | null {
-  if (
-    verification.status !== "completed" ||
-    verification.outcome !== "match" ||
-    verification.workerExecutionId === null
-  ) return null;
-  return {
-    verificationId: verification.id,
-    archiveRecoveryId: verification.archiveRecoveryId,
-    originalDiscArchiveId: verification.originalDiscArchiveId,
-    discInspectionId: verification.discInspectionId,
-    detectedDiscId: verification.detectedDiscId,
-    mediaGeneration: verification.mediaGeneration,
-    verificationWorkerExecutionId: verification.workerExecutionId,
-    checkpointRevision: verification.checkpointRevision,
-    checkpointDigest: verification.checkpointDigest,
   };
 }
 
@@ -240,6 +221,7 @@ export async function inspectDvdDiscVerification(
       : access.discInspections.list({ ids: [latest.discInspectionId] })[0] ??
         null;
     const latestCurrent = latest !== null &&
+      latest.archiveRecoveryAttemptId === recovery.attemptId &&
       dvdDiscVerificationInsertionIsCurrent(latest, latestInspection) &&
       dvdDiscVerificationCheckpointIsCurrent(latest, checkpoint) &&
       header !== null &&
@@ -273,10 +255,10 @@ export async function inspectDvdDiscVerification(
         message: "More than one current disc insertion is available.",
       });
     }
-    if (recovery.status === "completed") {
+    if (recovery.status !== "eligible") {
       blockingReasons.push({
-        code: "RECOVERY_COMPLETED",
-        message: "Archive Recovery has no unresolved source to verify.",
+        code: `RECOVERY_${recovery.status.toUpperCase()}`,
+        message: "Archive Recovery is not eligible for DVD Disc Verification.",
       });
     }
     const active = latest?.status === "queued" ||
@@ -288,7 +270,7 @@ export async function inspectDvdDiscVerification(
       });
     }
     return {
-      archiveRecovery: recovery,
+      archiveRecovery: visibleArchiveRecovery(recovery),
       checkpoint,
       insertion: currentInspection === null ? null : {
         discInspectionId: currentInspection.discInspectionId,
@@ -327,10 +309,10 @@ export async function inspectDvdDiscVerification(
                     message: "The verification has no durable worker execution binding.",
                   }
               : null;
-        const workflowReason = recovery.status === "completed"
+        const workflowReason = recovery.status !== "eligible"
           ? {
-              code: "RECOVERY_COMPLETED",
-              message: "Archive Recovery has no unresolved source to update.",
+              code: `RECOVERY_${recovery.status.toUpperCase()}`,
+              message: "Archive Recovery is not eligible for source updates.",
             }
           : null;
         const authorityReasons = [
@@ -341,7 +323,7 @@ export async function inspectDvdDiscVerification(
         ].filter((reason) => reason !== null);
         const authority = latest === null
           ? null
-          : recoveryWriteAuthority(latest);
+          : dvdRecoveryWriteAuthority(latest);
         return authorityReasons.length === 0 && authority !== null
           ? { available: true, blockingReasons: [], authority }
           : { available: false, blockingReasons: authorityReasons };

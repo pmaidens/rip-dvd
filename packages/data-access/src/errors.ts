@@ -40,6 +40,20 @@ export class StaleJobAttemptError extends Error {
   }
 }
 
+export class StaleArchiveRecoveryAttemptError extends DomainInvariantError {
+  readonly code = "STALE_RECOVERY_ATTEMPT" as const;
+
+  constructor(
+    readonly currentIdentities: {
+      archiveRecoveryId: string;
+      attemptId: string;
+    },
+  ) {
+    super("Archive Recovery attempt is stale.");
+    this.name = "StaleArchiveRecoveryAttemptError";
+  }
+}
+
 export class StaleDvdStructuralCheckpointError extends DomainInvariantError {
   constructor() {
     super("DVD structural check checkpoint is no longer current");

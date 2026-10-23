@@ -223,6 +223,43 @@ it("inspects, submits, replays, and rejects stale DVD Disc Verification", async 
   });
 });
 
+it("redacts Recovery claim and device identity from verification inspection", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const access = fixture.openAccess();
+  access.archiveRecoveryWork.claim(
+    seeded.recoveryId,
+    "synthetic-private-recovery-worker",
+  );
+  access.close();
+  const sqlite = new DatabaseSync(fixture.databasePath);
+  sqlite.prepare(`UPDATE archive_recovery_work SET
+    admitted_device_path = ?, admitted_device_id = ?, admitted_device_inode = ?
+    WHERE archive_recovery_id = ?`).run(
+      "/dev/synthetic-private-recovery",
+      "synthetic-private-device",
+      "synthetic-private-inode",
+      seeded.recoveryId,
+    );
+  sqlite.close();
+
+  const inspected = await fixture.run([
+    "archive-recovery",
+    "inspect-verification",
+    seeded.recoveryId,
+  ]);
+  expect(inspected.exitCode).toBe(0);
+  expect((inspected.result as {
+    archiveRecovery: { work: unknown };
+  }).archiveRecovery.work).toEqual({
+    archiveRecoveryId: seeded.recoveryId,
+    originalDiscArchiveId: seeded.archive.id,
+    attemptId: seeded.attemptId,
+    status: "claimed",
+  });
+});
+
 it("keeps a durable mismatch authoritative when a worker claim expires", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
@@ -272,6 +309,84 @@ it("keeps a durable mismatch authoritative when a worker claim expires", async (
     });
   } finally {
     access.close();
+  }
+});
+
+it("fences queued and running verification work when Recovery Stop commits", async () => {
+  const queuedFixture = createOperatorWorkflowFixture();
+  fixtures.push(queuedFixture);
+  const queuedSeed = await seedDvdDiscVerificationFixture(queuedFixture);
+  const queuedSubmission = await queuedFixture.run([
+    "archive-recovery", "verify-disc", queuedSeed.recoveryId,
+    "--key", "00000000-0000-4000-8000-000000000470",
+    "--disc-inspection-id", queuedSeed.inspection.id,
+    "--checkpoint-revision", "1",
+    "--checkpoint-digest", queuedSeed.manifest.manifestDigest,
+  ]);
+  expect(queuedSubmission.exitCode).toBe(0);
+  const queuedAccess = queuedFixture.openAccess();
+  try {
+    queuedAccess.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000471",
+      archiveRecoveryId: queuedSeed.recoveryId,
+      attemptId: queuedSeed.attemptId,
+    });
+    expect(queuedAccess.dvdDiscVerifications.claimNext(
+      "synthetic-stopped-queued-verification-worker",
+    )).toBeNull();
+    expect(queuedAccess.dvdDiscVerifications.findLatestForRecovery(
+      queuedSeed.recoveryId,
+    )).toMatchObject({
+      status: "failed",
+      failureCode: "DISC_VERIFICATION_UNAVAILABLE",
+    });
+  } finally {
+    queuedAccess.close();
+  }
+
+  const runningFixture = createOperatorWorkflowFixture();
+  fixtures.push(runningFixture);
+  const runningSeed = await seedDvdDiscVerificationFixture(runningFixture);
+  const runningSubmission = await runningFixture.run([
+    "archive-recovery", "verify-disc", runningSeed.recoveryId,
+    "--key", "00000000-0000-4000-8000-000000000472",
+    "--disc-inspection-id", runningSeed.inspection.id,
+    "--checkpoint-revision", "1",
+    "--checkpoint-digest", runningSeed.manifest.manifestDigest,
+  ]);
+  expect(runningSubmission.exitCode).toBe(0);
+  const runningAccess = runningFixture.openAccess();
+  try {
+    const claim = runningAccess.dvdDiscVerifications.claimNext(
+      "synthetic-stopped-running-verification-worker",
+    );
+    if (claim === null) throw new Error("Expected verification claim");
+    const stop = runningAccess.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000473",
+      archiveRecoveryId: runningSeed.recoveryId,
+      attemptId: runningSeed.attemptId,
+    });
+    expect(runningAccess.dvdDiscVerifications.renewClaim(claim)).toBe(false);
+    expect(runningAccess.dvdDiscVerifications.admitSourceRead(claim, {
+      devicePath: runningSeed.verificationDrive.devicePath,
+      deviceId: "1",
+      inode: "2",
+    }))
+      .toBe(false);
+    expect(runningAccess.archiveRecoveryWork.prepareStop({
+      archiveRecoveryId: runningSeed.recoveryId,
+      attemptId: runningSeed.attemptId,
+      stopOperationId: stop.stopOperationId,
+    })).toBe(false);
+
+    runningAccess.dvdDiscVerifications.fail(claim);
+    expect(runningAccess.archiveRecoveryWork.prepareStop({
+      archiveRecoveryId: runningSeed.recoveryId,
+      attemptId: runningSeed.attemptId,
+      stopOperationId: stop.stopOperationId,
+    })).toBe(true);
+  } finally {
+    runningAccess.close();
   }
 });
 

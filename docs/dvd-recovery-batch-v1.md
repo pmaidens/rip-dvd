@@ -6,12 +6,26 @@ sector per recovery read, so one batch covers exactly one 2,048-byte sector.
 A later recovery pass may call the operation repeatedly; this operation does
 not schedule reads or reopen new-format admission.
 
-The caller must hold an eligible Archive Recovery, its current claimed durable
-work reservation, and a current committed checkpoint. The batch validates the
-reservation before filesystem I/O, at each commit boundary, and inside the
-database projection transaction. The claim does not expire with an Encode Job
-lease and is released only after the writer is quiescent. The latest storage
-preflight must be supported, and a recovered observation must re-prove the actual archive inode's
+The caller must hold an Archive Recovery that has been transitioned to
+`running`, its current claimed durable work reservation, and a completed
+matching DVD Disc Verification bound at the exact checkpoint where that pass
+started. Source-read admission is serialized with Stop in the same immediate
+database transaction; `stopping` is accepted only while an already-admitted
+read or batch settles. The same Stop boundary invalidates queued DVD Disc
+Verification, prevents claim renewal and new verification reads, and waits for
+running verification work to settle before reconciliation and completion.
+After the binding, the same claim
+may commit monotonic one-sector descendants during that pass; a settled pass
+cannot reuse the binding at its later checkpoint. The batch validates the
+reservation and pass-scoped verification before filesystem I/O, at each commit
+boundary, and inside the database projection transaction. The claim does not
+expire with an Encode Job lease and is released only after the writer is
+quiescent. Stop preserves that reservation through reconciliation and releases
+it only as Stop completes; when no pass has been claimed yet, Stop creates the
+reservation atomically with its state change. A deferred Stop keeps its queue
+position but yields the worker to unrelated eligible Recovery work. The latest
+storage preflight must be supported, and a recovered observation must re-prove
+the actual archive inode's
 `linux-rwf-atomic-v1` unit and alignment. All filesystem work and the database
 projection run under the archive's exclusive image-ownership interval.
 
@@ -72,11 +86,13 @@ cleans them up.
 
 The SQLite transaction verifies the exact base revision and immutable archive
 evidence, inserts the one-sector recovery read and next manifest, advances the
-header, updates Archive Integrity and normalized counts, and marks Recovery
-completed only when the source map is empty. Replaying the exact already
-projected checkpoint is idempotent; a stale or conflicting base is rejected.
-Revision 10,000 is the final readable checkpoint; a further batch is rejected
-before journal creation or image access.
+header, and updates Archive Integrity and normalized counts. A claimed Recovery
+remains `running` through projection, journal cleanup, and writer release. Pass
+settlement then removes the claim and atomically marks Recovery `completed`
+when the source map is empty or `eligible` when more source evidence remains.
+Replaying the exact already projected checkpoint is idempotent; a stale or
+conflicting base is rejected. Revision 10,000 is the final readable checkpoint;
+a further batch is rejected before journal creation or image access.
 
 ## Recovery checkpoints and operator evidence
 

@@ -39,10 +39,12 @@ async function seedRecovery(
       bad_sector_ranges = '[{"startLba":10,"sectorCount":1}]'
       WHERE id = ?`).run(saved.archive.id);
     database.prepare(`INSERT INTO archive_recoveries (
-      id, original_disc_archive_id, status, created_at, updated_at
-    ) VALUES (?, ?, 'eligible', 1, 1)`).run(
+      id, original_disc_archive_id, attempt_id, attempt_ordinal, status,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, 1, 'eligible', 1, 1)`).run(
       recoveryId,
       saved.archive.id,
+      `${recoveryId}:attempt:1`,
     );
   } finally {
     database.close();
@@ -184,6 +186,155 @@ it("keeps web and JSON CLI submission, progress, replay, and evidence equal", as
         current: { status: "completed" },
       },
     });
+  } finally {
+    access.close();
+  }
+});
+
+it("keeps wait pending for reconciliation after a faulted Stop", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedRecovery(fixture);
+  const access = fixture.openAccess();
+  const recoveryId = seeded.recoveryId as ArchiveRecoveryId;
+  try {
+    const recovery = access.catalog.findArchiveRecoveryById(recoveryId)!;
+    const stop = access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000490",
+      archiveRecoveryId: recoveryId,
+      attemptId: recovery.attemptId,
+    });
+    access.archiveRecoveryWork.markStopFault({
+      archiveRecoveryId: recoveryId,
+      attemptId: recovery.attemptId,
+      stopOperationId: stop.stopOperationId,
+      faultCode: "STORAGE_UNSUPPORTED",
+    });
+
+    const submitted = await fixture.run([
+      "archive-recovery",
+      "reconcile",
+      recoveryId,
+      "--key",
+      "00000000-0000-4000-8000-000000000491",
+    ]);
+    expect(submitted.result).toMatchObject({
+      reconciliation: { status: "queued" },
+    });
+    const queued = await fixture.run([
+      "wait",
+      "archive-recoveries",
+      recoveryId,
+      "--timeout-ms",
+      "0",
+    ]);
+    expect(queued).toMatchObject({
+      exitCode: 3,
+      result: {
+        outcome: "timeout",
+        current: {
+          status: "queued",
+          recoveryStatus: "faulted",
+          reconciliation: { status: "queued" },
+        },
+      },
+    });
+
+    expect(access.dvdRecoveryReconciliations.claimNext(
+      "synthetic-faulted-stop-reconciliation-worker",
+    )).toMatchObject({ status: "running" });
+    const running = await fixture.run([
+      "wait",
+      "archive-recoveries",
+      recoveryId,
+      "--timeout-ms",
+      "0",
+    ]);
+    expect(running).toMatchObject({
+      exitCode: 3,
+      result: {
+        outcome: "timeout",
+        current: {
+          status: "running",
+          recoveryStatus: "faulted",
+          reconciliation: { status: "running" },
+        },
+      },
+    });
+  } finally {
+    access.close();
+  }
+});
+
+it("rejects reconciliation while a Recovery pass owns the attempt", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedRecovery(fixture);
+  const access = fixture.openAccess();
+  const recoveryId = seeded.recoveryId as ArchiveRecoveryId;
+  try {
+    access.archiveRecoveryWork.claim(
+      recoveryId,
+      "synthetic-active-recovery-worker",
+    );
+    const database = new DatabaseSync(fixture.databasePath);
+    database.prepare(`UPDATE archive_recoveries
+      SET status = 'running', updated_at = updated_at + 1
+      WHERE id = ?`).run(recoveryId);
+    database.close();
+
+    const inspection = await createDvdRecoveryReconciliationInspectionRoute(
+      seeded.recoveryId,
+      () => access,
+    );
+    expect(await inspection.json()).toMatchObject({
+      action: {
+        available: false,
+        blockingReasons: [{ code: "RECOVERY_PASS_ACTIVE" }],
+      },
+    });
+    const genericInspection = await fixture.run([
+      "inspect",
+      "archive-recoveries",
+      seeded.recoveryId,
+    ]);
+    expect(genericInspection.result).toMatchObject({
+      item: {
+        availableActions: expect.arrayContaining([
+          expect.objectContaining({
+            name: "reconcile",
+            eligible: false,
+            blockingReasons: [
+              "The active DVD recovery pass must quiesce first.",
+            ],
+          }),
+        ]),
+      },
+    });
+    const web = await createDvdRecoveryReconciliationRoute(
+      request(
+        seeded.recoveryId,
+        "00000000-0000-4000-8000-000000000464",
+      ),
+      seeded.recoveryId,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const cli = await fixture.run([
+      "archive-recovery",
+      "reconcile",
+      seeded.recoveryId,
+      "--key",
+      "00000000-0000-4000-8000-000000000465",
+    ]);
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toMatchObject({
+      error: { code: "RECONCILIATION_REJECTED" },
+    });
+    expect(access.dvdRecoveryReconciliations.findLatestForRecovery(recoveryId))
+      .toBeNull();
   } finally {
     access.close();
   }

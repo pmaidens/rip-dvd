@@ -14,8 +14,11 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { expect, it } from "vitest";
-import { defaultArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import { expect, it, vi } from "vitest";
+import {
+  defaultArchiveImageOwnership,
+  type ArchiveImageOwnership,
+} from "@rip-dvd/worker-runtime";
 import {
   ENCODE_JOB_LEASE_DURATION_MS,
   type DvdDiscVerificationId,
@@ -125,10 +128,12 @@ function prepareEligibleRecovery(
       archiveId,
     );
     database.prepare(`INSERT INTO archive_recoveries (
-      id, original_disc_archive_id, status, created_at, updated_at
-    ) VALUES (?, ?, 'eligible', 1, 1)`).run(
+      id, original_disc_archive_id, attempt_id, attempt_ordinal, status,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, 1, 'eligible', 1, 1)`).run(
       `${archiveId}:recovery`,
       archiveId,
+      `${archiveId}:recovery:attempt:1`,
     );
   } finally {
     database.close();
@@ -176,16 +181,18 @@ function prepareEligibleRecovery(
   database = new DatabaseSync(fixture.databasePath);
   try {
     database.prepare(`INSERT INTO dvd_disc_verifications (
-      id, archive_recovery_id, attempt_ordinal, original_disc_archive_id,
+      id, archive_recovery_id, archive_recovery_attempt_id, attempt_ordinal,
+      original_disc_archive_id,
       disc_inspection_id, detected_disc_id, media_generation,
       source_metadata_fingerprint, observed_metadata_fingerprint,
       checkpoint_revision, checkpoint_digest, status, outcome, reasons,
       findings, budget_exhausted, worker_execution_id, claim_token,
       claimed_at, started_at, completed_at, failure_code, created_at, updated_at
-    ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', 'match', '[]',
+    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', 'match', '[]',
       '[]', 0, ?, NULL, NULL, 1, 1, NULL, 1, 1)`).run(
       verificationId,
       recovery.id,
+      recovery.attemptId,
       archive.id,
       inspection.id,
       sourceDisc.id,
@@ -202,6 +209,7 @@ function prepareEligibleRecovery(
   return {
     verificationId,
     archiveRecoveryId: recovery.id,
+    archiveRecoveryAttemptId: recovery.attemptId,
     originalDiscArchiveId: archive.id,
     discInspectionId: inspection.id,
     detectedDiscId: sourceDisc.id,
@@ -486,7 +494,7 @@ it("commits one recovered sector through the worker and shared web/CLI evidence 
         badSectorCount: 1,
       });
     expect(access.catalog.findArchiveRecovery(saved.archive.id)).toMatchObject({
-      status: "eligible",
+      status: "running",
     });
     const image = readFileSync(saved.archive.archivePath);
     expect(image.subarray(10 * 2_048, 11 * 2_048)).toEqual(recovered);
@@ -633,6 +641,11 @@ it("rejects a batch at the final readable checkpoint before mutation", async () 
   const access = fixture.openAccess();
   const imageBefore = readFileSync(saved.archive.archivePath);
   const header = access.catalog.findDvdArchiveEvidenceHeader(saved.archive.id)!;
+  const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
+  access.archiveRecoveryWork.bindVerification(
+    recoveryWorkClaim,
+    writeAuthority,
+  );
   const capacityDatabase = new DatabaseSync(fixture.databasePath);
   capacityDatabase.prepare(`
     UPDATE dvd_disc_verifications
@@ -654,7 +667,6 @@ it("rejects a batch at the final readable checkpoint before mutation", async () 
     },
   };
   try {
-    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
     await expect(commitDvdRecoveryBatch({
       access: cappedAccess,
       originalsLibraryPath: fixture.originalsLibraryPath,
@@ -814,6 +826,13 @@ it.each([
           if (point === faultPoint) throw new Error(`synthetic ${faultPoint}`);
         },
       })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+
+      expect(access.catalog.findArchiveRecoveryById(
+        recoveryWorkClaim.archiveRecoveryId,
+      )).toMatchObject({
+        status: "running",
+        work: { claimToken: recoveryWorkClaim.claimToken },
+      });
 
       const result = await reconcileDvdRecoveryCheckpoint({
         access,
@@ -1181,6 +1200,164 @@ it("fails while an archive writer remains active", async () => {
           atomicWriter: syntheticAtomicWriter,
         })).rejects.toMatchObject({ code: "WRITER_NOT_QUIESCENT" });
       },
+    });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+}, RECOVERY_TEST_TIMEOUT_MS);
+
+it("releases stale recovery work only after archive ownership exits", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const saved = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  prepareEligibleRecovery(fixture, saved.archive.id, [{
+    startLba: 10,
+    sectorCount: 1,
+  }]);
+  const access = fixture.openAccess();
+  try {
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
+    let ownershipActive = false;
+    const ownership: ArchiveImageOwnership = {
+      ...defaultArchiveImageOwnership,
+      async withWriter(request) {
+        ownershipActive = true;
+        const result = await defaultArchiveImageOwnership.withWriter({
+          ...request,
+          async task(handle) {
+            const reconciled = await request.task(handle);
+            expect(access.catalog.findArchiveRecovery(saved.archive.id))
+              .toMatchObject({
+                work: { claimToken: recoveryWorkClaim.claimToken },
+              });
+            return reconciled;
+          },
+        });
+        ownershipActive = false;
+        return result;
+      },
+    };
+    const release = vi.spyOn(
+      access.archiveRecoveryWork,
+      "releaseAfterReconciliation",
+    );
+
+    await expect(reconcileDvdRecoveryCheckpoint({
+      access,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      originalDiscArchiveId: saved.archive.id,
+      atomicWriter: syntheticAtomicWriter,
+      archiveImageOwnership: ownership,
+    })).resolves.toMatchObject({ outcome: "already_consistent" });
+
+    expect(ownershipActive).toBe(false);
+    expect(release).toHaveBeenCalledOnce();
+    expect(access.catalog.findArchiveRecovery(saved.archive.id))
+      .toMatchObject({ work: null });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+}, RECOVERY_TEST_TIMEOUT_MS);
+
+it("preserves recovery work when Stop wins the reconciliation release race", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const saved = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  prepareEligibleRecovery(fixture, saved.archive.id, [{
+    startLba: 10,
+    sectorCount: 1,
+  }]);
+  const access = fixture.openAccess();
+  try {
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
+    const ownership: ArchiveImageOwnership = {
+      ...defaultArchiveImageOwnership,
+      async withWriter(request) {
+        const result = await defaultArchiveImageOwnership.withWriter(request);
+        access.archiveRecoveryWork.requestStop({
+          mutationKey: "00000000-0000-4000-8000-000000000478",
+          archiveRecoveryId: recoveryWorkClaim.archiveRecoveryId,
+          attemptId: recoveryWorkClaim.attemptId,
+        });
+        return result;
+      },
+    };
+
+    await expect(reconcileDvdRecoveryCheckpoint({
+      access,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      originalDiscArchiveId: saved.archive.id,
+      atomicWriter: syntheticAtomicWriter,
+      archiveImageOwnership: ownership,
+    })).resolves.toMatchObject({ outcome: "already_consistent" });
+
+    expect(access.catalog.findArchiveRecovery(saved.archive.id))
+      .toMatchObject({
+        status: "stopping",
+        work: { claimToken: recoveryWorkClaim.claimToken },
+      });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+}, RECOVERY_TEST_TIMEOUT_MS);
+
+it("accepts Stop completion racing reconciliation cleanup", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const saved = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  prepareEligibleRecovery(fixture, saved.archive.id, [{
+    startLba: 10,
+    sectorCount: 1,
+  }]);
+  const access = fixture.openAccess();
+  try {
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
+    const stop = access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000487",
+      archiveRecoveryId: recoveryWorkClaim.archiveRecoveryId,
+      attemptId: recoveryWorkClaim.attemptId,
+    });
+    const findArchiveRecovery =
+      access.catalog.findArchiveRecovery.bind(access.catalog);
+    let recoveryReads = 0;
+    vi.spyOn(access.catalog, "findArchiveRecovery").mockImplementation(
+      (archiveId) => {
+        const snapshot = findArchiveRecovery(archiveId);
+        recoveryReads += 1;
+        if (recoveryReads === 2) {
+          access.archiveRecoveryWork.completeStop({
+            archiveRecoveryId: recoveryWorkClaim.archiveRecoveryId,
+            attemptId: recoveryWorkClaim.attemptId,
+            stopOperationId: stop.stopOperationId,
+          });
+        }
+        return snapshot;
+      },
+    );
+
+    await expect(reconcileDvdRecoveryCheckpoint({
+      access,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      originalDiscArchiveId: saved.archive.id,
+      atomicWriter: syntheticAtomicWriter,
+    })).resolves.toMatchObject({ outcome: "already_consistent" });
+
+    expect(recoveryReads).toBe(2);
+    expect(findArchiveRecovery(saved.archive.id)).toMatchObject({
+      status: "stopped",
+      work: null,
     });
   } finally {
     access.close();

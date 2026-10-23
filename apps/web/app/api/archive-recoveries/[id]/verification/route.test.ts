@@ -120,6 +120,80 @@ it("keeps web inspection and replayed submission equal to the JSON CLI", async (
   }
 });
 
+it("withholds write authority after the Recovery attempt rotates", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const submitted = await fixture.run([
+    "archive-recovery",
+    "verify-disc",
+    seeded.recoveryId,
+    "--key",
+    "00000000-0000-4000-8000-000000000467",
+    "--disc-inspection-id",
+    seeded.inspection.id,
+    "--checkpoint-revision",
+    "1",
+    "--checkpoint-digest",
+    seeded.manifest.manifestDigest,
+  ]);
+  expect(submitted.exitCode).toBe(0);
+  const access = fixture.openAccess();
+  try {
+    const claim = access.dvdDiscVerifications.claimNext(
+      "synthetic-verification-worker",
+    );
+    if (claim === null) throw new Error("Expected verification claim");
+    const findings = seeded.sampleManifest.samples.map((sample) => ({
+      ...sample,
+      outcome: "match" as const,
+      referenceDigest: sample.digest,
+      observedDigest: sample.digest,
+      diagnostic: null,
+    }));
+    for (const finding of findings) {
+      access.dvdDiscVerifications.appendFinding(claim, finding);
+    }
+    access.dvdDiscVerifications.complete(claim, {
+      findings,
+      budgetExhausted: false,
+      interrupted: false,
+      insertionChanged: false,
+      checkpointChanged: false,
+    });
+
+    const database = new DatabaseSync(fixture.databasePath);
+    database.prepare(`UPDATE archive_recoveries SET
+      attempt_id = ?, attempt_ordinal = 2, updated_at = updated_at + 1
+      WHERE id = ?`).run(
+        "synthetic-next-recovery-attempt",
+        seeded.recoveryId,
+      );
+    database.close();
+
+    const webInspection = await createDvdDiscVerificationInspectionRoute(
+      seeded.recoveryId,
+      () => access,
+    );
+    const cliInspection = await fixture.run([
+      "archive-recovery",
+      "inspect-verification",
+      seeded.recoveryId,
+    ]);
+    const body = await webInspection.json();
+    expect(body).toEqual(cliInspection.result);
+    expect(body).toMatchObject({
+      verification: { current: false },
+      writeAuthority: {
+        available: false,
+        blockingReasons: [{ code: "DISC_VERIFICATION_STALE" }],
+      },
+    });
+  } finally {
+    access.close();
+  }
+});
+
 it("keeps validation, not-found, and unavailable failures structured", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);

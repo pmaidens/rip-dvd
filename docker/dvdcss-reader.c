@@ -320,17 +320,29 @@ static int parse_endpoint_lba(const char *text, uint64_t *lba)
     return 0;
 }
 
-static int parse_sample_lba(const char *text, uint64_t *lba)
+static int parse_source_read_lba(const char *text, uint64_t *lba)
 {
     char *end = NULL;
     errno = 0;
     unsigned long long value = strtoull(text, &end, 10);
     if (errno != 0 || end == text || *end != '\0' ||
         value > MAX_DVD_CONTENT_BYTES / DVDCSS_BLOCK_SIZE) {
-        fprintf(stderr, "DVD Disc Verification sample LBA is invalid\n");
+        fprintf(stderr, "DVD source read LBA is invalid\n");
         return 1;
     }
     *lba = (uint64_t)value;
+    return 0;
+}
+
+static int require_source_read_parent(void)
+{
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0) {
+        return fail_errno("DVD source read parent-death guard failed");
+    }
+    if (getppid() == 1) {
+        fprintf(stderr, "DVD source read parent exited during startup\n");
+        return 1;
+    }
     return 0;
 }
 
@@ -344,13 +356,7 @@ static int arm_verification_lifetime(const char *text)
         fprintf(stderr, "DVD Disc Verification lifetime is invalid\n");
         return 1;
     }
-    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0) {
-        return fail_errno("DVD Disc Verification parent-death guard failed");
-    }
-    if (getppid() == 1) {
-        fprintf(stderr, "DVD Disc Verification parent exited during startup\n");
-        return 1;
-    }
+    if (require_source_read_parent() != 0) return 1;
     alarm((unsigned int)value);
     return 0;
 }
@@ -1916,14 +1922,14 @@ static int run_hash(struct read_backend *backend, uint64_t size_bytes)
         fail_errno("DVD content hash output failed");
 }
 
-static int run_verification_sample(struct read_backend *backend,
-                                   uint64_t start_lba, int block_count,
-                                   uint64_t accepted_end_lba_exclusive)
+static int run_source_read(struct read_backend *backend,
+                           uint64_t start_lba, int block_count,
+                           uint64_t accepted_end_lba_exclusive)
 {
     size_t byte_count = (size_t)block_count * DVDCSS_BLOCK_SIZE;
     unsigned char *buffer = NULL;
     if (posix_memalign((void **)&buffer, DVDCSS_BLOCK_SIZE, byte_count) != 0) {
-        fprintf(stderr, "DVD Disc Verification sample allocation failed\n");
+        fprintf(stderr, "DVD source read allocation failed\n");
         return 1;
     }
     struct backend_read_result result = backend_read(
@@ -1956,7 +1962,7 @@ static int run_verification_sample(struct read_backend *backend,
             &result.failure, NULL,
             accepted_end_lba_exclusive * DVDCSS_BLOCK_SIZE, 0);
     } else {
-        fprintf(stderr, "DVD Disc Verification sample read failed\n");
+        fprintf(stderr, "DVD source read failed\n");
         status = 1;
     }
     free(buffer);
@@ -2624,6 +2630,25 @@ static int await_copy_authorization(uint64_t size_bytes,
     }
     free(text);
     *resume_bitmap = bitmap;
+    return 0;
+}
+
+static int await_source_read_authorization(void)
+{
+    static const char ready[] =
+        "rip-dvd-source-read-authorization-ready\n";
+    if (write(4, ready, sizeof(ready) - 1) != (ssize_t)(sizeof(ready) - 1)) {
+        return fail_errno("DVD source read authorization readiness failed");
+    }
+    char authorized = 0;
+    ssize_t bytes_read;
+    do {
+        bytes_read = read(5, &authorized, 1);
+    } while (bytes_read < 0 && errno == EINTR);
+    if (bytes_read != 1 || authorized != '1') {
+        fprintf(stderr, "DVD source read authorization was denied\n");
+        return 1;
+    }
     return 0;
 }
 
@@ -3451,12 +3476,14 @@ static int run_test_endpoint(int argc, char **argv)
     return close_test_backend(&backend, status);
 }
 
-static int run_test_verification_sample(int argc, char **argv)
+static int run_test_source_read(int argc, char **argv,
+                                uint64_t required_block_count,
+                                const char *operation_name)
 {
     if (argc != 9) {
         fprintf(stderr,
-                "usage: %s verify-sample-test SOURCE SIZE START COUNT FAULTS DELAY MODE\n",
-                argv[0]);
+                "usage: %s %s SOURCE SIZE START COUNT FAULTS DELAY MODE\n",
+                argv[0], operation_name);
         return 2;
     }
     uint64_t size_bytes = 0;
@@ -3474,11 +3501,11 @@ static int run_test_verification_sample(int argc, char **argv)
         parse_test_integer(argv[4], size_bytes / DVDCSS_BLOCK_SIZE,
                            &start_lba) != 0 ||
         parse_test_integer(argv[5], 32, &block_count) != 0 ||
-        block_count != 32 ||
+        block_count != required_block_count ||
         start_lba + block_count > size_bytes / DVDCSS_BLOCK_SIZE) {
         return close_test_backend(&backend, 2);
     }
-    int status = run_verification_sample(
+    int status = run_source_read(
         &backend, start_lba, (int)block_count,
         size_bytes / DVDCSS_BLOCK_SIZE);
     return close_test_backend(&backend, status);
@@ -3528,7 +3555,10 @@ int main(int argc, char **argv)
         return run_test_endpoint(argc, argv);
     }
     if (argc > 1 && strcmp(argv[1], "verify-sample-test") == 0) {
-        return run_test_verification_sample(argc, argv);
+        return run_test_source_read(argc, argv, 32, "verify-sample-test");
+    }
+    if (argc > 1 && strcmp(argv[1], "recover-sector-test") == 0) {
+        return run_test_source_read(argc, argv, 1, "recover-sector-test");
     }
     if (argc > 1 && strcmp(argv[1], "verification-lifetime-test") == 0) {
         return run_test_verification_lifetime(argc, argv);
@@ -3536,33 +3566,41 @@ int main(int argc, char **argv)
 #endif
     int verification_sample = argc > 1 &&
         strcmp(argv[1], "verify-sample-v1") == 0;
-    if (verification_sample) {
-        if (argc != 7) {
-            fprintf(stderr, "DVD Disc Verification sample arguments are invalid\n");
+    int recovery_sector = argc > 1 &&
+        strcmp(argv[1], "recover-sector-v1") == 0;
+    if (verification_sample || recovery_sector) {
+        if (
+            (verification_sample && argc != 7) ||
+            (recovery_sector && argc != 6)
+        ) {
+            fprintf(stderr, "DVD source read arguments are invalid\n");
             return 2;
         }
         uint64_t start_lba = 0;
         uint64_t block_count = 0;
         uint64_t accepted_end_lba_exclusive = 0;
-        if (parse_sample_lba(argv[3], &start_lba) != 0 ||
-            parse_sample_lba(argv[4], &block_count) != 0 ||
-            parse_sample_lba(argv[5], &accepted_end_lba_exclusive) != 0 ||
-            arm_verification_lifetime(argv[6]) != 0 ||
-            block_count != 32 ||
+        if (parse_source_read_lba(argv[3], &start_lba) != 0 ||
+            parse_source_read_lba(argv[4], &block_count) != 0 ||
+            parse_source_read_lba(argv[5], &accepted_end_lba_exclusive) != 0 ||
+            (verification_sample
+                ? arm_verification_lifetime(argv[6])
+                : require_source_read_parent()) != 0 ||
+            block_count != (verification_sample ? 32 : 1) ||
             accepted_end_lba_exclusive == 0 ||
             start_lba + block_count > accepted_end_lba_exclusive ||
             start_lba > MAX_DVD_CONTENT_BYTES / DVDCSS_BLOCK_SIZE -
                 block_count) {
-            fprintf(stderr, "DVD Disc Verification sample range is invalid\n");
+            fprintf(stderr, "DVD source read range is invalid\n");
             return 2;
         }
+        if (await_source_read_authorization() != 0) return 1;
         dvdcss_t dvdcss = dvdcss_open(argv[2]);
         if (dvdcss == NULL) {
             fprintf(stderr, "DVD content open failed\n");
             return 1;
         }
         struct read_backend backend = { .dvdcss = dvdcss };
-        int status = run_verification_sample(
+        int status = run_source_read(
             &backend, start_lba, (int)block_count,
             accepted_end_lba_exclusive);
         if (dvdcss_close(dvdcss) != 0 && status == 0) {

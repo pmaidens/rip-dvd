@@ -54,6 +54,7 @@ import {
 } from "./disc-settling-fixture.js";
 import type {
   ArchiveJobId,
+  ArchiveRecoveryAttemptId,
   ArchiveRecoveryId,
   ArchiveRequestId,
   DetectedDiscId,
@@ -130,6 +131,7 @@ type ConcurrentWorkerResult =
         | "reviewed"
         | "skipped"
         | "started"
+        | "stopping"
         | "versioned";
       id?: string;
       code?: string;
@@ -180,6 +182,12 @@ type ConcurrentOperation = (
   | {
       operation: "request-archive-recovery";
       archiveRecoveryId: ArchiveRecoveryId;
+    }
+  | {
+      operation: "stop-archive-recovery";
+      archiveRecoveryId: ArchiveRecoveryId;
+      attemptId: ArchiveRecoveryAttemptId;
+      mutationKey: string;
     }
   | {
       operation: "complete-catalog-review";
@@ -617,9 +625,14 @@ function markArchiveWithDvdRecoveryEvidence(
       );
       sqlite.prepare(`
         INSERT INTO archive_recoveries (
-          id, original_disc_archive_id, status, created_at, updated_at
-        ) VALUES (?, ?, 'eligible', 1, 1)
-      `).run(digestOverrides.archiveRecoveryId, originalDiscArchiveId);
+          id, original_disc_archive_id, attempt_id, attempt_ordinal, status,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, 1, 'eligible', 1, 1)
+      `).run(
+        digestOverrides.archiveRecoveryId,
+        originalDiscArchiveId,
+        `${digestOverrides.archiveRecoveryId}:attempt:1`,
+      );
     }
   } finally {
     sqlite.close();
@@ -1805,7 +1818,12 @@ describe("data-access facade", () => {
           name !== "20261022044512_parched_norrin_radd" &&
           name !== "20261022044526_chilly_madame_hydra" &&
           name !== "20261022080829_dvd-title-identities" &&
-          name !== "20261022100044_futuristic_cannonball",
+          name !== "20261022100044_futuristic_cannonball" &&
+          name !== "20261022205917_burly_shard" &&
+          name !== "20261022222723_awesome_cyclops" &&
+          name !== "20261023003003_ambiguous_gwen_stacy" &&
+          name !== "20261023014315_faithful_triton" &&
+          name !== "20261023021122_fearless_morg",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -9031,6 +9049,21 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261023021122_fearless_morg",
+        },
+        {
+          name: "20261023014315_faithful_triton",
+        },
+        {
+          name: "20261023003003_ambiguous_gwen_stacy",
+        },
+        {
+          name: "20261022222723_awesome_cyclops",
+        },
+        {
+          name: "20261022205917_burly_shard",
+        },
+        {
           name: "20261022195659_fresh_silver_samurai",
         },
         {
@@ -9050,21 +9083,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20261019204228_dvd-initial-save",
-        },
-        {
-          name: "20261019172643_strong_lila_cheney",
-        },
-        {
-          name: "20261019162901_notification_delivery_reliability",
-        },
-        {
-          name: "20261019154548_notifications",
-        },
-        {
-          name: "20261004053119_scsi-read-path-notice",
-        },
-        {
-          name: "20260930003626_dvd-evidence-checkpoints",
         },
       ]);
     expect(
@@ -13897,15 +13915,158 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const sqlite = new DatabaseSync(databasePath);
     expect(() => sqlite.prepare(`
       INSERT INTO archive_recovery_work (
-        archive_recovery_id, original_disc_archive_id, status, requested_at,
-        created_at, updated_at
-      ) VALUES (?, ?, 'requested', 1, 1, 1)
-    `).run(firstRecoveryId, second.archive.id)).toThrow(/foreign key/i);
+        archive_recovery_id, original_disc_archive_id, attempt_id, status,
+        requested_at, created_at, updated_at
+      ) VALUES (?, ?, ?, 'requested', 1, 1, 1)
+    `).run(
+      firstRecoveryId,
+      second.archive.id,
+      `${firstRecoveryId}:attempt:1`,
+    )).toThrow(/foreign key/i);
     expect(sqlite.prepare(`
       SELECT archive_recovery_id
       FROM archive_recovery_work
     `).all()).toEqual([]);
     sqlite.close();
+  });
+
+  it("rejects invalid Archive Recovery fault and Stop persistence shapes", () => {
+    const databasePath = createTestDatabasePath();
+    const fixture = createDiscSelectionCorrectionFixture({
+      databasePath,
+      key: "recovery-persistence-shape",
+    });
+    const recoveryId = "recovery-persistence-shape" as ArchiveRecoveryId;
+    fixture.access.close();
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      fixture.archive.id,
+      "recovery-persistence-shape",
+      { archiveRecoveryId: recoveryId },
+    );
+
+    const sqlite = new DatabaseSync(databasePath);
+    try {
+      expect(() => sqlite.prepare(`UPDATE archive_recoveries
+        SET status = 'faulted', fault_code = 'UNKNOWN_FAULT'
+        WHERE id = ?`).run(recoveryId)).toThrow(/check constraint/i);
+      expect(() => sqlite.prepare(`UPDATE archive_recoveries
+        SET stop_operation_id = 'synthetic-stop', stop_requested_at = 1
+        WHERE id = ?`).run(recoveryId)).toThrow(/check constraint/i);
+      expect(sqlite.prepare(`SELECT status, stop_operation_id, fault_code
+        FROM archive_recoveries WHERE id = ?`).get(recoveryId)).toEqual({
+          status: "eligible",
+          stop_operation_id: null,
+          fault_code: null,
+        });
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it("skips an encode-owned verified candidate without starving the queue", () => {
+    const databasePath = createTestDatabasePath();
+    const blockedKey = "verified-candidate-a-blocked";
+    const claimableKey = "verified-candidate-b-claimable";
+    const blocked = createDiscSelectionCorrectionFixture({
+      databasePath,
+      key: blockedKey,
+      contentIdFill: "a",
+    });
+    const claimable = createDiscSelectionCorrectionFixture({
+      databasePath,
+      key: claimableKey,
+      contentIdFill: "b",
+    });
+    const profile = blocked.access.encodingProfiles.create({
+      key: blockedKey,
+      displayName: "Verified candidate blocked by Encode work",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    const encode = blocked.access.encodeJobs.enqueue({
+      discSelectionId: blocked.mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Verified Candidate Blocked.mkv",
+    });
+    const blockedRecoveryId =
+      "verified-candidate-a-blocked-recovery" as ArchiveRecoveryId;
+    const claimableRecoveryId =
+      "verified-candidate-b-claimable-recovery" as ArchiveRecoveryId;
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      blocked.archive.id,
+      blockedKey,
+      { archiveRecoveryId: blockedRecoveryId },
+    );
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      claimable.archive.id,
+      claimableKey,
+      { archiveRecoveryId: claimableRecoveryId },
+    );
+    const blockedHeader = blocked.access.catalog.findDvdArchiveEvidenceHeader(
+      blocked.archive.id,
+    )!;
+    const claimableHeader = claimable.access.catalog
+      .findDvdArchiveEvidenceHeader(claimable.archive.id)!;
+    const sqlite = new DatabaseSync(databasePath);
+    const insertVerification = sqlite.prepare(`
+      INSERT INTO dvd_disc_verifications (
+        id, archive_recovery_id, archive_recovery_attempt_id,
+        attempt_ordinal, original_disc_archive_id, disc_inspection_id,
+        detected_disc_id, media_generation, source_metadata_fingerprint,
+        observed_metadata_fingerprint, checkpoint_revision,
+        checkpoint_digest, status, outcome, reasons, findings,
+        budget_exhausted, worker_execution_id, claim_token, claimed_at,
+        started_at, completed_at, failure_code, created_at, updated_at
+      ) VALUES (
+        ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 1, ?, 'completed', 'match', '[]', '[]',
+        0, ?, NULL, NULL, 1, 1, NULL, 1, 1
+      )
+    `);
+    for (const candidate of [{
+      key: blockedKey,
+      recoveryId: blockedRecoveryId,
+      archive: blocked.archive,
+      checkpointDigest: blockedHeader.currentManifestDigest,
+    }, {
+      key: claimableKey,
+      recoveryId: claimableRecoveryId,
+      archive: claimable.archive,
+      checkpointDigest: claimableHeader.currentManifestDigest,
+    }]) {
+      insertVerification.run(
+        `${candidate.key}-verification`,
+        candidate.recoveryId,
+        `${candidate.recoveryId}:attempt:1`,
+        candidate.archive.id,
+        `${candidate.key}-evidence-inspection`,
+        candidate.archive.detectedDiscId,
+        `${candidate.key}-evidence-generation`,
+        candidate.archive.fingerprint,
+        candidate.archive.fingerprint,
+        candidate.checkpointDigest,
+        `${candidate.key}-verification-worker`,
+      );
+    }
+    sqlite.close();
+
+    const claimed = blocked.access.archiveRecoveryWork
+      .claimNextVerifiedCandidate("verified-candidate-worker");
+    expect(claimed).toMatchObject({
+      recovery: { id: claimableRecoveryId, status: "running" },
+      claim: {
+        archiveRecoveryId: claimableRecoveryId,
+        status: "claimed",
+      },
+    });
+    expect(blocked.access.catalog.findArchiveRecoveryById(blockedRecoveryId))
+      .toMatchObject({ status: "eligible", work: null });
+    expect(blocked.access.encodeJobs.find(encode.id))
+      .toMatchObject({ status: "queued" });
+    blocked.access.close();
+    claimable.access.close();
   });
 
   it("blocks recovery request and claim when Encode Job work already owns the archive", () => {
@@ -14353,6 +14514,150 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           expect.objectContaining({
             ...(existingJob === null ? {} : { id: existingJob.id }),
             status: "queued",
+          }),
+        ]);
+      }
+      exclusionAccess.close();
+    },
+  );
+
+  it.each([
+    ["enqueue", "stop-first", 0, 150],
+    ["enqueue", "encode-first", 150, 0],
+    ["requeue", "stop-first", 0, 150],
+    ["requeue", "encode-first", 150, 0],
+    ["claim", "stop-first", 0, 150],
+    ["claim", "encode-first", 150, 0],
+  ] as const)(
+    "atomically resolves the Stop/%s race with %s ordering",
+    async (operation, ordering, stopDelayMs, encodeDelayMs) => {
+      const databasePath = createTestDatabasePath();
+      const { access, archive, mistakenSelection } =
+        createDiscSelectionCorrectionFixture({
+          databasePath,
+          key: `stop-${operation}-race-${ordering}`,
+        });
+      const profile = access.encodingProfiles.create({
+        key: `stop-${operation}-race-${ordering}`,
+        displayName: `Stop ${operation} race ${ordering}`,
+        mediaDomain: "dvd_video",
+        settings: { preset: "Fast 480p30" },
+      });
+      const recoveryId =
+        `stop-${operation}-race-${ordering}` as ArchiveRecoveryId;
+      const existingJob = operation === "enqueue"
+        ? null
+        : access.encodeJobs.enqueue({
+          discSelectionId: mistakenSelection.id,
+          encodingProfileId: profile.id,
+          outputPath: `/media/movies/Stop ${operation} Race ${ordering}.mkv`,
+        });
+      if (
+        operation === "requeue" ||
+        (operation === "claim" && ordering === "stop-first")
+      ) {
+        const claim = access.encodeJobs.claimNext(
+          `stop-${operation}-race-preparation-${ordering}`,
+        );
+        if (claim === null) throw new Error("Expected Encode Job claim");
+        access.encodeJobs.fail(claim, "Synthetic race predecessor failure");
+      }
+      markArchiveWithDvdRecoveryEvidence(
+        databasePath,
+        archive.id,
+        `stop-${operation}-race-${ordering}`,
+        { archiveRecoveryId: recoveryId },
+      );
+      const recovery = access.catalog.findArchiveRecovery(archive.id);
+      if (recovery === null) throw new Error("Expected Archive Recovery");
+      access.close();
+      const exclusionAccess = openEncodeExclusionTestDatabase(databasePath);
+
+      const encodeOperation: ConcurrentOperation = operation === "enqueue"
+        ? {
+          operation: "enqueue-encode",
+          discSelectionId: mistakenSelection.id,
+          encodingProfileId: profile.id,
+          outputPath:
+            `/media/movies/Stop Enqueue Race Fresh ${ordering}.mkv`,
+          delayMs: encodeDelayMs,
+        }
+        : operation === "requeue"
+        ? {
+          operation: "requeue-encode",
+          encodeJobId: existingJob!.id,
+          mutationKey: `stop-requeue-race-${ordering}`,
+          delayMs: encodeDelayMs,
+        }
+        : ordering === "stop-first"
+        ? {
+          operation: "queue-stale-and-claim-encode",
+          encodeJobId: existingJob!.id,
+          delayMs: encodeDelayMs,
+        }
+        : { operation: "claim-encode", delayMs: encodeDelayMs };
+      const stopMutationKeys = {
+        enqueue: {
+          "stop-first": "00000000-0000-4000-8000-000000000481",
+          "encode-first": "00000000-0000-4000-8000-000000000482",
+        },
+        requeue: {
+          "stop-first": "00000000-0000-4000-8000-000000000483",
+          "encode-first": "00000000-0000-4000-8000-000000000484",
+        },
+        claim: {
+          "stop-first": "00000000-0000-4000-8000-000000000485",
+          "encode-first": "00000000-0000-4000-8000-000000000486",
+        },
+      } as const;
+
+      const results = await runBarrierWorkers({
+        databasePath,
+        allowDvdRecoveryEvidenceEncodingForExclusionTest: true,
+        mode: "operation",
+        operations: [{
+          operation: "stop-archive-recovery",
+          archiveRecoveryId: recoveryId,
+          attemptId: recovery.attemptId,
+          mutationKey: stopMutationKeys[operation][ordering],
+          delayMs: stopDelayMs,
+        }, encodeOperation],
+      });
+
+      if (ordering === "stop-first") {
+        expect(results[0]).toEqual({
+          outcome: "stopping",
+          id: recoveryId,
+        });
+        expect(results[1]).toEqual(operation === "claim"
+          ? { outcome: "rejected" }
+          : { outcome: "rejected", code: "ENCODE_WORK_CONFLICT" });
+        expect(exclusionAccess.catalog.findArchiveRecovery(archive.id))
+          .toMatchObject({
+            id: recoveryId,
+            status: "stopping",
+            work: expect.objectContaining({ status: "requested" }),
+          });
+        expect(exclusionAccess.encodeJobs.list()).toEqual(operation === "enqueue"
+          ? []
+          : [expect.objectContaining({
+            id: existingJob!.id,
+            status: operation === "requeue" ? "failed" : "queued",
+          })]);
+      } else {
+        expect(results[0]).toEqual({
+          outcome: "rejected",
+          code: "ENCODE_WORK_CONFLICT",
+        });
+        expect(results[1]).toMatchObject({
+          outcome: operation === "claim" ? "claimed" : "enqueued",
+        });
+        expect(exclusionAccess.catalog.findArchiveRecovery(archive.id))
+          .toMatchObject({ id: recoveryId, status: "eligible", work: null });
+        expect(exclusionAccess.encodeJobs.list()).toEqual([
+          expect.objectContaining({
+            ...(existingJob === null ? {} : { id: existingJob.id }),
+            status: operation === "claim" ? "running" : "queued",
           }),
         ]);
       }
