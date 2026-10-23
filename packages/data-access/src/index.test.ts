@@ -34,6 +34,7 @@ import {
   createDvdArchiveRecoveryReadEvidenceDigest,
   createDvdStructuralAssessment,
   createDvdTitleDamageAssessment,
+  dvdEvidenceRangesAfterRecoveryRead,
   dvdTitleIdentityCatalogMappingProjectionDigest,
   createCleanReadArchiveIntegrityEvidence,
   createDiscSelectionSourceIdentity,
@@ -684,13 +685,35 @@ function advanceDvdTitleIdentityCheckpointForTest(
       )
   `).all() as Array<{ name: string; sql: string }>;
   const current = sqlite.prepare(`
-    SELECT current_manifest_id AS manifestId,
-           current_manifest_revision AS manifestRevision
-    FROM dvd_archive_evidence_headers
-    WHERE original_disc_archive_id = ?
+    SELECT h.current_manifest_id AS manifestId,
+           h.current_manifest_revision AS manifestRevision,
+           m.manifest_digest AS manifestDigest,
+           m.evidence_format AS evidenceFormat,
+           m.image_fingerprint AS imageFingerprint,
+           m.sector_size_bytes AS sectorSizeBytes,
+           m.accepted_end_lba_exclusive AS acceptedEndLbaExclusive,
+           m.boundary_policy_version AS boundaryPolicyVersion,
+           m.boundary_reported_size_bytes AS boundaryReportedSizeBytes,
+           m.boundary_published_size_bytes AS boundaryPublishedSizeBytes,
+           m.boundary_evidence_digest AS boundaryEvidenceDigest,
+           m.unrecovered_source_ranges AS unrecoveredSourceRanges
+    FROM dvd_archive_evidence_headers h
+    INNER JOIN dvd_archive_evidence_manifests m
+      ON m.id = h.current_manifest_id
+    WHERE h.original_disc_archive_id = ?
   `).get(originalDiscArchiveId) as {
     manifestId: string;
     manifestRevision: number;
+    manifestDigest: string;
+    evidenceFormat: typeof DVD_RECOVERY_EVIDENCE_FORMAT;
+    imageFingerprint: string;
+    sectorSizeBytes: number;
+    acceptedEndLbaExclusive: number;
+    boundaryPolicyVersion: string;
+    boundaryReportedSizeBytes: number;
+    boundaryPublishedSizeBytes: number;
+    boundaryEvidenceDigest: string;
+    unrecoveredSourceRanges: string;
   } | undefined;
   if (current === undefined || revision !== current.manifestRevision + 1) {
     sqlite.close();
@@ -698,7 +721,39 @@ function advanceDvdTitleIdentityCheckpointForTest(
   }
   const recoveryReadId = `synthetic-title-recovery-${revision}`;
   const manifestId = `synthetic-title-manifest-${revision}`;
-  const manifestDigest = revision.toString(16).padStart(64, "0");
+  const recoveryReadEvidenceDigest = createDvdArchiveRecoveryReadEvidenceDigest({
+    originalDiscArchiveId,
+    fromManifestId: current.manifestId,
+    fromManifestRevision: current.manifestRevision,
+    startLba: 0,
+    sectorCount: 1,
+    outcome: "failed",
+  });
+  const previousUnrecoveredSourceRanges = JSON.parse(
+    current.unrecoveredSourceRanges,
+  ) as DvdUnrecoveredSourceRange[];
+  const unrecoveredSourceRanges = dvdEvidenceRangesAfterRecoveryRead(
+    previousUnrecoveredSourceRanges,
+    0,
+    "failed",
+  );
+  const manifestDigests = createDvdArchiveEvidenceManifestDigests({
+    originalDiscArchiveId,
+    revision,
+    previousManifestId: current.manifestId,
+    previousManifestDigest: current.manifestDigest,
+    recoveryReadId,
+    recoveryReadEvidenceDigest,
+    evidenceFormat: current.evidenceFormat,
+    imageFingerprint: current.imageFingerprint,
+    sectorSizeBytes: current.sectorSizeBytes,
+    acceptedEndLbaExclusive: current.acceptedEndLbaExclusive,
+    boundaryPolicyVersion: current.boundaryPolicyVersion,
+    boundaryReportedSizeBytes: current.boundaryReportedSizeBytes,
+    boundaryPublishedSizeBytes: current.boundaryPublishedSizeBytes,
+    boundaryEvidenceDigest: current.boundaryEvidenceDigest,
+    unrecoveredSourceRanges,
+  });
   try {
     for (const guard of guards) sqlite.exec(`DROP TRIGGER "${guard.name}"`);
     sqlite.prepare(`
@@ -706,13 +761,13 @@ function advanceDvdTitleIdentityCheckpointForTest(
         id, original_disc_archive_id, from_manifest_id,
         from_manifest_revision, start_lba, sector_count, outcome,
         evidence_digest, created_at
-      ) VALUES (?, ?, ?, ?, 0, 1, 'recovered', ?, ?)
+      ) VALUES (?, ?, ?, ?, 0, 1, 'failed', ?, ?)
     `).run(
       recoveryReadId,
       originalDiscArchiveId,
       current.manifestId,
       current.manifestRevision,
-      "e".repeat(64),
+      recoveryReadEvidenceDigest,
       revision,
     );
     sqlite.prepare(`
@@ -729,14 +784,16 @@ function advanceDvdTitleIdentityCheckpointForTest(
         image_fingerprint, sector_size_bytes, accepted_end_lba_exclusive,
         boundary_policy_version, boundary_reported_size_bytes,
         boundary_published_size_bytes, boundary_evidence_digest,
-        unrecovered_source_ranges, unrecovered_source_ranges_digest, ?, ?
+        ?, ?, ?, ?
       FROM dvd_archive_evidence_manifests
       WHERE id = ?
     `).run(
       manifestId,
       revision,
       recoveryReadId,
-      manifestDigest,
+      JSON.stringify(unrecoveredSourceRanges),
+      manifestDigests.unrecoveredSourceRangesDigest,
+      manifestDigests.manifestDigest,
       revision,
       current.manifestId,
     );
@@ -748,7 +805,7 @@ function advanceDvdTitleIdentityCheckpointForTest(
     `).run(
       manifestId,
       revision,
-      manifestDigest,
+      manifestDigests.manifestDigest,
       revision,
       originalDiscArchiveId,
     );
@@ -756,7 +813,11 @@ function advanceDvdTitleIdentityCheckpointForTest(
     for (const guard of guards) sqlite.exec(guard.sql);
     sqlite.close();
   }
-  return { manifestId, manifestRevision: revision, manifestDigest };
+  return {
+    manifestId,
+    manifestRevision: revision,
+    manifestDigest: manifestDigests.manifestDigest,
+  };
 }
 
 function createDvdTitleIdentityArchiveFixture(
@@ -15284,6 +15345,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       databasePath,
       archive.id,
       "synthetic-title-continuity",
+      { archiveRecoveryId: "synthetic-title-continuity-recovery" },
     );
     const firstHeader = access.catalog.findDvdArchiveEvidenceHeader(archive.id)!;
     const titleObservation = (displayTitleNumber: number, cellId = 1) => ({
@@ -16079,7 +16141,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     fixture.access.catalog.recordDvdTitleIdentityObservations({
       originalDiscArchiveId: fixture.archive.id,
       checkpoint,
-      observations: [titleIdentityObservation(1)],
+      observations: [titleIdentityObservation(2, { cellId: 2 })],
     });
     for (let revision = 3; revision <= 4; revision += 1) {
       checkpoint = advanceDvdTitleIdentityCheckpointForTest(
@@ -16090,13 +16152,19 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       fixture.access.catalog.recordDvdTitleIdentityObservations({
         originalDiscArchiveId: fixture.archive.id,
         checkpoint,
-        observations: [titleIdentityObservation(1)],
+        observations: [titleIdentityObservation(revision, {
+          cellId: revision,
+        })],
       });
     }
     const statementAll = vi.spyOn(StatementSync.prototype, "all");
     const projectedRowCount = () => statementAll.mock.results.reduce(
       (total, result) => total +
         (Array.isArray(result.value) ? result.value.length : 0),
+      0,
+    );
+    const maximumBoundParameterCount = () => statementAll.mock.calls.reduce(
+      (maximum, parameters) => Math.max(maximum, parameters.length),
       0,
     );
     const readProjection = () => fixture.access.catalog
@@ -16112,6 +16180,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(readProjection()?.titleIdentity).not.toBeNull();
     const shortHistoryRows = projectedRowCount();
     const shortHistoryQueries = statementAll.mock.calls.length;
+    const shortHistoryMaximumBoundParameters = maximumBoundParameterCount();
 
     let deepAuditReview: ReturnType<
       typeof fixture.access.catalog.recordDvdTitleIdentityObservations
@@ -16125,7 +16194,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       deepAuditReview = fixture.access.catalog.recordDvdTitleIdentityObservations({
         originalDiscArchiveId: fixture.archive.id,
         checkpoint,
-        observations: [titleIdentityObservation(1)],
+        observations: [titleIdentityObservation(revision, {
+          cellId: revision,
+        })],
       });
     }
     statementAll.mockClear();
@@ -16133,11 +16204,15 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(longProjection?.titleIdentity).not.toBeNull();
     const longHistoryRows = projectedRowCount();
     const longHistoryQueries = statementAll.mock.calls.length;
+    const longHistoryMaximumBoundParameters = maximumBoundParameterCount();
     statementAll.mockRestore();
 
     expect(shortHistoryRows).toBeGreaterThan(0);
     expect(longHistoryRows).toBe(shortHistoryRows);
     expect(longHistoryQueries).toBe(shortHistoryQueries);
+    expect(longHistoryMaximumBoundParameters).toBe(
+      shortHistoryMaximumBoundParameters,
+    );
     expect(longProjection?.titleIdentity?.catalogMappingProjectionId).toBe(
       deepAuditReview === undefined
         ? undefined
@@ -16230,10 +16305,14 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
     );
     const fixtures = [first, second];
-    for (const fixture of fixtures) {
-      const header = first.access.catalog.findDvdArchiveEvidenceHeader(
+    const headers = fixtures.map((fixture) => ({
+      originalDiscArchiveId: fixture.archive.id,
+      evidenceHeader: first.access.catalog.findDvdArchiveEvidenceHeader(
         fixture.archive.id,
-      )!;
+      )!,
+    }));
+    for (const [index, fixture] of fixtures.entries()) {
+      const header = headers[index]!.evidenceHeader;
       const reviewSet = first.access.catalog.recordDvdTitleIdentityObservations({
         originalDiscArchiveId: fixture.archive.id,
         checkpoint: {
@@ -16374,21 +16453,63 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       `).run(fixture.archive.id, damage.id);
       sqlite.close();
     }
-    const headers = fixtures.map((fixture) => ({
-      originalDiscArchiveId: fixture.archive.id,
-      evidenceHeader: first.access.catalog.findDvdArchiveEvidenceHeader(
-        fixture.archive.id,
-      ),
-    }));
+    for (let revision = 2; revision <= 24; revision += 1) {
+      const checkpoint = advanceDvdTitleIdentityCheckpointForTest(
+        first.databasePath,
+        first.archive.id,
+        revision,
+      );
+      first.access.catalog.recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: first.archive.id,
+        checkpoint,
+        observations: [0, 1, 2].map((offset) => {
+          const displayTitleNumber = revision * 3 - 2 + offset;
+          return titleIdentityObservation(displayTitleNumber, {
+            cellId: displayTitleNumber,
+          });
+        }),
+      });
+      headers[0] = {
+        originalDiscArchiveId: first.archive.id,
+        evidenceHeader: {
+          ...headers[0]!.evidenceHeader,
+          currentManifestId: checkpoint.manifestId,
+          currentManifestRevision: checkpoint.manifestRevision,
+          currentManifestDigest: checkpoint.manifestDigest,
+        },
+      };
+    }
     const statementAll = vi.spyOn(StatementSync.prototype, "all");
     const statementGet = vi.spyOn(StatementSync.prototype, "get");
     const queryCount = () =>
       statementAll.mock.calls.length + statementGet.mock.calls.length;
+    const projectedRowCount = () => statementAll.mock.results.reduce(
+      (total, result) => total +
+        (Array.isArray(result.value) ? result.value.length : 0),
+      0,
+    );
+    const maximumBoundParameterCount = () => statementAll.mock.calls.reduce(
+      (maximum, parameters) => Math.max(maximum, parameters.length),
+      0,
+    );
     try {
       expect(first.access.catalog.readDvdCatalogReviewWorkflowEvidence([
         headers[0]!,
-      ]).get(first.archive.id)?.titleDamage.state).toBe("current");
+      ]).get(first.archive.id)?.titleDamage.state).toBe("outdated");
       const singleArchiveQueryCount = queryCount();
+      const longHistoryRows = projectedRowCount();
+      const longHistoryMaximumBoundParameters = maximumBoundParameterCount();
+
+      statementAll.mockClear();
+      statementGet.mockClear();
+      expect(first.access.catalog.readDvdCatalogReviewWorkflowEvidence([
+        headers[1]!,
+      ]).get(second.archive.id)?.titleDamage.state).toBe("current");
+      expect(projectedRowCount()).toBe(longHistoryRows);
+      expect(maximumBoundParameterCount()).toBe(
+        longHistoryMaximumBoundParameters,
+      );
+      expect(queryCount()).toBe(singleArchiveQueryCount);
 
       statementAll.mockClear();
       statementGet.mockClear();
@@ -16397,11 +16518,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       );
       expect(fixtures.map(({ archive }) =>
         batch.get(archive.id)?.titleDamage.state
-      )).toEqual(["current", "current"]);
+      )).toEqual(["outdated", "current"]);
       expect(queryCount()).toBe(singleArchiveQueryCount);
       expect(fixtures.map(({ archive }) =>
         first.access.dvdTitleDamageAssessments.inspect(archive.id).state
-      )).toEqual(["current", "current"]);
+      )).toEqual(["outdated", "current"]);
     } finally {
       statementAll.mockRestore();
       statementGet.mockRestore();
@@ -16664,13 +16785,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       currentManifestRevision: thirdCheckpoint.manifestRevision,
       currentManifestDigest: thirdCheckpoint.manifestDigest,
     };
-    expect(() =>
+    expect(
       wrongPredecessor.access.catalog
         .readDvdCatalogReviewWorkflowEvidence([{
           originalDiscArchiveId: wrongPredecessor.archive.id,
           evidenceHeader: wrongPredecessorHeader,
-        }])
-    ).toThrow(/continuity claim does not match/i);
+        }]).get(wrongPredecessor.archive.id)?.titleIdentity,
+    ).not.toBeNull();
     wrongPredecessor.access.close();
 
     const corruptedChain = createDvdTitleIdentityArchiveFixture(

@@ -1196,6 +1196,52 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
         current: { recovery: { state: "faulted" } },
       },
     });
+
+    const resumedDatabase = new DatabaseSync(fixture.databasePath);
+    resumedDatabase.prepare(`
+      UPDATE archive_recoveries
+      SET status = 'running', fault_code = NULL
+      WHERE original_disc_archive_id = ?
+    `).run(archive.id);
+    resumedDatabase.close();
+    const resumed = await readBoth();
+    const labelMutationKey = "00000000-0000-4000-8000-000000000419";
+    const currentLabelWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "update_disc_selection",
+        discSelectionId: firstSelectionId,
+        catalogRevision: resumed.catalogRevision,
+        mutationKey: labelMutationKey,
+        changes: { label: "Synthetic current feature" },
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const currentLabelWebResult = await currentLabelWeb.json();
+    const currentLabelCli = await fixture.run([
+      "disc-selection",
+      "update",
+      archive.id,
+      firstSelectionId,
+      "--key",
+      labelMutationKey,
+      "--revision",
+      resumed.catalogRevision,
+      "--label",
+      "Synthetic current feature",
+    ]);
+    expect(currentLabelWeb.status).toBe(200);
+    expect(currentLabelCli.exitCode).toBe(0);
+    expect(currentLabelCli.result).toEqual(currentLabelWebResult);
+    expect(currentLabelCli.result).toMatchObject({
+      discSelection: { label: "Synthetic current feature" },
+    });
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    }).find(({ id }) => id === firstSelectionId)?.label).toBe(
+      "Synthetic current feature",
+    );
   } finally {
     access.close();
     fixture.dispose();
