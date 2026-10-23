@@ -275,6 +275,33 @@ it("continues a productive pass in reverse and pauses after no progress", async 
           passCursorLba: null,
         },
       });
+    const queuedCli = await fixture.run([
+      "inspect",
+      "archive-recoveries",
+      seeded.recoveryId,
+    ]);
+    const queuedWeb = createOperationsResponse(
+      input.access,
+      new Request(
+        `http://localhost/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
+      ),
+    );
+    expect(queuedCli.exitCode).toBe(0);
+    expect(queuedCli.result).toEqual(await queuedWeb.json());
+    expect(queuedCli.result).toMatchObject({
+      item: { status: "running", recoveryStatus: "eligible" },
+    });
+    const queuedWait = await fixture.run([
+      "wait",
+      "archive-recoveries",
+      seeded.recoveryId,
+      "--timeout-ms",
+      "0",
+    ]);
+    expect(queuedWait.result).toMatchObject({
+      outcome: "timeout",
+      current: { status: "running", recoveryStatus: "eligible" },
+    });
 
     expect(await pollDvdRecoveryPass(input)).toBe(true);
     expect(source.start.mock.calls.map(([read]) => read.startLba))
@@ -1461,7 +1488,19 @@ it("rolls a published checkpoint forward before requeueing a crashed claim", asy
     expect(await pollDvdRecoveryPass(input)).toBe(true);
     expect(source.start).not.toHaveBeenCalled();
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
-      .toMatchObject({ status: "completed", work: null });
+      .toMatchObject({
+        status: "completed",
+        work: null,
+        passHistory: [{
+          passNumber: 1,
+          direction: "forward",
+          initialUnrecoveredSectorCount: 1,
+          recoveredSectorCount: 1,
+          remainingSectorCount: 0,
+          lastCursorLba: 208,
+          outcome: "completed",
+        }],
+      });
     expect(input.access.catalog.findDvdArchiveEvidenceHeader(seeded.archive.id))
       .toMatchObject({ currentManifestRevision: 2 });
   } finally {

@@ -4,9 +4,11 @@ import {
   DVD_RECOVERY_PASS_CLAIM_LEASE_MS,
   type ArchiveRecovery,
   type ArchiveRecoveryFaultCode,
+  type ArchiveRecoveryPassDirection,
   type ClaimedArchiveRecoveryWork,
   type DataAccess,
   type DvdDiscVerification,
+  type DvdUnrecoveredSourceRange,
   type DvdRecoveryWriteAuthority,
   type OpticalDeviceIdentity,
 } from "@rip-dvd/data-access";
@@ -74,6 +76,45 @@ export class DvdRecoveryPassFault extends Error {
 
 class DvdRecoveryStopDeferred extends Error {
   override readonly name = "DvdRecoveryStopDeferred";
+}
+
+function* recoveryPassSectorLbas(input: {
+  direction: ArchiveRecoveryPassDirection;
+  cursorLba: number | null;
+  ranges: readonly DvdUnrecoveredSourceRange[];
+}): Generator<number> {
+  if (input.direction === "forward") {
+    const firstUnattemptedLba = input.cursorLba === null
+      ? 0
+      : input.cursorLba + 1;
+    for (const range of input.ranges) {
+      const endLbaExclusive = range.startLba + range.sectorCount;
+      for (
+        let lba = Math.max(range.startLba, firstUnattemptedLba);
+        lba < endLbaExclusive;
+        lba += 1
+      ) {
+        yield lba;
+      }
+    }
+    return;
+  }
+
+  for (let index = input.ranges.length - 1; index >= 0; index -= 1) {
+    const range = input.ranges[index];
+    if (range === undefined) continue;
+    const endLbaExclusive = range.startLba + range.sectorCount;
+    for (
+      let lba = Math.min(
+        endLbaExclusive,
+        input.cursorLba ?? endLbaExclusive,
+      ) - 1;
+      lba >= range.startLba;
+      lba -= 1
+    ) {
+      yield lba;
+    }
+  }
 }
 
 function admittedDeviceIdentity(
@@ -553,170 +594,142 @@ export async function pollDvdRecoveryPass(input: {
     if (checkpoint === null) {
       throw new DvdRecoveryPassFault("SOURCE_READ_FAILED");
     }
-    const ranges = (claim.passDirection === "forward"
-      ? checkpoint.unrecoveredSourceRanges
-      : [...checkpoint.unrecoveredSourceRanges].reverse()).flatMap((range) => {
-        const endLbaExclusive = range.startLba + range.sectorCount;
-        if (claim.passDirection === "forward") {
-          const startLba = Math.max(
-            range.startLba,
-            claim.passCursorLba === null ? 0 : claim.passCursorLba + 1,
-          );
-          return startLba >= endLbaExclusive
-            ? []
-            : [{ startLba, endLbaExclusive }];
-        }
-        const resumedEndLbaExclusive = Math.min(
-          endLbaExclusive,
-          claim.passCursorLba ?? endLbaExclusive,
-        );
-        return range.startLba >= resumedEndLbaExclusive
-          ? []
-          : [{
-              startLba: range.startLba,
-              endLbaExclusive: resumedEndLbaExclusive,
-            }];
-      });
-    for (const range of ranges) {
-      for (
-        let startLba = claim.passDirection === "forward"
-          ? range.startLba
-          : range.endLbaExclusive - 1;
-        claim.passDirection === "forward"
-          ? startLba < range.endLbaExclusive
-          : startLba >= range.startLba;
-        startLba += claim.passDirection === "forward" ? 1 : -1
-      ) {
-        throwIfRenewalFailed();
-        signal.throwIfAborted();
-        const before = currentRecovery(input.access, candidate.recovery);
-        if (before.status === "stopping") {
-          const outcome = await finalizeStopSafely({
-            ...input,
-            archiveImageOwnership,
-            claim,
-            reconcile,
-            recovery: before,
-            signal,
-          });
-          return outcome !== "deferred";
-        }
-        if (before.status !== "running") {
-          throw new DvdRecoveryPassFault("SOURCE_CHANGED");
-        }
-        input.access.archiveRecoveryWork.assertClaim(claim);
-        const devicePath = await currentInsertionDevicePath({
-          access: input.access,
-          authority,
-          mediaGenerationObserver: input.mediaGenerationObserver,
-          signal,
-        });
-        if (devicePath === null) {
-          throw new DvdRecoveryPassFault("SOURCE_CHANGED");
-        }
-        let admittedRead:
-          | ReturnType<DvdRecoverySourceReader["start"]>
-          | undefined;
-        try {
-          try {
-            admittedRead = input.reader.start({
-              devicePath,
-              startLba,
-              sectorCount: 1,
-              acceptedEndLbaExclusive:
-                checkpoint.acceptedEndLbaExclusive,
-            });
-            await awaitDvdSourceReadReady(admittedRead, signal);
-          } catch (cause) {
-            throw new DvdRecoveryPassFault("SOURCE_READ_FAILED", {
-              cause,
-            });
-          }
-          const admitted = input.access.archiveRecoveryWork.admitSourceRead(
-            claim,
-            devicePath,
-            admittedRead.deviceIdentity,
-          );
-          if (admitted === null) {
-            throw new DvdRecoveryPassFault("SOURCE_CHANGED");
-          }
-          authorizeDvdSourceRead(admittedRead);
-        } catch (error) {
-          if (admittedRead !== undefined) {
-            void admittedRead.result.catch(() => undefined);
-            admittedRead.cancel();
-            await admittedRead.closed;
-          }
-          throw error;
-        }
-        if (admittedRead === undefined) {
-          throw new DvdRecoveryPassFault("SOURCE_READ_FAILED");
-        }
-        const completed = await waitForRead({
-          active: admittedRead,
-          access: input.access,
-          recovery: candidate.recovery,
-          signal,
-          stopPollIntervalMs: input.stopPollIntervalMs ??
-            DEFAULT_STOP_POLL_INTERVAL_MS,
-        });
-        const afterRead = currentRecovery(input.access, candidate.recovery);
-        if (completed.outcome === "stopped" || afterRead.status === "stopping") {
-          const outcome = await finalizeStopSafely({
-            ...input,
-            archiveImageOwnership,
-            claim,
-            reconcile,
-            recovery: afterRead,
-            signal,
-          });
-          return outcome !== "deferred";
-        }
-        if (await currentInsertionDevicePath({
-          access: input.access,
-          authority,
-          mediaGenerationObserver: input.mediaGenerationObserver,
-          signal,
-        }) !== devicePath) {
-          throw new DvdRecoveryPassFault("SOURCE_CHANGED");
-        }
-        const observation = completed.read.outcome === "readable"
-          ? {
-              startLba,
-              outcome: "recovered" as const,
-              bytes: completed.read.bytes,
-            }
-          : completed.read.diagnostic.category === "medium_error"
-            ? { startLba, outcome: "failed" as const }
-            : (() => {
-                throw new DvdRecoveryPassFault(
-                  sourceFaultCode(completed.read.diagnostic),
-                );
-              })();
-        await (input.commit ?? commitDvdRecoveryBatch)({
-          access: input.access,
-          originalsLibraryPath: input.originalsLibraryPath,
-          originalDiscArchiveId: candidate.recovery.originalDiscArchiveId,
-          recoveryWorkClaim: claim,
-          writeAuthority: authority,
-          observation,
+    for (
+      const startLba of recoveryPassSectorLbas({
+        direction: claim.passDirection,
+        cursorLba: claim.passCursorLba,
+        ranges: checkpoint.unrecoveredSourceRanges,
+      })
+    ) {
+      throwIfRenewalFailed();
+      signal.throwIfAborted();
+      const before = currentRecovery(input.access, candidate.recovery);
+      if (before.status === "stopping") {
+        const outcome = await finalizeStopSafely({
+          ...input,
           archiveImageOwnership,
-          atomicWriter: input.atomicWriter,
+          claim,
+          reconcile,
+          recovery: before,
           signal,
         });
-        throwIfRenewalFailed();
-        const afterBatch = currentRecovery(input.access, candidate.recovery);
-        if (afterBatch.status === "stopping") {
-          const outcome = await finalizeStopSafely({
-            ...input,
-            archiveImageOwnership,
-            claim,
-            reconcile,
-            recovery: afterBatch,
-            signal,
+        return outcome !== "deferred";
+      }
+      if (before.status !== "running") {
+        throw new DvdRecoveryPassFault("SOURCE_CHANGED");
+      }
+      input.access.archiveRecoveryWork.assertClaim(claim);
+      const devicePath = await currentInsertionDevicePath({
+        access: input.access,
+        authority,
+        mediaGenerationObserver: input.mediaGenerationObserver,
+        signal,
+      });
+      if (devicePath === null) {
+        throw new DvdRecoveryPassFault("SOURCE_CHANGED");
+      }
+      let admittedRead:
+        | ReturnType<DvdRecoverySourceReader["start"]>
+        | undefined;
+      try {
+        try {
+          admittedRead = input.reader.start({
+            devicePath,
+            startLba,
+            sectorCount: 1,
+            acceptedEndLbaExclusive:
+              checkpoint.acceptedEndLbaExclusive,
           });
-          return outcome !== "deferred";
+          await awaitDvdSourceReadReady(admittedRead, signal);
+        } catch (cause) {
+          throw new DvdRecoveryPassFault("SOURCE_READ_FAILED", {
+            cause,
+          });
         }
+        const admitted = input.access.archiveRecoveryWork.admitSourceRead(
+          claim,
+          devicePath,
+          admittedRead.deviceIdentity,
+        );
+        if (admitted === null) {
+          throw new DvdRecoveryPassFault("SOURCE_CHANGED");
+        }
+        authorizeDvdSourceRead(admittedRead);
+      } catch (error) {
+        if (admittedRead !== undefined) {
+          void admittedRead.result.catch(() => undefined);
+          admittedRead.cancel();
+          await admittedRead.closed;
+        }
+        throw error;
+      }
+      if (admittedRead === undefined) {
+        throw new DvdRecoveryPassFault("SOURCE_READ_FAILED");
+      }
+      const completed = await waitForRead({
+        active: admittedRead,
+        access: input.access,
+        recovery: candidate.recovery,
+        signal,
+        stopPollIntervalMs: input.stopPollIntervalMs ??
+          DEFAULT_STOP_POLL_INTERVAL_MS,
+      });
+      const afterRead = currentRecovery(input.access, candidate.recovery);
+      if (completed.outcome === "stopped" || afterRead.status === "stopping") {
+        const outcome = await finalizeStopSafely({
+          ...input,
+          archiveImageOwnership,
+          claim,
+          reconcile,
+          recovery: afterRead,
+          signal,
+        });
+        return outcome !== "deferred";
+      }
+      if (await currentInsertionDevicePath({
+        access: input.access,
+        authority,
+        mediaGenerationObserver: input.mediaGenerationObserver,
+        signal,
+      }) !== devicePath) {
+        throw new DvdRecoveryPassFault("SOURCE_CHANGED");
+      }
+      const observation = completed.read.outcome === "readable"
+        ? {
+            startLba,
+            outcome: "recovered" as const,
+            bytes: completed.read.bytes,
+          }
+        : completed.read.diagnostic.category === "medium_error"
+          ? { startLba, outcome: "failed" as const }
+          : (() => {
+              throw new DvdRecoveryPassFault(
+                sourceFaultCode(completed.read.diagnostic),
+              );
+            })();
+      await (input.commit ?? commitDvdRecoveryBatch)({
+        access: input.access,
+        originalsLibraryPath: input.originalsLibraryPath,
+        originalDiscArchiveId: candidate.recovery.originalDiscArchiveId,
+        recoveryWorkClaim: claim,
+        writeAuthority: authority,
+        observation,
+        archiveImageOwnership,
+        atomicWriter: input.atomicWriter,
+        signal,
+      });
+      throwIfRenewalFailed();
+      const afterBatch = currentRecovery(input.access, candidate.recovery);
+      if (afterBatch.status === "stopping") {
+        const outcome = await finalizeStopSafely({
+          ...input,
+          archiveImageOwnership,
+          claim,
+          reconcile,
+          recovery: afterBatch,
+          signal,
+        });
+        return outcome !== "deferred";
       }
     }
     input.access.archiveRecoveryWork.settlePass(claim);

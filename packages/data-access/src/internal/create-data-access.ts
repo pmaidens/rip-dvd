@@ -1628,11 +1628,11 @@ export function createDataAccessInternal(
     }
     return recovery;
   };
-  const settledArchiveRecoveryStatus = (
+  const currentDvdUnrecoveredSourceRanges = (
     querySource: Pick<typeof database, "select">,
     originalDiscArchiveId: OriginalDiscArchiveId,
-  ): "eligible" | "completed" => {
-    const manifest = requireRow(
+  ) =>
+    requireRow(
       querySource.select({
         unrecoveredSourceRanges:
           dvdArchiveEvidenceManifests.unrecoveredSourceRanges,
@@ -1648,8 +1648,15 @@ export function createDataAccessInternal(
       )).get(),
       "DVD Archive Evidence",
       originalDiscArchiveId,
-    );
-    return manifest.unrecoveredSourceRanges.length === 0
+    ).unrecoveredSourceRanges;
+  const settledArchiveRecoveryStatus = (
+    querySource: Pick<typeof database, "select">,
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): "eligible" | "completed" => {
+    return currentDvdUnrecoveredSourceRanges(
+      querySource,
+      originalDiscArchiveId,
+    ).length === 0
       ? "completed"
       : "eligible";
   };
@@ -1657,27 +1664,68 @@ export function createDataAccessInternal(
     querySource: Pick<typeof database, "select">,
     originalDiscArchiveId: OriginalDiscArchiveId,
   ): number => {
-    const manifest = requireRow(
-      querySource.select({
-        unrecoveredSourceRanges:
-          dvdArchiveEvidenceManifests.unrecoveredSourceRanges,
-      }).from(dvdArchiveEvidenceHeaders).innerJoin(
-        dvdArchiveEvidenceManifests,
-        eq(
-          dvdArchiveEvidenceManifests.id,
-          dvdArchiveEvidenceHeaders.currentManifestId,
-        ),
-      ).where(eq(
-        dvdArchiveEvidenceHeaders.originalDiscArchiveId,
-        originalDiscArchiveId,
-      )).get(),
-      "DVD Archive Evidence",
+    return currentDvdUnrecoveredSourceRanges(
+      querySource,
       originalDiscArchiveId,
-    );
-    return manifest.unrecoveredSourceRanges.reduce(
+    ).reduce(
       (total, range) => total + range.sectorCount,
       0,
     );
+  };
+  const archiveRecoveryPassSettlement = (
+    querySource: Pick<typeof database, "select">,
+    recovery: ArchiveRecovery,
+    timestamp: Date,
+  ) => {
+    const work = recovery.work;
+    if (
+      work === null || work.passStartedAt === null ||
+      work.passInitialUnrecoveredSectorCount === null
+    ) {
+      throw new DomainInvariantError(
+        "Archive Recovery pass has no durable starting progress",
+      );
+    }
+    const remainingSectorCount = unrecoveredSectorCount(
+      querySource,
+      recovery.originalDiscArchiveId,
+    );
+    if (
+      work.passInitialUnrecoveredSectorCount - remainingSectorCount !==
+        work.passRecoveredSectorCount
+    ) {
+      throw new DomainInvariantError(
+        "Archive Recovery pass progress does not match the current checkpoint",
+      );
+    }
+    const outcome = remainingSectorCount === 0
+      ? "completed" as const
+      : work.passRecoveredSectorCount > 0
+        ? "productive" as const
+        : "no_progress" as const;
+    const completedAtMs = timestamp.getTime();
+    return {
+      outcome,
+      history: [
+        ...recovery.passHistory,
+        {
+          passNumber: work.passNumber,
+          direction: work.passDirection,
+          initialUnrecoveredSectorCount:
+            work.passInitialUnrecoveredSectorCount,
+          recoveredSectorCount: work.passRecoveredSectorCount,
+          remainingSectorCount,
+          lastCursorLba: work.passCursorLba,
+          startedAtMs: work.passStartedAt.getTime(),
+          completedAtMs,
+          elapsedMs: Math.max(
+            0,
+            completedAtMs - work.passStartedAt.getTime(),
+          ),
+          outcome,
+        },
+      ].slice(-DVD_RECOVERY_PASS_HISTORY_LIMIT),
+    };
   };
   const requireNoPendingDvdRecoveryReconciliation = (
     querySource: Pick<typeof database, "select">,
@@ -10421,52 +10469,17 @@ export function createDataAccessInternal(
             return recovery;
           }
           const timestamp = now();
-          const work = recovery.work;
-          if (
-            work === null || work.passStartedAt === null ||
-            work.passInitialUnrecoveredSectorCount === null
-          ) {
-            throw new DomainInvariantError(
-              "Archive Recovery pass has no durable starting progress",
-            );
-          }
-          const remainingSectorCount = unrecoveredSectorCount(
+          const { outcome, history } = archiveRecoveryPassSettlement(
             transaction,
-            recovery.originalDiscArchiveId,
+            recovery,
+            timestamp,
           );
-          if (
-            work.passInitialUnrecoveredSectorCount - remainingSectorCount !==
-              work.passRecoveredSectorCount
-          ) {
+          const work = recovery.work;
+          if (work === null) {
             throw new DomainInvariantError(
-              "Archive Recovery pass progress does not match the current checkpoint",
+              "Archive Recovery pass has no durable work",
             );
           }
-          const outcome = remainingSectorCount === 0
-            ? "completed" as const
-            : work.passRecoveredSectorCount > 0
-              ? "productive" as const
-              : "no_progress" as const;
-          const completedAtMs = timestamp.getTime();
-          const history = [
-            ...recovery.passHistory,
-            {
-              passNumber: work.passNumber,
-              direction: work.passDirection,
-              initialUnrecoveredSectorCount:
-                work.passInitialUnrecoveredSectorCount,
-              recoveredSectorCount: work.passRecoveredSectorCount,
-              remainingSectorCount,
-              lastCursorLba: work.passCursorLba,
-              startedAtMs: work.passStartedAt.getTime(),
-              completedAtMs,
-              elapsedMs: Math.max(
-                0,
-                completedAtMs - work.passStartedAt.getTime(),
-              ),
-              outcome,
-            },
-          ].slice(-DVD_RECOVERY_PASS_HISTORY_LIMIT);
           if (outcome === "completed") {
             transaction.delete(archiveRecoveryWork).where(and(
               eq(
@@ -10605,6 +10618,26 @@ export function createDataAccessInternal(
           if (recovery.status === "stopping" || recovery.work === null) {
             return recovery;
           }
+          const timestamp = now();
+          const settledStatus = recovery.status === "running"
+            ? settledArchiveRecoveryStatus(
+                transaction,
+                recovery.originalDiscArchiveId,
+              )
+            : recovery.status;
+          const completion = recovery.status === "running" &&
+              settledStatus === "completed"
+            ? archiveRecoveryPassSettlement(
+                transaction,
+                recovery,
+                timestamp,
+              )
+            : null;
+          if (completion !== null && completion.outcome !== "completed") {
+            throw new DomainInvariantError(
+              "Completed Archive Recovery still has unrecovered sectors",
+            );
+          }
           const removed = transaction.delete(archiveRecoveryWork).where(and(
             eq(
               archiveRecoveryWork.archiveRecoveryId,
@@ -10621,11 +10654,11 @@ export function createDataAccessInternal(
           }
           if (recovery.status === "running") {
             transaction.update(archiveRecoveries).set({
-              status: settledArchiveRecoveryStatus(
-                transaction,
-                recovery.originalDiscArchiveId,
-              ),
-              updatedAt: now(),
+              status: settledStatus,
+              ...(completion === null
+                ? {}
+                : { passHistory: completion.history }),
+              updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveries.id, recovery.id),
               eq(archiveRecoveries.attemptId, recovery.attemptId),
@@ -10660,6 +10693,18 @@ export function createDataAccessInternal(
             recovery.originalDiscArchiveId,
           );
           const timestamp = now();
+          const completion = settledStatus === "completed"
+            ? archiveRecoveryPassSettlement(
+                transaction,
+                recovery,
+                timestamp,
+              )
+            : null;
+          if (completion !== null && completion.outcome !== "completed") {
+            throw new DomainInvariantError(
+              "Completed Archive Recovery still has unrecovered sectors",
+            );
+          }
           if (settledStatus === "completed") {
             requireRow(
               transaction.delete(archiveRecoveryWork).where(and(
@@ -10704,6 +10749,9 @@ export function createDataAccessInternal(
           requireRow(
             transaction.update(archiveRecoveries).set({
               status: settledStatus,
+              ...(completion === null
+                ? {}
+                : { passHistory: completion.history }),
               updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveries.id, recovery.id),
@@ -10768,9 +10816,25 @@ export function createDataAccessInternal(
               transaction,
               recoveryBeforeRelease.originalDiscArchiveId,
             );
+            const timestamp = now();
+            const completion = settledStatus === "completed"
+              ? archiveRecoveryPassSettlement(
+                  transaction,
+                  recoveryBeforeRelease,
+                  timestamp,
+                )
+              : null;
+            if (completion !== null && completion.outcome !== "completed") {
+              throw new DomainInvariantError(
+                "Completed Archive Recovery still has unrecovered sectors",
+              );
+            }
             transaction.update(archiveRecoveries).set({
               status: settledStatus,
-              updatedAt: now(),
+              ...(completion === null
+                ? {}
+                : { passHistory: completion.history }),
+              updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveries.id, recoveryBeforeRelease.id),
               eq(archiveRecoveries.attemptId, recoveryBeforeRelease.attemptId),

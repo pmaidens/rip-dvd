@@ -141,7 +141,13 @@ function archiveRecoveryOperation(
     dvdRecoveryReconciliationBlockingReasons(recovery, reconciliation);
   const reconciliationIsActive = reconciliation?.status === "queued" ||
     reconciliation?.status === "running";
-  const recoveryOwnsStatus = recovery.status === "running" ||
+  const recoveryPassIsQueued = recovery.status === "eligible" &&
+    recovery.work?.status === "requested";
+  const reportedRecoveryStatus = recoveryPassIsQueued
+    ? "running"
+    : recovery.status;
+  const recoveryOwnsStatus = recoveryPassIsQueued ||
+    recovery.status === "running" ||
     recovery.status === "stopping" || !reconciliationIsActive &&
       (recovery.status === "paused" || recovery.status === "stopped" ||
         recovery.status === "faulted" || recovery.status === "completed");
@@ -153,7 +159,7 @@ function archiveRecoveryOperation(
     ...visibleArchiveRecovery(recovery),
     recoveryStatus: recovery.status,
     status: recoveryOwnsStatus
-      ? recovery.status
+      ? reportedRecoveryStatus
       : reconciliation?.status ?? "idle",
     reconciliation: visibleDvdRecoveryReconciliation(reconciliation),
     checkpoint: access.catalog.findDvdArchiveEvidenceHeader(
