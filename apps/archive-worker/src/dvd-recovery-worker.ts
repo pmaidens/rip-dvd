@@ -507,7 +507,36 @@ export async function pollDvdRecoveryPass(input: {
     }
     input.access.archiveRecoveryWork.settlePass(claim);
   } catch (error) {
-    if (signal.aborted) throw error;
+    if (signal.aborted) {
+      const recovery = currentRecovery(input.access, candidate.recovery);
+      if (recovery.status !== "stopping") {
+        if (error instanceof DvdRecoveryBatchFault) {
+          try {
+            await reconcile({
+              access: input.access,
+              originalsLibraryPath: input.originalsLibraryPath,
+              originalDiscArchiveId: recovery.originalDiscArchiveId,
+              archiveImageOwnership,
+              atomicWriter: input.atomicWriter,
+              releaseRecoveryWork: false,
+            });
+            input.access.archiveRecoveryWork.releaseAfterReconciliation({
+              archiveRecoveryId: recovery.id,
+              attemptId: recovery.attemptId,
+            });
+          } catch (reconciliationError) {
+            input.access.archiveRecoveryWork.markFault({
+              claim,
+              faultCode: stopFaultCode(reconciliationError),
+              retainWork: true,
+            });
+          }
+        } else {
+          input.access.archiveRecoveryWork.release(claim);
+        }
+      }
+      throw error;
+    }
     const recovery = currentRecovery(input.access, candidate.recovery);
     if (recovery.status === "stopping") {
       const outcome = await finalizeStopSafely({

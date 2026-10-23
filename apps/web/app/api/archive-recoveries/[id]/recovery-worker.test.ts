@@ -24,6 +24,7 @@ import { seedDvdDiscVerificationFixture } from "../../../../../operator-cli/src/
 import { createOperatorWorkflowFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
 import {
   commitDvdRecoveryBatch,
+  DvdRecoveryBatchFault,
   type DvdRecoveryAtomicWriter,
 } from "../../../../../archive-worker/src/dvd-recovery-batch.js";
 import {
@@ -570,6 +571,120 @@ it("keeps Stop durable until a blocked source command is reaped", async () => {
     });
   } finally {
     input.access.close();
+  }
+}, 20_000);
+
+it("releases a quiesced read on shutdown so a restarted worker can resume", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 201,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  await completeVerification(fixture, seeded);
+  let closeRead!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    closeRead = resolve;
+  });
+  const cancel = vi.fn(() => closeRead());
+  const firstSource = {
+    start: vi.fn(() => ({
+      result: new Promise<never>(() => {}),
+      closed,
+      cancel,
+    })),
+  };
+  const controller = new AbortController();
+  const firstInput = pollInput(fixture, firstSource);
+  try {
+    const polling = pollDvdRecoveryPass({
+      ...firstInput,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(firstSource.start).toHaveBeenCalledOnce());
+    controller.abort(new Error("Synthetic recovery worker shutdown"));
+
+    await expect(polling).rejects.toThrow("SOURCE_READ_FAILED");
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(firstInput.access.catalog.findArchiveRecoveryById(
+      seeded.recoveryId,
+    )).toMatchObject({ status: "eligible", work: null });
+  } finally {
+    firstInput.access.close();
+  }
+
+  const restartedSource = immediateReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(2_048, 0x64),
+  }));
+  const restartedInput = pollInput(fixture, restartedSource.reader);
+  restartedInput.workerExecutionId = "synthetic-restarted-recovery-worker";
+  try {
+    expect(await pollDvdRecoveryPass(restartedInput)).toBe(true);
+    expect(restartedSource.start).toHaveBeenCalledOnce();
+    expect(restartedInput.access.catalog.findArchiveRecoveryById(
+      seeded.recoveryId,
+    )).toMatchObject({ status: "completed", work: null });
+  } finally {
+    restartedInput.access.close();
+  }
+}, 20_000);
+
+it("reconciles an interrupted batch before restart reclaims the pass", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 202,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  await completeVerification(fixture, seeded);
+  const controller = new AbortController();
+  const firstSource = immediateReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(2_048, 0x65),
+  }));
+  const firstInput = pollInput(fixture, firstSource.reader);
+  const commit = vi.fn(async () => {
+    controller.abort(new Error("Synthetic batch shutdown"));
+    throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT");
+  }) as unknown as typeof commitDvdRecoveryBatch;
+  const reconcile = vi.fn(async () => ({
+    outcome: "already_consistent" as const,
+    evidence: {},
+  })) as unknown as typeof reconcileDvdRecoveryCheckpoint;
+  try {
+    await expect(pollDvdRecoveryPass({
+      ...firstInput,
+      commit,
+      reconcile,
+      signal: controller.signal,
+    })).rejects.toThrow("CONSISTENCY_FAULT");
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+      originalDiscArchiveId: seeded.archive.id,
+      releaseRecoveryWork: false,
+    }));
+    expect(firstInput.access.catalog.findArchiveRecoveryById(
+      seeded.recoveryId,
+    )).toMatchObject({ status: "eligible", work: null });
+  } finally {
+    firstInput.access.close();
+  }
+
+  const restartedSource = immediateReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(2_048, 0x66),
+  }));
+  const restartedInput = pollInput(fixture, restartedSource.reader);
+  restartedInput.workerExecutionId = "synthetic-batch-restart-worker";
+  try {
+    expect(await pollDvdRecoveryPass(restartedInput)).toBe(true);
+    expect(restartedInput.access.catalog.findArchiveRecoveryById(
+      seeded.recoveryId,
+    )).toMatchObject({ status: "completed", work: null });
+  } finally {
+    restartedInput.access.close();
   }
 }, 20_000);
 
