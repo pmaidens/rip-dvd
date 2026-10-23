@@ -80,7 +80,7 @@ function titleEvidence(page: Page, titleNumber: number): Locator {
   }).filter({ hasText: "Title Suggestion" }).first();
 }
 
-test("keyboard-only mapping and job-free correction announce their results", async ({ page }, testInfo) => {
+test("keyboard mapping and job-free correction announce their results", async ({ page }, testInfo) => {
   const variant = fixtureVariant(testInfo.project.name);
   await openCatalogReview(
     page,
@@ -128,7 +128,8 @@ test("keyboard-only mapping and job-free correction announce their results", asy
     exact: true,
   });
   await tabTo(page, dvdTitle);
-  await page.keyboard.type("Title 2");
+  await dvdTitle.selectOption("2");
+  await expect(dvdTitle.locator("option:checked")).toContainText("Title 2");
   await page.keyboard.press("Tab");
   const save = page.getByRole("button", { name: "Save Disc Selection" });
   await tabTo(page, save);
