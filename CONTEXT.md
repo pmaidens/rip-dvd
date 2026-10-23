@@ -35,7 +35,9 @@ An operator's decision to stop Archive Recovery and keep the saved Original Disc
 The decision also fences DVD Disc Verification for that Recovery attempt:
 queued verification is invalidated, no further verification read is admitted,
 and Stop remains `stopping` until a running verification and its active source
-command have settled.
+command have settled. If Recovery admitted a source command, Stop proves that
+exact device inode inactive before reconciliation; a later drive-path reuse
+does not redirect that proof.
 _Avoid_: Archive Request cancellation, archive deletion
 
 **Operator Disc Confirmation**:

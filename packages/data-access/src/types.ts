@@ -605,6 +605,14 @@ export interface DvdRecoveryWriteAuthority {
   checkpointDigest: string;
 }
 
+export interface OpticalDeviceIdentity {
+  devicePath: string;
+  deviceId: string;
+  inode: string;
+}
+
+export const DVD_RECOVERY_PASS_CLAIM_LEASE_MS = 65_000;
+
 export interface ArchiveRecoveryWork {
   archiveRecoveryId: ArchiveRecoveryId;
   originalDiscArchiveId: OriginalDiscArchiveId;
@@ -615,6 +623,10 @@ export interface ArchiveRecoveryWork {
   claimedBy: string | null;
   claimToken: ArchiveRecoveryClaimToken | null;
   claimedAt: Date | null;
+  passCursorLba: number | null;
+  admittedDevicePath: string | null;
+  admittedDeviceId: string | null;
+  admittedDeviceInode: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -628,6 +640,7 @@ export type ClaimedArchiveRecoveryWork = ArchiveRecoveryWork & {
 
 export interface ArchiveRecoveryWorkAccess {
   findNextStopping(): ArchiveRecovery | null;
+  findNextInterrupted(workerId: string): ArchiveRecovery | null;
   claimNextVerifiedCandidate(workerId: string): {
     recovery: ArchiveRecovery;
     verification: DvdDiscVerification;
@@ -639,10 +652,11 @@ export interface ArchiveRecoveryWorkAccess {
     workerId: string,
   ): ClaimedArchiveRecoveryWork;
   assertClaim(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
+  renewClaim(claim: ClaimedArchiveRecoveryWork): boolean;
   admitSourceRead(
     claim: ClaimedArchiveRecoveryWork,
     expectedDevicePath: string,
-    start: (devicePath: string) => void,
+    start: (devicePath: string) => OpticalDeviceIdentity,
   ): ArchiveRecovery | null;
   bindVerification(
     claim: ClaimedArchiveRecoveryWork,

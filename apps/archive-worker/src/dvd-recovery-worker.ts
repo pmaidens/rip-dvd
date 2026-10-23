@@ -1,11 +1,13 @@
 import {
   dvdDiscVerificationInsertionIsCurrent,
   dvdRecoveryWriteAuthority,
+  DVD_RECOVERY_PASS_CLAIM_LEASE_MS,
   type ArchiveRecovery,
   type ArchiveRecoveryFaultCode,
   type ClaimedArchiveRecoveryWork,
   type DataAccess,
   type DvdRecoveryWriteAuthority,
+  type OpticalDeviceIdentity,
 } from "@rip-dvd/data-access";
 import {
   defaultArchiveImageOwnership,
@@ -28,13 +30,21 @@ import {
   reconcileDvdRecoveryCheckpoint,
 } from "./dvd-recovery-reconciliation.js";
 import { runDurableWorkPoller } from "./durable-work-poller.js";
-import type { DvdCopyRunner } from "./dvd-archiver.js";
+import type {
+  DvdCopyRunner,
+  DvdDeviceIdentityInactivityGuard,
+} from "./dvd-archiver.js";
 import {
   createNodeMediaGenerationObserver,
   type MediaGenerationObserver,
 } from "./optical-media-generation.js";
 
 const DEFAULT_STOP_POLL_INTERVAL_MS = 100;
+
+type DvdRecoveryDeviceInactivity = Pick<
+  DvdCopyRunner,
+  "withDeviceInactive"
+> & DvdDeviceIdentityInactivityGuard;
 
 type DvdRecoveryPassFaultCode =
   | "SOURCE_CHANGED"
@@ -61,6 +71,24 @@ export class DvdRecoveryPassFault extends Error {
 
 class DvdRecoveryStopDeferred extends Error {
   override readonly name = "DvdRecoveryStopDeferred";
+}
+
+function admittedDeviceIdentity(
+  recovery: ArchiveRecovery,
+): OpticalDeviceIdentity | null {
+  const work = recovery.work;
+  if (work === null || work.admittedDevicePath === null) return null;
+  if (
+    work.admittedDeviceId === null ||
+    work.admittedDeviceInode === null
+  ) {
+    throw new DvdRecoveryPassFault("SOURCE_CHANGED");
+  }
+  return {
+    devicePath: work.admittedDevicePath,
+    deviceId: work.admittedDeviceId,
+    inode: work.admittedDeviceInode,
+  };
 }
 
 function sourceFaultCode(
@@ -200,7 +228,7 @@ async function waitForRead(input: {
 async function finalizeStop(input: {
   access: DataAccess;
   archiveImageOwnership: ArchiveImageOwnership;
-  deviceInactivity: Pick<DvdCopyRunner, "withDeviceInactive">;
+  deviceInactivity: DvdRecoveryDeviceInactivity;
   originalsLibraryPath: string;
   recovery: ArchiveRecovery;
   reconcile: typeof reconcileDvdRecoveryCheckpoint;
@@ -219,18 +247,6 @@ async function finalizeStop(input: {
       "Stop is waiting for DVD Disc Verification to settle",
     );
   }
-  const verificationId = input.recovery.work?.verificationId;
-  const latestVerification = verificationId === null ||
-      verificationId === undefined
-    ? input.access.dvdDiscVerifications.findLatestForRecovery(
-        input.recovery.id,
-      )
-    : null;
-  const verification = verificationId === null || verificationId === undefined
-    ? latestVerification?.archiveRecoveryAttemptId === input.recovery.attemptId
-      ? latestVerification
-      : null
-    : input.access.dvdDiscVerifications.find(verificationId);
   const reconcileAndComplete = async () => {
     await input.reconcile({
       access: input.access,
@@ -246,7 +262,8 @@ async function finalizeStop(input: {
       stopOperationId,
     });
   };
-  if (verification === null) {
+  const deviceIdentity = admittedDeviceIdentity(input.recovery);
+  if (deviceIdentity === null) {
     try {
       await reconcileAndComplete();
     } catch (cause) {
@@ -263,29 +280,10 @@ async function finalizeStop(input: {
     }
     return;
   }
-  if (
-    verification.archiveRecoveryId !== input.recovery.id ||
-    verification.archiveRecoveryAttemptId !== input.recovery.attemptId ||
-    verification.originalDiscArchiveId !==
-      input.recovery.originalDiscArchiveId
-  ) {
-    throw new DvdRecoveryPassFault("SOURCE_CHANGED");
-  }
-  const inspection = input.access.discInspections.list({
-    ids: [verification.discInspectionId],
-  })[0];
-  const drive = inspection === undefined
-    ? undefined
-    : input.access.catalog.listOpticalDrives({
-        ids: [inspection.opticalDriveId],
-      })[0];
-  if (drive === undefined) {
-    throw new DvdRecoveryPassFault("SOURCE_CHANGED");
-  }
   let deviceInactive = false;
   try {
-    await input.deviceInactivity.withDeviceInactive(
-      drive.devicePath,
+    await input.deviceInactivity.withDeviceIdentityInactive(
+      deviceIdentity,
       async () => {
         deviceInactive = true;
         await reconcileAndComplete();
@@ -302,6 +300,72 @@ async function finalizeStop(input: {
       });
     }
     throw cause;
+  }
+}
+
+async function reclaimInterruptedPass(input: {
+  access: DataAccess;
+  atomicWriter?: DvdRecoveryAtomicWriter;
+  archiveImageOwnership: ArchiveImageOwnership;
+  deviceInactivity: DvdRecoveryDeviceInactivity;
+  originalsLibraryPath: string;
+  recovery: ArchiveRecovery;
+  reconcile: typeof reconcileDvdRecoveryCheckpoint;
+  signal: AbortSignal;
+}): Promise<"reclaimed" | "deferred" | "faulted"> {
+  const work = input.recovery.work;
+  if (
+    work === null ||
+    work.status !== "claimed" ||
+    work.claimedBy === null ||
+    work.claimToken === null ||
+    work.claimedAt === null
+  ) {
+    throw new DvdRecoveryPassFault("SOURCE_CHANGED");
+  }
+  const claim = work as ClaimedArchiveRecoveryWork;
+  const reconcileAndRequeue = async () => {
+    await input.reconcile({
+      access: input.access,
+      originalsLibraryPath: input.originalsLibraryPath,
+      originalDiscArchiveId: input.recovery.originalDiscArchiveId,
+      archiveImageOwnership: input.archiveImageOwnership,
+      atomicWriter: input.atomicWriter,
+      releaseRecoveryWork: false,
+      signal: input.signal,
+    });
+    input.access.archiveRecoveryWork.requeue(claim);
+  };
+  let quiescenceEntered = false;
+  try {
+    const deviceIdentity = admittedDeviceIdentity(input.recovery);
+    if (deviceIdentity === null) {
+      quiescenceEntered = true;
+      await reconcileAndRequeue();
+    } else {
+      await input.deviceInactivity.withDeviceIdentityInactive(
+        deviceIdentity,
+        async () => {
+          quiescenceEntered = true;
+          await reconcileAndRequeue();
+        },
+      );
+    }
+    return "reclaimed";
+  } catch (error) {
+    if (
+      !quiescenceEntered ||
+      (error instanceof DvdRecoveryReconciliationFault &&
+        error.code === "WRITER_NOT_QUIESCENT")
+    ) {
+      return "deferred";
+    }
+    input.access.archiveRecoveryWork.markFault({
+      claim,
+      faultCode: stopFaultCode(error),
+      retainWork: true,
+    });
+    return "faulted";
   }
 }
 
@@ -342,7 +406,7 @@ export async function pollDvdRecoveryPass(input: {
   atomicWriter?: DvdRecoveryAtomicWriter;
   archiveImageOwnership?: ArchiveImageOwnership;
   commit?: typeof commitDvdRecoveryBatch;
-  deviceInactivity: Pick<DvdCopyRunner, "withDeviceInactive">;
+  deviceInactivity: DvdRecoveryDeviceInactivity;
   mediaGenerationObserver: MediaGenerationObserver;
   originalsLibraryPath: string;
   reader: DvdRecoverySourceReader;
@@ -373,10 +437,38 @@ export async function pollDvdRecoveryPass(input: {
     storage.facts.mutationProtection.status !== "verified"
   ) return false;
 
+  const interrupted = input.access.archiveRecoveryWork.findNextInterrupted(
+    input.workerExecutionId,
+  );
+  if (interrupted !== null) {
+    const outcome = await reclaimInterruptedPass({
+      ...input,
+      archiveImageOwnership,
+      reconcile,
+      recovery: interrupted,
+      signal,
+    });
+    return outcome !== "deferred";
+  }
+
   const candidate = input.access.archiveRecoveryWork
     .claimNextVerifiedCandidate(input.workerExecutionId);
   if (candidate === null) return false;
   const claim: ClaimedArchiveRecoveryWork = candidate.claim;
+  let renewalFault: unknown;
+  const renewalInterval = setInterval(() => {
+    try {
+      if (!input.access.archiveRecoveryWork.renewClaim(claim)) {
+        renewalFault = new DvdRecoveryPassFault("SOURCE_CHANGED");
+      }
+    } catch (error) {
+      renewalFault = error;
+    }
+  }, Math.floor(DVD_RECOVERY_PASS_CLAIM_LEASE_MS / 2));
+  renewalInterval.unref();
+  const throwIfRenewalFailed = () => {
+    if (renewalFault !== undefined) throw renewalFault;
+  };
   try {
     const authority = dvdRecoveryWriteAuthority(candidate.verification);
     if (authority === null) {
@@ -389,16 +481,23 @@ export async function pollDvdRecoveryPass(input: {
     if (checkpoint === null) {
       throw new DvdRecoveryPassFault("SOURCE_READ_FAILED");
     }
-    const ranges = checkpoint.unrecoveredSourceRanges.map((range) => ({
-      startLba: range.startLba,
-      sectorCount: range.sectorCount,
-    }));
+    const firstUnattemptedLba = claim.passCursorLba === null
+      ? 0
+      : claim.passCursorLba + 1;
+    const ranges = checkpoint.unrecoveredSourceRanges.flatMap((range) => {
+      const endLbaExclusive = range.startLba + range.sectorCount;
+      const startLba = Math.max(range.startLba, firstUnattemptedLba);
+      return startLba >= endLbaExclusive
+        ? []
+        : [{ startLba, sectorCount: endLbaExclusive - startLba }];
+    });
     for (const range of ranges) {
       for (
         let startLba = range.startLba;
         startLba < range.startLba + range.sectorCount;
         startLba += 1
       ) {
+        throwIfRenewalFailed();
         signal.throwIfAborted();
         const before = currentRecovery(input.access, candidate.recovery);
         if (before.status === "stopping") {
@@ -424,7 +523,9 @@ export async function pollDvdRecoveryPass(input: {
         if (devicePath === null) {
           throw new DvdRecoveryPassFault("SOURCE_CHANGED");
         }
-        let admittedRead: ActiveBoundedProcess<DvdSourceRead> | undefined;
+        let admittedRead:
+          | ReturnType<DvdRecoverySourceReader["start"]>
+          | undefined;
         try {
           const admitted = input.access.archiveRecoveryWork.admitSourceRead(
             claim,
@@ -438,6 +539,7 @@ export async function pollDvdRecoveryPass(input: {
                   acceptedEndLbaExclusive:
                     checkpoint.acceptedEndLbaExclusive,
                 });
+                return admittedRead.deviceIdentity;
               } catch (cause) {
                 throw new DvdRecoveryPassFault("SOURCE_READ_FAILED", {
                   cause,
@@ -509,6 +611,7 @@ export async function pollDvdRecoveryPass(input: {
           atomicWriter: input.atomicWriter,
           signal,
         });
+        throwIfRenewalFailed();
         const afterBatch = currentRecovery(input.access, candidate.recovery);
         if (afterBatch.status === "stopping") {
           const outcome = await finalizeStopSafely({
@@ -571,13 +674,15 @@ export async function pollDvdRecoveryPass(input: {
       retainWork: error instanceof DvdRecoveryBatchFault &&
         error.retainRecoveryWork,
     });
+  } finally {
+    clearInterval(renewalInterval);
   }
   return true;
 }
 
 export async function runDvdRecoveryWorker(input: {
   access: DataAccess;
-  deviceInactivity: Pick<DvdCopyRunner, "withDeviceInactive">;
+  deviceInactivity: DvdRecoveryDeviceInactivity;
   intervalMs: number;
   log(message: string): void;
   originalsLibraryPath: string;

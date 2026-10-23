@@ -39,6 +39,10 @@ import {
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 
+function syntheticDeviceIdentity(devicePath: string) {
+  return { devicePath, deviceId: "2049", inode: "7" };
+}
+
 afterEach(() => {
   fixtures.splice(0).forEach((fixture) => fixture.dispose());
 });
@@ -165,6 +169,7 @@ function immediateReader(
       result: Promise.resolve(read(input.startLba)),
       closed: Promise.resolve(),
       cancel: vi.fn(),
+      deviceIdentity: syntheticDeviceIdentity(input.devicePath),
     }));
   return { reader: { start }, start };
 }
@@ -179,6 +184,12 @@ function pollInput(
     deviceInactivity: {
       async withDeviceInactive(
         _devicePath: string,
+        mutation: () => void | Promise<void>,
+      ) {
+        await mutation();
+      },
+      async withDeviceIdentityInactive(
+        _identity: ReturnType<typeof syntheticDeviceIdentity>,
         mutation: () => void | Promise<void>,
       ) {
         await mutation();
@@ -623,10 +634,11 @@ it("keeps Stop durable until a blocked source command is reaped", async () => {
     closeRead = resolve;
   });
   const cancel = vi.fn();
-  const start = vi.fn(() => ({
+  const start = vi.fn((read: Parameters<DvdRecoverySourceReader["start"]>[0]) => ({
     result: new Promise<never>(() => {}),
     closed,
     cancel,
+    deviceIdentity: syntheticDeviceIdentity(read.devicePath),
   }));
   const input = pollInput(fixture, { start });
   const reconcile = vi.fn(async () => ({
@@ -689,6 +701,80 @@ it("keeps Stop durable until a blocked source command is reaped", async () => {
   }
 }, 20_000);
 
+it("stops against the admitted inode after the drive path is reused", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const originalDevicePath = "/dev/synthetic-stop-before-renumber";
+  const replacementDevicePath = "/dev/synthetic-stop-after-renumber";
+  const serialNumber = "synthetic-stop-renumber-serial";
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 208,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }], originalDevicePath);
+  const setupAccess = fixture.openAccess();
+  try {
+    setupAccess.catalog.upsertOpticalDrive({
+      devicePath: originalDevicePath,
+      serialNumber,
+      isEnabled: true,
+      isPresent: true,
+    });
+  } finally {
+    setupAccess.close();
+  }
+  await completeVerification(fixture, seeded);
+  let closeRead!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    closeRead = resolve;
+  });
+  const cancel = vi.fn();
+  const admittedIdentity = syntheticDeviceIdentity(originalDevicePath);
+  const source = {
+    start: vi.fn(() => ({
+      result: new Promise<never>(() => {}),
+      closed,
+      cancel,
+      deviceIdentity: admittedIdentity,
+    })),
+  };
+  const input = pollInput(fixture, source);
+  const withDeviceIdentityInactive = vi.fn(async (
+    _identity: ReturnType<typeof syntheticDeviceIdentity>,
+    mutation: () => void | Promise<void>,
+  ) => mutation());
+  input.deviceInactivity.withDeviceIdentityInactive =
+    withDeviceIdentityInactive;
+  try {
+    const polling = pollDvdRecoveryPass({
+      ...input,
+      stopPollIntervalMs: 1,
+    });
+    await vi.waitFor(() => expect(source.start).toHaveBeenCalledOnce());
+    input.access.catalog.reconcileOpticalDrives([{
+      devicePath: replacementDevicePath,
+      serialNumber,
+      isConfiguredDevice: false,
+    }]);
+    input.access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000492",
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    });
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+    closeRead();
+    await expect(polling).resolves.toBe(true);
+    expect(withDeviceIdentityInactive).toHaveBeenCalledWith(
+      admittedIdentity,
+      expect.any(Function),
+    );
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "stopped", work: null });
+  } finally {
+    input.access.close();
+  }
+}, 20_000);
+
 it("releases a quiesced read on shutdown so a restarted worker can resume", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
@@ -704,10 +790,11 @@ it("releases a quiesced read on shutdown so a restarted worker can resume", asyn
   });
   const cancel = vi.fn(() => closeRead());
   const firstSource = {
-    start: vi.fn(() => ({
+    start: vi.fn((read: Parameters<DvdRecoverySourceReader["start"]>[0]) => ({
       result: new Promise<never>(() => {}),
       closed,
       cancel,
+      deviceIdentity: syntheticDeviceIdentity(read.devicePath),
     })),
   };
   const controller = new AbortController();
@@ -823,6 +910,170 @@ it("resumes the remaining sectors after shutdown follows a committed batch", asy
   }
 }, 20_000);
 
+it("does not retry a failed sector when restart resumes the same pass", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 205,
+    sectorCount: 2,
+    classification: "skipped_untested",
+  }]);
+  await completeVerification(fixture, seeded);
+  const controller = new AbortController();
+  const firstSource = immediateReader(() => ({
+    outcome: "unreadable",
+    diagnostic: mediumError,
+  }));
+  const firstInput = pollInput(fixture, firstSource.reader);
+  const commit = vi.fn(async (
+    batch: Parameters<typeof commitDvdRecoveryBatch>[0],
+  ) => {
+    const result = await commitDvdRecoveryBatch(batch);
+    controller.abort(new Error("Synthetic failed-sector checkpoint shutdown"));
+    return result;
+  });
+  try {
+    await expect(pollDvdRecoveryPass({
+      ...firstInput,
+      commit,
+      signal: controller.signal,
+    })).rejects.toThrow("Synthetic failed-sector checkpoint shutdown");
+    expect(firstSource.start.mock.calls.map(([read]) => read.startLba))
+      .toEqual([205]);
+    expect(firstInput.access.catalog.findArchiveRecoveryById(
+      seeded.recoveryId,
+    )).toMatchObject({
+      status: "eligible",
+      work: { status: "requested", passCursorLba: 205 },
+    });
+  } finally {
+    firstInput.access.close();
+  }
+
+  const restartedSource = immediateReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(2_048, 0x69),
+  }));
+  const restartedInput = pollInput(fixture, restartedSource.reader);
+  restartedInput.workerExecutionId = "synthetic-failed-sector-restart-worker";
+  try {
+    expect(await pollDvdRecoveryPass(restartedInput)).toBe(true);
+    expect(restartedSource.start.mock.calls.map(([read]) => read.startLba))
+      .toEqual([206]);
+    expect(restartedInput.access.catalog.findArchiveRecoveryById(
+      seeded.recoveryId,
+    )).toMatchObject({ status: "eligible", work: null });
+  } finally {
+    restartedInput.access.close();
+  }
+}, 20_000);
+
+it("reclaims a crashed worker claim before a restarted worker resumes", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 207,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  await completeVerification(fixture, seeded);
+  const crashedAccess = fixture.openAccess();
+  const crashed = crashedAccess.archiveRecoveryWork
+    .claimNextVerifiedCandidate("synthetic-crashed-recovery-worker");
+  if (crashed === null) throw new Error("Expected crashed recovery claim");
+  const crashedIdentity = syntheticDeviceIdentity(
+    seeded.verificationDrive.devicePath,
+  );
+  crashedAccess.archiveRecoveryWork.admitSourceRead(
+    crashed.claim,
+    seeded.verificationDrive.devicePath,
+    () => crashedIdentity,
+  );
+  crashedAccess.close();
+  const crashedDatabase = new DatabaseSync(fixture.databasePath);
+  crashedDatabase.prepare(`UPDATE archive_recovery_work
+    SET claimed_at = 0
+    WHERE archive_recovery_id = ?`).run(seeded.recoveryId);
+  crashedDatabase.close();
+
+  const source = immediateReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(2_048, 0x6a),
+  }));
+  const input = pollInput(fixture, source.reader);
+  input.workerExecutionId = "synthetic-restarted-after-crash-worker";
+  const withDeviceIdentityInactive = vi.fn(async (
+    _identity: ReturnType<typeof syntheticDeviceIdentity>,
+    mutation: () => void | Promise<void>,
+  ) => mutation());
+  input.deviceInactivity.withDeviceIdentityInactive =
+    withDeviceIdentityInactive;
+  try {
+    expect(await pollDvdRecoveryPass(input)).toBe(true);
+    expect(withDeviceIdentityInactive).toHaveBeenCalledWith(
+      crashedIdentity,
+      expect.any(Function),
+    );
+    expect(source.start).not.toHaveBeenCalled();
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "eligible",
+        work: {
+          status: "requested",
+          admittedDevicePath: null,
+          admittedDeviceId: null,
+          admittedDeviceInode: null,
+        },
+      });
+
+    expect(await pollDvdRecoveryPass(input)).toBe(true);
+    expect(source.start).toHaveBeenCalledOnce();
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "completed", work: null });
+  } finally {
+    input.access.close();
+  }
+}, 20_000);
+
+it("does not take over a foreign claim before its lease expires", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 209,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  await completeVerification(fixture, seeded);
+  const liveAccess = fixture.openAccess();
+  const live = liveAccess.archiveRecoveryWork
+    .claimNextVerifiedCandidate("synthetic-live-recovery-worker");
+  if (live === null) throw new Error("Expected live recovery claim");
+  expect(liveAccess.archiveRecoveryWork.renewClaim(live.claim)).toBe(true);
+  const source = immediateReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(2_048),
+  }));
+  const input = pollInput(fixture, source.reader);
+  input.workerExecutionId = "synthetic-competing-recovery-worker";
+  const withDeviceIdentityInactive = vi.fn();
+  input.deviceInactivity.withDeviceIdentityInactive =
+    withDeviceIdentityInactive;
+  try {
+    expect(await pollDvdRecoveryPass(input)).toBe(false);
+    expect(withDeviceIdentityInactive).not.toHaveBeenCalled();
+    expect(source.start).not.toHaveBeenCalled();
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "running",
+        work: { claimedBy: "synthetic-live-recovery-worker" },
+      });
+  } finally {
+    liveAccess.archiveRecoveryWork.requeue(live.claim);
+    liveAccess.close();
+    input.access.close();
+  }
+});
+
 it("reconciles an interrupted batch before restart reclaims the pass", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
@@ -928,10 +1179,7 @@ it("finishes a durable Stop after a worker restart without another read", async 
 
     expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(true);
     expect(source.start).not.toHaveBeenCalled();
-    expect(withDeviceInactive).toHaveBeenCalledWith(
-      seeded.verificationDrive.devicePath,
-      expect.any(Function),
-    );
+    expect(withDeviceInactive).not.toHaveBeenCalled();
     expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
       releaseRecoveryWork: false,
     }));
@@ -976,6 +1224,56 @@ it("stops an idle eligible Recovery after its source drive disappears", async ()
     expect(source.start).not.toHaveBeenCalled();
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({ status: "stopped", work: null });
+  } finally {
+    input.access.close();
+  }
+});
+
+it("stops queued verification work after its drive disappears", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(
+    fixture,
+    undefined,
+    "/dev/synthetic-queued-verification-drive",
+  );
+  const submitted = await fixture.run([
+    "archive-recovery", "verify-disc", seeded.recoveryId,
+    "--key", "00000000-0000-4000-8000-000000000493",
+    "--disc-inspection-id", seeded.inspection.id,
+    "--checkpoint-revision", "1",
+    "--checkpoint-digest", seeded.manifest.manifestDigest,
+  ]);
+  expect(submitted.exitCode).toBe(0);
+  const source = immediateReader(() => {
+    throw new Error("No recovery read is allowed while stopping");
+  });
+  const input = pollInput(fixture, source.reader);
+  input.access.catalog.reconcileOpticalDrives([]);
+  const withDeviceInactive = vi.fn(async () => {
+    throw new Error("A queued verification has no active device handle");
+  });
+  const withDeviceIdentityInactive = vi.fn(async () => {
+    throw new Error("A queued verification has no admitted device identity");
+  });
+  input.deviceInactivity.withDeviceInactive = withDeviceInactive;
+  input.deviceInactivity.withDeviceIdentityInactive =
+    withDeviceIdentityInactive;
+  try {
+    input.access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000494",
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    });
+
+    expect(await pollDvdRecoveryPass(input)).toBe(true);
+    expect(withDeviceInactive).not.toHaveBeenCalled();
+    expect(withDeviceIdentityInactive).not.toHaveBeenCalled();
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "stopped", work: null });
+    expect(input.access.dvdDiscVerifications.findLatestForRecovery(
+      seeded.recoveryId,
+    )).toMatchObject({ status: "failed" });
   } finally {
     input.access.close();
   }
@@ -1117,7 +1415,7 @@ it("keeps Stop pending while archive ownership is not quiescent", async () => {
   }
 });
 
-it("keeps Stop pending until device inactivity can be acquired", async () => {
+it("keeps Stop pending until admitted device inactivity can be acquired", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const seeded = await seedDvdDiscVerificationFixture(fixture, [{
@@ -1125,13 +1423,16 @@ it("keeps Stop pending until device inactivity can be acquired", async () => {
     sectorCount: 1,
     classification: "skipped_untested",
   }], "/dev/synthetic-recovery-drive");
-  const authority = await completeVerification(fixture, seeded);
+  await completeVerification(fixture, seeded);
   const source = immediateReader(() => {
     throw new Error("No source read is allowed while stopping");
   });
   const input = pollInput(fixture, source.reader);
   let inactivityAttempts = 0;
-  input.deviceInactivity.withDeviceInactive = async (_path, mutation) => {
+  input.deviceInactivity.withDeviceIdentityInactive = async (
+    _identity,
+    mutation,
+  ) => {
     inactivityAttempts += 1;
     if (inactivityAttempts === 1) {
       throw new Error("DVD archive device is still active");
@@ -1143,12 +1444,14 @@ it("keeps Stop pending until device inactivity can be acquired", async () => {
     evidence: {},
   })) as unknown as typeof reconcileDvdRecoveryCheckpoint;
   try {
-    const work = input.access.archiveRecoveryWork.request(seeded.recoveryId);
-    const claim = input.access.archiveRecoveryWork.claim(
-      work.archiveRecoveryId,
-      "synthetic-device-inactivity-worker",
+    const candidate = input.access.archiveRecoveryWork
+      .claimNextVerifiedCandidate("synthetic-device-inactivity-worker");
+    if (candidate === null) throw new Error("Expected recovery claim");
+    input.access.archiveRecoveryWork.admitSourceRead(
+      candidate.claim,
+      seeded.verificationDrive.devicePath,
+      syntheticDeviceIdentity,
     );
-    input.access.archiveRecoveryWork.bindVerification(claim, authority);
     const requested = input.access.archiveRecoveryWork.requestStop({
       mutationKey: "00000000-0000-4000-8000-000000000469",
       archiveRecoveryId: seeded.recoveryId,
@@ -1239,10 +1542,7 @@ it("keeps Stop pending until running disc verification settles", async () => {
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({ status: "stopped", work: null });
     expect(reconcile).toHaveBeenCalledOnce();
-    expect(withDeviceInactive).toHaveBeenCalledWith(
-      seeded.verificationDrive.devicePath,
-      expect.any(Function),
-    );
+    expect(withDeviceInactive).not.toHaveBeenCalled();
     expect(source.start).not.toHaveBeenCalled();
   } finally {
     input.access.close();

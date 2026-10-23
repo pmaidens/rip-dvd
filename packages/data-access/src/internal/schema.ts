@@ -1780,6 +1780,10 @@ export const archiveRecoveryWork = sqliteTable(
     claimedBy: text("claimed_by"),
     claimToken: text("claim_token").$type<ArchiveRecoveryClaimToken>(),
     claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
+    passCursorLba: integer("pass_cursor_lba"),
+    admittedDevicePath: text("admitted_device_path"),
+    admittedDeviceId: text("admitted_device_id"),
+    admittedDeviceInode: text("admitted_device_inode"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -1810,6 +1814,14 @@ export const archiveRecoveryWork = sqliteTable(
     check(
       "archive_recovery_work_claim_check",
       sql`(${table.status} = 'requested' and ${table.requestedAt} is not null and ${table.claimedBy} is null and ${table.claimToken} is null and ${table.claimedAt} is null) or (${table.status} = 'claimed' and ${table.claimedBy} is not null and ${table.claimToken} is not null and ${table.claimedAt} is not null)`,
+    ),
+    check(
+      "archive_recovery_work_cursor_check",
+      sql`${table.passCursorLba} is null or (typeof(${table.passCursorLba}) = 'integer' and ${table.passCursorLba} >= 0)`,
+    ),
+    check(
+      "archive_recovery_work_device_identity_check",
+      sql`(${table.admittedDevicePath} is null and ${table.admittedDeviceId} is null and ${table.admittedDeviceInode} is null) or (${table.status} = 'claimed' and ${table.admittedDevicePath} is not null and length(${table.admittedDevicePath}) > 0 and ${table.admittedDeviceId} is not null and length(${table.admittedDeviceId}) > 0 and ${table.admittedDeviceInode} is not null and length(${table.admittedDeviceInode}) > 0)`,
     ),
   ],
 );

@@ -121,9 +121,11 @@ is neither Filesystem Verification nor an Archive Audit.
 Each verification claim and source-read admission is also bound to the current
 eligible Recovery attempt. Recovery Stop invalidates queued verification,
 denies claim renewal and further read admission, and remains `stopping` until
-the running verification has reaped any active helper and settled. Stop then
-takes device inactivity on the verification drive before it reports
-`stopped`.
+the running verification has reaped any active helper and settled. A queued
+verification has no device handle to quiesce. If Recovery admitted a source
+helper, its exact device path, device identity, and inode are retained with the
+claim; Stop proves that identity inactive before reconciliation rather than
+trusting a path that may have been renumbered or reused.
 
 This deliberately trades sector-level duplicate detection and general
 post-copy raw-image hash verification for materially less optical-drive wear
@@ -203,3 +205,12 @@ checkpoint. Once a partial pass settles, another pass requires a new
 checkpoint-current verification. This pass-scoped rule lets one verified pass
 narrow several sectors without treating its own first committed sector as an
 unrelated checkpoint change.
+
+The same durable work record advances a pass cursor in the transaction that
+projects each one-sector checkpoint. Graceful restart and post-crash takeover
+therefore resume strictly after the last attempted sector, including a sector
+that retained individually-failed evidence. Workers renew the pass claim
+independently of sector progress. An expired foreign claim is taken over only
+after the admitted device identity and archive writer are proven quiescent and
+reconciliation has completed; takeover fences the prior token, clears the
+now-inactive device identity, and preserves the cursor.

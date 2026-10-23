@@ -372,6 +372,7 @@ import {
   DISC_INSPECTION_SETTLING_TIMEOUT_MS,
   DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
   DVD_LOGICAL_SECTOR_BYTES,
+  DVD_RECOVERY_PASS_CLAIM_LEASE_MS,
   ENCODE_JOB_LEASE_DURATION_MS,
 } from "../types.js";
 import { newId, requireRow } from "./persistence.js";
@@ -8599,6 +8600,30 @@ export function createDataAccessInternal(
         archiveRecoveries.originalDiscArchiveId,
         archiveId,
       )).run();
+      const recoveryWork = transaction.select().from(archiveRecoveryWork)
+        .where(and(
+          eq(archiveRecoveryWork.archiveRecoveryId, current.recovery.id),
+          eq(archiveRecoveryWork.attemptId, current.recovery.attemptId),
+          eq(archiveRecoveryWork.status, "claimed"),
+          ...(claim === undefined
+            ? []
+            : [eq(archiveRecoveryWork.claimToken, claim.claimToken)]),
+        )).get();
+      if (recoveryWork !== undefined) {
+        transaction.update(archiveRecoveryWork).set({
+          passCursorLba: recoveryRead.startLba,
+          updatedAt: timestamp,
+        }).where(and(
+          eq(
+            archiveRecoveryWork.archiveRecoveryId,
+            recoveryWork.archiveRecoveryId,
+          ),
+          eq(archiveRecoveryWork.status, "claimed"),
+          ...(claim === undefined
+            ? []
+            : [eq(archiveRecoveryWork.claimToken, claim.claimToken)]),
+        )).run();
+      }
     }, { behavior: "immediate" });
 
     const projected = access.catalog.findDvdArchiveEvidenceHeader(archiveId);
@@ -9297,6 +9322,35 @@ export function createDataAccessInternal(
               archiveRecoveryId: candidate.id,
             });
       },
+      findNextInterrupted(workerId) {
+        const activeWorkerId = requireNonEmpty(workerId, "workerId");
+        const expiredBefore = new Date(
+          now().getTime() - DVD_RECOVERY_PASS_CLAIM_LEASE_MS,
+        );
+        const candidate = database.select({ id: archiveRecoveries.id })
+          .from(archiveRecoveries)
+          .innerJoin(
+            archiveRecoveryWork,
+            eq(archiveRecoveryWork.archiveRecoveryId, archiveRecoveries.id),
+          )
+          .where(and(
+            eq(archiveRecoveries.status, "running"),
+            eq(archiveRecoveryWork.status, "claimed"),
+            ne(archiveRecoveryWork.claimedBy, activeWorkerId),
+            lt(archiveRecoveryWork.claimedAt, expiredBefore),
+          ))
+          .orderBy(
+            asc(archiveRecoveryWork.claimedAt),
+            asc(archiveRecoveries.id),
+          )
+          .limit(1)
+          .get();
+        return candidate === undefined
+          ? null
+          : findArchiveRecoveryRecord(database, {
+              archiveRecoveryId: candidate.id,
+            });
+      },
       claimNextVerifiedCandidate(workerId) {
         const claimedBy = requireNonEmpty(workerId, "workerId");
         return database.transaction((transaction) => {
@@ -9645,6 +9699,29 @@ export function createDataAccessInternal(
       assertClaim(claim) {
         return requireCurrentArchiveRecoveryClaim(database, claim);
       },
+      renewClaim(claim) {
+        const timestamp = now();
+        return database.update(archiveRecoveryWork).set({
+          claimedAt: timestamp,
+          updatedAt: timestamp,
+        }).where(and(
+          eq(archiveRecoveryWork.archiveRecoveryId, claim.archiveRecoveryId),
+          eq(archiveRecoveryWork.attemptId, claim.attemptId),
+          eq(archiveRecoveryWork.status, "claimed"),
+          eq(archiveRecoveryWork.claimToken, claim.claimToken),
+          exists(
+            database.select({ id: archiveRecoveries.id })
+              .from(archiveRecoveries)
+              .where(and(
+                eq(archiveRecoveries.id, claim.archiveRecoveryId),
+                eq(archiveRecoveries.attemptId, claim.attemptId),
+                eq(archiveRecoveries.status, "running"),
+              )),
+          ),
+        )).returning({
+          archiveRecoveryId: archiveRecoveryWork.archiveRecoveryId,
+        }).get() !== undefined;
+      },
       admitSourceRead(claim, expectedDevicePath, start) {
         return database.transaction((transaction) => {
           const recovery = requireCurrentArchiveRecoveryClaim(
@@ -9695,8 +9772,38 @@ export function createDataAccessInternal(
           ) {
             return null;
           }
-          start(drive.devicePath);
-          return recovery;
+          const identity = start(drive.devicePath);
+          if (
+            identity.devicePath !== drive.devicePath ||
+            !/^\d+$/.test(identity.deviceId) ||
+            !/^\d+$/.test(identity.inode)
+          ) {
+            throw new DomainInvariantError(
+              "DVD Recovery source device identity is invalid",
+            );
+          }
+          requireRow(
+            transaction.update(archiveRecoveryWork).set({
+              admittedDevicePath: identity.devicePath,
+              admittedDeviceId: identity.deviceId,
+              admittedDeviceInode: identity.inode,
+              updatedAt: now(),
+            }).where(and(
+              eq(
+                archiveRecoveryWork.archiveRecoveryId,
+                claim.archiveRecoveryId,
+              ),
+              eq(archiveRecoveryWork.status, "claimed"),
+              eq(archiveRecoveryWork.claimToken, claim.claimToken),
+            )).returning({
+              archiveRecoveryId: archiveRecoveryWork.archiveRecoveryId,
+            }).get(),
+            "Archive Recovery work",
+            claim.archiveRecoveryId,
+          );
+          return findArchiveRecoveryRecord(transaction, {
+            archiveRecoveryId: recovery.id,
+          });
         }, { behavior: "immediate" });
       },
       bindVerification(claim, authority) {
@@ -10356,6 +10463,9 @@ export function createDataAccessInternal(
                 claimedBy: null,
                 claimToken: null,
                 claimedAt: null,
+                admittedDevicePath: null,
+                admittedDeviceId: null,
+                admittedDeviceInode: null,
                 updatedAt: timestamp,
               }).where(and(
                 eq(

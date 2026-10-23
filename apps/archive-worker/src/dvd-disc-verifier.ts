@@ -13,6 +13,7 @@ import {
   type DataAccess,
   type DvdDiscVerificationDiagnostic,
   type DvdDiscVerificationSampleFinding,
+  type OpticalDeviceIdentity,
   type DvdSourceSampleManifest,
 } from "@rip-dvd/data-access";
 import {
@@ -127,7 +128,9 @@ export interface DvdVerificationSourceReader {
 export interface DvdRecoverySourceReader {
   start(
     input: DvdSourceReadRange & { timeoutMs?: never },
-  ): ActiveBoundedProcess<DvdSourceRead>;
+  ): ActiveBoundedProcess<DvdSourceRead> & {
+    deviceIdentity: OpticalDeviceIdentity;
+  };
 }
 
 class DvdVerificationReadDeadlineError extends Error {
@@ -144,14 +147,17 @@ class DvdVerificationReadStoppedError extends Error {
   }
 }
 
-function openOpticalDriveLock(devicePath: string): number {
+function openOpticalDriveLock(devicePath: string): {
+  descriptor: number;
+  deviceIdentity: OpticalDeviceIdentity;
+} {
   const descriptor = openSync(
     devicePath,
     constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
   );
   try {
-    const opened = fstatSync(descriptor);
-    const linked = lstatSync(devicePath);
+    const opened = fstatSync(descriptor, { bigint: true });
+    const linked = lstatSync(devicePath, { bigint: true });
     if (
       (!opened.isBlockDevice() && !opened.isCharacterDevice()) ||
       (!linked.isBlockDevice() && !linked.isCharacterDevice()) ||
@@ -159,7 +165,14 @@ function openOpticalDriveLock(devicePath: string): number {
       opened.dev !== linked.dev ||
       opened.ino !== linked.ino
     ) throw new Error("DVD Disc Verification Optical Drive lock is unsafe");
-    return descriptor;
+    return {
+      descriptor,
+      deviceIdentity: {
+        devicePath,
+        deviceId: String(opened.dev),
+        inode: String(opened.ino),
+      },
+    };
   } catch (error) {
     closeSync(descriptor);
     throw error;
@@ -174,7 +187,9 @@ function createNodeDvdSourceReader<Input extends DvdSourceReadRange & {
   operationName: string;
   requiredSectorCount: number;
 }): {
-  start(input: Input): ActiveBoundedProcess<DvdSourceRead>;
+  start(input: Input): ActiveBoundedProcess<DvdSourceRead> & {
+    deviceIdentity: OpticalDeviceIdentity;
+  };
 } {
   return {
     start(input) {
@@ -193,7 +208,8 @@ function createNodeDvdSourceReader<Input extends DvdSourceReadRange & {
         ) ||
         !options.boundedLifetime && input.timeoutMs !== undefined
       ) throw new Error(`${options.operationName} is invalid`);
-      const lockDescriptor = openOpticalDriveLock(devicePath);
+      const { descriptor: lockDescriptor, deviceIdentity } =
+        openOpticalDriveLock(devicePath);
       let activeProcess;
       try {
         activeProcess = startNodeBoundedCommandProcess({
@@ -227,6 +243,7 @@ function createNodeDvdSourceReader<Input extends DvdSourceReadRange & {
       }
       return {
         ...activeProcess,
+        deviceIdentity,
         result: activeProcess.result.then(
           ({ exitCode, signal, stderr, stdout }) => {
             if (signal === "SIGALRM") {

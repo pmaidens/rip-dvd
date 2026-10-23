@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import {
-  type Stats,
   closeSync,
   constants as fsConstants,
   fstatSync,
@@ -177,6 +176,13 @@ export interface DvdCopyRunner {
     mutation: () => void | Promise<void>,
   ): Promise<void>;
   waitForInactive(devicePath: string, outputPath: string): Promise<void>;
+}
+
+export interface DvdDeviceIdentityInactivityGuard {
+  withDeviceIdentityInactive(
+    identity: import("@rip-dvd/data-access").OpticalDeviceIdentity,
+    mutation: () => void | Promise<void>,
+  ): Promise<void>;
 }
 
 type DvdNativeCopyRequest =
@@ -437,7 +443,9 @@ export function createNodeDvdCopyRunner({
   requireInactive?: (devicePath: string) => void;
   spawnLockProcess?: SpawnDvdDeviceLockProcess;
   spawnProcess?: SpawnDvdCopyProcess;
-} = {}): DvdCopyRunner & DvdInitialCopyRunner {
+} = {}): DvdCopyRunner &
+  DvdInitialCopyRunner &
+  DvdDeviceIdentityInactivityGuard {
   if (
     !Number.isSafeInteger(deviceLockTimeoutMs) ||
     deviceLockTimeoutMs <= 0
@@ -1012,6 +1020,22 @@ export function createNodeDvdCopyRunner({
         deviceLockTimeoutMs,
       );
     },
+    withDeviceIdentityInactive(identity, mutation) {
+      const safeDevicePath = requireSafeOpticalDevicePath(identity.devicePath);
+      const safeIdentity = { ...identity, devicePath: safeDevicePath };
+      requireDeviceIdentityInactive(safeIdentity);
+      if (!currentPathMatchesDeviceIdentity(safeIdentity)) {
+        return Promise.resolve(mutation());
+      }
+      return withExclusiveDeviceInactivity(
+        safeDevicePath,
+        mutation,
+        () => requireDeviceIdentityInactive(safeIdentity),
+        spawnLockProcess,
+        deviceLockTimeoutMs,
+        safeIdentity,
+      );
+    },
     waitForInactive(devicePath, outputPath) {
       return coordinator.waitForInactive(
         copyKey(requireSafeOpticalDevicePath(devicePath), outputPath),
@@ -1025,7 +1049,7 @@ function isVanishedProcEntry(error: unknown): boolean {
 }
 
 function requireSameOwnerInodeInactive(
-  target: Stats,
+  target: { deviceId: string; inode: string },
   ownerUid: number,
   activeError: string,
   ambiguousError: string,
@@ -1051,14 +1075,16 @@ function requireSameOwnerInodeInactive(
       }
       let processMetadata;
       try {
-        processMetadata = statSync(`/proc/${processEntry.name}`);
+        processMetadata = statSync(`/proc/${processEntry.name}`, {
+          bigint: true,
+        });
       } catch (error) {
         if (isVanishedProcEntry(error)) {
           continue;
         }
         throw new Error(ambiguousError);
       }
-      if (processMetadata.uid !== ownerUid) {
+      if (processMetadata.uid !== BigInt(ownerUid)) {
         continue;
       }
       let descriptorDirectory;
@@ -1080,8 +1106,12 @@ function requireSameOwnerInodeInactive(
           try {
             const opened = statSync(
               `/proc/${processEntry.name}/fd/${descriptorEntry.name}`,
+              { bigint: true },
             );
-            if (opened.dev === target.dev && opened.ino === target.ino) {
+            if (
+              String(opened.dev) === target.deviceId &&
+              String(opened.ino) === target.inode
+            ) {
               throw new Error(activeError);
             }
           } catch (error) {
@@ -1106,6 +1136,40 @@ function requireSameOwnerInodeInactive(
   }
 }
 
+function requireDeviceIdentityInactive(
+  identity: import("@rip-dvd/data-access").OpticalDeviceIdentity,
+): void {
+  if (
+    !/^\/dev\/[A-Za-z0-9._/-]+$/.test(identity.devicePath) ||
+    !/^\d+$/.test(identity.deviceId) ||
+    !/^\d+$/.test(identity.inode) ||
+    process.geteuid === undefined
+  ) {
+    throw new Error("DVD archive device identity is unsafe");
+  }
+  requireSameOwnerInodeInactive(
+    { deviceId: identity.deviceId, inode: identity.inode },
+    process.geteuid(),
+    "DVD archive device is still active",
+    "Could not prove the DVD archive device is inactive",
+  );
+}
+
+function currentPathMatchesDeviceIdentity(
+  identity: import("@rip-dvd/data-access").OpticalDeviceIdentity,
+): boolean {
+  try {
+    const linked = lstatSync(identity.devicePath, { bigint: true });
+    return !linked.isSymbolicLink() &&
+      (linked.isBlockDevice() || linked.isCharacterDevice()) &&
+      String(linked.dev) === identity.deviceId &&
+      String(linked.ino) === identity.inode;
+  } catch (error) {
+    if (isVanishedProcEntry(error)) return false;
+    throw error;
+  }
+}
+
 function requireDeviceInactive(devicePath: string): void {
   const device = lstatSync(devicePath);
   if (
@@ -1116,7 +1180,7 @@ function requireDeviceInactive(devicePath: string): void {
     throw new Error("DVD archive device path is unsafe");
   }
   requireSameOwnerInodeInactive(
-    device,
+    { deviceId: String(device.dev), inode: String(device.ino) },
     process.geteuid(),
     "DVD archive device is still active",
     "Could not prove the DVD archive device is inactive",
@@ -1129,11 +1193,22 @@ async function withExclusiveDeviceInactivity(
   requireInactive: (devicePath: string) => void,
   spawnLockProcess: SpawnDvdDeviceLockProcess,
   timeoutMs: number,
+  expectedIdentity?: import("@rip-dvd/data-access").OpticalDeviceIdentity,
 ): Promise<void> {
   // The scan catches pre-lock and pre-upgrade readers. Acquiring the same
   // inode flock used by copy then closes the gap through the mutation.
   requireInactive(devicePath);
   const lockDescriptor = openDeviceLock(devicePath);
+  if (expectedIdentity !== undefined) {
+    const opened = fstatSync(lockDescriptor, { bigint: true });
+    if (
+      String(opened.dev) !== expectedIdentity.deviceId ||
+      String(opened.ino) !== expectedIdentity.inode
+    ) {
+      closeSync(lockDescriptor);
+      throw new Error("DVD archive device identity changed");
+    }
+  }
   let child: DvdDeviceLockChildProcess;
   try {
     child = spawnLockProcess(
@@ -1236,7 +1311,7 @@ function requirePartialInactive(partialPath: string): void {
     throw new Error("DVD archive partial path is unsafe");
   }
   requireSameOwnerInodeInactive(
-    partial,
+    { deviceId: String(partial.dev), inode: String(partial.ino) },
     partial.uid,
     "DVD archive copy is still active",
     "Could not prove the DVD archive partial is inactive",
