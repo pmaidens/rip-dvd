@@ -147,6 +147,9 @@ function parsedCommand(
     ...(action === "update" ? { changes: input } : {}),
     ...(action === "create" || action === "repair" || action === "correct"
       ? { selection: input } : {}),
+    ...(action === "create" && catalogRevision
+      ? { catalogRevision }
+      : {}),
     ...(action === "correct" ? { catalogRevision, ...(correctionReason ? { correctionReason } : {}) } : {}),
   };
   const parsed = parseCatalogReviewCommand(body, { mediaItemKinds: MEDIA_ITEM_KINDS });
@@ -239,7 +242,8 @@ export function runDiscSelection(rest: readonly string[], io: SelectionIO): unkn
   if (consequential && !options.has("--acknowledge")) {
     invalid("Acknowledgement of a Disc Selection preview is required.");
   }
-  if (!consequential && ["--acknowledge", "--revision", "--preview-token"].some((name) => options.has(name))) {
+  if (!consequential && ["--acknowledge", "--preview-token"].some((name) => options.has(name)) ||
+      !consequential && action !== "create" && options.has("--revision")) {
     invalid("This Disc Selection change does not require a preview.");
   }
   const expectedCatalogRevision = consequential ? revision(options.get("--revision")) : undefined;

@@ -30,7 +30,7 @@ interface CatalogReviewDiscSelectionsProps {
   correctionRetainedOutputHistoryPage:
     CatalogReviewDto["correctionRetainedOutputHistoryPage"];
   mediaItems: CatalogReviewMediaItem[];
-  rawTitles: DvdTitle[];
+  rawTitles: Array<DvdTitle | Pick<DvdTitle, "number" | "chapters">>;
   selectionKind: DiscSelectionKind;
   isSaving: boolean;
   onPage(offset: number): void;

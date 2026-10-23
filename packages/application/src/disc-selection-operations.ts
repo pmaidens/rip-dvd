@@ -206,12 +206,17 @@ export function executeDiscSelectionCommand(
   const mutation = discSelectionMutation(archiveId, command);
   const mutationKey = parseMutationKey(options.mutationKey);
   const requiresPreview = discSelectionCommandRequiresPreview(command);
+  const expectedCatalogRevision = options.expectedCatalogRevision ??
+    (command.action === "create_disc_selection" && command.catalogRevision
+      ? new Date(command.catalogRevision)
+      : undefined);
   if (requiresPreview && (options.acknowledged !== true || !options.expectedCatalogRevision ||
       !options.previewToken)) {
     throw new DomainInvariantError("Disc Selection preview acknowledgement is required");
   }
-  if (!requiresPreview && (options.acknowledged === true || options.expectedCatalogRevision ||
-      options.previewToken)) {
+  if (!requiresPreview && (options.acknowledged === true ||
+      (expectedCatalogRevision !== undefined &&
+        command.action !== "create_disc_selection") || options.previewToken)) {
     throw new DomainInvariantError("This Disc Selection change does not require a preview");
   }
   if (options.previewToken !== undefined) {
@@ -226,7 +231,7 @@ export function executeDiscSelectionCommand(
     originalDiscArchiveId: archiveId,
     mutation,
     mutationKey,
-    ...(options.expectedCatalogRevision ? { expectedCatalogRevision: options.expectedCatalogRevision } : {}),
+    ...(expectedCatalogRevision ? { expectedCatalogRevision } : {}),
     ...(options.previewToken ? { previewToken: options.previewToken } : {}),
   });
   return {

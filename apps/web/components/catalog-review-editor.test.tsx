@@ -28,6 +28,7 @@ import {
   CatalogReviewEditor,
   type CatalogReviewDto,
   CatalogReviewView,
+  catalogReviewSelectionTitles,
   mutateCatalogReview,
 } from "./catalog-review-editor";
 import { rearchiveAcceptancePreviewConfirmation } from "./catalog-review-mutation";
@@ -2236,6 +2237,7 @@ describe("CatalogReviewView", () => {
       },
       create_disc_selection: {
         action: "create_disc_selection",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
         selection: {
           mediaItemId: "media-item-1",
           sourceIdentity: { kind: "main_feature" },
@@ -2426,6 +2428,17 @@ describe("CatalogReviewView", () => {
         },
       }],
     };
+    review.rawScan.titles = [{
+      number: 1,
+      durationSeconds: 3_600,
+      chapters: 10,
+      audioStreams: [],
+      subtitles: [],
+    }];
+    expect(catalogReviewSelectionTitles(review)).toEqual([{
+      number: 2,
+      chapters: 18,
+    }]);
     review.discSelections = [];
     review.rearchiveProposal = {
       state: "stale",

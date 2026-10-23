@@ -87,6 +87,24 @@ interface CatalogReviewViewProps {
   ): void;
 }
 
+export function catalogReviewSelectionTitles(
+  review: Pick<
+    Extract<CatalogReviewLoadState, { status: "loaded" }>["review"],
+    "rawScan" | "titleIdentity"
+  >,
+) {
+  return review.titleIdentity?.available
+    ? review.titleIdentity.items
+      .filter(({ presentAtCurrentCheckpoint, observation }) =>
+        presentAtCurrentCheckpoint && observation.angleNumber === 1
+      )
+      .map(({ observation }) => ({
+        number: observation.displayTitleNumber,
+        chapters: observation.chapterCount,
+      }))
+    : review.rawScan.titles;
+}
+
 export function CatalogReviewView({
   state,
   editingMediaItemId,
@@ -245,7 +263,7 @@ export function CatalogReviewView({
                 review.correctionRetainedOutputHistoryPage
               }
               mediaItems={review.mediaItems}
-              rawTitles={review.rawScan.titles}
+              rawTitles={catalogReviewSelectionTitles(review)}
               selectionKind={selectionKind}
               isSaving={isSaving}
               onPage={onDiscSelectionsPage}

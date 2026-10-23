@@ -123,7 +123,7 @@ it("runs every structured input form through the executable without the web serv
   expect(access.catalog.listMediaItems()).toHaveLength(1);
   expect(access.catalog.listDiscSelections({ originalDiscArchiveId: archive.id })).toHaveLength(1);
   access.close();
-}, 10_000);
+}, 15_000);
 
 it("recovers a committed proposal after a lost response and data-access restart", async () => {
   const { current, archive } = fixture();

@@ -145,6 +145,7 @@ export type CatalogReviewCommand =
     }
   | {
       action: "create_disc_selection";
+      catalogRevision?: string;
       selection: CatalogReviewDiscSelectionInput;
     }
   | {
@@ -964,13 +965,20 @@ export function parseCatalogReviewCommand(
         : invalid("Invalid Media Item");
     }
     case "create_disc_selection": {
+      const revision = body.catalogRevision === undefined
+        ? undefined
+        : catalogRevision(body.catalogRevision);
       const parsedSelection = parseDiscSelectionInput(body.selection);
-      return parsedSelection.ok
-        ? {
-            ok: true,
-            command: { action, selection: parsedSelection.selection },
-          }
-        : invalid(parsedSelection.error);
+      if (!parsedSelection.ok) return invalid(parsedSelection.error);
+      if (revision === null) return invalid("Invalid Disc Selection");
+      return {
+        ok: true,
+        command: {
+          action,
+          ...(revision === undefined ? {} : { catalogRevision: revision }),
+          selection: parsedSelection.selection,
+        },
+      };
     }
     case "update_disc_selection": {
       const discSelectionId = boundedString(body.discSelectionId);

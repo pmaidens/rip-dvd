@@ -102,6 +102,8 @@ it("shows every checkpoint-bound Title Identity through the public JSON CLI", as
       ],
     },
   });
+  const catalogRevision = (response.result as { catalogRevision: string })
+    .catalogRevision;
 
   const created = await fixture.run([
     "disc-selection",
@@ -109,6 +111,8 @@ it("shows every checkpoint-bound Title Identity through the public JSON CLI", as
     archive.id,
     "--key",
     "00000000-0000-4000-8000-000000000401",
+    "--revision",
+    catalogRevision,
     "--media-item-id",
     mediaItem.id,
     "--source-kind",

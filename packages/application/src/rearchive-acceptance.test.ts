@@ -21,6 +21,7 @@ import {
 import { afterEach, expect, it } from "vitest";
 
 import { createApplicationOperations } from "./index.js";
+import { CatalogReviewCompletionUnavailableError } from "./catalog-review-workflow.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -818,7 +819,7 @@ it("blocks a DVD evidence replacement before Re-archive Acceptance preview persi
       current.seeded.targetArchive.id,
       command,
       current.mediaLibraryPath,
-    )).toThrow(DvdRecoveryEvidenceEncodingUnavailableError);
+    )).toThrow(CatalogReviewCompletionUnavailableError);
     expect(current.access.catalog.listDiscSelections({
       ids: [current.seeded.sourceSelection.id],
     })).toEqual([expect.objectContaining({

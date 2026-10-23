@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 
 import {
   createOperatorWorkflowFixture,
+  markArchiveWithDvdRecoveryEvidence,
   seedRearchiveCatalogReviewFixture,
 } from "./operator-workflow.test-support.js";
 import { runRearchiveAcceptance } from "./rearchive-acceptance.js";
@@ -212,6 +213,60 @@ it("accepts an omitted replacement plan without media-library configuration", as
   expect(accepted.replacementEncodeJobs).toBeUndefined();
   const access = current.openAccess();
   expect(access.encodeJobs.list()).toEqual([]);
+  access.close();
+});
+
+it("blocks new-format Re-archive Acceptance when no replacement is selected", async () => {
+  const { saved, seeded } = await saveReadyRearchiveProposal(
+    "00000000-0000-4000-8000-000000000555",
+  );
+  markArchiveWithDvdRecoveryEvidence(
+    current.databasePath,
+    seeded.targetArchive.id,
+    "synthetic-rearchive-acceptance-blocked",
+  );
+  const command = {
+    action: "accept_rearchive",
+    catalogRevision: saved.catalogRevision,
+    sourceCatalogRevision: saved.sourceCatalogRevision,
+    replacementEncodes: [],
+  };
+  const preview = await current.run([
+    "catalog-review",
+    "preview-rearchive-acceptance",
+    seeded.targetArchive.id,
+    "--json",
+    JSON.stringify(command),
+  ]);
+  expect(preview.exitCode).toBe(2);
+  expect(preview.result).toMatchObject({
+    error: { code: "CATALOG_REVIEW_COMPLETION_UNAVAILABLE" },
+  });
+
+  const acceptance = await current.run([
+    "catalog-review",
+    "accept-rearchive",
+    seeded.targetArchive.id,
+    "--key",
+    "00000000-0000-4000-8000-000000000556",
+    "--revision",
+    saved.catalogRevision,
+    "--source-revision",
+    saved.sourceCatalogRevision,
+    "--preview-token",
+    "rearchive-acceptance-preview:00000000-0000-4000-8000-000000000557",
+    "--acknowledge",
+    "--json",
+    JSON.stringify(command),
+  ]);
+  expect(acceptance.exitCode).toBe(2);
+  expect(acceptance.result).toMatchObject({
+    error: { code: "CATALOG_REVIEW_COMPLETION_UNAVAILABLE" },
+  });
+  const access = current.openAccess();
+  expect(access.catalog.listOriginalDiscArchives({
+    ids: [seeded.targetArchive.id],
+  })[0]?.catalogReviewOutcome).toBe("needs_review");
   access.close();
 });
 

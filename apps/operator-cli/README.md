@@ -364,6 +364,7 @@ Job. A blocked preview has no token and cannot be acknowledged.
 ```sh
 rip-dvd disc-selection show <archive-id> <selection-id>
 rip-dvd disc-selection create <archive-id> --key <key> \
+  --revision <catalog-revision-from-show> \
   --media-item-id <media-item-id> --source-kind dvd_title --title-number 1
 rip-dvd disc-selection update <archive-id> <selection-id> --key <key> \
   --label "Main feature"
@@ -385,7 +386,12 @@ rip-dvd disc-selection repair <archive-id> <selection-id> --key <key> \
 
 `create`, `update`, `repair`, `correct`, and `delete` require a previously
 chosen mutation key. Repeating an identical invocation returns its original
-result. Reusing the key with different inputs fails. An `update` that changes
+result. Reusing the key with different inputs fails. For a
+`dvd-recovery-evidence-v1` archive, `create` also requires the Catalog Review
+revision returned by `catalog-review show`; the mutation validates the source
+against current Title Identity evidence and rejects a stale revision rather
+than retargeting a title number. Legacy creation remains revision-optional.
+An `update` that changes
 the Media Item or source, plus every `repair`, `correct`, and `delete`, requires
 an action-specific preview. Pass the returned revision and token with
 `--acknowledge`. A changed Catalog Review revision or different proposal
@@ -412,6 +418,7 @@ and acknowledgement stay as command options for every input form.
 
 ```sh
 rip-dvd disc-selection create <archive-id> --key <key> \
+  --revision <catalog-revision-from-show> \
   --json '{"mediaItemId":"<media-item-id>","sourceIdentity":{"kind":"dvd_title","titleNumber":1}}'
 printf '%s\n' '{"label":"Featurette"}' |
   rip-dvd disc-selection update <archive-id> <selection-id> --key <key> --stdin

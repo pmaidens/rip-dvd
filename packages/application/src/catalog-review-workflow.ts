@@ -290,8 +290,8 @@ export function describeCatalogReviewWorkflow(
   ];
   const damageReasons = uniqueReasons([
     ...consistencyReasons,
-    ...recoveryReasons,
     ...assessmentReasons,
+    ...recoveryReasons,
     ...mappingReasons,
   ]);
   const damageDecisionAvailable = damageReasons.length === 0;

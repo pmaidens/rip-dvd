@@ -451,7 +451,12 @@ export function useCatalogReviewState({
   function createDiscSelection(selection: CreateDiscSelectionInput) {
     const { replacesDiscSelectionId, correctionReason, ...values } = selection;
     if (!replacesDiscSelectionId) {
-      void mutate({ action: "create_disc_selection", selection: values });
+      if (state.status !== "loaded") return;
+      void mutate({
+        action: "create_disc_selection",
+        catalogRevision: state.review.catalogRevision,
+        selection: values,
+      });
       return;
     }
     if (state.status !== "loaded") return;

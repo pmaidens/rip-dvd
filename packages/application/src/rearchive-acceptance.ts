@@ -10,6 +10,7 @@ import { normalizeCorrectedEncodeReplacements } from "./corrected-encode-replace
 import {
   requireDvdRecoveryEvidenceEncodingAvailableForArchive,
 } from "./dvd-recovery-evidence-encoding.js";
+import { assertLegacyCatalogReviewCompletionAvailable } from "./catalog-review-workflow.js";
 import { parseMutationKey } from "./mutation-key.js";
 import {
   createRearchiveAcceptancePreviewToken,
@@ -57,6 +58,7 @@ export function previewRearchiveAcceptance(
     ...validateAcceptanceCommand(command, mediaLibraryPath),
   };
   const plan = access.readConsistentSnapshot((snapshot) => {
+    assertLegacyCatalogReviewCompletionAvailable(snapshot, targetArchiveId);
     if (input.replacements.length > 0) {
       requireDvdRecoveryEvidenceEncodingAvailableForArchive(
         snapshot,
@@ -128,6 +130,9 @@ export function acceptRearchive(
   const parsedCommand = validateAcceptanceCommand(
     command,
     input.mediaLibraryPath,
+  );
+  access.readConsistentSnapshot((snapshot) =>
+    assertLegacyCatalogReviewCompletionAvailable(snapshot, targetArchiveId)
   );
   if (
     input.acknowledge !== true ||

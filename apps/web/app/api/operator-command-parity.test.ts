@@ -176,7 +176,7 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       chapterCount: 12,
       sourceExtents: [{ startLba: 0, sectorCount: 1 }],
     }, {
-      displayTitleNumber: 2,
+      displayTitleNumber: 3,
       navigation: {
         videoTitleSetNumber: 2,
         titleSetTitleNumber: 1,
@@ -252,8 +252,8 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
           action: "damage_decision",
           available: false,
           reasons: [
-            { code: "RECOVERY_ACTIVE" },
             { code: "ASSESSMENT_PENDING" },
+            { code: "RECOVERY_ACTIVE" },
             { code: "SELECTION_UNIDENTIFIED" },
           ],
         },
@@ -305,8 +305,8 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
         action === "damage_decision"
       )?.reasons.map(({ code }) => code),
     ).toEqual([
-      "RECOVERY_ACTIVE",
       "ASSESSMENT_PENDING",
+      "RECOVERY_ACTIVE",
       "MAPPING_REVIEW_REQUIRED",
       "SELECTION_UNIDENTIFIED",
     ]);
@@ -314,6 +314,7 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
     const firstMutationKey = "00000000-0000-4000-8000-000000000397";
     const firstSelectionCommand = {
       action: "create_disc_selection" as const,
+      catalogRevision: before.catalogRevision,
       selection: {
         mediaItemId: mediaItem.id,
         sourceIdentity: { kind: "dvd_title" as const, titleNumber: 1 },
@@ -334,6 +335,8 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       archive.id,
       "--key",
       firstMutationKey,
+      "--revision",
+      before.catalogRevision,
       "--media-item-id",
       mediaItem.id,
       "--source-kind",
@@ -344,18 +347,21 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
     expect(mappedFirstWeb.status).toBe(201);
     expect(mappedFirst.exitCode, JSON.stringify(mappedFirst.result)).toBe(0);
     expect(mappedFirst.result).toEqual(await mappedFirstWeb.json());
+    const afterFirst = await readBoth();
     const mappedSecond = await fixture.run([
       "disc-selection",
       "create",
       archive.id,
       "--key",
       "00000000-0000-4000-8000-000000000398",
+      "--revision",
+      afterFirst.catalogRevision,
       "--media-item-id",
       secondMediaItem.id,
       "--source-kind",
       "dvd_title",
       "--title-number",
-      "2",
+      "3",
     ]);
     expect(mappedSecond.exitCode, JSON.stringify(mappedSecond.result)).toBe(0);
     const after = await readBoth();
@@ -372,8 +378,8 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
         action === "damage_decision"
       )?.reasons,
     ).toEqual([
-      expect.objectContaining({ code: "RECOVERY_ACTIVE" }),
       expect.objectContaining({ code: "ASSESSMENT_PENDING" }),
+      expect.objectContaining({ code: "RECOVERY_ACTIVE" }),
     ]);
 
     const completionCommand = {
@@ -1544,7 +1550,12 @@ it("blocks Re-archive replacement previews consistently through web and CLI", as
     expect(web.status).toBe(409);
     expect(cli.exitCode).toBe(2);
     expect(cli.result).toEqual(await web.json());
-    expect(cli.result).toEqual(dvdEvidenceEncodingUnavailableError);
+    expect(cli.result).toMatchObject({
+      error: {
+        code: "CATALOG_REVIEW_COMPLETION_UNAVAILABLE",
+        reasons: [{ code: "CATALOG_REVIEW_COMPLETION_UNAVAILABLE" }],
+      },
+    });
     expect(access.catalog.listDiscSelections({
       ids: [seeded.sourceSelection.id],
     })).toEqual([expect.objectContaining({
