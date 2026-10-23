@@ -16094,11 +16094,28 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       });
     }
     const statementAll = vi.spyOn(StatementSync.prototype, "all");
+    const statementGet = vi.spyOn(StatementSync.prototype, "get");
     const projectedRowCount = () => statementAll.mock.results.reduce(
       (total, result) => total +
         (Array.isArray(result.value) ? result.value.length : 0),
       0,
     );
+    const auditedObservationCount = () => {
+      for (
+        let index = statementGet.mock.results.length - 1;
+        index >= 0;
+        index -= 1
+      ) {
+        const result = statementGet.mock.results[index]?.value;
+        if (
+          result !== null && typeof result === "object" &&
+          "audited_observation_count" in result
+        ) {
+          return Number(result.audited_observation_count);
+        }
+      }
+      return undefined;
+    };
     const readProjection = () => fixture.access.catalog
       .readDvdCatalogReviewWorkflowEvidence([{
         originalDiscArchiveId: fixture.archive.id,
@@ -16112,6 +16129,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(readProjection()?.titleIdentity).not.toBeNull();
     const shortHistoryRows = projectedRowCount();
     const shortHistoryQueries = statementAll.mock.calls.length;
+    const shortHistoryGets = statementGet.mock.calls.length;
+    const shortHistoryAuditedObservations = auditedObservationCount();
 
     let deepAuditReview: ReturnType<
       typeof fixture.access.catalog.recordDvdTitleIdentityObservations
@@ -16129,15 +16148,22 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       });
     }
     statementAll.mockClear();
+    statementGet.mockClear();
     const longProjection = readProjection();
     expect(longProjection?.titleIdentity).not.toBeNull();
     const longHistoryRows = projectedRowCount();
     const longHistoryQueries = statementAll.mock.calls.length;
+    const longHistoryGets = statementGet.mock.calls.length;
+    const longHistoryAuditedObservations = auditedObservationCount();
     statementAll.mockRestore();
+    statementGet.mockRestore();
 
     expect(shortHistoryRows).toBeGreaterThan(0);
     expect(longHistoryRows).toBe(shortHistoryRows);
     expect(longHistoryQueries).toBe(shortHistoryQueries);
+    expect(longHistoryGets).toBe(shortHistoryGets);
+    expect(shortHistoryAuditedObservations).toBe(4);
+    expect(longHistoryAuditedObservations).toBe(24);
     expect(longProjection?.titleIdentity?.catalogMappingProjectionId).toBe(
       deepAuditReview === undefined
         ? undefined

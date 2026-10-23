@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import type { DiscSelectionAction } from "@rip-dvd/data-access";
 import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
@@ -154,6 +154,7 @@ export function CatalogReviewDiscSelections({
   const [draftCatalogRevision, setDraftCatalogRevision] = useState<
     string | null
   >(null);
+  const hydratedSelectionId = useRef<string | null>(null);
   const editingSelection = editingSelectionId === null
     ? null
     : discSelections.find((selection) => selection.id === editingSelectionId) ??
@@ -167,7 +168,17 @@ export function CatalogReviewDiscSelections({
 
   useEffect(() => {
     const selection = editingSelection;
-    if (selection === null) return;
+    if (selection === null) {
+      hydratedSelectionId.current = null;
+      return;
+    }
+    if (
+      hydratedSelectionId.current === selection.id &&
+      draftCatalogRevision !== null
+    ) {
+      return;
+    }
+    hydratedSelectionId.current = selection.id;
     setMediaItemId(selection.mediaItemId);
     setLabel(selection.label ?? "");
     setClearLabel(false);
@@ -186,7 +197,7 @@ export function CatalogReviewDiscSelections({
       setChapterStart("");
       setChapterEnd("");
     }
-  }, [editingSelection, onSelectionKindChange]);
+  }, [draftCatalogRevision, editingSelection, onSelectionKindChange]);
 
   function selectCatalogAction(event: React.ChangeEvent<HTMLSelectElement>) {
     const selection = discSelections.find(

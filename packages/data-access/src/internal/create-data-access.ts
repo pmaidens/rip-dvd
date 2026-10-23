@@ -9635,184 +9635,125 @@ export function createDataAccessInternal(
       ),
     ]);
     const continuityAudit = sqlite.prepare(`
-      with recursive
-      input_target(manifest_id, archive_id, manifest_revision) as (
-        select
-          json_extract(value, '$.manifestId'),
-          json_extract(value, '$.archiveId'),
-          cast(json_extract(value, '$.manifestRevision') as integer)
+      with
+      input_archive(archive_id) as (
+        select distinct json_extract(value, '$.archiveId')
         from json_each(?)
       ),
-      target(manifest_id, archive_id, manifest_revision) as (
-        select manifest_id, archive_id, manifest_revision
-        from input_target
-        union
+      first_set as (
         select
-          predecessor_set.manifest_id,
-          predecessor_set.original_disc_archive_id,
-          predecessor_set.manifest_revision
-        from target
-        inner join dvd_title_identity_observations as current
-          on current.manifest_id = target.manifest_id
-        inner join dvd_title_identity_observations as predecessor
-          on predecessor.id = current.previous_observation_id
-        inner join dvd_title_identity_sets as predecessor_set
-          on predecessor_set.manifest_id = predecessor.manifest_id
+          identity_set.original_disc_archive_id as archive_id,
+          min(identity_set.manifest_revision) as manifest_revision
+        from dvd_title_identity_sets as identity_set
+        inner join input_archive
+          on input_archive.archive_id =
+            identity_set.original_disc_archive_id
+        group by identity_set.original_disc_archive_id
       ),
-      current_rows as (
+      ordered as (
         select
-          target.manifest_id as target_manifest_id,
           observation.*,
+          identity_set.original_disc_archive_id as archive_id,
+          identity_set.manifest_revision,
+          identity_set.manifest_digest as set_manifest_digest,
+          identity_set.policy_version as set_policy_version,
+          identity.original_disc_archive_id as identity_archive_id,
+          manifest.original_disc_archive_id as manifest_archive_id,
+          manifest.revision as evidence_manifest_revision,
+          manifest.manifest_digest as evidence_manifest_digest,
+          first_set.manifest_revision as first_manifest_revision,
           count(*) over (
-            partition by target.manifest_id, observation.content_digest
-          ) as current_digest_count
-        from dvd_title_identity_observations as observation
-        inner join target on target.manifest_id = observation.manifest_id
-      ),
-      prior_ranked as (
-        select
-          target.manifest_id as target_manifest_id,
-          observation.*,
-          row_number() over (
-            partition by target.manifest_id, observation.title_identity_id
-            order by identity_set.manifest_revision desc, observation.id asc
-          ) as identity_rank
+            partition by observation.manifest_id, observation.content_digest
+          ) as current_digest_count,
+          lag(observation.id) over (
+            partition by
+              identity_set.original_disc_archive_id,
+              observation.title_identity_id
+            order by identity_set.manifest_revision, observation.id
+          ) as expected_previous_id,
+          lag(observation.content_digest) over (
+            partition by
+              identity_set.original_disc_archive_id,
+              observation.title_identity_id
+            order by identity_set.manifest_revision, observation.id
+          ) as previous_content_digest,
+          lag(observation.display_title_number) over (
+            partition by
+              identity_set.original_disc_archive_id,
+              observation.title_identity_id
+            order by identity_set.manifest_revision, observation.id
+          ) as previous_display_title_number
         from dvd_title_identity_observations as observation
         inner join dvd_title_identity_sets as identity_set
           on identity_set.manifest_id = observation.manifest_id
-        inner join target
-          on target.archive_id = identity_set.original_disc_archive_id
-          and identity_set.manifest_revision < target.manifest_revision
+        inner join dvd_title_identities as identity
+          on identity.id = observation.title_identity_id
+        inner join dvd_archive_evidence_manifests as manifest
+          on manifest.id = identity_set.manifest_id
+        inner join input_archive
+          on input_archive.archive_id =
+            identity_set.original_disc_archive_id
+        inner join first_set
+          on first_set.archive_id = identity_set.original_disc_archive_id
       ),
-      prior_latest as (
-        select * from prior_ranked where identity_rank = 1
-      ),
-      prior_rows as (
+      digest_identities as (
         select
-          prior_latest.*,
-          count(*) over (
-            partition by
-              prior_latest.target_manifest_id,
-              prior_latest.content_digest
-          ) as prior_digest_count
-        from prior_latest
-      ),
-      exact_matches as (
-        select
-          current.target_manifest_id,
-          current.id as current_id,
-          prior.id as previous_id,
-          prior.title_identity_id as previous_identity_id
-        from current_rows as current
-        inner join prior_rows as prior
-          on prior.target_manifest_id = current.target_manifest_id
-          and prior.content_digest = current.content_digest
-        where current.current_digest_count = 1
-          and prior.prior_digest_count = 1
-      ),
-      current_unmatched as (
-        select current.*
-        from current_rows as current
-        where not exists (
-          select 1 from exact_matches
-          where exact_matches.target_manifest_id = current.target_manifest_id
-            and exact_matches.current_id = current.id
-        )
-      ),
-      prior_unmatched as (
-        select prior.*
-        from prior_rows as prior
-        where not exists (
-          select 1 from exact_matches
-          where exact_matches.target_manifest_id = prior.target_manifest_id
-            and exact_matches.previous_id = prior.id
-        )
-      ),
-      current_title_counts as (
-        select
-          target_manifest_id,
-          display_title_number,
-          count(*) as title_count
-        from current_unmatched
-        group by target_manifest_id, display_title_number
-      ),
-      prior_title_counts as (
-        select
-          target_manifest_id,
-          display_title_number,
-          count(*) as title_count
-        from prior_unmatched
-        group by target_manifest_id, display_title_number
-      ),
-      uncertain_matches as (
-        select
-          current.target_manifest_id,
-          current.id as current_id,
-          prior.id as previous_id,
-          prior.title_identity_id as previous_identity_id
-        from current_unmatched as current
-        inner join current_title_counts as current_count
-          on current_count.target_manifest_id = current.target_manifest_id
-          and current_count.display_title_number = current.display_title_number
-          and current_count.title_count = 1
-        inner join prior_unmatched as prior
-          on prior.target_manifest_id = current.target_manifest_id
-          and prior.display_title_number = current.display_title_number
-        inner join prior_title_counts as prior_count
-          on prior_count.target_manifest_id = prior.target_manifest_id
-          and prior_count.display_title_number = prior.display_title_number
-          and prior_count.title_count = 1
-      ),
-      expected as (
-        select
-          current.target_manifest_id,
-          current.id as current_id,
-          coalesce(exact.previous_id, uncertain.previous_id)
-            as previous_id,
-          coalesce(
-            exact.previous_identity_id,
-            uncertain.previous_identity_id
-          ) as previous_identity_id,
-          case
-            when exact.previous_id is not null then 'proved'
-            when uncertain.previous_id is not null then 'uncertain'
-            when exists (
-              select 1
-              from dvd_title_identity_sets as prior_set
-              inner join target
-                on target.manifest_id = current.target_manifest_id
-                and target.archive_id = prior_set.original_disc_archive_id
-                and prior_set.manifest_revision < target.manifest_revision
-            ) then 'new'
-            else 'initial'
-          end as continuity_result
-        from current_rows as current
-        left join exact_matches as exact
-          on exact.target_manifest_id = current.target_manifest_id
-          and exact.current_id = current.id
-        left join uncertain_matches as uncertain
-          on uncertain.target_manifest_id = current.target_manifest_id
-          and uncertain.current_id = current.id
+          archive_id,
+          content_digest,
+          count(distinct title_identity_id) as identity_count
+        from ordered
+        group by archive_id, content_digest
       )
-      select count(*) as invalid_count
-      from current_rows as current
-      inner join expected
-        on expected.target_manifest_id = current.target_manifest_id
-        and expected.current_id = current.id
-      where current.continuity_result != expected.continuity_result
-        or current.previous_observation_id is not expected.previous_id
-        or (
-          expected.previous_identity_id is not null
-          and current.title_identity_id != expected.previous_identity_id
-        )
-        or (
-          expected.previous_id is null
-          and exists (
-            select 1 from prior_rows as prior
-            where prior.target_manifest_id = current.target_manifest_id
-              and prior.title_identity_id = current.title_identity_id
-          )
-        )
+      select
+        count(*) as audited_observation_count,
+        coalesce(sum(case
+          when ordered.set_policy_version != ?
+            or ordered.continuity_policy_version !=
+              ordered.set_policy_version
+            or ordered.identity_archive_id != ordered.archive_id
+            or ordered.manifest_archive_id != ordered.archive_id
+            or ordered.evidence_manifest_revision !=
+              ordered.manifest_revision
+            or ordered.evidence_manifest_digest !=
+              ordered.set_manifest_digest
+            or ordered.previous_observation_id is not
+              ordered.expected_previous_id
+            or (
+              ordered.expected_previous_id is null
+              and ordered.continuity_result != case
+                when ordered.manifest_revision =
+                  ordered.first_manifest_revision then 'initial'
+                else 'new'
+              end
+            )
+            or (
+              ordered.expected_previous_id is not null
+              and ordered.continuity_result not in ('proved', 'uncertain')
+            )
+            or (
+              ordered.continuity_result = 'proved'
+              and (
+                ordered.content_digest != ordered.previous_content_digest
+                or ordered.current_digest_count != 1
+              )
+            )
+            or (
+              ordered.continuity_result = 'uncertain'
+              and (
+                ordered.display_title_number !=
+                  ordered.previous_display_title_number
+                or (
+                  ordered.content_digest = ordered.previous_content_digest
+                  and ordered.current_digest_count = 1
+                  and digest_identities.identity_count = 1
+                )
+              )
+            )
+          then 1 else 0 end), 0) as invalid_count
+      from ordered
+      inner join digest_identities
+        on digest_identities.archive_id = ordered.archive_id
+        and digest_identities.content_digest = ordered.content_digest
     `);
     const continuityAuditTargets: Array<{
       manifestId: string;
@@ -9853,7 +9794,8 @@ export function createDataAccessInternal(
     }
     const continuity = continuityAudit.get(
       JSON.stringify(continuityAuditTargets),
-    ) as { invalid_count: number };
+      DVD_TITLE_IDENTITY_CONTINUITY_VERSION,
+    ) as { audited_observation_count: number; invalid_count: number };
     if (continuity.invalid_count !== 0) {
       throw new DomainInvariantError(
         "Title Identity continuity claim does not match its evidence",

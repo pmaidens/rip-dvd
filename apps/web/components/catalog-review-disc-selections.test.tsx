@@ -744,10 +744,14 @@ describe("CatalogReviewDiscSelections", () => {
       _catalogRevision: string,
       onCommitted: () => void,
     ) => onCommitted());
-    const render = (catalogRevision: string) => root.render(
+    const render = (
+      catalogRevision: string,
+      selection: CatalogReviewDiscSelection = editableSelection,
+    ) => root.render(
       <InteractiveDiscSelections
         catalogRevision={catalogRevision}
         onUpdate={onUpdate}
+        selection={selection}
       />,
     );
     await act(async () => render("2026-01-01T00:00:00.000Z"));
@@ -760,7 +764,6 @@ describe("CatalogReviewDiscSelections", () => {
       action.dispatchEvent(new Event("change", { bubbles: true }));
     });
 
-    await act(async () => render("2026-01-01T00:00:01.000Z"));
     const mediaItem = container.querySelector<HTMLSelectElement>(
       'select[name="mediaItemId"]',
     );
@@ -773,16 +776,35 @@ describe("CatalogReviewDiscSelections", () => {
     await act(async () => {
       mediaItem.value = "episode-2";
       mediaItem.dispatchEvent(new Event("change", { bubbles: true }));
-      submit.click();
     });
+    await act(async () => render(
+      "2026-01-01T00:00:01.000Z",
+      { ...editableSelection, sourceIdentity: {
+        ...editableSelection.sourceIdentity,
+      } },
+    ));
+    expect(mediaItem.value).toBe("episode-2");
+    await act(async () => submit.click());
 
     expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
       mediaItemId: "episode-2",
     }, "2026-01-01T00:00:00.000Z", expect.any(Function));
-    await act(async () => submit.click());
+    await act(async () => render(
+      "2026-01-01T00:00:02.000Z",
+      { ...editableSelection, mediaItemId: "episode-2" },
+    ));
+    const label = container.querySelector<HTMLInputElement>(
+      'input[name="label"]',
+    );
+    if (!label) throw new Error("Expected editable label control");
+    await act(async () => {
+      label.value = "Updated label";
+      label.dispatchEvent(new Event("input", { bubbles: true }));
+      submit.click();
+    });
     expect(onUpdate).toHaveBeenLastCalledWith(editableSelection.id, {
-      mediaItemId: "episode-2",
-    }, "2026-01-01T00:00:01.000Z", expect.any(Function));
+      label: "Updated label",
+    }, "2026-01-01T00:00:02.000Z", expect.any(Function));
     expect(onUpdate).toHaveBeenCalledTimes(2);
     await act(async () => root.unmount());
     container.remove();
@@ -827,7 +849,12 @@ describe("CatalogReviewDiscSelections", () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
-    const onUpdate = vi.fn();
+    const onUpdate = vi.fn((
+      _id: string,
+      _changes: UpdateDiscSelectionInput,
+      _catalogRevision: string,
+      onCommitted: () => void,
+    ) => onCommitted());
     await act(async () => {
       root.render(<InteractiveDiscSelections onUpdate={onUpdate} />);
     });
