@@ -1727,6 +1727,95 @@ export function createDataAccessInternal(
       ].slice(-DVD_RECOVERY_PASS_HISTORY_LIMIT),
     };
   };
+  const queueNextArchiveRecoveryPassVerification = (
+    transaction: CatalogTransaction,
+    recovery: ArchiveRecovery,
+    timestamp: Date,
+  ): void => {
+    const verificationId = recovery.work?.verificationId;
+    if (verificationId === null || verificationId === undefined) {
+      throw new DomainInvariantError(
+        "Archive Recovery pass has no bound DVD Disc Verification",
+      );
+    }
+    const previous = requireRow(
+      transaction.select().from(dvdDiscVerifications).where(and(
+        eq(dvdDiscVerifications.id, verificationId),
+        eq(dvdDiscVerifications.archiveRecoveryId, recovery.id),
+        eq(
+          dvdDiscVerifications.archiveRecoveryAttemptId,
+          recovery.attemptId,
+        ),
+        eq(dvdDiscVerifications.status, "completed"),
+        eq(dvdDiscVerifications.outcome, "match"),
+      )).get(),
+      "DVD Disc Verification",
+      verificationId,
+    );
+    const header = requireRow(
+      transaction.select().from(dvdArchiveEvidenceHeaders).where(eq(
+        dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+        recovery.originalDiscArchiveId,
+      )).get(),
+      "DVD Archive Evidence",
+      recovery.originalDiscArchiveId,
+    );
+    const attemptOrdinal = requireRow(
+      transaction.select({
+        value:
+          sql<number>`coalesce(max(${dvdDiscVerifications.attemptOrdinal}), 0) + 1`,
+      }).from(dvdDiscVerifications).where(eq(
+        dvdDiscVerifications.archiveRecoveryId,
+        recovery.id,
+      )).get(),
+      "DVD Disc Verification attempt sequence",
+      recovery.id,
+    ).value;
+    transaction.insert(dvdDiscVerifications).values({
+      id: newId<DvdDiscVerificationId>(),
+      archiveRecoveryId: recovery.id,
+      archiveRecoveryAttemptId: recovery.attemptId,
+      attemptOrdinal,
+      originalDiscArchiveId: recovery.originalDiscArchiveId,
+      discInspectionId: previous.discInspectionId,
+      detectedDiscId: previous.detectedDiscId,
+      mediaGeneration: previous.mediaGeneration,
+      sourceMetadataFingerprint: previous.sourceMetadataFingerprint,
+      observedMetadataFingerprint: previous.observedMetadataFingerprint,
+      checkpointRevision: header.currentManifestRevision,
+      checkpointDigest: header.currentManifestDigest,
+      status: "queued",
+      reasons: [],
+      findings: [],
+      budgetExhausted: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }).run();
+  };
+  const archiveRecoveryCompletionAfterInterruption = (
+    transaction: CatalogTransaction,
+    recovery: ArchiveRecovery,
+    timestamp: Date,
+  ) => {
+    const status = settledArchiveRecoveryStatus(
+      transaction,
+      recovery.originalDiscArchiveId,
+    );
+    if (status === "eligible") {
+      return { status, history: null };
+    }
+    const completion = archiveRecoveryPassSettlement(
+      transaction,
+      recovery,
+      timestamp,
+    );
+    if (completion.outcome !== "completed") {
+      throw new DomainInvariantError(
+        "Completed Archive Recovery still has unrecovered sectors",
+      );
+    }
+    return { status, history: completion.history };
+  };
   const requireNoPendingDvdRecoveryReconciliation = (
     querySource: Pick<typeof database, "select">,
     archiveRecoveryId: ArchiveRecoveryId,
@@ -10489,8 +10578,18 @@ export function createDataAccessInternal(
               eq(archiveRecoveryWork.claimToken, claim.claimToken),
             )).run();
           } else {
+            if (outcome === "productive") {
+              queueNextArchiveRecoveryPassVerification(
+                transaction,
+                recovery,
+                timestamp,
+              );
+            }
             transaction.update(archiveRecoveryWork).set({
               status: "requested",
+              verificationId: outcome === "productive"
+                ? null
+                : work.verificationId,
               requestedAt: timestamp,
               claimedBy: null,
               claimToken: null,
@@ -10619,25 +10718,13 @@ export function createDataAccessInternal(
             return recovery;
           }
           const timestamp = now();
-          const settledStatus = recovery.status === "running"
-            ? settledArchiveRecoveryStatus(
-                transaction,
-                recovery.originalDiscArchiveId,
-              )
-            : recovery.status;
-          const completion = recovery.status === "running" &&
-              settledStatus === "completed"
-            ? archiveRecoveryPassSettlement(
+          const settlement = recovery.status === "running"
+            ? archiveRecoveryCompletionAfterInterruption(
                 transaction,
                 recovery,
                 timestamp,
               )
             : null;
-          if (completion !== null && completion.outcome !== "completed") {
-            throw new DomainInvariantError(
-              "Completed Archive Recovery still has unrecovered sectors",
-            );
-          }
           const removed = transaction.delete(archiveRecoveryWork).where(and(
             eq(
               archiveRecoveryWork.archiveRecoveryId,
@@ -10652,12 +10739,12 @@ export function createDataAccessInternal(
               input.archiveRecoveryId,
             );
           }
-          if (recovery.status === "running") {
+          if (recovery.status === "running" && settlement !== null) {
             transaction.update(archiveRecoveries).set({
-              status: settledStatus,
-              ...(completion === null
+              status: settlement.status,
+              ...(settlement.history === null
                 ? {}
-                : { passHistory: completion.history }),
+                : { passHistory: settlement.history }),
               updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveries.id, recovery.id),
@@ -10688,24 +10775,13 @@ export function createDataAccessInternal(
               "eligible",
             );
           }
-          const settledStatus = settledArchiveRecoveryStatus(
-            transaction,
-            recovery.originalDiscArchiveId,
-          );
           const timestamp = now();
-          const completion = settledStatus === "completed"
-            ? archiveRecoveryPassSettlement(
-                transaction,
-                recovery,
-                timestamp,
-              )
-            : null;
-          if (completion !== null && completion.outcome !== "completed") {
-            throw new DomainInvariantError(
-              "Completed Archive Recovery still has unrecovered sectors",
-            );
-          }
-          if (settledStatus === "completed") {
+          const settlement = archiveRecoveryCompletionAfterInterruption(
+            transaction,
+            recovery,
+            timestamp,
+          );
+          if (settlement.status === "completed") {
             requireRow(
               transaction.delete(archiveRecoveryWork).where(and(
                 eq(
@@ -10748,10 +10824,10 @@ export function createDataAccessInternal(
           }
           requireRow(
             transaction.update(archiveRecoveries).set({
-              status: settledStatus,
-              ...(completion === null
+              status: settlement.status,
+              ...(settlement.history === null
                 ? {}
-                : { passHistory: completion.history }),
+                : { passHistory: settlement.history }),
               updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveries.id, recovery.id),
@@ -10793,6 +10869,14 @@ export function createDataAccessInternal(
           if (recoveryBeforeRelease.status === "stopping") {
             return recoveryBeforeRelease;
           }
+          const timestamp = now();
+          const settlement = recoveryBeforeRelease.status === "running"
+            ? archiveRecoveryCompletionAfterInterruption(
+                transaction,
+                recoveryBeforeRelease,
+                timestamp,
+              )
+            : null;
           const removed = transaction
             .delete(archiveRecoveryWork)
             .where(and(
@@ -10811,29 +10895,14 @@ export function createDataAccessInternal(
               claim.archiveRecoveryId,
             );
           }
-          if (recoveryBeforeRelease.status === "running") {
-            const settledStatus = settledArchiveRecoveryStatus(
-              transaction,
-              recoveryBeforeRelease.originalDiscArchiveId,
-            );
-            const timestamp = now();
-            const completion = settledStatus === "completed"
-              ? archiveRecoveryPassSettlement(
-                  transaction,
-                  recoveryBeforeRelease,
-                  timestamp,
-                )
-              : null;
-            if (completion !== null && completion.outcome !== "completed") {
-              throw new DomainInvariantError(
-                "Completed Archive Recovery still has unrecovered sectors",
-              );
-            }
+          if (
+            recoveryBeforeRelease.status === "running" && settlement !== null
+          ) {
             transaction.update(archiveRecoveries).set({
-              status: settledStatus,
-              ...(completion === null
+              status: settlement.status,
+              ...(settlement.history === null
                 ? {}
-                : { passHistory: completion.history }),
+                : { passHistory: settlement.history }),
               updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveries.id, recoveryBeforeRelease.id),

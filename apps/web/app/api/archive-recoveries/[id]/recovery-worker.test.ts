@@ -131,6 +131,13 @@ async function completeVerification(
     checkpoint.currentManifestDigest,
   ]);
   expect(result.exitCode).toBe(0);
+  return completeQueuedVerification(fixture, seeded);
+}
+
+function completeQueuedVerification(
+  fixture: ReturnType<typeof createOperatorWorkflowFixture>,
+  seeded: Awaited<ReturnType<typeof seedDvdDiscVerificationFixture>>,
+) {
   const access = fixture.openAccess();
   try {
     const claim = access.dvdDiscVerifications.claimNext(
@@ -267,6 +274,7 @@ it("continues a productive pass in reverse and pauses after no progress", async 
         }],
         work: {
           status: "requested",
+          verificationId: null,
           passNumber: 2,
           passDirection: "reverse",
           passStartedAt: null,
@@ -275,6 +283,14 @@ it("continues a productive pass in reverse and pauses after no progress", async 
           passCursorLba: null,
         },
       });
+    const nextVerification = input.access.dvdDiscVerifications
+      .findLatestForRecovery(seeded.recoveryId);
+    expect(nextVerification).toMatchObject({
+      attemptOrdinal: 2,
+      status: "queued",
+      checkpointRevision: checkpoint?.revision,
+      checkpointDigest: checkpoint?.manifestDigest,
+    });
     const queuedCli = await fixture.run([
       "inspect",
       "archive-recoveries",
@@ -302,6 +318,10 @@ it("continues a productive pass in reverse and pauses after no progress", async 
       outcome: "timeout",
       current: { status: "running", recoveryStatus: "eligible" },
     });
+    expect(await pollDvdRecoveryPass(input)).toBe(false);
+    expect(source.start.mock.calls.map(([read]) => read.startLba))
+      .toEqual([100, 101, 102]);
+    completeQueuedVerification(fixture, seeded);
 
     expect(await pollDvdRecoveryPass(input)).toBe(true);
     expect(source.start.mock.calls.map(([read]) => read.startLba))
