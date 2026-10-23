@@ -2449,7 +2449,8 @@ describe("data-access facade", () => {
           name !== "20261023014315_faithful_triton" &&
           name !== "20261023021122_fearless_morg" &&
           name !== "20261023052549_simple_harry_osborn" &&
-          name !== "20261023075807_quick_mentor",
+          name !== "20261023075807_quick_mentor" &&
+          name !== "20261023134137_cynical_leopardon",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -9677,7 +9678,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
-          name: "20261023075807_quick_mentor",
+          name: "20261023134137_cynical_leopardon",
         },
         {
           name: "20261023052549_simple_harry_osborn",
@@ -15670,6 +15671,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           review.items,
         ),
       currentMappingStates: ["unmapped"],
+      currentDefaultAngleTitleCount: 1,
     });
     expect(fixture.access.catalog.listDiscSelections({
       ids: [selection.id],
@@ -16281,6 +16283,87 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
+  it("caps active new-format mappings without changing legacy selection capacity", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const current = createDvdTitleIdentityArchiveFixture(
+      "title-active-selection-cap",
+      { access, databasePath },
+    );
+    const legacy = createDvdTitleIdentityArchiveFixture(
+      "title-legacy-selection-cap",
+      {
+        access,
+        databasePath,
+        fingerprintCharacter: "6",
+        markEvidence: false,
+      },
+    );
+    const mediaItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic selection capacity",
+    });
+    const currentHeader = access.catalog.findDvdArchiveEvidenceHeader(
+      current.archive.id,
+    )!;
+    expect(() => access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: current.archive.id,
+      checkpoint: {
+        manifestId: currentHeader.currentManifestId,
+        manifestRevision: currentHeader.currentManifestRevision,
+        manifestDigest: currentHeader.currentManifestDigest,
+      },
+      observations: Array.from(
+        { length: MAX_DVD_TITLES + 1 },
+        (_value, index) =>
+          titleIdentityObservation(index + 1, { cellId: index + 1 }),
+      ),
+    })).toThrow(/limited to 512 titles per checkpoint/i);
+    const seedSelections = (
+      archiveId: typeof current.archive.id,
+      prefix: string,
+    ) => {
+      const seed = access.catalog.createDiscSelection({
+        originalDiscArchiveId: archiveId,
+        mediaItemId: mediaItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      });
+      const sqlite = new DatabaseSync(databasePath);
+      const clone = sqlite.prepare(`
+        INSERT INTO disc_selections (
+          id, original_disc_archive_id, media_item_id, source_key, kind,
+          title_number, chapter_start, chapter_end, label, is_catalog_active,
+          created_at, updated_at
+        )
+        SELECT ?, original_disc_archive_id, media_item_id, source_key, kind,
+          title_number, chapter_start, chapter_end, label, is_catalog_active,
+          created_at, updated_at
+        FROM disc_selections
+        WHERE id = ?
+      `);
+      sqlite.exec("BEGIN IMMEDIATE");
+      for (let index = 1; index < MAX_DVD_TITLES; index += 1) {
+        clone.run(`${prefix}-${index}`, seed.id);
+      }
+      sqlite.exec("COMMIT");
+      sqlite.close();
+    };
+    seedSelections(current.archive.id, "synthetic-current-selection");
+    seedSelections(legacy.archive.id, "synthetic-legacy-selection");
+
+    expect(() => access.catalog.createDiscSelection({
+      originalDiscArchiveId: current.archive.id,
+      mediaItemId: mediaItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    })).toThrow(/limited to 512 active Disc Selections/i);
+    expect(access.catalog.createDiscSelection({
+      originalDiscArchiveId: legacy.archive.id,
+      mediaItemId: mediaItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    })).toMatchObject({ originalDiscArchiveId: legacy.archive.id });
+    access.close();
+  });
+
   it("batches Title Damage workflow evidence across archives and titles", () => {
     const databasePath = createTestDatabasePath();
     const workspace = mkdtempSync(join(tmpdir(), "rip-dvd-damage-batch-"));
@@ -16453,7 +16536,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       `).run(fixture.archive.id, damage.id);
       sqlite.close();
     }
-    for (let revision = 2; revision <= 24; revision += 1) {
+    const advanceFirstArchive = (revision: number) => {
       const checkpoint = advanceDvdTitleIdentityCheckpointForTest(
         first.databasePath,
         first.archive.id,
@@ -16478,7 +16561,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           currentManifestDigest: checkpoint.manifestDigest,
         },
       };
-    }
+    };
+    advanceFirstArchive(2);
     const statementAll = vi.spyOn(StatementSync.prototype, "all");
     const statementGet = vi.spyOn(StatementSync.prototype, "get");
     const queryCount = () =>
@@ -16497,19 +16581,64 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         headers[0]!,
       ]).get(first.archive.id)?.titleDamage.state).toBe("outdated");
       const singleArchiveQueryCount = queryCount();
-      const longHistoryRows = projectedRowCount();
-      const longHistoryMaximumBoundParameters = maximumBoundParameterCount();
+      const shortHistoryRows = projectedRowCount();
+      const shortHistoryMaximumBoundParameters = maximumBoundParameterCount();
+
+      statementAll.mockClear();
+      statementGet.mockClear();
+      const sqlite = new DatabaseSync(first.databasePath);
+      const repeatStructuralAttempt = sqlite.prepare(`
+        INSERT INTO dvd_structural_check_attempts (
+          original_disc_archive_id, manifest_id, manifest_revision,
+          manifest_digest, accepted_end_lba_exclusive, outcome,
+          assessment_id, findings, failure_code, failure_message, created_at
+        ) VALUES (?, ?, ?, ?, ?, 'failed', NULL, NULL, ?, ?, ?)
+      `);
+      const repeatDamageAttempt = sqlite.prepare(`
+        INSERT INTO dvd_title_damage_assessment_attempts (
+          original_disc_archive_id, assessment_id, created_at
+        )
+        SELECT original_disc_archive_id, assessment_id, ?
+        FROM dvd_title_damage_assessment_attempts
+        WHERE original_disc_archive_id = ?
+        ORDER BY sequence ASC
+        LIMIT 1
+      `);
+      for (let createdAt = 2; createdAt <= 24; createdAt += 1) {
+        repeatStructuralAttempt.run(
+          first.archive.id,
+          headers[0]!.evidenceHeader.currentManifestId,
+          headers[0]!.evidenceHeader.currentManifestRevision,
+          headers[0]!.evidenceHeader.currentManifestDigest,
+          headers[0]!.evidenceHeader.acceptedEndLbaExclusive,
+          "SYNTHETIC_READ_FAILURE",
+          "Synthetic structural read failure",
+          createdAt,
+        );
+        repeatDamageAttempt.run(createdAt, first.archive.id);
+      }
+      sqlite.close();
+      for (let revision = 3; revision <= 24; revision += 1) {
+        advanceFirstArchive(revision);
+      }
+
+      statementAll.mockClear();
+      statementGet.mockClear();
+      expect(first.access.catalog.readDvdCatalogReviewWorkflowEvidence([
+        headers[0]!,
+      ]).get(first.archive.id)?.titleDamage.state).toBe("outdated");
+      expect(projectedRowCount()).toBe(shortHistoryRows);
+      expect(maximumBoundParameterCount()).toBe(
+        shortHistoryMaximumBoundParameters,
+      );
+      expect(queryCount()).toBe(singleArchiveQueryCount);
 
       statementAll.mockClear();
       statementGet.mockClear();
       expect(first.access.catalog.readDvdCatalogReviewWorkflowEvidence([
         headers[1]!,
       ]).get(second.archive.id)?.titleDamage.state).toBe("current");
-      expect(projectedRowCount()).toBe(longHistoryRows);
-      expect(maximumBoundParameterCount()).toBe(
-        longHistoryMaximumBoundParameters,
-      );
-      expect(queryCount()).toBe(singleArchiveQueryCount);
+      const currentArchiveQueryCount = queryCount();
 
       statementAll.mockClear();
       statementGet.mockClear();
@@ -16519,10 +16648,26 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       expect(fixtures.map(({ archive }) =>
         batch.get(archive.id)?.titleDamage.state
       )).toEqual(["outdated", "current"]);
-      expect(queryCount()).toBe(singleArchiveQueryCount);
+      expect(queryCount()).toBe(currentArchiveQueryCount);
       expect(fixtures.map(({ archive }) =>
         first.access.dvdTitleDamageAssessments.inspect(archive.id).state
       )).toEqual(["outdated", "current"]);
+
+      const mappedMediaItem = first.access.catalog.createMediaItem({
+        kind: "movie",
+        title: "Synthetic post-assessment mapping",
+      });
+      first.access.catalog.createDiscSelection({
+        originalDiscArchiveId: second.archive.id,
+        mediaItemId: mappedMediaItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      });
+      expect(first.access.catalog.readDvdCatalogReviewWorkflowEvidence([
+        headers[1]!,
+      ]).get(second.archive.id)?.titleDamage.state).toBe("outdated");
+      expect(
+        first.access.dvdTitleDamageAssessments.inspect(second.archive.id).state,
+      ).toBe("outdated");
     } finally {
       statementAll.mockRestore();
       statementGet.mockRestore();
@@ -16594,6 +16739,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           missing.items,
         ),
       currentMappingStates: ["needs_mapping_review"],
+      currentDefaultAngleTitleCount: 0,
     });
 
     const rediscoveredCheckpoint = advanceDvdTitleIdentityCheckpointForTest(

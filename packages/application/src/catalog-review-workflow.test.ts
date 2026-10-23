@@ -45,6 +45,7 @@ function decisionReadyEvidence(
     titleIdentity: {
       catalogMappingProjectionId: "synthetic-mapping-projection",
       currentMappingStates: ["mapped"],
+      currentDefaultAngleTitleCount: 1,
     },
     titleDamage: {
       state: "current",
@@ -166,6 +167,7 @@ it("blocks a damage decision while an absent retained title needs mapping review
       titleIdentity: {
         catalogMappingProjectionId: "synthetic-mapping-projection",
         currentMappingStates: ["mapped", "needs_mapping_review"],
+        currentDefaultAngleTitleCount: 1,
       },
     },
   );
@@ -241,8 +243,40 @@ it("does not advertise mapping before current Title Identity evidence exists", (
     action === "catalog_mapping"
   )).toMatchObject({
     available: false,
-    reasons: [{ code: "SELECTION_UNIDENTIFIED" }],
   });
+  expect(workflow?.actions.find(({ action }) =>
+    action === "catalog_mapping"
+  )?.reasons).toEqual(expect.arrayContaining([
+    expect.objectContaining({ code: "SELECTION_UNIDENTIFIED" }),
+  ]));
+});
+
+it("does not advertise mapping when only retained absent-title evidence exists", () => {
+  const evidence = decisionReadyEvidence(false);
+  const workflow = describeCatalogReviewWorkflow(
+    {} as ConsistentReadAccess,
+    archiveId,
+    {
+      ...evidence,
+      titleIdentity: {
+        catalogMappingProjectionId: "synthetic-retained-mapping-projection",
+        currentMappingStates: ["needs_mapping_review"],
+        currentDefaultAngleTitleCount: 0,
+      },
+    },
+  );
+
+  expect(workflow?.facts.mappingState).toBe("pending");
+  expect(workflow?.actions.find(({ action }) =>
+    action === "catalog_mapping"
+  )).toMatchObject({
+    available: false,
+  });
+  expect(workflow?.actions.find(({ action }) =>
+    action === "catalog_mapping"
+  )?.reasons).toEqual(expect.arrayContaining([
+    expect.objectContaining({ code: "SELECTION_UNIDENTIFIED" }),
+  ]));
 });
 
 it("preserves a transactional mapping rejection if the latest workflow recovered", () => {

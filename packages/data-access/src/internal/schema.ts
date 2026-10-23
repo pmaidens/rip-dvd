@@ -1569,6 +1569,12 @@ export const dvdStructuralCheckAttempts = sqliteTable(
       table.manifestRevision,
       table.sequence,
     ),
+    index("dvd_structural_check_attempts_current_completed_idx").on(
+      table.originalDiscArchiveId,
+      table.manifestId,
+      table.outcome,
+      table.sequence,
+    ),
     check(
       "dvd_structural_check_attempts_checkpoint_check",
       sql`typeof(${table.manifestRevision}) = 'integer' and ${table.manifestRevision} > 0 and length(${table.manifestDigest}) = 64 and ${table.manifestDigest} not glob '*[^0-9a-f]*' and typeof(${table.acceptedEndLbaExclusive}) = 'integer' and ${table.acceptedEndLbaExclusive} > 0`,

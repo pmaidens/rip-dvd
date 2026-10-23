@@ -3603,6 +3603,27 @@ export function createDataAccessInternal(
       "original disc archive",
       input.originalDiscArchiveId,
     );
+    const dvdEvidenceHeader = transaction.select({
+      evidenceFormat: dvdArchiveEvidenceHeaders.evidenceFormat,
+    }).from(dvdArchiveEvidenceHeaders).where(eq(
+      dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+      input.originalDiscArchiveId,
+    )).get();
+    if (dvdEvidenceHeader?.evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT) {
+      const activeSelectionCount = transaction.select({ value: count() })
+        .from(discSelections).where(and(
+          eq(
+            discSelections.originalDiscArchiveId,
+            input.originalDiscArchiveId,
+          ),
+          eq(discSelections.isCatalogActive, true),
+        )).get()?.value ?? 0;
+      if (activeSelectionCount >= MAX_DVD_TITLES) {
+        throw new DomainInvariantError(
+          `New-format DVD archives are limited to ${MAX_DVD_TITLES} active Disc Selections`,
+        );
+      }
+    }
     requireRow(
       transaction
         .select({ id: mediaItems.id })
@@ -9196,11 +9217,29 @@ export function createDataAccessInternal(
       ? []
       : database.select({
         observationId: dvdTitleIdentityObservations.id,
+        manifestId: dvdTitleIdentityObservations.manifestId,
         titleIdentityId: dvdTitleIdentityObservations.titleIdentityId,
       }).from(dvdTitleIdentityObservations).where(inArray(
         dvdTitleIdentityObservations.manifestId,
         currentManifestIds,
-      )).all();
+      )).limit(MAX_DVD_TITLES * markedIds.length + 1).all();
+    const currentIdentityCountByManifestId = new Map<string, number>();
+    for (const { manifestId } of currentIdentityRows) {
+      currentIdentityCountByManifestId.set(
+        manifestId,
+        (currentIdentityCountByManifestId.get(manifestId) ?? 0) + 1,
+      );
+    }
+    if (
+      currentIdentityRows.length > MAX_DVD_TITLES * markedIds.length ||
+      [...currentIdentityCountByManifestId.values()].some((value) =>
+        value > MAX_DVD_TITLES
+      )
+    ) {
+      throw new DomainInvariantError(
+        `Title Identity observations exceed the ${MAX_DVD_TITLES}-title checkpoint limit`,
+      );
+    }
     const bindingRows = database.select({
       originalDiscArchiveId: dvdTitleIdentities.originalDiscArchiveId,
       titleIdentityId: dvdTitleIdentitySelectionBindings.titleIdentityId,
@@ -9246,7 +9285,24 @@ export function createDataAccessInternal(
     )).orderBy(
       asc(dvdTitleIdentitySelectionBindings.titleIdentityId),
       asc(dvdTitleIdentitySelectionBindings.discSelectionId),
-    ).all();
+    ).limit(MAX_DVD_TITLES * markedIds.length + 1).all();
+    const bindingCountByArchiveId = new Map<OriginalDiscArchiveId, number>();
+    for (const { originalDiscArchiveId } of bindingRows) {
+      bindingCountByArchiveId.set(
+        originalDiscArchiveId,
+        (bindingCountByArchiveId.get(originalDiscArchiveId) ?? 0) + 1,
+      );
+    }
+    if (
+      bindingRows.length > MAX_DVD_TITLES * markedIds.length ||
+      [...bindingCountByArchiveId.values()].some((value) =>
+        value > MAX_DVD_TITLES
+      )
+    ) {
+      throw new DomainInvariantError(
+        `New-format DVD archives cannot exceed ${MAX_DVD_TITLES} active Disc Selections`,
+      );
+    }
     const currentIdentityIds = new Set(currentIdentityRows.map(
       ({ titleIdentityId }) => titleIdentityId,
     ));
@@ -9497,6 +9553,10 @@ export function createDataAccessInternal(
       OriginalDiscArchiveId,
       DvdCatalogReviewWorkflowEvidence["titleIdentity"]
     >();
+    const titleIdentityReviewSetIdentityByArchiveId = new Map<
+      OriginalDiscArchiveId,
+      string
+    >();
     for (const id of markedIds) {
       const header = archiveById.get(id)?.evidenceHeader;
       if (header === null || header === undefined) continue;
@@ -9637,6 +9697,10 @@ export function createDataAccessInternal(
         manifestDigest: currentSet.manifestDigest,
       };
       const mappingItems = dvdTitleIdentityCatalogMappingItems(items);
+      titleIdentityReviewSetIdentityByArchiveId.set(
+        id,
+        dvdTitleIdentityReviewSetDigest(checkpoint, items),
+      );
       titleIdentityByArchiveId.set(id, {
         catalogMappingProjectionId:
           dvdTitleIdentityCatalogMappingProjectionDigest(
@@ -9646,43 +9710,66 @@ export function createDataAccessInternal(
         currentMappingStates: mappingItems.map(({ mappingState }) =>
           mappingState
         ),
+        currentDefaultAngleTitleCount: items.filter((item) =>
+          item.presentAtCurrentCheckpoint &&
+          item.observation.angleNumber === 1
+        ).length,
       });
     }
 
-    const latestCompletedStructuralSequence = database.select({
-      originalDiscArchiveId:
-        dvdStructuralCheckAttempts.originalDiscArchiveId,
-      sequence: sql<number>`max(${dvdStructuralCheckAttempts.sequence})`.as(
-        "sequence",
-      ),
-    }).from(dvdStructuralCheckAttempts).where(and(
-      inArray(dvdStructuralCheckAttempts.originalDiscArchiveId, markedIds),
-      eq(dvdStructuralCheckAttempts.outcome, "completed"),
-    )).groupBy(dvdStructuralCheckAttempts.originalDiscArchiveId).as(
-      "latest_catalog_workflow_structural_sequence",
+    const structuralCheckpoints = markedIds.flatMap((id) => {
+      const header = archiveById.get(id)?.evidenceHeader;
+      return header === null || header === undefined
+        ? []
+        : [{ originalDiscArchiveId: id, manifestId: header.currentManifestId }];
+    });
+    const structuralSequenceRows = structuralCheckpoints.length === 0
+      ? []
+      : sqlite.prepare(`
+        WITH current_checkpoints (
+          original_disc_archive_id,
+          manifest_id
+        ) AS (
+          VALUES ${structuralCheckpoints.map(() => "(?, ?)").join(", ")}
+        )
+        SELECT
+          current_checkpoints.original_disc_archive_id AS originalDiscArchiveId,
+          (
+            SELECT attempt.sequence
+            FROM dvd_structural_check_attempts AS attempt
+            WHERE attempt.original_disc_archive_id =
+                current_checkpoints.original_disc_archive_id
+              AND attempt.manifest_id = current_checkpoints.manifest_id
+              AND attempt.outcome = 'completed'
+            ORDER BY attempt.sequence DESC
+            LIMIT 1
+          ) AS sequence
+        FROM current_checkpoints
+      `).all(...structuralCheckpoints.flatMap((checkpoint) => [
+        checkpoint.originalDiscArchiveId,
+        checkpoint.manifestId,
+      ])) as Array<{
+        originalDiscArchiveId: OriginalDiscArchiveId;
+        sequence: number | null;
+      }>;
+    const structuralSequences = structuralSequenceRows.flatMap(({ sequence }) =>
+      sequence === null ? [] : [sequence]
     );
-    const structuralRows = database.select({
-      attempt: dvdStructuralCheckAttempts,
-      assessment: dvdStructuralAssessments,
-    }).from(dvdStructuralCheckAttempts).innerJoin(
-      dvdStructuralAssessments,
-      eq(
-        dvdStructuralAssessments.id,
-        dvdStructuralCheckAttempts.assessmentId,
-      ),
-    ).innerJoin(
-      latestCompletedStructuralSequence,
-      and(
+    const structuralRows = structuralSequences.length === 0
+      ? []
+      : database.select({
+        attempt: dvdStructuralCheckAttempts,
+        assessment: dvdStructuralAssessments,
+      }).from(dvdStructuralCheckAttempts).innerJoin(
+        dvdStructuralAssessments,
         eq(
-          latestCompletedStructuralSequence.originalDiscArchiveId,
-          dvdStructuralCheckAttempts.originalDiscArchiveId,
+          dvdStructuralAssessments.id,
+          dvdStructuralCheckAttempts.assessmentId,
         ),
-        eq(
-          latestCompletedStructuralSequence.sequence,
-          dvdStructuralCheckAttempts.sequence,
-        ),
-      ),
-    ).all();
+      ).where(inArray(
+        dvdStructuralCheckAttempts.sequence,
+        structuralSequences,
+      )).all();
     const currentStructuralByArchiveId = new Map<
       OriginalDiscArchiveId,
       DvdStructuralAssessmentRecord
@@ -9720,41 +9807,43 @@ export function createDataAccessInternal(
         );
       }
     }
-    const latestDamageSequence = database.select({
-      originalDiscArchiveId:
-        dvdTitleDamageAssessmentAttempts.originalDiscArchiveId,
-      sequence:
-        sql<number>`max(${dvdTitleDamageAssessmentAttempts.sequence})`.as(
-          "sequence",
-        ),
-    }).from(dvdTitleDamageAssessmentAttempts).where(inArray(
-      dvdTitleDamageAssessmentAttempts.originalDiscArchiveId,
-      markedIds,
-    )).groupBy(
-      dvdTitleDamageAssessmentAttempts.originalDiscArchiveId,
-    ).as("latest_catalog_workflow_damage_sequence");
-    const damageRows = database.select({
-      attempt: dvdTitleDamageAssessmentAttempts,
-      assessment: dvdTitleDamageAssessments,
-    }).from(dvdTitleDamageAssessmentAttempts).innerJoin(
-      dvdTitleDamageAssessments,
-      eq(
-        dvdTitleDamageAssessments.id,
-        dvdTitleDamageAssessmentAttempts.assessmentId,
-      ),
-    ).innerJoin(
-      latestDamageSequence,
-      and(
+    const damageSequenceRows = sqlite.prepare(`
+      WITH archive_ids (original_disc_archive_id) AS (
+        VALUES ${markedIds.map(() => "(?)").join(", ")}
+      )
+      SELECT
+        archive_ids.original_disc_archive_id AS originalDiscArchiveId,
+        (
+          SELECT attempt.sequence
+          FROM dvd_title_damage_assessment_attempts AS attempt
+          WHERE attempt.original_disc_archive_id =
+              archive_ids.original_disc_archive_id
+          ORDER BY attempt.sequence DESC
+          LIMIT 1
+        ) AS sequence
+      FROM archive_ids
+    `).all(...markedIds) as Array<{
+      originalDiscArchiveId: OriginalDiscArchiveId;
+      sequence: number | null;
+    }>;
+    const damageSequences = damageSequenceRows.flatMap(({ sequence }) =>
+      sequence === null ? [] : [sequence]
+    );
+    const damageRows = damageSequences.length === 0
+      ? []
+      : database.select({
+        attempt: dvdTitleDamageAssessmentAttempts,
+        assessment: dvdTitleDamageAssessments,
+      }).from(dvdTitleDamageAssessmentAttempts).innerJoin(
+        dvdTitleDamageAssessments,
         eq(
-          latestDamageSequence.originalDiscArchiveId,
-          dvdTitleDamageAssessmentAttempts.originalDiscArchiveId,
+          dvdTitleDamageAssessments.id,
+          dvdTitleDamageAssessmentAttempts.assessmentId,
         ),
-        eq(
-          latestDamageSequence.sequence,
-          dvdTitleDamageAssessmentAttempts.sequence,
-        ),
-      ),
-    ).all();
+      ).where(inArray(
+        dvdTitleDamageAssessmentAttempts.sequence,
+        damageSequences,
+      )).all();
     const damageManifestIds = [...new Set(damageRows.map(({ assessment }) =>
       assessment.manifestId
     ))];
@@ -9855,9 +9944,6 @@ export function createDataAccessInternal(
       const titleIdentity = titleIdentityByArchiveId.get(id) ?? null;
       const structural = currentStructuralByArchiveId.get(id);
       const latestDamage = latestDamageByArchiveId.get(id);
-      // The hot workflow projection keeps physical assessment currency
-      // checkpoint-bound. Mapping readiness is projected separately above;
-      // the detailed damage read owns the full review-set identity audit.
       const isCurrent = header !== null && titleIdentity !== null &&
         structural !== undefined && latestDamage !== undefined &&
         latestDamage.checkpoint.manifestId === header.currentManifestId &&
@@ -9867,6 +9953,8 @@ export function createDataAccessInternal(
           header.currentManifestDigest &&
         latestDamage.checkpoint.acceptedEndLbaExclusive ===
           header.acceptedEndLbaExclusive &&
+        latestDamage.titleIdentityReviewSetIdentity ===
+          titleIdentityReviewSetIdentityByArchiveId.get(id) &&
         latestDamage.structuralAssessmentIdentity === structural.id;
       titleDamageByArchiveId.set(id, {
         state: header === null
@@ -15369,6 +15457,11 @@ export function createDataAccessInternal(
 
       recordDvdTitleIdentityObservations(input) {
         database.transaction((transaction) => {
+          if (input.observations.length > MAX_DVD_TITLES) {
+            throw new DomainInvariantError(
+              `Title Identity observations are limited to ${MAX_DVD_TITLES} titles per checkpoint`,
+            );
+          }
           const header = transaction.select().from(dvdArchiveEvidenceHeaders)
             .where(eq(
               dvdArchiveEvidenceHeaders.originalDiscArchiveId,

@@ -259,6 +259,10 @@ export function describeCatalogReviewWorkflow(
           reviewSet.items,
         )
           .map(({ mappingState }) => mappingState),
+        currentDefaultAngleTitleCount: reviewSet.items.filter((item) =>
+          item.presentAtCurrentCheckpoint &&
+          item.observation.angleNumber === 1
+        ).length,
       }
     : prefetched.titleIdentity;
   const inspectedTitleDamage = prefetched === undefined
@@ -277,7 +281,8 @@ export function describeCatalogReviewWorkflow(
   const mappingStates = titleIdentity?.currentMappingStates ?? [];
   const hasMappingReview = mappingStates.includes("needs_mapping_review");
   const hasUnmappedSelection = mappingStates.includes("unmapped");
-  const mappingState = titleIdentity === null || mappingStates.length === 0
+  const mappingState = titleIdentity === null ||
+      titleIdentity.currentDefaultAngleTitleCount === 0
     ? "pending" as const
     : hasMappingReview
     ? "needs_mapping_review" as const

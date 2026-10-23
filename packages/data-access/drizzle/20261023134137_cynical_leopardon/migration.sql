@@ -1,0 +1,1 @@
+CREATE INDEX `dvd_structural_check_attempts_current_completed_idx` ON `dvd_structural_check_attempts` (`original_disc_archive_id`,`manifest_id`,`outcome`,`sequence`);

@@ -537,6 +537,7 @@ export interface DvdCatalogReviewWorkflowEvidence {
   titleIdentity: {
     catalogMappingProjectionId: string;
     currentMappingStates: readonly DvdTitleIdentityMappingState[];
+    currentDefaultAngleTitleCount: number;
   } | null;
   titleDamage: {
     state: DvdTitleDamageAssessmentInspection["state"];

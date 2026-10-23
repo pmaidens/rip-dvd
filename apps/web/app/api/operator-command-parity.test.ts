@@ -464,6 +464,10 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
             "needs_mapping_review",
             "unmapped",
           ],
+          currentDefaultAngleTitleCount: reviewSet.items.filter((item) =>
+            item.presentAtCurrentCheckpoint &&
+            item.observation.angleNumber === 1
+          ).length,
         },
         titleDamage: {
           state: "pending",
@@ -1421,8 +1425,18 @@ it("keeps absent retained mapping blockers identical through web, CLI, and dashb
     };
     expect(review.reviewWorkflow.facts).toMatchObject({
       mapped: false,
-      mappingState: "needs_mapping_review",
+      mappingState: "pending",
       readyForDamageDecision: false,
+    });
+    expect(
+      review.reviewWorkflow.actions.find(({ action }) =>
+        action === "catalog_mapping"
+      ),
+    ).toMatchObject({
+      available: false,
+      reasons: expect.arrayContaining([expect.objectContaining({
+        code: "SELECTION_UNIDENTIFIED",
+      })]),
     });
     expect(
       review.reviewWorkflow.actions.find(({ action }) =>

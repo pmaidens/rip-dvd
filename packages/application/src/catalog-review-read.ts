@@ -335,6 +335,11 @@ export function readCatalogReview(
             titleIdentityReviewSet.items,
           )
             .map(({ mappingState }) => mappingState),
+          currentDefaultAngleTitleCount: titleIdentityReviewSet.items.filter(
+            (item) =>
+              item.presentAtCurrentCheckpoint &&
+              item.observation.angleNumber === 1,
+          ).length,
         },
       titleDamage: {
         state: titleDamageInspection.state,
