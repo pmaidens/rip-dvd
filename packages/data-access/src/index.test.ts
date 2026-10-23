@@ -1233,6 +1233,7 @@ describe("data-access facade", () => {
         "dvd_archive_evidence_headers",
         "dvd_archive_evidence_manifests",
         "dvd_archive_recovery_reads",
+        "dvd_disc_confirmations",
         "dvd_disc_verifications",
         "dvd_recovery_reconciliations",
         "dvd_structural_assessments",
@@ -1253,7 +1254,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(47);
+    expect(identifierTables).toHaveLength(48);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -2371,7 +2372,8 @@ describe("data-access facade", () => {
           name !== "20261023003003_ambiguous_gwen_stacy" &&
           name !== "20261023014315_faithful_triton" &&
           name !== "20261023021122_fearless_morg" &&
-          name !== "20261023052549_simple_harry_osborn",
+          name !== "20261023052549_simple_harry_osborn" &&
+          name !== "20261023075807_quick_mentor",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -9597,6 +9599,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261023075807_quick_mentor",
+        },
+        {
           name: "20261023052549_simple_harry_osborn",
         },
         {
@@ -9628,9 +9633,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20261022044512_parched_norrin_radd",
-        },
-        {
-          name: "20261022044144_icy_barracuda",
         },
       ]);
     expect(
@@ -14643,6 +14645,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       "encode-first-recovery-exclusion",
       { archiveRecoveryId: recoveryId },
     );
+    expect(access.archiveRecoveryWork.findEncodeWorkConflict(recoveryId))
+      .toMatchObject({
+        archiveRecovery: { id: recoveryId },
+        encodeJobs: [{ id: queued.id, status: "queued" }],
+      });
 
     for (const attempt of [
       () => access.archiveRecoveryWork.request(recoveryId),

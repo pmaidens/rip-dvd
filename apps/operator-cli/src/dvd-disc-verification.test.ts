@@ -484,3 +484,173 @@ it("selects the latest verification by its durable attempt sequence", async () =
     access.close();
   }
 });
+
+async function completeMismatchForConfirmation(
+  fixture: ReturnType<typeof createOperatorWorkflowFixture>,
+  seeded: Awaited<ReturnType<typeof seedDvdDiscVerificationFixture>>,
+) {
+  const submitted = await fixture.run([
+    "archive-recovery",
+    "verify-disc",
+    seeded.recoveryId,
+    "--key",
+    "00000000-0000-4000-8000-000000000443",
+    "--disc-inspection-id",
+    seeded.inspection.id,
+    "--checkpoint-revision",
+    "1",
+    "--checkpoint-digest",
+    seeded.manifest.manifestDigest,
+  ]);
+  expect(submitted.exitCode).toBe(0);
+
+  const access = fixture.openAccess();
+  const claim = access.dvdDiscVerifications.claimNext(
+    "synthetic-confirmation-worker-execution",
+  );
+  if (claim === null) throw new Error("Expected DVD Disc Verification claim");
+  const sample = seeded.sampleManifest.samples[0]!;
+  access.dvdDiscVerifications.appendFinding(claim, {
+    ...sample,
+    outcome: "mismatch",
+    referenceDigest: sample.digest,
+    observedDigest: "f".repeat(64),
+    diagnostic: null,
+  });
+  const verification = access.dvdDiscVerifications.complete(claim, {
+    findings: [{
+      ...sample,
+      outcome: "mismatch",
+      referenceDigest: sample.digest,
+      observedDigest: "f".repeat(64),
+      diagnostic: null,
+    }],
+    budgetExhausted: false,
+    interrupted: false,
+    insertionChanged: false,
+    checkpointChanged: false,
+  });
+  access.close();
+  return verification;
+}
+
+it("previews, records, and replays explicit mixed-source confirmation", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const verification = await completeMismatchForConfirmation(fixture, seeded);
+
+  const previewed = await fixture.run([
+    "archive-recovery",
+    "preview-disc-confirmation",
+    seeded.recoveryId,
+  ]);
+  expect(previewed).toMatchObject({ exitCode: 0, stderr: "" });
+  expect(previewed.result).toMatchObject({
+    archiveRecovery: {
+      id: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+      status: "eligible",
+    },
+    checkpoint: { revision: 1, digest: seeded.manifest.manifestDigest },
+    insertion: {
+      discInspectionId: seeded.inspection.id,
+      detectedDiscId: seeded.verificationDisc.id,
+      mediaGeneration: "synthetic-verification-generation",
+    },
+    verification: {
+      id: verification.id,
+      outcome: "mismatch",
+      workerExecutionId: "synthetic-confirmation-worker-execution",
+    },
+    confirmation: null,
+    provenance: {
+      imageUsesConfirmedSource: false,
+      confirmations: [],
+    },
+    action: {
+      name: "confirm-disc",
+      available: true,
+      blockingReasons: [],
+      expectedInputs: {
+        archiveRecoveryId: seeded.recoveryId,
+        originalDiscArchiveId: seeded.archive.id,
+        archiveRecoveryAttemptId: seeded.attemptId,
+        discInspectionId: seeded.inspection.id,
+        detectedDiscId: seeded.verificationDisc.id,
+        mediaGeneration: "synthetic-verification-generation",
+        verificationId: verification.id,
+        verificationWorkerExecutionId:
+          "synthetic-confirmation-worker-execution",
+        verificationOutcome: "mismatch",
+        checkpointRevision: 1,
+        checkpointDigest: seeded.manifest.manifestDigest,
+        acknowledgeMixedSource: true,
+      },
+    },
+  });
+
+  const expectedInputs = (previewed.result as {
+    action: { expectedInputs: Record<string, string | number | boolean> };
+  }).action.expectedInputs;
+  const command = [
+    "archive-recovery",
+    "confirm-disc",
+    seeded.recoveryId,
+    "--key",
+    "00000000-0000-4000-8000-000000000444",
+    "--archive-id",
+    String(expectedInputs.originalDiscArchiveId),
+    "--attempt-id",
+    String(expectedInputs.archiveRecoveryAttemptId),
+    "--disc-inspection-id",
+    String(expectedInputs.discInspectionId),
+    "--detected-disc-id",
+    String(expectedInputs.detectedDiscId),
+    "--media-generation",
+    String(expectedInputs.mediaGeneration),
+    "--verification-id",
+    String(expectedInputs.verificationId),
+    "--verification-execution-id",
+    String(expectedInputs.verificationWorkerExecutionId),
+    "--verification-outcome",
+    String(expectedInputs.verificationOutcome),
+    "--verification-result-digest",
+    String(expectedInputs.verificationResultDigest),
+    "--checkpoint-revision",
+    String(expectedInputs.checkpointRevision),
+    "--checkpoint-digest",
+    String(expectedInputs.checkpointDigest),
+    "--acknowledge-mixed-source",
+  ];
+  const recorded = await fixture.run(command);
+  const replayed = await fixture.run(command);
+  expect(recorded).toMatchObject({
+    exitCode: 0,
+    result: {
+      confirmation: {
+        verificationId: verification.id,
+        acknowledgedMixedSource: true,
+        current: true,
+      },
+    },
+  });
+  expect(replayed.result).toEqual(recorded.result);
+  const provenance = await fixture.run([
+    "archive-recovery",
+    "preview-disc-confirmation",
+    seeded.recoveryId,
+  ]);
+  expect(provenance.result).toMatchObject({
+    provenance: {
+      imageUsesConfirmedSource: false,
+      confirmations: [{
+        confirmation: { verificationId: verification.id },
+        recoveredSectorCount: 0,
+        failedReadCount: 0,
+        firstRecoveredLba: null,
+        lastRecoveredLba: null,
+      }],
+    },
+  });
+});

@@ -209,4 +209,23 @@ describe("DVD Archive Evidence digests", () => {
       outcome: "failed",
     }, "0".repeat(64))).toThrow("does not match its contents");
   });
+
+  it("binds recovery read evidence to its source authorization", () => {
+    const input = {
+      originalDiscArchiveId: "archive-1",
+      fromManifestId: "manifest-1",
+      fromManifestRevision: 1,
+      startLba: 1,
+      sectorCount: 1,
+      outcome: "recovered" as const,
+      verificationId: "verification-1",
+      discConfirmationId: "confirmation-1",
+    };
+    const digest = createDvdArchiveRecoveryReadEvidenceDigest(input);
+
+    expect(() => assertDvdArchiveRecoveryReadEvidenceDigest({
+      ...input,
+      discConfirmationId: "confirmation-2",
+    }, digest)).toThrow("does not match its contents");
+  });
 });

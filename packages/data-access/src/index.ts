@@ -48,6 +48,7 @@ export type {
 } from "./archive-recovery-work.js";
 export * from "./dvd-recovery-storage-preflight.js";
 export * from "./dvd-disc-verification.js";
+export * from "./dvd-disc-confirmation.js";
 export * from "./dvd-structural-assessment.js";
 export * from "./dvd-title-damage-assessment.js";
 export {

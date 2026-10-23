@@ -1,7 +1,8 @@
 import {
   assertDvdSourceSampleManifestProjection,
   DvdCheckpointReadFault,
-  DVD_RECOVERY_STORAGE_REASON_MESSAGES,
+  dvdRecoveryStorageBlockingReason,
+  ENCODE_WORK_CONFLICT,
   dvdDiscVerificationCheckpointIsCurrent,
   dvdDiscVerificationInsertionIsCurrent,
   dvdRecoveryWriteAuthority,
@@ -125,17 +126,6 @@ function currentDiscVerificationInsertion(
           mediaGeneration: current.mediaGeneration,
         },
     candidates: visible,
-  };
-}
-
-function dvdRecoveryStorageBlockingReason(access: DataAccess):
-  { code: string; message: string } | null {
-  const preflight = access.dvdRecoveryStorage.readCurrent();
-  if (preflight?.status === "supported") return null;
-  const code = preflight?.reasonCode ?? "STORAGE_UNSUPPORTED";
-  return {
-    code,
-    message: DVD_RECOVERY_STORAGE_REASON_MESSAGES[code],
   };
 }
 
@@ -269,6 +259,11 @@ export async function inspectDvdDiscVerification(
         message: "A DVD Disc Verification is already active.",
       });
     }
+    const encodeWorkConflict = access.archiveRecoveryWork
+      .findEncodeWorkConflict(recovery.id);
+    if (encodeWorkConflict !== null) {
+      blockingReasons.push(ENCODE_WORK_CONFLICT);
+    }
     return {
       archiveRecovery: visibleArchiveRecovery(recovery),
       checkpoint,
@@ -283,7 +278,9 @@ export async function inspectDvdDiscVerification(
         ? null
         : visibleVerification(latest, latestCurrent),
       writeAuthority: (() => {
-        const storageReason = dvdRecoveryStorageBlockingReason(access);
+        const storageReason = dvdRecoveryStorageBlockingReason(
+          access.dvdRecoveryStorage.readCurrent(),
+        );
         const verificationReason = latest === null
           ? {
               code: "DISC_VERIFICATION_REQUIRED",
@@ -320,6 +317,7 @@ export async function inspectDvdDiscVerification(
           storageReason,
           verificationReason,
           workflowReason,
+          encodeWorkConflict === null ? null : ENCODE_WORK_CONFLICT,
         ].filter((reason) => reason !== null);
         const authority = latest === null
           ? null

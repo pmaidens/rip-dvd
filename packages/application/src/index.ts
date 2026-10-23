@@ -18,6 +18,7 @@ import type {
   EncodingProfile,
   EncodingProfileId,
   DiscInspectionId,
+  DvdDiscVerificationId,
   FilesystemVerificationTarget,
   EncodeJobId,
   OriginalDiscArchiveId,
@@ -41,6 +42,10 @@ import {
   inspectDvdDiscVerification,
   requestDvdDiscVerification,
 } from "./dvd-disc-verification.js";
+import {
+  previewDvdDiscConfirmation,
+  recordDvdDiscConfirmation,
+} from "./dvd-disc-confirmation.js";
 import {
   inspectDvdRecoveryReconciliation,
   requestDvdRecoveryReconciliation,
@@ -235,6 +240,9 @@ export {
   inspectDvdDiscVerification,
   type DvdDiscVerificationAvailabilityCode,
 } from "./dvd-disc-verification.js";
+export {
+  previewDvdDiscConfirmation,
+} from "./dvd-disc-confirmation.js";
 export type {
   OperationInspectionOptions,
   OperationKind,
@@ -502,6 +510,18 @@ export function createApplicationOperations(
       if (id.length > 256) throw new RangeError("Invalid Archive Recovery ID.");
       return inspectDvdDiscVerification(access, id as ArchiveRecoveryId);
     },
+    previewDvdDiscConfirmation: (archiveRecoveryId: string) => {
+      const id = requiredString(
+        archiveRecoveryId,
+        "Archive Recovery ID",
+      );
+      if (id.length > 256) throw new RangeError("Invalid Archive Recovery ID.");
+      return previewDvdDiscConfirmation(
+        access,
+        id as ArchiveRecoveryId,
+        dependencies.archiveImageOwnership,
+      );
+    },
     inspectDvdRecoveryReconciliation: (archiveRecoveryId: string) => {
       const id = requiredString(
         archiveRecoveryId,
@@ -584,6 +604,100 @@ export function createApplicationOperations(
         checkpointRevision: Number(input.checkpointRevision),
         checkpointDigest,
       });
+    },
+    confirmDisc: (input: {
+      mutationKey: unknown;
+      archiveRecoveryId: unknown;
+      originalDiscArchiveId: unknown;
+      archiveRecoveryAttemptId: unknown;
+      discInspectionId: unknown;
+      detectedDiscId: unknown;
+      mediaGeneration: unknown;
+      verificationId: unknown;
+      verificationWorkerExecutionId: unknown;
+      verificationOutcome: unknown;
+      verificationResultDigest: unknown;
+      checkpointRevision: unknown;
+      checkpointDigest: unknown;
+      acknowledgeMixedSource: unknown;
+    }) => {
+      const archiveRecoveryId = requiredString(
+        input.archiveRecoveryId,
+        "Archive Recovery ID",
+      );
+      const originalDiscArchiveId = requiredString(
+        input.originalDiscArchiveId,
+        "Original Disc Archive ID",
+      );
+      const archiveRecoveryAttemptId = requiredString(
+        input.archiveRecoveryAttemptId,
+        "Archive Recovery attempt ID",
+      );
+      const discInspectionId = requiredString(
+        input.discInspectionId,
+        "Disc Inspection ID",
+      );
+      const detectedDiscId = requiredString(
+        input.detectedDiscId,
+        "Detected Disc ID",
+      );
+      const mediaGeneration = requiredString(
+        input.mediaGeneration,
+        "media generation",
+      );
+      const verificationId = requiredString(
+        input.verificationId,
+        "DVD Disc Verification ID",
+      );
+      const verificationWorkerExecutionId = requiredString(
+        input.verificationWorkerExecutionId,
+        "verification worker execution ID",
+      );
+      const verificationResultDigest = requiredString(
+        input.verificationResultDigest,
+        "verification result digest",
+      );
+      const checkpointDigest = requiredString(
+        input.checkpointDigest,
+        "checkpoint digest",
+      );
+      if (
+        [
+          archiveRecoveryId,
+          originalDiscArchiveId,
+          archiveRecoveryAttemptId,
+          discInspectionId,
+          detectedDiscId,
+          mediaGeneration,
+          verificationId,
+          verificationWorkerExecutionId,
+        ].some((value) => value.length > 256) ||
+        (input.verificationOutcome !== "mismatch" &&
+          input.verificationOutcome !== "inconclusive") ||
+        !/^[0-9a-f]{64}$/.test(verificationResultDigest) ||
+        !Number.isSafeInteger(input.checkpointRevision) ||
+        Number(input.checkpointRevision) <= 0 ||
+        !/^[0-9a-f]{64}$/.test(checkpointDigest) ||
+        input.acknowledgeMixedSource !== true
+      ) throw new RangeError("Invalid DVD Disc Confirmation input.");
+      return recordDvdDiscConfirmation(access, {
+        mutationKey: parseMutationKey(input.mutationKey),
+        archiveRecoveryId: archiveRecoveryId as ArchiveRecoveryId,
+        originalDiscArchiveId:
+          originalDiscArchiveId as OriginalDiscArchiveId,
+        archiveRecoveryAttemptId:
+          archiveRecoveryAttemptId as ArchiveRecoveryAttemptId,
+        discInspectionId: discInspectionId as DiscInspectionId,
+        detectedDiscId: detectedDiscId as DetectedDiscId,
+        mediaGeneration,
+        verificationId: verificationId as DvdDiscVerificationId,
+        verificationWorkerExecutionId,
+        verificationOutcome: input.verificationOutcome,
+        verificationResultDigest,
+        checkpointRevision: Number(input.checkpointRevision),
+        checkpointDigest,
+        acknowledgeMixedSource: true,
+      }, dependencies.archiveImageOwnership);
     },
     submitFilesystemVerification: (input: {
       mutationKey: unknown;

@@ -1,3 +1,5 @@
+import type { DvdRecoveryStorageReasonCode } from "./dvd-recovery-storage-preflight.js";
+
 export class RecordNotFoundError extends Error {
   constructor(recordType: string, id: string) {
     super(`${recordType} not found: ${id}`);
@@ -23,6 +25,20 @@ export class MutationKeyConflictError extends DomainInvariantError {
   constructor() {
     super("Mutation key has already been used for different operation or inputs");
     this.name = "MutationKeyConflictError";
+  }
+}
+
+export class DvdRecoveryStorageUnavailableError
+  extends DomainInvariantError {
+  readonly blockingReasons: readonly { code: DvdRecoveryStorageReasonCode; message: string }[];
+
+  constructor(
+    readonly code: DvdRecoveryStorageReasonCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "DvdRecoveryStorageUnavailableError";
+    this.blockingReasons = [{ code, message }];
   }
 }
 
@@ -89,6 +105,41 @@ export class StaleDvdDiscVerificationError extends DomainInvariantError {
     message: string;
   }[] {
     return [{ code: this.code, message: this.message }];
+  }
+}
+
+export class StaleDvdDiscConfirmationError extends DomainInvariantError {
+  readonly code = "DISC_CONFIRMATION_EXPIRED" as const;
+
+  constructor(
+    readonly reasons: readonly {
+      code:
+        | "RECOVERY_ATTEMPT_CHANGED"
+        | "DISC_INSERTION_CHANGED"
+        | "WORKER_EXECUTION_CHANGED"
+        | "DISC_CHECKPOINT_CHANGED"
+        | "DISC_VERIFICATION_CHANGED"
+        | "DISC_VERIFICATION_RESULT_CHANGED"
+        | "DISC_SOURCE_CHANGED";
+      message: string;
+    }[],
+    readonly currentIdentities: {
+      archiveRecoveryId: string;
+      originalDiscArchiveId: string;
+      archiveRecoveryAttemptId: string;
+      checkpoint: { revision: number; digest: string } | null;
+      insertion: {
+        discInspectionId: string;
+        detectedDiscId: string;
+        mediaGeneration: string;
+      } | null;
+      verificationId: string | null;
+      verificationWorkerExecutionId: string | null;
+      verificationResultDigest: string | null;
+    } | null = null,
+  ) {
+    super("DVD Disc Confirmation preview is no longer current.");
+    this.name = "StaleDvdDiscConfirmationError";
   }
 }
 

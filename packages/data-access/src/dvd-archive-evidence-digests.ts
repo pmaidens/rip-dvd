@@ -28,6 +28,8 @@ export interface DvdArchiveRecoveryReadEvidenceDigestInput {
   startLba: number;
   sectorCount: number;
   outcome: DvdArchiveRecoveryReadOutcome;
+  verificationId?: string;
+  discConfirmationId?: string | null;
 }
 
 export interface DvdArchiveEvidenceManifestDigestInput {
@@ -251,14 +253,32 @@ export function createDvdArchiveRecoveryReadEvidenceDigest(
   if (input.outcome !== "recovered" && input.outcome !== "failed") {
     throw new DomainInvariantError("Recovery read outcome is invalid");
   }
-  return digest(RECOVERY_READ_EVIDENCE_DOMAIN, [
+  const payload: unknown[] = [
     input.originalDiscArchiveId,
     input.fromManifestId,
     input.fromManifestRevision,
     input.startLba,
     input.sectorCount,
     input.outcome,
-  ]);
+  ];
+  if (input.verificationId !== undefined) {
+    requireNonEmptyString(
+      input.verificationId,
+      "Recovery read verification ID",
+    );
+    if (input.discConfirmationId !== null) {
+      requireNonEmptyString(
+        input.discConfirmationId ?? "",
+        "Recovery read disc confirmation ID",
+      );
+    }
+    payload.push(input.verificationId, input.discConfirmationId ?? null);
+  } else if (input.discConfirmationId !== undefined) {
+    throw new DomainInvariantError(
+      "Recovery read confirmation requires a verification",
+    );
+  }
+  return digest(RECOVERY_READ_EVIDENCE_DOMAIN, payload);
 }
 
 export function assertDvdArchiveRecoveryReadEvidenceDigest(

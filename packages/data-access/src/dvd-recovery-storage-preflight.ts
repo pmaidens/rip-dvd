@@ -106,6 +106,17 @@ export interface DvdRecoveryStoragePreflight
   checkedAt: Date;
 }
 
+export function dvdRecoveryStorageBlockingReason(
+  preflight: DvdRecoveryStoragePreflight | null,
+): { code: DvdRecoveryStorageReasonCode; message: string } | null {
+  if (preflight?.status === "supported") return null;
+  const code = preflight?.reasonCode ?? "STORAGE_UNSUPPORTED";
+  return {
+    code,
+    message: DVD_RECOVERY_STORAGE_REASON_MESSAGES[code],
+  };
+}
+
 const CAPABILITY_STATES = new Set<DvdRecoveryStorageCapabilityState>([
   "verified",
   "failed",

@@ -35,12 +35,14 @@ import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
   EncodeWorkConflictError,
+  DvdRecoveryStorageUnavailableError,
   DvdRecoveryEvidenceAdmissionClosedError,
   DvdRecoveryEvidenceEncodingUnavailableError,
   InvalidStatusTransitionError,
   MutationKeyConflictError,
   RecordNotFoundError,
   StaleDvdDiscVerificationError,
+  StaleDvdDiscConfirmationError,
   StaleArchiveRecoveryAttemptError,
   validateEncodeQueueSearchQuery,
   type OriginalDiscArchiveId,
@@ -190,13 +192,13 @@ const commandDefinitions = [
   },
   {
     name: "archive-recovery",
-    description: "Inspect or request DVD Disc Verification, checkpoint reconciliation, and safe Stop for an Archive Recovery.",
-    usage: "rip-dvd archive-recovery <inspect-verification|verify-disc|inspect-reconciliation|reconcile|stop> <archive-recovery-id> [options]",
+    description: "Inspect or request DVD Disc Verification, Operator Disc Confirmation, checkpoint reconciliation, and safe Stop for an Archive Recovery.",
+    usage: "rip-dvd archive-recovery <inspect-verification|verify-disc|preview-disc-confirmation|confirm-disc|inspect-reconciliation|reconcile|stop> <archive-recovery-id> [options]",
     inputs: {
-      arguments: ["action: inspect-verification|verify-disc|inspect-reconciliation|reconcile|stop", "archive-recovery-id"],
-      options: ["--key", "--disc-inspection-id", "--checkpoint-revision", "--checkpoint-digest", "--attempt-id"],
+      arguments: ["action: inspect-verification|verify-disc|preview-disc-confirmation|confirm-disc|inspect-reconciliation|reconcile|stop", "archive-recovery-id"],
+      options: ["--key", "--archive-id", "--attempt-id", "--disc-inspection-id", "--detected-disc-id", "--media-generation", "--verification-id", "--verification-execution-id", "--verification-outcome", "--verification-result-digest", "--checkpoint-revision", "--checkpoint-digest", "--acknowledge-mixed-source"],
     },
-    example: "rip-dvd archive-recovery verify-disc <archive-recovery-id> --key 00000000-0000-4000-8000-000000000001 --disc-inspection-id <id> --checkpoint-revision 1 --checkpoint-digest <sha256>",
+    example: "rip-dvd archive-recovery preview-disc-confirmation <archive-recovery-id>",
   },
   {
     name: "encode-output",
@@ -555,6 +557,23 @@ async function runDvdDiscVerificationCommand(
         message: error.message,
       }]);
     }
+    if (error instanceof DvdRecoveryStorageUnavailableError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+      );
+    }
+    if (error instanceof EncodeWorkConflictError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+        { current: error.current },
+      );
+    }
     if (error instanceof StaleDvdDiscVerificationError) {
       throw new CommandFailure(
         error.code,
@@ -573,6 +592,179 @@ async function runDvdDiscVerificationCommand(
     throw new CommandFailure(
       "DISC_VERIFICATION_UNAVAILABLE",
       "DVD Disc Verification is unavailable.",
+      1,
+    );
+  }
+}
+
+function discConfirmationInputs(args: readonly string[]) {
+  const archiveRecoveryId = args[0]?.trim();
+  const allowed = new Set([
+    "--key",
+    "--archive-id",
+    "--attempt-id",
+    "--disc-inspection-id",
+    "--detected-disc-id",
+    "--media-generation",
+    "--verification-id",
+    "--verification-execution-id",
+    "--verification-outcome",
+    "--verification-result-digest",
+    "--checkpoint-revision",
+    "--checkpoint-digest",
+    "--acknowledge-mixed-source",
+  ]);
+  const options = new Map<string, string>();
+  for (let index = 1; index < args.length;) {
+    const name = args[index]!;
+    if (!allowed.has(name) || options.has(name)) {
+      throw new CommandFailure(
+        "INVALID_ARGUMENTS",
+        "Invalid DVD Disc Confirmation options.",
+        2,
+      );
+    }
+    if (name === "--acknowledge-mixed-source") {
+      options.set(name, "true");
+      index += 1;
+      continue;
+    }
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new CommandFailure(
+        "INVALID_ARGUMENTS",
+        "Invalid DVD Disc Confirmation options.",
+        2,
+      );
+    }
+    options.set(name, value);
+    index += 2;
+  }
+  const required = (name: string) => options.get(name)?.trim() ?? "";
+  const checkpointRevision = required("--checkpoint-revision");
+  const verificationOutcome = required("--verification-outcome");
+  const verificationResultDigest = required("--verification-result-digest");
+  const checkpointDigest = required("--checkpoint-digest");
+  const boundedIdentities = [
+    archiveRecoveryId ?? "",
+    required("--archive-id"),
+    required("--attempt-id"),
+    required("--disc-inspection-id"),
+    required("--detected-disc-id"),
+    required("--media-generation"),
+    required("--verification-id"),
+    required("--verification-execution-id"),
+  ];
+  if (
+    options.size !== allowed.size ||
+    boundedIdentities.some((value) => value.length === 0 || value.length > 256) ||
+    (verificationOutcome !== "mismatch" &&
+      verificationOutcome !== "inconclusive") ||
+    !/^[0-9a-f]{64}$/.test(verificationResultDigest) ||
+    !/^[1-9]\d*$/.test(checkpointRevision) ||
+    !Number.isSafeInteger(Number(checkpointRevision)) ||
+    !/^[0-9a-f]{64}$/.test(checkpointDigest) ||
+    options.get("--acknowledge-mixed-source") !== "true"
+  ) {
+    throw new CommandFailure(
+      "INVALID_ARGUMENTS",
+      "DVD Disc Confirmation requires the current preview identities and explicit mixed-source acknowledgement.",
+      2,
+    );
+  }
+  return {
+    mutationKey: mutationKeyFromOptions(options),
+    archiveRecoveryId: archiveRecoveryId!,
+    originalDiscArchiveId: required("--archive-id"),
+    archiveRecoveryAttemptId: required("--attempt-id"),
+    discInspectionId: required("--disc-inspection-id"),
+    detectedDiscId: required("--detected-disc-id"),
+    mediaGeneration: required("--media-generation"),
+    verificationId: required("--verification-id"),
+    verificationWorkerExecutionId: required("--verification-execution-id"),
+    verificationOutcome,
+    verificationResultDigest,
+    checkpointRevision: Number(checkpointRevision),
+    checkpointDigest,
+    acknowledgeMixedSource: true,
+  };
+}
+
+async function runDvdDiscConfirmationCommand(
+  name: "preview-disc-confirmation" | "confirm-disc",
+  args: readonly string[],
+  io: CommandIO,
+) {
+  try {
+    return await withAccessAsync<unknown>(io.openAccess, (access) => {
+      const operations = createApplicationOperations(access);
+      return name === "preview-disc-confirmation"
+        ? operations.previewDvdDiscConfirmation(
+            verificationInspectionInputs(args).archiveRecoveryId,
+          )
+        : operations.confirmDisc(discConfirmationInputs(args));
+    });
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    if (error instanceof MutationKeyConflictError) {
+      throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    if (error instanceof RecordNotFoundError) {
+      throw new CommandFailure(
+        "NOT_FOUND",
+        "DVD Disc Confirmation target was not found.",
+        2,
+      );
+    }
+    if (error instanceof StaleDvdDiscConfirmationError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        undefined,
+        {
+          reasons: error.reasons,
+          currentIdentities: error.currentIdentities,
+        },
+      );
+    }
+    if (error instanceof DvdDiscVerificationUnavailableError) {
+      throw new CommandFailure(error.code, error.message, 2, [{
+        code: error.code,
+        message: error.message,
+      }]);
+    }
+    if (error instanceof DvdRecoveryStorageUnavailableError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+      );
+    }
+    if (error instanceof EncodeWorkConflictError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+        { current: error.current },
+      );
+    }
+    if (
+      error instanceof DomainInvariantError ||
+      error instanceof InvalidStatusTransitionError ||
+      error instanceof RangeError
+    ) {
+      throw new CommandFailure(
+        "DISC_CONFIRMATION_REJECTED",
+        error.message,
+        2,
+      );
+    }
+    throw new CommandFailure(
+      "DISC_CONFIRMATION_UNAVAILABLE",
+      "DVD Disc Confirmation is unavailable.",
       1,
     );
   }
@@ -1791,12 +1983,14 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         const [action, ...actionArgs] = rest;
         if (
           action !== "inspect-verification" && action !== "verify-disc" &&
+          action !== "preview-disc-confirmation" &&
+          action !== "confirm-disc" &&
           action !== "inspect-reconciliation" && action !== "reconcile" &&
           action !== "stop"
         ) {
           throw new CommandFailure(
             "INVALID_ARGUMENTS",
-            "Archive Recovery action must be inspect-verification, verify-disc, inspect-reconciliation, reconcile, or stop.",
+            "Archive Recovery action must be inspect-verification, verify-disc, preview-disc-confirmation, confirm-disc, inspect-reconciliation, reconcile, or stop.",
             2,
           );
         }
@@ -1804,6 +1998,9 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
           io.stdout,
           action === "stop"
             ? runDvdRecoveryStopCommand(actionArgs, io)
+            : action === "preview-disc-confirmation" ||
+                action === "confirm-disc"
+            ? await runDvdDiscConfirmationCommand(action, actionArgs, io)
             : action === "inspect-verification" || action === "verify-disc"
             ? await runDvdDiscVerificationCommand(action, actionArgs, io)
             : await runDvdRecoveryReconciliationCommand(
