@@ -389,7 +389,7 @@ it("keeps a no-progress pause durable and exposes it identically", async () => {
   fixtures.push(fixture);
   const seeded = await seedDvdDiscVerificationFixture(fixture, [{
     startLba: 175,
-    sectorCount: 3,
+    sectorCount: 1,
     classification: "skipped_untested",
   }]);
   await completeVerification(fixture, seeded);
