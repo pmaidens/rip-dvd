@@ -20,6 +20,7 @@ import {
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import {
   createApplicationOperations,
+  describeCatalogReviewWorkflow,
   encodeOutputArtifactIdentity,
   type CatalogMetadataLookup,
   type EncodeOutputMediaProbe,
@@ -99,6 +100,12 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
         chapters: 12,
         audioStreams: [],
         subtitles: [],
+      }, {
+        number: 2,
+        durationSeconds: 2_700,
+        chapters: 6,
+        audioStreams: [],
+        subtitles: [],
       }],
     },
   });
@@ -114,6 +121,10 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
   const mediaItem = seedAccess.catalog.createMediaItem({
     kind: "movie",
     title: "Synthetic recovery mapping",
+  });
+  const secondMediaItem = seedAccess.catalog.createMediaItem({
+    kind: "movie",
+    title: "Synthetic recovery mapping two",
   });
   seedAccess.close();
   markArchiveWithDvdRecoveryEvidence(
@@ -162,6 +173,25 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       chapterStart: 1,
       chapterEnd: 12,
       chapterCount: 12,
+      sourceExtents: [{ startLba: 0, sectorCount: 1 }],
+    }, {
+      displayTitleNumber: 2,
+      navigation: {
+        videoTitleSetNumber: 2,
+        titleSetTitleNumber: 1,
+        programChainNumber: 1,
+      },
+      selectedPath: [{
+        programNumber: 1,
+        cellNumber: 1,
+        vobId: 2,
+        cellId: 1,
+      }],
+      angleNumber: 1,
+      angleCount: 1,
+      chapterStart: 1,
+      chapterEnd: 6,
+      chapterCount: 6,
       sourceExtents: [{ startLba: 0, sectorCount: 1 }],
     }],
   });
@@ -221,16 +251,57 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
           action: "damage_decision",
           available: false,
           reasons: [
-            { code: "ASSESSMENT_PENDING" },
             { code: "RECOVERY_ACTIVE" },
+            { code: "ASSESSMENT_PENDING" },
             { code: "SELECTION_UNIDENTIFIED" },
           ],
         },
         { action: "encode", available: false },
       ],
     });
+    const dashboard = readDashboardSnapshot(access, {
+      catalogReviewView: "needs_review",
+    });
+    expect(dashboard.catalogReview.status).toBe("loaded");
+    if (dashboard.catalogReview.status !== "loaded") {
+      throw new Error("Catalog Review dashboard is unavailable");
+    }
+    expect(
+      dashboard.catalogReview.items.find(({ id }) => id === archive.id)
+        ?.reviewWorkflow,
+    ).toEqual(before.reviewWorkflow);
 
-    const mapped = await fixture.run([
+    const mixedWorkflow = describeCatalogReviewWorkflow(
+      access,
+      archive.id,
+      {
+        evidenceHeader: checkpoint,
+        titleIdentityReviewSet: {
+          ...reviewSet,
+          items: [
+            {
+              ...reviewSet.items[0]!,
+              mappingState: "needs_mapping_review",
+            },
+            reviewSet.items[1]!,
+          ],
+        },
+        titleDamageInspection:
+          access.dvdTitleDamageAssessments.inspect(archive.id),
+      },
+    );
+    expect(
+      mixedWorkflow?.actions.find(({ action }) =>
+        action === "damage_decision"
+      )?.reasons.map(({ code }) => code),
+    ).toEqual([
+      "RECOVERY_ACTIVE",
+      "ASSESSMENT_PENDING",
+      "MAPPING_REVIEW_REQUIRED",
+      "SELECTION_UNIDENTIFIED",
+    ]);
+
+    const mappedFirst = await fixture.run([
       "disc-selection",
       "create",
       archive.id,
@@ -243,7 +314,21 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       "--title-number",
       "1",
     ]);
-    expect(mapped.exitCode, JSON.stringify(mapped.result)).toBe(0);
+    expect(mappedFirst.exitCode, JSON.stringify(mappedFirst.result)).toBe(0);
+    const mappedSecond = await fixture.run([
+      "disc-selection",
+      "create",
+      archive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000398",
+      "--media-item-id",
+      secondMediaItem.id,
+      "--source-kind",
+      "dvd_title",
+      "--title-number",
+      "2",
+    ]);
+    expect(mappedSecond.exitCode, JSON.stringify(mappedSecond.result)).toBe(0);
     const after = await readBoth();
     expect(after.reviewOutcome).toBe("needs_review");
     expect(after.reviewWorkflow.facts).toMatchObject({
@@ -258,29 +343,42 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
         action === "damage_decision"
       )?.reasons,
     ).toEqual([
-      expect.objectContaining({ code: "ASSESSMENT_PENDING" }),
       expect.objectContaining({ code: "RECOVERY_ACTIVE" }),
+      expect.objectContaining({ code: "ASSESSMENT_PENDING" }),
     ]);
 
+    const completionCommand = {
+      action: "complete_review" as const,
+      catalogRevision: after.catalogRevision,
+      outcome: "reviewed_with_selections" as const,
+      replacementEncodes: [],
+    };
+    const webCompletion = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        ...completionCommand,
+        preview: true,
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
     const completion = await fixture.run([
       "catalog-review",
       "preview-completion",
       archive.id,
       "--json",
-      JSON.stringify({
-        action: "complete_review",
-        catalogRevision: after.catalogRevision,
-        outcome: "reviewed_with_selections",
-        replacementEncodes: [],
-      }),
+      JSON.stringify(completionCommand),
     ]);
+    expect(webCompletion.status).toBe(409);
     expect(completion.exitCode).toBe(2);
+    expect(completion.result).toEqual(await webCompletion.json());
     expect(completion.result).toMatchObject({
       error: {
-        code: "DAMAGE_DECISION_UNAVAILABLE",
-        blockingReasons: [
-          { code: "ASSESSMENT_PENDING" },
+        code: "CATALOG_REVIEW_COMPLETION_UNAVAILABLE",
+        reasons: [
           { code: "RECOVERY_ACTIVE" },
+          { code: "ASSESSMENT_PENDING" },
+          { code: "ACCEPTANCE_REQUIRED" },
         ],
         current: {
           recovery: { state: "running" },

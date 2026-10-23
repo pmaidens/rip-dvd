@@ -224,7 +224,16 @@ test("Review Steps preserve mapping drafts and explain an unavailable damage dec
   await expect(archive.getByText("Recovering", { exact: true })).toBeVisible();
   await expect(archive.getByText("Unmapped content remains", { exact: true }))
     .toBeVisible();
-  await expect(archive.getByText("Not ready", { exact: true })).toBeVisible();
+  const damageReadiness = archive.getByText("Damage decision", {
+    exact: true,
+  }).locator("..");
+  await expect(damageReadiness.getByText("Not ready", { exact: true }))
+    .toBeVisible();
+  const encodingReadiness = archive.getByText("Encoding readiness", {
+    exact: true,
+  }).locator("..");
+  await expect(encodingReadiness.getByText("Not ready", { exact: true }))
+    .toBeVisible();
 
   await openCatalogReview(page, discLabel);
   const steps = page.getByRole("tablist", { name: "Review Steps" });

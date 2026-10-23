@@ -66,6 +66,12 @@ export function CatalogReviewWorkflowFacts({
         <dd>{mappingLabel(workflow.facts.mappingState)}</dd>
       </div>
       <div>
+        <dt>Damage decision</dt>
+        <dd>{workflow.facts.readyForDamageDecision
+          ? "Ready"
+          : "Not ready"}</dd>
+      </div>
+      <div>
         <dt>Encoding readiness</dt>
         <dd>{workflow.facts.readyForEncoding ? "Ready" : "Not ready"}</dd>
       </div>
