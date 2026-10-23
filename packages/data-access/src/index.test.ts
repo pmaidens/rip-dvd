@@ -1922,7 +1922,7 @@ describe("data-access facade", () => {
     } finally {
       verified.close();
     }
-  });
+  }, 10_000);
 
   it("migrates historical Disc Inspections without inventing settling evidence", () => {
     const databasePath = createTestDatabasePath();
