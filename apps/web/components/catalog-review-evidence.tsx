@@ -161,6 +161,7 @@ export function CatalogReviewEvidence({
   mediaItems = [],
   activeMappingProposal = null,
   activeEpisodicMappingProposal = null,
+  allowMainFeatureProposal = true,
   isSaving = false,
   mappingProposalError = null,
   onStartMappingProposal,
@@ -176,6 +177,7 @@ export function CatalogReviewEvidence({
   mediaItems?: CatalogReviewMediaItem[];
   activeMappingProposal?: MappingProposal | null;
   activeEpisodicMappingProposal?: EpisodicMappingProposal | null;
+  allowMainFeatureProposal?: boolean;
   isSaving?: boolean;
   mappingProposalError?: string | null;
   onStartMappingProposal?(proposal: MappingProposal): void;
@@ -504,7 +506,7 @@ export function CatalogReviewEvidence({
           </span>
         </p>
       ) : null}
-      {onStartMappingProposal ? (
+      {onStartMappingProposal && allowMainFeatureProposal ? (
         <div className="catalog-archive-mapping-action">
           <button
             type="button"
@@ -523,7 +525,8 @@ export function CatalogReviewEvidence({
           </span>
         </div>
       ) : null}
-      {activeMappingProposal?.sourceIdentity.kind === "main_feature" ? (
+      {allowMainFeatureProposal &&
+          activeMappingProposal?.sourceIdentity.kind === "main_feature" ? (
         <CatalogReviewMappingProposal
           key={mappingProposalIdentity(activeMappingProposal)}
           proposal={activeMappingProposal}

@@ -38,10 +38,12 @@ function InteractiveDiscSelections({
   onUpdate,
   selection = editableSelection,
   mappingReviewSelectionIds,
+  allowMainFeature,
 }: {
   onUpdate(id: string, changes: UpdateDiscSelectionInput): void;
   selection?: CatalogReviewDiscSelection;
   mappingReviewSelectionIds?: ReadonlySet<string>;
+  allowMainFeature?: boolean;
 }) {
   const [selectionKind, setSelectionKind] =
     useState<DiscSelectionKind>("main_feature");
@@ -103,6 +105,7 @@ function InteractiveDiscSelections({
         subtitles: [],
       }]}
       mappingReviewSelectionIds={mappingReviewSelectionIds}
+      allowMainFeature={allowMainFeature}
       selectionKind={selectionKind}
       isSaving={false}
       onPage={() => undefined}
@@ -118,6 +121,33 @@ function InteractiveDiscSelections({
 }
 
 describe("CatalogReviewDiscSelections", () => {
+  it("uses exact title mapping when main-feature is unavailable", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <InteractiveDiscSelections
+          onUpdate={() => undefined}
+          allowMainFeature={false}
+        />,
+      );
+    });
+
+    const source = container.querySelector<HTMLSelectElement>(
+      'select[name="selectionKind"]',
+    );
+    expect(source?.value).toBe("dvd_title");
+    expect(Array.from(source?.options ?? []).map(({ value }) => value)).toEqual([
+      "dvd_title",
+      "dvd_chapters",
+    ]);
+    expect(container.querySelector('select[name="titleNumber"]')).not.toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it("renders reviewed mappings, repair choices, and pagination", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewDiscSelections

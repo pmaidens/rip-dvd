@@ -243,6 +243,7 @@ export function CatalogReviewView({
             mediaItems={review.mediaItems}
             activeMappingProposal={activeMappingProposal}
             activeEpisodicMappingProposal={activeEpisodicMappingProposal}
+            allowMainFeatureProposal={review.reviewWorkflow === undefined}
             isSaving={isSaving}
             mappingProposalError={mappingProposalError}
             onStartMappingProposal={onStartMappingProposal}
@@ -297,6 +298,7 @@ export function CatalogReviewView({
                   )
                   : [],
               )}
+              allowMainFeature={review.reviewWorkflow === undefined}
               selectionKind={selectionKind}
               isSaving={isSaving}
               onPage={onDiscSelectionsPage}

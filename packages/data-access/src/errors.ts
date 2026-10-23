@@ -59,6 +59,18 @@ export class CatalogMappingEvidenceUnavailableError
   }
 }
 
+export class UnsupportedCatalogMappingSourceError
+  extends DomainInvariantError {
+  readonly code = "CATALOG_MAPPING_SOURCE_UNSUPPORTED" as const;
+
+  constructor() {
+    super(
+      "Current-evidence mapping requires an exact DVD title or chapter range",
+    );
+    this.name = "UnsupportedCatalogMappingSourceError";
+  }
+}
+
 export class StaleJobAttemptError extends Error {
   constructor(recordType: string, id: string) {
     super(`Stale ${recordType} attempt: ${id}`);

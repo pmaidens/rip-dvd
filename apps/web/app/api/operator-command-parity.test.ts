@@ -277,7 +277,26 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
         cellId: 1,
       }],
       angleNumber: 1,
-      angleCount: 1,
+      angleCount: 2,
+      chapterStart: 1,
+      chapterEnd: 12,
+      chapterCount: 12,
+      sourceExtents: [{ startLba: 0, sectorCount: 1 }],
+    }, {
+      displayTitleNumber: 1,
+      navigation: {
+        videoTitleSetNumber: 1,
+        titleSetTitleNumber: 1,
+        programChainNumber: 1,
+      },
+      selectedPath: [{
+        programNumber: 1,
+        cellNumber: 1,
+        vobId: 1,
+        cellId: 2,
+      }],
+      angleNumber: 2,
+      angleCount: 2,
       chapterStart: 1,
       chapterEnd: 12,
       chapterCount: 12,
@@ -420,6 +439,44 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       "CATALOG_DAMAGE_DECISION_UNAVAILABLE",
     ]);
 
+    const unsupportedWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "create_disc_selection",
+        catalogRevision: before.catalogRevision,
+        mutationKey: "00000000-0000-4000-8000-000000000405",
+        selection: {
+          mediaItemId: mediaItem.id,
+          sourceIdentity: { kind: "main_feature" },
+        },
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const unsupportedCli = await fixture.run([
+      "disc-selection",
+      "create",
+      archive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000406",
+      "--revision",
+      before.catalogRevision,
+      "--media-item-id",
+      mediaItem.id,
+      "--source-kind",
+      "main_feature",
+    ]);
+    expect(unsupportedWeb.status).toBe(409);
+    expect(unsupportedCli.exitCode).toBe(2);
+    expect(unsupportedCli.result).toEqual(await unsupportedWeb.json());
+    expect(unsupportedCli.result).toEqual({
+      error: {
+        code: "CATALOG_MAPPING_SOURCE_UNSUPPORTED",
+        message:
+          "Current-evidence mapping requires an exact DVD title or chapter range",
+      },
+    });
+
     const firstMutationKey = "00000000-0000-4000-8000-000000000397";
     const firstSelectionCommand = {
       action: "create_disc_selection" as const,
@@ -456,6 +513,9 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
     expect(mappedFirstWeb.status).toBe(201);
     expect(mappedFirst.exitCode, JSON.stringify(mappedFirst.result)).toBe(0);
     expect(mappedFirst.result).toEqual(await mappedFirstWeb.json());
+    const firstSelectionId = (mappedFirst.result as {
+      discSelection: { id: string };
+    }).discSelection.id;
     const afterFirst = await readBoth();
     const staleWeb = await createCatalogReviewRoute(
       catalogReviewMutationRequest(archive.id, {
@@ -575,6 +635,9 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       "3",
     ]);
     expect(mappedSecond.exitCode, JSON.stringify(mappedSecond.result)).toBe(0);
+    const secondSelectionId = (mappedSecond.result as {
+      discSelection: { id: string };
+    }).discSelection.id;
     const after = await readBoth();
     expect(after.reviewOutcome).toBe("needs_review");
     expect(after.reviewWorkflow.facts).toMatchObject({
@@ -632,6 +695,149 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
           titleIdentityReviewSetId:
             after.reviewWorkflow.current.titleIdentityReviewSetId,
         },
+      },
+    });
+
+    const webUpdatePreviewResponse = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "update_disc_selection",
+        discSelectionId: firstSelectionId,
+        changes: { mediaItemId: secondMediaItem.id },
+        preview: true,
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const webUpdatePreview = await webUpdatePreviewResponse.json() as {
+      catalogRevision: string;
+      previewToken: string;
+    };
+    const cliUpdatePreviewResult = await fixture.run([
+      "disc-selection",
+      "preview",
+      "update",
+      archive.id,
+      firstSelectionId,
+      "--media-item-id",
+      secondMediaItem.id,
+    ]);
+    const cliUpdatePreview = cliUpdatePreviewResult.result as {
+      catalogRevision: string;
+      previewToken: string;
+    };
+    const webDeletePreviewResponse = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "delete_disc_selection",
+        discSelectionId: secondSelectionId,
+        preview: true,
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const webDeletePreview = await webDeletePreviewResponse.json() as {
+      catalogRevision: string;
+      previewToken: string;
+    };
+    const cliDeletePreviewResult = await fixture.run([
+      "disc-selection",
+      "preview",
+      "delete",
+      archive.id,
+      secondSelectionId,
+    ]);
+    const cliDeletePreview = cliDeletePreviewResult.result as {
+      catalogRevision: string;
+      previewToken: string;
+    };
+    expect(webUpdatePreviewResponse.status).toBe(200);
+    expect(cliUpdatePreviewResult.exitCode).toBe(0);
+    expect(webDeletePreviewResponse.status).toBe(200);
+    expect(cliDeletePreviewResult.exitCode).toBe(0);
+
+    const faultDatabase = new DatabaseSync(fixture.databasePath);
+    faultDatabase.prepare(`
+      UPDATE archive_recoveries
+      SET status = 'faulted', fault_code = 'CONSISTENCY_FAULT'
+      WHERE original_disc_archive_id = ?
+    `).run(archive.id);
+    faultDatabase.close();
+
+    const blockedWebUpdate = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "update_disc_selection",
+        discSelectionId: firstSelectionId,
+        changes: { mediaItemId: secondMediaItem.id },
+        mutationKey: "00000000-0000-4000-8000-000000000409",
+        expectedCatalogRevision: webUpdatePreview.catalogRevision,
+        previewToken: webUpdatePreview.previewToken,
+        acknowledge: true,
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const blockedCliUpdate = await fixture.run([
+      "disc-selection",
+      "update",
+      archive.id,
+      firstSelectionId,
+      "--key",
+      "00000000-0000-4000-8000-000000000410",
+      "--media-item-id",
+      secondMediaItem.id,
+      "--revision",
+      cliUpdatePreview.catalogRevision,
+      "--preview-token",
+      cliUpdatePreview.previewToken,
+      "--acknowledge",
+    ]);
+    expect(blockedWebUpdate.status).toBe(409);
+    expect(blockedCliUpdate.exitCode).toBe(2);
+    expect(blockedCliUpdate.result).toEqual(await blockedWebUpdate.json());
+    expect(blockedCliUpdate.result).toMatchObject({
+      error: {
+        code: "CATALOG_MAPPING_UNAVAILABLE",
+        reasons: [{ code: "CONSISTENCY_FAULT" }],
+        current: { recovery: { state: "faulted" } },
+      },
+    });
+
+    const blockedWebDelete = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "delete_disc_selection",
+        discSelectionId: secondSelectionId,
+        mutationKey: "00000000-0000-4000-8000-000000000411",
+        expectedCatalogRevision: webDeletePreview.catalogRevision,
+        previewToken: webDeletePreview.previewToken,
+        acknowledge: true,
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const blockedCliDelete = await fixture.run([
+      "disc-selection",
+      "delete",
+      archive.id,
+      secondSelectionId,
+      "--key",
+      "00000000-0000-4000-8000-000000000412",
+      "--revision",
+      cliDeletePreview.catalogRevision,
+      "--preview-token",
+      cliDeletePreview.previewToken,
+      "--acknowledge",
+    ]);
+    expect(blockedWebDelete.status).toBe(409);
+    expect(blockedCliDelete.exitCode).toBe(2);
+    expect(blockedCliDelete.result).toEqual(await blockedWebDelete.json());
+    expect(blockedCliDelete.result).toMatchObject({
+      error: {
+        code: "CATALOG_MAPPING_UNAVAILABLE",
+        reasons: [{ code: "CONSISTENCY_FAULT" }],
+        current: { recovery: { state: "faulted" } },
       },
     });
   } finally {
@@ -1368,6 +1574,71 @@ const dvdEvidenceEncodingUnavailableError = {
     }],
   },
 };
+
+it("normalizes stale legacy Mapping Proposals through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const seeded = seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  try {
+    const review = await fixture.run([
+      "catalog-review",
+      "show",
+      seeded.archive.id,
+    ]);
+    const staleRevision = (review.result as { catalogRevision: string })
+      .catalogRevision;
+    const revisionDatabase = new DatabaseSync(fixture.databasePath);
+    revisionDatabase.prepare(`
+      UPDATE original_disc_archives
+      SET updated_at = updated_at + 1
+      WHERE id = ?
+    `).run(seeded.archive.id);
+    revisionDatabase.close();
+    const proposal = {
+      action: "create_mapping_proposal" as const,
+      catalogRevision: staleRevision,
+      target: {
+        choice: "create_new" as const,
+        mediaItem: { kind: "movie" as const, title: "Synthetic stale target" },
+      },
+      discSelection: {
+        sourceIdentity: { kind: "main_feature" as const },
+      },
+    };
+    const web = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(seeded.archive.id, {
+        ...proposal,
+        mutationKey: "00000000-0000-4000-8000-000000000407",
+      }),
+      seeded.archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const cli = await fixture.run([
+      "catalog-review",
+      "apply-proposal",
+      seeded.archive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000408",
+      "--json",
+      JSON.stringify(proposal),
+    ]);
+
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toMatchObject({
+      error: {
+        code: "STALE_CATALOG_REVISION",
+        reasons: [{ code: "STALE_CATALOG_REVISION" }],
+        current: null,
+      },
+    });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
 
 it("blocks Catalog Review replacement previews consistently through web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();

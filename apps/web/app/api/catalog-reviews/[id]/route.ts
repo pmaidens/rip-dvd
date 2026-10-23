@@ -5,6 +5,7 @@ import {
   MEDIA_ITEM_KINDS,
   MutationKeyConflictError,
   RecordNotFoundError,
+  UnsupportedCatalogMappingSourceError,
   type DataAccess,
   type DiscSelectionId,
   type OriginalDiscArchiveId,
@@ -394,6 +395,12 @@ export async function createCatalogReviewRoute(
     }
     if (error instanceof RecordNotFoundError) {
       return response({ error: error.message }, 404);
+    }
+    if (error instanceof UnsupportedCatalogMappingSourceError) {
+      return response({ error: {
+        code: error.code,
+        message: error.message,
+      } }, 409);
     }
     if (error instanceof DomainInvariantError) {
       return response({ error: error.message }, 409);

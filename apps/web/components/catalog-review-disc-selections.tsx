@@ -32,6 +32,7 @@ interface CatalogReviewDiscSelectionsProps {
   mediaItems: CatalogReviewMediaItem[];
   rawTitles: Array<DvdTitle | Pick<DvdTitle, "number" | "chapters">>;
   mappingReviewSelectionIds?: ReadonlySet<string>;
+  allowMainFeature?: boolean;
   selectionKind: DiscSelectionKind;
   isSaving: boolean;
   onPage(offset: number): void;
@@ -109,6 +110,7 @@ export function CatalogReviewDiscSelections({
   mediaItems,
   rawTitles,
   mappingReviewSelectionIds = new Set(),
+  allowMainFeature = true,
   selectionKind,
   isSaving,
   onPage,
@@ -120,6 +122,13 @@ export function CatalogReviewDiscSelections({
   onUpdate,
   onDelete,
 }: CatalogReviewDiscSelectionsProps) {
+  const availableSelectionKinds = allowMainFeature
+    ? DISC_SELECTION_KINDS
+    : DISC_SELECTION_KINDS.filter((kind) => kind !== "main_feature");
+  const effectiveSelectionKind = !allowMainFeature &&
+      selectionKind === "main_feature"
+    ? "dvd_title"
+    : selectionKind;
   const hierarchy = orderMediaItemHierarchy(mediaItems);
   const itemsById = new Map(mediaItems.map((item) => [item.id, item]));
   const [editingSelectionId, setEditingSelectionId] = useState<string | null>(
@@ -135,6 +144,12 @@ export function CatalogReviewDiscSelections({
     ? null
     : discSelections.find((selection) => selection.id === editingSelectionId) ??
       null;
+
+  useEffect(() => {
+    if (!allowMainFeature && selectionKind === "main_feature") {
+      onSelectionKindChange("dvd_title");
+    }
+  }, [allowMainFeature, onSelectionKindChange, selectionKind]);
 
   useEffect(() => {
     const selection = editingSelection;
@@ -196,14 +211,14 @@ export function CatalogReviewDiscSelections({
       ...(nextLabel ? { label: nextLabel } : {}),
     };
     let sourceIdentity: CatalogReviewDiscSelection["sourceIdentity"];
-    if (selectionKind === "main_feature") {
-      sourceIdentity = { kind: selectionKind };
+    if (effectiveSelectionKind === "main_feature") {
+      sourceIdentity = { kind: effectiveSelectionKind };
     } else {
       const selectedTitleNumber = integerFormValue(form, "titleNumber");
       if (selectedTitleNumber === undefined) return;
-      if (selectionKind === "dvd_title") {
+      if (effectiveSelectionKind === "dvd_title") {
         sourceIdentity = {
-          kind: selectionKind,
+          kind: effectiveSelectionKind,
           titleNumber: selectedTitleNumber,
         };
       } else {
@@ -213,7 +228,7 @@ export function CatalogReviewDiscSelections({
           selectedChapterStart === undefined || selectedChapterEnd === undefined
         ) return;
         sourceIdentity = {
-          kind: selectionKind,
+          kind: effectiveSelectionKind,
           titleNumber: selectedTitleNumber,
           chapterStart: selectedChapterStart,
           chapterEnd: selectedChapterEnd,
@@ -475,21 +490,21 @@ export function CatalogReviewDiscSelections({
             Source
             <select
               name="selectionKind"
-              value={selectionKind}
+              value={effectiveSelectionKind}
               onChange={(event) => {
                 onSelectionKindChange(
                   event.currentTarget.value as DiscSelectionKind,
                 );
               }}
             >
-              {DISC_SELECTION_KINDS.map((kind) => (
+              {availableSelectionKinds.map((kind) => (
                 <option key={kind} value={kind}>
                   {discSelectionLabels[kind]}
                 </option>
               ))}
             </select>
           </label>
-          {selectionKind !== "main_feature" ? (
+          {effectiveSelectionKind !== "main_feature" ? (
             <label>
               DVD title
               <select
@@ -507,7 +522,7 @@ export function CatalogReviewDiscSelections({
               </select>
             </label>
           ) : null}
-          {selectionKind === "dvd_chapters" ? (
+          {effectiveSelectionKind === "dvd_chapters" ? (
             <>
               <label>
                 First chapter

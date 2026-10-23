@@ -16,6 +16,7 @@ import {
   DomainInvariantError,
   MutationKeyConflictError,
   RecordNotFoundError,
+  UnsupportedCatalogMappingSourceError,
   MEDIA_ITEM_KINDS,
   type DataAccess,
   type DiscSelectionId,
@@ -185,6 +186,9 @@ function withSelectionAccess<T>(io: SelectionIO, operation: (access: DataAccess)
     }
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("SELECTION_NOT_FOUND", "Disc Selection or its source was not found.", 2);
+    }
+    if (error instanceof UnsupportedCatalogMappingSourceError) {
+      throw new CommandFailure(error.code, error.message, 2);
     }
     if (error instanceof DomainInvariantError) {
       throw new CommandFailure(

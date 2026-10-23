@@ -326,8 +326,13 @@ export function readCatalogReview(
         : {
           reviewSetIdentity: titleIdentityReviewSet.reviewSetIdentity,
           currentMappingStates: titleIdentityReviewSet.items
-            .filter(({ presentAtCurrentCheckpoint, discSelectionMappings }) =>
-              presentAtCurrentCheckpoint || discSelectionMappings.length > 0
+            .filter(({
+              presentAtCurrentCheckpoint,
+              discSelectionMappings,
+              observation,
+            }) =>
+              (presentAtCurrentCheckpoint && observation.angleNumber === 1) ||
+              discSelectionMappings.length > 0
             )
             .map(({ mappingState }) => mappingState),
         },

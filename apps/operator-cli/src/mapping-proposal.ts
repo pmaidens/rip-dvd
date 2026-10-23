@@ -14,6 +14,7 @@ import {
   MutationKeyConflictError,
   RecordNotFoundError,
   StaleCatalogRevisionError,
+  UnsupportedCatalogMappingSourceError,
   type DataAccess,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
@@ -118,6 +119,9 @@ export function runMappingProposal(rest: readonly string[], io: MappingProposalI
     }
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("PROPOSAL_REJECTED", error.message, 2);
+    }
+    if (error instanceof UnsupportedCatalogMappingSourceError) {
+      throw new CommandFailure(error.code, error.message, 2);
     }
     if (error instanceof StaleCatalogRevisionError) {
       throw new CommandFailure("STALE_CATALOG_REVISION", error.message, 2);

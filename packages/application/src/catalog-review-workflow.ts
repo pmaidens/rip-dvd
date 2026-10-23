@@ -109,18 +109,31 @@ export class CatalogReviewMappingUnavailableError
   readonly blockingReasons: readonly CatalogReviewWorkflowReason[];
   readonly current: CatalogReviewWorkflow["current"];
 
-  constructor(workflow: CatalogReviewWorkflow) {
+  constructor(
+    workflow: CatalogReviewWorkflow,
+    rejectionReason?: CatalogReviewWorkflowReason,
+  ) {
     const mapping = workflow.actions.find(({ action }) =>
       action === "catalog_mapping"
     );
-    if (mapping === undefined || mapping.available) {
+    if (mapping === undefined) {
+      throw new DomainInvariantError(
+        "Catalog Review workflow is missing mapping unavailability",
+      );
+    }
+    const blockingReasons = mapping.available
+      ? rejectionReason === undefined
+        ? null
+        : [rejectionReason]
+      : mapping.reasons;
+    if (blockingReasons === null) {
       throw new DomainInvariantError(
         "Catalog Review workflow is missing mapping unavailability",
       );
     }
     super("Catalog mapping is unavailable for the current workflow evidence.");
     this.name = "CatalogReviewMappingUnavailableError";
-    this.blockingReasons = mapping.reasons;
+    this.blockingReasons = blockingReasons;
     this.current = workflow.current;
   }
 }
@@ -128,10 +141,10 @@ export class CatalogReviewMappingUnavailableError
 export class CatalogReviewRevisionStaleError extends DomainInvariantError {
   readonly code = "STALE_CATALOG_REVISION" as const;
   readonly blockingReasons: readonly CatalogReviewWorkflowReason[];
-  readonly current: CatalogReviewWorkflow["current"];
+  readonly current: CatalogReviewWorkflow["current"] | null;
 
   constructor(
-    workflow: CatalogReviewWorkflow,
+    workflow: CatalogReviewWorkflow | null,
     expectedCatalogRevision: string,
     currentCatalogRevision: string,
   ) {
@@ -142,7 +155,7 @@ export class CatalogReviewRevisionStaleError extends DomainInvariantError {
       message: "Catalog Review evidence changed; reload before mapping.",
       details: { expectedCatalogRevision, currentCatalogRevision },
     }];
-    this.current = workflow.current;
+    this.current = workflow?.current ?? null;
   }
 }
 
@@ -170,7 +183,6 @@ export function rethrowCatalogMappingOperationError(
   if (
     error instanceof StaleCatalogRevisionError &&
     expectedCatalogRevision !== undefined &&
-    current.workflow !== null &&
     current.archive !== null
   ) {
     throw new CatalogReviewRevisionStaleError(
@@ -183,7 +195,14 @@ export function rethrowCatalogMappingOperationError(
     error instanceof CatalogMappingEvidenceUnavailableError &&
     current.workflow !== null
   ) {
-    throw new CatalogReviewMappingUnavailableError(current.workflow);
+    throw new CatalogReviewMappingUnavailableError(current.workflow, {
+      code: "CONSISTENCY_FAULT",
+      message: error.message,
+      details: {
+        originalDiscArchiveId,
+        rejectedBy: "transactional_catalog_mapping_guard",
+      },
+    });
   }
   throw error;
 }
@@ -230,8 +249,13 @@ export function describeCatalogReviewWorkflow(
       : {
         reviewSetIdentity: reviewSet.reviewSetIdentity,
         currentMappingStates: reviewSet.items
-          .filter(({ presentAtCurrentCheckpoint, discSelectionMappings }) =>
-            presentAtCurrentCheckpoint || discSelectionMappings.length > 0
+          .filter(({
+            presentAtCurrentCheckpoint,
+            discSelectionMappings,
+            observation,
+          }) =>
+            (presentAtCurrentCheckpoint && observation.angleNumber === 1) ||
+            discSelectionMappings.length > 0
           )
           .map(({ mappingState }) => mappingState),
       }

@@ -149,7 +149,7 @@ it("shows every checkpoint-bound Title Identity through the public JSON CLI", as
     },
   });
 
-  const unmapPreview = await fixture.run([
+  const unsupportedPreview = await fixture.run([
     "disc-selection",
     "preview",
     "update",
@@ -158,72 +158,14 @@ it("shows every checkpoint-bound Title Identity through the public JSON CLI", as
     "--source-kind",
     "main_feature",
   ]);
-  const unmapDecision = unmapPreview.result as {
-    catalogRevision: string;
-    previewToken: string;
-  };
-  const unmapped = await fixture.run([
-    "disc-selection",
-    "update",
-    archive.id,
-    selectionId,
-    "--key",
-    "00000000-0000-4000-8000-000000000402",
-    "--source-kind",
-    "main_feature",
-    "--revision",
-    unmapDecision.catalogRevision,
-    "--preview-token",
-    unmapDecision.previewToken,
-    "--acknowledge",
-  ]);
-  expect(unmapped.exitCode).toBe(0);
-  expect((await fixture.run([
-    "catalog-review",
-    "show",
-    archive.id,
-  ])).result).toMatchObject({
-    titleIdentity: {
-      items: [
-        { mappingState: "unmapped", discSelectionMappings: [] },
-        { mappingState: "unmapped", discSelectionMappings: [] },
-      ],
+  expect(unsupportedPreview).toMatchObject({
+    exitCode: 2,
+    result: {
+      error: {
+        code: "CATALOG_MAPPING_SOURCE_UNSUPPORTED",
+      },
     },
   });
-
-  const remapPreview = await fixture.run([
-    "disc-selection",
-    "preview",
-    "update",
-    archive.id,
-    selectionId,
-    "--source-kind",
-    "dvd_title",
-    "--title-number",
-    "1",
-  ]);
-  const remapDecision = remapPreview.result as {
-    catalogRevision: string;
-    previewToken: string;
-  };
-  const remapped = await fixture.run([
-    "disc-selection",
-    "update",
-    archive.id,
-    selectionId,
-    "--key",
-    "00000000-0000-4000-8000-000000000403",
-    "--source-kind",
-    "dvd_title",
-    "--title-number",
-    "1",
-    "--revision",
-    remapDecision.catalogRevision,
-    "--preview-token",
-    remapDecision.previewToken,
-    "--acknowledge",
-  ]);
-  expect(remapped.exitCode).toBe(0);
   expect((await fixture.run([
     "catalog-review",
     "show",
@@ -260,7 +202,7 @@ it("shows every checkpoint-bound Title Identity through the public JSON CLI", as
     archive.id,
     selectionId,
     "--key",
-    "00000000-0000-4000-8000-000000000404",
+    "00000000-0000-4000-8000-000000000402",
     "--revision",
     deletionDecision.catalogRevision,
     "--preview-token",

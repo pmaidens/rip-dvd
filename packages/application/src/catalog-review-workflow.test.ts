@@ -1,13 +1,21 @@
 import { expect, it } from "vitest";
 import type {
   ConsistentReadAccess,
+  DataAccess,
   DvdCatalogReviewWorkflowEvidence,
   OriginalDiscArchiveId,
+} from "@rip-dvd/data-access";
+import {
+  CatalogMappingEvidenceUnavailableError,
+  StaleCatalogRevisionError,
 } from "@rip-dvd/data-access";
 
 import {
   CatalogReviewCompletionUnavailableError,
+  CatalogReviewMappingUnavailableError,
+  CatalogReviewRevisionStaleError,
   describeCatalogReviewWorkflow,
+  rethrowCatalogMappingOperationError,
   type CatalogReviewWorkflow,
 } from "./catalog-review-workflow.js";
 
@@ -235,4 +243,71 @@ it("does not advertise mapping before current Title Identity evidence exists", (
     available: false,
     reasons: [{ code: "SELECTION_UNIDENTIFIED" }],
   });
+});
+
+it("preserves a transactional mapping rejection if the latest workflow recovered", () => {
+  const workflow = describeCatalogReviewWorkflow(
+    {} as ConsistentReadAccess,
+    archiveId,
+    decisionReadyEvidence(false),
+  )!;
+  const access = {
+    readConsistentSnapshot: () => ({
+      workflow,
+      archive: { updatedAt: new Date("2026-10-23T12:00:00.000Z") },
+    }),
+  } as unknown as Pick<DataAccess, "readConsistentSnapshot">;
+
+  expect(() => rethrowCatalogMappingOperationError(
+    access,
+    archiveId,
+    new Date("2026-10-23T11:00:00.000Z"),
+    new CatalogMappingEvidenceUnavailableError(),
+  )).toThrowError(CatalogReviewMappingUnavailableError);
+  try {
+    rethrowCatalogMappingOperationError(
+      access,
+      archiveId,
+      new Date("2026-10-23T11:00:00.000Z"),
+      new CatalogMappingEvidenceUnavailableError(),
+    );
+  } catch (error) {
+    expect(error).toMatchObject({
+      code: "CATALOG_MAPPING_UNAVAILABLE",
+      blockingReasons: [{
+        code: "CONSISTENCY_FAULT",
+        details: { rejectedBy: "transactional_catalog_mapping_guard" },
+      }],
+      current: workflow.current,
+    });
+  }
+});
+
+it("normalizes stale legacy mapping failures at the shared boundary", () => {
+  const access = {
+    readConsistentSnapshot: () => ({
+      workflow: null,
+      archive: { updatedAt: new Date("2026-10-23T12:00:00.000Z") },
+    }),
+  } as unknown as Pick<DataAccess, "readConsistentSnapshot">;
+
+  expect(() => rethrowCatalogMappingOperationError(
+    access,
+    archiveId,
+    new Date("2026-10-23T11:00:00.000Z"),
+    new StaleCatalogRevisionError("Catalog review revision is stale"),
+  )).toThrowError(CatalogReviewRevisionStaleError);
+  try {
+    rethrowCatalogMappingOperationError(
+      access,
+      archiveId,
+      new Date("2026-10-23T11:00:00.000Z"),
+      new StaleCatalogRevisionError("Catalog review revision is stale"),
+    );
+  } catch (error) {
+    expect(error).toMatchObject({
+      code: "STALE_CATALOG_REVISION",
+      current: null,
+    });
+  }
 });

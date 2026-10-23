@@ -62,6 +62,20 @@ describe("Catalog Review volume-label formatting", () => {
 });
 
 describe("CatalogReviewEvidence", () => {
+  it("hides main-feature proposals for current-evidence mapping", () => {
+    const html = renderToStaticMarkup(
+      <CatalogReviewEvidence
+        volumeLabel="CURRENT_EVIDENCE_DISC"
+        coverage={evidenceCoverage}
+        titles={[]}
+        allowMainFeatureProposal={false}
+        onStartMappingProposal={() => undefined}
+      />,
+    );
+
+    expect(html).not.toContain("Map DVD main feature");
+  });
+
   it("renders the overlap warning for exact-overlap coverage", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewEvidence

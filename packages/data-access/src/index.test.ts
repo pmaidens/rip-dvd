@@ -15771,6 +15771,27 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       observations: [titleIdentityObservation(1)],
     });
+    const originalItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic existing recovery mapping",
+    });
+    const initialRevision = fixture.access.catalog.listOriginalDiscArchives({
+      ids: [fixture.archive.id],
+    })[0]!.updatedAt;
+    const initialMutation = {
+      action: "create" as const,
+      selection: {
+        originalDiscArchiveId: fixture.archive.id,
+        mediaItemId: originalItem.id,
+        sourceIdentity: { kind: "dvd_title" as const, titleNumber: 1 },
+      },
+    };
+    const existing = fixture.access.catalog.mutateDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      expectedCatalogRevision: initialRevision,
+      mutationKey: "synthetic-existing-recovery-mapping",
+      mutation: initialMutation,
+    });
     const sqlite = new DatabaseSync(fixture.databasePath);
     sqlite.prepare(`
       UPDATE archive_recoveries
@@ -15799,9 +15820,135 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
       },
     })).toThrow(/current Title Identity evidence/i);
+    expect(fixture.access.catalog.mutateDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      expectedCatalogRevision: initialRevision,
+      mutationKey: "synthetic-existing-recovery-mapping",
+      mutation: initialMutation,
+    }).discSelection.id).toBe(existing.discSelection.id);
+    expect(() => fixture.access.catalog.mutateDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      mutationKey: "synthetic-faulted-recovery-update",
+      mutation: {
+        action: "update",
+        discSelectionId: existing.discSelection.id,
+        changes: {
+          originalDiscArchiveId: fixture.archive.id,
+          mediaItemId: mediaItem.id,
+        },
+      },
+    })).toThrow(/current Title Identity evidence/i);
+    expect(() => fixture.access.catalog.mutateDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      mutationKey: "synthetic-faulted-recovery-delete",
+      mutation: {
+        action: "delete",
+        discSelectionId: existing.discSelection.id,
+      },
+    })).toThrow(/current Title Identity evidence/i);
+    expect(fixture.access.catalog.listDiscSelections({
+      originalDiscArchiveId: fixture.archive.id,
+    })).toEqual([expect.objectContaining({
+      id: existing.discSelection.id,
+      mediaItemId: originalItem.id,
+    })]);
+    fixture.access.close();
+  });
+
+  it("rejects main-feature mapping against current Title Identity evidence", () => {
+    const fixture = createDvdTitleIdentityArchiveFixture(
+      "title-main-feature-current-mapping",
+    );
+    const header = fixture.access.catalog.findDvdArchiveEvidenceHeader(
+      fixture.archive.id,
+    )!;
+    fixture.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: fixture.archive.id,
+      checkpoint: {
+        manifestId: header.currentManifestId,
+        manifestRevision: header.currentManifestRevision,
+        manifestDigest: header.currentManifestDigest,
+      },
+      observations: [titleIdentityObservation(1)],
+    });
+    const mediaItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic unsupported main feature",
+    });
+    const catalogRevision = fixture.access.catalog.listOriginalDiscArchives({
+      ids: [fixture.archive.id],
+    })[0]!.updatedAt;
+
+    expect(() => fixture.access.catalog.mutateDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      expectedCatalogRevision: catalogRevision,
+      mutationKey: "synthetic-current-main-feature-mapping",
+      mutation: {
+        action: "create",
+        selection: {
+          originalDiscArchiveId: fixture.archive.id,
+          mediaItemId: mediaItem.id,
+          sourceIdentity: { kind: "main_feature" },
+        },
+      },
+    })).toThrow(/exact DVD title or chapter range/i);
     expect(fixture.access.catalog.listDiscSelections({
       originalDiscArchiveId: fixture.archive.id,
     })).toEqual([]);
+    fixture.access.close();
+  });
+
+  it("maps default angles without requiring duplicate multi-angle mappings", () => {
+    const fixture = createDvdTitleIdentityArchiveFixture(
+      "title-default-angle-workflow-mapping",
+    );
+    const header = fixture.access.catalog.findDvdArchiveEvidenceHeader(
+      fixture.archive.id,
+    )!;
+    const reviewSet = fixture.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: fixture.archive.id,
+      checkpoint: {
+        manifestId: header.currentManifestId,
+        manifestRevision: header.currentManifestRevision,
+        manifestDigest: header.currentManifestDigest,
+      },
+      observations: [
+        titleIdentityObservation(1, { angleCount: 2 }),
+        titleIdentityObservation(1, {
+          angleNumber: 2,
+          angleCount: 2,
+          cellId: 2,
+        }),
+      ],
+    });
+    expect(reviewSet.items).toHaveLength(2);
+    const mediaItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic multi-angle feature",
+    });
+    const catalogRevision = fixture.access.catalog.listOriginalDiscArchives({
+      ids: [fixture.archive.id],
+    })[0]!.updatedAt;
+    fixture.access.catalog.mutateDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      expectedCatalogRevision: catalogRevision,
+      mutationKey: "synthetic-default-angle-mapping",
+      mutation: {
+        action: "create",
+        selection: {
+          originalDiscArchiveId: fixture.archive.id,
+          mediaItemId: mediaItem.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        },
+      },
+    });
+
+    expect(fixture.access.catalog.readDvdCatalogReviewWorkflowEvidence([{
+      originalDiscArchiveId: fixture.archive.id,
+      evidenceHeader: header,
+    }]).get(fixture.archive.id)?.titleIdentity?.currentMappingStates).toEqual([
+      "mapped",
+    ]);
     fixture.access.close();
   });
 
@@ -15871,7 +16018,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     fixture.access.catalog.recordDvdTitleIdentityObservations({
       originalDiscArchiveId: fixture.archive.id,
       checkpoint,
-      observations: [titleIdentityObservation(1)],
+      observations: [titleIdentityObservation(2, { cellId: 2 })],
     });
     const statementAll = vi.spyOn(StatementSync.prototype, "all");
     const projectedRowCount = () => statementAll.mock.results.reduce(
@@ -15901,7 +16048,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       fixture.access.catalog.recordDvdTitleIdentityObservations({
         originalDiscArchiveId: fixture.archive.id,
         checkpoint,
-        observations: [titleIdentityObservation(1)],
+        observations: [titleIdentityObservation(revision, {
+          cellId: revision,
+        })],
       });
     }
     statementAll.mockClear();

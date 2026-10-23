@@ -259,7 +259,9 @@ For an existing Media Item, use
 The optional `discSelection.label` names the selected source. Source kinds are
 `main_feature`, `dvd_title`, and `dvd_chapters`. A chapter source also needs
 `titleNumber`, `chapterStart`, and `chapterEnd`. Omit `completeReview` to leave
-Catalog Review open.
+Catalog Review open. A `dvd-recovery-evidence-v1` archive accepts exact
+`dvd_title` and `dvd_chapters` sources only; `main_feature` remains available
+for legacy evidence.
 
 Episodic proposal schema:
 
@@ -295,7 +297,8 @@ rip-dvd catalog-review apply-proposal <archive-id> --key <key> \
 The command writes one JSON result and exits 0 on success. Invalid JSON or
 proposal shape exits 2 with `INVALID_ARGUMENTS` or `INVALID_PROPOSAL`.
 Rejected members, stale revisions, and key conflicts exit 2 with
-`PROPOSAL_REJECTED`, `STALE_CATALOG_REVISION`, or `MUTATION_KEY_CONFLICT`.
+`PROPOSAL_REJECTED`, `CATALOG_MAPPING_SOURCE_UNSUPPORTED`,
+`STALE_CATALOG_REVISION`, or `MUTATION_KEY_CONFLICT`.
 Database unavailability exits 1 with `PROPOSAL_UNAVAILABLE`.
 
 ## Complete Catalog Review
@@ -390,14 +393,18 @@ result. Reusing the key with different inputs fails. For a
 `dvd-recovery-evidence-v1` archive, `create` also requires the Catalog Review
 revision returned by `catalog-review show`; the mutation validates the source
 against current Title Identity evidence and rejects a stale revision rather
-than retargeting a title number. Legacy creation remains revision-optional.
+than retargeting a title number. Only exact default-angle `dvd_title` and
+`dvd_chapters` sources are accepted for this format. Legacy creation remains
+revision-optional and continues to accept `main_feature`.
 An `update` that changes
 the Media Item or source, plus every `repair`, `correct`, and `delete`, requires
 an action-specific preview. Pass the returned revision and token with
 `--acknowledge`. A changed Catalog Review revision or different proposal
 rejects the decision. Label-only updates execute directly. The catalog uses
 the same archive binding, source validation, and Encode Job provenance rules
-as the web editor.
+as the web editor. Every new-format mutation, including label or Media Item
+updates and deletion, is rejected if current Title Identity evidence or a
+consistent Recovery state is unavailable.
 For an unsafe legacy selection, `delete` quarantines the selection when its
 Encode Job history must remain. Inspect the affected job with
 `inspect encode-jobs <job-id>` and the current mappings and correction history
