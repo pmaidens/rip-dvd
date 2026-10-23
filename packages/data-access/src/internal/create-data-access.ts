@@ -1727,6 +1727,51 @@ export function createDataAccessInternal(
       ].slice(-DVD_RECOVERY_PASS_HISTORY_LIMIT),
     };
   };
+  const insertQueuedDvdDiscVerification = (
+    transaction: CatalogTransaction,
+    input: Pick<
+      DvdDiscVerification,
+      | "archiveRecoveryId"
+      | "archiveRecoveryAttemptId"
+      | "originalDiscArchiveId"
+      | "discInspectionId"
+      | "detectedDiscId"
+      | "mediaGeneration"
+      | "sourceMetadataFingerprint"
+      | "observedMetadataFingerprint"
+      | "checkpointRevision"
+      | "checkpointDigest"
+    >,
+    timestamp: Date,
+  ) => {
+    const id = newId<DvdDiscVerificationId>();
+    const attemptOrdinal = requireRow(
+      transaction.select({
+        value:
+          sql<number>`coalesce(max(${dvdDiscVerifications.attemptOrdinal}), 0) + 1`,
+      }).from(dvdDiscVerifications).where(eq(
+        dvdDiscVerifications.archiveRecoveryId,
+        input.archiveRecoveryId,
+      )).get(),
+      "DVD Disc Verification attempt sequence",
+      input.archiveRecoveryId,
+    ).value;
+    return requireRow(
+      transaction.insert(dvdDiscVerifications).values({
+        id,
+        ...input,
+        attemptOrdinal,
+        status: "queued",
+        reasons: [],
+        findings: [],
+        budgetExhausted: false,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }).returning().get(),
+      "DVD Disc Verification",
+      id,
+    );
+  };
   const queueNextArchiveRecoveryPassVerification = (
     transaction: CatalogTransaction,
     recovery: ArchiveRecovery,
@@ -1760,22 +1805,9 @@ export function createDataAccessInternal(
       "DVD Archive Evidence",
       recovery.originalDiscArchiveId,
     );
-    const attemptOrdinal = requireRow(
-      transaction.select({
-        value:
-          sql<number>`coalesce(max(${dvdDiscVerifications.attemptOrdinal}), 0) + 1`,
-      }).from(dvdDiscVerifications).where(eq(
-        dvdDiscVerifications.archiveRecoveryId,
-        recovery.id,
-      )).get(),
-      "DVD Disc Verification attempt sequence",
-      recovery.id,
-    ).value;
-    transaction.insert(dvdDiscVerifications).values({
-      id: newId<DvdDiscVerificationId>(),
+    insertQueuedDvdDiscVerification(transaction, {
       archiveRecoveryId: recovery.id,
       archiveRecoveryAttemptId: recovery.attemptId,
-      attemptOrdinal,
       originalDiscArchiveId: recovery.originalDiscArchiveId,
       discInspectionId: previous.discInspectionId,
       detectedDiscId: previous.detectedDiscId,
@@ -1784,13 +1816,7 @@ export function createDataAccessInternal(
       observedMetadataFingerprint: previous.observedMetadataFingerprint,
       checkpointRevision: header.currentManifestRevision,
       checkpointDigest: header.currentManifestDigest,
-      status: "queued",
-      reasons: [],
-      findings: [],
-      budgetExhausted: false,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    }).run();
+    }, timestamp);
   };
   const archiveRecoveryCompletionAfterInterruption = (
     transaction: CatalogTransaction,
@@ -5403,10 +5429,27 @@ export function createDataAccessInternal(
   function decodeArchiveRecoveryStopReceipt(
     stored: string,
   ): ArchiveRecoveryStopReceipt {
-    return JSON.parse(stored, (field, value: unknown) =>
+    const outcome = JSON.parse(stored, (field, value: unknown) =>
       field.endsWith("At") && typeof value === "string"
         ? new Date(value)
         : value) as ArchiveRecoveryStopReceipt;
+    return {
+      ...outcome,
+      pauseReason: outcome.pauseReason ?? null,
+      passHistory: outcome.passHistory ?? [],
+      work: outcome.work === null
+        ? null
+        : {
+            ...outcome.work,
+            passNumber: outcome.work.passNumber ?? 1,
+            passDirection: outcome.work.passDirection ?? "forward",
+            passStartedAt: outcome.work.passStartedAt ?? null,
+            passInitialUnrecoveredSectorCount:
+              outcome.work.passInitialUnrecoveredSectorCount ?? null,
+            passRecoveredSectorCount:
+              outcome.work.passRecoveredSectorCount ?? 0,
+          },
+    };
   }
 
   function decodeCatalogReviewCompletionOutcome(
@@ -10948,10 +10991,16 @@ export function createDataAccessInternal(
             "Archive Recovery",
             input.archiveRecoveryId,
           );
-          if (recovery.status === "running" || recovery.status === "stopping") {
+          if (
+            recovery.status === "running" || recovery.status === "stopping" ||
+            (recovery.status === "eligible" &&
+              recovery.work?.status === "requested")
+          ) {
             throw new InvalidStatusTransitionError(
               "Archive Recovery",
-              recovery.status,
+              recovery.work?.status === "requested"
+                ? "requested"
+                : recovery.status,
               "DVD recovery reconciliation",
             );
           }
@@ -11300,18 +11349,7 @@ export function createDataAccessInternal(
               "queued",
             );
           }
-          const id = newId<DvdDiscVerificationId>();
           const timestamp = now();
-          const attemptOrdinal = requireRow(
-            transaction.select({
-              value: sql<number>`coalesce(max(${dvdDiscVerifications.attemptOrdinal}), 0) + 1`,
-            }).from(dvdDiscVerifications).where(eq(
-              dvdDiscVerifications.archiveRecoveryId,
-              recovery.id,
-            )).get(),
-            "DVD Disc Verification attempt sequence",
-            recovery.id,
-          ).value;
           const storedSourceManifest = transaction
             .select({ manifest: dvdSourceSampleManifests.manifest })
             .from(dvdSourceSampleManifests)
@@ -11326,31 +11364,19 @@ export function createDataAccessInternal(
           validateDvdDiscVerificationManifestBinding(sourceManifest, {
             sourceMetadataFingerprint: archive.fingerprint,
           }, header);
-          const row = requireRow(
-            transaction.insert(dvdDiscVerifications).values({
-              id,
-              archiveRecoveryId: recovery.id,
-              archiveRecoveryAttemptId: recovery.attemptId,
-              attemptOrdinal,
-              originalDiscArchiveId: recovery.originalDiscArchiveId,
-              discInspectionId: inspection.id,
-              detectedDiscId: observedDisc.id,
-              mediaGeneration: inspection.mediaGeneration,
-              sourceMetadataFingerprint:
-                sourceManifest?.sourceMetadataFingerprint ?? archive.fingerprint,
-              observedMetadataFingerprint: observedDisc.fingerprint,
-              checkpointRevision: header.currentManifestRevision,
-              checkpointDigest: header.currentManifestDigest,
-              status: "queued",
-              reasons: [],
-              findings: [],
-              budgetExhausted: false,
-              createdAt: timestamp,
-              updatedAt: timestamp,
-            }).returning().get(),
-            "DVD Disc Verification",
-            id,
-          );
+          const row = insertQueuedDvdDiscVerification(transaction, {
+            archiveRecoveryId: recovery.id,
+            archiveRecoveryAttemptId: recovery.attemptId,
+            originalDiscArchiveId: recovery.originalDiscArchiveId,
+            discInspectionId: inspection.id,
+            detectedDiscId: observedDisc.id,
+            mediaGeneration: inspection.mediaGeneration,
+            sourceMetadataFingerprint:
+              sourceManifest?.sourceMetadataFingerprint ?? archive.fingerprint,
+            observedMetadataFingerprint: observedDisc.fingerprint,
+            checkpointRevision: header.currentManifestRevision,
+            checkpointDigest: header.currentManifestDigest,
+          }, timestamp);
           recordMutationInvocation(
             transaction,
             input.mutationKey,
@@ -13669,6 +13695,17 @@ export function createDataAccessInternal(
               ),
             )),
         );
+        const requestedRecoveryPass = exists(
+          database.select({ id: archiveRecoveryWork.archiveRecoveryId })
+            .from(archiveRecoveryWork)
+            .where(and(
+              eq(
+                archiveRecoveryWork.archiveRecoveryId,
+                archiveRecoveries.id,
+              ),
+              eq(archiveRecoveryWork.status, "requested"),
+            )),
+        );
         const active = database.select({ id: archiveRecoveries.id })
           .from(archiveRecoveries)
           .where(or(
@@ -13677,6 +13714,7 @@ export function createDataAccessInternal(
               "paused",
               "stopping",
             ]),
+            requestedRecoveryPass,
             activeReconciliation,
           ))
           .orderBy(desc(archiveRecoveries.updatedAt), desc(archiveRecoveries.id))
@@ -13691,6 +13729,17 @@ export function createDataAccessInternal(
               ne(archiveRecoveries.status, "running"),
               ne(archiveRecoveries.status, "paused"),
               ne(archiveRecoveries.status, "stopping"),
+              notExists(
+                database.select({
+                  id: archiveRecoveryWork.archiveRecoveryId,
+                }).from(archiveRecoveryWork).where(and(
+                  eq(
+                    archiveRecoveryWork.archiveRecoveryId,
+                    archiveRecoveries.id,
+                  ),
+                  eq(archiveRecoveryWork.status, "requested"),
+                )),
+              ),
               notExists(
                 database.select({ id: dvdRecoveryReconciliations.id })
                   .from(dvdRecoveryReconciliations)

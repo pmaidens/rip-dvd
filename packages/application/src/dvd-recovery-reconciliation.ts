@@ -34,12 +34,13 @@ function reconciliationContext(
 }
 
 export function dvdRecoveryReconciliationBlockingReasons(
-  recovery: Pick<ArchiveRecovery, "status">,
+  recovery: Pick<ArchiveRecovery, "status" | "work">,
   latest: Pick<DvdRecoveryReconciliation, "status"> | null,
 ) {
   const active = latest?.status === "queued" || latest?.status === "running";
   const recoveryPassActive = recovery.status === "running" ||
-    recovery.status === "stopping";
+    recovery.status === "stopping" ||
+    (recovery.status === "eligible" && recovery.work?.status === "requested");
   return [
     ...(active ? [{
         code: "RECONCILIATION_ACTIVE",

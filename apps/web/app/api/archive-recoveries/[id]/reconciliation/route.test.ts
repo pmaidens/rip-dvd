@@ -266,21 +266,18 @@ it("keeps wait pending for reconciliation after a faulted Stop", async () => {
   }
 });
 
-it("rejects reconciliation while a Recovery pass owns the attempt", async () => {
+it("rejects reconciliation while a productive continuation is queued", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const seeded = await seedRecovery(fixture);
   const access = fixture.openAccess();
   const recoveryId = seeded.recoveryId as ArchiveRecoveryId;
   try {
-    access.archiveRecoveryWork.claim(
-      recoveryId,
-      "synthetic-active-recovery-worker",
-    );
+    access.archiveRecoveryWork.request(recoveryId);
     const database = new DatabaseSync(fixture.databasePath);
-    database.prepare(`UPDATE archive_recoveries
-      SET status = 'running', updated_at = updated_at + 1
-      WHERE id = ?`).run(recoveryId);
+    database.prepare(`UPDATE archive_recovery_work
+      SET pass_number = 2, pass_direction = 'reverse'
+      WHERE archive_recovery_id = ?`).run(recoveryId);
     database.close();
 
     const inspection = await createDvdRecoveryReconciliationInspectionRoute(
@@ -335,6 +332,71 @@ it("rejects reconciliation while a Recovery pass owns the attempt", async () => 
     });
     expect(access.dvdRecoveryReconciliations.findLatestForRecovery(recoveryId))
       .toBeNull();
+  } finally {
+    access.close();
+  }
+});
+
+it("keeps requested Recovery work in a bounded active listing", () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const setup = createLegacySidecarDataAccess({
+    databasePath: fixture.databasePath,
+    mediaLibraryPath: fixture.mediaLibraryPath,
+    originalsLibraryPath: fixture.originalsLibraryPath,
+  });
+  const drive = setup.catalog.upsertOpticalDrive({
+    devicePath: "/dev/synthetic-bounded-recovery-list",
+    isPresent: true,
+  });
+  const archives = ["queued", "historical"].map((name) => {
+    const disc = setup.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: `synthetic-bounded-recovery-${name}`,
+    });
+    setup.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    setup.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    return setup.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: `/synthetic/bounded-recovery-${name}.iso`,
+      fingerprint: disc.fingerprint,
+    });
+  });
+  setup.close();
+  const queuedRecoveryId = "synthetic-bounded-queued-recovery";
+  markArchiveWithDvdRecoveryEvidence(
+    fixture.databasePath,
+    archives[0]!.id,
+    "synthetic-bounded-queued",
+    {
+      archiveRecovery: {
+        id: queuedRecoveryId,
+        workStatus: "requested",
+      },
+    },
+  );
+  markArchiveWithDvdRecoveryEvidence(
+    fixture.databasePath,
+    archives[1]!.id,
+    "synthetic-bounded-historical",
+    {
+      archiveRecovery: { id: "synthetic-bounded-historical-recovery" },
+    },
+  );
+  const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`UPDATE archive_recoveries SET updated_at = 1
+    WHERE id = ?`).run(queuedRecoveryId);
+  database.prepare(`UPDATE archive_recoveries SET updated_at = 2
+    WHERE id = ?`).run("synthetic-bounded-historical-recovery");
+  database.close();
+
+  const access = fixture.openAccess();
+  try {
+    expect(access.catalog.listArchiveRecoveries({ limit: 1 }))
+      .toEqual([expect.objectContaining({ id: queuedRecoveryId })]);
   } finally {
     access.close();
   }

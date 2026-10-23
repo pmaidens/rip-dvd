@@ -12,11 +12,11 @@ recovery runs complete unresolved-only passes without a time limit. Each pass
 that recovers bytes schedules another pass in the opposite direction. A
 complete pass that recovers no bytes durably pauses recovery; this is a safe
 scheduling boundary, not a conclusion that the remaining source is damaged.
-The operator can explicitly resume another pass or Stop the recovery. Web
-cancellation and `rip-dvd cancel-archive-request` use the same Archive Request
-operation. A CLI wait deadline ends the observer's wait without cancelling
-background work. The retired `RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS` setting has no
-effect.
+The operator can Stop the recovery. A future explicit Resume control can start
+another pass after a no-progress pause. Web cancellation and
+`rip-dvd cancel-archive-request` use the same Archive Request operation. A CLI
+wait deadline ends the observer's wait without cancelling background work. The
+retired `RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS` setting has no effect.
 
 Cancellation still propagates through the Archive Job signal, stops helper
 processes, and closes authorization pipes. Copy ownership remains reserved
