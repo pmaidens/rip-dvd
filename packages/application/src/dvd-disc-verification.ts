@@ -67,6 +67,9 @@ function visibleVerification(
 ) {
   const {
     claimToken: _claimToken,
+    admittedDevicePath: _admittedDevicePath,
+    admittedDeviceId: _admittedDeviceId,
+    admittedDeviceInode: _admittedDeviceInode,
     ...visible
   } = verification;
   return {

@@ -1975,6 +1975,9 @@ export const dvdDiscVerifications = sqliteTable(
     workerExecutionId: text("worker_execution_id"),
     claimToken: text("claim_token").$type<DvdDiscVerificationClaimToken>(),
     claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
+    admittedDevicePath: text("admitted_device_path"),
+    admittedDeviceId: text("admitted_device_id"),
+    admittedDeviceInode: text("admitted_device_inode"),
     startedAt: integer("started_at", { mode: "timestamp_ms" }),
     completedAt: integer("completed_at", { mode: "timestamp_ms" }),
     failureCode: text("failure_code"),
@@ -2015,6 +2018,10 @@ export const dvdDiscVerifications = sqliteTable(
     check(
       "dvd_disc_verifications_claim_check",
       sql`(${table.status} = 'running' and ${table.claimToken} is not null and ${table.claimedAt} is not null and ${table.workerExecutionId} is not null and ${table.startedAt} is not null) or (${table.status} <> 'running' and ${table.claimToken} is null and ${table.claimedAt} is null)`,
+    ),
+    check(
+      "dvd_disc_verifications_device_identity_check",
+      sql`(${table.admittedDevicePath} is null and ${table.admittedDeviceId} is null and ${table.admittedDeviceInode} is null) or (${table.admittedDevicePath} is not null and length(${table.admittedDevicePath}) > 0 and ${table.admittedDeviceId} is not null and length(${table.admittedDeviceId}) > 0 and ${table.admittedDeviceInode} is not null and length(${table.admittedDeviceInode}) > 0)`,
     ),
   ],
 );

@@ -8586,20 +8586,6 @@ export function createDataAccessInternal(
         badSectorRanges,
         updatedAt: timestamp,
       }).where(eq(originalDiscArchives.id, archiveId)).run();
-      transaction.update(archiveRecoveries).set({
-        status: current.recovery.status === "stopping" ||
-            current.recovery.status === "faulted"
-          ? current.recovery.status
-          : claim !== undefined
-            ? "running"
-            : badSectorCount === 0
-              ? "completed"
-              : "eligible",
-        updatedAt: timestamp,
-      }).where(eq(
-        archiveRecoveries.originalDiscArchiveId,
-        archiveId,
-      )).run();
       const recoveryWork = transaction.select().from(archiveRecoveryWork)
         .where(and(
           eq(archiveRecoveryWork.archiveRecoveryId, current.recovery.id),
@@ -8609,6 +8595,20 @@ export function createDataAccessInternal(
             ? []
             : [eq(archiveRecoveryWork.claimToken, claim.claimToken)]),
         )).get();
+      transaction.update(archiveRecoveries).set({
+        status: current.recovery.status === "stopping" ||
+            current.recovery.status === "faulted"
+          ? current.recovery.status
+          : recoveryWork !== undefined
+            ? "running"
+            : badSectorCount === 0
+              ? "completed"
+              : "eligible",
+        updatedAt: timestamp,
+      }).where(eq(
+        archiveRecoveries.originalDiscArchiveId,
+        archiveId,
+      )).run();
       if (recoveryWork !== undefined) {
         transaction.update(archiveRecoveryWork).set({
           passCursorLba: recoveryRead.startLba,
@@ -9323,7 +9323,7 @@ export function createDataAccessInternal(
             });
       },
       findNextInterrupted(workerId) {
-        const activeWorkerId = requireNonEmpty(workerId, "workerId");
+        requireNonEmpty(workerId, "workerId");
         const expiredBefore = new Date(
           now().getTime() - DVD_RECOVERY_PASS_CLAIM_LEASE_MS,
         );
@@ -9336,7 +9336,6 @@ export function createDataAccessInternal(
           .where(and(
             eq(archiveRecoveries.status, "running"),
             eq(archiveRecoveryWork.status, "claimed"),
-            ne(archiveRecoveryWork.claimedBy, activeWorkerId),
             lt(archiveRecoveryWork.claimedAt, expiredBefore),
           ))
           .orderBy(
@@ -9698,6 +9697,72 @@ export function createDataAccessInternal(
       },
       assertClaim(claim) {
         return requireCurrentArchiveRecoveryClaim(database, claim);
+      },
+      beginInterruptedTakeover(claim, workerId) {
+        const claimedBy = requireNonEmpty(workerId, "workerId");
+        const expiredBefore = new Date(
+          now().getTime() - DVD_RECOVERY_PASS_CLAIM_LEASE_MS,
+        );
+        return database.transaction((transaction) => {
+          const current = transaction.select().from(archiveRecoveryWork)
+            .where(and(
+              eq(
+                archiveRecoveryWork.archiveRecoveryId,
+                claim.archiveRecoveryId,
+              ),
+              eq(archiveRecoveryWork.attemptId, claim.attemptId),
+              eq(archiveRecoveryWork.status, "claimed"),
+              eq(archiveRecoveryWork.claimToken, claim.claimToken),
+              lt(archiveRecoveryWork.claimedAt, expiredBefore),
+              exists(
+                transaction.select({ id: archiveRecoveries.id })
+                  .from(archiveRecoveries)
+                  .where(and(
+                    eq(archiveRecoveries.id, claim.archiveRecoveryId),
+                    eq(archiveRecoveries.attemptId, claim.attemptId),
+                    eq(archiveRecoveries.status, "running"),
+                  )),
+              ),
+            )).get();
+          if (current === undefined) return null;
+          const timestamp = now();
+          const takeover = transaction.update(archiveRecoveryWork).set({
+            claimedBy,
+            claimToken: newId<ArchiveRecoveryClaimToken>(),
+            claimedAt: timestamp,
+            updatedAt: timestamp,
+          }).where(and(
+            eq(
+              archiveRecoveryWork.archiveRecoveryId,
+              claim.archiveRecoveryId,
+            ),
+            eq(archiveRecoveryWork.attemptId, claim.attemptId),
+            eq(archiveRecoveryWork.status, "claimed"),
+            eq(archiveRecoveryWork.claimToken, claim.claimToken),
+            lt(archiveRecoveryWork.claimedAt, expiredBefore),
+          )).returning().get();
+          if (
+            takeover === undefined ||
+            takeover.status !== "claimed" ||
+            takeover.claimedBy === null ||
+            takeover.claimToken === null ||
+            takeover.claimedAt === null
+          ) return null;
+          return takeover as ClaimedArchiveRecoveryWork;
+        }, { behavior: "immediate" });
+      },
+      deferInterruptedTakeover(claim) {
+        return database.update(archiveRecoveryWork).set({
+          claimedAt: new Date(0),
+          updatedAt: now(),
+        }).where(and(
+          eq(archiveRecoveryWork.archiveRecoveryId, claim.archiveRecoveryId),
+          eq(archiveRecoveryWork.attemptId, claim.attemptId),
+          eq(archiveRecoveryWork.status, "claimed"),
+          eq(archiveRecoveryWork.claimToken, claim.claimToken),
+        )).returning({
+          archiveRecoveryId: archiveRecoveryWork.archiveRecoveryId,
+        }).get() !== undefined;
       },
       renewClaim(claim) {
         const timestamp = now();
@@ -11164,6 +11229,20 @@ export function createDataAccessInternal(
             recovery?.status !== "eligible" ||
             recovery.attemptId !== current.archiveRecoveryAttemptId
           ) return false;
+          const inspection = transaction.select().from(discInspections)
+            .where(eq(discInspections.id, current.discInspectionId)).get();
+          const drive = inspection === undefined
+            ? undefined
+            : transaction.select().from(opticalDrives).where(eq(
+              opticalDrives.id,
+              inspection.opticalDriveId,
+            )).get();
+          if (
+            !dvdDiscVerificationInsertionIsCurrent(current, inspection) ||
+            drive === undefined ||
+            !drive.isPresent ||
+            !drive.isEnabled
+          ) return false;
           const timestamp = now();
           const renewed = transaction.update(dvdDiscVerifications).set({
             claimedAt: timestamp,
@@ -11174,7 +11253,30 @@ export function createDataAccessInternal(
             eq(dvdDiscVerifications.claimToken, claimToken),
           )).returning({ id: dvdDiscVerifications.id }).get();
           if (renewed === undefined) return false;
-          start();
+          const identity = start();
+          if (
+            identity.devicePath !== drive.devicePath ||
+            !/^\d+$/.test(identity.deviceId) ||
+            !/^\d+$/.test(identity.inode)
+          ) {
+            throw new DomainInvariantError(
+              "DVD Disc Verification source device identity is invalid",
+            );
+          }
+          requireRow(
+            transaction.update(dvdDiscVerifications).set({
+              admittedDevicePath: identity.devicePath,
+              admittedDeviceId: identity.deviceId,
+              admittedDeviceInode: identity.inode,
+              updatedAt: now(),
+            }).where(and(
+              eq(dvdDiscVerifications.id, claim.id),
+              eq(dvdDiscVerifications.status, "running"),
+              eq(dvdDiscVerifications.claimToken, claimToken),
+            )).returning({ id: dvdDiscVerifications.id }).get(),
+            "DVD Disc Verification",
+            claim.id,
+          );
           return true;
         }, { behavior: "immediate" });
       },

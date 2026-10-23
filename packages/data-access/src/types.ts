@@ -580,6 +580,9 @@ export interface DvdDiscVerification {
   workerExecutionId: string | null;
   claimToken: DvdDiscVerificationClaimToken | null;
   claimedAt: Date | null;
+  admittedDevicePath: string | null;
+  admittedDeviceId: string | null;
+  admittedDeviceInode: string | null;
   startedAt: Date | null;
   completedAt: Date | null;
   failureCode: string | null;
@@ -652,6 +655,11 @@ export interface ArchiveRecoveryWorkAccess {
     workerId: string,
   ): ClaimedArchiveRecoveryWork;
   assertClaim(claim: ClaimedArchiveRecoveryWork): ArchiveRecovery;
+  beginInterruptedTakeover(
+    claim: ClaimedArchiveRecoveryWork,
+    workerId: string,
+  ): ClaimedArchiveRecoveryWork | null;
+  deferInterruptedTakeover(claim: ClaimedArchiveRecoveryWork): boolean;
   renewClaim(claim: ClaimedArchiveRecoveryWork): boolean;
   admitSourceRead(
     claim: ClaimedArchiveRecoveryWork,
@@ -2410,7 +2418,7 @@ export interface DvdDiscVerificationAccess {
   renewClaim(claim: DvdDiscVerification): boolean;
   admitSourceRead(
     claim: DvdDiscVerification,
-    start: () => void,
+    start: () => OpticalDeviceIdentity,
   ): boolean;
   appendFinding(
     claim: DvdDiscVerification,

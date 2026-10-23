@@ -32,6 +32,11 @@ const diagnostic: DvdDiscVerificationDiagnostic = {
   ascq: null,
   informationLba: null,
 };
+const deviceIdentity = {
+  devicePath: "/dev/synthetic-disc",
+  deviceId: "1",
+  inode: "2",
+};
 
 function sampleBytes(index: number): Buffer {
   const bytes = Buffer.alloc(DVD_SOURCE_SAMPLE_BYTE_COUNT, index);
@@ -71,6 +76,7 @@ function reader(
       result: Promise.resolve(read(startLba / 64)),
       closed: Promise.resolve(),
       cancel: vi.fn(),
+      deviceIdentity,
     }));
   return { reader: { start: run }, run };
 }
@@ -330,6 +336,7 @@ it("cancels a hung read at the deadline and waits for quiescence", async () => {
           closeRead = resolve;
         }),
         cancel,
+        deviceIdentity,
       })),
     };
     const verification = verifyInsertedDvdAgainstSamples({
@@ -376,6 +383,7 @@ it("cancels a hung read on worker shutdown and waits for quiescence", async () =
         closeRead = resolve;
       }),
       cancel,
+      deviceIdentity,
     })),
   };
   const controller = new AbortController();

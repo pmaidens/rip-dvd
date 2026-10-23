@@ -1005,16 +1005,44 @@ it("reclaims a crashed worker claim before a restarted worker resumes", async ()
   const withDeviceIdentityInactive = vi.fn(async (
     _identity: ReturnType<typeof syntheticDeviceIdentity>,
     mutation: () => void | Promise<void>,
-  ) => mutation());
+  ) => {
+    if (withDeviceIdentityInactive.mock.calls.length === 1) {
+      expect(input.access.archiveRecoveryWork.renewClaim(crashed.claim))
+        .toBe(false);
+      const staleStart = vi.fn(() => crashedIdentity);
+      expect(() => input.access.archiveRecoveryWork.admitSourceRead(
+        crashed.claim,
+        seeded.verificationDrive.devicePath,
+        staleStart,
+      )).toThrow();
+      expect(staleStart).not.toHaveBeenCalled();
+      throw new Error("Synthetic crashed helper remains active");
+    }
+    await mutation();
+  });
   input.deviceInactivity.withDeviceIdentityInactive =
     withDeviceIdentityInactive;
   try {
-    expect(await pollDvdRecoveryPass(input)).toBe(true);
+    expect(await pollDvdRecoveryPass(input)).toBe(false);
     expect(withDeviceIdentityInactive).toHaveBeenCalledWith(
       crashedIdentity,
       expect.any(Function),
     );
     expect(source.start).not.toHaveBeenCalled();
+    const fenced = input.access.catalog.findArchiveRecoveryById(
+      seeded.recoveryId,
+    );
+    expect(fenced).toMatchObject({
+      status: "running",
+      work: {
+        status: "claimed",
+        claimedBy: "synthetic-restarted-after-crash-worker",
+        admittedDevicePath: crashedIdentity.devicePath,
+      },
+    });
+    expect(fenced?.work?.claimToken).not.toBe(crashed.claim.claimToken);
+
+    expect(await pollDvdRecoveryPass(input)).toBe(true);
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({
         status: "eligible",
@@ -1030,6 +1058,64 @@ it("reclaims a crashed worker claim before a restarted worker resumes", async ()
     expect(source.start).toHaveBeenCalledOnce();
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({ status: "completed", work: null });
+  } finally {
+    input.access.close();
+  }
+}, 20_000);
+
+it("rolls a published checkpoint forward before requeueing a crashed claim", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 208,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  const authority = await completeVerification(fixture, seeded);
+  const crashedAccess = fixture.openAccess();
+  const crashed = crashedAccess.archiveRecoveryWork
+    .claimNextVerifiedCandidate("synthetic-published-checkpoint-worker");
+  if (crashed === null) throw new Error("Expected crashed recovery claim");
+  let pointerPublished = false;
+  await expect(commitDvdRecoveryBatch({
+    access: crashedAccess,
+    originalsLibraryPath: fixture.originalsLibraryPath,
+    originalDiscArchiveId: seeded.archive.id,
+    recoveryWorkClaim: crashed.claim,
+    writeAuthority: authority,
+    observation: {
+      startLba: 208,
+      outcome: "recovered",
+      bytes: Buffer.alloc(2_048, 0x6c),
+    },
+    atomicWriter: syntheticAtomicWriter,
+    fault(point) {
+      if (point === "after:pointer") {
+        pointerPublished = true;
+        throw new Error("Synthetic process loss after pointer publication");
+      }
+    },
+  })).rejects.toThrow("CONSISTENCY_FAULT");
+  expect(pointerPublished).toBe(true);
+  crashedAccess.close();
+  const crashedDatabase = new DatabaseSync(fixture.databasePath);
+  crashedDatabase.prepare(`UPDATE archive_recovery_work
+    SET claimed_at = 0
+    WHERE archive_recovery_id = ?`).run(seeded.recoveryId);
+  crashedDatabase.close();
+
+  const source = immediateReader(() => {
+    throw new Error("Published recovery evidence must not be read again");
+  });
+  const input = pollInput(fixture, source.reader);
+  input.workerExecutionId = "synthetic-published-checkpoint-restart-worker";
+  try {
+    expect(await pollDvdRecoveryPass(input)).toBe(true);
+    expect(source.start).not.toHaveBeenCalled();
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "completed", work: null });
+    expect(input.access.catalog.findDvdArchiveEvidenceHeader(seeded.archive.id))
+      .toMatchObject({ currentManifestRevision: 2 });
   } finally {
     input.access.close();
   }
@@ -1549,6 +1635,88 @@ it("keeps Stop pending until running disc verification settles", async () => {
   }
 });
 
+it("keeps Stop pending while an expired verification helper is still active", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(
+    fixture,
+    undefined,
+    "/dev/synthetic-expired-verification-drive",
+  );
+  const submitted = await fixture.run([
+    "archive-recovery", "verify-disc", seeded.recoveryId,
+    "--key", "00000000-0000-4000-8000-000000000490",
+    "--disc-inspection-id", seeded.inspection.id,
+    "--checkpoint-revision", "1",
+    "--checkpoint-digest", seeded.manifest.manifestDigest,
+  ]);
+  expect(submitted.exitCode).toBe(0);
+  const source = immediateReader(() => {
+    throw new Error("No recovery read is allowed while stopping");
+  });
+  const input = pollInput(fixture, source.reader);
+  const verificationClaim = input.access.dvdDiscVerifications.claimNext(
+    "synthetic-expired-verification-worker",
+  );
+  if (verificationClaim === null) {
+    throw new Error("Expected verification claim");
+  }
+  const verificationIdentity = syntheticDeviceIdentity(
+    seeded.verificationDrive.devicePath,
+  );
+  expect(input.access.dvdDiscVerifications.admitSourceRead(
+    verificationClaim,
+    () => verificationIdentity,
+  )).toBe(true);
+  input.access.archiveRecoveryWork.requestStop({
+    mutationKey: "00000000-0000-4000-8000-000000000491",
+    archiveRecoveryId: seeded.recoveryId,
+    attemptId: seeded.attemptId,
+  });
+  const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`UPDATE dvd_disc_verifications
+    SET claimed_at = 0
+    WHERE id = ?`).run(verificationClaim.id);
+  database.close();
+  let inactivityAttempts = 0;
+  input.deviceInactivity.withDeviceIdentityInactive = async (
+    identity,
+    mutation,
+  ) => {
+    expect(identity).toEqual(verificationIdentity);
+    inactivityAttempts += 1;
+    if (inactivityAttempts === 1) {
+      throw new Error("Synthetic verification helper remains active");
+    }
+    await mutation();
+  };
+  const reconcile = vi.fn(async () => ({
+    outcome: "already_consistent",
+    evidence: {},
+  })) as unknown as typeof reconcileDvdRecoveryCheckpoint;
+  try {
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(false);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "stopping" });
+    expect(input.access.dvdDiscVerifications.find(verificationClaim.id))
+      .toMatchObject({
+        status: "completed",
+        admittedDevicePath: verificationIdentity.devicePath,
+        admittedDeviceId: verificationIdentity.deviceId,
+        admittedDeviceInode: verificationIdentity.inode,
+      });
+    expect(reconcile).not.toHaveBeenCalled();
+
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(true);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "stopped", work: null });
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(source.start).not.toHaveBeenCalled();
+  } finally {
+    input.access.close();
+  }
+});
+
 it("starts no further verification read after Stop commits", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
@@ -1576,6 +1744,9 @@ it("starts no further verification read after Stop commits", async () => {
     })),
     closed: firstRead,
     cancel: vi.fn(),
+    deviceIdentity: syntheticDeviceIdentity(
+      "/dev/synthetic-verification-stop-drive",
+    ),
   }));
   const access = fixture.openAccess();
   try {
@@ -1635,6 +1806,9 @@ it("quiesces a verification read when admission fails after start", async () => 
     result: new Promise<never>(() => {}),
     closed,
     cancel,
+    deviceIdentity: syntheticDeviceIdentity(
+      "/dev/synthetic-verification-admission-drive",
+    ),
   }));
   const access = fixture.openAccess();
   try {

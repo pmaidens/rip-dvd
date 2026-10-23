@@ -122,7 +122,9 @@ interface DvdSourceReadRange {
 export interface DvdVerificationSourceReader {
   start(
     input: DvdSourceReadRange & { timeoutMs: number },
-  ): ActiveBoundedProcess<DvdSourceRead>;
+  ): ActiveBoundedProcess<DvdSourceRead> & {
+    deviceIdentity: OpticalDeviceIdentity;
+  };
 }
 
 export interface DvdRecoverySourceReader {
@@ -580,12 +582,17 @@ export async function pollDvdDiscVerification(input: {
             devicePath: drive.devicePath,
             reader: {
               start(request) {
-                let active: ActiveBoundedProcess<DvdSourceRead> | undefined;
+                let active:
+                  | (ActiveBoundedProcess<DvdSourceRead> & {
+                    deviceIdentity: OpticalDeviceIdentity;
+                  })
+                  | undefined;
                 try {
                   const admitted = input.access.dvdDiscVerifications
                     .admitSourceRead(claim, () => {
                       assertOwned();
                       active = input.reader.start(request);
+                      return active.deviceIdentity;
                     });
                   if (!admitted || active === undefined) {
                     throw new Error("DVD Disc Verification claim expired");

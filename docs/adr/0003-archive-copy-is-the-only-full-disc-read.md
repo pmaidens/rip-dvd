@@ -121,11 +121,13 @@ is neither Filesystem Verification nor an Archive Audit.
 Each verification claim and source-read admission is also bound to the current
 eligible Recovery attempt. Recovery Stop invalidates queued verification,
 denies claim renewal and further read admission, and remains `stopping` until
-the running verification has reaped any active helper and settled. A queued
-verification has no device handle to quiesce. If Recovery admitted a source
-helper, its exact device path, device identity, and inode are retained with the
-claim; Stop proves that identity inactive before reconciliation rather than
-trusting a path that may have been renumbered or reused.
+verification work has settled and every admitted verification helper's exact
+device identity is proven inactive. The identity remains durable even if an
+expired verification lease is settled first. A queued verification has no
+device handle to quiesce. Recovery source helpers retain the same exact device
+path, device identity, and inode with their claim; Stop proves that identity
+inactive before reconciliation rather than trusting a path that may have been
+renumbered or reused.
 
 This deliberately trades sector-level duplicate detection and general
 post-copy raw-image hash verification for materially less optical-drive wear
@@ -210,7 +212,9 @@ The same durable work record advances a pass cursor in the transaction that
 projects each one-sector checkpoint. Graceful restart and post-crash takeover
 therefore resume strictly after the last attempted sector, including a sector
 that retained individually-failed evidence. Workers renew the pass claim
-independently of sector progress. An expired foreign claim is taken over only
-after the admitted device identity and archive writer are proven quiescent and
-reconciliation has completed; takeover fences the prior token, clears the
-now-inactive device identity, and preserves the cursor.
+independently of sector progress. Before inspecting an expired claim's admitted
+device identity, takeover atomically rotates the claim token so the prior
+worker can neither renew nor admit another read. It then proves that exact
+device identity and the archive writer quiescent, reconciles any published
+checkpoint while retaining the claimed `running` state, requeues the pass,
+clears the now-inactive identity, and preserves the cursor.

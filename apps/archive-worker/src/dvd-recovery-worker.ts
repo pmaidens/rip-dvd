@@ -6,6 +6,7 @@ import {
   type ArchiveRecoveryFaultCode,
   type ClaimedArchiveRecoveryWork,
   type DataAccess,
+  type DvdDiscVerification,
   type DvdRecoveryWriteAuthority,
   type OpticalDeviceIdentity,
 } from "@rip-dvd/data-access";
@@ -89,6 +90,53 @@ function admittedDeviceIdentity(
     deviceId: work.admittedDeviceId,
     inode: work.admittedDeviceInode,
   };
+}
+
+function admittedVerificationDeviceIdentity(
+  verification: DvdDiscVerification | null,
+  attemptId: ArchiveRecovery["attemptId"],
+): OpticalDeviceIdentity | null {
+  if (
+    verification === null ||
+    verification.archiveRecoveryAttemptId !== attemptId ||
+    verification.admittedDevicePath === null
+  ) return null;
+  if (
+    verification.admittedDeviceId === null ||
+    verification.admittedDeviceInode === null
+  ) {
+    throw new DvdRecoveryPassFault("SOURCE_CHANGED");
+  }
+  return {
+    devicePath: verification.admittedDevicePath,
+    deviceId: verification.admittedDeviceId,
+    inode: verification.admittedDeviceInode,
+  };
+}
+
+async function withDeviceIdentitiesInactive(
+  deviceInactivity: DvdRecoveryDeviceInactivity,
+  identities: readonly OpticalDeviceIdentity[],
+  mutation: () => void | Promise<void>,
+): Promise<void> {
+  const unique = identities.filter((identity, index) =>
+    identities.findIndex((candidate) =>
+      candidate.deviceId === identity.deviceId &&
+      candidate.inode === identity.inode
+    ) === index
+  );
+  const enter = async (index: number): Promise<void> => {
+    const identity = unique[index];
+    if (identity === undefined) {
+      await mutation();
+      return;
+    }
+    await deviceInactivity.withDeviceIdentityInactive(
+      identity,
+      () => enter(index + 1),
+    );
+  };
+  await enter(0);
 }
 
 function sourceFaultCode(
@@ -262,8 +310,16 @@ async function finalizeStop(input: {
       stopOperationId,
     });
   };
-  const deviceIdentity = admittedDeviceIdentity(input.recovery);
-  if (deviceIdentity === null) {
+  const deviceIdentities = [
+    admittedDeviceIdentity(input.recovery),
+    admittedVerificationDeviceIdentity(
+      input.access.dvdDiscVerifications.findLatestForRecovery(
+        input.recovery.id,
+      ),
+      input.recovery.attemptId,
+    ),
+  ].filter((identity) => identity !== null);
+  if (deviceIdentities.length === 0) {
     try {
       await reconcileAndComplete();
     } catch (cause) {
@@ -282,8 +338,9 @@ async function finalizeStop(input: {
   }
   let deviceInactive = false;
   try {
-    await input.deviceInactivity.withDeviceIdentityInactive(
-      deviceIdentity,
+    await withDeviceIdentitiesInactive(
+      input.deviceInactivity,
+      deviceIdentities,
       async () => {
         deviceInactive = true;
         await reconcileAndComplete();
@@ -312,6 +369,7 @@ async function reclaimInterruptedPass(input: {
   recovery: ArchiveRecovery;
   reconcile: typeof reconcileDvdRecoveryCheckpoint;
   signal: AbortSignal;
+  workerExecutionId: string;
 }): Promise<"reclaimed" | "deferred" | "faulted"> {
   const work = input.recovery.work;
   if (
@@ -323,8 +381,14 @@ async function reclaimInterruptedPass(input: {
   ) {
     throw new DvdRecoveryPassFault("SOURCE_CHANGED");
   }
-  const claim = work as ClaimedArchiveRecoveryWork;
+  const staleClaim = work as ClaimedArchiveRecoveryWork;
+  const claim = input.access.archiveRecoveryWork.beginInterruptedTakeover(
+    staleClaim,
+    input.workerExecutionId,
+  );
+  if (claim === null) return "deferred";
   const reconcileAndRequeue = async () => {
+    input.access.archiveRecoveryWork.assertClaim(claim);
     await input.reconcile({
       access: input.access,
       originalsLibraryPath: input.originalsLibraryPath,
@@ -358,6 +422,7 @@ async function reclaimInterruptedPass(input: {
       (error instanceof DvdRecoveryReconciliationFault &&
         error.code === "WRITER_NOT_QUIESCENT")
     ) {
+      input.access.archiveRecoveryWork.deferInterruptedTakeover(claim);
       return "deferred";
     }
     input.access.archiveRecoveryWork.markFault({
