@@ -279,20 +279,41 @@ export function CatalogReviewAutomation({
 
   if (review.reviewOutcome !== "needs_review") return null;
   if (review.coverage.discSelectionCount > 0) {
-    const mappingIsComplete = review.coverage.mainFeatureSelections > 0 ||
-      (review.coverage.titles.length > 0 &&
-        review.coverage.partiallyMappedTitles === 0 &&
-        review.coverage.unmappedTitles === 0);
+    const mappingIsComplete = review.reviewWorkflow === undefined
+      ? review.coverage.mainFeatureSelections > 0 ||
+        (review.coverage.titles.length > 0 &&
+          review.coverage.partiallyMappedTitles === 0 &&
+          review.coverage.unmappedTitles === 0)
+      : review.reviewWorkflow.facts.mapped;
     if (!mappingIsComplete) {
       return (
         <section className="catalog-automation" aria-labelledby="catalog-manual-title">
           <p className="section-eyebrow">Manual review still needed</p>
           <h3 id="catalog-manual-title">Some content is mapped, but the disc is not resolved</h3>
           <p>
-            Keep using the manual tools below to identify the remaining titles,
-            or finish deliberately from the Review Coverage section after you
-            confirm they are menus or extras.
+            {review.reviewWorkflow === undefined
+              ? "Keep using the manual tools below to identify the remaining titles, or finish deliberately from the Review Coverage section after you confirm they are menus or extras."
+              : "Keep using the mapping tools below until every retained title has a concrete catalog identity. Damage decisions remain separate from mapping."}
           </p>
+        </section>
+      );
+    }
+    if (review.reviewWorkflow !== undefined) {
+      return (
+        <section
+          className="catalog-automation is-ready"
+          aria-labelledby="catalog-mapping-complete-title"
+        >
+          <div>
+            <p className="section-eyebrow">Catalog mapping</p>
+            <h3 id="catalog-mapping-complete-title">
+              The catalog mapping is complete
+            </h3>
+            <p>
+              Mapping is saved separately from recovery and the damage
+              decision.
+            </p>
+          </div>
         </section>
       );
     }
@@ -320,11 +341,7 @@ export function CatalogReviewAutomation({
           <p>
             Review the corrected replacement choices below before finishing.
           </p>
-        ) : (
-          <p>
-            Mapping is saved separately from recovery and the damage decision.
-          </p>
-        )}
+        ) : null}
       </section>
     );
   }

@@ -318,9 +318,27 @@ export function readCatalogReview(
     }
     const coverage = snapshot.catalog.getCatalogReviewCoverage(id);
     const reviewWorkflow = describeCatalogReviewWorkflow(snapshot, id, {
+      archiveJobs: snapshot.archiveJobs.listForArchive(id),
       evidenceHeader: evidenceHeaders.get(id) ?? null,
-      titleIdentityReviewSet,
-      titleDamageInspection,
+      recovery: snapshot.catalog.findArchiveRecovery(id),
+      titleIdentity: titleIdentityReviewSet === null
+        ? null
+        : {
+          reviewSetIdentity: titleIdentityReviewSet.reviewSetIdentity,
+          currentMappingStates: titleIdentityReviewSet.items
+            .filter(({ presentAtCurrentCheckpoint }) =>
+              presentAtCurrentCheckpoint
+            )
+            .map(({ mappingState }) => mappingState),
+        },
+      titleDamage: {
+        state: titleDamageInspection.state,
+        currentAssessmentIdentity:
+          titleDamageInspection.currentAssessmentIdentity,
+        acceptanceRequired: titleDamageInspection.state === "current" &&
+          titleDamageInspection.assessment !== null &&
+          !titleDamageInspection.assessment.noTitleMissingSourceProved,
+      },
     });
     const reviewActionAvailability = snapshot.catalog.getCatalogReviewActionAvailability(id);
     const discSelectionRows = snapshot.catalog.listDiscSelections({

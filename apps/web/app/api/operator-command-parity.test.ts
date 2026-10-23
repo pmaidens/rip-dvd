@@ -51,6 +51,7 @@ import {
 } from "./catalog-reviews/[id]/damage/route";
 import { createCatalogSuggestionRoute } from "./catalog-reviews/[id]/suggestion/route";
 import { createDeploymentReadinessResponse } from "./deployment-readiness/route";
+import { createDashboardRoute } from "./dashboard/route";
 import { createHealthResponse } from "./health/route";
 import { createOperationsResponse } from "./operations/route";
 import { createArchiveRequestsRoute } from "./archive-requests/route";
@@ -259,15 +260,22 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
         { action: "encode", available: false },
       ],
     });
-    const dashboard = readDashboardSnapshot(access, {
-      catalogReviewView: "needs_review",
-    });
+    const dashboardResponse = createDashboardRoute(
+      () => access,
+      new Request(
+        `${trustedOrigin}/api/dashboard?catalogReviewView=needs_review`,
+      ),
+    );
+    expect(dashboardResponse.status).toBe(200);
+    const dashboard = await dashboardResponse.json();
     expect(dashboard.catalogReview.status).toBe("loaded");
     if (dashboard.catalogReview.status !== "loaded") {
       throw new Error("Catalog Review dashboard is unavailable");
     }
     expect(
-      dashboard.catalogReview.items.find(({ id }) => id === archive.id)
+      dashboard.catalogReview.items.find(
+        ({ id }: { id: string }) => id === archive.id,
+      )
         ?.reviewWorkflow,
     ).toEqual(before.reviewWorkflow);
 
@@ -275,19 +283,21 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       access,
       archive.id,
       {
+        archiveJobs: access.archiveJobs.listForArchive(archive.id),
         evidenceHeader: checkpoint,
-        titleIdentityReviewSet: {
-          ...reviewSet,
-          items: [
-            {
-              ...reviewSet.items[0]!,
-              mappingState: "needs_mapping_review",
-            },
-            reviewSet.items[1]!,
+        recovery: access.catalog.findArchiveRecovery(archive.id),
+        titleIdentity: {
+          reviewSetIdentity: reviewSet.reviewSetIdentity,
+          currentMappingStates: [
+            "needs_mapping_review",
+            "unmapped",
           ],
         },
-        titleDamageInspection:
-          access.dvdTitleDamageAssessments.inspect(archive.id),
+        titleDamage: {
+          state: "pending",
+          currentAssessmentIdentity: null,
+          acceptanceRequired: false,
+        },
       },
     );
     expect(
@@ -301,12 +311,29 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       "SELECTION_UNIDENTIFIED",
     ]);
 
+    const firstMutationKey = "00000000-0000-4000-8000-000000000397";
+    const firstSelectionCommand = {
+      action: "create_disc_selection" as const,
+      selection: {
+        mediaItemId: mediaItem.id,
+        sourceIdentity: { kind: "dvd_title" as const, titleNumber: 1 },
+      },
+    };
+    const mappedFirstWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        ...firstSelectionCommand,
+        mutationKey: firstMutationKey,
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
     const mappedFirst = await fixture.run([
       "disc-selection",
       "create",
       archive.id,
       "--key",
-      "00000000-0000-4000-8000-000000000397",
+      firstMutationKey,
       "--media-item-id",
       mediaItem.id,
       "--source-kind",
@@ -314,7 +341,9 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       "--title-number",
       "1",
     ]);
+    expect(mappedFirstWeb.status).toBe(201);
     expect(mappedFirst.exitCode, JSON.stringify(mappedFirst.result)).toBe(0);
+    expect(mappedFirst.result).toEqual(await mappedFirstWeb.json());
     const mappedSecond = await fixture.run([
       "disc-selection",
       "create",
@@ -376,9 +405,7 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       error: {
         code: "CATALOG_REVIEW_COMPLETION_UNAVAILABLE",
         reasons: [
-          { code: "RECOVERY_ACTIVE" },
-          { code: "ASSESSMENT_PENDING" },
-          { code: "ACCEPTANCE_REQUIRED" },
+          { code: "CATALOG_REVIEW_COMPLETION_UNAVAILABLE" },
         ],
         current: {
           recovery: { state: "running" },

@@ -267,6 +267,106 @@ describe("CatalogReviewAutomation", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it("does not treat a new-format main-feature selection as a complete mapping", async () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    const recoveringReview = review(1);
+    recoveringReview.reviewWorkflow = {
+      schemaVersion: 1,
+      evidenceFormat: "dvd-recovery-evidence-v1",
+      facts: {
+        saved: true,
+        recovering: true,
+        mapped: false,
+        mappingState: "unmapped",
+        readyForDamageDecision: false,
+        readyForEncoding: false,
+      },
+      current: {
+        originalDiscArchiveId: recoveringReview.archive.id,
+        archiveJob: { id: "archive-job-1", status: "completed" },
+        checkpoint: { revision: 2, manifestDigest: "synthetic-digest" },
+        recovery: {
+          id: "recovery-1",
+          attemptId: "recovery-attempt-1",
+          state: "running",
+          work: null,
+        },
+        titleIdentityReviewSetId: "review-set-1",
+        titleDamageAssessmentId: null,
+      },
+      actions: [{
+        action: "catalog_mapping",
+        available: true,
+        reasons: [],
+        expectedInputs: ["catalogRevision", "mutationKey"],
+      }, {
+        action: "damage_decision",
+        available: false,
+        reasons: [],
+        expectedInputs: [
+          "checkpointRevision",
+          "assessmentIdentity",
+          "reviewSetIdentity",
+          "mutationKey",
+        ],
+      }, {
+        action: "encode",
+        available: false,
+        reasons: [],
+        expectedInputs: [
+          "checkpointRevision",
+          "assessmentIdentity",
+          "reviewSetIdentity",
+          "acceptanceIdentity",
+        ],
+      }],
+    };
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewAutomation
+          review={recoveringReview}
+          isSaving={false}
+          completionEnabled={false}
+          onAcceptProposal={() => undefined}
+          onCompleteReview={() => undefined}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Manual review still needed");
+    expect(container.textContent).toContain("every retained title");
+    expect(container.textContent).not.toContain("Ready to finish");
+    expect(fetcher).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewAutomation
+          review={{
+            ...recoveringReview,
+            reviewWorkflow: {
+              ...recoveringReview.reviewWorkflow!,
+              facts: {
+                ...recoveringReview.reviewWorkflow!.facts,
+                mapped: true,
+                mappingState: "mapped",
+              },
+            },
+          }}
+          isSaving={false}
+          completionEnabled={false}
+          onAcceptProposal={() => undefined}
+          onCompleteReview={() => undefined}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("catalog mapping is complete");
+    expect(container.textContent).toContain("saved separately from recovery");
+    expect(container.textContent).not.toContain("Ready to finish");
+  });
+
   it("keeps a partial episodic mapping in explicit manual review", async () => {
     const fetcher = vi.fn();
     vi.stubGlobal("fetch", fetcher);

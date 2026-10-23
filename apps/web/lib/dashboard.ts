@@ -1462,6 +1462,10 @@ function readDashboardSnapshotRecords(
       evidenceHeadersByArchiveId.get(archive.id) ?? null,
     ),
   );
+  const catalogReviewWorkflowEvidence =
+    access.catalog.readDvdCatalogReviewWorkflowEvidence(
+      catalogReviewArchives.map((archive) => archive.id),
+    );
   const previousCatalogReviewBoundary =
     catalogReviewArchives.at(-1) ??
     (catalogReviewCursor?.direction === "older"
@@ -2127,9 +2131,18 @@ function readDashboardSnapshotRecords(
       : {
           status: "loaded" as const,
           items: catalogReviewArchives.map((archive) => {
+            const workflowEvidence = catalogReviewWorkflowEvidence.get(
+              archive.id,
+            );
+            if (workflowEvidence === undefined) {
+              throw new Error(
+                "Catalog Review workflow evidence is unavailable",
+              );
+            }
             const reviewWorkflow = describeCatalogReviewWorkflow(
               access,
               archive.id,
+              workflowEvidence,
             );
             const boundaryEvidence =
               archiveBoundaryEvidenceFromRecord(archive);

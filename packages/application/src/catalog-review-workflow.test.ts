@@ -1,11 +1,52 @@
 import { expect, it } from "vitest";
+import type {
+  ConsistentReadAccess,
+  DvdCatalogReviewWorkflowEvidence,
+  OriginalDiscArchiveId,
+} from "@rip-dvd/data-access";
 
 import {
   CatalogReviewCompletionUnavailableError,
+  describeCatalogReviewWorkflow,
   type CatalogReviewWorkflow,
 } from "./catalog-review-workflow.js";
 
-it("rejects legacy completion with an actionable reason when a damage decision is ready", () => {
+const archiveId = "synthetic-archive" as OriginalDiscArchiveId;
+
+function decisionReadyEvidence(
+  acceptanceRequired: boolean,
+): DvdCatalogReviewWorkflowEvidence {
+  return {
+    archiveJobs: [{
+      id: "synthetic-archive-job",
+      evidenceFormat: "dvd-recovery-evidence-v1",
+      status: "completed",
+    }],
+    evidenceHeader: {
+      sourceArchiveJobId: "synthetic-archive-job",
+      evidenceFormat: "dvd-recovery-evidence-v1",
+      currentManifestRevision: 2,
+      currentManifestDigest: "synthetic-digest",
+    },
+    recovery: {
+      id: "synthetic-recovery",
+      attemptId: "synthetic-attempt",
+      status: "completed",
+      work: null,
+    },
+    titleIdentity: {
+      reviewSetIdentity: "synthetic-review-set",
+      currentMappingStates: ["mapped"],
+    },
+    titleDamage: {
+      state: "current",
+      currentAssessmentIdentity: "synthetic-assessment",
+      acceptanceRequired,
+    },
+  } as unknown as DvdCatalogReviewWorkflowEvidence;
+}
+
+it("rejects legacy completion without inventing a damage acceptance requirement", () => {
   const workflow = {
     schemaVersion: 1,
     evidenceFormat: "dvd-recovery-evidence-v1",
@@ -61,9 +102,36 @@ it("rejects legacy completion with an actionable reason when a damage decision i
   expect(new CatalogReviewCompletionUnavailableError(workflow)).toMatchObject({
     code: "CATALOG_REVIEW_COMPLETION_UNAVAILABLE",
     blockingReasons: [{
-      code: "ACCEPTANCE_REQUIRED",
-      details: { originalDiscArchiveId: "synthetic-archive" },
+      code: "CATALOG_REVIEW_COMPLETION_UNAVAILABLE",
+      details: {
+        evidenceFormat: "dvd-recovery-evidence-v1",
+        replacementAction: "damage_decision",
+      },
     }],
     current: workflow.current,
   });
+});
+
+it("requires acceptance only when the current damage assessment proves it is needed", () => {
+  const access = {} as ConsistentReadAccess;
+  const cleanWorkflow = describeCatalogReviewWorkflow(
+    access,
+    archiveId,
+    decisionReadyEvidence(false),
+  );
+  const damagedWorkflow = describeCatalogReviewWorkflow(
+    access,
+    archiveId,
+    decisionReadyEvidence(true),
+  );
+
+  expect(cleanWorkflow?.actions.find(({ action }) => action === "encode")
+    ?.reasons.map(({ code }) => code)).toEqual([
+      "DVD_RECOVERY_EVIDENCE_ENCODING_UNAVAILABLE",
+    ]);
+  expect(damagedWorkflow?.actions.find(({ action }) => action === "encode")
+    ?.reasons.map(({ code }) => code)).toEqual([
+      "ACCEPTANCE_REQUIRED",
+      "DVD_RECOVERY_EVIDENCE_ENCODING_UNAVAILABLE",
+    ]);
 });

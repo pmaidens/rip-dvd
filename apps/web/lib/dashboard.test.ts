@@ -29,6 +29,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createNodeDvdCopyRunner } from "../../archive-worker/src/dvd-archiver";
 import { DVD_READ_FAILURE_RESULT_PREFIX } from "../../archive-worker/src/dvd-recovery-contracts";
+import { markArchiveWithDvdRecoveryEvidence } from "../../operator-cli/src/operator-workflow.test-support";
 
 import { readDashboardSnapshot } from "./dashboard";
 import { DASHBOARD_ACTIVE_DISC_LIMIT } from "./dashboard-bounds";
@@ -101,6 +102,96 @@ function seedEncodeJob(
 }
 
 describe("readDashboardSnapshot", () => {
+  it("uses one bounded workflow-evidence read as Catalog Review rows grow", () => {
+    const { access, databasePath } = dataAccessFixture.createWithDatabasePath();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/synthetic-dashboard-batch",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const archiveIds = Array.from({ length: 3 }, (_, index) => {
+      const fingerprint = `synthetic-dashboard-batch-${index}`;
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+        volumeLabel: `SYNTHETIC_BATCH_${index}`,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      return access.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: `/media/originals/synthetic-batch-${index}.iso`,
+        fingerprint,
+      }).id;
+    });
+    archiveIds.forEach((id, index) =>
+      markArchiveWithDvdRecoveryEvidence(
+        databasePath,
+        id,
+        `synthetic-dashboard-batch-${index}`,
+      )
+    );
+    const workflowEvidenceReads = vi.fn();
+    const batchedAccess: DataAccess = {
+      ...access,
+      readConsistentSnapshot(read) {
+        return access.readConsistentSnapshot((snapshot) =>
+          read({
+            ...snapshot,
+            catalog: {
+              ...snapshot.catalog,
+              readDvdCatalogReviewWorkflowEvidence(ids) {
+                workflowEvidenceReads(ids);
+                return snapshot.catalog
+                  .readDvdCatalogReviewWorkflowEvidence(ids);
+              },
+              findDvdArchiveEvidenceHeader() {
+                throw new Error("Dashboard workflow read fanned out by row");
+              },
+              readDvdTitleIdentityReviewSet() {
+                throw new Error("Dashboard workflow read fanned out by row");
+              },
+              findArchiveRecovery() {
+                throw new Error("Dashboard workflow read fanned out by row");
+              },
+            },
+          })
+        );
+      },
+    };
+
+    const dashboard = readDashboardSnapshot(batchedAccess, {
+      activityLimit: 20,
+    });
+
+    expect(dashboard.catalogReview).toMatchObject({
+      status: "loaded",
+      items: archiveIds.map((id) => ({ id })),
+    });
+    expect(workflowEvidenceReads).toHaveBeenCalledOnce();
+    expect(workflowEvidenceReads).toHaveBeenCalledWith(archiveIds);
+
+    const prepare = vi.spyOn(DatabaseSync.prototype, "prepare");
+    access.readConsistentSnapshot((snapshot) =>
+      snapshot.catalog.readDvdCatalogReviewWorkflowEvidence([
+        archiveIds[0]!,
+      ])
+    );
+    const singleArchiveQueryCount = prepare.mock.calls.length;
+    prepare.mockClear();
+    access.readConsistentSnapshot((snapshot) =>
+      snapshot.catalog.readDvdCatalogReviewWorkflowEvidence(archiveIds)
+    );
+    const multipleArchiveQueryCount = prepare.mock.calls.length;
+    prepare.mockRestore();
+
+    expect(singleArchiveQueryCount).toBeGreaterThan(0);
+    expect(multipleArchiveQueryCount).toBe(singleArchiveQueryCount);
+  });
+
   it("maps every structured Encode failure reason without exposing diagnostics", () => {
     const access = dataAccessFixture.create();
     const { job } = seedEncodeJob(access);

@@ -6,9 +6,7 @@ import {
   type ArchiveJobStatus,
   type ArchiveRecoveryStatus,
   type ConsistentReadAccess,
-  type DvdArchiveEvidenceHeader,
-  type DvdTitleDamageAssessmentInspection,
-  type DvdTitleIdentityReviewSet,
+  type DvdCatalogReviewWorkflowEvidence,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 
@@ -22,6 +20,7 @@ export type CatalogReviewWorkflowReasonCode =
   | "MAPPING_REVIEW_REQUIRED"
   | "SELECTION_UNIDENTIFIED"
   | "ACCEPTANCE_REQUIRED"
+  | "CATALOG_REVIEW_COMPLETION_UNAVAILABLE"
   | typeof DVD_RECOVERY_EVIDENCE_ENCODING.code;
 
 export interface CatalogReviewWorkflowReason {
@@ -86,17 +85,15 @@ export class CatalogReviewCompletionUnavailableError
       "Legacy Catalog Review completion is unavailable for dvd-recovery-evidence-v1; use the separate damage decision workflow.",
     );
     this.name = "CatalogReviewCompletionUnavailableError";
-    this.blockingReasons = uniqueReasons([
-      ...decision.reasons,
-      {
-        code: "ACCEPTANCE_REQUIRED",
-        message:
-          "The separate damage decision has not been accepted for the reviewed content set.",
-        details: {
-          originalDiscArchiveId: workflow.current.originalDiscArchiveId,
-        },
+    this.blockingReasons = [{
+      code: "CATALOG_REVIEW_COMPLETION_UNAVAILABLE",
+      message:
+        "This evidence format uses the separate damage decision workflow instead of legacy Catalog Review completion.",
+      details: {
+        evidenceFormat: workflow.evidenceFormat,
+        replacementAction: decision.action,
       },
-    ]);
+    }];
     this.current = workflow.current;
   }
 }
@@ -115,15 +112,10 @@ function uniqueReasons(
 export function describeCatalogReviewWorkflow(
   access: ConsistentReadAccess,
   originalDiscArchiveId: OriginalDiscArchiveId,
-  prefetched?: {
-    evidenceHeader: DvdArchiveEvidenceHeader | null;
-    titleIdentityReviewSet: DvdTitleIdentityReviewSet | null;
-    titleDamageInspection: DvdTitleDamageAssessmentInspection;
-  },
+  prefetched?: DvdCatalogReviewWorkflowEvidence,
 ): CatalogReviewWorkflow | null {
-  const archiveJobs = access.archiveJobs.listForArchive(
-    originalDiscArchiveId,
-  );
+  const archiveJobs = prefetched?.archiveJobs ??
+    access.archiveJobs.listForArchive(originalDiscArchiveId);
   const header = prefetched === undefined
     ? access.catalog.findDvdArchiveEvidenceHeader(originalDiscArchiveId)
     : prefetched.evidenceHeader;
@@ -136,23 +128,41 @@ export function describeCatalogReviewWorkflow(
       job.evidenceFormat === "dvd-recovery-evidence-v1"
     ) ?? null
     : archiveJobs.find((job) => job.id === header.sourceArchiveJobId) ?? null;
-  const recovery = access.catalog.findArchiveRecovery(originalDiscArchiveId);
+  const recovery = prefetched === undefined
+    ? access.catalog.findArchiveRecovery(originalDiscArchiveId)
+    : prefetched.recovery;
   const reviewSet = prefetched === undefined
     ? access.catalog.readDvdTitleIdentityReviewSet(originalDiscArchiveId)
-    : prefetched.titleIdentityReviewSet;
-  const titleDamage = prefetched === undefined
+    : null;
+  const titleIdentity = prefetched === undefined
+    ? reviewSet === null
+      ? null
+      : {
+        reviewSetIdentity: reviewSet.reviewSetIdentity,
+        currentMappingStates: reviewSet.items
+          .filter(({ presentAtCurrentCheckpoint }) =>
+            presentAtCurrentCheckpoint
+          )
+          .map(({ mappingState }) => mappingState),
+      }
+    : prefetched.titleIdentity;
+  const inspectedTitleDamage = prefetched === undefined
     ? access.dvdTitleDamageAssessments.inspect(originalDiscArchiveId)
-    : prefetched.titleDamageInspection;
-  const currentTitles = reviewSet?.items.filter((item) =>
-    item.presentAtCurrentCheckpoint
-  ) ?? [];
-  const hasMappingReview = currentTitles.some((item) =>
-    item.mappingState === "needs_mapping_review"
-  );
-  const hasUnmappedSelection = currentTitles.some((item) =>
-    item.mappingState === "unmapped"
-  );
-  const mappingState = reviewSet === null || currentTitles.length === 0
+    : null;
+  const titleDamage = prefetched === undefined
+    ? {
+      state: inspectedTitleDamage!.state,
+      currentAssessmentIdentity:
+        inspectedTitleDamage!.currentAssessmentIdentity,
+      acceptanceRequired: inspectedTitleDamage!.state === "current" &&
+        inspectedTitleDamage!.assessment !== null &&
+        !inspectedTitleDamage!.assessment.noTitleMissingSourceProved,
+    }
+    : prefetched.titleDamage;
+  const mappingStates = titleIdentity?.currentMappingStates ?? [];
+  const hasMappingReview = mappingStates.includes("needs_mapping_review");
+  const hasUnmappedSelection = mappingStates.includes("unmapped");
+  const mappingState = titleIdentity === null || mappingStates.length === 0
     ? "pending" as const
     : hasMappingReview
     ? "needs_mapping_review" as const
@@ -254,10 +264,10 @@ export function describeCatalogReviewWorkflow(
         code: "MAPPING_REVIEW_REQUIRED",
         message: "At least one retained mapping requires operator review.",
         details: {
-          titleIdentityReviewSetId: reviewSet?.reviewSetIdentity ?? null,
+          titleIdentityReviewSetId: titleIdentity?.reviewSetIdentity ?? null,
           mappingState,
-          affectedTitleCount: currentTitles.filter((item) =>
-            item.mappingState === "needs_mapping_review"
+          affectedTitleCount: mappingStates.filter((state) =>
+            state === "needs_mapping_review"
           ).length,
         },
       } satisfies CatalogReviewWorkflowReason]
@@ -269,13 +279,11 @@ export function describeCatalogReviewWorkflow(
           ? "Current title identities are not available for mapping."
           : "At least one current title has no catalog mapping.",
         details: {
-          titleIdentityReviewSetId: reviewSet?.reviewSetIdentity ?? null,
+          titleIdentityReviewSetId: titleIdentity?.reviewSetIdentity ?? null,
           mappingState,
           affectedTitleCount: mappingState === "pending"
             ? 0
-            : currentTitles.filter((item) =>
-              item.mappingState === "unmapped"
-            ).length,
+            : mappingStates.filter((state) => state === "unmapped").length,
         },
       } satisfies CatalogReviewWorkflowReason]
       : []),
@@ -289,12 +297,17 @@ export function describeCatalogReviewWorkflow(
   const damageDecisionAvailable = damageReasons.length === 0;
   const encodeReasons = uniqueReasons([
     ...damageReasons,
-    {
-      code: "ACCEPTANCE_REQUIRED",
-      message:
-        "Current damage or unknown impact has not been accepted for the reviewed content set.",
-      details: { originalDiscArchiveId },
-    },
+    ...(titleDamage.acceptanceRequired
+      ? [{
+        code: "ACCEPTANCE_REQUIRED" as const,
+        message:
+          "Current damage or unknown impact has not been accepted for the reviewed content set.",
+        details: {
+          originalDiscArchiveId,
+          titleDamageAssessmentId: titleDamage.currentAssessmentIdentity,
+        },
+      }]
+      : []),
     {
       code: DVD_RECOVERY_EVIDENCE_ENCODING.code,
       message: DVD_RECOVERY_EVIDENCE_ENCODING.message,
@@ -333,7 +346,7 @@ export function describeCatalogReviewWorkflow(
           state: recovery.status,
           work: recoveryWork,
         },
-      titleIdentityReviewSetId: reviewSet?.reviewSetIdentity ?? null,
+      titleIdentityReviewSetId: titleIdentity?.reviewSetIdentity ?? null,
       titleDamageAssessmentId: titleDamage.currentAssessmentIdentity,
     },
     actions: [

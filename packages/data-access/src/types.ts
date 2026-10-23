@@ -74,6 +74,7 @@ import type {
 } from "./dvd-structural-assessment.js";
 import type {
   DvdTitleDamageAssessmentAccess,
+  DvdTitleDamageAssessmentInspection,
   DvdTitleDamageAssessmentRecord,
   RecordDvdTitleDamageMappingInput,
 } from "./dvd-title-damage-assessment.js";
@@ -527,6 +528,21 @@ export interface DvdTitleIdentityReviewSet {
   reviewSetIdentity: string;
   items: readonly DvdTitleIdentityReviewSetItem[];
   createdAt: Date;
+}
+
+export interface DvdCatalogReviewWorkflowEvidence {
+  archiveJobs: readonly ArchiveJob[];
+  evidenceHeader: DvdArchiveEvidenceHeader | null;
+  recovery: ArchiveRecovery | null;
+  titleIdentity: {
+    reviewSetIdentity: string;
+    currentMappingStates: readonly DvdTitleIdentityMappingState[];
+  } | null;
+  titleDamage: {
+    state: DvdTitleDamageAssessmentInspection["state"];
+    currentAssessmentIdentity: string | null;
+    acceptanceRequired: boolean;
+  };
 }
 
 export interface RecordDvdTitleIdentityObservationsInput {
@@ -1842,6 +1858,9 @@ export interface CatalogAccess {
   readDvdTitleIdentityReviewSet(
     id: OriginalDiscArchiveId,
   ): DvdTitleIdentityReviewSet | null;
+  readDvdCatalogReviewWorkflowEvidence(
+    ids: readonly OriginalDiscArchiveId[],
+  ): ReadonlyMap<OriginalDiscArchiveId, DvdCatalogReviewWorkflowEvidence>;
   auditDvdArchiveEvidenceChains(
     ids: readonly OriginalDiscArchiveId[],
   ): void;
@@ -2572,6 +2591,7 @@ export type SnapshotCatalogAccess = Pick<
   | "findDvdArchiveEvidenceHeader"
   | "findDvdArchiveEvidenceHeaders"
   | "readDvdTitleIdentityReviewSet"
+  | "readDvdCatalogReviewWorkflowEvidence"
   | "findArchiveRecovery"
   | "findArchiveRecoveryById"
   | "listArchiveRecoveries"
