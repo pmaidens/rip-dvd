@@ -496,6 +496,9 @@ export function useCatalogReviewState({
       void mutate({
         action: "repair_disc_selection",
         discSelectionId: replacesDiscSelectionId,
+        ...(state.review.reviewWorkflow !== undefined
+          ? { catalogRevision: state.review.catalogRevision }
+          : {}),
         selection: values,
       });
     }
@@ -508,6 +511,9 @@ export function useCatalogReviewState({
     void mutate({
       action: "update_disc_selection",
       discSelectionId,
+      ...(state.status === "loaded" && state.review.reviewWorkflow !== undefined
+        ? { catalogRevision: state.review.catalogRevision }
+        : {}),
       changes,
     });
   }

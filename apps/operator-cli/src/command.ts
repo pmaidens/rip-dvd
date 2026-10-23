@@ -280,7 +280,7 @@ const commandDefinitions = [
     usage: "rip-dvd disc-selection <show|preview|create|update|repair|correct|delete> [action] <archive-id> [selection-id] [options]",
     inputs: {
       arguments: ["action (required after preview)", "archive-id", "selection-id (except create)"],
-      options: ["mutations: --key <key>", "dvd-recovery-evidence-v1 create: --revision <catalog-revision>", "mapping updates, repair, correct, delete: --revision <catalog-revision> --preview-token <token> --acknowledge",
+      options: ["mutations: --key <key>", "dvd-recovery-evidence-v1 create and update/repair previews: --revision <catalog-revision>", "correction previews: --revision <catalog-revision>", "mapping updates, repair, correct, delete: --revision <catalog-revision> --preview-token <token> --acknowledge",
         "selection input: flags or --json <object> or --stdin or --file <path>"],
     },
     example: "rip-dvd disc-selection create <archive-id> --key <key> --revision <catalog-revision> --media-item-id <id> --source-kind dvd_title --title-number 1",

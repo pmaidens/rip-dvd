@@ -20,6 +20,8 @@ import {
 } from "./disc-selection-preview-token.js";
 import { parseMutationKey } from "./mutation-key.js";
 import {
+  CatalogReviewRevisionStaleError,
+  describeCatalogReviewWorkflow,
   rethrowCatalogMappingOperationError,
 } from "./catalog-review-workflow.js";
 
@@ -146,11 +148,41 @@ export function previewDiscSelectionChange(
     };
   }
   const mutation = discSelectionMutation(archiveId, command);
-  const catalogRevision = new Date(current.catalogRevision);
-  if (mutation.action === "correct" &&
-      mutation.selection.catalogRevision.getTime() !== catalogRevision.getTime()) {
-    throw new DomainInvariantError("Catalog review revision is stale");
+  const currentCatalogRevision = new Date(current.catalogRevision);
+  const reviewedCatalogRevision = command.action === "update_disc_selection" ||
+      command.action === "repair_disc_selection" ||
+      command.action === "correct_disc_selection"
+    ? command.catalogRevision
+    : undefined;
+  let workflow: ReturnType<typeof describeCatalogReviewWorkflow> | undefined;
+  const currentWorkflow = () => {
+    workflow ??= describeCatalogReviewWorkflow(access, archiveId);
+    return workflow;
+  };
+  if (
+    (command.action === "update_disc_selection" ||
+      command.action === "repair_disc_selection") &&
+    reviewedCatalogRevision === undefined &&
+    currentWorkflow() !== null
+  ) {
+    throw new DomainInvariantError(
+      "Current-evidence Disc Selection preview requires the reviewed Catalog Review revision",
+    );
   }
+  if (
+    reviewedCatalogRevision !== undefined &&
+    new Date(reviewedCatalogRevision).getTime() !==
+      currentCatalogRevision.getTime()
+  ) {
+    throw new CatalogReviewRevisionStaleError(
+      currentWorkflow(),
+      reviewedCatalogRevision,
+      current.catalogRevision,
+    );
+  }
+  const catalogRevision = reviewedCatalogRevision === undefined
+    ? currentCatalogRevision
+    : new Date(reviewedCatalogRevision);
   let proposed: ReturnType<
     DataAccess["catalog"]["previewDiscSelectionChange"]
   >;

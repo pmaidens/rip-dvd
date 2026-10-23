@@ -372,6 +372,7 @@ rip-dvd disc-selection create <archive-id> --key <key> \
 rip-dvd disc-selection update <archive-id> <selection-id> --key <key> \
   --label "Main feature"
 rip-dvd disc-selection preview correct <archive-id> <selection-id> \
+  --revision <catalog-revision-from-show> \
   --media-item-id <media-item-id> --source-kind main_feature
 rip-dvd disc-selection correct <archive-id> <selection-id> --key <key> \
   --revision <catalog-revision-from-preview> --preview-token <token-from-preview> \
@@ -381,6 +382,7 @@ rip-dvd disc-selection delete <archive-id> <selection-id> --key <key> \
   --revision <catalog-revision-from-preview> --preview-token <token-from-preview> \
   --acknowledge
 rip-dvd disc-selection preview repair <archive-id> <selection-id> \
+  --revision <catalog-revision-from-show> \
   --media-item-id <media-item-id> --source-kind dvd_title --title-number 1
 rip-dvd disc-selection repair <archive-id> <selection-id> --key <key> \
   --revision <catalog-revision-from-preview> --preview-token <token-from-preview> \
@@ -393,7 +395,9 @@ result. Reusing the key with different inputs fails. For a
 `dvd-recovery-evidence-v1` archive, `create` also requires the Catalog Review
 revision returned by `catalog-review show`; the mutation validates the source
 against current Title Identity evidence and rejects a stale revision rather
-than retargeting a title number. Only exact default-angle `dvd_title` and
+than retargeting a title number. New-format update and repair previews also
+require that reviewed revision; correction previews require it for every
+format. Only exact default-angle `dvd_title` and
 `dvd_chapters` sources are accepted for this format. Legacy creation remains
 revision-optional and continues to accept `main_feature`.
 An `update` that changes

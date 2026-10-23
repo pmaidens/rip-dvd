@@ -2,6 +2,7 @@ import {
   archiveRecoveryWorkIdentity,
   CatalogMappingEvidenceUnavailableError,
   dvdTitleIdentityCatalogMappingItems,
+  dvdTitleIdentityCatalogMappingProjectionDigest,
   dvdRecoveryEvidenceFormatForArchive,
   DVD_RECOVERY_EVIDENCE_ENCODING,
   DomainInvariantError,
@@ -66,7 +67,7 @@ export interface CatalogReviewWorkflow {
       state: ArchiveRecoveryStatus;
       work: ReturnType<typeof archiveRecoveryWorkIdentity> | null;
     } | null;
-    titleIdentityReviewSetId: string | null;
+    catalogMappingProjectionId: string | null;
     titleDamageAssessmentId: string | null;
   };
   actions: readonly CatalogReviewWorkflowAction[];
@@ -248,7 +249,11 @@ export function describeCatalogReviewWorkflow(
     ? reviewSet === null
       ? null
       : {
-        reviewSetIdentity: reviewSet.reviewSetIdentity,
+        catalogMappingProjectionId:
+          dvdTitleIdentityCatalogMappingProjectionDigest(
+            reviewSet.checkpoint,
+            reviewSet.items,
+          ),
         currentMappingStates: dvdTitleIdentityCatalogMappingItems(
           reviewSet.items,
         )
@@ -374,7 +379,8 @@ export function describeCatalogReviewWorkflow(
         code: "MAPPING_REVIEW_REQUIRED",
         message: "At least one retained mapping requires operator review.",
         details: {
-          titleIdentityReviewSetId: titleIdentity?.reviewSetIdentity ?? null,
+          catalogMappingProjectionId:
+            titleIdentity?.catalogMappingProjectionId ?? null,
           mappingState,
           affectedTitleCount: mappingStates.filter((state) =>
             state === "needs_mapping_review"
@@ -389,7 +395,8 @@ export function describeCatalogReviewWorkflow(
           ? "Current title identities are not available for mapping."
           : "At least one current title has no catalog mapping.",
         details: {
-          titleIdentityReviewSetId: titleIdentity?.reviewSetIdentity ?? null,
+          catalogMappingProjectionId:
+            titleIdentity?.catalogMappingProjectionId ?? null,
           mappingState,
           affectedTitleCount: mappingState === "pending"
             ? 0
@@ -471,7 +478,8 @@ export function describeCatalogReviewWorkflow(
           state: recovery.status,
           work: recoveryWork,
         },
-      titleIdentityReviewSetId: titleIdentity?.reviewSetIdentity ?? null,
+      catalogMappingProjectionId:
+        titleIdentity?.catalogMappingProjectionId ?? null,
       titleDamageAssessmentId: titleDamage.currentAssessmentIdentity,
     },
     actions: [

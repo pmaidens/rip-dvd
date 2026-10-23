@@ -2448,7 +2448,7 @@ describe("CatalogReviewView", () => {
           state: "running",
           work: null,
         },
-        titleIdentityReviewSetId: null,
+        catalogMappingProjectionId: null,
         titleDamageAssessmentId: null,
       },
       actions: [{

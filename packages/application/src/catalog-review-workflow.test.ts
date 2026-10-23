@@ -43,7 +43,7 @@ function decisionReadyEvidence(
       work: null,
     },
     titleIdentity: {
-      reviewSetIdentity: "synthetic-review-set",
+      catalogMappingProjectionId: "synthetic-mapping-projection",
       currentMappingStates: ["mapped"],
     },
     titleDamage: {
@@ -76,7 +76,7 @@ it("rejects legacy completion without inventing a damage acceptance requirement"
         state: "completed",
         work: null,
       },
-      titleIdentityReviewSetId: "synthetic-review-set",
+      catalogMappingProjectionId: "synthetic-mapping-projection",
       titleDamageAssessmentId: "synthetic-assessment",
     },
     actions: [{
@@ -164,7 +164,7 @@ it("blocks a damage decision while an absent retained title needs mapping review
     {
       ...evidence,
       titleIdentity: {
-        reviewSetIdentity: "synthetic-review-set",
+        catalogMappingProjectionId: "synthetic-mapping-projection",
         currentMappingStates: ["mapped", "needs_mapping_review"],
       },
     },

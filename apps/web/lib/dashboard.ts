@@ -2181,7 +2181,7 @@ function readDashboardSnapshotRecords(
                   reviewWorkflow.current.checkpoint?.revision ?? "checkpoint",
                   reviewWorkflow.current.recovery?.state ?? "recovery",
                   reviewWorkflow.current.recovery?.work?.status ?? "work",
-                  reviewWorkflow.current.titleIdentityReviewSetId ??
+                  reviewWorkflow.current.catalogMappingProjectionId ??
                     "review-set",
                   reviewWorkflow.current.titleDamageAssessmentId ??
                     "assessment",

@@ -151,11 +151,13 @@ export type CatalogReviewCommand =
   | {
       action: "update_disc_selection";
       discSelectionId: string;
+      catalogRevision?: string;
       changes: CatalogReviewDiscSelectionChanges;
     }
   | {
       action: "repair_disc_selection";
       discSelectionId: string;
+      catalogRevision?: string;
       selection: CatalogReviewDiscSelectionInput;
     }
   | {
@@ -982,11 +984,19 @@ export function parseCatalogReviewCommand(
     }
     case "update_disc_selection": {
       const discSelectionId = boundedString(body.discSelectionId);
+      const revision = body.catalogRevision === undefined
+        ? undefined
+        : catalogRevision(body.catalogRevision);
       const changes = parseDiscSelectionChanges(body.changes);
-      return discSelectionId && changes
+      return discSelectionId && changes && revision !== null
         ? {
             ok: true,
-            command: { action, discSelectionId, changes },
+            command: {
+              action,
+              discSelectionId,
+              ...(revision === undefined ? {} : { catalogRevision: revision }),
+              changes,
+            },
           }
         : invalid(
           "Invalid Disc Selection update",
@@ -995,16 +1005,21 @@ export function parseCatalogReviewCommand(
     }
     case "repair_disc_selection": {
       const discSelectionId = boundedString(body.discSelectionId);
+      const revision = body.catalogRevision === undefined
+        ? undefined
+        : catalogRevision(body.catalogRevision);
       if (!discSelectionId) {
         return invalid("Invalid Disc Selection");
       }
       const parsedSelection = parseDiscSelectionInput(body.selection);
+      if (revision === null) return invalid("Invalid Disc Selection");
       return parsedSelection.ok
         ? {
             ok: true,
             command: {
               action,
               discSelectionId,
+              ...(revision === undefined ? {} : { catalogRevision: revision }),
               selection: parsedSelection.selection,
             },
           }

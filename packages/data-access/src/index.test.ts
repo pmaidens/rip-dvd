@@ -34,6 +34,7 @@ import {
   createDvdArchiveRecoveryReadEvidenceDigest,
   createDvdStructuralAssessment,
   createDvdTitleDamageAssessment,
+  dvdTitleIdentityCatalogMappingProjectionDigest,
   createCleanReadArchiveIntegrityEvidence,
   createDiscSelectionSourceIdentity,
   createUnknownArchiveIntegrityEvidence,
@@ -15599,7 +15600,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
       }]).get(fixture.archive.id);
     expect(workflowEvidence?.titleIdentity).toEqual({
-      reviewSetIdentity: review.reviewSetIdentity,
+      catalogMappingProjectionId:
+        dvdTitleIdentityCatalogMappingProjectionDigest(
+          review.checkpoint,
+          review.items,
+        ),
       currentMappingStates: ["unmapped"],
     });
     expect(fixture.access.catalog.listDiscSelections({
@@ -16118,10 +16123,72 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
 
     expect(shortHistoryRows).toBeGreaterThan(0);
     expect(longHistoryRows).toBe(shortHistoryRows);
-    expect(longProjection?.titleIdentity?.reviewSetIdentity).toBe(
-      deepAuditReview?.reviewSetIdentity,
+    expect(longProjection?.titleIdentity?.catalogMappingProjectionId).toBe(
+      deepAuditReview === undefined
+        ? undefined
+        : dvdTitleIdentityCatalogMappingProjectionDigest(
+          deepAuditReview.checkpoint,
+          deepAuditReview.items,
+        ),
     );
     fixture.access.close();
+  });
+
+  it("chunks high-cardinality Title Identity workflow projections across archives", () => {
+    const databasePath = createTestDatabasePath();
+    const workspace = mkdtempSync(join(tmpdir(), "rip-dvd-title-capacity-"));
+    temporaryDirectories.push(workspace);
+    const originalsLibraryPath = join(workspace, "originals");
+    mkdirSync(originalsLibraryPath);
+    const access = createLegacySidecarDataAccess({
+      databasePath,
+      originalsLibraryPath,
+    });
+    const first = createDvdTitleIdentityArchiveFixture(
+      "title-capacity-first",
+      { access, databasePath, originalsLibraryPath },
+    );
+    const second = createDvdTitleIdentityArchiveFixture(
+      "title-capacity-second",
+      {
+        access,
+        databasePath,
+        fingerprintCharacter: "7",
+        originalsLibraryPath,
+      },
+    );
+    const fixtures = [first, second];
+    const headers = fixtures.map((fixture) => {
+      const header = access.catalog.findDvdArchiveEvidenceHeader(
+        fixture.archive.id,
+      )!;
+      access.catalog.recordDvdTitleIdentityObservations({
+        originalDiscArchiveId: fixture.archive.id,
+        checkpoint: {
+          manifestId: header.currentManifestId,
+          manifestRevision: header.currentManifestRevision,
+          manifestDigest: header.currentManifestDigest,
+        },
+        observations: Array.from({ length: 225 }, (_value, index) =>
+          titleIdentityObservation(index + 1, { cellId: index + 1 })
+        ),
+      });
+      return {
+        originalDiscArchiveId: fixture.archive.id,
+        evidenceHeader: header,
+      };
+    });
+
+    const workflow = access.catalog.readDvdCatalogReviewWorkflowEvidence(
+      headers,
+    );
+    expect(fixtures.map(({ archive }) =>
+      workflow.get(archive.id)?.titleIdentity?.currentMappingStates.length
+    )).toEqual([225, 225]);
+    expect(fixtures.map(({ archive }) =>
+      workflow.get(archive.id)?.titleIdentity?.catalogMappingProjectionId
+    )).toEqual([expect.any(String), expect.any(String)]);
+    access.close();
   });
 
   it("batches Title Damage workflow evidence across archives and titles", () => {
@@ -16162,6 +16229,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         observations: [
           titleIdentityObservation(1),
           titleIdentityObservation(2, { cellId: 2 }),
+          titleIdentityObservation(2, {
+            angleNumber: 2,
+            angleCount: 2,
+            cellId: 3,
+          }),
         ],
       });
       const currentItems = reviewSet.items.filter(
@@ -16312,6 +16384,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         batch.get(archive.id)?.titleDamage.state
       )).toEqual(["current", "current"]);
       expect(queryCount()).toBe(singleArchiveQueryCount);
+      expect(fixtures.map(({ archive }) =>
+        first.access.dvdTitleDamageAssessments.inspect(archive.id).state
+      )).toEqual(["current", "current"]);
     } finally {
       statementAll.mockRestore();
       statementGet.mockRestore();
@@ -16377,7 +16452,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         evidenceHeader: missingHeader,
       }]).get(fixture.archive.id)?.titleIdentity,
     ).toMatchObject({
-      reviewSetIdentity: missing.reviewSetIdentity,
+      catalogMappingProjectionId:
+        dvdTitleIdentityCatalogMappingProjectionDigest(
+          missing.checkpoint,
+          missing.items,
+        ),
       currentMappingStates: ["needs_mapping_review"],
     });
 

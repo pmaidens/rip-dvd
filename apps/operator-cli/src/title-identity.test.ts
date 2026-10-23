@@ -134,6 +134,9 @@ it("shows every checkpoint-bound Title Identity through the public JSON CLI", as
     "show",
     archive.id,
   ]);
+  const afterCreateRevision = (afterCreate.result as {
+    catalogRevision: string;
+  }).catalogRevision;
   expect(afterCreate.result).toMatchObject({
     titleIdentity: {
       items: [
@@ -155,6 +158,8 @@ it("shows every checkpoint-bound Title Identity through the public JSON CLI", as
     "update",
     archive.id,
     selectionId,
+    "--revision",
+    afterCreateRevision,
     "--source-kind",
     "main_feature",
   ]);

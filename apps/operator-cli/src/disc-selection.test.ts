@@ -172,6 +172,8 @@ it("rejects invalid sources and protects locked Encode Job provenance", async ()
     encodingProfileId: profile.id, outputPath: join(current.mediaLibraryPath, "synthetic-film.mkv") });
   access.close();
   const detail = await current.run(["disc-selection", "show", archive.id, selectionId]);
+  const detailRevision = (detail.result as { catalogRevision: string })
+    .catalogRevision;
   expect(detail.result).toMatchObject({ actionAvailability: { state: "locked_provenance",
     availableActions: ["correct"] }, affectedEncodeJobs: [{ status: "queued" }] });
   const updated = await current.run(["disc-selection", "preview", "update", archive.id, selectionId,
@@ -182,10 +184,12 @@ it("rejects invalid sources and protects locked Encode Job provenance", async ()
   expect(deleted.result).toMatchObject({ state: "blocked", actionAvailability: {
     state: "locked_provenance", availableActions: ["correct"] } });
   const invalidProposal = await current.run(["disc-selection", "preview", "correct", archive.id, selectionId,
-    "--media-item-id", second.id, "--source-kind", "dvd_title", "--title-number", "99"]);
+    "--revision", detailRevision, "--media-item-id", second.id,
+    "--source-kind", "dvd_title", "--title-number", "99"]);
   expect(invalidProposal.result).toMatchObject({ error: { code: "SELECTION_REJECTED" } });
   const preview = await current.run(["disc-selection", "preview", "correct", archive.id, selectionId,
-    "--media-item-id", second.id, "--source-kind", "main_feature"]);
+    "--revision", detailRevision, "--media-item-id", second.id,
+    "--source-kind", "main_feature"]);
   expect(preview.result).toMatchObject({ proposedDiscSelection: { mediaItemId: second.id } });
   expect(preview.result).toMatchObject({ state: "available", consequences: {
     currentSelection: "superseded", createsReplacementSelection: true,
@@ -213,7 +217,8 @@ it("rejects invalid sources and protects locked Encode Job provenance", async ()
   expect(stale.result).toMatchObject({ error: { code: "SELECTION_REJECTED",
     message: "Disc Selection preview is stale because Encode Job history changed" } });
   const currentPreview = await current.run(["disc-selection", "preview", "correct", archive.id, selectionId,
-    "--media-item-id", second.id, "--source-kind", "main_feature"]);
+    "--revision", detailRevision, "--media-item-id", second.id,
+    "--source-kind", "main_feature"]);
   expect(currentPreview.result).toMatchObject({ consequences: {
     requestsEncodeJobCancellation: [additionalJob.id],
   } });
@@ -266,10 +271,13 @@ it("previews unsafe legacy repair and quarantine while preserving completed Enco
   markUnsafeLegacySelections(current.databasePath, [selection.id, other.id]);
 
   const show = await current.run(["disc-selection", "show", archive.id, selection.id]);
+  const showRevision = (show.result as { catalogRevision: string })
+    .catalogRevision;
   expect(show.result).toMatchObject({ actionAvailability: { state: "needs_repair",
     availableActions: ["repair", "remove"] }, historicalEncodeJobCount: 1 });
   const blockedCorrection = await current.run(["disc-selection", "preview", "correct", archive.id,
-    selection.id, "--media-item-id", second.id, "--source-kind", "dvd_title", "--title-number", "1"]);
+    selection.id, "--revision", showRevision, "--media-item-id", second.id,
+    "--source-kind", "dvd_title", "--title-number", "1"]);
   expect(blockedCorrection.result).toMatchObject({ state: "blocked", action: "correct_disc_selection",
     actionAvailability: { state: "needs_repair" } });
   expect(blockedCorrection.result).not.toHaveProperty("previewToken");

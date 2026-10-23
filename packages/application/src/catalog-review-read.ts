@@ -3,6 +3,7 @@ import {
   decodeArchivedDvdTitles,
   DomainInvariantError,
   dvdTitleIdentityCatalogMappingItems,
+  dvdTitleIdentityCatalogMappingProjectionDigest,
   withAuthoritativeDvdArchiveIntegrity,
   type DataAccess,
   type DiscSelection,
@@ -325,7 +326,11 @@ export function readCatalogReview(
       titleIdentity: titleIdentityReviewSet === null
         ? null
         : {
-          reviewSetIdentity: titleIdentityReviewSet.reviewSetIdentity,
+          catalogMappingProjectionId:
+            dvdTitleIdentityCatalogMappingProjectionDigest(
+              titleIdentityReviewSet.checkpoint,
+              titleIdentityReviewSet.items,
+            ),
           currentMappingStates: dvdTitleIdentityCatalogMappingItems(
             titleIdentityReviewSet.items,
           )

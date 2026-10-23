@@ -150,7 +150,8 @@ function parsedCommand(
     ...(action === "update" ? { changes: input } : {}),
     ...(action === "create" || action === "repair" || action === "correct"
       ? { selection: input } : {}),
-    ...(action === "create" && catalogRevision
+    ...((action === "create" || action === "update" || action === "repair") &&
+        catalogRevision
       ? { catalogRevision }
       : {}),
     ...(action === "correct" ? { catalogRevision, ...(correctionReason ? { correctionReason } : {}) } : {}),
@@ -230,8 +231,14 @@ export function runDiscSelection(rest: readonly string[], io: SelectionIO): unkn
   }
   let mutationKey: string | undefined;
   if (isPreview) {
-    if (["--key", "--revision", "--preview-token", "--acknowledge"].some((name) => options.has(name))) {
+    if (["--key", "--preview-token", "--acknowledge"].some((name) => options.has(name))) {
       invalid("Preview takes proposal input without a key or acknowledgement.");
+    }
+    if (
+      options.has("--revision") &&
+      action !== "update" && action !== "repair" && action !== "correct"
+    ) {
+      invalid("A preview revision applies only to update, repair, or correction.");
     }
   } else {
     try {
@@ -245,9 +252,14 @@ export function runDiscSelection(rest: readonly string[], io: SelectionIO): unkn
   }
   const input = payload(action, options, io);
   if (isPreview) {
+    const command = parsedCommand(
+      action,
+      selectionId,
+      input,
+      options.get("--revision"),
+      options.get("--reason"),
+    );
     return withSelectionAccess(io, (access) => {
-      const current = previewDiscSelection(access, archiveId, selectionId!);
-      const command = parsedCommand(action, selectionId, input, current.catalogRevision, options.get("--reason"));
       return previewDiscSelectionChange(access, archiveId, command);
     });
   }

@@ -124,8 +124,8 @@ export function CatalogReviewRecoveryStep({
             )}</dd>
           </div>
           <div>
-            <dt>Title Identity review set</dt>
-            <dd>{identity(workflow.current.titleIdentityReviewSetId)}</dd>
+            <dt>Catalog mapping projection</dt>
+            <dd>{identity(workflow.current.catalogMappingProjectionId)}</dd>
           </div>
           <div>
             <dt>Title Damage Assessment</dt>

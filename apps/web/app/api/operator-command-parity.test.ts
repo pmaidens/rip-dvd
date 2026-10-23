@@ -8,6 +8,7 @@ import {
   createDvdArchiveBoundaryEvidenceDigest,
   createDvdArchiveEvidenceManifestDigests,
   createDvdStructuralAssessment,
+  dvdTitleIdentityCatalogMappingProjectionDigest,
   DVD_RECOVERY_EVIDENCE_ADMISSION,
   DVD_RECOVERY_EVIDENCE_ENCODING,
   DVD_RECOVERY_EVIDENCE_FORMAT,
@@ -250,7 +251,7 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
     error: {
       code: "CATALOG_MAPPING_UNAVAILABLE",
       reasons: [{ code: "SELECTION_UNIDENTIFIED" }],
-      current: { titleIdentityReviewSetId: null },
+      current: { catalogMappingProjectionId: null },
     },
   });
   const pendingProposal = {
@@ -289,7 +290,7 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
     error: {
       code: "CATALOG_MAPPING_UNAVAILABLE",
       reasons: [{ code: "SELECTION_UNIDENTIFIED" }],
-      current: { titleIdentityReviewSetId: null },
+      current: { catalogMappingProjectionId: null },
     },
   });
   const reviewSet = access.catalog.recordDvdTitleIdentityObservations({
@@ -405,7 +406,11 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
           state: "running",
           work: { status: "claimed" },
         },
-        titleIdentityReviewSetId: reviewSet.reviewSetIdentity,
+        catalogMappingProjectionId:
+          dvdTitleIdentityCatalogMappingProjectionDigest(
+            reviewSet.checkpoint,
+            reviewSet.items,
+          ),
         titleDamageAssessmentId: null,
       },
       actions: [
@@ -450,7 +455,11 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
         evidenceHeader: checkpoint,
         recovery: access.catalog.findArchiveRecovery(archive.id),
         titleIdentity: {
-          reviewSetIdentity: reviewSet.reviewSetIdentity,
+          catalogMappingProjectionId:
+            dvdTitleIdentityCatalogMappingProjectionDigest(
+              reviewSet.checkpoint,
+              reviewSet.items,
+            ),
           currentMappingStates: [
             "needs_mapping_review",
             "unmapped",
@@ -597,8 +606,8 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
         }],
         current: {
           checkpoint: { revision: 1 },
-          titleIdentityReviewSetId:
-            afterFirst.reviewWorkflow.current.titleIdentityReviewSetId,
+          catalogMappingProjectionId:
+            afterFirst.reviewWorkflow.current.catalogMappingProjectionId,
         },
       },
     });
@@ -650,8 +659,8 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
         }],
         current: {
           checkpoint: { revision: 1 },
-          titleIdentityReviewSetId:
-            afterFirst.reviewWorkflow.current.titleIdentityReviewSetId,
+          catalogMappingProjectionId:
+            afterFirst.reviewWorkflow.current.catalogMappingProjectionId,
         },
       },
     });
@@ -728,8 +737,47 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
         ],
         current: {
           recovery: { state: "running" },
-          titleIdentityReviewSetId:
-            after.reviewWorkflow.current.titleIdentityReviewSetId,
+          catalogMappingProjectionId:
+            after.reviewWorkflow.current.catalogMappingProjectionId,
+        },
+      },
+    });
+
+    const staleWebUpdatePreview = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "update_disc_selection",
+        discSelectionId: firstSelectionId,
+        catalogRevision: before.catalogRevision,
+        changes: { mediaItemId: secondMediaItem.id },
+        preview: true,
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const staleCliUpdatePreview = await fixture.run([
+      "disc-selection",
+      "preview",
+      "update",
+      archive.id,
+      firstSelectionId,
+      "--revision",
+      before.catalogRevision,
+      "--media-item-id",
+      secondMediaItem.id,
+    ]);
+    expect(staleWebUpdatePreview.status).toBe(409);
+    expect(staleCliUpdatePreview.exitCode).toBe(2);
+    expect(staleCliUpdatePreview.result).toEqual(
+      await staleWebUpdatePreview.json(),
+    );
+    expect(staleCliUpdatePreview.result).toMatchObject({
+      error: {
+        code: "STALE_CATALOG_REVISION",
+        reasons: [{ code: "STALE_CATALOG_REVISION" }],
+        current: {
+          catalogMappingProjectionId:
+            after.reviewWorkflow.current.catalogMappingProjectionId,
         },
       },
     });
@@ -738,6 +786,7 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       catalogReviewMutationRequest(archive.id, {
         action: "update_disc_selection",
         discSelectionId: firstSelectionId,
+        catalogRevision: after.catalogRevision,
         changes: { mediaItemId: secondMediaItem.id },
         preview: true,
       }),
@@ -755,6 +804,8 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       "update",
       archive.id,
       firstSelectionId,
+      "--revision",
+      after.catalogRevision,
       "--media-item-id",
       secondMediaItem.id,
     ]);
@@ -804,6 +855,7 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       catalogReviewMutationRequest(archive.id, {
         action: "update_disc_selection",
         discSelectionId: firstSelectionId,
+        catalogRevision: after.catalogRevision,
         changes: { mediaItemId: secondMediaItem.id },
         preview: true,
       }),
@@ -817,6 +869,8 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       "update",
       archive.id,
       firstSelectionId,
+      "--revision",
+      after.catalogRevision,
       "--media-item-id",
       secondMediaItem.id,
     ]);

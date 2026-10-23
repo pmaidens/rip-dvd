@@ -535,7 +535,7 @@ export interface DvdCatalogReviewWorkflowEvidence {
   evidenceHeader: DvdArchiveEvidenceHeader | null;
   recovery: ArchiveRecovery | null;
   titleIdentity: {
-    reviewSetIdentity: string;
+    catalogMappingProjectionId: string;
     currentMappingStates: readonly DvdTitleIdentityMappingState[];
   } | null;
   titleDamage: {

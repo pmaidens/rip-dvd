@@ -292,7 +292,7 @@ describe("CatalogReviewAutomation", () => {
           state: "running",
           work: null,
         },
-        titleIdentityReviewSetId: "review-set-1",
+        catalogMappingProjectionId: "mapping-projection-1",
         titleDamageAssessmentId: null,
       },
       actions: [{
