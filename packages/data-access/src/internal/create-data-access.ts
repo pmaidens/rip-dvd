@@ -9361,6 +9361,24 @@ export function createDataAccessInternal(
                 )),
               ),
               notExists(
+                transaction.select({ id: encodeJobs.id })
+                  .from(encodeJobs)
+                  .innerJoin(
+                    discSelections,
+                    eq(discSelections.id, encodeJobs.discSelectionId),
+                  )
+                  .where(and(
+                    eq(
+                      discSelections.originalDiscArchiveId,
+                      archiveRecoveries.originalDiscArchiveId,
+                    ),
+                    inArray(
+                      encodeJobs.status,
+                      ACTIVE_ENCODE_WORK_STATUSES,
+                    ),
+                  )),
+              ),
+              notExists(
                 transaction.select({ id: dvdRecoveryReconciliations.id })
                   .from(dvdRecoveryReconciliations)
                   .where(and(

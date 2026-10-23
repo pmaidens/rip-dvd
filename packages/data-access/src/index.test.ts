@@ -13962,6 +13962,111 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     }
   });
 
+  it("skips an encode-owned verified candidate without starving the queue", () => {
+    const databasePath = createTestDatabasePath();
+    const blockedKey = "verified-candidate-a-blocked";
+    const claimableKey = "verified-candidate-b-claimable";
+    const blocked = createDiscSelectionCorrectionFixture({
+      databasePath,
+      key: blockedKey,
+      contentIdFill: "a",
+    });
+    const claimable = createDiscSelectionCorrectionFixture({
+      databasePath,
+      key: claimableKey,
+      contentIdFill: "b",
+    });
+    const profile = blocked.access.encodingProfiles.create({
+      key: blockedKey,
+      displayName: "Verified candidate blocked by Encode work",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    const encode = blocked.access.encodeJobs.enqueue({
+      discSelectionId: blocked.mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Verified Candidate Blocked.mkv",
+    });
+    const blockedRecoveryId =
+      "verified-candidate-a-blocked-recovery" as ArchiveRecoveryId;
+    const claimableRecoveryId =
+      "verified-candidate-b-claimable-recovery" as ArchiveRecoveryId;
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      blocked.archive.id,
+      blockedKey,
+      { archiveRecoveryId: blockedRecoveryId },
+    );
+    markArchiveWithDvdRecoveryEvidence(
+      databasePath,
+      claimable.archive.id,
+      claimableKey,
+      { archiveRecoveryId: claimableRecoveryId },
+    );
+    const blockedHeader = blocked.access.catalog.findDvdArchiveEvidenceHeader(
+      blocked.archive.id,
+    )!;
+    const claimableHeader = claimable.access.catalog
+      .findDvdArchiveEvidenceHeader(claimable.archive.id)!;
+    const sqlite = new DatabaseSync(databasePath);
+    const insertVerification = sqlite.prepare(`
+      INSERT INTO dvd_disc_verifications (
+        id, archive_recovery_id, archive_recovery_attempt_id,
+        attempt_ordinal, original_disc_archive_id, disc_inspection_id,
+        detected_disc_id, media_generation, source_metadata_fingerprint,
+        observed_metadata_fingerprint, checkpoint_revision,
+        checkpoint_digest, status, outcome, reasons, findings,
+        budget_exhausted, worker_execution_id, claim_token, claimed_at,
+        started_at, completed_at, failure_code, created_at, updated_at
+      ) VALUES (
+        ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 1, ?, 'completed', 'match', '[]', '[]',
+        0, ?, NULL, NULL, 1, 1, NULL, 1, 1
+      )
+    `);
+    for (const candidate of [{
+      key: blockedKey,
+      recoveryId: blockedRecoveryId,
+      archive: blocked.archive,
+      checkpointDigest: blockedHeader.currentManifestDigest,
+    }, {
+      key: claimableKey,
+      recoveryId: claimableRecoveryId,
+      archive: claimable.archive,
+      checkpointDigest: claimableHeader.currentManifestDigest,
+    }]) {
+      insertVerification.run(
+        `${candidate.key}-verification`,
+        candidate.recoveryId,
+        `${candidate.recoveryId}:attempt:1`,
+        candidate.archive.id,
+        `${candidate.key}-evidence-inspection`,
+        candidate.archive.detectedDiscId,
+        `${candidate.key}-evidence-generation`,
+        candidate.archive.fingerprint,
+        candidate.archive.fingerprint,
+        candidate.checkpointDigest,
+        `${candidate.key}-verification-worker`,
+      );
+    }
+    sqlite.close();
+
+    const claimed = blocked.access.archiveRecoveryWork
+      .claimNextVerifiedCandidate("verified-candidate-worker");
+    expect(claimed).toMatchObject({
+      recovery: { id: claimableRecoveryId, status: "running" },
+      claim: {
+        archiveRecoveryId: claimableRecoveryId,
+        status: "claimed",
+      },
+    });
+    expect(blocked.access.catalog.findArchiveRecoveryById(blockedRecoveryId))
+      .toMatchObject({ status: "eligible", work: null });
+    expect(blocked.access.encodeJobs.find(encode.id))
+      .toMatchObject({ status: "queued" });
+    blocked.access.close();
+    claimable.access.close();
+  });
+
   it("blocks recovery request and claim when Encode Job work already owns the archive", () => {
     const databasePath = createTestDatabasePath();
     const { access, archive, mistakenSelection } =
