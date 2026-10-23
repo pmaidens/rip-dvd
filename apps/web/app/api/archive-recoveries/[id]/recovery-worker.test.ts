@@ -194,38 +194,40 @@ function rewriteStopReceiptAsLegacy(databasePath: string, mutationKey: string) {
   database.close();
 }
 
-function immediateReader(
-  read: (startLba: number) =>
-    | { outcome: "readable"; bytes: Buffer }
-    | { outcome: "unreadable"; diagnostic: DvdDiscVerificationDiagnostic },
+type SyntheticSourceReadResult =
+  | { outcome: "readable"; bytes: Buffer }
+  | { outcome: "unreadable"; diagnostic: DvdDiscVerificationDiagnostic };
+
+function immediateSourceReader<
+  Request extends { devicePath: string; startLba: number },
+>(
+  read: (startLba: number) => SyntheticSourceReadResult,
 ) {
-  const start = vi.fn((input:
-    Parameters<DvdRecoverySourceReader["start"]>[0]) => ({
-      result: Promise.resolve(read(input.startLba)),
-      closed: Promise.resolve(),
-      cancel: vi.fn(),
-      deviceIdentity: syntheticDeviceIdentity(input.devicePath),
-      ready: Promise.resolve(),
-      authorize: vi.fn(),
-    }));
+  const start = vi.fn((input: Request) => ({
+    result: Promise.resolve(read(input.startLba)),
+    closed: Promise.resolve(),
+    cancel: vi.fn(),
+    deviceIdentity: syntheticDeviceIdentity(input.devicePath),
+    ready: Promise.resolve(),
+    authorize: vi.fn(),
+  }));
   return { reader: { start }, start };
 }
 
-function immediateVerificationReader(
-  read: (startLba: number) =>
-    | { outcome: "readable"; bytes: Buffer }
-    | { outcome: "unreadable"; diagnostic: DvdDiscVerificationDiagnostic },
+function immediateReader(
+  read: (startLba: number) => SyntheticSourceReadResult,
 ) {
-  const start = vi.fn((input:
-    Parameters<DvdVerificationSourceReader["start"]>[0]) => ({
-      result: Promise.resolve(read(input.startLba)),
-      closed: Promise.resolve(),
-      cancel: vi.fn(),
-      deviceIdentity: syntheticDeviceIdentity(input.devicePath),
-      ready: Promise.resolve(),
-      authorize: vi.fn(),
-    }));
-  return { reader: { start }, start };
+  return immediateSourceReader<
+    Parameters<DvdRecoverySourceReader["start"]>[0]
+  >(read);
+}
+
+function immediateVerificationReader(
+  read: (startLba: number) => SyntheticSourceReadResult,
+) {
+  return immediateSourceReader<
+    Parameters<DvdVerificationSourceReader["start"]>[0]
+  >(read);
 }
 
 function pollInput(

@@ -9,11 +9,14 @@ The legacy full-disc content reader follows the same cancellation policy.
 
 An initial archive can hold its drive and worker slot indefinitely. A resumed
 recovery runs complete unresolved-only passes without a time limit. Each pass
-that recovers bytes schedules another pass in the opposite direction. A
-complete pass that recovers no bytes durably pauses recovery; this is a safe
-scheduling boundary, not a conclusion that the remaining source is damaged.
-The operator can Stop the recovery. A future explicit Resume control can start
-another pass after a no-progress pause. Web cancellation and
+that recovers bytes schedules another pass in the opposite direction after a
+fresh checkpoint-current sampled verification. A verifier interruption queues
+a durable retry; a removed, changed, or nonmatching source faults the Recovery
+instead of leaving the continuation reported as running. A complete pass that
+recovers no bytes durably pauses recovery; this is a safe scheduling boundary,
+not a conclusion that the remaining source is damaged. The operator can Stop
+the recovery. A future explicit Resume control can start another pass after a
+no-progress pause. Web cancellation and
 `rip-dvd cancel-archive-request` use the same Archive Request operation. A CLI
 wait deadline ends the observer's wait without cancelling background work. The
 retired `RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS` setting has no effect.
