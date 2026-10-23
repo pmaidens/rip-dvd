@@ -2004,6 +2004,8 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     attemptId: "evidence-new-format-recovery-attempt",
     attemptOrdinal: 1,
     status: "eligible",
+    pauseReason: null,
+    passHistory: [],
     stopOperationId: null,
     stopRequestedAt: null,
     stoppedAt: null,

@@ -404,6 +404,7 @@ const DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
 const ENCODE_JOB_FAILURE_REPORT_JOB_LIMIT = 400;
 const DVD_ARCHIVE_EVIDENCE_AUDIT_MANIFEST_LIMIT = 10_000;
+const DVD_RECOVERY_PASS_HISTORY_LIMIT = 16;
 
 function discSelectionMatchesTitleObservation(
   selection: DiscSelection,
@@ -1651,6 +1652,32 @@ export function createDataAccessInternal(
     return manifest.unrecoveredSourceRanges.length === 0
       ? "completed"
       : "eligible";
+  };
+  const unrecoveredSectorCount = (
+    querySource: Pick<typeof database, "select">,
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): number => {
+    const manifest = requireRow(
+      querySource.select({
+        unrecoveredSourceRanges:
+          dvdArchiveEvidenceManifests.unrecoveredSourceRanges,
+      }).from(dvdArchiveEvidenceHeaders).innerJoin(
+        dvdArchiveEvidenceManifests,
+        eq(
+          dvdArchiveEvidenceManifests.id,
+          dvdArchiveEvidenceHeaders.currentManifestId,
+        ),
+      ).where(eq(
+        dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+        originalDiscArchiveId,
+      )).get(),
+      "DVD Archive Evidence",
+      originalDiscArchiveId,
+    );
+    return manifest.unrecoveredSourceRanges.reduce(
+      (total, range) => total + range.sectorCount,
+      0,
+    );
   };
   const requireNoPendingDvdRecoveryReconciliation = (
     querySource: Pick<typeof database, "select">,
@@ -7673,6 +7700,8 @@ export function createDataAccessInternal(
           attemptId: newId<import("../types.js").ArchiveRecoveryAttemptId>(),
           attemptOrdinal: 1,
           status: initial.unrecoveredSourceRanges.length ? "eligible" : "completed",
+          pauseReason: null,
+          passHistory: [],
           createdAt: timestamp, updatedAt: timestamp,
         }).run();
       }
@@ -8612,6 +8641,9 @@ export function createDataAccessInternal(
       if (recoveryWork !== undefined) {
         transaction.update(archiveRecoveryWork).set({
           passCursorLba: recoveryRead.startLba,
+          passRecoveredSectorCount: recoveryRead.outcome === "recovered"
+            ? sql`${archiveRecoveryWork.passRecoveredSectorCount} + 1`
+            : archiveRecoveryWork.passRecoveredSectorCount,
           updatedAt: timestamp,
         }).where(and(
           eq(
@@ -9512,6 +9544,13 @@ export function createDataAccessInternal(
             recovery.id,
           );
           const timestamp = now();
+          const passStartedAt = recovery.work?.passStartedAt ?? timestamp;
+          const passInitialUnrecoveredSectorCount =
+            recovery.work?.passInitialUnrecoveredSectorCount ??
+              unrecoveredSectorCount(
+                transaction,
+                recovery.originalDiscArchiveId,
+              );
           const claimToken = newId<ArchiveRecoveryClaimToken>();
           const claimed = recovery.work === null
             ? transaction.insert(archiveRecoveryWork).values({
@@ -9524,6 +9563,8 @@ export function createDataAccessInternal(
               claimedBy,
               claimToken,
               claimedAt: timestamp,
+              passStartedAt,
+              passInitialUnrecoveredSectorCount,
               createdAt: timestamp,
               updatedAt: timestamp,
             }).returning().get()
@@ -9533,6 +9574,8 @@ export function createDataAccessInternal(
               claimedBy,
               claimToken,
               claimedAt: timestamp,
+              passStartedAt,
+              passInitialUnrecoveredSectorCount,
               updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveryWork.archiveRecoveryId, recovery.id),
@@ -9647,6 +9690,13 @@ export function createDataAccessInternal(
           requireNoActiveEncodeWork(transaction, recovery);
           const timestamp = now();
           const claimToken = newId<ArchiveRecoveryClaimToken>();
+          const passStartedAt = recovery.work?.passStartedAt ?? timestamp;
+          const passInitialUnrecoveredSectorCount =
+            recovery.work?.passInitialUnrecoveredSectorCount ??
+              unrecoveredSectorCount(
+                transaction,
+                recovery.originalDiscArchiveId,
+              );
           const claimed = recovery.work === null
             ? transaction
               .insert(archiveRecoveryWork)
@@ -9660,6 +9710,8 @@ export function createDataAccessInternal(
                 claimedBy,
                 claimToken,
                 claimedAt: timestamp,
+                passStartedAt,
+                passInitialUnrecoveredSectorCount,
                 createdAt: timestamp,
                 updatedAt: timestamp,
               })
@@ -9673,6 +9725,8 @@ export function createDataAccessInternal(
                 claimedBy,
                 claimToken,
                 claimedAt: timestamp,
+                passStartedAt,
+                passInitialUnrecoveredSectorCount,
                 updatedAt: timestamp,
               })
               .where(and(
@@ -9985,7 +10039,8 @@ export function createDataAccessInternal(
           }
           if (
             recovery.status !== "eligible" &&
-            recovery.status !== "running"
+            recovery.status !== "running" &&
+            recovery.status !== "paused"
           ) {
             throw new InvalidStatusTransitionError(
               "Archive Recovery",
@@ -10021,11 +10076,16 @@ export function createDataAccessInternal(
               stopRequestedAt: timestamp,
               stoppedAt: null,
               faultCode: null,
+              pauseReason: null,
               updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveries.id, recovery.id),
               eq(archiveRecoveries.attemptId, recovery.attemptId),
-              inArray(archiveRecoveries.status, ["eligible", "running"]),
+              inArray(archiveRecoveries.status, [
+                "eligible",
+                "running",
+                "paused",
+              ]),
             )).returning().get(),
             "Archive Recovery",
             recovery.id,
@@ -10360,17 +10420,100 @@ export function createDataAccessInternal(
           ) {
             return recovery;
           }
-          const settledStatus = settledArchiveRecoveryStatus(
+          const timestamp = now();
+          const work = recovery.work;
+          if (
+            work === null || work.passStartedAt === null ||
+            work.passInitialUnrecoveredSectorCount === null
+          ) {
+            throw new DomainInvariantError(
+              "Archive Recovery pass has no durable starting progress",
+            );
+          }
+          const remainingSectorCount = unrecoveredSectorCount(
             transaction,
             recovery.originalDiscArchiveId,
           );
-          transaction.delete(archiveRecoveryWork).where(and(
-            eq(archiveRecoveryWork.archiveRecoveryId, claim.archiveRecoveryId),
-            eq(archiveRecoveryWork.claimToken, claim.claimToken),
-          )).run();
-          const timestamp = now();
+          if (
+            work.passInitialUnrecoveredSectorCount - remainingSectorCount !==
+              work.passRecoveredSectorCount
+          ) {
+            throw new DomainInvariantError(
+              "Archive Recovery pass progress does not match the current checkpoint",
+            );
+          }
+          const outcome = remainingSectorCount === 0
+            ? "completed" as const
+            : work.passRecoveredSectorCount > 0
+              ? "productive" as const
+              : "no_progress" as const;
+          const completedAtMs = timestamp.getTime();
+          const history = [
+            ...recovery.passHistory,
+            {
+              passNumber: work.passNumber,
+              direction: work.passDirection,
+              initialUnrecoveredSectorCount:
+                work.passInitialUnrecoveredSectorCount,
+              recoveredSectorCount: work.passRecoveredSectorCount,
+              remainingSectorCount,
+              lastCursorLba: work.passCursorLba,
+              startedAtMs: work.passStartedAt.getTime(),
+              completedAtMs,
+              elapsedMs: Math.max(
+                0,
+                completedAtMs - work.passStartedAt.getTime(),
+              ),
+              outcome,
+            },
+          ].slice(-DVD_RECOVERY_PASS_HISTORY_LIMIT);
+          if (outcome === "completed") {
+            transaction.delete(archiveRecoveryWork).where(and(
+              eq(
+                archiveRecoveryWork.archiveRecoveryId,
+                claim.archiveRecoveryId,
+              ),
+              eq(archiveRecoveryWork.claimToken, claim.claimToken),
+            )).run();
+          } else {
+            transaction.update(archiveRecoveryWork).set({
+              status: "requested",
+              requestedAt: timestamp,
+              claimedBy: null,
+              claimToken: null,
+              claimedAt: null,
+              admittedDevicePath: null,
+              admittedDeviceId: null,
+              admittedDeviceInode: null,
+              ...(outcome === "productive"
+                ? {
+                    passNumber: work.passNumber + 1,
+                    passDirection: work.passDirection === "forward"
+                      ? "reverse" as const
+                      : "forward" as const,
+                    passStartedAt: null,
+                    passInitialUnrecoveredSectorCount: null,
+                    passRecoveredSectorCount: 0,
+                    passCursorLba: null,
+                  }
+                : {}),
+              updatedAt: timestamp,
+            }).where(and(
+              eq(
+                archiveRecoveryWork.archiveRecoveryId,
+                claim.archiveRecoveryId,
+              ),
+              eq(archiveRecoveryWork.claimToken, claim.claimToken),
+            )).run();
+          }
           transaction.update(archiveRecoveries).set({
-            status: settledStatus,
+            status: outcome === "completed"
+              ? "completed"
+              : outcome === "productive"
+                ? "eligible"
+                : "paused",
+            pauseReason: outcome === "no_progress" ? "no_progress" : null,
+            passHistory: history,
             updatedAt: timestamp,
           }).where(and(
             eq(archiveRecoveries.id, recovery.id),
@@ -10409,6 +10552,7 @@ export function createDataAccessInternal(
             transaction.update(archiveRecoveries).set({
               status: "faulted",
               faultCode,
+              pauseReason: null,
               updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveries.id, recovery.id),
@@ -13395,7 +13539,11 @@ export function createDataAccessInternal(
         const active = database.select({ id: archiveRecoveries.id })
           .from(archiveRecoveries)
           .where(or(
-            inArray(archiveRecoveries.status, ["running", "stopping"]),
+            inArray(archiveRecoveries.status, [
+              "running",
+              "paused",
+              "stopping",
+            ]),
             activeReconciliation,
           ))
           .orderBy(desc(archiveRecoveries.updatedAt), desc(archiveRecoveries.id))
@@ -13408,6 +13556,7 @@ export function createDataAccessInternal(
             .from(archiveRecoveries)
             .where(and(
               ne(archiveRecoveries.status, "running"),
+              ne(archiveRecoveries.status, "paused"),
               ne(archiveRecoveries.status, "stopping"),
               notExists(
                 database.select({ id: dvdRecoveryReconciliations.id })

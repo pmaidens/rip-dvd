@@ -26,10 +26,24 @@ export const DVD_UNRECOVERED_SOURCE_CLASSIFICATIONS = [
 export const ARCHIVE_RECOVERY_STATUSES = [
   "eligible",
   "running",
+  "paused",
   "stopping",
   "stopped",
   "completed",
   "faulted",
+] as const;
+
+export const ARCHIVE_RECOVERY_PAUSE_REASONS = ["no_progress"] as const;
+
+export const ARCHIVE_RECOVERY_PASS_DIRECTIONS = [
+  "forward",
+  "reverse",
+] as const;
+
+export const ARCHIVE_RECOVERY_PASS_OUTCOMES = [
+  "productive",
+  "no_progress",
+  "completed",
 ] as const;
 
 export const ARCHIVE_RECOVERY_WORK_STATUSES = [

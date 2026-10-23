@@ -9,6 +9,9 @@ import type {
   ARCHIVE_INTEGRITIES,
   ARCHIVE_RECOVERY_FAULT_CODES,
   ARCHIVE_RECOVERY_STATUSES,
+  ARCHIVE_RECOVERY_PAUSE_REASONS,
+  ARCHIVE_RECOVERY_PASS_DIRECTIONS,
+  ARCHIVE_RECOVERY_PASS_OUTCOMES,
   ARCHIVE_RECOVERY_WORK_STATUSES,
   CATALOG_REVIEW_OUTCOMES,
   DETECTED_DISC_STATUSES,
@@ -82,6 +85,12 @@ export type DvdUnrecoveredSourceClassification =
   (typeof DVD_UNRECOVERED_SOURCE_CLASSIFICATIONS)[number];
 export type ArchiveRecoveryStatus =
   (typeof ARCHIVE_RECOVERY_STATUSES)[number];
+export type ArchiveRecoveryPauseReason =
+  (typeof ARCHIVE_RECOVERY_PAUSE_REASONS)[number];
+export type ArchiveRecoveryPassDirection =
+  (typeof ARCHIVE_RECOVERY_PASS_DIRECTIONS)[number];
+export type ArchiveRecoveryPassOutcome =
+  (typeof ARCHIVE_RECOVERY_PASS_OUTCOMES)[number];
 export type ArchiveRecoveryFaultCode =
   (typeof ARCHIVE_RECOVERY_FAULT_CODES)[number];
 export type ArchiveRecoveryWorkStatus =
@@ -538,6 +547,8 @@ export interface ArchiveRecovery {
   attemptId: ArchiveRecoveryAttemptId;
   attemptOrdinal: number;
   status: ArchiveRecoveryStatus;
+  pauseReason: ArchiveRecoveryPauseReason | null;
+  passHistory: readonly ArchiveRecoveryPassSummary[];
   stopOperationId: ArchiveRecoveryStopOperationId | null;
   stopRequestedAt: Date | null;
   stoppedAt: Date | null;
@@ -545,6 +556,19 @@ export interface ArchiveRecovery {
   work: ArchiveRecoveryWork | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface ArchiveRecoveryPassSummary {
+  passNumber: number;
+  direction: ArchiveRecoveryPassDirection;
+  initialUnrecoveredSectorCount: number;
+  recoveredSectorCount: number;
+  remainingSectorCount: number;
+  lastCursorLba: number | null;
+  startedAtMs: number;
+  completedAtMs: number;
+  elapsedMs: number;
+  outcome: ArchiveRecoveryPassOutcome;
 }
 
 export interface ArchiveRecoveryStopReceipt extends ArchiveRecovery {
@@ -626,6 +650,11 @@ export interface ArchiveRecoveryWork {
   claimedBy: string | null;
   claimToken: ArchiveRecoveryClaimToken | null;
   claimedAt: Date | null;
+  passNumber: number;
+  passDirection: ArchiveRecoveryPassDirection;
+  passStartedAt: Date | null;
+  passInitialUnrecoveredSectorCount: number | null;
+  passRecoveredSectorCount: number;
   passCursorLba: number | null;
   admittedDevicePath: string | null;
   admittedDeviceId: string | null;

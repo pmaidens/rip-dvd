@@ -22,6 +22,8 @@ import {
   ARCHIVE_FORMATS,
   ARCHIVE_INTEGRITIES,
   ARCHIVE_RECOVERY_FAULT_CODES,
+  ARCHIVE_RECOVERY_PASS_DIRECTIONS,
+  ARCHIVE_RECOVERY_PAUSE_REASONS,
   ARCHIVE_RECOVERY_STATUSES,
   ARCHIVE_RECOVERY_WORK_STATUSES,
   CATALOG_REVIEW_OUTCOMES,
@@ -89,6 +91,9 @@ import type {
   ArchiveJobClaimToken,
   ArchiveRecoveryId,
   ArchiveRecoveryFaultCode,
+  ArchiveRecoveryPassDirection,
+  ArchiveRecoveryPassSummary,
+  ArchiveRecoveryPauseReason,
   ArchiveRecoveryAttemptId,
   ArchiveRecoveryClaimToken,
   ArchiveRecoveryStopOperationId,
@@ -1719,6 +1724,13 @@ export const archiveRecoveries = sqliteTable(
     status: text("status", { enum: ARCHIVE_RECOVERY_STATUSES })
       .$type<ArchiveRecoveryStatus>()
       .notNull(),
+    pauseReason: text("pause_reason", {
+      enum: ARCHIVE_RECOVERY_PAUSE_REASONS,
+    }).$type<ArchiveRecoveryPauseReason>(),
+    passHistory: text("pass_history", { mode: "json" })
+      .$type<readonly ArchiveRecoveryPassSummary[]>()
+      .notNull()
+      .default(sql`'[]'`),
     stopOperationId: text("stop_operation_id")
       .$type<ArchiveRecoveryStopOperationId>(),
     stopRequestedAt: integer("stop_requested_at", { mode: "timestamp_ms" }),
@@ -1742,6 +1754,14 @@ export const archiveRecoveries = sqliteTable(
     check(
       "archive_recoveries_status_check",
       sql`${table.status} in (${sqliteStringLiterals(ARCHIVE_RECOVERY_STATUSES)})`,
+    ),
+    check(
+      "archive_recoveries_pause_check",
+      sql`(${table.status} = 'paused' and ${table.pauseReason} in (${sqliteStringLiterals(ARCHIVE_RECOVERY_PAUSE_REASONS)})) or (${table.status} <> 'paused' and ${table.pauseReason} is null)`,
+    ),
+    check(
+      "archive_recoveries_pass_history_check",
+      sql`json_valid(${table.passHistory}) and json_type(${table.passHistory}) = 'array' and json_array_length(${table.passHistory}) <= 16`,
     ),
     check(
       "archive_recoveries_stop_check",
@@ -1780,6 +1800,17 @@ export const archiveRecoveryWork = sqliteTable(
     claimedBy: text("claimed_by"),
     claimToken: text("claim_token").$type<ArchiveRecoveryClaimToken>(),
     claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
+    passNumber: integer("pass_number").notNull().default(1),
+    passDirection: text("pass_direction", {
+      enum: ARCHIVE_RECOVERY_PASS_DIRECTIONS,
+    }).$type<ArchiveRecoveryPassDirection>().notNull().default("forward"),
+    passStartedAt: integer("pass_started_at", { mode: "timestamp_ms" }),
+    passInitialUnrecoveredSectorCount: integer(
+      "pass_initial_unrecovered_sector_count",
+    ),
+    passRecoveredSectorCount: integer("pass_recovered_sector_count")
+      .notNull()
+      .default(0),
     passCursorLba: integer("pass_cursor_lba"),
     admittedDevicePath: text("admitted_device_path"),
     admittedDeviceId: text("admitted_device_id"),
@@ -1818,6 +1849,10 @@ export const archiveRecoveryWork = sqliteTable(
     check(
       "archive_recovery_work_cursor_check",
       sql`${table.passCursorLba} is null or (typeof(${table.passCursorLba}) = 'integer' and ${table.passCursorLba} >= 0)`,
+    ),
+    check(
+      "archive_recovery_work_pass_check",
+      sql`typeof(${table.passNumber}) = 'integer' and ${table.passNumber} > 0 and ${table.passDirection} in (${sqliteStringLiterals(ARCHIVE_RECOVERY_PASS_DIRECTIONS)}) and ((${table.passStartedAt} is null and ${table.passInitialUnrecoveredSectorCount} is null and ${table.passRecoveredSectorCount} = 0 and ${table.passCursorLba} is null) or (${table.passStartedAt} is not null and typeof(${table.passInitialUnrecoveredSectorCount}) = 'integer' and ${table.passInitialUnrecoveredSectorCount} > 0 and typeof(${table.passRecoveredSectorCount}) = 'integer' and ${table.passRecoveredSectorCount} between 0 and ${table.passInitialUnrecoveredSectorCount}))`,
     ),
     check(
       "archive_recovery_work_device_identity_check",

@@ -553,21 +553,39 @@ export async function pollDvdRecoveryPass(input: {
     if (checkpoint === null) {
       throw new DvdRecoveryPassFault("SOURCE_READ_FAILED");
     }
-    const firstUnattemptedLba = claim.passCursorLba === null
-      ? 0
-      : claim.passCursorLba + 1;
-    const ranges = checkpoint.unrecoveredSourceRanges.flatMap((range) => {
-      const endLbaExclusive = range.startLba + range.sectorCount;
-      const startLba = Math.max(range.startLba, firstUnattemptedLba);
-      return startLba >= endLbaExclusive
-        ? []
-        : [{ startLba, sectorCount: endLbaExclusive - startLba }];
-    });
+    const ranges = (claim.passDirection === "forward"
+      ? checkpoint.unrecoveredSourceRanges
+      : [...checkpoint.unrecoveredSourceRanges].reverse()).flatMap((range) => {
+        const endLbaExclusive = range.startLba + range.sectorCount;
+        if (claim.passDirection === "forward") {
+          const startLba = Math.max(
+            range.startLba,
+            claim.passCursorLba === null ? 0 : claim.passCursorLba + 1,
+          );
+          return startLba >= endLbaExclusive
+            ? []
+            : [{ startLba, endLbaExclusive }];
+        }
+        const resumedEndLbaExclusive = Math.min(
+          endLbaExclusive,
+          claim.passCursorLba ?? endLbaExclusive,
+        );
+        return range.startLba >= resumedEndLbaExclusive
+          ? []
+          : [{
+              startLba: range.startLba,
+              endLbaExclusive: resumedEndLbaExclusive,
+            }];
+      });
     for (const range of ranges) {
       for (
-        let startLba = range.startLba;
-        startLba < range.startLba + range.sectorCount;
-        startLba += 1
+        let startLba = claim.passDirection === "forward"
+          ? range.startLba
+          : range.endLbaExclusive - 1;
+        claim.passDirection === "forward"
+          ? startLba < range.endLbaExclusive
+          : startLba >= range.startLba;
+        startLba += claim.passDirection === "forward" ? 1 : -1
       ) {
         throwIfRenewalFailed();
         signal.throwIfAborted();

@@ -143,8 +143,8 @@ function archiveRecoveryOperation(
     reconciliation?.status === "running";
   const recoveryOwnsStatus = recovery.status === "running" ||
     recovery.status === "stopping" || !reconciliationIsActive &&
-      (recovery.status === "stopped" || recovery.status === "faulted" ||
-        recovery.status === "completed");
+      (recovery.status === "paused" || recovery.status === "stopped" ||
+        recovery.status === "faulted" || recovery.status === "completed");
   const encodeJobs = access.catalog.listDiscSelections({
     originalDiscArchiveId: recovery.originalDiscArchiveId,
     includeHistorical: true,
@@ -1116,7 +1116,13 @@ const TERMINAL_STATUSES: Record<WaitableKind, readonly string[]> = {
   "disc-inspections": ["completed", "failed", "aborted"],
   "archive-requests": ["fulfilled", "cancelled", "needs_attention"],
   "archive-jobs": ["completed", "failed", "cancelled", "aborted"],
-  "archive-recoveries": ["completed", "failed", "stopped", "faulted"],
+  "archive-recoveries": [
+    "paused",
+    "completed",
+    "failed",
+    "stopped",
+    "faulted",
+  ],
   "encode-jobs": ["completed", "failed", "cancelled"],
   "archive-audits": ["completed", "failed"],
   "filesystem-verifications": ["completed", "failed"],
