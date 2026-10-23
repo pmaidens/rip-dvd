@@ -1,5 +1,6 @@
 import { afterEach, expect, it } from "vitest";
 import { join } from "node:path";
+import type { ArchiveRecoveryStopOperationId } from "@rip-dvd/data-access";
 
 import {
   createOperatorWorkflowFixture,
@@ -159,6 +160,76 @@ it("offers the same attempt-bound durable Stop through web and CLI", async () =>
     expect(stoppedWeb.status).toBe(409);
     expect(stoppedCli.exitCode).toBe(2);
     expect(stoppedCli.result).toEqual(await stoppedWeb.json());
+  } finally {
+    access.close();
+  }
+});
+
+it("retains the Stop operation identity through a terminal fault", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const mutationKey = "00000000-0000-4000-8000-000000000492";
+  const access = fixture.openAccess();
+  try {
+    const submitted = await createDvdRecoveryStopRoute(
+      request(seeded.recoveryId, mutationKey, seeded.attemptId),
+      seeded.recoveryId,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const receipt = await submitted.json() as {
+      archiveRecovery: { stopRequestedAt: string };
+      operation: { operationId: ArchiveRecoveryStopOperationId };
+    };
+    access.archiveRecoveryWork.markStopFault({
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+      stopOperationId: receipt.operation.operationId,
+      faultCode: "STORAGE_UNSUPPORTED",
+    });
+
+    const webStatus = createOperationsResponse(
+      access,
+      new Request(
+        `http://localhost:3000/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    const cliStatus = await fixture.run([
+      "inspect",
+      "archive-recoveries",
+      seeded.recoveryId,
+    ]);
+    expect(cliStatus.result).toEqual(await webStatus.json());
+    expect(cliStatus.result).toMatchObject({
+      item: {
+        status: "faulted",
+        recoveryStatus: "faulted",
+        stopOperationId: receipt.operation.operationId,
+        stopRequestedAt: receipt.archiveRecovery.stopRequestedAt,
+        faultCode: "STORAGE_UNSUPPORTED",
+      },
+    });
+
+    const waited = await fixture.run([
+      "wait",
+      "archive-recoveries",
+      seeded.recoveryId,
+      "--timeout-ms",
+      "0",
+    ]);
+    expect(waited).toMatchObject({
+      exitCode: 0,
+      result: {
+        outcome: "settled",
+        current: {
+          status: "faulted",
+          stopOperationId: receipt.operation.operationId,
+          stopRequestedAt: receipt.archiveRecovery.stopRequestedAt,
+        },
+      },
+    });
   } finally {
     access.close();
   }

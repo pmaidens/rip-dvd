@@ -1820,7 +1820,8 @@ describe("data-access facade", () => {
           name !== "20261022080829_dvd-title-identities" &&
           name !== "20261022100044_futuristic_cannonball" &&
           name !== "20261022205917_burly_shard" &&
-          name !== "20261022222723_awesome_cyclops",
+          name !== "20261022222723_awesome_cyclops" &&
+          name !== "20261023003003_ambiguous_gwen_stacy",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -9046,6 +9047,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261023003003_ambiguous_gwen_stacy",
+        },
+        {
           name: "20261022222723_awesome_cyclops",
         },
         {
@@ -9077,9 +9081,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20261019162901_notification_delivery_reliability",
-        },
-        {
-          name: "20261019154548_notifications",
         },
       ]);
     expect(

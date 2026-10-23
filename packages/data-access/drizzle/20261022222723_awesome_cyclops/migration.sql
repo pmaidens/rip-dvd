@@ -42,6 +42,17 @@ CREATE TABLE `__new_dvd_disc_verifications` (
 INSERT INTO `__new_dvd_disc_verifications`(`id`, `archive_recovery_id`, `attempt_ordinal`, `original_disc_archive_id`, `disc_inspection_id`, `detected_disc_id`, `media_generation`, `source_metadata_fingerprint`, `observed_metadata_fingerprint`, `checkpoint_revision`, `checkpoint_digest`, `status`, `outcome`, `reasons`, `findings`, `budget_exhausted`, `worker_execution_id`, `claim_token`, `claimed_at`, `started_at`, `completed_at`, `failure_code`, `created_at`, `updated_at`) SELECT `id`, `archive_recovery_id`, `attempt_ordinal`, `original_disc_archive_id`, `disc_inspection_id`, `detected_disc_id`, `media_generation`, `source_metadata_fingerprint`, `observed_metadata_fingerprint`, `checkpoint_revision`, `checkpoint_digest`, `status`, `outcome`, `reasons`, `findings`, `budget_exhausted`, `worker_execution_id`, `claim_token`, `claimed_at`, `started_at`, `completed_at`, `failure_code`, `created_at`, `updated_at` FROM `dvd_disc_verifications`;--> statement-breakpoint
 DROP TABLE `dvd_disc_verifications`;--> statement-breakpoint
 ALTER TABLE `__new_dvd_disc_verifications` RENAME TO `dvd_disc_verifications`;--> statement-breakpoint
+UPDATE `dvd_disc_verifications`
+SET `status` = 'failed',
+	`outcome` = NULL,
+	`worker_execution_id` = NULL,
+	`claim_token` = NULL,
+	`claimed_at` = NULL,
+	`started_at` = NULL,
+	`completed_at` = `updated_at`,
+	`failure_code` = 'DISC_VERIFICATION_UNAVAILABLE'
+WHERE `archive_recovery_attempt_id` IS NULL
+	AND `status` IN ('queued', 'running');--> statement-breakpoint
 PRAGMA foreign_keys=ON;--> statement-breakpoint
 PRAGMA foreign_keys=OFF;--> statement-breakpoint
 CREATE TABLE `__new_dvd_recovery_reconciliations` (

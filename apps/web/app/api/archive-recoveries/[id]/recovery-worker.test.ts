@@ -644,7 +644,7 @@ it("faults an unreconcilable Stop so it cannot poison the stopping queue", async
     throw new DvdRecoveryReconciliationFault("STORAGE_UNSUPPORTED");
   }) as unknown as typeof reconcileDvdRecoveryCheckpoint;
   try {
-    input.access.archiveRecoveryWork.requestStop({
+    const stop = input.access.archiveRecoveryWork.requestStop({
       mutationKey: "00000000-0000-4000-8000-000000000466",
       archiveRecoveryId: seeded.recoveryId,
       attemptId: seeded.attemptId,
@@ -655,8 +655,8 @@ it("faults an unreconcilable Stop so it cannot poison the stopping queue", async
       .toMatchObject({
         status: "faulted",
         faultCode: "STORAGE_UNSUPPORTED",
-        stopOperationId: null,
-        stopRequestedAt: null,
+        stopOperationId: stop.stopOperationId,
+        stopRequestedAt: stop.stopRequestedAt,
         stoppedAt: null,
         work: expect.objectContaining({ status: "requested" }),
       });

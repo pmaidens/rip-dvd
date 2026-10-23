@@ -10063,8 +10063,6 @@ export function createDataAccessInternal(
           requireRow(
             transaction.update(archiveRecoveries).set({
               status: "faulted",
-              stopOperationId: null,
-              stopRequestedAt: null,
               stoppedAt: null,
               faultCode,
               updatedAt: timestamp,

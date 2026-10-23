@@ -284,6 +284,227 @@ it("migrates the production pre-bounded Disc Inspection schema", () => {
   freshSqlite.close();
 });
 
+it("terminalizes active disc verification without an attempt identity", () => {
+  const databasePath = createDatabasePath(
+    "rip-dvd-verification-attempt-migration-",
+  );
+  const previousMigrations = createMigrationsThrough(
+    "20261022205917_burly_shard",
+  );
+  const previousAccess = createDataAccess({
+    databasePath,
+    migrationsFolder: previousMigrations,
+  });
+  previousAccess.close();
+
+  const fixtureKey = "verification-attempt-migration";
+  seedEncodeJob(databasePath, fixtureKey);
+  const archiveId = `${fixtureKey}-archive`;
+  const discId = `${fixtureKey}-disc`;
+  const driveId = `${fixtureKey}-drive`;
+  const fingerprint = `${fixtureKey}-fingerprint`;
+  const inspectionId = `${fixtureKey}-inspection`;
+  const requestId = `${fixtureKey}-request`;
+  const archiveJobId = `${fixtureKey}-archive-job`;
+  const manifestId = `${fixtureKey}-manifest`;
+  const recoveryId = `${fixtureKey}-recovery`;
+  const attemptId = `${recoveryId}:attempt:1`;
+  const boundaryEvidence = createNormalDvdArchiveBoundaryEvidence({
+    reportedSizeBytes: 2_048,
+    endpointProof: {
+      proofVersion: "dvd-normal-endpoint-proof-v1",
+      confirmationCount: 2,
+      firstExcludedLba: 1,
+      outOfRangeEvidence: {
+        classifierVersion: "scsi-read-classifier-v2",
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseResponseCode: 0x72,
+        senseKey: 0x05,
+        asc: 0x21,
+        ascq: 0,
+      },
+    },
+  });
+  const boundaryDigest = createDvdArchiveBoundaryEvidenceDigest(
+    boundaryEvidence,
+  );
+  const unrecoveredSourceRanges = [{
+    startLba: 0,
+    sectorCount: 1,
+    classification: "skipped_untested" as const,
+  }];
+  const manifest = createDvdArchiveEvidenceManifestDigests({
+    originalDiscArchiveId: archiveId,
+    revision: 1,
+    previousManifestId: null,
+    previousManifestDigest: null,
+    recoveryReadId: null,
+    recoveryReadEvidenceDigest: null,
+    evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+    imageFingerprint: fingerprint,
+    sectorSizeBytes: 2_048,
+    acceptedEndLbaExclusive: 1,
+    boundaryPolicyVersion: boundaryEvidence.policyVersion,
+    boundaryReportedSizeBytes: boundaryEvidence.reportedSizeBytes,
+    boundaryPublishedSizeBytes: boundaryEvidence.publishedSizeBytes,
+    boundaryEvidenceDigest: boundaryDigest,
+    unrecoveredSourceRanges,
+  });
+  const historical = new DatabaseSync(databasePath);
+  historical.prepare(`
+    UPDATE original_disc_archives
+    SET boundary_policy_version = ?, boundary_reported_size_bytes = ?,
+        boundary_published_size_bytes = ?, boundary_excluded_sector_count = 0,
+        boundary_first_excluded_lba = 1,
+        boundary_maximum_referenced_lba = NULL,
+        boundary_read_failure_classifier_version = 'scsi-read-classifier-v2',
+        boundary_read_failure_scsi_status = 2,
+        boundary_read_failure_host_status = 0,
+        boundary_read_failure_driver_status = 8,
+        boundary_read_failure_sense_response_code = 114,
+        boundary_read_failure_sense_key = 5,
+        boundary_read_failure_asc = 33,
+        boundary_read_failure_ascq = 0
+    WHERE id = ?
+  `).run(
+    boundaryEvidence.policyVersion,
+    boundaryEvidence.reportedSizeBytes,
+    boundaryEvidence.publishedSizeBytes,
+    archiveId,
+  );
+  historical.prepare(`
+    INSERT INTO disc_inspections (
+      id, optical_drive_id, detected_disc_id, media_generation, is_current,
+      status, phase, total_bytes, phase_started_at, attempt_started_at,
+      started_at, completed_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 1, 'completed', 'confirming_media', 2048,
+      1, 1, 1, 1, 1, 1)
+  `).run(inspectionId, driveId, discId, `${fixtureKey}-generation`);
+  historical.prepare(`
+    INSERT INTO archive_requests (
+      id, detected_disc_id, evidence_format, status, priority,
+      fulfilled_at, created_at, updated_at
+    ) VALUES (?, ?, ?, 'fulfilled', 0, 1, 1, 1)
+  `).run(requestId, discId, DVD_RECOVERY_EVIDENCE_FORMAT);
+  historical.prepare(`
+    INSERT INTO archive_jobs (
+      id, archive_request_id, disc_inspection_id, detected_disc_id,
+      original_disc_archive_id, evidence_format, attempt_ordinal, status,
+      priority, progress_phase, progress_percent, progress_bytes,
+      last_progress_at, started_at, completed_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 1, 'completed', 0, 'finalizing', 100, 2048,
+      1, 1, 1, 1, 1)
+  `).run(
+    archiveJobId,
+    requestId,
+    inspectionId,
+    discId,
+    archiveId,
+    DVD_RECOVERY_EVIDENCE_FORMAT,
+  );
+  historical.prepare(`
+    INSERT INTO dvd_archive_evidence_manifests (
+      id, original_disc_archive_id, revision, evidence_format,
+      image_fingerprint, sector_size_bytes, accepted_end_lba_exclusive,
+      boundary_policy_version, boundary_reported_size_bytes,
+      boundary_published_size_bytes, boundary_evidence_digest,
+      unrecovered_source_ranges, unrecovered_source_ranges_digest,
+      manifest_digest, created_at
+    ) VALUES (?, ?, 1, ?, ?, 2048, 1, ?, ?, ?, ?, ?, ?, ?, 1)
+  `).run(
+    manifestId,
+    archiveId,
+    DVD_RECOVERY_EVIDENCE_FORMAT,
+    fingerprint,
+    boundaryEvidence.policyVersion,
+    boundaryEvidence.reportedSizeBytes,
+    boundaryEvidence.publishedSizeBytes,
+    boundaryDigest,
+    JSON.stringify(unrecoveredSourceRanges),
+    manifest.unrecoveredSourceRangesDigest,
+    manifest.manifestDigest,
+  );
+  historical.prepare(`
+    INSERT INTO dvd_archive_evidence_headers (
+      original_disc_archive_id, source_archive_job_id, evidence_format,
+      boundary_policy_version, boundary_reported_size_bytes,
+      boundary_published_size_bytes, boundary_evidence_digest,
+      sector_size_bytes, accepted_end_lba_exclusive, current_manifest_id,
+      current_manifest_revision, current_manifest_digest, created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 2048, 1, ?, 1, ?, 1, 1)
+  `).run(
+    archiveId,
+    archiveJobId,
+    DVD_RECOVERY_EVIDENCE_FORMAT,
+    boundaryEvidence.policyVersion,
+    boundaryEvidence.reportedSizeBytes,
+    boundaryEvidence.publishedSizeBytes,
+    boundaryDigest,
+    manifestId,
+    manifest.manifestDigest,
+  );
+  historical.prepare(`
+    UPDATE original_disc_archives
+    SET integrity = 'incomplete_read', integrity_evidence_revision = 1,
+        integrity_policy_version = ?, bad_sector_count = 1,
+        bad_area_count = 1,
+        bad_sector_ranges = '[{"startLba":0,"sectorCount":1}]',
+        bad_sector_counts_by_title = NULL
+    WHERE id = ?
+  `).run(DVD_RECOVERY_EVIDENCE_FORMAT, archiveId);
+  historical.prepare(`
+    INSERT INTO archive_recoveries (
+      id, original_disc_archive_id, attempt_id, attempt_ordinal, status,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, 1, 'eligible', 1, 1)
+  `).run(recoveryId, archiveId, attemptId);
+  historical.prepare(`
+    INSERT INTO dvd_disc_verifications (
+      id, archive_recovery_id, attempt_ordinal, original_disc_archive_id,
+      disc_inspection_id, detected_disc_id, media_generation,
+      source_metadata_fingerprint, observed_metadata_fingerprint,
+      checkpoint_revision, checkpoint_digest, status, reasons, findings,
+      budget_exhausted, created_at, updated_at
+    ) VALUES (
+      'legacy-active-verification', ?, 1, ?, ?, ?, ?,
+      'legacy-source-fingerprint', 'legacy-observed-fingerprint',
+      1, ?, 'queued', '[]', '[]', 0, 1, 2
+    )
+  `).run(
+    recoveryId,
+    archiveId,
+    inspectionId,
+    discId,
+    `${fixtureKey}-generation`,
+    "a".repeat(64),
+  );
+  expect(historical.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  historical.close();
+
+  const migrated = createDataAccess({ databasePath });
+  expect(migrated.dvdDiscVerifications.find(
+    "legacy-active-verification" as never,
+  )).toMatchObject({
+    archiveRecoveryAttemptId: null,
+    status: "failed",
+    completedAt: new Date(2),
+    failureCode: "DISC_VERIFICATION_UNAVAILABLE",
+  });
+  migrated.close();
+
+  const sqlite = new DatabaseSync(databasePath);
+  expect(sqlite.prepare(`
+    SELECT count(*) AS count
+    FROM dvd_disc_verifications
+    WHERE archive_recovery_attempt_id IS NULL
+      AND status IN ('queued', 'running')
+  `).get()).toEqual({ count: 0 });
+  sqlite.close();
+});
+
 it("keeps the fresh and published bounded migration paths intact", () => {
   const databasePath = createDatabasePath("rip-dvd-bounded-migration-");
   const boundedMigrationsFolder = createMigrationsThrough(

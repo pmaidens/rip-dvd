@@ -1745,7 +1745,7 @@ export const archiveRecoveries = sqliteTable(
     ),
     check(
       "archive_recoveries_stop_check",
-      sql`(${table.status} = 'stopping' and ${table.stopOperationId} is not null and ${table.stopRequestedAt} is not null and ${table.stoppedAt} is null) or (${table.status} = 'stopped' and ${table.stopOperationId} is not null and ${table.stopRequestedAt} is not null and ${table.stoppedAt} is not null) or (${table.status} not in ('stopping', 'stopped') and ${table.stopOperationId} is null and ${table.stopRequestedAt} is null and ${table.stoppedAt} is null)`,
+      sql`(${table.status} = 'stopping' and ${table.stopOperationId} is not null and ${table.stopRequestedAt} is not null and ${table.stoppedAt} is null) or (${table.status} = 'stopped' and ${table.stopOperationId} is not null and ${table.stopRequestedAt} is not null and ${table.stoppedAt} is not null) or (${table.status} = 'faulted' and ${table.stoppedAt} is null and ((${table.stopOperationId} is null and ${table.stopRequestedAt} is null) or (${table.stopOperationId} is not null and ${table.stopRequestedAt} is not null))) or (${table.status} not in ('stopping', 'stopped', 'faulted') and ${table.stopOperationId} is null and ${table.stopRequestedAt} is null and ${table.stoppedAt} is null)`,
     ),
     check(
       "archive_recoveries_fault_check",
