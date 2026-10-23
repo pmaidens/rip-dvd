@@ -151,11 +151,23 @@ export function previewDiscSelectionChange(
       mutation.selection.catalogRevision.getTime() !== catalogRevision.getTime()) {
     throw new DomainInvariantError("Catalog review revision is stale");
   }
-  const proposed = access.catalog.previewDiscSelectionChange({
-    originalDiscArchiveId: archiveId,
-    expectedCatalogRevision: catalogRevision,
-    mutation,
-  });
+  let proposed: ReturnType<
+    DataAccess["catalog"]["previewDiscSelectionChange"]
+  >;
+  try {
+    proposed = access.catalog.previewDiscSelectionChange({
+      originalDiscArchiveId: archiveId,
+      expectedCatalogRevision: catalogRevision,
+      mutation,
+    });
+  } catch (error) {
+    rethrowCatalogMappingOperationError(
+      access,
+      archiveId,
+      catalogRevision,
+      error,
+    );
+  }
   const previewToken = createDiscSelectionPreviewToken();
   access.catalog.recordDiscSelectionPreviewDecision({
     previewToken,

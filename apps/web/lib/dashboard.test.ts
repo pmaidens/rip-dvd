@@ -2047,6 +2047,45 @@ describe("readDashboardSnapshot", () => {
     expect(dashboard.catalogReview).toEqual({ status: "loaded", items: [] });
   });
 
+  it("isolates Catalog Review workflow evidence failures to that section", () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/synthetic-workflow-evidence",
+      displayName: "Synthetic workflow drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "synthetic-workflow-evidence",
+      volumeLabel: "SYNTHETIC_WORKFLOW_EVIDENCE",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/synthetic-workflow-evidence.iso",
+      fingerprint: "synthetic-workflow-evidence",
+    });
+
+    const dashboard = readDashboardSnapshot(withSnapshotOverrides(access, {
+      catalog: {
+        readDvdCatalogReviewWorkflowEvidence() {
+          throw new Error("workflow evidence unavailable");
+        },
+      },
+    }));
+
+    expect(dashboard.catalogReview).toEqual({ status: "error" });
+    expect(dashboard.opticalDrives).toMatchObject({ status: "loaded" });
+    expect(dashboard.detectedDiscs).toMatchObject({ status: "loaded" });
+    expect(dashboard.archiveJobs).toMatchObject({ status: "loaded" });
+    expect(dashboard.encodeJobs).toMatchObject({ status: "loaded" });
+  });
+
   it("keeps activity relationship reads bounded when Encode Jobs fail", () => {
     const access = dataAccessFixture.create();
     const listDiscSelections = vi.fn((options) =>

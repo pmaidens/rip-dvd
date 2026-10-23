@@ -276,6 +276,25 @@ function renderCatalogReviewEditor(archiveId: string): void {
 }
 
 describe("CatalogReviewEditor", () => {
+  it("surfaces bounded messages from structured mutation errors", async () => {
+    await expect(mutateCatalogReview("archive-1", {
+      action: "create_disc_selection",
+      catalogRevision: "2026-08-11T06:00:00.000Z",
+      selection: {
+        mediaItemId: "media-item-1",
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    }, async () => Response.json({
+      error: {
+        code: "CATALOG_MAPPING_UNAVAILABLE",
+        message: "Catalog mapping is unavailable for current evidence.",
+        reasons: [{ code: "CONSISTENCY_FAULT" }],
+      },
+    }, { status: 409 }))).rejects.toThrow(
+      "Catalog mapping is unavailable for current evidence.",
+    );
+  });
+
   it("lists each affected Encode Job in the Re-archive Acceptance acknowledgement", () => {
     const message = rearchiveAcceptancePreviewConfirmation({
       ...availableRearchiveAcceptancePreview({
@@ -2387,6 +2406,89 @@ describe("CatalogReviewView", () => {
     expect(catalogReviewSelectionTitles(review)).toEqual(
       review.rawScan.titles,
     );
+  });
+
+  it("keeps legacy automatic cataloging out of new-format Review Steps", async () => {
+    const requests = stubDeferredCatalogReviewRequests();
+    const review = catalogReview({
+      archiveId: "new-format-archive",
+      discLabel: "NEW_FORMAT_ARCHIVE",
+    });
+    review.automaticCataloging = { configured: true };
+    review.mediaItems = [];
+    review.discSelections = [];
+    review.coverage = {
+      discSelectionCount: 0,
+      mediaItemsWithSelections: 0,
+      mappedTitles: 0,
+      partiallyMappedTitles: 0,
+      unmappedTitles: 0,
+      mainFeatureSelections: 0,
+      titles: [],
+    };
+    review.reviewActionAvailability = archiveOnlyActionAvailability;
+    review.reviewWorkflow = {
+      schemaVersion: 1,
+      evidenceFormat: "dvd-recovery-evidence-v1",
+      facts: {
+        saved: true,
+        recovering: true,
+        mapped: false,
+        mappingState: "pending",
+        readyForDamageDecision: false,
+        readyForEncoding: false,
+      },
+      current: {
+        originalDiscArchiveId: review.archive.id,
+        archiveJob: { id: "archive-job-1", status: "completed" },
+        checkpoint: { revision: 1, manifestDigest: "a".repeat(64) },
+        recovery: {
+          id: "recovery-1",
+          attemptId: "attempt-1",
+          state: "running",
+          work: null,
+        },
+        titleIdentityReviewSetId: null,
+        titleDamageAssessmentId: null,
+      },
+      actions: [{
+        action: "catalog_mapping",
+        available: false,
+        reasons: [{
+          code: "SELECTION_UNIDENTIFIED",
+          message: "Current title identity evidence is pending.",
+          details: {},
+        }],
+        expectedInputs: ["catalogRevision", "mutationKey"],
+      }, {
+        action: "damage_decision",
+        available: false,
+        reasons: [{
+          code: "RECOVERY_ACTIVE",
+          message: "Archive Recovery is still active.",
+          details: {},
+        }],
+        expectedInputs: [],
+      }, {
+        action: "encode",
+        available: false,
+        reasons: [{
+          code: "RECOVERY_ACTIVE",
+          message: "Archive Recovery is still active.",
+          details: {},
+        }],
+        expectedInputs: [],
+      }],
+    };
+
+    await act(async () => renderCatalogReviewEditor(review.archive.id));
+    await resolveRequest(requests[0]!, review);
+
+    expect(requests).toHaveLength(1);
+    expect(container.querySelector('[role="tablist"][aria-label="Review Steps"]'))
+      .not.toBeNull();
+    expect(container.textContent).not.toContain("Automatic cataloging");
+    expect(container.textContent).not.toContain("Identifying this title");
   });
 
   it("reviews and saves fresh re-archive mappings before acceptance", async () => {

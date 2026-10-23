@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   DomainInvariantError,
+  StaleCatalogRevisionError,
   type DataAccess,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
@@ -11,7 +12,11 @@ import {
   discSelectionCommandRequiresPreview,
   type CatalogReviewCommand,
 } from "./catalog-review-command.js";
-import { executeDiscSelectionCommand } from "./disc-selection-operations.js";
+import {
+  executeDiscSelectionCommand,
+  previewDiscSelectionChange,
+} from "./disc-selection-operations.js";
+import { CatalogReviewRevisionStaleError } from "./catalog-review-workflow.js";
 import { InvalidMutationKeyError } from "./mutation-key.js";
 
 const archiveId = "archive-1" as OriginalDiscArchiveId;
@@ -138,5 +143,68 @@ describe("Disc Selection preview policy", () => {
       "Disc Selection preview does not match the proposed change",
     ));
     expect(mutateDiscSelection).not.toHaveBeenCalled();
+  });
+
+  it("translates a revision race during preview at the application boundary", () => {
+    const previewRevision = "2026-01-01T00:00:00.000Z";
+    const currentRevision = new Date("2026-01-01T00:00:01.000Z");
+    const access = {
+      catalog: {
+        previewDiscSelectionMutation: () => ({
+          catalogRevision: previewRevision,
+          discSelection: {
+            id: "selection-1",
+            originalDiscArchiveId: archiveId,
+            mediaItemId: "media-item-1",
+            sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+            label: null,
+          },
+          actionAvailability: {
+            state: "editable",
+            availableActions: ["update", "remove"],
+            reason: null,
+            relatedEncodeJob: null,
+          },
+          affectedEncodeJobs: [],
+          outputReservationReleaseJobs: [],
+          historicalEncodeJobCount: 0,
+          evidenceHash: "a".repeat(64),
+        }),
+        previewDiscSelectionChange: () => {
+          throw new StaleCatalogRevisionError(
+            "Catalog review revision is stale",
+          );
+        },
+        findDvdArchiveEvidenceHeader: () => null,
+        listOriginalDiscArchives: () => [{ updatedAt: currentRevision }],
+      },
+      archiveJobs: { listForArchive: () => [] },
+      readConsistentSnapshot(read: (snapshot: unknown) => unknown) {
+        return read(this);
+      },
+    } as unknown as DataAccess;
+
+    expect(() => previewDiscSelectionChange(access, archiveId, {
+      action: "delete_disc_selection",
+      discSelectionId: "selection-1",
+    })).toThrowError(CatalogReviewRevisionStaleError);
+    try {
+      previewDiscSelectionChange(access, archiveId, {
+        action: "delete_disc_selection",
+        discSelectionId: "selection-1",
+      });
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "STALE_CATALOG_REVISION",
+        current: null,
+        blockingReasons: [{
+          code: "STALE_CATALOG_REVISION",
+          details: {
+            expectedCatalogRevision: previewRevision,
+            currentCatalogRevision: currentRevision.toISOString(),
+          },
+        }],
+      });
+    }
   });
 });

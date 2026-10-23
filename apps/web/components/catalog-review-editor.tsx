@@ -212,11 +212,13 @@ export function CatalogReviewView({
         />
       ) : null}
 
-      {review.rearchiveProposal ? null : (
+      {review.rearchiveProposal || review.reviewWorkflow !== undefined
+        ? null
+        : (
         <CatalogReviewAutomation
           review={review}
           isSaving={isSaving}
-          completionEnabled={review.reviewWorkflow === undefined}
+          completionEnabled
           onAcceptProposal={onAcceptAutomaticCatalogProposal}
           onCompleteReview={onCompleteReview}
         />

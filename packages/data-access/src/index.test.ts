@@ -15952,6 +15952,60 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     fixture.access.close();
   });
 
+  it("rejects mapping mutations when only non-default angle evidence exists", () => {
+    const fixture = createDvdTitleIdentityArchiveFixture(
+      "title-non-default-angle-mapping",
+    );
+    const mediaItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic alternate angle feature",
+    });
+    const selection = fixture.access.catalog.createDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      mediaItemId: mediaItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    const header = fixture.access.catalog.findDvdArchiveEvidenceHeader(
+      fixture.archive.id,
+    )!;
+    fixture.access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: fixture.archive.id,
+      checkpoint: {
+        manifestId: header.currentManifestId,
+        manifestRevision: header.currentManifestRevision,
+        manifestDigest: header.currentManifestDigest,
+      },
+      observations: [titleIdentityObservation(1, {
+        angleNumber: 2,
+        angleCount: 2,
+      })],
+    });
+
+    expect(() => fixture.access.catalog.mutateDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      mutationKey: "synthetic-non-default-angle-update",
+      mutation: {
+        action: "update",
+        discSelectionId: selection.id,
+        changes: {
+          originalDiscArchiveId: fixture.archive.id,
+          label: "Alternate angle",
+        },
+      },
+    })).toThrow(/current Title Identity evidence/i);
+    expect(() => fixture.access.catalog.mutateDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      mutationKey: "synthetic-non-default-angle-delete",
+      mutation: {
+        action: "delete",
+        discSelectionId: selection.id,
+      },
+    })).toThrow(/current Title Identity evidence/i);
+    expect(fixture.access.catalog.listDiscSelections({ ids: [selection.id] }))
+      .toEqual([expect.objectContaining({ id: selection.id })]);
+    fixture.access.close();
+  });
+
   it("does not repair a headerless marked archive from raw scan evidence", () => {
     const fixture = createDvdTitleIdentityArchiveFixture(
       "title-headerless-current-repair",
@@ -16039,13 +16093,16 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(readProjection()?.titleIdentity).not.toBeNull();
     const shortHistoryRows = projectedRowCount();
 
+    let deepAuditReview: ReturnType<
+      typeof fixture.access.catalog.recordDvdTitleIdentityObservations
+    > | undefined;
     for (let revision = 3; revision <= 24; revision += 1) {
       checkpoint = advanceDvdTitleIdentityCheckpointForTest(
         fixture.databasePath,
         fixture.archive.id,
         revision,
       );
-      fixture.access.catalog.recordDvdTitleIdentityObservations({
+      deepAuditReview = fixture.access.catalog.recordDvdTitleIdentityObservations({
         originalDiscArchiveId: fixture.archive.id,
         checkpoint,
         observations: [titleIdentityObservation(revision, {
@@ -16054,12 +16111,16 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       });
     }
     statementAll.mockClear();
-    expect(readProjection()?.titleIdentity).not.toBeNull();
+    const longProjection = readProjection();
+    expect(longProjection?.titleIdentity).not.toBeNull();
     const longHistoryRows = projectedRowCount();
     statementAll.mockRestore();
 
     expect(shortHistoryRows).toBeGreaterThan(0);
     expect(longHistoryRows).toBe(shortHistoryRows);
+    expect(longProjection?.titleIdentity?.reviewSetIdentity).toBe(
+      deepAuditReview?.reviewSetIdentity,
+    );
     fixture.access.close();
   });
 

@@ -164,6 +164,7 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
   expect(pendingCliReview.result).toEqual(await pendingWebReview.json());
   const pending = pendingCliReview.result as {
     catalogRevision: string;
+    automaticCataloging: { configured: boolean };
     reviewWorkflow: {
       actions: Array<{
         action: string;
@@ -178,6 +179,41 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
     available: false,
     reasons: [{ code: "SELECTION_UNIDENTIFIED" }],
   });
+  expect(pending.automaticCataloging).toEqual({ configured: false });
+  const automaticSearch = vi.fn(async () => [{
+    id: 101,
+    kind: "movie" as const,
+    title: "Synthetic Review Recovery",
+    year: 2026,
+  }]);
+  const lookup: CatalogMetadataLookup = {
+    search: automaticSearch,
+    getTvDetails: async () => ({ seasons: [] }),
+    getTvSeason: async () => {
+      throw new Error("Unexpected season lookup");
+    },
+  };
+  const webSuggestion = await createCatalogSuggestionRoute(
+    new Request(
+      `${trustedOrigin}/api/catalog-reviews/${archive.id}/suggestion`,
+    ),
+    archive.id,
+    () => access,
+    () => lookup,
+  );
+  const cliSuggestion = await fixture.run([
+    "catalog-review",
+    "suggest",
+    archive.id,
+  ], lookup);
+  expect(webSuggestion.status).toBe(200);
+  expect(cliSuggestion.exitCode).toBe(0);
+  expect(cliSuggestion.result).toEqual(await webSuggestion.json());
+  expect(cliSuggestion.result).toMatchObject({
+    status: "needs_review",
+    reason: "manual_mapping_required",
+  });
+  expect(automaticSearch).not.toHaveBeenCalled();
   const pendingWebMapping = await createCatalogReviewRoute(
     catalogReviewMutationRequest(archive.id, {
       action: "create_disc_selection",
@@ -764,6 +800,62 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
     `).run(archive.id);
     faultDatabase.close();
 
+    const faultedWebUpdatePreview = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "update_disc_selection",
+        discSelectionId: firstSelectionId,
+        changes: { mediaItemId: secondMediaItem.id },
+        preview: true,
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const faultedCliUpdatePreview = await fixture.run([
+      "disc-selection",
+      "preview",
+      "update",
+      archive.id,
+      firstSelectionId,
+      "--media-item-id",
+      secondMediaItem.id,
+    ]);
+    expect(faultedWebUpdatePreview.status).toBe(409);
+    expect(faultedCliUpdatePreview.exitCode).toBe(2);
+    expect(faultedCliUpdatePreview.result).toEqual(
+      await faultedWebUpdatePreview.json(),
+    );
+    expect(faultedCliUpdatePreview.result).toMatchObject({
+      error: {
+        code: "CATALOG_MAPPING_UNAVAILABLE",
+        reasons: [{ code: "CONSISTENCY_FAULT" }],
+        current: { recovery: { state: "faulted" } },
+      },
+    });
+
+    const faultedWebDeletePreview = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "delete_disc_selection",
+        discSelectionId: secondSelectionId,
+        preview: true,
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const faultedCliDeletePreview = await fixture.run([
+      "disc-selection",
+      "preview",
+      "delete",
+      archive.id,
+      secondSelectionId,
+    ]);
+    expect(faultedWebDeletePreview.status).toBe(409);
+    expect(faultedCliDeletePreview.exitCode).toBe(2);
+    expect(faultedCliDeletePreview.result).toEqual(
+      await faultedWebDeletePreview.json(),
+    );
+
     const blockedWebUpdate = await createCatalogReviewRoute(
       catalogReviewMutationRequest(archive.id, {
         action: "update_disc_selection",
@@ -838,6 +930,84 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
         code: "CATALOG_MAPPING_UNAVAILABLE",
         reasons: [{ code: "CONSISTENCY_FAULT" }],
         current: { recovery: { state: "faulted" } },
+      },
+    });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("rejects mapping previews when only a non-default title angle is current", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive } = await seedCommittedArchiveEvidence(
+    fixture,
+    [],
+    false,
+    true,
+  );
+  const access = fixture.openAccess();
+  try {
+    const selection = access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })[0]!;
+    const checkpoint = access.catalog.findDvdArchiveEvidenceHeader(
+      archive.id,
+    )!;
+    access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: archive.id,
+      checkpoint: {
+        manifestId: checkpoint.currentManifestId,
+        manifestRevision: checkpoint.currentManifestRevision,
+        manifestDigest: checkpoint.currentManifestDigest,
+      },
+      observations: [{
+        displayTitleNumber: 1,
+        navigation: {
+          videoTitleSetNumber: 1,
+          titleSetTitleNumber: 1,
+          programChainNumber: 1,
+        },
+        selectedPath: [{
+          programNumber: 1,
+          cellNumber: 1,
+          vobId: 1,
+          cellId: 2,
+        }],
+        angleNumber: 2,
+        angleCount: 2,
+        chapterStart: 1,
+        chapterEnd: 1,
+        chapterCount: 1,
+        sourceExtents: [{ startLba: 0, sectorCount: 1 }],
+      }],
+    });
+
+    const web = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "delete_disc_selection",
+        discSelectionId: selection.id,
+        preview: true,
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const cli = await fixture.run([
+      "disc-selection",
+      "preview",
+      "delete",
+      archive.id,
+      selection.id,
+    ]);
+
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toMatchObject({
+      error: {
+        code: "CATALOG_MAPPING_UNAVAILABLE",
+        reasons: [{ code: "SELECTION_UNIDENTIFIED" }],
       },
     });
   } finally {

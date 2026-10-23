@@ -1,6 +1,7 @@
 import {
   archiveRecoveryWorkIdentity,
   CatalogMappingEvidenceUnavailableError,
+  dvdTitleIdentityCatalogMappingItems,
   dvdRecoveryEvidenceFormatForArchive,
   DVD_RECOVERY_EVIDENCE_ENCODING,
   DomainInvariantError,
@@ -248,15 +249,9 @@ export function describeCatalogReviewWorkflow(
       ? null
       : {
         reviewSetIdentity: reviewSet.reviewSetIdentity,
-        currentMappingStates: reviewSet.items
-          .filter(({
-            presentAtCurrentCheckpoint,
-            discSelectionMappings,
-            observation,
-          }) =>
-            (presentAtCurrentCheckpoint && observation.angleNumber === 1) ||
-            discSelectionMappings.length > 0
-          )
+        currentMappingStates: dvdTitleIdentityCatalogMappingItems(
+          reviewSet.items,
+        )
           .map(({ mappingState }) => mappingState),
       }
     : prefetched.titleIdentity;

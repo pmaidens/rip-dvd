@@ -113,6 +113,7 @@ export type AutomaticCatalogSuggestion =
         | "ambiguous_catalog_match"
         | "catalog_identity_conflict"
         | "metadata_match_uncertain"
+        | "manual_mapping_required"
         | "season_unknown"
         | "episode_order_uncertain";
       message: string;

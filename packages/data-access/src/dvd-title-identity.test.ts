@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  dvdTitleIdentityCatalogMappingItems,
   dvdTitleIdentityContentDigest,
   dvdTitleIdentityObservationSetDigest,
   dvdTitleIdentityReviewSetDigest,
@@ -88,5 +89,37 @@ describe("DVD Title Identity digests", () => {
       ...observation,
       displayTitleNumber: 99,
     })).toBe(contentDigest);
+
+    const alternateAngle = {
+      ...items[0]!,
+      titleIdentityId: "title-identity-2" as DvdTitleIdentityId,
+      observation: {
+        ...items[0]!.observation,
+        id: "observation-3" as DvdTitleIdentityObservationId,
+        titleIdentityId: "title-identity-2" as DvdTitleIdentityId,
+        angleNumber: 2,
+      },
+      mappingState: "unmapped" as const,
+      discSelectionMappings: [],
+    };
+    expect(dvdTitleIdentityCatalogMappingItems([
+      items[0]!,
+      alternateAngle,
+      {
+        ...alternateAngle,
+        discSelectionMappings: [{
+          discSelectionId: "selection-2" as DiscSelectionId,
+          mappingState: "needs_mapping_review",
+        }],
+      },
+    ])).toEqual([
+      items[0],
+      expect.objectContaining({
+        titleIdentityId: "title-identity-2",
+        discSelectionMappings: [expect.objectContaining({
+          discSelectionId: "selection-2",
+        })],
+      }),
+    ]);
   });
 });

@@ -201,6 +201,7 @@ import {
 } from "../dvd-archive-evidence-digests.js";
 import {
   DVD_TITLE_IDENTITY_CONTINUITY_VERSION,
+  dvdTitleIdentityCatalogMappingItems,
   dvdTitleIdentityContentDigest,
   dvdTitleIdentityObservationSetDigest,
   dvdTitleIdentityReviewSetDigest,
@@ -3511,10 +3512,13 @@ export function createDataAccessInternal(
       currentRows,
       header.acceptedEndLbaExclusive,
     );
-    if (currentRows.length === 0) {
+    const currentMappingRows = currentRows.filter(({ angleNumber }) =>
+      angleNumber === 1
+    );
+    if (currentMappingRows.length === 0) {
       throw new CatalogMappingEvidenceUnavailableError();
     }
-    return currentRows;
+    return currentMappingRows;
   }
 
   function validateDiscSelectionSourceIdentity(
@@ -9027,7 +9031,10 @@ export function createDataAccessInternal(
       evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
       checkpoint,
       policyVersion: set.policyVersion,
-      reviewSetIdentity: dvdTitleIdentityReviewSetDigest(checkpoint, items),
+      reviewSetIdentity: dvdTitleIdentityReviewSetDigest(
+        checkpoint,
+        dvdTitleIdentityCatalogMappingItems(items),
+      ),
       items,
       createdAt: set.createdAt,
     };
@@ -9844,22 +9851,17 @@ export function createDataAccessInternal(
         evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
         checkpoint,
         policyVersion: currentSet.policyVersion,
-        reviewSetIdentity: dvdTitleIdentityReviewSetDigest(checkpoint, items),
+        reviewSetIdentity: dvdTitleIdentityReviewSetDigest(
+          checkpoint,
+          dvdTitleIdentityCatalogMappingItems(items),
+        ),
         items,
         createdAt: currentSet.createdAt,
       } satisfies DvdTitleIdentityReviewSet;
       options.onTitleIdentityReviewSet?.(reviewSet);
       titleIdentityByArchiveId.set(id, {
         reviewSetIdentity: reviewSet.reviewSetIdentity,
-        currentMappingStates: items
-          .filter(({
-            presentAtCurrentCheckpoint,
-            discSelectionMappings,
-            observation,
-          }) =>
-            (presentAtCurrentCheckpoint && observation.angleNumber === 1) ||
-            discSelectionMappings.length > 0
-          )
+        currentMappingStates: dvdTitleIdentityCatalogMappingItems(items)
           .map(({ mappingState }) => mappingState),
       });
     }

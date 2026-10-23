@@ -179,6 +179,7 @@ export type {
   PublicationMutationRecoveryLock,
 } from "./internal/create-data-access.js";
 export type { FilesystemPathProbe } from "./internal/bounded-filesystem-path-probe.js";
+export { dvdTitleIdentityCatalogMappingItems } from "./dvd-title-identity.js";
 
 export function createDataAccess(input: CreateDataAccessOptions): DataAccess {
   return createDataAccessInternal(input);

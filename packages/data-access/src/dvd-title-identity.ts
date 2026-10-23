@@ -334,6 +334,19 @@ export function dvdTitleIdentityReviewSetDigest(
   ]);
 }
 
+export function dvdTitleIdentityCatalogMappingItems(
+  items: readonly DvdTitleIdentityReviewSetItem[],
+): DvdTitleIdentityReviewSetItem[] {
+  return items.filter(({
+    presentAtCurrentCheckpoint,
+    discSelectionMappings,
+    observation,
+  }) =>
+    (presentAtCurrentCheckpoint && observation.angleNumber === 1) ||
+    discSelectionMappings.length > 0
+  );
+}
+
 function canonicalTitleIdentityContent(
   observation: NormalizedDvdTitleIdentityObservation,
 ): unknown {

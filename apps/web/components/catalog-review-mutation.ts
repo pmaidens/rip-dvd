@@ -991,9 +991,17 @@ async function catalogReviewMutationError(response: Response): Promise<Error> {
   let message = "Catalog review mutation failed";
   try {
     const body: unknown = await response.json();
-    if (typeof body === "object" && body !== null && "error" in body &&
-        typeof body.error === "string" && body.error.trim() !== "") {
-      message = body.error.trim().slice(0, 512);
+    if (typeof body === "object" && body !== null && "error" in body) {
+      const error = body.error;
+      if (typeof error === "string" && error.trim() !== "") {
+        message = error.trim().slice(0, 512);
+      } else if (
+        typeof error === "object" && error !== null &&
+        "message" in error && typeof error.message === "string" &&
+        error.message.trim() !== ""
+      ) {
+        message = error.message.trim().slice(0, 512);
+      }
     }
   } catch {
     // Keep the bounded generic message for non-JSON error responses.

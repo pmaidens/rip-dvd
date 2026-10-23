@@ -1462,13 +1462,13 @@ function readDashboardSnapshotRecords(
       evidenceHeadersByArchiveId.get(archive.id) ?? null,
     ),
   );
-  const catalogReviewWorkflowEvidence =
+  const catalogReviewWorkflowEvidenceSource = readSource(() =>
     access.catalog.readDvdCatalogReviewWorkflowEvidence(
       catalogReviewArchives.map((archive) => ({
         originalDiscArchiveId: archive.id,
         evidenceHeader: evidenceHeadersByArchiveId.get(archive.id) ?? null,
       })),
-    );
+    ));
   const previousCatalogReviewBoundary =
     catalogReviewArchives.at(-1) ??
     (catalogReviewCursor?.direction === "older"
@@ -2129,12 +2129,13 @@ function readDashboardSnapshotRecords(
   const catalogReview =
     archiveSource.status === "error" ||
       rearchiveRequestSource.status === "error" ||
-      rearchiveJobSource.status === "error"
+      rearchiveJobSource.status === "error" ||
+      catalogReviewWorkflowEvidenceSource.status === "error"
       ? unavailable<DashboardCatalogReviewItem>()
       : {
           status: "loaded" as const,
           items: catalogReviewArchives.map((archive) => {
-            const workflowEvidence = catalogReviewWorkflowEvidence.get(
+            const workflowEvidence = catalogReviewWorkflowEvidenceSource.value.get(
               archive.id,
             );
             if (workflowEvidence === undefined) {

@@ -2,6 +2,7 @@ import {
   archiveBoundaryEvidenceFromRecord,
   decodeArchivedDvdTitles,
   DomainInvariantError,
+  dvdTitleIdentityCatalogMappingItems,
   withAuthoritativeDvdArchiveIntegrity,
   type DataAccess,
   type DiscSelection,
@@ -325,15 +326,9 @@ export function readCatalogReview(
         ? null
         : {
           reviewSetIdentity: titleIdentityReviewSet.reviewSetIdentity,
-          currentMappingStates: titleIdentityReviewSet.items
-            .filter(({
-              presentAtCurrentCheckpoint,
-              discSelectionMappings,
-              observation,
-            }) =>
-              (presentAtCurrentCheckpoint && observation.angleNumber === 1) ||
-              discSelectionMappings.length > 0
-            )
+          currentMappingStates: dvdTitleIdentityCatalogMappingItems(
+            titleIdentityReviewSet.items,
+          )
             .map(({ mappingState }) => mappingState),
         },
       titleDamage: {
@@ -523,7 +518,7 @@ export function readCatalogReview(
     return {
       catalogRevision: archive.updatedAt.toISOString(),
       automaticCataloging: {
-        configured: automaticCatalogingConfigured,
+        configured: reviewWorkflow === null && automaticCatalogingConfigured,
       },
       archive: serializeArchiveEvidence(archive, disc.volumeLabel),
       reviewOutcome: archive.catalogReviewOutcome,
