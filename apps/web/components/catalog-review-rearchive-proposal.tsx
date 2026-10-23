@@ -86,6 +86,7 @@ export function CatalogReviewRearchiveProposal({
   mediaItems,
   replacementPlan,
   isSaving,
+  mappingAvailable = true,
   onPreview,
   onSave,
   onAccept,
@@ -96,6 +97,7 @@ export function CatalogReviewRearchiveProposal({
   mediaItems: CatalogReviewMediaItem[];
   replacementPlan?: CatalogReviewReplacementPlan;
   isSaving: boolean;
+  mappingAvailable?: boolean;
   onPreview(input: SaveRearchiveMappingProposalInput): Promise<
     CatalogReviewRearchiveProposal
   >;
@@ -450,7 +452,7 @@ export function CatalogReviewRearchiveProposal({
       <div className="profile-actions">
         <button
           type="button"
-          disabled={isSaving}
+          disabled={isSaving || !mappingAvailable}
           onClick={() => {
             const requestId = previewRequestId.current + 1;
             previewRequestId.current = requestId;
@@ -473,7 +475,8 @@ export function CatalogReviewRearchiveProposal({
         </button>
         <button
           type="button"
-          disabled={isSaving || !isPreviewCurrent || preview.state !== "ready"}
+          disabled={isSaving || !mappingAvailable || !isPreviewCurrent ||
+            preview.state !== "ready"}
           onClick={() => onSave({ mappings })}
         >
           {proposal.persisted ? "Save proposal changes" : "Save reviewed proposal"}

@@ -3,6 +3,7 @@ import { inspectCatalogTitleDamage } from "./catalog-title-damage.js";
 import { createNotificationOperations } from "./notifications.js";
 import { isHandBrakePreset } from "@rip-dvd/config";
 import {
+  DomainInvariantError,
   DVD_RECOVERY_EVIDENCE_FORMAT,
   encodingProfileQueueBlockingReasons,
   withAuthoritativeDvdArchiveIntegrity,
@@ -87,6 +88,10 @@ import {
 } from "./encode-output-inspection.js";
 import { describeDvdRecoveryStorage } from "./dvd-recovery-storage.js";
 import type { ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import {
+  assertCatalogReviewMappingAvailable,
+  rethrowCatalogMappingOperationError,
+} from "./catalog-review-workflow.js";
 
 export class InvalidProfileInputError extends Error {
   constructor(message = "Invalid Encoding Profile input.") {
@@ -137,16 +142,18 @@ function rearchiveMappingProposalInput(
 }
 
 function presentRearchiveMappingProposal(
-  access: DataAccess,
+  access: Pick<ConsistentReadAccess, "catalog">,
   proposal: RearchiveMappingProposalReview,
+  providedEvidenceHeaders?: ReturnType<
+    ConsistentReadAccess["catalog"]["findDvdArchiveEvidenceHeaders"]
+  >,
 ) {
   const evidenceArchiveIds = [...new Set([
     proposal.sourceArchive.id,
     proposal.targetArchive.id,
   ])];
-  const evidenceHeaders = access.catalog.findDvdArchiveEvidenceHeaders(
-    evidenceArchiveIds,
-  );
+  const evidenceHeaders = providedEvidenceHeaders ??
+    access.catalog.findDvdArchiveEvidenceHeaders(evidenceArchiveIds);
   const authoritativeProposal = {
     ...proposal,
     sourceArchive: withAuthoritativeDvdArchiveIntegrity(
@@ -756,19 +763,73 @@ export function createApplicationOperations(
     ) => readCatalogReview(access, id, coordinates, automaticCatalogingConfigured),
     previewRearchiveMappingProposal: (
       input: RearchiveMappingProposalOperationInput,
-    ) => presentRearchiveMappingProposal(
-      access,
-      access.catalog.previewRearchiveMappingProposal(
-        rearchiveMappingProposalInput(input),
-      ),
-    ),
+    ) => {
+      const proposalInput = rearchiveMappingProposalInput(input);
+      return access.readConsistentSnapshot((snapshot) => {
+        const targetArchive = snapshot.catalog.listOriginalDiscArchives({
+          ids: [proposalInput.originalDiscArchiveId],
+          limit: 1,
+        })[0];
+        if (targetArchive === undefined) {
+          return presentRearchiveMappingProposal(
+            snapshot,
+            snapshot.catalog.previewRearchiveMappingProposal(proposalInput),
+          );
+        }
+        const evidenceArchiveIds = [...new Set([
+          ...(targetArchive.rearchiveSourceArchiveId === null
+            ? []
+            : [targetArchive.rearchiveSourceArchiveId]),
+          targetArchive.id,
+        ])];
+        const evidenceHeaders = snapshot.catalog.findDvdArchiveEvidenceHeaders(
+          evidenceArchiveIds,
+        );
+        const workflowEvidence = snapshot.catalog
+          .readDvdCatalogReviewWorkflowEvidence([{
+            originalDiscArchiveId: proposalInput.originalDiscArchiveId,
+            evidenceHeader: evidenceHeaders.get(
+              proposalInput.originalDiscArchiveId,
+            ) ?? null,
+          }]).get(proposalInput.originalDiscArchiveId);
+        if (workflowEvidence === undefined) {
+          throw new DomainInvariantError(
+            "Catalog Review workflow evidence is unavailable",
+          );
+        }
+        assertCatalogReviewMappingAvailable(
+          snapshot,
+          proposalInput.originalDiscArchiveId,
+          workflowEvidence,
+        );
+        const proposal = snapshot.catalog.previewRearchiveMappingProposal(
+          proposalInput,
+        );
+        return presentRearchiveMappingProposal(
+          snapshot,
+          proposal,
+          evidenceHeaders,
+        );
+      });
+    },
     saveRearchiveMappingProposal: (
       input: RearchiveMappingProposalOperationInput & { mutationKey: unknown },
     ) => {
-      const proposal = access.catalog.saveRearchiveMappingProposal({
-        ...rearchiveMappingProposalInput(input),
-        mutationKey: parseMutationKey(input.mutationKey),
-      });
+      const proposalInput = rearchiveMappingProposalInput(input);
+      let proposal: RearchiveMappingProposalReview;
+      try {
+        proposal = access.catalog.saveRearchiveMappingProposal({
+          ...proposalInput,
+          mutationKey: parseMutationKey(input.mutationKey),
+        });
+      } catch (error) {
+        rethrowCatalogMappingOperationError(
+          access,
+          proposalInput.originalDiscArchiveId,
+          proposalInput.catalogRevision,
+          error,
+        );
+      }
       return {
         message: "Re-archive Mapping Proposal saved",
         proposal: presentRearchiveMappingProposal(access, proposal),
@@ -867,6 +928,7 @@ export { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
 export { readCatalogReview, serializeDiscSelection, serializeMediaItem } from "./catalog-review-read.js";
 export type { CatalogReviewPageCoordinates } from "./catalog-review-read.js";
 export {
+  assertCatalogReviewMappingAvailable,
   assertLegacyCatalogReviewCompletionAvailable,
   CatalogReviewMappingUnavailableError,
   CatalogReviewCompletionUnavailableError,

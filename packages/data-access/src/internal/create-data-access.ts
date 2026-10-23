@@ -13852,6 +13852,8 @@ export function createDataAccessInternal(
             access.catalog.readRearchiveMappingProposal(
               originalDiscArchiveId,
             ),
+          previewRearchiveMappingProposal: (input) =>
+            access.catalog.previewRearchiveMappingProposal(input),
           planRearchiveAcceptance: (input) =>
             access.catalog.planRearchiveAcceptance(input),
           listRearchiveEncodeReplacementPlans: (options) =>
@@ -17612,6 +17614,20 @@ export function createDataAccessInternal(
             decodeRearchiveMappingProposalReview,
           );
           if (replay !== undefined) return replay;
+          const evidenceHeader = transaction.select({
+            evidenceFormat: dvdArchiveEvidenceHeaders.evidenceFormat,
+          }).from(dvdArchiveEvidenceHeaders).where(eq(
+            dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+            input.originalDiscArchiveId,
+          )).get();
+          if (
+            evidenceHeader?.evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT
+          ) {
+            requireCurrentCatalogMappingEvidence(
+              transaction,
+              input.originalDiscArchiveId,
+            );
+          }
           const preview = evaluateRearchiveMappingProposal(
             transaction,
             semanticFields,

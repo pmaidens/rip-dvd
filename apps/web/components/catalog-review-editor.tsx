@@ -234,6 +234,7 @@ export function CatalogReviewView({
           mediaItems={review.mediaItems}
           replacementPlan={review.replacementPlan}
           isSaving={isSaving}
+          mappingAvailable={mappingAvailable}
           onPreview={onPreviewRearchiveMappingProposal}
           onSave={onSaveRearchiveMappingProposal}
           onAccept={onAcceptRearchive}
@@ -308,7 +309,7 @@ export function CatalogReviewView({
               (selection) => selection.mediaItemId,
             )}
             editingMediaItemId={editingMediaItemId}
-            isSaving={isSaving || !mappingAvailable}
+            isSaving={isSaving}
             onEdit={onEditMediaItem}
             onCancelEdit={onCancelEdit}
             onSave={onSaveMediaItem}

@@ -2610,6 +2610,7 @@ export type SnapshotCatalogAccess = Pick<
   | "searchMediaItems"
   | "listDiscSelections"
   | "readRearchiveMappingProposal"
+  | "previewRearchiveMappingProposal"
   | "planRearchiveAcceptance"
   | "listRearchiveEncodeReplacementPlans"
   | "getCatalogReviewCoverage"

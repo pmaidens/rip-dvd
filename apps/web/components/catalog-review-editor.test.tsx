@@ -1537,9 +1537,92 @@ describe("CatalogReviewEditor", () => {
     const mapMovie = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "Map as movie",
     );
+    const searchMediaItems = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Search full catalog",
+    );
     expect(remove?.disabled).toBe(true);
     expect(mapMovie?.disabled).toBe(true);
+    expect(searchMediaItems?.disabled).toBe(false);
     await act(async () => submit.click());
+    expect(postedCommands).toEqual([]);
+  });
+
+  it("blocks Re-archive Mapping Proposal changes when mapping is unavailable", async () => {
+    const review = activeRecoveryCatalogReview(catalogReview({
+      archiveId: "fresh-archive",
+      discLabel: "FRESH_UNAVAILABLE_REARCHIVE",
+    }), 1);
+    review.reviewWorkflow = {
+      ...review.reviewWorkflow!,
+      actions: review.reviewWorkflow!.actions.map((action) =>
+        action.action === "catalog_mapping"
+          ? {
+              ...action,
+              available: false,
+              reasons: [{
+                code: "SELECTION_UNIDENTIFIED" as const,
+                message: "Current title identities are not available for mapping.",
+                details: {},
+              }],
+            }
+          : action
+      ),
+    };
+    review.rearchiveProposal = {
+      state: "ready",
+      persisted: false,
+      catalogRevision: review.catalogRevision,
+      sourceCatalogRevision: "2026-08-10T06:00:00.000Z",
+      sourceArchive: {
+        ...review.archive,
+        id: "prior-archive",
+        detectedDiscId: "prior-disc",
+        discLabel: "PRIOR_DISC",
+        archivedAt: "2026-08-10T06:00:00.000Z",
+        catalogReviewedAt: "2026-08-10T07:00:00.000Z",
+        catalogReviewOutcome: "reviewed_with_selections",
+      },
+      targetArchive: review.archive,
+      mappings: [{
+        state: "valid",
+        reason: null,
+        sourceDiscSelectionId: "source-selection-1",
+        priorMapping: {
+          mediaItemId: review.mediaItems[0]!.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+          label: null,
+        },
+        proposedMapping: {
+          mediaItemId: review.mediaItems[0]!.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+          label: null,
+        },
+      }],
+    };
+    const postedCommands: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (init?.method === "POST") {
+        postedCommands.push(JSON.parse(String(init.body)) as unknown);
+        return Response.json({});
+      }
+      return Response.json(review);
+    }));
+
+    await act(async () => renderCatalogReviewEditor(review.archive.id));
+    const preview = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Preview proposal",
+    );
+    const save = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Save reviewed proposal",
+    );
+    expect(preview?.disabled).toBe(true);
+    expect(save?.disabled).toBe(true);
+    expect(container.textContent).toContain("SELECTION_UNIDENTIFIED");
+    preview?.click();
+    save?.click();
     expect(postedCommands).toEqual([]);
   });
 

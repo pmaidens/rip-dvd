@@ -2716,6 +2716,97 @@ it("blocks Re-archive replacement previews consistently through web and CLI", as
   }
 });
 
+it("blocks unavailable Re-archive mapping consistently through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const seeded = seedRearchiveCatalogReviewFixture(fixture);
+  const shown = await fixture.run([
+    "catalog-review",
+    "show",
+    seeded.targetArchive.id,
+  ]);
+  const initial = (shown.result as {
+    rearchiveProposal: {
+      catalogRevision: string;
+      sourceCatalogRevision: string;
+      mappings: Array<{
+        sourceDiscSelectionId: string;
+        proposedMapping: {
+          mediaItemId: string;
+          sourceIdentity: { kind: "dvd_title"; titleNumber: number };
+          label: string | null;
+        };
+      }>;
+    };
+  }).rearchiveProposal;
+  markArchiveWithDvdRecoveryEvidence(
+    fixture.databasePath,
+    seeded.targetArchive.id,
+    "rearchive-mapping-unavailable-parity",
+    { archiveRecovery: { id: "rearchive-mapping-unavailable-recovery" } },
+  );
+  const access = fixture.openAccess();
+  try {
+    const previewCommand = {
+      action: "preview_rearchive_mapping_proposal" as const,
+      catalogRevision: initial.catalogRevision,
+      sourceCatalogRevision: initial.sourceCatalogRevision,
+      mappings: [],
+    };
+    const previewWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(seeded.targetArchive.id, previewCommand),
+      seeded.targetArchive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const previewCli = await fixture.run([
+      "catalog-review",
+      "preview-rearchive-proposal",
+      seeded.targetArchive.id,
+      "--json",
+      JSON.stringify(previewCommand),
+    ]);
+    expect(previewWeb.status).toBe(409);
+    expect(previewCli.exitCode).toBe(2);
+    expect(previewCli.result).toEqual(await previewWeb.json());
+    expect(previewCli.result).toMatchObject({
+      error: {
+        code: "CATALOG_MAPPING_UNAVAILABLE",
+        reasons: [{ code: "SELECTION_UNIDENTIFIED" }],
+      },
+    });
+
+    const saveCommand = {
+      ...previewCommand,
+      action: "save_rearchive_mapping_proposal" as const,
+      mutationKey: "00000000-0000-4000-8000-000000000411",
+    };
+    const saveWeb = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(seeded.targetArchive.id, saveCommand),
+      seeded.targetArchive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const saveCli = await fixture.run([
+      "catalog-review",
+      "save-rearchive-proposal",
+      seeded.targetArchive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000412",
+      "--json",
+      JSON.stringify(saveCommand),
+    ]);
+    expect(saveWeb.status).toBe(409);
+    expect(saveCli.exitCode).toBe(2);
+    expect(saveCli.result).toEqual(await saveWeb.json());
+    expect(access.catalog.readRearchiveMappingProposal(
+      seeded.targetArchive.id,
+    )).toMatchObject({ persisted: false });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
 it("shares Encode Job validation and keyed outcomes across web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
   const { archive, correctedSelection } = seedCatalogReviewForReadFixture(fixture);

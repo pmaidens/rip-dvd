@@ -521,6 +521,30 @@ export function describeCatalogReviewWorkflow(
   };
 }
 
+export function assertCatalogReviewMappingAvailable(
+  access: ConsistentReadAccess,
+  originalDiscArchiveId: OriginalDiscArchiveId,
+  prefetched?: DvdCatalogReviewWorkflowEvidence,
+): void {
+  const workflow = describeCatalogReviewWorkflow(
+    access,
+    originalDiscArchiveId,
+    prefetched,
+  );
+  if (workflow === null) return;
+  const mapping = workflow.actions.find(({ action }) =>
+    action === "catalog_mapping"
+  );
+  if (mapping === undefined) {
+    throw new DomainInvariantError(
+      "Catalog Review workflow is missing mapping availability",
+    );
+  }
+  if (!mapping.available) {
+    throw new CatalogReviewMappingUnavailableError(workflow);
+  }
+}
+
 export function assertLegacyCatalogReviewCompletionAvailable(
   access: ConsistentReadAccess,
   originalDiscArchiveId: OriginalDiscArchiveId,
