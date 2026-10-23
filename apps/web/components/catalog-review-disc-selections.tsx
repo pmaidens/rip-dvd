@@ -154,6 +154,8 @@ export function CatalogReviewDiscSelections({
   const [draftCatalogRevision, setDraftCatalogRevision] = useState<
     string | null
   >(null);
+  const draftUsesStaleEvidence = draftCatalogRevision !== null &&
+    draftCatalogRevision !== catalogRevision;
   const hydratedSelectionId = useRef<string | null>(null);
   const editingSelection = editingSelectionId === null
     ? null
@@ -478,6 +480,20 @@ export function CatalogReviewDiscSelections({
         onSubmit={submitSelection}
       >
         <h3>{editingSelection ? "Edit Disc Selection" : "Add Disc Selection"}</h3>
+        {draftUsesStaleEvidence ? (
+          <div className="section-message" role="status">
+            <span>
+              Catalog evidence changed while this draft was open. Your values
+              are preserved; review the refreshed evidence before continuing.
+            </span>{" "}
+            <button
+              type="button"
+              onClick={() => setDraftCatalogRevision(catalogRevision)}
+            >
+              Use refreshed evidence
+            </button>
+          </div>
+        ) : null}
         {hasSupersessionCorrection ? (
           <p>
             A job-backed Disc Selection Correction creates a new identity and
@@ -635,7 +651,8 @@ export function CatalogReviewDiscSelections({
         </div>
         <button
           type="submit"
-          disabled={isSaving || mediaItems.length === 0}
+          disabled={isSaving || mediaItems.length === 0 ||
+            draftUsesStaleEvidence}
         >
           {editingSelection ? "Save Disc Selection" : "Add Disc Selection"}
         </button>

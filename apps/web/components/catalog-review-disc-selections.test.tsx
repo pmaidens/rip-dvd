@@ -734,7 +734,7 @@ describe("CatalogReviewDiscSelections", () => {
     container.remove();
   });
 
-  it("binds a preserved draft and resets it after a committed mapping", async () => {
+  it("preserves a stale draft until the operator binds it to refreshed evidence", async () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -784,11 +784,26 @@ describe("CatalogReviewDiscSelections", () => {
       } },
     ));
     expect(mediaItem.value).toBe("episode-2");
+    expect(submit.disabled).toBe(true);
+    expect(container.textContent).toContain(
+      "Catalog evidence changed while this draft was open",
+    );
+    await act(async () => submit.click());
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    const useRefreshedEvidence = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Use refreshed evidence");
+    if (!useRefreshedEvidence) {
+      throw new Error("Expected the refreshed-evidence draft action");
+    }
+    await act(async () => useRefreshedEvidence.click());
+    expect(mediaItem.value).toBe("episode-2");
+    expect(submit.disabled).toBe(false);
     await act(async () => submit.click());
 
     expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
       mediaItemId: "episode-2",
-    }, "2026-01-01T00:00:00.000Z", expect.any(Function));
+    }, "2026-01-01T00:00:01.000Z", expect.any(Function));
     await act(async () => render(
       "2026-01-01T00:00:02.000Z",
       { ...editableSelection, mediaItemId: "episode-2" },

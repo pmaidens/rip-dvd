@@ -256,6 +256,137 @@ function catalogReview({
   };
 }
 
+function activeRecoveryCatalogReview(
+  review: CatalogReviewDto,
+  checkpointRevision: number,
+): CatalogReviewDto {
+  const manifestDigest = checkpointRevision === 1
+    ? "a".repeat(64)
+    : "b".repeat(64);
+  const manifestId = `synthetic-manifest-${checkpointRevision}`;
+  const titleIdentityId = "synthetic-title-1";
+  review.rawScan.titles = [{
+    number: 1,
+    durationSeconds: 2_400,
+    chapters: 8,
+    audioStreams: [],
+    subtitles: [],
+  }];
+  review.titleIdentity = {
+    available: true,
+    unavailableReason: null,
+    checkpoint: {
+      manifestId,
+      manifestRevision: checkpointRevision,
+      manifestDigest,
+    },
+    policyVersion: "dvd-title-identity-continuity-v1",
+    reviewSetIdentity: "c".repeat(64),
+    items: [{
+      titleIdentityId,
+      presentAtCurrentCheckpoint: true,
+      mappingState: "mapped",
+      discSelectionMappings: [{
+        discSelectionId: review.discSelections[0]!.id,
+        mappingState: "mapped",
+      }],
+      reviewContinuity: {
+        result: checkpointRevision === 1 ? "initial" : "proved",
+        policyVersion: "dvd-title-identity-continuity-v1",
+        previousObservationId: checkpointRevision === 1
+          ? null
+          : "synthetic-observation-1",
+      },
+      observation: {
+        id: `synthetic-observation-${checkpointRevision}`,
+        titleIdentityId,
+        checkpoint: {
+          manifestId,
+          manifestRevision: checkpointRevision,
+          manifestDigest,
+        },
+        displayTitleNumber: 1,
+        navigation: {
+          videoTitleSetNumber: 1,
+          titleSetTitleNumber: 1,
+          programChainNumber: 1,
+        },
+        selectedPath: [{
+          programNumber: 1,
+          cellNumber: 1,
+          vobId: 1,
+          cellId: 1,
+        }],
+        angleNumber: 1,
+        angleCount: 1,
+        chapterStart: 1,
+        chapterEnd: 8,
+        chapterCount: 8,
+        sourceExtents: [{ startLba: 100, sectorCount: 200 }],
+        contentDigest: "d".repeat(64),
+        continuity: {
+          result: checkpointRevision === 1 ? "initial" : "proved",
+          policyVersion: "dvd-title-identity-continuity-v1",
+          previousObservationId: checkpointRevision === 1
+            ? null
+            : "synthetic-observation-1",
+        },
+        createdAt: review.catalogRevision,
+      },
+    }],
+  };
+  review.reviewWorkflow = {
+    schemaVersion: 1,
+    evidenceFormat: "dvd-recovery-evidence-v1",
+    facts: {
+      saved: true,
+      recovering: true,
+      mapped: true,
+      mappingState: "mapped",
+      readyForDamageDecision: false,
+      readyForEncoding: false,
+    },
+    current: {
+      originalDiscArchiveId: review.archive.id,
+      archiveJob: { id: "archive-job-1", status: "completed" },
+      checkpoint: { revision: checkpointRevision, manifestDigest },
+      recovery: {
+        id: "recovery-1",
+        attemptId: "attempt-1",
+        state: "running",
+        work: null,
+      },
+      catalogMappingProjectionId: "e".repeat(64),
+      titleDamageAssessmentId: null,
+    },
+    actions: [{
+      action: "catalog_mapping",
+      available: true,
+      reasons: [],
+      expectedInputs: ["catalogRevision", "mutationKey"],
+    }, {
+      action: "damage_decision",
+      available: false,
+      reasons: [{
+        code: "RECOVERY_ACTIVE",
+        message: "Archive Recovery is still active.",
+        details: {},
+      }],
+      expectedInputs: [],
+    }, {
+      action: "encode",
+      available: false,
+      reasons: [{
+        code: "RECOVERY_ACTIVE",
+        message: "Archive Recovery is still active.",
+        details: {},
+      }],
+      expectedInputs: [],
+    }],
+  };
+  return review;
+}
+
 async function resolveRequest(
   request: PendingRequest,
   body: CatalogReviewDto,
@@ -1158,6 +1289,148 @@ describe("CatalogReviewEditor", () => {
       { ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
         expectedCatalogRevision: review.catalogRevision, previewToken,
         acknowledge: true },
+    ]);
+    expect(container.textContent).toContain(
+      "Mapping changed; review required",
+    );
+  });
+
+  it("rebinds a preserved mapping draft after Recovery advances and rejects a stale save", async () => {
+    const initialReview = activeRecoveryCatalogReview(catalogReview({
+      archiveId: "archive-a",
+      discLabel: "ACTIVE_RECOVERY_DRAFT",
+    }), 1);
+    initialReview.mediaItems.push({
+      id: "episode-2",
+      parentId: null,
+      kind: "episode",
+      title: "Episode Two",
+      year: null,
+      seasonNumber: null,
+      episodeNumber: 2,
+    });
+    const refreshedReview = activeRecoveryCatalogReview({
+      ...initialReview,
+      catalogRevision: "2026-08-11T06:00:01.000Z",
+      rawScan: { ...initialReview.rawScan },
+      mediaItems: [...initialReview.mediaItems],
+      discSelections: initialReview.discSelections.map((selection) => ({
+        ...selection,
+        sourceIdentity: { ...selection.sourceIdentity },
+      })),
+    }, 2);
+    const committedReview: CatalogReviewDto = {
+      ...refreshedReview,
+      catalogRevision: "2026-08-11T06:00:02.000Z",
+      discSelections: refreshedReview.discSelections.map((selection) => ({
+        ...selection,
+        mediaItemId: "episode-2",
+      })),
+    };
+    const postedCommands: Array<Record<string, unknown>> = [];
+    let getCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (init?.method !== "POST") {
+        getCount += 1;
+        return Response.json(
+          getCount === 1
+            ? initialReview
+            : getCount === 2
+            ? refreshedReview
+            : committedReview,
+        );
+      }
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      postedCommands.push(body);
+      if (body.preview === true) {
+        return Response.json(availableDiscSelectionPreview(
+          String(body.catalogRevision),
+          "update_disc_selection",
+        ));
+      }
+      if (postedCommands.length === 2) {
+        return Response.json({
+          error: "Catalog review changed; reload before changing mappings",
+        }, { status: 409 });
+      }
+      return Response.json({ message: "Mapping changed; review required" });
+    }));
+
+    const render = (activityRevision: string) => root.render(
+      <CatalogReviewEditor
+        archiveId="archive-a"
+        activityRevision={activityRevision}
+        onClose={() => undefined}
+        onCompleted={() => undefined}
+      />,
+    );
+    await act(async () => render("activity-1"));
+    const action = container.querySelector<HTMLSelectElement>(
+      'select[name="replacesDiscSelectionId"]',
+    );
+    if (!action) throw new Error("Expected the Catalog action control");
+    await act(async () => {
+      action.value = initialReview.discSelections[0]!.id;
+      action.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const mediaItem = container.querySelector<HTMLSelectElement>(
+      'select[name="mediaItemId"]',
+    );
+    const submit = container.querySelector<HTMLButtonElement>(
+      'button[type="submit"]',
+    );
+    if (!mediaItem || !submit) {
+      throw new Error("Expected editable Disc Selection controls");
+    }
+    await act(async () => {
+      mediaItem.value = "episode-2";
+      mediaItem.dispatchEvent(new Event("change", { bubbles: true }));
+      submit.click();
+    });
+    expect(container.textContent).toContain(
+      "Catalog review changed; reload before changing mappings",
+    );
+
+    await act(async () => render("activity-2"));
+    expect(mediaItem.value).toBe("episode-2");
+    expect(submit.disabled).toBe(true);
+    const useRefreshedEvidence = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Use refreshed evidence");
+    if (!useRefreshedEvidence) {
+      throw new Error("Expected the refreshed-evidence draft action");
+    }
+    await act(async () => useRefreshedEvidence.click());
+    expect(mediaItem.value).toBe("episode-2");
+    await act(async () => submit.click());
+
+    expect(postedCommands).toEqual([
+      expect.objectContaining({
+        action: "update_disc_selection",
+        catalogRevision: initialReview.catalogRevision,
+        changes: { mediaItemId: "episode-2" },
+        preview: true,
+      }),
+      expect.objectContaining({
+        action: "update_disc_selection",
+        catalogRevision: initialReview.catalogRevision,
+        expectedCatalogRevision: initialReview.catalogRevision,
+        acknowledge: true,
+      }),
+      expect.objectContaining({
+        action: "update_disc_selection",
+        catalogRevision: refreshedReview.catalogRevision,
+        changes: { mediaItemId: "episode-2" },
+        preview: true,
+      }),
+      expect.objectContaining({
+        action: "update_disc_selection",
+        catalogRevision: refreshedReview.catalogRevision,
+        expectedCatalogRevision: refreshedReview.catalogRevision,
+        acknowledge: true,
+      }),
     ]);
     expect(container.textContent).toContain(
       "Mapping changed; review required",
