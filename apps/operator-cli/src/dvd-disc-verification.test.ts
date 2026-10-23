@@ -329,11 +329,13 @@ it("fences queued and running verification work when Recovery Stop commits", asy
       archiveRecoveryId: runningSeed.recoveryId,
       attemptId: runningSeed.attemptId,
     });
-    const start = vi.fn();
     expect(runningAccess.dvdDiscVerifications.renewClaim(claim)).toBe(false);
-    expect(runningAccess.dvdDiscVerifications.admitSourceRead(claim, start))
+    expect(runningAccess.dvdDiscVerifications.admitSourceRead(claim, {
+      devicePath: runningSeed.verificationDrive.devicePath,
+      deviceId: "1",
+      inode: "2",
+    }))
       .toBe(false);
-    expect(start).not.toHaveBeenCalled();
     expect(runningAccess.archiveRecoveryWork.prepareStop({
       archiveRecoveryId: runningSeed.recoveryId,
       attemptId: runningSeed.attemptId,

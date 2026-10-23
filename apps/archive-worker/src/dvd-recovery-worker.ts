@@ -17,6 +17,8 @@ import {
 
 import type { ActiveBoundedProcess } from "./bounded-child-process.js";
 import {
+  authorizeDvdSourceRead,
+  awaitDvdSourceReadReady,
   createNodeDvdRecoverySourceReader,
   type DvdRecoverySourceReader,
   type DvdSourceRead,
@@ -598,29 +600,29 @@ export async function pollDvdRecoveryPass(input: {
           | ReturnType<DvdRecoverySourceReader["start"]>
           | undefined;
         try {
+          try {
+            admittedRead = input.reader.start({
+              devicePath,
+              startLba,
+              sectorCount: 1,
+              acceptedEndLbaExclusive:
+                checkpoint.acceptedEndLbaExclusive,
+            });
+            await awaitDvdSourceReadReady(admittedRead, signal);
+          } catch (cause) {
+            throw new DvdRecoveryPassFault("SOURCE_READ_FAILED", {
+              cause,
+            });
+          }
           const admitted = input.access.archiveRecoveryWork.admitSourceRead(
             claim,
             devicePath,
-            (admittedDevicePath) => {
-              try {
-                admittedRead = input.reader.start({
-                  devicePath: admittedDevicePath,
-                  startLba,
-                  sectorCount: 1,
-                  acceptedEndLbaExclusive:
-                    checkpoint.acceptedEndLbaExclusive,
-                });
-                return admittedRead.deviceIdentity;
-              } catch (cause) {
-                throw new DvdRecoveryPassFault("SOURCE_READ_FAILED", {
-                  cause,
-                });
-              }
-            },
+            admittedRead.deviceIdentity,
           );
           if (admitted === null) {
             throw new DvdRecoveryPassFault("SOURCE_CHANGED");
           }
+          authorizeDvdSourceRead(admittedRead);
         } catch (error) {
           if (admittedRead !== undefined) {
             void admittedRead.result.catch(() => undefined);

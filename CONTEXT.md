@@ -36,7 +36,9 @@ The decision also fences DVD Disc Verification for that Recovery attempt:
 queued verification is invalidated, no further verification read is admitted,
 and Stop remains `stopping` until verification work has settled and every
 admitted verification or Recovery source command's exact device inode is
-proven inactive. A later drive-path reuse does not redirect that proof.
+proven inactive. A source helper may acquire its descriptor before admission,
+but it cannot read until that exact identity has committed durably. A later
+drive-path reuse does not redirect the proof.
 _Avoid_: Archive Request cancellation, archive deletion
 
 **Operator Disc Confirmation**:

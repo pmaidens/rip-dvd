@@ -664,7 +664,7 @@ export interface ArchiveRecoveryWorkAccess {
   admitSourceRead(
     claim: ClaimedArchiveRecoveryWork,
     expectedDevicePath: string,
-    start: (devicePath: string) => OpticalDeviceIdentity,
+    identity: OpticalDeviceIdentity,
   ): ArchiveRecovery | null;
   bindVerification(
     claim: ClaimedArchiveRecoveryWork,
@@ -2423,7 +2423,7 @@ export interface DvdDiscVerificationAccess {
   renewClaim(claim: DvdDiscVerification): boolean;
   admitSourceRead(
     claim: DvdDiscVerification,
-    start: () => OpticalDeviceIdentity,
+    identity: OpticalDeviceIdentity,
   ): boolean;
   appendFinding(
     claim: DvdDiscVerification,

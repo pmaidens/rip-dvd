@@ -171,6 +171,8 @@ function immediateReader(
       closed: Promise.resolve(),
       cancel: vi.fn(),
       deviceIdentity: syntheticDeviceIdentity(input.devicePath),
+      ready: Promise.resolve(),
+      authorize: vi.fn(),
     }));
   return { reader: { start }, start };
 }
@@ -439,7 +441,7 @@ it("does not admit a pass while reconciliation remains unresolved", async () => 
   }
 });
 
-it("does not start a source read when Stop commits during insertion observation", async () => {
+it("does not authorize a source read when Stop commits during insertion observation", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const seeded = await seedDvdDiscVerificationFixture(fixture);
@@ -470,7 +472,10 @@ it("does not start a source read when Stop commits during insertion observation"
     finishObservation("synthetic-verification-generation");
 
     await polling;
-    expect(source.start).not.toHaveBeenCalled();
+    expect(source.start).toHaveBeenCalledOnce();
+    expect(source.start.mock.results[0]?.value.authorize)
+      .not.toHaveBeenCalled();
+    expect(source.start.mock.results[0]?.value.cancel).toHaveBeenCalledOnce();
     expect(reconcile).toHaveBeenCalledTimes(1);
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({ status: "stopped", work: null });
@@ -536,7 +541,7 @@ it("follows a serial-proven drive renumber between admitted sector reads", async
   }
 });
 
-it("rejects a source read when the observed drive path changes before admission", async () => {
+it("rejects an unauthorized read when the drive path changes before admission", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const originalDevicePath = "/dev/synthetic-observed-recovery-drive";
@@ -571,18 +576,21 @@ it("rejects a source read when the observed drive path changes before admission"
   const admitSourceRead = input.access.archiveRecoveryWork.admitSourceRead
     .bind(input.access.archiveRecoveryWork);
   vi.spyOn(input.access.archiveRecoveryWork, "admitSourceRead")
-    .mockImplementation((claim, expectedDevicePath, start) => {
+    .mockImplementation((claim, expectedDevicePath, identity) => {
       const renumbered = input.access.catalog.reconcileOpticalDrives([{
         devicePath: renumberedDevicePath,
         serialNumber,
         isConfiguredDevice: false,
       }]).find((drive) => drive.serialNumber === serialNumber);
       expect(renumbered?.id).toBe(seeded.verificationDrive.id);
-      return admitSourceRead(claim, expectedDevicePath, start);
+      return admitSourceRead(claim, expectedDevicePath, identity);
     });
   try {
     expect(await pollDvdRecoveryPass(input)).toBe(true);
-    expect(source.start).not.toHaveBeenCalled();
+    expect(source.start).toHaveBeenCalledOnce();
+    expect(source.start.mock.results[0]?.value.authorize)
+      .not.toHaveBeenCalled();
+    expect(source.start.mock.results[0]?.value.cancel).toHaveBeenCalledOnce();
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({
         status: "faulted",
@@ -594,7 +602,7 @@ it("rejects a source read when the observed drive path changes before admission"
   }
 });
 
-it("keeps Stop pending while a rejected recovery admission is quiesced", async () => {
+it("keeps Stop pending while a rejected recovery admission claim is live", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const seeded = await seedDvdDiscVerificationFixture(fixture, [{
@@ -616,17 +624,19 @@ it("keeps Stop pending while a rejected recovery admission is quiesced", async (
     expect(observeResult).toHaveBeenCalledOnce();
     rejectRead(new Error("Synthetic cancelled recovery read"));
   });
+  const authorize = vi.fn();
   const start = vi.fn((request:
     Parameters<DvdRecoverySourceReader["start"]>[0]) => ({
       result,
       closed,
       cancel,
       deviceIdentity: syntheticDeviceIdentity(request.devicePath),
+      ready: Promise.resolve(),
+      authorize,
     }));
   const input = pollInput(fixture, { start });
   vi.spyOn(input.access.archiveRecoveryWork, "admitSourceRead")
-    .mockImplementation((_claim, expectedDevicePath, startRead) => {
-      startRead(expectedDevicePath);
+    .mockImplementation(() => {
       throw new Error("Synthetic recovery admission commit failure");
     });
   const stopInput = pollInput(
@@ -638,6 +648,7 @@ it("keeps Stop pending while a rejected recovery admission is quiesced", async (
   try {
     const polling = pollDvdRecoveryPass(input);
     await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+    expect(authorize).not.toHaveBeenCalled();
     const stopAccess = fixture.openAccess();
     const stopOperationId = (() => {
       try {
@@ -674,6 +685,75 @@ it("keeps Stop pending while a rejected recovery admission is quiesced", async (
       .toMatchObject({ status: "stopped", faultCode: null });
   } finally {
     stopInput.access.close();
+    input.access.close();
+  }
+});
+
+it("allows Stop after rolled-back recovery admission expires without authorizing", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 149,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  await completeVerification(fixture, seeded);
+  const input = pollInput(fixture, immediateReader(() => {
+    throw new Error("Stop must not start another recovery read");
+  }).reader);
+  const candidate = input.access.archiveRecoveryWork
+    .claimNextVerifiedCandidate("synthetic-crashed-admission-worker");
+  if (candidate === null) throw new Error("Expected recovery claim");
+  const authorize = vi.fn();
+  const cancel = vi.fn();
+  const start = vi.fn(() => ({
+    result: new Promise<never>(() => {}),
+    closed: new Promise<void>(() => {}),
+    cancel,
+    deviceIdentity: {
+      ...syntheticDeviceIdentity(seeded.verificationDrive.devicePath),
+      deviceId: "invalid",
+    },
+    ready: Promise.resolve(),
+    authorize,
+  }));
+  const preparedRead = start();
+  await preparedRead.ready;
+  expect(() => input.access.archiveRecoveryWork.admitSourceRead(
+    candidate.claim,
+    seeded.verificationDrive.devicePath,
+    preparedRead.deviceIdentity,
+  )).toThrow("DVD Recovery source device identity is invalid");
+  expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+    .toMatchObject({
+      work: {
+        admittedDevicePath: null,
+        admittedDeviceId: null,
+        admittedDeviceInode: null,
+      },
+    });
+  const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`UPDATE archive_recovery_work
+    SET claimed_at = 0
+    WHERE archive_recovery_id = ?`).run(seeded.recoveryId);
+  database.close();
+  input.access.archiveRecoveryWork.requestStop({
+    mutationKey: "00000000-0000-4000-8000-000000000496",
+    archiveRecoveryId: seeded.recoveryId,
+    attemptId: seeded.attemptId,
+  });
+  const reconcile = vi.fn(async () => ({
+    outcome: "already_consistent",
+    evidence: {},
+  })) as unknown as typeof reconcileDvdRecoveryCheckpoint;
+  try {
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(true);
+    expect(start).toHaveBeenCalledOnce();
+    expect(authorize).not.toHaveBeenCalled();
+    expect(cancel).not.toHaveBeenCalled();
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "stopped", work: null });
+  } finally {
     input.access.close();
   }
 });
@@ -724,6 +804,8 @@ it("keeps Stop durable until a blocked source command is reaped", async () => {
     closed,
     cancel,
     deviceIdentity: syntheticDeviceIdentity(read.devicePath),
+    ready: Promise.resolve(),
+    authorize: vi.fn(),
   }));
   const input = pollInput(fixture, { start });
   const reconcile = vi.fn(async () => ({
@@ -821,6 +903,8 @@ it("stops against the admitted inode after the drive path is reused", async () =
       closed,
       cancel,
       deviceIdentity: admittedIdentity,
+      ready: Promise.resolve(),
+      authorize: vi.fn(),
     })),
   };
   const input = pollInput(fixture, source);
@@ -880,6 +964,8 @@ it("releases a quiesced read on shutdown so a restarted worker can resume", asyn
       closed,
       cancel,
       deviceIdentity: syntheticDeviceIdentity(read.devicePath),
+      ready: Promise.resolve(),
+      authorize: vi.fn(),
     })),
   };
   const controller = new AbortController();
@@ -1072,7 +1158,7 @@ it("reclaims a crashed worker claim before a restarted worker resumes", async ()
   crashedAccess.archiveRecoveryWork.admitSourceRead(
     crashed.claim,
     seeded.verificationDrive.devicePath,
-    () => crashedIdentity,
+    crashedIdentity,
   );
   crashedAccess.close();
   const crashedDatabase = new DatabaseSync(fixture.databasePath);
@@ -1095,7 +1181,7 @@ it("reclaims a crashed worker claim before a restarted worker resumes", async ()
       input.access.archiveRecoveryWork.admitSourceRead(
         claim,
         seeded.verificationDrive.devicePath,
-        () => racedIdentity,
+        racedIdentity,
       );
       return beginInterruptedTakeover(claim, workerId);
     })
@@ -1107,13 +1193,11 @@ it("reclaims a crashed worker claim before a restarted worker resumes", async ()
     if (withDeviceIdentityInactive.mock.calls.length === 1) {
       expect(input.access.archiveRecoveryWork.renewClaim(crashed.claim))
         .toBe(false);
-      const staleStart = vi.fn(() => crashedIdentity);
       expect(() => input.access.archiveRecoveryWork.admitSourceRead(
         crashed.claim,
         seeded.verificationDrive.devicePath,
-        staleStart,
+        crashedIdentity,
       )).toThrow();
-      expect(staleStart).not.toHaveBeenCalled();
       throw new Error("Synthetic crashed helper remains active");
     }
     await mutation();
@@ -1640,7 +1724,7 @@ it("keeps Stop pending until admitted device inactivity can be acquired", async 
     input.access.archiveRecoveryWork.admitSourceRead(
       candidate.claim,
       seeded.verificationDrive.devicePath,
-      syntheticDeviceIdentity,
+      syntheticDeviceIdentity(seeded.verificationDrive.devicePath),
     );
     const requested = input.access.archiveRecoveryWork.requestStop({
       mutationKey: "00000000-0000-4000-8000-000000000469",
@@ -1775,7 +1859,7 @@ it("keeps Stop pending while an expired verification helper is still active", as
   );
   expect(input.access.dvdDiscVerifications.admitSourceRead(
     verificationClaim,
-    () => verificationIdentity,
+    verificationIdentity,
   )).toBe(true);
   input.access.archiveRecoveryWork.requestStop({
     mutationKey: "00000000-0000-4000-8000-000000000491",
@@ -1860,7 +1944,7 @@ it("quiesces every admitted verification identity for the stopped attempt", asyn
   };
   expect(input.access.dvdDiscVerifications.admitSourceRead(
     firstClaim,
-    () => firstIdentity,
+    firstIdentity,
   )).toBe(true);
   const database = new DatabaseSync(fixture.databasePath);
   database.prepare(`UPDATE dvd_disc_verifications
@@ -1885,7 +1969,7 @@ it("quiesces every admitted verification identity for the stopped attempt", asyn
   };
   expect(input.access.dvdDiscVerifications.admitSourceRead(
     secondClaim,
-    () => secondIdentity,
+    secondIdentity,
   )).toBe(true);
   input.access.archiveRecoveryWork.requestStop({
     mutationKey: "00000000-0000-4000-8000-000000000495",
@@ -1974,6 +2058,8 @@ it("starts no further verification read after Stop commits", async () => {
     deviceIdentity: syntheticDeviceIdentity(
       "/dev/synthetic-verification-stop-drive",
     ),
+    ready: Promise.resolve(),
+    authorize: vi.fn(),
   }));
   const access = fixture.openAccess();
   try {
@@ -2037,6 +2123,7 @@ it("quiesces a verification read when admission fails after start", async () => 
     expect(observeResult).toHaveBeenCalledOnce();
     rejectRead(new Error("Synthetic cancelled verification read"));
   });
+  const authorize = vi.fn();
   const start = vi.fn(() => ({
     result,
     closed,
@@ -2044,12 +2131,13 @@ it("quiesces a verification read when admission fails after start", async () => 
     deviceIdentity: syntheticDeviceIdentity(
       "/dev/synthetic-verification-admission-drive",
     ),
+    ready: Promise.resolve(),
+    authorize,
   }));
   const access = fixture.openAccess();
   try {
     vi.spyOn(access.dvdDiscVerifications, "admitSourceRead")
-      .mockImplementation((_claim, startRead) => {
-        startRead();
+      .mockImplementation(() => {
         throw new Error("Synthetic admission commit failure");
       });
     const fail = vi.spyOn(access.dvdDiscVerifications, "fail");
@@ -2065,6 +2153,7 @@ it("quiesces a verification read when admission fails after start", async () => 
       },
     });
     await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+    expect(authorize).not.toHaveBeenCalled();
     expect(fail).not.toHaveBeenCalled();
 
     closeRead();
@@ -2078,13 +2167,86 @@ it("quiesces a verification read when admission fails after start", async () => 
   }
 });
 
+it("allows Stop after rolled-back verification admission expires without authorizing", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(
+    fixture,
+    undefined,
+    "/dev/synthetic-rolled-back-verification-drive",
+  );
+  const submitted = await fixture.run([
+    "archive-recovery", "verify-disc", seeded.recoveryId,
+    "--key", "00000000-0000-4000-8000-000000000497",
+    "--disc-inspection-id", seeded.inspection.id,
+    "--checkpoint-revision", "1",
+    "--checkpoint-digest", seeded.manifest.manifestDigest,
+  ]);
+  expect(submitted.exitCode).toBe(0);
+  const input = pollInput(fixture, immediateReader(() => {
+    throw new Error("Stop must not start a recovery read");
+  }).reader);
+  const claim = input.access.dvdDiscVerifications.claimNext(
+    "synthetic-crashed-verification-admission-worker",
+  );
+  if (claim === null) throw new Error("Expected verification claim");
+  const authorize = vi.fn();
+  const cancel = vi.fn();
+  const start = vi.fn(() => ({
+    result: new Promise<never>(() => {}),
+    closed: new Promise<void>(() => {}),
+    cancel,
+    deviceIdentity: {
+      ...syntheticDeviceIdentity(seeded.verificationDrive.devicePath),
+      inode: "invalid",
+    },
+    ready: Promise.resolve(),
+    authorize,
+  }));
+  const preparedRead = start();
+  await preparedRead.ready;
+  expect(() => input.access.dvdDiscVerifications.admitSourceRead(
+    claim,
+    preparedRead.deviceIdentity,
+  )).toThrow("DVD Disc Verification source device identity is invalid");
+  expect(input.access.dvdDiscVerifications.find(claim.id)).toMatchObject({
+    status: "running",
+    admittedDevicePath: null,
+    admittedDeviceId: null,
+    admittedDeviceInode: null,
+  });
+  const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`UPDATE dvd_disc_verifications
+    SET claimed_at = 0
+    WHERE id = ?`).run(claim.id);
+  database.close();
+  input.access.archiveRecoveryWork.requestStop({
+    mutationKey: "00000000-0000-4000-8000-000000000498",
+    archiveRecoveryId: seeded.recoveryId,
+    attemptId: seeded.attemptId,
+  });
+  const reconcile = vi.fn(async () => ({
+    outcome: "already_consistent",
+    evidence: {},
+  })) as unknown as typeof reconcileDvdRecoveryCheckpoint;
+  try {
+    expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(true);
+    expect(start).toHaveBeenCalledOnce();
+    expect(authorize).not.toHaveBeenCalled();
+    expect(cancel).not.toHaveBeenCalled();
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "stopped", work: null });
+  } finally {
+    input.access.close();
+  }
+});
+
 it("rejects source-read admission after Stop commits", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const seeded = await seedDvdDiscVerificationFixture(fixture);
   const authority = await completeVerification(fixture, seeded);
   const access = fixture.openAccess();
-  const start = vi.fn();
   try {
     const claim = access.archiveRecoveryWork.claim(
       access.archiveRecoveryWork.request(seeded.recoveryId).archiveRecoveryId,
@@ -2100,10 +2262,9 @@ it("rejects source-read admission after Stop commits", async () => {
     expect(() => access.archiveRecoveryWork.admitSourceRead(
       claim,
       seeded.verificationDrive.devicePath,
-      start,
+      syntheticDeviceIdentity(seeded.verificationDrive.devicePath),
     ))
       .toThrow();
-    expect(start).not.toHaveBeenCalled();
   } finally {
     access.close();
   }

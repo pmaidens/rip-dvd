@@ -41,6 +41,8 @@ writeFileSync(replacementSourcePath, Buffer.alloc(content.byteLength, 173));
 const descriptorBoundSourcePath = "/tmp/rip-dvd-reader-descriptor-source.img";
 const descriptorReplacementPath =
   "/tmp/rip-dvd-reader-descriptor-replacement.img";
+const descriptorAuthorizationPath =
+  "/tmp/rip-dvd-reader-descriptor-authorization";
 writeFileSync(descriptorBoundSourcePath, content);
 writeFileSync(
   descriptorReplacementPath,
@@ -51,6 +53,11 @@ const descriptorBoundSource = openSync(
   constants.O_RDONLY | constants.O_NOFOLLOW,
 );
 renameSync(descriptorReplacementPath, descriptorBoundSourcePath);
+writeFileSync(descriptorAuthorizationPath, "1");
+const descriptorAuthorization = openSync(
+  descriptorAuthorizationPath,
+  constants.O_RDONLY | constants.O_NOFOLLOW,
+);
 let descriptorBoundRead;
 try {
   descriptorBoundRead = spawnSync(
@@ -64,14 +71,25 @@ try {
     ],
     {
       encoding: "buffer",
-      stdio: ["ignore", "pipe", "pipe", descriptorBoundSource],
+      stdio: [
+        "ignore",
+        "pipe",
+        "pipe",
+        descriptorBoundSource,
+        "pipe",
+        descriptorAuthorization,
+      ],
     },
   );
 } finally {
   closeSync(descriptorBoundSource);
+  closeSync(descriptorAuthorization);
 }
 if (
   descriptorBoundRead.status !== 0 ||
+  !descriptorBoundRead.output[4]?.equals(
+    Buffer.from("rip-dvd-source-read-authorization-ready\n"),
+  ) ||
   !descriptorBoundRead.stdout.equals(content.subarray(0, 2_048))
 ) {
   throw new Error("descriptor-bound DVD source read check failed");

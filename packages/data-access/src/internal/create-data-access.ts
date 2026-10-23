@@ -9787,7 +9787,7 @@ export function createDataAccessInternal(
           archiveRecoveryId: archiveRecoveryWork.archiveRecoveryId,
         }).get() !== undefined;
       },
-      admitSourceRead(claim, expectedDevicePath, start) {
+      admitSourceRead(claim, expectedDevicePath, identity) {
         return database.transaction((transaction) => {
           const recovery = requireCurrentArchiveRecoveryClaim(
             transaction,
@@ -9837,7 +9837,6 @@ export function createDataAccessInternal(
           ) {
             return null;
           }
-          const identity = start(drive.devicePath);
           if (
             identity.devicePath !== drive.devicePath ||
             !/^\d+$/.test(identity.deviceId) ||
@@ -11230,7 +11229,7 @@ export function createDataAccessInternal(
           )).returning({ id: dvdDiscVerifications.id }).get() !== undefined;
         }, { behavior: "immediate" });
       },
-      admitSourceRead(claim, start) {
+      admitSourceRead(claim, identity) {
         if (claim.claimToken === null || claim.status !== "running") {
           return false;
         }
@@ -11273,7 +11272,6 @@ export function createDataAccessInternal(
             eq(dvdDiscVerifications.claimToken, claimToken),
           )).returning({ id: dvdDiscVerifications.id }).get();
           if (renewed === undefined) return false;
-          const identity = start();
           if (
             identity.devicePath !== drive.devicePath ||
             !/^\d+$/.test(identity.deviceId) ||

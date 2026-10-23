@@ -2633,6 +2633,25 @@ static int await_copy_authorization(uint64_t size_bytes,
     return 0;
 }
 
+static int await_source_read_authorization(void)
+{
+    static const char ready[] =
+        "rip-dvd-source-read-authorization-ready\n";
+    if (write(4, ready, sizeof(ready) - 1) != (ssize_t)(sizeof(ready) - 1)) {
+        return fail_errno("DVD source read authorization readiness failed");
+    }
+    char authorized = 0;
+    ssize_t bytes_read;
+    do {
+        bytes_read = read(5, &authorized, 1);
+    } while (bytes_read < 0 && errno == EINTR);
+    if (bytes_read != 1 || authorized != '1') {
+        fprintf(stderr, "DVD source read authorization was denied\n");
+        return 1;
+    }
+    return 0;
+}
+
 #ifdef RIP_DVD_READER_TESTING
 static int parse_test_delay(const char *text, unsigned int *delay_ms)
 {
@@ -3574,6 +3593,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "DVD source read range is invalid\n");
             return 2;
         }
+        if (await_source_read_authorization() != 0) return 1;
         dvdcss_t dvdcss = dvdcss_open(argv[2]);
         if (dvdcss == NULL) {
             fprintf(stderr, "DVD content open failed\n");

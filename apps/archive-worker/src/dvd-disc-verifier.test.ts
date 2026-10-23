@@ -20,7 +20,8 @@ import {
   type DvdVerificationSourceReader,
 } from "./dvd-disc-verifier.js";
 import type {
-  StartNodeBoundedCommandProcessOptions,
+  BoundedRawCommandProcessCompletion,
+  StartNodeAuthorizedBoundedCommandProcessOptions,
 } from "./bounded-child-process.js";
 
 const metadataFingerprint = `dvdmeta-sha256:${"a".repeat(64)}`;
@@ -81,26 +82,38 @@ function reader(
       closed: Promise.resolve(),
       cancel: vi.fn(),
       deviceIdentity,
+      ready: Promise.resolve(),
+      authorize: vi.fn(),
     }));
   return { reader: { start: run }, run };
 }
 
 it("binds a recovery helper read to the inherited device descriptor", async () => {
-  let launched: StartNodeBoundedCommandProcessOptions | undefined;
+  let launched: StartNodeAuthorizedBoundedCommandProcessOptions | undefined;
   const bytes = Buffer.alloc(2_048, 0x4f);
   const startProcess = vi.fn((
-    options: StartNodeBoundedCommandProcessOptions,
+    options: StartNodeAuthorizedBoundedCommandProcessOptions,
   ) => {
     launched = options;
+    let resolveResult!: (value: {
+      exitCode: number;
+      signal: null;
+      stderr: Buffer;
+      stdout: Buffer;
+    }) => void;
     return {
-      result: Promise.resolve({
+      result: new Promise<BoundedRawCommandProcessCompletion>((resolve) => {
+        resolveResult = resolve;
+      }),
+      closed: Promise.resolve(),
+      cancel: vi.fn(),
+      ready: Promise.resolve(),
+      authorize: vi.fn(() => resolveResult({
         exitCode: 0,
         signal: null,
         stderr: Buffer.alloc(0),
         stdout: bytes,
-      }),
-      closed: Promise.resolve(),
-      cancel: vi.fn(),
+      })),
     };
   });
   const active = createNodeDvdRecoverySourceReader({ startProcess }).start({
@@ -117,6 +130,12 @@ it("binds a recovery helper read to the inherited device descriptor", async () =
     "/proc/self/fd/3",
   ]);
   expect(launched?.extraFileDescriptors).toEqual([expect.any(Number)]);
+  expect(launched).toMatchObject({
+    authorizationPayload: "1",
+    authorizationReadyMessage: "rip-dvd-source-read-authorization-ready\n",
+  });
+  await active.ready;
+  active.authorize();
   await expect(active.result).resolves.toEqual({ outcome: "readable", bytes });
 });
 
@@ -376,6 +395,8 @@ it("cancels a hung read at the deadline and waits for quiescence", async () => {
         }),
         cancel,
         deviceIdentity,
+        ready: Promise.resolve(),
+        authorize: vi.fn(),
       })),
     };
     const verification = verifyInsertedDvdAgainstSamples({
@@ -423,6 +444,8 @@ it("cancels a hung read on worker shutdown and waits for quiescence", async () =
       }),
       cancel,
       deviceIdentity,
+      ready: Promise.resolve(),
+      authorize: vi.fn(),
     })),
   };
   const controller = new AbortController();

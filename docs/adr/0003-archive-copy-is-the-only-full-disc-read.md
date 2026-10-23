@@ -131,7 +131,12 @@ renumbered or reused. The helper reads through the inherited descriptor used
 to capture and lock that identity, so it cannot reopen a reused path onto a
 different device. While a non-expired Recovery claim remains live, only that
 claim's worker may report its reads quiescent and advance Stop; another worker
-must wait for the handoff or lease expiry.
+must wait for the handoff or lease expiry. Both verification and Recovery
+helpers first acquire the inherited descriptor and wait behind an authorization
+gate. The worker commits that descriptor's exact identity before authorizing
+DVD I/O. If admission rolls back or the worker exits first, the helper cannot
+begin a read; after a successful commit, Stop has the durable identity needed
+to fence the helper even if the worker then crashes.
 
 This deliberately trades sector-level duplicate detection and general
 post-copy raw-image hash verification for materially less optical-drive wear

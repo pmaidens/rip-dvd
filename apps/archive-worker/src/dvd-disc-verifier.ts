@@ -30,14 +30,17 @@ import {
   parseDvdReadFailureTerminalResultProtocol,
 } from "./dvd-recovery-contracts.js";
 import {
-  startNodeBoundedCommandProcess,
+  startNodeAuthorizedBoundedCommandProcess,
+  type ActiveAuthorizedBoundedCommandProcess,
   type ActiveBoundedProcess,
-  type StartNodeBoundedCommandProcessOptions,
+  type StartNodeAuthorizedBoundedCommandProcessOptions,
 } from "./bounded-child-process.js";
 
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 const MAX_DIAGNOSTIC_BYTES = 65_536;
 const OPTICAL_DEVICE_DESCRIPTOR_PATH = "/proc/self/fd/3";
+const SOURCE_READ_AUTHORIZATION_READY =
+  "rip-dvd-source-read-authorization-ready\n";
 
 const VERIFICATION_FAILURE_KEYS = [
   "asc", "ascq", "category", "classifierVersion", "driverStatus",
@@ -114,6 +117,47 @@ export type DvdSourceRead =
   | { outcome: "readable"; bytes: Buffer }
   | { outcome: "unreadable"; diagnostic: DvdDiscVerificationDiagnostic };
 
+export interface ActiveDvdSourceRead
+  extends ActiveBoundedProcess<DvdSourceRead> {
+  deviceIdentity: OpticalDeviceIdentity;
+  /** Resolves after the helper holds its descriptor but before it may read. */
+  ready: Promise<void>;
+  /** Releases the helper only after its exact identity is durably admitted. */
+  authorize(): void;
+}
+
+export async function awaitDvdSourceReadReady(
+  active: ActiveDvdSourceRead,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal === undefined) {
+    await active.ready;
+    return;
+  }
+  let removeAbortListener = () => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const onAbort = () => {
+      try {
+        signal.throwIfAborted();
+      } catch (error) {
+        reject(error);
+      }
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+  });
+  try {
+    await Promise.race([active.ready, aborted]);
+  } finally {
+    removeAbortListener();
+  }
+}
+
+export function authorizeDvdSourceRead(active: ActiveDvdSourceRead): void {
+  active.authorize();
+}
+
 interface DvdSourceReadRange {
   devicePath: string;
   startLba: number;
@@ -122,8 +166,8 @@ interface DvdSourceReadRange {
 }
 
 type DvdSourceReadProcessLauncher = (
-  input: StartNodeBoundedCommandProcessOptions,
-) => ReturnType<typeof startNodeBoundedCommandProcess>;
+  input: StartNodeAuthorizedBoundedCommandProcessOptions,
+) => ActiveAuthorizedBoundedCommandProcess;
 
 interface NodeDvdSourceReaderDependencies {
   startProcess?: DvdSourceReadProcessLauncher;
@@ -132,17 +176,13 @@ interface NodeDvdSourceReaderDependencies {
 export interface DvdVerificationSourceReader {
   start(
     input: DvdSourceReadRange & { timeoutMs: number },
-  ): ActiveBoundedProcess<DvdSourceRead> & {
-    deviceIdentity: OpticalDeviceIdentity;
-  };
+  ): ActiveDvdSourceRead;
 }
 
 export interface DvdRecoverySourceReader {
   start(
     input: DvdSourceReadRange & { timeoutMs?: never },
-  ): ActiveBoundedProcess<DvdSourceRead> & {
-    deviceIdentity: OpticalDeviceIdentity;
-  };
+  ): ActiveDvdSourceRead;
 }
 
 class DvdVerificationReadDeadlineError extends Error {
@@ -200,9 +240,7 @@ function createNodeDvdSourceReader<Input extends DvdSourceReadRange & {
   requiredSectorCount: number;
   startProcess?: DvdSourceReadProcessLauncher;
 }): {
-  start(input: Input): ActiveBoundedProcess<DvdSourceRead> & {
-    deviceIdentity: OpticalDeviceIdentity;
-  };
+  start(input: Input): ActiveDvdSourceRead;
 } {
   return {
     start(input) {
@@ -222,7 +260,7 @@ function createNodeDvdSourceReader<Input extends DvdSourceReadRange & {
         !options.boundedLifetime && input.timeoutMs !== undefined
       ) throw new Error(`${options.operationName} is invalid`);
       const startProcess = options.startProcess ??
-        startNodeBoundedCommandProcess;
+        startNodeAuthorizedBoundedCommandProcess;
       const { descriptor: lockDescriptor, deviceIdentity } =
         openOpticalDriveLock(devicePath);
       let activeProcess;
@@ -247,6 +285,8 @@ function createNodeDvdSourceReader<Input extends DvdSourceReadRange & {
               : [String(Math.max(1, Math.ceil(input.timeoutMs / 1_000)))]),
           ],
           extraFileDescriptors: [lockDescriptor],
+          authorizationPayload: "1",
+          authorizationReadyMessage: SOURCE_READ_AUTHORIZATION_READY,
           maxOutputBytes: Math.max(
             options.requiredSectorCount * 2_048,
             MAX_DIAGNOSTIC_BYTES,
@@ -589,74 +629,63 @@ export async function pollDvdDiscVerification(input: {
             "DVD Disc Verification source manifest does not match the checkpoint",
           );
         }
-        let rejectedAdmissionRead:
-          | ActiveBoundedProcess<DvdSourceRead>
-          | undefined;
-        let result;
-        try {
-          result = await verifyInsertedDvdAgainstSamples({
-            manifest,
-            sourceMetadataFingerprint: claim.sourceMetadataFingerprint,
-            observedMetadataFingerprint: claim.observedMetadataFingerprint,
-            devicePath: drive.devicePath,
-            reader: {
-              start(request) {
-                let active:
-                  | (ActiveBoundedProcess<DvdSourceRead> & {
-                    deviceIdentity: OpticalDeviceIdentity;
-                  })
-                  | undefined;
-                try {
-                  const admitted = input.access.dvdDiscVerifications
-                    .admitSourceRead(claim, () => {
-                      assertOwned();
-                      active = input.reader.start(request);
-                      return active.deviceIdentity;
-                    });
-                  if (!admitted || active === undefined) {
-                    throw new Error("DVD Disc Verification claim expired");
-                  }
-                  return active;
-                } catch (error) {
-                  if (active !== undefined) {
-                    rejectedAdmissionRead = active;
+        const result = await verifyInsertedDvdAgainstSamples({
+          manifest,
+          sourceMetadataFingerprint: claim.sourceMetadataFingerprint,
+          observedMetadataFingerprint: claim.observedMetadataFingerprint,
+          devicePath: drive.devicePath,
+          reader: {
+            start(request) {
+              const active = input.reader.start(request);
+              return {
+                ...active,
+                result: (async () => {
+                  try {
+                    await awaitDvdSourceReadReady(active);
+                    assertOwned();
+                    const admitted = input.access.dvdDiscVerifications
+                      .admitSourceRead(claim, active.deviceIdentity);
+                    if (!admitted) {
+                      throw new Error(
+                        "DVD Disc Verification claim expired",
+                      );
+                    }
+                    authorizeDvdSourceRead(active);
+                    return await active.result;
+                  } catch (error) {
                     void active.result.catch(() => undefined);
                     active.cancel();
+                    await active.closed;
+                    throw error;
                   }
-                  throw error;
-                }
-              },
+                })(),
+              };
             },
-            startedAtMs: claim.startedAt.getTime(),
-            signal: input.signal,
-            insertionIsCurrent: inspectionIsCurrent,
-            checkpointIsCurrent,
-            authorizeRead: () => {
-              assertOwned();
-              if (heartbeatError !== undefined) return false;
-              const active = input.access.dvdDiscVerifications.renewClaim(
-                claim,
+          },
+          startedAtMs: claim.startedAt.getTime(),
+          signal: input.signal,
+          insertionIsCurrent: inspectionIsCurrent,
+          checkpointIsCurrent,
+          authorizeRead: () => {
+            assertOwned();
+            if (heartbeatError !== undefined) return false;
+            const active = input.access.dvdDiscVerifications.renewClaim(
+              claim,
+            );
+            if (!active) {
+              heartbeatError = new Error(
+                "DVD Disc Verification claim expired",
               );
-              if (!active) {
-                heartbeatError = new Error(
-                  "DVD Disc Verification claim expired",
-                );
-              }
-              return active;
-            },
-            recordFinding: (finding) => {
-              assertOwned();
-              if (heartbeatError !== undefined) throw heartbeatError;
-              input.access.dvdDiscVerifications.appendFinding(claim, finding);
-              assertOwned();
-            },
-          });
-        } catch (error) {
-          if (rejectedAdmissionRead !== undefined) {
-            await rejectedAdmissionRead.closed;
-          }
-          throw error;
-        }
+            }
+            return active;
+          },
+          recordFinding: (finding) => {
+            assertOwned();
+            if (heartbeatError !== undefined) throw heartbeatError;
+            input.access.dvdDiscVerifications.appendFinding(claim, finding);
+            assertOwned();
+          },
+        });
         assertOwned();
         input.access.dvdDiscVerifications.complete(claim, result);
       },
