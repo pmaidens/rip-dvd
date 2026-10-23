@@ -5433,21 +5433,34 @@ export function createDataAccessInternal(
       field.endsWith("At") && typeof value === "string"
         ? new Date(value)
         : value) as ArchiveRecoveryStopReceipt;
+    const legacyWork = outcome.work;
+    const recoveredSectorCount = legacyWork?.passRecoveredSectorCount ?? 0;
+    const passStarted = legacyWork !== null && (
+      legacyWork.status === "claimed" ||
+      (legacyWork.passCursorLba !== null &&
+        legacyWork.passCursorLba !== undefined) ||
+      (legacyWork.passStartedAt !== null &&
+        legacyWork.passStartedAt !== undefined) ||
+      (legacyWork.passInitialUnrecoveredSectorCount !== null &&
+        legacyWork.passInitialUnrecoveredSectorCount !== undefined) ||
+      recoveredSectorCount > 0
+    );
     return {
       ...outcome,
       pauseReason: outcome.pauseReason ?? null,
       passHistory: outcome.passHistory ?? [],
-      work: outcome.work === null
+      work: legacyWork === null
         ? null
         : {
-            ...outcome.work,
-            passNumber: outcome.work.passNumber ?? 1,
-            passDirection: outcome.work.passDirection ?? "forward",
-            passStartedAt: outcome.work.passStartedAt ?? null,
+            ...legacyWork,
+            passNumber: legacyWork.passNumber ?? 1,
+            passDirection: legacyWork.passDirection ?? "forward",
+            passStartedAt: legacyWork.passStartedAt ??
+              (passStarted ? legacyWork.createdAt : null),
             passInitialUnrecoveredSectorCount:
-              outcome.work.passInitialUnrecoveredSectorCount ?? null,
-            passRecoveredSectorCount:
-              outcome.work.passRecoveredSectorCount ?? 0,
+              legacyWork.passInitialUnrecoveredSectorCount ??
+                (passStarted ? Math.max(1, recoveredSectorCount) : null),
+            passRecoveredSectorCount: recoveredSectorCount,
           },
     };
   }

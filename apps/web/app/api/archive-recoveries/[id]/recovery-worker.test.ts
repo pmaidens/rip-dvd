@@ -168,6 +168,31 @@ function completeQueuedVerification(
   }
 }
 
+function rewriteStopReceiptAsLegacy(databasePath: string, mutationKey: string) {
+  const database = new DatabaseSync(databasePath);
+  const stored = database.prepare(
+    "SELECT outcome FROM mutation_invocations WHERE key = ?",
+  ).get(mutationKey) as { outcome: string };
+  const legacy = JSON.parse(stored.outcome) as {
+    pauseReason?: unknown;
+    passHistory?: unknown;
+    work: Record<string, unknown> | null;
+  };
+  delete legacy.pauseReason;
+  delete legacy.passHistory;
+  if (legacy.work !== null) {
+    delete legacy.work.passNumber;
+    delete legacy.work.passDirection;
+    delete legacy.work.passStartedAt;
+    delete legacy.work.passInitialUnrecoveredSectorCount;
+    delete legacy.work.passRecoveredSectorCount;
+  }
+  database.prepare(
+    "UPDATE mutation_invocations SET outcome = ? WHERE key = ?",
+  ).run(JSON.stringify(legacy), mutationKey);
+  database.close();
+}
+
 function immediateReader(
   read: (startLba: number) =>
     | { outcome: "readable"; bytes: Buffer }
@@ -451,7 +476,7 @@ it("keeps a no-progress pause durable and exposes it identically", async () => {
   }
 }, 20_000);
 
-it("normalizes pass state when replaying a legacy Stop receipt", async () => {
+it("keeps an unstarted legacy Stop receipt unstarted", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const seeded = await seedDvdDiscVerificationFixture(fixture, [{
@@ -467,29 +492,46 @@ it("normalizes pass state when replaying a legacy Stop receipt", async () => {
     attemptId: seeded.attemptId,
   });
   access.close();
+  rewriteStopReceiptAsLegacy(fixture.databasePath, mutationKey);
 
-  const database = new DatabaseSync(fixture.databasePath);
-  const stored = database.prepare(
-    "SELECT outcome FROM mutation_invocations WHERE key = ?",
-  ).get(mutationKey) as { outcome: string };
-  const legacy = JSON.parse(stored.outcome) as {
-    pauseReason?: unknown;
-    passHistory?: unknown;
-    work: Record<string, unknown> | null;
-  };
-  delete legacy.pauseReason;
-  delete legacy.passHistory;
-  if (legacy.work !== null) {
-    delete legacy.work.passNumber;
-    delete legacy.work.passDirection;
-    delete legacy.work.passStartedAt;
-    delete legacy.work.passInitialUnrecoveredSectorCount;
-    delete legacy.work.passRecoveredSectorCount;
+  const restarted = fixture.openAccess();
+  try {
+    expect(restarted.archiveRecoveryWork.requestStop({
+      mutationKey,
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    })).toEqual(original);
+  } finally {
+    restarted.close();
   }
-  database.prepare(
-    "UPDATE mutation_invocations SET outcome = ? WHERE key = ?",
-  ).run(JSON.stringify(legacy), mutationKey);
-  database.close();
+});
+
+it("normalizes progressed pass state in a legacy Stop receipt", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 175,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  await completeVerification(fixture, seeded);
+  const mutationKey = "00000000-0000-4000-8000-000000000467";
+  const access = fixture.openAccess();
+  expect(access.archiveRecoveryWork.claimNextVerifiedCandidate(
+    "synthetic-legacy-stop-worker",
+  )).not.toBeNull();
+  const progressDatabase = new DatabaseSync(fixture.databasePath);
+  progressDatabase.prepare(`UPDATE archive_recovery_work
+    SET pass_cursor_lba = 175
+    WHERE archive_recovery_id = ?`).run(seeded.recoveryId);
+  progressDatabase.close();
+  const original = access.archiveRecoveryWork.requestStop({
+    mutationKey,
+    archiveRecoveryId: seeded.recoveryId,
+    attemptId: seeded.attemptId,
+  });
+  access.close();
+  rewriteStopReceiptAsLegacy(fixture.databasePath, mutationKey);
 
   const restarted = fixture.openAccess();
   try {

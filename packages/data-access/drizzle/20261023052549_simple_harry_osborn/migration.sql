@@ -78,7 +78,7 @@ INSERT INTO `__new_archive_recovery_work`(
 	`verification_id`, `requested_at`, `claimed_by`, `claim_token`, `claimed_at`,
 	1, 'forward',
 	CASE WHEN `status` = 'claimed' OR `pass_cursor_lba` IS NOT NULL
-		THEN COALESCE(`claimed_at`, `requested_at`, `created_at`) ELSE NULL END,
+		THEN `created_at` ELSE NULL END,
 	CASE WHEN `status` = 'claimed' OR `pass_cursor_lba` IS NOT NULL THEN
 		(SELECT COALESCE(SUM(CAST(json_extract(r.value, '$.sectorCount') AS integer)), 0)
 		 FROM `dvd_archive_evidence_headers` h

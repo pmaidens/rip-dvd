@@ -1623,7 +1623,7 @@ describe("data-access facade", () => {
           claimed_at: 11,
           pass_number: 1,
           pass_direction: "forward",
-          pass_started_at: 11,
+          pass_started_at: 5,
           pass_initial_unrecovered_sector_count: 2,
           pass_recovered_sector_count: 1,
           pass_cursor_lba: 0,
@@ -1640,13 +1640,31 @@ describe("data-access facade", () => {
           claimed_at: null,
           pass_number: 1,
           pass_direction: "forward",
-          pass_started_at: 10,
+          pass_started_at: 5,
           pass_initial_unrecovered_sector_count: 2,
           pass_recovered_sector_count: 1,
           pass_cursor_lba: 0,
           admitted_device_path: null,
           admitted_device_id: null,
           admitted_device_inode: null,
+        },
+      ]);
+      expect(verified.prepare(`
+        SELECT work.archive_recovery_id,
+               work.pass_started_at <= MIN(reads.created_at) AS chronological
+        FROM archive_recovery_work work
+        INNER JOIN dvd_archive_recovery_reads reads
+          ON reads.original_disc_archive_id = work.original_disc_archive_id
+        GROUP BY work.archive_recovery_id, work.pass_started_at
+        ORDER BY work.archive_recovery_id
+      `).all()).toEqual([
+        {
+          archive_recovery_id: "migration-claimed-recovery",
+          chronological: 1,
+        },
+        {
+          archive_recovery_id: "migration-requested-recovery",
+          chronological: 1,
         },
       ]);
       expect(verified.prepare(`
