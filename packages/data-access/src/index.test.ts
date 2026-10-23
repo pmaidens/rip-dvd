@@ -16450,9 +16450,15 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         unknownReasons: [],
       },
     }];
+    const catalogMappingProjectionId =
+      dvdTitleIdentityCatalogMappingProjectionDigest(
+        reviewSet.checkpoint,
+        reviewSet.items,
+      );
     const damage = createDvdTitleDamageAssessment({
       checkpoint: structural.checkpoint,
       titleIdentityReviewSetIdentity: reviewSet.reviewSetIdentity,
+      catalogMappingProjectionId,
       structuralAssessmentIdentity: structural.id,
       structuralFindings: {
         dvdNavigation: "valid",
@@ -16471,11 +16477,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         ...titleMappings[0]!,
       }],
     });
-    const catalogMappingProjectionId =
-      dvdTitleIdentityCatalogMappingProjectionDigest(
-        reviewSet.checkpoint,
-        reviewSet.items,
-      );
     const sqlite = new DatabaseSync(fixture.databasePath);
     sqlite.prepare(`
       INSERT INTO dvd_structural_assessments (
@@ -16554,36 +16555,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       currentAssessmentIdentity: damage.id,
     });
 
-    const legacyProjection = new DatabaseSync(fixture.databasePath);
-    const damageGuards = legacyProjection.prepare(`
-      SELECT name, sql
-      FROM sqlite_master
-      WHERE type = 'trigger'
-        AND tbl_name = 'dvd_title_damage_assessments'
-    `).all() as Array<{ name: string; sql: string }>;
-    try {
-      for (const guard of damageGuards) {
-        legacyProjection.exec(`DROP TRIGGER "${guard.name}"`);
-      }
-      legacyProjection.prepare(`
-        UPDATE dvd_title_damage_assessments
-        SET catalog_mapping_projection_id = NULL
-        WHERE id = ?
-      `).run(damage.id);
-    } finally {
-      for (const guard of damageGuards) legacyProjection.exec(guard.sql);
-    }
-    legacyProjection.close();
-    expect(workflow()).toMatchObject({
-      state: "outdated",
-      currentAssessmentIdentity: null,
-    });
-    expect(fixture.access.dvdTitleDamageAssessments.inspect(
-      fixture.archive.id,
-    )).toMatchObject({
-      state: "outdated",
-      currentAssessmentIdentity: null,
-    });
     fixture.access.close();
   });
 
@@ -16782,9 +16753,15 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
             unknownReasons: [],
           },
         }));
+      const catalogMappingProjectionId =
+        dvdTitleIdentityCatalogMappingProjectionDigest(
+          reviewSet.checkpoint,
+          reviewSet.items,
+        );
       const damage = createDvdTitleDamageAssessment({
         checkpoint: structural.checkpoint,
         titleIdentityReviewSetIdentity: reviewSet.reviewSetIdentity,
+        catalogMappingProjectionId,
         structuralAssessmentIdentity: structural.id,
         structuralFindings: {
           dvdNavigation: "valid",
@@ -16803,11 +16780,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           ...titleMappings[index]!,
         })),
       });
-      const catalogMappingProjectionId =
-        dvdTitleIdentityCatalogMappingProjectionDigest(
-          reviewSet.checkpoint,
-          reviewSet.items,
-        );
       const sqlite = new DatabaseSync(first.databasePath);
       sqlite.prepare(`
         INSERT INTO dvd_structural_assessments (

@@ -28,6 +28,7 @@ function assessmentInput(): DvdTitleDamageAssessmentInput {
   return {
     checkpoint,
     titleIdentityReviewSetIdentity: "b".repeat(64),
+    catalogMappingProjectionId: "d".repeat(64),
     structuralAssessmentIdentity: `dvd-structural-assessment:${"c".repeat(64)}`,
     structuralFindings: {
       dvdNavigation: "valid",
@@ -211,6 +212,22 @@ describe("createDvdTitleDamageAssessment", () => {
     const second = createDvdTitleDamageAssessment(assessmentInput());
 
     expect(second.id).toBe(first.id);
+  });
+
+  it("binds current identities to the Catalog mapping projection", () => {
+    const firstInput = assessmentInput();
+    const first = createDvdTitleDamageAssessment(firstInput);
+    const remapped = createDvdTitleDamageAssessment({
+      ...firstInput,
+      catalogMappingProjectionId: "e".repeat(64),
+    });
+    const migrated = createDvdTitleDamageAssessment({
+      ...firstInput,
+      catalogMappingProjectionId: null,
+    });
+
+    expect(remapped.id).not.toBe(first.id);
+    expect(migrated.id).not.toBe(first.id);
   });
 
   it("uses locale-independent ordering for identity-bearing text", () => {

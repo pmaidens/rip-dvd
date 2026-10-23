@@ -406,9 +406,15 @@ function seedTitleDamagePaging(variant, fingerprintFill) {
       unknownReasons: [],
     },
   }));
+  const catalogMappingProjectionId =
+    dvdTitleIdentityCatalogMappingProjectionDigest(
+      reviewSet.checkpoint,
+      reviewSet.items,
+    );
   const assessment = createDvdTitleDamageAssessment({
     checkpoint,
     titleIdentityReviewSetIdentity: reviewSet.reviewSetIdentity,
+    catalogMappingProjectionId,
     structuralAssessmentIdentity: structural.id,
     structuralFindings: {
       dvdNavigation: "valid",
@@ -428,11 +434,6 @@ function seedTitleDamagePaging(variant, fingerprintFill) {
       ...storedMappings[index],
     })),
   });
-  const catalogMappingProjectionId =
-    dvdTitleIdentityCatalogMappingProjectionDigest(
-      reviewSet.checkpoint,
-      reviewSet.items,
-    );
   const evidenceSqlite = new DatabaseSync(databasePath);
   evidenceSqlite.prepare(`
     INSERT INTO dvd_structural_assessments (

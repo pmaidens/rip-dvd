@@ -21,7 +21,10 @@ stored Catalog mapping projection identity at the same exact checkpoint. That
 bounded projection contains every mutable mapping input to the review set; the
 remaining review-set evidence is immutable within the checkpoint. An older
 assessment without that projection identity is outdated rather than assumed
-current.
+current. Current assessment identities include the projection identity, so a
+reassessment after a mapping change creates a distinct immutable row. A
+migrated assessment without the projection retains its legacy identity and is
+replaced by a current row on reassessment.
 
 The assessment intersects each title's deduplicated source set with current
 Unrecovered Source. Complete maps expose the unique numerator, denominator,

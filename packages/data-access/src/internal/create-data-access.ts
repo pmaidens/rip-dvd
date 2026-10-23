@@ -10352,6 +10352,7 @@ export function createDataAccessInternal(
         acceptedEndLbaExclusive: row.acceptedEndLbaExclusive,
       },
       titleIdentityReviewSetIdentity: row.titleIdentityReviewSetIdentity,
+      catalogMappingProjectionId: row.catalogMappingProjectionId,
       structuralAssessmentIdentity: row.structuralAssessmentIdentity,
       structuralFindings: titleDamageStructuralFindings(structuralAssessment),
       unrecoveredSourceRanges: manifest.unrecoveredSourceRanges,
@@ -10594,6 +10595,7 @@ export function createDataAccessInternal(
         acceptedEndLbaExclusive: header.acceptedEndLbaExclusive,
       },
       titleIdentityReviewSetIdentity: reviewSet.reviewSetIdentity,
+      catalogMappingProjectionId,
       structuralAssessmentIdentity: structural.id,
       structuralFindings: titleDamageStructuralFindings(
         structural,
