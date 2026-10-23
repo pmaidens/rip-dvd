@@ -140,8 +140,8 @@ export function describeCatalogReviewWorkflow(
       : {
         reviewSetIdentity: reviewSet.reviewSetIdentity,
         currentMappingStates: reviewSet.items
-          .filter(({ presentAtCurrentCheckpoint }) =>
-            presentAtCurrentCheckpoint
+          .filter(({ presentAtCurrentCheckpoint, discSelectionMappings }) =>
+            presentAtCurrentCheckpoint || discSelectionMappings.length > 0
           )
           .map(({ mappingState }) => mappingState),
       }

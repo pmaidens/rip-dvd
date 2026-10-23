@@ -420,6 +420,130 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
   }
 });
 
+it("keeps absent retained mapping blockers identical through web, CLI, and dashboard", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const { archive, manifest } = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  const access = fixture.openAccess();
+  try {
+    const mediaItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic retained mapping",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: mediaItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    const firstHeader = access.catalog.findDvdArchiveEvidenceHeader(
+      archive.id,
+    )!;
+    const firstReviewSet = access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: archive.id,
+      checkpoint: {
+        manifestId: firstHeader.currentManifestId,
+        manifestRevision: firstHeader.currentManifestRevision,
+        manifestDigest: firstHeader.currentManifestDigest,
+      },
+      observations: [{
+        displayTitleNumber: 1,
+        navigation: {
+          videoTitleSetNumber: 1,
+          titleSetTitleNumber: 1,
+          programChainNumber: 1,
+        },
+        selectedPath: [{
+          programNumber: 1,
+          cellNumber: 1,
+          vobId: 1,
+          cellId: 1,
+        }],
+        angleNumber: 1,
+        angleCount: 1,
+        chapterStart: 1,
+        chapterEnd: 12,
+        chapterCount: 12,
+        sourceExtents: [{ startLba: 0, sectorCount: 1 }],
+      }],
+    });
+    expect(firstReviewSet.items[0]?.discSelectionMappings).toEqual([{
+      discSelectionId: selection.id,
+      mappingState: "mapped",
+    }]);
+
+    const nextManifest = advanceCommittedArchiveEvidence(fixture, manifest);
+    const missingReviewSet = access.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: archive.id,
+      checkpoint: {
+        manifestId: nextManifest.id,
+        manifestRevision: nextManifest.revision,
+        manifestDigest: nextManifest.manifestDigest,
+      },
+      observations: [],
+    });
+    expect(missingReviewSet.items[0]).toMatchObject({
+      presentAtCurrentCheckpoint: false,
+      mappingState: "needs_mapping_review",
+      discSelectionMappings: [{
+        discSelectionId: selection.id,
+        mappingState: "needs_mapping_review",
+      }],
+    });
+
+    const web = await createCatalogReviewRoute(
+      new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const cli = await fixture.run(["catalog-review", "show", archive.id]);
+    expect(web.status).toBe(200);
+    expect(cli.exitCode, JSON.stringify(cli.result)).toBe(0);
+    expect(cli.result).toEqual(await web.json());
+    const review = cli.result as {
+      reviewWorkflow: {
+        facts: Record<string, unknown>;
+        actions: Array<{
+          action: string;
+          available: boolean;
+          reasons: Array<{ code: string }>;
+        }>;
+      };
+    };
+    expect(review.reviewWorkflow.facts).toMatchObject({
+      mapped: false,
+      mappingState: "needs_mapping_review",
+      readyForDamageDecision: false,
+    });
+    expect(
+      review.reviewWorkflow.actions.find(({ action }) =>
+        action === "damage_decision"
+      ),
+    ).toMatchObject({
+      available: false,
+      reasons: expect.arrayContaining([expect.objectContaining({
+        code: "MAPPING_REVIEW_REQUIRED",
+      })]),
+    });
+
+    const dashboard = readDashboardSnapshot(access, { activityLimit: 20 });
+    expect(dashboard.catalogReview.status).toBe("loaded");
+    if (dashboard.catalogReview.status !== "loaded") {
+      throw new Error("Catalog Review dashboard is unavailable");
+    }
+    expect(
+      dashboard.catalogReview.items.find(({ id }) => id === archive.id)
+        ?.reviewWorkflow,
+    ).toEqual(review.reviewWorkflow);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
 it("reports a missing marked Title Damage checkpoint through web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
   const { archive } = await seedCommittedArchiveEvidence(fixture);

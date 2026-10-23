@@ -326,8 +326,8 @@ export function readCatalogReview(
         : {
           reviewSetIdentity: titleIdentityReviewSet.reviewSetIdentity,
           currentMappingStates: titleIdentityReviewSet.items
-            .filter(({ presentAtCurrentCheckpoint }) =>
-              presentAtCurrentCheckpoint
+            .filter(({ presentAtCurrentCheckpoint, discSelectionMappings }) =>
+              presentAtCurrentCheckpoint || discSelectionMappings.length > 0
             )
             .map(({ mappingState }) => mappingState),
         },

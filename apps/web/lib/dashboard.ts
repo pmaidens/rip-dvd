@@ -1464,7 +1464,10 @@ function readDashboardSnapshotRecords(
   );
   const catalogReviewWorkflowEvidence =
     access.catalog.readDvdCatalogReviewWorkflowEvidence(
-      catalogReviewArchives.map((archive) => archive.id),
+      catalogReviewArchives.map((archive) => ({
+        originalDiscArchiveId: archive.id,
+        evidenceHeader: evidenceHeadersByArchiveId.get(archive.id) ?? null,
+      })),
     );
   const previousCatalogReviewBoundary =
     catalogReviewArchives.at(-1) ??

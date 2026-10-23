@@ -1859,7 +1859,10 @@ export interface CatalogAccess {
     id: OriginalDiscArchiveId,
   ): DvdTitleIdentityReviewSet | null;
   readDvdCatalogReviewWorkflowEvidence(
-    ids: readonly OriginalDiscArchiveId[],
+    archives: readonly {
+      originalDiscArchiveId: OriginalDiscArchiveId;
+      evidenceHeader: DvdArchiveEvidenceHeader | null;
+    }[],
   ): ReadonlyMap<OriginalDiscArchiveId, DvdCatalogReviewWorkflowEvidence>;
   auditDvdArchiveEvidenceChains(
     ids: readonly OriginalDiscArchiveId[],

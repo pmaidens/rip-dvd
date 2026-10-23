@@ -15663,6 +15663,21 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         }],
       }),
     ]);
+    const missingHeader = {
+      ...header,
+      currentManifestId: missingCheckpoint.manifestId,
+      currentManifestRevision: missingCheckpoint.manifestRevision,
+      currentManifestDigest: missingCheckpoint.manifestDigest,
+    };
+    expect(
+      fixture.access.catalog.readDvdCatalogReviewWorkflowEvidence([{
+        originalDiscArchiveId: fixture.archive.id,
+        evidenceHeader: missingHeader,
+      }]).get(fixture.archive.id)?.titleIdentity,
+    ).toMatchObject({
+      reviewSetIdentity: missing.reviewSetIdentity,
+      currentMappingStates: ["needs_mapping_review"],
+    });
 
     const rediscoveredCheckpoint = advanceDvdTitleIdentityCheckpointForTest(
       fixture.databasePath,
@@ -15722,6 +15737,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       programChainNumber: 1,
     }), initial.items[0]!.observation.id);
     predecessorDatabase.close();
+    expect(() =>
+      corruptedPredecessor.access.catalog
+        .readDvdCatalogReviewWorkflowEvidence([{
+          originalDiscArchiveId: corruptedPredecessor.archive.id,
+          evidenceHeader: predecessorHeader,
+        }])
+    ).toThrow(/content digest does not match/i);
     const predecessorCheckpoint = advanceDvdTitleIdentityCheckpointForTest(
       corruptedPredecessor.databasePath,
       corruptedPredecessor.archive.id,
@@ -15839,6 +15861,19 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       wrongPredecessor.access.catalog.readDvdTitleIdentityReviewSet(
         wrongPredecessor.archive.id,
       )
+    ).toThrow(/continuity claim does not match/i);
+    const wrongPredecessorHeader = {
+      ...predecessorHeader,
+      currentManifestId: thirdCheckpoint.manifestId,
+      currentManifestRevision: thirdCheckpoint.manifestRevision,
+      currentManifestDigest: thirdCheckpoint.manifestDigest,
+    };
+    expect(() =>
+      wrongPredecessor.access.catalog
+        .readDvdCatalogReviewWorkflowEvidence([{
+          originalDiscArchiveId: wrongPredecessor.archive.id,
+          evidenceHeader: wrongPredecessorHeader,
+        }])
     ).toThrow(/continuity claim does not match/i);
     wrongPredecessor.access.close();
 
@@ -16029,6 +16064,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       wrongObservation.access.catalog.readDvdTitleIdentityReviewSet(
         wrongObservation.archive.id,
       )
+    ).toThrow(/binding does not match its archive evidence/i);
+    expect(() =>
+      wrongObservation.access.catalog
+        .readDvdCatalogReviewWorkflowEvidence([{
+          originalDiscArchiveId: wrongObservation.archive.id,
+          evidenceHeader: wrongHeader,
+        }])
     ).toThrow(/binding does not match its archive evidence/i);
     wrongObservation.access.close();
   });

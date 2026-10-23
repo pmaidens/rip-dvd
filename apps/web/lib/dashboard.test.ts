@@ -134,6 +134,13 @@ describe("readDashboardSnapshot", () => {
         `synthetic-dashboard-batch-${index}`,
       )
     );
+    const evidenceHeaders = access.catalog.findDvdArchiveEvidenceHeaders(
+      archiveIds,
+    );
+    const workflowEvidenceInputs = archiveIds.map((id) => ({
+      originalDiscArchiveId: id,
+      evidenceHeader: evidenceHeaders.get(id) ?? null,
+    }));
     const workflowEvidenceReads = vi.fn();
     const batchedAccess: DataAccess = {
       ...access,
@@ -172,18 +179,22 @@ describe("readDashboardSnapshot", () => {
       items: archiveIds.map((id) => ({ id })),
     });
     expect(workflowEvidenceReads).toHaveBeenCalledOnce();
-    expect(workflowEvidenceReads).toHaveBeenCalledWith(archiveIds);
+    expect(workflowEvidenceReads).toHaveBeenCalledWith(
+      workflowEvidenceInputs,
+    );
 
     const prepare = vi.spyOn(DatabaseSync.prototype, "prepare");
     access.readConsistentSnapshot((snapshot) =>
       snapshot.catalog.readDvdCatalogReviewWorkflowEvidence([
-        archiveIds[0]!,
+        workflowEvidenceInputs[0]!,
       ])
     );
     const singleArchiveQueryCount = prepare.mock.calls.length;
     prepare.mockClear();
     access.readConsistentSnapshot((snapshot) =>
-      snapshot.catalog.readDvdCatalogReviewWorkflowEvidence(archiveIds)
+      snapshot.catalog.readDvdCatalogReviewWorkflowEvidence(
+        workflowEvidenceInputs,
+      )
     );
     const multipleArchiveQueryCount = prepare.mock.calls.length;
     prepare.mockRestore();

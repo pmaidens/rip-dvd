@@ -135,3 +135,32 @@ it("requires acceptance only when the current damage assessment proves it is nee
       "DVD_RECOVERY_EVIDENCE_ENCODING_UNAVAILABLE",
     ]);
 });
+
+it("blocks a damage decision while an absent retained title needs mapping review", () => {
+  const evidence = decisionReadyEvidence(false);
+  const workflow = describeCatalogReviewWorkflow(
+    {} as ConsistentReadAccess,
+    archiveId,
+    {
+      ...evidence,
+      titleIdentity: {
+        reviewSetIdentity: "synthetic-review-set",
+        currentMappingStates: ["mapped", "needs_mapping_review"],
+      },
+    },
+  );
+
+  expect(workflow?.facts).toMatchObject({
+    mapped: false,
+    mappingState: "needs_mapping_review",
+    readyForDamageDecision: false,
+  });
+  expect(workflow?.actions.find(({ action }) => action === "damage_decision"))
+    .toMatchObject({
+      available: false,
+      reasons: [{
+        code: "MAPPING_REVIEW_REQUIRED",
+        details: { affectedTitleCount: 1 },
+      }],
+    });
+});
