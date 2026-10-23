@@ -551,45 +551,68 @@ export async function pollDvdDiscVerification(input: {
             "DVD Disc Verification source manifest does not match the checkpoint",
           );
         }
-        const result = await verifyInsertedDvdAgainstSamples({
-          manifest,
-          sourceMetadataFingerprint: claim.sourceMetadataFingerprint,
-          observedMetadataFingerprint: claim.observedMetadataFingerprint,
-          devicePath: drive.devicePath,
-          reader: {
-            start(request) {
-              let active: ActiveBoundedProcess<DvdSourceRead> | undefined;
-              const admitted = input.access.dvdDiscVerifications
-                .admitSourceRead(claim, () => {
-                  assertOwned();
-                  active = input.reader.start(request);
-                });
-              if (!admitted || active === undefined) {
-                throw new Error("DVD Disc Verification claim expired");
+        let rejectedAdmissionRead:
+          | ActiveBoundedProcess<DvdSourceRead>
+          | undefined;
+        let result;
+        try {
+          result = await verifyInsertedDvdAgainstSamples({
+            manifest,
+            sourceMetadataFingerprint: claim.sourceMetadataFingerprint,
+            observedMetadataFingerprint: claim.observedMetadataFingerprint,
+            devicePath: drive.devicePath,
+            reader: {
+              start(request) {
+                let active: ActiveBoundedProcess<DvdSourceRead> | undefined;
+                try {
+                  const admitted = input.access.dvdDiscVerifications
+                    .admitSourceRead(claim, () => {
+                      assertOwned();
+                      active = input.reader.start(request);
+                    });
+                  if (!admitted || active === undefined) {
+                    throw new Error("DVD Disc Verification claim expired");
+                  }
+                  return active;
+                } catch (error) {
+                  if (active !== undefined) {
+                    rejectedAdmissionRead = active;
+                    active.cancel();
+                  }
+                  throw error;
+                }
+              },
+            },
+            startedAtMs: claim.startedAt.getTime(),
+            signal: input.signal,
+            insertionIsCurrent: inspectionIsCurrent,
+            checkpointIsCurrent,
+            authorizeRead: () => {
+              assertOwned();
+              if (heartbeatError !== undefined) return false;
+              const active = input.access.dvdDiscVerifications.renewClaim(
+                claim,
+              );
+              if (!active) {
+                heartbeatError = new Error(
+                  "DVD Disc Verification claim expired",
+                );
               }
               return active;
             },
-          },
-          startedAtMs: claim.startedAt.getTime(),
-          signal: input.signal,
-          insertionIsCurrent: inspectionIsCurrent,
-          checkpointIsCurrent,
-          authorizeRead: () => {
-            assertOwned();
-            if (heartbeatError !== undefined) return false;
-            const active = input.access.dvdDiscVerifications.renewClaim(claim);
-            if (!active) {
-              heartbeatError = new Error("DVD Disc Verification claim expired");
-            }
-            return active;
-          },
-          recordFinding: (finding) => {
-            assertOwned();
-            if (heartbeatError !== undefined) throw heartbeatError;
-            input.access.dvdDiscVerifications.appendFinding(claim, finding);
-            assertOwned();
-          },
-        });
+            recordFinding: (finding) => {
+              assertOwned();
+              if (heartbeatError !== undefined) throw heartbeatError;
+              input.access.dvdDiscVerifications.appendFinding(claim, finding);
+              assertOwned();
+            },
+          });
+        } catch (error) {
+          if (rejectedAdmissionRead !== undefined) {
+            await rejectedAdmissionRead.closed;
+          }
+          throw error;
+        }
         assertOwned();
         input.access.dvdDiscVerifications.complete(claim, result);
       },

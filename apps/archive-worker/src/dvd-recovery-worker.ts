@@ -334,6 +334,7 @@ export async function pollDvdRecoveryPass(input: {
   access: DataAccess;
   atomicWriter?: DvdRecoveryAtomicWriter;
   archiveImageOwnership?: ArchiveImageOwnership;
+  commit?: typeof commitDvdRecoveryBatch;
   deviceInactivity: Pick<DvdCopyRunner, "withDeviceInactive">;
   mediaGenerationObserver: MediaGenerationObserver;
   originalsLibraryPath: string;
@@ -474,7 +475,7 @@ export async function pollDvdRecoveryPass(input: {
                   sourceFaultCode(completed.read.diagnostic),
                 );
               })();
-        await commitDvdRecoveryBatch({
+        await (input.commit ?? commitDvdRecoveryBatch)({
           access: input.access,
           originalsLibraryPath: input.originalsLibraryPath,
           originalDiscArchiveId: candidate.recovery.originalDiscArchiveId,

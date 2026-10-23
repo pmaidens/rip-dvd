@@ -22,7 +22,10 @@ import {
 
 import { seedDvdDiscVerificationFixture } from "../../../../../operator-cli/src/dvd-disc-verification.test-support.js";
 import { createOperatorWorkflowFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
-import type { DvdRecoveryAtomicWriter } from "../../../../../archive-worker/src/dvd-recovery-batch.js";
+import {
+  commitDvdRecoveryBatch,
+  type DvdRecoveryAtomicWriter,
+} from "../../../../../archive-worker/src/dvd-recovery-batch.js";
 import {
   pollDvdDiscVerification,
   type DvdRecoverySourceReader,
@@ -30,7 +33,7 @@ import {
 import { pollDvdRecoveryPass } from "../../../../../archive-worker/src/dvd-recovery-worker.js";
 import {
   DvdRecoveryReconciliationFault,
-  type reconcileDvdRecoveryCheckpoint,
+  reconcileDvdRecoveryCheckpoint,
 } from "../../../../../archive-worker/src/dvd-recovery-reconciliation.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
@@ -906,6 +909,65 @@ it("starts no further verification read after Stop commits", async () => {
   }
 });
 
+it("quiesces a verification read when admission fails after start", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(
+    fixture,
+    undefined,
+    "/dev/synthetic-verification-admission-drive",
+  );
+  const submitted = await fixture.run([
+    "archive-recovery", "verify-disc", seeded.recoveryId,
+    "--key", "00000000-0000-4000-8000-000000000488",
+    "--disc-inspection-id", seeded.inspection.id,
+    "--checkpoint-revision", "1",
+    "--checkpoint-digest", seeded.manifest.manifestDigest,
+  ]);
+  expect(submitted.exitCode).toBe(0);
+  let closeRead!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    closeRead = resolve;
+  });
+  const cancel = vi.fn();
+  const start = vi.fn(() => ({
+    result: new Promise<never>(() => {}),
+    closed,
+    cancel,
+  }));
+  const access = fixture.openAccess();
+  try {
+    vi.spyOn(access.dvdDiscVerifications, "admitSourceRead")
+      .mockImplementation((_claim, startRead) => {
+        startRead();
+        throw new Error("Synthetic admission commit failure");
+      });
+    const fail = vi.spyOn(access.dvdDiscVerifications, "fail");
+
+    const polling = pollDvdDiscVerification({
+      access,
+      reader: { start },
+      workerExecutionId: "synthetic-verification-admission-worker",
+      mediaGenerationObserver: {
+        async observe() {
+          return "synthetic-verification-generation";
+        },
+      },
+    });
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+    expect(fail).not.toHaveBeenCalled();
+
+    closeRead();
+    await expect(polling).resolves.toBe(true);
+    expect(fail).toHaveBeenCalledOnce();
+    expect(access.dvdDiscVerifications.findLatestForRecovery(
+      seeded.recoveryId,
+    )).toMatchObject({ status: "failed" });
+  } finally {
+    access.close();
+  }
+});
+
 it("rejects source-read admission after Stop commits", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
@@ -984,6 +1046,54 @@ it("keeps a transport fault out of source evidence and preserves the Archive Job
       .toEqual(expect.arrayContaining([
         expect.objectContaining({ status: "completed" }),
       ]));
+  } finally {
+    input.access.close();
+  }
+});
+
+it("rolls forward a published checkpoint after the worker faults", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  await completeVerification(fixture, seeded);
+  const source = immediateReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(2_048, 0x6b),
+  }));
+  const input = pollInput(fixture, source.reader);
+  const commit: typeof commitDvdRecoveryBatch = (options) =>
+    commitDvdRecoveryBatch({
+      ...options,
+      fault(point) {
+        if (point === "after:pointer") {
+          throw new Error("Synthetic crash after pointer publication");
+        }
+      },
+    });
+  try {
+    expect(await pollDvdRecoveryPass({ ...input, commit })).toBe(true);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "faulted",
+        faultCode: "CONSISTENCY_FAULT",
+        work: null,
+      });
+
+    await expect(reconcileDvdRecoveryCheckpoint({
+      access: input.access,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      originalDiscArchiveId: seeded.archive.id,
+      atomicWriter: syntheticAtomicWriter,
+    })).resolves.toMatchObject({
+      outcome: "rolled_forward",
+      evidence: { authoritativeCheckpoint: { revision: 2 } },
+    });
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "faulted",
+        faultCode: "CONSISTENCY_FAULT",
+        work: null,
+      });
   } finally {
     input.access.close();
   }

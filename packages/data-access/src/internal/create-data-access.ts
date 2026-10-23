@@ -8494,8 +8494,12 @@ export function createDataAccessInternal(
           ? "projected digest" : null,
         current.manifest.originalDiscArchiveId !== archiveId
           ? "archive identity" : null,
-        !(["eligible", "running", "stopping"] as const).includes(
-            current.recovery.status as "eligible" | "running" | "stopping",
+        !(["eligible", "running", "stopping", "faulted"] as const).includes(
+            current.recovery.status as
+              | "eligible"
+              | "running"
+              | "stopping"
+              | "faulted",
           )
           ? "recovery status" : null,
         current.archive.integrityEvidenceRevision !==
@@ -8582,8 +8586,9 @@ export function createDataAccessInternal(
         updatedAt: timestamp,
       }).where(eq(originalDiscArchives.id, archiveId)).run();
       transaction.update(archiveRecoveries).set({
-        status: current.recovery.status === "stopping"
-          ? "stopping"
+        status: current.recovery.status === "stopping" ||
+            current.recovery.status === "faulted"
+          ? current.recovery.status
           : claim !== undefined
             ? "running"
             : badSectorCount === 0
@@ -10178,6 +10183,20 @@ export function createDataAccessInternal(
       },
       release(claim) {
         return database.transaction((transaction) => {
+          const recoveryAfterCompletion = findArchiveRecoveryRecord(
+            transaction,
+            {
+              archiveRecoveryId: claim.archiveRecoveryId,
+              originalDiscArchiveId: claim.originalDiscArchiveId,
+            },
+          );
+          if (
+            recoveryAfterCompletion?.status === "stopped" &&
+            recoveryAfterCompletion.attemptId === claim.attemptId &&
+            recoveryAfterCompletion.work === null
+          ) {
+            return recoveryAfterCompletion;
+          }
           const recoveryBeforeRelease = requireCurrentArchiveRecoveryClaim(
             transaction,
             claim,

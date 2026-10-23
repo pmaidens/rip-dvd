@@ -1307,6 +1307,61 @@ it("preserves recovery work when Stop wins the reconciliation release race", asy
   }
 }, RECOVERY_TEST_TIMEOUT_MS);
 
+it("accepts Stop completion racing reconciliation cleanup", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const saved = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  prepareEligibleRecovery(fixture, saved.archive.id, [{
+    startLba: 10,
+    sectorCount: 1,
+  }]);
+  const access = fixture.openAccess();
+  try {
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
+    const stop = access.archiveRecoveryWork.requestStop({
+      mutationKey: "00000000-0000-4000-8000-000000000487",
+      archiveRecoveryId: recoveryWorkClaim.archiveRecoveryId,
+      attemptId: recoveryWorkClaim.attemptId,
+    });
+    const findArchiveRecovery =
+      access.catalog.findArchiveRecovery.bind(access.catalog);
+    let recoveryReads = 0;
+    vi.spyOn(access.catalog, "findArchiveRecovery").mockImplementation(
+      (archiveId) => {
+        const snapshot = findArchiveRecovery(archiveId);
+        recoveryReads += 1;
+        if (recoveryReads === 2) {
+          access.archiveRecoveryWork.completeStop({
+            archiveRecoveryId: recoveryWorkClaim.archiveRecoveryId,
+            attemptId: recoveryWorkClaim.attemptId,
+            stopOperationId: stop.stopOperationId,
+          });
+        }
+        return snapshot;
+      },
+    );
+
+    await expect(reconcileDvdRecoveryCheckpoint({
+      access,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      originalDiscArchiveId: saved.archive.id,
+      atomicWriter: syntheticAtomicWriter,
+    })).resolves.toMatchObject({ outcome: "already_consistent" });
+
+    expect(recoveryReads).toBe(2);
+    expect(findArchiveRecovery(saved.archive.id)).toMatchObject({
+      status: "stopped",
+      work: null,
+    });
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+}, RECOVERY_TEST_TIMEOUT_MS);
+
 it.each(["limit=0", "limit=101", "cursor=bad", "offset=1", "limit=1&limit=2"])("rejects invalid paging %s", async (query) => {
   const fixture = createOperatorWorkflowFixture();
   const access = fixture.openAccess();
