@@ -404,6 +404,7 @@ const DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
 const ENCODE_JOB_FAILURE_REPORT_JOB_LIMIT = 400;
 const DVD_ARCHIVE_EVIDENCE_AUDIT_MANIFEST_LIMIT = 10_000;
+const DVD_RECOVERY_PASS_HISTORY_LIMIT = 16;
 
 function discSelectionMatchesTitleObservation(
   selection: DiscSelection,
@@ -1627,11 +1628,11 @@ export function createDataAccessInternal(
     }
     return recovery;
   };
-  const settledArchiveRecoveryStatus = (
+  const currentDvdUnrecoveredSourceRanges = (
     querySource: Pick<typeof database, "select">,
     originalDiscArchiveId: OriginalDiscArchiveId,
-  ): "eligible" | "completed" => {
-    const manifest = requireRow(
+  ) =>
+    requireRow(
       querySource.select({
         unrecoveredSourceRanges:
           dvdArchiveEvidenceManifests.unrecoveredSourceRanges,
@@ -1647,10 +1648,258 @@ export function createDataAccessInternal(
       )).get(),
       "DVD Archive Evidence",
       originalDiscArchiveId,
-    );
-    return manifest.unrecoveredSourceRanges.length === 0
+    ).unrecoveredSourceRanges;
+  const settledArchiveRecoveryStatus = (
+    querySource: Pick<typeof database, "select">,
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): "eligible" | "completed" => {
+    return currentDvdUnrecoveredSourceRanges(
+      querySource,
+      originalDiscArchiveId,
+    ).length === 0
       ? "completed"
       : "eligible";
+  };
+  const unrecoveredSectorCount = (
+    querySource: Pick<typeof database, "select">,
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): number => {
+    return currentDvdUnrecoveredSourceRanges(
+      querySource,
+      originalDiscArchiveId,
+    ).reduce(
+      (total, range) => total + range.sectorCount,
+      0,
+    );
+  };
+  const archiveRecoveryPassSettlement = (
+    querySource: Pick<typeof database, "select">,
+    recovery: ArchiveRecovery,
+    timestamp: Date,
+  ) => {
+    const work = recovery.work;
+    if (
+      work === null || work.passStartedAt === null ||
+      work.passInitialUnrecoveredSectorCount === null
+    ) {
+      throw new DomainInvariantError(
+        "Archive Recovery pass has no durable starting progress",
+      );
+    }
+    const remainingSectorCount = unrecoveredSectorCount(
+      querySource,
+      recovery.originalDiscArchiveId,
+    );
+    if (
+      work.passInitialUnrecoveredSectorCount - remainingSectorCount !==
+        work.passRecoveredSectorCount
+    ) {
+      throw new DomainInvariantError(
+        "Archive Recovery pass progress does not match the current checkpoint",
+      );
+    }
+    const outcome = remainingSectorCount === 0
+      ? "completed" as const
+      : work.passRecoveredSectorCount > 0
+        ? "productive" as const
+        : "no_progress" as const;
+    const completedAtMs = timestamp.getTime();
+    return {
+      outcome,
+      history: [
+        ...recovery.passHistory,
+        {
+          passNumber: work.passNumber,
+          direction: work.passDirection,
+          initialUnrecoveredSectorCount:
+            work.passInitialUnrecoveredSectorCount,
+          recoveredSectorCount: work.passRecoveredSectorCount,
+          remainingSectorCount,
+          lastCursorLba: work.passCursorLba,
+          startedAtMs: work.passStartedAt.getTime(),
+          completedAtMs,
+          elapsedMs: Math.max(
+            0,
+            completedAtMs - work.passStartedAt.getTime(),
+          ),
+          outcome,
+        },
+      ].slice(-DVD_RECOVERY_PASS_HISTORY_LIMIT),
+    };
+  };
+  const insertQueuedDvdDiscVerification = (
+    transaction: CatalogTransaction,
+    input: Pick<
+      DvdDiscVerification,
+      | "archiveRecoveryId"
+      | "archiveRecoveryAttemptId"
+      | "originalDiscArchiveId"
+      | "discInspectionId"
+      | "detectedDiscId"
+      | "mediaGeneration"
+      | "sourceMetadataFingerprint"
+      | "observedMetadataFingerprint"
+      | "checkpointRevision"
+      | "checkpointDigest"
+    >,
+    timestamp: Date,
+  ) => {
+    const id = newId<DvdDiscVerificationId>();
+    const attemptOrdinal = requireRow(
+      transaction.select({
+        value:
+          sql<number>`coalesce(max(${dvdDiscVerifications.attemptOrdinal}), 0) + 1`,
+      }).from(dvdDiscVerifications).where(eq(
+        dvdDiscVerifications.archiveRecoveryId,
+        input.archiveRecoveryId,
+      )).get(),
+      "DVD Disc Verification attempt sequence",
+      input.archiveRecoveryId,
+    ).value;
+    return requireRow(
+      transaction.insert(dvdDiscVerifications).values({
+        id,
+        ...input,
+        attemptOrdinal,
+        status: "queued",
+        reasons: [],
+        findings: [],
+        budgetExhausted: false,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }).returning().get(),
+      "DVD Disc Verification",
+      id,
+    );
+  };
+  const queueNextArchiveRecoveryPassVerification = (
+    transaction: CatalogTransaction,
+    recovery: ArchiveRecovery,
+    timestamp: Date,
+  ): void => {
+    const verificationId = recovery.work?.verificationId;
+    if (verificationId === null || verificationId === undefined) {
+      throw new DomainInvariantError(
+        "Archive Recovery pass has no bound DVD Disc Verification",
+      );
+    }
+    const previous = requireRow(
+      transaction.select().from(dvdDiscVerifications).where(and(
+        eq(dvdDiscVerifications.id, verificationId),
+        eq(dvdDiscVerifications.archiveRecoveryId, recovery.id),
+        eq(
+          dvdDiscVerifications.archiveRecoveryAttemptId,
+          recovery.attemptId,
+        ),
+        eq(dvdDiscVerifications.status, "completed"),
+        eq(dvdDiscVerifications.outcome, "match"),
+      )).get(),
+      "DVD Disc Verification",
+      verificationId,
+    );
+    const header = requireRow(
+      transaction.select().from(dvdArchiveEvidenceHeaders).where(eq(
+        dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+        recovery.originalDiscArchiveId,
+      )).get(),
+      "DVD Archive Evidence",
+      recovery.originalDiscArchiveId,
+    );
+    insertQueuedDvdDiscVerification(transaction, {
+      archiveRecoveryId: recovery.id,
+      archiveRecoveryAttemptId: recovery.attemptId,
+      originalDiscArchiveId: recovery.originalDiscArchiveId,
+      discInspectionId: previous.discInspectionId,
+      detectedDiscId: previous.detectedDiscId,
+      mediaGeneration: previous.mediaGeneration,
+      sourceMetadataFingerprint: previous.sourceMetadataFingerprint,
+      observedMetadataFingerprint: previous.observedMetadataFingerprint,
+      checkpointRevision: header.currentManifestRevision,
+      checkpointDigest: header.currentManifestDigest,
+    }, timestamp);
+  };
+  const settleGeneratedContinuationVerification = (
+    transaction: CatalogTransaction,
+    verification: typeof dvdDiscVerifications.$inferSelect,
+    evaluated: {
+      outcome: "match" | "mismatch" | "inconclusive";
+      reasons: readonly DvdDiscVerificationReasonCode[];
+    } | null,
+    timestamp: Date,
+  ): void => {
+    const recovery = findArchiveRecoveryRecord(transaction, {
+      archiveRecoveryId: verification.archiveRecoveryId,
+    });
+    const lastPass = recovery?.passHistory.at(-1);
+    if (
+      recovery?.status !== "eligible" ||
+      recovery.attemptId !== verification.archiveRecoveryAttemptId ||
+      recovery.work?.status !== "requested" ||
+      recovery.work.verificationId !== null ||
+      recovery.work.passStartedAt !== null ||
+      lastPass?.outcome !== "productive" ||
+      recovery.work.passNumber !== lastPass.passNumber + 1
+    ) return;
+    if (evaluated?.outcome === "match") return;
+    const retryableInterruption = evaluated?.outcome === "inconclusive" &&
+      evaluated.reasons.includes("DISC_VERIFICATION_INTERRUPTED") &&
+      evaluated.reasons.every((reason) =>
+        reason === "DISC_SAMPLE_COVERAGE_INCOMPLETE" ||
+        reason === "DISC_VERIFICATION_INTERRUPTED"
+      );
+    if (retryableInterruption) {
+      insertQueuedDvdDiscVerification(transaction, {
+        archiveRecoveryId: verification.archiveRecoveryId,
+        archiveRecoveryAttemptId: verification.archiveRecoveryAttemptId,
+        originalDiscArchiveId: verification.originalDiscArchiveId,
+        discInspectionId: verification.discInspectionId,
+        detectedDiscId: verification.detectedDiscId,
+        mediaGeneration: verification.mediaGeneration,
+        sourceMetadataFingerprint: verification.sourceMetadataFingerprint,
+        observedMetadataFingerprint: verification.observedMetadataFingerprint,
+        checkpointRevision: verification.checkpointRevision,
+        checkpointDigest: verification.checkpointDigest,
+      }, timestamp);
+      return;
+    }
+    requireRow(
+      transaction.update(archiveRecoveries).set({
+        status: "faulted",
+        faultCode: "DISC_VERIFICATION_STALE",
+        pauseReason: null,
+        updatedAt: timestamp,
+      }).where(and(
+        eq(archiveRecoveries.id, recovery.id),
+        eq(archiveRecoveries.attemptId, recovery.attemptId),
+        eq(archiveRecoveries.status, "eligible"),
+      )).returning({ id: archiveRecoveries.id }).get(),
+      "Archive Recovery",
+      recovery.id,
+    );
+  };
+  const archiveRecoveryCompletionAfterInterruption = (
+    transaction: CatalogTransaction,
+    recovery: ArchiveRecovery,
+    timestamp: Date,
+  ) => {
+    const status = settledArchiveRecoveryStatus(
+      transaction,
+      recovery.originalDiscArchiveId,
+    );
+    if (status === "eligible") {
+      return { status, history: null };
+    }
+    const completion = archiveRecoveryPassSettlement(
+      transaction,
+      recovery,
+      timestamp,
+    );
+    if (completion.outcome !== "completed") {
+      throw new DomainInvariantError(
+        "Completed Archive Recovery still has unrecovered sectors",
+      );
+    }
+    return { status, history: completion.history };
   };
   const requireNoPendingDvdRecoveryReconciliation = (
     querySource: Pick<typeof database, "select">,
@@ -5239,10 +5488,59 @@ export function createDataAccessInternal(
   function decodeArchiveRecoveryStopReceipt(
     stored: string,
   ): ArchiveRecoveryStopReceipt {
-    return JSON.parse(stored, (field, value: unknown) =>
+    const outcome = JSON.parse(stored, (field, value: unknown) =>
       field.endsWith("At") && typeof value === "string"
         ? new Date(value)
         : value) as ArchiveRecoveryStopReceipt;
+    const legacyWork = outcome.work;
+    const storedRecoveredSectorCount = legacyWork?.passRecoveredSectorCount;
+    const passStarted = legacyWork !== null && (
+      legacyWork.status === "claimed" ||
+      (legacyWork.passCursorLba !== null &&
+        legacyWork.passCursorLba !== undefined) ||
+      (legacyWork.passStartedAt !== null &&
+        legacyWork.passStartedAt !== undefined) ||
+      (legacyWork.passInitialUnrecoveredSectorCount !== null &&
+        legacyWork.passInitialUnrecoveredSectorCount !== undefined) ||
+      (storedRecoveredSectorCount ?? 0) > 0
+    );
+    const recoveredSectorCount = storedRecoveredSectorCount ??
+      (passStarted && legacyWork !== null
+        ? database.select({
+            value:
+              sql<number>`coalesce(sum(${dvdArchiveRecoveryReads.sectorCount}), 0)`,
+          }).from(dvdArchiveRecoveryReads).where(and(
+            eq(
+              dvdArchiveRecoveryReads.originalDiscArchiveId,
+              outcome.originalDiscArchiveId,
+            ),
+            eq(dvdArchiveRecoveryReads.outcome, "recovered"),
+            gte(dvdArchiveRecoveryReads.createdAt, legacyWork.createdAt),
+          )).get()?.value ?? 0
+        : 0);
+    const initialUnrecoveredSectorCount =
+      legacyWork?.passInitialUnrecoveredSectorCount ??
+      (passStarted
+        ? unrecoveredSectorCount(database, outcome.originalDiscArchiveId) +
+          recoveredSectorCount
+        : null);
+    return {
+      ...outcome,
+      pauseReason: outcome.pauseReason ?? null,
+      passHistory: outcome.passHistory ?? [],
+      work: legacyWork === null
+        ? null
+        : {
+            ...legacyWork,
+            passNumber: legacyWork.passNumber ?? 1,
+            passDirection: legacyWork.passDirection ?? "forward",
+            passStartedAt: legacyWork.passStartedAt ??
+              (passStarted ? legacyWork.createdAt : null),
+            passInitialUnrecoveredSectorCount:
+              initialUnrecoveredSectorCount,
+            passRecoveredSectorCount: recoveredSectorCount,
+          },
+    };
   }
 
   function decodeCatalogReviewCompletionOutcome(
@@ -7673,6 +7971,8 @@ export function createDataAccessInternal(
           attemptId: newId<import("../types.js").ArchiveRecoveryAttemptId>(),
           attemptOrdinal: 1,
           status: initial.unrecoveredSourceRanges.length ? "eligible" : "completed",
+          pauseReason: null,
+          passHistory: [],
           createdAt: timestamp, updatedAt: timestamp,
         }).run();
       }
@@ -8612,6 +8912,9 @@ export function createDataAccessInternal(
       if (recoveryWork !== undefined) {
         transaction.update(archiveRecoveryWork).set({
           passCursorLba: recoveryRead.startLba,
+          passRecoveredSectorCount: recoveryRead.outcome === "recovered"
+            ? sql`${archiveRecoveryWork.passRecoveredSectorCount} + 1`
+            : archiveRecoveryWork.passRecoveredSectorCount,
           updatedAt: timestamp,
         }).where(and(
           eq(
@@ -9512,6 +9815,13 @@ export function createDataAccessInternal(
             recovery.id,
           );
           const timestamp = now();
+          const passStartedAt = recovery.work?.passStartedAt ?? timestamp;
+          const passInitialUnrecoveredSectorCount =
+            recovery.work?.passInitialUnrecoveredSectorCount ??
+              unrecoveredSectorCount(
+                transaction,
+                recovery.originalDiscArchiveId,
+              );
           const claimToken = newId<ArchiveRecoveryClaimToken>();
           const claimed = recovery.work === null
             ? transaction.insert(archiveRecoveryWork).values({
@@ -9524,6 +9834,8 @@ export function createDataAccessInternal(
               claimedBy,
               claimToken,
               claimedAt: timestamp,
+              passStartedAt,
+              passInitialUnrecoveredSectorCount,
               createdAt: timestamp,
               updatedAt: timestamp,
             }).returning().get()
@@ -9533,6 +9845,8 @@ export function createDataAccessInternal(
               claimedBy,
               claimToken,
               claimedAt: timestamp,
+              passStartedAt,
+              passInitialUnrecoveredSectorCount,
               updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveryWork.archiveRecoveryId, recovery.id),
@@ -9647,6 +9961,13 @@ export function createDataAccessInternal(
           requireNoActiveEncodeWork(transaction, recovery);
           const timestamp = now();
           const claimToken = newId<ArchiveRecoveryClaimToken>();
+          const passStartedAt = recovery.work?.passStartedAt ?? timestamp;
+          const passInitialUnrecoveredSectorCount =
+            recovery.work?.passInitialUnrecoveredSectorCount ??
+              unrecoveredSectorCount(
+                transaction,
+                recovery.originalDiscArchiveId,
+              );
           const claimed = recovery.work === null
             ? transaction
               .insert(archiveRecoveryWork)
@@ -9660,6 +9981,8 @@ export function createDataAccessInternal(
                 claimedBy,
                 claimToken,
                 claimedAt: timestamp,
+                passStartedAt,
+                passInitialUnrecoveredSectorCount,
                 createdAt: timestamp,
                 updatedAt: timestamp,
               })
@@ -9673,6 +9996,8 @@ export function createDataAccessInternal(
                 claimedBy,
                 claimToken,
                 claimedAt: timestamp,
+                passStartedAt,
+                passInitialUnrecoveredSectorCount,
                 updatedAt: timestamp,
               })
               .where(and(
@@ -9985,7 +10310,8 @@ export function createDataAccessInternal(
           }
           if (
             recovery.status !== "eligible" &&
-            recovery.status !== "running"
+            recovery.status !== "running" &&
+            recovery.status !== "paused"
           ) {
             throw new InvalidStatusTransitionError(
               "Archive Recovery",
@@ -10021,11 +10347,16 @@ export function createDataAccessInternal(
               stopRequestedAt: timestamp,
               stoppedAt: null,
               faultCode: null,
+              pauseReason: null,
               updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveries.id, recovery.id),
               eq(archiveRecoveries.attemptId, recovery.attemptId),
-              inArray(archiveRecoveries.status, ["eligible", "running"]),
+              inArray(archiveRecoveries.status, [
+                "eligible",
+                "running",
+                "paused",
+              ]),
             )).returning().get(),
             "Archive Recovery",
             recovery.id,
@@ -10360,17 +10691,75 @@ export function createDataAccessInternal(
           ) {
             return recovery;
           }
-          const settledStatus = settledArchiveRecoveryStatus(
-            transaction,
-            recovery.originalDiscArchiveId,
-          );
-          transaction.delete(archiveRecoveryWork).where(and(
-            eq(archiveRecoveryWork.archiveRecoveryId, claim.archiveRecoveryId),
-            eq(archiveRecoveryWork.claimToken, claim.claimToken),
-          )).run();
           const timestamp = now();
+          const { outcome, history } = archiveRecoveryPassSettlement(
+            transaction,
+            recovery,
+            timestamp,
+          );
+          const work = recovery.work;
+          if (work === null) {
+            throw new DomainInvariantError(
+              "Archive Recovery pass has no durable work",
+            );
+          }
+          if (outcome === "completed") {
+            transaction.delete(archiveRecoveryWork).where(and(
+              eq(
+                archiveRecoveryWork.archiveRecoveryId,
+                claim.archiveRecoveryId,
+              ),
+              eq(archiveRecoveryWork.claimToken, claim.claimToken),
+            )).run();
+          } else {
+            if (outcome === "productive") {
+              queueNextArchiveRecoveryPassVerification(
+                transaction,
+                recovery,
+                timestamp,
+              );
+            }
+            transaction.update(archiveRecoveryWork).set({
+              status: "requested",
+              verificationId: outcome === "productive"
+                ? null
+                : work.verificationId,
+              requestedAt: timestamp,
+              claimedBy: null,
+              claimToken: null,
+              claimedAt: null,
+              admittedDevicePath: null,
+              admittedDeviceId: null,
+              admittedDeviceInode: null,
+              ...(outcome === "productive"
+                ? {
+                    passNumber: work.passNumber + 1,
+                    passDirection: work.passDirection === "forward"
+                      ? "reverse" as const
+                      : "forward" as const,
+                    passStartedAt: null,
+                    passInitialUnrecoveredSectorCount: null,
+                    passRecoveredSectorCount: 0,
+                    passCursorLba: null,
+                  }
+                : {}),
+              updatedAt: timestamp,
+            }).where(and(
+              eq(
+                archiveRecoveryWork.archiveRecoveryId,
+                claim.archiveRecoveryId,
+              ),
+              eq(archiveRecoveryWork.claimToken, claim.claimToken),
+            )).run();
+          }
           transaction.update(archiveRecoveries).set({
-            status: settledStatus,
+            status: outcome === "completed"
+              ? "completed"
+              : outcome === "productive"
+                ? "eligible"
+                : "paused",
+            pauseReason: outcome === "no_progress" ? "no_progress" : null,
+            passHistory: history,
             updatedAt: timestamp,
           }).where(and(
             eq(archiveRecoveries.id, recovery.id),
@@ -10409,6 +10798,7 @@ export function createDataAccessInternal(
             transaction.update(archiveRecoveries).set({
               status: "faulted",
               faultCode,
+              pauseReason: null,
               updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveries.id, recovery.id),
@@ -10461,6 +10851,21 @@ export function createDataAccessInternal(
           if (recovery.status === "stopping" || recovery.work === null) {
             return recovery;
           }
+          if (recovery.status === "paused") {
+            throw new InvalidStatusTransitionError(
+              "Archive Recovery",
+              recovery.status,
+              "DVD recovery reconciliation release",
+            );
+          }
+          const timestamp = now();
+          const settlement = recovery.status === "running"
+            ? archiveRecoveryCompletionAfterInterruption(
+                transaction,
+                recovery,
+                timestamp,
+              )
+            : null;
           const removed = transaction.delete(archiveRecoveryWork).where(and(
             eq(
               archiveRecoveryWork.archiveRecoveryId,
@@ -10475,13 +10880,13 @@ export function createDataAccessInternal(
               input.archiveRecoveryId,
             );
           }
-          if (recovery.status === "running") {
+          if (recovery.status === "running" && settlement !== null) {
             transaction.update(archiveRecoveries).set({
-              status: settledArchiveRecoveryStatus(
-                transaction,
-                recovery.originalDiscArchiveId,
-              ),
-              updatedAt: now(),
+              status: settlement.status,
+              ...(settlement.history === null
+                ? {}
+                : { passHistory: settlement.history }),
+              updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveries.id, recovery.id),
               eq(archiveRecoveries.attemptId, recovery.attemptId),
@@ -10511,12 +10916,13 @@ export function createDataAccessInternal(
               "eligible",
             );
           }
-          const settledStatus = settledArchiveRecoveryStatus(
-            transaction,
-            recovery.originalDiscArchiveId,
-          );
           const timestamp = now();
-          if (settledStatus === "completed") {
+          const settlement = archiveRecoveryCompletionAfterInterruption(
+            transaction,
+            recovery,
+            timestamp,
+          );
+          if (settlement.status === "completed") {
             requireRow(
               transaction.delete(archiveRecoveryWork).where(and(
                 eq(
@@ -10559,7 +10965,10 @@ export function createDataAccessInternal(
           }
           requireRow(
             transaction.update(archiveRecoveries).set({
-              status: settledStatus,
+              status: settlement.status,
+              ...(settlement.history === null
+                ? {}
+                : { passHistory: settlement.history }),
               updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveries.id, recovery.id),
@@ -10601,6 +11010,14 @@ export function createDataAccessInternal(
           if (recoveryBeforeRelease.status === "stopping") {
             return recoveryBeforeRelease;
           }
+          const timestamp = now();
+          const settlement = recoveryBeforeRelease.status === "running"
+            ? archiveRecoveryCompletionAfterInterruption(
+                transaction,
+                recoveryBeforeRelease,
+                timestamp,
+              )
+            : null;
           const removed = transaction
             .delete(archiveRecoveryWork)
             .where(and(
@@ -10619,14 +11036,15 @@ export function createDataAccessInternal(
               claim.archiveRecoveryId,
             );
           }
-          if (recoveryBeforeRelease.status === "running") {
-            const settledStatus = settledArchiveRecoveryStatus(
-              transaction,
-              recoveryBeforeRelease.originalDiscArchiveId,
-            );
+          if (
+            recoveryBeforeRelease.status === "running" && settlement !== null
+          ) {
             transaction.update(archiveRecoveries).set({
-              status: settledStatus,
-              updatedAt: now(),
+              status: settlement.status,
+              ...(settlement.history === null
+                ? {}
+                : { passHistory: settlement.history }),
+              updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveries.id, recoveryBeforeRelease.id),
               eq(archiveRecoveries.attemptId, recoveryBeforeRelease.attemptId),
@@ -10671,10 +11089,17 @@ export function createDataAccessInternal(
             "Archive Recovery",
             input.archiveRecoveryId,
           );
-          if (recovery.status === "running" || recovery.status === "stopping") {
+          if (
+            recovery.status === "running" || recovery.status === "stopping" ||
+            ((recovery.status === "eligible" ||
+                recovery.status === "paused") &&
+              recovery.work?.status === "requested")
+          ) {
             throw new InvalidStatusTransitionError(
               "Archive Recovery",
-              recovery.status,
+              recovery.work?.status === "requested"
+                ? "requested"
+                : recovery.status,
               "DVD recovery reconciliation",
             );
           }
@@ -11023,18 +11448,7 @@ export function createDataAccessInternal(
               "queued",
             );
           }
-          const id = newId<DvdDiscVerificationId>();
           const timestamp = now();
-          const attemptOrdinal = requireRow(
-            transaction.select({
-              value: sql<number>`coalesce(max(${dvdDiscVerifications.attemptOrdinal}), 0) + 1`,
-            }).from(dvdDiscVerifications).where(eq(
-              dvdDiscVerifications.archiveRecoveryId,
-              recovery.id,
-            )).get(),
-            "DVD Disc Verification attempt sequence",
-            recovery.id,
-          ).value;
           const storedSourceManifest = transaction
             .select({ manifest: dvdSourceSampleManifests.manifest })
             .from(dvdSourceSampleManifests)
@@ -11049,31 +11463,19 @@ export function createDataAccessInternal(
           validateDvdDiscVerificationManifestBinding(sourceManifest, {
             sourceMetadataFingerprint: archive.fingerprint,
           }, header);
-          const row = requireRow(
-            transaction.insert(dvdDiscVerifications).values({
-              id,
-              archiveRecoveryId: recovery.id,
-              archiveRecoveryAttemptId: recovery.attemptId,
-              attemptOrdinal,
-              originalDiscArchiveId: recovery.originalDiscArchiveId,
-              discInspectionId: inspection.id,
-              detectedDiscId: observedDisc.id,
-              mediaGeneration: inspection.mediaGeneration,
-              sourceMetadataFingerprint:
-                sourceManifest?.sourceMetadataFingerprint ?? archive.fingerprint,
-              observedMetadataFingerprint: observedDisc.fingerprint,
-              checkpointRevision: header.currentManifestRevision,
-              checkpointDigest: header.currentManifestDigest,
-              status: "queued",
-              reasons: [],
-              findings: [],
-              budgetExhausted: false,
-              createdAt: timestamp,
-              updatedAt: timestamp,
-            }).returning().get(),
-            "DVD Disc Verification",
-            id,
-          );
+          const row = insertQueuedDvdDiscVerification(transaction, {
+            archiveRecoveryId: recovery.id,
+            archiveRecoveryAttemptId: recovery.attemptId,
+            originalDiscArchiveId: recovery.originalDiscArchiveId,
+            discInspectionId: inspection.id,
+            detectedDiscId: observedDisc.id,
+            mediaGeneration: inspection.mediaGeneration,
+            sourceMetadataFingerprint:
+              sourceManifest?.sourceMetadataFingerprint ?? archive.fingerprint,
+            observedMetadataFingerprint: observedDisc.fingerprint,
+            checkpointRevision: header.currentManifestRevision,
+            checkpointDigest: header.currentManifestDigest,
+          }, timestamp);
           recordMutationInvocation(
             transaction,
             input.mutationKey,
@@ -11133,7 +11535,7 @@ export function createDataAccessInternal(
                 interrupted: true,
               },
             );
-            transaction.update(dvdDiscVerifications).set({
+            const completed = transaction.update(dvdDiscVerifications).set({
               status: "completed",
               outcome: evaluated.outcome,
               reasons: evaluated.reasons,
@@ -11145,7 +11547,15 @@ export function createDataAccessInternal(
               eq(dvdDiscVerifications.id, verification.id),
               eq(dvdDiscVerifications.status, "running"),
               eq(dvdDiscVerifications.claimToken, claimToken),
-            )).run();
+            )).returning().get();
+            if (completed !== undefined) {
+              settleGeneratedContinuationVerification(
+                transaction,
+                completed,
+                evaluated,
+                timestamp,
+              );
+            }
           }
           return expired.length;
         }, { behavior: "immediate" });
@@ -11396,7 +11806,7 @@ export function createDataAccessInternal(
             },
           );
           const timestamp = now();
-          return toDvdDiscVerification(requireRow(
+          const completed = requireRow(
             transaction.update(dvdDiscVerifications).set({
               status: "completed",
               outcome: evaluated.outcome,
@@ -11414,25 +11824,42 @@ export function createDataAccessInternal(
             )).returning().get(),
             "DVD Disc Verification",
             claim.id,
-          ));
+          );
+          settleGeneratedContinuationVerification(
+            transaction,
+            completed,
+            evaluated,
+            timestamp,
+          );
+          return toDvdDiscVerification(completed);
         }, { behavior: "immediate" });
       },
       fail(claim) {
         if (claim.claimToken === null) return null;
-        const timestamp = now();
-        const row = database.update(dvdDiscVerifications).set({
-          status: "failed",
-          claimToken: null,
-          claimedAt: null,
-          completedAt: timestamp,
-          failureCode: "DISC_VERIFICATION_UNAVAILABLE",
-          updatedAt: timestamp,
-        }).where(and(
-          eq(dvdDiscVerifications.id, claim.id),
-          eq(dvdDiscVerifications.status, "running"),
-          eq(dvdDiscVerifications.claimToken, claim.claimToken),
-        )).returning().get();
-        return row === undefined ? null : toDvdDiscVerification(row);
+        const claimToken = claim.claimToken;
+        return database.transaction((transaction) => {
+          const timestamp = now();
+          const row = transaction.update(dvdDiscVerifications).set({
+            status: "failed",
+            claimToken: null,
+            claimedAt: null,
+            completedAt: timestamp,
+            failureCode: "DISC_VERIFICATION_UNAVAILABLE",
+            updatedAt: timestamp,
+          }).where(and(
+            eq(dvdDiscVerifications.id, claim.id),
+            eq(dvdDiscVerifications.status, "running"),
+            eq(dvdDiscVerifications.claimToken, claimToken),
+          )).returning().get();
+          if (row === undefined) return null;
+          settleGeneratedContinuationVerification(
+            transaction,
+            row,
+            null,
+            timestamp,
+          );
+          return toDvdDiscVerification(row);
+        }, { behavior: "immediate" });
       },
     },
     readConsistentSnapshot(read) {
@@ -13392,10 +13819,26 @@ export function createDataAccessInternal(
               ),
             )),
         );
+        const requestedRecoveryPass = exists(
+          database.select({ id: archiveRecoveryWork.archiveRecoveryId })
+            .from(archiveRecoveryWork)
+            .where(and(
+              eq(
+                archiveRecoveryWork.archiveRecoveryId,
+                archiveRecoveries.id,
+              ),
+              eq(archiveRecoveryWork.status, "requested"),
+            )),
+        );
         const active = database.select({ id: archiveRecoveries.id })
           .from(archiveRecoveries)
           .where(or(
-            inArray(archiveRecoveries.status, ["running", "stopping"]),
+            inArray(archiveRecoveries.status, [
+              "running",
+              "paused",
+              "stopping",
+            ]),
+            requestedRecoveryPass,
             activeReconciliation,
           ))
           .orderBy(desc(archiveRecoveries.updatedAt), desc(archiveRecoveries.id))
@@ -13408,7 +13851,19 @@ export function createDataAccessInternal(
             .from(archiveRecoveries)
             .where(and(
               ne(archiveRecoveries.status, "running"),
+              ne(archiveRecoveries.status, "paused"),
               ne(archiveRecoveries.status, "stopping"),
+              notExists(
+                database.select({
+                  id: archiveRecoveryWork.archiveRecoveryId,
+                }).from(archiveRecoveryWork).where(and(
+                  eq(
+                    archiveRecoveryWork.archiveRecoveryId,
+                    archiveRecoveries.id,
+                  ),
+                  eq(archiveRecoveryWork.status, "requested"),
+                )),
+              ),
               notExists(
                 database.select({ id: dvdRecoveryReconciliations.id })
                   .from(dvdRecoveryReconciliations)

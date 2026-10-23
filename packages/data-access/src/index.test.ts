@@ -25,11 +25,13 @@ import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   archiveBoundaryEvidenceFromRecord,
+  canonicalPublicationJson,
   DISC_INSPECTION_LEASE_DURATION_MS,
   createCorrectedDvdArchiveBoundaryEvidence,
   createDataAccess,
   createDvdArchiveBoundaryEvidenceDigest,
   createDvdArchiveEvidenceManifestDigests,
+  createDvdArchiveRecoveryReadEvidenceDigest,
   createCleanReadArchiveIntegrityEvidence,
   createDiscSelectionSourceIdentity,
   createUnknownArchiveIntegrityEvidence,
@@ -1295,6 +1297,551 @@ describe("data-access facade", () => {
     reopened.close();
   });
 
+  it("preserves active Recovery pass progress through migration", () => {
+    const databasePath = createTestDatabasePath();
+    const sqlite = new DatabaseSync(databasePath);
+    const migrationsRoot = new URL("../drizzle/", import.meta.url);
+    const recoveryPassMigration =
+      "20261023052549_simple_harry_osborn";
+    const predecessorNames = readdirSync(migrationsRoot)
+      .filter((name) => /^\d/.test(name) && name < recoveryPassMigration)
+      .sort();
+    for (const migrationName of predecessorNames) {
+      const migration = readFileSync(
+        new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        "utf8",
+      );
+      for (const statement of migration.split("--> statement-breakpoint")) {
+        if (statement.trim()) sqlite.exec(statement);
+      }
+    }
+    sqlite.exec(`
+      CREATE TABLE __drizzle_migrations (
+        id integer primary key,
+        hash text not null,
+        created_at numeric,
+        name text,
+        applied_at text
+      );
+    `);
+    const recordMigration = sqlite.prepare(`
+      INSERT INTO __drizzle_migrations (hash, created_at, name)
+      VALUES (?, 0, ?)
+    `);
+    for (const migrationName of predecessorNames) {
+      recordMigration.run(`pre-recovery-pass-${migrationName}`, migrationName);
+    }
+    sqlite.exec(`
+      INSERT INTO optical_drives (
+        id, device_path, is_enabled, is_present, last_seen_at, created_at,
+        updated_at
+      ) VALUES ('migration-drive', '/dev/synthetic-dvd', 1, 1, 1, 1, 1);
+    `);
+    const boundaryEvidence =
+      createNormalDvdArchiveBoundaryEvidenceForTest(4_096);
+    const boundaryDigest =
+      createDvdArchiveBoundaryEvidenceDigest(boundaryEvidence);
+    for (const state of ["requested", "claimed"] as const) {
+      const prefix = `migration-${state}`;
+      const initialUnrecoveredSourceRanges = [{
+        startLba: 0,
+        sectorCount: 2,
+        classification: "skipped_untested" as const,
+      }];
+      const unrecoveredSourceRanges = [{
+        startLba: 1,
+        sectorCount: 1,
+        classification: "skipped_untested" as const,
+      }];
+      const initialManifestId = `${prefix}-manifest-1`;
+      const currentManifestId = `${prefix}-manifest-2`;
+      const recoveryReadId = `${prefix}-read`;
+      const initialManifest = createDvdArchiveEvidenceManifestDigests({
+        originalDiscArchiveId:
+          `${prefix}-archive` as OriginalDiscArchiveId,
+        revision: 1,
+        previousManifestId: null,
+        previousManifestDigest: null,
+        recoveryReadId: null,
+        recoveryReadEvidenceDigest: null,
+        evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+        imageFingerprint: `${prefix}-fingerprint`,
+        sectorSizeBytes: 2_048,
+        acceptedEndLbaExclusive: 2,
+        boundaryPolicyVersion: boundaryEvidence.policyVersion,
+        boundaryReportedSizeBytes: 4_096,
+        boundaryPublishedSizeBytes: 4_096,
+        boundaryEvidenceDigest: boundaryDigest,
+        unrecoveredSourceRanges: initialUnrecoveredSourceRanges,
+      });
+      const readDigest = createDvdArchiveRecoveryReadEvidenceDigest({
+        originalDiscArchiveId: `${prefix}-archive`,
+        fromManifestId: initialManifestId,
+        fromManifestRevision: 1,
+        startLba: 0,
+        sectorCount: 1,
+        outcome: "recovered",
+      });
+      const currentManifest = createDvdArchiveEvidenceManifestDigests({
+        originalDiscArchiveId:
+          `${prefix}-archive` as OriginalDiscArchiveId,
+        revision: 2,
+        previousManifestId: initialManifestId,
+        previousManifestDigest: initialManifest.manifestDigest,
+        recoveryReadId,
+        recoveryReadEvidenceDigest: readDigest,
+        evidenceFormat: DVD_RECOVERY_EVIDENCE_FORMAT,
+        imageFingerprint: `${prefix}-fingerprint`,
+        sectorSizeBytes: 2_048,
+        acceptedEndLbaExclusive: 2,
+        boundaryPolicyVersion: boundaryEvidence.policyVersion,
+        boundaryReportedSizeBytes: 4_096,
+        boundaryPublishedSizeBytes: 4_096,
+        boundaryEvidenceDigest: boundaryDigest,
+        unrecoveredSourceRanges,
+      });
+      sqlite.prepare(`
+        INSERT INTO detected_discs (
+          id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+          created_at, updated_at
+        ) VALUES (?, 'migration-drive', 'dvd', ?, 'archived', 1, 1, 1)
+      `).run(`${prefix}-disc`, `${prefix}-fingerprint`);
+      sqlite.prepare(`
+        INSERT INTO original_disc_archives (
+          id, detected_disc_id, disc_kind, archive_format, archive_path,
+          fingerprint, size_bytes, boundary_policy_version,
+          boundary_reported_size_bytes, boundary_published_size_bytes,
+          boundary_excluded_sector_count, boundary_first_excluded_lba,
+          boundary_maximum_referenced_lba,
+          boundary_read_failure_classifier_version,
+          boundary_read_failure_scsi_status,
+          boundary_read_failure_host_status,
+          boundary_read_failure_driver_status,
+          boundary_read_failure_sense_response_code,
+          boundary_read_failure_sense_key, boundary_read_failure_asc,
+          boundary_read_failure_ascq, archived_at, created_at, updated_at
+        ) VALUES (
+          ?, ?, 'dvd', 'iso', ?, ?, 4096, 'dvd-archive-boundary-v2',
+          4096, 4096, 0, 2, NULL, 'scsi-read-classifier-v2',
+          2, 0, 8, 114, 5, 33, 0, 1, 1, 1
+        )
+      `).run(
+        `${prefix}-archive`,
+        `${prefix}-disc`,
+        `/synthetic/${state}.iso`,
+        `${prefix}-fingerprint`,
+      );
+      sqlite.prepare(`
+        INSERT INTO archive_requests (
+          id, detected_disc_id, evidence_format, status, fulfilled_at,
+          created_at, updated_at
+        ) VALUES (?, ?, 'dvd-recovery-evidence-v1', 'fulfilled', 1, 1, 1)
+      `).run(`${prefix}-request`, `${prefix}-disc`);
+      sqlite.prepare(`
+        INSERT INTO disc_inspections (
+          id, optical_drive_id, detected_disc_id, media_generation,
+          is_current, status, phase, total_bytes, phase_started_at,
+          attempt_started_at, started_at, completed_at, created_at, updated_at
+        ) VALUES (
+          ?, 'migration-drive', ?, ?, 0, 'completed', 'confirming_media', 4096,
+          1, 1, 1, 1, 1, 1
+        )
+      `).run(
+        `${prefix}-inspection`,
+        `${prefix}-disc`,
+        `${prefix}-generation`,
+      );
+      sqlite.prepare(`
+        INSERT INTO archive_jobs (
+          id, archive_request_id, disc_inspection_id, detected_disc_id,
+          original_disc_archive_id, evidence_format, attempt_ordinal, status,
+          progress_phase, progress_percent, progress_bytes, last_progress_at,
+          started_at, completed_at, created_at, updated_at
+        ) VALUES (
+          ?, ?, ?, ?, ?, 'dvd-recovery-evidence-v1', 1, 'completed',
+          'finalizing', 100, 4096, 1, 1, 1, 1, 1
+        )
+      `).run(
+        `${prefix}-job`,
+        `${prefix}-request`,
+        `${prefix}-inspection`,
+        `${prefix}-disc`,
+        `${prefix}-archive`,
+      );
+      sqlite.prepare(`
+        INSERT INTO dvd_archive_evidence_manifests (
+          id, original_disc_archive_id, revision, evidence_format,
+          image_fingerprint, sector_size_bytes, accepted_end_lba_exclusive,
+          boundary_policy_version, boundary_reported_size_bytes,
+          boundary_published_size_bytes, boundary_evidence_digest,
+          unrecovered_source_ranges, unrecovered_source_ranges_digest,
+          manifest_digest, created_at
+        ) VALUES (
+          ?, ?, 1, 'dvd-recovery-evidence-v1', ?, 2048, 2,
+          'dvd-archive-boundary-v2', 4096, 4096, ?,
+          ?, ?, ?, 1
+        )
+      `).run(
+        initialManifestId,
+        `${prefix}-archive`,
+        `${prefix}-fingerprint`,
+        boundaryDigest,
+        JSON.stringify(initialUnrecoveredSourceRanges),
+        initialManifest.unrecoveredSourceRangesDigest,
+        initialManifest.manifestDigest,
+      );
+      sqlite.prepare(`
+        INSERT INTO dvd_archive_evidence_headers (
+          original_disc_archive_id, source_archive_job_id, evidence_format,
+          boundary_policy_version, boundary_reported_size_bytes,
+          boundary_published_size_bytes, boundary_evidence_digest,
+          sector_size_bytes, accepted_end_lba_exclusive,
+          current_manifest_id, current_manifest_revision,
+          current_manifest_digest, created_at, updated_at
+        ) VALUES (
+          ?, ?, 'dvd-recovery-evidence-v1', 'dvd-archive-boundary-v2',
+          4096, 4096, ?, 2048, 2, ?, 1, ?, 1, 1
+        )
+      `).run(
+        `${prefix}-archive`,
+        `${prefix}-job`,
+        boundaryDigest,
+        initialManifestId,
+        initialManifest.manifestDigest,
+      );
+      sqlite.prepare(`
+        INSERT INTO dvd_archive_recovery_reads (
+          id, original_disc_archive_id, from_manifest_id,
+          from_manifest_revision, start_lba, sector_count, outcome,
+          evidence_digest, created_at
+        ) VALUES (?, ?, ?, 1, 0, 1, 'recovered', ?, 6)
+      `).run(
+        recoveryReadId,
+        `${prefix}-archive`,
+        initialManifestId,
+        readDigest,
+      );
+      sqlite.prepare(`
+        INSERT INTO dvd_archive_evidence_manifests (
+          id, original_disc_archive_id, revision, previous_manifest_id,
+          recovery_read_id, evidence_format, image_fingerprint,
+          sector_size_bytes, accepted_end_lba_exclusive,
+          boundary_policy_version, boundary_reported_size_bytes,
+          boundary_published_size_bytes, boundary_evidence_digest,
+          unrecovered_source_ranges, unrecovered_source_ranges_digest,
+          manifest_digest, created_at
+        ) VALUES (
+          ?, ?, 2, ?, ?, 'dvd-recovery-evidence-v1', ?, 2048, 2,
+          'dvd-archive-boundary-v2', 4096, 4096, ?, ?, ?, ?, 7
+        )
+      `).run(
+        currentManifestId,
+        `${prefix}-archive`,
+        initialManifestId,
+        recoveryReadId,
+        `${prefix}-fingerprint`,
+        boundaryDigest,
+        JSON.stringify(unrecoveredSourceRanges),
+        currentManifest.unrecoveredSourceRangesDigest,
+        currentManifest.manifestDigest,
+      );
+      sqlite.prepare(`
+        UPDATE dvd_archive_evidence_headers
+        SET current_manifest_id = ?, current_manifest_revision = 2,
+            current_manifest_digest = ?, updated_at = 7
+        WHERE original_disc_archive_id = ?
+      `).run(
+        currentManifestId,
+        currentManifest.manifestDigest,
+        `${prefix}-archive`,
+      );
+      sqlite.prepare(`
+        UPDATE original_disc_archives
+        SET integrity = 'incomplete_read', integrity_evidence_revision = 2,
+            integrity_policy_version = 'dvd-recovery-evidence-v1',
+            bad_sector_count = 1, bad_area_count = 1,
+            bad_sector_ranges = '[{"startLba":1,"sectorCount":1}]'
+        WHERE id = ?
+      `).run(`${prefix}-archive`);
+      sqlite.prepare(`
+        INSERT INTO archive_recoveries (
+          id, original_disc_archive_id, attempt_id, attempt_ordinal, status,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, 1, 'eligible', 1, 1)
+      `).run(
+        `${prefix}-recovery`,
+        `${prefix}-archive`,
+        `${prefix}-attempt`,
+      );
+      sqlite.prepare(`
+        INSERT INTO archive_recovery_work (
+          archive_recovery_id, original_disc_archive_id, attempt_id, status,
+          requested_at, claimed_by, claim_token, claimed_at, pass_cursor_lba,
+          admitted_device_path, admitted_device_id, admitted_device_inode,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 10, ?, ?, ?, 0, ?, ?, ?, 5, 10)
+      `).run(
+        `${prefix}-recovery`,
+        `${prefix}-archive`,
+        `${prefix}-attempt`,
+        state,
+        state === "claimed" ? "migration-worker" : null,
+        state === "claimed" ? "migration-token" : null,
+        state === "claimed" ? 11 : null,
+        state === "claimed" ? "/dev/synthetic-dvd" : null,
+        state === "claimed" ? "1" : null,
+        state === "claimed" ? "2" : null,
+      );
+      if (state === "claimed") {
+        sqlite.prepare(`
+          UPDATE archive_recoveries SET status = 'running', updated_at = 2
+          WHERE id = ?
+        `).run(`${prefix}-recovery`);
+      }
+      sqlite.prepare(`
+        INSERT INTO mutation_invocations (
+          key, operation, semantic_input, outcome, created_at
+        ) VALUES (?, 'archive_recovery.stop', ?, ?, 12)
+      `).run(
+        `${prefix}-stop-key`,
+        canonicalPublicationJson({
+          archiveRecoveryId: `${prefix}-recovery`,
+          attemptId: `${prefix}-attempt`,
+        }),
+        JSON.stringify({
+          id: `${prefix}-recovery`,
+          originalDiscArchiveId: `${prefix}-archive`,
+          attemptId: `${prefix}-attempt`,
+          attemptOrdinal: 1,
+          status: "stopping",
+          stopOperationId: `${prefix}-stop-operation`,
+          stopRequestedAt: new Date(12).toISOString(),
+          stoppedAt: null,
+          faultCode: null,
+          work: {
+            archiveRecoveryId: `${prefix}-recovery`,
+            originalDiscArchiveId: `${prefix}-archive`,
+            attemptId: `${prefix}-attempt`,
+            status: state,
+            verificationId: null,
+            requestedAt: new Date(10).toISOString(),
+            claimedBy: state === "claimed" ? "migration-worker" : null,
+            claimToken: state === "claimed" ? "migration-token" : null,
+            claimedAt: state === "claimed"
+              ? new Date(11).toISOString()
+              : null,
+            passCursorLba: 0,
+            admittedDevicePath: state === "claimed"
+              ? "/dev/synthetic-dvd"
+              : null,
+            admittedDeviceId: state === "claimed" ? "1" : null,
+            admittedDeviceInode: state === "claimed" ? "2" : null,
+            createdAt: new Date(5).toISOString(),
+            updatedAt: new Date(10).toISOString(),
+          },
+          createdAt: new Date(1).toISOString(),
+          updatedAt: new Date(12).toISOString(),
+        }),
+      );
+    }
+    const settledReadDigest = createDvdArchiveRecoveryReadEvidenceDigest({
+      originalDiscArchiveId: "migration-requested-archive",
+      fromManifestId: "migration-requested-manifest-2",
+      fromManifestRevision: 2,
+      startLba: 1,
+      sectorCount: 1,
+      outcome: "recovered",
+    });
+    sqlite.prepare(`
+      INSERT INTO mutation_invocations (
+        key, operation, semantic_input, outcome, created_at
+      ) VALUES (?, 'archive_recovery.stop', ?, ?, 12)
+    `).run(
+      "migration-settled-stop-key",
+      canonicalPublicationJson({
+        archiveRecoveryId: "migration-settled-recovery",
+        attemptId: "migration-settled-attempt",
+      }),
+      JSON.stringify({
+        id: "migration-settled-recovery",
+        originalDiscArchiveId: "migration-requested-archive",
+        attemptId: "migration-settled-attempt",
+        attemptOrdinal: 1,
+        status: "stopping",
+        stopOperationId: "migration-settled-stop-operation",
+        stopRequestedAt: new Date(12).toISOString(),
+        stoppedAt: null,
+        faultCode: null,
+        work: {
+          archiveRecoveryId: "migration-settled-recovery",
+          originalDiscArchiveId: "migration-requested-archive",
+          attemptId: "migration-settled-attempt",
+          status: "claimed",
+          verificationId: null,
+          requestedAt: null,
+          claimedBy: "migration-settled-worker",
+          claimToken: "migration-settled-token",
+          claimedAt: new Date(11).toISOString(),
+          passCursorLba: 0,
+          admittedDevicePath: "/dev/synthetic-dvd",
+          admittedDeviceId: "1",
+          admittedDeviceInode: "2",
+          createdAt: new Date(5).toISOString(),
+          updatedAt: new Date(12).toISOString(),
+        },
+        createdAt: new Date(1).toISOString(),
+        updatedAt: new Date(12).toISOString(),
+      }),
+    );
+    sqlite.close();
+
+    const migrated = openTestDatabase(databasePath);
+    for (const state of ["requested", "claimed"] as const) {
+      const prefix = `migration-${state}`;
+      expect(migrated.archiveRecoveryWork.requestStop({
+        mutationKey: `${prefix}-stop-key`,
+        archiveRecoveryId: `${prefix}-recovery` as ArchiveRecoveryId,
+        attemptId: `${prefix}-attempt` as ArchiveRecoveryAttemptId,
+      })).toMatchObject({
+        pauseReason: null,
+        passHistory: [],
+        work: {
+          passNumber: 1,
+          passDirection: "forward",
+          passStartedAt: new Date(5),
+          passInitialUnrecoveredSectorCount: 2,
+          passRecoveredSectorCount: 1,
+          passCursorLba: 0,
+        },
+      });
+    }
+    const settledStopInput = {
+      mutationKey: "migration-settled-stop-key",
+      archiveRecoveryId:
+        "migration-settled-recovery" as ArchiveRecoveryId,
+      attemptId: "migration-settled-attempt" as ArchiveRecoveryAttemptId,
+    };
+    const settledReceipt = migrated.archiveRecoveryWork.requestStop(
+      settledStopInput,
+    );
+    expect(settledReceipt).toMatchObject({
+      pauseReason: null,
+      passHistory: [],
+      work: {
+        passNumber: 1,
+        passDirection: "forward",
+        passStartedAt: new Date(5),
+        passInitialUnrecoveredSectorCount: 2,
+        passRecoveredSectorCount: 1,
+        passCursorLba: 0,
+      },
+    });
+    const laterEvidence = new DatabaseSync(databasePath);
+    laterEvidence.prepare(`
+      INSERT INTO dvd_archive_recovery_reads (
+        id, original_disc_archive_id, from_manifest_id,
+        from_manifest_revision, start_lba, sector_count, outcome,
+        evidence_digest, created_at
+      ) VALUES (?, ?, ?, 2, 1, 1, 'recovered', ?, 13)
+    `).run(
+      "migration-requested-later-read",
+      "migration-requested-archive",
+      "migration-requested-manifest-2",
+      settledReadDigest,
+    );
+    laterEvidence.close();
+    expect(migrated.archiveRecoveryWork.requestStop(settledStopInput))
+      .toEqual(settledReceipt);
+    migrated.close();
+    const verified = new DatabaseSync(databasePath);
+    try {
+      expect(verified.prepare(`
+        SELECT archive_recovery_id, status, requested_at, claimed_by,
+               claim_token, claimed_at, pass_number, pass_direction,
+               pass_started_at, pass_initial_unrecovered_sector_count,
+               pass_recovered_sector_count, pass_cursor_lba,
+               admitted_device_path, admitted_device_id,
+               admitted_device_inode
+        FROM archive_recovery_work
+        ORDER BY archive_recovery_id
+      `).all()).toEqual([
+        {
+          archive_recovery_id: "migration-claimed-recovery",
+          status: "claimed",
+          requested_at: 10,
+          claimed_by: "migration-worker",
+          claim_token: "migration-token",
+          claimed_at: 11,
+          pass_number: 1,
+          pass_direction: "forward",
+          pass_started_at: 5,
+          pass_initial_unrecovered_sector_count: 2,
+          pass_recovered_sector_count: 1,
+          pass_cursor_lba: 0,
+          admitted_device_path: "/dev/synthetic-dvd",
+          admitted_device_id: "1",
+          admitted_device_inode: "2",
+        },
+        {
+          archive_recovery_id: "migration-requested-recovery",
+          status: "requested",
+          requested_at: 10,
+          claimed_by: null,
+          claim_token: null,
+          claimed_at: null,
+          pass_number: 1,
+          pass_direction: "forward",
+          pass_started_at: 5,
+          pass_initial_unrecovered_sector_count: 2,
+          pass_recovered_sector_count: 1,
+          pass_cursor_lba: 0,
+          admitted_device_path: null,
+          admitted_device_id: null,
+          admitted_device_inode: null,
+        },
+      ]);
+      expect(verified.prepare(`
+        SELECT work.archive_recovery_id,
+               work.pass_started_at <= MIN(reads.created_at) AS chronological
+        FROM archive_recovery_work work
+        INNER JOIN dvd_archive_recovery_reads reads
+          ON reads.original_disc_archive_id = work.original_disc_archive_id
+        GROUP BY work.archive_recovery_id, work.pass_started_at
+        ORDER BY work.archive_recovery_id
+      `).all()).toEqual([
+        {
+          archive_recovery_id: "migration-claimed-recovery",
+          chronological: 1,
+        },
+        {
+          archive_recovery_id: "migration-requested-recovery",
+          chronological: 1,
+        },
+      ]);
+      expect(verified.prepare(`
+        SELECT id, status, pause_reason, pass_history
+        FROM archive_recoveries
+        ORDER BY id
+      `).all()).toEqual([
+        {
+          id: "migration-claimed-recovery",
+          status: "running",
+          pause_reason: null,
+          pass_history: "[]",
+        },
+        {
+          id: "migration-requested-recovery",
+          status: "eligible",
+          pause_reason: null,
+          pass_history: "[]",
+        },
+      ]);
+      expect(verified.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    } finally {
+      verified.close();
+    }
+  });
+
   it("migrates historical Disc Inspections without inventing settling evidence", () => {
     const databasePath = createTestDatabasePath();
     const sqlite = new DatabaseSync(databasePath);
@@ -1823,7 +2370,8 @@ describe("data-access facade", () => {
           name !== "20261022222723_awesome_cyclops" &&
           name !== "20261023003003_ambiguous_gwen_stacy" &&
           name !== "20261023014315_faithful_triton" &&
-          name !== "20261023021122_fearless_morg",
+          name !== "20261023021122_fearless_morg" &&
+          name !== "20261023052549_simple_harry_osborn",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -9049,6 +9597,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261023052549_simple_harry_osborn",
+        },
+        {
           name: "20261023021122_fearless_morg",
         },
         {
@@ -9080,9 +9631,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20261022044144_icy_barracuda",
-        },
-        {
-          name: "20261019204228_dvd-initial-save",
         },
       ]);
     expect(

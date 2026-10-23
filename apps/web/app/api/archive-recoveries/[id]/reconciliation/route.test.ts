@@ -266,21 +266,30 @@ it("keeps wait pending for reconciliation after a faulted Stop", async () => {
   }
 });
 
-it("rejects reconciliation while a Recovery pass owns the attempt", async () => {
+async function expectReconciliationBlockedWhileWorkRetained(
+  recoveryStatus: "eligible" | "paused",
+) {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const seeded = await seedRecovery(fixture);
   const access = fixture.openAccess();
   const recoveryId = seeded.recoveryId as ArchiveRecoveryId;
   try {
-    access.archiveRecoveryWork.claim(
-      recoveryId,
-      "synthetic-active-recovery-worker",
-    );
+    access.archiveRecoveryWork.request(recoveryId);
     const database = new DatabaseSync(fixture.databasePath);
-    database.prepare(`UPDATE archive_recoveries
-      SET status = 'running', updated_at = updated_at + 1
-      WHERE id = ?`).run(recoveryId);
+    if (recoveryStatus === "paused") {
+      database.prepare(`UPDATE archive_recovery_work SET
+        pass_started_at = 1, pass_initial_unrecovered_sector_count = 1,
+        pass_cursor_lba = 10
+        WHERE archive_recovery_id = ?`).run(recoveryId);
+      database.prepare(`UPDATE archive_recoveries SET
+        status = 'paused', pause_reason = 'no_progress'
+        WHERE id = ?`).run(recoveryId);
+    } else {
+      database.prepare(`UPDATE archive_recovery_work
+        SET pass_number = 2, pass_direction = 'reverse'
+        WHERE archive_recovery_id = ?`).run(recoveryId);
+    }
     database.close();
 
     const inspection = await createDvdRecoveryReconciliationInspectionRoute(
@@ -305,7 +314,7 @@ it("rejects reconciliation while a Recovery pass owns the attempt", async () => 
             name: "reconcile",
             eligible: false,
             blockingReasons: [
-              "The active DVD recovery pass must quiesce first.",
+              "The retained DVD recovery pass must be stopped before reconciliation.",
             ],
           }),
         ]),
@@ -314,7 +323,9 @@ it("rejects reconciliation while a Recovery pass owns the attempt", async () => 
     const web = await createDvdRecoveryReconciliationRoute(
       request(
         seeded.recoveryId,
-        "00000000-0000-4000-8000-000000000464",
+        recoveryStatus === "paused"
+          ? "00000000-0000-4000-8000-000000000468"
+          : "00000000-0000-4000-8000-000000000464",
       ),
       seeded.recoveryId,
       () => access,
@@ -325,7 +336,9 @@ it("rejects reconciliation while a Recovery pass owns the attempt", async () => 
       "reconcile",
       seeded.recoveryId,
       "--key",
-      "00000000-0000-4000-8000-000000000465",
+      recoveryStatus === "paused"
+        ? "00000000-0000-4000-8000-000000000469"
+        : "00000000-0000-4000-8000-000000000465",
     ]);
     expect(web.status).toBe(409);
     expect(cli.exitCode).toBe(2);
@@ -335,6 +348,76 @@ it("rejects reconciliation while a Recovery pass owns the attempt", async () => 
     });
     expect(access.dvdRecoveryReconciliations.findLatestForRecovery(recoveryId))
       .toBeNull();
+  } finally {
+    access.close();
+  }
+}
+
+it.each(["eligible", "paused"] as const)(
+  "rejects reconciliation while %s Recovery work is retained",
+  expectReconciliationBlockedWhileWorkRetained,
+);
+
+it("keeps requested Recovery work in a bounded active listing", () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const setup = createLegacySidecarDataAccess({
+    databasePath: fixture.databasePath,
+    mediaLibraryPath: fixture.mediaLibraryPath,
+    originalsLibraryPath: fixture.originalsLibraryPath,
+  });
+  const drive = setup.catalog.upsertOpticalDrive({
+    devicePath: "/dev/synthetic-bounded-recovery-list",
+    isPresent: true,
+  });
+  const archives = ["queued", "historical"].map((name) => {
+    const disc = setup.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: `synthetic-bounded-recovery-${name}`,
+    });
+    setup.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    setup.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    return setup.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: `/synthetic/bounded-recovery-${name}.iso`,
+      fingerprint: disc.fingerprint,
+    });
+  });
+  setup.close();
+  const queuedRecoveryId = "synthetic-bounded-queued-recovery";
+  markArchiveWithDvdRecoveryEvidence(
+    fixture.databasePath,
+    archives[0]!.id,
+    "synthetic-bounded-queued",
+    {
+      archiveRecovery: {
+        id: queuedRecoveryId,
+        workStatus: "requested",
+      },
+    },
+  );
+  markArchiveWithDvdRecoveryEvidence(
+    fixture.databasePath,
+    archives[1]!.id,
+    "synthetic-bounded-historical",
+    {
+      archiveRecovery: { id: "synthetic-bounded-historical-recovery" },
+    },
+  );
+  const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`UPDATE archive_recoveries SET updated_at = 1
+    WHERE id = ?`).run(queuedRecoveryId);
+  database.prepare(`UPDATE archive_recoveries SET updated_at = 2
+    WHERE id = ?`).run("synthetic-bounded-historical-recovery");
+  database.close();
+
+  const access = fixture.openAccess();
+  try {
+    expect(access.catalog.listArchiveRecoveries({ limit: 1 }))
+      .toEqual([expect.objectContaining({ id: queuedRecoveryId })]);
   } finally {
     access.close();
   }

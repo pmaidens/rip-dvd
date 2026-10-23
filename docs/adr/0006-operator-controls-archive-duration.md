@@ -7,12 +7,19 @@ retained-image snapshots, filesystem classification, navigation validation, and
 title playback validation have no wall-clock deadline or inactivity watchdog.
 The legacy full-disc content reader follows the same cancellation policy.
 
-An archive can hold its drive and worker slot indefinitely. The dashboard may
-warn about missing forward progress, but only an explicit operator cancellation
-stops work for that reason. Web cancellation and `rip-dvd cancel-archive-request`
-use the same Archive Request operation. A CLI wait deadline ends the observer's
-wait without cancelling background work. The retired
-`RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS` setting has no effect.
+An initial archive can hold its drive and worker slot indefinitely. A resumed
+recovery runs complete unresolved-only passes without a time limit. Each pass
+that recovers bytes schedules another pass in the opposite direction after a
+fresh checkpoint-current sampled verification. A verifier interruption queues
+a durable retry; a removed, changed, or nonmatching source faults the Recovery
+instead of leaving the continuation reported as running. A complete pass that
+recovers no bytes durably pauses recovery; this is a safe scheduling boundary,
+not a conclusion that the remaining source is damaged. The operator can Stop
+the recovery. A future explicit Resume control can start another pass after a
+no-progress pause. Web cancellation and
+`rip-dvd cancel-archive-request` use the same Archive Request operation. A CLI
+wait deadline ends the observer's wait without cancelling background work. The
+retired `RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS` setting has no effect.
 
 Cancellation still propagates through the Archive Job signal, stops helper
 processes, and closes authorization pipes. Copy ownership remains reserved
@@ -32,7 +39,9 @@ retain their command deadlines. Lock acquisition remains bounded to reject
 conflicting or unprovable ownership. Native SCSI command timeouts remain part
 of actual I/O failure reporting. Separate read-only Archive Audits and
 Filesystem Verification remain bounded and cannot cancel an Archive Job.
-These bounds do not impose a total archive duration or a progress requirement.
+These bounds do not impose a total archive duration, overall recovery deadline,
+or fixed recovery-pass cap. The no-progress pass boundary is based on an
+exhaustive unresolved-sector sweep rather than elapsed time or inactivity.
 
 The original Archive Job implementation introduced a 12-hour copy deadline
 alongside helper cancellation and process-closure ownership. The libdvdcss

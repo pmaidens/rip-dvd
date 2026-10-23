@@ -141,10 +141,16 @@ function archiveRecoveryOperation(
     dvdRecoveryReconciliationBlockingReasons(recovery, reconciliation);
   const reconciliationIsActive = reconciliation?.status === "queued" ||
     reconciliation?.status === "running";
-  const recoveryOwnsStatus = recovery.status === "running" ||
+  const recoveryPassIsQueued = recovery.status === "eligible" &&
+    recovery.work?.status === "requested";
+  const reportedRecoveryStatus = recoveryPassIsQueued
+    ? "running"
+    : recovery.status;
+  const recoveryOwnsStatus = recoveryPassIsQueued ||
+    recovery.status === "running" ||
     recovery.status === "stopping" || !reconciliationIsActive &&
-      (recovery.status === "stopped" || recovery.status === "faulted" ||
-        recovery.status === "completed");
+      (recovery.status === "paused" || recovery.status === "stopped" ||
+        recovery.status === "faulted" || recovery.status === "completed");
   const encodeJobs = access.catalog.listDiscSelections({
     originalDiscArchiveId: recovery.originalDiscArchiveId,
     includeHistorical: true,
@@ -153,7 +159,7 @@ function archiveRecoveryOperation(
     ...visibleArchiveRecovery(recovery),
     recoveryStatus: recovery.status,
     status: recoveryOwnsStatus
-      ? recovery.status
+      ? reportedRecoveryStatus
       : reconciliation?.status ?? "idle",
     reconciliation: visibleDvdRecoveryReconciliation(reconciliation),
     checkpoint: access.catalog.findDvdArchiveEvidenceHeader(
@@ -1116,7 +1122,13 @@ const TERMINAL_STATUSES: Record<WaitableKind, readonly string[]> = {
   "disc-inspections": ["completed", "failed", "aborted"],
   "archive-requests": ["fulfilled", "cancelled", "needs_attention"],
   "archive-jobs": ["completed", "failed", "cancelled", "aborted"],
-  "archive-recoveries": ["completed", "failed", "stopped", "faulted"],
+  "archive-recoveries": [
+    "paused",
+    "completed",
+    "failed",
+    "stopped",
+    "faulted",
+  ],
   "encode-jobs": ["completed", "failed", "cancelled"],
   "archive-audits": ["completed", "failed"],
   "filesystem-verifications": ["completed", "failed"],

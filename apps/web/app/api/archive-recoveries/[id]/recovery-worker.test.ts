@@ -31,12 +31,14 @@ import {
 import {
   pollDvdDiscVerification,
   type DvdRecoverySourceReader,
+  type DvdVerificationSourceReader,
 } from "../../../../../archive-worker/src/dvd-disc-verifier.js";
 import { pollDvdRecoveryPass } from "../../../../../archive-worker/src/dvd-recovery-worker.js";
 import {
   DvdRecoveryReconciliationFault,
   reconcileDvdRecoveryCheckpoint,
 } from "../../../../../archive-worker/src/dvd-recovery-reconciliation.js";
+import { createOperationsResponse } from "../../operations/route.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 
@@ -130,6 +132,13 @@ async function completeVerification(
     checkpoint.currentManifestDigest,
   ]);
   expect(result.exitCode).toBe(0);
+  return completeQueuedVerification(fixture, seeded);
+}
+
+function completeQueuedVerification(
+  fixture: ReturnType<typeof createOperatorWorkflowFixture>,
+  seeded: Awaited<ReturnType<typeof seedDvdDiscVerificationFixture>>,
+) {
   const access = fixture.openAccess();
   try {
     const claim = access.dvdDiscVerifications.claimNext(
@@ -160,21 +169,65 @@ async function completeVerification(
   }
 }
 
-function immediateReader(
-  read: (startLba: number) =>
-    | { outcome: "readable"; bytes: Buffer }
-    | { outcome: "unreadable"; diagnostic: DvdDiscVerificationDiagnostic },
+function rewriteStopReceiptAsLegacy(databasePath: string, mutationKey: string) {
+  const database = new DatabaseSync(databasePath);
+  const stored = database.prepare(
+    "SELECT outcome FROM mutation_invocations WHERE key = ?",
+  ).get(mutationKey) as { outcome: string };
+  const legacy = JSON.parse(stored.outcome) as {
+    pauseReason?: unknown;
+    passHistory?: unknown;
+    work: Record<string, unknown> | null;
+  };
+  delete legacy.pauseReason;
+  delete legacy.passHistory;
+  if (legacy.work !== null) {
+    delete legacy.work.passNumber;
+    delete legacy.work.passDirection;
+    delete legacy.work.passStartedAt;
+    delete legacy.work.passInitialUnrecoveredSectorCount;
+    delete legacy.work.passRecoveredSectorCount;
+  }
+  database.prepare(
+    "UPDATE mutation_invocations SET outcome = ? WHERE key = ?",
+  ).run(JSON.stringify(legacy), mutationKey);
+  database.close();
+}
+
+type SyntheticSourceReadResult =
+  | { outcome: "readable"; bytes: Buffer }
+  | { outcome: "unreadable"; diagnostic: DvdDiscVerificationDiagnostic };
+
+function immediateSourceReader<
+  Request extends { devicePath: string; startLba: number },
+>(
+  read: (startLba: number) => SyntheticSourceReadResult,
 ) {
-  const start = vi.fn((input:
-    Parameters<DvdRecoverySourceReader["start"]>[0]) => ({
-      result: Promise.resolve(read(input.startLba)),
-      closed: Promise.resolve(),
-      cancel: vi.fn(),
-      deviceIdentity: syntheticDeviceIdentity(input.devicePath),
-      ready: Promise.resolve(),
-      authorize: vi.fn(),
-    }));
+  const start = vi.fn((input: Request) => ({
+    result: Promise.resolve(read(input.startLba)),
+    closed: Promise.resolve(),
+    cancel: vi.fn(),
+    deviceIdentity: syntheticDeviceIdentity(input.devicePath),
+    ready: Promise.resolve(),
+    authorize: vi.fn(),
+  }));
   return { reader: { start }, start };
+}
+
+function immediateReader(
+  read: (startLba: number) => SyntheticSourceReadResult,
+) {
+  return immediateSourceReader<
+    Parameters<DvdRecoverySourceReader["start"]>[0]
+  >(read);
+}
+
+function immediateVerificationReader(
+  read: (startLba: number) => SyntheticSourceReadResult,
+) {
+  return immediateSourceReader<
+    Parameters<DvdVerificationSourceReader["start"]>[0]
+  >(read);
 }
 
 function pollInput(
@@ -209,7 +262,7 @@ function pollInput(
   };
 }
 
-it("narrows a skipped region sector by sector and preserves recovered positions", async () => {
+it("continues a productive pass in reverse and pauses after no progress", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const seeded = await seedDvdDiscVerificationFixture(fixture, [{
@@ -252,16 +305,248 @@ it("narrows a skipped region sector by sector and preserves recovered positions"
     expect(after.subarray(102 * 2_048, 103 * 2_048))
       .toEqual(Buffer.alloc(2_048, 102));
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
-      .toMatchObject({ status: "eligible", work: null });
+      .toMatchObject({
+        status: "eligible",
+        pauseReason: null,
+        passHistory: [{
+          passNumber: 1,
+          direction: "forward",
+          initialUnrecoveredSectorCount: 3,
+          recoveredSectorCount: 2,
+          remainingSectorCount: 1,
+          lastCursorLba: 102,
+          outcome: "productive",
+        }],
+        work: {
+          status: "requested",
+          verificationId: null,
+          passNumber: 2,
+          passDirection: "reverse",
+          passStartedAt: null,
+          passInitialUnrecoveredSectorCount: null,
+          passRecoveredSectorCount: 0,
+          passCursorLba: null,
+        },
+      });
+    const nextVerification = input.access.dvdDiscVerifications
+      .findLatestForRecovery(seeded.recoveryId);
+    expect(nextVerification).toMatchObject({
+      attemptOrdinal: 2,
+      status: "queued",
+      checkpointRevision: checkpoint?.revision,
+      checkpointDigest: checkpoint?.manifestDigest,
+    });
+    const queuedCli = await fixture.run([
+      "inspect",
+      "archive-recoveries",
+      seeded.recoveryId,
+    ]);
+    const queuedWeb = createOperationsResponse(
+      input.access,
+      new Request(
+        `http://localhost/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
+      ),
+    );
+    expect(queuedCli.exitCode).toBe(0);
+    expect(queuedCli.result).toEqual(await queuedWeb.json());
+    expect(queuedCli.result).toMatchObject({
+      item: { status: "running", recoveryStatus: "eligible" },
+    });
+    const queuedWait = await fixture.run([
+      "wait",
+      "archive-recoveries",
+      seeded.recoveryId,
+      "--timeout-ms",
+      "0",
+    ]);
+    expect(queuedWait.result).toMatchObject({
+      outcome: "timeout",
+      current: { status: "running", recoveryStatus: "eligible" },
+    });
     expect(await pollDvdRecoveryPass(input)).toBe(false);
+    expect(source.start.mock.calls.map(([read]) => read.startLba))
+      .toEqual([100, 101, 102]);
+    completeQueuedVerification(fixture, seeded);
+
+    expect(await pollDvdRecoveryPass(input)).toBe(true);
+    expect(source.start.mock.calls.map(([read]) => read.startLba))
+      .toEqual([100, 101, 102, 101]);
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
-      .toMatchObject({ status: "eligible", faultCode: null, work: null });
+      .toMatchObject({
+        status: "paused",
+        pauseReason: "no_progress",
+        faultCode: null,
+        passHistory: [
+          expect.objectContaining({
+            passNumber: 1,
+            direction: "forward",
+            outcome: "productive",
+          }),
+          expect.objectContaining({
+            passNumber: 2,
+            direction: "reverse",
+            initialUnrecoveredSectorCount: 1,
+            recoveredSectorCount: 0,
+            remainingSectorCount: 1,
+            lastCursorLba: 101,
+            outcome: "no_progress",
+          }),
+        ],
+        work: {
+          status: "requested",
+          passNumber: 2,
+          passDirection: "reverse",
+          passCursorLba: 101,
+        },
+      });
   } finally {
     input.access.close();
   }
 }, 20_000);
 
-it("persists repeated tolerable evidence across separately verified passes", async () => {
+it("retries an interrupted between-pass verification after restart", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 200,
+    sectorCount: 3,
+    classification: "skipped_untested",
+  }]);
+  await completeVerification(fixture, seeded);
+  const firstPassSource = immediateReader((startLba) => startLba === 201
+    ? { outcome: "unreadable", diagnostic: mediumError }
+    : { outcome: "readable", bytes: Buffer.alloc(2_048, startLba) });
+  const firstRun = pollInput(fixture, firstPassSource.reader);
+  expect(await pollDvdRecoveryPass(firstRun)).toBe(true);
+  const interrupted = firstRun.access.dvdDiscVerifications.claimNext(
+    "synthetic-interrupted-continuation-verifier",
+  );
+  if (interrupted === null) {
+    throw new Error("Expected between-pass verification claim");
+  }
+  const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`UPDATE dvd_disc_verifications SET claimed_at = 0
+    WHERE id = ?`).run(interrupted.id);
+  database.close();
+  firstRun.access.close();
+
+  const restarted = fixture.openAccess();
+  expect(restarted.dvdDiscVerifications.recoverExpiredClaims()).toBe(1);
+  expect(restarted.dvdDiscVerifications.listForRecoveryAttempt(
+    seeded.recoveryId,
+    seeded.attemptId,
+  )).toMatchObject([
+    { attemptOrdinal: 1, status: "completed", outcome: "match" },
+    {
+      attemptOrdinal: 2,
+      status: "completed",
+      outcome: "inconclusive",
+      reasons: expect.arrayContaining(["DISC_VERIFICATION_INTERRUPTED"]),
+    },
+    { attemptOrdinal: 3, status: "queued", outcome: null },
+  ]);
+  expect(restarted.catalog.findArchiveRecoveryById(seeded.recoveryId))
+    .toMatchObject({
+      status: "eligible",
+      faultCode: null,
+      work: { status: "requested", passNumber: 2 },
+    });
+  restarted.close();
+
+  completeQueuedVerification(fixture, seeded);
+  const resumedSource = immediateReader(() => ({
+    outcome: "unreadable",
+    diagnostic: mediumError,
+  }));
+  const resumed = pollInput(fixture, resumedSource.reader);
+  try {
+    expect(await pollDvdRecoveryPass(resumed)).toBe(true);
+    expect(resumed.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "paused",
+        pauseReason: "no_progress",
+        work: { passNumber: 2, passDirection: "reverse" },
+      });
+  } finally {
+    resumed.access.close();
+  }
+}, 20_000);
+
+it("faults a continuation when its source is removed between passes", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 210,
+    sectorCount: 3,
+    classification: "skipped_untested",
+  }]);
+  await completeVerification(fixture, seeded);
+  const firstPassSource = immediateReader((startLba) => startLba === 211
+    ? { outcome: "unreadable", diagnostic: mediumError }
+    : { outcome: "readable", bytes: Buffer.alloc(2_048, startLba) });
+  const input = pollInput(fixture, firstPassSource.reader);
+  try {
+    expect(await pollDvdRecoveryPass(input)).toBe(true);
+    const verificationSource = immediateVerificationReader(() => ({
+      outcome: "readable",
+      bytes: Buffer.alloc(2_048),
+    }));
+    expect(await pollDvdDiscVerification({
+      access: input.access,
+      reader: verificationSource.reader,
+      workerExecutionId: "synthetic-removed-continuation-verifier",
+      mediaGenerationObserver: {
+        async observe() {
+          return "synthetic-removed-generation";
+        },
+      },
+    })).toBe(true);
+    expect(verificationSource.start).not.toHaveBeenCalled();
+    expect(input.access.dvdDiscVerifications.findLatestForRecovery(
+      seeded.recoveryId,
+    )).toMatchObject({
+      status: "completed",
+      outcome: "inconclusive",
+      reasons: expect.arrayContaining(["DISC_INSERTION_CHANGED"]),
+    });
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "faulted",
+        faultCode: "DISC_VERIFICATION_STALE",
+        work: { status: "requested", passNumber: 2 },
+      });
+    const inspected = await fixture.run([
+      "inspect",
+      "archive-recoveries",
+      seeded.recoveryId,
+    ]);
+    expect(inspected.result).toMatchObject({
+      item: {
+        status: "faulted",
+        recoveryStatus: "faulted",
+        faultCode: "DISC_VERIFICATION_STALE",
+      },
+    });
+    const waited = await fixture.run([
+      "wait",
+      "archive-recoveries",
+      seeded.recoveryId,
+      "--timeout-ms",
+      "0",
+    ]);
+    expect(waited.result).toMatchObject({
+      outcome: "settled",
+      current: {
+        status: "faulted",
+        faultCode: "DISC_VERIFICATION_STALE",
+      },
+    });
+  } finally {
+    input.access.close();
+  }
+}, 20_000);
+
+it("keeps a no-progress pause durable and exposes it identically", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const seeded = await seedDvdDiscVerificationFixture(fixture, [{
@@ -277,29 +562,205 @@ it("persists repeated tolerable evidence across separately verified passes", asy
   const input = pollInput(fixture, source.reader);
   try {
     expect(await pollDvdRecoveryPass(input)).toBe(true);
-    await completeVerification(
-      fixture,
-      seeded,
-      "00000000-0000-4000-8000-000000000460",
-    );
-    expect(await pollDvdRecoveryPass(input)).toBe(true);
-
-    const checkpoint = await input.access.readDvdCheckpoint(
-      seeded.archive.id,
-      defaultArchiveImageOwnership,
-    );
-    expect(checkpoint).toMatchObject({
-      revision: 3,
-      recoveryRead: { startLba: 175, outcome: "failed" },
-      unrecoveredSourceRanges: [{
-        startLba: 175,
-        sectorCount: 1,
-        classification: "individually_failed",
-      }],
-    });
-    expect(source.start).toHaveBeenCalledTimes(2);
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
-      .toMatchObject({ status: "eligible", faultCode: null, work: null });
+      .toMatchObject({
+        status: "paused",
+        pauseReason: "no_progress",
+        passHistory: [expect.objectContaining({
+          passNumber: 1,
+          direction: "forward",
+          outcome: "no_progress",
+        })],
+      });
+  } finally {
+    input.access.close();
+  }
+
+  const restarted = pollInput(fixture, source.reader);
+  restarted.workerExecutionId = "synthetic-no-progress-restart-worker";
+  try {
+    expect(await pollDvdRecoveryPass(restarted)).toBe(false);
+    expect(source.start).toHaveBeenCalledOnce();
+    const cli = await fixture.run([
+      "inspect",
+      "archive-recoveries",
+      seeded.recoveryId,
+    ]);
+    const web = createOperationsResponse(
+      restarted.access,
+      new Request(
+        `http://localhost/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
+      ),
+    );
+    expect(cli.exitCode).toBe(0);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toMatchObject({
+      item: {
+        status: "paused",
+        recoveryStatus: "paused",
+        pauseReason: "no_progress",
+        availableActions: expect.arrayContaining([
+          expect.objectContaining({ name: "stop", eligible: true }),
+        ]),
+      },
+    });
+    const waited = await fixture.run([
+      "wait",
+      "archive-recoveries",
+      seeded.recoveryId,
+      "--timeout-ms",
+      "0",
+    ]);
+    expect(waited.result).toMatchObject({
+      outcome: "settled",
+      current: { status: "paused", pauseReason: "no_progress" },
+    });
+    const stop = await fixture.run([
+      "archive-recovery",
+      "stop",
+      seeded.recoveryId,
+      "--key",
+      "00000000-0000-4000-8000-000000000460",
+      "--attempt-id",
+      seeded.attemptId,
+    ]);
+    expect(stop).toMatchObject({
+      exitCode: 0,
+      result: {
+        archiveRecovery: { status: "stopping", pauseReason: null },
+      },
+    });
+    expect(await pollDvdRecoveryPass(restarted)).toBe(true);
+    expect(restarted.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "stopped", work: null });
+  } finally {
+    restarted.access.close();
+  }
+}, 20_000);
+
+it("keeps an unstarted legacy Stop receipt unstarted", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 175,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  const mutationKey = "00000000-0000-4000-8000-000000000466";
+  const access = fixture.openAccess();
+  const original = access.archiveRecoveryWork.requestStop({
+    mutationKey,
+    archiveRecoveryId: seeded.recoveryId,
+    attemptId: seeded.attemptId,
+  });
+  access.close();
+  rewriteStopReceiptAsLegacy(fixture.databasePath, mutationKey);
+
+  const restarted = fixture.openAccess();
+  try {
+    expect(restarted.archiveRecoveryWork.requestStop({
+      mutationKey,
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    })).toEqual(original);
+  } finally {
+    restarted.close();
+  }
+});
+
+it("normalizes progressed pass state in a legacy Stop receipt", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 175,
+    sectorCount: 3,
+    classification: "skipped_untested",
+  }]);
+  await completeVerification(fixture, seeded);
+  const mutationKey = "00000000-0000-4000-8000-000000000467";
+  const access = fixture.openAccess();
+  expect(access.archiveRecoveryWork.claimNextVerifiedCandidate(
+    "synthetic-legacy-stop-worker",
+  )).not.toBeNull();
+  const progressDatabase = new DatabaseSync(fixture.databasePath);
+  progressDatabase.prepare(`UPDATE archive_recovery_work
+    SET pass_cursor_lba = 175
+    WHERE archive_recovery_id = ?`).run(seeded.recoveryId);
+  progressDatabase.close();
+  const original = access.archiveRecoveryWork.requestStop({
+    mutationKey,
+    archiveRecoveryId: seeded.recoveryId,
+    attemptId: seeded.attemptId,
+  });
+  access.close();
+  rewriteStopReceiptAsLegacy(fixture.databasePath, mutationKey);
+
+  const restarted = fixture.openAccess();
+  try {
+    expect(restarted.archiveRecoveryWork.requestStop({
+      mutationKey,
+      archiveRecoveryId: seeded.recoveryId,
+      attemptId: seeded.attemptId,
+    })).toEqual(original);
+  } finally {
+    restarted.close();
+  }
+});
+
+it("retains only the latest sixteen completed pass summaries", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 176,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  await completeVerification(fixture, seeded);
+  const setupAccess = fixture.openAccess();
+  setupAccess.archiveRecoveryWork.request(seeded.recoveryId);
+  setupAccess.close();
+  const priorHistory = Array.from({ length: 16 }, (_, index) => ({
+    passNumber: index + 1,
+    direction: index % 2 === 0 ? "forward" : "reverse",
+    initialUnrecoveredSectorCount: 1,
+    recoveredSectorCount: 1,
+    remainingSectorCount: 1,
+    lastCursorLba: 176,
+    startedAtMs: index * 2,
+    completedAtMs: index * 2 + 1,
+    elapsedMs: 1,
+    outcome: "productive",
+  }));
+  const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`UPDATE archive_recoveries
+    SET pass_history = ?
+    WHERE id = ?`).run(JSON.stringify(priorHistory), seeded.recoveryId);
+  database.prepare(`UPDATE archive_recovery_work
+    SET pass_number = 17
+    WHERE archive_recovery_id = ?`).run(seeded.recoveryId);
+  database.close();
+  const source = immediateReader(() => ({
+    outcome: "unreadable",
+    diagnostic: mediumError,
+  }));
+  const input = pollInput(fixture, source.reader);
+  try {
+    expect(await pollDvdRecoveryPass(input)).toBe(true);
+    const recovery = input.access.catalog.findArchiveRecoveryById(
+      seeded.recoveryId,
+    );
+    expect(recovery).toMatchObject({
+      status: "paused",
+      pauseReason: "no_progress",
+    });
+    expect(recovery?.passHistory).toHaveLength(16);
+    expect(recovery?.passHistory.at(0)?.passNumber).toBe(2);
+    expect(recovery?.passHistory.at(-1)).toMatchObject({
+      passNumber: 17,
+      direction: "forward",
+      recoveredSectorCount: 0,
+      outcome: "no_progress",
+    });
   } finally {
     input.access.close();
   }
@@ -1133,7 +1594,14 @@ it("does not retry a failed sector when restart resumes the same pass", async ()
       .toEqual([206]);
     expect(restartedInput.access.catalog.findArchiveRecoveryById(
       seeded.recoveryId,
-    )).toMatchObject({ status: "eligible", work: null });
+    )).toMatchObject({
+      status: "eligible",
+      work: {
+        status: "requested",
+        passNumber: 2,
+        passDirection: "reverse",
+      },
+    });
   } finally {
     restartedInput.access.close();
   }
@@ -1296,7 +1764,19 @@ it("rolls a published checkpoint forward before requeueing a crashed claim", asy
     expect(await pollDvdRecoveryPass(input)).toBe(true);
     expect(source.start).not.toHaveBeenCalled();
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
-      .toMatchObject({ status: "completed", work: null });
+      .toMatchObject({
+        status: "completed",
+        work: null,
+        passHistory: [{
+          passNumber: 1,
+          direction: "forward",
+          initialUnrecoveredSectorCount: 1,
+          recoveredSectorCount: 1,
+          remainingSectorCount: 0,
+          lastCursorLba: 208,
+          outcome: "completed",
+        }],
+      });
     expect(input.access.catalog.findDvdArchiveEvidenceHeader(seeded.archive.id))
       .toMatchObject({ currentManifestRevision: 2 });
   } finally {
