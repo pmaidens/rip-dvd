@@ -620,6 +620,7 @@ export async function pollDvdRecoveryPass(input: {
           }
         } catch (error) {
           if (admittedRead !== undefined) {
+            void admittedRead.result.catch(() => undefined);
             admittedRead.cancel();
             await admittedRead.closed;
           }

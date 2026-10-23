@@ -601,6 +601,7 @@ export async function pollDvdDiscVerification(input: {
                 } catch (error) {
                   if (active !== undefined) {
                     rejectedAdmissionRead = active;
+                    void active.result.catch(() => undefined);
                     active.cancel();
                   }
                   throw error;

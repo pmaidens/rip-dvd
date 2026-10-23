@@ -593,6 +593,56 @@ it("rejects a source read when the observed drive path changes before admission"
   }
 });
 
+it("observes and quiesces a recovery read when admission fails after start", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 149,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  await completeVerification(fixture, seeded);
+  let rejectRead!: (reason?: unknown) => void;
+  const result = new Promise<never>((_resolve, reject) => {
+    rejectRead = reject;
+  });
+  const observeResult = vi.spyOn(result, "catch");
+  let closeRead!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    closeRead = resolve;
+  });
+  const cancel = vi.fn(() => {
+    expect(observeResult).toHaveBeenCalledOnce();
+    rejectRead(new Error("Synthetic cancelled recovery read"));
+  });
+  const start = vi.fn((request:
+    Parameters<DvdRecoverySourceReader["start"]>[0]) => ({
+      result,
+      closed,
+      cancel,
+      deviceIdentity: syntheticDeviceIdentity(request.devicePath),
+    }));
+  const input = pollInput(fixture, { start });
+  vi.spyOn(input.access.archiveRecoveryWork, "admitSourceRead")
+    .mockImplementation((_claim, expectedDevicePath, startRead) => {
+      startRead(expectedDevicePath);
+      throw new Error("Synthetic recovery admission commit failure");
+    });
+  try {
+    const polling = pollDvdRecoveryPass(input);
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "running" });
+
+    closeRead();
+    await expect(polling).resolves.toBe(true);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ status: "faulted", faultCode: "CONSISTENCY_FAULT" });
+  } finally {
+    input.access.close();
+  }
+});
+
 it("finishes a fully recovered pass without rewriting the successful Archive Job", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
@@ -1933,9 +1983,17 @@ it("quiesces a verification read when admission fails after start", async () => 
   const closed = new Promise<void>((resolve) => {
     closeRead = resolve;
   });
-  const cancel = vi.fn();
+  let rejectRead!: (reason?: unknown) => void;
+  const result = new Promise<never>((_resolve, reject) => {
+    rejectRead = reject;
+  });
+  const observeResult = vi.spyOn(result, "catch");
+  const cancel = vi.fn(() => {
+    expect(observeResult).toHaveBeenCalledOnce();
+    rejectRead(new Error("Synthetic cancelled verification read"));
+  });
   const start = vi.fn(() => ({
-    result: new Promise<never>(() => {}),
+    result,
     closed,
     cancel,
     deviceIdentity: syntheticDeviceIdentity(
