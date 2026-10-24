@@ -314,22 +314,22 @@ function validateUnrecoveredRanges(
   });
 }
 
-function intersections(
+function intersections<Range extends UnreadableSectorRange>(
   source: readonly UnreadableSectorRange[],
-  unrecovered: readonly DvdUnrecoveredSourceRange[],
-): readonly DvdUnrecoveredSourceRange[] {
-  const result: DvdUnrecoveredSourceRange[] = [];
+  target: readonly Range[],
+): readonly Range[] {
+  const result: Range[] = [];
   for (const sourceRange of source) {
     const sourceEnd = sourceRange.startLba + sourceRange.sectorCount;
-    for (const missing of unrecovered) {
-      const missingEnd = missing.startLba + missing.sectorCount;
-      const startLba = Math.max(sourceRange.startLba, missing.startLba);
-      const endLbaExclusive = Math.min(sourceEnd, missingEnd);
+    for (const targetRange of target) {
+      const targetEnd = targetRange.startLba + targetRange.sectorCount;
+      const startLba = Math.max(sourceRange.startLba, targetRange.startLba);
+      const endLbaExclusive = Math.min(sourceEnd, targetEnd);
       if (endLbaExclusive > startLba) {
         result.push({
+          ...targetRange,
           startLba,
           sectorCount: endLbaExclusive - startLba,
-          classification: missing.classification,
         });
       }
     }
@@ -337,16 +337,13 @@ function intersections(
   return result;
 }
 
-function subtractRanges(
-  unrecovered: readonly DvdUnrecoveredSourceRange[],
+function subtractRanges<Range extends UnreadableSectorRange>(
+  target: readonly Range[],
   known: readonly UnreadableSectorRange[],
-): readonly DvdUnrecoveredSourceRange[] {
-  const result: DvdUnrecoveredSourceRange[] = [];
-  for (const missing of unrecovered) {
-    let segments: UnreadableSectorRange[] = [{
-      startLba: missing.startLba,
-      sectorCount: missing.sectorCount,
-    }];
+): readonly Range[] {
+  const result: Range[] = [];
+  for (const targetRange of target) {
+    let segments: Range[] = [{ ...targetRange }];
     for (const covered of known) {
       const coveredEnd = covered.startLba + covered.sectorCount;
       segments = segments.flatMap((segment) => {
@@ -356,15 +353,17 @@ function subtractRanges(
         ) {
           return [segment];
         }
-        const pieces: UnreadableSectorRange[] = [];
+        const pieces: Range[] = [];
         if (covered.startLba > segment.startLba) {
           pieces.push({
+            ...segment,
             startLba: segment.startLba,
             sectorCount: covered.startLba - segment.startLba,
           });
         }
         if (coveredEnd < segmentEnd) {
           pieces.push({
+            ...segment,
             startLba: coveredEnd,
             sectorCount: segmentEnd - coveredEnd,
           });
@@ -372,10 +371,7 @@ function subtractRanges(
         return pieces;
       });
     }
-    result.push(...segments.map((segment) => ({
-      ...segment,
-      classification: missing.classification,
-    })));
+    result.push(...segments);
   }
   return result;
 }
@@ -466,64 +462,6 @@ function sourceContinuityRiskRanges(
       verificationOutcome: entry.verificationOutcome,
     }))
   ) ?? [];
-}
-
-function sourceContinuityIntersections(
-  source: readonly UnreadableSectorRange[],
-  risk: readonly DvdTitleDamageSourceContinuityRiskRange[],
-): readonly DvdTitleDamageSourceContinuityRiskRange[] {
-  const result: DvdTitleDamageSourceContinuityRiskRange[] = [];
-  for (const sourceRange of source) {
-    const sourceEnd = sourceRange.startLba + sourceRange.sectorCount;
-    for (const risky of risk) {
-      const riskEnd = risky.startLba + risky.sectorCount;
-      const startLba = Math.max(sourceRange.startLba, risky.startLba);
-      const endLbaExclusive = Math.min(sourceEnd, riskEnd);
-      if (endLbaExclusive > startLba) {
-        result.push({
-          startLba,
-          sectorCount: endLbaExclusive - startLba,
-          discConfirmationId: risky.discConfirmationId,
-          verificationOutcome: risky.verificationOutcome,
-        });
-      }
-    }
-  }
-  return result;
-}
-
-function subtractSourceContinuityRanges(
-  risk: readonly DvdTitleDamageSourceContinuityRiskRange[],
-  known: readonly UnreadableSectorRange[],
-): readonly DvdTitleDamageSourceContinuityRiskRange[] {
-  return risk.flatMap((risky) => {
-    let segments: DvdTitleDamageSourceContinuityRiskRange[] = [{ ...risky }];
-    for (const covered of known) {
-      const coveredEnd = covered.startLba + covered.sectorCount;
-      segments = segments.flatMap((segment) => {
-        const segmentEnd = segment.startLba + segment.sectorCount;
-        if (
-          coveredEnd <= segment.startLba || covered.startLba >= segmentEnd
-        ) return [segment];
-        return [
-          ...(covered.startLba > segment.startLba
-            ? [{
-              ...segment,
-              sectorCount: covered.startLba - segment.startLba,
-            }]
-            : []),
-          ...(coveredEnd < segmentEnd
-            ? [{
-              ...segment,
-              startLba: coveredEnd,
-              sectorCount: segmentEnd - coveredEnd,
-            }]
-            : []),
-        ];
-      });
-    }
-    return segments;
-  });
 }
 
 export function dvdTitleDamageAssessmentRequiresAcceptance(
@@ -664,7 +602,7 @@ export function createDvdTitleDamageAssessment(
       unrecoveredSourceRanges,
     );
     const missingSectorCount = sectorCount(knownUnrecoveredSourceRanges);
-    const knownSourceContinuityRiskRanges = sourceContinuityIntersections(
+    const knownSourceContinuityRiskRanges = intersections(
       uniqueSourceRanges,
       continuityRiskRanges,
     );
@@ -737,7 +675,7 @@ export function createDvdTitleDamageAssessment(
     unrecoveredSourceRanges: unknownRanges,
     reasons: validateUnknownReasons(unknownReasons),
   };
-  const unattributedContinuityRanges = subtractSourceContinuityRanges(
+  const unattributedContinuityRanges = subtractRanges(
     continuityRiskRanges,
     knownTitleSourceRanges,
   );
