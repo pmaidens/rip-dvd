@@ -411,6 +411,25 @@ function seedTitleDamagePaging(variant, fingerprintFill) {
       reviewSet.checkpoint,
       reviewSet.items,
     );
+  const sourceContinuity = {
+    policyVersion: "dvd-title-source-continuity-v1",
+    provenance: [{
+      discConfirmationId: `${fixtureId}-confirmation`,
+      archiveRecoveryId: recoveryId,
+      archiveRecoveryAttemptId: recoveryAttemptId,
+      verificationId: `${fixtureId}-verification`,
+      verificationOutcome: "mismatch",
+      verificationResultDigest: "d".repeat(64),
+      confirmationCheckpoint: {
+        manifestRevision: 1,
+        manifestDigest: "e".repeat(64),
+      },
+      recoveredSourceRanges: [
+        { startLba: 25, sectorCount: 2 },
+        { startLba: 3_500, sectorCount: 2 },
+      ],
+    }],
+  };
   const assessment = createDvdTitleDamageAssessment({
     checkpoint,
     titleIdentityReviewSetIdentity: reviewSet.reviewSetIdentity,
@@ -421,6 +440,7 @@ function seedTitleDamagePaging(variant, fingerprintFill) {
       titleEnumeration: "valid",
     },
     unrecoveredSourceRanges,
+    sourceContinuity,
     titles: currentItems.map((item, index) => ({
       titleIdentityId: item.titleIdentityId,
       titleIdentityObservationId: item.observation.id,
@@ -471,8 +491,8 @@ function seedTitleDamagePaging(variant, fingerprintFill) {
       manifest_digest, accepted_end_lba_exclusive,
       title_identity_review_set_identity, catalog_mapping_projection_id,
       structural_assessment_identity, policy_version, title_mappings,
-      created_at
-    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 1)
+      source_continuity, created_at
+    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 1)
   `).run(
     assessment.id,
     archive.id,
@@ -484,6 +504,7 @@ function seedTitleDamagePaging(variant, fingerprintFill) {
     structural.id,
     assessment.policyVersion,
     JSON.stringify(storedMappings),
+    JSON.stringify(sourceContinuity),
   );
   evidenceSqlite.prepare(`
     INSERT INTO dvd_title_damage_assessment_attempts (

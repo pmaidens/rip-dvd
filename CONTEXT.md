@@ -78,6 +78,10 @@ _Avoid_: Proven unreadable sectors, lost playback
 An assessment of a title's source damage, mapping coverage, and estimated affected playback for a particular saved archive revision and selected playback path and angle. Known damage and unknown impact can coexist; subsequent source changes make the assessment outdated.
 _Avoid_: Watchability verdict, damage score
 
+**Source-Continuity Risk**:
+Source sectors recovered from a disc after the operator confirmed a mismatched or inconclusive DVD Disc Verification. The bytes are present, but their continuity with the saved source is uncertain. This remains visible after all sectors recover and Archive Integrity becomes `clean_read`.
+_Avoid_: Unrecovered Source, corrupt sectors, accepted damage
+
 **Title Identity**:
 The evidence-backed continuity of a title across archive revisions. A matching title number alone does not establish continuity for catalog selections, assessments, or operator acceptance.
 _Avoid_: Title number, title position

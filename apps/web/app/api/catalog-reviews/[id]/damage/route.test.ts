@@ -66,6 +66,8 @@ it("uses the shared paged Title Damage operation and rejects another revision's 
     knownUnrecoveredSourceRanges: [],
     unrecoveredUniqueSourceSectorCount: 0,
     titleMissingSourcePercentage: 0,
+    knownSourceContinuityRiskRanges: [],
+    sourceContinuityRiskSectorCount: 0,
   });
   const inspection = {
     schemaVersion: 1,
@@ -102,6 +104,15 @@ it("uses the shared paged Title Damage operation and rejects another revision's 
         unrecoveredSourceSectorCount: 0,
         unrecoveredSourceRanges: [],
         reasons: [],
+      },
+      sourceContinuity: {
+        policyVersion: "dvd-title-source-continuity-v1",
+        provenance: [],
+        sourceContinuityRiskSectorCount: 0,
+      },
+      unattributedSourceContinuityRisk: {
+        sourceSectorCount: 0,
+        sourceRanges: [],
       },
       noTitleMissingSourceProved: true,
       createdAt: new Date("2026-01-01T00:00:00.000Z"),

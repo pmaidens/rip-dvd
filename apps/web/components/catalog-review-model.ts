@@ -7,6 +7,8 @@ import type {
   ArchiveIntegrity,
   DvdTitleBadSectorCount,
   DvdTitleDamageAssessmentItem,
+  DvdTitleDamageSourceContinuityInput,
+  DvdTitleDamageSourceContinuityRiskRange,
   DvdTitleDamageUnknownReason,
   DvdUnrecoveredSourceRange,
   UnreadableSectorRange,
@@ -304,6 +306,13 @@ export interface CatalogReviewTitleDamage {
     unrecoveredSourceSectorCount: number;
     unrecoveredSourceRanges: readonly DvdUnrecoveredSourceRange[];
     reasons: readonly DvdTitleDamageUnknownReason[];
+  } | null;
+  sourceContinuity: (DvdTitleDamageSourceContinuityInput & {
+    sourceContinuityRiskSectorCount: number;
+  }) | null;
+  unattributedSourceContinuityRisk: {
+    sourceSectorCount: number;
+    sourceRanges: readonly DvdTitleDamageSourceContinuityRiskRange[];
   } | null;
   noTitleMissingSourceProved: boolean;
   unavailableReasons: readonly DvdTitleDamageUnknownReason[];

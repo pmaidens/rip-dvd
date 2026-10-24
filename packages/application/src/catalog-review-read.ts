@@ -2,6 +2,7 @@ import {
   archiveBoundaryEvidenceFromRecord,
   decodeArchivedDvdTitles,
   DomainInvariantError,
+  dvdTitleDamageAssessmentRequiresAcceptance,
   dvdTitleIdentityCatalogMappingItems,
   dvdTitleIdentityCatalogMappingProjectionDigest,
   withAuthoritativeDvdArchiveIntegrity,
@@ -144,6 +145,8 @@ function serializeTitleDamage(
       items: [],
       truncated: false,
       unknownTitleImpact: null,
+      sourceContinuity: null,
+      unattributedSourceContinuityRisk: null,
       noTitleMissingSourceProved: false,
       unavailableReasons: inspection.unavailableReasons,
     };
@@ -160,6 +163,9 @@ function serializeTitleDamage(
     truncated: inspection.state === "current" &&
       items.length < assessment.items.length,
     unknownTitleImpact: assessment.unknownTitleImpact,
+    sourceContinuity: assessment.sourceContinuity,
+    unattributedSourceContinuityRisk:
+      assessment.unattributedSourceContinuityRisk,
     noTitleMissingSourceProved: assessment.noTitleMissingSourceProved,
     unavailableReasons: inspection.unavailableReasons,
   };
@@ -347,7 +353,9 @@ export function readCatalogReview(
           titleDamageInspection.currentAssessmentIdentity,
         acceptanceRequired: titleDamageInspection.state === "current" &&
           titleDamageInspection.assessment !== null &&
-          !titleDamageInspection.assessment.noTitleMissingSourceProved,
+          dvdTitleDamageAssessmentRequiresAcceptance(
+            titleDamageInspection.assessment,
+          ),
       },
     });
     const reviewActionAvailability = snapshot.catalog.getCatalogReviewActionAvailability(id);

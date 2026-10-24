@@ -102,6 +102,8 @@ export function inspectCatalogTitleDamage(
       truncated: false,
       nextCursor: null,
       unknownTitleImpact: null,
+      sourceContinuity: null,
+      unattributedSourceContinuityRisk: null,
       noTitleMissingSourceProved: false,
       unavailableReasons: result.unavailableReasons,
     };
@@ -137,6 +139,9 @@ export function inspectCatalogTitleDamage(
       truncated: false,
       nextCursor: null,
       unknownTitleImpact: assessment.unknownTitleImpact,
+      sourceContinuity: assessment.sourceContinuity,
+      unattributedSourceContinuityRisk:
+        assessment.unattributedSourceContinuityRisk,
       noTitleMissingSourceProved: assessment.noTitleMissingSourceProved,
       unavailableReasons: result.unavailableReasons,
     };
@@ -174,6 +179,9 @@ export function inspectCatalogTitleDamage(
     truncated,
     nextCursor,
     unknownTitleImpact: assessment.unknownTitleImpact,
+    sourceContinuity: assessment.sourceContinuity,
+    unattributedSourceContinuityRisk:
+      assessment.unattributedSourceContinuityRisk,
     noTitleMissingSourceProved: assessment.noTitleMissingSourceProved,
     unavailableReasons: result.unavailableReasons,
   };

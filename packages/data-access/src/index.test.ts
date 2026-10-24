@@ -9679,10 +9679,20 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
+          "select name from pragma_table_info('dvd_title_damage_assessments')",
+        )
+        .all(),
+    ).toContainEqual({ name: "source_continuity" });
+    expect(
+      sqlite
+        .prepare(
           "select name from __drizzle_migrations order by id desc limit 12",
         )
         .all(),
       ).toEqual([
+        {
+          name: "20261024175458_nappy_black_tom",
+        },
         {
           name: "20261023141501_even_enchantress",
         },
@@ -9715,9 +9725,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20261022185502_perfect_lily_hollister",
-        },
-        {
-          name: "20261022100044_futuristic_cannonball",
         },
       ]);
     expect(
@@ -16460,6 +16467,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         reviewSet.checkpoint,
         reviewSet.items,
       );
+    const sourceContinuity = {
+      policyVersion: "dvd-title-source-continuity-v1" as const,
+      provenance: [],
+    };
     const damage = createDvdTitleDamageAssessment({
       checkpoint: structural.checkpoint,
       titleIdentityReviewSetIdentity: reviewSet.reviewSetIdentity,
@@ -16470,6 +16481,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         titleEnumeration: "valid",
       },
       unrecoveredSourceRanges: header.unrecoveredSourceRanges,
+      sourceContinuity,
       titles: [{
         titleIdentityId: currentItem.titleIdentityId,
         displayTitleNumber: currentItem.observation.displayTitleNumber,
@@ -16521,8 +16533,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         manifest_digest, accepted_end_lba_exclusive,
         title_identity_review_set_identity,
         catalog_mapping_projection_id, structural_assessment_identity,
-        policy_version, title_mappings, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2)
+        policy_version, title_mappings, source_continuity, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2)
     `).run(
       damage.id,
       fixture.archive.id,
@@ -16535,6 +16547,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       structural.id,
       damage.policyVersion,
       JSON.stringify(titleMappings),
+      JSON.stringify(sourceContinuity),
     );
     expect(() => sqlite.prepare(`
       INSERT INTO dvd_title_damage_assessments (
@@ -16782,6 +16795,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           reviewSet.checkpoint,
           reviewSet.items,
         );
+      const sourceContinuity = {
+        policyVersion: "dvd-title-source-continuity-v1" as const,
+        provenance: [],
+      };
       const damage = createDvdTitleDamageAssessment({
         checkpoint: structural.checkpoint,
         titleIdentityReviewSetIdentity: reviewSet.reviewSetIdentity,
@@ -16792,6 +16809,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           titleEnumeration: "valid",
         },
         unrecoveredSourceRanges: header.unrecoveredSourceRanges,
+        sourceContinuity,
         titles: currentItems.map((item, index) => ({
           titleIdentityId: item.titleIdentityId,
           displayTitleNumber: item.observation.displayTitleNumber,
@@ -16844,8 +16862,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           title_identity_review_set_identity,
           catalog_mapping_projection_id,
           structural_assessment_identity, policy_version, title_mappings,
-          created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+          source_continuity, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
       `).run(
         damage.id,
         fixture.archive.id,
@@ -16858,6 +16876,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         structural.id,
         damage.policyVersion,
         JSON.stringify(titleMappings),
+        JSON.stringify(sourceContinuity),
       );
       sqlite.prepare(`
         INSERT INTO dvd_title_damage_assessment_attempts (

@@ -117,6 +117,12 @@ Use `--selection-offset`, `--correction-offset`, `--correction-job-offset`,
 `damage` returns revision-bound Title Damage Assessment evidence. Each response
 includes the checkpoint revision, item offset, bounded items, truncation state,
 and a next cursor. Continue with the returned `nextCursor` until it is `null`.
+The response reports Unrecovered Source separately from Source-Continuity Risk
+introduced by operator-confirmed mismatched or inconclusive recovery. Confirmed
+source ranges include their immutable confirmation and verification provenance.
+Risk outside all known title paths remains in
+`unattributedSourceContinuityRisk`, including after Archive Integrity becomes
+`clean_read`.
 The default limit is 20 and the maximum is 100. A cursor stops being valid when
 the checkpoint or its current assessment changes and returns
 `TITLE_DAMAGE_CURSOR_STALE`; restart without a cursor to inspect the current

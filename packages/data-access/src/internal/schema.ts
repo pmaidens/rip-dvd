@@ -72,6 +72,7 @@ import {
   type DvdStructuralValidity,
 } from "../dvd-structural-assessment.js";
 import type {
+  DvdTitleDamageSourceContinuityInput,
   RecordDvdTitleDamageMappingInput,
 } from "../dvd-title-damage-assessment.js";
 import type {
@@ -1620,6 +1621,8 @@ export const dvdTitleDamageAssessments = sqliteTable(
     titleMappings: text("title_mappings", { mode: "json" })
       .$type<readonly RecordDvdTitleDamageMappingInput[]>()
       .notNull(),
+    sourceContinuity: text("source_continuity", { mode: "json" })
+      .$type<DvdTitleDamageSourceContinuityInput>(),
     createdAt: createdAt(),
   },
   (table) => [
@@ -1650,6 +1653,10 @@ export const dvdTitleDamageAssessments = sqliteTable(
     check(
       "dvd_title_damage_assessments_mappings_check",
       sql`json_valid(${table.titleMappings}) and json_type(${table.titleMappings}) = 'array'`,
+    ),
+    check(
+      "dvd_title_damage_assessments_source_continuity_check",
+      sql`${table.sourceContinuity} is null or (json_valid(${table.sourceContinuity}) and json_type(${table.sourceContinuity}) = 'object')`,
     ),
   ],
 );

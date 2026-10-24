@@ -212,9 +212,12 @@ import {
 } from "../dvd-title-identity.js";
 import {
   createDvdTitleDamageAssessment,
+  dvdTitleDamageAssessmentRequiresAcceptance,
   DVD_TITLE_DAMAGE_ASSESSMENT_POLICY_VERSION,
+  DVD_TITLE_DAMAGE_SOURCE_CONTINUITY_POLICY_VERSION,
   type DvdTitleDamageAssessmentRecord,
   type DvdTitleDamageMappingInput,
+  type DvdTitleDamageSourceContinuityInput,
   type RecordDvdTitleDamageAssessmentInput,
 } from "../dvd-title-damage-assessment.js";
 import { isArchiveReadFailureEvidenceConsistent } from "../archive-read-failure.js";
@@ -9995,6 +9998,7 @@ export function createDataAccessInternal(
         latestDamage.catalogMappingProjectionId !== null &&
         latestDamage.catalogMappingProjectionId ===
           titleIdentity.catalogMappingProjectionId &&
+        latestDamage.record.sourceContinuity !== null &&
         latestDamage.record.structuralAssessmentIdentity === structural.id;
       titleDamageByArchiveId.set(id, {
         state: header === null
@@ -10006,7 +10010,7 @@ export function createDataAccessInternal(
           : "outdated",
         currentAssessmentIdentity: isCurrent ? latestDamage.record.id : null,
         acceptanceRequired: isCurrent && latestDamage !== undefined
-          ? !latestDamage.record.noTitleMissingSourceProved
+          ? dvdTitleDamageAssessmentRequiresAcceptance(latestDamage.record)
           : false,
       });
     }
@@ -10320,6 +10324,104 @@ export function createDataAccessInternal(
     };
   }
 
+  function readDvdTitleDamageSourceContinuity(
+    originalDiscArchiveId: OriginalDiscArchiveId,
+    manifestRevision: number,
+  ): DvdTitleDamageSourceContinuityInput {
+    const recoveredRanges = sqlite.prepare(`
+      with ordered_reads as (
+        select
+          disc_confirmation_id,
+          start_lba,
+          start_lba - row_number() over (
+            partition by disc_confirmation_id
+            order by start_lba
+          ) as range_key
+        from dvd_archive_recovery_reads
+        where original_disc_archive_id = ?
+          and from_manifest_revision < ?
+          and outcome = 'recovered'
+          and disc_confirmation_id is not null
+      )
+      select
+        disc_confirmation_id,
+        min(start_lba) as start_lba,
+        count(*) as sector_count
+      from ordered_reads
+      group by disc_confirmation_id, range_key
+      order by disc_confirmation_id, start_lba
+    `).all(
+      originalDiscArchiveId,
+      manifestRevision,
+    ) as unknown as Array<{
+      disc_confirmation_id: DvdDiscConfirmationId;
+      start_lba: number;
+      sector_count: number;
+    }>;
+    const confirmationIds = [...new Set(recoveredRanges.map((range) =>
+      range.disc_confirmation_id
+    ))];
+    const confirmations = confirmationIds.length === 0
+      ? []
+      : database.select().from(dvdDiscConfirmations).where(inArray(
+          dvdDiscConfirmations.id,
+          confirmationIds,
+        )).all().map(toDvdDiscConfirmation);
+    const confirmationById = new Map(confirmations.map((confirmation) => [
+      confirmation.id,
+      confirmation,
+    ]));
+    const byConfirmation = new Map<
+      DvdDiscConfirmationId,
+      {
+        confirmation: DvdDiscConfirmation;
+        recoveredSourceRanges: Array<{
+          startLba: number;
+          sectorCount: number;
+        }>;
+      }
+    >();
+    for (const range of recoveredRanges) {
+      const confirmation = confirmationById.get(range.disc_confirmation_id);
+      if (
+        confirmation === undefined ||
+        confirmation.originalDiscArchiveId !== originalDiscArchiveId ||
+        confirmation.checkpointRevision >= manifestRevision
+      ) {
+        throw new DomainInvariantError(
+          "Title Damage Assessment source-continuity provenance is inconsistent",
+        );
+      }
+      const current = byConfirmation.get(confirmation.id) ?? {
+        confirmation,
+        recoveredSourceRanges: [],
+      };
+      current.recoveredSourceRanges.push({
+        startLba: Number(range.start_lba),
+        sectorCount: Number(range.sector_count),
+      });
+      byConfirmation.set(confirmation.id, current);
+    }
+    return {
+      policyVersion: DVD_TITLE_DAMAGE_SOURCE_CONTINUITY_POLICY_VERSION,
+      provenance: [...byConfirmation.values()].map((entry) => ({
+        discConfirmationId: entry.confirmation.id,
+        archiveRecoveryId: entry.confirmation.archiveRecoveryId,
+        archiveRecoveryAttemptId:
+          entry.confirmation.archiveRecoveryAttemptId,
+        verificationId: entry.confirmation.verificationId,
+        verificationOutcome: entry.confirmation.verificationOutcome,
+        verificationResultDigest:
+          entry.confirmation.verificationResultDigest,
+        confirmationCheckpoint: {
+          manifestRevision: entry.confirmation.checkpointRevision,
+          manifestDigest: entry.confirmation.checkpointDigest,
+        },
+        recoveredSourceRanges: entry.recoveredSourceRanges,
+      })),
+    };
+  }
+
   type DvdTitleDamageDecodeEvidence = {
     manifest: typeof dvdArchiveEvidenceManifests.$inferSelect | undefined;
     structuralAssessment:
@@ -10486,6 +10588,7 @@ export function createDataAccessInternal(
       structuralAssessmentIdentity: row.structuralAssessmentIdentity,
       structuralFindings: titleDamageStructuralFindings(structuralAssessment),
       unrecoveredSourceRanges: manifest.unrecoveredSourceRanges,
+      sourceContinuity: row.sourceContinuity,
       titles: titleDamageMappings(
         row.originalDiscArchiveId,
         row.manifestId,
@@ -10590,6 +10693,7 @@ export function createDataAccessInternal(
           reviewSet.reviewSetIdentity &&
         latestRow.catalogMappingProjectionId !== null &&
         latestRow.catalogMappingProjectionId === catalogMappingProjectionId &&
+        latestRow.sourceContinuity !== null &&
         latestRow.structuralAssessmentIdentity ===
           structural.currentAssessmentIdentity
       ? latestRow
@@ -10716,6 +10820,10 @@ export function createDataAccessInternal(
           item.observation.sourceExtents,
         ]),
     );
+    const sourceContinuity = readDvdTitleDamageSourceContinuity(
+      input.originalDiscArchiveId,
+      header.currentManifestRevision,
+    );
     const assessment = createValidatedDvdTitleDamageAssessment({
       checkpoint: {
         originalDiscArchiveId: input.originalDiscArchiveId,
@@ -10731,6 +10839,7 @@ export function createDataAccessInternal(
         structural,
       ),
       unrecoveredSourceRanges: header.unrecoveredSourceRanges,
+      sourceContinuity,
       titles: titleDamageMappings(
         input.originalDiscArchiveId,
         header.currentManifestId,
@@ -10813,6 +10922,7 @@ export function createDataAccessInternal(
           input.structuralAssessmentIdentity,
         policyVersion: assessment.policyVersion,
         titleMappings: input.titles,
+        sourceContinuity,
         createdAt,
       }).onConflictDoNothing({
         target: dvdTitleDamageAssessments.id,
