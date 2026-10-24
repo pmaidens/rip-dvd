@@ -143,6 +143,7 @@ type ConcurrentWorkerResult =
         | "skipped"
         | "started"
         | "stopping"
+        | "waiting_for_disc"
         | "versioned";
       id?: string;
       code?: string;
@@ -198,6 +199,14 @@ type ConcurrentOperation = (
       operation: "stop-archive-recovery";
       archiveRecoveryId: ArchiveRecoveryId;
       attemptId: ArchiveRecoveryAttemptId;
+      mutationKey: string;
+    }
+  | {
+      operation: "resume-archive-recovery";
+      archiveRecoveryId: ArchiveRecoveryId;
+      attemptId: ArchiveRecoveryAttemptId;
+      checkpointRevision: number;
+      checkpointDigest: string;
       mutationKey: string;
     }
   | {
@@ -15204,6 +15213,197 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       }
       exclusionAccess.close();
     },
+  );
+
+  it.each([
+    ["enqueue", "resume-first", 0, 150],
+    ["enqueue", "encode-first", 150, 0],
+    ["requeue", "resume-first", 0, 150],
+    ["requeue", "encode-first", 150, 0],
+    ["claim", "resume-first", 0, 150],
+    ["claim", "encode-first", 150, 0],
+  ] as const)(
+    "atomically resolves the Resume/%s race with %s ordering",
+    async (operation, ordering, resumeDelayMs, encodeDelayMs) => {
+      const databasePath = createTestDatabasePath();
+      const { access, archive, mistakenSelection } =
+        createDiscSelectionCorrectionFixture({
+          databasePath,
+          key: `resume-${operation}-race-${ordering}`,
+        });
+      const profile = access.encodingProfiles.create({
+        key: `resume-${operation}-race-${ordering}`,
+        displayName: `Resume ${operation} race ${ordering}`,
+        mediaDomain: "dvd_video",
+        settings: { preset: "Fast 480p30" },
+      });
+      const recoveryId =
+        `resume-${operation}-race-${ordering}` as ArchiveRecoveryId;
+      const existingJob = operation === "enqueue"
+        ? null
+        : access.encodeJobs.enqueue({
+          discSelectionId: mistakenSelection.id,
+          encodingProfileId: profile.id,
+          outputPath: `/media/movies/Resume ${operation} Race ${ordering}.mkv`,
+        });
+      if (
+        operation === "requeue" ||
+        (operation === "claim" && ordering === "resume-first")
+      ) {
+        const claim = access.encodeJobs.claimNext(
+          `resume-${operation}-race-preparation-${ordering}`,
+        );
+        if (claim === null) throw new Error("Expected Encode Job claim");
+        access.encodeJobs.fail(claim, "Synthetic race predecessor failure");
+      }
+      markArchiveWithDvdRecoveryEvidence(
+        databasePath,
+        archive.id,
+        `resume-${operation}-race-${ordering}`,
+        { archiveRecoveryId: recoveryId },
+      );
+      const recovery = access.catalog.findArchiveRecovery(archive.id);
+      const checkpoint = access.catalog.findDvdArchiveEvidenceHeader(
+        archive.id,
+      );
+      if (recovery === null || checkpoint === null) {
+        throw new Error("Expected resumable Archive Recovery");
+      }
+      access.dvdRecoveryStorage.record({
+        contractVersion: "dvd-recovery-storage-preflight-v1",
+        status: "supported",
+        reasonCode: null,
+        facts: {
+          filesystemType: "synthetic-local",
+          storageClass: "local",
+          mutationProtection: {
+            status: "verified",
+            contract: "linux-rwf-atomic-v1",
+            unitBytes: 4_096,
+            memoryAlignmentBytes: 512,
+          },
+          journalReservationBytes: 1_048_576,
+          journalPayloadBytes: 983_040,
+          journalReservation: "verified",
+          journalSynchronization: "verified",
+          imageSynchronization: "verified",
+          checkpointSynchronization: "verified",
+          checkpointReplacement: "verified",
+          directorySynchronization: "verified",
+          crossProcessWriterExclusion: "verified",
+          crossHostWriterExclusion: "not_applicable",
+          disconnectionBehavior: "not_applicable",
+        },
+      });
+      const paused = new DatabaseSync(databasePath);
+      paused.prepare(`UPDATE archive_recoveries
+        SET status = 'paused', pause_reason = 'no_progress', updated_at = 2
+        WHERE id = ?`).run(recoveryId);
+      paused.close();
+      access.close();
+      const exclusionAccess = openEncodeExclusionTestDatabase(databasePath);
+
+      const encodeOperation: ConcurrentOperation = operation === "enqueue"
+        ? {
+          operation: "enqueue-encode",
+          discSelectionId: mistakenSelection.id,
+          encodingProfileId: profile.id,
+          outputPath:
+            `/media/movies/Resume Enqueue Race Fresh ${ordering}.mkv`,
+          delayMs: encodeDelayMs,
+        }
+        : operation === "requeue"
+        ? {
+          operation: "requeue-encode",
+          encodeJobId: existingJob!.id,
+          mutationKey: `resume-requeue-race-${ordering}`,
+          delayMs: encodeDelayMs,
+        }
+        : ordering === "resume-first"
+        ? {
+          operation: "queue-stale-and-claim-encode",
+          encodeJobId: existingJob!.id,
+          delayMs: encodeDelayMs,
+        }
+        : { operation: "claim-encode", delayMs: encodeDelayMs };
+      const resumeMutationKeys = {
+        enqueue: {
+          "resume-first": "00000000-0000-4000-8000-000000000491",
+          "encode-first": "00000000-0000-4000-8000-000000000492",
+        },
+        requeue: {
+          "resume-first": "00000000-0000-4000-8000-000000000493",
+          "encode-first": "00000000-0000-4000-8000-000000000494",
+        },
+        claim: {
+          "resume-first": "00000000-0000-4000-8000-000000000495",
+          "encode-first": "00000000-0000-4000-8000-000000000496",
+        },
+      } as const;
+      const results = await runBarrierWorkers({
+        databasePath,
+        allowDvdRecoveryEvidenceEncodingForExclusionTest: true,
+        mode: "operation",
+        operations: [{
+          operation: "resume-archive-recovery",
+          archiveRecoveryId: recoveryId,
+          attemptId: recovery.attemptId,
+          checkpointRevision: checkpoint.currentManifestRevision,
+          checkpointDigest: checkpoint.currentManifestDigest,
+          mutationKey: resumeMutationKeys[operation][ordering],
+          delayMs: resumeDelayMs,
+        }, encodeOperation],
+      });
+
+      const settled = exclusionAccess.catalog.findArchiveRecovery(archive.id);
+      if (ordering === "resume-first") {
+        expect(results[0]).toEqual({
+          outcome: "waiting_for_disc",
+          id: recoveryId,
+        });
+        expect(results[1]).toEqual(operation === "claim"
+          ? { outcome: "rejected" }
+          : { outcome: "rejected", code: "ENCODE_WORK_CONFLICT" });
+        expect(settled).toMatchObject({
+          id: recoveryId,
+          status: "waiting_for_disc",
+          resumeOperationId: expect.any(String),
+          work: expect.objectContaining({ status: "requested" }),
+        });
+        expect(settled?.attemptId).not.toBe(recovery.attemptId);
+        expect(exclusionAccess.encodeJobs.list()).toEqual(
+          operation === "enqueue"
+            ? []
+            : [expect.objectContaining({
+              id: existingJob!.id,
+              status: operation === "requeue" ? "failed" : "queued",
+            })],
+        );
+      } else {
+        expect(results[0]).toEqual({
+          outcome: "rejected",
+          code: "ENCODE_WORK_CONFLICT",
+        });
+        expect(results[1]).toMatchObject({
+          outcome: operation === "claim" ? "claimed" : "enqueued",
+        });
+        expect(settled).toMatchObject({
+          id: recoveryId,
+          status: "paused",
+          attemptId: recovery.attemptId,
+          resumeOperationId: null,
+          work: null,
+        });
+        expect(exclusionAccess.encodeJobs.list()).toEqual([
+          expect.objectContaining({
+            ...(existingJob === null ? {} : { id: existingJob.id }),
+            status: operation === "claim" ? "running" : "queued",
+          }),
+        ]);
+      }
+      exclusionAccess.close();
+    },
+    20_000,
   );
 
   it.each([

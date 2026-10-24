@@ -233,6 +233,27 @@ try {
         value: { outcome: "rejected", code: error.code },
       });
     }
+  } else if (workerData.operation === "resume-archive-recovery") {
+    try {
+      const recovery = access.archiveRecoveryWork.requestResume({
+        mutationKey: workerData.mutationKey,
+        archiveRecoveryId: workerData.archiveRecoveryId,
+        attemptId: workerData.attemptId,
+        checkpointRevision: workerData.checkpointRevision,
+        checkpointDigest: workerData.checkpointDigest,
+        speedMode: "normal",
+      });
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: recovery.status, id: recovery.id },
+      });
+    } catch (error) {
+      if (!(error instanceof EncodeWorkConflictError)) throw error;
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "rejected", code: error.code },
+      });
+    }
   } else if (workerData.operation === "complete-catalog-review") {
     try {
       const archive = access.catalog.completeCatalogReview(

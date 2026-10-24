@@ -412,6 +412,96 @@ it("applies and records an explicit Resume speed before verification reads", asy
   }
 });
 
+it("retries Resume verification after speed selection is cancelled", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`UPDATE archive_recoveries SET
+    status = 'paused', pause_reason = 'no_progress', updated_at = updated_at + 1
+    WHERE id = ?`).run(seeded.recoveryId);
+  database.close();
+  expect((await fixture.run([
+    "archive-recovery", "resume", seeded.recoveryId,
+    "--key", "00000000-0000-4000-8000-000000000624",
+    "--attempt-id", seeded.attemptId,
+    "--checkpoint-revision", String(seeded.pointer.currentManifestRevision),
+    "--checkpoint-digest", seeded.pointer.currentManifestDigest,
+    "--speed-mode", "low",
+  ])).exitCode).toBe(0);
+
+  const shutdown = new AbortController();
+  let cancelFirstRequest = true;
+  const speedController = {
+    apply: vi.fn(async (input: { signal: AbortSignal }) => {
+      if (cancelFirstRequest) {
+        cancelFirstRequest = false;
+        shutdown.abort();
+        input.signal.throwIfAborted();
+      }
+      return {
+        attemptedSpeeds: [4],
+        selectedSpeed: 4,
+        observedSpeed: 4,
+        outcome: "accepted" as const,
+      };
+    }),
+  };
+  const source = immediateVerificationReader((startLba) => {
+    const index = startLba / 64;
+    const bytes = Buffer.alloc(32 * 2_048, index);
+    bytes[bytes.length - 1] = index + 1;
+    return { outcome: "readable", bytes };
+  });
+  const access = fixture.openAccess();
+  try {
+    expect(await pollDvdDiscVerification({
+      access,
+      reader: source.reader,
+      workerExecutionId: "synthetic-cancelled-speed-verifier",
+      mediaGenerationObserver: {
+        async observe() {
+          return "synthetic-verification-generation";
+        },
+      },
+      speedController,
+      signal: shutdown.signal,
+    })).toBe(true);
+    const retry = access.dvdDiscVerifications.findLatestForRecovery(
+      seeded.recoveryId,
+    )!;
+    expect(retry).toMatchObject({
+      status: "queued",
+      discInspectionId: seeded.inspection.id,
+    });
+    expect(access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "eligible",
+        speedRequestResult: null,
+        work: { status: "requested", verificationId: retry.id },
+      });
+
+    expect(await pollDvdDiscVerification({
+      access,
+      reader: source.reader,
+      workerExecutionId: "synthetic-restarted-speed-verifier",
+      mediaGenerationObserver: {
+        async observe() {
+          return "synthetic-verification-generation";
+        },
+      },
+      speedController,
+    })).toBe(true);
+    expect(speedController.apply).toHaveBeenCalledTimes(2);
+    expect(source.start).toHaveBeenCalled();
+    expect(access.dvdDiscVerifications.findLatestForRecovery(
+      seeded.recoveryId,
+    )).toMatchObject({ status: "completed", outcome: "match" });
+  } finally {
+    access.close();
+  }
+});
+
 it("continues a productive pass in reverse and pauses after no progress", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);

@@ -2226,7 +2226,7 @@ export function createDataAccessInternal(
       recovery.work.verificationId === verification.id
     ) {
       if (retryableInterruption) {
-        insertQueuedDvdDiscVerification(transaction, {
+        const retry = insertQueuedDvdDiscVerification(transaction, {
           archiveRecoveryId: verification.archiveRecoveryId,
           archiveRecoveryAttemptId: verification.archiveRecoveryAttemptId,
           originalDiscArchiveId: verification.originalDiscArchiveId,
@@ -2239,6 +2239,22 @@ export function createDataAccessInternal(
           checkpointRevision: verification.checkpointRevision,
           checkpointDigest: verification.checkpointDigest,
         }, timestamp);
+        requireRow(
+          transaction.update(archiveRecoveryWork).set({
+            verificationId: retry.id,
+            requestedAt: timestamp,
+            updatedAt: timestamp,
+          }).where(and(
+            eq(archiveRecoveryWork.archiveRecoveryId, recovery.id),
+            eq(archiveRecoveryWork.attemptId, recovery.attemptId),
+            eq(archiveRecoveryWork.status, "requested"),
+            eq(archiveRecoveryWork.verificationId, verification.id),
+          )).returning({
+            archiveRecoveryId: archiveRecoveryWork.archiveRecoveryId,
+          }).get(),
+          "Archive Recovery work",
+          recovery.id,
+        );
         return;
       }
       if (evaluated?.outcome === "match") return;

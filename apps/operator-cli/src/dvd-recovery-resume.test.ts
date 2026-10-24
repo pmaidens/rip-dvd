@@ -338,7 +338,35 @@ it("retries interrupted Resume verification without another Resume", async () =>
     .toMatchObject({
       status: "eligible",
       attemptId: recovery.attemptId,
-      work: { status: "requested" },
+      work: {
+        status: "requested",
+        verificationId: expect.any(String),
+      },
+    });
+  const retry = access.dvdDiscVerifications.claimNext(
+    "synthetic-interrupted-resume-retry-verifier",
+  )!;
+  const sample = seeded.sampleManifest.samples[0]!;
+  const mismatch = {
+    ...sample,
+    outcome: "mismatch" as const,
+    referenceDigest: sample.digest,
+    observedDigest: "e".repeat(64),
+    diagnostic: null,
+  };
+  access.dvdDiscVerifications.appendFinding(retry, mismatch);
+  access.dvdDiscVerifications.complete(retry, {
+    findings: [mismatch],
+    budgetExhausted: false,
+    interrupted: false,
+    insertionChanged: false,
+    checkpointChanged: false,
+  });
+  expect(access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+    .toMatchObject({
+      status: "waiting_for_disc",
+      attemptId: recovery.attemptId,
+      work: { status: "requested", verificationId: null },
     });
   access.close();
 });

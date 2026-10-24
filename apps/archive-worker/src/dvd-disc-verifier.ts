@@ -734,7 +734,26 @@ export async function pollDvdDiscVerification(input: {
       throw new Error("DVD Disc Verification checkpoint is unavailable");
     }
   } catch {
-    input.access.dvdDiscVerifications.fail(claim);
+    if (input.signal?.aborted) {
+      const current = input.access.dvdDiscVerifications.find(claim.id);
+      try {
+        if (current === null || current.status !== "running") {
+          input.access.dvdDiscVerifications.fail(claim);
+        } else {
+          input.access.dvdDiscVerifications.complete(current, {
+            findings: current.findings,
+            budgetExhausted: current.budgetExhausted,
+            interrupted: true,
+            insertionChanged: false,
+            checkpointChanged: false,
+          });
+        }
+      } catch {
+        input.access.dvdDiscVerifications.fail(claim);
+      }
+    } else {
+      input.access.dvdDiscVerifications.fail(claim);
+    }
   } finally {
     clearInterval(heartbeat);
   }
