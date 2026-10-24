@@ -137,6 +137,7 @@ type ConcurrentWorkerResult =
         | "corrected"
         | "created"
         | "enqueued"
+        | "queued"
         | "rejected"
         | "requested"
         | "reviewed"
@@ -207,6 +208,11 @@ type ConcurrentOperation = (
       attemptId: ArchiveRecoveryAttemptId;
       checkpointRevision: number;
       checkpointDigest: string;
+      mutationKey: string;
+    }
+  | {
+      operation: "submit-recovery-reconciliation";
+      archiveRecoveryId: ArchiveRecoveryId;
       mutationKey: string;
     }
   | {
@@ -15402,6 +15408,121 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         ]);
       }
       exclusionAccess.close();
+    },
+    20_000,
+  );
+
+  it.each([
+    ["resume-first", 0, 150],
+    ["reconciliation-first", 150, 0],
+  ] as const)(
+    "atomically resolves the Resume/reconciliation race with %s ordering",
+    async (ordering, resumeDelayMs, reconciliationDelayMs) => {
+      const databasePath = createTestDatabasePath();
+      const key = `resume-reconcile-${ordering === "resume-first" ? "rf" : "cf"}`;
+      const { access, archive } = createDiscSelectionCorrectionFixture({
+        databasePath,
+        key,
+      });
+      const recoveryId = `${key}-recovery` as ArchiveRecoveryId;
+      markArchiveWithDvdRecoveryEvidence(
+        databasePath,
+        archive.id,
+        key,
+        { archiveRecoveryId: recoveryId },
+      );
+      const recovery = access.catalog.findArchiveRecovery(archive.id);
+      const checkpoint = access.catalog.findDvdArchiveEvidenceHeader(
+        archive.id,
+      );
+      if (recovery === null || checkpoint === null) {
+        throw new Error("Expected resumable Archive Recovery");
+      }
+      access.dvdRecoveryStorage.record({
+        contractVersion: "dvd-recovery-storage-preflight-v1",
+        status: "supported",
+        reasonCode: null,
+        facts: {
+          filesystemType: "synthetic-local",
+          storageClass: "local",
+          mutationProtection: {
+            status: "verified",
+            contract: "linux-rwf-atomic-v1",
+            unitBytes: 4_096,
+            memoryAlignmentBytes: 512,
+          },
+          journalReservationBytes: 1_048_576,
+          journalPayloadBytes: 983_040,
+          journalReservation: "verified",
+          journalSynchronization: "verified",
+          imageSynchronization: "verified",
+          checkpointSynchronization: "verified",
+          checkpointReplacement: "verified",
+          directorySynchronization: "verified",
+          crossProcessWriterExclusion: "verified",
+          crossHostWriterExclusion: "not_applicable",
+          disconnectionBehavior: "not_applicable",
+        },
+      });
+      const sqlite = new DatabaseSync(databasePath);
+      sqlite.prepare(`UPDATE archive_recoveries
+        SET status = 'paused', pause_reason = 'no_progress', updated_at = 2
+        WHERE id = ?`).run(recoveryId);
+      sqlite.close();
+      access.close();
+
+      const results = await runBarrierWorkers({
+        databasePath,
+        allowDvdRecoveryEvidenceEncodingForExclusionTest: true,
+        mode: "operation",
+        operations: [{
+          operation: "resume-archive-recovery",
+          archiveRecoveryId: recoveryId,
+          attemptId: recovery.attemptId,
+          checkpointRevision: checkpoint.currentManifestRevision,
+          checkpointDigest: checkpoint.currentManifestDigest,
+          mutationKey: ordering === "resume-first"
+            ? "00000000-0000-4000-8000-000000000497"
+            : "00000000-0000-4000-8000-000000000498",
+          delayMs: resumeDelayMs,
+        }, {
+          operation: "submit-recovery-reconciliation",
+          archiveRecoveryId: recoveryId,
+          mutationKey: ordering === "resume-first"
+            ? "00000000-0000-4000-8000-000000000499"
+            : "00000000-0000-4000-8000-000000000500",
+          delayMs: reconciliationDelayMs,
+        }],
+      });
+
+      const settledAccess = openEncodeExclusionTestDatabase(databasePath);
+      const settled = settledAccess.catalog.findArchiveRecovery(archive.id);
+      const latest = settledAccess.dvdRecoveryReconciliations
+        .findLatestForRecovery(recoveryId);
+      if (ordering === "resume-first") {
+        expect(results[0]).toEqual({
+          outcome: "waiting_for_disc",
+          id: recoveryId,
+        });
+        expect(results[1]).toEqual({ outcome: "rejected" });
+        expect(settled).toMatchObject({
+          status: "waiting_for_disc",
+          resumeOperationId: expect.any(String),
+          work: { status: "requested" },
+        });
+        expect(latest).toBeNull();
+      } else {
+        expect(results[0]).toEqual({ outcome: "rejected" });
+        expect(results[1]).toMatchObject({ outcome: "queued" });
+        expect(settled).toMatchObject({
+          status: "paused",
+          attemptId: recovery.attemptId,
+          resumeOperationId: null,
+          work: null,
+        });
+        expect(latest).toMatchObject({ status: "queued" });
+      }
+      settledAccess.close();
     },
     20_000,
   );

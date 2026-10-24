@@ -379,21 +379,38 @@ async function step(
   name: DvdRecoveryBatchStep,
   work: () => Promise<void>,
 ): Promise<void> {
-  assertRecoveryWorkClaim(options);
-  assertRecoveryWriteAuthority(options, name !== "cleanup");
-  options.signal?.throwIfAborted();
-  ownership.assertOwned();
-  await options.fault?.(`before:${name}`);
-  assertRecoveryWorkClaim(options);
-  assertRecoveryWriteAuthority(options, name !== "cleanup");
-  options.signal?.throwIfAborted();
-  ownership.assertOwned();
-  await work();
-  assertRecoveryWorkClaim(options);
-  await options.fault?.(`after:${name}`);
-  assertRecoveryWorkClaim(options);
-  options.signal?.throwIfAborted();
-  ownership.assertOwned();
+  let mutationStarted = false;
+  try {
+    assertRecoveryWorkClaim(options);
+    assertRecoveryWriteAuthority(options, name !== "cleanup");
+    options.signal?.throwIfAborted();
+    ownership.assertOwned();
+    await options.fault?.(`before:${name}`);
+    assertRecoveryWorkClaim(options);
+    assertRecoveryWriteAuthority(options, name !== "cleanup");
+    options.signal?.throwIfAborted();
+    ownership.assertOwned();
+    mutationStarted = true;
+    await work();
+    assertRecoveryWorkClaim(options);
+    await options.fault?.(`after:${name}`);
+    assertRecoveryWorkClaim(options);
+    options.signal?.throwIfAborted();
+    ownership.assertOwned();
+  } catch (cause) {
+    if (!mutationStarted) throw cause;
+    if (cause instanceof DvdRecoveryBatchFault) {
+      if (cause.retainRecoveryWork) throw cause;
+      throw new DvdRecoveryBatchFault(cause.code, {
+        cause,
+        retainRecoveryWork: true,
+      });
+    }
+    throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT", {
+      cause,
+      retainRecoveryWork: true,
+    });
+  }
 }
 
 async function readImageVersion(

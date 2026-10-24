@@ -68,6 +68,7 @@ export function dvdRecoveryResumeAction(input: {
   recovery: ArchiveRecovery;
   checkpoint: DvdArchiveEvidenceHeader | null;
   reconciliation: DvdRecoveryReconciliation | null;
+  ownershipReasons: readonly { code: string; message: string }[];
   storageReason: { code: string; message: string } | null;
   encodeJobs: readonly Pick<EncodeJob, "id" | "status" | "createdAt">[];
 }) {
@@ -107,6 +108,7 @@ export function dvdRecoveryResumeAction(input: {
   const blockingReasons = [
     statusReason,
     checkpointReason,
+    ...input.ownershipReasons,
     reconciliationReason,
     input.storageReason,
     encodeReason,

@@ -2058,28 +2058,36 @@ export function createDataAccessInternal(
   const currentResumeInsertion = (
     transaction: CatalogTransaction,
     recovery: Pick<ArchiveRecovery, "originalDiscArchiveId">,
-  ) => transaction.select({ inspection: discInspections }).from(
-    originalDiscArchives,
-  ).innerJoin(
-    detectedDiscs,
-    eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
-  ).innerJoin(
-    discInspections,
-    eq(discInspections.opticalDriveId, detectedDiscs.opticalDriveId),
-  ).innerJoin(
-    opticalDrives,
-    eq(opticalDrives.id, discInspections.opticalDriveId),
-  ).where(and(
-    eq(originalDiscArchives.id, recovery.originalDiscArchiveId),
-    eq(opticalDrives.isPresent, true),
-    eq(opticalDrives.isEnabled, true),
-    eq(discInspections.isCurrent, true),
-    eq(discInspections.status, "completed"),
-    isNotNull(discInspections.detectedDiscId),
-  )).orderBy(
-    desc(discInspections.updatedAt),
-    desc(discInspections.id),
-  ).limit(1).get()?.inspection ?? null;
+  ) => {
+    const source = transaction.select({
+      opticalDriveId: detectedDiscs.opticalDriveId,
+    }).from(originalDiscArchives).innerJoin(
+      detectedDiscs,
+      eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+    ).where(eq(
+      originalDiscArchives.id,
+      recovery.originalDiscArchiveId,
+    )).get();
+    const candidates = transaction.select({ inspection: discInspections })
+      .from(discInspections).innerJoin(
+        opticalDrives,
+        eq(opticalDrives.id, discInspections.opticalDriveId),
+      ).where(and(
+        eq(opticalDrives.isPresent, true),
+        eq(opticalDrives.isEnabled, true),
+        eq(discInspections.isCurrent, true),
+        eq(discInspections.status, "completed"),
+        isNotNull(discInspections.detectedDiscId),
+      )).orderBy(
+        desc(discInspections.updatedAt),
+        desc(discInspections.id),
+      ).all();
+    const sourceInsertion = candidates.find(({ inspection }) =>
+      inspection.opticalDriveId === source?.opticalDriveId
+    );
+    return sourceInsertion?.inspection ??
+      (candidates.length === 1 ? candidates[0]!.inspection : null);
+  };
   const queueResumeVerification = (
     transaction: CatalogTransaction,
     recovery: ArchiveRecovery,
@@ -10443,7 +10451,8 @@ export function createDataAccessInternal(
               | "running"
               | "stopping"
               | "faulted",
-          )
+          ) && !(current.recovery.status === "paused" &&
+            current.recovery.pauseReason === "storage_fault")
           ? "recovery status" : null,
         current.archive.integrityEvidenceRevision !==
             current.header.currentManifestRevision
@@ -10560,7 +10569,8 @@ export function createDataAccessInternal(
         )).get();
       transaction.update(archiveRecoveries).set({
         status: current.recovery.status === "stopping" ||
-            current.recovery.status === "faulted"
+            current.recovery.status === "faulted" ||
+            current.recovery.status === "paused"
           ? current.recovery.status
           : recoveryWork !== undefined
             ? "running"
@@ -13390,7 +13400,8 @@ export function createDataAccessInternal(
           if (
             recovery.status === "running" || recovery.status === "stopping" ||
             ((recovery.status === "eligible" ||
-                recovery.status === "paused") &&
+                recovery.status === "paused" ||
+                recovery.status === "waiting_for_disc") &&
               recovery.work?.status === "requested")
           ) {
             throw new InvalidStatusTransitionError(

@@ -3337,10 +3337,12 @@ it("keeps a transport fault out of source evidence and preserves the Archive Job
   }
 });
 
-it("rolls forward a published checkpoint after the worker faults", async () => {
+it("rolls forward a published checkpoint and explicitly resumes after a storage fault", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
-  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [
+    { startLba: 900, sectorCount: 2, classification: "skipped_untested" },
+  ]);
   await completeVerification(fixture, seeded);
   const source = immediateReader(() => ({
     outcome: "readable",
@@ -3352,7 +3354,7 @@ it("rolls forward a published checkpoint after the worker faults", async () => {
       ...options,
       fault(point) {
         if (point === "after:pointer") {
-          throw new Error("Synthetic crash after pointer publication");
+          throw new DvdRecoveryBatchFault("CHECKPOINT_REPLACEMENT_FAILED");
         }
       },
     });
@@ -3360,9 +3362,10 @@ it("rolls forward a published checkpoint after the worker faults", async () => {
     expect(await pollDvdRecoveryPass({ ...input, commit })).toBe(true);
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({
-        status: "faulted",
-        faultCode: "CONSISTENCY_FAULT",
-        work: null,
+        status: "paused",
+        pauseReason: "storage_fault",
+        faultCode: null,
+        work: expect.objectContaining({ status: "claimed" }),
       });
 
     await expect(reconcileDvdRecoveryCheckpoint({
@@ -3376,10 +3379,40 @@ it("rolls forward a published checkpoint after the worker faults", async () => {
     });
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({
-        status: "faulted",
-        faultCode: "CONSISTENCY_FAULT",
+        status: "paused",
+        pauseReason: "storage_fault",
         work: null,
       });
+    const reconciled = input.access.catalog.findArchiveRecoveryById(
+      seeded.recoveryId,
+    )!;
+    const checkpoint = input.access.catalog.findDvdArchiveEvidenceHeader(
+      seeded.archive.id,
+    )!;
+    expect(await fixture.run([
+      "archive-recovery",
+      "resume",
+      reconciled.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000501",
+      "--attempt-id",
+      reconciled.attemptId,
+      "--checkpoint-revision",
+      String(checkpoint.currentManifestRevision),
+      "--checkpoint-digest",
+      checkpoint.currentManifestDigest,
+      "--speed-mode",
+      "normal",
+    ])).toMatchObject({
+      exitCode: 0,
+      result: {
+        archiveRecovery: {
+          status: "eligible",
+          pauseReason: null,
+          work: { status: "requested" },
+        },
+      },
+    });
   } finally {
     input.access.close();
   }

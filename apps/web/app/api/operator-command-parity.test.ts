@@ -4642,6 +4642,32 @@ it("returns the same operational records and evidence through web and CLI", asyn
             },
           },
         });
+        const recoveryResponse = createOperationsResponse(
+          access,
+          new Request(
+            "http://localhost/api/operations?kind=archive-recoveries&id=synthetic-evidence-recovery",
+          ),
+          fixture.originalsLibraryPath,
+        );
+        const recoveryCli = await fixture.run([
+          "inspect",
+          "archive-recoveries",
+          "synthetic-evidence-recovery",
+        ]);
+        expect(recoveryCli.result).toEqual(await recoveryResponse.json());
+        expect(recoveryCli.result).toMatchObject({
+          item: {
+            availableActions: expect.arrayContaining([
+              expect.objectContaining({
+                name: "resume",
+                available: false,
+                blockingReasons: expect.arrayContaining([
+                  expect.objectContaining({ code: "WRITER_NOT_QUIESCENT" }),
+                ]),
+              }),
+            ]),
+          },
+        });
       },
     });
     expect(

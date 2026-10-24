@@ -219,6 +219,133 @@ it("activates a waiting Resume only after an insertion appears", async () => {
   }
 });
 
+it("uses the sole current insertion on an alternate drive for Resume", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const stopped = stopRecovery(fixture, seeded.recoveryId, seeded.attemptId);
+  const sqlite = new DatabaseSync(fixture.databasePath);
+  sqlite.prepare("UPDATE disc_inspections SET is_current = 0").run();
+  sqlite.close();
+  const access = fixture.openAccess();
+  const alternateDrive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/synthetic-resume-alternate",
+    isEnabled: true,
+    isPresent: true,
+  });
+  const alternateDisc = access.catalog.registerDetectedDisc({
+    opticalDriveId: alternateDrive.id,
+    discKind: "dvd",
+    fingerprint: seeded.sourceDisc.fingerprint,
+  });
+  const started = beginSettledDiscInspectionForTest(access, {
+    opticalDriveId: alternateDrive.id,
+    mediaGeneration: "synthetic-resume-alternate-generation",
+    mediaCapacityBytes: 1_024 * 2_048,
+  });
+  access.discInspections.record(started.claim, {
+    type: "metadata",
+    volumeLabel: "SYNTHETIC_RESUME_ALTERNATE",
+    titleCount: 1,
+    chapterCount: 1,
+    audioStreamCount: 1,
+    subtitleStreamCount: 0,
+    totalBytes: 1_024 * 2_048,
+  });
+  const alternateInspection = access.discInspections.record(started.claim, {
+    type: "complete",
+    detectedDiscId: alternateDisc.id,
+  });
+  started.restoreSystemTime();
+  access.close();
+
+  expect(await fixture.run(resumeArgs({
+    recoveryId: stopped.id,
+    attemptId: stopped.attemptId,
+    revision: seeded.pointer.currentManifestRevision,
+    digest: seeded.pointer.currentManifestDigest,
+    mutationKey: "00000000-0000-4000-8000-000000000610",
+  }))).toMatchObject({
+    exitCode: 0,
+    result: {
+      archiveRecovery: {
+        status: "eligible",
+        work: { status: "requested" },
+      },
+    },
+  });
+  const verified = fixture.openAccess();
+  expect(verified.dvdDiscVerifications.findLatestForRecovery(stopped.id))
+    .toMatchObject({ discInspectionId: alternateInspection.id });
+  verified.close();
+});
+
+it("waits when Resume sees ambiguous alternate-drive insertions", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const stopped = stopRecovery(fixture, seeded.recoveryId, seeded.attemptId);
+  const sqlite = new DatabaseSync(fixture.databasePath);
+  sqlite.prepare("UPDATE disc_inspections SET is_current = 0").run();
+  sqlite.close();
+  const access = fixture.openAccess();
+  for (const ordinal of [1, 2]) {
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: `/dev/synthetic-resume-ambiguous-${ordinal}`,
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: `${seeded.sourceDisc.fingerprint}-${ordinal}`,
+    });
+    const started = beginSettledDiscInspectionForTest(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: `synthetic-resume-ambiguous-generation-${ordinal}`,
+      mediaCapacityBytes: 1_024 * 2_048,
+    });
+    access.discInspections.record(started.claim, {
+      type: "metadata",
+      volumeLabel: `SYNTHETIC_RESUME_AMBIGUOUS_${ordinal}`,
+      titleCount: 1,
+      chapterCount: 1,
+      audioStreamCount: 1,
+      subtitleStreamCount: 0,
+      totalBytes: 1_024 * 2_048,
+    });
+    access.discInspections.record(started.claim, {
+      type: "complete",
+      detectedDiscId: disc.id,
+    });
+    started.restoreSystemTime();
+  }
+  access.close();
+
+  expect(await fixture.run(resumeArgs({
+    recoveryId: stopped.id,
+    attemptId: stopped.attemptId,
+    revision: seeded.pointer.currentManifestRevision,
+    digest: seeded.pointer.currentManifestDigest,
+    mutationKey: "00000000-0000-4000-8000-000000000611",
+  }))).toMatchObject({
+    exitCode: 0,
+    result: {
+      archiveRecovery: {
+        status: "waiting_for_disc",
+        work: { status: "requested" },
+      },
+    },
+  });
+  const waiting = fixture.openAccess();
+  expect(waiting.catalog.findArchiveRecoveryById(stopped.id)).toMatchObject({
+    work: { status: "requested", verificationId: null },
+  });
+  expect(waiting.dvdDiscVerifications.findLatestForRecovery(stopped.id))
+    .toBeNull();
+  waiting.close();
+});
+
 it("waits for a changed insertion after Resume verification mismatch", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);

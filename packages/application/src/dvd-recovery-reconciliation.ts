@@ -40,7 +40,8 @@ export function dvdRecoveryReconciliationBlockingReasons(
   const active = latest?.status === "queued" || latest?.status === "running";
   const recoveryPassReserved = recovery.status === "running" ||
     recovery.status === "stopping" ||
-    ((recovery.status === "eligible" || recovery.status === "paused") &&
+    ((recovery.status === "eligible" || recovery.status === "paused" ||
+        recovery.status === "waiting_for_disc") &&
       recovery.work?.status === "requested");
   return [
     ...(active ? [{
