@@ -88,6 +88,11 @@ export async function previewDvdDiscConfirmation(
   const persistedVerification = verification === null
     ? null
     : access.dvdDiscVerifications.find(verification.id);
+  const recovery = access.catalog.findArchiveRecoveryById(archiveRecoveryId);
+  const waitingResumeConfirmation = recovery?.status === "waiting_for_disc" &&
+    recovery.resumeOperationId !== null &&
+    recovery.work?.status === "requested" &&
+    recovery.work.verificationId === persistedVerification?.id;
   const expiredConfirmationForVerification = latestConfirmation !== null &&
     persistedVerification !== null &&
     latestConfirmation.verificationId === persistedVerification.id &&
@@ -95,7 +100,9 @@ export async function previewDvdDiscConfirmation(
   const blockingReasons = inspection.writeAuthority.blockingReasons.filter(
     (reason) =>
       reason.code !== "DISC_VERIFICATION_MISMATCH" &&
-      reason.code !== "DISC_VERIFICATION_INCONCLUSIVE",
+      reason.code !== "DISC_VERIFICATION_INCONCLUSIVE" &&
+      !(waitingResumeConfirmation &&
+        reason.code === "RECOVERY_WAITING_FOR_DISC"),
   );
   if (verification === null) {
     blockingReasons.push({

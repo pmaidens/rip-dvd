@@ -478,6 +478,8 @@ async function reclaimInterruptedPass(input: {
       claim,
       faultCode: stopFaultCode(error),
       retainWork: true,
+      storageFault: error instanceof DvdRecoveryReconciliationFault &&
+        error.code === "STORAGE_UNSUPPORTED",
     });
     return "faulted";
   }
@@ -782,6 +784,10 @@ export async function pollDvdRecoveryPass(input: {
               claim,
               faultCode: stopFaultCode(reconciliationError),
               retainWork: true,
+              storageFault:
+                reconciliationError instanceof
+                  DvdRecoveryReconciliationFault &&
+                reconciliationError.code === "STORAGE_UNSUPPORTED",
             });
           }
         } else {
@@ -810,6 +816,8 @@ export async function pollDvdRecoveryPass(input: {
         : "CONSISTENCY_FAULT",
       retainWork: error instanceof DvdRecoveryBatchFault &&
         error.retainRecoveryWork,
+      storageFault: error instanceof DvdRecoveryBatchFault &&
+        error.storageFault,
     });
   } finally {
     clearInterval(renewalInterval);

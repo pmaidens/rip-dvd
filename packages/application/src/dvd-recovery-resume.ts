@@ -85,13 +85,19 @@ export function dvdRecoveryResumeAction(input: {
         message: "Archive Recovery has no current checkpoint.",
       }
     : null;
-  const reconciliationReason = input.reconciliation?.status === "queued" ||
-      input.reconciliation?.status === "running"
-    ? {
-        code: "RECOVERY_RECONCILIATION_ACTIVE",
-        message: "Archive Recovery checkpoint reconciliation is active.",
-      }
-    : null;
+  const reconciliationReason = input.reconciliation === null ||
+      input.reconciliation.status === "completed"
+    ? null
+    : input.reconciliation.status === "failed"
+      ? {
+          code: "RECOVERY_RECONCILIATION_FAILED",
+          message:
+            "Archive Recovery checkpoint reconciliation must succeed before Resume.",
+        }
+      : {
+          code: "RECOVERY_RECONCILIATION_ACTIVE",
+          message: "Archive Recovery checkpoint reconciliation is active.",
+        };
   const encodeConflict = createEncodeWorkConflictCurrent(
     input.recovery,
     input.encodeJobs,

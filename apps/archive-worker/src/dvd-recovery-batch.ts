@@ -83,11 +83,13 @@ export type DvdRecoveryBatchFaultCode =
 
 interface DvdRecoveryBatchFaultOptions extends ErrorOptions {
   retainRecoveryWork?: boolean;
+  storageFault?: boolean;
 }
 
 export class DvdRecoveryBatchFault extends Error {
   override readonly name = "DvdRecoveryBatchFault";
   readonly retainRecoveryWork: boolean;
+  readonly storageFault: boolean;
 
   constructor(
     readonly code: DvdRecoveryBatchFaultCode,
@@ -95,6 +97,7 @@ export class DvdRecoveryBatchFault extends Error {
   ) {
     super(code, options);
     this.retainRecoveryWork = options?.retainRecoveryWork ?? false;
+    this.storageFault = options?.storageFault ?? false;
   }
 }
 
@@ -227,6 +230,7 @@ export interface DvdRecoveryBatchOptions {
   observation: DvdRecoveryReadObservation;
   archiveImageOwnership?: ArchiveImageOwnership;
   atomicWriter?: DvdRecoveryAtomicWriter;
+  directorySync?(path: string): Promise<void>;
   signal?: AbortSignal;
   fault?(point: `before:${DvdRecoveryBatchStep}` | `after:${DvdRecoveryBatchStep}`): void | Promise<void>;
 }
@@ -346,9 +350,33 @@ function hasCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
 }
 
-async function syncDirectory(path: string): Promise<void> {
-  const directory = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  try { await directory.sync(); } finally { await directory.close(); }
+async function syncDirectory(
+  path: string,
+  faultCode: Extract<
+    DvdRecoveryBatchFaultCode,
+    "JOURNAL_SYNC_FAILED" | "CHECKPOINT_SYNC_FAILED" |
+      "CHECKPOINT_REPLACEMENT_FAILED"
+  >,
+  synchronize: (path: string) => Promise<void> = async (directoryPath) => {
+    const directory = await open(
+      directoryPath,
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+    );
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  },
+): Promise<void> {
+  try {
+    await synchronize(path);
+  } catch (cause) {
+    throw new DvdRecoveryBatchFault(faultCode, {
+      cause,
+      storageFault: true,
+    });
+  }
 }
 
 async function pathsFor(options: DvdRecoveryBatchOptions): Promise<RecoveryPaths> {
@@ -404,6 +432,7 @@ async function step(
       throw new DvdRecoveryBatchFault(cause.code, {
         cause,
         retainRecoveryWork: true,
+        storageFault: cause.storageFault,
       });
     }
     throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT", {
@@ -457,9 +486,10 @@ async function reserveJournal(
     constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
     0o600,
   ).catch((cause) => {
+    const exists = hasCode(cause, "EEXIST");
     throw new DvdRecoveryBatchFault(
-      hasCode(cause, "EEXIST") ? "CONSISTENCY_FAULT" : "JOURNAL_RESERVATION_FAILED",
-      { cause },
+      exists ? "CONSISTENCY_FAULT" : "JOURNAL_RESERVATION_FAILED",
+      { cause, storageFault: !exists },
     );
   });
   try {
@@ -473,7 +503,10 @@ async function reserveJournal(
         position += result.bytesWritten;
       }
     } catch (cause) {
-      throw new DvdRecoveryBatchFault("JOURNAL_RESERVATION_FAILED", { cause });
+      throw new DvdRecoveryBatchFault("JOURNAL_RESERVATION_FAILED", {
+        cause,
+        storageFault: true,
+      });
     }
     await descriptor.sync();
     const header = Buffer.alloc(DVD_RECOVERY_JOURNAL_METADATA_BYTES);
@@ -491,62 +524,204 @@ async function reserveJournal(
     return journalDigest;
   } catch (cause) {
     if (cause instanceof DvdRecoveryBatchFault) throw cause;
-    throw new DvdRecoveryBatchFault("JOURNAL_SYNC_FAILED", { cause });
+    throw new DvdRecoveryBatchFault("JOURNAL_SYNC_FAILED", {
+      cause,
+      storageFault: true,
+    });
   } finally {
-    await descriptor.close();
+    try {
+      await descriptor.close();
+    } catch (cause) {
+      throw new DvdRecoveryBatchFault("JOURNAL_SYNC_FAILED", {
+        cause,
+        storageFault: true,
+      });
+    }
   }
 }
 
-async function installImmutableRecord(path: string, value: unknown): Promise<void> {
+async function installImmutableRecord(
+  path: string,
+  value: unknown,
+  directorySync?: (path: string) => Promise<void>,
+): Promise<void> {
   const bytes = canonicalPublicationJson(value);
   try {
     const existing = await readFile(path, "utf8");
-    if (existing !== bytes) throw new Error("Immutable record conflicts");
-    const descriptor = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try { await descriptor.sync(); } finally { await descriptor.close(); }
-    await syncDirectory(dirname(path));
+    if (existing !== bytes) {
+      throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT");
+    }
+    const descriptor = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    ).catch((cause) => {
+      throw new DvdRecoveryBatchFault("CHECKPOINT_SYNC_FAILED", {
+        cause,
+        storageFault: true,
+      });
+    });
+    try {
+      await descriptor.sync();
+    } catch (cause) {
+      throw new DvdRecoveryBatchFault("CHECKPOINT_SYNC_FAILED", {
+        cause,
+        storageFault: true,
+      });
+    } finally {
+      try {
+        await descriptor.close();
+      } catch (cause) {
+        throw new DvdRecoveryBatchFault("CHECKPOINT_SYNC_FAILED", {
+          cause,
+          storageFault: true,
+        });
+      }
+    }
+    await syncDirectory(
+      dirname(path),
+      "CHECKPOINT_SYNC_FAILED",
+      directorySync,
+    );
     return;
   } catch (error) {
-    if (!hasCode(error, "ENOENT")) throw error;
+    if (error instanceof DvdRecoveryBatchFault) throw error;
+    if (!hasCode(error, "ENOENT")) {
+      throw new DvdRecoveryBatchFault("CHECKPOINT_SYNC_FAILED", {
+        cause: error,
+        storageFault: true,
+      });
+    }
   }
   const temporary = `${path}.${process.pid}.tmp`;
   const descriptor = await open(
     temporary,
     constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
     0o600,
-  );
+  ).catch((cause) => {
+    const exists = hasCode(cause, "EEXIST");
+    throw new DvdRecoveryBatchFault(
+      exists ? "CONSISTENCY_FAULT" : "CHECKPOINT_SYNC_FAILED",
+      { cause, storageFault: !exists },
+    );
+  });
   try {
     await descriptor.writeFile(bytes);
     await descriptor.sync();
-  } finally { await descriptor.close(); }
-  try {
-    await link(temporary, path);
-    await syncDirectory(dirname(path));
+  } catch (cause) {
+    throw new DvdRecoveryBatchFault("CHECKPOINT_SYNC_FAILED", {
+      cause,
+      storageFault: true,
+    });
   } finally {
-    await unlink(temporary);
-    await syncDirectory(dirname(path));
+    try {
+      await descriptor.close();
+    } catch (cause) {
+      throw new DvdRecoveryBatchFault("CHECKPOINT_SYNC_FAILED", {
+        cause,
+        storageFault: true,
+      });
+    }
+  }
+  try {
+    await link(temporary, path).catch((cause) => {
+      const exists = hasCode(cause, "EEXIST");
+      throw new DvdRecoveryBatchFault(
+        exists ? "CONSISTENCY_FAULT" : "CHECKPOINT_SYNC_FAILED",
+        { cause, storageFault: !exists },
+      );
+    });
+    await syncDirectory(
+      dirname(path),
+      "CHECKPOINT_SYNC_FAILED",
+      directorySync,
+    );
+  } finally {
+    try {
+      await unlink(temporary);
+    } catch (cause) {
+      throw new DvdRecoveryBatchFault("CHECKPOINT_SYNC_FAILED", {
+        cause,
+        storageFault: true,
+      });
+    }
+    await syncDirectory(
+      dirname(path),
+      "CHECKPOINT_SYNC_FAILED",
+      directorySync,
+    );
   }
 }
 
-async function replacePointer(path: string, value: unknown): Promise<void> {
+async function replacePointer(
+  path: string,
+  value: unknown,
+  directorySync?: (path: string) => Promise<void>,
+): Promise<void> {
   const temporary = `${path}.${process.pid}.next`;
   const descriptor = await open(
     temporary,
     constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
     0o600,
-  );
+  ).catch((cause) => {
+    const exists = hasCode(cause, "EEXIST");
+    throw new DvdRecoveryBatchFault(
+      exists ? "CONSISTENCY_FAULT" : "CHECKPOINT_REPLACEMENT_FAILED",
+      { cause, storageFault: !exists },
+    );
+  });
   try {
     await descriptor.writeFile(canonicalPublicationJson(value));
     await descriptor.sync();
-  } finally { await descriptor.close(); }
-  try {
-    await rename(temporary, path);
-    await syncDirectory(dirname(path));
+  } catch (cause) {
+    throw new DvdRecoveryBatchFault("CHECKPOINT_REPLACEMENT_FAILED", {
+      cause,
+      storageFault: true,
+    });
   } finally {
-    try { await unlink(temporary); } catch (error) { if (!hasCode(error, "ENOENT")) throw error; }
+    try {
+      await descriptor.close();
+    } catch (cause) {
+      throw new DvdRecoveryBatchFault("CHECKPOINT_REPLACEMENT_FAILED", {
+        cause,
+        storageFault: true,
+      });
+    }
   }
-  if (await readFile(path, "utf8") !== canonicalPublicationJson(value)) {
-    throw new Error("Installed recovery pointer differs");
+  try {
+    await rename(temporary, path).catch((cause) => {
+      throw new DvdRecoveryBatchFault("CHECKPOINT_REPLACEMENT_FAILED", {
+        cause,
+        storageFault: true,
+      });
+    });
+    await syncDirectory(
+      dirname(path),
+      "CHECKPOINT_REPLACEMENT_FAILED",
+      directorySync,
+    );
+  } finally {
+    try {
+      await unlink(temporary);
+    } catch (cause) {
+      if (!hasCode(cause, "ENOENT")) {
+        throw new DvdRecoveryBatchFault("CHECKPOINT_REPLACEMENT_FAILED", {
+          cause,
+          storageFault: true,
+        });
+      }
+    }
+  }
+  let installed;
+  try {
+    installed = await readFile(path, "utf8");
+  } catch (cause) {
+    throw new DvdRecoveryBatchFault("CHECKPOINT_REPLACEMENT_FAILED", {
+      cause,
+      storageFault: true,
+    });
+  }
+  if (installed !== canonicalPublicationJson(value)) {
+    throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT");
   }
 }
 
@@ -654,7 +829,9 @@ async function runOwnedBatch(
   const storage = options.access.dvdRecoveryStorage.readCurrent();
   const protection = storage?.facts.mutationProtection;
   if (storage?.status !== "supported" || protection?.status !== "verified") {
-    throw new DvdRecoveryBatchFault("STORAGE_UNSUPPORTED");
+    throw new DvdRecoveryBatchFault("STORAGE_UNSUPPORTED", {
+      storageFault: true,
+    });
   }
   const current = await readCommittedDvdCheckpoint({
     originalsLibraryPath: paths.root,
@@ -705,12 +882,17 @@ async function runOwnedBatch(
         ownershipDescriptor: ownership.descriptor,
       });
     } catch (cause) {
-      throw new DvdRecoveryBatchFault("STORAGE_UNSUPPORTED", { cause });
+      throw new DvdRecoveryBatchFault("STORAGE_UNSUPPORTED", {
+        cause,
+        storageFault: true,
+      });
     }
     if (actualProtection.contract !== protection.contract ||
       actualProtection.unitBytes !== protection.unitBytes ||
       actualProtection.memoryAlignmentBytes !== protection.memoryAlignmentBytes) {
-      throw new DvdRecoveryBatchFault("STORAGE_UNSUPPORTED");
+      throw new DvdRecoveryBatchFault("STORAGE_UNSUPPORTED", {
+        storageFault: true,
+      });
     }
     const sectorStart = options.observation.startLba * 2_048;
     const startByte = Math.floor(sectorStart / protection.unitBytes) * protection.unitBytes;
@@ -780,7 +962,11 @@ async function runOwnedBatch(
     };
     await step(options, ownership, "journal", async () => {
       journalDigest = await reserveJournal(paths.journal, journalWithoutDigest, before);
-      await syncDirectory(paths.directory);
+      await syncDirectory(
+        paths.directory,
+        "JOURNAL_SYNC_FAILED",
+        options.directorySync,
+      );
     });
     await step(options, ownership, "write", async () => {
       for (let index = 0; index < protectedRanges.length; index += 1) {
@@ -799,31 +985,74 @@ async function runOwnedBatch(
             unitBytes: protection.unitBytes,
           });
         } catch (cause) {
-          throw new DvdRecoveryBatchFault("IMAGE_WRITE_FAILED", { cause });
+          throw new DvdRecoveryBatchFault("IMAGE_WRITE_FAILED", {
+            cause,
+            storageFault: true,
+          });
         }
         if (result.bytesWritten !== protection.unitBytes ||
           result.unitBytes !== protection.unitBytes) {
-          throw new DvdRecoveryBatchFault("IMAGE_WRITE_FAILED");
+          throw new DvdRecoveryBatchFault("IMAGE_WRITE_FAILED", {
+            storageFault: true,
+          });
         }
       }
     });
     await step(options, ownership, "image_sync", async () => {
       const descriptor = await open(paths.image, constants.O_RDONLY | constants.O_NOFOLLOW)
-        .catch((cause) => { throw new DvdRecoveryBatchFault("IMAGE_SYNC_FAILED", { cause }); });
+        .catch((cause) => {
+          throw new DvdRecoveryBatchFault("IMAGE_SYNC_FAILED", {
+            cause,
+            storageFault: true,
+          });
+        });
       try {
-        await descriptor.sync();
+        try {
+          await descriptor.sync();
+        } catch (cause) {
+          throw new DvdRecoveryBatchFault("IMAGE_SYNC_FAILED", {
+            cause,
+            storageFault: true,
+          });
+        }
         const actual = Buffer.alloc(after.length);
-        const read = await descriptor.read(actual, 0, actual.length, startByte);
+        let read;
+        try {
+          read = await descriptor.read(actual, 0, actual.length, startByte);
+        } catch (cause) {
+          throw new DvdRecoveryBatchFault("IMAGE_SYNC_FAILED", {
+            cause,
+            storageFault: true,
+          });
+        }
         if (read.bytesRead !== actual.length || !actual.equals(after)) throw new Error("Protected image verification failed");
-        const stat = await descriptor.stat({ bigint: true });
-        const named = await lstat(paths.image, { bigint: true });
+        let stat;
+        let named;
+        try {
+          stat = await descriptor.stat({ bigint: true });
+          named = await lstat(paths.image, { bigint: true });
+        } catch (cause) {
+          throw new DvdRecoveryBatchFault("IMAGE_SYNC_FAILED", {
+            cause,
+            storageFault: true,
+          });
+        }
         if (stat.dev !== named.dev || stat.ino !== named.ino || stat.size !== BigInt(current.boundaryPublishedSizeBytes) ||
           `${stat.dev}:${stat.ino}` !== current.image.filesystemIdentity) throw new Error("Image identity changed");
         image = { filesystemIdentity: `${stat.dev}:${stat.ino}`, mtimeNs: stat.mtimeNs.toString() };
       } catch (cause) {
         if (cause instanceof DvdRecoveryBatchFault) throw cause;
-        throw new DvdRecoveryBatchFault("IMAGE_SYNC_FAILED", { cause });
-      } finally { await descriptor.close(); }
+        throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT", { cause });
+      } finally {
+        try {
+          await descriptor.close();
+        } catch (cause) {
+          throw new DvdRecoveryBatchFault("IMAGE_SYNC_FAILED", {
+            cause,
+            storageFault: true,
+          });
+        }
+      }
     });
   }
 
@@ -842,8 +1071,11 @@ async function runOwnedBatch(
   });
   const manifestPath = join(paths.directory, `recovery-manifest-${manifest.revision}.json`);
   await step(options, ownership, "manifest", async () => {
-    try { await installImmutableRecord(manifestPath, manifest); }
-    catch (cause) { throw new DvdRecoveryBatchFault("CHECKPOINT_SYNC_FAILED", { cause }); }
+    await installImmutableRecord(
+      manifestPath,
+      manifest,
+      options.directorySync,
+    );
   });
   const currentPointer = {
     originalDiscArchiveId: current.originalDiscArchiveId,
@@ -860,11 +1092,19 @@ async function runOwnedBatch(
     publicationDigest: manifest.publicationDigest,
   };
   await step(options, ownership, "pointer", async () => {
-    if (await readFile(paths.pointer, "utf8") !== canonicalPublicationJson(currentPointer)) {
+    let currentBytes;
+    try {
+      currentBytes = await readFile(paths.pointer, "utf8");
+    } catch (cause) {
+      throw new DvdRecoveryBatchFault("CHECKPOINT_REPLACEMENT_FAILED", {
+        cause,
+        storageFault: true,
+      });
+    }
+    if (currentBytes !== canonicalPublicationJson(currentPointer)) {
       throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT");
     }
-    try { await replacePointer(paths.pointer, nextPointer); }
-    catch (cause) { throw new DvdRecoveryBatchFault("CHECKPOINT_REPLACEMENT_FAILED", { cause }); }
+    await replacePointer(paths.pointer, nextPointer, options.directorySync);
   });
   let projected = header;
   await step(options, ownership, "database", async () => {
@@ -876,8 +1116,19 @@ async function runOwnedBatch(
   });
   if (options.observation.outcome === "recovered") {
     await step(options, ownership, "cleanup", async () => {
-      await unlink(paths.journal);
-      await syncDirectory(paths.directory);
+      try {
+        await unlink(paths.journal);
+      } catch (cause) {
+        throw new DvdRecoveryBatchFault("JOURNAL_SYNC_FAILED", {
+          cause,
+          storageFault: true,
+        });
+      }
+      await syncDirectory(
+        paths.directory,
+        "JOURNAL_SYNC_FAILED",
+        options.directorySync,
+      );
     });
   }
   return { manifest, header: projected };

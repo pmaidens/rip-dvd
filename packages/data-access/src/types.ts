@@ -880,6 +880,7 @@ export interface ArchiveRecoveryWorkAccess {
     claim: ClaimedArchiveRecoveryWork;
     faultCode: ArchiveRecoveryFaultCode;
     retainWork: boolean;
+    storageFault: boolean;
   }): ArchiveRecovery;
   releaseAfterReconciliation(input: {
     archiveRecoveryId: ArchiveRecoveryId;

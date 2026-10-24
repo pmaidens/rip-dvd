@@ -3349,17 +3349,21 @@ it("rolls forward a published checkpoint and explicitly resumes after a storage 
     bytes: Buffer.alloc(2_048, 0x6b),
   }));
   const input = pollInput(fixture, source.reader);
-  const commit: typeof commitDvdRecoveryBatch = (options) =>
-    commitDvdRecoveryBatch({
+  let directorySyncCount = 0;
+  const commit: typeof commitDvdRecoveryBatch = (options) => {
+    return commitDvdRecoveryBatch({
       ...options,
-      fault(point) {
-        if (point === "after:pointer") {
-          throw new DvdRecoveryBatchFault("CHECKPOINT_REPLACEMENT_FAILED");
+      async directorySync() {
+        directorySyncCount += 1;
+        if (directorySyncCount === 4) {
+          throw new Error("Synthetic checkpoint directory sync failure");
         }
       },
     });
+  };
   try {
     expect(await pollDvdRecoveryPass({ ...input, commit })).toBe(true);
+    expect(directorySyncCount).toBe(4);
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({
         status: "paused",
@@ -3413,6 +3417,43 @@ it("rolls forward a published checkpoint and explicitly resumes after a storage 
         },
       },
     });
+  } finally {
+    input.access.close();
+  }
+});
+
+it.each([
+  "CHECKPOINT_CAPACITY_EXHAUSTED",
+  "IMAGE_SYNC_FAILED",
+  "CHECKPOINT_SYNC_FAILED",
+] as const)("does not relabel %s consistency failures as storage faults", async (
+  faultCode,
+) => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  await completeVerification(fixture, seeded);
+  const source = immediateReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(2_048, 0x6c),
+  }));
+  const input = pollInput(fixture, source.reader);
+  try {
+    expect(await pollDvdRecoveryPass({
+      ...input,
+      async commit() {
+        throw new DvdRecoveryBatchFault(faultCode, {
+          retainRecoveryWork: true,
+        });
+      },
+    })).toBe(true);
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "faulted",
+        pauseReason: null,
+        faultCode,
+        work: expect.objectContaining({ status: "claimed" }),
+      });
   } finally {
     input.access.close();
   }
@@ -3478,6 +3519,7 @@ it("preserves a Stop that wins the race with fault recording", async () => {
       claim,
       faultCode: "SOURCE_TRANSPORT_ERROR",
       retainWork: false,
+      storageFault: false,
     });
     expect(access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({

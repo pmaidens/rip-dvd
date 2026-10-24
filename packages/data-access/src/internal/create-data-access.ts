@@ -437,18 +437,6 @@ const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
 const ENCODE_JOB_FAILURE_REPORT_JOB_LIMIT = 400;
 const DVD_ARCHIVE_EVIDENCE_AUDIT_MANIFEST_LIMIT = 10_000;
 const DVD_RECOVERY_PASS_HISTORY_LIMIT = 16;
-const DVD_RECOVERY_STORAGE_FAULT_CODES = new Set<ArchiveRecoveryFaultCode>([
-  "STORAGE_UNSUPPORTED",
-  "JOURNAL_CAPACITY_INSUFFICIENT",
-  "JOURNAL_RESERVATION_FAILED",
-  "JOURNAL_SYNC_FAILED",
-  "IMAGE_WRITE_FAILED",
-  "IMAGE_SYNC_FAILED",
-  "CHECKPOINT_CAPACITY_EXHAUSTED",
-  "CHECKPOINT_SYNC_FAILED",
-  "CHECKPOINT_REPLACEMENT_FAILED",
-]);
-
 function discSelectionMatchesTitleObservation(
   selection: DiscSelection,
   observation: Pick<
@@ -2164,6 +2152,7 @@ export function createDataAccessInternal(
     inspection: typeof discInspections.$inferSelect,
     timestamp: Date,
   ): ArchiveRecovery => {
+    const priorVerificationId = recovery.work?.verificationId ?? null;
     const verification = queueResumeVerification(
       transaction,
       recovery,
@@ -2173,13 +2162,16 @@ export function createDataAccessInternal(
     requireRow(
       transaction.update(archiveRecoveryWork).set({
         verificationId: verification.id,
+        discConfirmationId: null,
         requestedAt: timestamp,
         updatedAt: timestamp,
       }).where(and(
         eq(archiveRecoveryWork.archiveRecoveryId, recovery.id),
         eq(archiveRecoveryWork.attemptId, recovery.attemptId),
         eq(archiveRecoveryWork.status, "requested"),
-        isNull(archiveRecoveryWork.verificationId),
+        priorVerificationId === null
+          ? isNull(archiveRecoveryWork.verificationId)
+          : eq(archiveRecoveryWork.verificationId, priorVerificationId),
       )).returning({
         archiveRecoveryId: archiveRecoveryWork.archiveRecoveryId,
       }).get(),
@@ -2266,16 +2258,6 @@ export function createDataAccessInternal(
         return;
       }
       if (evaluated?.outcome === "match") return;
-      transaction.update(archiveRecoveryWork).set({
-        verificationId: null,
-        requestedAt: timestamp,
-        updatedAt: timestamp,
-      }).where(and(
-        eq(archiveRecoveryWork.archiveRecoveryId, recovery.id),
-        eq(archiveRecoveryWork.attemptId, recovery.attemptId),
-        eq(archiveRecoveryWork.status, "requested"),
-        eq(archiveRecoveryWork.verificationId, verification.id),
-      )).run();
       transaction.update(archiveRecoveries).set({
         status: "waiting_for_disc",
         speedRequestResult: null,
@@ -12475,8 +12457,7 @@ export function createDataAccessInternal(
             });
             if (
               recovery === null || recovery.resumeOperationId === null ||
-              recovery.work?.status !== "requested" ||
-              recovery.work.verificationId !== null
+              recovery.work?.status !== "requested"
             ) continue;
             const insertion = currentResumeInsertion(transaction, recovery);
             if (insertion === null) continue;
@@ -13106,9 +13087,7 @@ export function createDataAccessInternal(
             );
           }
           const timestamp = now();
-          const storageFault = DVD_RECOVERY_STORAGE_FAULT_CODES.has(
-            faultCode,
-          );
+          const storageFault = input.storageFault;
           requireRow(
             transaction.update(archiveRecoveries).set({
               status: storageFault ? "paused" : "faulted",
@@ -13718,7 +13697,12 @@ export function createDataAccessInternal(
             "archive recovery",
             input.archiveRecoveryId,
           );
-          if (recovery.status !== "eligible") {
+          const waitingResumeConfirmation =
+            recovery.status === "waiting_for_disc" &&
+            recovery.resumeOperationId !== null &&
+            recovery.work?.status === "requested" &&
+            recovery.work.verificationId === input.verificationId;
+          if (recovery.status !== "eligible" && !waitingResumeConfirmation) {
             throw new InvalidStatusTransitionError(
               "archive recovery",
               recovery.status,
@@ -13920,6 +13904,38 @@ export function createDataAccessInternal(
             "DVD Disc Confirmation",
             input.verificationId,
           );
+          if (waitingResumeConfirmation) {
+            requireRow(
+              transaction.update(archiveRecoveryWork).set({
+                discConfirmationId: confirmation.id,
+                updatedAt: timestamp,
+              }).where(and(
+                eq(archiveRecoveryWork.archiveRecoveryId, recovery.id),
+                eq(archiveRecoveryWork.attemptId, recovery.attemptId),
+                eq(archiveRecoveryWork.status, "requested"),
+                eq(
+                  archiveRecoveryWork.verificationId,
+                  input.verificationId,
+                ),
+              )).returning({
+                archiveRecoveryId: archiveRecoveryWork.archiveRecoveryId,
+              }).get(),
+              "Archive Recovery work",
+              recovery.id,
+            );
+            requireRow(
+              transaction.update(archiveRecoveries).set({
+                status: "eligible",
+                updatedAt: timestamp,
+              }).where(and(
+                eq(archiveRecoveries.id, recovery.id),
+                eq(archiveRecoveries.attemptId, recovery.attemptId),
+                eq(archiveRecoveries.status, "waiting_for_disc"),
+              )).returning({ id: archiveRecoveries.id }).get(),
+              "Archive Recovery",
+              recovery.id,
+            );
+          }
           return recordMutationInvocation(
             transaction,
             mutationKey,

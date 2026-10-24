@@ -389,7 +389,7 @@ it("waits for a changed insertion after Resume verification mismatch", async () 
       status: "waiting_for_disc",
       speedMode: "low",
       speedRequestResult: null,
-      work: { status: "requested", verificationId: null },
+      work: { status: "requested", verificationId: claim.id },
     });
   expect(access.archiveRecoveryWork.activateWaitingResume()).toBeNull();
 
@@ -421,6 +421,111 @@ it("waits for a changed insertion after Resume verification mismatch", async () 
     seeded.recoveryId,
   )).toMatchObject({ discInspectionId: changed.id, status: "queued" });
   access.close();
+});
+
+it("allows explicit confirmation after Resume verification mismatch", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`UPDATE archive_recoveries SET
+    status = 'paused', pause_reason = 'no_progress', updated_at = updated_at + 1
+    WHERE id = ?`).run(seeded.recoveryId);
+  database.close();
+  await fixture.run(resumeArgs({
+    recoveryId: seeded.recoveryId,
+    attemptId: seeded.attemptId,
+    revision: seeded.pointer.currentManifestRevision,
+    digest: seeded.pointer.currentManifestDigest,
+    mutationKey: "00000000-0000-4000-8000-000000000612",
+  }));
+
+  const access = fixture.openAccess();
+  const workerExecutionId = "synthetic-resume-confirmation-worker";
+  const claim = access.dvdDiscVerifications.claimNext(workerExecutionId);
+  if (claim === null) throw new Error("Expected Resume verification claim");
+  const sample = seeded.sampleManifest.samples[0]!;
+  const finding = {
+    ...sample,
+    outcome: "mismatch" as const,
+    referenceDigest: sample.digest,
+    observedDigest: "d".repeat(64),
+    diagnostic: null,
+  };
+  access.dvdDiscVerifications.appendFinding(claim, finding);
+  const verification = access.dvdDiscVerifications.complete(claim, {
+    findings: [finding],
+    budgetExhausted: false,
+    interrupted: false,
+    insertionChanged: false,
+    checkpointChanged: false,
+  });
+  access.close();
+
+  const previewed = await fixture.run([
+    "archive-recovery",
+    "preview-disc-confirmation",
+    seeded.recoveryId,
+  ]);
+  expect(previewed).toMatchObject({
+    exitCode: 0,
+    result: {
+      archiveRecovery: { status: "waiting_for_disc" },
+      verification: { id: verification.id, outcome: "mismatch" },
+      action: { available: true, blockingReasons: [] },
+    },
+  });
+  const expectedInputs = (previewed.result as {
+    action: { expectedInputs: Record<string, string | number | boolean> };
+  }).action.expectedInputs;
+  const confirmed = await fixture.run([
+    "archive-recovery",
+    "confirm-disc",
+    seeded.recoveryId,
+    "--key",
+    "00000000-0000-4000-8000-000000000613",
+    "--archive-id",
+    String(expectedInputs.originalDiscArchiveId),
+    "--attempt-id",
+    String(expectedInputs.archiveRecoveryAttemptId),
+    "--disc-inspection-id",
+    String(expectedInputs.discInspectionId),
+    "--detected-disc-id",
+    String(expectedInputs.detectedDiscId),
+    "--media-generation",
+    String(expectedInputs.mediaGeneration),
+    "--verification-id",
+    String(expectedInputs.verificationId),
+    "--verification-execution-id",
+    String(expectedInputs.verificationWorkerExecutionId),
+    "--verification-outcome",
+    String(expectedInputs.verificationOutcome),
+    "--verification-result-digest",
+    String(expectedInputs.verificationResultDigest),
+    "--checkpoint-revision",
+    String(expectedInputs.checkpointRevision),
+    "--checkpoint-digest",
+    String(expectedInputs.checkpointDigest),
+    "--acknowledge-mixed-source",
+  ]);
+  expect(confirmed).toMatchObject({
+    exitCode: 0,
+    result: { confirmation: { verificationId: verification.id } },
+  });
+  const confirmedAccess = fixture.openAccess();
+  expect(confirmedAccess.catalog.findArchiveRecoveryById(seeded.recoveryId))
+    .toMatchObject({
+      status: "eligible",
+      work: {
+        status: "requested",
+        verificationId: verification.id,
+        discConfirmationId: expect.any(String),
+      },
+    });
+  expect(confirmedAccess.archiveRecoveryWork.claimNextVerifiedCandidate(
+    workerExecutionId,
+  )).not.toBeNull();
+  confirmedAccess.close();
 });
 
 it("retries interrupted Resume verification without another Resume", async () => {
@@ -493,9 +598,64 @@ it("retries interrupted Resume verification without another Resume", async () =>
     .toMatchObject({
       status: "waiting_for_disc",
       attemptId: recovery.attemptId,
-      work: { status: "requested", verificationId: null },
+      work: { status: "requested", verificationId: retry.id },
     });
   access.close();
+});
+
+it("blocks Resume after failed checkpoint reconciliation", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`UPDATE archive_recoveries SET
+    status = 'paused', pause_reason = 'no_progress', updated_at = updated_at + 1
+    WHERE id = ?`).run(seeded.recoveryId);
+  database.close();
+  const access = fixture.openAccess();
+  access.dvdRecoveryReconciliations.submit({
+    mutationKey: "00000000-0000-4000-8000-000000000614",
+    archiveRecoveryId: seeded.recoveryId,
+  });
+  const claim = access.dvdRecoveryReconciliations.claimNext(
+    "synthetic-failed-reconciliation-worker",
+  );
+  if (claim === null) throw new Error("Expected reconciliation claim");
+  expect(access.dvdRecoveryReconciliations.fail(
+    claim,
+    "CONSISTENCY_FAULT",
+  )).not.toBeNull();
+  access.close();
+
+  expect(await fixture.run(["inspect", "archive-recoveries", seeded.recoveryId]))
+    .toMatchObject({
+      exitCode: 0,
+      result: {
+        item: {
+          availableActions: expect.arrayContaining([
+            expect.objectContaining({
+              name: "resume",
+              available: false,
+              blockingReasons: expect.arrayContaining([
+                expect.objectContaining({
+                  code: "RECOVERY_RECONCILIATION_FAILED",
+                }),
+              ]),
+            }),
+          ]),
+        },
+      },
+    });
+  expect(await fixture.run(resumeArgs({
+    recoveryId: seeded.recoveryId,
+    attemptId: seeded.attemptId,
+    revision: seeded.pointer.currentManifestRevision,
+    digest: seeded.pointer.currentManifestDigest,
+    mutationKey: "00000000-0000-4000-8000-000000000615",
+  }))).toMatchObject({
+    exitCode: 2,
+    result: { error: { code: "CONSISTENCY_FAULT" } },
+  });
 });
 
 it("keeps a repaired storage fault paused until explicit Resume", async () => {
@@ -516,6 +676,7 @@ it("keeps a repaired storage fault paused until explicit Resume", async () => {
     claim,
     faultCode: "STORAGE_UNSUPPORTED",
     retainWork: true,
+    storageFault: true,
   });
   expect(paused).toMatchObject({
     status: "paused",
