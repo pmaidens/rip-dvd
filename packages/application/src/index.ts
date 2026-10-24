@@ -1,4 +1,5 @@
 import { inspectArchiveEvidence } from "./archive-evidence.js";
+import { inspectArchiveRecoveryRanges } from "./archive-recovery-ranges.js";
 import { inspectCatalogTitleDamage } from "./catalog-title-damage.js";
 import { createNotificationOperations } from "./notifications.js";
 import { isHandBrakePreset } from "@rip-dvd/config";
@@ -412,6 +413,15 @@ export function createApplicationOperations(
         options,
         dependencies.archiveImageOwnership,
       ),
+    inspectArchiveRecoveryRanges: (
+      archiveRecoveryId: string,
+      options?: { limit?: number; cursor?: string },
+    ) => inspectArchiveRecoveryRanges(
+      access,
+      archiveRecoveryId,
+      options,
+      dependencies.archiveImageOwnership,
+    ),
     inspectCatalogTitleDamage: (
       archiveId: string,
       options?: { limit?: number; cursor?: string },
@@ -974,6 +984,11 @@ export * from "./notification-dispatch.js";
 export * from "./notification-transport.js";
 
 export { inspectArchiveEvidence, InvalidArchiveEvidenceInputError } from "./archive-evidence.js";
+export {
+  inspectArchiveRecoveryRanges,
+  InvalidArchiveRecoveryRangesInputError,
+  presentArchiveRecoveryRangeEvidence,
+} from "./archive-recovery-ranges.js";
 export {
   inspectCatalogTitleDamage,
   InvalidCatalogTitleDamageInputError,

@@ -13988,6 +13988,8 @@ export function createDataAccessInternal(
             access.catalog.findArchiveRecovery(id),
           findArchiveRecoveryById: (id) =>
             access.catalog.findArchiveRecoveryById(id),
+          readDvdArchiveRecoveryRangeEvidence: (id) =>
+            access.catalog.readDvdArchiveRecoveryRangeEvidence(id),
           listArchiveRecoveries: (options) =>
             access.catalog.listArchiveRecoveries(options),
           findDvdSourceSampleManifest: (id) =>
@@ -15919,6 +15921,128 @@ export function createDataAccessInternal(
         return findArchiveRecoveryRecord(database, {
           archiveRecoveryId: id,
         });
+      },
+
+      readDvdArchiveRecoveryRangeEvidence(id) {
+        if (!hasDvdRecoveryEvidenceSchema) return null;
+        const recovery = findArchiveRecoveryRecord(database, {
+          archiveRecoveryId: id,
+        });
+        if (recovery === null) return null;
+        const checkpoint = access.catalog.findDvdArchiveEvidenceHeader(
+          recovery.originalDiscArchiveId,
+        );
+        if (checkpoint === null) {
+          throw new DomainInvariantError(
+            "Archive Recovery has no committed DVD checkpoint",
+          );
+        }
+        const rows = database.select({
+          checkpointRevision: dvdArchiveEvidenceManifests.revision,
+          previousManifestId:
+            dvdArchiveEvidenceManifests.previousManifestId,
+          previousManifestRevision:
+            previousDvdArchiveEvidenceManifests.revision,
+          previousRanges:
+            previousDvdArchiveEvidenceManifests.unrecoveredSourceRanges,
+          currentRanges:
+            dvdArchiveEvidenceManifests.unrecoveredSourceRanges,
+          readId: dvdArchiveRecoveryReads.id,
+          readOriginalDiscArchiveId:
+            dvdArchiveRecoveryReads.originalDiscArchiveId,
+          readFromManifestId: dvdArchiveRecoveryReads.fromManifestId,
+          readFromManifestRevision:
+            dvdArchiveRecoveryReads.fromManifestRevision,
+          readStartLba: dvdArchiveRecoveryReads.startLba,
+          readSectorCount: dvdArchiveRecoveryReads.sectorCount,
+          readOutcome: dvdArchiveRecoveryReads.outcome,
+          readVerificationId: dvdArchiveRecoveryReads.verificationId,
+          readDiscConfirmationId:
+            dvdArchiveRecoveryReads.discConfirmationId,
+          readEvidenceDigest: dvdArchiveRecoveryReads.evidenceDigest,
+          observedAt: dvdArchiveRecoveryReads.createdAt,
+        }).from(dvdArchiveEvidenceManifests).innerJoin(
+          previousDvdArchiveEvidenceManifests,
+          eq(
+            previousDvdArchiveEvidenceManifests.id,
+            dvdArchiveEvidenceManifests.previousManifestId,
+          ),
+        ).innerJoin(
+          dvdArchiveRecoveryReads,
+          eq(
+            dvdArchiveRecoveryReads.id,
+            dvdArchiveEvidenceManifests.recoveryReadId,
+          ),
+        ).where(and(
+          eq(
+            dvdArchiveEvidenceManifests.originalDiscArchiveId,
+            recovery.originalDiscArchiveId,
+          ),
+          lte(
+            dvdArchiveEvidenceManifests.revision,
+            checkpoint.currentManifestRevision,
+          ),
+        )).orderBy(asc(dvdArchiveEvidenceManifests.revision)).all();
+        if (rows.length !== checkpoint.currentManifestRevision - 1) {
+          throw new DomainInvariantError(
+            "DVD Archive Recovery range history is incomplete",
+          );
+        }
+        const observations = rows.map((row, index) => {
+          const expectedRevision = index + 2;
+          const recoveryRead = {
+            originalDiscArchiveId: row.readOriginalDiscArchiveId,
+            fromManifestId: row.readFromManifestId,
+            fromManifestRevision: row.readFromManifestRevision,
+            startLba: row.readStartLba,
+            sectorCount: row.readSectorCount,
+            outcome: row.readOutcome,
+            ...(row.readVerificationId === null
+              ? {}
+              : {
+                  verificationId: row.readVerificationId,
+                  discConfirmationId: row.readDiscConfirmationId,
+                }),
+          };
+          if (
+            row.checkpointRevision !== expectedRevision ||
+            row.previousManifestRevision !== expectedRevision - 1 ||
+            row.previousManifestId !== row.readFromManifestId ||
+            row.readFromManifestRevision !== expectedRevision - 1 ||
+            row.readOriginalDiscArchiveId !==
+              recovery.originalDiscArchiveId
+          ) {
+            throw new DomainInvariantError(
+              "DVD Archive Recovery range history is inconsistent",
+            );
+          }
+          assertDvdArchiveRecoveryReadEvidenceDigest(
+            recoveryRead,
+            row.readEvidenceDigest,
+          );
+          assertDvdEvidenceRangeTransition(
+            row.previousRanges,
+            row.currentRanges,
+            recoveryRead,
+          );
+          const previousRange = row.previousRanges.find((range) =>
+            row.readStartLba >= range.startLba &&
+            row.readStartLba < range.startLba + range.sectorCount
+          );
+          if (previousRange === undefined) {
+            throw new DomainInvariantError(
+              "DVD Archive Recovery observation has no prior source range",
+            );
+          }
+          return {
+            checkpointRevision: row.checkpointRevision,
+            startLba: row.readStartLba,
+            outcome: row.readOutcome,
+            fromClassification: previousRange.classification,
+            observedAt: row.observedAt,
+          };
+        });
+        return { recovery, checkpoint, observations };
       },
 
       listArchiveRecoveries(options) {

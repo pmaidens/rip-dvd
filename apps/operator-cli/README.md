@@ -62,7 +62,8 @@ rip-dvd wait archive-audits <run-id> --timeout-ms 30000
 
 Wait expiry and SSH disconnection do not cancel submitted work. The same
 status and wait pattern applies to Disc Inspections, Archive Requests, Archive
-Jobs, Encode Jobs, archive audits, and filesystem verification.
+Jobs, Archive Recoveries, Encode Jobs, archive audits, and filesystem
+verification.
 
 The former `interactive`, `rip`, `scan`, `title`, `extras`, `queue`, `encode`,
 and `join` forms are retired. Each returns `LEGACY_COMMAND_RETIRED` with a
@@ -85,6 +86,23 @@ archive-requests <request-id>` or `wait archive-requests <request-id>` to follow
 it. Retrying a failed request continues that same request and rescue state. It
 does not create a fresh generation. The prior archive and its catalog history
 remain unchanged when the request succeeds, fails, or is cancelled.
+
+# Archive Recovery evidence
+
+Inspect a recovery's current accepted extent, checkpoint identity, category
+counts, pass progress, and bounded history. Page every normalized source range
+by carrying `nextCursor` into the next request:
+
+```sh
+rip-dvd archive-recovery ranges <recovery-id> --limit 100
+rip-dvd archive-recovery ranges <recovery-id> --limit 100 --cursor <cursor>
+```
+
+A range cursor is bound to the exact recovery checkpoint. If that checkpoint
+changes, the command returns `available: false` with the current checkpoint
+and progress identities instead of combining pages from different revisions.
+`completionEstimate` is either a minimum and maximum for the current pass or
+`unknown`; it is never an overall recovery estimate.
 
 # Catalog Review read commands
 

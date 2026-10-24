@@ -591,6 +591,20 @@ export interface ArchiveRecoveryPassSummary {
   outcome: ArchiveRecoveryPassOutcome;
 }
 
+export interface DvdArchiveRecoveryRangeObservation {
+  checkpointRevision: number;
+  startLba: number;
+  outcome: "recovered" | "failed";
+  fromClassification: DvdUnrecoveredSourceClassification;
+  observedAt: Date;
+}
+
+export interface DvdArchiveRecoveryRangeEvidence {
+  recovery: ArchiveRecovery;
+  checkpoint: DvdArchiveEvidenceHeader;
+  observations: readonly DvdArchiveRecoveryRangeObservation[];
+}
+
 export interface ArchiveRecoveryStopReceipt extends ArchiveRecovery {
   status: "stopping";
   stopOperationId: ArchiveRecoveryStopOperationId;
@@ -1871,6 +1885,9 @@ export interface CatalogAccess {
   ): void;
   findArchiveRecovery(id: OriginalDiscArchiveId): ArchiveRecovery | null;
   findArchiveRecoveryById(id: ArchiveRecoveryId): ArchiveRecovery | null;
+  readDvdArchiveRecoveryRangeEvidence(
+    id: ArchiveRecoveryId,
+  ): DvdArchiveRecoveryRangeEvidence | null;
   listArchiveRecoveries(options: { limit: number }): ArchiveRecovery[];
   findDvdSourceSampleManifest(
     id: OriginalDiscArchiveId,
@@ -2599,6 +2616,7 @@ export type SnapshotCatalogAccess = Pick<
   | "readDvdCatalogReviewWorkflowEvidence"
   | "findArchiveRecovery"
   | "findArchiveRecoveryById"
+  | "readDvdArchiveRecoveryRangeEvidence"
   | "listArchiveRecoveries"
   | "findDvdSourceSampleManifest"
   | "listCatalogReviewArchives"

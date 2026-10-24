@@ -5,6 +5,7 @@ import {
   DvdDiscVerificationUnavailableError,
   InvalidCatalogTitleDamageInputError,
   InvalidArchiveEvidenceInputError,
+  InvalidArchiveRecoveryRangesInputError,
   InvalidNotificationInputError,
   NotificationsUnavailableError,
   createTmdbCatalogLookup,
@@ -192,13 +193,13 @@ const commandDefinitions = [
   },
   {
     name: "archive-recovery",
-    description: "Inspect or request DVD Disc Verification, Operator Disc Confirmation, checkpoint reconciliation, and safe Stop for an Archive Recovery.",
-    usage: "rip-dvd archive-recovery <inspect-verification|verify-disc|preview-disc-confirmation|confirm-disc|inspect-reconciliation|reconcile|stop> <archive-recovery-id> [options]",
+    description: "Inspect complete source ranges or request DVD Disc Verification, Operator Disc Confirmation, checkpoint reconciliation, and safe Stop for an Archive Recovery.",
+    usage: "rip-dvd archive-recovery <ranges|inspect-verification|verify-disc|preview-disc-confirmation|confirm-disc|inspect-reconciliation|reconcile|stop> <archive-recovery-id> [options]",
     inputs: {
-      arguments: ["action: inspect-verification|verify-disc|preview-disc-confirmation|confirm-disc|inspect-reconciliation|reconcile|stop", "archive-recovery-id"],
-      options: ["--key", "--archive-id", "--attempt-id", "--disc-inspection-id", "--detected-disc-id", "--media-generation", "--verification-id", "--verification-execution-id", "--verification-outcome", "--verification-result-digest", "--checkpoint-revision", "--checkpoint-digest", "--acknowledge-mixed-source"],
+      arguments: ["action: ranges|inspect-verification|verify-disc|preview-disc-confirmation|confirm-disc|inspect-reconciliation|reconcile|stop", "archive-recovery-id"],
+      options: ["--limit", "--cursor", "--key", "--archive-id", "--attempt-id", "--disc-inspection-id", "--detected-disc-id", "--media-generation", "--verification-id", "--verification-execution-id", "--verification-outcome", "--verification-result-digest", "--checkpoint-revision", "--checkpoint-digest", "--acknowledge-mixed-source"],
     },
-    example: "rip-dvd archive-recovery preview-disc-confirmation <archive-recovery-id>",
+    example: "rip-dvd archive-recovery ranges <archive-recovery-id> --limit 20",
   },
   {
     name: "encode-output",
@@ -489,6 +490,56 @@ function verificationInspectionInputs(args: readonly string[]) {
     );
   }
   return { archiveRecoveryId };
+}
+
+async function runDvdRecoveryRangesCommand(
+  args: readonly string[],
+  io: CommandIO,
+) {
+  const [archiveRecoveryId, ...optionArgs] = args;
+  const options = profileOptions(
+    optionArgs,
+    ["--limit", "--cursor"],
+    "Invalid Archive Recovery range options.",
+  );
+  if (!archiveRecoveryId || archiveRecoveryId.length > 256) {
+    throw new CommandFailure(
+      "INVALID_ARGUMENTS",
+      "Archive Recovery ID is required.",
+      2,
+    );
+  }
+  try {
+    return await withAccessAsync<unknown>(io.openAccess, (access) =>
+      createApplicationOperations(access).inspectArchiveRecoveryRanges(
+        archiveRecoveryId,
+        {
+          ...(options.has("--limit")
+            ? { limit: Number(options.get("--limit")) }
+            : {}),
+          ...(options.has("--cursor")
+            ? { cursor: options.get("--cursor")! }
+            : {}),
+        },
+      ));
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    if (error instanceof InvalidArchiveRecoveryRangesInputError) {
+      throw new CommandFailure("INVALID_ARGUMENTS", error.message, 2);
+    }
+    if (error instanceof RecordNotFoundError) {
+      throw new CommandFailure(
+        "NOT_FOUND",
+        "Archive Recovery was not found.",
+        2,
+      );
+    }
+    throw new CommandFailure(
+      "RECOVERY_RANGE_INSPECTION_UNAVAILABLE",
+      "Archive Recovery ranges are unavailable.",
+      1,
+    );
+  }
 }
 
 function discVerificationInputs(args: readonly string[]) {
@@ -1982,6 +2033,7 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
       } else {
         const [action, ...actionArgs] = rest;
         if (
+          action !== "ranges" &&
           action !== "inspect-verification" && action !== "verify-disc" &&
           action !== "preview-disc-confirmation" &&
           action !== "confirm-disc" &&
@@ -1990,13 +2042,15 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         ) {
           throw new CommandFailure(
             "INVALID_ARGUMENTS",
-            "Archive Recovery action must be inspect-verification, verify-disc, preview-disc-confirmation, confirm-disc, inspect-reconciliation, reconcile, or stop.",
+            "Archive Recovery action must be ranges, inspect-verification, verify-disc, preview-disc-confirmation, confirm-disc, inspect-reconciliation, reconcile, or stop.",
             2,
           );
         }
         emit(
           io.stdout,
-          action === "stop"
+          action === "ranges"
+            ? await runDvdRecoveryRangesCommand(actionArgs, io)
+            : action === "stop"
             ? runDvdRecoveryStopCommand(actionArgs, io)
             : action === "preview-disc-confirmation" ||
                 action === "confirm-disc"
