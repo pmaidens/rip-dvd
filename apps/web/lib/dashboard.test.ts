@@ -77,9 +77,12 @@ it("changes Catalog Review activity when Recovery identities change", () => {
       mappingState: "unmapped",
       readyForDamageDecision: false,
       readyForEncoding: false,
+      archiveOnly: false,
     },
     current: {
       originalDiscArchiveId,
+      catalogRevision: "2026-10-23T12:00:00.000Z",
+      catalogReviewOutcome: "needs_review",
       archiveJob: { id: "archive-job-1", status: "completed" },
       checkpoint: { revision: 1, manifestDigest: "a".repeat(64) },
       recovery: {
@@ -96,6 +99,8 @@ it("changes Catalog Review activity when Recovery identities change", () => {
       catalogMappingProjectionId: null,
       titleDamageAssessmentId: null,
     },
+    choiceHistory: [],
+    choiceHistoryPage: { limit: 100, truncated: false },
     actions: [],
   } satisfies CatalogReviewWorkflow;
   const replacementRecoveryId = "recovery-2" as ArchiveRecoveryId;

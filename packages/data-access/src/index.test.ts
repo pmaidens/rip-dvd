@@ -45,6 +45,7 @@ import {
   createDiscSelectionSourceIdentity,
   createUnknownArchiveIntegrityEvidence,
   createWatchableSalvageArchiveIntegrityEvidence,
+  CatalogMappingEvidenceUnavailableError,
   DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
   DVD_RECOVERY_EVIDENCE_FORMAT,
   DVD_TITLE_MAP_SCHEMA_VERSION,
@@ -1332,6 +1333,7 @@ describe("data-access facade", () => {
         "archive_recoveries",
         "archive_recovery_work",
         "archive_requests",
+        "catalog_review_evidence_choices",
         "disc_inspection_attempts",
         "disc_inspections",
         "disc_selection_supersessions",
@@ -1359,7 +1361,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(48);
+    expect(identifierTables).toHaveLength(49);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -2497,7 +2499,8 @@ describe("data-access facade", () => {
           name !== "20261023141501_even_enchantress" &&
           name !== "20261024175458_nappy_black_tom" &&
           name !== "20261024185350_archive-recovery-resume" &&
-          name !== "20261024192300_woozy_wasp",
+          name !== "20261024192300_woozy_wasp" &&
+          name !== "20261028031248_flowery_dorian_gray",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -3771,6 +3774,279 @@ describe("data-access facade", () => {
       limit: 101,
     })).toThrow("Catalog Review archive limit must be between 1 and 100");
     access.close();
+  });
+
+  it("orders immutable Catalog Review evidence choices by monotonic catalog revision", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-24T18:00:00.000Z"));
+    const fixture = createDvdTitleIdentityArchiveFixture(
+      "catalog-choice-history",
+    );
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    sqlite.prepare(`
+      UPDATE archive_recoveries
+      SET status = 'stopped', stop_operation_id = 'synthetic-stop',
+          stop_requested_at = 2, stopped_at = 3, updated_at = 3
+      WHERE original_disc_archive_id = ?
+    `).run(fixture.archive.id);
+    sqlite.close();
+
+    const header = fixture.access.catalog.findDvdArchiveEvidenceHeader(
+      fixture.archive.id,
+    )!;
+    const recordChoice = (
+      choice: "archive_only" | "reopen",
+      mutationKey: string,
+      catalogRevision: Date,
+    ) => fixture.access.catalog.recordCatalogReviewEvidenceChoice({
+      originalDiscArchiveId: fixture.archive.id,
+      choice,
+      mutationKey,
+      catalogRevision,
+      checkpointRevision: header.currentManifestRevision,
+      checkpointDigest: header.currentManifestDigest,
+    });
+    const mediaItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic durable archive-only mapping",
+    });
+    const existingSelection = fixture.access.catalog.createDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      mediaItemId: mediaItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    const openArchive = fixture.access.catalog.listOriginalDiscArchives({
+      ids: [fixture.archive.id],
+    })[0]!;
+    const archived = recordChoice(
+      "archive_only",
+      "catalog-choice-history-archive-1",
+      openArchive.updatedAt,
+    );
+    expect(() => fixture.access.catalog.mutateDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      mutationKey: "catalog-choice-history-mapping",
+      expectedCatalogRevision: archived.resultingArchive.updatedAt,
+      mutation: {
+        action: "create",
+        selection: {
+          originalDiscArchiveId: fixture.archive.id,
+          mediaItemId: mediaItem.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        },
+      },
+    })).toThrow(CatalogMappingEvidenceUnavailableError);
+    expect(() => fixture.access.catalog.mutateDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      mutationKey: "catalog-choice-history-delete",
+      expectedCatalogRevision: archived.resultingArchive.updatedAt,
+      mutation: {
+        action: "delete",
+        discSelectionId: existingSelection.id,
+      },
+    })).toThrow(CatalogMappingEvidenceUnavailableError);
+    expect(fixture.access.catalog.listDiscSelections({
+      originalDiscArchiveId: fixture.archive.id,
+    })).toEqual([expect.objectContaining({ id: existingSelection.id })]);
+    expect(fixture.access.catalog.listOriginalDiscArchives({
+      ids: [fixture.archive.id],
+    })[0]).toMatchObject({ catalogReviewOutcome: "archive_only" });
+    vi.setSystemTime(new Date("2026-10-24T17:00:00.000Z"));
+    const reopened = recordChoice(
+      "reopen",
+      "catalog-choice-history-reopen",
+      archived.resultingArchive.updatedAt,
+    );
+    const archivedAgain = recordChoice(
+      "archive_only",
+      "catalog-choice-history-archive-2",
+      reopened.resultingArchive.updatedAt,
+    );
+
+    const history = fixture.access.catalog.listCatalogReviewEvidenceChoices(
+      fixture.archive.id,
+      { limit: 100 },
+    );
+    expect(history.map(({ choice }) => choice)).toEqual([
+      "archive_only",
+      "reopen",
+      "archive_only",
+    ]);
+    expect(history.map(({ catalogRevision }) => catalogRevision.getTime()))
+      .toEqual([
+        reopened.resultingArchive.updatedAt.getTime(),
+        archived.resultingArchive.updatedAt.getTime(),
+        openArchive.updatedAt.getTime(),
+      ]);
+    expect(archivedAgain.recordedAt.getTime()).toBeLessThan(
+      archived.recordedAt.getTime(),
+    );
+    const unrelated = createDvdTitleIdentityArchiveFixture(
+      "catalog-choice-unrelated",
+      {
+        access: fixture.access,
+        databasePath: fixture.databasePath,
+        fingerprintCharacter: "8",
+      },
+    );
+    const unrelatedHeader = fixture.access.catalog.findDvdArchiveEvidenceHeader(
+      unrelated.archive.id,
+    )!;
+    const unrelatedRecovery = fixture.access.catalog.findArchiveRecovery(
+      unrelated.archive.id,
+    )!;
+    fixture.access.close();
+
+    const evidenceDatabase = new DatabaseSync(fixture.databasePath);
+    const cloneChoice = (overrides: string) => `
+      INSERT INTO catalog_review_evidence_choices (
+        id, original_disc_archive_id, choice, catalog_revision,
+        checkpoint_revision, checkpoint_digest, archive_recovery_id,
+        archive_recovery_attempt_id, archive_recovery_status, recorded_at
+      )
+      SELECT 'invalid-${overrides}', original_disc_archive_id, choice,
+        catalog_revision, checkpoint_revision,
+        ${overrides === "digest" ? "'INVALID'" : "checkpoint_digest"},
+        ${overrides === "recovery-id" ? "'   '" : "archive_recovery_id"},
+        ${overrides === "attempt-id" ? "''" : "archive_recovery_attempt_id"},
+        ${overrides === "status" ? "'invalid'" : "archive_recovery_status"},
+        recorded_at
+      FROM catalog_review_evidence_choices
+      WHERE id = ?
+    `;
+    for (const invalidField of [
+      "digest",
+      "recovery-id",
+      "attempt-id",
+      "status",
+    ]) {
+      expect(() => evidenceDatabase.prepare(cloneChoice(invalidField)).run(
+        history[0]!.id,
+      )).toThrow();
+    }
+    const insertChoice = evidenceDatabase.prepare(`
+      INSERT INTO catalog_review_evidence_choices (
+        id, original_disc_archive_id, choice, catalog_revision,
+        checkpoint_revision, checkpoint_digest, archive_recovery_id,
+        archive_recovery_attempt_id, archive_recovery_status, recorded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    expect(() => insertChoice.run(
+      "stale-checkpoint-choice",
+      fixture.archive.id,
+      "reopen",
+      archivedAgain.resultingArchive.updatedAt.getTime(),
+      header.currentManifestRevision + 1,
+      header.currentManifestDigest,
+      history[0]!.archiveRecoveryId,
+      history[0]!.archiveRecoveryAttemptId,
+      history[0]!.archiveRecoveryStatus,
+      archivedAgain.recordedAt.getTime(),
+    )).toThrow(/inconsistent/i);
+    expect(() => insertChoice.run(
+      "cross-archive-choice",
+      fixture.archive.id,
+      "reopen",
+      archivedAgain.resultingArchive.updatedAt.getTime(),
+      header.currentManifestRevision,
+      header.currentManifestDigest,
+      unrelatedRecovery.id,
+      unrelatedRecovery.attemptId,
+      unrelatedRecovery.status,
+      archivedAgain.recordedAt.getTime(),
+    )).toThrow(/inconsistent|foreign key/i);
+    expect(() => insertChoice.run(
+      "nonterminal-archive-only-choice",
+      unrelated.archive.id,
+      "archive_only",
+      unrelated.archive.updatedAt.getTime(),
+      unrelatedHeader.currentManifestRevision,
+      unrelatedHeader.currentManifestDigest,
+      unrelatedRecovery.id,
+      unrelatedRecovery.attemptId,
+      unrelatedRecovery.status,
+      archivedAgain.recordedAt.getTime(),
+    )).toThrow(/inconsistent/i);
+    expect(() => evidenceDatabase.prepare(`
+      UPDATE catalog_review_evidence_choices
+      SET recorded_at = recorded_at + 1
+      WHERE id = ?
+    `).run(history[0]!.id)).toThrow(/immutable/i);
+    expect(() => evidenceDatabase.prepare(`
+      DELETE FROM catalog_review_evidence_choices WHERE id = ?
+    `).run(history[0]!.id)).toThrow(/immutable/i);
+    evidenceDatabase.exec("PRAGMA foreign_keys = ON");
+    evidenceDatabase.prepare(`
+      DELETE FROM archive_recovery_work WHERE archive_recovery_id = ?
+    `).run(history[0]!.archiveRecoveryId);
+    expect(() => evidenceDatabase.prepare(`
+      UPDATE archive_recoveries SET
+        attempt_id = 'synthetic-next-catalog-choice-attempt',
+        attempt_ordinal = attempt_ordinal + 1,
+        status = 'eligible', stop_operation_id = NULL,
+        stop_requested_at = NULL, stopped_at = NULL,
+        updated_at = updated_at + 1
+      WHERE id = ?
+    `).run(history[0]!.archiveRecoveryId)).not.toThrow();
+    expect(evidenceDatabase.prepare(`
+      SELECT count(*) AS count FROM catalog_review_evidence_choices
+      WHERE original_disc_archive_id = ?
+    `).get(fixture.archive.id)).toEqual({ count: 3 });
+    evidenceDatabase.close();
+  });
+
+  it("rejects a Catalog Review evidence choice when an older manifest is inconsistent", () => {
+    const fixture = createDvdTitleIdentityArchiveFixture(
+      "catalog-choice-inconsistent",
+    );
+    advanceDvdTitleIdentityCheckpointForTest(
+      fixture.databasePath,
+      fixture.archive.id,
+      2,
+    );
+    const header = advanceDvdTitleIdentityCheckpointForTest(
+      fixture.databasePath,
+      fixture.archive.id,
+      3,
+    );
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    const initialManifestId = sqlite.prepare(`
+      SELECT id FROM dvd_archive_evidence_manifests
+      WHERE original_disc_archive_id = ? AND revision = 1
+    `).get(fixture.archive.id) as { id: string };
+    sqlite.prepare(`
+      UPDATE archive_recoveries
+      SET status = 'stopped', stop_operation_id = 'synthetic-stop',
+          stop_requested_at = 2, stopped_at = 3, updated_at = 3
+      WHERE original_disc_archive_id = ?
+    `).run(fixture.archive.id);
+    sqlite.exec("DROP TRIGGER dvd_evidence_manifest_update_guard");
+    sqlite.prepare(`
+      UPDATE dvd_archive_evidence_manifests
+      SET manifest_digest = ?
+      WHERE id = ?
+    `).run("f".repeat(64), initialManifestId.id);
+    sqlite.close();
+
+    expect(() => fixture.access.catalog.recordCatalogReviewEvidenceChoice({
+      originalDiscArchiveId: fixture.archive.id,
+      choice: "archive_only",
+      mutationKey: "catalog-choice-inconsistent",
+      catalogRevision: fixture.archive.updatedAt,
+      checkpointRevision: header.manifestRevision,
+      checkpointDigest: header.manifestDigest,
+    })).toThrow(/evidence digest does not match/i);
+    expect(fixture.access.catalog.listOriginalDiscArchives({
+      ids: [fixture.archive.id],
+    })[0]).toMatchObject({
+      catalogReviewOutcome: "needs_review",
+      catalogReviewedAt: null,
+    });
+    expect(fixture.access.catalog.listCatalogReviewEvidenceChoices(
+      fixture.archive.id,
+      { limit: 100 },
+    )).toEqual([]);
+    fixture.access.close();
   });
 
   it("keeps partially cataloged archives in review until review is explicitly completed", () => {
@@ -9732,6 +10008,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261028031248_flowery_dorian_gray",
+        },
+        {
           name: "20261024192300_woozy_wasp",
         },
         {
@@ -9763,9 +10042,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20261022222723_awesome_cyclops",
-        },
-        {
-          name: "20261022205917_burly_shard",
         },
       ]);
     expect(

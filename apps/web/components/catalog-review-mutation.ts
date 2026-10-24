@@ -210,6 +210,7 @@ function isAcknowledgedCatalogMutationCommand(
 }
 
 const pendingProposalKeys = new Map<string, string>();
+const pendingEvidenceChoiceKeys = new Map<string, string>();
 const pendingAcknowledgedInvocations = new Map<
   string,
   PendingAcknowledgedCatalogMutation
@@ -230,6 +231,14 @@ export async function mutateCatalogReview(
   if (proposalIdentity !== null) {
     proposalMutationKey = pendingProposalKeys.get(proposalIdentity) ?? createMutationKey();
     pendingProposalKeys.set(proposalIdentity, proposalMutationKey);
+  }
+  const evidenceChoice = command.action === "archive_only" ||
+    command.action === "reopen";
+  const evidenceChoiceKey = evidenceChoice
+    ? pendingEvidenceChoiceKeys.get(identity) ?? createMutationKey()
+    : undefined;
+  if (evidenceChoiceKey !== undefined) {
+    pendingEvidenceChoiceKeys.set(identity, evidenceChoiceKey);
   }
   const storage = options.storage === undefined
     ? browserMutationStorage() : options.storage;
@@ -312,8 +321,15 @@ export async function mutateCatalogReview(
     : await postCatalogReview(archiveId, {
       ...command,
       ...(proposalMutationKey ? { mutationKey: proposalMutationKey } : {}),
+      ...(evidenceChoiceKey ? { mutationKey: evidenceChoiceKey } : {}),
     }, fetcher);
   if (!response.ok) {
+    if (
+      evidenceChoiceKey !== undefined &&
+      !ambiguousMutationResponse(response.status)
+    ) {
+      pendingEvidenceChoiceKeys.delete(identity);
+    }
     if (acknowledgedInvocation !== undefined &&
         !ambiguousMutationResponse(response.status)) {
       deletePendingAcknowledgedCatalogMutation(archiveId, storage);
@@ -324,6 +340,9 @@ export async function mutateCatalogReview(
     throw await catalogReviewMutationError(response);
   }
   if (proposalIdentity !== null) pendingProposalKeys.delete(proposalIdentity);
+  if (evidenceChoiceKey !== undefined) {
+    pendingEvidenceChoiceKeys.delete(identity);
+  }
   if (acknowledgedInvocation !== undefined) {
     deletePendingAcknowledgedCatalogMutation(archiveId, storage);
   }

@@ -42,6 +42,8 @@ export const CATALOG_REVIEW_COMMAND_ACTIONS = [
   "repair_disc_selection",
   "correct_disc_selection",
   "delete_disc_selection",
+  "archive_only",
+  "reopen",
   "complete_review",
 ] as const;
 export const MAX_CATALOG_REVIEW_REPLACEMENT_ENCODES = 100;
@@ -172,6 +174,12 @@ export type CatalogReviewCommand =
       discSelectionId: string;
     }
   | {
+      action: "archive_only" | "reopen";
+      catalogRevision: string;
+      checkpointRevision: number;
+      checkpointDigest: string;
+    }
+  | {
       action: "complete_review";
       catalogRevision: string;
       outcome: CompletedCatalogReviewOutcome;
@@ -239,7 +247,8 @@ export type CatalogReviewCommandValidationError =
   | "Invalid Disc Selection Correction"
   | "Invalid corrected Encode replacement plan"
   | "Invalid catalog review revision"
-  | "Invalid catalog review outcome";
+  | "Invalid catalog review outcome"
+  | "Invalid Catalog Review evidence choice";
 
 export type CatalogReviewCommandParseResult =
   | { ok: true; command: CatalogReviewCommand }
@@ -1054,6 +1063,27 @@ export function parseCatalogReviewCommand(
       return discSelectionId
         ? { ok: true, command: { action, discSelectionId } }
         : invalid("Invalid Disc Selection");
+    }
+    case "archive_only":
+    case "reopen": {
+      const revision = catalogRevision(body.catalogRevision);
+      const checkpointRevision = optionalInteger(
+        body.checkpointRevision,
+        1,
+      );
+      const checkpointDigest = boundedString(body.checkpointDigest, 256);
+      return revision && typeof checkpointRevision === "number" &&
+          checkpointDigest && /^[0-9a-f]{64}$/.test(checkpointDigest)
+        ? {
+            ok: true,
+            command: {
+              action,
+              catalogRevision: revision,
+              checkpointRevision,
+              checkpointDigest,
+            },
+          }
+        : invalid("Invalid Catalog Review evidence choice");
     }
     case "complete_review": {
       const revision = catalogRevision(body.catalogRevision);

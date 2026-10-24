@@ -25,6 +25,10 @@ function decisionReadyEvidence(
   acceptanceRequired: boolean,
 ): DvdCatalogReviewWorkflowEvidence {
   return {
+    catalogReview: {
+      catalogRevision: "2026-10-24T00:00:00.000Z",
+      outcome: "needs_review",
+    },
     archiveJobs: [{
       id: "synthetic-archive-job",
       evidenceFormat: "dvd-recovery-evidence-v1",
@@ -52,6 +56,7 @@ function decisionReadyEvidence(
       currentAssessmentIdentity: "synthetic-assessment",
       acceptanceRequired,
     },
+    choiceHistory: [],
   } as unknown as DvdCatalogReviewWorkflowEvidence;
 }
 
@@ -66,9 +71,12 @@ it("rejects legacy completion without inventing a damage acceptance requirement"
       mappingState: "mapped",
       readyForDamageDecision: true,
       readyForEncoding: false,
+      archiveOnly: false,
     },
     current: {
       originalDiscArchiveId: "synthetic-archive",
+      catalogRevision: "2026-10-24T00:00:00.000Z",
+      catalogReviewOutcome: "needs_review",
       archiveJob: { id: "synthetic-archive-job", status: "completed" },
       checkpoint: { revision: 2, manifestDigest: "synthetic-digest" },
       recovery: {
@@ -80,6 +88,8 @@ it("rejects legacy completion without inventing a damage acceptance requirement"
       catalogMappingProjectionId: "synthetic-mapping-projection",
       titleDamageAssessmentId: "synthetic-assessment",
     },
+    choiceHistory: [],
+    choiceHistoryPage: { limit: 100, truncated: false },
     actions: [{
       action: "catalog_mapping",
       available: true,
@@ -155,6 +165,64 @@ it("requires acceptance only when the current damage assessment proves it is nee
       "ACCEPTANCE_REQUIRED",
       "DVD_RECOVERY_EVIDENCE_ENCODING_UNAVAILABLE",
     ]);
+});
+
+it("offers archive-only only for stopped or completed Recovery", () => {
+  const completed = describeCatalogReviewWorkflow(
+    {} as ConsistentReadAccess,
+    archiveId,
+    decisionReadyEvidence(false),
+  );
+  const activeEvidence = decisionReadyEvidence(false);
+  const active = describeCatalogReviewWorkflow(
+    {} as ConsistentReadAccess,
+    archiveId,
+    {
+      ...activeEvidence,
+      recovery: { ...activeEvidence.recovery!, status: "running" },
+    },
+  );
+
+  expect(completed?.actions.find(({ action }) => action === "archive_only"))
+    .toMatchObject({ available: true, reasons: [] });
+  expect(completed?.actions.find(({ action }) => action === "reopen"))
+    .toMatchObject({
+      available: false,
+      reasons: [{ code: "CATALOG_REVIEW_OPEN" }],
+    });
+  expect(active?.actions.find(({ action }) => action === "archive_only"))
+    .toMatchObject({
+      available: false,
+      reasons: [{ code: "RECOVERY_ACTIVE" }],
+    });
+});
+
+it("keeps archive-only through later Recovery while allowing explicit reopen", () => {
+  const evidence = decisionReadyEvidence(false);
+  const workflow = describeCatalogReviewWorkflow(
+    {} as ConsistentReadAccess,
+    archiveId,
+    {
+      ...evidence,
+      catalogReview: {
+        ...evidence.catalogReview!,
+        outcome: "archive_only",
+      },
+      recovery: { ...evidence.recovery!, status: "running" },
+    },
+  );
+
+  expect(workflow?.facts.archiveOnly).toBe(true);
+  expect(workflow?.actions.find(({ action }) => action === "catalog_mapping")
+    ?.reasons.map(({ code }) => code)).toContain(
+      "CATALOG_REVIEW_ARCHIVE_ONLY",
+    );
+  expect(workflow?.actions.find(({ action }) => action === "reopen"))
+    .toMatchObject({ available: true, reasons: [] });
+  expect(workflow?.actions.find(({ action }) => action === "encode")
+    ?.reasons.map(({ code }) => code)).toContain(
+      "CATALOG_REVIEW_ARCHIVE_ONLY",
+    );
 });
 
 it("blocks a damage decision while an absent retained title needs mapping review", () => {

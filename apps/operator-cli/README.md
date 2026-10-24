@@ -122,6 +122,8 @@ stdout. Invalid input exits 2; an unavailable read exits 1.
 ```sh
 rip-dvd catalog-review show <archive-id>
 rip-dvd catalog-review damage <archive-id> [--limit 100] [--cursor <cursor>]
+rip-dvd catalog-review archive-only <archive-id> --key <key> --revision <catalog-revision> --checkpoint-revision <n> --checkpoint-digest <digest>
+rip-dvd catalog-review reopen <archive-id> --key <key> --revision <catalog-revision> --checkpoint-revision <n> --checkpoint-digest <digest>
 rip-dvd catalog-review suggest <archive-id>
 rip-dvd catalog-review suggest <archive-id> --tmdb-id 42 --media-type movie
 ```
@@ -334,6 +336,29 @@ Rejected members, stale revisions, and key conflicts exit 2 with
 `STALE_CATALOG_REVISION`, or `MUTATION_KEY_CONFLICT`.
 Database unavailability exits 1 with `PROPOSAL_UNAVAILABLE`.
 
+## Choose archive-only or reopen
+
+For a `dvd-recovery-evidence-v1` archive, copy the catalog revision and current
+checkpoint identity from `catalog-review show`. Archive-only is available after
+Archive Recovery stops or completes. It records an explicit choice without
+accepting damage or queueing an Encode Job. Reopen records a new choice against
+the current checkpoint and does not restore an expired damage acceptance.
+
+```sh
+rip-dvd catalog-review archive-only <archive-id> \
+  --key <key> --revision <catalog-revision> \
+  --checkpoint-revision <n> --checkpoint-digest <digest>
+rip-dvd catalog-review reopen <archive-id> \
+  --key <key> --revision <catalog-revision> \
+  --checkpoint-revision <n> --checkpoint-digest <digest>
+```
+
+Both operations recheck the catalog revision and checkpoint atomically. A
+repeated key with the same input returns the original choice. Reusing the key
+with different input returns `MUTATION_KEY_CONFLICT`. `catalog-review show`
+returns the 100 most recent choices and reports when older retained history is
+not included in that response.
+
 ## Complete Catalog Review
 
 Review completion is a previewed, keyed operation. Start with `catalog-review
@@ -357,9 +382,10 @@ queueing replacements.
 }
 ```
 
-Use `outcome: "archive_only"` only when the review has no Disc Selections, and
-leave `replacementEncodes` empty for that outcome. Preview validates the whole
-plan, resolves output paths inside the configured media library, reports
+For historical evidence, use `outcome: "archive_only"` only when the review has
+no Disc Selections, and leave `replacementEncodes` empty for that outcome.
+Preview validates the whole plan, resolves output paths inside the configured
+media library, reports
 selected and omitted replacements plus the exact failed predecessor output
 reservations it will release, and returns an opaque `previewToken` bound to the
 exact plan and catalog revision.

@@ -75,6 +75,7 @@ import {
   completeCatalogReview,
   previewCatalogReviewCompletion,
 } from "./catalog-review-completion.js";
+import { recordCatalogReviewEvidenceChoice } from "./catalog-review-choice.js";
 import {
   acceptRearchive,
   previewRearchiveAcceptance,
@@ -919,6 +920,16 @@ export function createApplicationOperations(
       command: Parameters<typeof completeCatalogReview>[2],
       input: Parameters<typeof completeCatalogReview>[3],
     ) => completeCatalogReview(access, archiveId, command, input),
+    recordCatalogReviewEvidenceChoice: (
+      archiveId: Parameters<typeof recordCatalogReviewEvidenceChoice>[1],
+      command: Parameters<typeof recordCatalogReviewEvidenceChoice>[2],
+      mutationKey: Parameters<typeof recordCatalogReviewEvidenceChoice>[3],
+    ) => recordCatalogReviewEvidenceChoice(
+      access,
+      archiveId,
+      command,
+      mutationKey,
+    ),
     searchMediaItems: (input: Parameters<typeof searchMediaItems>[1]) =>
       searchMediaItems(access, input),
     showMediaItem: (id: Parameters<typeof showMediaItem>[1]) => showMediaItem(access, id),
@@ -998,6 +1009,7 @@ export type {
 export * from "./catalog-review-types.js";
 export * from "./catalog-review-command.js";
 export * from "./catalog-review-completion.js";
+export * from "./catalog-review-choice.js";
 export * from "./catalog-review-completion-preview-token.js";
 export * from "./rearchive-acceptance.js";
 export * from "./rearchive-acceptance-preview-token.js";

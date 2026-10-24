@@ -104,6 +104,7 @@ import type {
   ArchiveRecoveryStopOperationId,
   ArchiveRecoveryStatus,
   ArchiveRecoveryWorkStatus,
+  CatalogReviewChoiceId,
   DvdRecoveryReconciliationClaimToken,
   DvdRecoveryReconciliationEvidence,
   DvdRecoveryReconciliationId,
@@ -1839,6 +1840,79 @@ export const archiveRecoveries = sqliteTable(
     check(
       "archive_recoveries_fault_check",
       sql`(${table.status} = 'faulted' and ${table.faultCode} in (${sqliteStringLiterals(ARCHIVE_RECOVERY_FAULT_CODES)})) or (${table.status} <> 'faulted' and ${table.faultCode} is null)`,
+    ),
+  ],
+);
+
+export const catalogReviewEvidenceChoices = sqliteTable(
+  "catalog_review_evidence_choices",
+  {
+    id: text("id").$type<CatalogReviewChoiceId>().notNull().primaryKey(),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
+    choice: text("choice", { enum: ["archive_only", "reopen"] })
+      .notNull(),
+    catalogRevision: integer("catalog_revision", { mode: "timestamp_ms" })
+      .notNull(),
+    checkpointRevision: integer("checkpoint_revision").notNull(),
+    checkpointDigest: text("checkpoint_digest").notNull(),
+    archiveRecoveryId: text("archive_recovery_id")
+      .$type<ArchiveRecoveryId>()
+      .notNull(),
+    archiveRecoveryAttemptId: text("archive_recovery_attempt_id")
+      .$type<ArchiveRecoveryAttemptId>()
+      .notNull(),
+    archiveRecoveryStatus: text("archive_recovery_status", {
+      enum: ARCHIVE_RECOVERY_STATUSES,
+    }).$type<ArchiveRecoveryStatus>().notNull(),
+    recordedAt: integer("recorded_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [
+        table.archiveRecoveryId,
+        table.originalDiscArchiveId,
+      ],
+      foreignColumns: [
+        archiveRecoveries.id,
+        archiveRecoveries.originalDiscArchiveId,
+      ],
+      name: "catalog_review_evidence_choices_recovery_fk",
+    }).onDelete("restrict"),
+    check(
+      "catalog_review_evidence_choices_id_not_null",
+      sql`${table.id} is not null`,
+    ),
+    index("catalog_review_evidence_choices_archive_revision_idx").on(
+      table.originalDiscArchiveId,
+      table.catalogRevision,
+      table.id,
+    ),
+    check(
+      "catalog_review_evidence_choices_choice_check",
+      sql`${table.choice} in ('archive_only', 'reopen')`,
+    ),
+    check(
+      "catalog_review_evidence_choices_checkpoint_revision_check",
+      sql`typeof(${table.checkpointRevision}) = 'integer' and ${table.checkpointRevision} > 0`,
+    ),
+    check(
+      "catalog_review_evidence_choices_checkpoint_digest_check",
+      sql`length(${table.checkpointDigest}) = 64 and ${table.checkpointDigest} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "catalog_review_evidence_choices_recovery_identity_check",
+      sql`length(trim(${table.archiveRecoveryId})) > 0 and length(trim(${table.archiveRecoveryAttemptId})) > 0`,
+    ),
+    check(
+      "catalog_review_evidence_choices_recovery_status_check",
+      sql`${table.archiveRecoveryStatus} in (${sqliteStringLiterals(ARCHIVE_RECOVERY_STATUSES)})`,
+    ),
+    check(
+      "catalog_review_evidence_choices_timestamp_check",
+      sql`typeof(${table.catalogRevision}) = 'integer' and typeof(${table.recordedAt}) = 'integer'`,
     ),
   ],
 );

@@ -26,6 +26,8 @@ export type CatalogReviewWorkflowReasonCode =
   | "MAPPING_REVIEW_REQUIRED"
   | "SELECTION_UNIDENTIFIED"
   | "ACCEPTANCE_REQUIRED"
+  | "CATALOG_REVIEW_ARCHIVE_ONLY"
+  | "CATALOG_REVIEW_OPEN"
   | "CATALOG_DAMAGE_DECISION_UNAVAILABLE"
   | "STALE_CATALOG_REVISION"
   | "CATALOG_REVIEW_COMPLETION_UNAVAILABLE"
@@ -38,7 +40,12 @@ export interface CatalogReviewWorkflowReason {
 }
 
 export interface CatalogReviewWorkflowAction {
-  action: "catalog_mapping" | "damage_decision" | "encode";
+  action:
+    | "catalog_mapping"
+    | "damage_decision"
+    | "archive_only"
+    | "reopen"
+    | "encode";
   available: boolean;
   reasons: readonly CatalogReviewWorkflowReason[];
   expectedInputs: readonly string[];
@@ -54,9 +61,12 @@ export interface CatalogReviewWorkflow {
     mappingState: "pending" | "unmapped" | "needs_mapping_review" | "mapped";
     readyForDamageDecision: boolean;
     readyForEncoding: boolean;
+    archiveOnly: boolean;
   };
   current: {
     originalDiscArchiveId: string;
+    catalogRevision: string;
+    catalogReviewOutcome: "needs_review" | "reviewed_with_selections" | "archive_only";
     archiveJob: { id: string; status: ArchiveJobStatus } | null;
     checkpoint: {
       revision: number;
@@ -71,6 +81,15 @@ export interface CatalogReviewWorkflow {
     catalogMappingProjectionId: string | null;
     titleDamageAssessmentId: string | null;
   };
+  choiceHistory: readonly {
+    id: string;
+    choice: "archive_only" | "reopen";
+    catalogRevision: string;
+    checkpoint: { revision: number; manifestDigest: string };
+    recovery: { id: string; attemptId: string; state: ArchiveRecoveryStatus };
+    recordedAt: string;
+  }[];
+  choiceHistoryPage: { limit: number; truncated: boolean };
   actions: readonly CatalogReviewWorkflowAction[];
 }
 
@@ -227,6 +246,7 @@ export function describeCatalogReviewWorkflow(
   originalDiscArchiveId: OriginalDiscArchiveId,
   prefetched?: DvdCatalogReviewWorkflowEvidence,
 ): CatalogReviewWorkflow | null {
+  const choiceHistoryLimit = 100;
   const archiveJobs = prefetched?.archiveJobs ??
     access.archiveJobs.listForArchive(originalDiscArchiveId);
   const header = prefetched === undefined
@@ -235,6 +255,26 @@ export function describeCatalogReviewWorkflow(
   if (dvdRecoveryEvidenceFormatForArchive(header, archiveJobs) === null) {
     return null;
   }
+  const catalogReview = prefetched?.catalogReview ?? (() => {
+    const archive = access.catalog.listOriginalDiscArchives({
+      ids: [originalDiscArchiveId],
+    })[0];
+    return archive === undefined
+      ? null
+      : {
+        catalogRevision: archive.updatedAt.toISOString(),
+        outcome: archive.catalogReviewOutcome,
+      };
+  })();
+  if (catalogReview === null) return null;
+  const archiveOnly = catalogReview.outcome === "archive_only";
+  const choiceHistoryRows = prefetched === undefined
+    ? access.catalog.listCatalogReviewEvidenceChoices(
+      originalDiscArchiveId,
+      { limit: choiceHistoryLimit + 1 },
+    )
+    : prefetched.choiceHistory ?? [];
+  const choiceHistory = choiceHistoryRows.slice(0, choiceHistoryLimit);
 
   const archiveJob = header === null
     ? archiveJobs.find((job) =>
@@ -384,6 +424,14 @@ export function describeCatalogReviewWorkflow(
     }]
     : [];
   const mappingReasons: CatalogReviewWorkflowReason[] = [
+    ...(archiveOnly
+      ? [{
+        code: "CATALOG_REVIEW_ARCHIVE_ONLY",
+        message:
+          "Catalog Review is archive-only; reopen it before changing catalog mapping.",
+        details: { originalDiscArchiveId },
+      } satisfies CatalogReviewWorkflowReason]
+      : []),
     ...(hasMappingReview
       ? [{
         code: "MAPPING_REVIEW_REQUIRED",
@@ -417,6 +465,14 @@ export function describeCatalogReviewWorkflow(
   ];
   const damageReasons = uniqueReasons([
     ...consistencyReasons,
+    ...(archiveOnly
+      ? [{
+        code: "CATALOG_REVIEW_ARCHIVE_ONLY" as const,
+        message:
+          "Catalog Review is archive-only; reopen it before making a damage decision.",
+        details: { originalDiscArchiveId },
+      }]
+      : []),
     ...assessmentReasons,
     ...recoveryReasons,
     ...mappingReasons,
@@ -425,7 +481,49 @@ export function describeCatalogReviewWorkflow(
   const mappingActionReasons = uniqueReasons([
     ...consistencyReasons,
     ...recoveryReasons.filter(({ code }) => code === "CONSISTENCY_FAULT"),
-    ...(mappingState === "pending" ? mappingReasons : []),
+    ...mappingReasons.filter(({ code }) =>
+      code === "CATALOG_REVIEW_ARCHIVE_ONLY" ||
+      mappingState === "pending"
+    ),
+  ]);
+  const archiveOnlyRecoveryReasons = recoveryReasons.map((reason) =>
+    reason.code === "RECOVERY_ACTIVE"
+      ? {
+        ...reason,
+        message:
+          "Archive Recovery must stop or complete before choosing archive-only.",
+      }
+      : reason
+  );
+  const archiveOnlyReasons = uniqueReasons([
+    ...consistencyReasons,
+    ...archiveOnlyRecoveryReasons,
+    ...(catalogReview.outcome === "needs_review"
+      ? []
+      : [{
+        code: "CATALOG_REVIEW_ARCHIVE_ONLY" as const,
+        message: archiveOnly
+          ? "Catalog Review is already archive-only."
+          : "Catalog Review is not open for an archive-only choice.",
+        details: {
+          originalDiscArchiveId,
+          catalogReviewOutcome: catalogReview.outcome,
+        },
+      }]),
+  ]);
+  const reopenReasons = uniqueReasons([
+    ...consistencyReasons,
+    ...recoveryReasons.filter(({ code }) => code === "CONSISTENCY_FAULT"),
+    ...(archiveOnly
+      ? []
+      : [{
+        code: "CATALOG_REVIEW_OPEN" as const,
+        message: "Catalog Review is already open.",
+        details: {
+          originalDiscArchiveId,
+          catalogReviewOutcome: catalogReview.outcome,
+        },
+      }]),
   ]);
   const damageDecisionReasons = uniqueReasons([
     ...damageReasons,
@@ -469,9 +567,12 @@ export function describeCatalogReviewWorkflow(
       mappingState,
       readyForDamageDecision: damageDecisionAvailable,
       readyForEncoding: false,
+      archiveOnly,
     },
     current: {
       originalDiscArchiveId,
+      catalogRevision: catalogReview.catalogRevision,
+      catalogReviewOutcome: catalogReview.outcome,
       archiveJob: archiveJob === null
         ? null
         : { id: archiveJob.id, status: archiveJob.status },
@@ -493,6 +594,25 @@ export function describeCatalogReviewWorkflow(
         titleIdentity?.catalogMappingProjectionId ?? null,
       titleDamageAssessmentId: titleDamage.currentAssessmentIdentity,
     },
+    choiceHistory: choiceHistory.map((choice) => ({
+      id: choice.id,
+      choice: choice.choice,
+      catalogRevision: choice.catalogRevision.toISOString(),
+      checkpoint: {
+        revision: choice.checkpointRevision,
+        manifestDigest: choice.checkpointDigest,
+      },
+      recovery: {
+        id: choice.archiveRecoveryId,
+        attemptId: choice.archiveRecoveryAttemptId,
+        state: choice.archiveRecoveryStatus,
+      },
+      recordedAt: choice.recordedAt.toISOString(),
+    })),
+    choiceHistoryPage: {
+      limit: choiceHistoryLimit,
+      truncated: choiceHistoryRows.length > choiceHistoryLimit,
+    },
     actions: [
       {
         action: "catalog_mapping",
@@ -509,6 +629,28 @@ export function describeCatalogReviewWorkflow(
           "assessmentIdentity",
           "reviewSetIdentity",
           "mutationKey",
+        ],
+      },
+      {
+        action: "archive_only",
+        available: archiveOnlyReasons.length === 0,
+        reasons: archiveOnlyReasons,
+        expectedInputs: [
+          "mutationKey",
+          "catalogRevision",
+          "checkpointRevision",
+          "checkpointDigest",
+        ],
+      },
+      {
+        action: "reopen",
+        available: reopenReasons.length === 0,
+        reasons: reopenReasons,
+        expectedInputs: [
+          "mutationKey",
+          "catalogRevision",
+          "checkpointRevision",
+          "checkpointDigest",
         ],
       },
       {

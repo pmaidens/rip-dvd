@@ -679,6 +679,21 @@ export function useCatalogReviewState({
     );
   }
 
+  function recordEvidenceChoice(choice: "archive_only" | "reopen") {
+    if (state.status !== "loaded") return;
+    const workflow = state.review.reviewWorkflow;
+    const checkpoint = workflow?.current.checkpoint;
+    if (workflow === undefined || checkpoint === null || checkpoint === undefined) {
+      return;
+    }
+    void mutate({
+      action: choice,
+      catalogRevision: state.review.catalogRevision,
+      checkpointRevision: checkpoint.revision,
+      checkpointDigest: checkpoint.manifestDigest,
+    });
+  }
+
   return {
     state,
     activeMappingProposal,
@@ -751,6 +766,7 @@ export function useCatalogReviewState({
     previewRearchiveMappingProposal,
     saveRearchiveMappingProposal,
     acceptRearchive,
+    recordEvidenceChoice,
     saveMediaItem,
     deleteMediaItem: (mediaItemId: string) =>
       void mutate({ action: "delete_media_item", mediaItemId }),

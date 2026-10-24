@@ -50,6 +50,14 @@ Verification before source reads. Normal or low drive speed is requested for
 that attempt, but firmware acceptance is recorded rather than assumed.
 _Avoid_: Automatic retry, Archive Request retry, continuing an old attempt
 
+**Archive-only Catalog Review**:
+An operator's explicit choice to retain a saved Original Disc Archive without
+accepting damage or allowing new encoding. The choice is recorded against the
+current checkpoint after Archive Recovery stops or completes, persists if
+Recovery runs again, and remains in history after the operator reopens Catalog
+Review against later evidence.
+_Avoid_: Recovery Stop, abandoned review, Title Damage Acceptance
+
 **Operator Disc Confirmation**:
 An operator's explicit assertion that the currently inserted disc is the source for one Archive Recovery attempt, recorded separately from automatic verification findings. It expires after a worker restart, reboot, disc removal, or detected source change.
 _Avoid_: Verified fingerprint match, disc name match, permanent disc approval

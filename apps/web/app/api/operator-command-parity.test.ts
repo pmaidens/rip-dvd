@@ -77,6 +77,372 @@ import { readDashboardSnapshot } from "../../lib/dashboard";
 
 const trustedOrigin = "http://localhost:3000";
 
+it("keeps archive-only and reopen choices identical through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  try {
+    const { archive } = await seedCommittedArchiveEvidence(fixture, [{
+      startLba: 12,
+      sectorCount: 2,
+      classification: "skipped_untested",
+    }], false, true);
+    withEvidenceGuardsDisabled(fixture.databasePath, (database) => {
+      database.prepare(`
+        UPDATE original_disc_archives
+        SET catalog_review_outcome = 'needs_review',
+            catalog_reviewed_at = NULL,
+            updated_at = updated_at + 1
+        WHERE id = ?
+      `).run(archive.id);
+      database.prepare(`
+        UPDATE archive_recoveries
+        SET status = 'completed', updated_at = updated_at + 1
+        WHERE original_disc_archive_id = ?
+      `).run(archive.id);
+    });
+    const setupAccess = fixture.openAccess();
+    const checkpoint = setupAccess.catalog.findDvdArchiveEvidenceHeader(
+      archive.id,
+    )!;
+    setupAccess.catalog.recordDvdTitleIdentityObservations({
+      originalDiscArchiveId: archive.id,
+      checkpoint: {
+        manifestId: checkpoint.currentManifestId,
+        manifestRevision: checkpoint.currentManifestRevision,
+        manifestDigest: checkpoint.currentManifestDigest,
+      },
+      observations: [{
+        displayTitleNumber: 1,
+        navigation: {
+          videoTitleSetNumber: 1,
+          titleSetTitleNumber: 1,
+          programChainNumber: 1,
+        },
+        selectedPath: [{
+          programNumber: 1,
+          cellNumber: 1,
+          vobId: 1,
+          cellId: 1,
+        }],
+        angleNumber: 1,
+        angleCount: 1,
+        chapterStart: 1,
+        chapterEnd: 12,
+        chapterCount: 12,
+        sourceExtents: [{ startLba: 0, sectorCount: 1 }],
+      }],
+    });
+    const existingMediaItem = setupAccess.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic retained archive-only mapping",
+    });
+    const existingSelection = setupAccess.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: existingMediaItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    setupAccess.close();
+
+    const read = await fixture.run(["catalog-review", "show", archive.id]);
+    const review = read.result as {
+      catalogRevision: string;
+      reviewWorkflow: {
+        current: {
+          checkpoint: { revision: number; manifestDigest: string };
+        };
+      };
+    };
+    const mutationKey = "00000000-0000-4000-8000-000000000412";
+    const body = {
+      action: "archive_only",
+      mutationKey,
+      catalogRevision: review.catalogRevision,
+      checkpointRevision: review.reviewWorkflow.current.checkpoint.revision,
+      checkpointDigest:
+        review.reviewWorkflow.current.checkpoint.manifestDigest,
+    };
+    const webResponse = await createCatalogReviewRoute(
+      new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+        },
+        body: JSON.stringify(body),
+      }),
+      archive.id,
+      fixture.openAccess,
+      () => trustedOrigin,
+      () => fixture.mediaLibraryPath,
+    );
+    const cliResponse = await fixture.run([
+      "catalog-review",
+      "archive-only",
+      archive.id,
+      "--key",
+      mutationKey,
+      "--revision",
+      review.catalogRevision,
+      "--checkpoint-revision",
+      String(review.reviewWorkflow.current.checkpoint.revision),
+      "--checkpoint-digest",
+      review.reviewWorkflow.current.checkpoint.manifestDigest,
+    ]);
+    expect(webResponse.status).toBe(200);
+    expect(cliResponse.exitCode).toBe(0);
+    expect(cliResponse.result).toEqual(await webResponse.json());
+
+    const afterArchiveOnly = await fixture.run([
+      "catalog-review",
+      "show",
+      archive.id,
+    ]);
+    expect(afterArchiveOnly.result).toMatchObject({
+      reviewOutcome: "archive_only",
+      reviewWorkflow: {
+        choiceHistory: [{ choice: "archive_only" }],
+      },
+    });
+    const mappingAccess = fixture.openAccess();
+    const mediaItem = mappingAccess.catalog.createMediaItem({
+      kind: "movie",
+      title: "Synthetic blocked archive-only mapping",
+    });
+    mappingAccess.close();
+    const archivedReview = afterArchiveOnly.result as typeof review;
+    const blockedWebMapping = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "create_disc_selection",
+        catalogRevision: archivedReview.catalogRevision,
+        mutationKey: "00000000-0000-4000-8000-000000000414",
+        selection: {
+          mediaItemId: mediaItem.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        },
+      }),
+      archive.id,
+      fixture.openAccess,
+      () => trustedOrigin,
+    );
+    const blockedCliMapping = await fixture.run([
+      "disc-selection",
+      "create",
+      archive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000415",
+      "--revision",
+      archivedReview.catalogRevision,
+      "--media-item-id",
+      mediaItem.id,
+      "--source-kind",
+      "dvd_title",
+      "--title-number",
+      "1",
+    ]);
+    expect(blockedWebMapping.status).toBe(409);
+    expect(blockedCliMapping.exitCode).toBe(2);
+    expect(blockedCliMapping.result).toEqual(await blockedWebMapping.json());
+    expect(blockedCliMapping.result).toMatchObject({
+      error: {
+        code: "CATALOG_MAPPING_UNAVAILABLE",
+        reasons: expect.arrayContaining([
+          expect.objectContaining({ code: "CATALOG_REVIEW_ARCHIVE_ONLY" }),
+        ]),
+      },
+    });
+    const blockedWebDeletePreview = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        action: "delete_disc_selection",
+        discSelectionId: existingSelection.id,
+        preview: true,
+      }),
+      archive.id,
+      fixture.openAccess,
+      () => trustedOrigin,
+    );
+    const blockedCliDeletePreview = await fixture.run([
+      "disc-selection",
+      "preview",
+      "delete",
+      archive.id,
+      existingSelection.id,
+    ]);
+    expect(blockedWebDeletePreview.status).toBe(409);
+    expect(blockedCliDeletePreview.exitCode).toBe(2);
+    expect(blockedCliDeletePreview.result).toEqual(
+      await blockedWebDeletePreview.json(),
+    );
+    expect(blockedCliDeletePreview.result).toMatchObject({
+      error: {
+        code: "CATALOG_MAPPING_UNAVAILABLE",
+        reasons: expect.arrayContaining([
+          expect.objectContaining({ code: "CATALOG_REVIEW_ARCHIVE_ONLY" }),
+        ]),
+      },
+    });
+    const stillArchived = await fixture.run([
+      "catalog-review",
+      "show",
+      archive.id,
+    ]);
+    expect(stillArchived.result).toMatchObject({
+      reviewOutcome: "archive_only",
+      reviewWorkflow: { choiceHistory: [{ choice: "archive_only" }] },
+    });
+    const retainedAccess = fixture.openAccess();
+    expect(retainedAccess.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: existingSelection.id }),
+    ]));
+    retainedAccess.close();
+    const reopenedReview = afterArchiveOnly.result as typeof review;
+    const reopenKey = "00000000-0000-4000-8000-000000000413";
+    const reopenBody = {
+      action: "reopen",
+      mutationKey: reopenKey,
+      catalogRevision: reopenedReview.catalogRevision,
+      checkpointRevision:
+        reopenedReview.reviewWorkflow.current.checkpoint.revision,
+      checkpointDigest:
+        reopenedReview.reviewWorkflow.current.checkpoint.manifestDigest,
+    };
+    const webReopen = await createCatalogReviewRoute(
+      new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+        },
+        body: JSON.stringify(reopenBody),
+      }),
+      archive.id,
+      fixture.openAccess,
+      () => trustedOrigin,
+      () => fixture.mediaLibraryPath,
+    );
+    const cliReopen = await fixture.run([
+      "catalog-review",
+      "reopen",
+      archive.id,
+      "--key",
+      reopenKey,
+      "--revision",
+      reopenedReview.catalogRevision,
+      "--checkpoint-revision",
+      String(reopenedReview.reviewWorkflow.current.checkpoint.revision),
+      "--checkpoint-digest",
+      reopenedReview.reviewWorkflow.current.checkpoint.manifestDigest,
+    ]);
+    expect(webReopen.status).toBe(200);
+    expect(cliReopen.exitCode).toBe(0);
+    expect(cliReopen.result).toEqual(await webReopen.json());
+  } finally {
+    fixture.dispose();
+  }
+});
+
+it("reports ancestor evidence corruption identically through web and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  try {
+    const { archive, manifest } = await seedCommittedArchiveEvidence(
+      fixture,
+      [{
+        startLba: 18,
+        sectorCount: 2,
+        classification: "skipped_untested",
+      }],
+      false,
+      true,
+    );
+    const second = advanceCommittedArchiveEvidence(fixture, manifest);
+    const third = advanceCommittedArchiveEvidence(fixture, second);
+    withEvidenceGuardsDisabled(fixture.databasePath, (database) => {
+      database.prepare(`
+        UPDATE original_disc_archives
+        SET catalog_review_outcome = 'needs_review',
+            catalog_reviewed_at = NULL,
+            updated_at = updated_at + 1
+        WHERE id = ?
+      `).run(archive.id);
+      database.prepare(`
+        UPDATE archive_recoveries
+        SET status = 'completed', updated_at = updated_at + 1
+        WHERE original_disc_archive_id = ?
+      `).run(archive.id);
+      database.prepare(`
+        UPDATE dvd_archive_evidence_manifests
+        SET manifest_digest = ?
+        WHERE original_disc_archive_id = ? AND revision = 1
+      `).run("f".repeat(64), archive.id);
+    });
+
+    const shown = await fixture.run([
+      "catalog-review",
+      "show",
+      archive.id,
+    ]);
+    expect(shown.exitCode).toBe(0);
+    const review = shown.result as {
+      catalogRevision: string;
+      reviewWorkflow: {
+        current: {
+          checkpoint: { revision: number; manifestDigest: string };
+        };
+      };
+    };
+    const command = {
+      action: "archive_only",
+      catalogRevision: review.catalogRevision,
+      checkpointRevision: review.reviewWorkflow.current.checkpoint.revision,
+      checkpointDigest:
+        review.reviewWorkflow.current.checkpoint.manifestDigest,
+    };
+    const web = await createCatalogReviewRoute(
+      catalogReviewMutationRequest(archive.id, {
+        ...command,
+        mutationKey: "00000000-0000-4000-8000-000000000416",
+      }),
+      archive.id,
+      fixture.openAccess,
+      () => trustedOrigin,
+    );
+    const cli = await fixture.run([
+      "catalog-review",
+      "archive-only",
+      archive.id,
+      "--key",
+      "00000000-0000-4000-8000-000000000417",
+      "--revision",
+      command.catalogRevision,
+      "--checkpoint-revision",
+      String(command.checkpointRevision),
+      "--checkpoint-digest",
+      command.checkpointDigest,
+    ]);
+    expect(web.status).toBe(409);
+    expect(cli.exitCode).toBe(2);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toMatchObject({
+      error: {
+        code: "CATALOG_REVIEW_CHOICE_UNAVAILABLE",
+        reasons: [{ code: "CONSISTENCY_FAULT" }],
+        current: {
+          originalDiscArchiveId: archive.id,
+          checkpoint: {
+            revision: third.revision,
+            manifestDigest: third.manifestDigest,
+          },
+          recovery: { state: "completed" },
+        },
+      },
+    });
+  } finally {
+    fixture.dispose();
+  }
+});
+
 it("keeps recovering Catalog Review facts and mapping identical through web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
   const seedAccess = createLegacySidecarDataAccess({
@@ -425,6 +791,16 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
             { code: "SELECTION_UNIDENTIFIED" },
             { code: "CATALOG_DAMAGE_DECISION_UNAVAILABLE" },
           ],
+        },
+        {
+          action: "archive_only",
+          available: false,
+          reasons: [{ code: "RECOVERY_ACTIVE" }],
+        },
+        {
+          action: "reopen",
+          available: false,
+          reasons: [{ code: "CATALOG_REVIEW_OPEN" }],
         },
         { action: "encode", available: false },
       ],

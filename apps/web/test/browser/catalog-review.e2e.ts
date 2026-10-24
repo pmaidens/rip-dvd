@@ -270,11 +270,19 @@ test("Review Steps preserve mapping drafts and explain an unavailable damage dec
   await expect(damagePanel.getByRole("heading", {
     name: "Damage decision readiness",
   })).toBeVisible();
-  await expect(damagePanel.getByText("RECOVERY_ACTIVE", { exact: true }))
-    .toBeVisible();
+  await expect(damagePanel.getByText(
+    "Archive Recovery must stop or complete before a damage decision.",
+    { exact: true },
+  )).toBeVisible();
   await expect(damagePanel.getByText("SELECTION_UNIDENTIFIED", {
     exact: true,
   })).toBeVisible();
+  await expect(damagePanel.getByRole("button", {
+    name: "Keep archive only",
+  })).toBeDisabled();
+  await expect(damagePanel.getByText(
+    "Archive Recovery must stop or complete before choosing archive-only.",
+  )).toBeVisible();
 
   await mapping.click();
   await expect(title).toHaveValue(draftTitle);
