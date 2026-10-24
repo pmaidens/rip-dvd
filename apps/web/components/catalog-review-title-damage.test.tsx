@@ -43,6 +43,13 @@ const titleDamage = {
       }],
       unrecoveredUniqueSourceSectorCount: 5,
       titleMissingSourcePercentage: 5,
+      knownSourceContinuityRiskRanges: [{
+        startLba: 25,
+        sectorCount: 2,
+        discConfirmationId: "synthetic-confirmation",
+        verificationOutcome: "mismatch",
+      }],
+      sourceContinuityRiskSectorCount: 2,
     },
     {
       titleIdentityId: "synthetic-title-2",
@@ -72,6 +79,8 @@ const titleDamage = {
       knownUnrecoveredSourceRanges: [],
       unrecoveredUniqueSourceSectorCount: 0,
       titleMissingSourcePercentage: null,
+      knownSourceContinuityRiskRanges: [],
+      sourceContinuityRiskSectorCount: 0,
     },
   ],
   truncated: false,
@@ -85,6 +94,35 @@ const titleDamage = {
     reasons: [{
       code: "TITLE_SOURCE_MAP_INCOMPLETE",
       message: "At least one selected title path has incomplete source coverage.",
+    }],
+  },
+  sourceContinuity: {
+    policyVersion: "dvd-title-source-continuity-v1",
+    provenance: [{
+      discConfirmationId: "synthetic-confirmation",
+      archiveRecoveryId: "synthetic-recovery",
+      archiveRecoveryAttemptId: "synthetic-attempt",
+      verificationId: "synthetic-verification",
+      verificationOutcome: "mismatch",
+      verificationResultDigest: "a".repeat(64),
+      confirmationCheckpoint: {
+        manifestRevision: 3,
+        manifestDigest: "b".repeat(64),
+      },
+      recoveredSourceRanges: [
+        { startLba: 25, sectorCount: 2 },
+        { startLba: 300, sectorCount: 2 },
+      ],
+    }],
+    sourceContinuityRiskSectorCount: 4,
+  },
+  unattributedSourceContinuityRisk: {
+    sourceSectorCount: 2,
+    sourceRanges: [{
+      startLba: 300,
+      sectorCount: 2,
+      discConfirmationId: "synthetic-confirmation",
+      verificationOutcome: "mismatch",
     }],
   },
   noTitleMissingSourceProved: false,
@@ -108,6 +146,9 @@ it("shows proved percentages, partial-map unknowns, and source outside known tit
   expect(html).toContain("Complete Title Missing-Source Percentage unavailable");
   expect(html).toContain("The selected path has unresolved navigation.");
   expect(html).toContain("Unknown title impact: 2 unrecovered source sectors");
+  expect(html).toContain("2 recovered source sectors have operator-confirmed uncertain continuity");
+  expect(html).toContain("Source-continuity risk: 4 recovered source sectors");
+  expect(html).toContain("Archive-level source-continuity risk: 2 confirmed source sectors");
   expect(html).not.toContain("no title damage found");
 });
 

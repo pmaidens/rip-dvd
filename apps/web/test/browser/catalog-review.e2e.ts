@@ -290,10 +290,14 @@ test("Title Damage paging retrieves evidence beyond the review summary", async (
   await page.getByRole("tab", { name: "Damage decision" }).click();
 
   const titleDamage = page.getByRole("heading", {
-    name: "Title missing source",
+    name: "Title damage assessment",
     level: 3,
   }).locator("xpath=ancestor::section[1]");
   await expect(titleDamage.getByText("DVD title 20", { exact: true }))
+    .toBeVisible();
+  await expect(titleDamage.getByText(/Source-continuity risk: 4 recovered/))
+    .toBeVisible();
+  await expect(titleDamage.getByText(/Archive-level source-continuity risk: 2/))
     .toBeVisible();
   await expect(titleDamage.getByText("DVD title 21", { exact: true }))
     .toHaveCount(0);

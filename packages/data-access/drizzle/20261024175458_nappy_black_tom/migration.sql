@@ -1,0 +1,1 @@
+ALTER TABLE `dvd_title_damage_assessments` ADD `source_continuity` text CONSTRAINT `dvd_title_damage_assessments_source_continuity_check` CHECK (`source_continuity` IS NULL OR (json_valid(`source_continuity`) AND json_type(`source_continuity`) = 'object'));

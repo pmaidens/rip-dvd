@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 
 import {
   createDvdTitleDamageAssessment,
+  type CommittedDvdCheckpointEvidence,
   type DvdCheckpointReadOwnership,
 } from "@rip-dvd/data-access";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
@@ -27,7 +28,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   vi.setSystemTime(new Date("2026-10-22T12:00:00.000Z"));
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
-  const { archive, manifest } = await seedCommittedArchiveEvidence(fixture, [
+  const seeded = await seedCommittedArchiveEvidence(fixture, [
     {
       startLba: 15,
       sectorCount: 5,
@@ -38,7 +39,99 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
       sectorCount: 2,
       classification: "skipped_untested",
     },
+    {
+      startLba: 400,
+      sectorCount: 1,
+      classification: "skipped_untested",
+    },
   ], false, true);
+  const { archive } = seeded;
+  let manifest: CommittedDvdCheckpointEvidence = seeded.manifest;
+  const verificationId = "synthetic-title-damage-verification";
+  const confirmationId = "synthetic-title-damage-confirmation";
+  const sourceSqlite = new DatabaseSync(fixture.databasePath);
+  const source = sourceSqlite.prepare(`
+    SELECT
+      recoveries.id AS recoveryId,
+      recoveries.attempt_id AS attemptId,
+      jobs.disc_inspection_id AS discInspectionId,
+      jobs.detected_disc_id AS detectedDiscId,
+      inspections.media_generation AS mediaGeneration
+    FROM archive_recoveries recoveries
+    INNER JOIN dvd_archive_evidence_headers headers
+      ON headers.original_disc_archive_id = recoveries.original_disc_archive_id
+    INNER JOIN archive_jobs jobs
+      ON jobs.id = headers.source_archive_job_id
+    INNER JOIN disc_inspections inspections
+      ON inspections.id = jobs.disc_inspection_id
+    WHERE recoveries.original_disc_archive_id = ?
+  `).get(archive.id) as {
+    recoveryId: string;
+    attemptId: string;
+    discInspectionId: string;
+    detectedDiscId: string;
+    mediaGeneration: string;
+  };
+  sourceSqlite.prepare(`
+    INSERT INTO dvd_disc_verifications (
+      id, archive_recovery_id, archive_recovery_attempt_id, attempt_ordinal,
+      original_disc_archive_id, disc_inspection_id, detected_disc_id,
+      media_generation, source_metadata_fingerprint,
+      observed_metadata_fingerprint, checkpoint_revision, checkpoint_digest,
+      status, outcome, reasons, findings, budget_exhausted,
+      worker_execution_id, completed_at, created_at, updated_at
+    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 1, ?, 'completed', 'mismatch',
+      ?, '[]', 0, ?, 1, 1, 1)
+  `).run(
+    verificationId,
+    source.recoveryId,
+    source.attemptId,
+    archive.id,
+    source.discInspectionId,
+    source.detectedDiscId,
+    source.mediaGeneration,
+    "a".repeat(64),
+    "b".repeat(64),
+    manifest.manifestDigest,
+    JSON.stringify(["DISC_SAMPLE_MISMATCH"]),
+    "synthetic-title-damage-verification-worker",
+  );
+  sourceSqlite.prepare(`
+    INSERT INTO dvd_disc_confirmations (
+      id, archive_recovery_id, archive_recovery_attempt_id,
+      original_disc_archive_id, verification_id, disc_inspection_id,
+      detected_disc_id, media_generation, verification_worker_execution_id,
+      verification_outcome, verification_result_digest, checkpoint_revision,
+      checkpoint_digest, acknowledged_mixed_source, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'mismatch', ?, 1, ?, 1, 1)
+  `).run(
+    confirmationId,
+    source.recoveryId,
+    source.attemptId,
+    archive.id,
+    verificationId,
+    source.discInspectionId,
+    source.detectedDiscId,
+    source.mediaGeneration,
+    "synthetic-title-damage-verification-worker",
+    "c".repeat(64),
+    manifest.manifestDigest,
+  );
+  sourceSqlite.close();
+  manifest = advanceCommittedArchiveEvidence(fixture, manifest, {
+    publishFilesystemCheckpoint: true,
+    outcome: "recovered",
+    sourceRangeIndex: 0,
+    verificationId,
+    discConfirmationId: confirmationId,
+  });
+  manifest = advanceCommittedArchiveEvidence(fixture, manifest, {
+    publishFilesystemCheckpoint: true,
+    outcome: "recovered",
+    sourceRangeIndex: 2,
+    verificationId,
+    discConfirmationId: confirmationId,
+  });
   const access = fixture.openAccess();
   const structuralResult = await access.assessDvdStructure(
     archive.id,
@@ -247,6 +340,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     structuralAssessmentIdentity: recorded.structuralAssessmentIdentity,
     structuralFindings: recorded.structuralFindings,
     unrecoveredSourceRanges: header.unrecoveredSourceRanges,
+    sourceContinuity: null,
     titles: recorded.items.map((item) => ({
       titleIdentityId: item.titleIdentityId,
       titleIdentityObservationId: item.titleIdentityObservationId,
@@ -313,7 +407,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     result: {
       titleDamage: {
         state: "current",
-        checkpointRevision: 1,
+        checkpointRevision: 3,
         assessmentIdentity: recorded.id,
         currentAssessmentIdentity: recorded.id,
         items: [
@@ -336,18 +430,30 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   expect(first.exitCode).toBe(0);
   expect(first.result).toMatchObject({
     state: "current",
-    checkpointRevision: 1,
+    checkpointRevision: 3,
     assessmentIdentity: recorded.id,
     items: [{
       displayTitleNumber: 1,
       uniqueSourceSectorCount: 110,
-      unrecoveredUniqueSourceSectorCount: 5,
-      titleMissingSourcePercentage: 5 / 110 * 100,
+      unrecoveredUniqueSourceSectorCount: 4,
+      titleMissingSourcePercentage: 4 / 110 * 100,
+      sourceContinuityRiskSectorCount: 1,
     }],
     truncated: true,
     nextCursor: expect.any(String),
     unknownTitleImpact: {
       unrecoveredSourceSectorCount: 2,
+    },
+    sourceContinuity: {
+      policyVersion: "dvd-title-source-continuity-v1",
+      sourceContinuityRiskSectorCount: 2,
+      provenance: [{
+        discConfirmationId: confirmationId,
+        verificationOutcome: "mismatch",
+      }],
+    },
+    unattributedSourceContinuityRisk: {
+      sourceSectorCount: 1,
     },
   });
   const cursor = (first.result as { nextCursor: string }).nextCursor;
@@ -363,7 +469,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   expect(second).toMatchObject({
     exitCode: 0,
     result: {
-      checkpointRevision: 1,
+      checkpointRevision: 3,
       itemOffset: 1,
       items: [
         { displayTitleNumber: 2 },
@@ -667,7 +773,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
       error: {
         code: "TITLE_DAMAGE_CURSOR_STALE",
         current: {
-          checkpointRevision: 2,
+          checkpointRevision: 4,
           assessmentIdentity: null,
         },
       },

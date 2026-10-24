@@ -150,7 +150,7 @@ function CatalogReviewTitleDamageEvidenceGeneration({
 
   return (
     <section className="catalog-pane" aria-labelledby="title-damage-heading">
-      <h3 id="title-damage-heading">Title missing source</h3>
+      <h3 id="title-damage-heading">Title damage assessment</h3>
       {titleDamage.state === "outdated" ? (
         <p>
           This assessment belongs to checkpoint {
@@ -186,6 +186,15 @@ function CatalogReviewTitleDamageEvidenceGeneration({
                     : "source sectors"
                 }.
               </span>
+              {item.sourceContinuityRiskSectorCount > 0 ? (
+                <span>
+                  {item.sourceContinuityRiskSectorCount} recovered source {
+                    item.sourceContinuityRiskSectorCount === 1
+                      ? "sector has"
+                      : "sectors have"
+                  } operator-confirmed uncertain continuity.
+                </span>
+              ) : null}
               {item.titleMissingSourcePercentage === null ? (
                 <>
                   <span>
@@ -218,6 +227,49 @@ function CatalogReviewTitleDamageEvidenceGeneration({
           title paths.
         </p>
       ) : null}
+      {titleDamage.sourceContinuity !== null &&
+          titleDamage.sourceContinuity.sourceContinuityRiskSectorCount > 0 ? (
+          <div>
+            <p>
+              Source-continuity risk: {
+                titleDamage.sourceContinuity.sourceContinuityRiskSectorCount
+              } recovered source {
+                titleDamage.sourceContinuity.sourceContinuityRiskSectorCount ===
+                    1
+                  ? "sector came"
+                  : "sectors came"
+              } from a disc accepted after mismatched or inconclusive
+              verification. This is separate from unrecovered source.
+            </p>
+            <ul>
+              {titleDamage.sourceContinuity.provenance.map((entry) => (
+                <li key={entry.discConfirmationId}>
+                  {entry.verificationOutcome === "mismatch"
+                    ? "Mismatched"
+                    : "Inconclusive"} source verification: {
+                      entry.recoveredSourceRanges.reduce(
+                        (total, range) => total + range.sectorCount,
+                        0,
+                      )
+                    } recovered source sectors.
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      {titleDamage.unattributedSourceContinuityRisk !== null &&
+          titleDamage.unattributedSourceContinuityRisk.sourceSectorCount > 0 ? (
+          <p>
+            Archive-level source-continuity risk: {
+              titleDamage.unattributedSourceContinuityRisk.sourceSectorCount
+            } confirmed source {
+              titleDamage.unattributedSourceContinuityRisk.sourceSectorCount ===
+                  1
+                ? "sector is"
+                : "sectors are"
+            } outside known title paths.
+          </p>
+        ) : null}
       {titleDamage.unknownTitleImpact !== null &&
           (titleDamage.unknownTitleImpact.unrecoveredSourceSectorCount > 0 ||
             titleDamage.unknownTitleImpact.reasons.length > 0) ? (

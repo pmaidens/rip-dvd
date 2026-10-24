@@ -3,6 +3,10 @@ import { createHash } from "node:crypto";
 import { canonicalJson } from "./canonical-json.js";
 import type { DvdStructuralFindingOutcome } from "./dvd-structural-assessment.js";
 import type {
+  ArchiveRecoveryAttemptId,
+  ArchiveRecoveryId,
+  DvdDiscConfirmationId,
+  DvdDiscVerificationId,
   DvdTitleIdentityId,
   DvdTitleIdentityObservationId,
   DvdTitleIdentitySelectedPathEntry,
@@ -13,6 +17,8 @@ import type {
 
 export const DVD_TITLE_DAMAGE_ASSESSMENT_POLICY_VERSION =
   "dvd-title-damage-assessment-v1" as const;
+export const DVD_TITLE_DAMAGE_SOURCE_CONTINUITY_POLICY_VERSION =
+  "dvd-title-source-continuity-v1" as const;
 
 const ASSESSMENT_ID_DOMAIN = "rip-dvd:dvd-title-damage-assessment:v1\0";
 
@@ -47,6 +53,31 @@ export interface DvdTitleDamageMappingInput {
   };
 }
 
+export interface DvdTitleDamageSourceContinuityProvenance {
+  discConfirmationId: DvdDiscConfirmationId;
+  archiveRecoveryId: ArchiveRecoveryId;
+  archiveRecoveryAttemptId: ArchiveRecoveryAttemptId;
+  verificationId: DvdDiscVerificationId;
+  verificationOutcome: "mismatch" | "inconclusive";
+  verificationResultDigest: string;
+  confirmationCheckpoint: {
+    manifestRevision: number;
+    manifestDigest: string;
+  };
+  recoveredSourceRanges: readonly UnreadableSectorRange[];
+}
+
+export interface DvdTitleDamageSourceContinuityInput {
+  policyVersion: typeof DVD_TITLE_DAMAGE_SOURCE_CONTINUITY_POLICY_VERSION;
+  provenance: readonly DvdTitleDamageSourceContinuityProvenance[];
+}
+
+export interface DvdTitleDamageSourceContinuityRiskRange
+  extends UnreadableSectorRange {
+  discConfirmationId: DvdDiscConfirmationId;
+  verificationOutcome: "mismatch" | "inconclusive";
+}
+
 export interface DvdTitleDamageAssessmentInput {
   checkpoint: {
     originalDiscArchiveId: OriginalDiscArchiveId;
@@ -63,6 +94,8 @@ export interface DvdTitleDamageAssessmentInput {
     titleEnumeration: DvdStructuralFindingOutcome;
   };
   unrecoveredSourceRanges: readonly DvdUnrecoveredSourceRange[];
+  /** Null only while decoding assessments written before continuity tracking. */
+  sourceContinuity: DvdTitleDamageSourceContinuityInput | null;
   titles: DvdTitleDamageMappingInput[];
 }
 
@@ -77,6 +110,9 @@ export interface DvdTitleDamageAssessmentItem {
   knownUnrecoveredSourceRanges: readonly DvdUnrecoveredSourceRange[];
   unrecoveredUniqueSourceSectorCount: number;
   titleMissingSourcePercentage: number | null;
+  knownSourceContinuityRiskRanges:
+    readonly DvdTitleDamageSourceContinuityRiskRange[];
+  sourceContinuityRiskSectorCount: number;
 }
 
 export interface DvdTitleDamageAssessment {
@@ -86,12 +122,19 @@ export interface DvdTitleDamageAssessment {
   titleIdentityReviewSetIdentity: string;
   structuralAssessmentIdentity: string;
   structuralFindings: DvdTitleDamageAssessmentInput["structuralFindings"];
+  sourceContinuity: (DvdTitleDamageSourceContinuityInput & {
+    sourceContinuityRiskSectorCount: number;
+  }) | null;
   items: readonly DvdTitleDamageAssessmentItem[];
   unknownTitleImpact: {
     unrecoveredSourceSectorCount: number;
     unrecoveredSourceRanges: readonly DvdUnrecoveredSourceRange[];
     reasons: readonly DvdTitleDamageUnknownReason[];
   };
+  unattributedSourceContinuityRisk: {
+    sourceSectorCount: number;
+    sourceRanges: readonly DvdTitleDamageSourceContinuityRiskRange[];
+  } | null;
   noTitleMissingSourceProved: boolean;
 }
 
@@ -271,22 +314,22 @@ function validateUnrecoveredRanges(
   });
 }
 
-function intersections(
+function intersections<Range extends UnreadableSectorRange>(
   source: readonly UnreadableSectorRange[],
-  unrecovered: readonly DvdUnrecoveredSourceRange[],
-): readonly DvdUnrecoveredSourceRange[] {
-  const result: DvdUnrecoveredSourceRange[] = [];
+  target: readonly Range[],
+): readonly Range[] {
+  const result: Range[] = [];
   for (const sourceRange of source) {
     const sourceEnd = sourceRange.startLba + sourceRange.sectorCount;
-    for (const missing of unrecovered) {
-      const missingEnd = missing.startLba + missing.sectorCount;
-      const startLba = Math.max(sourceRange.startLba, missing.startLba);
-      const endLbaExclusive = Math.min(sourceEnd, missingEnd);
+    for (const targetRange of target) {
+      const targetEnd = targetRange.startLba + targetRange.sectorCount;
+      const startLba = Math.max(sourceRange.startLba, targetRange.startLba);
+      const endLbaExclusive = Math.min(sourceEnd, targetEnd);
       if (endLbaExclusive > startLba) {
         result.push({
+          ...targetRange,
           startLba,
           sectorCount: endLbaExclusive - startLba,
-          classification: missing.classification,
         });
       }
     }
@@ -294,16 +337,13 @@ function intersections(
   return result;
 }
 
-function subtractRanges(
-  unrecovered: readonly DvdUnrecoveredSourceRange[],
+function subtractRanges<Range extends UnreadableSectorRange>(
+  target: readonly Range[],
   known: readonly UnreadableSectorRange[],
-): readonly DvdUnrecoveredSourceRange[] {
-  const result: DvdUnrecoveredSourceRange[] = [];
-  for (const missing of unrecovered) {
-    let segments: UnreadableSectorRange[] = [{
-      startLba: missing.startLba,
-      sectorCount: missing.sectorCount,
-    }];
+): readonly Range[] {
+  const result: Range[] = [];
+  for (const targetRange of target) {
+    let segments: Range[] = [{ ...targetRange }];
     for (const covered of known) {
       const coveredEnd = covered.startLba + covered.sectorCount;
       segments = segments.flatMap((segment) => {
@@ -313,15 +353,17 @@ function subtractRanges(
         ) {
           return [segment];
         }
-        const pieces: UnreadableSectorRange[] = [];
+        const pieces: Range[] = [];
         if (covered.startLba > segment.startLba) {
           pieces.push({
+            ...segment,
             startLba: segment.startLba,
             sectorCount: covered.startLba - segment.startLba,
           });
         }
         if (coveredEnd < segmentEnd) {
           pieces.push({
+            ...segment,
             startLba: coveredEnd,
             sectorCount: segmentEnd - coveredEnd,
           });
@@ -329,16 +371,107 @@ function subtractRanges(
         return pieces;
       });
     }
-    result.push(...segments.map((segment) => ({
-      ...segment,
-      classification: missing.classification,
-    })));
+    result.push(...segments);
   }
   return result;
 }
 
 function sectorCount(ranges: readonly UnreadableSectorRange[]): number {
   return ranges.reduce((total, range) => total + range.sectorCount, 0);
+}
+
+function normalizeSourceContinuity(
+  input: DvdTitleDamageSourceContinuityInput | null,
+  acceptedEndLbaExclusive: number,
+): DvdTitleDamageAssessment["sourceContinuity"] {
+  if (input === null) return null;
+  if (
+    input.policyVersion !== DVD_TITLE_DAMAGE_SOURCE_CONTINUITY_POLICY_VERSION ||
+    !Array.isArray(input.provenance)
+  ) {
+    throw new TypeError("Invalid DVD source-continuity evidence");
+  }
+  const confirmationIds = new Set<string>();
+  const provenance = input.provenance.map((entry) => {
+    if (
+      !boundedText(entry.discConfirmationId, 128) ||
+      confirmationIds.has(entry.discConfirmationId) ||
+      !boundedText(entry.archiveRecoveryId, 128) ||
+      !boundedText(entry.archiveRecoveryAttemptId, 128) ||
+      !boundedText(entry.verificationId, 128) ||
+      (entry.verificationOutcome !== "mismatch" &&
+        entry.verificationOutcome !== "inconclusive") ||
+      !/^[a-f0-9]{64}$/.test(entry.verificationResultDigest) ||
+      !Number.isSafeInteger(entry.confirmationCheckpoint.manifestRevision) ||
+      entry.confirmationCheckpoint.manifestRevision < 1 ||
+      !/^[a-f0-9]{64}$/.test(entry.confirmationCheckpoint.manifestDigest)
+    ) {
+      throw new TypeError("Invalid DVD source-continuity provenance");
+    }
+    confirmationIds.add(entry.discConfirmationId);
+    return {
+      discConfirmationId: entry.discConfirmationId,
+      archiveRecoveryId: entry.archiveRecoveryId,
+      archiveRecoveryAttemptId: entry.archiveRecoveryAttemptId,
+      verificationId: entry.verificationId,
+      verificationOutcome: entry.verificationOutcome,
+      verificationResultDigest: entry.verificationResultDigest,
+      confirmationCheckpoint: { ...entry.confirmationCheckpoint },
+      recoveredSourceRanges: normalizeRanges(
+        entry.recoveredSourceRanges,
+        acceptedEndLbaExclusive,
+        "Confirmed DVD recovery source range",
+      ),
+    };
+  }).sort((left, right) =>
+    compareCodeUnits(left.discConfirmationId, right.discConfirmationId)
+  );
+  const riskRanges = provenance.flatMap((entry) =>
+    entry.recoveredSourceRanges.map((range) => ({
+      ...range,
+      discConfirmationId: entry.discConfirmationId,
+      verificationOutcome: entry.verificationOutcome,
+    }))
+  ).sort((left, right) =>
+    left.startLba - right.startLba || left.sectorCount - right.sectorCount ||
+    compareCodeUnits(left.discConfirmationId, right.discConfirmationId)
+  );
+  let previousEnd = -1;
+  for (const range of riskRanges) {
+    if (range.startLba < previousEnd) {
+      throw new TypeError(
+        "Confirmed DVD recovery source ranges must not overlap",
+      );
+    }
+    previousEnd = range.startLba + range.sectorCount;
+  }
+  return {
+    policyVersion: input.policyVersion,
+    provenance,
+    sourceContinuityRiskSectorCount: sectorCount(riskRanges),
+  };
+}
+
+function sourceContinuityRiskRanges(
+  sourceContinuity: DvdTitleDamageAssessment["sourceContinuity"],
+): readonly DvdTitleDamageSourceContinuityRiskRange[] {
+  return sourceContinuity?.provenance.flatMap((entry) =>
+    entry.recoveredSourceRanges.map((range) => ({
+      ...range,
+      discConfirmationId: entry.discConfirmationId,
+      verificationOutcome: entry.verificationOutcome,
+    }))
+  ) ?? [];
+}
+
+export function dvdTitleDamageAssessmentRequiresAcceptance(
+  assessment: Pick<
+    DvdTitleDamageAssessment,
+    "noTitleMissingSourceProved" | "sourceContinuity"
+  >,
+): boolean {
+  return !assessment.noTitleMissingSourceProved ||
+    (assessment.sourceContinuity?.sourceContinuityRiskSectorCount ?? 0) > 0;
 }
 
 export function createDvdTitleDamageAssessment(
@@ -363,6 +496,11 @@ export function createDvdTitleDamageAssessment(
     input.unrecoveredSourceRanges,
     checkpoint.acceptedEndLbaExclusive,
   );
+  const sourceContinuity = normalizeSourceContinuity(
+    input.sourceContinuity,
+    checkpoint.acceptedEndLbaExclusive,
+  );
+  const continuityRiskRanges = sourceContinuityRiskRanges(sourceContinuity);
   const seenIdentityIds = new Set<string>();
   const seenObservationIds = new Set<string>();
   const items = input.titles.map((title) => {
@@ -464,6 +602,10 @@ export function createDvdTitleDamageAssessment(
       unrecoveredSourceRanges,
     );
     const missingSectorCount = sectorCount(knownUnrecoveredSourceRanges);
+    const knownSourceContinuityRiskRanges = intersections(
+      uniqueSourceRanges,
+      continuityRiskRanges,
+    );
     const complete = title.mappingCoverage.state === "complete";
     const denominator = complete ? sectorCount(uniqueSourceRanges) : null;
     return {
@@ -483,6 +625,10 @@ export function createDvdTitleDamageAssessment(
       titleMissingSourcePercentage: denominator === null
         ? null
         : missingSectorCount / denominator * 100,
+      knownSourceContinuityRiskRanges,
+      sourceContinuityRiskSectorCount: sectorCount(
+        knownSourceContinuityRiskRanges,
+      ),
     } satisfies DvdTitleDamageAssessmentItem;
   }).sort((left, right) =>
     left.displayTitleNumber - right.displayTitleNumber ||
@@ -529,13 +675,23 @@ export function createDvdTitleDamageAssessment(
     unrecoveredSourceRanges: unknownRanges,
     reasons: validateUnknownReasons(unknownReasons),
   };
+  const unattributedContinuityRanges = subtractRanges(
+    continuityRiskRanges,
+    knownTitleSourceRanges,
+  );
+  const unattributedSourceContinuityRisk = sourceContinuity === null
+    ? null
+    : {
+      sourceSectorCount: sectorCount(unattributedContinuityRanges),
+      sourceRanges: unattributedContinuityRanges,
+    };
   const noTitleMissingSourceProved = structuralMapIsValid &&
     items.every((item) =>
       item.mappingCoverage.state === "complete" &&
       item.unrecoveredUniqueSourceSectorCount === 0
     ) &&
     unknownTitleImpact.unrecoveredSourceSectorCount === 0;
-  const semanticEvidence = {
+  const legacySemanticEvidence = {
     checkpoint,
     titleIdentityReviewSetIdentity: input.titleIdentityReviewSetIdentity,
     structuralAssessmentIdentity: input.structuralAssessmentIdentity,
@@ -544,14 +700,22 @@ export function createDvdTitleDamageAssessment(
     unknownTitleImpact,
     noTitleMissingSourceProved,
   };
-  // Rows written before the Catalog mapping dependency was persisted retain
-  // their original identity so they remain readable as outdated evidence.
-  // Current rows bind the projection into their immutable identity, allowing
-  // the same damage evidence to be recorded again after a mapping change.
+  const semanticEvidence = {
+    ...legacySemanticEvidence,
+    sourceContinuity,
+    unattributedSourceContinuityRisk,
+  };
+  // Rows written before the Catalog mapping or source-continuity dependencies
+  // were persisted retain their original identity so they remain readable as
+  // outdated evidence. Current rows bind both dependencies into their
+  // immutable identity.
+  const identityEvidenceBase = sourceContinuity === null
+    ? legacySemanticEvidence
+    : semanticEvidence;
   const identityEvidence = input.catalogMappingProjectionId === null
-    ? semanticEvidence
+    ? identityEvidenceBase
     : {
-      ...semanticEvidence,
+      ...identityEvidenceBase,
       catalogMappingProjectionId: input.catalogMappingProjectionId,
     };
   const digest = createHash("sha256")

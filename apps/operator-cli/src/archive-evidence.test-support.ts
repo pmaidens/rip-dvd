@@ -1,10 +1,16 @@
 import {
+  closeSync,
+  fsyncSync,
   lstatSync,
+  openSync,
+  readSync,
   realpathSync,
   mkdirSync,
   utimesSync,
+  writeSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -12,6 +18,7 @@ import {
   createDvdArchiveRecoveryReadEvidenceDigest,
   canonicalPublicationJson, createDvdInitialPublicationDigest,
   createDvdRecoveryCheckpointPublicationDigest,
+  type CommittedDvdCheckpointEvidence,
   type DvdUnrecoveredSourceRange,
 } from "@rip-dvd/data-access";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
@@ -111,25 +118,41 @@ export async function seedCommittedArchiveEvidence(
 
 export function advanceCommittedArchiveEvidence(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
-  manifest: Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>["manifest"],
-  options: { publishFilesystemCheckpoint?: boolean } = {},
+  manifest: CommittedDvdCheckpointEvidence,
+  options: {
+    publishFilesystemCheckpoint?: boolean;
+    outcome?: "failed" | "recovered";
+    sourceRangeIndex?: number;
+    verificationId?: string;
+    discConfirmationId?: string;
+  } = {},
 ) {
-  const sourceRange = manifest.unrecoveredSourceRanges[0];
+  const sourceRangeIndex = options.sourceRangeIndex ?? 0;
+  const sourceRange = manifest.unrecoveredSourceRanges[sourceRangeIndex];
   if (sourceRange === undefined) {
     throw new Error("A synthetic Unrecovered Source range is required");
   }
+  const outcome = options.outcome ?? "failed";
+  const recoveryReadId =
+    `synthetic-structural-recovery-read-${manifest.revision + 1}`;
   const recoveryReadInput = {
     originalDiscArchiveId: manifest.originalDiscArchiveId,
     fromManifestId: manifest.id,
     fromManifestRevision: manifest.revision,
     startLba: sourceRange.startLba,
     sectorCount: 1,
-    outcome: "failed" as const,
+    outcome,
+    ...(options.verificationId === undefined
+      ? {}
+      : { verificationId: options.verificationId }),
+    ...(options.discConfirmationId === undefined
+      ? {}
+      : { discConfirmationId: options.discConfirmationId }),
   };
   const recoveryReadEvidenceDigest =
     createDvdArchiveRecoveryReadEvidenceDigest(recoveryReadInput);
   const recoveryRead = {
-    id: "synthetic-structural-recovery-read",
+    id: recoveryReadId,
     ...recoveryReadInput,
     evidenceDigest: recoveryReadEvidenceDigest,
   };
@@ -141,20 +164,23 @@ export function advanceCommittedArchiveEvidence(
       sectorCount: sourceRange.sectorCount - 1,
     }];
   const unrecoveredSourceRanges = [
-    {
-      startLba: sourceRange.startLba,
-      sectorCount: 1,
-      classification: "individually_failed" as const,
-    },
+    ...manifest.unrecoveredSourceRanges.slice(0, sourceRangeIndex),
+    ...(outcome === "failed"
+      ? [{
+        startLba: sourceRange.startLba,
+        sectorCount: 1,
+        classification: "individually_failed" as const,
+      }]
+      : []),
     ...remainingRange,
-    ...manifest.unrecoveredSourceRanges.slice(1),
+    ...manifest.unrecoveredSourceRanges.slice(sourceRangeIndex + 1),
   ];
   const input = {
     originalDiscArchiveId: manifest.originalDiscArchiveId,
     revision: manifest.revision + 1,
     previousManifestId: manifest.id,
     previousManifestDigest: manifest.manifestDigest,
-    recoveryReadId: "synthetic-structural-recovery-read",
+    recoveryReadId,
     recoveryReadEvidenceDigest,
     evidenceFormat: manifest.evidenceFormat,
     imageFingerprint: manifest.imageFingerprint,
@@ -171,18 +197,65 @@ export function advanceCommittedArchiveEvidence(
     ...createDvdArchiveEvidenceManifestDigests(input),
     id: `${manifest.originalDiscArchiveId}:recovery:${input.revision}`,
   };
+  const previousImage = manifest.image;
+  let image = previousImage;
+  let journalDigest: string | null = null;
+  let protectedRanges: Array<{
+    startByte: number;
+    byteCount: number;
+    unitBytes: number;
+    beforeDigest: string;
+    afterDigest: string;
+  }> = [];
+  if (outcome === "recovered") {
+    const archivePath = join(
+      realpathSync(fixture.originalsLibraryPath),
+      `${manifest.originalDiscArchiveId}.iso`,
+    );
+    const startByte = sourceRange.startLba * manifest.sectorSizeBytes;
+    const before = Buffer.alloc(manifest.sectorSizeBytes);
+    const after = Buffer.alloc(manifest.sectorSizeBytes, input.revision);
+    const descriptor = openSync(archivePath, "r+");
+    try {
+      readSync(descriptor, before, 0, before.length, startByte);
+      writeSync(descriptor, after, 0, after.length, startByte);
+      fsyncSync(descriptor);
+    } finally {
+      closeSync(descriptor);
+    }
+    utimesSync(
+      archivePath,
+      1_700_000_000 + input.revision,
+      1_700_000_000 + input.revision,
+    );
+    const imageStat = lstatSync(archivePath, { bigint: true });
+    image = {
+      filesystemIdentity: `${imageStat.dev}:${imageStat.ino}`,
+      mtimeNs: imageStat.mtimeNs.toString(),
+    };
+    journalDigest = "d".repeat(64);
+    protectedRanges = [{
+      startByte,
+      byteCount: manifest.sectorSizeBytes,
+      unitBytes: manifest.sectorSizeBytes,
+      beforeDigest: createHash("sha256").update(before).digest("hex"),
+      afterDigest: createHash("sha256").update(after).digest("hex"),
+    }];
+  }
   const publicationPayload = {
     ...digestFields,
     checkpointFormat: "dvd-recovery-batch-v1" as const,
     sourceArchiveJobId: manifest.sourceArchiveJobId,
-    rootPublicationDigest: manifest.publicationDigest,
+    rootPublicationDigest: "rootPublicationDigest" in manifest
+      ? manifest.rootPublicationDigest
+      : manifest.publicationDigest,
     previousPublicationDigest: manifest.publicationDigest,
-    image: manifest.image,
-    previousImage: manifest.image,
+    image,
+    previousImage,
     boundaryEvidence: manifest.boundaryEvidence,
     recoveryRead,
-    journalDigest: null,
-    protectedRanges: [],
+    journalDigest,
+    protectedRanges,
   };
   const next = {
     ...publicationPayload,
@@ -193,14 +266,17 @@ export function advanceCommittedArchiveEvidence(
       INSERT INTO dvd_archive_recovery_reads (
         id, original_disc_archive_id, from_manifest_id,
         from_manifest_revision, start_lba, sector_count, outcome,
-        evidence_digest, created_at
-      ) VALUES (?, ?, ?, ?, ?, 1, 'failed', ?, 2)
+        verification_id, disc_confirmation_id, evidence_digest, created_at
+      ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 2)
     `).run(
       input.recoveryReadId,
       recoveryRead.originalDiscArchiveId,
       recoveryRead.fromManifestId,
       recoveryRead.fromManifestRevision,
       recoveryRead.startLba,
+      recoveryRead.outcome,
+      recoveryRead.verificationId ?? null,
+      recoveryRead.discConfirmationId ?? null,
       recoveryReadEvidenceDigest,
     );
     db.prepare(`

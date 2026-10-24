@@ -2,9 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   createDvdTitleDamageAssessment,
+  dvdTitleDamageAssessmentRequiresAcceptance,
   type DvdTitleDamageAssessmentInput,
 } from "./dvd-title-damage-assessment.js";
 import type {
+  ArchiveRecoveryAttemptId,
+  ArchiveRecoveryId,
+  DvdDiscConfirmationId,
+  DvdDiscVerificationId,
   DvdTitleIdentityId,
   DvdTitleIdentityObservationId,
   OriginalDiscArchiveId,
@@ -46,6 +51,28 @@ function assessmentInput(): DvdTitleDamageAssessmentInput {
         classification: "skipped_untested",
       },
     ],
+    sourceContinuity: {
+      policyVersion: "dvd-title-source-continuity-v1",
+      provenance: [{
+        discConfirmationId:
+          "synthetic-confirmation-1" as DvdDiscConfirmationId,
+        archiveRecoveryId: "synthetic-recovery-1" as ArchiveRecoveryId,
+        archiveRecoveryAttemptId:
+          "synthetic-recovery-attempt-1" as ArchiveRecoveryAttemptId,
+        verificationId:
+          "synthetic-verification-1" as DvdDiscVerificationId,
+        verificationOutcome: "mismatch",
+        verificationResultDigest: "e".repeat(64),
+        confirmationCheckpoint: {
+          manifestRevision: 1,
+          manifestDigest: "f".repeat(64),
+        },
+        recoveredSourceRanges: [
+          { startLba: 25, sectorCount: 3 },
+          { startLba: 400, sectorCount: 2 },
+        ],
+      }],
+    },
     titles: [
       {
         titleIdentityId: titleId(1),
@@ -143,11 +170,19 @@ describe("createDvdTitleDamageAssessment", () => {
         sectorCount: 5,
         classification: "individually_failed",
       }],
+      knownSourceContinuityRiskRanges: [{
+        startLba: 25,
+        sectorCount: 3,
+        discConfirmationId: "synthetic-confirmation-1",
+        verificationOutcome: "mismatch",
+      }],
+      sourceContinuityRiskSectorCount: 3,
     });
     expect(assessment.items[1]).toMatchObject({
       uniqueSourceSectorCount: 60,
       unrecoveredUniqueSourceSectorCount: 5,
       titleMissingSourcePercentage: 5 / 60 * 100,
+      sourceContinuityRiskSectorCount: 3,
     });
     expect(assessment.items[2]).toMatchObject({
       uniqueSourceSectorCount: null,
@@ -168,6 +203,20 @@ describe("createDvdTitleDamageAssessment", () => {
       }],
     });
     expect(assessment.noTitleMissingSourceProved).toBe(false);
+    expect(assessment.sourceContinuity).toMatchObject({
+      policyVersion: "dvd-title-source-continuity-v1",
+      sourceContinuityRiskSectorCount: 5,
+    });
+    expect(assessment.unattributedSourceContinuityRisk).toEqual({
+      sourceSectorCount: 2,
+      sourceRanges: [{
+        startLba: 400,
+        sectorCount: 2,
+        discConfirmationId: "synthetic-confirmation-1",
+        verificationOutcome: "mismatch",
+      }],
+    });
+    expect(dvdTitleDamageAssessmentRequiresAcceptance(assessment)).toBe(true);
   });
 
   it("omits percentages and refuses a false clean result when navigation is not proved", () => {
@@ -212,6 +261,43 @@ describe("createDvdTitleDamageAssessment", () => {
     const second = createDvdTitleDamageAssessment(assessmentInput());
 
     expect(second.id).toBe(first.id);
+  });
+
+  it("changes identity when confirmed-source continuity changes", () => {
+    const firstInput = assessmentInput();
+    const first = createDvdTitleDamageAssessment(firstInput);
+    const secondInput = assessmentInput();
+    secondInput.sourceContinuity = {
+      ...secondInput.sourceContinuity!,
+      provenance: [{
+        ...secondInput.sourceContinuity!.provenance[0]!,
+        recoveredSourceRanges: [{ startLba: 26, sectorCount: 2 }],
+      }],
+    };
+    const second = createDvdTitleDamageAssessment(secondInput);
+
+    expect(second.id).not.toBe(first.id);
+  });
+
+  it("requires a decision for continuity risk after all source recovers", () => {
+    const input = assessmentInput();
+    input.unrecoveredSourceRanges = [];
+    input.titles = input.titles.slice(0, 2);
+
+    const assessment = createDvdTitleDamageAssessment(input);
+
+    expect(assessment.noTitleMissingSourceProved).toBe(true);
+    expect(assessment.sourceContinuity?.sourceContinuityRiskSectorCount).toBe(5);
+    expect(dvdTitleDamageAssessmentRequiresAcceptance(assessment)).toBe(true);
+  });
+
+  it("preserves the identity of evidence written before continuity tracking", () => {
+    const input = assessmentInput();
+    input.sourceContinuity = null;
+
+    expect(createDvdTitleDamageAssessment(input).id).toBe(
+      "dvd-title-damage-assessment:fab9e13eea28b55b987e759b64c23368a7b88e1d39f069c2ab798f364d1648a8",
+    );
   });
 
   it("binds current identities to the Catalog mapping projection", () => {

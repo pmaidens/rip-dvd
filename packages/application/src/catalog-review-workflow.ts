@@ -3,6 +3,7 @@ import {
   CatalogMappingEvidenceUnavailableError,
   dvdTitleIdentityCatalogMappingItems,
   dvdTitleIdentityCatalogMappingProjectionDigest,
+  dvdTitleDamageAssessmentRequiresAcceptance,
   dvdRecoveryEvidenceFormatForArchive,
   DVD_RECOVERY_EVIDENCE_ENCODING,
   DomainInvariantError,
@@ -275,7 +276,9 @@ export function describeCatalogReviewWorkflow(
         inspectedTitleDamage!.currentAssessmentIdentity,
       acceptanceRequired: inspectedTitleDamage!.state === "current" &&
         inspectedTitleDamage!.assessment !== null &&
-        !inspectedTitleDamage!.assessment.noTitleMissingSourceProved,
+        dvdTitleDamageAssessmentRequiresAcceptance(
+          inspectedTitleDamage!.assessment,
+        ),
     }
     : prefetched.titleDamage;
   const mappingStates = titleIdentity?.currentMappingStates ?? [];
