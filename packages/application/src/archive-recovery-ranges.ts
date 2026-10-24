@@ -230,26 +230,68 @@ export function presentArchiveRecoveryRangeEvidence(
   };
 }
 
-function parseCursor(value: string | undefined): unknown[] | null {
+interface ArchiveRecoveryRangesCursor {
+  archiveRecoveryId: string;
+  originalDiscArchiveId: string;
+  checkpointRevision: number;
+  manifestId: string;
+  manifestDigest: string;
+  offset: number;
+}
+
+function encodeCursor(cursor: ArchiveRecoveryRangesCursor): string {
+  return Buffer.from(JSON.stringify([
+    "dvd-recovery-ranges-page-v1",
+    cursor.archiveRecoveryId,
+    cursor.originalDiscArchiveId,
+    cursor.checkpointRevision,
+    cursor.manifestId,
+    cursor.manifestDigest,
+    cursor.offset,
+  ])).toString("base64url");
+}
+
+function parseCursor(
+  value: string | undefined,
+): ArchiveRecoveryRangesCursor | null {
   if (value === undefined) return null;
   try {
     const decoded: unknown = JSON.parse(
       Buffer.from(value, "base64url").toString("utf8"),
     );
+    if (!Array.isArray(decoded) || decoded.length !== 7) throw new Error();
+    const [
+      kind,
+      archiveRecoveryId,
+      originalDiscArchiveId,
+      checkpointRevision,
+      manifestId,
+      manifestDigest,
+      offset,
+    ] = decoded;
     if (
-      !Array.isArray(decoded) || decoded.length !== 7 ||
-      decoded[0] !== "dvd-recovery-ranges-page-v1" ||
-      typeof decoded[1] !== "string" ||
-      typeof decoded[2] !== "string" ||
-      !Number.isSafeInteger(decoded[3]) || decoded[3] < 1 ||
-      typeof decoded[4] !== "string" ||
-      typeof decoded[5] !== "string" ||
-      !Number.isSafeInteger(decoded[6]) || decoded[6] < 1 ||
-      Buffer.from(JSON.stringify(decoded)).toString("base64url") !== value
+      kind !== "dvd-recovery-ranges-page-v1" ||
+      typeof archiveRecoveryId !== "string" ||
+      typeof originalDiscArchiveId !== "string" ||
+      typeof checkpointRevision !== "number" ||
+      !Number.isSafeInteger(checkpointRevision) || checkpointRevision < 1 ||
+      typeof manifestId !== "string" ||
+      typeof manifestDigest !== "string" ||
+      typeof offset !== "number" ||
+      !Number.isSafeInteger(offset) || offset < 1
     ) {
       throw new Error();
     }
-    return decoded;
+    const cursor = {
+      archiveRecoveryId,
+      originalDiscArchiveId,
+      checkpointRevision,
+      manifestId,
+      manifestDigest,
+      offset,
+    };
+    if (encodeCursor(cursor) !== value) throw new Error();
+    return cursor;
   } catch {
     throw new InvalidArchiveRecoveryRangesInputError(
       "Invalid Archive Recovery range cursor.",
@@ -344,16 +386,16 @@ export async function inspectArchiveRecoveryRanges(
   if (
     cursor !== null &&
     (
-      cursor[1] !== archiveRecoveryId ||
-      cursor[2] !== recovery.originalDiscArchiveId ||
-      cursor[3] !== presented.checkpoint.revision ||
-      cursor[4] !== presented.checkpoint.manifestId ||
-      cursor[5] !== presented.checkpoint.manifestDigest
+      cursor.archiveRecoveryId !== archiveRecoveryId ||
+      cursor.originalDiscArchiveId !== recovery.originalDiscArchiveId ||
+      cursor.checkpointRevision !== presented.checkpoint.revision ||
+      cursor.manifestId !== presented.checkpoint.manifestId ||
+      cursor.manifestDigest !== presented.checkpoint.manifestDigest
     )
   ) {
     return unavailable("DVD_RECOVERY_RANGE_CURSOR_STALE", presented);
   }
-  const offset = cursor === null ? 0 : Number(cursor[6]);
+  const offset = cursor?.offset ?? 0;
   if (cursor !== null && offset >= presented.ranges.length) {
     throw new InvalidArchiveRecoveryRangesInputError(
       "Archive Recovery range cursor is outside the range map.",
@@ -382,14 +424,13 @@ export async function inspectArchiveRecoveryRanges(
     complete,
     nextCursor: complete
       ? null
-      : Buffer.from(JSON.stringify([
-          "dvd-recovery-ranges-page-v1",
+      : encodeCursor({
           archiveRecoveryId,
-          recovery.originalDiscArchiveId,
-          presented.checkpoint.revision,
-          presented.checkpoint.manifestId,
-          presented.checkpoint.manifestDigest,
-          nextOffset,
-        ])).toString("base64url"),
+          originalDiscArchiveId: recovery.originalDiscArchiveId,
+          checkpointRevision: presented.checkpoint.revision,
+          manifestId: presented.checkpoint.manifestId,
+          manifestDigest: presented.checkpoint.manifestDigest,
+          offset: nextOffset,
+        }),
   };
 }
