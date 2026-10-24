@@ -156,6 +156,49 @@ it("compacts recovered ranges and rejects a cursor after the checkpoint changes"
   });
 });
 
+it("bounds transition history across repeated no-change rechecks", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 40,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }], false, true);
+  let manifest = advanceCommittedArchiveEvidence(fixture, seeded.manifest, {
+    startLba: 40,
+    outcome: "failed",
+    publishFilesystemCheckpoint: true,
+  });
+  for (let index = 0; index < 17; index += 1) {
+    manifest = advanceCommittedArchiveEvidence(fixture, manifest, {
+      startLba: 40,
+      outcome: "failed",
+      publishFilesystemCheckpoint: true,
+    });
+  }
+
+  const ranges = await fixture.run([
+    "archive-recovery", "ranges", "synthetic-committed-recovery",
+  ]);
+  expect(ranges.exitCode).toBe(0);
+  expect(ranges.result).toMatchObject({
+    available: true,
+    checkpoint: { revision: 19 },
+    history: {
+      transitions: {
+        items: [],
+        totalCount: null,
+        truncated: true,
+      },
+    },
+    ranges: [{
+      startLba: 40,
+      sectorCount: 1,
+      classification: "individually_failed",
+    }],
+  });
+});
+
 it("reports qualified current-pass progress through inspect and wait", async () => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date(1_500));

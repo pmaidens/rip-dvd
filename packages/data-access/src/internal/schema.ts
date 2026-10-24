@@ -1717,6 +1717,17 @@ export const dvdArchiveRecoveryReads = sqliteTable(
     createdAt: createdAt(),
   },
   (table) => [
+    index("dvd_archive_recovery_reads_archive_outcome_lba_revision_idx").on(
+      table.originalDiscArchiveId,
+      table.outcome,
+      table.startLba,
+      table.fromManifestRevision,
+    ),
+    index("dvd_archive_recovery_reads_archive_created_revision_idx").on(
+      table.originalDiscArchiveId,
+      table.createdAt,
+      table.fromManifestRevision,
+    ),
     index("dvd_archive_recovery_reads_confirmation_outcome_lba_idx").on(
       table.discConfirmationId,
       table.outcome,

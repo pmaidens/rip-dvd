@@ -599,10 +599,31 @@ export interface DvdArchiveRecoveryRangeObservation {
   observedAt: Date;
 }
 
+export interface DvdArchiveRecoverySourceRange extends UnreadableSectorRange {
+  classification:
+    | DvdUnrecoveredSourceClassification
+    | "recovered";
+}
+
 export interface DvdArchiveRecoveryRangeEvidence {
   recovery: ArchiveRecovery;
   checkpoint: DvdArchiveEvidenceHeader;
-  observations: readonly DvdArchiveRecoveryRangeObservation[];
+  recoveredSectorCount: number;
+  currentPassObservations: {
+    count: number;
+    positiveIntervalCount: number;
+    minimumIntervalMs: number | null;
+    maximumIntervalMs: number | null;
+    lastObservedAt: Date | null;
+  };
+  transitions: {
+    items: readonly DvdArchiveRecoveryRangeObservation[];
+    totalCount: number | null;
+    truncated: boolean;
+  };
+  ranges: readonly DvdArchiveRecoverySourceRange[];
+  rangeOffset: number;
+  rangeCount: number;
 }
 
 export interface ArchiveRecoveryStopReceipt extends ArchiveRecovery {
@@ -1887,6 +1908,7 @@ export interface CatalogAccess {
   findArchiveRecoveryById(id: ArchiveRecoveryId): ArchiveRecovery | null;
   readDvdArchiveRecoveryRangeEvidence(
     id: ArchiveRecoveryId,
+    options: { rangeOffset: number; rangeLimit: number },
   ): DvdArchiveRecoveryRangeEvidence | null;
   listArchiveRecoveries(options: { limit: number }): ArchiveRecovery[];
   findDvdSourceSampleManifest(

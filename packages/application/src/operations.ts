@@ -158,7 +158,10 @@ function archiveRecoveryOperation(
     includeHistorical: true,
   }).flatMap(({ id }) => access.encodeJobs.listForDiscSelection(id));
   const rangeEvidence = includeProgress
-    ? access.catalog.readDvdArchiveRecoveryRangeEvidence(recovery.id)
+    ? access.catalog.readDvdArchiveRecoveryRangeEvidence(recovery.id, {
+        rangeOffset: 0,
+        rangeLimit: 1,
+      })
     : null;
   const presentedRangeEvidence = rangeEvidence === null
     ? null

@@ -583,6 +583,7 @@ const CORRECTED_ENCODE_REPLACEMENT_LIMIT = 100;
 const ENCODE_QUEUE_DISC_SELECTION_LIMIT = 100;
 const RETAINED_ENCODE_OUTPUT_LOOKUP_LIMIT = 400;
 const RETAINED_ENCODE_OUTPUT_PAGE_LIMIT = 100;
+const DVD_RECOVERY_TRANSITION_SCAN_LIMIT = 16;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -13988,8 +13989,8 @@ export function createDataAccessInternal(
             access.catalog.findArchiveRecovery(id),
           findArchiveRecoveryById: (id) =>
             access.catalog.findArchiveRecoveryById(id),
-          readDvdArchiveRecoveryRangeEvidence: (id) =>
-            access.catalog.readDvdArchiveRecoveryRangeEvidence(id),
+          readDvdArchiveRecoveryRangeEvidence: (id, options) =>
+            access.catalog.readDvdArchiveRecoveryRangeEvidence(id, options),
           listArchiveRecoveries: (options) =>
             access.catalog.listArchiveRecoveries(options),
           findDvdSourceSampleManifest: (id) =>
@@ -15923,8 +15924,23 @@ export function createDataAccessInternal(
         });
       },
 
-      readDvdArchiveRecoveryRangeEvidence(id) {
+      readDvdArchiveRecoveryRangeEvidence(id, options) {
         if (!hasDvdRecoveryEvidenceSchema) return null;
+        const rangeOffset = options.rangeOffset;
+        if (!Number.isSafeInteger(rangeOffset) || rangeOffset < 0) {
+          throw new DomainInvariantError(
+            "Archive Recovery range offset must be a non-negative safe integer",
+          );
+        }
+        const rangeLimit = requirePositiveSafeInteger(
+          options.rangeLimit,
+          "Archive Recovery range limit",
+        );
+        if (rangeLimit > 100) {
+          throw new DomainInvariantError(
+            "Archive Recovery ranges are limited to 100 records",
+          );
+        }
         const recovery = findArchiveRecoveryRecord(database, {
           archiveRecoveryId: id,
         });
@@ -15937,112 +15953,267 @@ export function createDataAccessInternal(
             "Archive Recovery has no committed DVD checkpoint",
           );
         }
-        const rows = database.select({
-          checkpointRevision: dvdArchiveEvidenceManifests.revision,
-          previousManifestId:
-            dvdArchiveEvidenceManifests.previousManifestId,
-          previousManifestRevision:
-            previousDvdArchiveEvidenceManifests.revision,
-          previousRanges:
-            previousDvdArchiveEvidenceManifests.unrecoveredSourceRanges,
-          currentRanges:
-            dvdArchiveEvidenceManifests.unrecoveredSourceRanges,
-          readId: dvdArchiveRecoveryReads.id,
-          readOriginalDiscArchiveId:
-            dvdArchiveRecoveryReads.originalDiscArchiveId,
-          readFromManifestId: dvdArchiveRecoveryReads.fromManifestId,
-          readFromManifestRevision:
-            dvdArchiveRecoveryReads.fromManifestRevision,
-          readStartLba: dvdArchiveRecoveryReads.startLba,
-          readSectorCount: dvdArchiveRecoveryReads.sectorCount,
-          readOutcome: dvdArchiveRecoveryReads.outcome,
-          readVerificationId: dvdArchiveRecoveryReads.verificationId,
-          readDiscConfirmationId:
-            dvdArchiveRecoveryReads.discConfirmationId,
-          readEvidenceDigest: dvdArchiveRecoveryReads.evidenceDigest,
-          observedAt: dvdArchiveRecoveryReads.createdAt,
-        }).from(dvdArchiveEvidenceManifests).innerJoin(
-          previousDvdArchiveEvidenceManifests,
-          eq(
-            previousDvdArchiveEvidenceManifests.id,
-            dvdArchiveEvidenceManifests.previousManifestId,
+        const rangeProjection = `
+          WITH current_ranges AS (
+            SELECT
+              CAST(json_extract(range.value, '$.startLba') AS INTEGER)
+                AS start_lba,
+              CAST(json_extract(range.value, '$.sectorCount') AS INTEGER)
+                AS sector_count,
+              json_extract(range.value, '$.classification') AS classification
+            FROM dvd_archive_evidence_manifests AS current_manifest,
+              json_each(current_manifest.unrecovered_source_ranges) AS range
+            WHERE current_manifest.id = ?
           ),
-        ).innerJoin(
-          dvdArchiveRecoveryReads,
-          eq(
-            dvdArchiveRecoveryReads.id,
-            dvdArchiveEvidenceManifests.recoveryReadId,
+          recovered_sectors AS (
+            SELECT DISTINCT start_lba
+            FROM dvd_archive_recovery_reads
+            WHERE original_disc_archive_id = ?
+              AND outcome = 'recovered'
+              AND from_manifest_revision < ?
           ),
-        ).where(and(
-          eq(
-            dvdArchiveEvidenceManifests.originalDiscArchiveId,
-            recovery.originalDiscArchiveId,
+          numbered_recovered AS (
+            SELECT
+              start_lba,
+              start_lba - row_number() OVER (ORDER BY start_lba) AS range_key
+            FROM recovered_sectors
           ),
-          lte(
-            dvdArchiveEvidenceManifests.revision,
-            checkpoint.currentManifestRevision,
+          recovered_ranges AS (
+            SELECT
+              min(start_lba) AS start_lba,
+              count(*) AS sector_count,
+              'recovered' AS classification
+            FROM numbered_recovered
+            GROUP BY range_key
           ),
-        )).orderBy(asc(dvdArchiveEvidenceManifests.revision)).all();
-        if (rows.length !== checkpoint.currentManifestRevision - 1) {
+          raw_ranges AS (
+            SELECT * FROM current_ranges
+            UNION ALL
+            SELECT * FROM recovered_ranges
+          ),
+          ordered_ranges AS (
+            SELECT
+              *,
+              lag(start_lba + sector_count) OVER (
+                ORDER BY start_lba
+              ) AS previous_end_lba,
+              lag(classification) OVER (
+                ORDER BY start_lba
+              ) AS previous_classification
+            FROM raw_ranges
+          ),
+          projection_integrity AS (
+            SELECT count(*) AS overlap_count
+            FROM ordered_ranges
+            WHERE previous_end_lba > start_lba
+          ),
+          marked_ranges AS (
+            SELECT
+              *,
+              CASE
+                WHEN previous_end_lba = start_lba
+                  AND previous_classification = classification
+                THEN 0
+                ELSE 1
+              END AS starts_group
+            FROM ordered_ranges
+          ),
+          grouped_ranges AS (
+            SELECT
+              *,
+              sum(starts_group) OVER (ORDER BY start_lba) AS range_group
+            FROM marked_ranges
+          ),
+          normalized_ranges AS (
+            SELECT
+              min(start_lba) AS start_lba,
+              sum(sector_count) AS sector_count,
+              classification
+            FROM grouped_ranges
+            GROUP BY range_group, classification
+          )
+        `;
+        type RangeRow = {
+          start_lba: number;
+          sector_count: number;
+          classification:
+            | "skipped_untested"
+            | "individually_failed"
+            | "recovered";
+          range_count: number;
+          recovered_sector_count: number;
+          overlap_count: number;
+        };
+        const rangeRows = sqlite.prepare(`${rangeProjection}
+          SELECT
+            start_lba,
+            sector_count,
+            classification,
+            count(*) OVER () AS range_count,
+            coalesce(sum(
+              CASE WHEN classification = 'recovered' THEN sector_count ELSE 0 END
+            ) OVER (), 0) AS recovered_sector_count,
+            (SELECT overlap_count FROM projection_integrity) AS overlap_count
+          FROM normalized_ranges
+          ORDER BY start_lba
+          LIMIT ? OFFSET ?
+        `).all(
+          checkpoint.currentManifestId,
+          recovery.originalDiscArchiveId,
+          checkpoint.currentManifestRevision,
+          rangeLimit,
+          rangeOffset,
+        ) as unknown as RangeRow[];
+        const rangeSummary = rangeRows[0] ?? sqlite.prepare(
+          `${rangeProjection}
+            SELECT
+              count(*) AS range_count,
+              coalesce(sum(
+                CASE WHEN classification = 'recovered' THEN sector_count ELSE 0 END
+              ), 0) AS recovered_sector_count,
+              (SELECT overlap_count FROM projection_integrity) AS overlap_count
+            FROM normalized_ranges
+          `,
+        ).get(
+          checkpoint.currentManifestId,
+          recovery.originalDiscArchiveId,
+          checkpoint.currentManifestRevision,
+        ) as unknown as Pick<
+          RangeRow,
+          "range_count" | "recovered_sector_count" | "overlap_count"
+        >;
+        if (Number(rangeSummary.overlap_count) !== 0) {
           throw new DomainInvariantError(
-            "DVD Archive Recovery range history is incomplete",
+            "DVD Archive Recovery source ranges overlap",
           );
         }
-        const observations = rows.map((row, index) => {
-          const expectedRevision = index + 2;
-          const recoveryRead = {
-            originalDiscArchiveId: row.readOriginalDiscArchiveId,
-            fromManifestId: row.readFromManifestId,
-            fromManifestRevision: row.readFromManifestRevision,
-            startLba: row.readStartLba,
-            sectorCount: row.readSectorCount,
-            outcome: row.readOutcome,
-            ...(row.readVerificationId === null
-              ? {}
-              : {
-                  verificationId: row.readVerificationId,
-                  discConfirmationId: row.readDiscConfirmationId,
-                }),
+        type TransitionRow = {
+          checkpoint_revision: number;
+          start_lba: number;
+          outcome: "recovered" | "failed";
+          observed_at: number;
+          previously_failed: 0 | 1;
+        };
+        const transitionRows = sqlite.prepare(`
+          SELECT
+            manifest.revision AS checkpoint_revision,
+            recovery_read.start_lba,
+            recovery_read.outcome,
+            recovery_read.created_at AS observed_at,
+            EXISTS (
+              SELECT 1
+              FROM dvd_archive_recovery_reads AS previous_failure
+              WHERE previous_failure.original_disc_archive_id =
+                  recovery_read.original_disc_archive_id
+                AND previous_failure.start_lba = recovery_read.start_lba
+                AND previous_failure.outcome = 'failed'
+                AND previous_failure.from_manifest_revision <
+                  recovery_read.from_manifest_revision
+            ) AS previously_failed
+          FROM dvd_archive_evidence_manifests AS manifest
+          INNER JOIN dvd_archive_recovery_reads AS recovery_read
+            ON recovery_read.id = manifest.recovery_read_id
+          WHERE manifest.original_disc_archive_id = ?
+            AND manifest.revision <= ?
+          ORDER BY manifest.revision DESC
+          LIMIT ?
+        `).all(
+          recovery.originalDiscArchiveId,
+          checkpoint.currentManifestRevision,
+          DVD_RECOVERY_TRANSITION_SCAN_LIMIT + 1,
+        ) as unknown as TransitionRow[];
+        const transitionHistoryIsComplete =
+          transitionRows.length <= DVD_RECOVERY_TRANSITION_SCAN_LIMIT;
+        const meaningfulTransitions = transitionRows
+          .slice(0, DVD_RECOVERY_TRANSITION_SCAN_LIMIT)
+          .filter((row) =>
+            row.outcome === "recovered" || row.previously_failed === 0
+          )
+          .map((row) => ({
+            checkpointRevision: row.checkpoint_revision,
+            startLba: row.start_lba,
+            outcome: row.outcome,
+            fromClassification: row.previously_failed === 1
+              ? "individually_failed" as const
+              : "skipped_untested" as const,
+            observedAt: new Date(row.observed_at),
+          }))
+          .reverse();
+        let currentPassObservations = {
+          count: 0,
+          positiveIntervalCount: 0,
+          minimumIntervalMs: null as number | null,
+          maximumIntervalMs: null as number | null,
+          lastObservedAt: null as Date | null,
+        };
+        const passStartedAtMs = recovery.work?.passStartedAt?.getTime();
+        if (passStartedAtMs !== undefined) {
+          const summary = sqlite.prepare(`
+            WITH pass_observations AS (
+              SELECT
+                created_at,
+                created_at - lag(created_at, 1, ?) OVER (
+                  ORDER BY from_manifest_revision
+                ) AS interval_ms
+              FROM dvd_archive_recovery_reads
+              WHERE original_disc_archive_id = ?
+                AND created_at >= ?
+                AND from_manifest_revision < ?
+            )
+            SELECT
+              count(*) AS observation_count,
+              count(CASE WHEN interval_ms > 0 THEN 1 END)
+                AS positive_interval_count,
+              min(CASE WHEN interval_ms > 0 THEN interval_ms END)
+                AS minimum_interval_ms,
+              max(CASE WHEN interval_ms > 0 THEN interval_ms END)
+                AS maximum_interval_ms,
+              max(created_at) AS last_observed_at
+            FROM pass_observations
+          `).get(
+            passStartedAtMs,
+            recovery.originalDiscArchiveId,
+            passStartedAtMs,
+            checkpoint.currentManifestRevision,
+          ) as unknown as {
+            observation_count: number;
+            positive_interval_count: number;
+            minimum_interval_ms: number | null;
+            maximum_interval_ms: number | null;
+            last_observed_at: number | null;
           };
-          if (
-            row.checkpointRevision !== expectedRevision ||
-            row.previousManifestRevision !== expectedRevision - 1 ||
-            row.previousManifestId !== row.readFromManifestId ||
-            row.readFromManifestRevision !== expectedRevision - 1 ||
-            row.readOriginalDiscArchiveId !==
-              recovery.originalDiscArchiveId
-          ) {
-            throw new DomainInvariantError(
-              "DVD Archive Recovery range history is inconsistent",
-            );
-          }
-          assertDvdArchiveRecoveryReadEvidenceDigest(
-            recoveryRead,
-            row.readEvidenceDigest,
-          );
-          assertDvdEvidenceRangeTransition(
-            row.previousRanges,
-            row.currentRanges,
-            recoveryRead,
-          );
-          const previousRange = row.previousRanges.find((range) =>
-            row.readStartLba >= range.startLba &&
-            row.readStartLba < range.startLba + range.sectorCount
-          );
-          if (previousRange === undefined) {
-            throw new DomainInvariantError(
-              "DVD Archive Recovery observation has no prior source range",
-            );
-          }
-          return {
-            checkpointRevision: row.checkpointRevision,
-            startLba: row.readStartLba,
-            outcome: row.readOutcome,
-            fromClassification: previousRange.classification,
-            observedAt: row.observedAt,
+          currentPassObservations = {
+            count: summary.observation_count,
+            positiveIntervalCount: summary.positive_interval_count,
+            minimumIntervalMs: summary.minimum_interval_ms,
+            maximumIntervalMs: summary.maximum_interval_ms,
+            lastObservedAt: summary.last_observed_at === null
+              ? null
+              : new Date(summary.last_observed_at),
           };
-        });
-        return { recovery, checkpoint, observations };
+        }
+        return {
+          recovery,
+          checkpoint,
+          recoveredSectorCount: Number(
+            rangeSummary.recovered_sector_count,
+          ),
+          currentPassObservations,
+          transitions: {
+            items: meaningfulTransitions,
+            totalCount: transitionHistoryIsComplete
+              ? meaningfulTransitions.length
+              : null,
+            truncated: !transitionHistoryIsComplete,
+          },
+          ranges: rangeRows.map((row) => ({
+            startLba: Number(row.start_lba),
+            sectorCount: Number(row.sector_count),
+            classification: row.classification,
+          })),
+          rangeOffset,
+          rangeCount: Number(rangeSummary.range_count),
+        };
       },
 
       listArchiveRecoveries(options) {

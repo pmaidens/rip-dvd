@@ -1,0 +1,2 @@
+CREATE INDEX `dvd_archive_recovery_reads_archive_outcome_lba_revision_idx` ON `dvd_archive_recovery_reads` (`original_disc_archive_id`,`outcome`,`start_lba`,`from_manifest_revision`);--> statement-breakpoint
+CREATE INDEX `dvd_archive_recovery_reads_archive_created_revision_idx` ON `dvd_archive_recovery_reads` (`original_disc_archive_id`,`created_at`,`from_manifest_revision`);

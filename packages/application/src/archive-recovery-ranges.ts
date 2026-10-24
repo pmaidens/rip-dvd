@@ -5,6 +5,7 @@ import {
   type ArchiveRecovery,
   type DataAccess,
   type DvdArchiveRecoveryRangeEvidence,
+  type DvdArchiveRecoverySourceRange,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import {
@@ -17,64 +18,16 @@ import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 
 export class InvalidArchiveRecoveryRangesInputError extends Error {}
 
-export interface ArchiveRecoverySourceRange {
-  startLba: number;
-  sectorCount: number;
-  classification:
-    | "skipped_untested"
-    | "individually_failed"
-    | "recovered";
-}
-
-const HISTORY_LIMIT = 16;
+export type ArchiveRecoverySourceRange = DvdArchiveRecoverySourceRange;
 
 function safeProduct(left: number, right: number): number {
   const value = left * right;
   return Number.isSafeInteger(value) ? value : Number.MAX_SAFE_INTEGER;
 }
 
-function compactRecoverySourceRanges(
-  evidence: DvdArchiveRecoveryRangeEvidence,
-): ArchiveRecoverySourceRange[] {
-  const ranges: ArchiveRecoverySourceRange[] = [
-    ...evidence.checkpoint.unrecoveredSourceRanges,
-    ...evidence.observations
-      .filter(({ outcome }) => outcome === "recovered")
-      .map(({ startLba }) => ({
-        startLba,
-        sectorCount: 1,
-        classification: "recovered" as const,
-      })),
-  ].sort((left, right) => left.startLba - right.startLba);
-  return ranges.reduce<ArchiveRecoverySourceRange[]>((normalized, range) => {
-    const previous = normalized.at(-1);
-    const previousEnd = previous === undefined
-      ? null
-      : previous.startLba + previous.sectorCount;
-    if (previousEnd !== null && range.startLba < previousEnd) {
-      throw new DomainInvariantError(
-        "DVD Archive Recovery source ranges overlap",
-      );
-    }
-    if (
-      previous !== undefined &&
-      previousEnd === range.startLba &&
-      previous.classification === range.classification
-    ) {
-      normalized[normalized.length - 1] = {
-        ...previous,
-        sectorCount: previous.sectorCount + range.sectorCount,
-      };
-    } else {
-      normalized.push(range);
-    }
-    return normalized;
-  }, []);
-}
-
 function currentPassProgress(
   recovery: ArchiveRecovery,
-  observations: DvdArchiveRecoveryRangeEvidence["observations"],
+  observations: DvdArchiveRecoveryRangeEvidence["currentPassObservations"],
   nowMs: number,
 ) {
   const work = recovery.work;
@@ -89,15 +42,10 @@ function currentPassProgress(
   const elapsedEndMs = passIsActive
     ? nowMs
     : completedPass?.completedAtMs ?? work.updatedAt.getTime();
-  const passObservations = startedAtMs === null
-    ? []
-    : observations.filter(({ observedAt }) =>
-      observedAt.getTime() >= startedAtMs
-    );
   const initialSectorCount = work.passInitialUnrecoveredSectorCount;
   const remainingSectorCount = initialSectorCount === null
     ? null
-    : initialSectorCount - passObservations.length;
+    : initialSectorCount - observations.count;
   if (remainingSectorCount !== null && remainingSectorCount < 0) {
     throw new DomainInvariantError(
       "Archive Recovery pass observations exceed its starting extent",
@@ -120,42 +68,37 @@ function currentPassProgress(
       scope: "current_pass",
       minimumRemainingMs: 0,
       maximumRemainingMs: 0,
-      observationCount: passObservations.length,
+      observationCount: observations.count,
     };
   } else if (
     passIsActive &&
     startedAtMs !== null && remainingSectorCount !== null &&
-    passObservations.length >= 2
+    observations.count >= 2 &&
+    observations.positiveIntervalCount >= 2 &&
+    observations.minimumIntervalMs !== null &&
+    observations.maximumIntervalMs !== null &&
+    observations.lastObservedAt !== null
   ) {
-    const completedAt = passObservations.map(({ observedAt }) =>
-      observedAt.getTime()
+    const currentObservationMs = Math.max(
+      0,
+      nowMs - observations.lastObservedAt.getTime(),
     );
-    const intervals = completedAt.map((timestamp, index) =>
-      timestamp - (index === 0 ? startedAtMs : completedAt[index - 1]!)
-    ).filter((duration) => duration > 0);
-    if (intervals.length >= 2) {
-      const minimumObservedMs = Math.min(...intervals);
-      const currentObservationMs = Math.max(
-        0,
-        nowMs - completedAt.at(-1)!,
-      );
-      const maximumObservedMs = Math.max(
-        ...intervals,
-        currentObservationMs,
-      );
-      completionEstimate = {
-        scope: "current_pass",
-        minimumRemainingMs: safeProduct(
-          remainingSectorCount,
-          minimumObservedMs,
-        ),
-        maximumRemainingMs: safeProduct(
-          remainingSectorCount,
-          maximumObservedMs,
-        ),
-        observationCount: passObservations.length,
-      };
-    }
+    const maximumObservedMs = Math.max(
+      observations.maximumIntervalMs,
+      currentObservationMs,
+    );
+    completionEstimate = {
+      scope: "current_pass",
+      minimumRemainingMs: safeProduct(
+        remainingSectorCount,
+        observations.minimumIntervalMs,
+      ),
+      maximumRemainingMs: safeProduct(
+        remainingSectorCount,
+        maximumObservedMs,
+      ),
+      observationCount: observations.count,
+    };
   }
   return {
     number: work.passNumber,
@@ -167,7 +110,7 @@ function currentPassProgress(
       : Math.max(0, elapsedEndMs - startedAtMs),
     initialUnrecoveredSectorCount: initialSectorCount,
     recoveredSectorCount: work.passRecoveredSectorCount,
-    observedSectorCount: passObservations.length,
+    observedSectorCount: observations.count,
     remainingSectorCount,
     completionEstimate,
   };
@@ -185,22 +128,6 @@ export function presentArchiveRecoveryRangeEvidence(
     .unrecoveredSourceRanges
     .filter(({ classification }) => classification === "individually_failed")
     .reduce((total, range) => total + range.sectorCount, 0);
-  const recoveredSectorCount = evidence.observations
-    .filter(({ outcome }) => outcome === "recovered").length;
-  const meaningfulTransitions = evidence.observations.flatMap((observation) => {
-    const toClassification = observation.outcome === "recovered"
-      ? "recovered" as const
-      : "individually_failed" as const;
-    return observation.fromClassification === toClassification
-      ? []
-      : [{
-          checkpointRevision: observation.checkpointRevision,
-          startLba: observation.startLba,
-          fromClassification: observation.fromClassification,
-          toClassification,
-          observedAt: observation.observedAt,
-        }];
-  });
   const passHistory = evidence.recovery.passHistory;
   const completedPassCount = passHistory.at(-1)?.passNumber ?? 0;
   return {
@@ -215,12 +142,12 @@ export function presentArchiveRecoveryRangeEvidence(
         evidence.checkpoint.acceptedEndLbaExclusive,
       skippedUntestedSectorCount,
       individuallyFailedSectorCount,
-      recoveredSectorCount,
+      recoveredSectorCount: evidence.recoveredSectorCount,
       unresolvedSectorCount:
         skippedUntestedSectorCount + individuallyFailedSectorCount,
       currentPass: currentPassProgress(
         evidence.recovery,
-        evidence.observations,
+        evidence.currentPassObservations,
         nowMs,
       ),
     },
@@ -232,12 +159,22 @@ export function presentArchiveRecoveryRangeEvidence(
           passHistory[0]!.passNumber > 1,
       },
       transitions: {
-        items: meaningfulTransitions.slice(-HISTORY_LIMIT),
-        totalCount: meaningfulTransitions.length,
-        truncated: meaningfulTransitions.length > HISTORY_LIMIT,
+        items: evidence.transitions.items.map((observation) => ({
+          checkpointRevision: observation.checkpointRevision,
+          startLba: observation.startLba,
+          fromClassification: observation.fromClassification,
+          toClassification: observation.outcome === "recovered"
+            ? "recovered" as const
+            : "individually_failed" as const,
+          observedAt: observation.observedAt,
+        })),
+        totalCount: evidence.transitions.totalCount,
+        truncated: evidence.transitions.truncated,
       },
     },
-    ranges: compactRecoverySourceRanges(evidence),
+    ranges: evidence.ranges,
+    rangeOffset: evidence.rangeOffset,
+    rangeCount: evidence.rangeCount,
   };
 }
 
@@ -329,6 +266,7 @@ export async function inspectArchiveRecoveryRanges(
     );
   }
   const cursor = parseCursor(options.cursor);
+  const rangeLimit = options.limit ?? 20;
   const recovery = access.catalog.findArchiveRecoveryById(
     archiveRecoveryId as ArchiveRecovery["id"],
   );
@@ -357,14 +295,29 @@ export async function inspectArchiveRecoveryRanges(
     nextCursor: null,
   });
   let presented;
+  let cursorIsStale = false;
   try {
     const read = await access.withDvdCurrentCheckpoint(
       recovery.originalDiscArchiveId as OriginalDiscArchiveId,
       archiveImageOwnership,
       async ({ checkpoint, assertOwned }) => {
+        const cursorMatchesCheckpoint = cursor === null ||
+          cursor.archiveRecoveryId === archiveRecoveryId &&
+            cursor.originalDiscArchiveId ===
+              recovery.originalDiscArchiveId &&
+            cursor.checkpointRevision ===
+              checkpoint.currentManifestRevision &&
+            cursor.manifestId === checkpoint.currentManifestId &&
+            cursor.manifestDigest === checkpoint.currentManifestDigest;
         const evidence = access.readConsistentSnapshot((snapshot) =>
           snapshot.catalog.readDvdArchiveRecoveryRangeEvidence(
             recovery.id,
+            {
+              rangeOffset: cursorMatchesCheckpoint
+                ? cursor?.offset ?? 0
+                : 0,
+              rangeLimit,
+            },
           )
         );
         if (
@@ -381,11 +334,15 @@ export async function inspectArchiveRecoveryRanges(
           );
         }
         assertOwned();
-        return presentArchiveRecoveryRangeEvidence(evidence);
+        return {
+          cursorIsStale: !cursorMatchesCheckpoint,
+          presented: presentArchiveRecoveryRangeEvidence(evidence),
+        };
       },
     );
     if (read === null) return unavailable("DVD_EVIDENCE_NOT_RECORDED");
-    presented = read;
+    presented = read.presented;
+    cursorIsStale = read.cursorIsStale;
   } catch (error) {
     return unavailable(
       error instanceof DvdCheckpointReadFault ||
@@ -394,30 +351,23 @@ export async function inspectArchiveRecoveryRanges(
         : "DVD_RECOVERY_RANGE_INSPECTION_UNAVAILABLE",
     );
   }
-  if (
-    cursor !== null &&
-    (
-      cursor.archiveRecoveryId !== archiveRecoveryId ||
-      cursor.originalDiscArchiveId !== recovery.originalDiscArchiveId ||
-      cursor.checkpointRevision !== presented.checkpoint.revision ||
-      cursor.manifestId !== presented.checkpoint.manifestId ||
-      cursor.manifestDigest !== presented.checkpoint.manifestDigest
-    )
-  ) {
+  if (cursorIsStale) {
     return unavailable("DVD_RECOVERY_RANGE_CURSOR_STALE", presented);
   }
-  const offset = cursor?.offset ?? 0;
-  if (cursor !== null && offset >= presented.ranges.length) {
+  const offset = presented.rangeOffset;
+  if (cursor !== null && presented.ranges.length === 0) {
+    if (offset < presented.rangeCount) {
+      throw new DomainInvariantError(
+        "Archive Recovery range page is incomplete",
+      );
+    }
     throw new InvalidArchiveRecoveryRangesInputError(
       "Archive Recovery range cursor is outside the range map.",
     );
   }
-  const ranges = presented.ranges.slice(
-    offset,
-    offset + (options.limit ?? 20),
-  );
+  const ranges = presented.ranges;
   const nextOffset = offset + ranges.length;
-  const complete = nextOffset === presented.ranges.length;
+  const complete = nextOffset === presented.rangeCount;
   return {
     schemaVersion: 1,
     archiveRecoveryId,
@@ -430,7 +380,7 @@ export async function inspectArchiveRecoveryRanges(
     history: presented.history,
     ranges,
     rangeOffset: offset,
-    rangeCount: presented.ranges.length,
+    rangeCount: presented.rangeCount,
     truncated: !complete,
     complete,
     nextCursor: complete
