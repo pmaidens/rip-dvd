@@ -53,6 +53,7 @@ import {
   requestDvdRecoveryReconciliation,
 } from "./dvd-recovery-reconciliation.js";
 import { requestDvdRecoveryStop } from "./dvd-recovery-stop.js";
+import { requestDvdRecoveryResume } from "./dvd-recovery-resume.js";
 import {
   mutateMediaItem,
   previewMediaItemChange,
@@ -588,6 +589,44 @@ export function createApplicationOperations(
         attemptId: attemptId as ArchiveRecoveryAttemptId,
       });
     },
+    resumeDvdRecovery: (input: {
+      mutationKey: unknown;
+      archiveRecoveryId: unknown;
+      attemptId: unknown;
+      checkpointRevision: unknown;
+      checkpointDigest: unknown;
+      speedMode: unknown;
+    }) => {
+      const archiveRecoveryId = requiredString(
+        input.archiveRecoveryId,
+        "Archive Recovery ID",
+      );
+      const attemptId = requiredString(
+        input.attemptId,
+        "Archive Recovery attempt ID",
+      );
+      const checkpointDigest = requiredString(
+        input.checkpointDigest,
+        "Archive Recovery checkpoint digest",
+      );
+      if (
+        archiveRecoveryId.length > 256 || attemptId.length > 256 ||
+        !Number.isSafeInteger(input.checkpointRevision) ||
+        Number(input.checkpointRevision) <= 0 ||
+        !/^[0-9a-f]{64}$/.test(checkpointDigest) ||
+        input.speedMode !== "normal" && input.speedMode !== "low"
+      ) {
+        throw new RangeError("Invalid Archive Recovery Resume input.");
+      }
+      return requestDvdRecoveryResume(access, {
+        mutationKey: parseMutationKey(input.mutationKey),
+        archiveRecoveryId: archiveRecoveryId as ArchiveRecoveryId,
+        attemptId: attemptId as ArchiveRecoveryAttemptId,
+        checkpointRevision: Number(input.checkpointRevision),
+        checkpointDigest,
+        speedMode: input.speedMode,
+      }, dependencies.archiveImageOwnership);
+    },
     verifyDisc: (input: {
       mutationKey: unknown;
       archiveRecoveryId: unknown;
@@ -906,6 +945,11 @@ export {
   dvdRecoveryStopAction,
   requestDvdRecoveryStop,
 } from "./dvd-recovery-stop.js";
+export {
+  dvdRecoveryResumeAction,
+  DvdRecoveryResumeUnavailableError,
+  requestDvdRecoveryResume,
+} from "./dvd-recovery-resume.js";
 export {
   FILESYSTEM_VERIFICATION_INVENTORY_PAGE_LIMIT,
   readFilesystemVerificationInventory,

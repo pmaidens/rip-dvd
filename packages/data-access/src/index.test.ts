@@ -2481,6 +2481,7 @@ describe("data-access facade", () => {
           name !== "20261023134137_cynical_leopardon" &&
           name !== "20261023141501_even_enchantress" &&
           name !== "20261024175458_nappy_black_tom" &&
+          name !== "20261024185350_archive-recovery-resume" &&
           name !== "20261024192300_woozy_wasp",
       )
       .sort();
@@ -9719,6 +9720,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           name: "20261024192300_woozy_wasp",
         },
         {
+          name: "20261024185350_archive-recovery-resume",
+        },
+        {
           name: "20261024175458_nappy_black_tom",
         },
         {
@@ -9747,9 +9751,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20261022205917_burly_shard",
-        },
-        {
-          name: "20261022195659_fresh_silver_samurai",
         },
       ]);
     expect(

@@ -3,6 +3,7 @@ import { StructuredInputError } from "./structured-input.js";
 import {
   createApplicationOperations,
   DvdDiscVerificationUnavailableError,
+  DvdRecoveryResumeUnavailableError,
   InvalidCatalogTitleDamageInputError,
   InvalidArchiveEvidenceInputError,
   InvalidArchiveRecoveryRangesInputError,
@@ -45,6 +46,7 @@ import {
   StaleDvdDiscVerificationError,
   StaleDvdDiscConfirmationError,
   StaleArchiveRecoveryAttemptError,
+  StaleArchiveRecoveryCheckpointError,
   validateEncodeQueueSearchQuery,
   type OriginalDiscArchiveId,
   type FilesystemVerificationTarget,
@@ -193,11 +195,11 @@ const commandDefinitions = [
   },
   {
     name: "archive-recovery",
-    description: "Inspect complete source ranges or request DVD Disc Verification, Operator Disc Confirmation, checkpoint reconciliation, and safe Stop for an Archive Recovery.",
-    usage: "rip-dvd archive-recovery <ranges|inspect-verification|verify-disc|preview-disc-confirmation|confirm-disc|inspect-reconciliation|reconcile|stop> <archive-recovery-id> [options]",
+    description: "Inspect complete source ranges or request DVD Disc Verification, Operator Disc Confirmation, checkpoint reconciliation, safe Stop, and explicit Resume for an Archive Recovery. Low speed is a firmware request whose accepted, rejected, or ignored result is reported on the recovery.",
+    usage: "rip-dvd archive-recovery <ranges|inspect-verification|verify-disc|preview-disc-confirmation|confirm-disc|inspect-reconciliation|reconcile|stop|resume> <archive-recovery-id> [options]",
     inputs: {
-      arguments: ["action: ranges|inspect-verification|verify-disc|preview-disc-confirmation|confirm-disc|inspect-reconciliation|reconcile|stop", "archive-recovery-id"],
-      options: ["--limit", "--cursor", "--key", "--archive-id", "--attempt-id", "--disc-inspection-id", "--detected-disc-id", "--media-generation", "--verification-id", "--verification-execution-id", "--verification-outcome", "--verification-result-digest", "--checkpoint-revision", "--checkpoint-digest", "--acknowledge-mixed-source"],
+      arguments: ["action: ranges|inspect-verification|verify-disc|preview-disc-confirmation|confirm-disc|inspect-reconciliation|reconcile|stop|resume", "archive-recovery-id"],
+      options: ["--limit", "--cursor", "--key", "--archive-id", "--attempt-id", "--disc-inspection-id", "--detected-disc-id", "--media-generation", "--verification-id", "--verification-execution-id", "--verification-outcome", "--verification-result-digest", "--checkpoint-revision", "--checkpoint-digest", "--speed-mode", "--acknowledge-mixed-source"],
     },
     example: "rip-dvd archive-recovery ranges <archive-recovery-id> --limit 20",
   },
@@ -953,6 +955,113 @@ function runDvdRecoveryStopCommand(args: readonly string[], io: CommandIO) {
     throw new CommandFailure(
       "RECOVERY_STOP_UNAVAILABLE",
       "Archive Recovery Stop is unavailable.",
+      1,
+    );
+  }
+}
+
+function dvdRecoveryResumeInputs(args: readonly string[]) {
+  const archiveRecoveryId = args[0]?.trim();
+  const { options, mutationKey } = mutationOptions(
+    args.slice(1),
+    [
+      "--key",
+      "--attempt-id",
+      "--checkpoint-revision",
+      "--checkpoint-digest",
+      "--speed-mode",
+    ],
+    "Invalid Archive Recovery Resume options.",
+  );
+  const attemptId = options.get("--attempt-id")?.trim();
+  const checkpointRevision = Number(options.get("--checkpoint-revision"));
+  const checkpointDigest = options.get("--checkpoint-digest")?.trim();
+  const speedMode = options.get("--speed-mode")?.trim();
+  if (
+    options.size !== 5 || !archiveRecoveryId || !attemptId ||
+    archiveRecoveryId.length > 256 || attemptId.length > 256 ||
+    !Number.isSafeInteger(checkpointRevision) || checkpointRevision <= 0 ||
+    !checkpointDigest || !/^[0-9a-f]{64}$/.test(checkpointDigest) ||
+    speedMode !== "normal" && speedMode !== "low"
+  ) {
+    throw new CommandFailure(
+      "INVALID_ARGUMENTS",
+      "Archive Recovery Resume requires current attempt and checkpoint identities plus --speed-mode normal|low.",
+      2,
+    );
+  }
+  return {
+    mutationKey,
+    archiveRecoveryId,
+    attemptId,
+    checkpointRevision,
+    checkpointDigest,
+    speedMode,
+  };
+}
+
+async function runDvdRecoveryResumeCommand(
+  args: readonly string[],
+  io: CommandIO,
+) {
+  try {
+    return await withAccessAsync(io.openAccess, (access) =>
+      createApplicationOperations(access).resumeDvdRecovery(
+        dvdRecoveryResumeInputs(args),
+      ));
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    if (error instanceof MutationKeyConflictError) {
+      throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    if (error instanceof RecordNotFoundError) {
+      throw new CommandFailure(
+        "NOT_FOUND",
+        "Archive Recovery Resume target was not found.",
+        2,
+      );
+    }
+    if (
+      error instanceof StaleArchiveRecoveryAttemptError ||
+      error instanceof StaleArchiveRecoveryCheckpointError
+    ) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        undefined,
+        { currentIdentities: error.currentIdentities },
+      );
+    }
+    if (error instanceof EncodeWorkConflictError) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+        { current: error.current },
+      );
+    }
+    if (
+      error instanceof DvdRecoveryStorageUnavailableError ||
+      error instanceof DvdRecoveryResumeUnavailableError
+    ) {
+      throw new CommandFailure(
+        error.code,
+        error.message,
+        2,
+        error.blockingReasons,
+      );
+    }
+    if (
+      error instanceof DomainInvariantError ||
+      error instanceof InvalidStatusTransitionError
+    ) {
+      throw new CommandFailure("RECOVERY_RESUME_REJECTED", error.message, 2);
+    }
+    throw new CommandFailure(
+      "RECOVERY_RESUME_UNAVAILABLE",
+      "Archive Recovery Resume is unavailable.",
       1,
     );
   }
@@ -2038,11 +2147,11 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
           action !== "preview-disc-confirmation" &&
           action !== "confirm-disc" &&
           action !== "inspect-reconciliation" && action !== "reconcile" &&
-          action !== "stop"
+          action !== "stop" && action !== "resume"
         ) {
           throw new CommandFailure(
             "INVALID_ARGUMENTS",
-            "Archive Recovery action must be ranges, inspect-verification, verify-disc, preview-disc-confirmation, confirm-disc, inspect-reconciliation, reconcile, or stop.",
+            "Archive Recovery action must be ranges, inspect-verification, verify-disc, preview-disc-confirmation, confirm-disc, inspect-reconciliation, reconcile, stop, or resume.",
             2,
           );
         }
@@ -2052,6 +2161,8 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
             ? await runDvdRecoveryRangesCommand(actionArgs, io)
             : action === "stop"
             ? runDvdRecoveryStopCommand(actionArgs, io)
+            : action === "resume"
+            ? await runDvdRecoveryResumeCommand(actionArgs, io)
             : action === "preview-disc-confirmation" ||
                 action === "confirm-disc"
             ? await runDvdDiscConfirmationCommand(action, actionArgs, io)

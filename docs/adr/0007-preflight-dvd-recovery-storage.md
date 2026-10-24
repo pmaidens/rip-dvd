@@ -60,3 +60,6 @@ Unrecovered Source evidence. The recovery writer requires a current supported
 result before opening an archive for mutation and still treats any later
 storage or synchronization failure as a storage fault. Its commit order is
 specified in [DVD recovery batch v1](../dvd-recovery-batch-v1.md).
+Such a fault durably pauses the Recovery. Repairing storage does not restart
+work: retained writes must first reconcile when necessary, then the operator
+must explicitly Resume or Stop the Recovery.

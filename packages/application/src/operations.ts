@@ -53,6 +53,7 @@ import {
   dvdRecoveryReconciliationBlockingReasons,
 } from "./dvd-recovery-reconciliation.js";
 import { dvdRecoveryStopAction } from "./dvd-recovery-stop.js";
+import { dvdRecoveryResumeAction } from "./dvd-recovery-resume.js";
 import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 import { presentArchiveRecoveryRangeEvidence } from "./archive-recovery-ranges.js";
 
@@ -151,7 +152,8 @@ function archiveRecoveryOperation(
   const recoveryOwnsStatus = recoveryPassIsQueued ||
     recovery.status === "running" ||
     recovery.status === "stopping" || !reconciliationIsActive &&
-      (recovery.status === "paused" || recovery.status === "stopped" ||
+      (recovery.status === "waiting_for_disc" ||
+        recovery.status === "paused" || recovery.status === "stopped" ||
         recovery.status === "faulted" || recovery.status === "completed");
   const encodeJobs = access.catalog.listDiscSelections({
     originalDiscArchiveId: recovery.originalDiscArchiveId,
@@ -193,6 +195,17 @@ function archiveRecoveryOperation(
         ),
       },
       dvdRecoveryStopAction(recovery, encodeJobs),
+      dvdRecoveryResumeAction({
+        recovery,
+        checkpoint: access.catalog.findDvdArchiveEvidenceHeader(
+          recovery.originalDiscArchiveId,
+        ),
+        reconciliation,
+        storageReason: describeDvdRecoveryStorage(
+          access.dvdRecoveryStorage.readCurrent(),
+        ).blockingReasons[0] ?? null,
+        encodeJobs,
+      }),
     ],
   };
 }

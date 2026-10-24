@@ -551,6 +551,10 @@ export async function pollDvdRecoveryPass(input: {
     storage.facts.mutationProtection.status !== "verified"
   ) return false;
 
+  if (input.access.archiveRecoveryWork.activateWaitingResume() !== null) {
+    return true;
+  }
+
   const interrupted = input.access.archiveRecoveryWork.findNextInterrupted(
     input.workerExecutionId,
   );

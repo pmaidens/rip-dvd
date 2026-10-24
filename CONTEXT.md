@@ -41,6 +41,15 @@ but it cannot read until that exact identity has committed durably. A later
 drive-path reuse does not redirect the proof.
 _Avoid_: Archive Request cancellation, archive deletion
 
+**Recovery Resume**:
+An operator's explicit, checkpoint-bound decision to start a new Archive
+Recovery attempt after Recovery Stop, a no-progress pause, or a repaired
+storage-fault pause. It reserves the archive against Encode work, waits
+durably when no disc is inserted, and requires fresh insertion-scoped DVD Disc
+Verification before source reads. Normal or low drive speed is requested for
+that attempt, but firmware acceptance is recorded rather than assumed.
+_Avoid_: Automatic retry, Archive Request retry, continuing an old attempt
+
 **Operator Disc Confirmation**:
 An operator's explicit assertion that the currently inserted disc is the source for one Archive Recovery attempt, recorded separately from automatic verification findings. It expires after a worker restart, reboot, disc removal, or detected source change.
 _Avoid_: Verified fingerprint match, disc name match, permanent disc approval

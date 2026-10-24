@@ -35,6 +35,10 @@ import {
   type ActiveBoundedProcess,
   type StartNodeAuthorizedBoundedCommandProcessOptions,
 } from "./bounded-child-process.js";
+import {
+  createNodeDvdDriveSpeedController,
+  type DvdDriveSpeedController,
+} from "./dvd-drive-speed.js";
 
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 const MAX_DIAGNOSTIC_BYTES = 65_536;
@@ -546,6 +550,7 @@ export async function pollDvdDiscVerification(input: {
   mediaGenerationObserver: MediaGenerationObserver;
   signal?: AbortSignal;
   archiveImageOwnership?: ArchiveImageOwnership;
+  speedController?: DvdDriveSpeedController;
 }): Promise<boolean> {
   input.access.dvdDiscVerifications.recoverExpiredClaims();
   const claim = input.access.dvdDiscVerifications.claimNext(
@@ -597,8 +602,43 @@ export async function pollDvdDiscVerification(input: {
           : input.access.catalog.listOpticalDrives({
               ids: [inspection.opticalDriveId],
             })[0];
-        if (drive === undefined || claim.startedAt === null) {
+        if (
+          drive === undefined || !drive.isPresent || !drive.isEnabled ||
+          claim.startedAt === null
+        ) {
           throw new Error("DVD Disc Verification insertion is unavailable");
+        }
+        let verificationStartedAtMs = claim.startedAt.getTime();
+        const recovery = input.access.catalog.findArchiveRecoveryById(
+          claim.archiveRecoveryId,
+        );
+        if (
+          recovery !== null &&
+          recovery.attemptId === claim.archiveRecoveryAttemptId &&
+          recovery.speedMode != null &&
+          (
+            recovery.speedRequestResult == null ||
+            recovery.speedRequestResult.attemptId !== recovery.attemptId ||
+            recovery.speedRequestResult.discInspectionId !==
+              claim.discInspectionId
+          )
+        ) {
+          const speedResult = await (
+            input.speedController ?? createNodeDvdDriveSpeedController()
+          ).apply({
+            devicePath: drive.devicePath,
+            mode: recovery.speedMode,
+            signal: insertionSignal,
+          });
+          assertOwned();
+          input.access.archiveRecoveryWork.recordSpeedRequestResult({
+            archiveRecoveryId: recovery.id,
+            attemptId: recovery.attemptId,
+            discInspectionId: claim.discInspectionId,
+            mode: recovery.speedMode,
+            ...speedResult,
+          });
+          verificationStartedAtMs = Date.now();
         }
         const inspectionIsCurrent = async () => {
           if (!databaseInspectionIsCurrent()) return false;
@@ -662,7 +702,7 @@ export async function pollDvdDiscVerification(input: {
               };
             },
           },
-          startedAtMs: claim.startedAt.getTime(),
+          startedAtMs: verificationStartedAtMs,
           signal: input.signal,
           insertionIsCurrent: inspectionIsCurrent,
           checkpointIsCurrent,

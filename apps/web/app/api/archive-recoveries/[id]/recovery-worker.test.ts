@@ -334,6 +334,84 @@ function pollInput(
   };
 }
 
+it("applies and records an explicit Resume speed before verification reads", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`UPDATE archive_recoveries SET
+    status = 'paused', pause_reason = 'no_progress', updated_at = updated_at + 1
+    WHERE id = ?`).run(seeded.recoveryId);
+  database.close();
+  const resumed = await fixture.run([
+    "archive-recovery", "resume", seeded.recoveryId,
+    "--key", "00000000-0000-4000-8000-000000000623",
+    "--attempt-id", seeded.attemptId,
+    "--checkpoint-revision", String(seeded.pointer.currentManifestRevision),
+    "--checkpoint-digest", seeded.pointer.currentManifestDigest,
+    "--speed-mode", "low",
+  ]);
+  expect(resumed.exitCode).toBe(0);
+  const speedController = {
+    apply: vi.fn(async () => ({
+      attemptedSpeeds: [4],
+      selectedSpeed: 4,
+      observedSpeed: 16,
+      outcome: "ignored" as const,
+    })),
+  };
+  const source = immediateVerificationReader((startLba) => {
+    const index = startLba / 64;
+    const bytes = Buffer.alloc(32 * 2_048, index);
+    bytes[bytes.length - 1] = index + 1;
+    return { outcome: "readable", bytes };
+  });
+  const access = fixture.openAccess();
+  try {
+    expect(await pollDvdDiscVerification({
+      access,
+      reader: source.reader,
+      workerExecutionId: "synthetic-resume-speed-verifier",
+      mediaGenerationObserver: {
+        async observe() {
+          return "synthetic-verification-generation";
+        },
+      },
+      speedController,
+    })).toBe(true);
+    expect(speedController.apply).toHaveBeenCalledOnce();
+    expect(speedController.apply.mock.invocationCallOrder[0])
+      .toBeLessThan(source.start.mock.invocationCallOrder[0]!);
+    expect(access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        speedMode: "low",
+        speedRequestResult: {
+          attemptId: expect.any(String),
+          discInspectionId: seeded.inspection.id,
+          mode: "low",
+          attemptedSpeeds: [4],
+          selectedSpeed: 4,
+          observedSpeed: 16,
+          outcome: "ignored",
+        },
+      });
+    expect(await pollDvdDiscVerification({
+      access,
+      reader: source.reader,
+      workerExecutionId: "synthetic-resume-speed-verifier-restart",
+      mediaGenerationObserver: {
+        async observe() {
+          return "synthetic-verification-generation";
+        },
+      },
+      speedController,
+    })).toBe(false);
+    expect(speedController.apply).toHaveBeenCalledOnce();
+  } finally {
+    access.close();
+  }
+});
+
 it("continues a productive pass in reverse and pauses after no progress", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);

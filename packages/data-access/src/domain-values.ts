@@ -25,6 +25,7 @@ export const DVD_UNRECOVERED_SOURCE_CLASSIFICATIONS = [
 
 export const ARCHIVE_RECOVERY_STATUSES = [
   "eligible",
+  "waiting_for_disc",
   "running",
   "paused",
   "stopping",
@@ -33,7 +34,18 @@ export const ARCHIVE_RECOVERY_STATUSES = [
   "faulted",
 ] as const;
 
-export const ARCHIVE_RECOVERY_PAUSE_REASONS = ["no_progress"] as const;
+export const ARCHIVE_RECOVERY_PAUSE_REASONS = [
+  "no_progress",
+  "storage_fault",
+] as const;
+
+export const ARCHIVE_RECOVERY_SPEED_MODES = ["normal", "low"] as const;
+
+export const ARCHIVE_RECOVERY_SPEED_REQUEST_OUTCOMES = [
+  "accepted",
+  "rejected",
+  "ignored",
+] as const;
 
 export const ARCHIVE_RECOVERY_PASS_DIRECTIONS = [
   "forward",

@@ -95,6 +95,21 @@ set -e
 printf '%s\n' "$stop_output" | assert_json_fields \
   'error.code=NOT_FOUND'
 
+set +e
+resume_output="$(invoke archive-recovery resume \
+  synthetic-missing-recovery \
+  --key synthetic-smoke-recovery-resume-key \
+  --attempt-id synthetic-missing-attempt \
+  --checkpoint-revision 1 \
+  --checkpoint-digest 0000000000000000000000000000000000000000000000000000000000000000 \
+  --speed-mode low \
+  2>"$temporary_directory/recovery-resume.stderr")"
+resume_status=$?
+set -e
+[ "$resume_status" -eq 2 ]
+printf '%s\n' "$resume_output" | assert_json_fields \
+  'error.code=NOT_FOUND'
+
 recovery_inventory="$(invoke inspect archive-recoveries)"
 printf '%s\n' "$recovery_inventory" | assert_json_fields \
   'schemaVersion=1' 'kind=archive-recoveries'

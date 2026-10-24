@@ -125,6 +125,21 @@ export class StaleArchiveRecoveryAttemptError extends DomainInvariantError {
   }
 }
 
+export class StaleArchiveRecoveryCheckpointError
+  extends DomainInvariantError {
+  readonly code = "STALE_RECOVERY_CHECKPOINT" as const;
+
+  constructor(
+    readonly currentIdentities: {
+      archiveRecoveryId: string;
+      checkpoint: { revision: number; digest: string } | null;
+    },
+  ) {
+    super("Archive Recovery checkpoint is stale.");
+    this.name = "StaleArchiveRecoveryCheckpointError";
+  }
+}
+
 export class StaleDvdStructuralCheckpointError extends DomainInvariantError {
   constructor() {
     super("DVD structural check checkpoint is no longer current");
