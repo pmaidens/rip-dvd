@@ -270,6 +270,7 @@ it("reports qualified current-pass progress through inspect and wait", async () 
     outcome: "no_progress",
   }]));
   terminal.close();
+  vi.setSystemTime(new Date(5_000));
   const settled = await fixture.run([
     "wait", "archive-recoveries", "synthetic-committed-recovery",
     "--timeout-ms", "0",
@@ -280,7 +281,10 @@ it("reports qualified current-pass progress through inspect and wait", async () 
     current: {
       status: "paused",
       progress: {
-        currentPass: { completionEstimate: "unknown" },
+        currentPass: {
+          elapsedMs: 500,
+          completionEstimate: "unknown",
+        },
       },
       history: {
         passes: { completedPassCount: 1, truncated: false },

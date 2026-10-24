@@ -80,6 +80,15 @@ function currentPassProgress(
   const work = recovery.work;
   if (work === null) return null;
   const startedAtMs = work.passStartedAt?.getTime() ?? null;
+  const passIsActive = recovery.status === "running" &&
+    work.status === "claimed";
+  const lastCompletedPass = recovery.passHistory.at(-1);
+  const completedPass = lastCompletedPass?.passNumber === work.passNumber
+    ? lastCompletedPass
+    : undefined;
+  const elapsedEndMs = passIsActive
+    ? nowMs
+    : completedPass?.completedAtMs ?? work.updatedAt.getTime();
   const passObservations = startedAtMs === null
     ? []
     : observations.filter(({ observedAt }) =>
@@ -103,7 +112,7 @@ function currentPassProgress(
         observationCount: number;
       } = "unknown";
   if (
-    recovery.status === "running" && work.status === "claimed" &&
+    passIsActive &&
     startedAtMs !== null && remainingSectorCount !== null &&
     remainingSectorCount === 0
   ) {
@@ -114,7 +123,7 @@ function currentPassProgress(
       observationCount: passObservations.length,
     };
   } else if (
-    recovery.status === "running" && work.status === "claimed" &&
+    passIsActive &&
     startedAtMs !== null && remainingSectorCount !== null &&
     passObservations.length >= 2
   ) {
@@ -153,7 +162,9 @@ function currentPassProgress(
     direction: work.passDirection,
     cursorLba: work.passCursorLba,
     startedAt: work.passStartedAt,
-    elapsedMs: startedAtMs === null ? null : Math.max(0, nowMs - startedAtMs),
+    elapsedMs: startedAtMs === null
+      ? null
+      : Math.max(0, elapsedEndMs - startedAtMs),
     initialUnrecoveredSectorCount: initialSectorCount,
     recoveredSectorCount: work.passRecoveredSectorCount,
     observedSectorCount: passObservations.length,
