@@ -2456,7 +2456,9 @@ describe("data-access facade", () => {
           name !== "20261023052549_simple_harry_osborn" &&
           name !== "20261023075807_quick_mentor" &&
           name !== "20261023134137_cynical_leopardon" &&
-          name !== "20261023141501_even_enchantress",
+          name !== "20261023141501_even_enchantress" &&
+          name !== "20261024175458_nappy_black_tom" &&
+          name !== "20261024192300_woozy_wasp",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -9691,6 +9693,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261024192300_woozy_wasp",
+        },
+        {
           name: "20261024175458_nappy_black_tom",
         },
         {
@@ -9722,9 +9727,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20261022195659_fresh_silver_samurai",
-        },
-        {
-          name: "20261022185502_perfect_lily_hollister",
         },
       ]);
     expect(
@@ -14701,6 +14703,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       claim: {
         archiveRecoveryId: claimableRecoveryId,
         status: "claimed",
+        passStartedManifestRevision: 1,
       },
     });
     expect(blocked.access.catalog.findArchiveRecoveryById(blockedRecoveryId))
@@ -14849,6 +14852,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       archiveRecoveryId: recoveryId,
       status: "claimed",
       claimedBy: "synthetic-recovery-worker",
+      passStartedManifestRevision: 1,
     });
 
     const enqueueMutationKey =

@@ -395,6 +395,7 @@ it("continues a productive pass in reverse and pauses after no progress", async 
           passNumber: 2,
           passDirection: "reverse",
           passStartedAt: null,
+          passStartedManifestRevision: null,
           passInitialUnrecoveredSectorCount: null,
           passRecoveredSectorCount: 0,
           passCursorLba: null,

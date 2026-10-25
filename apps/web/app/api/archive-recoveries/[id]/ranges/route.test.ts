@@ -116,11 +116,11 @@ it("matches changed checkpoints, no-change history, counts, and pass estimates",
     INSERT INTO archive_recovery_work (
       archive_recovery_id, original_disc_archive_id, attempt_id, status,
       verification_id, claimed_by, claim_token, claimed_at, pass_number,
-      pass_direction, pass_started_at,
+      pass_direction, pass_started_at, pass_started_manifest_revision,
       pass_initial_unrecovered_sector_count, pass_recovered_sector_count,
       pass_cursor_lba, created_at, updated_at
     ) SELECT id, original_disc_archive_id, attempt_id, 'claimed', NULL,
-      'synthetic-worker', 'synthetic-claim', 1000, 1, 'forward', 1000, 5, 2,
+      'synthetic-worker', 'synthetic-claim', 1000, 1, 'forward', 1000, 3, 5, 2,
       101, 1000, 1300
     FROM archive_recoveries
     WHERE id = 'synthetic-committed-recovery'
@@ -180,8 +180,8 @@ it("matches changed checkpoints, no-change history, counts, and pass estimates",
     expect(unknown).toMatchObject({
       progress: {
         currentPass: {
-          observedSectorCount: 1,
-          remainingSectorCount: 4,
+          observedSectorCount: 2,
+          remainingSectorCount: 3,
           completionEstimate: "unknown",
         },
       },

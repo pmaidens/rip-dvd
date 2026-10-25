@@ -1034,6 +1034,16 @@
       "autoincrement": false,
       "default": null,
       "generated": null,
+      "name": "pass_started_manifest_revision",
+      "entityType": "columns",
+      "table": "archive_recovery_work"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
       "name": "pass_initial_unrecovered_sector_count",
       "entityType": "columns",
       "table": "archive_recovery_work"
@@ -8136,14 +8146,6 @@
           "isExpression": false
         },
         {
-          "value": "outcome",
-          "isExpression": false
-        },
-        {
-          "value": "start_lba",
-          "isExpression": false
-        },
-        {
           "value": "from_manifest_revision",
           "isExpression": false
         }
@@ -8151,29 +8153,7 @@
       "isUnique": false,
       "where": null,
       "origin": "manual",
-      "name": "dvd_archive_recovery_reads_archive_outcome_lba_revision_idx",
-      "entityType": "indexes",
-      "table": "dvd_archive_recovery_reads"
-    },
-    {
-      "columns": [
-        {
-          "value": "original_disc_archive_id",
-          "isExpression": false
-        },
-        {
-          "value": "created_at",
-          "isExpression": false
-        },
-        {
-          "value": "from_manifest_revision",
-          "isExpression": false
-        }
-      ],
-      "isUnique": false,
-      "where": null,
-      "origin": "manual",
-      "name": "dvd_archive_recovery_reads_archive_created_revision_idx",
+      "name": "dvd_archive_recovery_reads_archive_revision_idx",
       "entityType": "indexes",
       "table": "dvd_archive_recovery_reads"
     },

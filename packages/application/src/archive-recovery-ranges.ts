@@ -74,7 +74,7 @@ function currentPassProgress(
     passIsActive &&
     startedAtMs !== null && remainingSectorCount !== null &&
     observations.count >= 2 &&
-    observations.positiveIntervalCount >= 2 &&
+    observations.positiveIntervalCount === observations.count &&
     observations.minimumIntervalMs !== null &&
     observations.maximumIntervalMs !== null &&
     observations.lastObservedAt !== null

@@ -102,9 +102,11 @@ A range cursor is bound to the exact recovery checkpoint. If that checkpoint
 changes, the command returns `available: false` with the current checkpoint
 and progress identities instead of combining pages from different revisions.
 `completionEstimate` is either a minimum and maximum for the current pass or
-`unknown`; it is never an overall recovery estimate. Transition history is a
-bounded recent view; `totalCount` is `null` and `truncated` is `true` when
-older observations fall outside that view.
+`unknown`; it is never an overall recovery estimate. Pass observations are
+bound to the durable checkpoint revision recorded when that pass starts.
+Transition history is a bounded recent view; `totalCount` is `null` and
+`truncated` is `true` when older meaningful transitions fall outside that
+view.
 
 # Catalog Review read commands
 

@@ -1,9 +1,11 @@
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
+import type { ArchiveRecoveryId } from "@rip-dvd/data-access";
 
 import {
   advanceCommittedArchiveEvidence,
   seedCommittedArchiveEvidence,
+  withEvidenceGuardsDisabled,
 } from "./archive-evidence.test-support.js";
 import {
   createOperatorWorkflowFixture,
@@ -186,9 +188,14 @@ it("bounds transition history across repeated no-change rechecks", async () => {
     checkpoint: { revision: 19 },
     history: {
       transitions: {
-        items: [],
-        totalCount: null,
-        truncated: true,
+        items: [{
+          checkpointRevision: 2,
+          startLba: 40,
+          fromClassification: "skipped_untested",
+          toClassification: "individually_failed",
+        }],
+        totalCount: 1,
+        truncated: false,
       },
     },
     ranges: [{
@@ -199,6 +206,107 @@ it("bounds transition history across repeated no-change rechecks", async () => {
   });
 });
 
+it("classifies transitions from the preceding checkpoint range", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 50,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }], false, true);
+  const failed = advanceCommittedArchiveEvidence(fixture, seeded.manifest, {
+    startLba: 50,
+    outcome: "failed",
+    publishFilesystemCheckpoint: true,
+  });
+  const unchanged = advanceCommittedArchiveEvidence(fixture, failed, {
+    startLba: 50,
+    outcome: "failed",
+    publishFilesystemCheckpoint: true,
+  });
+  advanceCommittedArchiveEvidence(fixture, unchanged, {
+    startLba: 50,
+    outcome: "recovered",
+    publishFilesystemCheckpoint: true,
+  });
+
+  const ranges = await fixture.run([
+    "archive-recovery", "ranges", "synthetic-committed-recovery",
+  ]);
+  expect(ranges.exitCode).toBe(0);
+  expect(ranges.result).toMatchObject({
+    history: {
+      transitions: {
+        items: [
+          {
+            checkpointRevision: 2,
+            startLba: 50,
+            fromClassification: "skipped_untested",
+            toClassification: "individually_failed",
+          },
+          {
+            checkpointRevision: 4,
+            startLba: 50,
+            fromClassification: "individually_failed",
+            toClassification: "recovered",
+          },
+        ],
+        totalCount: 2,
+        truncated: false,
+      },
+    },
+  });
+});
+
+it("fails closed when bounded transition evidence is corrupted", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 60,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }], false, true);
+  const first = advanceCommittedArchiveEvidence(fixture, seeded.manifest, {
+    startLba: 60,
+    outcome: "failed",
+    publishFilesystemCheckpoint: true,
+  });
+  const second = advanceCommittedArchiveEvidence(fixture, first, {
+    startLba: 60,
+    outcome: "failed",
+    publishFilesystemCheckpoint: true,
+  });
+  advanceCommittedArchiveEvidence(fixture, second, {
+    startLba: 60,
+    outcome: "failed",
+    publishFilesystemCheckpoint: true,
+  });
+  withEvidenceGuardsDisabled(fixture.databasePath, (database) => {
+    database.prepare(`
+      UPDATE dvd_archive_recovery_reads
+      SET evidence_digest = ?
+      WHERE from_manifest_revision = 1
+    `).run("0".repeat(64));
+  });
+
+  const access = fixture.openAccess();
+  expect(() => access.catalog.readDvdArchiveRecoveryRangeEvidence(
+    "synthetic-committed-recovery" as ArchiveRecoveryId,
+    { rangeOffset: 0, rangeLimit: 20 },
+  )).toThrow(/evidence digest/i);
+  access.close();
+
+  const ranges = await fixture.run([
+    "archive-recovery", "ranges", "synthetic-committed-recovery",
+  ]);
+  expect(ranges.exitCode).toBe(0);
+  expect(ranges.result).toMatchObject({
+    available: false,
+    unavailableReason: "DVD_PUBLICATION_CHECKPOINT_CONFLICT",
+    ranges: null,
+  });
+});
+
 it("reports qualified current-pass progress through inspect and wait", async () => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date(1_500));
@@ -206,17 +314,27 @@ it("reports qualified current-pass progress through inspect and wait", async () 
   fixtures.push(fixture);
   const seeded = await seedCommittedArchiveEvidence(fixture, [{
     startLba: 100,
-    sectorCount: 4,
+    sectorCount: 5,
     classification: "skipped_untested",
   }], false, true);
-  const second = advanceCommittedArchiveEvidence(fixture, seeded.manifest, {
-    startLba: 100,
+  const previousPass = advanceCommittedArchiveEvidence(
+    fixture,
+    seeded.manifest,
+    {
+      startLba: 100,
+      outcome: "recovered",
+      createdAtMs: 2_000,
+      publishFilesystemCheckpoint: true,
+    },
+  );
+  const second = advanceCommittedArchiveEvidence(fixture, previousPass, {
+    startLba: 101,
     outcome: "recovered",
     createdAtMs: 1_100,
     publishFilesystemCheckpoint: true,
   });
   advanceCommittedArchiveEvidence(fixture, second, {
-    startLba: 101,
+    startLba: 102,
     outcome: "recovered",
     createdAtMs: 1_300,
     publishFilesystemCheckpoint: true,
@@ -226,12 +344,12 @@ it("reports qualified current-pass progress through inspect and wait", async () 
     INSERT INTO archive_recovery_work (
       archive_recovery_id, original_disc_archive_id, attempt_id, status,
       verification_id, claimed_by, claim_token, claimed_at, pass_number,
-      pass_direction, pass_started_at,
+      pass_direction, pass_started_at, pass_started_manifest_revision,
       pass_initial_unrecovered_sector_count, pass_recovered_sector_count,
       pass_cursor_lba, created_at, updated_at
     ) SELECT id, original_disc_archive_id, attempt_id, 'claimed', NULL,
-      'synthetic-worker', 'synthetic-claim', 1000, 1, 'forward', 1000, 4, 2,
-      101, 1000, 1300
+      'synthetic-worker', 'synthetic-claim', 1000, 1, 'forward', 1000, 2, 4, 2,
+      102, 1000, 1300
     FROM archive_recoveries
     WHERE id = 'synthetic-committed-recovery'
   `).run();
@@ -250,7 +368,7 @@ it("reports qualified current-pass progress through inspect and wait", async () 
       currentPass: {
         number: 1,
         direction: "forward",
-        cursorLba: 101,
+        cursorLba: 102,
         elapsedMs: 500,
         observedSectorCount: 2,
         remainingSectorCount: 2,
@@ -270,7 +388,7 @@ it("reports qualified current-pass progress through inspect and wait", async () 
     item: {
       status: "running",
       progress: {
-        recoveredSectorCount: 2,
+        recoveredSectorCount: 3,
         currentPass: { completionEstimate: { scope: "current_pass" } },
       },
     },

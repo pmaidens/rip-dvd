@@ -741,6 +741,7 @@ export interface ArchiveRecoveryWork {
   passNumber: number;
   passDirection: ArchiveRecoveryPassDirection;
   passStartedAt: Date | null;
+  passStartedManifestRevision: number | null;
   passInitialUnrecoveredSectorCount: number | null;
   passRecoveredSectorCount: number;
   passCursorLba: number | null;

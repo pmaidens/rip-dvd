@@ -1717,15 +1717,8 @@ export const dvdArchiveRecoveryReads = sqliteTable(
     createdAt: createdAt(),
   },
   (table) => [
-    index("dvd_archive_recovery_reads_archive_outcome_lba_revision_idx").on(
+    index("dvd_archive_recovery_reads_archive_revision_idx").on(
       table.originalDiscArchiveId,
-      table.outcome,
-      table.startLba,
-      table.fromManifestRevision,
-    ),
-    index("dvd_archive_recovery_reads_archive_created_revision_idx").on(
-      table.originalDiscArchiveId,
-      table.createdAt,
       table.fromManifestRevision,
     ),
     index("dvd_archive_recovery_reads_confirmation_outcome_lba_idx").on(
@@ -1850,6 +1843,7 @@ export const archiveRecoveryWork = sqliteTable(
       enum: ARCHIVE_RECOVERY_PASS_DIRECTIONS,
     }).$type<ArchiveRecoveryPassDirection>().notNull().default("forward"),
     passStartedAt: integer("pass_started_at", { mode: "timestamp_ms" }),
+    passStartedManifestRevision: integer("pass_started_manifest_revision"),
     passInitialUnrecoveredSectorCount: integer(
       "pass_initial_unrecovered_sector_count",
     ),

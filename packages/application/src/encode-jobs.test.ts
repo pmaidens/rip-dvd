@@ -70,6 +70,7 @@ describe("readQueueOptions", () => {
         passNumber: 1,
         passDirection: "forward",
         passStartedAt: timestamp,
+        passStartedManifestRevision: 1,
         passInitialUnrecoveredSectorCount: 1,
         passRecoveredSectorCount: 0,
         passCursorLba: null,
