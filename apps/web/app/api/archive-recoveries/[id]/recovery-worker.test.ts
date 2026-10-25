@@ -118,6 +118,7 @@ async function completeMismatchAndConfirm(
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   fixtures.splice(0).forEach((fixture) => fixture.dispose());
 });
 
@@ -394,8 +395,14 @@ it("continues a productive pass in reverse and pauses after no progress", async 
           passNumber: 2,
           passDirection: "reverse",
           passStartedAt: null,
+          passStartedManifestRevision: null,
           passInitialUnrecoveredSectorCount: null,
           passRecoveredSectorCount: 0,
+          passObservationCount: null,
+          passPositiveIntervalCount: null,
+          passMinimumIntervalMs: null,
+          passMaximumIntervalMs: null,
+          passLastObservedAt: null,
           passCursorLba: null,
         },
       });
@@ -468,6 +475,9 @@ it("continues a productive pass in reverse and pauses after no progress", async 
           passNumber: 2,
           passDirection: "reverse",
           passCursorLba: 101,
+          passObservationCount: 1,
+          passPositiveIntervalCount: 1,
+          passLastObservedAt: expect.any(Date),
         },
       });
   } finally {
@@ -652,6 +662,9 @@ it("keeps a no-progress pause durable and exposes it identically", async () => {
   try {
     expect(await pollDvdRecoveryPass(restarted)).toBe(false);
     expect(source.start).toHaveBeenCalledOnce();
+    const inspectionTime = new Date();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(inspectionTime);
     const cli = await fixture.run([
       "inspect",
       "archive-recoveries",
@@ -663,8 +676,10 @@ it("keeps a no-progress pause durable and exposes it identically", async () => {
         `http://localhost/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
       ),
     );
+    const webResult = await web.json();
+    vi.useRealTimers();
     expect(cli.exitCode).toBe(0);
-    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toEqual(webResult);
     expect(cli.result).toMatchObject({
       item: {
         status: "paused",

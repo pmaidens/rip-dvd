@@ -765,13 +765,22 @@ function advanceDvdTitleIdentityCheckpointForTest(
       INSERT INTO dvd_archive_recovery_reads (
         id, original_disc_archive_id, from_manifest_id,
         from_manifest_revision, start_lba, sector_count, outcome,
+        from_classification, meaningful_transition,
         evidence_digest, created_at
-      ) VALUES (?, ?, ?, ?, 0, 1, 'failed', ?, ?)
+      ) VALUES (?, ?, ?, ?, 0, 1, 'failed', ?, ?, ?, ?)
     `).run(
       recoveryReadId,
       originalDiscArchiveId,
       current.manifestId,
       current.manifestRevision,
+      previousUnrecoveredSourceRanges.find((range) =>
+        range.startLba === 0
+      )!.classification,
+      previousUnrecoveredSourceRanges.find((range) =>
+          range.startLba === 0
+        )!.classification === "skipped_untested"
+        ? 1
+        : 0,
       recoveryReadEvidenceDigest,
       revision,
     );
@@ -1791,8 +1800,14 @@ describe("data-access facade", () => {
           passNumber: 1,
           passDirection: "forward",
           passStartedAt: new Date(5),
+          passStartedManifestRevision: null,
           passInitialUnrecoveredSectorCount: 2,
           passRecoveredSectorCount: 1,
+          passObservationCount: null,
+          passPositiveIntervalCount: null,
+          passMinimumIntervalMs: null,
+          passMaximumIntervalMs: null,
+          passLastObservedAt: null,
           passCursorLba: 0,
         },
       });
@@ -1813,8 +1828,14 @@ describe("data-access facade", () => {
         passNumber: 1,
         passDirection: "forward",
         passStartedAt: new Date(5),
+        passStartedManifestRevision: null,
         passInitialUnrecoveredSectorCount: 2,
         passRecoveredSectorCount: 1,
+        passObservationCount: null,
+        passPositiveIntervalCount: null,
+        passMinimumIntervalMs: null,
+        passMaximumIntervalMs: null,
+        passLastObservedAt: null,
         passCursorLba: 0,
       },
     });
@@ -1823,8 +1844,10 @@ describe("data-access facade", () => {
       INSERT INTO dvd_archive_recovery_reads (
         id, original_disc_archive_id, from_manifest_id,
         from_manifest_revision, start_lba, sector_count, outcome,
+        from_classification, meaningful_transition,
         evidence_digest, created_at
-      ) VALUES (?, ?, ?, 2, 1, 1, 'recovered', ?, 13)
+      ) VALUES (?, ?, ?, 2, 1, 1, 'recovered',
+        'skipped_untested', 1, ?, 13)
     `).run(
       "migration-requested-later-read",
       "migration-requested-archive",
@@ -2456,7 +2479,9 @@ describe("data-access facade", () => {
           name !== "20261023052549_simple_harry_osborn" &&
           name !== "20261023075807_quick_mentor" &&
           name !== "20261023134137_cynical_leopardon" &&
-          name !== "20261023141501_even_enchantress",
+          name !== "20261023141501_even_enchantress" &&
+          name !== "20261024175458_nappy_black_tom" &&
+          name !== "20261024192300_woozy_wasp",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -9691,6 +9716,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
       ).toEqual([
         {
+          name: "20261024192300_woozy_wasp",
+        },
+        {
           name: "20261024175458_nappy_black_tom",
         },
         {
@@ -9722,9 +9750,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20261022195659_fresh_silver_samurai",
-        },
-        {
-          name: "20261022185502_perfect_lily_hollister",
         },
       ]);
     expect(
@@ -14701,6 +14726,12 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       claim: {
         archiveRecoveryId: claimableRecoveryId,
         status: "claimed",
+        passStartedManifestRevision: 1,
+        passObservationCount: 0,
+        passPositiveIntervalCount: 0,
+        passMinimumIntervalMs: null,
+        passMaximumIntervalMs: null,
+        passLastObservedAt: null,
       },
     });
     expect(blocked.access.catalog.findArchiveRecoveryById(blockedRecoveryId))
@@ -14849,6 +14880,12 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       archiveRecoveryId: recoveryId,
       status: "claimed",
       claimedBy: "synthetic-recovery-worker",
+      passStartedManifestRevision: 1,
+      passObservationCount: 0,
+      passPositiveIntervalCount: 0,
+      passMinimumIntervalMs: null,
+      passMaximumIntervalMs: null,
+      passLastObservedAt: null,
     });
 
     const enqueueMutationKey =

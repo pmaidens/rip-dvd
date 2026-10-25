@@ -336,6 +336,7 @@ import type {
   DiscSelectionSupersession,
   DvdArchiveEvidenceHeader,
   DvdArchiveEvidenceFormat,
+  DvdUnrecoveredSourceRange,
   DvdCatalogReviewWorkflowEvidence,
   DvdDiscConfirmation,
   DvdDiscConfirmationId,
@@ -583,6 +584,7 @@ const CORRECTED_ENCODE_REPLACEMENT_LIMIT = 100;
 const ENCODE_QUEUE_DISC_SELECTION_LIMIT = 100;
 const RETAINED_ENCODE_OUTPUT_LOOKUP_LIMIT = 400;
 const RETAINED_ENCODE_OUTPUT_PAGE_LIMIT = 100;
+const DVD_RECOVERY_TRANSITION_SCAN_LIMIT = 16;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -1847,6 +1849,49 @@ export function createDataAccessInternal(
       (total, range) => total + range.sectorCount,
       0,
     );
+  };
+  const archiveRecoveryPassStart = (
+    querySource: Pick<typeof database, "select">,
+    recovery: ArchiveRecovery,
+    timestamp: Date,
+  ) => {
+    const work = recovery.work;
+    if (work !== null && work.passStartedAt !== null) {
+      return {
+        passStartedAt: work.passStartedAt,
+        passStartedManifestRevision: work.passStartedManifestRevision,
+        passInitialUnrecoveredSectorCount:
+          work.passInitialUnrecoveredSectorCount,
+        passObservationCount: work.passObservationCount,
+        passPositiveIntervalCount: work.passPositiveIntervalCount,
+        passMinimumIntervalMs: work.passMinimumIntervalMs,
+        passMaximumIntervalMs: work.passMaximumIntervalMs,
+        passLastObservedAt: work.passLastObservedAt,
+      };
+    }
+    const passStartedManifestRevision = requireRow(
+      querySource.select({
+        revision: dvdArchiveEvidenceHeaders.currentManifestRevision,
+      }).from(dvdArchiveEvidenceHeaders).where(eq(
+        dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+        recovery.originalDiscArchiveId,
+      )).get(),
+      "DVD Archive Evidence",
+      recovery.originalDiscArchiveId,
+    ).revision;
+    return {
+      passStartedAt: timestamp,
+      passStartedManifestRevision,
+      passInitialUnrecoveredSectorCount: unrecoveredSectorCount(
+        querySource,
+        recovery.originalDiscArchiveId,
+      ),
+      passObservationCount: 0,
+      passPositiveIntervalCount: 0,
+      passMinimumIntervalMs: null,
+      passMaximumIntervalMs: null,
+      passLastObservedAt: null,
+    };
   };
   const archiveRecoveryPassSettlement = (
     querySource: Pick<typeof database, "select">,
@@ -5865,9 +5910,17 @@ export function createDataAccessInternal(
             passDirection: legacyWork.passDirection ?? "forward",
             passStartedAt: legacyWork.passStartedAt ??
               (passStarted ? legacyWork.createdAt : null),
+            passStartedManifestRevision:
+              legacyWork.passStartedManifestRevision ?? null,
             passInitialUnrecoveredSectorCount:
               initialUnrecoveredSectorCount,
             passRecoveredSectorCount: recoveredSectorCount,
+            passObservationCount: legacyWork.passObservationCount ?? null,
+            passPositiveIntervalCount:
+              legacyWork.passPositiveIntervalCount ?? null,
+            passMinimumIntervalMs: legacyWork.passMinimumIntervalMs ?? null,
+            passMaximumIntervalMs: legacyWork.passMaximumIntervalMs ?? null,
+            passLastObservedAt: legacyWork.passLastObservedAt ?? null,
           },
     };
   }
@@ -10197,6 +10250,18 @@ export function createDataAccessInternal(
         manifest.unrecoveredSourceRanges,
         recoveryRead,
       );
+      const sourceRange = current.manifest.unrecoveredSourceRanges.find(
+        (range) =>
+          recoveryRead.startLba >= range.startLba &&
+          recoveryRead.startLba < range.startLba + range.sectorCount,
+      );
+      if (sourceRange === undefined) {
+        throw new DomainInvariantError(
+          "DVD recovery read has no predecessor source range",
+        );
+      }
+      const meaningfulTransition = recoveryRead.outcome === "recovered" ||
+        sourceRange.classification === "skipped_untested";
 
       const timestamp = new Date(Math.max(
         now().getTime(),
@@ -10207,6 +10272,8 @@ export function createDataAccessInternal(
       transaction.insert(dvdArchiveRecoveryReads).values({
         ...recoveryRead,
         originalDiscArchiveId: archiveId,
+        fromClassification: sourceRange.classification,
+        meaningfulTransition,
         verificationId: recoveryRead.verificationId as
           | DvdDiscVerificationId
           | undefined,
@@ -10278,11 +10345,66 @@ export function createDataAccessInternal(
         archiveId,
       )).run();
       if (recoveryWork !== undefined) {
+        const observationFields = [
+          recoveryWork.passObservationCount,
+          recoveryWork.passPositiveIntervalCount,
+        ];
+        const hasAnyObservationState = observationFields.some((value) =>
+          value !== null
+        ) || recoveryWork.passMinimumIntervalMs !== null ||
+          recoveryWork.passMaximumIntervalMs !== null ||
+          recoveryWork.passLastObservedAt !== null;
+        const hasPassObservationBoundary =
+          recoveryWork.passStartedAt !== null &&
+          recoveryWork.passStartedManifestRevision !== null;
+        if (hasAnyObservationState && !hasPassObservationBoundary) {
+          throw new DomainInvariantError(
+            "Archive Recovery pass observation state has no checkpoint boundary",
+          );
+        }
+        let observationUpdate = {};
+        if (hasPassObservationBoundary) {
+          const observationCount = recoveryWork.passObservationCount;
+          const positiveIntervalCount =
+            recoveryWork.passPositiveIntervalCount;
+          if (
+            observationCount === null || positiveIntervalCount === null ||
+            recoveryRead.fromManifestRevision <
+              recoveryWork.passStartedManifestRevision!
+          ) {
+            throw new DomainInvariantError(
+              "Archive Recovery pass observation state is inconsistent",
+            );
+          }
+          const intervalMs = timestamp.getTime() -
+            (recoveryWork.passLastObservedAt ?? recoveryWork.passStartedAt!)
+              .getTime();
+          const positiveInterval = intervalMs > 0;
+          observationUpdate = {
+            passObservationCount: observationCount + 1,
+            passPositiveIntervalCount:
+              positiveIntervalCount + (positiveInterval ? 1 : 0),
+            passMinimumIntervalMs: positiveInterval
+              ? Math.min(
+                recoveryWork.passMinimumIntervalMs ?? intervalMs,
+                intervalMs,
+              )
+              : recoveryWork.passMinimumIntervalMs,
+            passMaximumIntervalMs: positiveInterval
+              ? Math.max(
+                recoveryWork.passMaximumIntervalMs ?? intervalMs,
+                intervalMs,
+              )
+              : recoveryWork.passMaximumIntervalMs,
+            passLastObservedAt: timestamp,
+          };
+        }
         transaction.update(archiveRecoveryWork).set({
           passCursorLba: recoveryRead.startLba,
           passRecoveredSectorCount: recoveryRead.outcome === "recovered"
             ? sql`${archiveRecoveryWork.passRecoveredSectorCount} + 1`
             : archiveRecoveryWork.passRecoveredSectorCount,
+          ...observationUpdate,
           updatedAt: timestamp,
         }).where(and(
           eq(
@@ -11415,13 +11537,11 @@ export function createDataAccessInternal(
             transaction,
             recovery.id,
           );
-          const passStartedAt = recovery.work?.passStartedAt ?? timestamp;
-          const passInitialUnrecoveredSectorCount =
-            recovery.work?.passInitialUnrecoveredSectorCount ??
-              unrecoveredSectorCount(
-                transaction,
-                recovery.originalDiscArchiveId,
-              );
+          const passStart = archiveRecoveryPassStart(
+            transaction,
+            recovery,
+            timestamp,
+          );
           const claimToken = newId<ArchiveRecoveryClaimToken>();
           const claimed = recovery.work === null
             ? transaction.insert(archiveRecoveryWork).values({
@@ -11435,8 +11555,7 @@ export function createDataAccessInternal(
               claimedBy,
               claimToken,
               claimedAt: timestamp,
-              passStartedAt,
-              passInitialUnrecoveredSectorCount,
+              ...passStart,
               createdAt: timestamp,
               updatedAt: timestamp,
             }).returning().get()
@@ -11447,8 +11566,7 @@ export function createDataAccessInternal(
               claimedBy,
               claimToken,
               claimedAt: timestamp,
-              passStartedAt,
-              passInitialUnrecoveredSectorCount,
+              ...passStart,
               updatedAt: timestamp,
             }).where(and(
               eq(archiveRecoveryWork.archiveRecoveryId, recovery.id),
@@ -11566,13 +11684,11 @@ export function createDataAccessInternal(
           requireNoActiveEncodeWork(transaction, recovery);
           const timestamp = now();
           const claimToken = newId<ArchiveRecoveryClaimToken>();
-          const passStartedAt = recovery.work?.passStartedAt ?? timestamp;
-          const passInitialUnrecoveredSectorCount =
-            recovery.work?.passInitialUnrecoveredSectorCount ??
-              unrecoveredSectorCount(
-                transaction,
-                recovery.originalDiscArchiveId,
-              );
+          const passStart = archiveRecoveryPassStart(
+            transaction,
+            recovery,
+            timestamp,
+          );
           const claimed = recovery.work === null
             ? transaction
               .insert(archiveRecoveryWork)
@@ -11586,8 +11702,7 @@ export function createDataAccessInternal(
                 claimedBy,
                 claimToken,
                 claimedAt: timestamp,
-                passStartedAt,
-                passInitialUnrecoveredSectorCount,
+                ...passStart,
                 createdAt: timestamp,
                 updatedAt: timestamp,
               })
@@ -11601,8 +11716,7 @@ export function createDataAccessInternal(
                 claimedBy,
                 claimToken,
                 claimedAt: timestamp,
-                passStartedAt,
-                passInitialUnrecoveredSectorCount,
+                ...passStart,
                 updatedAt: timestamp,
               })
               .where(and(
@@ -12364,8 +12478,14 @@ export function createDataAccessInternal(
                       ? "reverse" as const
                       : "forward" as const,
                     passStartedAt: null,
+                    passStartedManifestRevision: null,
                     passInitialUnrecoveredSectorCount: null,
                     passRecoveredSectorCount: 0,
+                    passObservationCount: null,
+                    passPositiveIntervalCount: null,
+                    passMinimumIntervalMs: null,
+                    passMaximumIntervalMs: null,
+                    passLastObservedAt: null,
                     passCursorLba: null,
                   }
                 : {}),
@@ -13988,6 +14108,8 @@ export function createDataAccessInternal(
             access.catalog.findArchiveRecovery(id),
           findArchiveRecoveryById: (id) =>
             access.catalog.findArchiveRecoveryById(id),
+          readDvdArchiveRecoveryRangeEvidence: (id, options) =>
+            access.catalog.readDvdArchiveRecoveryRangeEvidence(id, options),
           listArchiveRecoveries: (options) =>
             access.catalog.listArchiveRecoveries(options),
           findDvdSourceSampleManifest: (id) =>
@@ -15919,6 +16041,676 @@ export function createDataAccessInternal(
         return findArchiveRecoveryRecord(database, {
           archiveRecoveryId: id,
         });
+      },
+
+      readDvdArchiveRecoveryRangeEvidence(id, options) {
+        if (!hasDvdRecoveryEvidenceSchema) return null;
+        const rangeOffset = options.rangeOffset;
+        if (!Number.isSafeInteger(rangeOffset) || rangeOffset < 0) {
+          throw new DomainInvariantError(
+            "Archive Recovery range offset must be a non-negative safe integer",
+          );
+        }
+        const rangeLimit = requirePositiveSafeInteger(
+          options.rangeLimit,
+          "Archive Recovery range limit",
+        );
+        if (rangeLimit > 100) {
+          throw new DomainInvariantError(
+            "Archive Recovery ranges are limited to 100 records",
+          );
+        }
+        const recovery = findArchiveRecoveryRecord(database, {
+          archiveRecoveryId: id,
+        });
+        if (recovery === null) return null;
+        const checkpoint = access.catalog.findDvdArchiveEvidenceHeader(
+          recovery.originalDiscArchiveId,
+        );
+        if (checkpoint === null) {
+          throw new DomainInvariantError(
+            "Archive Recovery has no committed DVD checkpoint",
+          );
+        }
+        const currentManifest = database.select()
+          .from(dvdArchiveEvidenceManifests)
+          .where(and(
+            eq(dvdArchiveEvidenceManifests.id, checkpoint.currentManifestId),
+            eq(
+              dvdArchiveEvidenceManifests.originalDiscArchiveId,
+              recovery.originalDiscArchiveId,
+            ),
+          )).get();
+        const initialManifest = database.select()
+          .from(dvdArchiveEvidenceManifests)
+          .where(and(
+            eq(
+              dvdArchiveEvidenceManifests.originalDiscArchiveId,
+              recovery.originalDiscArchiveId,
+            ),
+            eq(dvdArchiveEvidenceManifests.revision, 1),
+          )).get();
+        if (
+          currentManifest === undefined || initialManifest === undefined ||
+          currentManifest.revision !== checkpoint.currentManifestRevision ||
+          currentManifest.manifestDigest !== checkpoint.currentManifestDigest ||
+          initialManifest.previousManifestId !== null ||
+          initialManifest.recoveryReadId !== null ||
+          initialManifest.evidenceFormat !== currentManifest.evidenceFormat ||
+          initialManifest.imageFingerprint !==
+            currentManifest.imageFingerprint ||
+          initialManifest.sectorSizeBytes !== currentManifest.sectorSizeBytes ||
+          initialManifest.acceptedEndLbaExclusive !==
+            currentManifest.acceptedEndLbaExclusive ||
+          initialManifest.boundaryPolicyVersion !==
+            currentManifest.boundaryPolicyVersion ||
+          initialManifest.boundaryReportedSizeBytes !==
+            currentManifest.boundaryReportedSizeBytes ||
+          initialManifest.boundaryPublishedSizeBytes !==
+            currentManifest.boundaryPublishedSizeBytes ||
+          initialManifest.boundaryEvidenceDigest !==
+            currentManifest.boundaryEvidenceDigest
+        ) {
+          throw new DomainInvariantError(
+            "DVD Archive Recovery initial range evidence is inconsistent",
+          );
+        }
+        assertDvdArchiveEvidenceManifestDigests({
+          originalDiscArchiveId: initialManifest.originalDiscArchiveId,
+          revision: initialManifest.revision,
+          previousManifestId: null,
+          previousManifestDigest: null,
+          recoveryReadId: null,
+          recoveryReadEvidenceDigest: null,
+          evidenceFormat: initialManifest.evidenceFormat,
+          imageFingerprint: initialManifest.imageFingerprint,
+          sectorSizeBytes: initialManifest.sectorSizeBytes,
+          acceptedEndLbaExclusive:
+            initialManifest.acceptedEndLbaExclusive,
+          boundaryPolicyVersion: initialManifest.boundaryPolicyVersion,
+          boundaryReportedSizeBytes:
+            initialManifest.boundaryReportedSizeBytes,
+          boundaryPublishedSizeBytes:
+            initialManifest.boundaryPublishedSizeBytes,
+          boundaryEvidenceDigest: initialManifest.boundaryEvidenceDigest,
+          unrecoveredSourceRanges:
+            initialManifest.unrecoveredSourceRanges,
+          unrecoveredSourceRangesDigest:
+            initialManifest.unrecoveredSourceRangesDigest,
+          manifestDigest: initialManifest.manifestDigest,
+        });
+        if (currentManifest.revision > 1) {
+          const previousManifest = currentManifest.previousManifestId === null
+            ? undefined
+            : database.select().from(dvdArchiveEvidenceManifests).where(eq(
+              dvdArchiveEvidenceManifests.id,
+              currentManifest.previousManifestId,
+            )).get();
+          const recoveryRead = currentManifest.recoveryReadId === null
+            ? undefined
+            : database.select().from(dvdArchiveRecoveryReads).where(eq(
+              dvdArchiveRecoveryReads.id,
+              currentManifest.recoveryReadId,
+            )).get();
+          if (
+            previousManifest === undefined || recoveryRead === undefined ||
+            previousManifest.originalDiscArchiveId !==
+              recovery.originalDiscArchiveId ||
+            previousManifest.revision + 1 !== currentManifest.revision ||
+            recoveryRead.originalDiscArchiveId !==
+              recovery.originalDiscArchiveId ||
+            recoveryRead.fromManifestId !== previousManifest.id ||
+            recoveryRead.fromManifestRevision !== previousManifest.revision
+          ) {
+            throw new DomainInvariantError(
+              "DVD Archive Recovery current transition is inconsistent",
+            );
+          }
+          const recoveryReadInput = {
+            originalDiscArchiveId: recoveryRead.originalDiscArchiveId,
+            fromManifestId: recoveryRead.fromManifestId,
+            fromManifestRevision: recoveryRead.fromManifestRevision,
+            startLba: recoveryRead.startLba,
+            sectorCount: recoveryRead.sectorCount,
+            outcome: recoveryRead.outcome,
+            ...(recoveryRead.verificationId === null
+              ? {}
+              : {
+                  verificationId: recoveryRead.verificationId,
+                  discConfirmationId: recoveryRead.discConfirmationId,
+                }),
+          };
+          assertDvdArchiveRecoveryReadEvidenceDigest(
+            recoveryReadInput,
+            recoveryRead.evidenceDigest,
+          );
+          assertDvdArchiveEvidenceManifestDigests({
+            ...currentManifest,
+            previousManifestDigest: previousManifest.manifestDigest,
+            recoveryReadEvidenceDigest: recoveryRead.evidenceDigest,
+          });
+          assertDvdEvidenceRangeTransition(
+            previousManifest.unrecoveredSourceRanges,
+            currentManifest.unrecoveredSourceRanges,
+            recoveryReadInput,
+          );
+          const sourceRange = previousManifest.unrecoveredSourceRanges.find(
+            (range) =>
+              recoveryRead.startLba >= range.startLba &&
+              recoveryRead.startLba < range.startLba + range.sectorCount,
+          );
+          const meaningfulTransition = recoveryRead.outcome === "recovered" ||
+            sourceRange?.classification === "skipped_untested";
+          if (
+            sourceRange === undefined ||
+            recoveryRead.fromClassification !== sourceRange.classification ||
+            recoveryRead.meaningfulTransition !== meaningfulTransition
+          ) {
+            throw new DomainInvariantError(
+              "DVD Archive Recovery current transition metadata is inconsistent",
+            );
+          }
+        }
+        const rangeProjection = `
+          WITH current_ranges AS (
+            SELECT
+              CAST(json_extract(range.value, '$.startLba') AS INTEGER)
+                AS start_lba,
+              CAST(json_extract(range.value, '$.sectorCount') AS INTEGER)
+                AS sector_count,
+              json_extract(range.value, '$.classification') AS classification
+            FROM dvd_archive_evidence_manifests AS current_manifest,
+              json_each(current_manifest.unrecovered_source_ranges) AS range
+            WHERE current_manifest.id = ?
+          ),
+          initial_ranges AS (
+            SELECT
+              CAST(json_extract(range.value, '$.startLba') AS INTEGER)
+                AS start_lba,
+              CAST(json_extract(range.value, '$.sectorCount') AS INTEGER)
+                AS sector_count,
+              json_extract(range.value, '$.classification') AS classification
+            FROM dvd_archive_evidence_manifests AS initial_manifest,
+              json_each(initial_manifest.unrecovered_source_ranges) AS range
+            WHERE initial_manifest.id = ?
+          ),
+          projection_integrity AS (
+            SELECT count(*) AS invalid_count
+            FROM current_ranges AS current_range
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM initial_ranges AS initial_range
+              WHERE current_range.start_lba >= initial_range.start_lba
+                AND current_range.start_lba + current_range.sector_count <=
+                  initial_range.start_lba + initial_range.sector_count
+            )
+          ),
+          breakpoints AS (
+            SELECT start_lba AS lba FROM initial_ranges
+            UNION
+            SELECT start_lba + sector_count AS lba FROM initial_ranges
+            UNION
+            SELECT start_lba AS lba FROM current_ranges
+            UNION
+            SELECT start_lba + sector_count AS lba FROM current_ranges
+          ),
+          ordered_breakpoints AS (
+            SELECT
+              lba AS start_lba,
+              lead(lba) OVER (ORDER BY lba) AS end_lba
+            FROM breakpoints
+          ),
+          projected_ranges AS (
+            SELECT
+              point.start_lba,
+              point.end_lba - point.start_lba AS sector_count,
+              coalesce((
+                SELECT current_range.classification
+                FROM current_ranges AS current_range
+                WHERE point.start_lba >= current_range.start_lba
+                  AND point.start_lba <
+                    current_range.start_lba + current_range.sector_count
+              ), 'recovered') AS classification
+            FROM ordered_breakpoints AS point
+            WHERE point.end_lba > point.start_lba
+              AND EXISTS (
+                SELECT 1
+                FROM initial_ranges AS initial_range
+                WHERE point.start_lba >= initial_range.start_lba
+                  AND point.end_lba <=
+                    initial_range.start_lba + initial_range.sector_count
+              )
+          ),
+          ordered_ranges AS (
+            SELECT
+              *,
+              lag(start_lba + sector_count) OVER (ORDER BY start_lba)
+                AS previous_end_lba,
+              lag(classification) OVER (ORDER BY start_lba)
+                AS previous_classification
+            FROM projected_ranges
+          ),
+          marked_ranges AS (
+            SELECT
+              *,
+              CASE
+                WHEN previous_end_lba = start_lba
+                  AND previous_classification = classification
+                THEN 0
+                ELSE 1
+              END AS starts_group
+            FROM ordered_ranges
+          ),
+          grouped_ranges AS (
+            SELECT
+              *,
+              sum(starts_group) OVER (ORDER BY start_lba) AS range_group
+            FROM marked_ranges
+          ),
+          normalized_ranges AS (
+            SELECT
+              min(start_lba) AS start_lba,
+              sum(sector_count) AS sector_count,
+              classification
+            FROM grouped_ranges
+            GROUP BY range_group, classification
+          )
+        `;
+        type RangeRow = {
+          start_lba: number;
+          sector_count: number;
+          classification:
+            | "skipped_untested"
+            | "individually_failed"
+            | "recovered";
+          range_count: number;
+          recovered_sector_count: number;
+          invalid_count: number;
+        };
+        const rangeRows = sqlite.prepare(`${rangeProjection}
+          SELECT
+            start_lba,
+            sector_count,
+            classification,
+            count(*) OVER () AS range_count,
+            coalesce(sum(
+              CASE WHEN classification = 'recovered' THEN sector_count ELSE 0 END
+            ) OVER (), 0) AS recovered_sector_count,
+            (SELECT invalid_count FROM projection_integrity) AS invalid_count
+          FROM normalized_ranges
+          ORDER BY start_lba
+          LIMIT ? OFFSET ?
+        `).all(
+          checkpoint.currentManifestId,
+          initialManifest.id,
+          rangeLimit,
+          rangeOffset,
+        ) as unknown as RangeRow[];
+        const rangeSummary = rangeRows[0] ?? sqlite.prepare(
+          `${rangeProjection}
+            SELECT
+              count(*) AS range_count,
+              coalesce(sum(
+                CASE WHEN classification = 'recovered' THEN sector_count ELSE 0 END
+              ), 0) AS recovered_sector_count,
+              (SELECT invalid_count FROM projection_integrity) AS invalid_count
+            FROM normalized_ranges
+          `,
+        ).get(
+          checkpoint.currentManifestId,
+          initialManifest.id,
+        ) as unknown as Pick<
+          RangeRow,
+          "range_count" | "recovered_sector_count" | "invalid_count"
+        >;
+        if (Number(rangeSummary.invalid_count) !== 0) {
+          throw new DomainInvariantError(
+            "DVD Archive Recovery source range projection is inconsistent",
+          );
+        }
+        type StoredTransitionManifest = {
+          id: string;
+          originalDiscArchiveId: string;
+          revision: number;
+          previousManifestId: string | null;
+          recoveryReadId: string | null;
+          evidenceFormat: "dvd-recovery-evidence-v1";
+          imageFingerprint: string;
+          sectorSizeBytes: number;
+          acceptedEndLbaExclusive: number;
+          boundaryPolicyVersion: string;
+          boundaryReportedSizeBytes: number;
+          boundaryPublishedSizeBytes: number;
+          boundaryEvidenceDigest: string;
+          unrecoveredSourceRanges: string;
+          unrecoveredSourceRangesDigest: string;
+          manifestDigest: string;
+          previousManifestDigest: string | null;
+          recoveryReadEvidenceDigest: string | null;
+        };
+        type TransitionRow = {
+          current_manifest: string | null;
+          previous_manifest: string | null;
+          read_id: string;
+          read_original_disc_archive_id: string;
+          read_from_manifest_id: string;
+          read_from_manifest_revision: number;
+          start_lba: number;
+          sector_count: number;
+          outcome: "recovered" | "failed";
+          from_classification:
+            | "skipped_untested"
+            | "individually_failed";
+          meaningful_transition: number;
+          verification_id: DvdDiscVerificationId | null;
+          disc_confirmation_id: DvdDiscConfirmationId | null;
+          evidence_digest: string;
+          observed_at: number;
+        };
+        const transitionRows = sqlite.prepare(`
+          WITH candidate_reads AS (
+            SELECT *
+            FROM dvd_archive_recovery_reads
+            WHERE original_disc_archive_id = ?
+              AND meaningful_transition = 1
+              AND from_manifest_revision < ?
+            ORDER BY from_manifest_revision DESC
+            LIMIT ?
+          )
+          SELECT
+            CASE WHEN manifest.id IS NULL THEN NULL ELSE json_object(
+              'id', manifest.id,
+              'originalDiscArchiveId', manifest.original_disc_archive_id,
+              'revision', manifest.revision,
+              'previousManifestId', manifest.previous_manifest_id,
+              'recoveryReadId', manifest.recovery_read_id,
+              'evidenceFormat', manifest.evidence_format,
+              'imageFingerprint', manifest.image_fingerprint,
+              'sectorSizeBytes', manifest.sector_size_bytes,
+              'acceptedEndLbaExclusive', manifest.accepted_end_lba_exclusive,
+              'boundaryPolicyVersion', manifest.boundary_policy_version,
+              'boundaryReportedSizeBytes',
+                manifest.boundary_reported_size_bytes,
+              'boundaryPublishedSizeBytes',
+                manifest.boundary_published_size_bytes,
+              'boundaryEvidenceDigest', manifest.boundary_evidence_digest,
+              'unrecoveredSourceRanges',
+                manifest.unrecovered_source_ranges,
+              'unrecoveredSourceRangesDigest',
+                manifest.unrecovered_source_ranges_digest,
+              'manifestDigest', manifest.manifest_digest,
+              'previousManifestDigest', previous_manifest.manifest_digest,
+              'recoveryReadEvidenceDigest', candidate_reads.evidence_digest
+            ) END AS current_manifest,
+            CASE WHEN previous_manifest.id IS NULL THEN NULL ELSE json_object(
+              'id', previous_manifest.id,
+              'originalDiscArchiveId',
+                previous_manifest.original_disc_archive_id,
+              'revision', previous_manifest.revision,
+              'previousManifestId',
+                previous_manifest.previous_manifest_id,
+              'recoveryReadId', previous_manifest.recovery_read_id,
+              'evidenceFormat', previous_manifest.evidence_format,
+              'imageFingerprint', previous_manifest.image_fingerprint,
+              'sectorSizeBytes', previous_manifest.sector_size_bytes,
+              'acceptedEndLbaExclusive',
+                previous_manifest.accepted_end_lba_exclusive,
+              'boundaryPolicyVersion',
+                previous_manifest.boundary_policy_version,
+              'boundaryReportedSizeBytes',
+                previous_manifest.boundary_reported_size_bytes,
+              'boundaryPublishedSizeBytes',
+                previous_manifest.boundary_published_size_bytes,
+              'boundaryEvidenceDigest',
+                previous_manifest.boundary_evidence_digest,
+              'unrecoveredSourceRanges',
+                previous_manifest.unrecovered_source_ranges,
+              'unrecoveredSourceRangesDigest',
+                previous_manifest.unrecovered_source_ranges_digest,
+              'manifestDigest', previous_manifest.manifest_digest,
+              'previousManifestDigest',
+                previous_previous_manifest.manifest_digest,
+              'recoveryReadEvidenceDigest',
+                previous_recovery_read.evidence_digest
+            ) END AS previous_manifest,
+            candidate_reads.id AS read_id,
+            candidate_reads.original_disc_archive_id AS
+              read_original_disc_archive_id,
+            candidate_reads.from_manifest_id AS read_from_manifest_id,
+            candidate_reads.from_manifest_revision AS
+              read_from_manifest_revision,
+            candidate_reads.start_lba,
+            candidate_reads.sector_count,
+            candidate_reads.outcome,
+            candidate_reads.from_classification,
+            candidate_reads.meaningful_transition,
+            candidate_reads.verification_id,
+            candidate_reads.disc_confirmation_id,
+            candidate_reads.evidence_digest,
+            candidate_reads.created_at AS observed_at
+          FROM candidate_reads
+          LEFT JOIN dvd_archive_evidence_manifests AS manifest
+            ON manifest.recovery_read_id = candidate_reads.id
+          LEFT JOIN dvd_archive_evidence_manifests AS previous_manifest
+            ON previous_manifest.id = candidate_reads.from_manifest_id
+          LEFT JOIN dvd_archive_evidence_manifests AS
+            previous_previous_manifest
+            ON previous_previous_manifest.id =
+              previous_manifest.previous_manifest_id
+          LEFT JOIN dvd_archive_recovery_reads AS previous_recovery_read
+            ON previous_recovery_read.id =
+              previous_manifest.recovery_read_id
+          ORDER BY candidate_reads.from_manifest_revision DESC
+        `).all(
+          recovery.originalDiscArchiveId,
+          checkpoint.currentManifestRevision,
+          DVD_RECOVERY_TRANSITION_SCAN_LIMIT + 1,
+        ) as unknown as TransitionRow[];
+        const transitionHistoryIsComplete =
+          transitionRows.length <= DVD_RECOVERY_TRANSITION_SCAN_LIMIT;
+        const readTransitionManifest = (
+          encoded: string | null,
+        ) => {
+          if (encoded === null) {
+            throw new DomainInvariantError(
+              "DVD Archive Recovery transition manifest is missing",
+            );
+          }
+          const stored = JSON.parse(encoded) as StoredTransitionManifest;
+          const unrecoveredSourceRanges = JSON.parse(
+            stored.unrecoveredSourceRanges,
+          ) as DvdUnrecoveredSourceRange[];
+          assertDvdArchiveEvidenceManifestDigests({
+            ...stored,
+            unrecoveredSourceRanges,
+          });
+          return { ...stored, unrecoveredSourceRanges };
+        };
+        const meaningfulTransitions = transitionRows
+          .map((row) => {
+            const previousManifest = readTransitionManifest(
+              row.previous_manifest,
+            );
+            const currentTransitionManifest = readTransitionManifest(
+              row.current_manifest,
+            );
+            const recoveryRead = {
+              originalDiscArchiveId: row.read_original_disc_archive_id,
+              fromManifestId: row.read_from_manifest_id,
+              fromManifestRevision: row.read_from_manifest_revision,
+              startLba: row.start_lba,
+              sectorCount: row.sector_count,
+              outcome: row.outcome,
+              ...(row.verification_id === null
+                ? {}
+                : {
+                    verificationId: row.verification_id,
+                    discConfirmationId: row.disc_confirmation_id,
+                  }),
+            };
+            if (
+              currentTransitionManifest.revision !==
+                  previousManifest.revision + 1 ||
+              currentTransitionManifest.previousManifestId !==
+                previousManifest.id ||
+              currentTransitionManifest.recoveryReadId !== row.read_id ||
+              currentTransitionManifest.originalDiscArchiveId !==
+                recovery.originalDiscArchiveId ||
+              previousManifest.originalDiscArchiveId !==
+                recovery.originalDiscArchiveId ||
+              row.read_original_disc_archive_id !==
+                recovery.originalDiscArchiveId ||
+              row.read_from_manifest_id !== previousManifest.id ||
+              row.read_from_manifest_revision !== previousManifest.revision ||
+              row.meaningful_transition !== 1
+            ) {
+              throw new DomainInvariantError(
+                "DVD Archive Recovery transition history is inconsistent",
+              );
+            }
+            assertDvdArchiveRecoveryReadEvidenceDigest(
+              recoveryRead,
+              row.evidence_digest,
+            );
+            assertDvdEvidenceRangeTransition(
+              previousManifest.unrecoveredSourceRanges,
+              currentTransitionManifest.unrecoveredSourceRanges,
+              recoveryRead,
+            );
+            const previousRange = previousManifest.unrecoveredSourceRanges
+              .find((range) =>
+                row.start_lba >= range.startLba &&
+                row.start_lba < range.startLba + range.sectorCount
+              );
+            const meaningfulTransition = row.outcome === "recovered" ||
+              previousRange?.classification === "skipped_untested";
+            if (
+              previousRange === undefined ||
+              previousRange.classification !== row.from_classification ||
+              !meaningfulTransition
+            ) {
+              throw new DomainInvariantError(
+                "DVD Archive Recovery transition has no valid prior source range",
+              );
+            }
+            return {
+              checkpointRevision: currentTransitionManifest.revision,
+              startLba: row.start_lba,
+              outcome: row.outcome,
+              fromClassification: row.from_classification,
+              observedAt: new Date(row.observed_at),
+            };
+          })
+          .slice(0, DVD_RECOVERY_TRANSITION_SCAN_LIMIT)
+          .reverse();
+        let currentPassObservations: {
+          count: number;
+          positiveIntervalCount: number;
+          minimumIntervalMs: number | null;
+          maximumIntervalMs: number | null;
+          lastObservedAt: Date | null;
+        } | null = null;
+        const work = recovery.work;
+        const passStartedManifestRevision =
+          work?.passStartedManifestRevision ?? null;
+        if (
+          passStartedManifestRevision !== null &&
+          (
+            !Number.isSafeInteger(passStartedManifestRevision) ||
+            passStartedManifestRevision < 1 ||
+            passStartedManifestRevision > checkpoint.currentManifestRevision
+          )
+        ) {
+          throw new DomainInvariantError(
+            "Archive Recovery pass checkpoint is inconsistent",
+          );
+        }
+        if (work !== null) {
+          const observationValues = [
+            work.passObservationCount,
+            work.passPositiveIntervalCount,
+            work.passMinimumIntervalMs,
+            work.passMaximumIntervalMs,
+            work.passLastObservedAt,
+          ];
+          const hasAnyObservationState = observationValues.some((value) =>
+            value !== null
+          );
+          const hasCompleteObservationBoundary =
+            work.passStartedAt !== null &&
+            passStartedManifestRevision !== null &&
+            work.passInitialUnrecoveredSectorCount !== null &&
+            work.passObservationCount !== null &&
+            work.passPositiveIntervalCount !== null;
+          if (hasAnyObservationState && !hasCompleteObservationBoundary) {
+            throw new DomainInvariantError(
+              "Archive Recovery pass observation state is inconsistent",
+            );
+          }
+          if (hasCompleteObservationBoundary) {
+            const count = work.passObservationCount!;
+            const positiveIntervalCount =
+              work.passPositiveIntervalCount!;
+            const minimumIntervalMs = work.passMinimumIntervalMs;
+            const maximumIntervalMs = work.passMaximumIntervalMs;
+            const lastObservedAt = work.passLastObservedAt;
+            const expectedObservationCount =
+              checkpoint.currentManifestRevision -
+              passStartedManifestRevision!;
+            const intervalBoundsAreValid = positiveIntervalCount === 0
+              ? minimumIntervalMs === null && maximumIntervalMs === null
+              : minimumIntervalMs !== null &&
+                maximumIntervalMs !== null &&
+                Number.isSafeInteger(minimumIntervalMs) &&
+                Number.isSafeInteger(maximumIntervalMs) &&
+                minimumIntervalMs > 0 &&
+                maximumIntervalMs >= minimumIntervalMs;
+            if (
+              !Number.isSafeInteger(count) || count < 0 ||
+              !Number.isSafeInteger(positiveIntervalCount) ||
+              positiveIntervalCount < 0 ||
+              positiveIntervalCount > count ||
+              count !== expectedObservationCount ||
+              (count === 0) !== (lastObservedAt === null) ||
+              !intervalBoundsAreValid ||
+              (lastObservedAt !== null &&
+                lastObservedAt.getTime() < work.passStartedAt!.getTime())
+            ) {
+              throw new DomainInvariantError(
+                "Archive Recovery pass observation state is inconsistent",
+              );
+            }
+            currentPassObservations = {
+              count,
+              positiveIntervalCount,
+              minimumIntervalMs,
+              maximumIntervalMs,
+              lastObservedAt,
+            };
+          }
+        }
+        return {
+          recovery,
+          checkpoint,
+          recoveredSectorCount: Number(
+            rangeSummary.recovered_sector_count,
+          ),
+          currentPassObservations,
+          transitions: {
+            items: meaningfulTransitions,
+            totalCount: transitionHistoryIsComplete
+              ? meaningfulTransitions.length
+              : null,
+            truncated: !transitionHistoryIsComplete,
+          },
+          ranges: rangeRows.map((row) => ({
+            startLba: Number(row.start_lba),
+            sectorCount: Number(row.sector_count),
+            classification: row.classification,
+          })),
+          rangeOffset,
+          rangeCount: Number(rangeSummary.range_count),
+        };
       },
 
       listArchiveRecoveries(options) {

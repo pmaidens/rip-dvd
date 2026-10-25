@@ -100,6 +100,16 @@ printf '%s\n' "$recovery_inventory" | assert_json_fields \
   'schemaVersion=1' 'kind=archive-recoveries'
 
 set +e
+ranges_output="$(invoke archive-recovery ranges \
+  synthetic-missing-recovery \
+  2>"$temporary_directory/recovery-ranges.stderr")"
+ranges_status=$?
+set -e
+[ "$ranges_status" -eq 2 ]
+printf '%s\n' "$ranges_output" | assert_json_fields \
+  'error.code=NOT_FOUND'
+
+set +e
 missing_key_output="$(invoke submit-archive-audit 2>"$temporary_directory/missing-key.stderr")"
 missing_key_status=$?
 set -e

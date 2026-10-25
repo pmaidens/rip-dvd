@@ -407,11 +407,14 @@ it("bounds recovered-range provenance independently from aggregate counts", asyn
         start_lba,
         sector_count,
         outcome,
+        from_classification,
+        meaningful_transition,
         verification_id,
         disc_confirmation_id,
         evidence_digest,
         created_at
-      ) values (?, ?, ?, ?, ?, 1, 'recovered', ?, ?, ?, ?)
+      ) values (?, ?, ?, ?, ?, 1, 'recovered',
+        'skipped_untested', 1, ?, ?, ?, ?)
     `);
     sqlite.exec("begin immediate");
     try {

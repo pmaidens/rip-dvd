@@ -18,6 +18,7 @@ import {
   createDvdArchiveRecoveryReadEvidenceDigest,
   canonicalPublicationJson, createDvdInitialPublicationDigest,
   createDvdRecoveryCheckpointPublicationDigest,
+  dvdEvidenceRangesAfterRecoveryRead,
   type CommittedDvdCheckpointEvidence,
   type DvdUnrecoveredSourceRange,
 } from "@rip-dvd/data-access";
@@ -123,23 +124,30 @@ export function advanceCommittedArchiveEvidence(
     publishFilesystemCheckpoint?: boolean;
     outcome?: "failed" | "recovered";
     sourceRangeIndex?: number;
+    startLba?: number;
+    readId?: string;
+    createdAtMs?: number;
     verificationId?: string;
     discConfirmationId?: string;
   } = {},
 ) {
-  const sourceRangeIndex = options.sourceRangeIndex ?? 0;
-  const sourceRange = manifest.unrecoveredSourceRanges[sourceRangeIndex];
+  const startLba = options.startLba ??
+    manifest.unrecoveredSourceRanges[options.sourceRangeIndex ?? 0]?.startLba;
+  const sourceRange = manifest.unrecoveredSourceRanges.find((range) =>
+    startLba !== undefined && startLba >= range.startLba &&
+    startLba < range.startLba + range.sectorCount
+  );
   if (sourceRange === undefined) {
     throw new Error("A synthetic Unrecovered Source range is required");
   }
   const outcome = options.outcome ?? "failed";
-  const recoveryReadId =
+  const recoveryReadId = options.readId ??
     `synthetic-structural-recovery-read-${manifest.revision + 1}`;
   const recoveryReadInput = {
     originalDiscArchiveId: manifest.originalDiscArchiveId,
     fromManifestId: manifest.id,
     fromManifestRevision: manifest.revision,
-    startLba: sourceRange.startLba,
+    startLba: startLba!,
     sectorCount: 1,
     outcome,
     ...(options.verificationId === undefined
@@ -156,25 +164,11 @@ export function advanceCommittedArchiveEvidence(
     ...recoveryReadInput,
     evidenceDigest: recoveryReadEvidenceDigest,
   };
-  const remainingRange = sourceRange.sectorCount === 1
-    ? []
-    : [{
-      ...sourceRange,
-      startLba: sourceRange.startLba + 1,
-      sectorCount: sourceRange.sectorCount - 1,
-    }];
-  const unrecoveredSourceRanges = [
-    ...manifest.unrecoveredSourceRanges.slice(0, sourceRangeIndex),
-    ...(outcome === "failed"
-      ? [{
-        startLba: sourceRange.startLba,
-        sectorCount: 1,
-        classification: "individually_failed" as const,
-      }]
-      : []),
-    ...remainingRange,
-    ...manifest.unrecoveredSourceRanges.slice(sourceRangeIndex + 1),
-  ];
+  const unrecoveredSourceRanges = dvdEvidenceRangesAfterRecoveryRead(
+    manifest.unrecoveredSourceRanges,
+    startLba!,
+    outcome,
+  );
   const input = {
     originalDiscArchiveId: manifest.originalDiscArchiveId,
     revision: manifest.revision + 1,
@@ -212,14 +206,38 @@ export function advanceCommittedArchiveEvidence(
       realpathSync(fixture.originalsLibraryPath),
       `${manifest.originalDiscArchiveId}.iso`,
     );
-    const startByte = sourceRange.startLba * manifest.sectorSizeBytes;
-    const before = Buffer.alloc(manifest.sectorSizeBytes);
-    const after = Buffer.alloc(manifest.sectorSizeBytes, input.revision);
+    const unitBytes = 4_096;
+    const sectorStartByte = startLba! * manifest.sectorSizeBytes;
+    const startByte = Math.floor(sectorStartByte / unitBytes) * unitBytes;
+    const sectorOffset = sectorStartByte - startByte;
+    const before = Buffer.alloc(unitBytes);
     const descriptor = openSync(archivePath, "r+");
     try {
-      readSync(descriptor, before, 0, before.length, startByte);
+      const bytesRead = readSync(
+        descriptor,
+        before,
+        0,
+        before.length,
+        startByte,
+      );
+      if (bytesRead !== unitBytes) {
+        throw new Error("Synthetic protected range is incomplete");
+      }
+      const after = Buffer.from(before);
+      after.fill(
+        (manifest.revision % 254) + 1,
+        sectorOffset,
+        sectorOffset + manifest.sectorSizeBytes,
+      );
       writeSync(descriptor, after, 0, after.length, startByte);
       fsyncSync(descriptor);
+      protectedRanges = [{
+        startByte,
+        byteCount: unitBytes,
+        unitBytes,
+        beforeDigest: createHash("sha256").update(before).digest("hex"),
+        afterDigest: createHash("sha256").update(after).digest("hex"),
+      }];
     } finally {
       closeSync(descriptor);
     }
@@ -233,14 +251,9 @@ export function advanceCommittedArchiveEvidence(
       filesystemIdentity: `${imageStat.dev}:${imageStat.ino}`,
       mtimeNs: imageStat.mtimeNs.toString(),
     };
-    journalDigest = "d".repeat(64);
-    protectedRanges = [{
-      startByte,
-      byteCount: manifest.sectorSizeBytes,
-      unitBytes: manifest.sectorSizeBytes,
-      beforeDigest: createHash("sha256").update(before).digest("hex"),
-      afterDigest: createHash("sha256").update(after).digest("hex"),
-    }];
+    journalDigest = createHash("sha256")
+      .update(`synthetic-journal-${manifest.revision + 1}`)
+      .digest("hex");
   }
   const publicationPayload = {
     ...digestFields,
@@ -266,8 +279,9 @@ export function advanceCommittedArchiveEvidence(
       INSERT INTO dvd_archive_recovery_reads (
         id, original_disc_archive_id, from_manifest_id,
         from_manifest_revision, start_lba, sector_count, outcome,
+        from_classification, meaningful_transition,
         verification_id, disc_confirmation_id, evidence_digest, created_at
-      ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 2)
+      ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.recoveryReadId,
       recoveryRead.originalDiscArchiveId,
@@ -275,9 +289,15 @@ export function advanceCommittedArchiveEvidence(
       recoveryRead.fromManifestRevision,
       recoveryRead.startLba,
       recoveryRead.outcome,
+      sourceRange.classification,
+      outcome === "recovered" ||
+          sourceRange.classification === "skipped_untested"
+        ? 1
+        : 0,
       recoveryRead.verificationId ?? null,
       recoveryRead.discConfirmationId ?? null,
       recoveryReadEvidenceDigest,
+      options.createdAtMs ?? manifest.revision + 1,
     );
     db.prepare(`
       INSERT INTO dvd_archive_evidence_manifests (
@@ -288,7 +308,7 @@ export function advanceCommittedArchiveEvidence(
         boundary_published_size_bytes, boundary_evidence_digest,
         unrecovered_source_ranges, unrecovered_source_ranges_digest,
         manifest_digest, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       next.id,
       next.originalDiscArchiveId,
@@ -306,6 +326,7 @@ export function advanceCommittedArchiveEvidence(
       JSON.stringify(next.unrecoveredSourceRanges),
       next.unrecoveredSourceRangesDigest,
       next.manifestDigest,
+      options.createdAtMs ?? manifest.revision + 1,
     );
     db.prepare(`
       UPDATE dvd_archive_evidence_headers
@@ -316,6 +337,28 @@ export function advanceCommittedArchiveEvidence(
       next.id,
       next.revision,
       next.manifestDigest,
+      next.originalDiscArchiveId,
+    );
+    const badSectorRanges = next.unrecoveredSourceRanges.map(
+      ({ startLba, sectorCount }) => ({ startLba, sectorCount }),
+    );
+    const badSectorCount = badSectorRanges.reduce(
+      (total, range) => total + range.sectorCount,
+      0,
+    );
+    db.prepare(`
+      UPDATE original_disc_archives
+      SET integrity = ?, integrity_evidence_revision = ?,
+          bad_sector_count = ?, bad_area_count = ?, bad_sector_ranges = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      badSectorCount === 0 ? "clean_read" : "incomplete_read",
+      next.revision,
+      badSectorCount,
+      badSectorRanges.length,
+      JSON.stringify(badSectorRanges),
+      options.createdAtMs ?? manifest.revision + 1,
       next.originalDiscArchiveId,
     );
   });

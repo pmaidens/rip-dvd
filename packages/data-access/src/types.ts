@@ -591,6 +591,41 @@ export interface ArchiveRecoveryPassSummary {
   outcome: ArchiveRecoveryPassOutcome;
 }
 
+export interface DvdArchiveRecoveryRangeObservation {
+  checkpointRevision: number;
+  startLba: number;
+  outcome: "recovered" | "failed";
+  fromClassification: DvdUnrecoveredSourceClassification;
+  observedAt: Date;
+}
+
+export interface DvdArchiveRecoverySourceRange extends UnreadableSectorRange {
+  classification:
+    | DvdUnrecoveredSourceClassification
+    | "recovered";
+}
+
+export interface DvdArchiveRecoveryRangeEvidence {
+  recovery: ArchiveRecovery;
+  checkpoint: DvdArchiveEvidenceHeader;
+  recoveredSectorCount: number;
+  currentPassObservations: {
+    count: number;
+    positiveIntervalCount: number;
+    minimumIntervalMs: number | null;
+    maximumIntervalMs: number | null;
+    lastObservedAt: Date | null;
+  } | null;
+  transitions: {
+    items: readonly DvdArchiveRecoveryRangeObservation[];
+    totalCount: number | null;
+    truncated: boolean;
+  };
+  ranges: readonly DvdArchiveRecoverySourceRange[];
+  rangeOffset: number;
+  rangeCount: number;
+}
+
 export interface ArchiveRecoveryStopReceipt extends ArchiveRecovery {
   status: "stopping";
   stopOperationId: ArchiveRecoveryStopOperationId;
@@ -706,8 +741,14 @@ export interface ArchiveRecoveryWork {
   passNumber: number;
   passDirection: ArchiveRecoveryPassDirection;
   passStartedAt: Date | null;
+  passStartedManifestRevision: number | null;
   passInitialUnrecoveredSectorCount: number | null;
   passRecoveredSectorCount: number;
+  passObservationCount: number | null;
+  passPositiveIntervalCount: number | null;
+  passMinimumIntervalMs: number | null;
+  passMaximumIntervalMs: number | null;
+  passLastObservedAt: Date | null;
   passCursorLba: number | null;
   admittedDevicePath: string | null;
   admittedDeviceId: string | null;
@@ -1871,6 +1912,10 @@ export interface CatalogAccess {
   ): void;
   findArchiveRecovery(id: OriginalDiscArchiveId): ArchiveRecovery | null;
   findArchiveRecoveryById(id: ArchiveRecoveryId): ArchiveRecovery | null;
+  readDvdArchiveRecoveryRangeEvidence(
+    id: ArchiveRecoveryId,
+    options: { rangeOffset: number; rangeLimit: number },
+  ): DvdArchiveRecoveryRangeEvidence | null;
   listArchiveRecoveries(options: { limit: number }): ArchiveRecovery[];
   findDvdSourceSampleManifest(
     id: OriginalDiscArchiveId,
@@ -2599,6 +2644,7 @@ export type SnapshotCatalogAccess = Pick<
   | "readDvdCatalogReviewWorkflowEvidence"
   | "findArchiveRecovery"
   | "findArchiveRecoveryById"
+  | "readDvdArchiveRecoveryRangeEvidence"
   | "listArchiveRecoveries"
   | "findDvdSourceSampleManifest"
   | "listCatalogReviewArchives"

@@ -1815,10 +1815,12 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     INSERT INTO dvd_archive_recovery_reads (
       id, original_disc_archive_id, from_manifest_id,
       from_manifest_revision, start_lba, sector_count, outcome,
+      from_classification, meaningful_transition,
       evidence_digest, created_at
     ) VALUES (
       'evidence-new-format-read-1', 'evidence-new-format-archive',
       'evidence-new-format-manifest-1', 1, 1, 1, 'failed',
+      'skipped_untested', 1,
       '${recoveryReadDigest}', 2
     )
   `);
@@ -1888,10 +1890,12 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     INSERT INTO dvd_archive_recovery_reads (
       id, original_disc_archive_id, from_manifest_id,
       from_manifest_revision, start_lba, sector_count, outcome,
+      from_classification, meaningful_transition,
       evidence_digest, created_at
     ) VALUES (
       'evidence-new-format-read-repeat', 'evidence-new-format-archive',
       'evidence-new-format-manifest-2', 2, 1, 1, 'failed',
+      'individually_failed', 0,
       '${repeatedRecoveryReadDigest}', 3
     )
   `);
@@ -2128,10 +2132,12 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     INSERT INTO dvd_archive_recovery_reads (
       id, original_disc_archive_id, from_manifest_id,
       from_manifest_revision, start_lba, sector_count, outcome,
+      from_classification, meaningful_transition,
       evidence_digest, created_at
     ) VALUES (
       'evidence-new-format-read-2', 'evidence-new-format-archive',
       'evidence-new-format-manifest-2', 2, 0, 1, 'recovered',
+      'skipped_untested', 1,
       '${recoveredFirstSectorReadDigest}', 3
     );
     INSERT INTO dvd_archive_evidence_manifests (
@@ -2161,10 +2167,12 @@ it("migrates legacy archives and rehearses restoring the pre-write DVD evidence 
     INSERT INTO dvd_archive_recovery_reads (
       id, original_disc_archive_id, from_manifest_id,
       from_manifest_revision, start_lba, sector_count, outcome,
+      from_classification, meaningful_transition,
       evidence_digest, created_at
     ) VALUES (
       'evidence-new-format-read-3', 'evidence-new-format-archive',
       'evidence-new-format-manifest-3', 3, 1, 1, 'recovered',
+      'individually_failed', 1,
       '${recoveredLastSectorReadDigest}', 4
     );
     INSERT INTO dvd_archive_evidence_manifests (

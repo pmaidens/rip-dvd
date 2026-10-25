@@ -54,6 +54,7 @@ import {
 } from "./dvd-recovery-reconciliation.js";
 import { dvdRecoveryStopAction } from "./dvd-recovery-stop.js";
 import { visibleArchiveRecovery } from "./archive-recovery-view.js";
+import { presentArchiveRecoveryRangeEvidence } from "./archive-recovery-ranges.js";
 
 export const OPERATION_KINDS = [
   "optical-drives",
@@ -134,6 +135,7 @@ function visibleDvdRecoveryReconciliation(
 function archiveRecoveryOperation(
   access: ConsistentReadAccess,
   recovery: ArchiveRecovery,
+  includeProgress = false,
 ) {
   const reconciliation = access.dvdRecoveryReconciliations
     .findLatestForRecovery(recovery.id);
@@ -155,6 +157,15 @@ function archiveRecoveryOperation(
     originalDiscArchiveId: recovery.originalDiscArchiveId,
     includeHistorical: true,
   }).flatMap(({ id }) => access.encodeJobs.listForDiscSelection(id));
+  const rangeEvidence = includeProgress
+    ? access.catalog.readDvdArchiveRecoveryRangeEvidence(recovery.id, {
+        rangeOffset: 0,
+        rangeLimit: 1,
+      })
+    : null;
+  const presentedRangeEvidence = rangeEvidence === null
+    ? null
+    : presentArchiveRecoveryRangeEvidence(rangeEvidence);
   return {
     ...visibleArchiveRecovery(recovery),
     recoveryStatus: recovery.status,
@@ -165,6 +176,12 @@ function archiveRecoveryOperation(
     checkpoint: access.catalog.findDvdArchiveEvidenceHeader(
       recovery.originalDiscArchiveId,
     ),
+    ...(includeProgress
+      ? {
+          progress: presentedRangeEvidence?.progress ?? null,
+          history: presentedRangeEvidence?.history ?? null,
+        }
+      : {}),
     availableActions: [
       {
         name: "reconcile",
@@ -786,7 +803,7 @@ function readDetail(
       );
       return recovery === null
         ? null
-        : archiveRecoveryOperation(access, recovery);
+        : archiveRecoveryOperation(access, recovery, true);
     }
     case "original-disc-archives": {
       const archive = access.catalog.listOriginalDiscArchives({ ids: [id as OriginalDiscArchiveId] })[0];
