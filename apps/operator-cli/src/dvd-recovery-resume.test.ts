@@ -1,9 +1,25 @@
 import { spawnSync } from "node:child_process";
+import {
+  mkdirSync,
+  renameSync,
+  rmdirSync,
+  symlinkSync,
+  unlinkSync,
+} from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it } from "vitest";
-import { createApplicationOperations } from "@rip-dvd/application";
+import {
+  createApplicationOperations,
+  requestDvdRecoveryResume,
+} from "@rip-dvd/application";
 import { beginSettledDiscInspectionForTest } from "@rip-dvd/data-access/test-support";
+import type { DataAccess } from "@rip-dvd/data-access";
+import {
+  defaultArchiveImageOwnership,
+  type ArchiveImageOwnership,
+} from "@rip-dvd/worker-runtime";
 
 import { seedDvdDiscVerificationFixture } from "./dvd-disc-verification.test-support.js";
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
@@ -672,8 +688,202 @@ it("blocks Resume after failed checkpoint reconciliation", async () => {
     mutationKey: "00000000-0000-4000-8000-000000000615",
   }))).toMatchObject({
     exitCode: 2,
-    result: { error: { code: "CONSISTENCY_FAULT" } },
+    result: { error: { code: "RECOVERY_RECONCILIATION_FAILED" } },
   });
+});
+
+it("reports reconciliation that starts during Resume checkpoint admission", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const stopped = stopRecovery(fixture, seeded.recoveryId, seeded.attemptId);
+  const access = fixture.openAccess();
+  try {
+    const ownership: ArchiveImageOwnership = {
+      ...defaultArchiveImageOwnership,
+      async withConsistentRead(request) {
+        access.dvdRecoveryReconciliations.submit({
+          mutationKey: "00000000-0000-4000-8000-000000000617",
+          archiveRecoveryId: stopped.id,
+        });
+        return defaultArchiveImageOwnership.withConsistentRead(request);
+      },
+    };
+    await expect(requestDvdRecoveryResume(access, {
+      mutationKey: "00000000-0000-4000-8000-000000000618",
+      archiveRecoveryId: stopped.id,
+      attemptId: stopped.attemptId,
+      checkpointRevision: seeded.pointer.currentManifestRevision,
+      checkpointDigest: seeded.pointer.currentManifestDigest,
+      speedMode: "normal",
+    }, ownership)).rejects.toMatchObject({
+      code: "RECOVERY_RECONCILIATION_ACTIVE",
+    });
+  } finally {
+    access.close();
+  }
+});
+
+it("retries Resume after reconciliation completes during checkpoint admission", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const stopped = stopRecovery(fixture, seeded.recoveryId, seeded.attemptId);
+  const access = fixture.openAccess();
+  let readAttempts = 0;
+  try {
+    const ownership: ArchiveImageOwnership = {
+      ...defaultArchiveImageOwnership,
+      async withConsistentRead(request) {
+        readAttempts += 1;
+        if (readAttempts === 1) {
+          access.dvdRecoveryReconciliations.submit({
+            mutationKey: "00000000-0000-4000-8000-000000000619",
+            archiveRecoveryId: stopped.id,
+          });
+          const claim = access.dvdRecoveryReconciliations.claimNext(
+            "synthetic-completed-reconciliation-worker",
+          );
+          if (claim === null) throw new Error("Expected reconciliation claim");
+          const checkpoint = {
+            revision: seeded.pointer.currentManifestRevision,
+            manifestId: seeded.pointer.currentManifestId,
+            manifestDigest: seeded.pointer.currentManifestDigest,
+          };
+          access.dvdRecoveryReconciliations.complete(claim, {
+            outcome: "already_consistent",
+            evidence: {
+              authoritativeCheckpoint: checkpoint,
+              databaseProjectionBefore: checkpoint,
+              databaseProjectionAfter: checkpoint,
+              journal: "absent",
+              uncommittedManifest: "absent",
+            },
+          });
+        }
+        return defaultArchiveImageOwnership.withConsistentRead(request);
+      },
+    };
+    await expect(requestDvdRecoveryResume(access, {
+      mutationKey: "00000000-0000-4000-8000-000000000620",
+      archiveRecoveryId: stopped.id,
+      attemptId: stopped.attemptId,
+      checkpointRevision: seeded.pointer.currentManifestRevision,
+      checkpointDigest: seeded.pointer.currentManifestDigest,
+      speedMode: "normal",
+    }, ownership)).resolves.toMatchObject({
+      archiveRecovery: {
+        id: stopped.id,
+        status: "eligible",
+      },
+    });
+    expect(readAttempts).toBe(2);
+  } finally {
+    access.close();
+  }
+});
+
+it("retries Resume when reconciliation completes after blocking admission", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const stopped = stopRecovery(fixture, seeded.recoveryId, seeded.attemptId);
+  const access = fixture.openAccess();
+  let inserted = false;
+  try {
+    const racingAccess: DataAccess = {
+      ...access,
+      dvdRecoveryStorage: {
+        ...access.dvdRecoveryStorage,
+        readCurrent() {
+          const storage = access.dvdRecoveryStorage.readCurrent();
+          if (inserted) return storage;
+          inserted = true;
+          access.dvdRecoveryReconciliations.submit({
+            mutationKey: "00000000-0000-4000-8000-000000000621",
+            archiveRecoveryId: stopped.id,
+          });
+          const claim = access.dvdRecoveryReconciliations.claimNext(
+            "synthetic-admission-reconciliation-worker",
+          );
+          if (claim === null) throw new Error("Expected reconciliation claim");
+          queueMicrotask(() => {
+            const checkpoint = {
+              revision: seeded.pointer.currentManifestRevision,
+              manifestId: seeded.pointer.currentManifestId,
+              manifestDigest: seeded.pointer.currentManifestDigest,
+            };
+            access.dvdRecoveryReconciliations.complete(claim, {
+              outcome: "already_consistent",
+              evidence: {
+                authoritativeCheckpoint: checkpoint,
+                databaseProjectionBefore: checkpoint,
+                databaseProjectionAfter: checkpoint,
+                journal: "absent",
+                uncommittedManifest: "absent",
+              },
+            });
+          });
+          return storage;
+        },
+      },
+    };
+    await expect(requestDvdRecoveryResume(racingAccess, {
+      mutationKey: "00000000-0000-4000-8000-000000000622",
+      archiveRecoveryId: stopped.id,
+      attemptId: stopped.attemptId,
+      checkpointRevision: seeded.pointer.currentManifestRevision,
+      checkpointDigest: seeded.pointer.currentManifestDigest,
+      speedMode: "normal",
+    })).resolves.toMatchObject({
+      archiveRecovery: {
+        id: stopped.id,
+        status: "eligible",
+      },
+    });
+  } finally {
+    access.close();
+  }
+});
+
+it.each([
+  "missing evidence directory",
+  "missing archive image",
+  "symlinked archive image",
+  "directory checkpoint record",
+] as const)("reports %s as a Resume consistency fault", async (failure) => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const stopped = stopRecovery(fixture, seeded.recoveryId, seeded.attemptId);
+  const originalPath = failure === "missing evidence directory"
+    ? seeded.directory
+    : failure === "directory checkpoint record"
+      ? join(seeded.directory, "checkpoint.json")
+      : seeded.archive.archivePath;
+  const retainedPath = `${originalPath}.retained`;
+  renameSync(originalPath, retainedPath);
+  if (failure === "symlinked archive image") {
+    symlinkSync(retainedPath, originalPath);
+  } else if (failure === "directory checkpoint record") {
+    mkdirSync(originalPath);
+  }
+  try {
+    expect(await fixture.run(resumeArgs({
+      recoveryId: stopped.id,
+      attemptId: stopped.attemptId,
+      revision: seeded.pointer.currentManifestRevision,
+      digest: seeded.pointer.currentManifestDigest,
+      mutationKey: "00000000-0000-4000-8000-000000000616",
+    }))).toMatchObject({
+      exitCode: 2,
+      result: { error: { code: "CONSISTENCY_FAULT" } },
+    });
+  } finally {
+    if (failure === "symlinked archive image") unlinkSync(originalPath);
+    if (failure === "directory checkpoint record") rmdirSync(originalPath);
+    renameSync(retainedPath, originalPath);
+  }
 });
 
 it("keeps a repaired storage fault paused until explicit Resume", async () => {

@@ -544,6 +544,14 @@ export async function verifyInsertedDvdAgainstSamples(input: {
   };
 }
 
+function isRetryableDeviceContention(error: unknown): boolean {
+  return error instanceof Error && [
+    "DVD archive copy is still active",
+    "DVD archive device is still active",
+    "DVD archive device lock timed out",
+  ].includes(error.message);
+}
+
 export async function pollDvdDiscVerification(input: {
   access: DataAccess;
   reader: DvdVerificationSourceReader;
@@ -764,8 +772,8 @@ export async function pollDvdDiscVerification(input: {
     if (executed === null) {
       throw new Error("DVD Disc Verification checkpoint is unavailable");
     }
-  } catch {
-    if (input.signal?.aborted) {
+  } catch (error) {
+    if (input.signal?.aborted || isRetryableDeviceContention(error)) {
       const current = input.access.dvdDiscVerifications.find(claim.id);
       try {
         if (current === null || current.status !== "running") {

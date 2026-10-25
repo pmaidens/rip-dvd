@@ -25,6 +25,8 @@ import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 
 export type DvdRecoveryResumeUnavailableCode =
   | "CONSISTENCY_FAULT"
+  | "RECOVERY_RECONCILIATION_ACTIVE"
+  | "RECOVERY_RECONCILIATION_FAILED"
   | "STORAGE_UNSUPPORTED"
   | "WRITER_NOT_QUIESCENT";
 
@@ -43,24 +45,60 @@ export class DvdRecoveryResumeUnavailableError extends Error {
     this.blockingReasons = [{ code, message }];
   }
 }
+
+function recoveryResumeUnavailableMessage(
+  code: DvdRecoveryResumeUnavailableCode,
+): string {
+  switch (code) {
+    case "RECOVERY_RECONCILIATION_ACTIVE":
+      return "Archive Recovery checkpoint reconciliation is active.";
+    case "RECOVERY_RECONCILIATION_FAILED":
+      return "Archive Recovery checkpoint reconciliation must succeed before Resume.";
+    case "STORAGE_UNSUPPORTED":
+      return "The archive storage contract is unavailable for Resume.";
+    case "WRITER_NOT_QUIESCENT":
+      return "The archive writer is not quiescent.";
+    case "CONSISTENCY_FAULT":
+      return "The current archive checkpoint could not be validated consistently.";
+  }
+}
+
+function recoveryReconciliationUnavailable(
+  reconciliation: DvdRecoveryReconciliation | null,
+): DvdRecoveryResumeUnavailableError | null {
+  if (reconciliation === null || reconciliation.status === "completed") {
+    return null;
+  }
+  const code = reconciliation.status === "failed"
+    ? "RECOVERY_RECONCILIATION_FAILED"
+    : "RECOVERY_RECONCILIATION_ACTIVE";
+  return new DvdRecoveryResumeUnavailableError(
+    code,
+    recoveryResumeUnavailableMessage(code),
+  );
+}
+
 function recoveryResumeAvailabilityFailure(error: unknown) {
   if (
     !(error instanceof DvdCheckpointReadFault) &&
     !(error instanceof ArchiveImageOwnershipError)
   ) return null;
-  const code: DvdRecoveryResumeUnavailableCode =
-    error instanceof ArchiveImageOwnershipError
-      ? error.code
-      : error.code === "DVD_EVIDENCE_STORAGE_UNAVAILABLE"
-        ? "STORAGE_UNSUPPORTED"
-        : "CONSISTENCY_FAULT";
+  let code: DvdRecoveryResumeUnavailableCode;
+  if (error instanceof ArchiveImageOwnershipError) {
+    code = error.code;
+  } else if (
+    error.code === "RECOVERY_RECONCILIATION_ACTIVE" ||
+    error.code === "RECOVERY_RECONCILIATION_FAILED"
+  ) {
+    code = error.code;
+  } else if (error.storageFault) {
+    code = "STORAGE_UNSUPPORTED";
+  } else {
+    code = "CONSISTENCY_FAULT";
+  }
   return new DvdRecoveryResumeUnavailableError(
     code,
-    code === "STORAGE_UNSUPPORTED"
-      ? "The archive storage contract is unavailable for Resume."
-      : code === "WRITER_NOT_QUIESCENT"
-        ? "The archive writer is not quiescent."
-        : "The current archive checkpoint could not be validated consistently.",
+    recoveryResumeUnavailableMessage(code),
   );
 }
 
@@ -179,6 +217,12 @@ export async function requestDvdRecoveryResume(
       input.archiveRecoveryId,
     );
   }
+  const reconciliationBeforeResume = access.dvdRecoveryReconciliations
+    .findLatestForRecovery(recovery.id);
+  const reconciliationUnavailable = recoveryReconciliationUnavailable(
+    reconciliationBeforeResume,
+  );
+  if (reconciliationUnavailable !== null) throw reconciliationUnavailable;
   const storageReason = dvdRecoveryStorageBlockingReason(
     access.dvdRecoveryStorage.readCurrent(),
   );
@@ -188,7 +232,7 @@ export async function requestDvdRecoveryResume(
       storageReason.message,
     );
   }
-  try {
+  const resumeWithCurrentCheckpoint = async () => {
     const resumed = await access.withDvdCurrentCheckpoint(
       recovery.originalDiscArchiveId,
       archiveImageOwnership,
@@ -215,18 +259,54 @@ export async function requestDvdRecoveryResume(
         "The current archive checkpoint is unavailable.",
       );
     }
-    return {
-      archiveRecovery: visibleArchiveRecovery(resumed),
-      operation: {
-        kind: "archive-recoveries" as const,
-        id: resumed.id,
-        operationId: resumed.resumeOperationId,
-        status: resumed.status,
-      },
-    };
-  } catch (error) {
+    return resumed;
+  };
+  const mapResumeFailure = (error: unknown): never => {
+    const reconciliationUnavailable = recoveryReconciliationUnavailable(
+      access.dvdRecoveryReconciliations.findLatestForRecovery(recovery.id),
+    );
+    if (reconciliationUnavailable !== null) throw reconciliationUnavailable;
     const unavailable = recoveryResumeAvailabilityFailure(error);
     if (unavailable !== null) throw unavailable;
     throw error;
+  };
+  const retryAfterCompletedReconciliation = async (error: unknown) => {
+    const reconciliation = access.dvdRecoveryReconciliations
+      .findLatestForRecovery(recovery.id);
+    const reconciliationUnavailable = recoveryReconciliationUnavailable(
+      reconciliation,
+    );
+    if (reconciliationUnavailable !== null) throw reconciliationUnavailable;
+    if (
+      error instanceof DvdCheckpointReadFault &&
+      (
+        error.code === "DVD_EVIDENCE_CHANGED_DURING_READ" ||
+        error.code === "CONSISTENCY_FAULT"
+      ) &&
+      reconciliation?.status === "completed" &&
+      reconciliation.id !== reconciliationBeforeResume?.id
+    ) {
+      try {
+        return await resumeWithCurrentCheckpoint();
+      } catch (retryError) {
+        return mapResumeFailure(retryError);
+      }
+    }
+    return mapResumeFailure(error);
+  };
+  let resumed;
+  try {
+    resumed = await resumeWithCurrentCheckpoint();
+  } catch (error) {
+    resumed = await retryAfterCompletedReconciliation(error);
   }
+  return {
+    archiveRecovery: visibleArchiveRecovery(resumed),
+    operation: {
+      kind: "archive-recoveries" as const,
+      id: resumed.id,
+      operationId: resumed.resumeOperationId,
+      status: resumed.status,
+    },
+  };
 }

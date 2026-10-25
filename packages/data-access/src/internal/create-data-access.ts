@@ -8833,7 +8833,9 @@ export function createDataAccessInternal(
       );
     }
     if (normalizedOriginalsLibraryPath === undefined) {
-      throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE");
+      throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE", {
+        storageFault: true,
+      });
     }
     const owned = await ownership.withConsistentRead<OwnedReadState>({
       archiveId: id,

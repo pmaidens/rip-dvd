@@ -83,6 +83,11 @@ export interface DvdCheckpointPointer {
 
 export { canonicalJson as canonicalPublicationJson };
 
+function isMissingOrUnsafeEvidencePath(error: unknown): boolean {
+  return error instanceof Error && "code" in error &&
+    ["ENOENT", "ENOTDIR", "ELOOP"].includes(String(error.code));
+}
+
 export function createDvdInitialPublicationDigest(value: unknown): string {
   return createHash("sha256").update("rip-dvd:dvd-initial-publication:v1\0")
     .update(canonicalJson(value)).digest("hex");
@@ -104,10 +109,10 @@ async function readRecord(path: string, code: string): Promise<unknown> {
         constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
       );
     } catch (cause) {
+      if (cause instanceof DvdCheckpointReadFault) throw cause;
       throw new DvdCheckpointReadFault(code, {
         cause,
-        storageFault: !(cause instanceof Error && "code" in cause &&
-          cause.code === "ENOENT"),
+        storageFault: !isMissingOrUnsafeEvidencePath(cause),
       });
     }
     let before;
@@ -116,16 +121,17 @@ async function readRecord(path: string, code: string): Promise<unknown> {
     let named;
     try {
       before = await file.stat({ bigint: true });
+      if (!before.isFile()) throw new DvdCheckpointReadFault(code);
       raw = await file.readFile("utf8");
       after = await file.stat({ bigint: true });
       named = await lstat(path, { bigint: true });
     } catch (cause) {
+      if (cause instanceof DvdCheckpointReadFault) throw cause;
       throw new DvdCheckpointReadFault(code, {
         cause,
-        storageFault: true,
+        storageFault: !isMissingOrUnsafeEvidencePath(cause),
       });
     }
-    if (!before.isFile()) throw new DvdCheckpointReadFault(code);
     let value: unknown;
     try {
       value = JSON.parse(raw);
@@ -158,7 +164,7 @@ async function pathExists(path: string): Promise<boolean> {
     }
     throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE", {
       cause: error,
-      storageFault: true,
+      storageFault: !isMissingOrUnsafeEvidencePath(error),
     });
   }
 }
@@ -303,7 +309,7 @@ export async function verifyDvdCheckpointImage(
     } catch (cause) {
       throw new DvdCheckpointReadFault("DVD_PUBLICATION_IMAGE_CONFLICT", {
         cause,
-        storageFault: true,
+        storageFault: !isMissingOrUnsafeEvidencePath(cause),
       });
     }
     let stat;
@@ -314,7 +320,7 @@ export async function verifyDvdCheckpointImage(
     } catch (cause) {
       throw new DvdCheckpointReadFault("DVD_PUBLICATION_IMAGE_CONFLICT", {
         cause,
-        storageFault: true,
+        storageFault: !isMissingOrUnsafeEvidencePath(cause),
       });
     }
     if (
@@ -349,7 +355,6 @@ export async function verifyDvdCheckpointImage(
         ) {
           throw new DvdCheckpointReadFault(
             "DVD_PUBLICATION_IMAGE_CONFLICT",
-            { storageFault: true },
           );
         }
         if (
@@ -417,7 +422,7 @@ async function readCommittedDvdCheckpointRecords(input: {
     if (cause instanceof DvdCheckpointReadFault) throw cause;
     throw new DvdCheckpointReadFault("DVD_PUBLICATION_PATH_CONFLICT", {
       cause,
-      storageFault: true,
+      storageFault: !isMissingOrUnsafeEvidencePath(cause),
     });
   }
   if (resolve(archive.archivePath) !== join(root, `${archive.id}.iso`)) {

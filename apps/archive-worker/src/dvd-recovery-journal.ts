@@ -58,6 +58,11 @@ function sha256(bytes: Buffer | string): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function isMissingOrUnsafeEvidencePath(error: unknown): boolean {
+  return error instanceof Error && "code" in error &&
+    ["ENOENT", "ENOTDIR", "ELOOP"].includes(String(error.code));
+}
+
 export function createDvdRecoveryJournalDigest(
   metadata: Omit<DvdRecoveryJournalMetadata, "journalDigest">,
   originalBytes: Buffer,
@@ -210,7 +215,12 @@ export async function readDvdRecoveryJournal(
     ) {
       throw new DvdRecoveryJournalFault();
     }
-    const raw: unknown = JSON.parse(metadataBytes.toString("utf8"));
+    let raw: unknown;
+    try {
+      raw = JSON.parse(metadataBytes.toString("utf8"));
+    } catch (cause) {
+      throw new DvdRecoveryJournalFault(undefined, { cause });
+    }
     assertMetadata(raw);
     if (canonicalPublicationJson(raw) !== metadataBytes.toString("utf8")) {
       throw new DvdRecoveryJournalFault();
@@ -235,7 +245,7 @@ export async function readDvdRecoveryJournal(
     if (cause instanceof DvdRecoveryJournalFault) throw cause;
     throw new DvdRecoveryJournalFault(undefined, {
       cause,
-      storageFault: true,
+      storageFault: !isMissingOrUnsafeEvidencePath(cause),
     });
   } finally {
     try {

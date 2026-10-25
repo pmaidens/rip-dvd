@@ -88,6 +88,11 @@ function sha256(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function isMissingOrUnsafeEvidencePath(error: unknown): boolean {
+  return error instanceof Error && "code" in error &&
+    ["ENOENT", "ENOTDIR", "ELOOP"].includes(String(error.code));
+}
+
 function checkpointIdentity(checkpoint: CommittedDvdCheckpointEvidence) {
   return {
     revision: checkpoint.revision,
@@ -134,7 +139,7 @@ async function syncDirectory(path: string): Promise<void> {
   ).catch((cause) => {
     throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
       cause,
-      storageFault: true,
+      storageFault: !isMissingOrUnsafeEvidencePath(cause),
     });
   });
   try {
@@ -164,7 +169,7 @@ async function removeFile(path: string): Promise<void> {
   } catch (cause) {
     throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
       cause,
-      storageFault: true,
+      storageFault: !isMissingOrUnsafeEvidencePath(cause),
     });
   }
 }
@@ -254,7 +259,7 @@ async function verifyProtectedBytes(input: {
   ).catch((cause) => {
     throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
       cause,
-      storageFault: true,
+      storageFault: !isMissingOrUnsafeEvidencePath(cause),
     });
   });
   try {
@@ -266,7 +271,7 @@ async function verifyProtectedBytes(input: {
     } catch (cause) {
       throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
         cause,
-        storageFault: true,
+        storageFault: !isMissingOrUnsafeEvidencePath(cause),
       });
     }
     if (
@@ -295,9 +300,7 @@ async function verifyProtectedBytes(input: {
         });
       }
       if (read.bytesRead !== bytes.length) {
-        throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
-          storageFault: true,
-        });
+        throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT");
       }
       const digest = sha256(bytes);
       if (digest === range.beforeDigest) states.push("before");

@@ -25,6 +25,7 @@ import {
   DVD_RECOVERY_JOURNAL_PAYLOAD_BYTES,
   DVD_RECOVERY_JOURNAL_RESERVATION_BYTES,
   DVD_RECOVERY_MAX_CHECKPOINT_REVISION,
+  DvdCheckpointReadFault,
   readCommittedDvdCheckpoint,
   type CommittedDvdCheckpointEvidence,
   type CommittedDvdRecoveryEvidence,
@@ -230,6 +231,7 @@ export interface DvdRecoveryBatchOptions {
   observation: DvdRecoveryReadObservation;
   archiveImageOwnership?: ArchiveImageOwnership;
   atomicWriter?: DvdRecoveryAtomicWriter;
+  readCheckpoint?: typeof readCommittedDvdCheckpoint;
   directorySync?(path: string): Promise<void>;
   signal?: AbortSignal;
   fault?(point: `before:${DvdRecoveryBatchStep}` | `after:${DvdRecoveryBatchStep}`): void | Promise<void>;
@@ -350,6 +352,10 @@ function hasCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
 }
 
+function isMissingOrUnsafeEvidencePath(error: unknown): boolean {
+  return ["ENOENT", "ENOTDIR", "ELOOP"].some((code) => hasCode(error, code));
+}
+
 async function syncDirectory(
   path: string,
   faultCode: Extract<
@@ -399,6 +405,9 @@ async function pathsFor(options: DvdRecoveryBatchOptions): Promise<RecoveryPaths
   try {
     resolvedDirectory = await realpath(directory);
   } catch (cause) {
+    if (isMissingOrUnsafeEvidencePath(cause)) {
+      throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT", { cause });
+    }
     throw new DvdRecoveryBatchFault("STORAGE_UNSUPPORTED", {
       cause,
       storageFault: true,
@@ -466,6 +475,9 @@ async function readImageVersion(
     path,
     constants.O_RDONLY | constants.O_NOFOLLOW,
   ).catch((cause) => {
+    if (isMissingOrUnsafeEvidencePath(cause)) {
+      throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT", { cause });
+    }
     throw new DvdRecoveryBatchFault("IMAGE_SYNC_FAILED", {
       cause,
       storageFault: true,
@@ -478,6 +490,9 @@ async function readImageVersion(
       stat = await descriptor.stat({ bigint: true });
       named = await lstat(path, { bigint: true });
     } catch (cause) {
+      if (isMissingOrUnsafeEvidencePath(cause)) {
+        throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT", { cause });
+      }
       throw new DvdRecoveryBatchFault("IMAGE_SYNC_FAILED", {
         cause,
         storageFault: true,
@@ -754,6 +769,9 @@ async function replacePointer(
   try {
     installed = await readFile(path, "utf8");
   } catch (cause) {
+    if (isMissingOrUnsafeEvidencePath(cause)) {
+      throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT", { cause });
+    }
     throw new DvdRecoveryBatchFault("CHECKPOINT_REPLACEMENT_FAILED", {
       cause,
       storageFault: true,
@@ -872,7 +890,7 @@ async function runOwnedBatch(
       storageFault: true,
     });
   }
-  const current = await readCommittedDvdCheckpoint({
+  const current = await (options.readCheckpoint ?? readCommittedDvdCheckpoint)({
     originalsLibraryPath: paths.root,
     archive,
     header,
@@ -1159,6 +1177,9 @@ async function runOwnedBatch(
     try {
       currentBytes = await readFile(paths.pointer, "utf8");
     } catch (cause) {
+      if (isMissingOrUnsafeEvidencePath(cause)) {
+        throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT", { cause });
+      }
       throw new DvdRecoveryBatchFault("CHECKPOINT_REPLACEMENT_FAILED", {
         cause,
         storageFault: true,
@@ -1182,6 +1203,9 @@ async function runOwnedBatch(
       try {
         await unlink(paths.journal);
       } catch (cause) {
+        if (isMissingOrUnsafeEvidencePath(cause)) {
+          throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT", { cause });
+        }
         throw new DvdRecoveryBatchFault("JOURNAL_SYNC_FAILED", {
           cause,
           storageFault: true,
@@ -1234,6 +1258,12 @@ export async function commitDvdRecoveryBatch(
     });
   } catch (cause) {
     if (cause instanceof DvdRecoveryBatchFault) throw cause;
+    if (cause instanceof DvdCheckpointReadFault) {
+      throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT", {
+        cause,
+        storageFault: cause.storageFault,
+      });
+    }
     const ownershipFaultCode = archiveImageOwnershipFaultCode(cause);
     if (ownershipFaultCode !== null) {
       throw new DvdRecoveryBatchFault(ownershipFaultCode, {
