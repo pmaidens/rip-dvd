@@ -15,8 +15,22 @@ a durable retry; a removed, changed, or nonmatching source faults the Recovery
 instead of leaving the continuation reported as running. A complete pass that
 recovers no bytes durably pauses recovery; this is a safe scheduling boundary,
 not a conclusion that the remaining source is damaged. The operator can Stop
-the recovery. A future explicit Resume control can start another pass after a
-no-progress pause. Web cancellation and
+the recovery. Explicit Resume starts a new attempt from a stopped Recovery or
+from a `no_progress` or repaired `storage_fault` pause. Resume is bound to the
+current attempt and checkpoint, rechecks storage and archive-image ownership,
+rejects active reconciliation or Encode work, and retains an Archive Recovery
+work reservation while it waits for a disc. A qualifying insertion receives a
+fresh bounded DVD Disc Verification before the new pass can read. A mismatch
+returns the same intent to `waiting_for_disc`; it does not consume the Resume
+or silently start against another source.
+
+Resume requires either normal drive speed or a low-speed request for the
+current attempt. Low speed asks the drive for 4x and falls back to 2x if the
+drive rejects 4x. Drive firmware may reject or ignore either request, so the
+attempt records the requested speeds, selected speed, observed speed when
+available, and an `accepted`, `rejected`, or `ignored` outcome before source
+verification reads begin. The result is evidence about the request, not a
+guarantee of physical drive speed. Web cancellation and
 `rip-dvd cancel-archive-request` use the same Archive Request operation. A CLI
 wait deadline ends the observer's wait without cancelling background work. The
 retired `RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS` setting has no effect.

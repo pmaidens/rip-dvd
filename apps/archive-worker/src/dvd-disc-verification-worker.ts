@@ -1,5 +1,6 @@
 import type { DataAccess } from "@rip-dvd/data-access";
 
+import type { DvdCopyRunner } from "./dvd-archiver.js";
 import { runDurableWorkPoller } from "./durable-work-poller.js";
 import {
   createNodeDvdVerificationSourceReader,
@@ -10,6 +11,10 @@ import {
   createNodeMediaGenerationObserver,
   type MediaGenerationObserver,
 } from "./optical-media-generation.js";
+import {
+  createNodeDvdDriveSpeedController,
+  type DvdDriveSpeedController,
+} from "./dvd-drive-speed.js";
 
 export async function runDvdDiscVerificationWorker(input: {
   access: DataAccess;
@@ -19,10 +24,14 @@ export async function runDvdDiscVerificationWorker(input: {
   workerExecutionId: string;
   reader?: DvdVerificationSourceReader;
   mediaGenerationObserver?: MediaGenerationObserver;
+  speedController?: DvdDriveSpeedController;
+  deviceInactivity: Pick<DvdCopyRunner, "withDeviceInactive">;
 }): Promise<void> {
   const reader = input.reader ?? createNodeDvdVerificationSourceReader();
   const mediaGenerationObserver = input.mediaGenerationObserver ??
     createNodeMediaGenerationObserver();
+  const speedController = input.speedController ??
+    createNodeDvdDriveSpeedController();
   await runDurableWorkPoller({
     intervalMs: input.intervalMs,
     signal: input.signal,
@@ -32,6 +41,8 @@ export async function runDvdDiscVerificationWorker(input: {
       reader,
       workerExecutionId: input.workerExecutionId,
       mediaGenerationObserver,
+      speedController,
+      deviceInactivity: input.deviceInactivity,
       signal: input.signal,
     }),
     pollFailureMessage: "DVD Disc Verification worker poll failed.",

@@ -24,6 +24,7 @@ import {
   ARCHIVE_RECOVERY_FAULT_CODES,
   ARCHIVE_RECOVERY_PASS_DIRECTIONS,
   ARCHIVE_RECOVERY_PAUSE_REASONS,
+  ARCHIVE_RECOVERY_SPEED_MODES,
   ARCHIVE_RECOVERY_STATUSES,
   ARCHIVE_RECOVERY_WORK_STATUSES,
   CATALOG_REVIEW_OUTCOMES,
@@ -97,6 +98,9 @@ import type {
   ArchiveRecoveryPauseReason,
   ArchiveRecoveryAttemptId,
   ArchiveRecoveryClaimToken,
+  ArchiveRecoveryResumeOperationId,
+  ArchiveRecoverySpeedMode,
+  ArchiveRecoverySpeedRequestResult,
   ArchiveRecoveryStopOperationId,
   ArchiveRecoveryStatus,
   ArchiveRecoveryWorkStatus,
@@ -1780,6 +1784,18 @@ export const archiveRecoveries = sqliteTable(
       .$type<readonly ArchiveRecoveryPassSummary[]>()
       .notNull()
       .default(sql`'[]'`),
+    resumeOperationId: text("resume_operation_id")
+      .$type<ArchiveRecoveryResumeOperationId>(),
+    resumeRequestedAt: integer("resume_requested_at", {
+      mode: "timestamp_ms",
+    }),
+    resumeCheckpointRevision: integer("resume_checkpoint_revision"),
+    resumeCheckpointDigest: text("resume_checkpoint_digest"),
+    speedMode: text("speed_mode", {
+      enum: ARCHIVE_RECOVERY_SPEED_MODES,
+    }).$type<ArchiveRecoverySpeedMode>(),
+    speedRequestResult: text("speed_request_result", { mode: "json" })
+      .$type<ArchiveRecoverySpeedRequestResult>(),
     stopOperationId: text("stop_operation_id")
       .$type<ArchiveRecoveryStopOperationId>(),
     stopRequestedAt: integer("stop_requested_at", { mode: "timestamp_ms" }),
@@ -1811,6 +1827,10 @@ export const archiveRecoveries = sqliteTable(
     check(
       "archive_recoveries_pass_history_check",
       sql`json_valid(${table.passHistory}) and json_type(${table.passHistory}) = 'array' and json_array_length(${table.passHistory}) <= 16`,
+    ),
+    check(
+      "archive_recoveries_resume_check",
+      sql`(${table.resumeOperationId} is null and ${table.resumeRequestedAt} is null and ${table.resumeCheckpointRevision} is null and ${table.resumeCheckpointDigest} is null and ${table.speedMode} is null and ${table.speedRequestResult} is null) or (${table.resumeOperationId} is not null and ${table.resumeRequestedAt} is not null and typeof(${table.resumeCheckpointRevision}) = 'integer' and ${table.resumeCheckpointRevision} > 0 and length(${table.resumeCheckpointDigest}) = 64 and ${table.resumeCheckpointDigest} not glob '*[^0-9a-f]*' and ${table.speedMode} in (${sqliteStringLiterals(ARCHIVE_RECOVERY_SPEED_MODES)}) and (${table.speedRequestResult} is null or (json_valid(${table.speedRequestResult}) and json_type(${table.speedRequestResult}) = 'object')))`,
     ),
     check(
       "archive_recoveries_stop_check",

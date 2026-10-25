@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -6,6 +7,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  symlinkSync,
   truncateSync,
   utimesSync,
   unlinkSync,
@@ -20,6 +22,7 @@ import {
   type ArchiveImageOwnership,
 } from "@rip-dvd/worker-runtime";
 import {
+  DvdCheckpointReadFault,
   ENCODE_JOB_LEASE_DURATION_MS,
   type DvdDiscVerificationId,
   type DvdRecoveryWriteAuthority,
@@ -31,6 +34,7 @@ import {
   type DvdRecoveryAtomicWriter,
 } from "../../../../../archive-worker/src/dvd-recovery-batch.js";
 import { reconcileDvdRecoveryCheckpoint } from "../../../../../archive-worker/src/dvd-recovery-reconciliation.js";
+import { DVD_RECOVERY_JOURNAL_MAGIC } from "../../../../../archive-worker/src/dvd-recovery-journal.js";
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
 import { seedCommittedArchiveEvidence } from "../../../../../operator-cli/src/archive-evidence.test-support.js";
 import { createArchiveEvidenceRoute } from "./route";
@@ -323,6 +327,93 @@ it("rejects a recovery batch without a current durable work claim", async () => 
       },
     })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
     expect(readFileSync(saved.archive.archivePath)).toEqual(imageBefore);
+    expect(existsSync(join(saved.directory, "recovery-journal.bin"))).toBe(false);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+}, RECOVERY_TEST_TIMEOUT_MS);
+
+it("classifies missing pre-journal evidence as a consistency fault", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const saved = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  const writeAuthority = prepareEligibleRecovery(fixture, saved.archive.id, [{
+    startLba: 10,
+    sectorCount: 1,
+  }]);
+  const access = fixture.openAccess();
+  const unavailableDirectory = `${saved.directory}.unavailable`;
+  try {
+    recordSupportedRecoveryStorage(access);
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
+    renameSync(saved.directory, unavailableDirectory);
+    await expect(commitDvdRecoveryBatch({
+      access,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      originalDiscArchiveId: saved.archive.id,
+      recoveryWorkClaim,
+      writeAuthority,
+      observation: {
+        startLba: 10,
+        outcome: "recovered",
+        bytes: Buffer.alloc(2_048, 0x61),
+      },
+      atomicWriter: syntheticAtomicWriter,
+    })).rejects.toMatchObject({
+      code: "CONSISTENCY_FAULT",
+      storageFault: false,
+      retainRecoveryWork: false,
+    });
+  } finally {
+    if (existsSync(unavailableDirectory)) {
+      renameSync(unavailableDirectory, saved.directory);
+    }
+    access.close();
+    fixture.dispose();
+  }
+}, RECOVERY_TEST_TIMEOUT_MS);
+
+it("preserves checkpoint-read storage provenance before mutation", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const saved = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  const writeAuthority = prepareEligibleRecovery(fixture, saved.archive.id, [{
+    startLba: 10,
+    sectorCount: 1,
+  }]);
+  const access = fixture.openAccess();
+  try {
+    recordSupportedRecoveryStorage(access);
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
+    await expect(commitDvdRecoveryBatch({
+      access,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      originalDiscArchiveId: saved.archive.id,
+      recoveryWorkClaim,
+      writeAuthority,
+      observation: {
+        startLba: 10,
+        outcome: "recovered",
+        bytes: Buffer.alloc(2_048, 0x61),
+      },
+      atomicWriter: syntheticAtomicWriter,
+      readCheckpoint: async () => {
+        throw new DvdCheckpointReadFault("CHECKPOINT_READ_FAILED", {
+          storageFault: true,
+        });
+      },
+    })).rejects.toMatchObject({
+      code: "CONSISTENCY_FAULT",
+      storageFault: true,
+      retainRecoveryWork: false,
+    });
     expect(existsSync(join(saved.directory, "recovery-journal.bin"))).toBe(false);
   } finally {
     access.close();
@@ -1055,7 +1146,12 @@ it("retains corrupt recovery evidence and reports a consistency fault", async ()
       },
     })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
     const corrupt = readFileSync(journalPath);
-    corrupt[0] = 0;
+    const magic = Buffer.from(DVD_RECOVERY_JOURNAL_MAGIC);
+    const malformedMetadata = Buffer.from("{]");
+    corrupt.writeUInt32BE(malformedMetadata.length, magic.length);
+    createHash("sha256").update(malformedMetadata).digest()
+      .copy(corrupt, magic.length + 4);
+    malformedMetadata.copy(corrupt, magic.length + 4 + 32);
     writeFileSync(journalPath, corrupt);
 
     await expect(reconcileDvdRecoveryCheckpoint({
@@ -1063,7 +1159,10 @@ it("retains corrupt recovery evidence and reports a consistency fault", async ()
       originalsLibraryPath: fixture.originalsLibraryPath,
       originalDiscArchiveId: saved.archive.id,
       atomicWriter: syntheticAtomicWriter,
-    })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+    })).rejects.toMatchObject({
+      code: "CONSISTENCY_FAULT",
+      storageFault: false,
+    });
     expect(existsSync(journalPath)).toBe(true);
     expect(access.catalog.findDvdArchiveEvidenceHeader(saved.archive.id))
       .toMatchObject({ currentManifestRevision: 1 });
@@ -1075,6 +1174,7 @@ it("retains corrupt recovery evidence and reports a consistency fault", async ()
 
 it.each([
   ["missing journal", "after:pointer"],
+  ["symlinked journal", "after:pointer"],
   ["corrupt manifest", "after:pointer"],
   ["wrong image extent", "after:journal"],
   ["wrong image identity", "after:journal"],
@@ -1122,6 +1222,10 @@ it.each([
 
       if (failure === "missing journal") {
         unlinkSync(journalPath);
+      } else if (failure === "symlinked journal") {
+        const retainedJournalPath = `${journalPath}.retained`;
+        renameSync(journalPath, retainedJournalPath);
+        symlinkSync(retainedJournalPath, journalPath);
       } else if (failure === "corrupt manifest") {
         writeFileSync(nextManifestPath, "{}");
       } else if (failure === "wrong image extent") {
@@ -1159,7 +1263,10 @@ it.each([
         originalsLibraryPath: fixture.originalsLibraryPath,
         originalDiscArchiveId: saved.archive.id,
         atomicWriter: reconciliationWriter,
-      })).rejects.toMatchObject({ code: "CONSISTENCY_FAULT" });
+      })).rejects.toMatchObject({
+        code: "CONSISTENCY_FAULT",
+        storageFault: failure === "failed rollback",
+      });
       expect(access.catalog.findDvdArchiveEvidenceHeader(saved.archive.id))
         .toMatchObject({ currentManifestRevision: 1 });
       expect(existsSync(nextManifestPath)).toBe(

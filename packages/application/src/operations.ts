@@ -53,6 +53,7 @@ import {
   dvdRecoveryReconciliationBlockingReasons,
 } from "./dvd-recovery-reconciliation.js";
 import { dvdRecoveryStopAction } from "./dvd-recovery-stop.js";
+import { dvdRecoveryResumeAction } from "./dvd-recovery-resume.js";
 import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 import { presentArchiveRecoveryRangeEvidence } from "./archive-recovery-ranges.js";
 
@@ -135,6 +136,10 @@ function visibleDvdRecoveryReconciliation(
 function archiveRecoveryOperation(
   access: ConsistentReadAccess,
   recovery: ArchiveRecovery,
+  options: Pick<
+    OperationInspectionOptions,
+    "originalsLibraryPath" | "archiveImageOwnership"
+  > = {},
   includeProgress = false,
 ) {
   const reconciliation = access.dvdRecoveryReconciliations
@@ -151,7 +156,8 @@ function archiveRecoveryOperation(
   const recoveryOwnsStatus = recoveryPassIsQueued ||
     recovery.status === "running" ||
     recovery.status === "stopping" || !reconciliationIsActive &&
-      (recovery.status === "paused" || recovery.status === "stopped" ||
+      (recovery.status === "waiting_for_disc" ||
+        recovery.status === "paused" || recovery.status === "stopped" ||
         recovery.status === "faulted" || recovery.status === "completed");
   const encodeJobs = access.catalog.listDiscSelections({
     originalDiscArchiveId: recovery.originalDiscArchiveId,
@@ -166,6 +172,17 @@ function archiveRecoveryOperation(
   const presentedRangeEvidence = rangeEvidence === null
     ? null
     : presentArchiveRecoveryRangeEvidence(rangeEvidence);
+  const archive = access.catalog.listOriginalDiscArchives({
+    ids: [recovery.originalDiscArchiveId],
+  })[0];
+  const ownership = archive === undefined ||
+      options.originalsLibraryPath === undefined
+    ? null
+    : (options.archiveImageOwnership ?? defaultArchiveImageOwnership).inspect({
+        archiveId: archive.id,
+        imagePath: archive.archivePath,
+        originalsLibraryPath: options.originalsLibraryPath,
+      });
   return {
     ...visibleArchiveRecovery(recovery),
     recoveryStatus: recovery.status,
@@ -193,6 +210,18 @@ function archiveRecoveryOperation(
         ),
       },
       dvdRecoveryStopAction(recovery, encodeJobs),
+      dvdRecoveryResumeAction({
+        recovery,
+        checkpoint: access.catalog.findDvdArchiveEvidenceHeader(
+          recovery.originalDiscArchiveId,
+        ),
+        reconciliation,
+        ownershipReasons: ownership?.stableRead.blockingReasons ?? [],
+        storageReason: describeDvdRecoveryStorage(
+          access.dvdRecoveryStorage.readCurrent(),
+        ).blockingReasons[0] ?? null,
+        encodeJobs,
+      }),
     ],
   };
 }
@@ -654,7 +683,15 @@ function activity(access: ConsistentReadAccess, limit: number) {
   ).slice(0, limit);
 }
 
-function readList(access: ConsistentReadAccess, kind: OperationKind, limit: number) {
+function readList(
+  access: ConsistentReadAccess,
+  kind: OperationKind,
+  limit: number,
+  options: Pick<
+    OperationInspectionOptions,
+    "originalsLibraryPath" | "archiveImageOwnership"
+  >,
+) {
   switch (kind) {
     case "optical-drives":
       return access.catalog.listOpticalDrives({ limit }).map(visibleDrive);
@@ -674,7 +711,7 @@ function readList(access: ConsistentReadAccess, kind: OperationKind, limit: numb
       }), ["running"], limit).map(visibleArchiveJob);
     case "archive-recoveries":
       return access.catalog.listArchiveRecoveries({ limit })
-        .map((recovery) => archiveRecoveryOperation(access, recovery));
+        .map((recovery) => archiveRecoveryOperation(access, recovery, options));
     case "original-disc-archives": {
       const archives = access.catalog.listOriginalDiscArchives({ limit });
       const evidenceHeaders = evidenceHeadersForArchives(access, archives);
@@ -803,7 +840,7 @@ function readDetail(
       );
       return recovery === null
         ? null
-        : archiveRecoveryOperation(access, recovery, true);
+        : archiveRecoveryOperation(access, recovery, options, true);
     }
     case "original-disc-archives": {
       const archive = access.catalog.listOriginalDiscArchives({ ids: [id as OriginalDiscArchiveId] })[0];
@@ -1112,7 +1149,7 @@ export function inspectOperations(
   }
   return access.readConsistentSnapshot((snapshot) =>
     options.id === undefined
-      ? { schemaVersion: 1, kind, items: readList(snapshot, kind, limit) }
+      ? { schemaVersion: 1, kind, items: readList(snapshot, kind, limit, options) }
       : {
         schemaVersion: 1,
         kind,

@@ -35,6 +35,11 @@ import {
   type ActiveBoundedProcess,
   type StartNodeAuthorizedBoundedCommandProcessOptions,
 } from "./bounded-child-process.js";
+import {
+  createNodeDvdDriveSpeedController,
+  type DvdDriveSpeedController,
+} from "./dvd-drive-speed.js";
+import type { DvdCopyRunner } from "./dvd-archiver.js";
 
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 const MAX_DIAGNOSTIC_BYTES = 65_536;
@@ -539,6 +544,14 @@ export async function verifyInsertedDvdAgainstSamples(input: {
   };
 }
 
+function isRetryableDeviceContention(error: unknown): boolean {
+  return error instanceof Error && [
+    "DVD archive copy is still active",
+    "DVD archive device is still active",
+    "DVD archive device lock timed out",
+  ].includes(error.message);
+}
+
 export async function pollDvdDiscVerification(input: {
   access: DataAccess;
   reader: DvdVerificationSourceReader;
@@ -546,6 +559,8 @@ export async function pollDvdDiscVerification(input: {
   mediaGenerationObserver: MediaGenerationObserver;
   signal?: AbortSignal;
   archiveImageOwnership?: ArchiveImageOwnership;
+  speedController?: DvdDriveSpeedController;
+  deviceInactivity: Pick<DvdCopyRunner, "withDeviceInactive">;
 }): Promise<boolean> {
   input.access.dvdDiscVerifications.recoverExpiredClaims();
   const claim = input.access.dvdDiscVerifications.claimNext(
@@ -597,7 +612,10 @@ export async function pollDvdDiscVerification(input: {
           : input.access.catalog.listOpticalDrives({
               ids: [inspection.opticalDriveId],
             })[0];
-        if (drive === undefined || claim.startedAt === null) {
+        if (
+          drive === undefined || !drive.isPresent || !drive.isEnabled ||
+          claim.startedAt === null
+        ) {
           throw new Error("DVD Disc Verification insertion is unavailable");
         }
         const inspectionIsCurrent = async () => {
@@ -613,6 +631,67 @@ export async function pollDvdDiscVerification(input: {
             return false;
           }
         };
+        let verificationStartedAtMs = claim.startedAt.getTime();
+        const recovery = input.access.catalog.findArchiveRecoveryById(
+          claim.archiveRecoveryId,
+        );
+        if (
+          recovery !== null &&
+          recovery.attemptId === claim.archiveRecoveryAttemptId &&
+          recovery.speedMode != null &&
+          (
+            recovery.speedRequestResult == null ||
+            recovery.speedRequestResult.attemptId !== recovery.attemptId ||
+            recovery.speedRequestResult.discInspectionId !==
+              claim.discInspectionId
+          )
+        ) {
+          await input.deviceInactivity.withDeviceInactive(
+            drive.devicePath,
+            async () => {
+              if (!await inspectionIsCurrent()) {
+                throw new Error(
+                  "DVD Disc Verification insertion changed before speed request",
+                );
+              }
+              const currentRecovery = input.access.catalog
+                .findArchiveRecoveryById(claim.archiveRecoveryId);
+              if (
+                currentRecovery === null ||
+                currentRecovery.attemptId !== claim.archiveRecoveryAttemptId ||
+                currentRecovery.status !== "eligible" ||
+                currentRecovery.speedMode === null ||
+                currentRecovery.speedMode !== recovery.speedMode ||
+                currentRecovery.work?.verificationId !== claim.id
+              ) {
+                throw new Error(
+                  "Archive Recovery changed before speed request",
+                );
+              }
+              const speedResult = await (
+                input.speedController ?? createNodeDvdDriveSpeedController()
+              ).apply({
+                devicePath: drive.devicePath,
+                mode: currentRecovery.speedMode,
+                signal: insertionSignal,
+              });
+              if (!await inspectionIsCurrent()) {
+                throw new Error(
+                  "DVD Disc Verification insertion changed during speed request",
+                );
+              }
+              assertOwned();
+              input.access.archiveRecoveryWork.recordSpeedRequestResult({
+                archiveRecoveryId: currentRecovery.id,
+                attemptId: currentRecovery.attemptId,
+                discInspectionId: claim.discInspectionId,
+                mode: currentRecovery.speedMode,
+                ...speedResult,
+              });
+              verificationStartedAtMs = Date.now();
+            },
+          );
+        }
         const projectedManifest = input.access.catalog.findDvdSourceSampleManifest(
           claim.originalDiscArchiveId,
         );
@@ -662,7 +741,7 @@ export async function pollDvdDiscVerification(input: {
               };
             },
           },
-          startedAtMs: claim.startedAt.getTime(),
+          startedAtMs: verificationStartedAtMs,
           signal: input.signal,
           insertionIsCurrent: inspectionIsCurrent,
           checkpointIsCurrent,
@@ -693,8 +772,27 @@ export async function pollDvdDiscVerification(input: {
     if (executed === null) {
       throw new Error("DVD Disc Verification checkpoint is unavailable");
     }
-  } catch {
-    input.access.dvdDiscVerifications.fail(claim);
+  } catch (error) {
+    if (input.signal?.aborted || isRetryableDeviceContention(error)) {
+      const current = input.access.dvdDiscVerifications.find(claim.id);
+      try {
+        if (current === null || current.status !== "running") {
+          input.access.dvdDiscVerifications.fail(claim);
+        } else {
+          input.access.dvdDiscVerifications.complete(current, {
+            findings: current.findings,
+            budgetExhausted: current.budgetExhausted,
+            interrupted: true,
+            insertionChanged: false,
+            checkpointChanged: false,
+          });
+        }
+      } catch {
+        input.access.dvdDiscVerifications.fail(claim);
+      }
+    } else {
+      input.access.dvdDiscVerifications.fail(claim);
+    }
   } finally {
     clearInterval(heartbeat);
   }

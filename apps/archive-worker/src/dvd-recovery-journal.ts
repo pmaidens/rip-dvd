@@ -40,12 +40,27 @@ export interface DvdRecoveryJournalMetadata {
   journalDigest: string;
 }
 
+interface DvdRecoveryJournalFaultOptions extends ErrorOptions {
+  storageFault?: boolean;
+}
+
 export class DvdRecoveryJournalFault extends Error {
   override readonly name = "DvdRecoveryJournalFault";
+  readonly storageFault: boolean;
+
+  constructor(message?: string, options?: DvdRecoveryJournalFaultOptions) {
+    super(message, options);
+    this.storageFault = options?.storageFault ?? false;
+  }
 }
 
 function sha256(bytes: Buffer | string): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+function isMissingOrUnsafeEvidencePath(error: unknown): boolean {
+  return error instanceof Error && "code" in error &&
+    ["ENOENT", "ENOTDIR", "ELOOP"].includes(String(error.code));
 }
 
 export function createDvdRecoveryJournalDigest(
@@ -200,7 +215,12 @@ export async function readDvdRecoveryJournal(
     ) {
       throw new DvdRecoveryJournalFault();
     }
-    const raw: unknown = JSON.parse(metadataBytes.toString("utf8"));
+    let raw: unknown;
+    try {
+      raw = JSON.parse(metadataBytes.toString("utf8"));
+    } catch (cause) {
+      throw new DvdRecoveryJournalFault(undefined, { cause });
+    }
     assertMetadata(raw);
     if (canonicalPublicationJson(raw) !== metadataBytes.toString("utf8")) {
       throw new DvdRecoveryJournalFault();
@@ -223,8 +243,18 @@ export async function readDvdRecoveryJournal(
     return { metadata: raw, originalBytes };
   } catch (cause) {
     if (cause instanceof DvdRecoveryJournalFault) throw cause;
-    throw new DvdRecoveryJournalFault(undefined, { cause });
+    throw new DvdRecoveryJournalFault(undefined, {
+      cause,
+      storageFault: !isMissingOrUnsafeEvidencePath(cause),
+    });
   } finally {
-    await descriptor?.close();
+    try {
+      await descriptor?.close();
+    } catch (cause) {
+      throw new DvdRecoveryJournalFault(undefined, {
+        cause,
+        storageFault: true,
+      });
+    }
   }
 }

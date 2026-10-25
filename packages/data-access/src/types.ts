@@ -12,6 +12,8 @@ import type {
   ARCHIVE_RECOVERY_PAUSE_REASONS,
   ARCHIVE_RECOVERY_PASS_DIRECTIONS,
   ARCHIVE_RECOVERY_PASS_OUTCOMES,
+  ARCHIVE_RECOVERY_SPEED_MODES,
+  ARCHIVE_RECOVERY_SPEED_REQUEST_OUTCOMES,
   ARCHIVE_RECOVERY_WORK_STATUSES,
   CATALOG_REVIEW_OUTCOMES,
   DETECTED_DISC_STATUSES,
@@ -89,6 +91,10 @@ export type ArchiveRecoveryStatus =
   (typeof ARCHIVE_RECOVERY_STATUSES)[number];
 export type ArchiveRecoveryPauseReason =
   (typeof ARCHIVE_RECOVERY_PAUSE_REASONS)[number];
+export type ArchiveRecoverySpeedMode =
+  (typeof ARCHIVE_RECOVERY_SPEED_MODES)[number];
+export type ArchiveRecoverySpeedRequestOutcome =
+  (typeof ARCHIVE_RECOVERY_SPEED_REQUEST_OUTCOMES)[number];
 export type ArchiveRecoveryPassDirection =
   (typeof ARCHIVE_RECOVERY_PASS_DIRECTIONS)[number];
 export type ArchiveRecoveryPassOutcome =
@@ -213,6 +219,8 @@ export type ArchiveRecoveryId = DomainId<"ArchiveRecovery">;
 export type ArchiveRecoveryAttemptId = DomainId<"ArchiveRecoveryAttempt">;
 export type ArchiveRecoveryStopOperationId =
   DomainId<"ArchiveRecoveryStopOperation">;
+export type ArchiveRecoveryResumeOperationId =
+  DomainId<"ArchiveRecoveryResumeOperation">;
 export type ArchiveRecoveryClaimToken = DomainId<"ArchiveRecoveryClaim">;
 export type DvdRecoveryReconciliationId =
   DomainId<"DvdRecoveryReconciliation">;
@@ -569,6 +577,12 @@ export interface ArchiveRecovery {
   status: ArchiveRecoveryStatus;
   pauseReason: ArchiveRecoveryPauseReason | null;
   passHistory: readonly ArchiveRecoveryPassSummary[];
+  resumeOperationId: ArchiveRecoveryResumeOperationId | null;
+  resumeRequestedAt: Date | null;
+  resumeCheckpointRevision: number | null;
+  resumeCheckpointDigest: string | null;
+  speedMode: ArchiveRecoverySpeedMode | null;
+  speedRequestResult: ArchiveRecoverySpeedRequestResult | null;
   stopOperationId: ArchiveRecoveryStopOperationId | null;
   stopRequestedAt: Date | null;
   stoppedAt: Date | null;
@@ -576,6 +590,17 @@ export interface ArchiveRecovery {
   work: ArchiveRecoveryWork | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface ArchiveRecoverySpeedRequestResult {
+  archiveRecoveryId: ArchiveRecoveryId;
+  attemptId: ArchiveRecoveryAttemptId;
+  discInspectionId: DiscInspectionId;
+  mode: ArchiveRecoverySpeedMode;
+  attemptedSpeeds: readonly number[];
+  selectedSpeed: number | null;
+  observedSpeed: number | null;
+  outcome: ArchiveRecoverySpeedRequestOutcome;
 }
 
 export interface ArchiveRecoveryPassSummary {
@@ -630,6 +655,15 @@ export interface ArchiveRecoveryStopReceipt extends ArchiveRecovery {
   status: "stopping";
   stopOperationId: ArchiveRecoveryStopOperationId;
   stopRequestedAt: Date;
+}
+
+export interface ArchiveRecoveryResumeReceipt extends ArchiveRecovery {
+  status: "eligible" | "waiting_for_disc";
+  resumeOperationId: ArchiveRecoveryResumeOperationId;
+  resumeRequestedAt: Date;
+  resumeCheckpointRevision: number;
+  resumeCheckpointDigest: string;
+  speedMode: ArchiveRecoverySpeedMode;
 }
 
 export type DvdDiscVerificationStatus =
@@ -800,6 +834,25 @@ export interface ArchiveRecoveryWorkAccess {
     archiveRecoveryId: ArchiveRecoveryId;
     attemptId: ArchiveRecoveryAttemptId;
   }): ArchiveRecoveryStopReceipt;
+  requestResume(input: {
+    mutationKey: string;
+    archiveRecoveryId: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+    checkpointRevision: number;
+    checkpointDigest: string;
+    speedMode: ArchiveRecoverySpeedMode;
+  }): ArchiveRecoveryResumeReceipt;
+  replayResume(input: {
+    mutationKey: string;
+    archiveRecoveryId: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+    checkpointRevision: number;
+    checkpointDigest: string;
+    speedMode: ArchiveRecoverySpeedMode;
+  }): ArchiveRecoveryResumeReceipt | null;
+  activateWaitingResume(): ArchiveRecovery | null;
+  recordSpeedRequestResult(input: ArchiveRecoverySpeedRequestResult):
+    ArchiveRecovery;
   prepareStop(input: {
     archiveRecoveryId: ArchiveRecoveryId;
     attemptId: ArchiveRecoveryAttemptId;
@@ -827,6 +880,7 @@ export interface ArchiveRecoveryWorkAccess {
     claim: ClaimedArchiveRecoveryWork;
     faultCode: ArchiveRecoveryFaultCode;
     retainWork: boolean;
+    storageFault: boolean;
   }): ArchiveRecovery;
   releaseAfterReconciliation(input: {
     archiveRecoveryId: ArchiveRecoveryId;

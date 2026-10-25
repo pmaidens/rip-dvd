@@ -233,6 +233,48 @@ try {
         value: { outcome: "rejected", code: error.code },
       });
     }
+  } else if (workerData.operation === "resume-archive-recovery") {
+    try {
+      const recovery = access.archiveRecoveryWork.requestResume({
+        mutationKey: workerData.mutationKey,
+        archiveRecoveryId: workerData.archiveRecoveryId,
+        attemptId: workerData.attemptId,
+        checkpointRevision: workerData.checkpointRevision,
+        checkpointDigest: workerData.checkpointDigest,
+        speedMode: "normal",
+      });
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: recovery.status, id: recovery.id },
+      });
+    } catch (error) {
+      if (!(error instanceof EncodeWorkConflictError) &&
+        !(error instanceof InvalidStatusTransitionError)) throw error;
+      parentPort.postMessage({
+        type: "result",
+        value: {
+          outcome: "rejected",
+          ...(typeof error.code === "string" ? { code: error.code } : {}),
+        },
+      });
+    }
+  } else if (workerData.operation === "submit-recovery-reconciliation") {
+    try {
+      const reconciliation = access.dvdRecoveryReconciliations.submit({
+        mutationKey: workerData.mutationKey,
+        archiveRecoveryId: workerData.archiveRecoveryId,
+      });
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "queued", id: reconciliation.id },
+      });
+    } catch (error) {
+      if (!(error instanceof InvalidStatusTransitionError)) throw error;
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "rejected" },
+      });
+    }
   } else if (workerData.operation === "complete-catalog-review") {
     try {
       const archive = access.catalog.completeCatalogReview(

@@ -345,8 +345,9 @@ export function describeCatalogReviewWorkflow(
     }];
   const recoveryReasons: CatalogReviewWorkflowReason[] = recovery === null
     ? []
-    : recovery.status === "eligible" || recovery.status === "running" ||
-        recovery.status === "paused"
+    : recovery.status === "eligible" ||
+        recovery.status === "waiting_for_disc" ||
+        recovery.status === "running" || recovery.status === "paused"
     ? [{
       code: "RECOVERY_ACTIVE",
       message:
@@ -460,7 +461,8 @@ export function describeCatalogReviewWorkflow(
     evidenceFormat: "dvd-recovery-evidence-v1",
     facts: {
       saved: archiveJob?.status === "completed",
-      recovering: recovery?.status === "running" ||
+      recovering: recovery?.status === "waiting_for_disc" ||
+        recovery?.status === "running" ||
         recovery?.status === "paused" ||
         recovery?.status === "stopping",
       mapped: mappingState === "mapped",

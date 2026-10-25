@@ -478,6 +478,8 @@ async function reclaimInterruptedPass(input: {
       claim,
       faultCode: stopFaultCode(error),
       retainWork: true,
+      storageFault: error instanceof DvdRecoveryReconciliationFault &&
+        error.storageFault,
     });
     return "faulted";
   }
@@ -550,6 +552,10 @@ export async function pollDvdRecoveryPass(input: {
     storage?.status !== "supported" ||
     storage.facts.mutationProtection.status !== "verified"
   ) return false;
+
+  if (input.access.archiveRecoveryWork.activateWaitingResume() !== null) {
+    return true;
+  }
 
   const interrupted = input.access.archiveRecoveryWork.findNextInterrupted(
     input.workerExecutionId,
@@ -778,6 +784,10 @@ export async function pollDvdRecoveryPass(input: {
               claim,
               faultCode: stopFaultCode(reconciliationError),
               retainWork: true,
+              storageFault:
+                reconciliationError instanceof
+                  DvdRecoveryReconciliationFault &&
+                reconciliationError.storageFault,
             });
           }
         } else {
@@ -806,6 +816,8 @@ export async function pollDvdRecoveryPass(input: {
         : "CONSISTENCY_FAULT",
       retainWork: error instanceof DvdRecoveryBatchFault &&
         error.retainRecoveryWork,
+      storageFault: error instanceof DvdRecoveryBatchFault &&
+        error.storageFault,
     });
   } finally {
     clearInterval(renewalInterval);

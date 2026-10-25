@@ -244,7 +244,7 @@ FROM worker-runtime-base AS archive-worker
 COPY --from=recovery-atomic-probe-builder /usr/local/bin/rip-dvd-recovery-atomic-probe /usr/local/bin/rip-dvd-recovery-atomic-probe
 COPY --from=recovery-atomic-probe-builder /usr/local/bin/rip-dvd-recovery-atomic-write /usr/local/bin/rip-dvd-recovery-atomic-write
 RUN apt-get update \
-  && apt-get install --yes --no-install-recommends handbrake-cli libssl3 lsdvd sg3-utils util-linux \
+  && apt-get install --yes --no-install-recommends eject handbrake-cli libssl3 lsdvd sg3-utils util-linux \
   && rm -rf /var/lib/apt/lists/* \
   && lsblk --json --output PATH,TYPE,TRAN,VENDOR,MODEL,SERIAL >/dev/null \
   && node -e "const { constants } = require('node:fs'); if (!Number.isInteger(constants.O_NONBLOCK)) process.exit(1)"

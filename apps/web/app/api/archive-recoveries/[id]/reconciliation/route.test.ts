@@ -267,7 +267,7 @@ it("keeps wait pending for reconciliation after a faulted Stop", async () => {
 });
 
 async function expectReconciliationBlockedWhileWorkRetained(
-  recoveryStatus: "eligible" | "paused",
+  recoveryStatus: "eligible" | "paused" | "waiting_for_disc",
 ) {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
@@ -289,6 +289,16 @@ async function expectReconciliationBlockedWhileWorkRetained(
       database.prepare(`UPDATE archive_recovery_work
         SET pass_number = 2, pass_direction = 'reverse'
         WHERE archive_recovery_id = ?`).run(recoveryId);
+    }
+    if (recoveryStatus === "waiting_for_disc") {
+      database.prepare(`UPDATE archive_recoveries SET
+        status = 'waiting_for_disc',
+        resume_operation_id = 'synthetic-waiting-resume',
+        resume_requested_at = 2,
+        resume_checkpoint_revision = 1,
+        resume_checkpoint_digest = ?,
+        speed_mode = 'normal'
+        WHERE id = ?`).run(seeded.pointer.currentManifestDigest, recoveryId);
     }
     database.close();
 
@@ -325,7 +335,9 @@ async function expectReconciliationBlockedWhileWorkRetained(
         seeded.recoveryId,
         recoveryStatus === "paused"
           ? "00000000-0000-4000-8000-000000000468"
-          : "00000000-0000-4000-8000-000000000464",
+          : recoveryStatus === "waiting_for_disc"
+            ? "00000000-0000-4000-8000-000000000502"
+            : "00000000-0000-4000-8000-000000000464",
       ),
       seeded.recoveryId,
       () => access,
@@ -338,7 +350,9 @@ async function expectReconciliationBlockedWhileWorkRetained(
       "--key",
       recoveryStatus === "paused"
         ? "00000000-0000-4000-8000-000000000469"
-        : "00000000-0000-4000-8000-000000000465",
+        : recoveryStatus === "waiting_for_disc"
+          ? "00000000-0000-4000-8000-000000000503"
+          : "00000000-0000-4000-8000-000000000465",
     ]);
     expect(web.status).toBe(409);
     expect(cli.exitCode).toBe(2);
@@ -353,7 +367,7 @@ async function expectReconciliationBlockedWhileWorkRetained(
   }
 }
 
-it.each(["eligible", "paused"] as const)(
+it.each(["eligible", "paused", "waiting_for_disc"] as const)(
   "rejects reconciliation while %s Recovery work is retained",
   expectReconciliationBlockedWhileWorkRetained,
 );
