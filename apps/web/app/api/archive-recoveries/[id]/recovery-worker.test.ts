@@ -398,6 +398,11 @@ it("continues a productive pass in reverse and pauses after no progress", async 
           passStartedManifestRevision: null,
           passInitialUnrecoveredSectorCount: null,
           passRecoveredSectorCount: 0,
+          passObservationCount: null,
+          passPositiveIntervalCount: null,
+          passMinimumIntervalMs: null,
+          passMaximumIntervalMs: null,
+          passLastObservedAt: null,
           passCursorLba: null,
         },
       });
@@ -470,6 +475,9 @@ it("continues a productive pass in reverse and pauses after no progress", async 
           passNumber: 2,
           passDirection: "reverse",
           passCursorLba: 101,
+          passObservationCount: 1,
+          passPositiveIntervalCount: 1,
+          passLastObservedAt: expect.any(Date),
         },
       });
   } finally {

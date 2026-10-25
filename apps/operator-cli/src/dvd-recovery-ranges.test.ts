@@ -1,6 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
-import type { ArchiveRecoveryId } from "@rip-dvd/data-access";
+import type {
+  ArchiveRecoveryId,
+  CommittedDvdCheckpointEvidence,
+} from "@rip-dvd/data-access";
 
 import {
   advanceCommittedArchiveEvidence,
@@ -307,6 +310,111 @@ it("fails closed when bounded transition evidence is corrupted", async () => {
   });
 });
 
+it("fails closed when the current no-change observation is corrupted", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 65,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }], false, true);
+  const first = advanceCommittedArchiveEvidence(fixture, seeded.manifest, {
+    startLba: 65,
+    outcome: "failed",
+    publishFilesystemCheckpoint: true,
+  });
+  advanceCommittedArchiveEvidence(fixture, first, {
+    startLba: 65,
+    outcome: "failed",
+    publishFilesystemCheckpoint: true,
+  });
+  withEvidenceGuardsDisabled(fixture.databasePath, (database) => {
+    database.prepare(`
+      UPDATE dvd_archive_recovery_reads
+      SET evidence_digest = ?
+      WHERE from_manifest_revision = 2
+    `).run("0".repeat(64));
+  });
+
+  const access = fixture.openAccess();
+  expect(() => access.catalog.readDvdArchiveRecoveryRangeEvidence(
+    "synthetic-committed-recovery" as ArchiveRecoveryId,
+    { rangeOffset: 0, rangeLimit: 20 },
+  )).toThrow(/evidence digest/i);
+  access.close();
+});
+
+it("fails closed when a bounded transition is detached from its source range", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 70,
+    sectorCount: 2,
+    classification: "skipped_untested",
+  }], false, true);
+  const first = advanceCommittedArchiveEvidence(fixture, seeded.manifest, {
+    startLba: 70,
+    outcome: "failed",
+    publishFilesystemCheckpoint: true,
+  });
+  const second = advanceCommittedArchiveEvidence(fixture, first, {
+    startLba: 70,
+    outcome: "recovered",
+    publishFilesystemCheckpoint: true,
+  });
+  advanceCommittedArchiveEvidence(fixture, second, {
+    startLba: 71,
+    outcome: "failed",
+    publishFilesystemCheckpoint: true,
+  });
+  withEvidenceGuardsDisabled(fixture.databasePath, (database) => {
+    database.prepare(`
+      UPDATE dvd_archive_recovery_reads
+      SET start_lba = 999
+      WHERE from_manifest_revision = 2
+    `).run();
+  });
+
+  const access = fixture.openAccess();
+  expect(() => access.catalog.readDvdArchiveRecoveryRangeEvidence(
+    "synthetic-committed-recovery" as ArchiveRecoveryId,
+    { rangeOffset: 0, rangeLimit: 20 },
+  )).toThrow(/transition|evidence digest/i);
+  access.close();
+});
+
+it("validates the extra bounded row used to report truncated history", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 200,
+    sectorCount: 17,
+    classification: "skipped_untested",
+  }], false, true);
+  let manifest: CommittedDvdCheckpointEvidence = seeded.manifest;
+  for (let index = 0; index < 17; index += 1) {
+    manifest = advanceCommittedArchiveEvidence(fixture, manifest, {
+      startLba: 200 + index,
+      outcome: "failed",
+      publishFilesystemCheckpoint: true,
+    });
+  }
+  withEvidenceGuardsDisabled(fixture.databasePath, (database) => {
+    database.prepare(`
+      UPDATE dvd_archive_evidence_manifests
+      SET manifest_digest = ?
+      WHERE revision = 2
+    `).run("0".repeat(64));
+  });
+
+  const access = fixture.openAccess();
+  expect(() => access.catalog.readDvdArchiveRecoveryRangeEvidence(
+    "synthetic-committed-recovery" as ArchiveRecoveryId,
+    { rangeOffset: 0, rangeLimit: 20 },
+  )).toThrow(/digest/i);
+  access.close();
+});
+
 it("reports qualified current-pass progress through inspect and wait", async () => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date(1_500));
@@ -346,10 +454,13 @@ it("reports qualified current-pass progress through inspect and wait", async () 
       verification_id, claimed_by, claim_token, claimed_at, pass_number,
       pass_direction, pass_started_at, pass_started_manifest_revision,
       pass_initial_unrecovered_sector_count, pass_recovered_sector_count,
+      pass_observation_count, pass_positive_interval_count,
+      pass_minimum_interval_ms, pass_maximum_interval_ms,
+      pass_last_observed_at,
       pass_cursor_lba, created_at, updated_at
     ) SELECT id, original_disc_archive_id, attempt_id, 'claimed', NULL,
       'synthetic-worker', 'synthetic-claim', 1000, 1, 'forward', 1000, 2, 4, 2,
-      102, 1000, 1300
+      2, 2, 100, 200, 1300, 102, 1000, 1300
     FROM archive_recoveries
     WHERE id = 'synthetic-committed-recovery'
   `).run();
@@ -449,6 +560,49 @@ it("reports qualified current-pass progress through inspect and wait", async () 
       },
       history: {
         passes: { completedPassCount: 1, truncated: false },
+      },
+    },
+  });
+});
+
+it("marks upgraded in-flight pass observations unavailable", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 120,
+    sectorCount: 2,
+    classification: "skipped_untested",
+  }], false, true);
+  const sqlite = new DatabaseSync(fixture.databasePath);
+  sqlite.prepare(`
+    INSERT INTO archive_recovery_work (
+      archive_recovery_id, original_disc_archive_id, attempt_id, status,
+      verification_id, claimed_by, claim_token, claimed_at, pass_number,
+      pass_direction, pass_started_at, pass_started_manifest_revision,
+      pass_initial_unrecovered_sector_count, pass_recovered_sector_count,
+      pass_cursor_lba, created_at, updated_at
+    ) SELECT id, original_disc_archive_id, attempt_id, 'claimed', NULL,
+      'synthetic-worker', 'synthetic-claim', 1000, 1, 'forward', 1000, NULL,
+      2, 0, NULL, 1000, 1000
+    FROM archive_recoveries
+    WHERE id = 'synthetic-committed-recovery'
+  `).run();
+  sqlite.prepare(`
+    UPDATE archive_recoveries
+    SET status = 'running', updated_at = 1000
+    WHERE id = 'synthetic-committed-recovery'
+  `).run();
+  sqlite.close();
+
+  const ranges = await fixture.run([
+    "archive-recovery", "ranges", "synthetic-committed-recovery",
+  ]);
+  expect(ranges.result).toMatchObject({
+    progress: {
+      currentPass: {
+        observedSectorCount: null,
+        remainingSectorCount: null,
+        completionEstimate: "unknown",
       },
     },
   });

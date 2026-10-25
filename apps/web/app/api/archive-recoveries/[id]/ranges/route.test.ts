@@ -118,10 +118,13 @@ it("matches changed checkpoints, no-change history, counts, and pass estimates",
       verification_id, claimed_by, claim_token, claimed_at, pass_number,
       pass_direction, pass_started_at, pass_started_manifest_revision,
       pass_initial_unrecovered_sector_count, pass_recovered_sector_count,
+      pass_observation_count, pass_positive_interval_count,
+      pass_minimum_interval_ms, pass_maximum_interval_ms,
+      pass_last_observed_at,
       pass_cursor_lba, created_at, updated_at
     ) SELECT id, original_disc_archive_id, attempt_id, 'claimed', NULL,
       'synthetic-worker', 'synthetic-claim', 1000, 1, 'forward', 1000, 3, 5, 2,
-      101, 1000, 1300
+      2, 2, 100, 200, 1300, 101, 1000, 1300
     FROM archive_recoveries
     WHERE id = 'synthetic-committed-recovery'
   `).run();
@@ -172,7 +175,7 @@ it("matches changed checkpoints, no-change history, counts, and pass estimates",
     const unknownSqlite = new DatabaseSync(fixture.databasePath);
     unknownSqlite.prepare(`
       UPDATE archive_recovery_work
-      SET pass_started_at = 1200, updated_at = 1500
+      SET pass_positive_interval_count = 1, updated_at = 1500
       WHERE archive_recovery_id = 'synthetic-committed-recovery'
     `).run();
     unknownSqlite.close();

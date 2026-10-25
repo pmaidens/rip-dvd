@@ -405,8 +405,10 @@ it("resolves immutable revision-one samples beside a validated later checkpoint"
         INSERT INTO dvd_archive_recovery_reads (
           id, original_disc_archive_id, from_manifest_id,
           from_manifest_revision, start_lba, sector_count, outcome,
+          from_classification, meaningful_transition,
           evidence_digest, created_at
-        ) VALUES (?, ?, ?, 1, 32, 1, 'failed', ?, 2)
+        ) VALUES (?, ?, ?, 1, 32, 1, 'failed',
+          'skipped_untested', 1, ?, 2)
       `).run(
         recoveryReadId,
         archiveId,

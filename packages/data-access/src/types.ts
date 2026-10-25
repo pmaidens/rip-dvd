@@ -615,7 +615,7 @@ export interface DvdArchiveRecoveryRangeEvidence {
     minimumIntervalMs: number | null;
     maximumIntervalMs: number | null;
     lastObservedAt: Date | null;
-  };
+  } | null;
   transitions: {
     items: readonly DvdArchiveRecoveryRangeObservation[];
     totalCount: number | null;
@@ -744,6 +744,11 @@ export interface ArchiveRecoveryWork {
   passStartedManifestRevision: number | null;
   passInitialUnrecoveredSectorCount: number | null;
   passRecoveredSectorCount: number;
+  passObservationCount: number | null;
+  passPositiveIntervalCount: number | null;
+  passMinimumIntervalMs: number | null;
+  passMaximumIntervalMs: number | null;
+  passLastObservedAt: Date | null;
   passCursorLba: number | null;
   admittedDevicePath: string | null;
   admittedDeviceId: string | null;

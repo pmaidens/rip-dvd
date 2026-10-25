@@ -103,10 +103,15 @@ changes, the command returns `available: false` with the current checkpoint
 and progress identities instead of combining pages from different revisions.
 `completionEstimate` is either a minimum and maximum for the current pass or
 `unknown`; it is never an overall recovery estimate. Pass observations are
-bound to the durable checkpoint revision recorded when that pass starts.
+counted incrementally from the durable checkpoint revision recorded when that
+pass starts, so polling does not rescan the checkpoint history. A pass already
+in flight during an upgrade reports unavailable observation counts and an
+`unknown` estimate until the next revision-bound pass starts.
 Transition history is a bounded recent view; `totalCount` is `null` and
 `truncated` is `true` when older meaningful transitions fall outside that
-view.
+view. Immutable read metadata identifies meaningful transitions before the
+bounded evidence validation step, so repeated no-change reads do not make the
+polling query grow with the full recovery history.
 
 # Catalog Review read commands
 

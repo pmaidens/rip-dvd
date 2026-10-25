@@ -279,8 +279,9 @@ export function advanceCommittedArchiveEvidence(
       INSERT INTO dvd_archive_recovery_reads (
         id, original_disc_archive_id, from_manifest_id,
         from_manifest_revision, start_lba, sector_count, outcome,
+        from_classification, meaningful_transition,
         verification_id, disc_confirmation_id, evidence_digest, created_at
-      ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.recoveryReadId,
       recoveryRead.originalDiscArchiveId,
@@ -288,6 +289,11 @@ export function advanceCommittedArchiveEvidence(
       recoveryRead.fromManifestRevision,
       recoveryRead.startLba,
       recoveryRead.outcome,
+      sourceRange.classification,
+      outcome === "recovered" ||
+          sourceRange.classification === "skipped_untested"
+        ? 1
+        : 0,
       recoveryRead.verificationId ?? null,
       recoveryRead.discConfirmationId ?? null,
       recoveryReadEvidenceDigest,

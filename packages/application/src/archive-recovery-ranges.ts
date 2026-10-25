@@ -43,7 +43,8 @@ function currentPassProgress(
     ? nowMs
     : completedPass?.completedAtMs ?? work.updatedAt.getTime();
   const initialSectorCount = work.passInitialUnrecoveredSectorCount;
-  const remainingSectorCount = initialSectorCount === null
+  const remainingSectorCount = initialSectorCount === null ||
+      observations === null
     ? null
     : initialSectorCount - observations.count;
   if (remainingSectorCount !== null && remainingSectorCount < 0) {
@@ -62,6 +63,7 @@ function currentPassProgress(
   if (
     passIsActive &&
     startedAtMs !== null && remainingSectorCount !== null &&
+    observations !== null &&
     remainingSectorCount === 0
   ) {
     completionEstimate = {
@@ -73,6 +75,7 @@ function currentPassProgress(
   } else if (
     passIsActive &&
     startedAtMs !== null && remainingSectorCount !== null &&
+    observations !== null &&
     observations.count >= 2 &&
     observations.positiveIntervalCount === observations.count &&
     observations.minimumIntervalMs !== null &&
@@ -110,7 +113,7 @@ function currentPassProgress(
       : Math.max(0, elapsedEndMs - startedAtMs),
     initialUnrecoveredSectorCount: initialSectorCount,
     recoveredSectorCount: work.passRecoveredSectorCount,
-    observedSectorCount: observations.count,
+    observedSectorCount: observations?.count ?? null,
     remainingSectorCount,
     completionEstimate,
   };

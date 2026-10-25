@@ -1064,6 +1064,56 @@
       "autoincrement": false,
       "default": null,
       "generated": null,
+      "name": "pass_observation_count",
+      "entityType": "columns",
+      "table": "archive_recovery_work"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "pass_positive_interval_count",
+      "entityType": "columns",
+      "table": "archive_recovery_work"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "pass_minimum_interval_ms",
+      "entityType": "columns",
+      "table": "archive_recovery_work"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "pass_maximum_interval_ms",
+      "entityType": "columns",
+      "table": "archive_recovery_work"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "pass_last_observed_at",
+      "entityType": "columns",
+      "table": "archive_recovery_work"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
       "name": "pass_cursor_lba",
       "entityType": "columns",
       "table": "archive_recovery_work"
@@ -2365,6 +2415,26 @@
       "default": null,
       "generated": null,
       "name": "outcome",
+      "entityType": "columns",
+      "table": "dvd_archive_recovery_reads"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'individually_failed'",
+      "generated": null,
+      "name": "from_classification",
+      "entityType": "columns",
+      "table": "dvd_archive_recovery_reads"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "true",
+      "generated": null,
+      "name": "meaningful_transition",
       "entityType": "columns",
       "table": "dvd_archive_recovery_reads"
     },
@@ -8154,6 +8224,28 @@
       "where": null,
       "origin": "manual",
       "name": "dvd_archive_recovery_reads_archive_revision_idx",
+      "entityType": "indexes",
+      "table": "dvd_archive_recovery_reads"
+    },
+    {
+      "columns": [
+        {
+          "value": "original_disc_archive_id",
+          "isExpression": false
+        },
+        {
+          "value": "meaningful_transition",
+          "isExpression": false
+        },
+        {
+          "value": "from_manifest_revision",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "dvd_archive_recovery_reads_archive_transition_revision_idx",
       "entityType": "indexes",
       "table": "dvd_archive_recovery_reads"
     },

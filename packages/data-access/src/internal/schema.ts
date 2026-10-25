@@ -120,6 +120,7 @@ import type {
   DvdTitleIdentitySelectedPathEntry,
   DvdTitleBadSectorCount,
   DvdArchiveEvidenceFormat,
+  DvdUnrecoveredSourceClassification,
   DvdUnrecoveredSourceRange,
   DvdDiscVerificationClaimToken,
   DvdDiscVerificationId,
@@ -1707,6 +1708,14 @@ export const dvdArchiveRecoveryReads = sqliteTable(
     startLba: integer("start_lba").notNull(),
     sectorCount: integer("sector_count").notNull(),
     outcome: text("outcome", { enum: ["recovered", "failed"] }).notNull(),
+    fromClassification: text("from_classification", {
+      enum: ["skipped_untested", "individually_failed"],
+    }).$type<DvdUnrecoveredSourceClassification>()
+      .notNull()
+      .default("individually_failed"),
+    meaningfulTransition: integer("meaningful_transition", {
+      mode: "boolean",
+    }).notNull().default(true),
     verificationId: text("verification_id")
       .$type<DvdDiscVerificationId>()
       .references(() => dvdDiscVerifications.id, { onDelete: "restrict" }),
@@ -1719,6 +1728,11 @@ export const dvdArchiveRecoveryReads = sqliteTable(
   (table) => [
     index("dvd_archive_recovery_reads_archive_revision_idx").on(
       table.originalDiscArchiveId,
+      table.fromManifestRevision,
+    ),
+    index("dvd_archive_recovery_reads_archive_transition_revision_idx").on(
+      table.originalDiscArchiveId,
+      table.meaningfulTransition,
       table.fromManifestRevision,
     ),
     index("dvd_archive_recovery_reads_confirmation_outcome_lba_idx").on(
@@ -1850,6 +1864,13 @@ export const archiveRecoveryWork = sqliteTable(
     passRecoveredSectorCount: integer("pass_recovered_sector_count")
       .notNull()
       .default(0),
+    passObservationCount: integer("pass_observation_count"),
+    passPositiveIntervalCount: integer("pass_positive_interval_count"),
+    passMinimumIntervalMs: integer("pass_minimum_interval_ms"),
+    passMaximumIntervalMs: integer("pass_maximum_interval_ms"),
+    passLastObservedAt: integer("pass_last_observed_at", {
+      mode: "timestamp_ms",
+    }),
     passCursorLba: integer("pass_cursor_lba"),
     admittedDevicePath: text("admitted_device_path"),
     admittedDeviceId: text("admitted_device_id"),
