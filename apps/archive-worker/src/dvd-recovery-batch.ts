@@ -384,21 +384,36 @@ async function pathsFor(options: DvdRecoveryBatchOptions): Promise<RecoveryPaths
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)) {
     throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT");
   }
+  let root;
   try {
-    const root = await realpath(options.originalsLibraryPath);
-    const directory = join(root, ".dvd-evidence", id);
-    const image = join(root, `${id}.iso`);
-    if (await realpath(directory) !== directory) throw new Error("Evidence path changed");
-    return {
-      root,
-      directory,
-      image,
-      journal: join(directory, DVD_RECOVERY_JOURNAL_NAME),
-      pointer: join(directory, "checkpoint.json"),
-    };
+    root = await realpath(options.originalsLibraryPath);
   } catch (cause) {
-    throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT", { cause });
+    throw new DvdRecoveryBatchFault("STORAGE_UNSUPPORTED", {
+      cause,
+      storageFault: true,
+    });
   }
+  const directory = join(root, ".dvd-evidence", id);
+  const image = join(root, `${id}.iso`);
+  let resolvedDirectory;
+  try {
+    resolvedDirectory = await realpath(directory);
+  } catch (cause) {
+    throw new DvdRecoveryBatchFault("STORAGE_UNSUPPORTED", {
+      cause,
+      storageFault: true,
+    });
+  }
+  if (resolvedDirectory !== directory) {
+    throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT");
+  }
+  return {
+    root,
+    directory,
+    image,
+    journal: join(directory, DVD_RECOVERY_JOURNAL_NAME),
+    pointer: join(directory, "checkpoint.json"),
+  };
 }
 
 async function step(
@@ -447,19 +462,43 @@ async function readImageVersion(
   expected: { filesystemIdentity: string; mtimeNs: string },
   sizeBytes: number,
 ): Promise<{ descriptor: Awaited<ReturnType<typeof open>>; filesystemIdentity: string; mtimeNs: string }> {
-  const descriptor = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const descriptor = await open(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW,
+  ).catch((cause) => {
+    throw new DvdRecoveryBatchFault("IMAGE_SYNC_FAILED", {
+      cause,
+      storageFault: true,
+    });
+  });
   try {
-    const stat = await descriptor.stat({ bigint: true });
-    const named = await lstat(path, { bigint: true });
+    let stat;
+    let named;
+    try {
+      stat = await descriptor.stat({ bigint: true });
+      named = await lstat(path, { bigint: true });
+    } catch (cause) {
+      throw new DvdRecoveryBatchFault("IMAGE_SYNC_FAILED", {
+        cause,
+        storageFault: true,
+      });
+    }
     const filesystemIdentity = `${stat.dev}:${stat.ino}`;
     const mtimeNs = stat.mtimeNs.toString();
     if (!stat.isFile() || named.isSymbolicLink() || stat.dev !== named.dev || stat.ino !== named.ino ||
       stat.size !== BigInt(sizeBytes) || filesystemIdentity !== expected.filesystemIdentity || mtimeNs !== expected.mtimeNs) {
-      throw new Error("Archive image version changed");
+      throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT");
     }
     return { descriptor, filesystemIdentity, mtimeNs };
   } catch (error) {
-    await descriptor.close();
+    try {
+      await descriptor.close();
+    } catch (cause) {
+      throw new DvdRecoveryBatchFault("IMAGE_SYNC_FAILED", {
+        cause,
+        storageFault: true,
+      });
+    }
     throw error;
   }
 }
@@ -902,13 +941,37 @@ async function runOwnedBatch(
       byteCount > DVD_RECOVERY_JOURNAL_PAYLOAD_BYTES) {
       throw new DvdRecoveryBatchFault("JOURNAL_CAPACITY_INSUFFICIENT");
     }
-    const beforeVersion = await readImageVersion(paths.image, current.image, current.boundaryPublishedSizeBytes)
-      .catch((cause) => { throw new DvdRecoveryBatchFault("CONSISTENCY_FAULT", { cause }); });
+    const beforeVersion = await readImageVersion(
+      paths.image,
+      current.image,
+      current.boundaryPublishedSizeBytes,
+    );
     const before = Buffer.alloc(byteCount);
     try {
-      const read = await beforeVersion.descriptor.read(before, 0, byteCount, startByte);
-      if (read.bytesRead !== byteCount) throw new Error("Protected image read was partial");
-    } finally { await beforeVersion.descriptor.close(); }
+      const read = await beforeVersion.descriptor.read(
+        before,
+        0,
+        byteCount,
+        startByte,
+      );
+      if (read.bytesRead !== byteCount) {
+        throw new Error("Protected image read was partial");
+      }
+    } catch (cause) {
+      throw new DvdRecoveryBatchFault("IMAGE_SYNC_FAILED", {
+        cause,
+        storageFault: true,
+      });
+    } finally {
+      try {
+        await beforeVersion.descriptor.close();
+      } catch (cause) {
+        throw new DvdRecoveryBatchFault("IMAGE_SYNC_FAILED", {
+          cause,
+          storageFault: true,
+        });
+      }
+    }
     const after = Buffer.from(before);
     options.observation.bytes.copy(after, sectorStart - startByte);
     protectedRanges = Array.from(

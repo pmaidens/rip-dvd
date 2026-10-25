@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import {
   canonicalPublicationJson,
+  DvdCheckpointReadFault,
   readDvdCheckpointForReconciliation,
   readDvdRecoveryManifestForReconciliation,
   verifyDvdCheckpointImage,
@@ -28,6 +29,7 @@ import {
 } from "./dvd-recovery-batch.js";
 import {
   DVD_RECOVERY_JOURNAL_NAME,
+  DvdRecoveryJournalFault,
   readDvdRecoveryJournal,
   type DvdRecoveryJournalMetadata,
 } from "./dvd-recovery-journal.js";
@@ -44,14 +46,20 @@ export type DvdRecoveryReconciliationFaultCode =
   | "WRITER_NOT_QUIESCENT"
   | "STORAGE_UNSUPPORTED";
 
+interface DvdRecoveryReconciliationFaultOptions extends ErrorOptions {
+  storageFault?: boolean;
+}
+
 export class DvdRecoveryReconciliationFault extends Error {
   override readonly name = "DvdRecoveryReconciliationFault";
+  readonly storageFault: boolean;
 
   constructor(
     readonly code: DvdRecoveryReconciliationFaultCode,
-    options?: ErrorOptions,
+    options?: DvdRecoveryReconciliationFaultOptions,
   ) {
     super(code, options);
+    this.storageFault = options?.storageFault ?? false;
   }
 }
 
@@ -109,15 +117,55 @@ function sameCheckpoint(
     left.manifestDigest === right.manifestDigest;
 }
 
+function checkpointVerificationFault(
+  cause: unknown,
+): DvdRecoveryReconciliationFault {
+  return new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
+    cause,
+    storageFault: cause instanceof DvdCheckpointReadFault &&
+      cause.storageFault,
+  });
+}
+
 async function syncDirectory(path: string): Promise<void> {
   const descriptor = await open(
     path,
     constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
-  );
+  ).catch((cause) => {
+    throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
+      cause,
+      storageFault: true,
+    });
+  });
   try {
-    await descriptor.sync();
+    try {
+      await descriptor.sync();
+    } catch (cause) {
+      throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
+        cause,
+        storageFault: true,
+      });
+    }
   } finally {
-    await descriptor.close();
+    try {
+      await descriptor.close();
+    } catch (cause) {
+      throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
+        cause,
+        storageFault: true,
+      });
+    }
+  }
+}
+
+async function removeFile(path: string): Promise<void> {
+  try {
+    await unlink(path);
+  } catch (cause) {
+    throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
+      cause,
+      storageFault: true,
+    });
   }
 }
 
@@ -203,10 +251,24 @@ async function verifyProtectedBytes(input: {
   const descriptor = await open(
     input.imagePath,
     constants.O_RDONLY | constants.O_NOFOLLOW,
-  );
+  ).catch((cause) => {
+    throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
+      cause,
+      storageFault: true,
+    });
+  });
   try {
-    const stat = await descriptor.stat({ bigint: true });
-    const named = await lstat(input.imagePath, { bigint: true });
+    let stat;
+    let named;
+    try {
+      stat = await descriptor.stat({ bigint: true });
+      named = await lstat(input.imagePath, { bigint: true });
+    } catch (cause) {
+      throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
+        cause,
+        storageFault: true,
+      });
+    }
     if (
       !stat.isFile() || named.isSymbolicLink() ||
       stat.dev !== named.dev || stat.ino !== named.ino ||
@@ -218,14 +280,24 @@ async function verifyProtectedBytes(input: {
     const states: Array<"before" | "after"> = [];
     for (const range of input.journal.protectedRanges) {
       const bytes = Buffer.alloc(range.byteCount);
-      const read = await descriptor.read(
-        bytes,
-        0,
-        bytes.length,
-        range.startByte,
-      );
+      let read;
+      try {
+        read = await descriptor.read(
+          bytes,
+          0,
+          bytes.length,
+          range.startByte,
+        );
+      } catch (cause) {
+        throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
+          cause,
+          storageFault: true,
+        });
+      }
       if (read.bytesRead !== bytes.length) {
-        throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT");
+        throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
+          storageFault: true,
+        });
       }
       const digest = sha256(bytes);
       if (digest === range.beforeDigest) states.push("before");
@@ -234,7 +306,14 @@ async function verifyProtectedBytes(input: {
     }
     return states;
   } finally {
-    await descriptor.close();
+    try {
+      await descriptor.close();
+    } catch (cause) {
+      throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
+        cause,
+        storageFault: true,
+      });
+    }
   }
 }
 
@@ -242,7 +321,9 @@ function recoveryStorageProtection(access: DataAccess) {
   const storage = access.dvdRecoveryStorage.readCurrent();
   const protection = storage?.facts.mutationProtection;
   if (storage?.status !== "supported" || protection?.status !== "verified") {
-    throw new DvdRecoveryReconciliationFault("STORAGE_UNSUPPORTED");
+    throw new DvdRecoveryReconciliationFault("STORAGE_UNSUPPORTED", {
+      storageFault: true,
+    });
   }
   return protection;
 }
@@ -266,7 +347,9 @@ async function rollbackUncommittedBatch(input: {
   const protection = recoveryStorageProtection(options.access);
   const writer = options.atomicWriter ?? nodeDvdRecoveryAtomicWriter;
   if (writer.restoreVersion === undefined) {
-    throw new DvdRecoveryReconciliationFault("STORAGE_UNSUPPORTED");
+    throw new DvdRecoveryReconciliationFault("STORAGE_UNSUPPORTED", {
+      storageFault: true,
+    });
   }
   let actualProtection;
   try {
@@ -276,7 +359,10 @@ async function rollbackUncommittedBatch(input: {
       ownershipDescriptor: ownership.descriptor,
     });
   } catch (cause) {
-    throw new DvdRecoveryReconciliationFault("STORAGE_UNSUPPORTED", { cause });
+    throw new DvdRecoveryReconciliationFault("STORAGE_UNSUPPORTED", {
+      cause,
+      storageFault: true,
+    });
   }
   if (
     actualProtection.contract !== protection.contract ||
@@ -285,7 +371,9 @@ async function rollbackUncommittedBatch(input: {
     journal.metadata.protectedRanges.some((range) =>
       range.unitBytes !== protection.unitBytes)
   ) {
-    throw new DvdRecoveryReconciliationFault("STORAGE_UNSUPPORTED");
+    throw new DvdRecoveryReconciliationFault("STORAGE_UNSUPPORTED", {
+      storageFault: true,
+    });
   }
   await boundary(options, ownership, "rollback", "rolling_back", async () => {
     for (let index = 0; index < journal.metadata.protectedRanges.length; index += 1) {
@@ -308,14 +396,16 @@ async function rollbackUncommittedBatch(input: {
       } catch (cause) {
         throw new DvdRecoveryReconciliationFault(
           "CONSISTENCY_FAULT",
-          { cause },
+          { cause, storageFault: true },
         );
       }
       if (
         written.bytesWritten !== range.byteCount ||
         written.unitBytes !== range.unitBytes
       ) {
-        throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT");
+        throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
+          storageFault: true,
+        });
       }
     }
   });
@@ -325,16 +415,24 @@ async function rollbackUncommittedBatch(input: {
     "rollback_sync",
     "rolling_back",
     async () => {
+      let restored;
       try {
-        const restored = writer.restoreVersion!({
+        restored = writer.restoreVersion!({
           imagePath,
           filesystemIdentity: current.image.filesystemIdentity,
           ownershipDescriptor: ownership.descriptor,
           mtimeNs: current.image.mtimeNs,
         });
-        if (restored.mtimeNs !== current.image.mtimeNs) {
-          throw new Error("Image version differs after rollback");
-        }
+      } catch (cause) {
+        throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
+          cause,
+          storageFault: true,
+        });
+      }
+      if (restored.mtimeNs !== current.image.mtimeNs) {
+        throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT");
+      }
+      try {
         await verifyDvdCheckpointImage(
           options.access.catalog.listOriginalDiscArchives({
             ids: [options.originalDiscArchiveId],
@@ -342,10 +440,7 @@ async function rollbackUncommittedBatch(input: {
           current,
         );
       } catch (cause) {
-        throw new DvdRecoveryReconciliationFault(
-          "CONSISTENCY_FAULT",
-          { cause },
-        );
+        throw checkpointVerificationFault(cause);
       }
     },
   );
@@ -356,11 +451,11 @@ async function rollbackUncommittedBatch(input: {
   let uncommittedManifest: "absent" | "removed" = "absent";
   await boundary(options, ownership, "cleanup", "cleaning_up", async () => {
     if (input.nextManifest !== null) {
-      await unlink(nextManifestPath);
+      await removeFile(nextManifestPath);
       uncommittedManifest = "removed";
       await syncDirectory(directory);
     }
-    await unlink(join(directory, DVD_RECOVERY_JOURNAL_NAME));
+    await removeFile(join(directory, DVD_RECOVERY_JOURNAL_NAME));
     await syncDirectory(directory);
   });
   return { journal: "removed", uncommittedManifest };
@@ -480,10 +575,10 @@ async function runOwnedReconciliation(
     try {
       await verifyDvdCheckpointImage(archive, authoritative);
     } catch (cause) {
-      throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", { cause });
+      throw checkpointVerificationFault(cause);
     }
     await boundary(options, ownership, "cleanup", "cleaning_up", async () => {
-      await unlink(join(
+      await removeFile(join(
         inspected.directory,
         `recovery-manifest-${uncommittedManifest.revision}.json`,
       ));
@@ -526,7 +621,7 @@ async function runOwnedReconciliation(
   try {
     await verifyDvdCheckpointImage(archive, authoritative);
   } catch (cause) {
-    throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", { cause });
+    throw checkpointVerificationFault(cause);
   }
   let projectionAfter = projectionBefore;
   let projected = false;
@@ -554,7 +649,7 @@ async function runOwnedReconciliation(
   let journalResult: "absent" | "removed" = "absent";
   if (journal !== null) {
     await boundary(options, ownership, "cleanup", "cleaning_up", async () => {
-      await unlink(journalPath);
+      await removeFile(journalPath);
       await syncDirectory(inspected.directory);
     });
     journalResult = "removed";
@@ -611,6 +706,15 @@ export async function reconcileDvdRecoveryCheckpoint(
     return result;
   } catch (cause) {
     if (cause instanceof DvdRecoveryReconciliationFault) throw cause;
+    if (cause instanceof DvdCheckpointReadFault) {
+      throw checkpointVerificationFault(cause);
+    }
+    if (cause instanceof DvdRecoveryJournalFault) {
+      throw new DvdRecoveryReconciliationFault("CONSISTENCY_FAULT", {
+        cause,
+        storageFault: cause.storageFault,
+      });
+    }
     if (cause instanceof ArchiveImageOwnershipError) {
       throw new DvdRecoveryReconciliationFault(cause.code, { cause });
     }

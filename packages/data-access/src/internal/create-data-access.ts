@@ -2260,7 +2260,6 @@ export function createDataAccessInternal(
       if (evaluated?.outcome === "match") return;
       transaction.update(archiveRecoveries).set({
         status: "waiting_for_disc",
-        speedRequestResult: null,
         updatedAt: timestamp,
       }).where(and(
         eq(archiveRecoveries.id, recovery.id),

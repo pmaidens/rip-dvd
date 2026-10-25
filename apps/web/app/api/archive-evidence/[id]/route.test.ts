@@ -330,6 +330,49 @@ it("rejects a recovery batch without a current durable work claim", async () => 
   }
 }, RECOVERY_TEST_TIMEOUT_MS);
 
+it("classifies a pre-journal evidence lookup failure as a storage fault", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const saved = await seedCommittedArchiveEvidence(fixture, [{
+    startLba: 10,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  const writeAuthority = prepareEligibleRecovery(fixture, saved.archive.id, [{
+    startLba: 10,
+    sectorCount: 1,
+  }]);
+  const access = fixture.openAccess();
+  const unavailableDirectory = `${saved.directory}.unavailable`;
+  try {
+    recordSupportedRecoveryStorage(access);
+    const recoveryWorkClaim = claimRecovery(access, saved.archive.id);
+    renameSync(saved.directory, unavailableDirectory);
+    await expect(commitDvdRecoveryBatch({
+      access,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      originalDiscArchiveId: saved.archive.id,
+      recoveryWorkClaim,
+      writeAuthority,
+      observation: {
+        startLba: 10,
+        outcome: "recovered",
+        bytes: Buffer.alloc(2_048, 0x61),
+      },
+      atomicWriter: syntheticAtomicWriter,
+    })).rejects.toMatchObject({
+      code: "STORAGE_UNSUPPORTED",
+      storageFault: true,
+      retainRecoveryWork: false,
+    });
+  } finally {
+    if (existsSync(unavailableDirectory)) {
+      renameSync(unavailableDirectory, saved.directory);
+    }
+    access.close();
+    fixture.dispose();
+  }
+}, RECOVERY_TEST_TIMEOUT_MS);
+
 it("rejects a recovery batch whose durable claim is released before mutation", async () => {
   const fixture = createOperatorWorkflowFixture();
   const saved = await seedCommittedArchiveEvidence(fixture, [{

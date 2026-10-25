@@ -79,6 +79,7 @@ await runConfiguredAsyncWorker(
         signal: workers.signal,
       })), stopOnFailure(runDvdDiscVerificationWorker({
         access,
+        deviceInactivity: copyRunner,
         intervalMs: config.workerPollIntervalMs,
         log,
         signal: workers.signal,

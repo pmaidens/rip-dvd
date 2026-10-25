@@ -1,5 +1,6 @@
 import type { DataAccess } from "@rip-dvd/data-access";
 
+import type { DvdCopyRunner } from "./dvd-archiver.js";
 import { runDurableWorkPoller } from "./durable-work-poller.js";
 import {
   createNodeDvdVerificationSourceReader,
@@ -24,6 +25,7 @@ export async function runDvdDiscVerificationWorker(input: {
   reader?: DvdVerificationSourceReader;
   mediaGenerationObserver?: MediaGenerationObserver;
   speedController?: DvdDriveSpeedController;
+  deviceInactivity: Pick<DvdCopyRunner, "withDeviceInactive">;
 }): Promise<void> {
   const reader = input.reader ?? createNodeDvdVerificationSourceReader();
   const mediaGenerationObserver = input.mediaGenerationObserver ??
@@ -40,6 +42,7 @@ export async function runDvdDiscVerificationWorker(input: {
       workerExecutionId: input.workerExecutionId,
       mediaGenerationObserver,
       speedController,
+      deviceInactivity: input.deviceInactivity,
       signal: input.signal,
     }),
     pollFailureMessage: "DVD Disc Verification worker poll failed.",

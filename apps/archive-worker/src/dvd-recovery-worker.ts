@@ -479,7 +479,7 @@ async function reclaimInterruptedPass(input: {
       faultCode: stopFaultCode(error),
       retainWork: true,
       storageFault: error instanceof DvdRecoveryReconciliationFault &&
-        error.code === "STORAGE_UNSUPPORTED",
+        error.storageFault,
     });
     return "faulted";
   }
@@ -787,7 +787,7 @@ export async function pollDvdRecoveryPass(input: {
               storageFault:
                 reconciliationError instanceof
                   DvdRecoveryReconciliationFault &&
-                reconciliationError.code === "STORAGE_UNSUPPORTED",
+                reconciliationError.storageFault,
             });
           }
         } else {

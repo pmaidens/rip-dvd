@@ -46,6 +46,15 @@ import { createOperationsResponse } from "../../operations/route.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 
+const immediateDeviceInactivity = {
+  async withDeviceInactive(
+    _devicePath: string,
+    mutation: () => void | Promise<void>,
+  ) {
+    await mutation();
+  },
+};
+
 function syntheticDeviceIdentity(devicePath: string) {
   return { devicePath, deviceId: "2049", inode: "7" };
 }
@@ -367,9 +376,17 @@ it("applies and records an explicit Resume speed before verification reads", asy
     return { outcome: "readable", bytes };
   });
   const access = fixture.openAccess();
+  const withDeviceInactive = vi.fn(async (
+    _devicePath: string,
+    mutation: () => void | Promise<void>,
+  ) => {
+    expect(speedController.apply).not.toHaveBeenCalled();
+    await mutation();
+  });
   try {
     expect(await pollDvdDiscVerification({
       access,
+      deviceInactivity: { withDeviceInactive },
       reader: source.reader,
       workerExecutionId: "synthetic-resume-speed-verifier",
       mediaGenerationObserver: {
@@ -379,6 +396,10 @@ it("applies and records an explicit Resume speed before verification reads", asy
       },
       speedController,
     })).toBe(true);
+    expect(withDeviceInactive).toHaveBeenCalledWith(
+      seeded.verificationDrive.devicePath,
+      expect.any(Function),
+    );
     expect(speedController.apply).toHaveBeenCalledOnce();
     expect(speedController.apply.mock.invocationCallOrder[0])
       .toBeLessThan(source.start.mock.invocationCallOrder[0]!);
@@ -397,6 +418,7 @@ it("applies and records an explicit Resume speed before verification reads", asy
       });
     expect(await pollDvdDiscVerification({
       access,
+      deviceInactivity: immediateDeviceInactivity,
       reader: source.reader,
       workerExecutionId: "synthetic-resume-speed-verifier-restart",
       mediaGenerationObserver: {
@@ -407,6 +429,68 @@ it("applies and records an explicit Resume speed before verification reads", asy
       speedController,
     })).toBe(false);
     expect(speedController.apply).toHaveBeenCalledOnce();
+  } finally {
+    access.close();
+  }
+});
+
+it("does not apply Resume speed after the insertion changes under drive exclusion", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`UPDATE archive_recoveries SET
+    status = 'paused', pause_reason = 'no_progress', updated_at = updated_at + 1
+    WHERE id = ?`).run(seeded.recoveryId);
+  database.close();
+  expect((await fixture.run([
+    "archive-recovery", "resume", seeded.recoveryId,
+    "--key", "00000000-0000-4000-8000-000000000625",
+    "--attempt-id", seeded.attemptId,
+    "--checkpoint-revision", String(seeded.pointer.currentManifestRevision),
+    "--checkpoint-digest", seeded.pointer.currentManifestDigest,
+    "--speed-mode", "low",
+  ])).exitCode).toBe(0);
+  const speedController = {
+    apply: vi.fn(async () => ({
+      attemptedSpeeds: [4],
+      selectedSpeed: 4,
+      observedSpeed: 4,
+      outcome: "accepted" as const,
+    })),
+  };
+  const source = immediateVerificationReader(() => ({
+    outcome: "readable",
+    bytes: Buffer.alloc(32 * 2_048),
+  }));
+  const access = fixture.openAccess();
+  const withDeviceInactive = vi.fn(async (
+    _devicePath: string,
+    mutation: () => void | Promise<void>,
+  ) => {
+    access.discInspections.clearCurrent({
+      opticalDriveId: seeded.verificationDrive.id,
+    });
+    await mutation();
+  });
+  try {
+    expect(await pollDvdDiscVerification({
+      access,
+      deviceInactivity: { withDeviceInactive },
+      reader: source.reader,
+      workerExecutionId: "synthetic-stale-resume-speed-verifier",
+      mediaGenerationObserver: {
+        async observe() {
+          return "synthetic-verification-generation";
+        },
+      },
+      speedController,
+    })).toBe(true);
+    expect(withDeviceInactive).toHaveBeenCalledOnce();
+    expect(speedController.apply).not.toHaveBeenCalled();
+    expect(source.start).not.toHaveBeenCalled();
+    expect(access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({ speedRequestResult: null });
   } finally {
     access.close();
   }
@@ -457,6 +541,7 @@ it("retries Resume verification after speed selection is cancelled", async () =>
   try {
     expect(await pollDvdDiscVerification({
       access,
+      deviceInactivity: immediateDeviceInactivity,
       reader: source.reader,
       workerExecutionId: "synthetic-cancelled-speed-verifier",
       mediaGenerationObserver: {
@@ -483,6 +568,7 @@ it("retries Resume verification after speed selection is cancelled", async () =>
 
     expect(await pollDvdDiscVerification({
       access,
+      deviceInactivity: immediateDeviceInactivity,
       reader: source.reader,
       workerExecutionId: "synthetic-restarted-speed-verifier",
       mediaGenerationObserver: {
@@ -742,6 +828,7 @@ it("faults a continuation when its source is removed between passes", async () =
     }));
     expect(await pollDvdDiscVerification({
       access: input.access,
+      deviceInactivity: immediateDeviceInactivity,
       reader: verificationSource.reader,
       workerExecutionId: "synthetic-removed-continuation-verifier",
       mediaGenerationObserver: {
@@ -2418,6 +2505,70 @@ it("reconciles an interrupted batch before restart reclaims the pass", async () 
   }
 }, 20_000);
 
+it("pauses a crashed claim when rollback image I/O has a storage fault", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{
+    startLba: 209,
+    sectorCount: 1,
+    classification: "skipped_untested",
+  }]);
+  const authority = await completeVerification(fixture, seeded);
+  const crashedAccess = fixture.openAccess();
+  const crashed = crashedAccess.archiveRecoveryWork
+    .claimNextVerifiedCandidate("synthetic-storage-crash-worker");
+  if (crashed === null) throw new Error("Expected crashed recovery claim");
+  await expect(commitDvdRecoveryBatch({
+    access: crashedAccess,
+    originalsLibraryPath: fixture.originalsLibraryPath,
+    originalDiscArchiveId: seeded.archive.id,
+    recoveryWorkClaim: crashed.claim,
+    writeAuthority: authority,
+    observation: {
+      startLba: 209,
+      outcome: "recovered",
+      bytes: Buffer.alloc(2_048, 0x6d),
+    },
+    atomicWriter: syntheticAtomicWriter,
+    fault(point) {
+      if (point === "after:write") {
+        throw new Error("Synthetic process loss after image write");
+      }
+    },
+  })).rejects.toThrow("CONSISTENCY_FAULT");
+  crashedAccess.close();
+  const crashedDatabase = new DatabaseSync(fixture.databasePath);
+  crashedDatabase.prepare(`UPDATE archive_recovery_work
+    SET claimed_at = 0
+    WHERE archive_recovery_id = ?`).run(seeded.recoveryId);
+  crashedDatabase.close();
+
+  const source = immediateReader(() => {
+    throw new Error("Rollback must finish before another source read");
+  });
+  const input = pollInput(fixture, source.reader);
+  input.workerExecutionId = "synthetic-storage-crash-restart-worker";
+  input.atomicWriter = {
+    ...syntheticAtomicWriter,
+    write() {
+      throw new Error("Synthetic rollback image I/O failure");
+    },
+  };
+  try {
+    expect(await pollDvdRecoveryPass(input)).toBe(true);
+    expect(source.start).not.toHaveBeenCalled();
+    expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
+      .toMatchObject({
+        status: "paused",
+        pauseReason: "storage_fault",
+        faultCode: null,
+        work: expect.objectContaining({ status: "claimed" }),
+      });
+  } finally {
+    input.access.close();
+  }
+}, 20_000);
+
 it("finishes a durable Stop after a worker restart without another read", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
@@ -3076,6 +3227,7 @@ it("starts no further verification read after Stop commits", async () => {
   try {
     const polling = pollDvdDiscVerification({
       access,
+      deviceInactivity: immediateDeviceInactivity,
       reader: { start },
       workerExecutionId: "synthetic-verification-stop-worker",
       mediaGenerationObserver: {
@@ -3155,6 +3307,7 @@ it("quiesces a verification read when admission fails after start", async () => 
 
     const polling = pollDvdDiscVerification({
       access,
+      deviceInactivity: immediateDeviceInactivity,
       reader: { start },
       workerExecutionId: "synthetic-verification-admission-worker",
       mediaGenerationObserver: {

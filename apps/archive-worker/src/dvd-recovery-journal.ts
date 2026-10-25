@@ -40,8 +40,18 @@ export interface DvdRecoveryJournalMetadata {
   journalDigest: string;
 }
 
+interface DvdRecoveryJournalFaultOptions extends ErrorOptions {
+  storageFault?: boolean;
+}
+
 export class DvdRecoveryJournalFault extends Error {
   override readonly name = "DvdRecoveryJournalFault";
+  readonly storageFault: boolean;
+
+  constructor(message?: string, options?: DvdRecoveryJournalFaultOptions) {
+    super(message, options);
+    this.storageFault = options?.storageFault ?? false;
+  }
 }
 
 function sha256(bytes: Buffer | string): string {
@@ -223,8 +233,18 @@ export async function readDvdRecoveryJournal(
     return { metadata: raw, originalBytes };
   } catch (cause) {
     if (cause instanceof DvdRecoveryJournalFault) throw cause;
-    throw new DvdRecoveryJournalFault(undefined, { cause });
+    throw new DvdRecoveryJournalFault(undefined, {
+      cause,
+      storageFault: true,
+    });
   } finally {
-    await descriptor?.close();
+    try {
+      await descriptor?.close();
+    } catch (cause) {
+      throw new DvdRecoveryJournalFault(undefined, {
+        cause,
+        storageFault: true,
+      });
+    }
   }
 }

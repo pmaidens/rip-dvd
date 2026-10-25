@@ -444,6 +444,19 @@ it("allows explicit confirmation after Resume verification mismatch", async () =
   const workerExecutionId = "synthetic-resume-confirmation-worker";
   const claim = access.dvdDiscVerifications.claimNext(workerExecutionId);
   if (claim === null) throw new Error("Expected Resume verification claim");
+  if (claim.archiveRecoveryAttemptId === null) {
+    throw new Error("Expected Resume verification attempt binding");
+  }
+  access.archiveRecoveryWork.recordSpeedRequestResult({
+    archiveRecoveryId: seeded.recoveryId,
+    attemptId: claim.archiveRecoveryAttemptId,
+    discInspectionId: claim.discInspectionId,
+    mode: "normal",
+    attemptedSpeeds: [16],
+    selectedSpeed: 16,
+    observedSpeed: 16,
+    outcome: "accepted",
+  });
   const sample = seeded.sampleManifest.samples[0]!;
   const finding = {
     ...sample,
@@ -516,6 +529,11 @@ it("allows explicit confirmation after Resume verification mismatch", async () =
   expect(confirmedAccess.catalog.findArchiveRecoveryById(seeded.recoveryId))
     .toMatchObject({
       status: "eligible",
+      speedRequestResult: {
+        discInspectionId: seeded.inspection.id,
+        mode: "normal",
+        outcome: "accepted",
+      },
       work: {
         status: "requested",
         verificationId: verification.id,

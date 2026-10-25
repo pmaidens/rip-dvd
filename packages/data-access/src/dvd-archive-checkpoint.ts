@@ -59,10 +59,17 @@ export type CommittedDvdCheckpointEvidence =
 
 export const DVD_RECOVERY_MAX_CHECKPOINT_REVISION = 10_000;
 
+interface DvdCheckpointReadFaultOptions extends ErrorOptions {
+  storageFault?: boolean;
+}
+
 export class DvdCheckpointReadFault extends Error {
-  constructor(readonly code: string, options?: ErrorOptions) {
+  readonly storageFault: boolean;
+
+  constructor(readonly code: string, options?: DvdCheckpointReadFaultOptions) {
     super(code, options);
     this.name = "DvdCheckpointReadFault";
+    this.storageFault = options?.storageFault ?? false;
   }
 }
 
@@ -91,18 +98,54 @@ export function createDvdRecoveryCheckpointPublicationDigest(
 async function readRecord(path: string, code: string): Promise<unknown> {
   let file;
   try {
-    file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    const before = await file.stat({ bigint: true });
-    if (!before.isFile()) throw new Error("Not regular evidence");
-    const value: unknown = JSON.parse(await file.readFile("utf8"));
-    const after = await file.stat({ bigint: true });
-    const named = await lstat(path, { bigint: true });
+    try {
+      file = await open(
+        path,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
+    } catch (cause) {
+      throw new DvdCheckpointReadFault(code, {
+        cause,
+        storageFault: !(cause instanceof Error && "code" in cause &&
+          cause.code === "ENOENT"),
+      });
+    }
+    let before;
+    let raw;
+    let after;
+    let named;
+    try {
+      before = await file.stat({ bigint: true });
+      raw = await file.readFile("utf8");
+      after = await file.stat({ bigint: true });
+      named = await lstat(path, { bigint: true });
+    } catch (cause) {
+      throw new DvdCheckpointReadFault(code, {
+        cause,
+        storageFault: true,
+      });
+    }
+    if (!before.isFile()) throw new DvdCheckpointReadFault(code);
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch (cause) {
+      throw new DvdCheckpointReadFault(code, { cause });
+    }
     if (before.ino !== named.ino || before.dev !== named.dev ||
       before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs)
-      throw new Error("Evidence changed during read");
+      throw new DvdCheckpointReadFault(code);
     return value;
-  } catch { throw new DvdCheckpointReadFault(code); }
-  finally { await file?.close(); }
+  } finally {
+    try {
+      await file?.close();
+    } catch (cause) {
+      throw new DvdCheckpointReadFault(code, {
+        cause,
+        storageFault: true,
+      });
+    }
+  }
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -113,7 +156,10 @@ async function pathExists(path: string): Promise<boolean> {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       return false;
     }
-    throw error;
+    throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE", {
+      cause: error,
+      storageFault: true,
+    });
   }
 }
 
@@ -249,12 +295,28 @@ export async function verifyDvdCheckpointImage(
 ): Promise<void> {
   let image;
   try {
-    image = await open(
-      archive.archivePath,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    );
-    const stat = await image.stat({ bigint: true });
-    const named = await lstat(archive.archivePath, { bigint: true });
+    try {
+      image = await open(
+        archive.archivePath,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
+    } catch (cause) {
+      throw new DvdCheckpointReadFault("DVD_PUBLICATION_IMAGE_CONFLICT", {
+        cause,
+        storageFault: true,
+      });
+    }
+    let stat;
+    let named;
+    try {
+      stat = await image.stat({ bigint: true });
+      named = await lstat(archive.archivePath, { bigint: true });
+    } catch (cause) {
+      throw new DvdCheckpointReadFault("DVD_PUBLICATION_IMAGE_CONFLICT", {
+        cause,
+        storageFault: true,
+      });
+    }
     if (
       !stat.isFile() || named.isSymbolicLink() || stat.ino !== named.ino ||
       stat.dev !== named.dev ||
@@ -263,29 +325,52 @@ export async function verifyDvdCheckpointImage(
       stat.mtimeNs.toString() !== manifest.image.mtimeNs ||
       named.size !== stat.size || named.mtimeNs !== stat.mtimeNs
     ) {
-      throw new Error("Image differs from checkpoint");
+      throw new DvdCheckpointReadFault("DVD_PUBLICATION_IMAGE_CONFLICT");
     }
     if ("protectedRanges" in manifest) {
       for (const range of manifest.protectedRanges) {
         const bytes = Buffer.alloc(range.byteCount);
-        const read = await image.read(
-          bytes,
-          0,
-          bytes.length,
-          range.startByte,
-        );
+        let read;
+        try {
+          read = await image.read(
+            bytes,
+            0,
+            bytes.length,
+            range.startByte,
+          );
+        } catch (cause) {
+          throw new DvdCheckpointReadFault(
+            "DVD_PUBLICATION_IMAGE_CONFLICT",
+            { cause, storageFault: true },
+          );
+        }
         if (
-          read.bytesRead !== bytes.length ||
-          createHash("sha256").update(bytes).digest("hex") !== range.afterDigest
+          read.bytesRead !== bytes.length
         ) {
-          throw new Error("Committed protected bytes differ");
+          throw new DvdCheckpointReadFault(
+            "DVD_PUBLICATION_IMAGE_CONFLICT",
+            { storageFault: true },
+          );
+        }
+        if (
+          createHash("sha256").update(bytes).digest("hex") !==
+            range.afterDigest
+        ) {
+          throw new DvdCheckpointReadFault(
+            "DVD_PUBLICATION_IMAGE_CONFLICT",
+          );
         }
       }
     }
-  } catch {
-    throw new DvdCheckpointReadFault("DVD_PUBLICATION_IMAGE_CONFLICT");
   } finally {
-    await image?.close();
+    try {
+      await image?.close();
+    } catch (cause) {
+      throw new DvdCheckpointReadFault("DVD_PUBLICATION_IMAGE_CONFLICT", {
+        cause,
+        storageFault: true,
+      });
+    }
   }
 }
 
@@ -311,16 +396,33 @@ async function readCommittedDvdCheckpointRecords(input: {
   const markedJobs = jobs.filter(job => job.evidenceFormat === "dvd-recovery-evidence-v1");
   if (header === null && markedJobs.length === 0) return null;
   input.assertImageOwnership();
-  if (!input.originalsLibraryPath) throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE");
+  if (!input.originalsLibraryPath) {
+    throw new DvdCheckpointReadFault("DVD_EVIDENCE_STORAGE_UNAVAILABLE", {
+      storageFault: true,
+    });
+  }
   let root: string;
   let directory: string;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(archive.id)) {
+    throw new DvdCheckpointReadFault("DVD_PUBLICATION_PATH_CONFLICT");
+  }
   try {
-    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(archive.id)) throw new Error("Invalid archive identity");
     root = await realpath(input.originalsLibraryPath);
     directory = join(root, ".dvd-evidence", archive.id);
-    if (await realpath(directory) !== directory || resolve(archive.archivePath) !== join(root, `${archive.id}.iso`))
-      throw new Error("Evidence path conflict");
-  } catch { throw new DvdCheckpointReadFault("DVD_PUBLICATION_PATH_CONFLICT"); }
+    const resolvedDirectory = await realpath(directory);
+    if (resolvedDirectory !== directory) {
+      throw new DvdCheckpointReadFault("DVD_PUBLICATION_PATH_CONFLICT");
+    }
+  } catch (cause) {
+    if (cause instanceof DvdCheckpointReadFault) throw cause;
+    throw new DvdCheckpointReadFault("DVD_PUBLICATION_PATH_CONFLICT", {
+      cause,
+      storageFault: true,
+    });
+  }
+  if (resolve(archive.archivePath) !== join(root, `${archive.id}.iso`)) {
+    throw new DvdCheckpointReadFault("DVD_PUBLICATION_PATH_CONFLICT");
+  }
   const journalPath = join(directory, "recovery-journal.bin");
   const journalPresent = await pathExists(journalPath);
   if (journalPresent && options.permitJournal !== true) {
