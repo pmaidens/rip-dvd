@@ -375,7 +375,7 @@ test("reviews source blockers and refreshed identities without admitting encode 
   await page.route("**/api/encode-readiness?*", async (route) => {
     const params = new URL(route.request().url()).searchParams;
     if (!params.has("archiveId")) {
-      await route.fulfill({ json: { archives: [{ id: "synthetic-readiness-archive", label: "Synthetic readiness disc" }],
+      await route.fulfill({ json: { archives: [{ id: "synthetic-readiness-archive", label: "Synthetic long archive label ".repeat(30) }],
         page: { offset: 0, limit: 50, hasNext: false } } });
       return;
     }

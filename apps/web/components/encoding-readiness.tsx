@@ -45,7 +45,7 @@ export function EncodingReadinessPanel({ revision }: { revision: number }) {
       });
     return () => controller.abort();
   }, [archiveId, revision, refresh]);
-  return <section aria-labelledby="encoding-readiness-title">
+  return <section className="encoding-readiness" aria-labelledby="encoding-readiness-title">
     <h2 id="encoding-readiness-title">Source readiness</h2>
     <p>Inspect the current source and decisions before encoding. New-format encode admission remains closed.</p>
     <label>Original Disc Archive
