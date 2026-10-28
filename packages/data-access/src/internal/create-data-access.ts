@@ -11178,6 +11178,11 @@ export function createDataAccessInternal(
   function recordDvdTitleDamageAssessment(
     input: RecordDvdTitleDamageAssessmentInput,
   ): DvdTitleDamageAssessmentRecord {
+    if (input.titles.some((title) => title.timingEvidence == null)) {
+      throw new DomainInvariantError(
+        "Current Title Damage Assessment requires timing evidence",
+      );
+    }
     const archive = access.catalog.listOriginalDiscArchives({
       ids: [input.originalDiscArchiveId],
     })[0];
