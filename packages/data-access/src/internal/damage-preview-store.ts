@@ -1,9 +1,16 @@
+import { and, eq, sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/node-sqlite";
+import { damagePreviews } from "./schema.js";
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { MutationKeyConflictError, RecordNotFoundError } from "../errors.js";
 import type { DamagePreviewAccess, DamagePreviewRecord } from "../damage-preview.js";
 
+// Shared by the recovery admission transaction and the preview store.
+export const damagePreviewHoldsRecovery = sql`${damagePreviews.status} IN ('queued', 'waiting_for_checkpoint_or_ownership', 'generating') AND coalesce(json_extract(${damagePreviews.record}, '$.sourceReleased'), 0) = 0`;
+
 export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date): DamagePreviewAccess {
+  const database = drizzle({ client: sqlite });
   function transaction<T>(action: () => T): T {
     sqlite.exec("BEGIN IMMEDIATE");
     try { const result = action(); sqlite.exec("COMMIT"); return result; }
@@ -37,6 +44,12 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
   }
   return {
     find,
+    pendingForRecovery(archiveId) {
+      const row = database.select({ record: damagePreviews.record }).from(damagePreviews).where(and(
+        eq(damagePreviews.originalDiscArchiveId, archiveId), damagePreviewHoldsRecovery,
+      )).orderBy(damagePreviews.createdAt, damagePreviews.id).limit(1).get();
+      return row ? JSON.parse(row.record) as DamagePreviewRecord : null;
+    },
     replay(input) {
       const previous = sqlite.prepare("SELECT operation, semantic_input, outcome FROM mutation_invocations WHERE key = ?").get(input.mutationKey);
       if (!previous) return null;

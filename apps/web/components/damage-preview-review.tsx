@@ -179,6 +179,7 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
       <button type="button" disabled={busy || !requestId || (preview !== null && !["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(preview.generationStatus))} onClick={() => void inspectPreview("cancel")}>Cancel preview request</button>
       {preview ? <div aria-label="Damage Preview request" role="status">
         <p>Request {preview.id}. Status: {preview.status}. Generation: {preview.generationStatus}.</p>
+        {preview.recoveryPause ? <p>Planned Recovery pause: {preview.recoveryPause.state}. {preview.recoveryPause.reason.message}</p> : null}
         {preview.reason ? <p>{preview.reason.code}: {preview.reason.message}</p> : null}
         {preview.outdatedReasons.map((reason) => <p key={reason.code}>{reason.message}</p>)}
         <p>{preview.progress.completedClips} of {preview.progress.totalClips} clips. Progress: {preview.progress.percent === null ? "unknown" : `${preview.progress.percent}%`}.</p>

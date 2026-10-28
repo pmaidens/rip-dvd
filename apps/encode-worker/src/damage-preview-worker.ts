@@ -106,11 +106,20 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
     const controller = new AbortController();
     const signal = AbortSignal.any([options.signal, controller.signal]);
     let contentionStarted: number | null = null;
+    const checkRecovery = () => {
+      const recovery = options.access.catalog.findArchiveRecovery(record.originalDiscArchiveId as OriginalDiscArchiveId);
+      const reviewedRecovery = review.reviewedRequest!.recovery;
+      if (recovery?.status === "stopping" || (recovery?.status === "stopped" && reviewedRecovery?.status !== "stopped")) {
+        controller.abort(new PreviewFailure("DAMAGE_PREVIEW_RECOVERY_STOP", "Recovery Stop preempted preview work without a contention grace period."));
+      } else if (!recovery || recovery.attemptId !== reviewedRecovery?.attemptId || recovery.status === "faulted") {
+        controller.abort(new PreviewFailure("DAMAGE_PREVIEW_RECOVERY_CHANGED", "Archive Recovery changed before the preview finished."));
+      }
+      return recovery;
+    };
     const monitor = setInterval(() => {
       try { execution.assertHeld(); } catch { controller.abort(new PreviewFailure("DAMAGE_PREVIEW_EXECUTION_LOST", "Preview execution ownership could not be proved.")); }
       if (options.access.damagePreviews.find(record.id)?.cancellationRequested) controller.abort(new PreviewFailure("DAMAGE_PREVIEW_CANCELLED", "The operator cancelled this request."));
-      const recovery = options.access.catalog.findArchiveRecovery(record.originalDiscArchiveId as OriginalDiscArchiveId);
-      if (recovery && !["stopped", "completed"].includes(recovery.status)) controller.abort(new PreviewFailure("DAMAGE_PREVIEW_RECOVERY_CHANGED", "Archive Recovery changed. Stop takes priority over preview work."));
+      if (!record.sourceReleased) checkRecovery();
     }, 100);
     monitor.unref();
     const previewOwnership: ArchiveImageOwnership = {
@@ -129,9 +138,18 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
       if (await realpath(directory) !== directory) throw new Error("Unsafe preview request directory.");
       while (true) {
         execution.assertHeld();
+        const recovery = checkRecovery();
+        signal.throwIfAborted();
+        if (recovery?.work?.status === "claimed") {
+          record.reason = { code: "DAMAGE_PREVIEW_WAITING_FOR_CHECKPOINT", message: "Recovery is settling its admitted source command and durable checkpoint before the planned preview pause." };
+          options.access.damagePreviews.update(record);
+          await delay(100, undefined, { signal });
+          continue;
+        }
         try {
           const outcome = await options.access.withDvdCheckpoint(record.originalDiscArchiveId as OriginalDiscArchiveId, previewOwnership, async (checkpoint, handle) => {
             execution.assertHeld();
+            checkRecovery(); signal.throwIfAborted();
             const current = options.access.readConsistentSnapshot((snapshot) => reviewDamagePreviewEvidence(snapshot, record.originalDiscArchiveId, JSON.parse(record.selectionJson) as DamagePreviewInput, checkpoint));
             if (current.preflightToken !== record.preflightToken || !current.available) throw new PreviewFailure("DAMAGE_PREVIEW_STALE", "The reviewed preview inputs changed before generation.");
             const request = review.reviewedRequest!;
@@ -174,6 +192,10 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
         }
       }
     } catch (error) { generationFailure = controller.signal.reason ?? error; record.reason = failureReason(generationFailure); }
+    // No source operation remains after the ownership callback settles. Release
+    // the durable planned pause before slow artifact validation and publication.
+    record.sourceReleased = true;
+    options.access.damagePreviews.update(record);
     try {
       // Source ownership has already closed. Validation, checksums and publication
       // operate only on generated media and cannot delay Recovery Stop or waiters.

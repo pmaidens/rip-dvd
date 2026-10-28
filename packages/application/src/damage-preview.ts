@@ -132,8 +132,8 @@ export function reviewDamagePreviewEvidence(
     recovery: snapshot.catalog.findArchiveRecovery(id),
     disc: snapshot.catalog.listDetectedDiscs(undefined, { ids: [archive.detectedDiscId] })[0],
   };
-  if (!evidence.recovery || !["stopped", "completed"].includes(evidence.recovery.status)) {
-    reasons.push({ code: "DAMAGE_PREVIEW_ACTIVE_RECOVERY_UNAVAILABLE", message: "Damage Preview generation requires stopped or completed Archive Recovery. Active Recovery previews are unavailable." });
+  if (!evidence.recovery || ["stopping", "faulted"].includes(evidence.recovery.status)) {
+    reasons.push({ code: "DAMAGE_PREVIEW_RECOVERY_UNAVAILABLE", message: "Damage Preview waits for a consistent Recovery checkpoint. Stopping or faulted Recovery cannot admit a new preview." });
   }
   const header = evidence.header;
   const checkpoint = header === null ? null : {
@@ -213,7 +213,7 @@ export function reviewDamagePreviewEvidence(
     encodingProfile: profile === null ? null : { id: profile.id, key: profile.key, version: profile.version, isActive: profile.isActive, settings: profile.settings },
   };
   if (input === null) reasons.push({ code: "DAMAGE_PREVIEW_SELECTION_REQUIRED", message: "Review a concrete title, range, streams and intended settings before requesting generation." });
-  const preflightToken = reviewedRequest === null ? null : `damage-preview-preflight:${createHash("sha256").update("rip-dvd:damage-preview-preflight:v1\0").update(canonicalPublicationJson(reviewedRequest)).digest("hex")}`;
+  const preflightToken = reviewedRequest === null ? null : `damage-preview-preflight:${createHash("sha256").update("rip-dvd:damage-preview-preflight:v1\0").update(canonicalPublicationJson({ ...reviewedRequest, recovery: evidence.recovery === null ? null : { id: evidence.recovery.id, attemptId: evidence.recovery.attemptId, status: ["stopped", "completed"].includes(evidence.recovery.status) ? evidence.recovery.status : "active" } })).digest("hex")}`;
   return {
     schemaVersion: 1,
     originalDiscArchiveId: archiveId,

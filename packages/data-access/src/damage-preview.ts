@@ -29,6 +29,8 @@ export interface DamagePreviewRecord {
   reviewJson: string;
   workerId: string | null;
   cancellationRequested: boolean;
+  /** True only after all admitted source readers have closed. Old records hold until terminal. */
+  sourceReleased?: boolean;
   reason: { code: string; message: string } | null;
   progress: { completedClips: number; totalClips: number; percent: number | null };
   commands: string[][];
@@ -41,6 +43,7 @@ export interface DamagePreviewRecord {
 }
 export interface DamagePreviewAccess {
   find(id: string): DamagePreviewRecord | null;
+  pendingForRecovery(archiveId: string): DamagePreviewRecord | null;
   list(archiveId?: string): DamagePreviewRecord[];
   replay(input: { mutationKey: string; archiveId: string; preflightToken: string; selectionJson: string }): DamagePreviewRecord | null;
   submit(input: { mutationKey: string; archiveId: string; preflightToken: string; selectionJson: string }, prepare: () => string): DamagePreviewRecord;

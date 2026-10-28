@@ -28,6 +28,12 @@ export function presentDamagePreview(record: DamagePreviewRecord, current?: Revi
     status: outdated && record.artifacts.length > 0 ? "outdated" : record.status,
     generationStatus: record.status, outdated,
     outdatedReasons: outdated ? [{ code: "DAMAGE_PREVIEW_INPUTS_CHANGED", message: "The current archive, title, selection, streams or intended settings differ from this sample." }] : [],
+    recoveryPause: review.reviewedRequest?.recovery && !["stopped", "completed"].includes(review.reviewedRequest.recovery.status) ? {
+      recoveryId: review.reviewedRequest.recovery.id,
+      attemptId: review.reviewedRequest.recovery.attemptId,
+      state: record.sourceReleased || !["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(record.status) ? "released" : record.status === "generating" ? "paused" : "waiting",
+      reason: { code: "DAMAGE_PREVIEW_PLANNED_RECOVERY_PAUSE", message: "Recovery finishes its admitted command and durable checkpoint, then pauses for this preview. This planned pause does not start the contention grace period." },
+    } : null,
     reason: record.reason, cancellationRequested: record.cancellationRequested, progress: record.progress,
     artifacts: record.artifacts.map(({ path: _path, ...artifact }) => artifact),
     provenance: { preflightToken: record.preflightToken, ...review.reviewedRequest, clips: review.clips, commands: record.commands, streamMapping: record.streamMapping, toolVersions: record.toolVersions, deviations: record.deviations },

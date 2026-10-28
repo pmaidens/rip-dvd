@@ -1,4 +1,4 @@
-import { createDamagePreviewAccess } from "./damage-preview-store.js";
+import { createDamagePreviewAccess, damagePreviewHoldsRecovery } from "./damage-preview-store.js";
 import { createEncodeOutputInspectionReceiptAccess } from "./encode-output-inspection-receipt-store.js";
 import {
   canonicalPublicationJson,
@@ -71,6 +71,7 @@ import { assignDvdContentIdAlias } from "./dvd-content-id-alias.js";
 import {
   archiveRequests,
   archiveJobs,
+  damagePreviews,
   archiveRecoveries,
   archiveRecoveryWork,
   catalogReviewEvidenceChoices,
@@ -11988,6 +11989,10 @@ export function createDataAccessInternal(
             )
             .where(and(
               eq(archiveRecoveries.status, "eligible"),
+              notExists(transaction.select({ id: damagePreviews.id }).from(damagePreviews).where(and(
+                eq(damagePreviews.originalDiscArchiveId, archiveRecoveries.originalDiscArchiveId),
+                damagePreviewHoldsRecovery,
+              ))),
               eq(
                 dvdDiscVerifications.archiveRecoveryAttemptId,
                 archiveRecoveries.attemptId,
@@ -12507,6 +12512,9 @@ export function createDataAccessInternal(
               "source_read",
             );
           }
+          // Admission and preview submission use the same immediate transaction boundary.
+          // A helper may be ready, but cannot read after a planned pause commits.
+          if (access.damagePreviews.pendingForRecovery(recovery.originalDiscArchiveId)) return null;
           requireNoPendingDvdRecoveryReconciliation(
             transaction,
             recovery.id,
