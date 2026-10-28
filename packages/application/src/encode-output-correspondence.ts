@@ -92,18 +92,19 @@ function classifyInterval(
       requested.mappingCoverage.unknownReasons.length > 0 || selected.mappingCoverage.unknownReasons.length > 0) {
     return unknown("SOURCE_MAPPING_INCOMPLETE", "Incomplete source mapping cannot prove that content is omitted from the output.");
   }
-  // The complete selected-title map is a superset for bounded chapters. A
-  // disjoint source range therefore remains excluded for those chapters too.
-  if (interval.sourceRanges.length > 0 && selected.uniqueSourceRanges.length > 0 &&
-      interval.sourceRanges.every((range) => selected.uniqueSourceRanges.every((selectedRange) =>
-        range.startLba + range.sectorCount <= selectedRange.startLba ||
-        selectedRange.startLba + selectedRange.sectorCount <= range.startLba))) {
-    return { ...base, status: "absent", reasonCode: "SOURCE_EXCLUDED_BY_SELECTION",
-      reason: "Every source range for this interval is outside the complete source map of the output's concrete playback selection." };
-  }
   const expectedDuration = source.output.expectedDurationSeconds;
   if (expectedDuration !== null && artifact.media.durationSeconds !== null && artifact.media.durationSeconds < expectedDuration * 0.98) {
     return unknown("OUTPUT_TRUNCATED", "The output is shorter than its recorded full-title validation minimum. Truncation does not prove interval absence.");
+  }
+  // Estimated interval sourceRanges contain only missing sectors. Prove the
+  // complete requested playback path excluded, including coarse timing spans.
+  // The selected-title map is a superset for bounded chapter selections too.
+  if (requested.uniqueSourceRanges.length > 0 && selected.uniqueSourceRanges.length > 0 &&
+      requested.uniqueSourceRanges.every((range) => selected.uniqueSourceRanges.every((selectedRange) =>
+        range.startLba + range.sectorCount <= selectedRange.startLba ||
+        selectedRange.startLba + selectedRange.sectorCount <= range.startLba))) {
+    return { ...base, status: "absent", reasonCode: "SOURCE_EXCLUDED_BY_SELECTION",
+      reason: "The complete requested playback source map is disjoint from the complete source map of the output's concrete playback selection." };
   }
   if (source.resolvedSource.chapterStart !== selected.selection.chapterStart || source.resolvedSource.chapterEnd !== selected.selection.chapterEnd) {
     return unknown("SOURCE_CHAPTER_MAPPING_INCOMPLETE", "The recorded title source map does not locate this interval within the selected chapter bounds.");

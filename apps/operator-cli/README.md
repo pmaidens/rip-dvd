@@ -625,6 +625,7 @@ Bounded lists set `encodeOutputArtifactsTruncated` when older generations are
 omitted. Page the complete history with
 `inspect encode-jobs <encode-job-id> --limit 1..100 --offset <n>`; each result
 returns `encodeOutputArtifactPage.nextOffset` when older generations remain.
+
 `encode-output intervals` queries indexes in the immutable source assessment's
 `estimatedAffectedPlayback.intervals` for one recorded title observation. It
 returns the actual canonical inspection together with each interval's reason

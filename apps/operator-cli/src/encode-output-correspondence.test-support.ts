@@ -10,7 +10,7 @@ import type { createOperatorWorkflowFixture } from "./operator-workflow.test-sup
  * omitted path uses sectors 200..299, including the unresolved sector 210. */
 export async function seedCorrespondenceClaim(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
-  options: { chapters?: boolean; partialOmittedMap?: boolean; sharedSource?: boolean } = {},
+  options: { chapters?: boolean; partialOmittedMap?: boolean; sharedSource?: boolean; overlappingPath?: boolean } = {},
 ) {
   const evidence = await seedCommittedArchiveEvidence(fixture, [
     { startLba: options.sharedSource ? 10 : 210, sectorCount: 1, classification: "skipped_untested" },
@@ -20,7 +20,7 @@ export async function seedCorrespondenceClaim(
       navigation: { videoTitleSetNumber: 2, titleSetTitleNumber: 1, programChainNumber: 1 },
       selectedPath: [{ programNumber: 1, cellNumber: 1, vobId: 2, cellId: 1 }],
       angleNumber: 1, angleCount: 1, chapterStart: 1, chapterEnd: 4, chapterCount: 4,
-      sourceExtents: [{ startLba: options.sharedSource ? 0 : 200, sectorCount: 100 }],
+      sourceExtents: [{ startLba: options.sharedSource ? 0 : options.overlappingPath ? 50 : 200, sectorCount: options.overlappingPath ? 250 : 100 }],
     }],
   });
   const access = openEncodeSourceTestAccess(fixture);
@@ -41,13 +41,13 @@ export async function seedCorrespondenceClaim(
       return {
         titleIdentityObservationId: item.observation.id,
         sourceReferences: [{ kind: "multiplexed_content" as const,
-          startLba: omitted && !options.sharedSource ? 200 : 0, sectorCount: 100 }],
+          startLba: omitted && !options.sharedSource ? options.overlappingPath ? 50 : 200 : 0, sectorCount: omitted && options.overlappingPath ? 250 : 100 }],
         mappingCoverage: { state: omitted && options.partialOmittedMap ? "partial" as const : "complete" as const,
           policyVersion: "synthetic-correspondence-map-v1",
           unknownReasons: omitted && options.partialOmittedMap ? [{ code: "SYNTHETIC_PARTIAL_MAP", message: "Synthetic incomplete omitted path map." }] : [] },
         timingEvidence: { policyVersion: "dvd-title-damage-timing-v1" as const,
-          occurrences: [{ playbackOccurrence: 1, spans: [{ sourceRange: { startLba: omitted && !options.sharedSource ? 200 : 0, sectorCount: 100 },
-            startMilliseconds: 1000, endMilliseconds: 5000, timingMethod: "synthetic-source-time-v1", coverage: "source_span" as const }], unknownReasons: [] }],
+          occurrences: [{ playbackOccurrence: 1, spans: [{ sourceRange: { startLba: omitted && !options.sharedSource ? options.overlappingPath ? 50 : 200 : 0, sectorCount: omitted && options.overlappingPath ? 250 : 100 },
+            startMilliseconds: 1000, endMilliseconds: 5000, timingMethod: "synthetic-source-time-v1", coverage: options.overlappingPath ? "whole_cell" as const : "source_span" as const }], unknownReasons: [] }],
         },
       };
     })))!;
