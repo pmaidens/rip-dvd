@@ -797,7 +797,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   }]);
   previewLedger.close();
 
-  const acceptedPreview = exactPreflight.result as {
+  type AcceptedPreview = {
     previewToken: string;
     current: {
       checkpoint: { revision: number; manifestDigest: string };
@@ -807,16 +807,16 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     catalogMappingProjectionId: string;
     reviewedContentIdentity: string;
   };
-  const acceptanceInput = {
+  const acceptanceInputFor = (preview: AcceptedPreview) => ({
     operator: "Synthetic CLI operator",
-    previewToken: acceptedPreview.previewToken,
-    checkpointRevision: acceptedPreview.current.checkpoint.revision,
-    checkpointDigest: acceptedPreview.current.checkpoint.manifestDigest,
-    assessmentIdentity: acceptedPreview.assessmentIdentity,
-    reviewSetIdentity: acceptedPreview.reviewSetIdentity,
+    previewToken: preview.previewToken,
+    checkpointRevision: preview.current.checkpoint.revision,
+    checkpointDigest: preview.current.checkpoint.manifestDigest,
+    assessmentIdentity: preview.assessmentIdentity,
+    reviewSetIdentity: preview.reviewSetIdentity,
     catalogMappingProjectionId:
-      acceptedPreview.catalogMappingProjectionId,
-    reviewedContentIdentity: acceptedPreview.reviewedContentIdentity,
+      preview.catalogMappingProjectionId,
+    reviewedContentIdentity: preview.reviewedContentIdentity,
     excludedTitleIdentityIds: [
       currentItems[1]!.titleIdentityId,
       currentItems[2]!.titleIdentityId,
@@ -826,7 +826,77 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
       titleIdentityId: currentItems[0]!.titleIdentityId,
     }],
     damageAcknowledgement: true,
-  };
+  });
+  const previewBeforeAffectedWork = exactPreflight.result as AcceptedPreview;
+  const affectedWorkProfile = access.encodingProfiles.create({
+    key: "synthetic-affected-work-profile",
+    displayName: "Synthetic affected-work profile",
+    mediaDomain: "dvd_video",
+    settings: { preset: "Fast 480p30" },
+  });
+  const affectedWorkJobId = "synthetic-title-damage-affected-work";
+  const affectedWorkSqlite = new DatabaseSync(fixture.databasePath);
+  affectedWorkSqlite.prepare(`
+    INSERT INTO encode_jobs (
+      id, disc_selection_id, encoding_profile_id, output_path,
+      status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 'queued', 1, 1)
+  `).run(
+    affectedWorkJobId,
+    mainFeatureSelection.id,
+    affectedWorkProfile.id,
+    join(fixture.mediaLibraryPath, "synthetic-affected-work.mkv"),
+  );
+  affectedWorkSqlite.close();
+  const staleAffectedWork = await fixture.run([
+    "catalog-review",
+    "accept-damage",
+    archive.id,
+    "--key",
+    "00000000-0000-4000-8000-000000000421",
+    "--json",
+    JSON.stringify(acceptanceInputFor(previewBeforeAffectedWork)),
+  ]);
+  expect(staleAffectedWork).toMatchObject({
+    exitCode: 2,
+    result: {
+      error: {
+        code: "STALE_TITLE_DAMAGE_DECISION",
+        current: {
+          assessmentIdentity: previewBeforeAffectedWork.assessmentIdentity,
+        },
+      },
+    },
+  });
+  const staleAffectedWorkLedger = new DatabaseSync(fixture.databasePath);
+  expect(staleAffectedWorkLedger.prepare(`
+    SELECT count(*) AS count
+    FROM dvd_title_damage_decisions
+  `).get()).toEqual({ count: 0 });
+  staleAffectedWorkLedger.prepare(`
+    UPDATE encode_jobs
+    SET status = 'cancelled', reserves_output_path = 0, updated_at = 2
+    WHERE id = ?
+  `).run(affectedWorkJobId);
+  staleAffectedWorkLedger.close();
+  const acceptedPreflight = await fixture.run([
+    "catalog-review",
+    "preview-damage-acceptance",
+    archive.id,
+    "--exclude-title-identity",
+    currentItems[1]!.titleIdentityId,
+    "--exclude-title-identity",
+    currentItems[2]!.titleIdentityId,
+    "--resolve-main-feature",
+    mainFeatureSelection.id,
+    currentItems[0]!.titleIdentityId,
+  ]);
+  expect(acceptedPreflight).toMatchObject({
+    exitCode: 0,
+    result: { available: true, affectedWork: [] },
+  });
+  const acceptedPreview = acceptedPreflight.result as AcceptedPreview;
+  const acceptanceInput = acceptanceInputFor(acceptedPreview);
   const acceptanceKey = "00000000-0000-4000-8000-000000000420";
   const accepted = await fixture.run([
     "catalog-review",

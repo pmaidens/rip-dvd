@@ -732,6 +732,7 @@ export function previewDvdTitleDamageAcceptance(
           createdAt: currentAssessment.createdAt.toISOString(),
         },
         acknowledgementRequired,
+        affectedWork,
       },
     });
   }

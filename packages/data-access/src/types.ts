@@ -1761,6 +1761,7 @@ export interface DvdTitleDamageDecisionSnapshot {
   exclusions: readonly DvdTitleDamageDecisionExclusion[];
   assessmentSnapshot: DvdTitleDamageDecisionAssessmentSnapshot;
   acknowledgementRequired: boolean;
+  affectedWork: readonly DvdTitleDamageDecisionAffectedWork[];
 }
 
 export type DvdTitleDamageDecisionAssessmentSnapshot = Omit<
@@ -1826,6 +1827,12 @@ export interface DvdTitleDamageDecisionExclusion {
   titleIdentityObservationId: DvdTitleIdentityObservationId;
   displayTitleNumber: number;
   angleNumber: number;
+}
+
+export interface DvdTitleDamageDecisionAffectedWork {
+  id: EncodeJobId;
+  discSelectionId: DiscSelectionId;
+  status: EncodeJobStatus;
 }
 
 export interface DvdTitleDamageDecisionExpectedIdentities {

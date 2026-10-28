@@ -79,6 +79,7 @@ function decision(
       exclusions: [],
       assessmentSnapshot: {} as DvdTitleDamageDecision["snapshot"]["assessmentSnapshot"],
       acknowledgementRequired: false,
+      affectedWork: [],
     },
     recordedAt,
   };

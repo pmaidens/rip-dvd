@@ -18425,7 +18425,8 @@ export function createDataAccessInternal(
             | undefined;
           if (
             typeof preview.expectedPreviewEvidence !== "string" ||
-            snapshot === undefined || snapshot.schemaVersion !== 1
+            snapshot === undefined || snapshot.schemaVersion !== 1 ||
+            !Array.isArray(snapshot.affectedWork)
           ) {
             throw new DomainInvariantError(
               "Title Damage Acceptance preview is invalid",
@@ -18464,6 +18465,23 @@ export function createDataAccessInternal(
             input.originalDiscArchiveId,
           );
           const recovery = snapshot.current.recovery;
+          const currentAffectedWork = transaction.select({
+            id: encodeJobs.id,
+            discSelectionId: encodeJobs.discSelectionId,
+            status: encodeJobs.status,
+          }).from(encodeJobs).innerJoin(
+            discSelections,
+            eq(discSelections.id, encodeJobs.discSelectionId),
+          ).where(and(
+            eq(
+              discSelections.originalDiscArchiveId,
+              input.originalDiscArchiveId,
+            ),
+            inArray(encodeJobs.status, ACTIVE_ENCODE_WORK_STATUSES),
+          )).orderBy(
+            asc(encodeJobs.createdAt),
+            asc(encodeJobs.id),
+          ).limit(ACTIVE_ENCODE_JOB_RESULT_LIMIT + 1).all();
           const stale =
             current.catalogRevision !== snapshot.current.catalogRevision ||
             current.checkpoint?.revision !== input.checkpoint.revision ||
@@ -18476,7 +18494,9 @@ export function createDataAccessInternal(
             current.assessmentIdentity !== input.assessmentIdentity ||
             current.reviewSetIdentity !== input.reviewSetIdentity ||
             current.catalogMappingProjectionId !==
-              input.catalogMappingProjectionId;
+              input.catalogMappingProjectionId ||
+            JSON.stringify(currentAffectedWork) !==
+              JSON.stringify(snapshot.affectedWork);
           if (stale) {
             throw new StaleDvdTitleDamageDecisionError(current);
           }
