@@ -1902,6 +1902,31 @@ export function createDataAccessInternal(
       passLastObservedAt: null,
     };
   };
+  const recordArchiveRecoveryOutcome = (
+    transaction: CatalogTransaction,
+    recovery: Pick<ArchiveRecovery, "id" | "originalDiscArchiveId" | "attemptId">,
+    kind: "recovery_completed" | "recovery_attention",
+    sourceTransitionId = `attempt:${recovery.attemptId}`,
+  ): void => {
+    const disc = requireRow(
+      transaction.select({ volumeLabel: detectedDiscs.volumeLabel })
+        .from(originalDiscArchives)
+        .innerJoin(detectedDiscs, eq(
+          detectedDiscs.id,
+          originalDiscArchives.detectedDiscId,
+        ))
+        .where(eq(originalDiscArchives.id, recovery.originalDiscArchiveId))
+        .get(),
+      "Original Disc Archive source",
+      recovery.originalDiscArchiveId,
+    );
+    recordNotificationOutcome(createNotificationEventWriter(transaction, now), {
+      kind,
+      sourceEventId: `archive-recovery:${recovery.id}:${sourceTransitionId}:${kind}`,
+      originalDiscArchiveId: recovery.originalDiscArchiveId,
+      label: disc.volumeLabel,
+    });
+  };
   const archiveRecoveryPassSettlement = (
     querySource: Pick<typeof database, "select">,
     recovery: ArchiveRecovery,
@@ -2312,6 +2337,7 @@ export function createDataAccessInternal(
       "Archive Recovery",
       recovery.id,
     );
+    recordArchiveRecoveryOutcome(transaction, recovery, "recovery_attention");
   };
   const archiveRecoveryCompletionAfterInterruption = (
     transaction: CatalogTransaction,
@@ -2335,6 +2361,7 @@ export function createDataAccessInternal(
         "Completed Archive Recovery still has unrecovered sectors",
       );
     }
+    recordArchiveRecoveryOutcome(transaction, recovery, "recovery_completed");
     return { status, history: completion.history };
   };
   const requireNoPendingDvdRecoveryReconciliation = (
@@ -10634,21 +10661,29 @@ export function createDataAccessInternal(
             ? []
             : [eq(archiveRecoveryWork.claimToken, claim.claimToken)]),
         )).get();
+      const recoveryStatus = current.recovery.status === "stopping" ||
+          current.recovery.status === "faulted" ||
+          current.recovery.status === "paused"
+        ? current.recovery.status
+        : recoveryWork !== undefined
+          ? "running"
+          : badSectorCount === 0
+            ? "completed"
+            : "eligible";
       transaction.update(archiveRecoveries).set({
-        status: current.recovery.status === "stopping" ||
-            current.recovery.status === "faulted" ||
-            current.recovery.status === "paused"
-          ? current.recovery.status
-          : recoveryWork !== undefined
-            ? "running"
-            : badSectorCount === 0
-              ? "completed"
-              : "eligible",
+        status: recoveryStatus,
         updatedAt: timestamp,
       }).where(eq(
         archiveRecoveries.originalDiscArchiveId,
         archiveId,
       )).run();
+      if (recoveryStatus === "completed" && current.recovery.status !== "completed") {
+        recordArchiveRecoveryOutcome(
+          transaction,
+          current.recovery,
+          "recovery_completed",
+        );
+      }
       if (recoveryWork !== undefined) {
         const observationFields = [
           recoveryWork.passObservationCount,
@@ -13073,6 +13108,12 @@ export function createDataAccessInternal(
             "Archive Recovery",
             recovery.id,
           );
+          recordArchiveRecoveryOutcome(
+            transaction,
+            recovery,
+            "recovery_attention",
+            `stop:${input.stopOperationId}`,
+          );
           return requireRow(
             findArchiveRecoveryRecord(transaction, {
               archiveRecoveryId: recovery.id,
@@ -13107,6 +13148,11 @@ export function createDataAccessInternal(
             );
           }
           if (outcome === "completed") {
+            recordArchiveRecoveryOutcome(
+              transaction,
+              recovery,
+              "recovery_completed",
+            );
             transaction.delete(archiveRecoveryWork).where(and(
               eq(
                 archiveRecoveryWork.archiveRecoveryId,
@@ -13217,6 +13263,11 @@ export function createDataAccessInternal(
             )).returning({ id: archiveRecoveries.id }).get(),
             "Archive Recovery",
             recovery.id,
+          );
+          recordArchiveRecoveryOutcome(
+            transaction,
+            recovery,
+            "recovery_attention",
           );
           if (!input.retainWork) {
             requireRow(
@@ -13736,20 +13787,33 @@ export function createDataAccessInternal(
       },
       fail(claim, failureCode) {
         const timestamp = now();
-        const row = database.update(dvdRecoveryReconciliations).set({
-          status: "failed",
-          phase: "completed",
-          failureCode,
-          claimToken: null,
-          claimedAt: null,
-          completedAt: timestamp,
-          updatedAt: timestamp,
-        }).where(and(
-          eq(dvdRecoveryReconciliations.id, claim.id),
-          eq(dvdRecoveryReconciliations.status, "running"),
-          eq(dvdRecoveryReconciliations.claimToken, claim.claimToken),
-        )).returning().get();
-        return row === undefined ? null : toDvdRecoveryReconciliation(row);
+        return database.transaction((transaction) => {
+          const row = transaction.update(dvdRecoveryReconciliations).set({
+            status: "failed",
+            phase: "completed",
+            failureCode,
+            claimToken: null,
+            claimedAt: null,
+            completedAt: timestamp,
+            updatedAt: timestamp,
+          }).where(and(
+            eq(dvdRecoveryReconciliations.id, claim.id),
+            eq(dvdRecoveryReconciliations.status, "running"),
+            eq(dvdRecoveryReconciliations.claimToken, claim.claimToken),
+          )).returning().get();
+          if (row === undefined) return null;
+          const recovery = requireRow(
+            findArchiveRecoveryRecord(transaction, {
+              archiveRecoveryId: row.archiveRecoveryId,
+            }) ?? undefined,
+            "Archive Recovery",
+            row.archiveRecoveryId,
+          );
+          recordArchiveRecoveryOutcome(
+            transaction, recovery, "recovery_attention", `reconciliation:${row.id}`,
+          );
+          return toDvdRecoveryReconciliation(row);
+        }, { behavior: "immediate" });
       },
     },
     dvdDiscConfirmations: {

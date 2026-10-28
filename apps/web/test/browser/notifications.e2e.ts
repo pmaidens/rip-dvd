@@ -2,7 +2,7 @@
 declare const self: ServiceWorkerGlobalScope;
 
 import { expect, test } from "@playwright/test";
-import { clickNotification, completeControlledRecoveryStop, controlledSubscription, deliverPush, dispatchQueuedPushes } from "./notification-test-support";
+import { clickNotification, completeControlledRecoveryStop, controlledSubscription, deliverPush, dispatchQueuedPushes, recoveryNotificationPayload } from "./notification-test-support";
 
 test("installs metadata and opts in, displays the queued test, navigates, and opts out without reopening permission", async ({ page, context }) => {
   await context.grantPermissions(["notifications"], { origin: "http://localhost:3101" });
@@ -100,6 +100,31 @@ test("opens a labeled Archive Job target using its current shared operation deta
   await page.goto(`/notifications/target?kind=archive-jobs&id=${encodeURIComponent(job.id)}`);
   await expect(page.getByRole("heading", { name: "SYNTHETIC_NOTIFICATION_DISC" })).toBeVisible();
   await expect(page.getByText("failed", { exact: true })).toBeVisible();
+});
+
+test("opens current Recovery details from a supplied recovery notification", async ({ page, context }) => {
+  await controlledSubscription(page);
+  await page.goto("/notifications");
+  await page.evaluate(async () => { await navigator.serviceWorker.ready; });
+  const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
+  const { items } = await (await page.request.get("/api/operations?kind=archive-recoveries")).json();
+  const recovery = items.find((item: { id: string }) => item.id === "browser-damage-recovery-alert-recovery");
+  expect(recovery).toBeTruthy();
+  const { item: archive } = await (await page.request.get(
+    `/api/operations?kind=original-disc-archives&id=${recovery.originalDiscArchiveId}`,
+  )).json();
+  const payload = recoveryNotificationPayload(recovery.originalDiscArchiveId, archive.detectedDisc.volumeLabel);
+  await deliverPush(worker, JSON.stringify(payload));
+  await clickNotification(worker, payload.tag);
+  await expect(page).toHaveURL(new RegExp(`/notifications/target\\?kind=original-disc-archives&id=${recovery.originalDiscArchiveId}$`));
+  await expect(page.getByRole("heading", { name: "Archive Recovery", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: archive.detectedDisc.volumeLabel, exact: true })).toBeVisible();
+  await expect(page.getByText("Current recovery status", { exact: true })).toBeVisible();
+  await expect(page.getByText(recovery.recoveryStatus.replaceAll("_", " "), { exact: true })).toBeVisible();
+  await expect(page.getByText("Unrecovered Source", { exact: true })).toBeVisible();
+  await expect(page.getByText("Checkpoint reconciliation status", { exact: true })).toBeVisible();
+  await expect(page.getByText("CONSISTENCY_FAULT", { exact: true })).toBeVisible();
+  expect(context.pages()).toHaveLength(1);
 });
 
 test("explains denied permission and unsupported APIs", async ({ page }) => {

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { inspectOperations } from "@rip-dvd/application";
+import type { ArchiveRecovery, DvdRecoveryReconciliation } from "@rip-dvd/data-access";
 import { loadConfig } from "@rip-dvd/config";
 import { getDataAccess } from "../../../lib/data-access";
 
@@ -13,6 +14,9 @@ export default async function NotificationTargetPage({ searchParams }: {
   let detail: { status: string | null; integrity: string | null; label: string | null } | null = null;
   let recoveryDetail: {
     status: string;
+    pauseReason: ArchiveRecovery["pauseReason"];
+    faultCode: ArchiveRecovery["faultCode"];
+    reconciliation: Pick<DvdRecoveryReconciliation, "status" | "failureCode"> | null;
     checkpointRevision: number | null;
     unresolvedSectorCount: number | null;
     actions: { name: string; eligible: boolean; reason: string | null }[];
@@ -37,6 +41,9 @@ export default async function NotificationTargetPage({ searchParams }: {
           if ("item" in recovery && recovery.item && "recoveryStatus" in recovery.item) {
             recoveryDetail = {
               status: recovery.item.recoveryStatus,
+              pauseReason: recovery.item.pauseReason,
+              faultCode: recovery.item.faultCode,
+              reconciliation: recovery.item.reconciliation,
               checkpointRevision: recovery.item.checkpoint?.currentManifestRevision ?? null,
               unresolvedSectorCount: recovery.item.progress?.unresolvedSectorCount ?? null,
               actions: recovery.item.availableActions,
@@ -56,6 +63,12 @@ export default async function NotificationTargetPage({ searchParams }: {
       <h2>Archive Recovery</h2>
       <dl>
         <dt>Current recovery status</dt><dd>{recoveryDetail.status.replaceAll("_", " ")}</dd>
+        {recoveryDetail.pauseReason && <><dt>Pause reason</dt><dd>{recoveryDetail.pauseReason.replaceAll("_", " ")}</dd></>}
+        {recoveryDetail.faultCode && <><dt>Fault reason</dt><dd>{recoveryDetail.faultCode}</dd></>}
+        {recoveryDetail.reconciliation?.status === "failed" && <>
+          <dt>Checkpoint reconciliation status</dt><dd>failed</dd>
+          <dt>Checkpoint reconciliation fault</dt><dd>{recoveryDetail.reconciliation.failureCode}</dd>
+        </>}
         <dt>Checkpoint revision</dt><dd>{recoveryDetail.checkpointRevision ?? "Unknown"}</dd>
         <dt>Unrecovered Source</dt><dd>{recoveryDetail.unresolvedSectorCount === null
           ? "Unknown" : `${recoveryDetail.unresolvedSectorCount} sectors`}</dd>
@@ -65,6 +78,7 @@ export default async function NotificationTargetPage({ searchParams }: {
           {action.name}: {action.eligible ? "Available" : action.reason ?? "Unavailable"}
         </li>)}
       </ul>
+      <p>Recovery and Archive Integrity do not establish watchability or authorize encoding.</p>
     </section>}
     <p><Link href="/discs">Disc intake and Archive Jobs</Link></p>
     <p><Link href="/catalog">Catalog and saved archives</Link></p>

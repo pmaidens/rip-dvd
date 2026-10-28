@@ -215,6 +215,11 @@ async function jobFixture(
 it.each([false, true])("saves the initial image, full evidence, job, request and separate Recovery together, damaged=%s", async (damaged) => {
   const f = await jobFixture(damaged);
   try {
+    f.access.notifications.register({
+      mutationKey: "synthetic-initial-save-subscriber", enable: true,
+      subscription: { endpoint: "https://web.push.apple.com/synthetic-initial-save", expirationTime: null,
+        keys: { p256dh: "synthetic-key", auth: "synthetic-auth" } },
+    });
     const saved = await saveDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion, proven: f.proven });
     const id = saved.originalDiscArchiveId!;
     expect(saved.status).toBe("completed");
@@ -230,6 +235,12 @@ it.each([false, true])("saves the initial image, full evidence, job, request and
     expect(pointer.currentManifestDigest).toBe(header.currentManifestDigest);
     expect((await reconcileDvdInitialArchiveForArchiveJob({ access: f.access, claim: f.claim, originalsLibraryPath: f.identity.originalsLibraryPath, exclusion: f.exclusion })).originalDiscArchiveId).toBe(id);
     expect(f.access.catalog.listOriginalDiscArchives({})).toHaveLength(1);
+    const deliveries = f.access.notifications.deliveries({ limit: 10 });
+    expect(deliveries).toHaveLength(1);
+    const delivery = f.access.notifications.claim({ now: new Date(), leaseMs: 30_000 });
+    expect(delivery?.payload.body).toBe(damaged
+      ? "Original Disc Archive saved. Source remains unrecovered; recovery may continue."
+      : "Original Disc Archive saved.");
   } finally { f.access.close(); }
 });
 

@@ -81,8 +81,27 @@ Each confirmed stop operation has its own event identity. Same-key replay,
 repeated Stop, worker restart and reconciliation do not add a second logical
 notification. A distinct stop after resumed work can alert again. Delivery
 failures leave durable Stop intent, archive evidence, and the completed initial
-Archive Job and fulfilled Archive Request unchanged. Later recovery completion
-and fault producers are separate work.
+Archive Job and fulfilled Archive Request unchanged.
+
+Later Archive Recovery completion and committed faults queue their own events
+in the owning outcome transaction. Completion requires a committed checkpoint
+with no Unrecovered Source. A clean initial save that creates completed Recovery
+queues only the Archive Job saved event. Recovery faults include a storage-fault
+pause, a failed continuation verification, a failed checkpoint reconciliation,
+and an unreconcilable Stop. An attention alert describes the need to inspect
+Recovery without claiming a new terminal status. These alerts never change the completed Archive Job or fulfilled
+Archive Request.
+
+Recovery event identities distinguish the owning transition and outcome.
+Repeated processing reuses that identity. Separate reconciliation attempts and
+Stop operations have distinct identities, while explicit Resume creates a new
+Recovery attempt that can report a later outcome. Productive passes,
+tolerable medium reads, no-progress pauses, generic polling faults, and process
+interruption alone do not queue outcome alerts. Transport uses the same
+recipient snapshot and dispatcher as Archive Job alerts. Clicking a recovery
+notification opens the saved archive's current Recovery status, pause or fault
+reason, and remaining-source count. These facts do not authorize encoding or
+establish watchability.
 
 The shared contract, formatter and transactional recorder are reused by producers.
 `recordNotificationOutcome(writer, outcome)` accepts authoritative facts and a

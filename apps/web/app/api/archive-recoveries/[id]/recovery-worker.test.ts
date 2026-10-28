@@ -46,6 +46,7 @@ import {
   reconcileDvdRecoveryCheckpoint,
 } from "../../../../../archive-worker/src/dvd-recovery-reconciliation.js";
 import { createOperationsResponse } from "../../operations/route.js";
+import { handleNotifications } from "../../notifications/route.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 
@@ -133,6 +134,240 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
   fixtures.splice(0).forEach((fixture) => fixture.dispose());
+});
+
+async function subscribeRecoveryBrowsers(
+  fixture: ReturnType<typeof createOperatorWorkflowFixture>,
+  names: string[] = [],
+) {
+  const workflow = await notificationWorkflow(fixture);
+  for (const name of names) await workflow.register(name);
+}
+
+it("notifies every subscribed browser once after later Recovery completes, with shared CLI and HTTP detail", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  await subscribeRecoveryBrowsers(fixture);
+  await completeVerification(fixture, seeded);
+  const input = pollInput(fixture, immediateReader(() => ({
+    outcome: "readable", bytes: Buffer.alloc(2_048, 0x6a),
+  })).reader);
+  try {
+    const initialJobs = input.access.archiveJobs.listForArchive(seeded.archive.id);
+    const initialRequest = initialJobs[0]!.archiveRequestId;
+    expect(initialJobs[0]!.status).toBe("completed");
+    expect((await fixture.run(["notifications", "deliveries"])).result)
+      .toMatchObject({ deliveries: [] });
+    expect(await pollDvdRecoveryPass(input)).toBe(true);
+    expect(await pollDvdRecoveryPass(input)).toBe(false);
+    const cli = await fixture.run(["inspect", "archive-recoveries", seeded.recoveryId]);
+    expect(cli).toMatchObject({ exitCode: 0, result: { item: { status: "completed" } } });
+    expect(await createOperationsResponse(input.access, new Request(
+      `https://operator.example/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
+    ), fixture.originalsLibraryPath).json()).toEqual(cli.result);
+    const deliveries = await fixture.run(["notifications", "deliveries"]);
+    expect(deliveries.result).toMatchObject({ deliveries: [
+      { status: "queued" }, { status: "queued" },
+    ] });
+    expect(await (await handleNotifications(new Request(
+      "https://operator.example/api/notifications?action=deliveries",
+    ), () => input.access)).json()).toEqual(deliveries.result);
+    await subscribeRecoveryBrowsers(fixture, ["future"]);
+    const sent: NotificationPayload[] = [];
+    expect(await dispatchNotifications(input.access, async (_recipient, payload) => {
+      sent.push(payload);
+    })).toEqual({ accepted: 2, failed: 0 });
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toMatchObject({
+      label: "EXAMPLE_FILM_2020",
+      body: "Archive Recovery completed. All remaining source recovered.",
+      destination: `/notifications/target?kind=original-disc-archives&id=${seeded.archive.id}`,
+    });
+    expect(sent[1]).toEqual(sent[0]);
+    expect(sent[0]!.tag).toMatch(/^rip-dvd-[a-f0-9]{32}$/);
+    expect(input.access.archiveJobs.listForArchive(seeded.archive.id)).toEqual(initialJobs);
+    expect((await fixture.run(["inspect", "archive-requests", initialRequest])).result)
+      .toMatchObject({ item: { status: "fulfilled" } });
+  } finally {
+    input.access.close();
+  }
+});
+
+it.each([false, true])("queues a committed Recovery attention outcome, storage pause=%s, without changing the saved job", async (storageFault) => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  await subscribeRecoveryBrowsers(fixture);
+  await completeVerification(fixture, seeded);
+  const input = pollInput(fixture, immediateReader(() => ({
+    outcome: "unreadable", diagnostic: transportError,
+  })).reader);
+  try {
+    const savedJobs = input.access.archiveJobs.listForArchive(seeded.archive.id);
+    if (storageFault) {
+      const database = new DatabaseSync(fixture.databasePath);
+      database.prepare("UPDATE detected_discs SET volume_label = NULL WHERE id = ?")
+        .run(seeded.archive.detectedDiscId);
+      database.close();
+    }
+    const run = storageFault ? {
+      ...input,
+      reader: immediateReader(() => ({
+        outcome: "readable", bytes: Buffer.alloc(2_048, 0x6a),
+      })).reader,
+      async commit() {
+        throw new DvdRecoveryBatchFault("IMAGE_WRITE_FAILED", {
+          storageFault: true, retainRecoveryWork: true,
+        });
+      },
+    } : input;
+    expect(await pollDvdRecoveryPass(run)).toBe(true);
+    expect(await pollDvdRecoveryPass(run)).toBe(false);
+    expect((await fixture.run(["inspect", "archive-recoveries", seeded.recoveryId])).result)
+      .toMatchObject({ item: storageFault
+        ? { status: "paused", pauseReason: "storage_fault", faultCode: null }
+        : { status: "faulted", faultCode: "SOURCE_TRANSPORT_ERROR" } });
+    const sent: NotificationPayload[] = [];
+    expect(await dispatchNotifications(input.access, async (_recipient, payload) => {
+      sent.push(payload);
+      if (storageFault) throw new Error("Synthetic sender rejection");
+    })).toEqual(storageFault ? { accepted: 0, failed: 2 } : { accepted: 2, failed: 0 });
+    expect(sent[0]).toMatchObject({
+      body: "Archive Recovery needs attention. Inspect the recovery for details.",
+      label: storageFault ? "Unlabelled disc" : "EXAMPLE_FILM_2020",
+      destination: `/notifications/target?kind=original-disc-archives&id=${seeded.archive.id}`,
+    });
+    expect(sent[1]).toEqual(sent[0]);
+    expect(input.access.archiveJobs.listForArchive(seeded.archive.id)).toEqual(savedJobs);
+  } finally {
+    input.access.close();
+  }
+});
+
+it("rolls back Recovery settlement with its notification and reconciles completion once after restart", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  await subscribeRecoveryBrowsers(fixture);
+  await completeVerification(fixture, seeded);
+  const input = pollInput(fixture, immediateReader(() => ({
+    outcome: "readable", bytes: Buffer.alloc(2_048, 0x6b),
+  })).reader);
+  const sqlite = new DatabaseSync(fixture.databasePath);
+  try {
+    sqlite.exec("CREATE TRIGGER synthetic_recovery_notification_rollback BEFORE INSERT ON notification_deliveries BEGIN SELECT RAISE(ABORT, 'Synthetic rollback'); END");
+    await expect(pollDvdRecoveryPass(input)).rejects.toThrow();
+    expect((await fixture.run(["notifications", "deliveries"])).result)
+      .toMatchObject({ deliveries: [] });
+    expect((await fixture.run(["inspect", "archive-recoveries", seeded.recoveryId])).result)
+      .toMatchObject({ item: { status: "running" } });
+    sqlite.exec("DROP TRIGGER synthetic_recovery_notification_rollback");
+    const restarted = fixture.openAccess();
+    try {
+      for (let repeat = 0; repeat < 2; repeat += 1) {
+        await reconcileDvdRecoveryCheckpoint({
+          access: restarted,
+          originalsLibraryPath: fixture.originalsLibraryPath,
+          originalDiscArchiveId: seeded.archive.id,
+          atomicWriter: syntheticAtomicWriter,
+        });
+      }
+      expect((await fixture.run(["inspect", "archive-recoveries", seeded.recoveryId])).result)
+        .toMatchObject({ item: { status: "completed" } });
+      const sent: NotificationPayload[] = [];
+      expect(await dispatchNotifications(restarted, async (_recipient, payload) => {
+        sent.push(payload);
+      })).toEqual({ accepted: 2, failed: 0 });
+      expect(sent[0]!.body).toBe("Archive Recovery completed. All remaining source recovered.");
+      expect(sent[1]).toEqual(sent[0]);
+    } finally {
+      restarted.close();
+    }
+  } finally {
+    sqlite.close();
+    input.access.close();
+  }
+});
+
+it("rolls back a committed fault when its recipient snapshot cannot persist", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  await subscribeRecoveryBrowsers(fixture);
+  const authority = await completeVerification(fixture, seeded);
+  const access = fixture.openAccess();
+  const sqlite = new DatabaseSync(fixture.databasePath);
+  try {
+    const claim = access.archiveRecoveryWork.claim(
+      access.archiveRecoveryWork.request(seeded.recoveryId).archiveRecoveryId,
+      "synthetic-fault-transaction-worker",
+    );
+    access.archiveRecoveryWork.bindVerification(claim, authority);
+    const fault = () => access.archiveRecoveryWork.markFault({
+      claim, faultCode: "SOURCE_TRANSPORT_ERROR", retainWork: false, storageFault: false,
+    });
+    sqlite.exec("CREATE TRIGGER synthetic_recovery_fault_rollback BEFORE INSERT ON notification_deliveries BEGIN SELECT RAISE(ABORT, 'Synthetic rollback'); END");
+    expect(fault).toThrow();
+    expect((await fixture.run(["inspect", "archive-recoveries", seeded.recoveryId])).result)
+      .toMatchObject({ item: { status: "running", faultCode: null } });
+    expect((await fixture.run(["notifications", "deliveries"])).result)
+      .toMatchObject({ deliveries: [] });
+    sqlite.exec("DROP TRIGGER synthetic_recovery_fault_rollback");
+    fault();
+    expect(fault).toThrow();
+    expect((await fixture.run(["notifications", "deliveries"])).result)
+      .toMatchObject({ deliveries: [{ status: "queued" }, { status: "queued" }] });
+  } finally {
+    sqlite.close();
+    access.close();
+  }
+});
+
+it("records a later Stop fault separately after rediscovery changes the label and another browser subscribes", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  await subscribeRecoveryBrowsers(fixture);
+  const authority = await completeVerification(fixture, seeded);
+  const access = fixture.openAccess();
+  try {
+    const claim = access.archiveRecoveryWork.claim(
+      access.archiveRecoveryWork.request(seeded.recoveryId).archiveRecoveryId,
+      "synthetic-distinct-fault-worker",
+    );
+    access.archiveRecoveryWork.bindVerification(claim, authority);
+    access.archiveRecoveryWork.markFault({
+      claim, faultCode: "IMAGE_WRITE_FAILED", retainWork: false, storageFault: true,
+    });
+    const sent: NotificationPayload[] = [];
+    const sender = async (_recipient: unknown, payload: NotificationPayload) => { sent.push(payload); };
+    expect(await dispatchNotifications(access, sender)).toEqual({ accepted: 2, failed: 0 });
+    await subscribeRecoveryBrowsers(fixture, ["future"]);
+    const disc = access.catalog.listDetectedDiscs(undefined, { ids: [seeded.archive.detectedDiscId] })[0]!;
+    access.catalog.registerDetectedDisc({
+      opticalDriveId: disc.opticalDriveId, discKind: disc.discKind,
+      fingerprint: disc.fingerprint, volumeLabel: "Synthetic rediscovered disc",
+    });
+    const stop = access.archiveRecoveryWork.requestStop({
+      mutationKey: "synthetic-distinct-fault-stop",
+      archiveRecoveryId: seeded.recoveryId, attemptId: seeded.attemptId,
+    });
+    access.archiveRecoveryWork.markStopFault({
+      archiveRecoveryId: seeded.recoveryId, attemptId: seeded.attemptId,
+      stopOperationId: stop.stopOperationId!, faultCode: "CONSISTENCY_FAULT",
+    });
+    expect(await dispatchNotifications(access, sender)).toEqual({ accepted: 3, failed: 0 });
+    expect(sent[2]).toMatchObject({
+      label: "Synthetic rediscovered disc",
+      body: "Archive Recovery needs attention. Inspect the recovery for details.",
+    });
+    expect(sent[2]!.tag).not.toBe(sent[0]!.tag);
+    expect(sent[3]).toEqual(sent[2]);
+    expect(sent[4]).toEqual(sent[2]);
+  } finally {
+    access.close();
+  }
 });
 
 const syntheticAtomicWriter: DvdRecoveryAtomicWriter = {
@@ -687,6 +922,7 @@ it("continues a productive pass in reverse and pauses after no progress", async 
     classification: "skipped_untested",
   }]);
   await completeVerification(fixture, seeded);
+  await subscribeRecoveryBrowsers(fixture);
   const before = readFileSync(seeded.archive.archivePath);
   const source = immediateReader((startLba) => startLba === 101
     ? { outcome: "unreadable", diagnostic: mediumError }
@@ -786,11 +1022,15 @@ it("continues a productive pass in reverse and pauses after no progress", async 
       current: { status: "running", recoveryStatus: "eligible" },
     });
     expect(await pollDvdRecoveryPass(input)).toBe(false);
+    expect((await fixture.run(["notifications", "deliveries"])).result)
+      .toMatchObject({ deliveries: [] });
     expect(source.start.mock.calls.map(([read]) => read.startLba))
       .toEqual([100, 101, 102]);
     completeQueuedVerification(fixture, seeded);
 
     expect(await pollDvdRecoveryPass(input)).toBe(true);
+    expect((await fixture.run(["notifications", "deliveries"])).result)
+      .toMatchObject({ deliveries: [] });
     expect(source.start.mock.calls.map(([read]) => read.startLba))
       .toEqual([100, 101, 102, 101]);
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
@@ -906,6 +1146,7 @@ it("faults a continuation when its source is removed between passes", async () =
     classification: "skipped_untested",
   }]);
   await completeVerification(fixture, seeded);
+  await subscribeRecoveryBrowsers(fixture);
   const firstPassSource = immediateReader((startLba) => startLba === 211
     ? { outcome: "unreadable", diagnostic: mediumError }
     : { outcome: "readable", bytes: Buffer.alloc(2_048, startLba) });
@@ -928,6 +1169,8 @@ it("faults a continuation when its source is removed between passes", async () =
       },
     })).toBe(true);
     expect(verificationSource.start).not.toHaveBeenCalled();
+    expect((await fixture.run(["notifications", "deliveries"])).result)
+      .toMatchObject({ deliveries: [{ status: "queued" }, { status: "queued" }] });
     expect(input.access.dvdDiscVerifications.findLatestForRecovery(
       seeded.recoveryId,
     )).toMatchObject({
@@ -1303,6 +1546,7 @@ it("does not admit a pass while reconciliation remains unresolved", async () => 
     classification: "skipped_untested",
   }]);
   await completeVerification(fixture, seeded);
+  await subscribeRecoveryBrowsers(fixture);
   const source = immediateReader(() => ({
     outcome: "readable",
     bytes: Buffer.alloc(2_048, 0x63),
@@ -1324,8 +1568,20 @@ it("does not admit a pass while reconciliation remains unresolved", async () => 
       reconciliation,
       "CONSISTENCY_FAULT",
     );
+    expect(input.access.dvdRecoveryReconciliations.fail(
+      reconciliation, "CONSISTENCY_FAULT",
+    )).toBeNull();
+    const detail = await fixture.run(["inspect", "archive-recoveries", seeded.recoveryId]);
+    expect(detail.result).toMatchObject({ item: {
+      reconciliation: { status: "failed", failureCode: "CONSISTENCY_FAULT" },
+    } });
+    expect(await createOperationsResponse(input.access, new Request(
+      `https://operator.example/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
+    ), fixture.originalsLibraryPath).json()).toEqual(detail.result);
     expect(await pollDvdRecoveryPass(input)).toBe(false);
     expect(source.start).not.toHaveBeenCalled();
+    expect((await fixture.run(["notifications", "deliveries"])).result)
+      .toMatchObject({ deliveries: [{ status: "queued" }, { status: "queued" }] });
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({ status: "eligible", work: null });
   } finally {
@@ -2180,6 +2436,7 @@ it("releases a quiesced read on shutdown so a restarted worker can resume", asyn
     classification: "skipped_untested",
   }]);
   await completeVerification(fixture, seeded);
+  await subscribeRecoveryBrowsers(fixture);
   let closeRead!: () => void;
   const closed = new Promise<void>((resolve) => {
     closeRead = resolve;
@@ -2207,6 +2464,8 @@ it("releases a quiesced read on shutdown so a restarted worker can resume", asyn
 
     await expect(polling).rejects.toThrow("SOURCE_READ_FAILED");
     expect(cancel).toHaveBeenCalledOnce();
+    expect((await fixture.run(["notifications", "deliveries"])).result)
+      .toMatchObject({ deliveries: [] });
     expect(firstInput.access.catalog.findArchiveRecoveryById(
       seeded.recoveryId,
     )).toMatchObject({
@@ -2871,6 +3130,7 @@ it("faults an unreconcilable Stop so it cannot poison the stopping queue", async
     sectorCount: 1,
     classification: "skipped_untested",
   }], "/dev/synthetic-recovery-drive");
+  await subscribeRecoveryBrowsers(fixture);
   const source = immediateReader(() => {
     throw new Error("No source read is allowed while stopping");
   });
@@ -2898,6 +3158,11 @@ it("faults an unreconcilable Stop so it cannot poison the stopping queue", async
     expect(await pollDvdRecoveryPass({ ...input, reconcile })).toBe(false);
     expect(reconcile).toHaveBeenCalledTimes(1);
     expect(source.start).not.toHaveBeenCalled();
+    const sent: NotificationPayload[] = [];
+    expect(await dispatchNotifications(input.access, async (_recipient, payload) => {
+      sent.push(payload);
+    })).toEqual({ accepted: 2, failed: 0 });
+    expect(sent[0]!.body).toBe("Archive Recovery needs attention. Inspect the recovery for details.");
   } finally {
     input.access.close();
   }
@@ -3645,6 +3910,7 @@ it("rolls forward a published checkpoint and explicitly resumes after a storage 
     { startLba: 900, sectorCount: 2, classification: "skipped_untested" },
   ]);
   await completeVerification(fixture, seeded);
+  await subscribeRecoveryBrowsers(fixture);
   const source = immediateReader(() => ({
     outcome: "readable",
     bytes: Buffer.alloc(2_048, 0x6b),
@@ -3718,6 +3984,17 @@ it("rolls forward a published checkpoint and explicitly resumes after a storage 
         },
       },
     });
+    completeQueuedVerification(fixture, seeded);
+    expect(await pollDvdRecoveryPass(input)).toBe(true);
+    const sent: NotificationPayload[] = [];
+    expect(await dispatchNotifications(input.access, async (_recipient, payload) => {
+      sent.push(payload);
+    })).toEqual({ accepted: 4, failed: 0 });
+    expect(new Set(sent.map(({ tag }) => tag)).size).toBe(2);
+    expect(new Set(sent.map(({ body }) => body))).toEqual(new Set([
+      "Archive Recovery needs attention. Inspect the recovery for details.",
+      "Archive Recovery completed. All remaining source recovered.",
+    ]));
   } finally {
     input.access.close();
   }

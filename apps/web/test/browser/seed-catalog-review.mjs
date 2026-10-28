@@ -551,6 +551,7 @@ function seedTitleDamagePaging(variant, fingerprintFill) {
     ) VALUES (?, ?, 1)
   `).run(archive.id, assessment.id);
   evidenceSqlite.close();
+  return { archive, recoveryId };
 }
 
 function seedKeyboardJourney(variant, fingerprintFill) {
@@ -842,6 +843,16 @@ try {
   seedTitleDamagePaging("desktop", "ab");
   seedTitleDamagePaging("mobile", "cd");
   seedTitleDamagePaging("notification", "ef");
+  const recoveryAlert = seedTitleDamagePaging("recovery-alert", "fa");
+  const recovery = access.catalog.findArchiveRecoveryById(recoveryAlert.recoveryId);
+  access.archiveRecoveryWork.release(recovery.work);
+  const reconciliation = access.dvdRecoveryReconciliations.submit({
+    mutationKey: "synthetic-browser-notification-reconciliation",
+    archiveRecoveryId: recoveryAlert.recoveryId,
+  });
+  const reconciliationClaim = access.dvdRecoveryReconciliations.claimNext("synthetic-browser-notification-worker");
+  if (reconciliationClaim?.id !== reconciliation.id) throw new Error("Expected synthetic notification reconciliation claim");
+  access.dvdRecoveryReconciliations.fail(reconciliationClaim, "CONSISTENCY_FAULT");
   seedKeyboardJourney("desktop", "1");
   seedComplexLayout("desktop", "2");
   seedKeyboardJourney("mobile", "3");
