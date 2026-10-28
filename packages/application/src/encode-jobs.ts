@@ -4,7 +4,6 @@ import {
   dvdRecoveryEvidenceFormatForArchive,
   encodingProfileQueueBlockingReasons,
   ENCODE_WORK_CONFLICT,
-  DvdRecoveryEvidenceEncodingUnavailableError,
   EncodeWorkConflictError,
   type ConsistentReadAccess,
   type DataAccess,
@@ -18,6 +17,9 @@ import {
   RecordNotFoundError,
 } from "@rip-dvd/data-access";
 
+import { defaultArchiveImageOwnership, type ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import { inspectEncodingReadiness, orderEncodingReadinessReasons } from "./encoding-readiness.js";
+import { parseEncodeSourceDecision, readEncodeRecoveryConflict, withEncodeSourceDecision } from "./encode-source-decision.js";
 import { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
 import { mediaOutputPath, suggestedMediaOutputPath } from "./media-output-path.js";
 import { parseMutationKey } from "./mutation-key.js";
@@ -25,43 +27,6 @@ import { encodeRequeueAvailability } from "./operations.js";
 
 const ENCODE_SELECTION_PAGE_SIZE = 100;
 const ENCODE_PROFILE_PAGE_SIZE = 100;
-
-function requireEvidenceEncodingAvailable(
-  access: DataAccess,
-  discSelectionId: DiscSelectionId,
-): void {
-  access.readConsistentSnapshot((snapshot) => {
-    const selection = snapshot.catalog.listDiscSelections({
-      ids: [discSelectionId],
-      includeHistorical: true,
-    })[0];
-    const recovery = selection === undefined
-      ? null
-      : snapshot.catalog.findArchiveRecovery(
-        selection.originalDiscArchiveId,
-      );
-    if (recovery !== null && recovery.work !== null) {
-      const encodeJobs = snapshot.catalog.listDiscSelections({
-        originalDiscArchiveId: recovery.originalDiscArchiveId,
-        includeHistorical: true,
-      }).flatMap(({ id }) => snapshot.encodeJobs.listForDiscSelection(id));
-      throw new EncodeWorkConflictError(
-        createEncodeWorkConflictCurrent(recovery, encodeJobs),
-      );
-    }
-    if (
-      selection !== undefined &&
-      dvdRecoveryEvidenceFormatForArchive(
-        snapshot.catalog.findDvdArchiveEvidenceHeader(
-          selection.originalDiscArchiveId,
-        ),
-        snapshot.archiveJobs.listForArchive(selection.originalDiscArchiveId),
-      ) !== null
-    ) {
-      throw new DvdRecoveryEvidenceEncodingUnavailableError();
-    }
-  });
-}
 
 function isQueueEligibleProfile(profile: EncodingProfile): boolean {
   return encodingProfileQueueBlockingReasons(profile).length === 0;
@@ -97,7 +62,7 @@ function requiredId(value: unknown): string {
   return value.trim();
 }
 
-export function enqueueEncodeJob(
+export async function enqueueEncodeJob(
   access: DataAccess,
   mediaLibraryPath: string,
   input: {
@@ -106,10 +71,16 @@ export function enqueueEncodeJob(
     outputPath: unknown;
     priority?: unknown;
     mutationKey: unknown;
+    expectedSourceDecision?: unknown;
+    originalsLibraryPath?: string;
   },
-): EncodeJob {
+  ownership: ArchiveImageOwnership = defaultArchiveImageOwnership,
+): Promise<EncodeJob> {
   const parsed = parseEncodeEnqueueInput(mediaLibraryPath, input);
-  return access.encodeJobs.enqueue(parsed);
+  const replay = access.encodeJobs.replayEnqueue(parsed);
+  if (replay) return replay;
+  return withEncodeSourceDecision(access, parsed.discSelectionId, parsed.expectedSourceDecision,
+    input.originalsLibraryPath ?? "", (assert) => access.encodeJobs.enqueue(parsed, assert), ownership);
 }
 
 export function parseEncodeEnqueueInput(
@@ -120,6 +91,7 @@ export function parseEncodeEnqueueInput(
     outputPath: unknown;
     priority?: unknown;
     mutationKey: unknown;
+    expectedSourceDecision?: unknown;
   },
 ) {
   const discSelectionId = requiredId(input.discSelectionId) as DiscSelectionId;
@@ -133,10 +105,11 @@ export function parseEncodeEnqueueInput(
     discSelectionId, encodingProfileId, outputPath,
     priority: priority as number,
     mutationKey: parseMutationKey(input.mutationKey),
+    expectedSourceDecision: parseEncodeSourceDecision(input.expectedSourceDecision),
   };
 }
 
-export function requeueEncodeJob(
+export async function requeueEncodeJob(
   access: DataAccess,
   mediaLibraryPath: string,
   input: {
@@ -146,8 +119,11 @@ export function requeueEncodeJob(
     mutationKey: unknown;
     expectedRevision?: unknown;
     acknowledgeReplacement?: unknown;
+    expectedSourceDecision?: unknown;
+    originalsLibraryPath?: string;
   },
-): EncodeJob {
+  ownership: ArchiveImageOwnership = defaultArchiveImageOwnership,
+): Promise<EncodeJob> {
   const encodeJobId = requiredId(input.encodeJobId) as EncodeJobId;
   const outputPath = input.outputPath === undefined
     ? undefined : mediaOutputPath(input.outputPath, mediaLibraryPath);
@@ -158,27 +134,50 @@ export function requeueEncodeJob(
   const expectedRevision = typeof input.expectedRevision === "string"
     ? input.expectedRevision
     : undefined;
-  return access.encodeJobs.requeue(encodeJobId, {
+  const options = {
     outputPath,
     priority: input.priority as number | undefined,
     mutationKey: parseMutationKey(input.mutationKey),
     expectedRevision,
     acknowledgeReplacement: input.acknowledgeReplacement === true,
-  });
+    expectedSourceDecision: parseEncodeSourceDecision(input.expectedSourceDecision),
+  };
+  const replay = access.encodeJobs.replayRequeue(encodeJobId, options);
+  if (replay) return replay;
+  const job = access.encodeJobs.find(encodeJobId);
+  if (!job) throw new RecordNotFoundError("Encode Job", encodeJobId);
+  return withEncodeSourceDecision(access, job.discSelectionId, options.expectedSourceDecision,
+    input.originalsLibraryPath ?? "", (assertSourceDecision) => access.encodeJobs.requeue(encodeJobId, { ...options, assertSourceDecision }), ownership);
 }
 
-export function previewEncodeRequeue(
+export async function previewEncodeRequeue(
   access: DataAccess,
-  input: { encodeJobId: unknown },
+  input: { encodeJobId: unknown; originalsLibraryPath?: string },
+  ownership: ArchiveImageOwnership = defaultArchiveImageOwnership,
 ) {
   const encodeJobId = requiredId(input.encodeJobId) as EncodeJobId;
   const job = access.encodeJobs.find(encodeJobId);
   if (job === null) {
     throw new RecordNotFoundError("Encode Job", encodeJobId);
   }
-  requireEvidenceEncodingAvailable(access, job.discSelectionId);
+  const selection = access.catalog.listDiscSelections({ ids: [job.discSelectionId], includeHistorical: true })[0];
+  const readiness = selection === undefined ? null : await inspectEncodingReadiness(
+    access, selection.originalDiscArchiveId, input.originalsLibraryPath ?? "", ownership,
+  );
+  const conflict = selection === undefined ? null : readEncodeRecoveryConflict(access, selection.originalDiscArchiveId);
   const replacesOutput = job.status === "completed" || job.replaceExistingOutput;
   return {
+    ...(readiness?.applicable ? {
+      sourceReadiness: readiness,
+      expectedSourceDecision: readiness.selections.find((item) => item.discSelectionId === job.discSelectionId)?.expectedSourceDecision ?? null,
+      available: readiness.sourceReady && readiness.admissionAvailable,
+      ...(conflict === null ? {} : { currentWork: conflict }),
+      blockingReasons: orderEncodingReadinessReasons([
+        ...readiness.blockingReasons,
+        ...(conflict === null ? [] : [{ ...ENCODE_WORK_CONFLICT, details: { current: conflict } }]),
+        ...readiness.admissionReasons.map((reason) => ({ ...reason, details: {} })),
+      ]),
+    } : {}),
     encodeJobId: job.id,
     status: job.status,
     revision: job.updatedAt.toISOString(),

@@ -2,6 +2,8 @@ import { loadConfig } from "@rip-dvd/config";
 import {
   createApplicationOperations,
   InvalidEncodeJobInputError,
+  EncodeSourceDecisionRejectedError,
+  InvalidEncodeSourceDecisionError,
   InvalidMutationKeyError,
   parseEncodeEnqueueInput,
   readQueueOptions,
@@ -35,6 +37,7 @@ const ENCODE_SELECTION_PAGE_SIZE = 100;
 interface EncodeJobsRuntimeConfig {
   mediaLibraryPath: string;
   webTrustedOrigin: string;
+  originalsLibraryPath?: string;
 }
 
 function response(body: unknown, status = 200): Response {
@@ -227,7 +230,7 @@ export async function createEncodeJobsRoute(
       const operations = createApplicationOperations(getAccess());
       if (action === "preview_requeue") {
         return response({
-          preview: operations.previewEncodeRequeue({ encodeJobId }),
+          preview: await operations.previewEncodeRequeue({ encodeJobId, originalsLibraryPath: config.originalsLibraryPath }),
         });
       }
       const job = action === "cancel"
@@ -235,13 +238,15 @@ export async function createEncodeJobsRoute(
           encodeJobId,
           mutationKey: body.mutationKey,
         })
-        : operations.requeueEncodeJob({
+        : await operations.requeueEncodeJob({
           encodeJobId,
           outputPath: body.outputPath,
           priority: body.priority,
           mutationKey: body.mutationKey,
           expectedRevision: body.expectedRevision,
           acknowledgeReplacement: body.acknowledgeReplacement,
+          expectedSourceDecision: body.expectedSourceDecision,
+          originalsLibraryPath: config.originalsLibraryPath,
           mediaLibraryPath: config.mediaLibraryPath,
         });
       return response({ job: serializeJob(job) });
@@ -253,12 +258,17 @@ export async function createEncodeJobsRoute(
       outputPath: body.outputPath,
       priority: body.priority,
       mutationKey: body.mutationKey,
+      expectedSourceDecision: body.expectedSourceDecision,
     });
-    const job = createApplicationOperations(getAccess()).enqueueEncodeJob({
-      ...input, mediaLibraryPath: config.mediaLibraryPath,
+    const job = await createApplicationOperations(getAccess()).enqueueEncodeJob({
+      ...input, mediaLibraryPath: config.mediaLibraryPath, originalsLibraryPath: config.originalsLibraryPath,
     });
     return response({ job: serializeJob(job) });
   } catch (error) {
+    if (error instanceof EncodeSourceDecisionRejectedError) return response({ error: {
+      code: error.code, message: error.message, current: error.current, blockingReasons: error.blockingReasons,
+    } }, 409);
+    if (error instanceof InvalidEncodeSourceDecisionError) return response({ error: "Invalid expected source decision" }, 400);
     if (error instanceof EncodeWorkConflictError) {
       return response({ error: {
         code: error.code,

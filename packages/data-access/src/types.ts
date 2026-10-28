@@ -2094,7 +2094,31 @@ export interface EncodeJobFailureReport extends EncodeJobFailureReportInput {
   createdAt: Date;
 }
 
+/** Exact source evidence reviewed before requesting Encode work. */
+export interface EncodeSourceDecision {
+  checkpoint: { manifestId: string; revision: number; manifestDigest: string } | null;
+  selectionIdentity: string;
+  titleIdentityId: string | null;
+  titleIdentityObservationId: string | null;
+  reviewSetIdentity: string | null;
+  catalogMappingProjectionId: string | null;
+  assessmentIdentity: string | null;
+  acceptanceIdentity: string | null;
+  reviewedContentIdentity: string | null;
+}
+
+export interface EncodeJobEnqueueInput {
+  discSelectionId: DiscSelectionId;
+  encodingProfileId: EncodingProfileId;
+  outputPath: string;
+  priority?: number;
+  mutationKey?: string;
+  expectedSourceDecision?: EncodeSourceDecision;
+}
+
 export interface EncodeJobRequeueOptions {
+  expectedSourceDecision?: EncodeSourceDecision;
+  assertSourceDecision?: () => void;
   outputPath?: string;
   priority?: number;
   mutationKey?: string;
@@ -2664,13 +2688,10 @@ export interface EncodeJobAccess {
     limit: number;
     offset?: number;
   }): EncodeQueueDiscSelectionPage;
-  enqueue(input: {
-    discSelectionId: DiscSelectionId;
-    encodingProfileId: EncodingProfileId;
-    outputPath: string;
-    priority?: number;
-    mutationKey?: string;
-  }): EncodeJob;
+  /** Replay before preparing external source evidence. Mutations recheck replay atomically. */
+  replayEnqueue(input: EncodeJobEnqueueInput): EncodeJob | null;
+  replayRequeue(id: EncodeJobId, options: EncodeJobRequeueOptions): EncodeJob | null;
+  enqueue(input: EncodeJobEnqueueInput, assertSourceDecision?: () => void): EncodeJob;
   requestCancellation(id: EncodeJobId, mutationKey?: string): EncodeJob;
   claimNext(workerId: string): RunningEncodeJob | null;
   renewClaim(claim: RunningEncodeJob): ClaimedEncodeJob;

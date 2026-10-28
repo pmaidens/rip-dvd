@@ -1683,6 +1683,18 @@ export function createDataAccessInternal(
       );
   }
 
+  function encodeEnqueueSemanticInput(input: import("../types.js").EncodeJobEnqueueInput) {
+    return JSON.stringify({
+      discSelectionId: input.discSelectionId,
+      encodingProfileId: input.encodingProfileId,
+      outputPath: requireNonEmpty(input.outputPath, "outputPath"),
+      priority: input.priority ?? 0,
+      ...(input.expectedSourceDecision === undefined ? {} : {
+        expectedSourceDecision: JSON.parse(canonicalPublicationJson(input.expectedSourceDecision)),
+      }),
+    });
+  }
+
   function encodeRequeueSemanticInput(
     id: EncodeJobId,
     options?: EncodeJobRequeueOptions,
@@ -1693,6 +1705,9 @@ export function createDataAccessInternal(
       priority: options?.priority ?? null,
       expectedRevision: options?.expectedRevision ?? null,
       acknowledgeReplacement: options?.acknowledgeReplacement ?? false,
+      ...(options?.expectedSourceDecision === undefined ? {} : {
+        expectedSourceDecision: JSON.parse(canonicalPublicationJson(options.expectedSourceDecision)),
+      }),
     });
   }
 
@@ -5963,6 +5978,7 @@ export function createDataAccessInternal(
           options?.mutationKey, "encode_job.requeue", semanticInput,
         );
         if (replay) return replay;
+        options?.assertSourceDecision?.();
         requireDvdRecoveryEvidenceEncodingAvailableForEncodeJob(
           transaction,
           id,
@@ -23653,15 +23669,16 @@ export function createDataAccessInternal(
         };
       },
 
-      enqueue(input) {
+      replayEnqueue(input) {
+        return database.transaction((transaction) => replayEncodeMutation(transaction, input.mutationKey, "encode_job.enqueue", encodeEnqueueSemanticInput(input)), { behavior: "immediate" });
+      },
+      replayRequeue(id, options) {
+        return database.transaction((transaction) => replayEncodeMutation(transaction, options.mutationKey, "encode_job.requeue", encodeRequeueSemanticInput(id, options)), { behavior: "immediate" });
+      },
+      enqueue(input, assertSourceDecision) {
         const timestamp = now();
         const outputPath = requireNonEmpty(input.outputPath, "outputPath");
-        const semanticInput = JSON.stringify({
-          discSelectionId: input.discSelectionId,
-          encodingProfileId: input.encodingProfileId,
-          outputPath,
-          priority: input.priority ?? 0,
-        });
+        const semanticInput = encodeEnqueueSemanticInput(input);
         const previous = database.transaction(
           (transaction) => replayEncodeMutation(
             transaction,
@@ -23736,7 +23753,7 @@ export function createDataAccessInternal(
           }
           return selectionReview;
         };
-        const validatedArchive = database.transaction(
+        const validatedArchive = assertSourceDecision === undefined ? database.transaction(
           (transaction) => {
             const selectionReview = selectReviewState(transaction);
             requireNoArchiveRecoveryWork(
@@ -23756,7 +23773,7 @@ export function createDataAccessInternal(
             );
           },
           { behavior: "deferred" },
-        );
+        ) : null;
         return database.transaction(
           (transaction) => {
             const replay = replayEncodeMutation(
@@ -23764,6 +23781,7 @@ export function createDataAccessInternal(
               input.mutationKey, "encode_job.enqueue", semanticInput,
             );
             if (replay) return replay;
+            assertSourceDecision?.();
             const selectionReview = selectReviewState(transaction);
             requireNoArchiveRecoveryWork(
               transaction,
@@ -23776,15 +23794,16 @@ export function createDataAccessInternal(
               throw new DvdRecoveryEvidenceEncodingUnavailableError();
             }
             requireCompletedReview(selectionReview);
+            const validated = validatedArchive ?? requireReviewableDiscSelections(selectionReview.originalDiscArchiveId, transaction);
             if (
-              selectionReview.originalDiscArchiveId !== validatedArchive.id
+              selectionReview.originalDiscArchiveId !== validated.id
             ) {
               throw new DomainInvariantError(
                 "Catalog changed during validation; retry the operation",
               );
             }
             requireCurrentCatalogValidation(
-              validatedArchive,
+              validated,
               transaction,
             );
             const existing = transaction
@@ -25776,6 +25795,7 @@ export function createDataAccessInternal(
           priority: options?.priority,
           expectedRevision: options?.expectedRevision,
           acknowledgeReplacement: options?.acknowledgeReplacement,
+          expectedSourceDecision: options?.expectedSourceDecision,
         });
         const replay = database.transaction(
           (transaction) => replayEncodeMutation(
@@ -25804,6 +25824,8 @@ export function createDataAccessInternal(
             mutationKey: options?.mutationKey,
             expectedRevision: options?.expectedRevision,
             acknowledgeReplacement: options?.acknowledgeReplacement,
+            expectedSourceDecision: options?.expectedSourceDecision,
+            assertSourceDecision: options?.assertSourceDecision,
           });
         } catch (error) {
           const racedReplay = database.transaction(
@@ -25816,6 +25838,12 @@ export function createDataAccessInternal(
             { behavior: "immediate" },
           );
           if (racedReplay) return racedReplay;
+          // A competing retry may have made this job nonterminal before the
+          // queue adapter reached its source assertion. Report stale source
+          // evidence before falling back to the workflow-state rejection.
+          if (error instanceof InvalidStatusTransitionError && options?.assertSourceDecision) {
+            database.transaction(() => options.assertSourceDecision!(), { behavior: "immediate" });
+          }
           throw error;
         }
       },

@@ -999,6 +999,7 @@ const pendingEncodeRequeueBodies = new Map<EncodeJobId, {
   mutationKey: string;
   expectedRevision: string;
   acknowledgeReplacement: boolean;
+  expectedSourceDecision?: unknown;
 }>();
 const pendingEncodeCancellationKeys = new Map<EncodeJobId, string>();
 
@@ -1064,8 +1065,14 @@ async function requestEncodeJobRequeue(
         revision: string;
         acknowledgementRequired: boolean;
         outputPath: string | null;
+        expectedSourceDecision?: unknown;
+        available?: boolean;
+        blockingReasons?: { message: string }[];
       };
     };
+    if (preview.available === false) {
+      throw new Error(preview.blockingReasons?.map((reason) => reason.message).join(" ") || "Encode source is unavailable");
+    }
     if (preview.acknowledgementRequired && !window.confirm(
       `Re-encode and replace the existing output at ${preview.outputPath}?`,
     )) {
@@ -1077,6 +1084,7 @@ async function requestEncodeJobRequeue(
       mutationKey: createMutationKey(),
       expectedRevision: preview.revision,
       acknowledgeReplacement: preview.acknowledgementRequired,
+      ...(preview.expectedSourceDecision === undefined ? {} : { expectedSourceDecision: preview.expectedSourceDecision }),
     };
     pendingEncodeRequeueBodies.set(encodeJobId, mutationBody);
   }
