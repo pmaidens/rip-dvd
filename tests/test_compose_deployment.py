@@ -1,5 +1,6 @@
 import json
 import pathlib
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -10,6 +11,13 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 OLD_COMMIT = "1" * 40
 TARGET_COMMIT = "2" * 40
+
+
+def dockerfile_stage(dockerfile: str, name: str) -> str:
+    header = re.search(rf"^FROM .+ AS {re.escape(name)}$", dockerfile, re.MULTILINE)
+    if header is None:
+        raise AssertionError(f"Missing Dockerfile stage: {name}")
+    return dockerfile[header.end():].split("\nFROM ", 1)[0]
 
 
 def compose_config(
@@ -79,7 +87,7 @@ def write_fake_docker(directory: pathlib.Path) -> None:
         "{{else}}{{.State.Status}}{{end}} web-container') "
         "printf '%s\\n' \"${WEB_HEALTH_STATUS:-healthy}\" ;;\n"
         "  'compose ps --status running --services') "
-        "printf '%s\\n' \"${RUNNING_SERVICES:-web archive-worker encode-worker}\" | "
+        "printf '%s\\n' \"${RUNNING_SERVICES:-web archive-worker encode-worker notification-worker}\" | "
         "tr ' ' '\\n' ;;\n"
         "esac\n"
     )
@@ -241,9 +249,18 @@ class ComposeDeploymentTests(unittest.TestCase):
 
         expected = {
             "web": {
-                "mounts": [("/data", False)],
+                "mounts": [
+                    ("/data", False),
+                    ("/media/movies", True),
+                    ("/media/originals", True),
+                ],
                 "devices": None,
                 "target": "web",
+            },
+            "notification-worker": {
+                "mounts": [("/data", False)],
+                "devices": None,
+                "target": "notification-worker",
             },
             "archive-worker": {
                 "mounts": [
@@ -330,6 +347,7 @@ class ComposeDeploymentTests(unittest.TestCase):
                 f"{ROOT}||compose --progress plain --profile maintenance build web",
                 f"{ROOT}||compose --progress plain --profile maintenance build archive-worker",
                 f"{ROOT}||compose --progress plain --profile maintenance build encode-worker",
+                f"{ROOT}||compose --progress plain --profile maintenance build notification-worker",
             ],
         )
 
@@ -356,12 +374,8 @@ class ComposeDeploymentTests(unittest.TestCase):
         self,
     ) -> None:
         dockerfile = (ROOT / "docker" / "runtime.Dockerfile").read_text()
-        web_builder = dockerfile.split(
-            "FROM shared-builder AS web-builder", maxsplit=1
-        )[1].split("FROM shared-builder AS archive-worker-builder", maxsplit=1)[0]
-        web_runtime = dockerfile.split("FROM runtime-base AS web", maxsplit=1)[
-            1
-        ].split("FROM runtime-base AS worker-runtime-base", maxsplit=1)[0]
+        web_builder = dockerfile_stage(dockerfile, "web-builder")
+        web_runtime = dockerfile_stage(dockerfile, "web")
 
         archive_source_copy = (
             "COPY apps/archive-worker/src apps/archive-worker/src"
@@ -421,7 +435,7 @@ class ComposeDeploymentTests(unittest.TestCase):
         )
 
         self.assertLess(backup, merge)
-        self.assertEqual(len(builds), 6)
+        self.assertEqual(len(builds), 7)
         self.assertLess(merge, builds[0])
         self.assertLess(builds[-1], first_stop)
         self.assertLess(first_stop, migrate)
@@ -540,7 +554,7 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker notification-worker web",
                 f"{ROOT}||compose --profile maintenance run --rm --no-deps migrate"
             ],
         )
@@ -560,7 +574,7 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web"
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker notification-worker web"
             ],
         )
 
@@ -573,9 +587,9 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker notification-worker web",
                 f"{ROOT}||compose --profile maintenance run --rm --no-deps migrate",
-                f"{ROOT}||compose up --detach --no-build web archive-worker encode-worker",
+                f"{ROOT}||compose up --detach --no-build web archive-worker encode-worker notification-worker",
             ],
         )
 
@@ -589,9 +603,9 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker notification-worker web",
                 f"{ROOT}||compose --profile maintenance run --rm --no-deps migrate",
-                f"{ROOT}||compose --file compose.yaml --file compose.linux-priority.yaml up --detach --no-build web archive-worker encode-worker",
+                f"{ROOT}||compose --file compose.yaml --file compose.linux-priority.yaml up --detach --no-build web archive-worker encode-worker notification-worker",
             ],
         )
 
@@ -609,9 +623,9 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker notification-worker web",
                 f"{ROOT}||compose --profile maintenance run --rm --no-deps migrate",
-                f"{ROOT}||compose --file compose.yaml --file compose.linux-priority.yaml up --detach --no-build web archive-worker encode-worker",
+                f"{ROOT}||compose --file compose.yaml --file compose.linux-priority.yaml up --detach --no-build web archive-worker encode-worker notification-worker",
             ],
         )
 
@@ -651,6 +665,31 @@ class ComposeDeploymentTests(unittest.TestCase):
         )
         self.assertEqual(calls, [])
 
+    def test_start_script_allows_loopback_backend_with_https_proxy_origin(
+        self,
+    ) -> None:
+        result, calls = run_compose_script(
+            "compose-start.sh",
+            environment={
+                "DOCKER_COMPOSE_ENVIRONMENT": "\n".join(
+                    (
+                        "RIP_DVD_WEB_BIND_ADDRESS=127.0.0.1",
+                        "RIP_DVD_WEB_TRUSTED_ORIGIN=https://dvd.example.test",
+                    )
+                ),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            calls,
+            [
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker notification-worker web",
+                f"{ROOT}||compose --profile maintenance run --rm --no-deps migrate",
+                f"{ROOT}||compose up --detach --no-build web archive-worker encode-worker notification-worker",
+            ],
+        )
+
     def test_start_script_allows_public_bind_with_public_trusted_origin(
         self,
     ) -> None:
@@ -670,9 +709,9 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker notification-worker web",
                 f"{ROOT}||compose --profile maintenance run --rm --no-deps migrate",
-                f"{ROOT}||compose up --detach --no-build web archive-worker encode-worker",
+                f"{ROOT}||compose up --detach --no-build web archive-worker encode-worker notification-worker",
             ],
         )
 
@@ -691,10 +730,10 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker notification-worker web",
                 f"{ROOT}||compose --profile maintenance run --rm --no-deps migrate",
-                f"{ROOT}||compose up --detach --no-build web archive-worker encode-worker",
-                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
+                f"{ROOT}||compose up --detach --no-build web archive-worker encode-worker notification-worker",
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker notification-worker web",
             ],
         )
         self.assertIn("runtime startup failed", result.stderr.lower())
@@ -713,9 +752,9 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertEqual(
             retry_calls,
             [
-                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker notification-worker web",
                 f"{ROOT}||compose --profile maintenance run --rm --no-deps migrate",
-                f"{ROOT}||compose up --detach --no-build web archive-worker encode-worker",
+                f"{ROOT}||compose up --detach --no-build web archive-worker encode-worker notification-worker",
             ],
         )
 
@@ -726,7 +765,7 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web"
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker notification-worker web"
             ],
         )
 
@@ -789,20 +828,14 @@ class ComposeDeploymentTests(unittest.TestCase):
 
         backup = services["backup"]
         self.assertEqual(
-            backup["volumes"],
             [
-                {
-                    "type": "volume",
-                    "source": "rip-dvd-data",
-                    "target": "/data",
-                    "volume": {},
-                },
-                {
-                    "type": "bind",
-                    "source": str(ROOT / "backups"),
-                    "target": "/backups",
-                    "bind": {"create_host_path": True},
-                },
+                (volume["type"], volume["source"], volume["target"],
+                 volume.get("read_only", False))
+                for volume in backup["volumes"]
+            ],
+            [
+                ("volume", "rip-dvd-data", "/data", False),
+                ("bind", str(ROOT / "backups"), "/backups", False),
             ],
         )
         self.assertNotIn("devices", migrate)
@@ -879,7 +912,7 @@ class ComposeDeploymentTests(unittest.TestCase):
         for expectation in (
             "Never run `docker compose down --volumes`",
             "SQLite online backup API",
-            "Stop all three runtime services before restoring",
+            "Stop all runtime services before restoring",
             "remain stopped after a failed migration or startup",
             "UID/GID 1000",
             "`/dev/sr0`",
@@ -1002,18 +1035,10 @@ class ComposeDeploymentTests(unittest.TestCase):
 
     def test_deployment_tools_image_is_separate_from_the_web_runtime(self) -> None:
         dockerfile = (ROOT / "docker" / "runtime.Dockerfile").read_text()
-        web_runtime = dockerfile.split("FROM runtime-base AS web", 1)[1].split(
-            "FROM runtime-base AS worker-runtime-base", 1
-        )[0]
-        deployment_runtime = dockerfile.split(
-            "FROM runtime-base AS deployment-tools", 1
-        )[1].split("FROM runtime-base AS web", 1)[0]
-        archive_runtime = dockerfile.split(
-            "FROM worker-runtime-base AS archive-worker", 1
-        )[1].split("\nFROM ", 1)[0]
-        encode_runtime = dockerfile.split(
-            "FROM encode-worker-runtime-base AS encode-worker", 1
-        )[1]
+        web_runtime = dockerfile_stage(dockerfile, "web")
+        deployment_runtime = dockerfile_stage(dockerfile, "deployment-tools")
+        archive_runtime = dockerfile_stage(dockerfile, "archive-worker")
+        encode_runtime = dockerfile_stage(dockerfile, "encode-worker")
 
         self.assertNotIn("sqlite3", web_runtime)
         self.assertNotIn("lsdvd", web_runtime)

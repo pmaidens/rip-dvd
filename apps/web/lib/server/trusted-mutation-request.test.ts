@@ -17,6 +17,13 @@ const trustedHeaders = {
   Origin: "http://localhost:3000",
 };
 
+const proxyHeaders = {
+  "Content-Type": "application/json",
+  Host: "dvd.example.test",
+  Origin: "https://dvd.example.test",
+  "Sec-Fetch-Site": "same-origin",
+};
+
 const requestCases: RequestCase[] = [
   {
     name: "the default trusted origin",
@@ -42,6 +49,43 @@ const requestCases: RequestCase[] = [
       "Sec-Fetch-Site": "same-origin",
     },
     expectedStatus: null,
+  },
+  {
+    name: "HTTPS terminated at a proxy with an HTTP upstream URL",
+    trustedOrigin: "https://dvd.example.test",
+    requestUrl: "http://127.0.0.1:3000/api/example",
+    headers: proxyHeaders,
+    expectedStatus: null,
+  },
+  {
+    name: "an internal Host despite matching forwarded HTTPS authority",
+    trustedOrigin: "https://dvd.example.test",
+    requestUrl: "http://127.0.0.1:3000/api/example",
+    headers: {
+      ...proxyHeaders,
+      Host: "127.0.0.1:3000",
+      "X-Forwarded-Host": "dvd.example.test",
+      "X-Forwarded-Proto": "https",
+      Forwarded: "host=dvd.example.test;proto=https",
+    },
+    expectedStatus: 403,
+    expectedBody: { error: "Cross-origin mutation rejected" },
+  },
+  {
+    name: "a proxy leaking the backend port into the external Host",
+    trustedOrigin: "https://dvd.example.test",
+    requestUrl: "http://127.0.0.1:3000/api/example",
+    headers: { ...proxyHeaders, Host: "dvd.example.test:3000" },
+    expectedStatus: 403,
+    expectedBody: { error: "Cross-origin mutation rejected" },
+  },
+  {
+    name: "a hostile Origin behind the HTTPS proxy",
+    trustedOrigin: "https://dvd.example.test",
+    requestUrl: "http://127.0.0.1:3000/api/example",
+    headers: { ...proxyHeaders, Origin: "https://attacker.example" },
+    expectedStatus: 403,
+    expectedBody: { error: "Cross-origin mutation rejected" },
   },
   {
     name: "a browser navigation",

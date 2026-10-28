@@ -8,6 +8,9 @@ browser or system settings. Supporting browsers use the standard Push API.
 A trusted HTTPS application origin is required. Localhost is also a browser
 secure context for development and automated tests.
 
+For private TLS setup, cutover, and rollback, follow
+[private HTTPS with Tailscale Serve](operations/private-https.md).
+
 Configure `RIP_DVD_WEB_TRUSTED_ORIGIN`, `RIP_DVD_VAPID_PUBLIC_KEY`,
 `RIP_DVD_VAPID_PRIVATE_KEY`, and `RIP_DVD_VAPID_SUBJECT` in the private deployment
 environment. Generate the VAPID pair once with
