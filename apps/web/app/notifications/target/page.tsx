@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { inspectOperations } from "@rip-dvd/application";
+import { loadConfig } from "@rip-dvd/config";
 import { getDataAccess } from "../../../lib/data-access";
 
 export const dynamic = "force-dynamic";
@@ -10,9 +11,17 @@ export default async function NotificationTargetPage({ searchParams }: {
   const { kind, id } = await searchParams;
   const supported = kind === "archive-jobs" || kind === "original-disc-archives";
   let detail: { status: string | null; integrity: string | null; label: string | null } | null = null;
+  let recoveryDetail: {
+    status: string;
+    checkpointRevision: number | null;
+    unresolvedSectorCount: number | null;
+    actions: { name: string; eligible: boolean; reason: string | null }[];
+  } | null = null;
   if (supported && typeof id === "string" && id.length > 0 && id.length <= 256) {
     try {
-      const result = inspectOperations(getDataAccess(), kind, { id });
+      const access = getDataAccess();
+      const inspectionOptions = { id, originalsLibraryPath: loadConfig().originalsLibraryPath };
+      const result = inspectOperations(access, kind, inspectionOptions);
       if ("item" in result && result.item) {
         const item = result.item;
         detail = {
@@ -20,6 +29,20 @@ export default async function NotificationTargetPage({ searchParams }: {
           integrity: "integrity" in item && typeof item.integrity === "string" ? item.integrity : null,
           label: "detectedDisc" in item && item.detectedDisc && "volumeLabel" in item.detectedDisc ? item.detectedDisc.volumeLabel : null,
         };
+        if ("archiveRecovery" in item && item.archiveRecovery?.record) {
+          const recovery = inspectOperations(access, "archive-recoveries", {
+            ...inspectionOptions,
+            id: item.archiveRecovery.record.id,
+          });
+          if ("item" in recovery && recovery.item && "recoveryStatus" in recovery.item) {
+            recoveryDetail = {
+              status: recovery.item.recoveryStatus,
+              checkpointRevision: recovery.item.checkpoint?.currentManifestRevision ?? null,
+              unresolvedSectorCount: recovery.item.progress?.unresolvedSectorCount ?? null,
+              actions: recovery.item.availableActions,
+            };
+          }
+        }
       }
     } catch { /* A stale notification remains navigable during an outage. */ }
   }
@@ -29,6 +52,20 @@ export default async function NotificationTargetPage({ searchParams }: {
       {detail.status && <><dt>Current status</dt><dd>{detail.status.replaceAll("_", " ")}</dd></>}
       {detail.integrity && <><dt>Archive Integrity</dt><dd>{detail.integrity.replaceAll("_", " ")}</dd></>}
     </dl></> : <p>This notification target is no longer available. Open the current operations views to inspect the work.</p>}
+    {recoveryDetail && <section aria-label="Archive Recovery detail">
+      <h2>Archive Recovery</h2>
+      <dl>
+        <dt>Current recovery status</dt><dd>{recoveryDetail.status.replaceAll("_", " ")}</dd>
+        <dt>Checkpoint revision</dt><dd>{recoveryDetail.checkpointRevision ?? "Unknown"}</dd>
+        <dt>Unrecovered Source</dt><dd>{recoveryDetail.unresolvedSectorCount === null
+          ? "Unknown" : `${recoveryDetail.unresolvedSectorCount} sectors`}</dd>
+      </dl>
+      <ul aria-label="Recovery action availability">
+        {recoveryDetail.actions.map((action) => <li key={action.name}>
+          {action.name}: {action.eligible ? "Available" : action.reason ?? "Unavailable"}
+        </li>)}
+      </ul>
+    </section>}
     <p><Link href="/discs">Disc intake and Archive Jobs</Link></p>
     <p><Link href="/catalog">Catalog and saved archives</Link></p>
     <p><Link href="/notifications">Notification settings</Link></p>

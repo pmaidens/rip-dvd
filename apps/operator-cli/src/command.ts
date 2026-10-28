@@ -196,7 +196,7 @@ const commandDefinitions = [
   },
   {
     name: "archive-recovery",
-    description: "Inspect complete source ranges or request DVD Disc Verification, Operator Disc Confirmation, checkpoint reconciliation, safe Stop, and explicit Resume for an Archive Recovery. Low speed is a firmware request whose accepted, rejected, or ignored result is reported on the recovery.",
+    description: "Inspect complete source ranges or request DVD Disc Verification, Operator Disc Confirmation, checkpoint reconciliation, safe Stop, and explicit Resume for an Archive Recovery. Safe Stop queues browser notifications only after reads, writer, and checkpoint settle, with remaining source reported. Low speed is a firmware request whose accepted, rejected, or ignored result is reported on the recovery.",
     usage: "rip-dvd archive-recovery <ranges|inspect-verification|verify-disc|preview-disc-confirmation|confirm-disc|inspect-reconciliation|reconcile|stop|resume> <archive-recovery-id> [options]",
     inputs: {
       arguments: ["action: ranges|inspect-verification|verify-disc|preview-disc-confirmation|confirm-disc|inspect-reconciliation|reconcile|stop|resume", "archive-recovery-id"],

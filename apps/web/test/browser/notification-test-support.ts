@@ -68,3 +68,17 @@ export async function clickNotification(worker: Worker, tag: string): Promise<vo
     await Promise.all(lifetime);
   }, tag);
 }
+
+/** The browser fixture has committed evidence and no real source commands or writer. */
+export function completeControlledRecoveryStop(recoveryId: string): void {
+  const data = pathToFileURL(resolve("../../packages/data-access/dist/index.js")).href;
+  execFileSync(process.execPath, ["--input-type=module", "-e", `
+    import { createDataAccess } from ${JSON.stringify(data)};
+    const access = createDataAccess({ databasePath: process.argv[1] });
+    try {
+      const recovery = access.catalog.findArchiveRecoveryById(process.argv[2]);
+      access.archiveRecoveryWork.completeStop({ archiveRecoveryId: recovery.id,
+        attemptId: recovery.attemptId, stopOperationId: recovery.stopOperationId });
+    } finally { access.close(); }
+  `, resolve("test-results/catalog-review-browser-data/rip-dvd.sqlite"), recoveryId], { encoding: "utf8" });
+}

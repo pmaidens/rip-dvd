@@ -69,7 +69,20 @@ runs independently and cannot revise the Archive Job or saved archive.
 Saved alerts with remaining source say so without claiming complete recovery,
 structural validity, watchability or encode eligibility. Existing DVD evidence
 admission gates remain closed; notifications do not admit new evidence formats.
-Later Archive Recovery transitions are integrated separately.
+Confirmed Recovery Stop also queues an event in the transaction that records
+`stopped`. Stop intent and `stopping` do not alert. The recovery lifecycle first
+settles source commands, writer ownership and checkpoint reconciliation. The
+formatter uses that checkpoint's remaining source and the disc label or fallback.
+An operator stop with Unrecovered Source is never described as full recovery.
+The notification links to the saved archive's current Recovery status, checkpoint,
+Unrecovered Source count and action availability.
+
+Each confirmed stop operation has its own event identity. Same-key replay,
+repeated Stop, worker restart and reconciliation do not add a second logical
+notification. A distinct stop after resumed work can alert again. Delivery
+failures leave durable Stop intent, archive evidence, and the completed initial
+Archive Job and fulfilled Archive Request unchanged. Later recovery completion
+and fault producers are separate work.
 
 The shared contract, formatter and transactional recorder are reused by producers.
 `recordNotificationOutcome(writer, outcome)` accepts authoritative facts and a

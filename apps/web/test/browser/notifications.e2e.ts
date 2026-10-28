@@ -2,7 +2,7 @@
 declare const self: ServiceWorkerGlobalScope;
 
 import { expect, test } from "@playwright/test";
-import { controlledSubscription, deliverPush, dispatchQueuedPushes } from "./notification-test-support";
+import { clickNotification, completeControlledRecoveryStop, controlledSubscription, deliverPush, dispatchQueuedPushes } from "./notification-test-support";
 
 test("installs metadata and opts in, displays the queued test, navigates, and opts out without reopening permission", async ({ page, context }) => {
   await context.grantPermissions(["notifications"], { origin: "http://localhost:3101" });
@@ -111,4 +111,48 @@ test("explains denied permission and unsupported APIs", async ({ page }) => {
   await page.addInitScript(() => { delete (window as unknown as { PushManager?: unknown }).PushManager; });
   await page.reload();
   await expect(page.getByText("This browser does not support Web Push.", { exact: false })).toBeVisible();
+});
+
+test("displays a confirmed Recovery Stop with remaining source and navigates to the saved archive", async ({ page, context }) => {
+  await controlledSubscription(page);
+  await page.goto("/notifications");
+  await page.getByRole("button", { name: "Enable notifications", exact: true }).click();
+  await expect(page.getByRole("status")).toHaveText("Notifications enabled on this browser.");
+  const recoveryId = "browser-damage-notification-recovery";
+  const before = await (await page.request.get("/api/notifications?action=deliveries")).json();
+  const stopped = await page.request.post(`/api/archive-recoveries/${recoveryId}/stop`, {
+    headers: { origin: "http://localhost:3101" },
+    data: { mutationKey: "synthetic-browser-stop", attemptId: `${recoveryId}:attempt:1` },
+  });
+  expect(stopped.status()).toBe(202);
+  expect(await (await page.request.get("/api/notifications?action=deliveries")).json()).toEqual(before);
+  completeControlledRecoveryStop(recoveryId);
+  const sent = dispatchQueuedPushes() as { label: string; body: string; tag: string; destination: string }[];
+  const payload = sent.find((item) => item.label === "CATALOG_BROWSER_DAMAGE_NOTIFICATION")!;
+  expect(payload).toMatchObject({ body: "Archive Recovery stopped. Source remains unrecovered.",
+    destination: expect.stringMatching(/^\/notifications\/target\?kind=original-disc-archives&id=/) });
+  const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
+  await deliverPush(worker, JSON.stringify(payload));
+  await expect.poll(() => worker.evaluate(async () => (await self.registration.getNotifications())
+    .map((notification) => ({ title: notification.title, body: notification.body }))))
+    .toContainEqual({ title: "CATALOG_BROWSER_DAMAGE_NOTIFICATION", body: "Archive Recovery stopped. Source remains unrecovered." });
+  await page.goto("/catalog");
+  await clickNotification(worker, payload.tag);
+  await expect(page).toHaveURL(`http://localhost:3101${payload.destination}`);
+  await expect(page.getByRole("heading", { name: "CATALOG_BROWSER_DAMAGE_NOTIFICATION" })).toBeVisible();
+  await expect(page.getByText("incomplete read", { exact: true })).toBeVisible();
+  const recoveryDetail = page.getByRole("region", { name: "Archive Recovery detail" });
+  await expect(recoveryDetail.getByText("stopped", { exact: true })).toBeVisible();
+  await expect(recoveryDetail.getByText("1 sectors", { exact: true })).toBeVisible();
+  await expect(recoveryDetail.getByRole("list", { name: "Recovery action availability" })).toContainText("Archive Recovery is already stopped.");
+  const current = await (await page.request.get(`/api/operations?kind=archive-recoveries&id=${recoveryId}`)).json();
+  const resume = current.item.availableActions.find((action: { name: string }) => action.name === "resume");
+  expect(resume.eligible).toBe(false);
+  // This fixture has no ownership namespace. Both views must fail closed.
+  expect(resume.blockingReasons).toEqual(expect.arrayContaining([
+    expect.objectContaining({ code: "CONSISTENCY_FAULT" }),
+  ]));
+  await expect(recoveryDetail.getByRole("list", { name: "Recovery action availability" }))
+    .toContainText(`resume: ${resume.reason}`);
+  expect(context.pages()).toHaveLength(1);
 });

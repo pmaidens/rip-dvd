@@ -1,4 +1,3 @@
-import { createECDH } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import { dispatchNotifications } from "@rip-dvd/application";
 import type { ArchiveReadFailureEvidence, NotificationPayload } from "@rip-dvd/data-access";
@@ -6,6 +5,7 @@ import { ARCHIVE_JOB_LEASE_DURATION_MS, createCleanReadArchiveIntegrityEvidence,
 import { beginSettledDiscInspectionForTest, createNormalDvdArchiveBoundaryEvidenceForTest } from "@rip-dvd/data-access/test-support";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { notificationWorkflow } from "./notification-workflow.test-support.js";
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
 
 const readFailure: ArchiveReadFailureEvidence = {
@@ -19,26 +19,10 @@ afterEach(() => {
   fixtures.splice(0).forEach((fixture) => fixture.dispose());
 });
 
-async function notificationWorkflow() {
-  const key = createECDH("prime256v1");
-  key.setPrivateKey(Buffer.alloc(32, 1));
-  vi.stubEnv("RIP_DVD_WEB_TRUSTED_ORIGIN", "https://operator.example");
-  vi.stubEnv("RIP_DVD_VAPID_PUBLIC_KEY", key.getPublicKey().toString("base64url"));
-  vi.stubEnv("RIP_DVD_VAPID_PRIVATE_KEY", key.getPrivateKey().toString("base64url"));
-  vi.stubEnv("RIP_DVD_VAPID_SUBJECT", "mailto:operator@example.com");
+async function createNotificationFixture() {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
-  async function register(browser: string) {
-    const result = await fixture.run(["notifications", "register", "--key", `synthetic-register-${browser}`, "--json", JSON.stringify({
-      enable: true,
-      subscription: { endpoint: `https://web.push.apple.com/synthetic-${browser}`, expirationTime: null,
-        keys: { p256dh: key.getPublicKey().toString("base64url"), auth: Buffer.alloc(16, 2).toString("base64url") } },
-    })]);
-    expect(result.exitCode).toBe(0);
-  }
-  await register("first");
-  await register("second");
-  return { fixture, register };
+  return notificationWorkflow(fixture);
 }
 
 async function startArchiveJob(fixture: ReturnType<typeof createOperatorWorkflowFixture>, label?: string) {
@@ -59,7 +43,7 @@ async function startArchiveJob(fixture: ReturnType<typeof createOperatorWorkflow
 }
 
 it("notifies every eligible browser when a CLI-initiated Archive Job fails", async () => {
-  const { fixture, register } = await notificationWorkflow();
+  const { fixture, register } = await createNotificationFixture();
   const { access, claim } = await startArchiveJob(fixture, "Synthetic disc");
   try {
     expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: [] });
@@ -79,7 +63,7 @@ it("notifies every eligible browser when a CLI-initiated Archive Job fails", asy
 });
 
 it.each(["clean", "unknown", "remaining"] as const)("notifies once after a %s archive save and preserves the saved outcome if sending fails", async (integrity) => {
-  const { fixture } = await notificationWorkflow();
+  const { fixture } = await createNotificationFixture();
   const { access, claim } = await startArchiveJob(fixture);
   const publication = {
     archivePath: join(fixture.originalsLibraryPath, "synthetic.iso"),
@@ -110,7 +94,7 @@ it.each(["clean", "unknown", "remaining"] as const)("notifies once after a %s ar
 });
 
 it("notifies once for persisted expired-claim failure after a worker restart", async () => {
-  const { fixture } = await notificationWorkflow();
+  const { fixture } = await createNotificationFixture();
   const { access, claim } = await startArchiveJob(fixture);
   access.close();
   vi.useFakeTimers({ toFake: ["Date"] });
@@ -128,7 +112,7 @@ it("notifies once for persisted expired-claim failure after a worker restart", a
 });
 
 it.each(["saved", "failed", "read_failure", "expired"] as const)("rolls back the %s outcome when notification persistence cannot commit", async (outcome) => {
-  const { fixture } = await notificationWorkflow();
+  const { fixture } = await createNotificationFixture();
   const { access, claim } = await startArchiveJob(fixture);
   const observer = fixture.openAccess();
   const sqlite = new DatabaseSync(fixture.databasePath);
@@ -161,7 +145,7 @@ it.each(["saved", "failed", "read_failure", "expired"] as const)("rolls back the
 });
 
 it.each(["abort", "fail", "read_failure", "expired"] as const)("does not alert on progress or cancellation through %s", async (outcome) => {
-  const { fixture } = await notificationWorkflow();
+  const { fixture } = await createNotificationFixture();
   const { access, claim } = await startArchiveJob(fixture);
   try {
     access.archiveJobs.updateProgress(claim, { phase: "copying", progressPercent: 20, progressBytes: 4096 });
@@ -183,7 +167,7 @@ it.each(["abort", "fail", "read_failure", "expired"] as const)("does not alert o
 });
 
 it("keeps incomplete-read publication admission closed without queuing a saved alert", async () => {
-  const { fixture } = await notificationWorkflow();
+  const { fixture } = await createNotificationFixture();
   const { access, claim } = await startArchiveJob(fixture);
   try {
     expect(() => access.archiveJobs.publish(claim, {
@@ -197,7 +181,7 @@ it("keeps incomplete-read publication admission closed without queuing a saved a
 });
 
 it("gives a retried Archive Request a distinct attempt outcome without rewriting the predecessor", async () => {
-  const { fixture } = await notificationWorkflow();
+  const { fixture } = await createNotificationFixture();
   const { access, claim } = await startArchiveJob(fixture);
   try {
     const first = access.archiveJobs.fail(claim, "Synthetic first failure");
@@ -222,7 +206,7 @@ it.each([
   { kind: "expired subscription", error: { statusCode: 410 }, status: "failed", failureCode: "subscription_expired" },
   { kind: "permanent rejection", error: { statusCode: 403 }, status: "failed", failureCode: "sender_rejected" },
 ])("retains an Archive Job outcome through $kind and dispatcher restart", async ({ error, status, failureCode }) => {
-  const { fixture } = await notificationWorkflow();
+  const { fixture } = await createNotificationFixture();
   const { access, claim } = await startArchiveJob(fixture, "Synthetic delivery disc");
   access.archiveJobs.fail(claim, "Synthetic source failure");
   const before = (await fixture.run(["inspect", "archive-jobs", claim.id])).result;
@@ -254,7 +238,7 @@ it.each([
 });
 
 it("fences abandoned Archive Job delivery claims and competing dispatchers", async () => {
-  const { fixture } = await notificationWorkflow();
+  const { fixture } = await createNotificationFixture();
   const { access, claim: archiveClaim } = await startArchiveJob(fixture);
   access.archiveJobs.fail(archiveClaim, "Synthetic failure");
   const timestamp = new Date();

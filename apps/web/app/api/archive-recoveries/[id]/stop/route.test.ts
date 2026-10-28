@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { join } from "node:path";
 import type { ArchiveRecoveryStopOperationId } from "@rip-dvd/data-access";
 
@@ -13,9 +13,13 @@ import {
 } from "./route.js";
 import { createOperationsResponse } from "../../../operations/route.js";
 
+import { notificationWorkflow } from "../../../../../../operator-cli/src/notification-workflow.test-support.js";
+import { handleNotifications } from "../../../notifications/route.js";
+
 const fixtures: Array<ReturnType<typeof createOperatorWorkflowFixture>> = [];
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const fixture of fixtures.splice(0)) fixture.dispose();
 });
 
@@ -41,6 +45,7 @@ function request(
 it("offers the same attempt-bound durable Stop through web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
+  await notificationWorkflow(fixture);
   const seeded = await seedDvdDiscVerificationFixture(fixture);
   const mutationKey = "00000000-0000-4000-8000-000000000440";
 
@@ -92,6 +97,8 @@ it("offers the same attempt-bound durable Stop through web and CLI", async () =>
       error: { code: "RECOVERY_STOP_REJECTED" },
     });
 
+    expect((await fixture.run(["notifications", "deliveries"])).result)
+      .toMatchObject({ deliveries: [] });
     const stopping = access.catalog.findArchiveRecoveryById(
       seeded.recoveryId,
     )!;
@@ -100,6 +107,14 @@ it("offers the same attempt-bound durable Stop through web and CLI", async () =>
       attemptId: stopping.attemptId,
       stopOperationId: stopping.stopOperationId!,
     });
+    const deliveries = await fixture.run(["notifications", "deliveries"]);
+    expect(deliveries.result).toMatchObject({ deliveries: [
+      { status: "queued" }, { status: "queued" },
+    ] });
+    const webDeliveries = await handleNotifications(new Request(
+      "http://localhost:3000/api/notifications?action=deliveries",
+    ), () => access);
+    expect(await webDeliveries.json()).toEqual(deliveries.result);
     const webStatus = createOperationsResponse(
       access,
       new Request(
