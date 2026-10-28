@@ -730,7 +730,12 @@ test("Damage Preview requests, waits for and cancels reviewed work with visible 
   const requestId = "11111111-2222-4333-8444-555555555555";
   const state = () => ({ schemaVersion: 1, id: requestId, status: cancelled ? "cancelled" : "queued", generationStatus: cancelled ? "cancelled" : "queued", outdated: false, outdatedReasons: [], reason: null, cancellationRequested: cancelled, progress: { completedClips: 0, totalClips: 1, percent: null }, artifacts: [], provenance: { checkpoint: { manifestRevision: 1 } }, warning: "Failed, empty or partial media never means no damage." });
   await page.route("**/api/damage-previews/*/availability", async (route) => {
-    const response = await route.fetch();
+    const endpoint = new URL(route.request().url());
+    const browserHost = endpoint.host;
+    endpoint.hostname = "127.0.0.1";
+    // Node requests do not inherit Chromium's test-host resolver rule.
+    const response = await route.fetch({ url: endpoint.href, headers: { ...route.request().headers(), host: browserHost } });
+    expect(response.ok()).toBe(true);
     const body = await response.json();
     if (route.request().method() === "POST") { body.available = true; body.blockingReasons = []; }
     await route.fulfill({ response, json: body });
