@@ -190,6 +190,7 @@ export function ArchiveArtifactCard({
       ))}`;
   const verification = artifact.sourceIdentity.verification;
   const confirmation = artifact.sourceIdentity.confirmation;
+  const currentInsertion = artifact.sourceIdentity.currentInsertion;
   const reconciliation = artifact.recovery.reconciliation;
   const sourceReadiness = artifact.readiness.sourceStability;
   const assessmentReadiness = artifact.readiness.titleAssessment;
@@ -345,15 +346,19 @@ export function ArchiveArtifactCard({
             <dt>DVD Disc Verification</dt>
             <dd>{verification === null
               ? "Not run"
-              : <>{[displayTerm(verification.status), verification.outcome === null
-                  ? null
-                  : displayTerm(verification.outcome)].filter(Boolean).join(" · ")} · <code>{verification.id}</code></>}</dd>
+              : <>{[
+                  displayTerm(verification.status),
+                  verification.outcome === null
+                    ? null
+                    : displayTerm(verification.outcome),
+                  verification.current ? "Current" : "Stale",
+                ].filter(Boolean).join(" · ")} · <code>{verification.id}</code></>}</dd>
           </div>
           <div>
             <dt>Current insertion</dt>
-            <dd>{verification === null
+            <dd>{currentInsertion === null
               ? "Unavailable"
-              : <><code>{verification.discInspectionId}</code> · <code>{verification.detectedDiscId}</code> · <code>{verification.mediaGeneration}</code></>}</dd>
+              : <><code>{currentInsertion.discInspectionId}</code> · <code>{currentInsertion.detectedDiscId}</code> · <code>{currentInsertion.mediaGeneration}</code></>}</dd>
           </div>
           <div>
             <dt>Operator Disc Confirmation</dt>

@@ -204,6 +204,11 @@ test("dispatches and refreshes every remaining archive recovery action", async (
         ...artifact,
         sourceIdentity: {
           ...artifact.sourceIdentity,
+          currentInsertion: {
+            discInspectionId: "browser-current-inspection",
+            detectedDiscId: "browser-current-disc",
+            mediaGeneration: "browser-current-generation",
+          },
           verification: {
             id: "browser-verification",
             discInspectionId: "browser-inspection",
@@ -211,18 +216,23 @@ test("dispatches and refreshes every remaining archive recovery action", async (
             mediaGeneration: "browser-media-generation",
             status: "queued",
             outcome: null,
-            current: true,
+            current: false,
             reasons: [],
           },
         },
       }),
       assertResult: async (artifact) => {
         const recovery = artifact.getByRole("region", { name: "Archive Recovery" });
-        await expect(recovery.getByText("queued · browser-verification", {
+        await expect(recovery.getByText("queued · Stale · browser-verification", {
           exact: false,
         })).toBeVisible();
-        await expect(recovery.getByText("browser-inspection", { exact: true }))
+        await expect(recovery.getByText("browser-current-inspection", {
+          exact: true,
+        })).toBeVisible();
+        await expect(recovery.getByText("browser-current-disc", { exact: true }))
           .toBeVisible();
+        await expect(recovery.getByText("browser-inspection", { exact: true }))
+          .toHaveCount(0);
       },
     },
     {

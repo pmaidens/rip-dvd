@@ -98,6 +98,11 @@ export interface ArchiveArtifact {
     };
   };
   sourceIdentity: {
+    currentInsertion: {
+      discInspectionId: string;
+      detectedDiscId: string;
+      mediaGeneration: string;
+    } | null;
     verification: {
       id: string;
       discInspectionId: string;
@@ -433,7 +438,11 @@ export function describeArchiveArtifact(
         expectedInputs: encode.expectedInputs,
       },
     },
-    sourceIdentity: { verification: null, confirmation: null },
+    sourceIdentity: {
+      currentInsertion: null,
+      verification: null,
+      confirmation: null,
+    },
     actions,
   };
 }
@@ -528,6 +537,7 @@ export async function enrichArchiveArtifactSourceIdentity(
   return {
     ...artifact,
     sourceIdentity: {
+      currentInsertion: confirmation.insertion,
       verification: confirmation.verification,
       confirmation: confirmation.confirmation,
     },
