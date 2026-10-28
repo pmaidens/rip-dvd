@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { cleanupDamagePreviewMedia, createApplicationOperations } from "@rip-dvd/application";
@@ -33,6 +34,30 @@ it("deletes media with keyed replay and stale checks while preserving request hi
   expect(await fixture.run([...args.slice(0, 4), "synthetic-stale-delete", ...args.slice(5)])).toMatchObject({ result: { error: { code: "DAMAGE_PREVIEW_MEDIA_STALE", current: { media: { token: after.media.token } } } } });
   advanceCommittedArchiveEvidence(fixture, seeded.manifest, { publishFilesystemCheckpoint: true });
   expect(await fixture.run(args)).toEqual(deleted);
+});
+
+it("replays the original cancellation response after separate media deletion", async () => {
+  const { fixture, id, inspect } = await setup();
+  const cancelArgs = ["damage-preview", "cancel", id, "--key", "synthetic-cancel-before-delete"];
+  const cancelled = await fixture.run(cancelArgs);
+  expect(cancelled).toMatchObject({ exitCode: 0, result: { generationStatus: "complete", media: { state: "retained" } } });
+  expect(await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-delete-after-cancel", "--json", JSON.stringify({ mediaToken: (await inspect()).media.token })])).toMatchObject({ exitCode: 0 });
+  expect(await fixture.run(cancelArgs)).toEqual(cancelled);
+  expect(await inspect()).toMatchObject({ media: { state: "removed", removal: { cause: "explicit_deletion" } } });
+});
+
+it("upgrades a historical cancellation receipt once without changing later replay", async () => {
+  const { fixture, id, inspect } = await setup();
+  const key = "synthetic-historical-cancel";
+  const args = ["damage-preview", "cancel", id, "--key", key];
+  await fixture.run(args);
+  const sqlite = new DatabaseSync(fixture.databasePath);
+  sqlite.prepare("UPDATE mutation_invocations SET outcome = json_remove(outcome, '$.cancellationResult') WHERE key = ?").run(key);
+  sqlite.close();
+  const upgraded = await fixture.run(args);
+  expect(upgraded).toMatchObject({ exitCode: 0, result: { generationStatus: "complete", media: { state: "retained" } } });
+  await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-historical-delete", "--json", JSON.stringify({ mediaToken: (await inspect()).media.token })]);
+  expect(await fixture.run(args)).toEqual(upgraded);
 });
 
 const day = 24 * 60 * 60 * 1_000;

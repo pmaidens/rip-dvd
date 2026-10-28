@@ -101,7 +101,7 @@ export async function inspectDamagePreview(access: DataAccess, id: string, _owne
   return describeDamagePreview(access, requiredRecord(access, id));
 }
 export function cancelDamagePreview(access: DataAccess, id: string, mutationKey: unknown) {
-  return presentDamagePreview(access.damagePreviews.cancel(id, parseMutationKey(mutationKey)));
+  return access.damagePreviews.cancel(id, parseMutationKey(mutationKey), presentDamagePreview);
 }
 export async function waitDamagePreview(access: DataAccess, id: string, options: { timeoutMs: number; pollMs?: number }, ownership?: ArchiveImageOwnership) {
   if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 0 || options.timeoutMs > 3_600_000 || (options.pollMs !== undefined && (!Number.isSafeInteger(options.pollMs) || options.pollMs < 100 || options.pollMs > 5_000))) throw new InvalidDamagePreviewInputError("Invalid Damage Preview wait duration.");

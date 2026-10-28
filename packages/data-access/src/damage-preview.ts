@@ -58,7 +58,7 @@ export interface DamagePreviewAccess {
   list(archiveId?: string): DamagePreviewRecord[];
   replay(input: { mutationKey: string; archiveId: string; preflightToken: string; selectionJson: string }): DamagePreviewRecord | null;
   submit(input: { mutationKey: string; archiveId: string; preflightToken: string; selectionJson: string }, prepare: () => string): DamagePreviewRecord;
-  cancel(id: string, mutationKey: string): DamagePreviewRecord;
+  cancel<T>(id: string, mutationKey: string, present: (record: DamagePreviewRecord) => T): T;
   claim(workerId: string): DamagePreviewRecord | null;
   update(record: DamagePreviewRecord): void;
   touchMedia(id: string): boolean;
