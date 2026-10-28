@@ -7,11 +7,16 @@ export const DAMAGE_PREVIEW_IDLE_MS = 30 * 24 * 60 * 60 * 1_000;
 export function previewGenerationActive(record: DamagePreviewRecord) {
   return ["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(record.status);
 }
-export function previewMediaFilesystemIdentity(path: string): string | null {
+export function previewMediaFileObservation(path: string) {
   try {
     const stat = lstatSync(path, { bigint: true });
-    return stat.isFile() ? [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":") : null;
-  } catch { return null; }
+    return stat.isFile()
+      ? { state: "retained", filesystemIdentity: [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":"), reasonCode: null }
+      : { state: "unsafe", filesystemIdentity: null, reasonCode: "DAMAGE_PREVIEW_MEDIA_UNSAFE" };
+  } catch (error) {
+    const missing = ["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "");
+    return { state: missing ? "missing" : "unavailable", filesystemIdentity: null, reasonCode: missing ? "DAMAGE_PREVIEW_MEDIA_MISSING" : "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE" };
+  }
 }
 export function previewMediaTargets(record: DamagePreviewRecord) {
   const paths = new Map(record.artifacts.map((artifact) => [artifact.path, artifact.identity]));
@@ -23,7 +28,7 @@ export function previewMediaTargets(record: DamagePreviewRecord) {
     const final = join(dirname(path), `${index}.mkv`);
     if (!paths.has(final)) paths.set(final, `damage-preview-unpublished.${record.id}.${index}.final`);
   }
-  return [...paths].map(([path, identity]) => ({ path, identity, filesystemIdentity: previewMediaFilesystemIdentity(path) }));
+  return [...paths].map(([path, identity]) => ({ path, identity, observation: previewMediaFileObservation(path) }));
 }
 export function damagePreviewMediaState(record: DamagePreviewRecord, targets = previewMediaTargets(record)) {
   const removal = record.mediaRemoval ?? null;
@@ -33,11 +38,12 @@ export function damagePreviewMediaState(record: DamagePreviewRecord, targets = p
     failed: { state: "removal_failed", reasonCode: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED" },
   }[removal.state];
   const files = record.artifacts.map((artifact) => {
-    const identity = targets.find((target) => target.identity === artifact.identity)?.filesystemIdentity ?? null;
-    const media = removalCondition ?? { state: identity === null ? "missing" : "retained", reasonCode: identity === null ? "DAMAGE_PREVIEW_MEDIA_MISSING" : null };
+    const { filesystemIdentity: identity, ...observation } = targets.find((target) => target.identity === artifact.identity)!.observation;
+    const media = removalCondition ?? observation;
     return { identity, media };
   });
-  const state = removalCondition?.state ?? (record.artifacts.length === 0 ? "not_generated" : files.some((file) => file.media.state !== "retained") ? "missing" : "retained");
+  const unavailable = targets.find((target) => ["unsafe", "unavailable"].includes(target.observation.state));
+  const state = removalCondition?.state ?? unavailable?.observation.state ?? (record.artifacts.length === 0 ? "not_generated" : files.some((file) => file.media.state !== "retained") ? "missing" : "retained");
   const identities = targets.map(({ path: _path, ...target }) => target);
   const token = `damage-preview-media:${createHash("sha256").update(canonicalPublicationJson({ id: record.id, status: record.status, artifacts: record.artifacts, targets: identities, lastAccessedAt: record.mediaLastAccessedAt ?? null, removal })).digest("hex")}`;
   return { state, token, lastAccessedAt: record.mediaLastAccessedAt ?? record.updatedAt, removal, history: record.mediaRemovalHistory ?? [], files };
@@ -68,6 +74,7 @@ export function presentDamagePreviewMedia(record: DamagePreviewRecord, retention
   const deletionReasons = previewGenerationActive(record) ? [{ code: "DAMAGE_PREVIEW_GENERATION_ACTIVE", message: "Cancel the preview and wait for generation to settle before removing media." }]
     : media.state === "removing" ? [{ code: "DAMAGE_PREVIEW_MEDIA_REMOVING", message: "Media removal is pending. Replay its invocation to resume it." }]
     : media.state === "removed" ? [{ code: "DAMAGE_PREVIEW_MEDIA_REMOVED", message: "Media was already removed. The request history is retained." }]
+    : media.state === "unsafe" || media.state === "unavailable" ? [{ code: media.state === "unsafe" ? "DAMAGE_PREVIEW_MEDIA_UNSAFE" : "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE", message: "The preview file cannot be safely inspected. Its absence is not proven." }]
     : record.artifacts.length === 0 && record.commands.length === 0 ? [{ code: "DAMAGE_PREVIEW_MEDIA_NOT_GENERATED", message: "This request has no generated media." }] : [];
   const cleanupReasons = [...deletionReasons,
     ...(media.state === "removal_failed" ? [{ code: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED", message: "Automatic cleanup stopped after a removal failure. Review the media and explicitly retry deletion." }] : []),

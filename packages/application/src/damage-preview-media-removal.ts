@@ -3,9 +3,22 @@ import { basename, dirname } from "node:path";
 import type { DataAccess, DamagePreviewRecord, DamagePreviewMediaRemoval } from "@rip-dvd/data-access";
 import { InvalidDamagePreviewInputError } from "./damage-preview-input.js";
 import { DamagePreviewRejectedError, describeDamagePreview } from "./damage-preview-operations.js";
-import { DAMAGE_PREVIEW_IDLE_MS, previewGenerationActive, previewMediaFilesystemIdentity, previewMediaTargets } from "./damage-preview-media-state.js";
+import { DAMAGE_PREVIEW_IDLE_MS, previewGenerationActive, previewMediaFileObservation, previewMediaTargets } from "./damage-preview-media-state.js";
 import { parseMutationKey } from "./mutation-key.js";
 
+function synchronizeRemovalDirectory(directory: string) {
+  let target = directory;
+  try { realpathSync(directory); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    // If the entire request directory is absent, flush its existing parent.
+    // A missing media root remains a failure, rather than proof of cleanup.
+    target = dirname(directory);
+  }
+  if (realpathSync(target) !== target) throw new Error("Unsafe media directory");
+  const handle = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY);
+  try { fsyncSync(handle); } finally { closeSync(handle); }
+}
 function removeFiles(record: DamagePreviewRecord): DamagePreviewMediaRemoval["outcomes"] {
   return previewMediaTargets(record).map(({ path, identity }) => {
     try {
@@ -15,13 +28,17 @@ function removeFiles(record: DamagePreviewRecord): DamagePreviewMediaRemoval["ou
       if (realpathSync(directory) !== directory) throw new Error("Unsafe media directory");
       if (!lstatSync(path).isFile()) throw new Error("Unsafe media file");
       const expected = record.mediaRemoval!.expectedFiles.find((file) => file.identity === identity);
-      if (!expected || expected.filesystemIdentity !== previewMediaFilesystemIdentity(path)) throw new Error("Preview media identity changed after deletion admission");
+      if (!expected || expected.filesystemIdentity !== previewMediaFileObservation(path).filesystemIdentity) throw new Error("Preview media identity changed after deletion admission");
       unlinkSync(path);
-      const handle = openSync(directory, constants.O_RDONLY);
-      try { fsyncSync(handle); } finally { closeSync(handle); }
+      synchronizeRemovalDirectory(directory);
       return { identity, outcome: "removed" as const, reasonCode: null };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { identity, outcome: "already_missing" as const, reasonCode: "DAMAGE_PREVIEW_MEDIA_MISSING" };
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        try {
+          synchronizeRemovalDirectory(dirname(path));
+          return { identity, outcome: "already_missing" as const, reasonCode: "DAMAGE_PREVIEW_MEDIA_MISSING" };
+        } catch { /* An observed absence is not complete until its directory is durable. */ }
+      }
       return { identity, outcome: "failed" as const, reasonCode: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED" };
     }
   });
@@ -37,7 +54,7 @@ export function removeDamagePreviewMedia(access: DataAccess, id: string, raw: un
     if (current.media.token !== input.mediaToken) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_MEDIA_STALE", [{ code: "DAMAGE_PREVIEW_MEDIA_STALE", message: "Review the current preview media before removing it." }], current);
     if (!current.media.deletion.available) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_MEDIA_UNAVAILABLE", current.media.deletion.reasons, current);
     if (cause === "idle_cleanup" && !current.media.cleanup.available) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_CLEANUP_UNAVAILABLE", current.media.cleanup.reasons, current);
-    return targets.map(({ path: _path, ...target }) => target);
+    return targets.map(({ identity, observation }) => ({ identity, filesystemIdentity: observation.filesystemIdentity }));
   }, removeFiles, (record) => describeDamagePreview(access, record));
   if (result.media.state === "removal_failed") throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED", [{ code: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED", message: "Some media could not be removed. Review the durable outcomes before retrying with a new key." }], result);
   return result;
