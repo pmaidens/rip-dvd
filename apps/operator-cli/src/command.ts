@@ -1732,7 +1732,12 @@ async function encodeOutputCommand(
         index += 2;
       }
     }
-    const structured = readStructuredObject(options, io);
+    let structured: unknown;
+    try { structured = readStructuredObject(options, io); }
+    catch (error) {
+      if (error instanceof StructuredInputError) throw new CommandFailure(error.code, error.message, 2);
+      throw error;
+    }
     if (structured === undefined || !options.has("--key") || "mutationKey" in (structured as Record<string, unknown>)) {
       throw new CommandFailure("INVALID_ARGUMENTS", "Acknowledgement requires --key and reviewed JSON input.", 2);
     }
@@ -1769,7 +1774,7 @@ async function encodeOutputCommand(
       throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
     }
     if (error instanceof EncodeOutputAcknowledgementRejectedError) {
-      throw new CommandFailure(error.reasonCode, error.message, 2, undefined, { current: error.current });
+      throw new CommandFailure(error.reasonCode, error.message, 2, undefined, { current: error.current, currentIdentity: error.currentIdentity });
     }
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("ENCODE_OUTPUT_NOT_FOUND", "Encode Output not found.", 2);

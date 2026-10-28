@@ -945,6 +945,7 @@ export class EncodeOutputAcknowledgementRejectedError extends Error {
   constructor(
     readonly reasonCode: string,
     readonly current: EncodeOutputInspection | null,
+    readonly currentIdentity: EncodeOutputFilesystemIdentity | null = current?.artifact.file.identity ?? null,
   ) {
     super("Encode Output inspection acknowledgement rejected. Inspect the current evidence again.");
     this.name = "EncodeOutputAcknowledgementRejectedError";
@@ -964,6 +965,11 @@ async function rejectAcknowledgementWithCurrentEvidence(
   let fresh: EncodeOutputInspection | null = null;
   try { fresh = await inspectEncodeOutput(access, input.artifactIdentity, mediaProbe); }
   catch (error) { if (!(error instanceof RecordNotFoundError)) throw error; }
+  let currentIdentity: EncodeOutputFilesystemIdentity | null = null;
+  try {
+    const authority = resolveEncodeOutputAuthority(access, parseEncodeOutputArtifactIdentity(input.artifactIdentity));
+    currentIdentity = await currentEncodeOutputIdentity(authority.outputPath);
+  } catch (error) { if (!(error instanceof RecordNotFoundError)) throw error; }
   // Refreshing may race a successfully committed retry too.
   const replay = access.encodeOutputInspectionReceipts.replay(input);
   if (replay !== null) return acknowledgementResult(replay);
@@ -973,6 +979,7 @@ async function rejectAcknowledgementWithCurrentEvidence(
         ? fresh.operatorInspection.acknowledgement.reasonCode ?? "OUTPUT_AUTHORITY_CHANGED"
         : reasonCode,
     fresh,
+    currentIdentity,
   );
 }
 

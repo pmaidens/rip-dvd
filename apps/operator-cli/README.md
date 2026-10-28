@@ -643,7 +643,9 @@ and their original receipts remain available. Same-key, same-input retries
 return the original receipt even after later changes. Changed input conflicts
 with that key. A fresh key with stale evidence fails without a receipt and
 returns current inspection identities with a stable reason. Missing, unowned,
-unsafe or changing files cannot be acknowledged. Probe failure can be
+changed or unsafe files also report their observed `error.currentIdentity`
+when obtainable, separately from the owned artifact's inspection state.
+Unsafe or changing files cannot be acknowledged. Probe failure can be
 acknowledged as an explicit unknown, preserving the reported validation result
 and `playability: not_assessed`.
 Receipt applicability also requires the same observed file mutation revision

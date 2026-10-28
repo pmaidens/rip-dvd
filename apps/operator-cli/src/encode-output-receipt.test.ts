@@ -183,6 +183,7 @@ it.each(["file", "missing", "unsafe", "validation", "provenance", "authority"])(
         : change === "unsafe" ? "OUTPUT_NOT_REGULAR"
         : change === "authority" ? "OUTPUT_AUTHORITY_CHANGED" : "OUTPUT_INSPECTION_STALE",
       current: { operatorInspection: { history: [] } },
+      currentIdentity: change === "missing" ? null : encodeOutputFilesystemIdentity(lstatSync(predecessor.outputPath)),
     } });
   },
 );
@@ -202,6 +203,21 @@ it("acknowledges probe failure as an unknown without asserting validation or pla
     media: { durationSeconds: null, streams: null, playability: "not_assessed" },
     provenance: { sourceSnapshotAvailability: "not_recorded" },
   } } });
+});
+
+it.each([
+  { input: ["--json", "{"], code: "INVALID_ARGUMENTS" },
+  { input: ["--json", "{}", "--stdin"], code: "INVALID_ARGUMENTS" },
+  { input: ["--file", "synthetic-missing-receipt-input.json"], code: "INVALID_INPUT" },
+])("reports structured input errors as operator input failures: $code", async ({ input, code }) => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const identity = "encode-output-v1.published.00000000-0000-4000-8000-000000000000";
+  const result = await fixture.run(["encode-output", "acknowledge-inspection", identity,
+    "--key", "synthetic-invalid-receipt-input", ...input], undefined, "{}", {
+    openAccess: () => { throw new Error("Invalid input must not open persistence"); },
+  });
+  expect(result).toMatchObject({ exitCode: 2, result: { error: { code } } });
 });
 
 it("requires an explicit acknowledgement, artifact authority and an exact token", async () => {

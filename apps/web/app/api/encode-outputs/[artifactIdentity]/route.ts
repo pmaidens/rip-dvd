@@ -99,7 +99,7 @@ export async function createEncodeOutputAcknowledgementRoute(
       return response({ error: { code: "MUTATION_KEY_CONFLICT", message: error.message } }, 409);
     }
     if (error instanceof EncodeOutputAcknowledgementRejectedError) {
-      return response({ error: { code: error.reasonCode, message: error.message, current: error.current } }, 409);
+      return response({ error: { code: error.reasonCode, message: error.message, current: error.current, currentIdentity: error.currentIdentity } }, 409);
     }
     if (error instanceof RecordNotFoundError) {
       return response({ error: { code: "ENCODE_OUTPUT_NOT_FOUND", message: "Encode Output not found." } }, 404);
