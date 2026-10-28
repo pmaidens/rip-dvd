@@ -48,15 +48,19 @@ it("shows newly available history pages when unchanged output is re-inspected", 
   try {
     await act(async () => { root.render(<EncodeOutputInspectionAcknowledgement inspection={before} />); });
     expect(container.textContent).not.toContain("Load more acknowledgement history");
-    const fetcher = vi.fn(async () => Response.json({ ...after, operatorInspection: { ...after.operatorInspection, history: [older], historyNextOffset: null } }));
+    const fetcher = vi.fn(async () => Response.json({ ...after, operatorInspection: { ...after.operatorInspection, history: [older], historyNextOffset: null } }))
+      .mockResolvedValueOnce(Response.json({ error: "Synthetic temporary failure" }, { status: 503 }));
     vi.stubGlobal("fetch", fetcher);
     await act(async () => { root.render(<EncodeOutputInspectionAcknowledgement inspection={after} />); });
     const more = [...container.querySelectorAll("button")].find((button) => button.textContent === "Load more acknowledgement history");
     expect(more).toBeDefined();
     await act(async () => { more!.click(); });
+    expect(container.textContent).toContain("Acknowledgement history is unavailable. Retry loading history.");
+    await act(async () => { more!.click(); });
     expect(fetcher).toHaveBeenCalledWith(`/api/encode-outputs/${encodeURIComponent(before.artifact.identity)}?receipt-offset=1`, { cache: "no-store" });
     expect(container.textContent).toContain(older.id);
     expect(container.textContent).toContain(newest.id);
     expect(container.textContent).not.toContain("Load more acknowledgement history");
+    expect(container.textContent).not.toContain("Acknowledgement history is unavailable");
   } finally { await act(async () => { root.unmount(); }); }
 });

@@ -9,7 +9,8 @@ export function EncodeOutputInspectionAcknowledgement({ inspection }: { inspecti
   const [acknowledged, setAcknowledged] = useState(false);
   const [mutationKey] = useState(createMutationKey);
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ revision: string; message: string } | null>(null);
+  const [historyError, setHistoryError] = useState<{ revision: string; message: string } | null>(null);
   const [receipt, setReceipt] = useState<EncodeOutputInspectionReceipt | null>(null);
   const [loadedHistory, setLoadedHistory] = useState<{
     revision: string; receipts: EncodeOutputInspectionReceipt[]; nextOffset: number | null;
@@ -24,6 +25,7 @@ export function EncodeOutputInspectionAcknowledgement({ inspection }: { inspecti
   async function loadHistory() {
     if (nextOffset === null || loadingHistory) return;
     setLoadingHistory(true);
+    setHistoryError(null);
     try {
       const response = await fetch(`/api/encode-outputs/${encodeURIComponent(inspection.artifact.identity)}?receipt-offset=${nextOffset}`, { cache: "no-store" });
       if (!response.ok) throw new Error("History unavailable");
@@ -33,7 +35,7 @@ export function EncodeOutputInspectionAcknowledgement({ inspection }: { inspecti
         receipts: [...(current?.revision === historyRevision ? current.receipts : []), ...result.operatorInspection.history],
         nextOffset: result.operatorInspection.historyNextOffset,
       }));
-    } catch { setError("Acknowledgement history is unavailable. Retry loading history."); }
+    } catch { setHistoryError({ revision: historyRevision, message: "Acknowledgement history is unavailable. Retry loading history." }); }
     finally { setLoadingHistory(false); }
   }
 
@@ -48,12 +50,12 @@ export function EncodeOutputInspectionAcknowledgement({ inspection }: { inspecti
       });
       const result = await response.json();
       if (!response.ok) {
-        setError(`${result.error?.code ?? "ACKNOWLEDGEMENT_UNAVAILABLE"}. Inspect the output again before retrying.`);
+        setError({ revision: historyRevision, message: `${result.error?.code ?? "ACKNOWLEDGEMENT_UNAVAILABLE"}. Inspect the output again before retrying.` });
         return;
       }
       setReceipt(result.receipt as EncodeOutputInspectionReceipt);
     } catch {
-      setError("Acknowledgement is unavailable. Retry to retrieve the result with the same mutation key.");
+      setError({ revision: historyRevision, message: "Acknowledgement is unavailable. Retry to retrieve the result with the same mutation key." });
     } finally {
       setPending(false);
     }
@@ -72,7 +74,8 @@ export function EncodeOutputInspectionAcknowledgement({ inspection }: { inspecti
         {pending ? "Recording acknowledgement…" : "Record inspection acknowledgement"}
       </button>
     </> : !reviewed.acknowledgement.eligible ? <p>Acknowledgement unavailable · {reviewed.acknowledgement.reasonCode}</p> : null}
-    {error !== null ? <p role="alert">{error}</p> : null}
+    {error?.revision === historyRevision ? <p role="alert">{error.message}</p> : null}
+    {historyError?.revision === historyRevision ? <p role="alert">{historyError.message}</p> : null}
     {history.length > 0 ? <details>
       <summary>Inspection acknowledgement history</summary>
       <ul>{history.map((entry) => <li key={entry.id}>
