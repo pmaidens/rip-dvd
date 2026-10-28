@@ -1,8 +1,9 @@
 import type { CommittedDvdCheckpointEvidence, DvdTitleIdentityObservationInput, UnreadableSectorRange } from "@rip-dvd/data-access";
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DamagePreviewInspection } from "@rip-dvd/application";
+import { encodeOutputFilesystemIdentity } from "@rip-dvd/data-access";
 import { DatabaseSync } from "node:sqlite";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { seedCommittedArchiveEvidence } from "./archive-evidence.test-support.js";
@@ -102,4 +103,18 @@ export async function seedRetainedDamagePreview(fixture: ReturnType<typeof creat
   access.damagePreviews.update(record); access.close();
   const inspect = async () => (await fixture.run(["damage-preview", "inspect", id])).result as DamagePreviewInspection;
   return { fixture, seeded, id, path, bytes, inspect };
+}
+
+export async function seedDamagePreviewWithNormalOutput(fixture: ReturnType<typeof createOperatorWorkflowFixture>) {
+  const preview = await seedRetainedDamagePreview(fixture);
+  const access = fixture.openAccess();
+  const selectionIds = new Set(access.catalog.listDiscSelections({ originalDiscArchiveId: preview.seeded.archive.id, includeHistorical: true }).map((item) => item.id));
+  const output = access.encodeJobs.list().find((job) => selectionIds.has(job.discSelectionId) && job.status === "completed")!;
+  access.close();
+  writeFileSync(output.outputPath, "synthetic historical normal output with no immutable source snapshot");
+  const sqlite = new DatabaseSync(fixture.databasePath);
+  sqlite.prepare("UPDATE encode_jobs SET output_validation_result = 'passed', output_validation_filesystem_identity = ?, output_validated_at = ?, output_completeness = 'complete' WHERE id = ?")
+    .run(encodeOutputFilesystemIdentity(lstatSync(output.outputPath)), Date.now(), output.id);
+  sqlite.close();
+  return { ...preview, output };
 }

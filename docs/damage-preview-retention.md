@@ -13,6 +13,25 @@ correspondence or a durable operator inspection receipt is unavailable,
 inspection reports `FINISHED_OUTPUT_INSPECTION_NOT_RECORDED` and protects the
 current sample.
 
+Preview inspection reads exact-generation acknowledgement receipts through the
+shared Encode Output inspector. `finishedOutputInspection` reports matching
+receipts separately from whether the output represents this sample. Receipt
+history and a matching job identity do not establish acknowledgement of the
+current generation. The captured source snapshot stays unchanged, including a
+historical `not_recorded` value.
+
+Candidate discovery uses bounded current catalog links and reports truncation.
+Those mutable links are discovery hints and never source proof. Until normal
+outputs provide immutable source equivalence, `retentionSatisfied` remains
+false, including when an acknowledgement matches. Read-only inspection does
+not create another receipt. Ordinary cleanup remains protected by the same
+unproved relationship.
+
+This output lookup runs during explicit preview inspection. Wait, cancellation,
+deletion and media transfer keep their request-status response and leave
+`finishedOutputInspection` null, so unrelated output probes do not extend a
+wait deadline or delay canonical media transfer.
+
 Unprotected media expires after 30 idle days. Outdated and partial media can
 expire during active review. Successful canonical media access resets idle
 time. Read-only status inspection does not. The Encode worker applies cleanup

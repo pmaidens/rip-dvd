@@ -9,6 +9,8 @@ import { parseMutationKey } from "./mutation-key.js";
 import { InvalidDamagePreviewInputError, parseDamagePreviewInput } from "./damage-preview-input.js";
 import { inspectDamagePreviewAvailability, reviewDamagePreviewEvidence } from "./damage-preview.js";
 import { damagePreviewMediaState, damagePreviewRetention, presentDamagePreviewMedia, type previewMediaTargets } from "./damage-preview-media-state.js";
+import { inspectDamagePreviewOutputAcknowledgements, type DamagePreviewFinishedOutputInspection } from "./damage-preview-output-inspection.js";
+import type { EncodeOutputMediaProbe } from "./encode-output-inspection.js";
 
 type Review = Awaited<ReturnType<typeof inspectDamagePreviewAvailability>>;
 export class DamagePreviewRejectedError extends Error {
@@ -50,6 +52,7 @@ export function presentDamagePreview(record: DamagePreviewRecord, context: {
     reason: record.reason, cancellationRequested: record.cancellationRequested, progress: record.progress,
     artifacts: record.artifacts.map(({ path: _path, ...artifact }, index) => ({ ...artifact, media: files[index]!.media })),
     media,
+    finishedOutputInspection: null as DamagePreviewFinishedOutputInspection | null,
     provenance: { preflightToken: record.preflightToken, ...review.reviewedRequest, clips: review.clips, commands: record.commands, streamMapping: record.streamMapping, toolVersions: record.toolVersions, deviations: record.deviations },
     createdAt: record.createdAt, updatedAt: record.updatedAt,
     warning: "A sample illustrates decoding at the recorded interval. Failed, empty or partial media never means no damage.",
@@ -117,19 +120,21 @@ export function describeDamagePreview(access: DataAccess, record: DamagePreviewR
   const outdated = superseded || previewMediaInputs(current) !== previewMediaInputs(original);
   return presentDamagePreview(record, { outdated, retention: damagePreviewRetention(access, record, outdated), mediaTargets });
 }
-export async function inspectDamagePreview(access: DataAccess, id: string, _ownership?: ArchiveImageOwnership) {
-  return describeDamagePreview(access, requiredRecord(access, id));
+export async function inspectDamagePreview(access: DataAccess, id: string, _ownership?: ArchiveImageOwnership, mediaProbe?: EncodeOutputMediaProbe) {
+  const record = requiredRecord(access, id);
+  const finishedOutputInspection = await inspectDamagePreviewOutputAcknowledgements(access, record.originalDiscArchiveId, mediaProbe);
+  return { ...describeDamagePreview(access, requiredRecord(access, id)), finishedOutputInspection };
 }
 export function cancelDamagePreview(access: DataAccess, id: string, mutationKey: unknown) {
   return access.damagePreviews.cancel(id, parseMutationKey(mutationKey), presentDamagePreview);
 }
-export async function waitDamagePreview(access: DataAccess, id: string, options: { timeoutMs: number; pollMs?: number }, ownership?: ArchiveImageOwnership) {
+export async function waitDamagePreview(access: DataAccess, id: string, options: { timeoutMs: number; pollMs?: number }, _ownership?: ArchiveImageOwnership) {
   if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 0 || options.timeoutMs > 3_600_000 || (options.pollMs !== undefined && (!Number.isSafeInteger(options.pollMs) || options.pollMs < 100 || options.pollMs > 5_000))) throw new InvalidDamagePreviewInputError("Invalid Damage Preview wait duration.");
   const deadline = Date.now() + options.timeoutMs;
   while (true) {
     const record = requiredRecord(access, id);
     const terminal = !["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(record.status);
-    if (terminal || Date.now() >= deadline) return { ...await inspectDamagePreview(access, id, ownership), wait: { terminal, timedOut: !terminal } };
+    if (terminal || Date.now() >= deadline) return { ...describeDamagePreview(access, record), wait: { terminal, timedOut: !terminal } };
     await delay(Math.min(options.pollMs ?? 500, Math.max(0, deadline - Date.now())));
   }
 }
@@ -160,7 +165,7 @@ export async function openDamagePreviewArtifact(access: DataAccess, identity: st
     return { file, record, artifact };
   } catch (error) { await file.close(); throw error; }
 }
-export async function exportDamagePreview(access: DataAccess, identity: string, destination: string, ownership?: ArchiveImageOwnership) {
+export async function exportDamagePreview(access: DataAccess, identity: string, destination: string, _ownership?: ArchiveImageOwnership) {
   if (!isAbsolute(destination) || destination.includes("\0")) throw new InvalidDamagePreviewInputError("Choose an absolute destination on the executing host.");
   const { file, record, artifact } = await openDamagePreviewArtifact(access, identity);
   const target = resolve(destination);
@@ -183,7 +188,7 @@ export async function exportDamagePreview(access: DataAccess, identity: string, 
       if ((await output.stat()).size !== artifact.sizeBytes) throw new Error("Canonical export was not written completely.");
       await output.sync();
     } finally { await output.close(); }
-    const preview = await inspectDamagePreview(access, record.id, ownership);
+    const preview = describeDamagePreview(access, requiredRecord(access, record.id));
     await link(temporary, target);
     return { artifactIdentity: identity, mediaType: artifact.mediaType, sizeBytes: artifact.sizeBytes, path: target, preview };
   } finally { await file.close(); await unlink(temporary).catch(() => undefined); }
