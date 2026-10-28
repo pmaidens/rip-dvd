@@ -25838,6 +25838,12 @@ export function createDataAccessInternal(
             { behavior: "immediate" },
           );
           if (racedReplay) return racedReplay;
+          // A competing retry may have made this job nonterminal before the
+          // queue adapter reached its source assertion. Report stale source
+          // evidence before falling back to the workflow-state rejection.
+          if (error instanceof InvalidStatusTransitionError && options?.assertSourceDecision) {
+            database.transaction(() => options.assertSourceDecision!(), { behavior: "immediate" });
+          }
           throw error;
         }
       },

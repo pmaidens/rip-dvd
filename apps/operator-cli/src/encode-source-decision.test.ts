@@ -78,6 +78,9 @@ it("reuses matching damage acceptance for retry and compression changes, and can
   expect(await fixture.run(["encode-requeue", "--key", "synthetic-retry", "--encode-job-id", job.id,
     "--source-decision", JSON.stringify({ ...decision, acceptanceIdentity: null })], undefined, undefined, { openAccess }))
     .toMatchObject({ exitCode: 2, result: { error: { code: "MUTATION_KEY_CONFLICT" } } });
+  expect(await fixture.run(["encode-requeue", "--key", "synthetic-fresh-stale-retry", "--encode-job-id", job.id,
+    "--source-decision", JSON.stringify(decision)], undefined, undefined, { openAccess }))
+    .toMatchObject({ exitCode: 2, result: { error: { code: "STALE_ENCODE_SOURCE_DECISION", current: { expectedSourceDecision: expect.objectContaining({ acceptanceIdentity: null }) } } } });
   expect(await command({ ...decision, acceptanceIdentity: null })).toMatchObject({ exitCode: 2,
     result: { error: { code: "MUTATION_KEY_CONFLICT" } } });
   expect(await command(decision, "synthetic-fresh-stale")).toMatchObject({ exitCode: 2,
