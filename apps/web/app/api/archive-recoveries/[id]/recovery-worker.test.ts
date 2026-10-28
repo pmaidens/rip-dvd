@@ -4362,7 +4362,12 @@ it("preempts an active preview immediately for Recovery Stop and acknowledges on
     quiesce(); await generating; await stopping;
     await pollDvdRecoveryPass(run);
     expect(run.access.catalog.findArchiveRecovery(seeded.archive.id)).toMatchObject({ status: "stopped", faultCode: null });
-    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "partial", checkpointVerified: true, reason: { code: "DAMAGE_PREVIEW_RECOVERY_STOP" }, artifacts: [{ coverage: { startMilliseconds: 0, endMilliseconds: 1_000 } }], recoveryPause: { state: "released" } });
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ status: "partial", generationStatus: "partial", outdated: false, checkpointVerified: true, reason: { code: "DAMAGE_PREVIEW_RECOVERY_STOP" }, artifacts: [{ coverage: { startMilliseconds: 0, endMilliseconds: 1_000 } }], recoveryPause: { state: "released" } });
+    const stoppedReview = await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify(selection)]);
+    expect(stoppedReview).toMatchObject({ exitCode: 0, result: { available: true } });
+    const sameIntent = await fixture.run(["damage-preview", "request", seeded.archive.id, "--key", "synthetic-same-intent-after-stop", "--json", JSON.stringify({ selection, preflightToken: (stoppedReview.result as { preflightToken: string }).preflightToken })]);
+    expect(sameIntent.exitCode).toBe(0);
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ status: "partial", outdated: false });
     expect(await pollDvdRecoveryPass(run)).toBe(false);
   } finally { quiesce?.(); run.access.close(); }
 });

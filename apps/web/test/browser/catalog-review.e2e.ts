@@ -651,6 +651,7 @@ test("Damage Preview reviews selections and requests a planned active Recovery p
   await expect(request.getByText(/Planned Recovery pause: waiting/)).toBeVisible();
   await preview.getByRole("button", { name: "Cancel preview request" }).click();
   await expect(request.getByText(/Generation: cancelled/)).toBeVisible();
+  await expect(request.getByText("Reviewed checkpoint verification: not verified.")).toBeVisible();
   await preview.getByLabel("Context before in seconds").fill("1.001");
   await expect(preview.getByRole("heading", { name: "Reviewed preview" })).toHaveCount(0);
   await preview.getByRole("button", { name: "Review preview selections" }).click();

@@ -20,9 +20,18 @@ function requiredRecord(access: DataAccess, id: string) {
   if (!record) throw new RecordNotFoundError("Damage Preview", id);
   return record;
 }
+function previewInputIdentity(review: Review): string {
+  const request = review.reviewedRequest;
+  // Admission status and token format may change after Stop without changing
+  // the sample's source or intended content within the same Recovery attempt.
+  return canonicalPublicationJson(request === null ? null : {
+    ...request,
+    recovery: request.recovery ? { id: request.recovery.id, attemptId: request.recovery.attemptId } : null,
+  });
+}
 export function presentDamagePreview(record: DamagePreviewRecord, current?: Review, superseded = false) {
   const review = JSON.parse(record.reviewJson) as Review;
-  const outdated = superseded || (current !== undefined && current.preflightToken !== record.preflightToken);
+  const outdated = superseded || (current !== undefined && previewInputIdentity(current) !== previewInputIdentity(review));
   return {
     schemaVersion: 1, id: record.id, originalDiscArchiveId: record.originalDiscArchiveId,
     status: outdated && record.artifacts.length > 0 ? "outdated" : record.status,
@@ -99,7 +108,7 @@ export async function inspectDamagePreview(access: DataAccess, id: string, _owne
   const history = access.damagePreviews.list(record.originalDiscArchiveId);
   const newerIntent = history.slice(history.findIndex((candidate) => candidate.id === record.id) + 1).filter((candidate) =>
     (JSON.parse(candidate.reviewJson) as Review).reviewedRequest?.title?.titleIdentityId === originalTitle).at(-1);
-  return presentDamagePreview(record, current, newerIntent !== undefined && newerIntent.preflightToken !== record.preflightToken);
+  return presentDamagePreview(record, current, newerIntent !== undefined && previewInputIdentity(JSON.parse(newerIntent.reviewJson) as Review) !== previewInputIdentity(JSON.parse(record.reviewJson) as Review));
 }
 export function cancelDamagePreview(access: DataAccess, id: string, mutationKey: unknown) {
   return presentDamagePreview(access.damagePreviews.cancel(id, parseMutationKey(mutationKey)));
