@@ -127,6 +127,8 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
       ...ownership,
       withConsistentRead(request) {
         return ownership.withConsistentRead({ ...request, signal, previewRead: { onContention(urgent, waiting) {
+          checkRecovery();
+          if (controller.signal.aborted) return;
           if (!waiting) { contentionStarted = null; return; }
           contentionStarted ??= Date.now();
           if (urgent || Date.now() - contentionStarted >= CONTENTION_GRACE_MS) controller.abort(new PreviewFailure("DAMAGE_PREVIEW_CONTENTION", "Preview generation yielded to the oldest eligible archive waiter."));

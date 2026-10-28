@@ -344,3 +344,28 @@ it("reports Recovery Stop when it commits between the owned Recovery check and t
     expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "failed", checkpointVerified: false, reason: { code: "DAMAGE_PREVIEW_RECOVERY_STOP" }, artifacts: [], provenance: { commands: [] } });
   } finally { access.close(); }
 });
+
+it("gives a committed Recovery Stop priority when the contention grace callback runs before the Recovery monitor", async () => {
+  const { fixture, seeded, request, access } = await setup(true);
+  const id = ((await request()).result as DamagePreviewInspection).id;
+  const base = createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath });
+  let onContention: ((urgent: boolean, waiting: boolean) => void) | undefined;
+  const ownership: ArchiveImageOwnership = { ...base, withConsistentRead(input) { onContention = input.previewRead?.onContention; return base.withConsistentRead(input); } };
+  let clock = 1_000_000;
+  const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+  try {
+    await pollDamagePreviews({ access, mediaLibraryPath: fixture.mediaLibraryPath, originalsLibraryPath: fixture.originalsLibraryPath, signal: new AbortController().signal, ownership, generator: media({
+      async generate(input) {
+        writeFileSync(input.outputPath, bytes);
+        onContention!(false, true);
+        clock += 120_001;
+        const recovery = access.catalog.findArchiveRecovery(seeded.archive.id)!;
+        access.archiveRecoveryWork.requestStop({ mutationKey: "synthetic-stop-at-grace-expiry", archiveRecoveryId: recovery.id, attemptId: recovery.attemptId });
+        onContention!(false, true);
+        input.signal.throwIfAborted();
+      },
+      inspect: async () => ({ videoStartMilliseconds: 0, durationMilliseconds: 1_000, videoCount: 1, audioCount: 1, subtitleCount: 0 }),
+    }) });
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "partial", reason: { code: "DAMAGE_PREVIEW_RECOVERY_STOP" }, artifacts: [{ coverage: { startMilliseconds: 0, endMilliseconds: 1_000 } }] });
+  } finally { now.mockRestore(); access.close(); }
+});
