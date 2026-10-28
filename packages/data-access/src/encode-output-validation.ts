@@ -13,7 +13,8 @@ export interface EncodeOutputValidationEvidence {
   policyVersion: "encode-output-validation-v1";
   duration: { expectedSeconds: number | null; minimumRatio: number | null; observedSeconds: number | null };
   video: { codec: string; profile: string; pixelFormat: string; firstPacketSeconds: number };
-  audio: { firstPacketSeconds: number | null; minimumStreams: number | null; observedStreams: number | null };
+  audio: { firstPacketSeconds: number | null; expectedSourceIds: readonly number[] | null;
+    outputSourceIds: readonly number[] | null; observedStreams: number | null; firstPacketsSeconds: readonly number[] | null };
   subtitles: { expectedSourceStreams: number | null; checked: true };
   decode: { seconds: number; frames: number; completed: true };
 }

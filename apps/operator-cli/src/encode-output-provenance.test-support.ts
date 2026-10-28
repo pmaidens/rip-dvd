@@ -9,7 +9,7 @@ export const syntheticOutputValidation = {
   policyVersion: "encode-output-validation-v1" as const,
   duration: { expectedSeconds: 500, minimumRatio: 0.98, observedSeconds: 500 },
   video: { codec: "h264", profile: "High", pixelFormat: "yuv420p", firstPacketSeconds: 0 },
-  audio: { firstPacketSeconds: 0, minimumStreams: 1, observedStreams: 1 },
+  audio: { firstPacketSeconds: 0, expectedSourceIds: [128], outputSourceIds: [128], observedStreams: 1, firstPacketsSeconds: [0] },
   subtitles: { expectedSourceStreams: 0, checked: true as const },
   decode: { seconds: 5, frames: 125, completed: true as const },
 };

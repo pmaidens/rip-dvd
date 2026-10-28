@@ -68,6 +68,7 @@ import {
 import { normalizeErrorMessage } from "./normalize-error-message.js";
 import { createProgressParser } from "./progress-parser.js";
 import { createHandBrakeSubtitleProvenanceParser } from "./handbrake-subtitle-provenance.js";
+import { createHandBrakeAudioProvenanceParser } from "./handbrake-audio-provenance.js";
 import {
   recordEncodePublicationRecoveryIncident,
   resolveEncodePublicationRecoveryIncident,
@@ -1819,7 +1820,7 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
     return { archive: source.archive, evidenceFormat: "dvd-recovery-evidence-v1" as const,
       preset: source.output.preset, selectionArguments: [...source.output.selectionArguments],
       expectedDurationSeconds: source.output.expectedDurationSeconds ?? undefined,
-      minimumAudioStreams: source.output.audioStreams.length,
+      expectedAudioSourceIds: source.output.audioStreams.map(({ id }) => id),
       subtitleScanTitleNumber: source.resolvedSource.displayTitleNumber };
   }
   return access.readConsistentSnapshot((snapshot) => {
@@ -2024,6 +2025,7 @@ export async function executeEncodeClaim(
       | readonly EncodeOutputVobSubExpectation[]
       | undefined;
     const subtitleProvenance = createHandBrakeSubtitleProvenanceParser();
+    const audioProvenance = createHandBrakeAudioProvenanceParser();
     const readArchive = async (
       ownership?: ArchiveImageOwnershipHandle,
     ): Promise<void> => {
@@ -2087,7 +2089,7 @@ export async function executeEncodeClaim(
       await options.runner.run({
         arguments_,
         onOutput: parseProgress,
-        onStderr: (text) => subtitleProvenance.push(text),
+        onStderr: (text) => { subtitleProvenance.push(text); audioProvenance.push(text); },
         outputPath: paths.partialPath,
         ...(ownership === undefined
           ? {}
@@ -2122,7 +2124,8 @@ export async function executeEncodeClaim(
     );
     failurePhase = "validation";
     const validationEvidence = await options.outputValidator.prepareAndValidate(partialPath, signal, {
-      ...("minimumAudioStreams" in input ? { minimumAudioStreams: input.minimumAudioStreams } : {}),
+      ...("expectedAudioSourceIds" in input ? { expectedAudioSourceIds: input.expectedAudioSourceIds,
+        audioOutputSourceIds: audioProvenance.finish() } : {}),
       ...(input.expectedDurationSeconds === undefined
         ? {}
         : { expectedDurationSeconds: input.expectedDurationSeconds }),

@@ -1,11 +1,11 @@
 import { MAX_DVD_SUBTITLES_PER_TITLE } from "@rip-dvd/data-access";
+import { createHandBrakeLogReader } from "./handbrake-log-reader.js";
 
 import {
   EncodeOutputValidationError,
   type EncodeOutputVobSubExpectation,
 } from "./encode-output-validator.js";
 
-const MAX_LINE_LENGTH = 65_536;
 // Allow both closed-caption formats and one additional search result.
 const MAX_OUTPUT_SUBTITLE_TRACKS = MAX_DVD_SUBTITLES_PER_TITLE + 3;
 
@@ -43,7 +43,6 @@ function invalidProvenance(): never {
 // an additional forced-only subset. Keep only this bounded evidence, not logs.
 // See libhb/work.c: analyze_subtitle_scan, sanitize_subtitles, hb_display_job_info.
 export function createHandBrakeSubtitleProvenanceParser() {
-  let buffer = "";
   let invalid = false;
   let task = "";
   let configuration = false;
@@ -51,9 +50,8 @@ export function createHandBrakeSubtitleProvenanceParser() {
   const statistics = new Map<string, SubtitleStatistics>();
   let selections: SubtitleSelection[] = [];
 
-  function line(text: string): void {
+  function line(value: string): void {
     if (invalid) return;
-    const value = text.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, "").trim();
     if (value.startsWith("Starting Task: ")) {
       task = value.slice("Starting Task: ".length);
       configuration = false;
@@ -116,26 +114,13 @@ export function createHandBrakeSubtitleProvenanceParser() {
     }
   }
 
+  const reader = createHandBrakeLogReader(line, () => { invalid = true; });
   return {
-    push(text: string) {
-      // Consume stderr separately so stdout progress cannot split evidence lines.
-      for (const part of text.split(/(?<=[\r\n])/)) {
-        buffer += part;
-        if (buffer.length > MAX_LINE_LENGTH) {
-          invalid = true;
-          buffer = "";
-        }
-        if (/[\r\n]$/.test(part)) {
-          line(buffer.trimEnd());
-          buffer = "";
-        }
-      }
-    },
+    push: reader.push,
     finish(
       expectations: readonly EncodeOutputVobSubExpectation[],
     ): readonly HandBrakeVobSubProvenance[] {
-      if (buffer) line(buffer);
-      buffer = "";
+      reader.finish();
       if (invalid || !configuration || task !== "Encoding Pass") invalidProvenance();
       const sourceNumbers = new Set(
         expectations.map((source) => source.sourceTrackNumber),

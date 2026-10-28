@@ -7,6 +7,7 @@ import { pollEncodeWorker, type HandBrakeRunRequest } from "../src/encode-worker
 import { seedEncodeClaim, withdrawClaimAcceptance, injectClaimRecoveryState } from "../../operator-cli/src/encode-claim.test-support.js";
 import { createOperatorWorkflowFixture } from "../../operator-cli/src/operator-workflow.test-support.js";
 import { encodeOutputArtifactIdentity } from "@rip-dvd/application";
+import { audioLog } from "../src/test-fixtures/handbrake-audio-log.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => { vi.useRealTimers(); fixtures.splice(0).forEach((fixture) => fixture.dispose()); });
@@ -136,10 +137,11 @@ it("holds shared ownership for the complete marked archive encode read", async (
       try { return await request.task({ ...handle, assertOwned() { handle.assertOwned(); assertOwned(); } }); }
       finally { ownershipActive = false; }
     } })) as typeof ownership.withConsistentRead };
-  const runner = { run: vi.fn(async ({ outputPath, sourceOwnershipDescriptor }: HandBrakeRunRequest) => {
+  const runner = { run: vi.fn(async ({ outputPath, sourceOwnershipDescriptor, onStderr }: HandBrakeRunRequest) => {
     expect(ownershipActive).toBe(true);
     expect(sourceOwnershipDescriptor).toBe(descriptor);
     writeFileSync(outputPath, "synthetic consistent encode", { flag: "wx" });
+    onStderr?.(audioLog());
   }) };
   const scanner = { scan: vi.fn(async (_path: string, _title: number, _signal: AbortSignal, sourceOwnershipDescriptor?: number) => {
     expect(ownershipActive).toBe(true);
