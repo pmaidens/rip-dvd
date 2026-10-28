@@ -844,7 +844,52 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     "z-synthetic-title-damage-affected-work",
     "a-synthetic-title-damage-affected-work",
   ] as const;
+  const correctedHistoricalSelectionId =
+    "synthetic-corrected-historical-selection";
+  const correctedHistoricalReplacementId =
+    "synthetic-corrected-historical-replacement";
+  const correctedHistoricalJobId =
+    "synthetic-corrected-historical-affected-work";
   const affectedWorkSqlite = new DatabaseSync(fixture.databasePath);
+  const insertCorrectedHistoricalSelection = affectedWorkSqlite.prepare(`
+    INSERT INTO disc_selections (
+      id, original_disc_archive_id, media_item_id, source_key, kind,
+      title_number, chapter_start, chapter_end, label, is_catalog_active,
+      created_at, updated_at
+    )
+    SELECT ?, original_disc_archive_id, media_item_id, source_key, kind,
+      title_number, chapter_start, chapter_end, label, 0, created_at, updated_at
+    FROM disc_selections
+    WHERE id = ?
+  `);
+  insertCorrectedHistoricalSelection.run(
+    correctedHistoricalSelectionId,
+    chapterMappedSelection.id,
+  );
+  insertCorrectedHistoricalSelection.run(
+    correctedHistoricalReplacementId,
+    chapterMappedSelection.id,
+  );
+  affectedWorkSqlite.prepare(`
+    INSERT INTO disc_selection_supersessions (
+      superseded_disc_selection_id, replacement_disc_selection_id,
+      reason, created_at
+    ) VALUES (?, ?, 'Synthetic corrected selection', 1)
+  `).run(
+    correctedHistoricalSelectionId,
+    correctedHistoricalReplacementId,
+  );
+  affectedWorkSqlite.prepare(`
+    INSERT INTO encode_jobs (
+      id, disc_selection_id, encoding_profile_id, output_path,
+      reserves_output_path, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 0, 'cancellation_requested', 0, 0)
+  `).run(
+    correctedHistoricalJobId,
+    correctedHistoricalSelectionId,
+    affectedWorkProfile.id,
+    join(fixture.mediaLibraryPath, "synthetic-corrected-historical.mkv"),
+  );
   const insertAffectedWork = affectedWorkSqlite.prepare(`
     INSERT INTO encode_jobs (
       id, disc_selection_id, encoding_profile_id, output_path,

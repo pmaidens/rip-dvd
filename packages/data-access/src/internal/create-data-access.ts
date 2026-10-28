@@ -18477,6 +18477,7 @@ export function createDataAccessInternal(
               discSelections.originalDiscArchiveId,
               input.originalDiscArchiveId,
             ),
+            eq(discSelections.isCatalogActive, true),
             inArray(encodeJobs.status, ACTIVE_ENCODE_WORK_STATUSES),
           )).orderBy(asc(encodeJobs.id))
             .limit(ACTIVE_ENCODE_JOB_RESULT_LIMIT + 1).all();
