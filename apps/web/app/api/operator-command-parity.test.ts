@@ -29,6 +29,8 @@ import {
 } from "@rip-dvd/application";
 import type {
   ArchiveRequestId,
+  ConsistentReadAccess,
+  DataAccess,
   MediaItemId,
 } from "@rip-dvd/data-access";
 import {
@@ -2654,6 +2656,46 @@ it("presents a clean new-format save as completed without scheduling source read
       SELECT count(*) AS count FROM dvd_disc_verifications
     `).get()).toEqual({ count: 0 });
     readAudit.close();
+
+    let snapshotReadCount = 0;
+    let reconciliationInjected = false;
+    const cleanRecovery = access.catalog.findArchiveRecovery(archive.id);
+    if (cleanRecovery === null) {
+      throw new Error("Expected clean Archive Recovery fixture");
+    }
+    const racingAccess: DataAccess = {
+      ...access,
+      readConsistentSnapshot<T>(
+        read: (snapshot: ConsistentReadAccess) => T,
+      ): T {
+        const result = access.readConsistentSnapshot(read);
+        snapshotReadCount += 1;
+        if (!reconciliationInjected) {
+          reconciliationInjected = true;
+          access.dvdRecoveryReconciliations.submit({
+            mutationKey: "synthetic-artifact-race-reconciliation",
+            archiveRecoveryId: cleanRecovery.id,
+          });
+        }
+        return result;
+      },
+    };
+    const racedResponse = await createOperationsResponse(
+      racingAccess,
+      new Request(
+        `${trustedOrigin}/api/operations?kind=original-disc-archives&id=${archive.id}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    expect(racedResponse.status).toBe(200);
+    expect(await racedResponse.json()).toMatchObject({
+      item: {
+        archiveArtifact: {
+          recovery: { reconciliation: { status: "queued" } },
+        },
+      },
+    });
+    expect(snapshotReadCount).toBe(4);
   } finally {
     access.close();
     fixture.dispose();

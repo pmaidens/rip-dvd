@@ -1206,14 +1206,32 @@ export async function inspectOperationsWithArtifacts(
       archiveArtifact: ArchiveArtifact;
     };
     try {
+      const enrichedArtifact = await enrichArchiveArtifactSourceIdentity(
+        access,
+        item.archiveArtifact,
+      );
+      const refreshedInspection = inspectOperations(access, kind, options);
+      if (
+        !("item" in refreshedInspection) ||
+        refreshedInspection.item === null ||
+        refreshedInspection.item === undefined ||
+        !("archiveArtifact" in refreshedInspection.item)
+      ) {
+        throw new ArchiveArtifactChangedError();
+      }
+      const refreshedItem = refreshedInspection.item as
+        typeof refreshedInspection.item & { archiveArtifact: ArchiveArtifact };
+      if (
+        JSON.stringify(item.archiveArtifact) !==
+          JSON.stringify(refreshedItem.archiveArtifact)
+      ) {
+        throw new ArchiveArtifactChangedError();
+      }
       return {
-        ...inspection,
+        ...refreshedInspection,
         item: {
-          ...item,
-          archiveArtifact: await enrichArchiveArtifactSourceIdentity(
-            access,
-            item.archiveArtifact,
-          ),
+          ...refreshedItem,
+          archiveArtifact: enrichedArtifact,
         },
       };
     } catch (error) {
