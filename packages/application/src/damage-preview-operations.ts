@@ -26,7 +26,7 @@ export function presentDamagePreview(record: DamagePreviewRecord, current?: Revi
   return {
     schemaVersion: 1, id: record.id, originalDiscArchiveId: record.originalDiscArchiveId,
     status: outdated && record.artifacts.length > 0 ? "outdated" : record.status,
-    generationStatus: record.status, outdated, checkpointVerified: review.current?.checkpointVerified ?? false,
+    generationStatus: record.status, outdated, checkpointVerified: record.checkpointVerified ?? review.current?.checkpointVerified ?? false,
     outdatedReasons: outdated ? [{ code: "DAMAGE_PREVIEW_INPUTS_CHANGED", message: "The current archive, title, selection, streams or intended settings differ from this sample." }] : [],
     recoveryPause: review.reviewedRequest?.recovery && !["stopped", "completed"].includes(review.reviewedRequest.recovery.status) ? {
       recoveryId: review.reviewedRequest.recovery.id,

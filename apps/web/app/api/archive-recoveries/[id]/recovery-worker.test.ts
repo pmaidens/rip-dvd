@@ -4362,7 +4362,7 @@ it("preempts an active preview immediately for Recovery Stop and acknowledges on
     quiesce(); await generating; await stopping;
     await pollDvdRecoveryPass(run);
     expect(run.access.catalog.findArchiveRecovery(seeded.archive.id)).toMatchObject({ status: "stopped", faultCode: null });
-    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "partial", reason: { code: "DAMAGE_PREVIEW_RECOVERY_STOP" }, artifacts: [{ coverage: { startMilliseconds: 0, endMilliseconds: 1_000 } }], recoveryPause: { state: "released" } });
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "partial", checkpointVerified: true, reason: { code: "DAMAGE_PREVIEW_RECOVERY_STOP" }, artifacts: [{ coverage: { startMilliseconds: 0, endMilliseconds: 1_000 } }], recoveryPause: { state: "released" } });
     expect(await pollDvdRecoveryPass(run)).toBe(false);
   } finally { quiesce?.(); run.access.close(); }
 });
@@ -4387,11 +4387,11 @@ it("samples one active Recovery revision for a preview and releases its planned 
   const baseline = readFileSync(seeded.archive.archivePath!);
   try {
     const generating = pollDamagePreviews({ access: run.access, mediaLibraryPath: fixture.mediaLibraryPath, originalsLibraryPath: fixture.originalsLibraryPath, signal: new AbortController().signal, generator: media({
-      async generate(request) { enter(); await done; expect(readFileSync(seeded.archive.archivePath!)).toEqual(baseline); writeFileSync(request.outputPath, bytes); },
+      async generate(request) { enter(); await done; expect(readFileSync(seeded.archive.archivePath!).equals(baseline)).toBe(true); writeFileSync(request.outputPath, bytes); },
       async inspect() { validate(); await published; return { videoStartMilliseconds: 0, durationMilliseconds: 10_000, videoCount: 1, audioCount: 1, subtitleCount: 0 }; },
     }) });
     await entered;
-    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "generating", recoveryPause: { state: "paused" }, provenance: { checkpoint: { manifestRevision: 1 } } });
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "generating", checkpointVerified: true, recoveryPause: { state: "paused" }, provenance: { checkpoint: { manifestRevision: 1 } } });
     expect(await pollDvdRecoveryPass(run)).toBe(false);
     finish(); await validating;
     expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "generating", recoveryPause: { state: "released" } });

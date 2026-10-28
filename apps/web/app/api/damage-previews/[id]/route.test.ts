@@ -293,3 +293,25 @@ it("maps logical DVD source IDs to track ordinals, retains subtitle variants and
     } finally { access.close(); }
   }
 });
+
+it("retains a stale terminal reason when an active writer advances the checkpoint during worker ownership acquisition", async () => {
+  const { fixture, seeded, request, access } = await setup(true);
+  const base = createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath });
+  let enter!: () => void, release!: () => void, acquiring!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const acquisition = new Promise<void>((resolve) => { acquiring = resolve; });
+  const id = ((await request()).result as DamagePreviewInspection).id;
+  const writer = base.withWriter({ archiveId: seeded.archive.id, imagePath: seeded.archive.archivePath, originalsLibraryPath: fixture.originalsLibraryPath, signal: new AbortController().signal, async task() { enter(); await released; advanceCommittedArchiveEvidence(fixture, seeded.manifest, { publishFilesystemCheckpoint: true }); } });
+  const ownership: ArchiveImageOwnership = { ...base, withConsistentRead(input) { acquiring(); return base.withConsistentRead(input); } };
+  try {
+    await entered;
+    const generate = () => pollDamagePreviews({ access, mediaLibraryPath: fixture.mediaLibraryPath, originalsLibraryPath: fixture.originalsLibraryPath, signal: new AbortController().signal, generator: media(), ownership });
+    const generating = generate();
+    await acquisition;
+    release(); await writer; await generating;
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "failed", checkpointVerified: false, reason: { code: "DAMAGE_PREVIEW_STALE" }, artifacts: [], provenance: { checkpoint: { manifestRevision: 1 }, commands: [] } });
+    await generate();
+    expect(access.damagePreviews.find(id)?.commands).toEqual([]);
+  } finally { release?.(); await writer; access.close(); }
+});

@@ -3,7 +3,7 @@ import { mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { reviewDamagePreviewEvidence, type DamagePreviewAvailability, type DamagePreviewInput } from "@rip-dvd/application";
-import { canonicalPublicationJson, type DataAccess, type DamagePreviewRecord, type OriginalDiscArchiveId } from "@rip-dvd/data-access";
+import { canonicalPublicationJson, DvdCheckpointReadFault, type DataAccess, type DamagePreviewRecord, type OriginalDiscArchiveId } from "@rip-dvd/data-access";
 import { acquireKernelProcessLock, inspectKernelProcessLock, defaultArchiveImageOwnership, ArchiveImageOwnershipError, type ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { DamagePreviewUnrepresentableError, createDamagePreviewGenerator, type DamagePreviewGenerator, type PreviewSourceTitle } from "./damage-preview-generator.js";
 import { DamagePreviewArtifactError, finalizePreviewArtifact, previewClipPaths } from "./damage-preview-artifact.js";
@@ -21,6 +21,7 @@ class PreviewFailure extends Error {
   constructor(readonly code: string, message: string) { super(message); }
 }
 function failureReason(error: unknown) {
+  if (error instanceof DvdCheckpointReadFault && error.code === "DVD_EVIDENCE_CHANGED_DURING_READ") return { code: "DAMAGE_PREVIEW_STALE", message: "The reviewed checkpoint changed while the request waited for image ownership." };
   return {
     code: error instanceof PreviewFailure || error instanceof DamagePreviewArtifactError || error instanceof ArchiveImageOwnershipError ? error.code : error instanceof DamagePreviewUnrepresentableError ? "DAMAGE_PREVIEW_UNREPRESENTABLE" : "DAMAGE_PREVIEW_GENERATION_FAILED",
     message: error instanceof PreviewFailure || error instanceof DamagePreviewArtifactError || error instanceof DamagePreviewUnrepresentableError ? error.message : "Preview generation did not complete. No conclusion about damage can be drawn.",
@@ -154,7 +155,7 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
             if (current.preflightToken !== record.preflightToken || !current.available) throw new PreviewFailure("DAMAGE_PREVIEW_STALE", "The reviewed preview inputs changed before generation.");
             const request = review.reviewedRequest!;
             handle.assertOwned();
-            record.reviewJson = JSON.stringify(current);
+            record.checkpointVerified = true;
             record.status = "generating"; record.reason = null;
             options.access.damagePreviews.update(record);
             record.toolVersions = await generator.versions();

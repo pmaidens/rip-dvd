@@ -31,6 +31,7 @@ export interface DamagePreviewRecord {
   cancellationRequested: boolean;
   /** True only after all admitted source readers have closed. Old records hold until terminal. */
   sourceReleased?: boolean;
+  checkpointVerified?: boolean;
   reason: { code: string; message: string } | null;
   progress: { completedClips: number; totalClips: number; percent: number | null };
   commands: string[][];
