@@ -1,10 +1,10 @@
 import { existsSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanupDamagePreviewMedia } from "@rip-dvd/application";
+import { cleanupDamagePreviewMedia, createApplicationOperations } from "@rip-dvd/application";
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
 import { seedRetainedDamagePreview } from "./damage-preview.test-support.js";
-import { advanceCommittedArchiveEvidence } from "./archive-evidence.test-support.js";
+import { advanceCommittedArchiveEvidence, withEvidenceGuardsDisabled } from "./archive-evidence.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => { vi.useRealTimers(); fixtures.splice(0).forEach((fixture) => fixture.dispose()); });
@@ -87,13 +87,43 @@ it("allows idle cleanup after an explicit archive-only choice and reports reopen
   expect(await choose("archive-only", "synthetic-archive-only")).toMatchObject({ exitCode: 0 });
   const selected = await inspect();
   expect(selected.media.retention).toMatchObject({ protectedForReview: false });
-  // Reopening changes the reviewed input identity. A new current request will
-  // be protected; the older sample remains outdated and may expire.
   expect(await choose("reopen", "synthetic-reopen")).toMatchObject({ exitCode: 0 });
-  expect((await inspect()).media.retention?.activeCatalogReview).toBe(true);
+  expect(await inspect()).toMatchObject({ outdated: false, media: { retention: { activeCatalogReview: true, protectedForReview: true } } });
   expect(await choose("archive-only", "synthetic-archive-only-again")).toMatchObject({ exitCode: 0 });
   vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(selected.updatedAt) + 31 * day);
   expect(await fixture.run(["damage-preview", "cleanup", id, "--key", "synthetic-archive-only-cleanup", "--json", JSON.stringify({ mediaToken: (await inspect()).media.token })])).toMatchObject({ exitCode: 0, result: { media: { state: "removed" } } });
+});
+
+it("keeps unchanged media protected after Catalog Review completion without output acknowledgement", async () => {
+  const { fixture, seeded, id, inspect } = await setup();
+  const before = await inspect();
+  withEvidenceGuardsDisabled(fixture.databasePath, (sqlite) => {
+    sqlite.prepare("UPDATE original_disc_archives SET catalog_review_outcome = 'reviewed_with_selections', catalog_reviewed_at = updated_at + 1, updated_at = updated_at + 1 WHERE id = ?").run(seeded.archive.id);
+  });
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(before.updatedAt) + 31 * day);
+  const current = await inspect();
+  expect(current).toMatchObject({ outdated: false, media: { retention: { activeCatalogReview: false, awaitingFinishedOutputInspection: true, protectedForReview: true } } });
+  expect(await fixture.run(["damage-preview", "cleanup", id, "--key", "synthetic-completed-review", "--json", JSON.stringify({ mediaToken: current.media.token })])).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_CLEANUP_UNAVAILABLE" } } });
+});
+
+it("reports expiry if cleanup wins while canonical export is validating the source", async () => {
+  const { fixture, id, inspect } = await setup();
+  const access = fixture.openAccess();
+  const record = access.damagePreviews.find(id)!; record.status = "partial"; access.damagePreviews.update(record);
+  const before = await inspect();
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(before.updatedAt) + 31 * day);
+  const other = fixture.openAccess();
+  const token = (await inspect()).media.token;
+  const touch = access.damagePreviews.touchMedia.bind(access.damagePreviews);
+  access.damagePreviews.touchMedia = (requestId) => {
+    createApplicationOperations(other).cleanupDamagePreviewMedia(id, { mediaToken: token, mutationKey: "synthetic-cleanup-during-export" });
+    return touch(requestId);
+  };
+  const destination = join(fixture.operatorHostPath, "expired-during-export.mkv");
+  try {
+    expect(await fixture.run(["damage-preview", "export", before.artifacts[0]!.identity, "--destination", destination], undefined, undefined, { openAccess: () => access })).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_EXPIRED" } } });
+    expect(existsSync(destination)).toBe(false);
+  } finally { other.close(); }
 });
 
 it("resumes durable deletion after process death, including already missing files", async () => {
@@ -141,4 +171,21 @@ it("preserves a replacement file when an interrupted deletion resumes", async ()
   expect(await fixture.run(args)).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED" } } });
   expect(readFileSync(path)).toEqual(replacement);
   expect(await inspect()).toMatchObject({ provenance: before.provenance, media: { removal: { state: "failed" } } });
+});
+
+it("does not adopt a replacement file during deletion admission", async () => {
+  const { fixture, id, path, inspect } = await setup();
+  const before = await inspect();
+  const access = fixture.openAccess();
+  const readSnapshot = access.readConsistentSnapshot.bind(access);
+  const replacement = Buffer.from("synthetic replacement during admission");
+  let replaced = false;
+  access.readConsistentSnapshot = (read) => {
+    const result = readSnapshot(read);
+    if (!replaced) { replaced = true; writeFileSync(path, replacement); }
+    return result;
+  };
+  const args = ["damage-preview", "delete", id, "--key", "synthetic-admission-file-race", "--json", JSON.stringify({ mediaToken: before.media.token })];
+  expect(await fixture.run(args, undefined, undefined, { openAccess: () => access })).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED" } } });
+  expect(readFileSync(path)).toEqual(replacement);
 });
