@@ -50,6 +50,83 @@ const titleDamage = {
         verificationOutcome: "mismatch",
       }],
       sourceContinuityRiskSectorCount: 2,
+      timingEvidence: {
+        policyVersion: "dvd-title-damage-timing-v1",
+        occurrences: [
+          {
+            playbackOccurrence: 1,
+            spans: [{
+              sourceRange: { startLba: 10, sectorCount: 3 },
+              startMilliseconds: 62_123,
+              endMilliseconds: 64_500,
+              timingMethod: "synthetic-vobu-timing-v1",
+              coverage: "source_span",
+            }],
+            unknownReasons: [],
+          },
+          {
+            playbackOccurrence: 2,
+            spans: [{
+              sourceRange: { startLba: 13, sectorCount: 2 },
+              startMilliseconds: 125_000,
+              endMilliseconds: 130_000,
+              timingMethod: "synthetic-cell-timing-v1",
+              coverage: "whole_cell",
+            }],
+            unknownReasons: [],
+          },
+          {
+            playbackOccurrence: 3,
+            spans: [],
+            unknownReasons: [{
+              code: "TIMING_UNAVAILABLE",
+              message: "No trustworthy timing evidence places this occurrence.",
+            }],
+          },
+        ],
+      },
+      estimatedAffectedPlayback: {
+        policyVersion: "dvd-title-damage-timing-v1",
+        intervals: [
+          {
+            playbackOccurrence: 1,
+            startMilliseconds: 62_123,
+            endMilliseconds: 64_500,
+            timingMethods: ["synthetic-vobu-timing-v1"],
+            coverage: "source_span",
+            sourceRanges: [{
+              startLba: 10,
+              sectorCount: 3,
+              classification: "individually_failed",
+            }],
+          },
+          {
+            playbackOccurrence: 2,
+            startMilliseconds: 125_000,
+            endMilliseconds: 130_000,
+            timingMethods: ["synthetic-cell-timing-v1"],
+            coverage: "whole_cell",
+            sourceRanges: [{
+              startLba: 13,
+              sectorCount: 2,
+              classification: "individually_failed",
+            }],
+          },
+        ],
+        unknownCoverage: [{
+          playbackOccurrence: 3,
+          unrecoveredSourceSectorCount: 5,
+          unrecoveredSourceRanges: [{
+            startLba: 10,
+            sectorCount: 5,
+            classification: "individually_failed",
+          }],
+          reasons: [{
+            code: "TIMING_UNAVAILABLE",
+            message: "No trustworthy timing evidence places this occurrence.",
+          }],
+        }],
+      },
     },
     {
       titleIdentityId: "synthetic-title-2",
@@ -81,6 +158,25 @@ const titleDamage = {
       titleMissingSourcePercentage: null,
       knownSourceContinuityRiskRanges: [],
       sourceContinuityRiskSectorCount: 0,
+      timingEvidence: {
+        policyVersion: "dvd-title-damage-timing-v1",
+        occurrences: [{
+          playbackOccurrence: 1,
+          spans: [{
+            sourceRange: { startLba: 200, sectorCount: 20 },
+            startMilliseconds: 0,
+            endMilliseconds: 12_000,
+            timingMethod: "synthetic-cell-timing-v1",
+            coverage: "whole_cell",
+          }],
+          unknownReasons: [],
+        }],
+      },
+      estimatedAffectedPlayback: {
+        policyVersion: "dvd-title-damage-timing-v1",
+        intervals: [],
+        unknownCoverage: [],
+      },
     },
   ],
   truncated: false,
@@ -149,6 +245,17 @@ it("shows proved percentages, partial-map unknowns, and source outside known tit
   expect(html).toContain("2 recovered source sectors have operator-confirmed uncertain continuity");
   expect(html).toContain("Source-continuity risk: 4 recovered source sectors");
   expect(html).toContain("Archive-level source-continuity risk: 2 confirmed source sectors");
+  expect(html).toContain("Estimated affected playback");
+  expect(html).toContain("Occurrence 1: 01:02.123 to 01:04.500");
+  expect(html).toContain("Coverage: source span");
+  expect(html).toContain("Occurrence 2: 02:05.000 to 02:10.000");
+  expect(html).toContain("Coverage: whole-cell span");
+  expect(html).toContain(
+    "Occurrence 3: playback location unknown for 5 unrecovered source sectors",
+  );
+  expect(html).toContain(
+    "They do not claim exact playback lost or bound decoder effects.",
+  );
   expect(html).not.toContain("no title damage found");
 });
 

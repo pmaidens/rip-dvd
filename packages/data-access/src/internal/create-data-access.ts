@@ -219,6 +219,7 @@ import {
   type DvdTitleDamageAssessmentRecord,
   type DvdTitleDamageMappingInput,
   type DvdTitleDamageSourceContinuityInput,
+  type PersistedDvdTitleDamageMappingInput,
   type RecordDvdTitleDamageAssessmentInput,
 } from "../dvd-title-damage-assessment.js";
 import { isArchiveReadFailureEvidenceConsistent } from "../archive-read-failure.js";
@@ -10860,7 +10861,7 @@ export function createDataAccessInternal(
   function titleDamageMappings(
     originalDiscArchiveId: OriginalDiscArchiveId,
     manifestId: string,
-    mappings: RecordDvdTitleDamageAssessmentInput["titles"],
+    mappings: readonly PersistedDvdTitleDamageMappingInput[],
     evidence?: Pick<
       DvdTitleDamageDecodeEvidence,
       "observations" | "titleIdentityArchiveIds"
@@ -10918,6 +10919,7 @@ export function createDataAccessInternal(
         },
         sourceReferences: mapping.sourceReferences,
         mappingCoverage: mapping.mappingCoverage,
+        timingEvidence: mapping.timingEvidence ?? null,
       };
     });
   }
@@ -11120,6 +11122,9 @@ export function createDataAccessInternal(
         latestRow.catalogMappingProjectionId !== null &&
         latestRow.catalogMappingProjectionId === catalogMappingProjectionId &&
         latestRow.sourceContinuity !== null &&
+        latestRow.titleMappings.every((mapping) =>
+          mapping.timingEvidence != null
+        ) &&
         latestRow.structuralAssessmentIdentity ===
           structural.currentAssessmentIdentity
       ? latestRow

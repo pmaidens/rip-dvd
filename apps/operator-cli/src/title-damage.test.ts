@@ -278,6 +278,30 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
         policyVersion: "synthetic-title-map-v1",
         unknownReasons: [],
       },
+      timingEvidence: {
+        policyVersion: "dvd-title-damage-timing-v1",
+        occurrences: [
+          {
+            playbackOccurrence: 1,
+            spans: [{
+              sourceRange: { startLba: 0, sectorCount: 110 },
+              startMilliseconds: 1_000,
+              endMilliseconds: 5_000,
+              timingMethod: "synthetic-vobu-timing-v1",
+              coverage: "source_span",
+            }],
+            unknownReasons: [],
+          },
+          {
+            playbackOccurrence: 2,
+            spans: [],
+            unknownReasons: [{
+              code: "TIMING_UNAVAILABLE",
+              message: "No trustworthy timing evidence places this occurrence.",
+            }],
+          },
+        ],
+      },
     },
     {
       titleIdentityObservationId: currentItems[1]!.observation.id,
@@ -294,6 +318,20 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
         policyVersion: "synthetic-title-map-v1",
         unknownReasons: [],
       },
+      timingEvidence: {
+        policyVersion: "dvd-title-damage-timing-v1",
+        occurrences: [{
+          playbackOccurrence: 1,
+          spans: [{
+            sourceRange: { startLba: 0, sectorCount: 60 },
+            startMilliseconds: 0,
+            endMilliseconds: 12_000,
+            timingMethod: "synthetic-cell-timing-v1",
+            coverage: "whole_cell",
+          }],
+          unknownReasons: [],
+        }],
+      },
     },
     {
       titleIdentityObservationId: currentItems[2]!.observation.id,
@@ -308,6 +346,17 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
         unknownReasons: [{
           code: "TITLE_SOURCE_MAP_INCOMPLETE",
           message: "The selected path has unresolved navigation.",
+        }],
+      },
+      timingEvidence: {
+        policyVersion: "dvd-title-damage-timing-v1",
+        occurrences: [{
+          playbackOccurrence: 1,
+          spans: [],
+          unknownReasons: [{
+            code: "TIMING_UNAVAILABLE",
+            message: "Playback timing is unavailable for this path.",
+          }],
         }],
       },
     },
@@ -351,6 +400,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
         ...range,
       })),
       mappingCoverage: item.mappingCoverage,
+      timingEvidence: null,
     })),
   });
   expect(migratedAssessment.id).not.toBe(recorded.id);
@@ -373,7 +423,10 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     recorded.titleIdentityReviewSetIdentity,
     recorded.structuralAssessmentIdentity,
     recorded.policyVersion,
-    JSON.stringify(mappings),
+    JSON.stringify(mappings.map((mapping) => {
+      const { timingEvidence: _timingEvidence, ...legacy } = mapping;
+      return legacy;
+    })),
     recorded.createdAt.getTime(),
   );
   migratedSqlite.prepare(`
@@ -397,6 +450,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
         ...range,
       })),
       mappingCoverage: item.mappingCoverage,
+      timingEvidence: item.timingEvidence!,
     })),
   );
   expect(repeated?.id).toBe(recorded.id);
@@ -438,6 +492,20 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
       unrecoveredUniqueSourceSectorCount: 4,
       titleMissingSourcePercentage: 4 / 110 * 100,
       sourceContinuityRiskSectorCount: 1,
+      estimatedAffectedPlayback: {
+        intervals: [{
+          playbackOccurrence: 1,
+          startMilliseconds: 1_000,
+          endMilliseconds: 5_000,
+          timingMethods: ["synthetic-vobu-timing-v1"],
+          coverage: "source_span",
+        }],
+        unknownCoverage: [{
+          playbackOccurrence: 2,
+          unrecoveredSourceSectorCount: 4,
+          reasons: [{ code: "TIMING_UNAVAILABLE" }],
+        }],
+      },
     }],
     truncated: true,
     nextCursor: expect.any(String),

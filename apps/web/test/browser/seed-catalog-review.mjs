@@ -394,7 +394,7 @@ function seedTitleDamagePaging(variant, fingerprintFill) {
   const currentItems = reviewSet.items.filter((item) =>
     item.presentAtCurrentCheckpoint
   );
-  const storedMappings = currentItems.map((item) => ({
+  const storedMappings = currentItems.map((item, index) => ({
     titleIdentityObservationId: item.observation.id,
     sourceReferences: item.observation.sourceExtents.map((range) => ({
       kind: "multiplexed_content",
@@ -404,6 +404,45 @@ function seedTitleDamagePaging(variant, fingerprintFill) {
       state: "complete",
       policyVersion: "synthetic-title-map-v1",
       unknownReasons: [],
+    },
+    timingEvidence: {
+      policyVersion: "dvd-title-damage-timing-v1",
+      occurrences: index === 0
+        ? [
+          {
+            playbackOccurrence: 1,
+            spans: [{
+              sourceRange: item.observation.sourceExtents[0],
+              startMilliseconds: 62_000,
+              endMilliseconds: 65_000,
+              timingMethod: "synthetic-vobu-timing-v1",
+              coverage: "source_span",
+            }],
+            unknownReasons: [],
+          },
+          {
+            playbackOccurrence: 2,
+            spans: [{
+              sourceRange: item.observation.sourceExtents[0],
+              startMilliseconds: 120_000,
+              endMilliseconds: 130_000,
+              timingMethod: "synthetic-cell-timing-v1",
+              coverage: "whole_cell",
+            }],
+            unknownReasons: [],
+          },
+        ]
+        : [{
+          playbackOccurrence: 1,
+          spans: [{
+            sourceRange: item.observation.sourceExtents[0],
+            startMilliseconds: index * 60_000,
+            endMilliseconds: index * 60_000 + 10_000,
+            timingMethod: "synthetic-cell-timing-v1",
+            coverage: "whole_cell",
+          }],
+          unknownReasons: [],
+        }],
     },
   }));
   const catalogMappingProjectionId =

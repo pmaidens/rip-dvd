@@ -74,7 +74,7 @@ import {
 } from "../dvd-structural-assessment.js";
 import type {
   DvdTitleDamageSourceContinuityInput,
-  RecordDvdTitleDamageMappingInput,
+  PersistedDvdTitleDamageMappingInput,
 } from "../dvd-title-damage-assessment.js";
 import type {
   DvdDiscVerificationReasonCode,
@@ -1625,7 +1625,7 @@ export const dvdTitleDamageAssessments = sqliteTable(
       }),
     policyVersion: text("policy_version").notNull(),
     titleMappings: text("title_mappings", { mode: "json" })
-      .$type<readonly RecordDvdTitleDamageMappingInput[]>()
+      .$type<readonly PersistedDvdTitleDamageMappingInput[]>()
       .notNull(),
     sourceContinuity: text("source_continuity", { mode: "json" })
       .$type<DvdTitleDamageSourceContinuityInput>(),
