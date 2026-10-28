@@ -194,12 +194,94 @@ const preview = {
   },
 } as unknown as DvdTitleDamageAcceptancePreview;
 
+const evidenceGeneration = {
+  current: {
+    originalDiscArchiveId: "synthetic-archive",
+    catalogRevision: "2026-10-27T12:00:00.000Z",
+    catalogReviewOutcome: "needs_review" as const,
+    archiveJob: { id: "synthetic-archive-job", status: "completed" as const },
+    checkpoint: { revision: 2, manifestDigest: "a".repeat(64) },
+    recovery: {
+      id: "synthetic-recovery",
+      attemptId: "synthetic-recovery-attempt",
+      state: "stopped" as const,
+      work: null,
+    },
+    catalogMappingProjectionId: "c".repeat(64),
+    titleDamageAssessmentId:
+      `dvd-title-damage-assessment:${"d".repeat(64)}`,
+  },
+  titleDamageState: "current" as const,
+};
+
+const boundEvidenceChanges = [
+  {
+    name: "catalog revision",
+    value: {
+      ...evidenceGeneration,
+      current: {
+        ...evidenceGeneration.current,
+        catalogRevision: "2026-10-27T12:00:01.000Z",
+      },
+    },
+  },
+  {
+    name: "checkpoint",
+    value: {
+      ...evidenceGeneration,
+      current: {
+        ...evidenceGeneration.current,
+        checkpoint: { revision: 3, manifestDigest: "e".repeat(64) },
+      },
+    },
+  },
+  {
+    name: "Catalog mapping projection",
+    value: {
+      ...evidenceGeneration,
+      current: {
+        ...evidenceGeneration.current,
+        catalogMappingProjectionId: "f".repeat(64),
+      },
+    },
+  },
+  {
+    name: "Title Damage Assessment identity",
+    value: {
+      ...evidenceGeneration,
+      current: {
+        ...evidenceGeneration.current,
+        titleDamageAssessmentId:
+          `dvd-title-damage-assessment:${"1".repeat(64)}`,
+      },
+    },
+  },
+  {
+    name: "Title Damage Assessment state",
+    value: { ...evidenceGeneration, titleDamageState: "outdated" as const },
+  },
+  {
+    name: "Recovery state",
+    value: {
+      ...evidenceGeneration,
+      current: {
+        ...evidenceGeneration.current,
+        recovery: {
+          ...evidenceGeneration.current.recovery,
+          state: "running" as const,
+        },
+      },
+    },
+  },
+];
+
 it("includes all current content by default and sends only explicit exclusions", async () => {
   const fetcher = vi.fn(async () => Response.json(preview));
   await act(async () => root.render(
     <CatalogReviewTitleDamageAcceptancePreview
       originalDiscArchiveId="synthetic-archive"
       titleIdentity={titleIdentity}
+      evidenceGeneration={evidenceGeneration}
       fetcher={fetcher}
     />,
   ));
@@ -283,6 +365,7 @@ it("invalidates the preview when the current review set changes", async () => {
     <CatalogReviewTitleDamageAcceptancePreview
       originalDiscArchiveId="synthetic-archive"
       titleIdentity={titleIdentity}
+      evidenceGeneration={evidenceGeneration}
       fetcher={fetcher}
     />,
   ));
@@ -298,9 +381,74 @@ it("invalidates the preview when the current review set changes", async () => {
         ...titleIdentity,
         reviewSetIdentity: "new-review-set-identity",
       }}
+      evidenceGeneration={evidenceGeneration}
       fetcher={fetcher}
     />,
   ));
+
+  expect(container.textContent).not.toContain(preview.previewToken);
+});
+
+it.each(boundEvidenceChanges)(
+  "invalidates the preview when the $name changes",
+  async ({ value }) => {
+    const fetcher = vi.fn(async () => Response.json(preview));
+    await act(async () => root.render(
+      <CatalogReviewTitleDamageAcceptancePreview
+        originalDiscArchiveId="synthetic-archive"
+        titleIdentity={titleIdentity}
+        evidenceGeneration={evidenceGeneration}
+        fetcher={fetcher}
+      />,
+    ));
+    await act(async () => {
+      (container.querySelector("button") as HTMLButtonElement).click();
+    });
+    expect(container.textContent).toContain(preview.previewToken);
+
+    await act(async () => root.render(
+      <CatalogReviewTitleDamageAcceptancePreview
+        originalDiscArchiveId="synthetic-archive"
+        titleIdentity={titleIdentity}
+        evidenceGeneration={value}
+        fetcher={fetcher}
+      />,
+    ));
+
+    expect(container.textContent).not.toContain(preview.previewToken);
+  },
+);
+
+it("ignores an in-flight preview from an older evidence generation", async () => {
+  let completeRequest: ((response: Response) => void) | undefined;
+  const fetcher = vi.fn(() => new Promise<Response>((resolve) => {
+    completeRequest = resolve;
+  }));
+  await act(async () => root.render(
+    <CatalogReviewTitleDamageAcceptancePreview
+      originalDiscArchiveId="synthetic-archive"
+      titleIdentity={titleIdentity}
+      evidenceGeneration={evidenceGeneration}
+      fetcher={fetcher}
+    />,
+  ));
+  await act(async () => {
+    (container.querySelector("button") as HTMLButtonElement).click();
+  });
+
+  const changed = boundEvidenceChanges[2]!.value;
+  await act(async () => root.render(
+    <CatalogReviewTitleDamageAcceptancePreview
+      originalDiscArchiveId="synthetic-archive"
+      titleIdentity={titleIdentity}
+      evidenceGeneration={changed}
+      fetcher={fetcher}
+    />,
+  ));
+  await act(async () => {
+    completeRequest?.(Response.json(preview));
+    await Promise.resolve();
+  });
 
   expect(container.textContent).not.toContain(preview.previewToken);
 });
@@ -334,6 +482,7 @@ it("shows active Disc Selections without a current Title Identity binding", asyn
     <CatalogReviewTitleDamageAcceptancePreview
       originalDiscArchiveId="synthetic-archive"
       titleIdentity={titleIdentity}
+      evidenceGeneration={evidenceGeneration}
       fetcher={fetcher}
     />,
   ));

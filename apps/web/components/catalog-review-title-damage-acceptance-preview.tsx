@@ -2,10 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import type {
+  CatalogReviewWorkflow,
   DvdTitleDamageAcceptancePreview,
 } from "@rip-dvd/application";
 
 import type {
+  CatalogReviewTitleDamage,
   CatalogReviewTitleIdentity,
 } from "./catalog-review-model";
 
@@ -27,10 +29,15 @@ function contentLabel(item: CurrentTitleIdentity): string {
 export function CatalogReviewTitleDamageAcceptancePreview({
   originalDiscArchiveId,
   titleIdentity,
+  evidenceGeneration,
   fetcher = fetch,
 }: {
   originalDiscArchiveId: string;
   titleIdentity?: CatalogReviewTitleIdentity;
+  evidenceGeneration: {
+    current: CatalogReviewWorkflow["current"];
+    titleDamageState: CatalogReviewTitleDamage["state"] | null;
+  };
   fetcher?: typeof fetch;
 }) {
   const items = currentItems(titleIdentity);
@@ -45,6 +52,7 @@ export function CatalogReviewTitleDamageAcceptancePreview({
   const [error, setError] = useState<string | null>(null);
   const requestVersion = useRef(0);
   const reviewSetIdentity = titleIdentity?.reviewSetIdentity ?? null;
+  const evidenceGenerationKey = JSON.stringify(evidenceGeneration);
 
   const invalidatePreview = () => {
     requestVersion.current += 1;
@@ -60,7 +68,7 @@ export function CatalogReviewTitleDamageAcceptancePreview({
     setPreview(null);
     setIsLoading(false);
     setError(null);
-  }, [originalDiscArchiveId, reviewSetIdentity]);
+  }, [evidenceGenerationKey, originalDiscArchiveId, reviewSetIdentity]);
 
   const toggle = (id: string) => {
     setExcluded((current) => {

@@ -515,6 +515,9 @@ export function previewDvdTitleDamageAcceptance(
   const unidentifiedItems = reviewedContent.filter((item) =>
     item.preflightMappingState === "unmapped"
   );
+  const emptyReviewedContent = reviewSet !== null &&
+    reviewedContent.length === 0;
+  const missingReviewSet = reviewSet === null;
   const reasons = uniqueReasons([
     ...baseReasons,
     ...(mappingReviewItems.length === 0
@@ -530,13 +533,16 @@ export function previewDvdTitleDamageAcceptance(
       }]),
     ...(unidentifiedItems.length === 0 &&
         unresolvedMainFeatureSelectionIds.length === 0 &&
-        unresolvedSelections.length === 0
+        unresolvedSelections.length === 0 &&
+        !emptyReviewedContent && !missingReviewSet
       ? []
       : [{
         code: "SELECTION_UNIDENTIFIED" as const,
         message:
-          "Every included content item and active Disc Selection must have a concrete current mapping and assessment.",
+          "The exact set must include current content with concrete Disc Selection mappings and assessment evidence.",
         details: {
+          emptyReviewedContent,
+          missingReviewSet,
           affectedTitleIdentityIds: unidentifiedItems.map((item) =>
             item.titleIdentityId
           ),
@@ -556,6 +562,9 @@ export function previewDvdTitleDamageAcceptance(
   unresolvedSelections.forEach(({ discSelectionId }) =>
     reviewedSelectionIds.add(discSelectionId)
   );
+  if (emptyReviewedContent) {
+    selections.forEach(({ id }) => reviewedSelectionIds.add(id));
+  }
   const affectedWork = [...new Map(plan.affectedWork
     .filter((job) => reviewedSelectionIds.has(job.discSelectionId))
     .map((job) => [job.id, affectedWorkView(job)] as const)).values()]

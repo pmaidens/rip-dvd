@@ -160,3 +160,36 @@ it("does not project an outdated assessment as current evidence", () => {
     action: { reasons: [{ code: "ASSESSMENT_OUTDATED" }] },
   });
 });
+
+it("blocks an empty exact set and keeps its affected work visible", () => {
+  const preview = previewDvdTitleDamageAcceptance(
+    createDvdTitleDamageAcceptancePreviewTestAccess({
+      includeAffectedWork: true,
+    }),
+    DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.archiveId as never,
+    {
+      excludedTitleIdentityIds: [
+        DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.titleIdentityId,
+      ],
+    },
+  );
+
+  expect(preview).toMatchObject({
+    available: false,
+    previewToken: null,
+    reviewedContent: [],
+    affectedWork: [{
+      id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.encodeJobId,
+      discSelectionId: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
+    }],
+    action: {
+      reasons: [{
+        code: "SELECTION_UNIDENTIFIED",
+        details: {
+          emptyReviewedContent: true,
+          missingReviewSet: false,
+        },
+      }],
+    },
+  });
+});
