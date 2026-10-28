@@ -100,3 +100,9 @@ export class EncodeWorkConflictError extends DomainInvariantError {
     this.name = "EncodeWorkConflictError";
   }
 }
+
+/** Planned preview work fences a read without invalidating its Recovery source. */
+export class ArchiveRecoveryPreviewPauseError extends Error {
+  override readonly name = "ArchiveRecoveryPreviewPauseError";
+  constructor() { super("Recovery is yielding its checkpoint to planned Damage Preview work."); }
+}

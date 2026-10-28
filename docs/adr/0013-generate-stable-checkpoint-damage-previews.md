@@ -8,7 +8,10 @@ transaction that records the request and mutation result. Replaying a committed
 key returns its original admission result even after source changes. Changed
 input conflicts with that key; stale input creates no request.
 
-Generation also supports active Archive Recovery. An admitted request durably
+Generation also supports active Archive Recovery. Submission waits through a
+live Recovery writer instead of treating the ownership acquisition timeout as
+unavailability. Once ownership is available, admission rechecks the exact
+reviewed token and commits no work if its checkpoint changed. An admitted request durably
 fences new Recovery source reads. An already admitted command closes and its
 batch commits before Recovery yields its claim at a complete checkpoint. The
 preview waits for that handoff, then takes exclusive consistent-read ownership.

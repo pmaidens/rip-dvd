@@ -4252,7 +4252,7 @@ it("leaves eligible Recovery work dormant on unsupported storage", async () => {
   }
 });
 
-it("holds verified Recovery for a durable planned preview pause, including source admission races, and resumes after cancellation", async () => {
+it.each([false, true])("holds verified Recovery for a durable planned preview pause and survives cancellation during handoff: %s", async (cancelDuringHandoff) => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
   const seeded = await seedDvdDiscVerificationFixture(fixture, [{ startLba: 10, sectorCount: 2, classification: "skipped_untested" }]);
   const preview = await seedDamagePreview(fixture, "source_span", [[1_000, 5_000]], { evidence: seeded, stopRecovery: false });
@@ -4261,6 +4261,17 @@ it("holds verified Recovery for a durable planned preview pause, including sourc
   let previewId = "";
   const source = immediateReader(() => ({ outcome: "unreadable", diagnostic: mediumError }));
   const run = pollInput(fixture, source.reader);
+  const admit = run.access.archiveRecoveryWork.admitSourceRead;
+  run.access.archiveRecoveryWork.admitSourceRead = (...args) => {
+    try {
+      const result = admit(...args);
+      if (cancelDuringHandoff && result === null) run.access.damagePreviews.cancel(previewId, "synthetic-handoff-cancel");
+      return result;
+    } catch (error) {
+      if (cancelDuringHandoff) run.access.damagePreviews.cancel(previewId, "synthetic-handoff-cancel");
+      throw error;
+    }
+  };
   const observe = run.mediaGenerationObserver.observe;
   run.mediaGenerationObserver.observe = async (path, signal) => {
     if (!previewId) {
@@ -4275,8 +4286,10 @@ it("holds verified Recovery for a durable planned preview pause, including sourc
     expect(await pollDvdRecoveryPass(run)).toBe(true);
     expect(source.start.mock.results.every((result) => result.type === "return" && result.value.authorize.mock.calls.length === 0)).toBe(true);
     expect(run.access.catalog.findArchiveRecovery(seeded.archive.id)).toMatchObject({ status: "eligible", faultCode: null });
-    expect(await pollDvdRecoveryPass(run)).toBe(false);
-    await fixture.run(["damage-preview", "cancel", previewId, "--key", "synthetic-racing-cancel"]);
+    if (!cancelDuringHandoff) {
+      expect(await pollDvdRecoveryPass(run)).toBe(false);
+      await fixture.run(["damage-preview", "cancel", previewId, "--key", "synthetic-racing-cancel"]);
+    }
     expect(await pollDvdRecoveryPass(run)).toBe(true);
     expect(source.start.mock.results.some((result) => result.type === "return" && result.value.authorize.mock.calls.length > 0)).toBe(true);
   } finally { run.access.close(); }
@@ -4356,7 +4369,7 @@ it("preempts an active preview immediately for Recovery Stop and acknowledges on
 
 it("samples one active Recovery revision for a preview and releases its planned pause before artifact validation so Recovery can continue", async () => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
-  const seeded = await seedDvdDiscVerificationFixture(fixture, [{ startLba: 10, sectorCount: 2, classification: "skipped_untested" }]);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{ startLba: 10, sectorCount: 1, classification: "skipped_untested" }]);
   const preview = await seedDamagePreview(fixture, "source_span", [[1_000, 5_000]], { evidence: seeded, stopRecovery: false });
   await completeVerification(fixture, seeded);
   const selection = { ...preview.input, intervalIndexes: [0] };
@@ -4383,7 +4396,7 @@ it("samples one active Recovery revision for a preview and releases its planned 
     finish(); await validating;
     expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "generating", recoveryPause: { state: "released" } });
     expect(await pollDvdRecoveryPass(run)).toBe(true);
-    expect(run.access.catalog.findDvdArchiveEvidenceHeader(seeded.archive.id)?.currentManifestRevision).toBe(3);
+    expect(run.access.catalog.findDvdArchiveEvidenceHeader(seeded.archive.id)?.currentManifestRevision).toBe(2);
     publish(); await generating;
     expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ status: "outdated", generationStatus: "complete", provenance: { checkpoint: { manifestRevision: 1 } }, artifacts: [{ coverage: { startMilliseconds: 0, endMilliseconds: 10_000 } }] });
   } finally { finish?.(); publish?.(); run.access.close(); }

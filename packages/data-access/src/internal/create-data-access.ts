@@ -1,3 +1,4 @@
+import { ArchiveRecoveryPreviewPauseError } from "../archive-recovery-work.js";
 import { createDamagePreviewAccess, damagePreviewHoldsRecovery } from "./damage-preview-store.js";
 import { createEncodeOutputInspectionReceiptAccess } from "./encode-output-inspection-receipt-store.js";
 import {
@@ -12514,7 +12515,7 @@ export function createDataAccessInternal(
           }
           // Admission and preview submission use the same immediate transaction boundary.
           // A helper may be ready, but cannot read after a planned pause commits.
-          if (access.damagePreviews.pendingForRecovery(recovery.originalDiscArchiveId)) return null;
+          if (access.damagePreviews.pendingForRecovery(recovery.originalDiscArchiveId)) throw new ArchiveRecoveryPreviewPauseError();
           requireNoPendingDvdRecoveryReconciliation(
             transaction,
             recovery.id,

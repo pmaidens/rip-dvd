@@ -1,4 +1,5 @@
 import {
+  ArchiveRecoveryPreviewPauseError,
   dvdConfirmedRecoveryWriteAuthority,
   dvdDiscVerificationInsertionIsCurrent,
   dvdRecoveryWriteAuthority,
@@ -46,8 +47,6 @@ import {
 } from "./optical-media-generation.js";
 
 const DEFAULT_STOP_POLL_INTERVAL_MS = 100;
-
-class DvdRecoveryPreviewPause extends Error {}
 
 type DvdRecoveryDeviceInactivity = Pick<
   DvdCopyRunner,
@@ -633,7 +632,7 @@ export async function pollDvdRecoveryPass(input: {
         throw new DvdRecoveryPassFault("SOURCE_CHANGED");
       }
       input.access.archiveRecoveryWork.assertClaim(claim);
-      if (input.access.damagePreviews.pendingForRecovery(candidate.recovery.originalDiscArchiveId)) throw new DvdRecoveryPreviewPause();
+      if (input.access.damagePreviews.pendingForRecovery(candidate.recovery.originalDiscArchiveId)) throw new ArchiveRecoveryPreviewPauseError();
       const devicePath = await currentInsertionDevicePath({
         access: input.access,
         authority,
@@ -667,7 +666,6 @@ export async function pollDvdRecoveryPass(input: {
           admittedRead.deviceIdentity,
         );
         if (admitted === null) {
-          if (input.access.damagePreviews.pendingForRecovery(candidate.recovery.originalDiscArchiveId)) throw new DvdRecoveryPreviewPause();
           throw new DvdRecoveryPassFault("SOURCE_CHANGED");
         }
         authorizeDvdSourceRead(admittedRead);
@@ -812,7 +810,7 @@ export async function pollDvdRecoveryPass(input: {
       });
       return outcome !== "deferred";
     }
-    if (error instanceof DvdRecoveryPreviewPause) {
+    if (error instanceof ArchiveRecoveryPreviewPauseError) {
       // Every admitted read and batch is closed before yielding the pass. Keep
       // its cursor and verification so completion of preview work can resume it.
       input.access.archiveRecoveryWork.requeue(claim);

@@ -59,18 +59,28 @@ export async function requestDamagePreview(access: DataAccess, archiveId: string
   const replay = access.damagePreviews.replay(admission);
   if (replay) return presentDamagePreview(replay);
   let record: DamagePreviewRecord | null;
-  try {
-    record = await access.withDvdCheckpoint<DamagePreviewRecord | null>(archiveId as OriginalDiscArchiveId, ownership,
-      async (_checkpoint, handle) => { handle.assertOwned(); return null; },
-      (checkpoint) => submit(checkpoint));
-  } catch (error) {
-    const committed = access.damagePreviews.replay(admission);
-    if (committed) return presentDamagePreview(committed);
-    if (!(error instanceof DvdCheckpointReadFault) && !(error instanceof ArchiveImageOwnershipError)) throw error;
-    const stale = error.code === "DVD_EVIDENCE_CHANGED_DURING_READ";
-    const reason = { code: stale ? "DAMAGE_PREVIEW_STALE" : error.code, message: stale ? "The saved checkpoint changed while the request waited. Review current evidence." : "The saved checkpoint cannot be admitted under proven image ownership." };
-    const current = access.readConsistentSnapshot((snapshot) => reviewDamagePreviewEvidence(snapshot, archiveId, selection, null, [reason]));
-    throw new DamagePreviewRejectedError(stale ? "DAMAGE_PREVIEW_STALE" : "DAMAGE_PREVIEW_UNAVAILABLE", [reason], current);
+  while (true) {
+    try {
+      record = await access.withDvdCheckpoint<DamagePreviewRecord | null>(archiveId as OriginalDiscArchiveId, ownership,
+        async (_checkpoint, handle) => { handle.assertOwned(); return null; },
+        (checkpoint) => submit(checkpoint));
+      break;
+    } catch (error) {
+      const committed = access.damagePreviews.replay(admission);
+      if (committed) return presentDamagePreview(committed);
+      if (!(error instanceof DvdCheckpointReadFault) && !(error instanceof ArchiveImageOwnershipError)) throw error;
+      const recovery = access.catalog.findArchiveRecovery(archiveId as OriginalDiscArchiveId);
+      if (error.code === "WRITER_NOT_QUIESCENT" && recovery && ["eligible", "waiting_for_disc", "running", "paused"].includes(recovery.status)) {
+        // Keep the invocation waiting rather than admitting an unverified token.
+        // Ownership and exact reviewed identities still commit together below.
+        await delay(100);
+        continue;
+      }
+      const stale = error.code === "DVD_EVIDENCE_CHANGED_DURING_READ";
+      const reason = { code: stale ? "DAMAGE_PREVIEW_STALE" : error.code, message: stale ? "The saved checkpoint changed while the request waited. Review current evidence." : "The saved checkpoint cannot be admitted under proven image ownership." };
+      const current = access.readConsistentSnapshot((snapshot) => reviewDamagePreviewEvidence(snapshot, archiveId, selection, null, [reason]));
+      throw new DamagePreviewRejectedError(stale ? "DAMAGE_PREVIEW_STALE" : "DAMAGE_PREVIEW_UNAVAILABLE", [reason], current);
+    }
   }
   if (record === null) record = submit(null);
   return presentDamagePreview(record);
