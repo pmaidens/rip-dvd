@@ -1,6 +1,8 @@
 import { afterEach, expect, it } from "vitest";
 import { writeFileSync } from "node:fs";
-import { encodeOutputArtifactIdentity, type EncodeOutputInspection } from "@rip-dvd/application";
+import { claimNextEncodeJob, encodeOutputArtifactIdentity, retainedEncodeOutputArtifactIdentity, type EncodeOutputInspection } from "@rip-dvd/application";
+import { seedEncodeClaim, withdrawClaimAcceptance } from "../../../../../operator-cli/src/encode-claim.test-support.js";
+import { publishSyntheticClaim } from "../../../../../operator-cli/src/encode-output-provenance.test-support.js";
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
 import { createEncodeOutputAcknowledgementRoute, createEncodeOutputInspectionRoute } from "./route";
 
@@ -8,6 +10,64 @@ const origin = "http://localhost:3000";
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
 const probe = async () => ({ durationSeconds: 90, streams: [] });
+
+it("shares retained replacement inspection and keeps historical source evidence unknown", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const { archive, predecessor } = seedCatalogReviewForReadFixture(fixture, { validatedOutputContents: "synthetic historical HTTP replacement" });
+  const access = fixture.openAccess();
+  try {
+    const replacement = access.catalog.completeCatalogReviewWithReplacements(archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt, "reviewed_with_selections",
+      [{ predecessorEncodeJobId: predecessor.id, encodingProfileId: predecessor.encodingProfileId, outputPath: predecessor.outputPath }]).replacementEncodeJobs[0]!;
+    publishSyntheticClaim(access, access.encodeJobs.claimNext("synthetic-retained-http-worker")!, true);
+    const retained = access.encodeJobs.listRetainedOutputs([predecessor.id, replacement.id])[0]!;
+    for (const identity of [retainedEncodeOutputArtifactIdentity(retained.id), encodeOutputArtifactIdentity(replacement.id)]) {
+      const web = await createEncodeOutputInspectionRoute(new Request(`${origin}/api/encode-outputs/${identity}`), identity, () => access, probe);
+      const cli = await fixture.run(["encode-output", "inspect", identity], undefined, undefined, { encodeOutputMediaProbe: probe });
+      expect(web.status).toBe(200);
+      expect(cli.exitCode).toBe(0);
+      expect(await web.json()).toEqual(cli.result);
+      expect(cli.result).toMatchObject({ artifact: { provenance: { sourceSnapshot: null, sourceSnapshotAvailability: "not_recorded" },
+        sourceDamage: { unknownImpact: true, watchability: "not_assessed" } } });
+    }
+  } finally { access.close(); }
+});
+
+it("shares recorded source/validation evidence through requeue and preserves receipts after later withdrawal", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedEncodeClaim(fixture, { continuityRisk: true });
+  const { access } = seeded;
+  const identity = encodeOutputArtifactIdentity(seeded.job.id);
+  const parity = async () => {
+    const web = await createEncodeOutputInspectionRoute(new Request(`${origin}/api/encode-outputs/${identity}`), identity, () => access, probe);
+    const cli = await fixture.run(["encode-output", "inspect", identity], undefined, undefined, { encodeOutputMediaProbe: probe });
+    expect(web.status).toBe(200);
+    expect(cli.exitCode).toBe(0);
+    const result = await web.json() as EncodeOutputInspection;
+    expect(cli.result).toEqual(result);
+    return result;
+  };
+  try {
+    const claim = (await claimNextEncodeJob(access, "synthetic-http-source-worker", fixture.originalsLibraryPath))!;
+    const validation = publishSyntheticClaim(access, claim);
+    const first = await parity();
+    expect(first.artifact).toMatchObject({ validation: { recordIdentity: validation.id }, provenance: {
+      sourceSnapshotAvailability: "recorded", sourceSnapshot: { id: claim.claimToken,
+        source: { sourceContinuityRisk: true, acceptance: { decision: "accepted" } } },
+    } });
+    const body = { acknowledged: true, reviewToken: first.operatorInspection.reviewToken, mutationKey: "synthetic-source-http-receipt" };
+    const response = await createEncodeOutputAcknowledgementRoute(request(identity, body), identity, () => access, () => origin, probe);
+    expect(response.status).toBe(200);
+    const receipt = (await response.json() as { receipt: unknown }).receipt;
+    access.encodeJobs.requeue(claim.id, { expectedSourceDecision: seeded.expectedSourceDecision });
+    const next = (await claimNextEncodeJob(access, "synthetic-http-retry-worker", fixture.originalsLibraryPath))!;
+    expect((await parity()).artifact.provenance).toEqual(first.artifact.provenance);
+    access.encodeJobs.fail(next, "Synthetic retry stopped before publication", { preserveReplacementAuthority: true });
+    await withdrawClaimAcceptance(fixture, seeded.archive.id, seeded.expectedSourceDecision.acceptanceIdentity!);
+    expect((await parity()).operatorInspection.history).toEqual([receipt]);
+    expect((await parity()).artifact.provenance).toEqual(first.artifact.provenance);
+  } finally { access.close(); }
+});
 
 function request(identity: string, body: unknown, requestOrigin = origin) {
   return new Request(`${origin}/api/encode-outputs/${identity}`, {

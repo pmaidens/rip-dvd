@@ -105,6 +105,7 @@ import {
   encodeJobFailureReports,
   encodeJobs,
   encodeClaimSnapshots,
+  encodeOutputValidations,
   encodingProfiles,
   filesystemVerificationRuns,
   legacyCutoverStagedSidecars,
@@ -3405,6 +3406,15 @@ export function createDataAccessInternal(
     }
     const finalizedAt = now();
     const publishedValidation = provenance?.publishedOutputValidation;
+    const validationRecord = publishedValidation === undefined ? undefined : transaction.select().from(encodeOutputValidations)
+      .where(and(eq(encodeOutputValidations.encodeJobId, jobId),
+        eq(encodeOutputValidations.claimToken, current.partialCleanupClaimToken ?? current.claimToken!),
+        eq(encodeOutputValidations.filesystemIdentity, publishedValidation.filesystemIdentity))).get();
+    const sourceClaim = current.partialCleanupClaimToken ?? current.claimToken;
+    if (replayedCompletion === undefined && sourceClaim !== null && transaction.select().from(encodeClaimSnapshots)
+      .where(eq(encodeClaimSnapshots.id, sourceClaim)).get() !== undefined && validationRecord === undefined) {
+      throw new DomainInvariantError("Claimed source output requires its exact recorded validation");
+    }
     retainCorrectedEncodeOutput(
       transaction,
       current,
@@ -3425,7 +3435,7 @@ export function createDataAccessInternal(
             ? publishedValidation?.filesystemIdentity ?? null
             : replayedCompletion.outputValidationFilesystemIdentity,
         outputValidatedAt: replayedCompletion === undefined
-          ? publishedValidation === undefined ? null : finalizedAt
+          ? publishedValidation === undefined ? null : validationRecord?.validatedAt ?? finalizedAt
           : replayedCompletion.outputValidatedAt,
         outputCompleteness: replayedCompletion === undefined
           ? publishedValidation?.completeness ?? null
@@ -15299,6 +15309,7 @@ export function createDataAccessInternal(
             access.archiveJobs.listLatestForRequests(archiveRequestIds),
         },
         encodeJobs: {
+          findOutputValidation: (id, identity, validatedAt) => access.encodeJobs.findOutputValidation(id, identity, validatedAt),
           listClaimSnapshots: (id, options) => access.encodeJobs.listClaimSnapshots(id, options),
           find: (id) => access.encodeJobs.find(id),
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
@@ -23971,6 +23982,34 @@ export function createDataAccessInternal(
       claimNext: encodeJobQueue.claimNext,
       findClaimSnapshot(id) {
         return database.select().from(encodeClaimSnapshots).where(eq(encodeClaimSnapshots.id, id)).get() ?? null;
+      },
+      recordOutputValidation(claim, identity, evidence) {
+        return database.transaction((transaction) => {
+          const owned = transaction.select().from(encodeJobs).where(and(eq(encodeJobs.id, claim.id),
+            eq(encodeJobs.status, "running"), eq(encodeJobs.claimToken, claim.claimToken))).get();
+          if (!owned) throw new StaleJobAttemptError("encode output validation", claim.id);
+          const snapshot = transaction.select().from(encodeClaimSnapshots)
+            .where(eq(encodeClaimSnapshots.id, claim.claimToken)).get();
+          if (snapshot !== undefined && (snapshot.encodeJobId !== claim.id || snapshot.source.output.path !== owned.outputPath)) {
+            throw new DomainInvariantError("Encode output claim provenance is inconsistent");
+          }
+          const existing = transaction.select().from(encodeOutputValidations)
+            .where(and(eq(encodeOutputValidations.encodeJobId, claim.id), eq(encodeOutputValidations.claimToken, claim.claimToken))).get();
+          if (existing) {
+            if (existing.filesystemIdentity !== identity || canonicalPublicationJson(existing.evidence) !== canonicalPublicationJson(evidence)) {
+              throw new DomainInvariantError("Encode output validation is immutable");
+            }
+            return existing;
+          }
+          return transaction.insert(encodeOutputValidations).values({ id: newId<string>(), encodeJobId: claim.id,
+            claimToken: claim.claimToken, filesystemIdentity: identity, validatedAt: now(),
+            sourceSnapshot: snapshot === undefined ? null : JSON.parse(JSON.stringify(snapshot)), evidence,
+          }).returning().get()!;
+        }, { behavior: "immediate" });
+      },
+      findOutputValidation(jobId, identity, validatedAt) {
+        return database.select().from(encodeOutputValidations).where(and(eq(encodeOutputValidations.encodeJobId, jobId),
+          eq(encodeOutputValidations.filesystemIdentity, identity), eq(encodeOutputValidations.validatedAt, validatedAt))).get() ?? null;
       },
       listClaimSnapshots(id, options = { limit: 20, offset: 0 }) {
         if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 101 ||

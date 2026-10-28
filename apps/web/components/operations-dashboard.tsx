@@ -285,6 +285,14 @@ function EncodeOutputInspectionDetails({
           </dd>
         </div>
         <div>
+          <dt>Validation record</dt>
+          <dd>{artifact.validation.recordIdentity ?? "Not recorded"}</dd>
+        </div>
+        <div>
+          <dt>Recorded validation checks</dt>
+          <dd>{artifact.validation.checks == null ? "Not recorded" : JSON.stringify(artifact.validation.checks)}</dd>
+        </div>
+        <div>
           <dt>Validation applies to observed file</dt>
           <dd>
             {artifact.validation.appliesToObservedFile === null
@@ -338,6 +346,16 @@ function EncodeOutputInspectionDetails({
         <div>
           <dt>Retained output record</dt>
           <dd>{artifact.provenance.retainedOutputId ?? "Not applicable"}</dd>
+        </div>
+        <div>
+          <dt>Source damage</dt>
+          <dd>{artifact.sourceDamage?.knownSourceDamage === true ? "Known source damage"
+            : artifact.sourceDamage?.knownSourceDamage === false ? "No known source damage in the recorded assessment" : "Unknown"}</dd>
+        </div>
+        <div>
+          <dt>Source impact</dt>
+          <dd>{artifact.sourceDamage?.unknownImpact !== false ? "Unknown impact" : "Recorded assessment available"}
+            {artifact.sourceDamage?.sourceContinuityRisk === true ? " · Source continuity risk" : ""}</dd>
         </div>
         <div>
           <dt>Source snapshot</dt>

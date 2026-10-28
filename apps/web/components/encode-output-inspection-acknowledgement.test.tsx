@@ -15,10 +15,11 @@ function inspectedOutput(): EncodeOutputInspection {
     artifact: {
       identity: "synthetic-artifact-identity", type: "canonical_encode_output", state: "published",
       encodeJob: { id: jobId, status: "completed", completedAt: null },
-      validation: { result: "unknown", identity: null, evidence: null, evidenceAvailability: "not_recorded", appliesToObservedFile: null },
+      validation: { result: "unknown", recordIdentity: null, checks: null, identity: null, evidence: null, evidenceAvailability: "not_recorded", appliesToObservedFile: null },
       provenance: { encodeJobId: jobId, discSelectionId: "synthetic-selection" as DiscSelectionId,
         encodingProfileId: "synthetic-profile" as EncodingProfileId, originalDiscArchiveId: null,
         retainedOutputId: null, sourceSnapshot: null, sourceSnapshotAvailability: "not_recorded" },
+      sourceDamage: { knownSourceDamage: null, unknownImpact: true, sourceContinuityRisk: null, watchability: "not_assessed" },
       file: { status: "unknown", identity: null, mutationRevision: null, sizeBytes: null,
         modifiedAt: null, completeness: "unknown", identityContinuity: "unknown" },
       inspectability: { status: "unknown", reasonCode: "OUTPUT_PROBE_FAILED", reason: "Synthetic probe failure" },

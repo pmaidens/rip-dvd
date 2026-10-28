@@ -1372,6 +1372,7 @@ describe("data-access facade", () => {
         "encode_claim_snapshots",
         "encode_job_failure_reports",
         "encode_output_inspection_receipts",
+        "encode_output_validations",
         "filesystem_verification_runs",
         "mutation_invocations",
         "rearchive_mapping_proposal_items",

@@ -1,4 +1,5 @@
 import type { EncodeClaimSource } from "../encode-claim-snapshot.js";
+import type { EncodeOutputSourceSnapshot, EncodeOutputValidationEvidence } from "../encode-output-validation.js";
 import type { EncodeSourceDecision } from "../types.js";
 import { sql } from "drizzle-orm";
 import {
@@ -2891,4 +2892,22 @@ export const encodeClaimSnapshots = sqliteTable("encode_claim_snapshots", {
   check("encode_claim_snapshots_id_not_null", sql`${table.id} is not null`),
   check("encode_claim_snapshots_source_check", sql`json_valid(${table.source}) and json_type(${table.source}, '$.schemaVersion') is 'integer' and json_extract(${table.source}, '$.schemaVersion') is 1`),
   index("encode_claim_snapshots_job_index").on(table.encodeJobId, table.createdAt, table.id),
+]);
+
+export const encodeOutputValidations = sqliteTable("encode_output_validations", {
+  id: text("id").notNull().primaryKey(),
+  encodeJobId: text("encode_job_id").$type<EncodeJobId>().notNull()
+    .references(() => encodeJobs.id, { onDelete: "restrict" }),
+  claimToken: text("claim_token").$type<EncodeJobClaimToken>().notNull(),
+  filesystemIdentity: text("filesystem_identity").$type<EncodeOutputFilesystemIdentity>().notNull(),
+  validatedAt: integer("validated_at", { mode: "timestamp_ms" }).notNull(),
+  sourceSnapshot: text("source_snapshot", { mode: "json" })
+    .$type<EncodeOutputSourceSnapshot>(),
+  evidence: text("evidence", { mode: "json" }).$type<EncodeOutputValidationEvidence>(),
+}, (table) => [
+  check("encode_output_validations_id_not_null", sql`${table.id} is not null`),
+  check("encode_output_validations_source_check", sql`${table.sourceSnapshot} is null or (json_valid(${table.sourceSnapshot}) and json_extract(${table.sourceSnapshot}, '$.id') = ${table.claimToken} and json_extract(${table.sourceSnapshot}, '$.encodeJobId') = ${table.encodeJobId} and json_extract(${table.sourceSnapshot}, '$.source.schemaVersion') = 1)`),
+  check("encode_output_validations_evidence_check", sql`${table.evidence} is null or (json_valid(${table.evidence}) and json_extract(${table.evidence}, '$.policyVersion') = 'encode-output-validation-v1')`),
+  uniqueIndex("encode_output_validations_claim_unique").on(table.encodeJobId, table.claimToken),
+  uniqueIndex("encode_output_validations_generation_unique").on(table.encodeJobId, table.filesystemIdentity, table.validatedAt),
 ]);

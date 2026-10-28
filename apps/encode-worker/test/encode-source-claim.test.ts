@@ -6,6 +6,7 @@ import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { pollEncodeWorker, type HandBrakeRunRequest } from "../src/encode-worker.js";
 import { seedEncodeClaim, withdrawClaimAcceptance, injectClaimRecoveryState } from "../../operator-cli/src/encode-claim.test-support.js";
 import { createOperatorWorkflowFixture } from "../../operator-cli/src/operator-workflow.test-support.js";
+import { encodeOutputArtifactIdentity } from "@rip-dvd/application";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => { vi.useRealTimers(); fixtures.splice(0).forEach((fixture) => fixture.dispose()); });
@@ -154,5 +155,12 @@ it("holds shared ownership for the complete marked archive encode read", async (
     expect(assertOwned).toHaveBeenCalled();
     expect(ownershipActive).toBe(false);
     expect(seeded.access.encodeJobs.find(seeded.job.id)?.status).toBe("completed");
+    const snapshot = seeded.access.encodeJobs.listClaimSnapshots(seeded.job.id)[0]!;
+    const inspected = await current.run(["encode-output", "inspect", encodeOutputArtifactIdentity(seeded.job.id)],
+      undefined, undefined, { encodeOutputMediaProbe: async () => ({ durationSeconds: 500, streams: [] }) });
+    expect(inspected).toMatchObject({ exitCode: 0, result: { artifact: {
+      provenance: { sourceSnapshotAvailability: "recorded", sourceSnapshot: JSON.parse(JSON.stringify(snapshot)) },
+      validation: { recordIdentity: expect.any(String) },
+    } } });
   } finally { seeded.access.close(); }
 });

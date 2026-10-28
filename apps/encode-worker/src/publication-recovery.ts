@@ -1819,6 +1819,7 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
     return { archive: source.archive, evidenceFormat: "dvd-recovery-evidence-v1" as const,
       preset: source.output.preset, selectionArguments: [...source.output.selectionArguments],
       expectedDurationSeconds: source.output.expectedDurationSeconds ?? undefined,
+      expectedAudioStreams: source.output.audioStreams.length,
       subtitleScanTitleNumber: source.resolvedSource.displayTitleNumber };
   }
   return access.readConsistentSnapshot((snapshot) => {
@@ -2120,7 +2121,8 @@ export async function executeEncodeClaim(
       "HandBrake did not produce a complete regular output file",
     );
     failurePhase = "validation";
-    await options.outputValidator.prepareAndValidate(partialPath, signal, {
+    const validationEvidence = await options.outputValidator.prepareAndValidate(partialPath, signal, {
+      ...("expectedAudioStreams" in input ? { expectedAudioStreams: input.expectedAudioStreams } : {}),
       ...(input.expectedDurationSeconds === undefined
         ? {}
         : { expectedDurationSeconds: input.expectedDurationSeconds }),
@@ -2137,6 +2139,9 @@ export async function executeEncodeClaim(
       "Encode output validation did not retain a regular output file",
     );
     await syncPath(partialPath);
+    renewClaim();
+    options.access.encodeJobs.recordOutputValidation(claim,
+      encodeOutputFilesystemIdentity(validatedPartialMetadata), validationEvidence ?? null);
     failurePhase = "publication";
     publishedOutputMetadata = validatedPartialMetadata;
     pendingPartialCleanup =

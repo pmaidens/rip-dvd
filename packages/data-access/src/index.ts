@@ -53,6 +53,7 @@ export * from "./dvd-disc-confirmation.js";
 export * from "./dvd-structural-assessment.js";
 export * from "./dvd-title-damage-assessment.js";
 export * from "./dvd-title-damage-decision.js";
+export * from "./encode-output-validation.js";
 export {
   assertDvdArchiveBoundaryEvidenceDigest,
   assertDvdArchiveEvidenceManifestDigests,

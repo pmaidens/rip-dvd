@@ -632,6 +632,20 @@ Probe failure reports unknown inspectability and does not claim that the file
 is playable. Inspection reports export as available only when the observed
 regular, nonempty file matches its recorded identity.
 
+New passing outputs have an immutable `artifact.validation.recordIdentity` and
+recorded `checks`. Their `provenance.sourceSnapshot` contains the exact claim,
+checkpoint, concrete selection, streams, assessment, acceptance and versioned
+settings used for that generation. Replacement and requeue preserve this
+association for each retained normal generation. Inspection does not substitute
+current catalog or job settings for missing evidence. `sourceDamage` reports
+known source damage, unknown impact and source-continuity risk separately from
+output validation, with watchability explicitly unassessed.
+
+Full-title validation still requires 98 percent of the stored title duration.
+Bounded chapter selections have no derived duration target. Source acceptance
+cannot waive required streams, subtitle checks, initial timing, bounded decode,
+storage synchronization or output ownership.
+
 Inspection, probing, export and playback do not record an operator
 acknowledgement. Use `acknowledge-inspection` with explicit `acknowledged: true`,
 the exact `operatorInspection.reviewToken` you reviewed, the artifact identity,
