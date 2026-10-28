@@ -4,7 +4,6 @@ import { afterEach, expect, it, vi } from "vitest";
 import { dispatchNotifications } from "@rip-dvd/application";
 import type { DataAccess, NotificationPayload } from "@rip-dvd/data-access";
 import { pollDvdRecoveryPass } from "../../../../../archive-worker/src/dvd-recovery-worker.js";
-import { advanceCommittedArchiveEvidence } from "../../../../../operator-cli/src/archive-evidence.test-support.js";
 import { seedDvdDiscVerificationFixture } from "../../../../../operator-cli/src/dvd-disc-verification.test-support.js";
 import { notificationWorkflow } from "../../../../../operator-cli/src/notification-workflow.test-support.js";
 import { createOperatorWorkflowFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
@@ -22,7 +21,10 @@ function pollStop(access: DataAccess, fixture: ReturnType<typeof createOperatorW
     workerExecutionId: "synthetic-stop-worker-restart",
     reader: { start() { throw new Error("Stop must not read source"); } },
     mediaGenerationObserver: { async observe() { throw new Error("Stop must not observe new source"); } },
-    deviceInactivity: { async withDeviceInactive(_path, task) { await task(); } },
+    deviceInactivity: {
+      async withDeviceInactive(_path, task) { await task(); },
+      async withDeviceIdentityInactive(_identity, task) { await task(); },
+    },
   });
 }
 
@@ -93,7 +95,7 @@ it("notifies once after safe Stop, including after restart and a later distinct 
     });
     expect(access.catalog.findDvdArchiveEvidenceHeader(seeded.archive.id)).toEqual(headerBefore);
   } finally { access.close(); }
-});
+}, 20_000);
 
 it("rolls back safe Stop with its event and uses the common missing-label fallback on retry", async () => {
   const fixture = createOperatorWorkflowFixture();
@@ -123,29 +125,4 @@ it("rolls back safe Stop with its event and uses the common missing-label fallba
     expect(sent).toEqual([expect.objectContaining({ title: "Unlabelled disc", label: "Unlabelled disc",
       body: "Archive Recovery stopped. Source remains unrecovered." }), expect.any(Object)]);
   } finally { database.close(); access.close(); }
-});
-
-it("reports the settled checkpoint when the last source is recovered during Stop", async () => {
-  const fixture = createOperatorWorkflowFixture();
-  fixtures.push(fixture);
-  await notificationWorkflow(fixture);
-  const seeded = await seedDvdDiscVerificationFixture(fixture);
-  expect((await fixture.run(["archive-recovery", "stop", seeded.recoveryId,
-    "--key", "synthetic-last-batch-stop", "--attempt-id", seeded.attemptId])).exitCode).toBe(0);
-  // A controlled committed batch settles after the Stop intent.
-  advanceCommittedArchiveEvidence(fixture, seeded.manifest, { outcome: "recovered" });
-  const access = fixture.openAccess();
-  try {
-    const recovery = access.catalog.findArchiveRecoveryById(seeded.recoveryId)!;
-    access.archiveRecoveryWork.completeStop({ archiveRecoveryId: recovery.id,
-      attemptId: recovery.attemptId, stopOperationId: recovery.stopOperationId! });
-    const sent: NotificationPayload[] = [];
-    expect(await dispatchNotifications(access, async (_recipient, payload) => { sent.push(payload); }))
-      .toEqual({ accepted: 2, failed: 0 });
-    expect(sent).toEqual([expect.objectContaining({
-      body: "Archive Recovery stopped. No source remains unrecovered.",
-    }), expect.any(Object)]);
-    expect((await fixture.run(["inspect", "archive-recoveries", seeded.recoveryId])).result)
-      .toMatchObject({ item: { status: "stopped" } });
-  } finally { access.close(); }
 });

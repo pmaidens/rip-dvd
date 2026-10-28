@@ -8,6 +8,7 @@ import {
   writeSync,
 } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { dispatchNotifications } from "@rip-dvd/application";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   createDvdDiscVerificationResultDigest,
@@ -15,6 +16,7 @@ import {
   DVD_RECOVERY_PASS_CLAIM_LEASE_MS,
   type ArchiveRecoveryAttemptId,
   type DvdDiscVerificationDiagnostic,
+  type NotificationPayload,
 } from "@rip-dvd/data-access";
 import {
   ArchiveImageOwnershipError,
@@ -1951,6 +1953,58 @@ it("finishes a fully recovered pass without rewriting the successful Archive Job
     input.access.close();
   }
 });
+
+it("notifies only after an active checkpoint batch settles the last source and releases ownership", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  await notificationWorkflow(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  await completeVerification(fixture, seeded);
+  const source = immediateReader(() => ({ outcome: "readable", bytes: Buffer.alloc(2_048, 0x6a) }));
+  const input = pollInput(fixture, source.reader);
+  let releaseBatch!: () => void;
+  const batchBlocked = new Promise<void>((resolve) => { releaseBatch = resolve; });
+  let batchEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { batchEntered = resolve; });
+  const commit: typeof commitDvdRecoveryBatch = (options) => commitDvdRecoveryBatch({
+    ...options,
+    async fault(point) {
+      if (point === "after:image_sync") {
+        batchEntered();
+        await batchBlocked;
+      }
+    },
+  });
+  const polling = pollDvdRecoveryPass({ ...input, commit });
+  try {
+    await Promise.race([entered, polling.then(() => {
+      throw new Error("Recovery ended before the controlled batch boundary");
+    })]);
+    expect((await fixture.run(["archive-recovery", "stop", seeded.recoveryId,
+      "--key", "synthetic-stop-active-batch", "--attempt-id", seeded.attemptId])).exitCode).toBe(0);
+    expect((await fixture.run(["inspect", "archive-recoveries", seeded.recoveryId])).result)
+      .toMatchObject({ item: { status: "stopping", checkpoint: { currentManifestRevision: 1 } } });
+    expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: [] });
+    expect(await pollDvdRecoveryPass({ ...input, workerExecutionId: "synthetic-competing-stop-worker" })).toBe(false);
+    expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: [] });
+    releaseBatch();
+    expect(await polling).toBe(true);
+    expect((await fixture.run(["inspect", "archive-recoveries", seeded.recoveryId])).result)
+      .toMatchObject({ item: { status: "stopped", checkpoint: { currentManifestRevision: 2 },
+        progress: { unresolvedSectorCount: 0 } } });
+    const sent: NotificationPayload[] = [];
+    expect(await dispatchNotifications(input.access, async (_recipient, payload) => { sent.push(payload); }))
+      .toEqual({ accepted: 2, failed: 0 });
+    expect(sent).toEqual([expect.objectContaining({
+      body: "Archive Recovery stopped. No source remains unrecovered.",
+    }), expect.any(Object)]);
+    expect(sent[1]).toEqual(sent[0]);
+  } finally {
+    releaseBatch();
+    await polling;
+    input.access.close();
+  }
+}, 20_000);
 
 it("keeps Stop durable until a blocked source command is reaped", async () => {
   const fixture = createOperatorWorkflowFixture();

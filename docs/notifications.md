@@ -74,7 +74,8 @@ Confirmed Recovery Stop also queues an event in the transaction that records
 settles source commands, writer ownership and checkpoint reconciliation. The
 formatter uses that checkpoint's remaining source and the disc label or fallback.
 An operator stop with Unrecovered Source is never described as full recovery.
-The notification links to the saved archive's current detail.
+The notification links to the saved archive's current Recovery status, checkpoint,
+Unrecovered Source count and action availability.
 
 Each confirmed stop operation has its own event identity. Same-key replay,
 repeated Stop, worker restart and reconciliation do not add a second logical

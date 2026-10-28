@@ -141,5 +141,9 @@ test("displays a confirmed Recovery Stop with remaining source and navigates to 
   await expect(page).toHaveURL(`http://localhost:3101${payload.destination}`);
   await expect(page.getByRole("heading", { name: "CATALOG_BROWSER_DAMAGE_NOTIFICATION" })).toBeVisible();
   await expect(page.getByText("incomplete read", { exact: true })).toBeVisible();
+  const recoveryDetail = page.getByRole("region", { name: "Archive Recovery detail" });
+  await expect(recoveryDetail.getByText("stopped", { exact: true })).toBeVisible();
+  await expect(recoveryDetail.getByText("1 sectors", { exact: true })).toBeVisible();
+  await expect(recoveryDetail.getByRole("list", { name: "Recovery action availability" })).toContainText("Archive Recovery is already stopped.");
   expect(context.pages()).toHaveLength(1);
 });
