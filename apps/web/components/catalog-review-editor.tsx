@@ -17,6 +17,7 @@ import { CatalogReviewMediaItems } from "./catalog-review-media-items";
 import { CatalogReviewRearchiveProposal } from "./catalog-review-rearchive-proposal";
 import { CatalogReviewTitleIdentity } from "./catalog-review-title-identity";
 import { CatalogReviewTitleDamageEvidence } from "./catalog-review-title-damage";
+import { DamagePreviewReview } from "./damage-preview-review";
 import {
   CatalogReviewDamageDecisionStatus,
   CatalogReviewMappingStatus,
@@ -525,6 +526,7 @@ export function CatalogReviewView({
               originalDiscArchiveId={review.archive.id}
               titleDamage={review.titleDamage}
             />
+            <DamagePreviewReview key={`${review.archive.id}:${review.catalogRevision}:${review.titleDamage?.currentAssessmentIdentity}`} archiveId={review.archive.id} />
             <CatalogReviewDamageDecisionStatus
               workflow={review.reviewWorkflow}
               isSaving={isSaving}

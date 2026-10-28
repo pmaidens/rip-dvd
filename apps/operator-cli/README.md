@@ -618,3 +618,51 @@ JSON error. Database or configuration failures return exit 1.
 
 Notification administration is available through `rip-dvd notifications`. See
 [Browser notifications](../../docs/notifications.md) for configuration and commands.
+
+## Damage Preview availability
+
+`rip-dvd damage-preview availability <archive-id>` discovers current saved
+checkpoint, Title Identity and assessment identities, qualified intervals,
+Encoding Profile versions and blocking reasons. It works before catalog mapping.
+Generation remains unavailable and new-format archive admission remains closed.
+Inspection never enqueues work, accepts damage or retains an ownership reservation.
+
+Supply a selection with exactly one of `--json`, `--stdin`, or `--file` to review
+the concrete input. This synthetic example uses placeholders returned by discovery:
+
+```json
+{
+  "mode": "damage",
+  "titleIdentityObservationId": "<observation-id>",
+  "assessmentIdentity": "<current-assessment-id>",
+  "playbackRange": { "startMilliseconds": 0, "endMilliseconds": 600000 },
+  "intervalIndexes": [0, 1],
+  "streams": { "audio": [1], "subtitles": [] },
+  "encodingProfileId": "<profile-id>"
+}
+```
+
+Interval indexes are zero-based within the selected title's current assessment.
+A changed assessment returns `DAMAGE_PREVIEW_ASSESSMENT_STALE` and current
+identities without substituting new intervals. The opaque `preflightToken`
+binds the normalized input, durable checkpoint and manifest, exact title path,
+angle and chapter bounds, assessment and timing evidence, streams, context,
+and intended profile version and settings. It authorizes no work.
+
+Individual markers remain in the response. Intervals with gaps of at most
+30 seconds group together. Context defaults to five seconds on each side;
+override it with `context.beforeMilliseconds` and `context.afterMilliseconds`.
+Context clips only to `playbackRange`, overlapping clips count once, and no
+clip-length cap applies. The range is an explicit operator selection, not a
+claim about verified decoded coverage. Coarse whole-cell timing requires
+`samplingWindow` with start and end milliseconds inside that range. The
+response retains the full uncertain span alongside the planned sample.
+
+With unknown timing, choose `mode: "ordinary_playback"` and an empty
+`intervalIndexes` list. This offers an identifiable-title selection without
+inventing a damage seek. Playback generation remains gated. Duration estimates
+describe planned clip coverage. Storage remains unknown because the intended
+preset settings do not provide a reliable byte rate; stream reproducibility
+also requires verification before generation is enabled. Every inspection
+returns all blocking reasons, and unavailable inspection succeeds with JSON
+`available: false`. Malformed input returns exit 2.

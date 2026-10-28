@@ -1,4 +1,5 @@
 import { inspectArchiveEvidence } from "./archive-evidence.js";
+import { inspectDamagePreviewAvailability } from "./damage-preview.js";
 import { inspectArchiveRecoveryRanges } from "./archive-recovery-ranges.js";
 import { inspectCatalogTitleDamage } from "./catalog-title-damage.js";
 import { createNotificationOperations } from "./notifications.js";
@@ -429,6 +430,8 @@ export function createApplicationOperations(
       archiveId: string,
       options?: { limit?: number; cursor?: string },
     ) => inspectCatalogTitleDamage(access, archiveId, options),
+    inspectDamagePreviewAvailability: (archiveId: string, input?: unknown) =>
+      inspectDamagePreviewAvailability(access, archiveId, input, dependencies.archiveImageOwnership),
     inspectEncodeOutput: (artifactIdentity: unknown) =>
       inspectEncodeOutput(
         access,
@@ -1041,6 +1044,9 @@ export * from "./notification-dispatch.js";
 export * from "./notification-transport.js";
 
 export { inspectArchiveEvidence, InvalidArchiveEvidenceInputError } from "./archive-evidence.js";
+export { InvalidDamagePreviewInputError } from "./damage-preview-input.js";
+export type { DamagePreviewInput, PlaybackRange } from "./damage-preview-input.js";
+export type DamagePreviewAvailability = Awaited<ReturnType<typeof inspectDamagePreviewAvailability>>;
 export {
   describeArchiveArtifact,
   enrichArchiveArtifactSourceIdentity,
