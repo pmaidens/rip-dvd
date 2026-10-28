@@ -414,3 +414,33 @@ test("reviews source blockers and refreshed identities without admitting encode 
   await expect(panel.locator("pre").first()).toContainText('"revision": 2');
   await expectNoPageOverflow(page);
 });
+
+test("retains readiness failures when a later archive-list refresh succeeds", async ({ page }) => {
+  let failReadiness = false;
+  let delayedListRequested = false;
+  let releaseList!: () => void;
+  const listRelease = new Promise<void>((resolve) => { releaseList = resolve; });
+  await page.route("**/api/encode-readiness?*", async (route) => {
+    if (!new URL(route.request().url()).searchParams.has("archiveId")) {
+      if (failReadiness) { delayedListRequested = true; await listRelease; }
+      await route.fulfill({ json: { archives: [{ id: "synthetic-error-archive", label: "Synthetic error disc" }],
+        page: { offset: 0, limit: 50, hasNext: false } } });
+    } else if (failReadiness) {
+      await route.fulfill({ status: 503, json: { error: { code: "ENCODING_READINESS_UNAVAILABLE" } } });
+    } else {
+      await route.fulfill({ json: { applicable: false, message: "Historical readiness example." } });
+    }
+  });
+  await page.goto("/encoding");
+  await page.getByRole("tab", { name: "Queue new jobs" }).click();
+  const panel = page.getByRole("region", { name: "Source readiness" });
+  await panel.getByLabel("Original Disc Archive").selectOption("synthetic-error-archive");
+  await expect(panel.getByText("Historical readiness example.")).toBeVisible();
+  failReadiness = true;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect.poll(() => delayedListRequested).toBe(true);
+  await expect(panel.getByRole("alert")).toHaveText("Encoding readiness is unavailable. Refresh to try again.");
+  releaseList();
+  await expect(panel.getByRole("alert")).toHaveText("Encoding readiness is unavailable. Refresh to try again.");
+  await expect(panel.getByText("Loading readiness...")).toHaveCount(0);
+});

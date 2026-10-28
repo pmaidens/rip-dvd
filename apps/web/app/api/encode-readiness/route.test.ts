@@ -1,15 +1,21 @@
 import { afterEach, expect, it } from "vitest";
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../../operator-cli/src/operator-workflow.test-support";
 import { seedEncodingReadiness } from "../../../../operator-cli/src/encoding-readiness.test-support";
+import { advanceCommittedArchiveEvidence, withEvidenceGuardsDisabled } from "../../../../operator-cli/src/archive-evidence.test-support";
 import { createEncodingReadinessRoute } from "./route";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
 
-it.each(["clean", "damage", "unknown", "historical"])("matches public CLI readiness and identities for %s content", async (kind) => {
+it.each(["clean", "damage", "unknown", "outdated", "corrupt", "historical"])("matches public CLI readiness and identities for %s content", async (kind) => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
-  const { archive } = kind === "historical" ? seedCatalogReviewForReadFixture(fixture)
+  const seeded = kind === "historical" ? null
     : await seedEncodingReadiness(fixture, { clean: kind === "clean", partial: kind === "unknown" });
+  const { archive } = seeded ?? seedCatalogReviewForReadFixture(fixture);
+  if (kind === "outdated" && seeded !== null) advanceCommittedArchiveEvidence(fixture, seeded.manifest, { publishFilesystemCheckpoint: true });
+  if (kind === "corrupt") withEvidenceGuardsDisabled(fixture.databasePath, (db) => {
+    db.prepare("UPDATE dvd_title_identity_observations SET content_digest = ?").run("0".repeat(64));
+  });
   const cli = await fixture.run(["encode-readiness", archive.id]);
   const access = fixture.openAccess();
   try {

@@ -14,6 +14,8 @@ import {
   type ArchiveImageOwnership,
 } from "@rip-dvd/worker-runtime";
 
+import { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
+
 export class InvalidEncodingReadinessInputError extends Error {}
 
 export interface EncodingReadinessReason {
@@ -46,7 +48,16 @@ function describe(
 ) {
   const archive = snapshot.catalog.listOriginalDiscArchives({ ids: [archiveId] })[0];
   if (!archive) throw new RecordNotFoundError("Original Disc Archive", archiveId);
-  const header = snapshot.catalog.findDvdArchiveEvidenceHeader(archiveId);
+  const evidenceFailures: EncodingReadinessReason[] = [];
+  function readEvidence<T>(component: string, read: () => T): T | null {
+    try { return read(); }
+    catch {
+      evidenceFailures.push({ code: "CONSISTENCY_FAULT",
+        message: "Persisted source evidence could not be verified.", details: { component } });
+      return null;
+    }
+  }
+  const header = readEvidence("checkpoint", () => snapshot.catalog.findDvdArchiveEvidenceHeader(archiveId));
   const jobs = snapshot.archiveJobs.listForArchive(archiveId);
   const evidenceFormat = dvdRecoveryEvidenceFormatForArchive(header, jobs);
   if (evidenceFormat === null) return {
@@ -57,9 +68,10 @@ function describe(
     blockingReasons: [], selections: [], assessment: null, ownership: null,
   };
   const recovery = snapshot.catalog.findArchiveRecovery(archiveId);
-  const review = snapshot.catalog.readDvdTitleIdentityReviewSet(archiveId);
-  const damage = snapshot.dvdTitleDamageAssessments.inspect(archiveId);
-  const decision = snapshot.catalog.inspectDvdTitleDamageDecision(archiveId);
+  const review = readEvidence("title_identity", () => snapshot.catalog.readDvdTitleIdentityReviewSet(archiveId));
+  const damage = readEvidence("title_damage_assessment", () => snapshot.dvdTitleDamageAssessments.inspect(archiveId));
+  const decision = readEvidence("title_damage_acceptance", () => snapshot.catalog.inspectDvdTitleDamageDecision(archiveId));
+  const assessmentState = damage?.state ?? "unavailable";
   const imageOwnership = ownership.inspect({
     archiveId, imagePath: archive.archivePath, originalsLibraryPath,
   });
@@ -80,16 +92,18 @@ function describe(
     reviewSetIdentity: review?.reviewSetIdentity ?? null,
     catalogMappingProjectionId: review === null ? null :
       dvdTitleIdentityCatalogMappingProjectionDigest(review.checkpoint, review.items),
-    assessmentIdentity: damage.currentAssessmentIdentity,
-    acceptanceState: decision.state,
-    acceptanceIdentity: decision.current?.id ?? null,
-    latestAcceptanceIdentity: decision.latest?.id ?? null,
-    reviewedContentIdentity: decision.current?.reviewedContentIdentity ?? null,
+    assessmentIdentity: damage?.currentAssessmentIdentity ?? null,
+    acceptanceState: decision?.state ?? "unavailable",
+    acceptanceIdentity: decision?.current?.id ?? null,
+    latestAcceptanceIdentity: decision?.latest?.id ?? null,
+    reviewedContentIdentity: decision?.current?.reviewedContentIdentity ?? null,
   };
   const reason = (code: string, message: string, details: Record<string, unknown> = {}) =>
     ({ code, message, details });
-  const reasons: EncodingReadinessReason[] = imageOwnership.stableRead.blockingReasons
-    .map(({ code, message }) => reason(code, message));
+  const reasons: EncodingReadinessReason[] = [
+    ...imageOwnership.stableRead.blockingReasons.map(({ code, message }) => reason(code, message)),
+    ...evidenceFailures,
+  ];
   if (header === null || recovery === null || recovery.status === "faulted" ||
       ((recovery.status === "stopped" || recovery.status === "completed") && recovery.work !== null) ||
       checkpointFailure !== null) {
@@ -101,10 +115,11 @@ function describe(
   if (job?.status !== "completed") reasons.push(reason("ARCHIVE_NOT_SAVED", "The initial Archive Job has not completed.", {
     archiveJobId: job?.id ?? null, status: job?.status ?? null,
   }));
-  if (damage.state !== "current") reasons.push(reason(
-    damage.state === "outdated" ? "ASSESSMENT_OUTDATED" : "ASSESSMENT_PENDING",
-    damage.state === "outdated" ? "The Title Damage Assessment is outdated." : "A current Title Damage Assessment is pending.",
-    { assessmentIdentity: damage.currentAssessmentIdentity, latestAssessmentIdentity: damage.assessment?.id ?? null },
+  if (assessmentState !== "current") reasons.push(reason(
+    assessmentState === "outdated" ? "ASSESSMENT_OUTDATED" : assessmentState === "unavailable" ? "CONSISTENCY_FAULT" : "ASSESSMENT_PENDING",
+    assessmentState === "outdated" ? "The Title Damage Assessment is outdated." : assessmentState === "unavailable"
+      ? "The Title Damage Assessment could not be verified." : "A current Title Damage Assessment is pending.",
+    { assessmentIdentity: damage?.currentAssessmentIdentity ?? null, latestAssessmentIdentity: damage?.assessment?.id ?? null },
   ));
   if (recovery !== null && !["stopped", "completed", "faulted"].includes(recovery.status)) {
     const code = recovery.status === "stopping" ? "RECOVERY_STOPPING"
@@ -116,23 +131,24 @@ function describe(
   if (archive.catalogReviewOutcome === "archive_only") reasons.push(reason(
     "CATALOG_REVIEW_ARCHIVE_ONLY", "Catalog Review is archive-only.",
   ));
-  const assessment = damage.state === "current" ? damage.assessment : null;
+  const assessment = assessmentState === "current" ? damage?.assessment ?? null : null;
   const archiveUnknown = assessment !== null && (
     assessment.unknownTitleImpact.unrecoveredSourceSectorCount > 0 ||
     assessment.unknownTitleImpact.reasons.length > 0 || assessment.sourceContinuity === null ||
     assessment.unattributedSourceContinuityRisk === null
   );
   const archiveContinuityRisk = (assessment?.unattributedSourceContinuityRisk?.sourceSectorCount ?? 0) > 0;
-  const selections = snapshot.catalog.listDiscSelections({ originalDiscArchiveId: archiveId })
-    .sort((a, b) => a.id.localeCompare(b.id)).map((selection) => {
+  const selectedContent = snapshot.catalog.listDiscSelections({ originalDiscArchiveId: archiveId });
+  const mediaItems = new Map(readMediaItemsWithAncestors(snapshot.catalog, selectedContent.map(({ mediaItemId }) => mediaItemId))
+    .map((item) => [item.id, item]));
+  const selections = selectedContent.sort((a, b) => a.id.localeCompare(b.id)).map((selection) => {
       const selectionIdentity = dvdTitleIdentityDiscSelectionDigest({
         discSelectionId: selection.id, mediaItemId: selection.mediaItemId, sourceIdentity: selection.sourceIdentity,
       });
-      const candidates = review?.items.filter((item) => item.presentAtCurrentCheckpoint &&
-        item.discSelectionMappings.some((mapping) => mapping.discSelectionId === selection.id)) ?? [];
+      const candidates = review?.items.filter((item) => item.discSelectionMappings.some((mapping) => mapping.discSelectionId === selection.id)) ?? [];
       // Main-feature choices are concrete only when a current exact-set decision
       // retained the operator's resolution. Never infer a longest-title choice.
-      const reviewedContent = decision.current?.snapshot.reviewedContent.find((item) =>
+      const reviewedContent = decision?.current?.snapshot.reviewedContent.find((item) =>
         item.catalogMappings.some((mapping) => mapping.discSelectionId === selection.id));
       const resolvedMainFeature = selection.sourceIdentity.kind === "main_feature" &&
           reviewedContent !== undefined
@@ -141,7 +157,7 @@ function describe(
           item.observation.id === reviewedContent.titleIdentityObservationId)
         : undefined;
       const item = candidates.length === 1 ? candidates[0] : resolvedMainFeature;
-      const observation = item?.observation;
+      const observation = item?.presentAtCurrentCheckpoint ? item.observation : undefined;
       const chapterStart = selection.sourceIdentity.kind === "dvd_chapters"
         ? selection.sourceIdentity.chapterStart : observation?.chapterStart;
       const chapterEnd = selection.sourceIdentity.kind === "dvd_chapters"
@@ -165,7 +181,7 @@ function describe(
         : "clean" as const;
       const continuityRisk = archiveContinuityRisk || (titleAssessment?.sourceContinuityRiskSectorCount ?? 0) > 0;
       const acceptanceRequired = titleAssessment === null ? null : impact !== "clean" || continuityRisk;
-      const covered = decision.current?.decision === "accepted" && reviewedContent !== undefined &&
+      const covered = decision?.current?.decision === "accepted" && reviewedContent !== undefined &&
         reviewedContent.titleIdentityId === item?.titleIdentityId &&
         reviewedContent.titleIdentityObservationId === observation?.id &&
         reviewedContent.catalogMappings.some((mapping) => mapping.discSelectionId === selection.id &&
@@ -176,20 +192,22 @@ function describe(
         "ASSESSMENT_PENDING", "The current assessment has no evidence for this selection.",
       ));
       if (acceptanceRequired && !covered) selectionReasons.push(reason(
-        decision.state === "withdrawn" ? "ACCEPTANCE_WITHDRAWN" : "ACCEPTANCE_REQUIRED",
-        decision.state === "withdrawn" ? "Title Damage Acceptance was withdrawn." : "Current Title Damage Acceptance is required for this content.",
+        (decision?.state ?? "unavailable") === "withdrawn" ? "ACCEPTANCE_WITHDRAWN" : "ACCEPTANCE_REQUIRED",
+        (decision?.state ?? "unavailable") === "withdrawn" ? "Title Damage Acceptance was withdrawn." : "Current Title Damage Acceptance is required for this content.",
       ));
       return {
         discSelectionId: selection.id, selectionIdentity, mediaItemId: selection.mediaItemId,
+        mediaTitle: mediaItems.get(selection.mediaItemId)?.title ?? "Unknown Media Item", label: selection.label,
         sourceIdentity: selection.sourceIdentity,
         titleIdentityId: item?.titleIdentityId ?? null,
-        titleIdentityObservationId: observation?.id ?? null,
+        titleIdentityObservationId: item?.observation.id ?? null,
+        presentAtCurrentCheckpoint: item?.presentAtCurrentCheckpoint ?? false,
         resolvedSource: !concrete || observation === undefined ? null : {
           navigation: observation.navigation, selectedPath: observation.selectedPath,
           displayTitleNumber: observation.displayTitleNumber,
           angleNumber: observation.angleNumber, chapterStart, chapterEnd,
         },
-        assessment: { state: damage.state, impact, sourceContinuityRisk: continuityRisk,
+        assessment: { state: assessmentState, impact, sourceContinuityRisk: continuityRisk,
           evidence: titleAssessment },
         acceptanceRequired, acceptanceSatisfied: acceptanceRequired === false || covered,
         sourceReady: reasons.length === 0 && selectionReasons.length === 0,
@@ -205,8 +223,8 @@ function describe(
     sourceReady: blockingReasons.length === 0, admissionAvailable: false,
     admissionReasons: [DVD_RECOVERY_EVIDENCE_ENCODING],
     current, recordedIntegrity: archive.integrity,
-    assessment: { state: damage.state, identity: damage.currentAssessmentIdentity,
-      latestIdentity: damage.assessment?.id ?? null },
+    assessment: { state: assessmentState, identity: damage?.currentAssessmentIdentity ?? null,
+      latestIdentity: damage?.assessment?.id ?? null },
     ownership: imageOwnership, blockingReasons, selections,
   };
 }

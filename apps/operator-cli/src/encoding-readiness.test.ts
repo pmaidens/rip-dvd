@@ -201,3 +201,42 @@ it("reports a damaged durable checkpoint as a consistency fault with current dat
     blockingReasons: [{ code: "CONSISTENCY_FAULT" }],
   });
 });
+
+it("reports corrupt persisted evidence as consistency blockers while retaining readable identities", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedEncodingReadiness(fixture, { clean: true });
+  withEvidenceGuardsDisabled(fixture.databasePath, (db) => {
+    db.prepare("UPDATE dvd_title_identity_observations SET content_digest = ?").run("0".repeat(64));
+  });
+  const result = await fixture.run(["encode-readiness", seeded.archive.id]);
+  expect(result).toMatchObject({ exitCode: 0, result: { sourceReady: false,
+    current: { originalDiscArchiveId: seeded.archive.id, checkpoint: { revision: 1 }, recovery: { state: "stopped" } },
+    ownership: { writer: { state: "inactive" } }, selections: [{ discSelectionId: seeded.selection.id }],
+  } });
+  const codes = (result.result as EncodingReadiness).blockingReasons.map(({ code }) => code);
+  expect(codes[0]).toBe("CONSISTENCY_FAULT");
+  expect(codes).toContain("SELECTION_UNIDENTIFIED");
+});
+
+it("retains disappeared Title Identities and their mapping-review blockers", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedEncodingReadiness(fixture);
+  const next = advanceCommittedArchiveEvidence(fixture, seeded.manifest, { publishFilesystemCheckpoint: true });
+  const access = fixture.openAccess();
+  access.catalog.recordDvdTitleIdentityObservations({ originalDiscArchiveId: seeded.archive.id,
+    checkpoint: { manifestId: next.id, manifestRevision: next.revision, manifestDigest: next.manifestDigest },
+    observations: [{ displayTitleNumber: 2,
+      navigation: { videoTitleSetNumber: 1, titleSetTitleNumber: 2, programChainNumber: 1 },
+      selectedPath: seeded.observation.selectedPath, angleNumber: 1, angleCount: 1,
+      chapterStart: 1, chapterEnd: 4, chapterCount: 4, sourceExtents: [{ startLba: 200, sectorCount: 100 }],
+    }],
+  });
+  access.close();
+  const result = (await fixture.run(["encode-readiness", seeded.archive.id])).result as EncodingReadiness;
+  expect(result).toMatchObject({ sourceReady: false, selections: [{
+    titleIdentityId: seeded.observation.titleIdentityId, presentAtCurrentCheckpoint: false, resolvedSource: null,
+  }] });
+  expect(result.blockingReasons.map(({ code }) => code)).toEqual([
+    "MAPPING_REVIEW_REQUIRED", "SELECTION_UNIDENTIFIED", "ASSESSMENT_OUTDATED",
+  ]);
+});
