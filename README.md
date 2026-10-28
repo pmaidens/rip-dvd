@@ -740,6 +740,11 @@ pairs to the application's stored device path and the physical drive reported
 inside the Archive Worker. `storagePaths` must include `/`; resource thresholds
 must be nonnegative integer byte counts.
 
+Keep `healthUrl` and `readinessUrl` on host loopback HTTP when TLS terminates
+at a local reverse proxy. These checks verify the application independently
+of the proxy. Verify the canonical HTTPS entry point from an operator device
+as well; see [private HTTPS deployment](docs/operations/private-https.md).
+
 The normal command sequence is:
 
 ```bash
@@ -786,14 +791,16 @@ cd /opt/rip-dvd
 ```
 
 `scripts/compose-build.sh` builds the migration, backup, operator CLI, web,
-archive-worker, and encode-worker images one at a time in that order. `scripts/update.sh`
+archive-worker, encode-worker, and notification-worker images one at a time
+in that order. `scripts/update.sh`
 verifies the pre-migration backup file before changing `HEAD`, fast-forwards
-only to the named commit, and leaves the old runtime serving during all six
+only to the named commit, and leaves the old runtime serving during sequential
 builds. `scripts/compose-migrate.sh`
-stops the web, archive, and encode runtimes before running versioned Drizzle
+stops the web, archive, encode, and notification runtimes before running
+versioned Drizzle
 migrations in a one-shot non-root container; if the bounded stop fails, no DDL
 is attempted. `scripts/compose-start.sh` refuses implicit rebuilds, uses that
-quiescing migration path, and then starts only the three long-running services.
+quiescing migration path, and then starts the configured long-running services.
 It also rejects a dashboard bind beyond loopback when
 `RIP_DVD_WEB_TRUSTED_ORIGIN` still names a loopback origin, before migration or
 runtime startup begins. If startup partially fails, it performs another bounded
@@ -824,7 +831,7 @@ after `PRAGMA integrity_check` returns `ok`. Copy those backup files to storage
 outside the Docker host and periodically test a restore into a disposable
 Compose project.
 
-Stop all three runtime services before restoring. Never restore by copying only
+Stop all runtime services before restoring. Never restore by copying only
 `rip-dvd.sqlite` over a live database: its `-wal` and `-shm` files are part of
 the active state. Preserve the current volume first, verify the selected backup
 with `PRAGMA integrity_check`, and use SQLite's `.restore` or `.backup` command
@@ -862,6 +869,13 @@ authority. To expose the dashboard on a trusted LAN, explicitly set
 `RIP_DVD_WEB_TRUSTED_ORIGIN` to the exact HTTP(S) origin users open, including
 its non-default port. This origin check limits cross-site mutation but is not
 access control, so do not expose the service to an untrusted network.
+
+For trusted HTTPS over a private Tailscale network, use host-level Tailscale
+Serve and keep the Compose backend on loopback. Follow the
+[private HTTPS cutover, verification, and rollback procedure](docs/operations/private-https.md).
+Port 3000 continues to serve HTTP internally. An HTTPS browser URL uses the
+proxy's port, normally 443, and an exact matching trusted origin. Routine
+application updates preserve the host's existing proxy configuration.
 
 The web root is an operations dashboard for Optical Drives, Detected Discs,
 Archive Jobs, Encode Jobs, and Original Disc Archives needing catalog review.
