@@ -1,4 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 
 import {
@@ -693,7 +695,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   });
   const exactPreflight = await fixture.run([
     "catalog-review",
-    "preview-title-damage-acceptance",
+    "preview-damage-acceptance",
     archive.id,
     "--exclude-title-identity",
     currentItems[1]!.titleIdentityId,
@@ -718,6 +720,9 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
       catalogMappingProjectionId: expect.any(String),
       reviewedContentIdentity: expect.any(String),
       acknowledgementRequired: true,
+      action: {
+        expectedInputs: expect.arrayContaining(["damageAcknowledgement"]),
+      },
       reviewedContent: [{
         titleIdentityId: currentItems[0]!.titleIdentityId,
         sourceIdentity: {
@@ -791,6 +796,56 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     outcome: expect.stringContaining("expectedPreviewEvidence"),
   }]);
   previewLedger.close();
+
+  const structuredInput = JSON.stringify({
+    excludedTitleIdentityIds: [
+      currentItems[1]!.titleIdentityId,
+      currentItems[2]!.titleIdentityId,
+    ],
+    mainFeatureResolutions: [{
+      discSelectionId: mainFeatureSelection.id,
+      titleIdentityId: currentItems[0]!.titleIdentityId,
+    }],
+  });
+  const structuredFile = join(
+    fixture.operatorHostPath,
+    "title-damage-acceptance.json",
+  );
+  writeFileSync(structuredFile, structuredInput);
+  const structuredPreflights = [
+    await fixture.run([
+      "catalog-review",
+      "preview-damage-acceptance",
+      archive.id,
+      "--json",
+      structuredInput,
+    ]),
+    await fixture.run([
+      "catalog-review",
+      "preview-damage-acceptance",
+      archive.id,
+      "--stdin",
+    ], null, structuredInput),
+    await fixture.run([
+      "catalog-review",
+      "preview-damage-acceptance",
+      archive.id,
+      "--file",
+      structuredFile,
+    ]),
+  ];
+  for (const structuredPreflight of structuredPreflights) {
+    expect(structuredPreflight).toMatchObject({
+      exitCode: 0,
+      result: {
+        available: true,
+        exclusions: [
+          { titleIdentityId: currentItems[1]!.titleIdentityId },
+          { titleIdentityId: currentItems[2]!.titleIdentityId },
+        ],
+      },
+    });
+  }
 
   const laterRecorded = await access.assessDvdTitleDamage(
     archive.id,

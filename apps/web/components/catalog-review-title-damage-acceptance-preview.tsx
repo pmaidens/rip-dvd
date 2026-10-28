@@ -10,6 +10,8 @@ import type {
   CatalogReviewTitleDamage,
   CatalogReviewTitleIdentity,
 } from "./catalog-review-model";
+import { CatalogReviewTitleDamageAssessmentEvidence } from
+  "./catalog-review-title-damage";
 
 type CurrentTitleIdentity = Extract<
   CatalogReviewTitleIdentity,
@@ -27,17 +29,32 @@ function contentLabel(item: CurrentTitleIdentity): string {
 }
 
 function mediaItemLabel(item: {
+  id: string;
   kind: string;
   title: string;
   year: number | null;
   seasonNumber: number | null;
   episodeNumber: number | null;
+  episodicContext?: {
+    tvShow: { id: string; title: string; year: number | null } | null;
+    season: {
+      id: string;
+      title: string;
+      year: number | null;
+      seasonNumber: number | null;
+    } | null;
+  } | null;
 }): string {
   const year = item.year === null ? "" : ` (${item.year})`;
   if (item.kind === "episode") {
-    return `${item.kind}: ${item.title}, season ${item.seasonNumber ?? "unknown"}, episode ${item.episodeNumber ?? "unknown"}${year}`;
+    const tvShow = item.episodicContext?.tvShow;
+    const season = item.episodicContext?.season;
+    const showYear = tvShow?.year === null || tvShow?.year === undefined
+      ? ""
+      : ` (${tvShow.year})`;
+    return `${item.kind}: ${tvShow?.title ?? "unknown TV show"}${showYear}, season ${season?.seasonNumber ?? "unknown"}, episode ${item.episodeNumber ?? "unknown"}: ${item.title}${year}; Media Item ${item.id}`;
   }
-  return `${item.kind}: ${item.title}${year}`;
+  return `${item.kind}: ${item.title}${year}; Media Item ${item.id}`;
 }
 
 export function CatalogReviewTitleDamageAcceptancePreview({
@@ -52,14 +69,6 @@ export function CatalogReviewTitleDamageAcceptancePreview({
     current: CatalogReviewWorkflow["current"];
     titleDamageState: CatalogReviewTitleDamage["state"] | null;
     activityRevision: string | null;
-    mediaItems: readonly {
-      id: string;
-      kind: string;
-      title: string;
-      year: number | null;
-      seasonNumber: number | null;
-      episodeNumber: number | null;
-    }[];
   };
   fetcher?: typeof fetch;
 }) {
@@ -265,9 +274,13 @@ export function CatalogReviewTitleDamageAcceptancePreview({
           {preview.evidenceFormat === null ? null : (
             <>
               <p>
-                Damage acknowledgement {preview.acknowledgementRequired
-                  ? "is required for this exact set"
-                  : "is not required for this clean exact set"}.
+                {preview.available
+                  ? `Damage acknowledgement ${
+                    preview.acknowledgementRequired
+                      ? "is required for this exact set"
+                      : "is not required for this clean exact set"
+                  }.`
+                  : "Damage acknowledgement has not been determined because the preflight is unavailable."}
               </p>
               <ul className="stack-list">
                 {preview.allContent.map((item) => (
@@ -281,6 +294,22 @@ export function CatalogReviewTitleDamageAcceptancePreview({
                       Chapters {item.sourceIdentity.chapterStart}-{
                         item.sourceIdentity.chapterEnd
                       }. {item.included ? "Included" : "Excluded"}.
+                    </span>
+                    <span>
+                      Title Identity <code>{item.titleIdentityId}</code>.
+                    </span>
+                    <span>
+                      Navigation: video title set {
+                        item.sourceIdentity.navigation.videoTitleSetNumber
+                      }, title-set title {
+                        item.sourceIdentity.navigation.titleSetTitleNumber
+                      }, program chain {
+                        item.sourceIdentity.navigation.programChainNumber
+                      }. Selected path: {
+                        item.sourceIdentity.selectedPath.map((cell) =>
+                          `program ${cell.programNumber}, cell ${cell.cellNumber}, VOB ${cell.vobId}, cell ID ${cell.cellId}`
+                        ).join("; ")
+                      }.
                     </span>
                     {item.catalogMappings.length === 0 ? (
                       <span>Unmapped source identity.</span>
@@ -308,100 +337,9 @@ export function CatalogReviewTitleDamageAcceptancePreview({
                     {item.assessmentSnapshot === null ? (
                       <span>Current assessment snapshot unavailable.</span>
                     ) : (
-                      <>
-                        <span>
-                          {item.assessmentSnapshot
-                            .unrecoveredUniqueSourceSectorCount}
-                          {" unrecovered source sectors; "}
-                          {item.assessmentSnapshot
-                            .sourceContinuityRiskSectorCount}
-                          {" source-continuity-risk sectors; "}
-                          {item.assessmentSnapshot.mappingCoverage.state}
-                          {" mapping coverage."}
-                        </span>
-                        <span>
-                          Title Missing-Source Percentage: {
-                            item.assessmentSnapshot.titleMissingSourcePercentage ===
-                                null
-                              ? "unavailable"
-                              : `${item.assessmentSnapshot.titleMissingSourcePercentage}%`
-                          }.
-                        </span>
-                        {item.assessmentSnapshot.mappingCoverage.unknownReasons
-                              .length === 0
-                          ? null
-                          : (
-                            <ul>
-                              {item.assessmentSnapshot.mappingCoverage
-                                .unknownReasons.map((reason) => (
-                                  <li key={reason.code}>
-                                    Mapping coverage unknown: <code>
-                                      {reason.code}
-                                    </code> {reason.message}
-                                  </li>
-                                ))}
-                            </ul>
-                          )}
-                        {(() => {
-                          const affectedPlayback = item.assessmentSnapshot
-                            .estimatedAffectedPlayback;
-                          if (affectedPlayback === null) {
-                            return <span>
-                              Estimated Affected Playback is unavailable.
-                            </span>;
-                          }
-                          return <>
-                            {affectedPlayback.intervals.length === 0
-                              ? (
-                                <span>
-                                  No known affected playback intervals.
-                                </span>
-                              )
-                              : (
-                                <ul>
-                                  {affectedPlayback.intervals.map(
-                                    (interval, index) => (
-                                      <li
-                                        key={`${interval.playbackOccurrence}:${index}`}
-                                      >
-                                        Playback occurrence {
-                                          interval.playbackOccurrence
-                                        }: affected source estimated at {
-                                          interval.startMilliseconds
-                                        }-{interval.endMilliseconds} ms; {
-                                          interval.timingMethods.join(", ")
-                                        }; {interval.coverage} coverage.
-                                      </li>
-                                    ),
-                                  )}
-                                </ul>
-                              )}
-                            {affectedPlayback.unknownCoverage.length === 0
-                              ? null
-                              : (
-                                <ul>
-                                  {affectedPlayback.unknownCoverage.map(
-                                    (coverage, index) => (
-                                      <li
-                                        key={`${coverage.playbackOccurrence}:${index}`}
-                                      >
-                                        Playback occurrence {
-                                          coverage.playbackOccurrence
-                                        } has unknown timing coverage for {
-                                          coverage.unrecoveredSourceSectorCount
-                                        } unrecovered source sectors. {
-                                          coverage.reasons.map((reason) =>
-                                            `${reason.code}: ${reason.message}`
-                                          ).join(" ")
-                                        }
-                                      </li>
-                                    ),
-                                  )}
-                                </ul>
-                              )}
-                          </>;
-                        })()}
-                      </>
+                      <CatalogReviewTitleDamageAssessmentEvidence
+                        assessment={item.assessmentSnapshot}
+                      />
                     )}
                   </li>
                 ))}

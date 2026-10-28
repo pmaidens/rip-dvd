@@ -106,6 +106,196 @@ function waitForCatalogReviewReloads(page: Page, count: number): Promise<void> {
   });
 }
 
+function damageAcceptanceBrowserPreview(
+  state: "available" | "pending" | "outdated",
+) {
+  const sourceIdentity = {
+    displayTitleNumber: 1,
+    navigation: {
+      videoTitleSetNumber: 1,
+      titleSetTitleNumber: 1,
+      programChainNumber: 1,
+    },
+    selectedPath: [{
+      programNumber: 1,
+      cellNumber: 1,
+      vobId: 1,
+      cellId: 1,
+    }],
+    angleNumber: 1,
+    angleCount: 1,
+    chapterStart: 1,
+    chapterEnd: 4,
+    chapterCount: 4,
+    sourceExtents: [{ startLba: 0, sectorCount: 100 }],
+  };
+  const assessmentSnapshot = {
+    unrecoveredUniqueSourceSectorCount: 4,
+    uniqueSourceSectorCount: 100,
+    sourceContinuityRiskSectorCount: 1,
+    titleMissingSourcePercentage: 4,
+    mappingCoverage: { state: "complete", unknownReasons: [] },
+    estimatedAffectedPlayback: {
+      intervals: [{
+        playbackOccurrence: 1,
+        startMilliseconds: 1_000,
+        endMilliseconds: 5_000,
+        timingMethods: ["synthetic-vobu-timing-v1"],
+        coverage: "source_span",
+      }],
+      unknownCoverage: [{
+        playbackOccurrence: 3,
+        unrecoveredSourceSectorCount: 4,
+        reasons: [{
+          code: "SYNTHETIC_TIMING_UNKNOWN",
+          message: "Timing is unavailable for this playback occurrence.",
+        }],
+      }],
+    },
+  };
+  const episode = {
+    id: "synthetic-browser-episode",
+    kind: "episode",
+    title: "A Distinct Episode",
+    year: 2026,
+    seasonNumber: null,
+    episodeNumber: 2,
+    episodicContext: {
+      tvShow: {
+        id: "synthetic-browser-show",
+        title: "Synthetic Show",
+        year: 2024,
+      },
+      season: {
+        id: "synthetic-browser-season",
+        title: "Season One",
+        year: 2025,
+        seasonNumber: 1,
+      },
+    },
+  };
+  const mapped = {
+    titleIdentityId: "synthetic-browser-title-identity-1",
+    titleIdentityObservationId: "synthetic-browser-observation-1",
+    included: true,
+    mappingState: "mapped",
+    preflightMappingState: "mapped",
+    reviewContinuity: { result: "proved" },
+    sourceIdentity,
+    catalogMappings: [{
+      discSelectionId: "synthetic-browser-selection",
+      discSelectionIdentity: "a".repeat(64),
+      mappingState: "mapped",
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      resolvedSourceIdentity: {
+        resolution: "title_identity_binding",
+        ...sourceIdentity,
+      },
+      label: null,
+      mediaItem: episode,
+    }],
+    assessmentSnapshot: state === "available" ? assessmentSnapshot : null,
+    acknowledgementRequired: state === "available",
+  };
+  const unmapped = {
+    ...mapped,
+    titleIdentityId: "synthetic-browser-title-identity-2",
+    titleIdentityObservationId: "synthetic-browser-observation-2",
+    included: false,
+    mappingState: "unmapped",
+    preflightMappingState: "unmapped",
+    sourceIdentity: {
+      ...sourceIdentity,
+      displayTitleNumber: 2,
+      navigation: {
+        videoTitleSetNumber: 2,
+        titleSetTitleNumber: 1,
+        programChainNumber: 3,
+      },
+      selectedPath: [{
+        programNumber: 2,
+        cellNumber: 4,
+        vobId: 7,
+        cellId: 9,
+      }],
+    },
+    catalogMappings: [],
+    assessmentSnapshot: null,
+    acknowledgementRequired: false,
+  };
+  const available = state === "available";
+  const reasonCode = state === "pending"
+    ? "ASSESSMENT_PENDING"
+    : "ASSESSMENT_OUTDATED";
+  return {
+    schemaVersion: 1,
+    evidenceFormat: "dvd-recovery-evidence-v1",
+    available,
+    previewToken: available
+      ? "dvd-title-damage-acceptance-preview:synthetic-browser-token"
+      : null,
+    action: {
+      available,
+      reasons: available
+        ? []
+        : [{
+          code: reasonCode,
+          message: state === "pending"
+            ? "Title Damage Assessment is pending."
+            : "Title Damage Assessment is outdated.",
+          details: {},
+        }],
+      expectedInputs: available
+        ? ["previewToken", "damageAcknowledgement"]
+        : ["excludedTitleIdentityIds", "mainFeatureResolutions"],
+    },
+    current: null,
+    reviewSetIdentity: "b".repeat(64),
+    catalogMappingProjectionId: "c".repeat(64),
+    assessmentIdentity: available ? `dvd-title-damage-assessment:${"d".repeat(64)}` : null,
+    reviewedContentIdentity: "e".repeat(64),
+    allContent: [mapped, unmapped],
+    reviewedContent: [mapped],
+    exclusions: [{
+      titleIdentityId: unmapped.titleIdentityId,
+      titleIdentityObservationId: unmapped.titleIdentityObservationId,
+      displayTitleNumber: 2,
+      angleNumber: 1,
+    }],
+    mainFeatureChoices: [],
+    unresolvedSelections: [],
+    assessmentSnapshot: available
+      ? {
+        unknownTitleImpact: {
+          unrecoveredSourceSectorCount: 0,
+          unrecoveredSourceRanges: [],
+          reasons: [],
+        },
+        unattributedSourceContinuityRisk: {
+          sourceSectorCount: 0,
+          sourceRanges: [],
+        },
+      }
+      : null,
+    acknowledgementRequired: available,
+    affectedWork: available
+      ? [{
+        id: "synthetic-browser-encode-job",
+        discSelectionId: "synthetic-browser-selection",
+        status: "queued",
+      }]
+      : [],
+    damagePreview: {
+      required: false,
+      available: false,
+      reasons: [{
+        code: "DAMAGE_PREVIEW_UNAVAILABLE",
+        message: "Damage Preview is optional.",
+      }],
+    },
+  };
+}
+
 test("keyboard mapping and job-free correction announce their results", async ({ page }, testInfo) => {
   const variant = fixtureVariant(testInfo.project.name);
   await openCatalogReview(
@@ -382,6 +572,60 @@ test("Damage Preview reviews selections and keeps generation explicitly unavaila
   await preview.getByRole("button", { name: "Review preview selections" }).click();
   await expect(preview.getByText("Estimated duration: unknown. Estimated storage: unknown.")).toBeVisible();
   await expect(preview.getByText(/COARSE_SAMPLING_WINDOW_REQUIRED:/)).toBeVisible();
+  await expectNoPageOverflow(page);
+});
+
+test("exact damage preflight identifies mapped and excluded content across assessment states", async ({ page }, testInfo) => {
+  const variant = fixtureVariant(testInfo.project.name);
+  await openCatalogReview(
+    page,
+    `CATALOG_BROWSER_DAMAGE_${variant.toUpperCase()}`,
+  );
+  await page.getByRole("tab", { name: "Damage decision" }).click();
+  const preflight = page.getByRole("heading", {
+    name: "Title Damage Acceptance preflight",
+  }).locator("xpath=ancestor::section[1]");
+  let responseState: "available" | "pending" | "outdated" = "available";
+  await page.route("**/title-damage-acceptance-preview", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(damageAcceptanceBrowserPreview(responseState)),
+    });
+  });
+
+  const preview = preflight.getByRole("button", {
+    name: "Preview exact review set",
+  });
+  await preview.click();
+  await expect(preflight.getByText(/Preflight available\./))
+    .toBeVisible();
+  await expect(preflight.getByText(/episode: Synthetic Show \(2024\), season 1, episode 2/))
+    .toBeVisible();
+  await expect(preflight.getByText(
+    "Title Identity synthetic-browser-title-identity-2.",
+  )).toBeVisible();
+  await expect(preflight.getByText(/Selected path: program 2, cell 4, VOB 7, cell ID 9/))
+    .toBeVisible();
+  await expect(preflight.getByText(/Occurrence 3: playback location unknown for 4 unrecovered source sectors/))
+    .toBeVisible();
+  await expect(preflight.getByText(/do not claim exact playback lost or bound decoder effects/))
+    .toBeVisible();
+  await expect(preflight.getByText(/Encode Job synthetic-browser-encode-job/))
+    .toBeVisible();
+  await expect(preflight.getByText(/Damage acknowledgement is required for this exact set/))
+    .toBeVisible();
+
+  responseState = "pending";
+  await preview.click();
+  await expect(preflight.getByText("ASSESSMENT_PENDING", { exact: true }))
+    .toBeVisible();
+  await expect(preflight.getByText(/Damage acknowledgement has not been determined/))
+    .toBeVisible();
+
+  responseState = "outdated";
+  await preview.click();
+  await expect(preflight.getByText("ASSESSMENT_OUTDATED", { exact: true }))
+    .toBeVisible();
   await expectNoPageOverflow(page);
 });
 

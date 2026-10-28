@@ -440,6 +440,8 @@ const DISC_SELECTION_SUPERSESSION_HISTORY_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
 const ENCODE_JOB_FAILURE_REPORT_JOB_LIMIT = 400;
+const ACTIVE_ENCODE_JOB_DISC_SELECTION_LIMIT = MAX_DVD_TITLES;
+const ACTIVE_ENCODE_JOB_RESULT_LIMIT = MAX_DVD_TITLES * 8;
 const DVD_ARCHIVE_EVIDENCE_AUDIT_MANIFEST_LIMIT = 10_000;
 const DVD_RECOVERY_PASS_HISTORY_LIMIT = 16;
 function discSelectionMatchesTitleObservation(
@@ -14944,6 +14946,8 @@ export function createDataAccessInternal(
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
           listForDiscSelection: (id) =>
             access.encodeJobs.listForDiscSelection(id),
+          listActiveForDiscSelections: (options) =>
+            access.encodeJobs.listActiveForDiscSelections(options),
           hasReservedOutputPathConflict: (job) =>
             access.encodeJobs.hasReservedOutputPathConflict(job),
           hasReservedOutputPath: (outputPath) =>
@@ -22672,6 +22676,43 @@ export function createDataAccessInternal(
           .where(eq(encodeJobs.discSelectionId, id))
           .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
           .all();
+      },
+      listActiveForDiscSelections(options) {
+        const discSelectionIds = [...new Set(options.discSelectionIds)];
+        if (
+          discSelectionIds.length > ACTIVE_ENCODE_JOB_DISC_SELECTION_LIMIT
+        ) {
+          throw new DomainInvariantError(
+            `Active Encode Job lookup is limited to ${ACTIVE_ENCODE_JOB_DISC_SELECTION_LIMIT} Disc Selections`,
+          );
+        }
+        if (
+          !Number.isSafeInteger(options.limit) || options.limit < 1 ||
+          options.limit > ACTIVE_ENCODE_JOB_RESULT_LIMIT
+        ) {
+          throw new DomainInvariantError(
+            `Active Encode Job lookup limit must be a safe integer between 1 and ${ACTIVE_ENCODE_JOB_RESULT_LIMIT}`,
+          );
+        }
+        if (discSelectionIds.length === 0) return [];
+        const jobs = database.select().from(encodeJobs)
+          .where(and(
+            inArray(encodeJobs.discSelectionId, discSelectionIds),
+            inArray(encodeJobs.status, [
+              "queued",
+              "running",
+              "cancellation_requested",
+            ]),
+          ))
+          .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
+          .limit(options.limit + 1)
+          .all();
+        if (jobs.length > options.limit) {
+          throw new DomainInvariantError(
+            `Active Encode Job lookup exceeds the ${options.limit}-job limit`,
+          );
+        }
+        return jobs;
       },
       hasReservedOutputPathConflict(job) {
         return database.select({ id: encodeJobs.id }).from(encodeJobs)

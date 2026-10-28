@@ -2432,6 +2432,10 @@ export interface ArchiveRequestWaitingStatus {
 export interface EncodeJobAccess {
   find(id: EncodeJobId): EncodeJob | null;
   listForDiscSelection(id: DiscSelectionId): EncodeJob[];
+  listActiveForDiscSelections(options: {
+    discSelectionIds: readonly DiscSelectionId[];
+    limit: number;
+  }): EncodeJob[];
   hasReservedOutputPathConflict(job: Pick<EncodeJob, "id" | "outputPath">): boolean;
   hasReservedOutputPath(outputPath: string): boolean;
   resolveQueueLogicalJobs(options: {
@@ -2828,6 +2832,7 @@ export interface ConsistentReadAccess {
     | "find"
     | "list"
     | "listForDiscSelection"
+    | "listActiveForDiscSelections"
     | "hasReservedOutputPathConflict"
     | "hasReservedOutputPath"
     | "resolveQueueLogicalJobs"

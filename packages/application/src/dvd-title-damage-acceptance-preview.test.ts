@@ -71,6 +71,32 @@ it("resolves a main-feature choice without a representative-title heuristic", ()
   }));
 });
 
+it("includes episode, season, and TV-show identity in mapped content", () => {
+  const preview = previewDvdTitleDamageAcceptance(
+    createDvdTitleDamageAcceptancePreviewTestAccess({ episodicMedia: true }),
+    DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.archiveId as never,
+  );
+
+  expect(preview.reviewedContent[0]?.catalogMappings[0]?.mediaItem).toMatchObject({
+    id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.episodeId,
+    kind: "episode",
+    title: "Synthetic Episode",
+    episodeNumber: 2,
+    episodicContext: {
+      tvShow: {
+        id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.tvShowId,
+        title: "Synthetic Series",
+        year: 2024,
+      },
+      season: {
+        id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.seasonId,
+        title: "Season One",
+        seasonNumber: 1,
+      },
+    },
+  });
+});
+
 it("blocks an unresolved main-feature choice", () => {
   const preview = previewDvdTitleDamageAcceptance(
     createDvdTitleDamageAcceptancePreviewTestAccess({
@@ -130,17 +156,42 @@ it("keeps an active unbound title selection visible and blocked", () => {
       discSelectionId: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
     }],
     action: {
-      reasons: [{
-        code: "SELECTION_UNIDENTIFIED",
-        details: {
-          affectedTitleIdentityIds: [],
-          unresolvedSelectionIds: [
-            DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
-          ],
+      reasons: [
+        {
+          code: "MAPPING_REVIEW_REQUIRED",
+          details: {
+            affectedDiscSelectionIds: [
+              DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
+            ],
+          },
         },
-      }],
+        {
+          code: "SELECTION_UNIDENTIFIED",
+          details: {
+            affectedTitleIdentityIds: [],
+            unresolvedSelectionIds: [
+              DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
+            ],
+          },
+        },
+      ],
     },
   });
+});
+
+it("orders a paused workflow after pending assessment evidence", () => {
+  const preview = previewDvdTitleDamageAcceptance(
+    createDvdTitleDamageAcceptancePreviewTestAccess({
+      assessmentState: "pending",
+      recoveryStatus: "paused",
+    }),
+    DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.archiveId as never,
+  );
+
+  expect(preview.action.reasons.map(({ code }) => code)).toEqual([
+    "ASSESSMENT_PENDING",
+    "RECOVERY_ACTIVE",
+  ]);
 });
 
 it("does not project an outdated assessment as current evidence", () => {
@@ -192,4 +243,16 @@ it("blocks an empty exact set and keeps its affected work visible", () => {
       }],
     },
   });
+});
+
+it("does not report terminal Encode Job history as affected work", () => {
+  const preview = previewDvdTitleDamageAcceptance(
+    createDvdTitleDamageAcceptancePreviewTestAccess({
+      includeAffectedWork: true,
+      affectedWorkStatus: "completed",
+    }),
+    DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.archiveId as never,
+  );
+
+  expect(preview.affectedWork).toEqual([]);
 });

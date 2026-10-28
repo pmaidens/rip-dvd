@@ -10,8 +10,13 @@ import {
 } from "@rip-dvd/data-access";
 
 import { CommandFailure } from "./command.js";
+import {
+  readStructuredObject,
+  StructuredInputError,
+  type StructuredInputIO,
+} from "./structured-input.js";
 
-interface DvdTitleDamageAcceptancePreviewIO {
+interface DvdTitleDamageAcceptancePreviewIO extends StructuredInputIO {
   openAccess(): DataAccess;
 }
 
@@ -19,10 +24,16 @@ function invalid(message: string): never {
   throw new CommandFailure("INVALID_ARGUMENTS", message, 2);
 }
 
-function parseArguments(rest: readonly string[]) {
+function parseArguments(
+  rest: readonly string[],
+  io: DvdTitleDamageAcceptancePreviewIO,
+) {
   const [verb, rawArchiveId, ...options] = rest;
-  if (verb !== "preview-title-damage-acceptance") {
-    invalid("Expected catalog-review preview-title-damage-acceptance.");
+  if (
+    verb !== "preview-damage-acceptance" &&
+    verb !== "preview-title-damage-acceptance"
+  ) {
+    invalid("Expected catalog-review preview-damage-acceptance.");
   }
   const archiveId = rawArchiveId?.trim();
   if (!archiveId || archiveId.length > 128) {
@@ -33,6 +44,7 @@ function parseArguments(rest: readonly string[]) {
     discSelectionId: string;
     titleIdentityId: string;
   }> = [];
+  const structuredOptions = new Map<string, string>();
   for (let index = 0; index < options.length;) {
     if (options[index] === "--exclude-title-identity" &&
         index + 1 < options.length) {
@@ -49,12 +61,50 @@ function parseArguments(rest: readonly string[]) {
       index += 3;
       continue;
     }
+    if (options[index] === "--stdin") {
+      if (structuredOptions.has("--stdin")) {
+        invalid("Structured input options may not be repeated.");
+      }
+      structuredOptions.set("--stdin", "true");
+      index += 1;
+      continue;
+    }
+    if (
+      (options[index] === "--json" || options[index] === "--file") &&
+      index + 1 < options.length
+    ) {
+      const name = options[index]!;
+      if (structuredOptions.has(name)) {
+        invalid("Structured input options may not be repeated.");
+      }
+      structuredOptions.set(name, options[index + 1]!);
+      index += 2;
+      continue;
+    }
     invalid("Invalid Title Damage Acceptance preflight options.");
   }
+  let structuredInput: unknown;
+  try {
+    structuredInput = readStructuredObject(structuredOptions, io);
+  } catch (error) {
+    if (error instanceof StructuredInputError) {
+      throw new CommandFailure(error.code, error.message, 2);
+    }
+    throw error;
+  }
+  if (
+    structuredInput !== undefined &&
+    (excludedTitleIdentityIds.length > 0 || mainFeatureResolutions.length > 0)
+  ) {
+    invalid("Choose flags or one structured input form, not both.");
+  }
+  const structured = structuredInput as Readonly<Record<string, unknown>> | undefined;
   return {
     archiveId: archiveId as OriginalDiscArchiveId,
-    excludedTitleIdentityIds,
-    mainFeatureResolutions,
+    excludedTitleIdentityIds:
+      structured?.excludedTitleIdentityIds ?? excludedTitleIdentityIds,
+    mainFeatureResolutions:
+      structured?.mainFeatureResolutions ?? mainFeatureResolutions,
   };
 }
 
@@ -62,7 +112,7 @@ export function runDvdTitleDamageAcceptancePreview(
   rest: readonly string[],
   io: DvdTitleDamageAcceptancePreviewIO,
 ): unknown {
-  const input = parseArguments(rest);
+  const input = parseArguments(rest, io);
   const access = io.openAccess();
   try {
     return createApplicationOperations(access).previewDvdTitleDamageAcceptance(

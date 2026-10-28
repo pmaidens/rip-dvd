@@ -3,6 +3,7 @@ import {
   type DataAccess,
   type DiscSelectionSourceIdentityInput,
   type DvdTitleDamageAcceptancePreviewDecisionInput,
+  type EncodeJobStatus,
 } from "@rip-dvd/data-access";
 
 export const DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS = {
@@ -11,16 +12,21 @@ export const DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS = {
   observationId: "synthetic-title-damage-observation",
   discSelectionId: "synthetic-title-damage-selection",
   mediaItemId: "synthetic-title-damage-movie",
+  tvShowId: "synthetic-title-damage-show",
+  seasonId: "synthetic-title-damage-season",
+  episodeId: "synthetic-title-damage-episode",
   encodeJobId: "synthetic-title-damage-encode-job",
 } as const;
 
 export function createDvdTitleDamageAcceptancePreviewTestAccess(options: {
   assessmentState?: "current" | "outdated" | "pending";
-  recoveryStatus?: "stopped" | "running";
+  recoveryStatus?: "stopped" | "running" | "paused";
   mappingState?: "mapped" | "needs_mapping_review" | "unmapped";
   sourceIdentity?: DiscSelectionSourceIdentityInput;
   bindSelection?: boolean;
   includeAffectedWork?: boolean;
+  affectedWorkStatus?: EncodeJobStatus;
+  episodicMedia?: boolean;
   recordPreview?: (
     input: DvdTitleDamageAcceptancePreviewDecisionInput,
   ) => void;
@@ -181,23 +187,62 @@ export function createDvdTitleDamageAcceptancePreviewTestAccess(options: {
     listDiscSelections: () => [{
       id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
       originalDiscArchiveId: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.archiveId,
-      mediaItemId: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.mediaItemId,
+      mediaItemId: options.episodicMedia
+        ? DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.episodeId
+        : DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.mediaItemId,
       sourceIdentity,
       label: null,
       createdAt: new Date("2026-01-01T00:00:00.000Z"),
       updatedAt: new Date("2026-01-01T00:00:00.000Z"),
     }],
-    listMediaItems: () => [{
-      id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.mediaItemId,
-      parentId: null,
-      kind: "movie",
-      title: "Synthetic parity movie",
-      year: 2026,
-      seasonNumber: null,
-      episodeNumber: null,
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
-    }],
+    listMediaItems: (input?: { ids?: readonly string[] }) => {
+      const timestamp = new Date("2026-01-01T00:00:00.000Z");
+      const items = options.episodicMedia
+        ? [{
+          id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.tvShowId,
+          parentId: null,
+          kind: "tv_show" as const,
+          title: "Synthetic Series",
+          year: 2024,
+          seasonNumber: null,
+          episodeNumber: null,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }, {
+          id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.seasonId,
+          parentId: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.tvShowId,
+          kind: "season" as const,
+          title: "Season One",
+          year: 2025,
+          seasonNumber: 1,
+          episodeNumber: null,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }, {
+          id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.episodeId,
+          parentId: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.seasonId,
+          kind: "episode" as const,
+          title: "Synthetic Episode",
+          year: 2026,
+          seasonNumber: null,
+          episodeNumber: 2,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }]
+        : [{
+          id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.mediaItemId,
+          parentId: null,
+          kind: "movie" as const,
+          title: "Synthetic parity movie",
+          year: 2026,
+          seasonNumber: null,
+          episodeNumber: null,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }];
+      const ids = new Set(input?.ids ?? items.map((item) => item.id));
+      return items.filter((item) => ids.has(item.id));
+    },
     recordDvdTitleDamageAcceptancePreviewDecision:
       options.recordPreview ?? (() => undefined),
   };
@@ -233,7 +278,19 @@ export function createDvdTitleDamageAcceptancePreviewTestAccess(options: {
           id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.encodeJobId,
           discSelectionId:
             DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
-          status: "queued",
+          status: options.affectedWorkStatus ?? "queued",
+        }]
+        : [],
+      listActiveForDiscSelections: () =>
+        options.includeAffectedWork &&
+          !["completed", "failed", "cancelled"].includes(
+            options.affectedWorkStatus ?? "queued",
+          )
+        ? [{
+          id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.encodeJobId,
+          discSelectionId:
+            DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
+          status: options.affectedWorkStatus ?? "queued",
         }]
         : [],
     },

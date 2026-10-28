@@ -5,7 +5,10 @@ import {
   type ArchiveRecoveryAttemptId,
   type ArchiveRecoveryId,
   type DataAccess,
+  type DiscSelectionId,
+  type EncodeJobId,
   type EncodeOutputFilesystemIdentity,
+  type MediaItemId,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import {
@@ -124,6 +127,41 @@ it("changes Catalog Review activity when Recovery identities change", () => {
 
   expect(catalogReviewActivityRevision(archive, replacement)).not.toBe(
     catalogReviewActivityRevision(archive, workflow),
+  );
+
+  const affectedWork = [{
+    id: "encode-job-1" as EncodeJobId,
+    discSelectionId: "disc-selection-1" as DiscSelectionId,
+    status: "queued" as const,
+  }];
+  expect(
+    catalogReviewActivityRevision(archive, workflow, [{
+      ...affectedWork[0]!,
+      status: "running",
+    }]),
+  ).not.toBe(catalogReviewActivityRevision(archive, workflow, affectedWork));
+
+  const boundMediaItem = {
+    id: "media-item-1" as MediaItemId,
+    parentId: null,
+    kind: "movie" as const,
+    title: "Synthetic Film",
+    year: 2026,
+    seasonNumber: null,
+    episodeNumber: null,
+  };
+  expect(
+    catalogReviewActivityRevision(archive, workflow, affectedWork, [{
+      ...boundMediaItem,
+      title: "Renamed Synthetic Film",
+    }]),
+  ).not.toBe(
+    catalogReviewActivityRevision(
+      archive,
+      workflow,
+      affectedWork,
+      [boundMediaItem],
+    ),
   );
 });
 
@@ -288,6 +326,32 @@ describe("readDashboardSnapshot", () => {
 
     expect(singleArchiveQueryCount).toBeGreaterThan(0);
     expect(multipleArchiveQueryCount).toBe(singleArchiveQueryCount);
+  });
+
+  it("revises Catalog Review evidence for ordinary active work and bound Media Items", () => {
+    const access = dataAccessFixture.create();
+    const { archive, job, mediaItem } = seedEncodeJob(access);
+    const revision = () => {
+      const snapshot = readDashboardSnapshot(access, {
+        catalogReviewView: "reviewed",
+      });
+      if (snapshot.catalogReview.status !== "loaded") {
+        throw new Error("Expected loaded Catalog Review activity");
+      }
+      return snapshot.catalogReview.items.find((item) => item.id === archive.id)
+        ?.activityRevision;
+    };
+
+    const queuedRevision = revision();
+    const claim = access.encodeJobs.claimNext("synthetic-dashboard-worker");
+    expect(claim?.id).toBe(job.id);
+    const runningRevision = revision();
+    expect(runningRevision).not.toBe(queuedRevision);
+
+    access.catalog.updateMediaItem(mediaItem.id, {
+      title: "Renamed enriched title",
+    });
+    expect(revision()).not.toBe(runningRevision);
   });
 
   it("maps every structured Encode failure reason without exposing diagnostics", () => {

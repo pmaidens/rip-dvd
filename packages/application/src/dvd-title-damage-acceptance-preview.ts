@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   DomainInvariantError,
   MAX_DVD_TITLES,
+  MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
   RecordNotFoundError,
   type DataAccess,
   type DiscSelectionId,
@@ -17,6 +18,7 @@ import {
 
 import {
   describeCatalogReviewWorkflow,
+  type CatalogReviewWorkflow,
   type CatalogReviewWorkflowAction,
   type CatalogReviewWorkflowReason,
 } from "./catalog-review-workflow.js";
@@ -24,6 +26,7 @@ import { createDvdTitleDamageAcceptancePreviewToken } from
   "./dvd-title-damage-acceptance-preview-token.js";
 
 const MAX_EXCLUSIONS = MAX_DVD_TITLES;
+const MAX_AFFECTED_ENCODE_JOBS = MAX_DVD_TITLES * 8;
 
 export class InvalidDvdTitleDamageAcceptancePreviewInputError extends Error {}
 
@@ -134,6 +137,9 @@ function uniqueReasons(
 
 function orderedReasons(
   reasons: readonly CatalogReviewWorkflowReason[],
+  recoveryState:
+    | NonNullable<CatalogReviewWorkflow["current"]["recovery"]>["state"]
+    | null,
 ): CatalogReviewWorkflowReason[] {
   const priority: Partial<Record<
     CatalogReviewWorkflowReason["code"],
@@ -141,7 +147,7 @@ function orderedReasons(
   >> = {
     ARCHIVE_NOT_SAVED: 0,
     CONSISTENCY_FAULT: 0,
-    RECOVERY_ACTIVE: 1,
+    RECOVERY_ACTIVE: recoveryState === "running" ? 1 : 3,
     RECOVERY_STOPPING: 1,
     ASSESSMENT_PENDING: 2,
     ASSESSMENT_OUTDATED: 2,
@@ -176,7 +182,16 @@ function orderedCurrentItems(
   );
 }
 
-function mediaItemView(item: MediaItem) {
+function mediaItemView(
+  item: MediaItem,
+  mediaItemById: ReadonlyMap<MediaItem["id"], MediaItem>,
+) {
+  const season = item.kind === "episode" && item.parentId !== null
+    ? mediaItemById.get(item.parentId) ?? null
+    : null;
+  const tvShow = season?.kind === "season" && season.parentId !== null
+    ? mediaItemById.get(season.parentId) ?? null
+    : null;
   return {
     id: item.id,
     kind: item.kind,
@@ -184,6 +199,25 @@ function mediaItemView(item: MediaItem) {
     year: item.year,
     seasonNumber: item.seasonNumber,
     episodeNumber: item.episodeNumber,
+    episodicContext: item.kind === "episode"
+      ? {
+        tvShow: tvShow?.kind === "tv_show"
+          ? {
+            id: tvShow.id,
+            title: tvShow.title,
+            year: tvShow.year,
+          }
+          : null,
+        season: season?.kind === "season"
+          ? {
+            id: season.id,
+            title: season.title,
+            year: season.year,
+            seasonNumber: season.seasonNumber,
+          }
+          : null,
+      }
+      : null,
   };
 }
 
@@ -259,12 +293,30 @@ export function previewDvdTitleDamageAcceptance(
     const mediaItemIds = [...new Set(selections.map((selection) =>
       selection.mediaItemId
     ))];
-    const mediaItems = mediaItemIds.length === 0
-      ? []
-      : snapshot.catalog.listMediaItems({ ids: mediaItemIds });
-    const affectedWork = selections.flatMap((selection) =>
-      snapshot.encodeJobs.listForDiscSelection(selection.id)
-    );
+    const mediaItems: MediaItem[] = [];
+    const seenMediaItemIds = new Set<MediaItem["id"]>();
+    let pendingMediaItemIds = mediaItemIds;
+    for (
+      let depth = 0;
+      pendingMediaItemIds.length > 0 &&
+      depth < MAX_MEDIA_ITEM_HIERARCHY_DEPTH;
+      depth += 1
+    ) {
+      const level = snapshot.catalog.listMediaItems({
+        ids: pendingMediaItemIds,
+      });
+      mediaItems.push(...level);
+      level.forEach((item) => seenMediaItemIds.add(item.id));
+      pendingMediaItemIds = [...new Set(level.flatMap((item) =>
+        item.parentId === null || seenMediaItemIds.has(item.parentId)
+          ? []
+          : [item.parentId]
+      ))];
+    }
+    const affectedWork = snapshot.encodeJobs.listActiveForDiscSelections({
+      discSelectionIds: selections.map((selection) => selection.id),
+      limit: MAX_AFFECTED_ENCODE_JOBS,
+    });
     return {
       unsupported: false as const,
       archive,
@@ -400,7 +452,7 @@ export function previewDvdTitleDamageAcceptance(
         sourceIdentity: selection.sourceIdentity,
         resolvedSourceIdentity: resolvedMappingSourceIdentity(item, selection),
         label: selection.label,
-        mediaItem: mediaItemView(mediaItem),
+        mediaItem: mediaItemView(mediaItem, mediaItemById),
       };
     });
     const boundSelectionIds = new Set(boundMappings.map((mapping) =>
@@ -434,7 +486,7 @@ export function previewDvdTitleDamageAcceptance(
             selection,
           ),
           label: selection.label,
-          mediaItem: mediaItemView(mediaItem),
+          mediaItem: mediaItemView(mediaItem, mediaItemById),
         }];
       },
     );
@@ -496,7 +548,7 @@ export function previewDvdTitleDamageAcceptance(
       : currentItemById.get(resolvedTitleIdentityId) ?? null;
     return {
       discSelectionId: selection.id,
-      mediaItem: mediaItemView(mediaItem),
+      mediaItem: mediaItemView(mediaItem, mediaItemById),
       resolvedTitleIdentityId,
       resolvedSourceIdentity: resolvedItem === null
         ? null
@@ -523,7 +575,7 @@ export function previewDvdTitleDamageAcceptance(
       discSelectionId: selection.id,
       sourceIdentity: selection.sourceIdentity,
       label: selection.label,
-      mediaItem: mediaItemView(mediaItem),
+      mediaItem: mediaItemView(mediaItem, mediaItemById),
     };
   }).sort((left, right) =>
     left.discSelectionId.localeCompare(right.discSelectionId)
@@ -544,14 +596,18 @@ export function previewDvdTitleDamageAcceptance(
   const missingReviewSet = reviewSet === null;
   const reasons = orderedReasons(uniqueReasons([
     ...baseReasons,
-    ...(mappingReviewItems.length === 0
+    ...(mappingReviewItems.length === 0 && unresolvedSelections.length === 0
       ? []
       : [{
         code: "MAPPING_REVIEW_REQUIRED" as const,
-        message: "At least one included mapping requires operator review.",
+        message:
+          "At least one included or retained mapping requires operator review.",
         details: {
           affectedTitleIdentityIds: mappingReviewItems.map((item) =>
             item.titleIdentityId
+          ),
+          affectedDiscSelectionIds: unresolvedSelections.map((selection) =>
+            selection.discSelectionId
           ),
         },
       }]),
@@ -576,7 +632,7 @@ export function previewDvdTitleDamageAcceptance(
           ),
         },
       }]),
-  ]));
+  ]), workflow.current.recovery?.state ?? null);
   const reviewedSelectionIds = new Set(reviewedContent.flatMap((item) =>
     item.catalogMappings.map((mapping) => mapping.discSelectionId)
   ));
@@ -658,6 +714,7 @@ export function previewDvdTitleDamageAcceptance(
           "reviewedContentIdentity",
           "excludedTitleIdentityIds",
           "mainFeatureResolutions",
+          ...(acknowledgementRequired ? ["damageAcknowledgement"] : []),
         ]
         : ["excludedTitleIdentityIds", "mainFeatureResolutions"],
     },

@@ -145,6 +145,7 @@ const preview = {
     }],
     assessmentSnapshot: {
       unrecoveredUniqueSourceSectorCount: 4,
+      uniqueSourceSectorCount: 100,
       sourceContinuityRiskSectorCount: 1,
       titleMissingSourcePercentage: 4,
       mappingCoverage: {
@@ -241,14 +242,6 @@ const evidenceGeneration = {
   },
   titleDamageState: "current" as const,
   activityRevision: "activity-revision-1",
-  mediaItems: [{
-    id: "synthetic-movie",
-    kind: "movie",
-    title: "Synthetic Movie",
-    year: 2026,
-    seasonNumber: null,
-    episodeNumber: null,
-  }],
 };
 
 const boundEvidenceChanges = [
@@ -317,16 +310,6 @@ const boundEvidenceChanges = [
       activityRevision: "activity-revision-2",
     },
   },
-  {
-    name: "mapped Media Item evidence",
-    value: {
-      ...evidenceGeneration,
-      mediaItems: [{
-        ...evidenceGeneration.mediaItems[0]!,
-        title: "Renamed Synthetic Movie",
-      }],
-    },
-  },
 ];
 
 it("includes all current content by default and sends only explicit exclusions", async () => {
@@ -359,6 +342,15 @@ it("includes all current content by default and sends only explicit exclusions",
     }),
   );
   expect(container.textContent).toContain("0 included, 1 excluded");
+  expect(container.textContent).toContain(
+    "Title Identity synthetic-title-1",
+  );
+  expect(container.textContent).toContain(
+    "Navigation: video title set 1, title-set title 1, program chain 1",
+  );
+  expect(container.textContent).toContain(
+    "Selected path: program 1, cell 1, VOB 1, cell ID 1",
+  );
   expect(container.textContent).toContain("movie: Synthetic Movie");
   expect(container.textContent).toContain("movie: Synthetic Movie (2026)");
   expect(container.textContent).toContain(
@@ -369,14 +361,17 @@ it("includes all current content by default and sends only explicit exclusions",
   );
   expect(container.textContent).toContain("Encode Job synthetic-encode-job");
   expect(container.textContent).toContain(
-    "Title Missing-Source Percentage: 4%",
+    "Title Missing-Source Percentage: 4% (4 of 100 unique source sectors)",
   );
   expect(container.textContent).toContain("SYNTHETIC_MAPPING_UNKNOWN");
   expect(container.textContent).toContain(
-    "Playback occurrence 1: affected source estimated at 1000-5000 ms",
+    "Occurrence 1: 00:01.000 to 00:05.000",
   );
   expect(container.textContent).toContain(
-    "Playback occurrence 2 has unknown timing coverage for 4 unrecovered source sectors",
+    "Occurrence 2: playback location unknown for 4 unrecovered source sectors",
+  );
+  expect(container.textContent).toContain(
+    "They do not claim exact playback lost or bound decoder effects",
   );
   const resolution = container.querySelector("select") as HTMLSelectElement;
   await act(async () => {
@@ -452,6 +447,41 @@ it("invalidates the preview when the current review set changes", async () => {
   ));
 
   expect(container.textContent).not.toContain(preview.previewToken);
+});
+
+it("does not describe an unavailable assessment as clean", async () => {
+  const unavailablePreview = {
+    ...preview,
+    available: false,
+    previewToken: null,
+    acknowledgementRequired: false,
+    action: {
+      available: false,
+      reasons: [{
+        code: "ASSESSMENT_PENDING",
+        message: "Title Damage Assessment is pending.",
+        details: {},
+      }],
+      expectedInputs: [],
+    },
+  } as unknown as DvdTitleDamageAcceptancePreview;
+  const fetcher = vi.fn(async () => Response.json(unavailablePreview));
+  await act(async () => root.render(
+    <CatalogReviewTitleDamageAcceptancePreview
+      originalDiscArchiveId="synthetic-archive"
+      titleIdentity={titleIdentity}
+      evidenceGeneration={evidenceGeneration}
+      fetcher={fetcher}
+    />,
+  ));
+  await act(async () => {
+    (container.querySelector("button") as HTMLButtonElement).click();
+  });
+
+  expect(container.textContent).toContain(
+    "Damage acknowledgement has not been determined because the preflight is unavailable",
+  );
+  expect(container.textContent).not.toContain("clean exact set");
 });
 
 it.each(boundEvidenceChanges)(
@@ -540,8 +570,21 @@ it("shows active Disc Selections without a current Title Identity binding", asyn
         kind: "episode" as const,
         title: "Synthetic Episode",
         year: 2026,
-        seasonNumber: 1,
+        seasonNumber: null,
         episodeNumber: 2,
+        episodicContext: {
+          tvShow: {
+            id: "synthetic-show",
+            title: "Synthetic Show",
+            year: 2024,
+          },
+          season: {
+            id: "synthetic-season",
+            title: "Season One",
+            year: 2025,
+            seasonNumber: 1,
+          },
+        },
       },
     }],
   } as unknown as DvdTitleDamageAcceptancePreview;
@@ -560,7 +603,7 @@ it("shows active Disc Selections without a current Title Identity binding", asyn
 
   expect(container.textContent).toContain("Unresolved Disc Selections");
   expect(container.textContent).toContain(
-    "episode: Synthetic Episode, season 1, episode 2 (2026). DVD title 7, chapters 2-5",
+    "episode: Synthetic Show (2024), season 1, episode 2: Synthetic Episode (2026); Media Item synthetic-orphaned-episode. DVD title 7, chapters 2-5",
   );
   expect(container.textContent).toContain("synthetic-orphaned-selection");
 });
