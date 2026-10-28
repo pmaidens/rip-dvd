@@ -8,7 +8,6 @@ import {
   writeSync,
 } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { createECDH } from "node:crypto";
 import { dispatchNotifications } from "@rip-dvd/application";
 import { afterEach, expect, it, vi } from "vitest";
 import {
@@ -139,30 +138,10 @@ afterEach(() => {
 
 async function subscribeRecoveryBrowsers(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
-  names = ["first", "second"],
+  names: string[] = [],
 ) {
-  const key = createECDH("prime256v1");
-  key.setPrivateKey(Buffer.alloc(32, 1));
-  vi.stubEnv("RIP_DVD_WEB_TRUSTED_ORIGIN", "https://operator.example");
-  vi.stubEnv("RIP_DVD_VAPID_PUBLIC_KEY", key.getPublicKey().toString("base64url"));
-  vi.stubEnv("RIP_DVD_VAPID_PRIVATE_KEY", key.getPrivateKey().toString("base64url"));
-  vi.stubEnv("RIP_DVD_VAPID_SUBJECT", "mailto:operator@example.com");
-  for (const name of names) {
-    expect((await fixture.run([
-      "notifications", "register", "--key", `synthetic-recovery-${name}`,
-      "--json", JSON.stringify({
-        enable: true,
-        subscription: {
-          endpoint: `https://web.push.apple.com/synthetic-recovery-${name}`,
-          expirationTime: null,
-          keys: {
-            p256dh: key.getPublicKey().toString("base64url"),
-            auth: Buffer.alloc(16, 2).toString("base64url"),
-          },
-        },
-      }),
-    ])).exitCode).toBe(0);
-  }
+  const workflow = await notificationWorkflow(fixture);
+  for (const name of names) await workflow.register(name);
 }
 
 it("notifies every subscribed browser once after later Recovery completes, with shared CLI and HTTP detail", async () => {

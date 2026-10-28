@@ -88,8 +88,8 @@ in the owning outcome transaction. Completion requires a committed checkpoint
 with no Unrecovered Source. A clean initial save that creates completed Recovery
 queues only the Archive Job saved event. Recovery faults include a storage-fault
 pause, a failed continuation verification, a failed checkpoint reconciliation,
-and an unreconcilable Stop. An attention alert describes the need to inspect Recovery without claiming a new
-terminal status. These alerts never change the completed Archive Job or fulfilled
+and an unreconcilable Stop. An attention alert describes the need to inspect
+Recovery without claiming a new terminal status. These alerts never change the completed Archive Job or fulfilled
 Archive Request.
 
 Recovery event identities distinguish the owning transition and outcome.
