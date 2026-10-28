@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { afterEach, expect, it, vi } from "vitest";
 
 import {
@@ -20,6 +21,95 @@ import {
 } from "./operator-workflow.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
+
+type WithdrawalRaceResult =
+  | { outcome: "claimed"; id: string }
+  | { outcome: "rejected" }
+  | {
+      outcome: "withdrawn";
+      affectedWork: { id: string; status: string }[];
+    };
+
+async function runWithdrawalClaimRace(input: {
+  databasePath: string;
+  originalDiscArchiveId: string;
+  acceptedDecisionId: string;
+  previewToken: string;
+  mutationKey: string;
+  operator: string;
+}): Promise<WithdrawalRaceResult[]> {
+  const barrier = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+  const operations = [
+    { operation: "claim-encode" },
+    {
+      operation: "withdraw-title-damage-acceptance",
+      originalDiscArchiveId: input.originalDiscArchiveId,
+      acceptedDecisionId: input.acceptedDecisionId,
+      previewToken: input.previewToken,
+      mutationKey: input.mutationKey,
+      operator: input.operator,
+    },
+  ];
+  const workers = operations.map((operation, index) =>
+    new Worker(
+      new URL(
+        "../../../packages/data-access/test/concurrency-worker.mjs",
+        import.meta.url,
+      ),
+      {
+        execArgv: ["--no-warnings"],
+        workerData: {
+          barrier,
+          databasePath: input.databasePath,
+          mode: "operation",
+          workerId: `title-damage-withdrawal-race-${index}`,
+          allowDvdRecoveryEvidenceEncodingForExclusionTest: true,
+          ...operation,
+        },
+      },
+    )
+  );
+  const ready = workers.map((worker) =>
+    new Promise<void>((resolve, reject) => {
+      const onMessage = (message: { type: string; value?: string }) => {
+        if (message.type === "ready") {
+          worker.off("message", onMessage);
+          resolve();
+        } else if (message.type === "failure") {
+          worker.off("message", onMessage);
+          reject(new Error(message.value));
+        }
+      };
+      worker.on("message", onMessage);
+      worker.once("error", reject);
+    })
+  );
+  const results = workers.map((worker) =>
+    new Promise<WithdrawalRaceResult>((resolve, reject) => {
+      worker.on("message", (message: {
+        type: string;
+        value?: WithdrawalRaceResult | string;
+      }) => {
+        if (message.type === "result") {
+          resolve(message.value as WithdrawalRaceResult);
+        } else if (message.type === "failure") {
+          reject(new Error(String(message.value)));
+        }
+      });
+      worker.once("error", reject);
+      worker.once("exit", (code) => {
+        if (code !== 0) {
+          reject(new Error(`Concurrency worker exited with code ${code}`));
+        }
+      });
+    })
+  );
+
+  await Promise.all(ready);
+  Atomics.store(new Int32Array(barrier), 0, 1);
+  Atomics.notify(new Int32Array(barrier), 0, workers.length);
+  return Promise.all(results);
+}
 
 afterEach(() => {
   vi.useRealTimers();
@@ -1081,6 +1171,46 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   const acceptedDecisionId = (accepted.result as {
     decision: { id: string };
   }).decision.id;
+  const largeAffectedWork = new DatabaseSync(fixture.databasePath);
+  largeAffectedWork.prepare(`
+    WITH RECURSIVE sequence(value) AS (
+      VALUES (1)
+      UNION ALL
+      SELECT value + 1 FROM sequence WHERE value < 4095
+    )
+    INSERT INTO encoding_profiles (
+      id, key, display_name, media_domain, version, is_active, settings,
+      created_at, updated_at
+    )
+    SELECT
+      printf('synthetic-bulk-affected-profile-%04d', value),
+      printf('synthetic-bulk-affected-profile-%04d', value),
+      printf('Synthetic bulk affected profile %04d', value),
+      'dvd_video', 1, 0, '{"preset":"Fast 480p30"}', 0, 0
+    FROM sequence
+  `).run();
+  largeAffectedWork.prepare(`
+    WITH RECURSIVE sequence(value) AS (
+      VALUES (1)
+      UNION ALL
+      SELECT value + 1 FROM sequence WHERE value < 4095
+    )
+    INSERT INTO encode_jobs (
+      id, disc_selection_id, encoding_profile_id, output_path,
+      status, created_at, updated_at
+    )
+    SELECT
+      printf('synthetic-bulk-affected-work-%04d', value),
+      ?,
+      printf('synthetic-bulk-affected-profile-%04d', value),
+      printf('%s%04d.mkv', ?, value),
+      'queued', value + 10, value + 10
+    FROM sequence
+  `).run(
+    mainFeatureSelection.id,
+    join(fixture.mediaLibraryPath, "synthetic-bulk-affected-work-"),
+  );
+  largeAffectedWork.close();
   const claimPreparation = new DatabaseSync(fixture.databasePath);
   claimPreparation.prepare(`
     UPDATE original_disc_archives
@@ -1123,6 +1253,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     previewToken: string;
     affectedWork: { id: string; status: string }[];
   };
+  expect(withdrawalResult.affectedWork).toHaveLength(4097);
   expect(withdrawalResult.affectedWork).toEqual(expect.arrayContaining([
     expect.objectContaining({ id: claimWinner.id, status: "running" }),
     expect.objectContaining({ status: "queued" }),
@@ -1167,6 +1298,26 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   `).get()).toEqual({ count: 1 });
   rejectedWithdrawalLedger.close();
   const withdrawalKey = "00000000-0000-4000-8000-000000000423";
+  const [claimRace, withdrawalRace] = await runWithdrawalClaimRace({
+    databasePath: fixture.databasePath,
+    originalDiscArchiveId: archive.id,
+    acceptedDecisionId,
+    previewToken: withdrawalInput.previewToken,
+    mutationKey: withdrawalKey,
+    operator: withdrawalInput.operator,
+  });
+  expect(withdrawalRace).toMatchObject({ outcome: "withdrawn" });
+  if (withdrawalRace.outcome !== "withdrawn") {
+    throw new Error("Expected withdrawal to complete in the claim race");
+  }
+  expect(withdrawalRace.affectedWork).toHaveLength(4097);
+  if (claimRace.outcome === "claimed") {
+    expect(withdrawalRace.affectedWork).toContainEqual(
+      expect.objectContaining({ id: claimRace.id, status: "running" }),
+    );
+  } else {
+    expect(claimRace).toEqual({ outcome: "rejected" });
+  }
   const withdrawn = await fixture.run([
     "catalog-review",
     "withdraw-damage",
@@ -1191,10 +1342,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   });
   expect((withdrawn.result as {
     affectedWork: { id: string; status: string }[];
-  }).affectedWork).toEqual(expect.arrayContaining([
-    expect.objectContaining({ id: claimWinner.id, status: "running" }),
-    expect.objectContaining({ status: "queued" }),
-  ]));
+  }).affectedWork).toEqual(withdrawalRace.affectedWork);
   expect(claimAccess.encodeJobs.claimNext(
     "synthetic-withdrawal-losing-worker",
   )).toBeNull();

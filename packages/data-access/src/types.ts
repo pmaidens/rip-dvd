@@ -2633,7 +2633,7 @@ export interface EncodeJobAccess {
   listForDiscSelection(id: DiscSelectionId): EncodeJob[];
   listActiveForDiscSelections(options: {
     discSelectionIds: readonly DiscSelectionId[];
-    limit: number;
+    limit: number | null;
   }): EncodeJob[];
   listActiveForOriginalDiscArchives(options: {
     originalDiscArchiveIds: readonly OriginalDiscArchiveId[];

@@ -171,6 +171,23 @@ try {
         ? { outcome: "claimed", id: claim.id }
         : { outcome: "rejected" },
     });
+  } else if (
+    workerData.operation === "withdraw-title-damage-acceptance"
+  ) {
+    const decision = access.catalog.withdrawDvdTitleDamageAcceptance({
+      mutationKey: workerData.mutationKey,
+      originalDiscArchiveId: workerData.originalDiscArchiveId,
+      acceptedDecisionId: workerData.acceptedDecisionId,
+      previewToken: workerData.previewToken,
+      operator: workerData.operator,
+    });
+    parentPort.postMessage({
+      type: "result",
+      value: {
+        outcome: decision.decision,
+        affectedWork: decision.snapshot.affectedWork,
+      },
+    });
   } else if (workerData.operation === "queue-stale-and-claim-encode") {
     const staleQueue = new DatabaseSync(workerData.databasePath);
     try {

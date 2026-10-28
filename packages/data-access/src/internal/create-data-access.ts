@@ -6260,13 +6260,7 @@ export function createDataAccessInternal(
     }).from(encodeJobs).where(and(
       inArray(encodeJobs.discSelectionId, selectionIds),
       inArray(encodeJobs.status, ["queued", "running"]),
-    )).orderBy(asc(encodeJobs.id))
-      .limit(ACTIVE_ENCODE_JOB_RESULT_LIMIT + 1).all();
-    if (jobs.length > ACTIVE_ENCODE_JOB_RESULT_LIMIT) {
-      throw new DomainInvariantError(
-        `Title Damage Acceptance withdrawal exceeds the ${ACTIVE_ENCODE_JOB_RESULT_LIMIT}-job limit`,
-      );
-    }
+    )).orderBy(asc(encodeJobs.id)).all();
     return jobs;
   }
 
@@ -23285,16 +23279,16 @@ export function createDataAccessInternal(
             `Active Encode Job lookup is limited to ${ACTIVE_ENCODE_JOB_DISC_SELECTION_LIMIT} Disc Selections`,
           );
         }
-        if (
+        if (options.limit !== null && (
           !Number.isSafeInteger(options.limit) || options.limit < 1 ||
           options.limit > ACTIVE_ENCODE_JOB_RESULT_LIMIT
-        ) {
+        )) {
           throw new DomainInvariantError(
             `Active Encode Job lookup limit must be a safe integer between 1 and ${ACTIVE_ENCODE_JOB_RESULT_LIMIT}`,
           );
         }
         if (discSelectionIds.length === 0) return [];
-        const jobs = database.select().from(encodeJobs)
+        const query = database.select().from(encodeJobs)
           .where(and(
             inArray(encodeJobs.discSelectionId, discSelectionIds),
             inArray(encodeJobs.status, [
@@ -23303,9 +23297,9 @@ export function createDataAccessInternal(
               "cancellation_requested",
             ]),
           ))
-          .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
-          .limit(options.limit + 1)
-          .all();
+          .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id));
+        if (options.limit === null) return query.all();
+        const jobs = query.limit(options.limit + 1).all();
         if (jobs.length > options.limit) {
           throw new DomainInvariantError(
             `Active Encode Job lookup exceeds the ${options.limit}-job limit`,

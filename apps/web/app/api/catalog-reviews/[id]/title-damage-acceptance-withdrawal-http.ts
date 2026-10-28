@@ -116,3 +116,22 @@ export function titleDamageAcceptanceWithdrawalErrorResponse(
     503,
   );
 }
+
+export async function runTitleDamageAcceptanceWithdrawalRoute(
+  request: Request,
+  getTrustedOrigin: () => string,
+  operation: (body: unknown) => unknown,
+): Promise<Response> {
+  const prepared = await prepareTitleDamageAcceptanceWithdrawalRequest(
+    request,
+    getTrustedOrigin,
+  );
+  if (prepared.response !== null) return prepared.response;
+  try {
+    return titleDamageAcceptanceWithdrawalResponse(
+      operation(prepared.body),
+    );
+  } catch (error) {
+    return titleDamageAcceptanceWithdrawalErrorResponse(error);
+  }
+}

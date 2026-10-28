@@ -6,11 +6,8 @@ import {
 } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../../../lib/data-access";
-import {
-  prepareTitleDamageAcceptanceWithdrawalRequest,
-  titleDamageAcceptanceWithdrawalErrorResponse,
-  titleDamageAcceptanceWithdrawalResponse,
-} from "../title-damage-acceptance-withdrawal-http";
+import { runTitleDamageAcceptanceWithdrawalRoute } from
+  "../title-damage-acceptance-withdrawal-http";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -21,22 +18,16 @@ export async function createDvdTitleDamageAcceptanceWithdrawalRoute(
   getAccess: () => DataAccess = getDataAccess,
   getTrustedOrigin: () => string = () => loadConfig().webTrustedOrigin,
 ): Promise<Response> {
-  const prepared = await prepareTitleDamageAcceptanceWithdrawalRequest(
+  return runTitleDamageAcceptanceWithdrawalRoute(
     request,
     getTrustedOrigin,
-  );
-  if (prepared.response !== null) return prepared.response;
-  try {
-    return titleDamageAcceptanceWithdrawalResponse(
+    (body) =>
       createApplicationOperations(getAccess())
-      .withdrawDvdTitleDamageAcceptance(
-        id as OriginalDiscArchiveId,
-        prepared.body,
-      ),
-    );
-  } catch (error) {
-    return titleDamageAcceptanceWithdrawalErrorResponse(error);
-  }
+        .withdrawDvdTitleDamageAcceptance(
+          id as OriginalDiscArchiveId,
+          body,
+        ),
+  );
 }
 
 export async function POST(

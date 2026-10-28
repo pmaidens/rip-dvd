@@ -363,6 +363,18 @@ export function CatalogReviewTitleDamageAcceptancePreview({
                           }. {withdrawalPreview.affectedWork.length} queued or
                           running Encode Jobs affected.
                         </p>
+                        {withdrawalPreview.acceptedDecision === null
+                          ? null
+                          : (
+                            <p>
+                              Withdrawal targets accepted decision{" "}
+                              <code>
+                                {withdrawalPreview.acceptedDecision.id}
+                              </code>, recorded by{" "}
+                              {withdrawalPreview.acceptedDecision.operator} at{" "}
+                              {withdrawalPreview.acceptedDecision.recordedAt}.
+                            </p>
+                          )}
                         {withdrawalPreview.action.reasons.length === 0
                           ? null
                           : (

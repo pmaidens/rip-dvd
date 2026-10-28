@@ -411,6 +411,9 @@ it("preflights and withdraws the current accepted decision", async () => {
   expect(container.textContent).toContain(
     "Encode Job synthetic-encode-job: queued",
   );
+  expect(container.textContent).toContain(
+    "Withdrawal targets accepted decision synthetic-accepted-decision, recorded by Synthetic persisted operator at 2026-10-28T08:00:00.000Z.",
+  );
 
   const operator = container.querySelector(
     'input[maxlength="128"]',
@@ -442,6 +445,52 @@ it("preflights and withdraws the current accepted decision", async () => {
   });
   expect(container.textContent).toContain(
     "Damage acceptance withdrawn for the current exact reviewed set by Synthetic withdrawal operator.",
+  );
+});
+
+it("shows the current accepted decision when a withdrawal target is stale", async () => {
+  const currentDecision = {
+    ...persistedDecision.current,
+    id: "synthetic-current-accepted-decision",
+    operator: "Synthetic current operator",
+    recordedAt: "2026-10-28T09:00:00.000Z",
+  };
+  const fetcher = vi.fn(async () => Response.json({
+    ...withdrawalPreview,
+    available: false,
+    previewToken: null,
+    action: {
+      available: false,
+      reasons: [{
+        code: "ACCEPTANCE_CHANGED",
+        message: "The requested Title Damage Acceptance decision is not current.",
+        details: { currentAcceptedDecisionId: currentDecision.id },
+      }],
+      expectedInputs: ["acceptedDecisionId"],
+    },
+    acceptedDecision: currentDecision,
+  }));
+  await act(async () => root.render(
+    <CatalogReviewTitleDamageAcceptancePreview
+      originalDiscArchiveId="synthetic-archive"
+      titleIdentity={titleIdentity}
+      titleDamageDecision={persistedDecision}
+      evidenceGeneration={evidenceGeneration}
+      fetcher={fetcher}
+    />,
+  ));
+
+  const previewButton = [...container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Preview withdrawal",
+  ) as HTMLButtonElement;
+  await act(async () => previewButton.click());
+
+  expect(container.textContent).toContain("ACCEPTANCE_CHANGED");
+  expect(container.textContent).toContain(
+    "Withdrawal targets accepted decision synthetic-current-accepted-decision, recorded by Synthetic current operator at 2026-10-28T09:00:00.000Z.",
+  );
+  expect(container.textContent).not.toContain(
+    "Withdraw Title Damage Acceptance decision",
   );
 });
 

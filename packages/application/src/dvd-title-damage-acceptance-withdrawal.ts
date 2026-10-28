@@ -1,5 +1,4 @@
 import {
-  MAX_DVD_TITLES,
   RecordNotFoundError,
   dvdTitleDamageDecisionSelectionIds,
   type DataAccess,
@@ -16,22 +15,14 @@ import {
   createDvdTitleDamageAcceptanceWithdrawalPreviewToken,
   isDvdTitleDamageAcceptanceWithdrawalPreviewToken,
 } from "./dvd-title-damage-acceptance-withdrawal-preview-token.js";
+import { parseRequiredText } from "./input-validation.js";
 import { parseMutationKey } from "./mutation-key.js";
 
 export class InvalidDvdTitleDamageAcceptanceWithdrawalInputError
   extends Error {}
 
-function requiredText(value: unknown, name: string, maximum = 128): string {
-  if (
-    typeof value !== "string" || value.trim() === "" ||
-    value.length > maximum
-  ) {
-    throw new InvalidDvdTitleDamageAcceptanceWithdrawalInputError(
-      `${name} must be a non-empty string.`,
-    );
-  }
-  return value.trim();
-}
+const invalidInput = (message: string) =>
+  new InvalidDvdTitleDamageAcceptanceWithdrawalInputError(message);
 
 function inputRecord(value: unknown, allowed: readonly string[]) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -52,9 +43,10 @@ function inputRecord(value: unknown, allowed: readonly string[]) {
 function previewInput(value: unknown) {
   const record = inputRecord(value, ["acceptedDecisionId"]);
   return {
-    acceptedDecisionId: requiredText(
+    acceptedDecisionId: parseRequiredText(
       record.acceptedDecisionId,
       "acceptedDecisionId",
+      invalidInput,
     ) as DvdTitleDamageDecisionId,
   };
 }
@@ -73,11 +65,12 @@ function withdrawalInput(value: unknown) {
   }
   return {
     mutationKey: parseMutationKey(record.mutationKey),
-    operator: requiredText(record.operator, "operator"),
+    operator: parseRequiredText(record.operator, "operator", invalidInput),
     previewToken: record.previewToken,
-    acceptedDecisionId: requiredText(
+    acceptedDecisionId: parseRequiredText(
       record.acceptedDecisionId,
       "acceptedDecisionId",
+      invalidInput,
     ) as DvdTitleDamageDecisionId,
   };
 }
@@ -123,7 +116,7 @@ export function previewDvdTitleDamageAcceptanceWithdrawal(
       ? []
       : snapshot.encodeJobs.listActiveForDiscSelections({
         discSelectionIds: dvdTitleDamageDecisionSelectionIds(accepted),
-        limit: MAX_DVD_TITLES * 8,
+        limit: null,
       }).filter((job) => job.status === "queued" || job.status === "running");
     return { evidence, inspection, accepted, jobs };
   });
