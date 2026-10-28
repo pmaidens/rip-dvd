@@ -1,11 +1,11 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, open, realpath, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { reviewDamagePreviewEvidence, type DamagePreviewAvailability, type DamagePreviewInput } from "@rip-dvd/application";
 import { canonicalPublicationJson, type DataAccess, type DamagePreviewRecord, type OriginalDiscArchiveId } from "@rip-dvd/data-access";
-import { archiveProcessIdentity, defaultArchiveImageOwnership, ArchiveImageOwnershipError, type ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import { acquireKernelProcessLock, inspectKernelProcessLock, defaultArchiveImageOwnership, ArchiveImageOwnershipError, type ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { DamagePreviewUnrepresentableError, createDamagePreviewGenerator, type DamagePreviewGenerator, type PreviewSourceTitle } from "./damage-preview-generator.js";
 
 const CONTENTION_GRACE_MS = 120_000;
@@ -27,11 +27,6 @@ async function quiesce(generator: DamagePreviewGenerator, path: string) {
     catch { await delay(100); }
   }
 }
-function workerIdentity() { return `damage-preview:${process.pid}:${archiveProcessIdentity(process.pid)}`; }
-function workerIsAlive(identity: string | null) {
-  const match = /^damage-preview:(\d+):(.+)$/.exec(identity ?? "");
-  return match !== null && archiveProcessIdentity(Number(match[1])) === match[2];
-}
 function plan(record: DamagePreviewRecord) { return JSON.parse(record.reviewJson) as DamagePreviewAvailability; }
 function sourceOffset(review: DamagePreviewAvailability, title: PreviewSourceTitle): number {
   const request = review.reviewedRequest!;
@@ -52,10 +47,12 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
   const mediaRoot = join(root, ".damage-previews");
   await mkdir(mediaRoot, { recursive: true, mode: 0o700 });
   if (await realpath(mediaRoot) !== mediaRoot) throw new Error("Unsafe preview media root.");
-  const workerId = workerIdentity();
+  const workersRoot = join(mediaRoot, ".workers");
+  await mkdir(workersRoot, { recursive: true, mode: 0o700 });
+  const workerLockPath = (id: string) => join(workersRoot, `${id}.lock`);
   // An abandoned execution is terminal. Never turn it back into queued work.
   for (const record of options.access.damagePreviews.list()) {
-    if (!["generating", "waiting_for_checkpoint_or_ownership"].includes(record.status) || workerIsAlive(record.workerId)) continue;
+    if (!["generating", "waiting_for_checkpoint_or_ownership"].includes(record.status) || record.workerId === null || !/^[a-f0-9-]{36}$/.test(record.workerId) || inspectKernelProcessLock(workerLockPath(record.workerId)) !== "inactive") continue;
     const review = plan(record);
     const image = review.reviewedRequest!.archive.path;
     const inspection = ownership.inspect({ archiveId: record.originalDiscArchiveId, imagePath: image, originalsLibraryPath: options.originalsLibraryPath });
@@ -68,100 +65,125 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
       options.access.damagePreviews.update(record);
     } catch { /* A surviving process retains ownership until it is quiescent. */ }
   }
-  const record = options.access.damagePreviews.list().find((item) => item.workerId === workerId && item.status === "waiting_for_checkpoint_or_ownership") ?? options.access.damagePreviews.claim(workerId);
-  if (!record) return;
-  const review = plan(record);
-  const directory = join(mediaRoot, record.id);
-
-  const controller = new AbortController();
-  const signal = AbortSignal.any([options.signal, controller.signal]);
-  let contentionStarted: number | null = null;
-  const monitor = setInterval(() => {
-    if (options.access.damagePreviews.find(record.id)?.cancellationRequested) controller.abort(new PreviewFailure("DAMAGE_PREVIEW_CANCELLED", "The operator cancelled this request."));
-    const recovery = options.access.catalog.findArchiveRecovery(record.originalDiscArchiveId as OriginalDiscArchiveId);
-    if (recovery && !["stopped", "completed"].includes(recovery.status)) controller.abort(new PreviewFailure("DAMAGE_PREVIEW_RECOVERY_CHANGED", "Archive Recovery changed. Stop takes priority over preview work."));
-  }, 100);
-  monitor.unref();
-  const previewOwnership: ArchiveImageOwnership = {
-    ...ownership,
-    withConsistentRead(request) {
-      return ownership.withConsistentRead({ ...request, signal,
-        previewRead: { onContention(urgent, waiting) {
-          if (!waiting) { contentionStarted = null; return; }
-          contentionStarted ??= Date.now();
-          if (urgent || Date.now() - contentionStarted >= CONTENTION_GRACE_MS) controller.abort(new PreviewFailure("DAMAGE_PREVIEW_CONTENTION", "Preview generation yielded to the oldest eligible archive waiter."));
-        } },
-      });
-    },
-  };
+  if (!options.access.damagePreviews.list().some((candidate) => candidate.status === "queued")) return;
+  const workerId = randomUUID();
+  const execution = acquireKernelProcessLock(workerLockPath(workerId));
   try {
-    await mkdir(directory, { mode: 0o700, recursive: true });
-    if (await realpath(directory) !== directory) throw new Error("Unsafe preview request directory.");
-    const outcome = await options.access.withDvdCheckpoint(record.originalDiscArchiveId as OriginalDiscArchiveId, previewOwnership, async (checkpoint, handle) => {
-      const current = options.access.readConsistentSnapshot((snapshot) => reviewDamagePreviewEvidence(snapshot, record.originalDiscArchiveId, JSON.parse(record.selectionJson) as DamagePreviewInput, checkpoint));
-      if (current.preflightToken !== record.preflightToken || !current.available) throw new PreviewFailure("DAMAGE_PREVIEW_STALE", "The reviewed preview inputs changed before generation.");
-      const request = review.reviewedRequest!;
-      handle.assertOwned();
-      record.toolVersions = await generator.versions();
-      const scanPath = join(directory, "scan.mkv");
-      const title = await generator.scan({ source: request.archive.path, titleNumber: request.title!.displayTitleNumber, angleNumber: request.title!.angleNumber, chapterStart: request.title!.chapterStart, chapterEnd: request.title!.chapterEnd, outputPath: scanPath, descriptor: handle.descriptor, signal: handle.signal }).finally(() => quiesce(generator, scanPath));
-      const offset = sourceOffset(review, title);
-      record.deviations = ["The sample uses explicit title-time boundaries instead of the complete playback selection."];
-      record.status = "generating";
-      options.access.damagePreviews.update(record);
-      for (const [index, clip] of review.clips.entries()) {
-        handle.signal.throwIfAborted();
+    const record = options.access.damagePreviews.claim(workerId);
+    if (!record) return;
+    const review = plan(record);
+    const directory = join(mediaRoot, record.id);
+
+    const controller = new AbortController();
+    const signal = AbortSignal.any([options.signal, controller.signal]);
+    let contentionStarted: number | null = null;
+    const monitor = setInterval(() => {
+      try { execution.assertHeld(); } catch { controller.abort(new PreviewFailure("DAMAGE_PREVIEW_EXECUTION_LOST", "Preview execution ownership could not be proved.")); }
+      if (options.access.damagePreviews.find(record.id)?.cancellationRequested) controller.abort(new PreviewFailure("DAMAGE_PREVIEW_CANCELLED", "The operator cancelled this request."));
+      const recovery = options.access.catalog.findArchiveRecovery(record.originalDiscArchiveId as OriginalDiscArchiveId);
+      if (recovery && !["stopped", "completed"].includes(recovery.status)) controller.abort(new PreviewFailure("DAMAGE_PREVIEW_RECOVERY_CHANGED", "Archive Recovery changed. Stop takes priority over preview work."));
+    }, 100);
+    monitor.unref();
+    const previewOwnership: ArchiveImageOwnership = {
+      ...ownership,
+      withConsistentRead(request) {
+        return ownership.withConsistentRead({ ...request, signal,
+          previewRead: { onContention(urgent, waiting) {
+            if (!waiting) { contentionStarted = null; return; }
+            contentionStarted ??= Date.now();
+            if (urgent || Date.now() - contentionStarted >= CONTENTION_GRACE_MS) controller.abort(new PreviewFailure("DAMAGE_PREVIEW_CONTENTION", "Preview generation yielded to the oldest eligible archive waiter."));
+          } },
+        });
+      },
+    };
+    try {
+      await mkdir(directory, { mode: 0o700, recursive: true });
+      if (await realpath(directory) !== directory) throw new Error("Unsafe preview request directory.");
+      let outcome: boolean | null;
+      while (true) {
+        execution.assertHeld();
+        try {
+          outcome = await options.access.withDvdCheckpoint(record.originalDiscArchiveId as OriginalDiscArchiveId, previewOwnership, async (checkpoint, handle) => {
+        execution.assertHeld();
+        const current = options.access.readConsistentSnapshot((snapshot) => reviewDamagePreviewEvidence(snapshot, record.originalDiscArchiveId, JSON.parse(record.selectionJson) as DamagePreviewInput, checkpoint));
+        if (current.preflightToken !== record.preflightToken || !current.available) throw new PreviewFailure("DAMAGE_PREVIEW_STALE", "The reviewed preview inputs changed before generation.");
+        const request = review.reviewedRequest!;
         handle.assertOwned();
-        const partial = join(directory, `${index}.partial.mkv`);
-        const final = join(directory, `${index}.mkv`);
-        const arguments_ = ["--no-dvdnav", "--title", String(request.title!.displayTitleNumber), "--angle", String(request.title!.angleNumber), "-i", request.archive.path, "-o", partial, "--format", "av_mkv", "--preset", String(request.encodingProfile!.settings.preset), "--audio", request.streams.audio.length ? request.streams.audio.join(",") : "none", "--subtitle", request.streams.subtitles.length ? request.streams.subtitles.map((id) => id + 1).join(",") : "none", "--subtitle-burned=none", "--start-at", `seconds:${(offset + clip.startMilliseconds) / 1_000}`, "--stop-at", `seconds:${(clip.endMilliseconds - clip.startMilliseconds) / 1_000}`];
-        record.commands.push(["rip-dvd-handbrake", ...arguments_]);
+        record.status = "generating";
+        record.reason = null;
         options.access.damagePreviews.update(record);
-        let generationError: unknown;
-        try {
-          await generator.generate({ arguments_, outputPath: partial, sourceOwnershipDescriptor: handle.descriptor, signal: handle.signal, onOutput(text) {
-            const match = /Encoding:.*?([\d.]+) %/.exec(text);
-            if (match) { record.progress.percent = Number(match[1]); options.access.damagePreviews.update(record); }
-          } });
-        } catch (error) { generationError = error; }
-        // Keep this proof inside the ownership callback. Throwing before process
-        // closure would let the worker drop its descriptor prematurely.
-        await quiesce(generator, partial);
-        try {
-          const media = await generator.inspect(partial);
-          if (media.videoCount !== 1 || media.audioCount !== request.streams.audio.length || media.subtitleCount !== request.streams.subtitles.length) throw new PreviewFailure("DAMAGE_PREVIEW_STREAM_UNREPRESENTABLE", "The sample did not retain the requested streams.");
-          const output = await open(partial, constants.O_RDWR | constants.O_NOFOLLOW);
-          let sizeBytes: number;
-          const hash = createHash("sha256");
-          try {
-            const stat = await output.stat();
-            if (!stat.isFile() || stat.size === 0) throw new Error("Empty sample.");
-            sizeBytes = stat.size;
-            for await (const chunk of output.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk);
-            await output.sync();
-          } finally { await output.close(); }
-          await rename(partial, final);
-          const directoryHandle = await open(directory, constants.O_RDONLY);
-          try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
-          const duration = Math.min(media.durationMilliseconds, clip.endMilliseconds - clip.startMilliseconds);
-          record.artifacts.push({ identity: `damage-preview-v1.${record.id}.${index}`, path: final, sizeBytes, sha256: hash.digest("hex"), mediaType: "video/x-matroska", coverageMethod: "handbrake_seek_and_probed_duration", durationMilliseconds: media.durationMilliseconds, coverage: { startMilliseconds: clip.startMilliseconds, endMilliseconds: clip.startMilliseconds + duration } });
-          record.progress.completedClips = record.artifacts.length;
+        record.toolVersions = await generator.versions();
+        const scanPath = join(directory, "scan.mkv");
+        const title = await generator.scan({ source: request.archive.path, titleNumber: request.title!.displayTitleNumber, angleNumber: request.title!.angleNumber, chapterStart: request.title!.chapterStart, chapterEnd: request.title!.chapterEnd, outputPath: scanPath, descriptor: handle.descriptor, signal: handle.signal }).finally(() => quiesce(generator, scanPath));
+        const offset = sourceOffset(review, title);
+        record.deviations = ["The sample uses explicit title-time boundaries instead of the complete playback selection."];
+        record.status = "generating";
+        options.access.damagePreviews.update(record);
+        for (const [index, clip] of review.clips.entries()) {
+          handle.signal.throwIfAborted();
+          handle.assertOwned();
+          execution.assertHeld();
+          const partial = join(directory, `${index}.partial.mkv`);
+          const final = join(directory, `${index}.mkv`);
+          const arguments_ = ["--no-dvdnav", "--title", String(request.title!.displayTitleNumber), "--angle", String(request.title!.angleNumber), "-i", request.archive.path, "-o", partial, "--format", "av_mkv", "--preset", String(request.encodingProfile!.settings.preset), "--audio", request.streams.audio.length ? request.streams.audio.join(",") : "none", "--subtitle", request.streams.subtitles.length ? request.streams.subtitles.map((id) => id + 1).join(",") : "none", "--subtitle-burned=none", "--start-at", `seconds:${(offset + clip.startMilliseconds) / 1_000}`, "--stop-at", `seconds:${(clip.endMilliseconds - clip.startMilliseconds) / 1_000}`];
+          record.commands.push(["rip-dvd-handbrake", ...arguments_]);
           options.access.damagePreviews.update(record);
-          if (media.durationMilliseconds + 100 < clip.endMilliseconds - clip.startMilliseconds) generationError ??= new PreviewFailure("DAMAGE_PREVIEW_INCOMPLETE_COVERAGE", "The sample ended before the requested interval. Actual partial coverage is recorded.");
-        } catch (error) { generationError ??= error; }
-        if (generationError) throw generationError;
+          let generationError: unknown;
+          try {
+            await generator.generate({ arguments_, outputPath: partial, sourceOwnershipDescriptor: handle.descriptor, signal: handle.signal, onOutput(text) {
+              const match = /Encoding:.*?([\d.]+) %/.exec(text);
+              if (match) { record.progress.percent = Number(match[1]); options.access.damagePreviews.update(record); }
+            } });
+          } catch (error) { generationError = error; }
+          // Keep this proof inside the ownership callback. Throwing before process
+          // closure would let the worker drop its descriptor prematurely.
+          await quiesce(generator, partial);
+          try {
+            const media = await generator.inspect(partial);
+            if (!Number.isFinite(media.videoStartMilliseconds) || media.videoStartMilliseconds < 0 || media.videoStartMilliseconds >= clip.endMilliseconds - clip.startMilliseconds) throw new PreviewFailure("DAMAGE_PREVIEW_TIMING_UNREPRESENTABLE", "The sample has no proven video coverage inside the requested interval.");
+            if (media.videoCount !== 1 || media.audioCount !== request.streams.audio.length || media.subtitleCount !== request.streams.subtitles.length) throw new PreviewFailure("DAMAGE_PREVIEW_STREAM_UNREPRESENTABLE", "The sample did not retain the requested streams.");
+            const output = await open(partial, constants.O_RDWR | constants.O_NOFOLLOW);
+            let sizeBytes: number;
+            const hash = createHash("sha256");
+            try {
+              const stat = await output.stat();
+              if (!stat.isFile() || stat.size === 0) throw new Error("Empty sample.");
+              sizeBytes = stat.size;
+              for await (const chunk of output.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk);
+              await output.sync();
+            } finally { await output.close(); }
+            await rename(partial, final);
+            const directoryHandle = await open(directory, constants.O_RDONLY);
+            try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
+            const coverageStart = clip.startMilliseconds + media.videoStartMilliseconds;
+            const coverageEnd = Math.min(clip.endMilliseconds, coverageStart + media.durationMilliseconds);
+            record.artifacts.push({ identity: `damage-preview-v1.${record.id}.${index}`, path: final, sizeBytes, sha256: hash.digest("hex"), mediaType: "video/x-matroska", coverageMethod: "handbrake_seek_and_probed_video_packets", durationMilliseconds: media.durationMilliseconds, coverage: { startMilliseconds: coverageStart, endMilliseconds: coverageEnd } });
+            record.progress.completedClips = record.artifacts.length;
+            options.access.damagePreviews.update(record);
+            if (media.videoStartMilliseconds > 100 || coverageEnd + 100 < clip.endMilliseconds) generationError ??= new PreviewFailure("DAMAGE_PREVIEW_INCOMPLETE_COVERAGE", "The sample ended before the requested interval. Actual partial coverage is recorded.");
+          } catch (error) { generationError ??= error; }
+          if (generationError) throw generationError;
+        }
+        return true;
+          });
+          break;
+        } catch (error) {
+          if (!(error instanceof ArchiveImageOwnershipError) || error.code !== "WRITER_NOT_QUIESCENT" || record.commands.length > 0 || signal.aborted) throw error;
+          record.reason = { code: "WRITER_NOT_QUIESCENT", message: "The preview is waiting for archive ownership and proven reader or writer closure." };
+          options.access.damagePreviews.update(record);
+          await delay(100, undefined, { signal });
+        }
       }
-      return true;
-    });
-    if (!outcome) throw new PreviewFailure("DAMAGE_PREVIEW_CHECKPOINT_UNAVAILABLE", "The reviewed checkpoint is unavailable.");
-    record.status = "complete";
-    record.progress.percent = 100;
-  } catch (error) {
-    const reason = controller.signal.reason ?? error;
-    record.status = reason instanceof ArchiveImageOwnershipError && reason.code === "WRITER_NOT_QUIESCENT" && record.commands.length === 0 ? "waiting_for_checkpoint_or_ownership" : record.artifacts.length > 0 ? "partial" : record.cancellationRequested || options.access.damagePreviews.find(record.id)?.cancellationRequested ? "cancelled" : options.signal.aborted ? "interrupted" : "failed";
-    record.reason = { code: reason instanceof PreviewFailure || reason instanceof ArchiveImageOwnershipError ? reason.code : reason instanceof DamagePreviewUnrepresentableError ? "DAMAGE_PREVIEW_UNREPRESENTABLE" : "DAMAGE_PREVIEW_GENERATION_FAILED", message: reason instanceof PreviewFailure || reason instanceof DamagePreviewUnrepresentableError ? reason.message : "Preview generation did not complete. No conclusion about damage can be drawn." };
-  } finally { clearInterval(monitor); }
-  options.access.damagePreviews.update(record);
+      if (!outcome) throw new PreviewFailure("DAMAGE_PREVIEW_CHECKPOINT_UNAVAILABLE", "The reviewed checkpoint is unavailable.");
+      record.status = "complete";
+      record.progress.percent = 100;
+    } catch (error) {
+      const reason = controller.signal.reason ?? error;
+      record.status = reason instanceof ArchiveImageOwnershipError && reason.code === "WRITER_NOT_QUIESCENT" && record.commands.length === 0 ? "waiting_for_checkpoint_or_ownership" : record.artifacts.length > 0 ? "partial" : record.cancellationRequested || options.access.damagePreviews.find(record.id)?.cancellationRequested ? "cancelled" : options.signal.aborted ? "interrupted" : "failed";
+      record.reason = { code: reason instanceof PreviewFailure || reason instanceof ArchiveImageOwnershipError ? reason.code : reason instanceof DamagePreviewUnrepresentableError ? "DAMAGE_PREVIEW_UNREPRESENTABLE" : "DAMAGE_PREVIEW_GENERATION_FAILED", message: reason instanceof PreviewFailure || reason instanceof DamagePreviewUnrepresentableError ? reason.message : "Preview generation did not complete. No conclusion about damage can be drawn." };
+    } finally { clearInterval(monitor); }
+    options.access.damagePreviews.update(record);
+  } finally { execution.release(); }
 }
 export async function runDamagePreviewWorker(options: Options & { pollIntervalMs: number; log(message: string): void }) {
   while (!options.signal.aborted) {

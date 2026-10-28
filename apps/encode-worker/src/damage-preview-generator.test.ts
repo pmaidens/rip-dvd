@@ -41,3 +41,13 @@ it.skipIf(!available)("scans a synthetic DVD and generates a playable canonical 
     expect((await generator.versions()).handbrake).toMatch(/1\.9\.2/);
   } });
 });
+
+it.skipIf(!available)("measures video packet coverage when a longer audio tail inflates container duration", async () => {
+  const root = mkdtempSync(join(tmpdir(), "preview-video-coverage-")); roots.push(root);
+  const path = join(root, "audio-tail.mkv");
+  execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-t", "1", "-i", "testsrc2=s=64x64:r=10", "-f", "lavfi", "-t", "4", "-i", "sine=frequency=440:sample_rate=48000", "-c:v", "ffv1", "-c:a", "pcm_s16le", path], { stdio: "pipe" });
+  const media = await createDamagePreviewGenerator().inspect(path);
+  expect(media).toMatchObject({ videoCount: 1, audioCount: 1 });
+  expect(media.durationMilliseconds).toBeGreaterThanOrEqual(900);
+  expect(media.durationMilliseconds).toBeLessThanOrEqual(1_100);
+});

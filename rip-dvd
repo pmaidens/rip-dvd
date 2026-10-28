@@ -17,7 +17,7 @@ if [ "$#" -eq 5 ] && [ "$1" = "damage-preview" ] && [ "$2" = "export" ] && [ "$4
         exit 2
     fi
     umask 077
-    export_directory=$(mktemp -d "${TMPDIR:-/tmp}/rip-dvd-preview-export.XXXXXX")
+    export_directory=$(mktemp -d "$(dirname "$destination")/.rip-dvd-preview-export.XXXXXX")
     export_container="rip-dvd-preview-export-$(basename "$export_directory" | tr '[:upper:].' '[:lower:]-')"
     cleanup_export() {
         docker rm --force "$export_container" >/dev/null 2>&1 || true

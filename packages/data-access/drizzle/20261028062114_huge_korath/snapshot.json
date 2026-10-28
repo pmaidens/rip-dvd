@@ -1,7 +1,7 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "fd727a7f-d062-4413-bce7-156d3a11dca7",
+  "id": "e426d0b0-8667-4542-8d65-a94f60e14cb4",
   "prevIds": [
     "b8b5b09e-cb8b-4ae2-9409-d7616bdeb200"
   ],
@@ -9794,6 +9794,12 @@
       "name": "corrected_encode_publication_authorities_id_not_null",
       "entityType": "checks",
       "table": "corrected_encode_publication_authorities"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "damage_previews_id_not_null",
+      "entityType": "checks",
+      "table": "damage_previews"
     },
     {
       "value": "\"status\" in ('queued', 'waiting_for_checkpoint_or_ownership', 'generating', 'complete', 'failed', 'cancelled', 'interrupted', 'partial')",

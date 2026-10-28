@@ -5,11 +5,13 @@ CREATE TABLE `damage_previews` (
 	`record` text NOT NULL,
 	`created_at` integer NOT NULL,
 	CONSTRAINT `fk_damage_previews_original_disc_archive_id_original_disc_archives_id_fk` FOREIGN KEY (`original_disc_archive_id`) REFERENCES `original_disc_archives`(`id`) ON DELETE RESTRICT,
+	CONSTRAINT "damage_previews_id_not_null" CHECK("id" is not null),
 	CONSTRAINT "damage_previews_status_check" CHECK("status" in ('queued', 'waiting_for_checkpoint_or_ownership', 'generating', 'complete', 'failed', 'cancelled', 'interrupted', 'partial')),
 	CONSTRAINT "damage_previews_record_check" CHECK(json_valid("record") and json_extract("record", '$.id') = "id" and json_extract("record", '$.status') = "status")
 );
 --> statement-breakpoint
-CREATE INDEX `damage_previews_queue_idx` ON `damage_previews` (`status`,`created_at`,`id`);--> statement-breakpoint
+CREATE INDEX `damage_previews_queue_idx` ON `damage_previews` (`status`,`created_at`,`id`);
+--> statement-breakpoint
 CREATE TRIGGER `damage_previews_provenance_immutable`
 BEFORE UPDATE ON `damage_previews`
 WHEN NEW.`id` <> OLD.`id`

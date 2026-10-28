@@ -1,3 +1,4 @@
+import { assertKernelFlock } from "./kernel-process-lock.js";
 import { enterArchiveImageAdmission } from "./archive-image-admission.js";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -687,17 +688,7 @@ function createNodeLockBackend(
     },
     assertHeld(descriptor, _lockPath, mode) {
       try {
-        const evidence = readFileSync(
-          `/proc/self/fdinfo/${descriptor}`,
-          "utf8",
-        );
-        const heldModes = [...evidence.matchAll(
-          /^lock:\s+\d+:\s+FLOCK\s+ADVISORY\s+(READ|WRITE)\b/gm,
-        )].map((match) => match[1]);
-        const expected = mode === "exclusive" ? "WRITE" : "READ";
-        if (heldModes.length !== 1 || heldModes[0] !== expected) {
-          throw new Error("Descriptor does not hold the expected flock");
-        }
+        assertKernelFlock(descriptor, mode);
       } catch (cause) {
         throw cause instanceof ArchiveImageOwnershipError
           ? cause

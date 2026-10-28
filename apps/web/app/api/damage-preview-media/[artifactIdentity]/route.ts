@@ -1,5 +1,5 @@
 import { Readable } from "node:stream";
-import { openDamagePreviewArtifact, InvalidDamagePreviewInputError, DamagePreviewRejectedError } from "@rip-dvd/application";
+import { inspectDamagePreview, openDamagePreviewArtifact, InvalidDamagePreviewInputError, DamagePreviewRejectedError } from "@rip-dvd/application";
 import { RecordNotFoundError, type DataAccess } from "@rip-dvd/data-access";
 import { getDataAccess } from "../../../../lib/data-access";
 
@@ -10,13 +10,18 @@ export const runtime = "nodejs";
 export async function createDamagePreviewMediaRoute(request: Request, identity: string, getAccess: () => DataAccess = getDataAccess) {
   if (request.method !== "GET" || new URL(request.url).search !== "") return Response.json({ error: { code: "INVALID_ARGUMENTS" } }, { status: 400 });
   try {
-    const { file, artifact, record } = await openDamagePreviewArtifact(getAccess(), identity);
+    const access = getAccess();
+    const { file, artifact, record } = await openDamagePreviewArtifact(access, identity);
+    let inspection;
+    try { inspection = await inspectDamagePreview(access, record.id); }
+    catch (error) { await file.close(); throw error; }
     const stream = file.createReadStream({ start: 0, autoClose: true });
     return new Response(Readable.toWeb(stream) as ReadableStream<Uint8Array>, { headers: {
       "Content-Type": artifact.mediaType, "Content-Length": String(artifact.sizeBytes),
       "Content-Disposition": `attachment; filename="damage-preview-${record.id}.mkv"`,
       "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
-      "X-Damage-Preview-Status": record.status,
+      "X-Damage-Preview-Status": inspection.status,
+      "X-Damage-Preview-Generation-Status": inspection.generationStatus,
     } });
   } catch (error) {
     const status = error instanceof InvalidDamagePreviewInputError ? 400 : error instanceof RecordNotFoundError || error instanceof DamagePreviewRejectedError ? 404 : 503;

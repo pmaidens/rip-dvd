@@ -13,9 +13,10 @@ open new-format Archive Job admission or record Title Damage Acceptance.
 
 The Encode worker runs a separate preview loop. A preview takes an exclusive
 image-read interval and passes the locked descriptor to its path verifier and
-HandBrake processes. An owner-only process-identity queue orders ordinary
-readers and writers waiting behind it. The image lock remains authoritative:
-removing a dead parent's queue ticket never releases a surviving helper's lock.
+HandBrake processes. An owner-only kernel-lock queue orders ordinary
+readers and writers waiting behind it. Ticket and worker-execution locks prove liveness across container PID namespaces.
+The image lock remains authoritative:
+removing an unlocked dead parent's queue ticket never releases a surviving helper's lock.
 A preview has no clip-length cap. Ordinary contention starts a two-minute grace;
 Recovery Stop and changed Recovery state interrupt it immediately. Process
 closure is proven before the preview returns its interval and the oldest
@@ -27,8 +28,8 @@ multi-angle, multi-PGC and other unrepresentable paths explicitly. The title sca
 then checks chapter boundaries and selected audio and subtitle streams.
 Generation uses the versioned intended HandBrake preset and canonical MKV.
 Each interval group produces an artifact with a retained command, tool versions,
-stream choices, checksum, requested seek and probed duration. The coverage method
-is qualified as HandBrake seek plus probed sample duration. Incomplete coverage
+stream choices, checksum, requested seek and probed video-packet coverage. The coverage method
+is qualified as HandBrake seek plus video-packet timestamps. Incomplete coverage
 or interrupted finalized media remains partial. Empty and undecodable files
 are never successful evidence about damage.
 
@@ -43,7 +44,8 @@ versions do not change Title Damage Acceptance.
 The public JSON CLI and HTTP adapters call the same operations. Canonical media
 exports use artifact identity and checksum verification. The installed Compose
 wrapper uses Docker's file transport to place bytes at the executing caller's
-chosen path, including with a remote daemon; no caller bind mount or server-local
+chosen path, including with a remote daemon. Staging beside the destination
+also supports a caller destination on another filesystem; no caller bind mount or server-local
 path substitutes for that transfer. JSON stdout contains metadata only. The web
 offers canonical downloads through the deployment's operator authentication
 boundary. Browser Viewing Renditions, retention cleanup, recreation and

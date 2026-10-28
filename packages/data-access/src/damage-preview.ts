@@ -7,7 +7,7 @@ export interface DamagePreviewArtifact {
   mediaType: "video/x-matroska";
   coverage: { startMilliseconds: number; endMilliseconds: number };
   durationMilliseconds: number;
-  coverageMethod?: "handbrake_seek_and_probed_duration";
+  coverageMethod?: "handbrake_seek_and_probed_video_packets";
 }
 export interface DamagePreviewRecord {
   id: string;

@@ -121,12 +121,16 @@ export async function exportDamagePreview(access: DataAccess, identity: string, 
         const read = await file.read(buffer, 0, buffer.length, position);
         if (read.bytesRead === 0) break;
         const chunk = buffer.subarray(0, read.bytesRead);
-        hash.update(chunk); await output.write(chunk); position += read.bytesRead;
+        hash.update(chunk);
+        await output.writeFile(chunk);
+        position += read.bytesRead;
       }
       if (position !== artifact.sizeBytes || hash.digest("hex") !== artifact.sha256) throw new Error("Preview media changed during export.");
+      if ((await output.stat()).size !== artifact.sizeBytes) throw new Error("Canonical export was not written completely.");
       await output.sync();
     } finally { await output.close(); }
+    const preview = await inspectDamagePreview(access, record.id, ownership);
     await link(temporary, target);
-    return { artifactIdentity: identity, mediaType: artifact.mediaType, sizeBytes: artifact.sizeBytes, path: target, preview: await inspectDamagePreview(access, record.id, ownership) };
+    return { artifactIdentity: identity, mediaType: artifact.mediaType, sizeBytes: artifact.sizeBytes, path: target, preview };
   } finally { await file.close(); await unlink(temporary).catch(() => undefined); }
 }

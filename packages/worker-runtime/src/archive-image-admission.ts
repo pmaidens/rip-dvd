@@ -1,21 +1,11 @@
+import { acquireKernelProcessLock, inspectKernelProcessLock, type KernelProcessLock } from "./kernel-process-lock.js";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants, closeSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync, renameSync, lstatSync, type Stats } from "node:fs";
+import { constants, closeSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync, renameSync, lstatSync, unlinkSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
-interface Ticket { id: string; pid: number; processIdentity: string; preview: boolean; waiting: boolean; urgent: boolean }
-export function archiveProcessIdentity(pid: number): string | null {
-  if (process.platform !== "linux") {
-    try { process.kill(pid, 0); return String(pid); } catch { return null; }
-  }
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-    if (fields[0] === "Z") return null;
-    return `${readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim()}:${fields[19]}`;
-  } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
-}
+interface Ticket { id: string; preview: boolean; waiting: boolean; urgent: boolean }
 function privateMetadata(metadata: Stats, directory = false) {
   if ((directory ? !metadata.isDirectory() : !metadata.isFile()) || metadata.uid !== process.geteuid?.() || (metadata.mode & 0o077) !== 0) throw new Error("Unsafe archive admission state.");
 }
@@ -31,9 +21,12 @@ export async function enterArchiveImageAdmission(input: {
   if (directoryMetadata.isSymbolicLink()) throw new Error("Unsafe archive admission directory.");
   const guardPath = join(input.directory, "guard");
   const descriptor = openSync(guardPath, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
-  privateMetadata(fstatSync(descriptor));
+  try { privateMetadata(fstatSync(descriptor)); } catch (error) { closeSync(descriptor); throw error; }
   const queuePath = join(input.directory, "queue.json");
-  const ticket: Ticket = { id: randomUUID(), pid: process.pid, processIdentity: archiveProcessIdentity(process.pid)!, preview: input.preview, waiting: false, urgent: input.urgent };
+  const ticket: Ticket = { id: randomUUID(), preview: input.preview, waiting: false, urgent: input.urgent };
+  const ticketPath = (id: string) => join(input.directory, `ticket-${id}`);
+  let ticketLock: KernelProcessLock;
+  try { ticketLock = acquireKernelProcessLock(ticketPath(ticket.id)); } catch (error) { closeSync(descriptor); throw error; }
   let localQueue: Ticket[] = [];
   function editQueue(edit: (queue: Ticket[]) => void): boolean {
     const named = lstatSync(guardPath);
@@ -48,11 +41,16 @@ export async function enterArchiveImageAdmission(input: {
         try { privateMetadata(fstatSync(file)); queue = JSON.parse(readFileSync(file, "utf8")) as Ticket[]; }
         finally { closeSync(file); }
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-      if (!Array.isArray(queue) || queue.some((entry) => !Number.isSafeInteger(entry.pid) || typeof entry.processIdentity !== "string" || typeof entry.id !== "string")) throw new Error("Invalid archive admission queue.");
-      queue = queue.filter((entry) => archiveProcessIdentity(entry.pid) === entry.processIdentity);
+      if (!Array.isArray(queue) || queue.some((entry) => typeof entry.id !== "string" || !/^[a-f0-9-]{36}$/.test(entry.id))) throw new Error("Invalid archive admission queue.");
+      queue = queue.filter((entry) => {
+        const state = entry.id === ticket.id ? "held" : inspectKernelProcessLock(ticketPath(entry.id));
+        if (state === "unknown") throw new Error("Archive admission liveness cannot be proved.");
+        return state === "held";
+      });
+      ticketLock.assertHeld();
       edit(queue);
       const temporary = join(input.directory, `${ticket.id}.tmp`);
-      writeFileSync(temporary, JSON.stringify(queue), { mode: 0o600 });
+      writeFileSync(temporary, JSON.stringify(queue), { mode: 0o600, flag: "wx" });
       renameSync(temporary, queuePath);
       localQueue = queue;
       return true;
@@ -65,9 +63,17 @@ export async function enterArchiveImageAdmission(input: {
   let registered = false;
   async function release() {
     if (monitor) clearInterval(monitor);
+    let removed = !registered;
     try {
       if (registered) while (!editQueue((queue) => { const index = queue.findIndex((entry) => entry.id === ticket.id); if (index >= 0) queue.splice(index, 1); })) await delay(10);
-    } finally { closeSync(descriptor); }
+      removed = true;
+    } finally {
+      ticketLock.release();
+      closeSync(descriptor);
+      // Queue removal commits first. A crash can leave an unreferenced ticket,
+      // but never a referenced missing ticket that would obscure liveness.
+      if (removed) unlinkSync(ticketPath(ticket.id));
+    }
   }
   try {
     while (true) {

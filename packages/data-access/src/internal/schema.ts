@@ -2784,6 +2784,7 @@ export const damagePreviews = sqliteTable("damage_previews", {
   record: text("record").notNull(),
   createdAt: integer("created_at").notNull(),
 }, (table) => [
+  check("damage_previews_id_not_null", sql`${table.id} is not null`),
   check("damage_previews_status_check", sql`${table.status} in ('queued', 'waiting_for_checkpoint_or_ownership', 'generating', 'complete', 'failed', 'cancelled', 'interrupted', 'partial')`),
   check("damage_previews_record_check", sql`json_valid(${table.record}) and json_extract(${table.record}, '$.id') = ${table.id} and json_extract(${table.record}, '$.status') = ${table.status}`),
   index("damage_previews_queue_idx").on(table.status, table.createdAt, table.id),

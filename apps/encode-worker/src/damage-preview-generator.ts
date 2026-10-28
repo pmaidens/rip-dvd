@@ -24,6 +24,35 @@ async function readPreviewTitle(arguments_: string[], descriptor: number, signal
     if (signal.aborted) abort();
   });
 }
+async function videoPacketCoverage(path: string): Promise<{ startMilliseconds: number; endMilliseconds: number }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_packets", "-show_entries", "packet=pts_time,duration_time", "-of", "csv=p=0", path], { shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    let pending = "", start = Infinity, end = -Infinity;
+    let failure: unknown;
+    const line = (text: string) => {
+      const [pts, duration] = text.trim().split(",");
+      if (!pts || pts === "N/A") return;
+      const timestamp = Number(pts), length = Number(duration);
+      if (!Number.isFinite(timestamp)) return;
+      start = Math.min(start, timestamp);
+      end = Math.max(end, timestamp + (Number.isFinite(length) && length > 0 ? length : 0));
+    };
+    child.stdout!.on("data", (chunk: Buffer) => {
+      pending += chunk.toString();
+      let boundary: number;
+      while ((boundary = pending.indexOf("\n")) >= 0) { line(pending.slice(0, boundary)); pending = pending.slice(boundary + 1); }
+      if (pending.length > 1_024) { failure = new Error("Video packet timing is unrepresentable."); child.kill("SIGKILL"); }
+    });
+    child.stderr!.resume();
+    const timeout = setTimeout(() => { failure = new Error("Video coverage probing timed out."); child.kill("SIGKILL"); }, 60_000);
+    child.once("error", (error) => { failure = error; });
+    child.once("close", (code) => {
+      clearTimeout(timeout); if (pending) line(pending);
+      if (failure || code !== 0 || !Number.isFinite(end - start) || end <= start) reject(failure ?? new Error("Video coverage is unavailable."));
+      else resolve({ startMilliseconds: start * 1_000, endMilliseconds: end * 1_000 });
+    });
+  });
+}
 export interface PreviewSourceTitle {
   durationMilliseconds: number;
   chapterDurations: number[];
@@ -34,6 +63,7 @@ export interface PreviewSourceTitle {
   selectedPath: { programNumber: number; cellNumber: number; vobId: number; cellId: number }[];
 }
 export interface PreviewMediaInspection {
+  videoStartMilliseconds: number;
   durationMilliseconds: number;
   videoCount: number;
   audioCount: number;
@@ -81,12 +111,16 @@ export function createDamagePreviewGenerator(runner: HandBrakeRunner = nodeHandB
     generate: (request) => runner.run(request),
     async inspect(path) {
       const { stdout } = await execute("ffprobe", ["-v", "error", "-show_format", "-show_streams", "-of", "json", path], { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 });
-      const media = JSON.parse(stdout) as { format?: { duration?: string; format_name?: string }; streams?: { codec_type: string }[] };
-      const durationMilliseconds = Number(media.format?.duration) * 1_000;
+      const media = JSON.parse(stdout) as { format?: { duration?: string; format_name?: string; start_time?: string }; streams?: { codec_type: string }[] };
+      const coverage = await videoPacketCoverage(path);
+      const durationMilliseconds = coverage.endMilliseconds - coverage.startMilliseconds;
+      const origin = Number(media.format?.start_time ?? 0) * 1_000;
+      if (!Number.isFinite(origin)) throw new Error("Sample timeline origin is unavailable.");
+      const videoStartMilliseconds = Math.max(0, coverage.startMilliseconds - origin);
       if (!media.format?.format_name?.split(",").includes("matroska") || !Number.isFinite(durationMilliseconds) || durationMilliseconds <= 0) throw new Error("Preview is not a playable canonical MKV.");
       // A real bounded decode distinguishes an indexed file from playable media.
       await execute("ffmpeg", ["-v", "error", "-xerror", "-i", path, "-t", "2", "-map", "0:v:0", "-f", "null", "-"], { timeout: 60_000, maxBuffer: 65_536 });
-      return { durationMilliseconds, videoCount: media.streams?.filter((item) => item.codec_type === "video").length ?? 0, audioCount: media.streams?.filter((item) => item.codec_type === "audio").length ?? 0, subtitleCount: media.streams?.filter((item) => item.codec_type === "subtitle").length ?? 0 };
+      return { durationMilliseconds, videoStartMilliseconds, videoCount: media.streams?.filter((item) => item.codec_type === "video").length ?? 0, audioCount: media.streams?.filter((item) => item.codec_type === "audio").length ?? 0, subtitleCount: media.streams?.filter((item) => item.codec_type === "subtitle").length ?? 0 };
     },
     whenInactive: (path) => runner.whenInactive?.(path) ?? Promise.resolve(),
     requireInactive(path) {

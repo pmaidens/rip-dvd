@@ -150,4 +150,4 @@ export async function runConfiguredAsyncWorker(
   }
 }
 
-export { archiveProcessIdentity } from "./archive-image-admission.js";
+export { acquireKernelProcessLock, inspectKernelProcessLock, type KernelProcessLock } from "./kernel-process-lock.js";

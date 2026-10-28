@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync } from "node:fs";
+import { open, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { createOperatorWorkflowFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
@@ -6,7 +7,7 @@ import { seedDamagePreview } from "../../../../../operator-cli/src/damage-previe
 import { advanceCommittedArchiveEvidence } from "../../../../../operator-cli/src/archive-evidence.test-support.js";
 import { pollDamagePreviews } from "../../../../../encode-worker/src/damage-preview-worker.js";
 import type { DamagePreviewGenerator } from "../../../../../encode-worker/src/damage-preview-generator.js";
-import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import { createArchiveImageOwnership, acquireKernelProcessLock } from "@rip-dvd/worker-runtime";
 import type { DamagePreviewInspection, DamagePreviewAvailability } from "@rip-dvd/application";
 import { createDamagePreviewRoute } from "./route";
 import { createDamagePreviewMediaRoute } from "../../damage-preview-media/[artifactIdentity]/route";
@@ -19,7 +20,7 @@ function media(overrides: Partial<DamagePreviewGenerator> = {}): DamagePreviewGe
     versions: async () => ({ handbrake: "synthetic-handbrake-v1", ffprobe: "synthetic-probe-v1" }),
     scan: async () => ({ navigation: { videoTitleSetNumber: 1, titleSetTitleNumber: 1, programChainNumber: 1 }, selectedPath: [{ programNumber: 1, cellNumber: 1, vobId: 1, cellId: 1 }], durationMilliseconds: 500_000, chapterDurations: [125_000, 125_000, 125_000, 125_000], audio: [1], subtitles: [], angleCount: 1 }),
     async generate(request) { writeFileSync(request.outputPath, bytes); request.onOutput("Encoding: task 1 of 1, 100.00 %"); },
-    inspect: async (path) => ({ durationMilliseconds: path.endsWith("0.partial.mkv") ? 45_000 : 339_000, videoCount: 1, audioCount: 1, subtitleCount: 0 }),
+    inspect: async (path) => ({ videoStartMilliseconds: 0, durationMilliseconds: path.endsWith("0.partial.mkv") ? 45_000 : 339_000, videoCount: 1, audioCount: 1, subtitleCount: 0 }),
     requireInactive() {}, whenInactive: async () => undefined,
     ...overrides,
   };
@@ -71,6 +72,21 @@ it("generates every reviewed group, retains provenance, exports canonical bytes 
     const exported = await fixture.run(["damage-preview", "export", identity, "--destination", destination]);
     expect(exported).toMatchObject({ exitCode: 0, result: { artifactIdentity: identity, mediaType: "video/x-matroska", sizeBytes: bytes.length, path: destination } });
     expect(readFileSync(destination)).toEqual(bytes);
+    const prototypeProbe = await open(join(fixture.operatorHostPath, "write-probe"), "wx");
+    const prototype = Object.getPrototypeOf(prototypeProbe);
+    await prototypeProbe.close();
+    const originalWrite = prototype.write;
+    const shortWrite = vi.spyOn(prototype, "write").mockImplementation(async function(this: FileHandle, ...arguments_: unknown[]) {
+      const buffer = arguments_[0];
+      if (!Buffer.isBuffer(buffer)) throw new Error("Synthetic short-write fixture expects bytes.");
+      return originalWrite.call(this, buffer.subarray(0, Math.max(1, Math.floor(buffer.length / 2))));
+    });
+    try {
+      const shortDestination = join(fixture.operatorHostPath, "complete-buffer-export.mkv");
+      expect(await fixture.run(["damage-preview", "export", identity, "--destination", shortDestination])).toMatchObject({ exitCode: 0 });
+      expect(readFileSync(shortDestination)).toEqual(bytes);
+    } finally { shortWrite.mockRestore(); }
+
     expect(exported.stdout).not.toContain(bytes.toString());
     expect(await fixture.run(["damage-preview", "export", identity, "--destination", destination])).toMatchObject({ exitCode: 1 });
     const response = await createDamagePreviewMediaRoute(new Request("http://localhost/api/damage-preview-media/test"), identity, () => access);
@@ -78,6 +94,10 @@ it("generates every reviewed group, retains provenance, exports canonical bytes 
     expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
     advanceCommittedArchiveEvidence(fixture, seeded.manifest, { publishFilesystemCheckpoint: true });
     expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ status: "outdated", generationStatus: "complete", provenance: { checkpoint: { manifestRevision: 1 } } });
+    const outdatedDownload = await createDamagePreviewMediaRoute(new Request("http://localhost/api/damage-preview-media/test"), identity, () => access);
+    expect(outdatedDownload.headers.get("X-Damage-Preview-Status")).toBe("outdated");
+    expect(outdatedDownload.headers.get("X-Damage-Preview-Generation-Status")).toBe("complete");
+    await outdatedDownload.arrayBuffer();
     expect((await request()).result).toMatchObject({ id, status: "queued" });
   } finally { access.close(); }
 });
@@ -87,7 +107,10 @@ it("keeps actual partial coverage, failures and cancellation distinct, and never
     try {
       const id = ((await request()).result as DamagePreviewInspection).id;
       if (outcome === "interrupted") {
-        const record = access.damagePreviews.claim("damage-preview:99999999:synthetic-dead")!;
+        const workerId = "11111111-2222-4333-8444-666666666666";
+        const lock = acquireKernelProcessLock(join(fixture.mediaLibraryPath, ".damage-previews", ".workers", `${workerId}.lock`));
+        lock.release();
+        const record = access.damagePreviews.claim(workerId)!;
         expect(record.id).toBe(id);
         await generate();
         await generate();
@@ -95,7 +118,7 @@ it("keeps actual partial coverage, failures and cancellation distinct, and never
         await generate(media({
           ...(outcome === "failed" ? { scan: async () => { throw new Error("synthetic scan failure"); } } : {}),
           ...(outcome === "cancelled" ? { generate: async (request) => { await fixture.run(["damage-preview", "cancel", id, "--key", "synthetic-cancel-running"]); throw request.signal.reason ?? new Error("cancelled"); } } : {}),
-          ...(outcome === "partial" ? { inspect: async () => ({ durationMilliseconds: 1_000, videoCount: 1, audioCount: 1, subtitleCount: 0 }) } : {}),
+          ...(outcome === "partial" ? { inspect: async () => ({ videoStartMilliseconds: 0, durationMilliseconds: 1_000, videoCount: 1, audioCount: 1, subtitleCount: 0 }) } : {}),
         }));
       }
       const inspected = (await fixture.run(["damage-preview", "inspect", id])).result as DamagePreviewInspection;
