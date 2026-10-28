@@ -1,4 +1,8 @@
 import type { CommittedDvdCheckpointEvidence, DvdTitleIdentityObservationInput, UnreadableSectorRange } from "@rip-dvd/data-access";
+import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import type { DamagePreviewInspection } from "@rip-dvd/application";
 import { DatabaseSync } from "node:sqlite";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { seedCommittedArchiveEvidence } from "./archive-evidence.test-support.js";
@@ -80,4 +84,22 @@ export async function seedDamagePreview(
       encodingProfileId: profile.id,
     },
   };
+}
+
+export async function seedRetainedDamagePreview(fixture: ReturnType<typeof createOperatorWorkflowFixture>) {
+  const seeded = await seedDamagePreview(fixture);
+  const review = (await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify(seeded.input)])).result as { preflightToken: string };
+  const requested = await fixture.run(["damage-preview", "request", seeded.archive.id, "--key", "synthetic-retained-request", "--json", JSON.stringify({ selection: seeded.input, preflightToken: review.preflightToken })]);
+  const id = (requested.result as { id: string }).id;
+  const access = fixture.openAccess();
+  const record = access.damagePreviews.claim("synthetic-retention-worker")!;
+  const directory = join(fixture.mediaLibraryPath, ".damage-previews", id);
+  mkdirSync(directory, { recursive: true });
+  const path = join(directory, "0.mkv");
+  const bytes = Buffer.from("synthetic finalized preview bytes"); writeFileSync(path, bytes);
+  record.status = "complete";
+  record.artifacts = [{ identity: `damage-preview-v1.${id}.0`, path, sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.length, mediaType: "video/x-matroska", durationMilliseconds: 45_000, coverage: { startMilliseconds: 0, endMilliseconds: 45_000 } }];
+  access.damagePreviews.update(record); access.close();
+  const inspect = async () => (await fixture.run(["damage-preview", "inspect", id])).result as DamagePreviewInspection;
+  return { fixture, seeded, id, path, bytes, inspect };
 }

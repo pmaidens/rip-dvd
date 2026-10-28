@@ -102,5 +102,43 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
       });
     },
     update,
+    touchMedia(id) {
+      sqlite.prepare("UPDATE damage_previews SET record = json_set(record, '$.mediaLastAccessedAt', ?) WHERE id = ? AND json_extract(record, '$.mediaRemoval') IS NULL").run(now().toISOString(), id);
+    },
+    removeMedia<T>(input: Parameters<DamagePreviewAccess["removeMedia"]>[0], prepare: Parameters<DamagePreviewAccess["removeMedia"]>[1], remove: Parameters<DamagePreviewAccess["removeMedia"]>[2], present: (record: DamagePreviewRecord) => T): T {
+      const operation = `damage-preview-${input.cause}`;
+      const semantic = JSON.stringify({ id: input.id, mediaToken: input.mediaToken });
+      const pending = transaction(() => {
+        const previous = sqlite.prepare("SELECT operation, semantic_input, outcome FROM mutation_invocations WHERE key = ?").get(input.mutationKey);
+        if (previous) {
+          if (previous.operation !== operation || previous.semantic_input !== semantic) throw new MutationKeyConflictError();
+          return JSON.parse(String(previous.outcome)) as { record: DamagePreviewRecord; result?: T };
+        }
+        const record = find(input.id);
+        if (!record) throw new RecordNotFoundError("Damage Preview", input.id);
+        const expectedFiles = prepare(record);
+        record.mediaLastAccessedAt ??= record.updatedAt;
+        if (record.mediaRemoval) record.mediaRemovalHistory = [...record.mediaRemovalHistory ?? [], record.mediaRemoval];
+        record.mediaRemoval = { mutationKey: input.mutationKey, mediaToken: input.mediaToken, cause: input.cause, state: "pending", startedAt: now().toISOString(), completedAt: null, expectedFiles, outcomes: [] };
+        update(record);
+        const receipt: { record: DamagePreviewRecord; result?: T } = { record };
+        sqlite.prepare("INSERT INTO mutation_invocations (key, operation, semantic_input, outcome, created_at) VALUES (?, ?, ?, ?, ?)").run(input.mutationKey, operation, semantic, JSON.stringify(receipt), now().getTime());
+        return receipt;
+      });
+      if (Object.hasOwn(pending, "result")) return pending.result!;
+      // The durable intent fences exports before any unlink. A crash can resume
+      // this same invocation; an absent file is a recorded cleanup outcome.
+      const outcomes = remove(pending.record);
+      return transaction(() => {
+        const previous = JSON.parse(String(sqlite.prepare("SELECT outcome FROM mutation_invocations WHERE key = ?").get(input.mutationKey)!.outcome)) as { record: DamagePreviewRecord; result?: T };
+        if (Object.hasOwn(previous, "result")) return previous.result!;
+        const record = find(input.id)!;
+        record.mediaRemoval = { ...pending.record.mediaRemoval!, state: outcomes.some((item) => item.outcome === "failed") ? "failed" : "complete", completedAt: now().toISOString(), outcomes };
+        update(record);
+        const result = present(record);
+        sqlite.prepare("UPDATE mutation_invocations SET outcome = ? WHERE key = ?").run(JSON.stringify({ record, result }), input.mutationKey);
+        return result;
+      });
+    },
   };
 }

@@ -8,6 +8,7 @@ import { ArchiveImageOwnershipError, defaultArchiveImageOwnership, type ArchiveI
 import { parseMutationKey } from "./mutation-key.js";
 import { InvalidDamagePreviewInputError, parseDamagePreviewInput } from "./damage-preview-input.js";
 import { inspectDamagePreviewAvailability, reviewDamagePreviewEvidence } from "./damage-preview.js";
+import { damagePreviewMediaState, damagePreviewRetention, presentDamagePreviewMedia } from "./damage-preview-media-state.js";
 
 type Review = Awaited<ReturnType<typeof inspectDamagePreviewAvailability>>;
 export class DamagePreviewRejectedError extends Error {
@@ -29,9 +30,10 @@ function previewInputIdentity(review: Review): string {
     recovery: request.recovery ? { id: request.recovery.id, attemptId: request.recovery.attemptId } : null,
   });
 }
-export function presentDamagePreview(record: DamagePreviewRecord, current?: Review, superseded = false) {
+export function presentDamagePreview(record: DamagePreviewRecord, current?: Review, superseded = false, retention: ReturnType<typeof damagePreviewRetention> | null = null) {
   const review = JSON.parse(record.reviewJson) as Review;
   const outdated = superseded || (current !== undefined && previewInputIdentity(current) !== previewInputIdentity(review));
+  const { files, ...media } = presentDamagePreviewMedia(record, retention);
   return {
     schemaVersion: 1, id: record.id, originalDiscArchiveId: record.originalDiscArchiveId,
     status: outdated && record.artifacts.length > 0 ? "outdated" : record.status,
@@ -44,7 +46,8 @@ export function presentDamagePreview(record: DamagePreviewRecord, current?: Revi
       reason: { code: "DAMAGE_PREVIEW_PLANNED_RECOVERY_PAUSE", message: "Recovery finishes its admitted command and durable checkpoint, then pauses for this preview. This planned pause does not start the contention grace period." },
     } : null,
     reason: record.reason, cancellationRequested: record.cancellationRequested, progress: record.progress,
-    artifacts: record.artifacts.map(({ path: _path, ...artifact }) => artifact),
+    artifacts: record.artifacts.map(({ path: _path, ...artifact }, index) => ({ ...artifact, media: files[index]!.media })),
+    media,
     provenance: { preflightToken: record.preflightToken, ...review.reviewedRequest, clips: review.clips, commands: record.commands, streamMapping: record.streamMapping, toolVersions: record.toolVersions, deviations: record.deviations },
     createdAt: record.createdAt, updatedAt: record.updatedAt,
     warning: "A sample illustrates decoding at the recorded interval. Failed, empty or partial media never means no damage.",
@@ -98,8 +101,7 @@ export async function requestDamagePreview(access: DataAccess, archiveId: string
   if (record === null) record = submit(null);
   return presentDamagePreview(record);
 }
-export async function inspectDamagePreview(access: DataAccess, id: string, _ownership?: ArchiveImageOwnership) {
-  const record = requiredRecord(access, id);
+export function describeDamagePreview(access: DataAccess, record: DamagePreviewRecord) {
   const saved = (JSON.parse(record.reviewJson) as Review).reviewedRequest!.checkpoint!;
   const current = access.readConsistentSnapshot((snapshot) => reviewDamagePreviewEvidence(snapshot, record.originalDiscArchiveId, parseDamagePreviewInput(JSON.parse(record.selectionJson)), {
     id: saved.manifestId, revision: saved.manifestRevision, manifestDigest: saved.manifestDigest, publicationDigest: saved.publicationDigest!,
@@ -108,7 +110,12 @@ export async function inspectDamagePreview(access: DataAccess, id: string, _owne
   const history = access.damagePreviews.list(record.originalDiscArchiveId);
   const newerIntent = history.slice(history.findIndex((candidate) => candidate.id === record.id) + 1).filter((candidate) =>
     (JSON.parse(candidate.reviewJson) as Review).reviewedRequest?.title?.titleIdentityId === originalTitle).at(-1);
-  return presentDamagePreview(record, current, newerIntent !== undefined && previewInputIdentity(JSON.parse(newerIntent.reviewJson) as Review) !== previewInputIdentity(JSON.parse(record.reviewJson) as Review));
+  const superseded = newerIntent !== undefined && previewInputIdentity(JSON.parse(newerIntent.reviewJson) as Review) !== previewInputIdentity(JSON.parse(record.reviewJson) as Review);
+  const outdated = superseded || previewInputIdentity(current) !== previewInputIdentity(JSON.parse(record.reviewJson) as Review);
+  return presentDamagePreview(record, current, superseded, damagePreviewRetention(access, record, outdated));
+}
+export async function inspectDamagePreview(access: DataAccess, id: string, _ownership?: ArchiveImageOwnership) {
+  return describeDamagePreview(access, requiredRecord(access, id));
 }
 export function cancelDamagePreview(access: DataAccess, id: string, mutationKey: unknown) {
   return presentDamagePreview(access.damagePreviews.cancel(id, parseMutationKey(mutationKey)));
@@ -129,6 +136,8 @@ export function damagePreviewArtifact(access: DataAccess, identity: string) {
   const record = requiredRecord(access, match[1]!);
   const artifact = record.artifacts.find((item) => item.identity === identity);
   if (!artifact) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_MEDIA_UNAVAILABLE", [{ code: "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE", message: "This request has no retained canonical media with that identity." }]);
+  const state = damagePreviewMediaState(record).files[record.artifacts.indexOf(artifact)]!;
+  if (state.media.reasonCode) throw new DamagePreviewRejectedError(state.media.reasonCode, [{ code: state.media.reasonCode, message: "Canonical media is absent or unavailable. Original provenance and generation results remain in request inspection." }], describeDamagePreview(access, record));
   return { record, artifact };
 }
 export async function openDamagePreviewArtifact(access: DataAccess, identity: string) {
@@ -140,6 +149,7 @@ export async function openDamagePreviewArtifact(access: DataAccess, identity: st
     const hash = createHash("sha256");
     for await (const chunk of file.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk);
     if (hash.digest("hex") !== artifact.sha256) throw new Error("Preview media identity changed.");
+    access.damagePreviews.touchMedia(record.id);
     return { file, record, artifact };
   } catch (error) { await file.close(); throw error; }
 }

@@ -20,6 +20,16 @@ export interface DamagePreviewStreamMapping {
   audio: DamagePreviewResolvedAudio[];
   subtitles: DamagePreviewResolvedSubtitle[];
 }
+export interface DamagePreviewMediaRemoval {
+  mutationKey: string;
+  mediaToken: string;
+  cause: "explicit_deletion" | "idle_cleanup";
+  state: "pending" | "complete" | "failed";
+  startedAt: string;
+  completedAt: string | null;
+  expectedFiles: { identity: string; filesystemIdentity: string | null }[];
+  outcomes: { identity: string; outcome: "removed" | "already_missing" | "failed"; reasonCode: string | null }[];
+}
 export interface DamagePreviewRecord {
   id: string;
   originalDiscArchiveId: string;
@@ -39,6 +49,10 @@ export interface DamagePreviewRecord {
   toolVersions: Record<string, string>;
   deviations: string[];
   artifacts: DamagePreviewArtifact[];
+  // Optional for requests written before media retention was introduced.
+  mediaLastAccessedAt?: string;
+  mediaRemoval?: DamagePreviewMediaRemoval;
+  mediaRemovalHistory?: DamagePreviewMediaRemoval[];
   createdAt: string;
   updatedAt: string;
 }
@@ -51,4 +65,9 @@ export interface DamagePreviewAccess {
   cancel(id: string, mutationKey: string): DamagePreviewRecord;
   claim(workerId: string): DamagePreviewRecord | null;
   update(record: DamagePreviewRecord): void;
+  touchMedia(id: string): void;
+  removeMedia<T>(input: { id: string; mutationKey: string; mediaToken: string; cause: DamagePreviewMediaRemoval["cause"] },
+    prepare: (record: DamagePreviewRecord) => DamagePreviewMediaRemoval["expectedFiles"],
+    remove: (record: DamagePreviewRecord) => DamagePreviewMediaRemoval["outcomes"],
+    present: (record: DamagePreviewRecord) => T): T;
 }
