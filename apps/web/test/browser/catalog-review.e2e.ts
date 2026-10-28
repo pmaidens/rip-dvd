@@ -307,6 +307,15 @@ test("Title Damage paging retrieves evidence beyond the review summary", async (
     .toBeVisible();
   await expect(titleDamage.getByText(/Archive-level source-continuity risk: 2/))
     .toBeVisible();
+  await expect(titleDamage.getByText("Estimated affected playback", {
+    exact: true,
+  })).toBeVisible();
+  await expect(titleDamage.getByText(/Occurrence 1: 01:02.000 to 01:05.000/))
+    .toBeVisible();
+  await expect(titleDamage.getByText(/Occurrence 2: 02:00.000 to 02:10.000/))
+    .toBeVisible();
+  await expect(titleDamage.getByText(/Coverage: source span/)).toBeVisible();
+  await expect(titleDamage.getByText(/Coverage: whole-cell span/)).toBeVisible();
   await expect(titleDamage.getByText("DVD title 21", { exact: true }))
     .toHaveCount(0);
   const loadMore = titleDamage.getByRole("button", {

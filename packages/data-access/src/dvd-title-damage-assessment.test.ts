@@ -99,6 +99,42 @@ function assessmentInput(): DvdTitleDamageAssessmentInput {
           policyVersion: "synthetic-title-map-v1",
           unknownReasons: [],
         },
+        timingEvidence: {
+          policyVersion: "dvd-title-damage-timing-v1",
+          occurrences: [
+            {
+              playbackOccurrence: 1,
+              spans: [
+                {
+                  sourceRange: { startLba: 15, sectorCount: 3 },
+                  startMilliseconds: 1_000,
+                  endMilliseconds: 2_000,
+                  timingMethod: "synthetic-vobu-timing-v1",
+                  coverage: "source_span",
+                },
+                {
+                  sourceRange: { startLba: 18, sectorCount: 2 },
+                  startMilliseconds: 1_800,
+                  endMilliseconds: 2_500,
+                  timingMethod: "synthetic-vobu-timing-v1",
+                  coverage: "source_span",
+                },
+              ],
+              unknownReasons: [],
+            },
+            {
+              playbackOccurrence: 2,
+              spans: [{
+                sourceRange: { startLba: 15, sectorCount: 5 },
+                startMilliseconds: 5_000,
+                endMilliseconds: 6_000,
+                timingMethod: "synthetic-vobu-timing-v1",
+                coverage: "source_span",
+              }],
+              unknownReasons: [],
+            },
+          ],
+        },
       },
       {
         titleIdentityId: titleId(2),
@@ -123,6 +159,20 @@ function assessmentInput(): DvdTitleDamageAssessmentInput {
           state: "complete",
           policyVersion: "synthetic-title-map-v1",
           unknownReasons: [],
+        },
+        timingEvidence: {
+          policyVersion: "dvd-title-damage-timing-v1",
+          occurrences: [{
+            playbackOccurrence: 1,
+            spans: [{
+              sourceRange: { startLba: 10, sectorCount: 50 },
+              startMilliseconds: 0,
+              endMilliseconds: 12_000,
+              timingMethod: "synthetic-cell-timing-v1",
+              coverage: "whole_cell",
+            }],
+            unknownReasons: [],
+          }],
         },
       },
       {
@@ -151,6 +201,17 @@ function assessmentInput(): DvdTitleDamageAssessmentInput {
             message: "The selected path has unresolved navigation.",
           }],
         },
+        timingEvidence: {
+          policyVersion: "dvd-title-damage-timing-v1",
+          occurrences: [{
+            playbackOccurrence: 1,
+            spans: [],
+            unknownReasons: [{
+              code: "TIMING_UNAVAILABLE",
+              message: "Playback timing is unavailable for this path.",
+            }],
+          }],
+        },
       },
     ],
   };
@@ -177,12 +238,47 @@ describe("createDvdTitleDamageAssessment", () => {
         verificationOutcome: "mismatch",
       }],
       sourceContinuityRiskSectorCount: 3,
+      estimatedAffectedPlayback: {
+        policyVersion: "dvd-title-damage-timing-v1",
+        intervals: [
+          {
+            playbackOccurrence: 1,
+            startMilliseconds: 1_000,
+            endMilliseconds: 2_500,
+            timingMethods: ["synthetic-vobu-timing-v1"],
+            coverage: "source_span",
+            sourceRanges: [{
+              startLba: 15,
+              sectorCount: 5,
+              classification: "individually_failed",
+            }],
+          },
+          {
+            playbackOccurrence: 2,
+            startMilliseconds: 5_000,
+            endMilliseconds: 6_000,
+            timingMethods: ["synthetic-vobu-timing-v1"],
+            coverage: "source_span",
+          },
+        ],
+        unknownCoverage: [],
+      },
     });
     expect(assessment.items[1]).toMatchObject({
       uniqueSourceSectorCount: 60,
       unrecoveredUniqueSourceSectorCount: 5,
       titleMissingSourcePercentage: 5 / 60 * 100,
       sourceContinuityRiskSectorCount: 3,
+      estimatedAffectedPlayback: {
+        intervals: [{
+          playbackOccurrence: 1,
+          startMilliseconds: 0,
+          endMilliseconds: 12_000,
+          timingMethods: ["synthetic-cell-timing-v1"],
+          coverage: "whole_cell",
+        }],
+        unknownCoverage: [],
+      },
     });
     expect(assessment.items[2]).toMatchObject({
       uniqueSourceSectorCount: null,
@@ -258,9 +354,67 @@ describe("createDvdTitleDamageAssessment", () => {
 
   it("keeps a stable identity for semantically identical evidence", () => {
     const first = createDvdTitleDamageAssessment(assessmentInput());
-    const second = createDvdTitleDamageAssessment(assessmentInput());
+    const reordered = assessmentInput();
+    reordered.titles.reverse();
+    const repeatedTitle = reordered.titles.find((title) =>
+      title.titleIdentityId === titleId(1)
+    )!;
+    const timingEvidence = repeatedTitle.timingEvidence!;
+    repeatedTitle.timingEvidence = {
+      ...timingEvidence,
+      occurrences: [...timingEvidence.occurrences].reverse().map(
+        (occurrence) => ({
+          ...occurrence,
+          spans: occurrence.playbackOccurrence === 1
+            ? [
+              ...occurrence.spans,
+              occurrence.spans[0]!,
+            ].reverse()
+            : occurrence.spans,
+        }),
+      ),
+    };
+    const second = createDvdTitleDamageAssessment(reordered);
 
     expect(second.id).toBe(first.id);
+  });
+
+  it("prefers source-span timing when coarse cell evidence covers the same gap", () => {
+    const input = assessmentInput();
+    input.titles = [input.titles[0]!];
+    input.titles[0]!.timingEvidence = {
+      policyVersion: "dvd-title-damage-timing-v1",
+      occurrences: [{
+        playbackOccurrence: 1,
+        spans: [
+          {
+            sourceRange: { startLba: 10, sectorCount: 100 },
+            startMilliseconds: 0,
+            endMilliseconds: 10_000,
+            timingMethod: "synthetic-cell-timing-v1",
+            coverage: "whole_cell",
+          },
+          {
+            sourceRange: { startLba: 15, sectorCount: 5 },
+            startMilliseconds: 1_000,
+            endMilliseconds: 2_500,
+            timingMethod: "synthetic-vobu-timing-v1",
+            coverage: "source_span",
+          },
+        ],
+        unknownReasons: [],
+      }],
+    };
+
+    expect(
+      createDvdTitleDamageAssessment(input).items[0]
+        ?.estimatedAffectedPlayback?.intervals,
+    ).toMatchObject([{
+      startMilliseconds: 1_000,
+      endMilliseconds: 2_500,
+      timingMethods: ["synthetic-vobu-timing-v1"],
+      coverage: "source_span",
+    }]);
   });
 
   it("changes identity when confirmed-source continuity changes", () => {
@@ -279,6 +433,65 @@ describe("createDvdTitleDamageAssessment", () => {
     expect(second.id).not.toBe(first.id);
   });
 
+  it("changes identity when the timing method changes", () => {
+    const first = createDvdTitleDamageAssessment(assessmentInput());
+    const changed = assessmentInput();
+    const firstTitle = changed.titles[0]!;
+    const timingEvidence = firstTitle.timingEvidence!;
+    changed.titles[0] = {
+      ...firstTitle,
+      timingEvidence: {
+        ...timingEvidence,
+        occurrences: timingEvidence.occurrences.map((occurrence, index) =>
+          index === 0
+            ? {
+              ...occurrence,
+              spans: occurrence.spans.map((span, spanIndex) =>
+                spanIndex === 0
+                  ? { ...span, timingMethod: "synthetic-vobu-timing-v2" }
+                  : span
+              ),
+            }
+            : occurrence
+        ),
+      },
+    };
+
+    expect(createDvdTitleDamageAssessment(changed).id).not.toBe(first.id);
+  });
+
+  it("reports missing source with unavailable timing as unknown coverage", () => {
+    const input = assessmentInput();
+    input.titles[0]!.timingEvidence = {
+      policyVersion: "dvd-title-damage-timing-v1",
+      occurrences: [{
+        playbackOccurrence: 1,
+        spans: [],
+        unknownReasons: [{
+          code: "TIMING_UNAVAILABLE",
+          message: "No trustworthy timing evidence places this source gap.",
+        }],
+      }],
+    };
+
+    expect(
+      createDvdTitleDamageAssessment(input).items[0]
+        ?.estimatedAffectedPlayback?.unknownCoverage,
+    ).toEqual([{
+      playbackOccurrence: 1,
+      unrecoveredSourceSectorCount: 5,
+      unrecoveredSourceRanges: [{
+        startLba: 15,
+        sectorCount: 5,
+        classification: "individually_failed",
+      }],
+      reasons: [{
+        code: "TIMING_UNAVAILABLE",
+        message: "No trustworthy timing evidence places this source gap.",
+      }],
+    }]);
+  });
+
   it("requires a decision for continuity risk after all source recovers", () => {
     const input = assessmentInput();
     input.unrecoveredSourceRanges = [];
@@ -294,6 +507,10 @@ describe("createDvdTitleDamageAssessment", () => {
   it("preserves the identity of evidence written before continuity tracking", () => {
     const input = assessmentInput();
     input.sourceContinuity = null;
+    input.titles = input.titles.map((title) => ({
+      ...title,
+      timingEvidence: null,
+    }));
 
     expect(createDvdTitleDamageAssessment(input).id).toBe(
       "dvd-title-damage-assessment:fab9e13eea28b55b987e759b64c23368a7b88e1d39f069c2ab798f364d1648a8",

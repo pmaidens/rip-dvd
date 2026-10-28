@@ -9,6 +9,20 @@ function percentage(value: number): string {
   return `${value.toFixed(2).replace(/\.00$/, "")}%`;
 }
 
+function playbackTime(milliseconds: number): string {
+  const wholeSeconds = Math.floor(milliseconds / 1_000);
+  const hours = Math.floor(wholeSeconds / 3_600);
+  const minutes = Math.floor(wholeSeconds % 3_600 / 60);
+  const seconds = wholeSeconds % 60;
+  const fraction = milliseconds % 1_000;
+  const clock = [
+    ...(hours > 0 ? [String(hours).padStart(2, "0")] : []),
+    String(minutes).padStart(2, "0"),
+    String(seconds).padStart(2, "0"),
+  ].join(":");
+  return `${clock}.${String(fraction).padStart(3, "0")}`;
+}
+
 interface TitleDamagePagingState {
   items: CatalogReviewTitleDamage["items"];
   nextCursor: string | null;
@@ -217,6 +231,72 @@ function CatalogReviewTitleDamageEvidenceGeneration({
                   } unique source sectors).
                 </span>
               )}
+              {item.estimatedAffectedPlayback !== null &&
+                  (item.estimatedAffectedPlayback.intervals.length > 0 ||
+                    item.estimatedAffectedPlayback.unknownCoverage.length > 0)
+                ? (
+                  <div>
+                    <p>Estimated affected playback</p>
+                    <p>
+                      These intervals locate source associated with the gap.
+                      They do not claim exact playback lost or bound decoder
+                      effects.
+                    </p>
+                    {item.estimatedAffectedPlayback.intervals.length > 0
+                      ? (
+                        <ul>
+                          {item.estimatedAffectedPlayback.intervals.map(
+                            (interval) => (
+                              <li
+                                key={JSON.stringify([
+                                  interval.playbackOccurrence,
+                                  interval.startMilliseconds,
+                                  interval.endMilliseconds,
+                                  interval.timingMethods,
+                                ])}
+                              >
+                                Occurrence {interval.playbackOccurrence}: {
+                                  playbackTime(interval.startMilliseconds)
+                                } to {playbackTime(interval.endMilliseconds)}.
+                                Timing {interval.timingMethods.length === 1
+                                  ? "method"
+                                  : "methods"}: {
+                                  interval.timingMethods.join(", ")
+                                }. Coverage: {interval.coverage === "whole_cell"
+                                  ? "whole-cell span"
+                                  : "source span"}.
+                              </li>
+                            ),
+                          )}
+                        </ul>
+                      )
+                      : null}
+                    {item.estimatedAffectedPlayback.unknownCoverage.map(
+                      (unknown) => (
+                        <div key={unknown.playbackOccurrence}>
+                          <p>
+                            Occurrence {unknown.playbackOccurrence}: playback
+                            location unknown for {
+                              unknown.unrecoveredSourceSectorCount
+                            } unrecovered source {
+                              unknown.unrecoveredSourceSectorCount === 1
+                                ? "sector"
+                                : "sectors"
+                            }.
+                          </p>
+                          <ul>
+                            {unknown.reasons.map((reason) => (
+                              <li key={`${reason.code}\0${reason.message}`}>
+                                {reason.message}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ),
+                    )}
+                  </div>
+                )
+                : null}
             </li>
           ))}
         </ul>

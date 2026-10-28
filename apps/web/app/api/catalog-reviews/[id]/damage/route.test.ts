@@ -68,6 +68,58 @@ it("uses the shared paged Title Damage operation and rejects another revision's 
     titleMissingSourcePercentage: 0,
     knownSourceContinuityRiskRanges: [],
     sourceContinuityRiskSectorCount: 0,
+    timingEvidence: {
+      policyVersion: "dvd-title-damage-timing-v1",
+      occurrences: [
+        {
+          playbackOccurrence: 1,
+          spans: [{
+            sourceRange: { startLba: number * 10, sectorCount: 1 },
+            startMilliseconds: 1_000,
+            endMilliseconds: 2_000,
+            timingMethod: "synthetic-vobu-timing-v1",
+            coverage: "source_span",
+          }],
+          unknownReasons: [],
+        },
+        {
+          playbackOccurrence: 2,
+          spans: [],
+          unknownReasons: [{
+            code: "TIMING_UNAVAILABLE",
+            message: "Playback timing is unavailable.",
+          }],
+        },
+      ],
+    },
+    estimatedAffectedPlayback: {
+      policyVersion: "dvd-title-damage-timing-v1",
+      intervals: [{
+        playbackOccurrence: 1,
+        startMilliseconds: 1_000,
+        endMilliseconds: 2_000,
+        timingMethods: ["synthetic-vobu-timing-v1"],
+        coverage: "source_span",
+        sourceRanges: [{
+          startLba: number * 10,
+          sectorCount: 1,
+          classification: "skipped_untested",
+        }],
+      }],
+      unknownCoverage: [{
+        playbackOccurrence: 2,
+        unrecoveredSourceSectorCount: 1,
+        unrecoveredSourceRanges: [{
+          startLba: number * 10 + 1,
+          sectorCount: 1,
+          classification: "skipped_untested",
+        }],
+        reasons: [{
+          code: "TIMING_UNAVAILABLE",
+          message: "Playback timing is unavailable.",
+        }],
+      }],
+    },
   });
   const inspection = {
     schemaVersion: 1,
@@ -134,7 +186,20 @@ it("uses the shared paged Title Damage operation and rejects another revision's 
   await expect(response.json()).resolves.toEqual(direct);
   expect(direct).toMatchObject({
     checkpointRevision: 1,
-    items: [{ displayTitleNumber: 1 }],
+    items: [{
+      displayTitleNumber: 1,
+      estimatedAffectedPlayback: {
+        intervals: [{
+          playbackOccurrence: 1,
+          timingMethods: ["synthetic-vobu-timing-v1"],
+          coverage: "source_span",
+        }],
+        unknownCoverage: [{
+          playbackOccurrence: 2,
+          reasons: [{ code: "TIMING_UNAVAILABLE" }],
+        }],
+      },
+    }],
     truncated: true,
     nextCursor: expect.any(String),
   });

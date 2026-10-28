@@ -19,6 +19,8 @@ export const DVD_TITLE_DAMAGE_ASSESSMENT_POLICY_VERSION =
   "dvd-title-damage-assessment-v1" as const;
 export const DVD_TITLE_DAMAGE_SOURCE_CONTINUITY_POLICY_VERSION =
   "dvd-title-source-continuity-v1" as const;
+export const DVD_TITLE_DAMAGE_TIMING_POLICY_VERSION =
+  "dvd-title-damage-timing-v1" as const;
 
 const ASSESSMENT_ID_DOMAIN = "rip-dvd:dvd-title-damage-assessment:v1\0";
 
@@ -33,6 +35,36 @@ export interface DvdTitleSourceReference extends UnreadableSectorRange {
 export interface DvdTitleDamageUnknownReason {
   code: string;
   message: string;
+}
+
+export type DvdTitleDamageTimingCoverage = "source_span" | "whole_cell";
+
+export interface DvdTitleDamageTimingSpan {
+  sourceRange: UnreadableSectorRange;
+  startMilliseconds: number;
+  endMilliseconds: number;
+  timingMethod: string;
+  coverage: DvdTitleDamageTimingCoverage;
+}
+
+export interface DvdTitleDamageTimingOccurrenceInput {
+  playbackOccurrence: number;
+  spans: readonly DvdTitleDamageTimingSpan[];
+  unknownReasons: readonly DvdTitleDamageUnknownReason[];
+}
+
+export interface DvdTitleDamageTimingInput {
+  policyVersion: typeof DVD_TITLE_DAMAGE_TIMING_POLICY_VERSION;
+  occurrences: readonly DvdTitleDamageTimingOccurrenceInput[];
+}
+
+export interface DvdTitleDamageAffectedPlaybackInterval {
+  playbackOccurrence: number;
+  startMilliseconds: number;
+  endMilliseconds: number;
+  timingMethods: readonly string[];
+  coverage: DvdTitleDamageTimingCoverage;
+  sourceRanges: readonly DvdUnrecoveredSourceRange[];
 }
 
 export interface DvdTitleDamageMappingInput {
@@ -51,6 +83,8 @@ export interface DvdTitleDamageMappingInput {
     policyVersion: string;
     unknownReasons: readonly DvdTitleDamageUnknownReason[];
   };
+  /** Null only while decoding assessments written before timing tracking. */
+  timingEvidence: DvdTitleDamageTimingInput | null;
 }
 
 export interface DvdTitleDamageSourceContinuityProvenance {
@@ -113,6 +147,17 @@ export interface DvdTitleDamageAssessmentItem {
   knownSourceContinuityRiskRanges:
     readonly DvdTitleDamageSourceContinuityRiskRange[];
   sourceContinuityRiskSectorCount: number;
+  timingEvidence: DvdTitleDamageTimingInput | null;
+  estimatedAffectedPlayback: {
+    policyVersion: typeof DVD_TITLE_DAMAGE_TIMING_POLICY_VERSION;
+    intervals: readonly DvdTitleDamageAffectedPlaybackInterval[];
+    unknownCoverage: readonly {
+      playbackOccurrence: number;
+      unrecoveredSourceSectorCount: number;
+      unrecoveredSourceRanges: readonly DvdUnrecoveredSourceRange[];
+      reasons: readonly DvdTitleDamageUnknownReason[];
+    }[];
+  } | null;
 }
 
 export interface DvdTitleDamageAssessment {
@@ -147,6 +192,12 @@ export interface RecordDvdTitleDamageMappingInput {
   titleIdentityObservationId: DvdTitleIdentityObservationId;
   sourceReferences: readonly DvdTitleSourceReference[];
   mappingCoverage: DvdTitleDamageMappingInput["mappingCoverage"];
+  timingEvidence: DvdTitleDamageTimingInput;
+}
+
+export interface PersistedDvdTitleDamageMappingInput
+  extends Omit<RecordDvdTitleDamageMappingInput, "timingEvidence"> {
+  timingEvidence?: DvdTitleDamageTimingInput;
 }
 
 export interface RecordDvdTitleDamageAssessmentInput {
@@ -380,6 +431,218 @@ function sectorCount(ranges: readonly UnreadableSectorRange[]): number {
   return ranges.reduce((total, range) => total + range.sectorCount, 0);
 }
 
+function normalizeUnrecoveredSourceRanges(
+  ranges: readonly DvdUnrecoveredSourceRange[],
+): readonly DvdUnrecoveredSourceRange[] {
+  const ordered = [...ranges].sort((left, right) =>
+    left.startLba - right.startLba ||
+    left.sectorCount - right.sectorCount ||
+    compareCodeUnits(left.classification, right.classification)
+  );
+  const normalized: DvdUnrecoveredSourceRange[] = [];
+  for (const range of ordered) {
+    const previous = normalized.at(-1);
+    if (
+      previous === undefined ||
+      previous.classification !== range.classification ||
+      range.startLba > previous.startLba + previous.sectorCount
+    ) {
+      normalized.push({ ...range });
+      continue;
+    }
+    const endLbaExclusive = Math.max(
+      previous.startLba + previous.sectorCount,
+      range.startLba + range.sectorCount,
+    );
+    previous.sectorCount = endLbaExclusive - previous.startLba;
+  }
+  return normalized;
+}
+
+function normalizeTimingEvidence(
+  input: DvdTitleDamageTimingInput | null,
+  uniqueSourceRanges: readonly UnreadableSectorRange[],
+  acceptedEndLbaExclusive: number,
+): DvdTitleDamageTimingInput | null {
+  if (input === null) return null;
+  if (
+    input.policyVersion !== DVD_TITLE_DAMAGE_TIMING_POLICY_VERSION ||
+    !Array.isArray(input.occurrences) || input.occurrences.length === 0
+  ) {
+    throw new TypeError("Invalid DVD title timing evidence");
+  }
+  const occurrenceNumbers = new Set<number>();
+  const occurrences = input.occurrences.map(
+    (occurrence: DvdTitleDamageTimingOccurrenceInput) => {
+      const playbackOccurrence = positiveSafeInteger(
+        occurrence.playbackOccurrence,
+        "DVD title playback occurrence",
+      );
+      if (
+        occurrenceNumbers.has(playbackOccurrence) ||
+        !Array.isArray(occurrence.spans)
+      ) {
+        throw new TypeError(
+          "Invalid or repeated DVD title playback occurrence",
+        );
+      }
+      occurrenceNumbers.add(playbackOccurrence);
+      const spans: DvdTitleDamageTimingSpan[] = occurrence.spans.map(
+        (span: DvdTitleDamageTimingSpan) => {
+          const sourceRange = normalizeRanges(
+            [span.sourceRange],
+            acceptedEndLbaExclusive,
+            "DVD title timing source range",
+          )[0]!;
+          if (subtractRanges([sourceRange], uniqueSourceRanges).length > 0) {
+            throw new TypeError(
+              "DVD title timing evidence falls outside the title source map",
+            );
+          }
+          const startMilliseconds = nonnegativeSafeInteger(
+            span.startMilliseconds,
+            "DVD title timing start",
+          );
+          const endMilliseconds = positiveSafeInteger(
+            span.endMilliseconds,
+            "DVD title timing end",
+          );
+          if (
+            endMilliseconds <= startMilliseconds ||
+            !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(span.timingMethod) ||
+            (span.coverage !== "source_span" &&
+              span.coverage !== "whole_cell")
+          ) {
+            throw new TypeError("Invalid DVD title timing span");
+          }
+          return {
+            sourceRange,
+            startMilliseconds,
+            endMilliseconds,
+            timingMethod: span.timingMethod,
+            coverage: span.coverage,
+          };
+        },
+      ).sort((left, right) =>
+        (left.coverage === right.coverage
+          ? 0
+          : left.coverage === "source_span"
+          ? -1
+          : 1) ||
+        left.sourceRange.startLba - right.sourceRange.startLba ||
+        left.sourceRange.sectorCount - right.sourceRange.sectorCount ||
+        left.startMilliseconds - right.startMilliseconds ||
+        left.endMilliseconds - right.endMilliseconds ||
+        compareCodeUnits(left.timingMethod, right.timingMethod)
+      );
+      const deduplicatedSpans = [
+        ...new Map<string, DvdTitleDamageTimingSpan>(
+          spans.map((span) => [canonicalJson(span), span]),
+        ).values(),
+      ];
+      return {
+        playbackOccurrence,
+        spans: deduplicatedSpans,
+        unknownReasons: validateUnknownReasons(occurrence.unknownReasons),
+      };
+    },
+  ).sort((left, right) =>
+    left.playbackOccurrence - right.playbackOccurrence
+  );
+  return { policyVersion: input.policyVersion, occurrences };
+}
+
+function mergeAffectedPlaybackIntervals(
+  candidates: readonly DvdTitleDamageAffectedPlaybackInterval[],
+): readonly DvdTitleDamageAffectedPlaybackInterval[] {
+  const ordered = [...candidates].sort((left, right) =>
+    left.playbackOccurrence - right.playbackOccurrence ||
+    left.startMilliseconds - right.startMilliseconds ||
+    left.endMilliseconds - right.endMilliseconds ||
+    compareCodeUnits(left.coverage, right.coverage)
+  );
+  const merged: DvdTitleDamageAffectedPlaybackInterval[] = [];
+  for (const candidate of ordered) {
+    const previous = merged.at(-1);
+    if (
+      previous === undefined ||
+      previous.playbackOccurrence !== candidate.playbackOccurrence ||
+      candidate.startMilliseconds >= previous.endMilliseconds
+    ) {
+      merged.push({
+        ...candidate,
+        timingMethods: [...candidate.timingMethods],
+        sourceRanges: [...candidate.sourceRanges],
+      });
+      continue;
+    }
+    previous.endMilliseconds = Math.max(
+      previous.endMilliseconds,
+      candidate.endMilliseconds,
+    );
+    previous.coverage = previous.coverage === "whole_cell" ||
+        candidate.coverage === "whole_cell"
+      ? "whole_cell"
+      : "source_span";
+    previous.timingMethods = [...new Set([
+      ...previous.timingMethods,
+      ...candidate.timingMethods,
+    ])].sort(compareCodeUnits);
+    previous.sourceRanges = normalizeUnrecoveredSourceRanges([
+      ...previous.sourceRanges,
+      ...candidate.sourceRanges,
+    ]);
+  }
+  return merged;
+}
+
+function estimateAffectedPlayback(
+  timingEvidence: DvdTitleDamageTimingInput | null,
+  knownUnrecoveredSourceRanges: readonly DvdUnrecoveredSourceRange[],
+): DvdTitleDamageAssessmentItem["estimatedAffectedPlayback"] {
+  if (timingEvidence === null) return null;
+  const candidates: DvdTitleDamageAffectedPlaybackInterval[] = [];
+  const unknownCoverage: NonNullable<
+    DvdTitleDamageAssessmentItem["estimatedAffectedPlayback"]
+  >["unknownCoverage"][number][] = [];
+  for (const occurrence of timingEvidence.occurrences) {
+    let remaining: readonly DvdUnrecoveredSourceRange[] = [
+      ...knownUnrecoveredSourceRanges,
+    ];
+    for (const span of occurrence.spans) {
+      const matched = intersections([span.sourceRange], remaining);
+      if (matched.length === 0) continue;
+      candidates.push({
+        playbackOccurrence: occurrence.playbackOccurrence,
+        startMilliseconds: span.startMilliseconds,
+        endMilliseconds: span.endMilliseconds,
+        timingMethods: [span.timingMethod],
+        coverage: span.coverage,
+        sourceRanges: matched,
+      });
+      remaining = subtractRanges(remaining, [span.sourceRange]);
+    }
+    if (remaining.length > 0) {
+      if (occurrence.unknownReasons.length === 0) {
+        throw new TypeError(
+          "Unplaced DVD title damage requires an explicit timing reason",
+        );
+      }
+      unknownCoverage.push({
+        playbackOccurrence: occurrence.playbackOccurrence,
+        unrecoveredSourceSectorCount: sectorCount(remaining),
+        unrecoveredSourceRanges: remaining,
+        reasons: occurrence.unknownReasons,
+      });
+    }
+  }
+  return {
+    policyVersion: timingEvidence.policyVersion,
+    intervals: mergeAffectedPlaybackIntervals(candidates),
+    unknownCoverage,
+  };
+}
+
 function normalizeSourceContinuity(
   input: DvdTitleDamageSourceContinuityInput | null,
   acceptedEndLbaExclusive: number,
@@ -568,6 +831,11 @@ export function createDvdTitleDamageAssessment(
       checkpoint.acceptedEndLbaExclusive,
       "DVD title source reference",
     );
+    const timingEvidence = normalizeTimingEvidence(
+      title.timingEvidence,
+      uniqueSourceRanges,
+      checkpoint.acceptedEndLbaExclusive,
+    );
     if (
       title.mappingCoverage.state !== "complete" &&
       title.mappingCoverage.state !== "partial"
@@ -629,6 +897,11 @@ export function createDvdTitleDamageAssessment(
       sourceContinuityRiskSectorCount: sectorCount(
         knownSourceContinuityRiskRanges,
       ),
+      timingEvidence,
+      estimatedAffectedPlayback: estimateAffectedPlayback(
+        timingEvidence,
+        knownUnrecoveredSourceRanges,
+      ),
     } satisfies DvdTitleDamageAssessmentItem;
   }).sort((left, right) =>
     left.displayTitleNumber - right.displayTitleNumber ||
@@ -637,6 +910,14 @@ export function createDvdTitleDamageAssessment(
       right.titleIdentityObservationId,
     )
   );
+  const timingStates = new Set(items.map((item) =>
+    item.timingEvidence === null ? "legacy" : "current"
+  ));
+  if (timingStates.size > 1) {
+    throw new TypeError(
+      "DVD Title Damage Assessment cannot mix legacy and current timing evidence",
+    );
+  }
   const knownTitleSourceInputs = items.flatMap((item) =>
     item.uniqueSourceRanges
   );
@@ -691,27 +972,47 @@ export function createDvdTitleDamageAssessment(
       item.unrecoveredUniqueSourceSectorCount === 0
     ) &&
     unknownTitleImpact.unrecoveredSourceSectorCount === 0;
-  const legacySemanticEvidence = {
+  const itemsWithoutTiming = items.map((item) => {
+    const {
+      timingEvidence: _timingEvidence,
+      estimatedAffectedPlayback: _estimatedAffectedPlayback,
+      ...untimed
+    } = item;
+    return untimed;
+  });
+  const semanticEvidenceBeforeContinuity = {
     checkpoint,
     titleIdentityReviewSetIdentity: input.titleIdentityReviewSetIdentity,
     structuralAssessmentIdentity: input.structuralAssessmentIdentity,
     structuralFindings,
-    items,
+    items: itemsWithoutTiming,
     unknownTitleImpact,
     noTitleMissingSourceProved,
   };
-  const semanticEvidence = {
-    ...legacySemanticEvidence,
+  const semanticEvidenceBeforeTiming = {
+    ...semanticEvidenceBeforeContinuity,
     sourceContinuity,
     unattributedSourceContinuityRisk,
   };
+  const semanticEvidence = {
+    ...semanticEvidenceBeforeTiming,
+    items,
+  };
   // Rows written before the Catalog mapping or source-continuity dependencies
-  // were persisted retain their original identity so they remain readable as
-  // outdated evidence. Current rows bind both dependencies into their
-  // immutable identity.
+  // or timing evidence were persisted retain their original identity so they
+  // remain readable as outdated evidence. Current rows bind every dependency
+  // into their immutable identity.
+  const hasCurrentTimingEvidence = timingStates.has("current");
+  if (sourceContinuity === null && hasCurrentTimingEvidence) {
+    throw new TypeError(
+      "Current DVD title timing evidence requires source-continuity evidence",
+    );
+  }
   const identityEvidenceBase = sourceContinuity === null
-    ? legacySemanticEvidence
-    : semanticEvidence;
+    ? semanticEvidenceBeforeContinuity
+    : hasCurrentTimingEvidence
+    ? semanticEvidence
+    : semanticEvidenceBeforeTiming;
   const identityEvidence = input.catalogMappingProjectionId === null
     ? identityEvidenceBase
     : {

@@ -152,6 +152,12 @@ source ranges include their immutable confirmation and verification provenance.
 Risk outside all known title paths remains in
 `unattributedSourceContinuityRisk`, including after Archive Integrity becomes
 `clean_read`.
+Each affected title also reports `estimatedAffectedPlayback`. Qualified
+intervals keep repeated playback occurrences separate and identify their
+timing method and either source-span or whole-cell coverage. Missing source
+that cannot be placed on the timeline remains in occurrence-specific
+`unknownCoverage`. The intervals locate affected source; they do not report
+exact playback lost or bound decoder effects.
 The default limit is 20 and the maximum is 100. A cursor stops being valid when
 the checkpoint or its current assessment changes and returns
 `TITLE_DAMAGE_CURSOR_STALE`; restart without a cursor to inspect the current

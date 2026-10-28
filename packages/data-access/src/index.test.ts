@@ -936,6 +936,20 @@ function titleIdentityObservation(
   };
 }
 
+function unavailableTitleDamageTimingEvidence() {
+  return {
+    policyVersion: "dvd-title-damage-timing-v1",
+    occurrences: [{
+      playbackOccurrence: 1,
+      spans: [],
+      unknownReasons: [{
+        code: "TIMING_UNAVAILABLE",
+        message: "Synthetic playback timing is unavailable.",
+      }],
+    }],
+  } as const;
+}
+
 function completeDiscInspection(
   access: ReturnType<typeof openTestDatabase>,
   input: {
@@ -17096,6 +17110,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         policyVersion: "synthetic-title-map-v1",
         unknownReasons: [],
       },
+      timingEvidence: unavailableTitleDamageTimingEvidence(),
     }];
     const catalogMappingProjectionId =
       dvdTitleIdentityCatalogMappingProjectionDigest(
@@ -17424,6 +17439,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
             policyVersion: "synthetic-title-map-v1",
             unknownReasons: [],
           },
+          timingEvidence: unavailableTitleDamageTimingEvidence(),
         }));
       const catalogMappingProjectionId =
         dvdTitleIdentityCatalogMappingProjectionDigest(
