@@ -5774,7 +5774,9 @@ export function createDataAccessInternal(
                 transaction,
                 originalDiscArchives.id,
               ),
-              dvdRecoveryEvidenceEncodeExclusion.forArchive(transaction),
+              options === undefined
+                ? sql`not ${dvdRecoveryEvidenceMarkerCondition(transaction, originalDiscArchives.id)}`
+                : dvdRecoveryEvidenceEncodeExclusion.forArchive(transaction),
               noWithdrawnTitleDamageAcceptanceForSelection(
                 originalDiscArchives.id,
                 encodeJobs.discSelectionId,

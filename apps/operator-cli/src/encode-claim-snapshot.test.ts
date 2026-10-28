@@ -1,3 +1,4 @@
+import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { DatabaseSync } from "node:sqlite";
 import { createApplicationOperations } from "@rip-dvd/application";
 import { seedEncodeClaim, withdrawClaimAcceptance, injectClaimRecoveryState } from "./encode-claim.test-support.js";
@@ -150,4 +151,33 @@ it("does no source-candidate scan or historical backlog materialization while ad
     expect(sourceReads).not.toHaveBeenCalled();
     expect(access.encodeJobs.listSourceClaimCandidates({ limit: 1, offset: 0 })).toEqual([]);
   } finally { vi.restoreAllMocks(); access.close(); }
+});
+
+it("claims eligible historical work ahead of a stale new-format queue entry when the source gate is enabled", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedEncodeClaim(fixture);
+  try {
+    const historical = createLegacySidecarDataAccess({ databasePath: fixture.databasePath });
+    const drive = historical.catalog.upsertOpticalDrive({ devicePath: "/dev/synthetic-mixed-drive", isPresent: true });
+    const disc = historical.catalog.registerDetectedDisc({ opticalDriveId: drive.id, discKind: "dvd", fingerprint: `sha256:${"d".repeat(64)}` });
+    historical.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    historical.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = historical.catalog.createOriginalDiscArchive({ detectedDiscId: disc.id, discKind: "dvd", archiveFormat: "iso",
+      archivePath: join(fixture.originalsLibraryPath, "synthetic-historical.iso"), fingerprint: disc.fingerprint });
+    const movie = historical.catalog.createMediaItem({ kind: "movie", title: "Synthetic historical film" });
+    const selection = historical.catalog.createDiscSelection({ originalDiscArchiveId: archive.id, mediaItemId: movie.id,
+      sourceIdentity: { kind: "main_feature" } });
+    historical.catalog.completeCatalogReview(archive.id, historical.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!.updatedAt,
+      "reviewed_with_selections");
+    const legacy = historical.encodeJobs.enqueue({ discSelectionId: selection.id, encodingProfileId: seeded.profile.id,
+      outputPath: join(fixture.mediaLibraryPath, "synthetic-historical-ready.mkv") });
+    historical.close();
+    const db = new DatabaseSync(fixture.databasePath);
+    db.prepare("UPDATE encode_jobs SET priority = 100, expected_source_decision = ? WHERE id = ?")
+      .run(JSON.stringify({ ...seeded.expectedSourceDecision, assessmentIdentity: "synthetic-stale-assessment" }), seeded.job.id);
+    db.close();
+    expect((await claimNextEncodeJob(seeded.access, "synthetic-mixed-worker", fixture.originalsLibraryPath))?.id).toBe(legacy.id);
+    expect(seeded.access.encodeJobs.listClaimSnapshots(legacy.id)).toEqual([]);
+    expect(seeded.access.encodeJobs.find(seeded.job.id)?.status).toBe("queued");
+  } finally { seeded.access.close(); }
 });
