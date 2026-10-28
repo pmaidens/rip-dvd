@@ -25,7 +25,7 @@ export function previewMediaTargets(record: DamagePreviewRecord) {
   }
   return [...paths].map(([path, identity]) => ({ path, identity, filesystemIdentity: previewMediaFilesystemIdentity(path) }));
 }
-export function damagePreviewMediaState(record: DamagePreviewRecord) {
+export function damagePreviewMediaState(record: DamagePreviewRecord, targets = previewMediaTargets(record)) {
   const removal = record.mediaRemoval ?? null;
   const removalCondition = removal === null ? null : {
     pending: { state: "removing", reasonCode: "DAMAGE_PREVIEW_MEDIA_REMOVING" },
@@ -33,13 +33,13 @@ export function damagePreviewMediaState(record: DamagePreviewRecord) {
     failed: { state: "removal_failed", reasonCode: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED" },
   }[removal.state];
   const files = record.artifacts.map((artifact) => {
-    const identity = previewMediaFilesystemIdentity(artifact.path);
+    const identity = targets.find((target) => target.identity === artifact.identity)?.filesystemIdentity ?? null;
     const media = removalCondition ?? { state: identity === null ? "missing" : "retained", reasonCode: identity === null ? "DAMAGE_PREVIEW_MEDIA_MISSING" : null };
     return { identity, media };
   });
   const state = removalCondition?.state ?? (record.artifacts.length === 0 ? "not_generated" : files.some((file) => file.media.state !== "retained") ? "missing" : "retained");
-  const targets = previewMediaTargets(record).map(({ path: _path, ...target }) => target);
-  const token = `damage-preview-media:${createHash("sha256").update(canonicalPublicationJson({ id: record.id, status: record.status, artifacts: record.artifacts, targets, lastAccessedAt: record.mediaLastAccessedAt ?? null, removal })).digest("hex")}`;
+  const identities = targets.map(({ path: _path, ...target }) => target);
+  const token = `damage-preview-media:${createHash("sha256").update(canonicalPublicationJson({ id: record.id, status: record.status, artifacts: record.artifacts, targets: identities, lastAccessedAt: record.mediaLastAccessedAt ?? null, removal })).digest("hex")}`;
   return { state, token, lastAccessedAt: record.mediaLastAccessedAt ?? record.updatedAt, removal, history: record.mediaRemovalHistory ?? [], files };
 }
 
@@ -63,8 +63,8 @@ export function damagePreviewRetention(access: ConsistentReadAccess, record: Dam
   };
 }
 
-export function presentDamagePreviewMedia(record: DamagePreviewRecord, retention: ReturnType<typeof damagePreviewRetention> | null) {
-  const { files, ...media } = damagePreviewMediaState(record);
+export function presentDamagePreviewMedia(record: DamagePreviewRecord, retention: ReturnType<typeof damagePreviewRetention> | null, targets?: ReturnType<typeof previewMediaTargets>) {
+  const { files, ...media } = damagePreviewMediaState(record, targets);
   const deletionReasons = previewGenerationActive(record) ? [{ code: "DAMAGE_PREVIEW_GENERATION_ACTIVE", message: "Cancel the preview and wait for generation to settle before removing media." }]
     : media.state === "removing" ? [{ code: "DAMAGE_PREVIEW_MEDIA_REMOVING", message: "Media removal is pending. Replay its invocation to resume it." }]
     : media.state === "removed" ? [{ code: "DAMAGE_PREVIEW_MEDIA_REMOVED", message: "Media was already removed. The request history is retained." }]

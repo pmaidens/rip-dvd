@@ -89,7 +89,7 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
     },
     update,
     touchMedia(id) {
-      sqlite.prepare("UPDATE damage_previews SET record = json_set(record, '$.mediaLastAccessedAt', ?) WHERE id = ? AND json_extract(record, '$.mediaRemoval') IS NULL").run(now().toISOString(), id);
+      return sqlite.prepare("UPDATE damage_previews SET record = json_set(record, '$.mediaLastAccessedAt', ?) WHERE id = ? AND json_extract(record, '$.mediaRemoval') IS NULL RETURNING id").get(now().toISOString(), id) !== undefined;
     },
     removeMedia<T>(input: Parameters<DamagePreviewAccess["removeMedia"]>[0], prepare: Parameters<DamagePreviewAccess["removeMedia"]>[1], remove: Parameters<DamagePreviewAccess["removeMedia"]>[2], present: (record: DamagePreviewRecord) => T): T {
       const operation = `damage-preview-${input.cause}`;

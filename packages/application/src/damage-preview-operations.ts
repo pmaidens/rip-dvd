@@ -8,7 +8,7 @@ import { ArchiveImageOwnershipError, defaultArchiveImageOwnership, type ArchiveI
 import { parseMutationKey } from "./mutation-key.js";
 import { InvalidDamagePreviewInputError, parseDamagePreviewInput } from "./damage-preview-input.js";
 import { inspectDamagePreviewAvailability, reviewDamagePreviewEvidence } from "./damage-preview.js";
-import { damagePreviewMediaState, damagePreviewRetention, presentDamagePreviewMedia } from "./damage-preview-media-state.js";
+import { damagePreviewMediaState, damagePreviewRetention, presentDamagePreviewMedia, type previewMediaTargets } from "./damage-preview-media-state.js";
 
 type Review = Awaited<ReturnType<typeof inspectDamagePreviewAvailability>>;
 export class DamagePreviewRejectedError extends Error {
@@ -21,10 +21,21 @@ function requiredRecord(access: DataAccess, id: string) {
   if (!record) throw new RecordNotFoundError("Damage Preview", id);
   return record;
 }
-export function presentDamagePreview(record: DamagePreviewRecord, current?: Review, superseded = false, retention: ReturnType<typeof damagePreviewRetention> | null = null) {
+function previewMediaInputs(review: Review) {
+  const request = review.reviewedRequest;
+  if (!request) return null;
+  const { recovery: _recovery, titleIdentityReviewSetIdentity: _reviewSet, archive, encodingProfile, ...selection } = request;
+  const { catalogRevision: _revision, ...source } = archive;
+  const { isActive: _active, ...intendedSettings } = encodingProfile ?? {};
+  return canonicalPublicationJson({ ...selection, archive: source, encodingProfile: encodingProfile === null ? null : intendedSettings });
+}
+export function presentDamagePreview(record: DamagePreviewRecord, context: {
+  outdated?: boolean; retention?: ReturnType<typeof damagePreviewRetention>;
+  mediaTargets?: ReturnType<typeof previewMediaTargets>;
+} = {}) {
   const review = JSON.parse(record.reviewJson) as Review;
-  const outdated = superseded || (current !== undefined && current.preflightToken !== record.preflightToken);
-  const { files, ...media } = presentDamagePreviewMedia(record, retention);
+  const outdated = context.outdated ?? false;
+  const { files, ...media } = presentDamagePreviewMedia(record, context.retention ?? null, context.mediaTargets);
   return {
     schemaVersion: 1, id: record.id, originalDiscArchiveId: record.originalDiscArchiveId,
     status: outdated && record.artifacts.length > 0 ? "outdated" : record.status,
@@ -72,18 +83,19 @@ export async function requestDamagePreview(access: DataAccess, archiveId: string
   if (record === null) record = submit(null);
   return presentDamagePreview(record);
 }
-export function describeDamagePreview(access: DataAccess, record: DamagePreviewRecord) {
-  const saved = (JSON.parse(record.reviewJson) as Review).reviewedRequest!.checkpoint!;
+export function describeDamagePreview(access: DataAccess, record: DamagePreviewRecord, mediaTargets?: ReturnType<typeof previewMediaTargets>) {
+  const original = JSON.parse(record.reviewJson) as Review;
+  const saved = original.reviewedRequest!.checkpoint!;
   const current = access.readConsistentSnapshot((snapshot) => reviewDamagePreviewEvidence(snapshot, record.originalDiscArchiveId, parseDamagePreviewInput(JSON.parse(record.selectionJson)), {
     id: saved.manifestId, revision: saved.manifestRevision, manifestDigest: saved.manifestDigest, publicationDigest: saved.publicationDigest!,
   }));
-  const originalTitle = (JSON.parse(record.reviewJson) as Review).reviewedRequest?.title?.titleIdentityId;
+  const originalTitle = original.reviewedRequest?.title?.titleIdentityId;
   const history = access.damagePreviews.list(record.originalDiscArchiveId);
   const newerIntent = history.slice(history.findIndex((candidate) => candidate.id === record.id) + 1).filter((candidate) =>
     (JSON.parse(candidate.reviewJson) as Review).reviewedRequest?.title?.titleIdentityId === originalTitle).at(-1);
-  const superseded = newerIntent !== undefined && newerIntent.preflightToken !== record.preflightToken;
-  const outdated = superseded || current.preflightToken !== record.preflightToken;
-  return presentDamagePreview(record, current, superseded, damagePreviewRetention(access, record, outdated));
+  const superseded = newerIntent !== undefined && previewMediaInputs(JSON.parse(newerIntent.reviewJson) as Review) !== previewMediaInputs(original);
+  const outdated = superseded || previewMediaInputs(current) !== previewMediaInputs(original);
+  return presentDamagePreview(record, { outdated, retention: damagePreviewRetention(access, record, outdated), mediaTargets });
 }
 export async function inspectDamagePreview(access: DataAccess, id: string, _ownership?: ArchiveImageOwnership) {
   return describeDamagePreview(access, requiredRecord(access, id));
@@ -120,7 +132,11 @@ export async function openDamagePreviewArtifact(access: DataAccess, identity: st
     const hash = createHash("sha256");
     for await (const chunk of file.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk);
     if (hash.digest("hex") !== artifact.sha256) throw new Error("Preview media identity changed.");
-    access.damagePreviews.touchMedia(record.id);
+    if (!access.damagePreviews.touchMedia(record.id)) {
+      const current = describeDamagePreview(access, requiredRecord(access, record.id));
+      const code = current.artifacts.find((item) => item.identity === identity)?.media.reasonCode ?? "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE";
+      throw new DamagePreviewRejectedError(code, [{ code, message: "Media removal won the access race. Inspect the retained request history." }], current);
+    }
     return { file, record, artifact };
   } catch (error) { await file.close(); throw error; }
 }
