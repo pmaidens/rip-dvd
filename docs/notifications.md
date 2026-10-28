@@ -88,14 +88,14 @@ in the owning outcome transaction. Completion requires a committed checkpoint
 with no Unrecovered Source. A clean initial save that creates completed Recovery
 queues only the Archive Job saved event. Recovery faults include a storage-fault
 pause, a failed continuation verification, a failed checkpoint reconciliation,
-and an unreconcilable Stop. An
-attention alert describes the need to inspect Recovery without claiming a new
+and an unreconcilable Stop. An attention alert describes the need to inspect Recovery without claiming a new
 terminal status. These alerts never change the completed Archive Job or fulfilled
 Archive Request.
 
-Recovery event identities distinguish the Recovery attempt and outcome.
-Reconciliation and worker restart reuse that identity, while explicit Resume
-creates a new attempt that can report a later outcome. Productive passes,
+Recovery event identities distinguish the owning transition and outcome.
+Repeated processing reuses that identity. Separate reconciliation attempts and
+Stop operations have distinct identities, while explicit Resume creates a new
+Recovery attempt that can report a later outcome. Productive passes,
 tolerable medium reads, no-progress pauses, generic polling faults, and process
 interruption alone do not queue outcome alerts. Transport uses the same
 recipient snapshot and dispatcher as Archive Job alerts. Clicking a recovery

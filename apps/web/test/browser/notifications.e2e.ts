@@ -108,7 +108,7 @@ test("opens current Recovery details from a supplied recovery notification", asy
   await page.evaluate(async () => { await navigator.serviceWorker.ready; });
   const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
   const { items } = await (await page.request.get("/api/operations?kind=archive-recoveries")).json();
-  const recovery = items[0];
+  const recovery = items.find((item: { id: string }) => item.id === "browser-damage-recovery-alert-recovery");
   expect(recovery).toBeTruthy();
   const { item: archive } = await (await page.request.get(
     `/api/operations?kind=original-disc-archives&id=${recovery.originalDiscArchiveId}`,
@@ -119,9 +119,11 @@ test("opens current Recovery details from a supplied recovery notification", asy
   await expect(page).toHaveURL(new RegExp(`/notifications/target\\?kind=original-disc-archives&id=${recovery.originalDiscArchiveId}$`));
   await expect(page.getByRole("heading", { name: "Archive Recovery", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: archive.detectedDisc.volumeLabel, exact: true })).toBeVisible();
-  await expect(page.getByText("Recovery status", { exact: true })).toBeVisible();
+  await expect(page.getByText("Current recovery status", { exact: true })).toBeVisible();
   await expect(page.getByText(recovery.recoveryStatus.replaceAll("_", " "), { exact: true })).toBeVisible();
-  await expect(page.getByText("Unrecovered Source sectors", { exact: true })).toBeVisible();
+  await expect(page.getByText("Unrecovered Source", { exact: true })).toBeVisible();
+  await expect(page.getByText("Checkpoint reconciliation status", { exact: true })).toBeVisible();
+  await expect(page.getByText("CONSISTENCY_FAULT", { exact: true })).toBeVisible();
   expect(context.pages()).toHaveLength(1);
 });
 

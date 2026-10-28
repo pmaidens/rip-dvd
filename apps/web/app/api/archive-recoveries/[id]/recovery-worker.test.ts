@@ -345,6 +345,52 @@ it("rolls back a committed fault when its recipient snapshot cannot persist", as
   }
 });
 
+it("records a later Stop fault separately after rediscovery changes the label and another browser subscribes", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture);
+  await subscribeRecoveryBrowsers(fixture);
+  const authority = await completeVerification(fixture, seeded);
+  const access = fixture.openAccess();
+  try {
+    const claim = access.archiveRecoveryWork.claim(
+      access.archiveRecoveryWork.request(seeded.recoveryId).archiveRecoveryId,
+      "synthetic-distinct-fault-worker",
+    );
+    access.archiveRecoveryWork.bindVerification(claim, authority);
+    access.archiveRecoveryWork.markFault({
+      claim, faultCode: "IMAGE_WRITE_FAILED", retainWork: false, storageFault: true,
+    });
+    const sent: NotificationPayload[] = [];
+    const sender = async (_recipient: unknown, payload: NotificationPayload) => { sent.push(payload); };
+    expect(await dispatchNotifications(access, sender)).toEqual({ accepted: 2, failed: 0 });
+    await subscribeRecoveryBrowsers(fixture, ["future"]);
+    const disc = access.catalog.listDetectedDiscs(undefined, { ids: [seeded.archive.detectedDiscId] })[0]!;
+    access.catalog.registerDetectedDisc({
+      opticalDriveId: disc.opticalDriveId, discKind: disc.discKind,
+      fingerprint: disc.fingerprint, volumeLabel: "Synthetic rediscovered disc",
+    });
+    const stop = access.archiveRecoveryWork.requestStop({
+      mutationKey: "synthetic-distinct-fault-stop",
+      archiveRecoveryId: seeded.recoveryId, attemptId: seeded.attemptId,
+    });
+    access.archiveRecoveryWork.markStopFault({
+      archiveRecoveryId: seeded.recoveryId, attemptId: seeded.attemptId,
+      stopOperationId: stop.stopOperationId!, faultCode: "CONSISTENCY_FAULT",
+    });
+    expect(await dispatchNotifications(access, sender)).toEqual({ accepted: 3, failed: 0 });
+    expect(sent[2]).toMatchObject({
+      label: "Synthetic rediscovered disc",
+      body: "Archive Recovery needs attention. Inspect the recovery for details.",
+    });
+    expect(sent[2]!.tag).not.toBe(sent[0]!.tag);
+    expect(sent[3]).toEqual(sent[2]);
+    expect(sent[4]).toEqual(sent[2]);
+  } finally {
+    access.close();
+  }
+});
+
 const syntheticAtomicWriter: DvdRecoveryAtomicWriter = {
   inspect() {
     return {
@@ -1543,6 +1589,16 @@ it("does not admit a pass while reconciliation remains unresolved", async () => 
       reconciliation,
       "CONSISTENCY_FAULT",
     );
+    expect(input.access.dvdRecoveryReconciliations.fail(
+      reconciliation, "CONSISTENCY_FAULT",
+    )).toBeNull();
+    const detail = await fixture.run(["inspect", "archive-recoveries", seeded.recoveryId]);
+    expect(detail.result).toMatchObject({ item: {
+      reconciliation: { status: "failed", failureCode: "CONSISTENCY_FAULT" },
+    } });
+    expect(await createOperationsResponse(input.access, new Request(
+      `https://operator.example/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
+    ), fixture.originalsLibraryPath).json()).toEqual(detail.result);
     expect(await pollDvdRecoveryPass(input)).toBe(false);
     expect(source.start).not.toHaveBeenCalled();
     expect((await fixture.run(["notifications", "deliveries"])).result)

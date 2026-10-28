@@ -141,8 +141,7 @@ cooperative abort do not emit failure notifications.
 Archive Recovery completion and committed attention outcomes also queue events
 within their persistence transactions. Pass settlement, reconciled completion,
 storage-fault pauses, failed continuation verification or checkpoint
-reconciliation, and unreconcilable Stop
-faults reuse the shared producer contract. They add no operator command or
+reconciliation, and unreconcilable Stop faults reuse the shared producer contract. They add no operator command or
 background work type. The recovery worker workflow tests inspect the same
 durable results through public JSON CLI and HTTP operations and dispatch through
 the controlled sender. Initial completed Recovery, productive or no-progress

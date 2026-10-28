@@ -1906,6 +1906,7 @@ export function createDataAccessInternal(
     transaction: CatalogTransaction,
     recovery: Pick<ArchiveRecovery, "id" | "originalDiscArchiveId" | "attemptId">,
     kind: "recovery_completed" | "recovery_attention",
+    sourceTransitionId = `attempt:${recovery.attemptId}`,
   ): void => {
     const disc = requireRow(
       transaction.select({ volumeLabel: detectedDiscs.volumeLabel })
@@ -1921,7 +1922,7 @@ export function createDataAccessInternal(
     );
     recordNotificationOutcome(createNotificationEventWriter(transaction, now), {
       kind,
-      sourceEventId: `archive-recovery:${recovery.id}:${recovery.attemptId}:${kind}`,
+      sourceEventId: `archive-recovery:${recovery.id}:${sourceTransitionId}:${kind}`,
       originalDiscArchiveId: recovery.originalDiscArchiveId,
       label: disc.volumeLabel,
     });
@@ -13111,6 +13112,7 @@ export function createDataAccessInternal(
             transaction,
             recovery,
             "recovery_attention",
+            `stop:${input.stopOperationId}`,
           );
           return requireRow(
             findArchiveRecoveryRecord(transaction, {
@@ -13807,7 +13809,9 @@ export function createDataAccessInternal(
             "Archive Recovery",
             row.archiveRecoveryId,
           );
-          recordArchiveRecoveryOutcome(transaction, recovery, "recovery_attention");
+          recordArchiveRecoveryOutcome(
+            transaction, recovery, "recovery_attention", `reconciliation:${row.id}`,
+          );
           return toDvdRecoveryReconciliation(row);
         }, { behavior: "immediate" });
       },
