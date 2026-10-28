@@ -1221,9 +1221,13 @@ export async function inspectOperationsWithArtifacts(
       }
       const refreshedItem = refreshedInspection.item as
         typeof refreshedInspection.item & { archiveArtifact: ArchiveArtifact };
+      const refreshedEnrichedArtifact = await enrichArchiveArtifactSourceIdentity(
+        access,
+        refreshedItem.archiveArtifact,
+      );
       if (
-        JSON.stringify(item.archiveArtifact) !==
-          JSON.stringify(refreshedItem.archiveArtifact)
+        JSON.stringify(enrichedArtifact) !==
+          JSON.stringify(refreshedEnrichedArtifact)
       ) {
         throw new ArchiveArtifactChangedError();
       }
@@ -1231,7 +1235,7 @@ export async function inspectOperationsWithArtifacts(
         ...refreshedInspection,
         item: {
           ...refreshedItem,
-          archiveArtifact: enrichedArtifact,
+          archiveArtifact: refreshedEnrichedArtifact,
         },
       };
     } catch (error) {
