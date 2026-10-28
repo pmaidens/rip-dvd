@@ -2698,6 +2698,9 @@ export interface EncodeJobAccess {
   listSourceClaimCandidates(options: { limit: number; offset: number }): EncodeJob[];
   claimNext(workerId: string, options?: EncodeJobClaimOptions): RunningEncodeJob | null;
   findClaimSnapshot(id: EncodeJobClaimToken): EncodeClaimSnapshot | null;
+  recordOutputValidation(claim: RunningEncodeJob, identity: EncodeOutputFilesystemIdentity,
+    evidence: import("./encode-output-validation.js").EncodeOutputValidationEvidence | null): import("./encode-output-validation.js").EncodeOutputValidationRecord;
+  findOutputValidation(jobId: EncodeJobId, identity: EncodeOutputFilesystemIdentity, validatedAt: Date): import("./encode-output-validation.js").EncodeOutputValidationRecord | null;
   listClaimSnapshots(id: EncodeJobId, options?: { limit: number; offset: number }): EncodeClaimSnapshot[];
   renewClaim(claim: RunningEncodeJob): ClaimedEncodeJob;
   completeCancellation(claim: RunningEncodeJob): EncodeJob;
@@ -3099,7 +3102,7 @@ export interface ConsistentReadAccess {
 export interface EncodeOutputInspectionReadAccess
   extends Omit<ConsistentReadAccess, "encodeJobs"> {
   readonly encodeJobs: ConsistentReadAccess["encodeJobs"] &
-    Pick<EncodeJobAccess, "findRetainedOutput">;
+    Pick<EncodeJobAccess, "findRetainedOutput" | "findOutputValidation">;
 }
 
 export interface DvdCheckpointReadHandle {

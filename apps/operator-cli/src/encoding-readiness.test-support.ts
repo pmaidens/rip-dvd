@@ -7,7 +7,7 @@ import type { createOperatorWorkflowFixture } from "./operator-workflow.test-sup
 
 export async function seedEncodingReadiness(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
-  options: { clean?: boolean; partial?: boolean; mainFeature?: boolean; continuityRisk?: boolean } = {},
+  options: { clean?: boolean; partial?: boolean; mainFeature?: boolean; continuityRisk?: boolean; otherTitlePartial?: boolean } = {},
 ) {
   let evidence: { archive: Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>["archive"]; manifest: CommittedDvdCheckpointEvidence } = await seedCommittedArchiveEvidence(fixture, options.clean ? [] : [
     { startLba: 10, sectorCount: 1, classification: "skipped_untested" },
@@ -42,7 +42,7 @@ export async function seedEncodingReadiness(
       publishFilesystemCheckpoint: true, outcome: "recovered", verificationId, discConfirmationId: confirmationId,
     }) };
   }
-  const seeded = await seedDamagePreview(fixture, "source_span", [[1000, 5000]], { evidence });
+  const seeded = await seedDamagePreview(fixture, "source_span", [[1000, 5000]], { evidence, otherTitlePartial: options.otherTitlePartial });
   const access = fixture.openAccess();
   if (!options.mainFeature) {
     const prior = access.catalog.listDiscSelections({ originalDiscArchiveId: seeded.archive.id })[0]!;
@@ -54,13 +54,14 @@ export async function seedEncodingReadiness(
     });
   }
   const ownership = createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath });
-  const reassess = async (partial = options.partial ?? false) => access.assessDvdTitleDamage(seeded.archive.id, ownership, async () => [{
-    titleIdentityObservationId: seeded.observation.id,
+  const reassess = async (partial = options.partial ?? false) => access.assessDvdTitleDamage(seeded.archive.id, ownership, async () =>
+    access.catalog.readDvdTitleIdentityReviewSet(seeded.archive.id)!.items.map(({ observation }) => ({
+    titleIdentityObservationId: observation.id,
     sourceReferences: [{ kind: "multiplexed_content", startLba: 0, sectorCount: 100 }],
-    mappingCoverage: { state: partial ? "partial" : "complete", policyVersion: "synthetic-readiness-map-v1",
-      unknownReasons: partial ? [{ code: "SYNTHETIC_UNKNOWN_IMPACT", message: "Synthetic partial source map." }] : [] },
+    mappingCoverage: { state: partial || observation.displayTitleNumber === 2 ? "partial" as const : "complete" as const, policyVersion: "synthetic-readiness-map-v1",
+      unknownReasons: partial || observation.displayTitleNumber === 2 ? [{ code: "SYNTHETIC_UNKNOWN_IMPACT", message: "Synthetic partial source map." }] : [] },
     timingEvidence: seeded.assessment!.items[0]!.timingEvidence!,
-  }]);
+  })));
   const assessment = await reassess();
   const selection = access.catalog.listDiscSelections({ originalDiscArchiveId: seeded.archive.id })[0]!;
   access.close();

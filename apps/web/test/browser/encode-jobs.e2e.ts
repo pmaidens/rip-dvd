@@ -39,7 +39,8 @@ async function expectNoPageOverflow(page: Page): Promise<void> {
   expect(result.scrollWidth).toBeLessThanOrEqual(result.clientWidth);
 }
 
-test("inspects and explicitly acknowledges a completed canonical Encode Output", async ({
+for (const recordedSource of [false, true]) {
+test(`inspects and explicitly acknowledges a completed canonical Encode Output, source recorded=${recordedSource}`, async ({
   page,
 }, testInfo) => {
   const variant = fixtureVariant(testInfo.project.name);
@@ -79,6 +80,8 @@ test("inspects and explicitly acknowledges a completed canonical Encode Output",
           },
           validation: {
             result: "unknown",
+            recordIdentity: recordedSource ? "synthetic-browser-validation-record" : null,
+            checks: recordedSource ? { policyVersion: "encode-output-validation-v1" } : null,
             identity: null,
             evidence: null,
             evidenceAvailability: "not_recorded",
@@ -90,9 +93,10 @@ test("inspects and explicitly acknowledges a completed canonical Encode Output",
             originalDiscArchiveId: "synthetic-browser-archive",
             encodingProfileId: "synthetic-browser-profile",
             retainedOutputId: null,
-            sourceSnapshot: null,
-            sourceSnapshotAvailability: "not_recorded",
+            sourceSnapshot: recordedSource ? { id: "synthetic-browser-source-claim", source: { assessment: { items: [] } } } : null,
+            sourceSnapshotAvailability: recordedSource ? "recorded" : "not_recorded",
           },
+          sourceDamage: { knownSourceDamage: recordedSource ? true : null, unknownImpact: true, sourceContinuityRisk: null, watchability: "not_assessed" },
           file: {
             status: "available",
             identity: "synthetic-browser-file-identity",
@@ -146,7 +150,13 @@ test("inspects and explicitly acknowledges a completed canonical Encode Output",
   await expect(inspection).toContainText(
     "Provenance Original Disc Archivesynthetic-browser-archive",
   );
-  await expect(inspection).toContainText("Source snapshotNot Recorded");
+  await expect(inspection).toContainText(recordedSource ? "Source snapshotRecorded" : "Source snapshotNot Recorded");
+  await expect(inspection).toContainText(recordedSource ? "Source damageKnown source damage" : "Source damageUnknown");
+  await expect(inspection).toContainText("Unknown impact");
+  if (recordedSource) {
+    await expect(inspection).toContainText("synthetic-browser-source-claim");
+    await expect(inspection).toContainText("synthetic-browser-validation-record");
+  }
   await expect(inspection).toContainText("1h 30m 0s");
   await expect(inspection).toContainText("synthetic-browser-file-identity");
   await expect(inspection).toContainText("Stream 0 · Video · h264");
@@ -166,6 +176,8 @@ test("inspects and explicitly acknowledges a completed canonical Encode Output",
   await expect(inspection).toContainText("synthetic-browser-inspection-receipt");
   await expectNoPageOverflow(page);
 });
+
+}
 
 test("queues a mixed worklist after resolving a new shared profile", async ({
   page,

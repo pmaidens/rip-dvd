@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import type {
   EncodeJobFailureEvidence,
   EncodeJobFailureValidationCheck,
+  EncodeOutputValidationEvidence,
 } from "@rip-dvd/data-access";
 
 import type { HandBrakeVobSubProvenance } from "./handbrake-subtitle-provenance.js";
@@ -39,10 +40,12 @@ export interface EncodeOutputValidator {
     outputPath: string,
     signal: AbortSignal,
     expectations?: EncodeOutputValidationExpectations,
-  ): Promise<void>;
+  ): Promise<EncodeOutputValidationEvidence | void>;
 }
 
 export interface EncodeOutputValidationExpectations {
+  expectedAudioSourceIds?: readonly number[];
+  audioOutputSourceIds?: readonly number[];
   expectedDurationSeconds?: number;
   expectedVobSubStreams?: readonly EncodeOutputVobSubExpectation[];
   vobSubProvenance?: readonly HandBrakeVobSubProvenance[];
@@ -94,7 +97,7 @@ const ENGLISH_LANGUAGE_NAMES = new Intl.DisplayNames(["en"], {
   type: "language",
 });
 
-type EncodeOutputValidationEvidence = Extract<
+type EncodeOutputFailureEvidence = Extract<
   EncodeJobFailureEvidence,
   { kind: "duration" | "validation_check" }
 >;
@@ -102,7 +105,7 @@ type EncodeOutputValidationEvidence = Extract<
 export class EncodeOutputValidationError extends Error {
   constructor(
     message: string,
-    readonly evidence: EncodeOutputValidationEvidence,
+    readonly evidence: EncodeOutputFailureEvidence,
   ) {
     super(`Encode output validation failed: ${message}`);
     this.name = "EncodeOutputValidationError";
@@ -112,7 +115,7 @@ export class EncodeOutputValidationError extends Error {
 function validationError(
   check: EncodeJobFailureValidationCheck,
   message: string,
-  evidence: EncodeOutputValidationEvidence = {
+  evidence: EncodeOutputFailureEvidence = {
     kind: "validation_check",
     check,
   },
@@ -710,8 +713,13 @@ export function createNodeEncodeOutputValidator({
   const outputRepairer =
     repairer ?? createNodeEncodeOutputRepairer({ runMediaTool });
   return {
-    async prepareAndValidate(outputPath, signal, expectations = {}) {
+    async prepareAndValidate(outputPath, signal, expectations = {}): Promise<EncodeOutputValidationEvidence> {
       signal.throwIfAborted();
+      if (expectations.expectedAudioSourceIds !== undefined &&
+        (expectations.expectedAudioSourceIds.some((id) => !Number.isSafeInteger(id) || id < 0) ||
+          new Set(expectations.expectedAudioSourceIds).size !== expectations.expectedAudioSourceIds.length)) {
+        throw new Error("Encode output audio expectation is invalid");
+      }
       if (
         expectations.expectedDurationSeconds !== undefined &&
         (!Number.isFinite(expectations.expectedDurationSeconds) ||
@@ -813,11 +821,11 @@ export function createNodeEncodeOutputValidator({
                 "-v",
                 "error",
                 "-select_streams",
-                "a:0",
+                expectations.expectedAudioSourceIds === undefined ? "a:0" : "a",
                 "-read_intervals",
                 "%+#1",
                 "-show_entries",
-                "packet=pts_time",
+                expectations.expectedAudioSourceIds === undefined ? "packet=pts_time" : "stream=index:packet=pts_time",
                 "-of",
                 "json",
                 outputPath,
@@ -833,7 +841,29 @@ export function createNodeEncodeOutputValidator({
         "audio",
         "audio_timing",
       );
-      const videoStartDelay = videoFirstPts - (firstPacketPts(audioProbe) ?? 0);
+      let audioFirstPts = firstPacketPts(audioProbe);
+      const observedAudioStreams = Array.isArray(audioProbe.streams) ? audioProbe.streams.length : null;
+      const audioFirstPackets: number[] | null = expectations.expectedAudioSourceIds === undefined ? null : [];
+      if (expectations.expectedAudioSourceIds !== undefined) {
+        const required = expectations.expectedAudioSourceIds;
+        const outputs = expectations.audioOutputSourceIds;
+        if (outputs === undefined || observedAudioStreams !== outputs.length ||
+          outputs.some((id) => !required.includes(id)) || required.some((id) => !outputs.includes(id))) {
+          throw validationError("audio_timing", "required audio source coverage does not match the source claim");
+        }
+        for (let index = 0; index < outputs.length; index++) {
+          const packets = parseProbeResult((await runTool(runMediaTool, {
+            arguments_: ["-v", "error", "-select_streams", `a:${index}`, "-read_intervals", "%+#1",
+              "-show_entries", "packet=pts_time", "-of", "json", outputPath],
+            executable: "ffprobe", signal, timeoutMs,
+          }, "required audio packet probe", "audio_timing")).stdout, "required audio packet", "audio_timing");
+          const first = firstPacketPts(packets);
+          if (first === null) throw validationError("audio_timing", "required audio stream has no readable first packet");
+          audioFirstPackets!.push(first);
+        }
+        audioFirstPts = audioFirstPackets![0] ?? null;
+      }
+      const videoStartDelay = videoFirstPts - (audioFirstPts ?? 0);
       if (videoStartDelay > MAX_VIDEO_START_DELAY_SECONDS) {
         throw validationError(
           "audio_timing",
@@ -887,6 +917,19 @@ export function createNodeEncodeOutputValidator({
           "the bounded video decode did not complete",
         );
       }
+      return {
+        policyVersion: "encode-output-validation-v1",
+        duration: { expectedSeconds: expectations.expectedDurationSeconds ?? null,
+          minimumRatio: expectations.expectedDurationSeconds === undefined ? null : MINIMUM_FULL_TITLE_DURATION_RATIO,
+          observedSeconds: outputDurationSeconds(videoProbe) },
+        video: { codec: videoStream.codec_name as string, profile: videoStream.profile as string,
+          pixelFormat: videoStream.pix_fmt as string, firstPacketSeconds: videoFirstPts },
+        audio: { firstPacketSeconds: audioFirstPts, expectedSourceIds: expectations.expectedAudioSourceIds ?? null,
+          outputSourceIds: expectations.audioOutputSourceIds ?? null,
+          observedStreams: observedAudioStreams, firstPacketsSeconds: audioFirstPackets },
+        subtitles: { expectedSourceStreams: expectations.expectedVobSubStreams?.length ?? null, checked: true },
+        decode: { seconds: VALIDATION_DECODE_SECONDS, frames: decodedFrames, completed: true },
+      };
     },
   };
 }

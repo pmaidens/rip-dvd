@@ -23,8 +23,12 @@ import type {
   RetainedEncodeOutputSummary,
   EncodeOutputInspectionAcknowledgement,
   EncodeOutputInspectionReceiptRecord,
+  EncodeOutputValidationRecord,
+  EncodeOutputSourceSnapshot,
+  EncodeClaimSource,
 } from "@rip-dvd/data-access";
 import { parseMutationKey } from "./mutation-key.js";
+import { assessmentHasUnknownSourceImpact } from "./source-damage-impact.js";
 
 const ENCODE_OUTPUT_ARTIFACT_PATTERN =
   /^encode-output-v1\.(published|retained)\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
@@ -331,6 +335,7 @@ function unknownInspection(
 }
 
 interface ResolvedEncodeOutput {
+  validationRecord: EncodeOutputValidationRecord | null;
   artifactIdentity: string;
   artifactState: "published" | "retained";
   authorityKey: string;
@@ -391,11 +396,8 @@ function inspectionResponse(
         completedAt: input.job.completedAt?.toISOString() ?? null,
       },
       validation,
-      provenance: historicalProvenance(
-        input.job,
-        input.originalDiscArchiveId,
-        input.retainedOutputId,
-      ),
+      provenance: outputProvenance(input),
+      sourceDamage: recordedSourceDamage(input.validationRecord),
       file: presentedFile,
       ...inspection,
       availableActions: [encodeOutputExportAction(
@@ -481,6 +483,8 @@ function presentedValidation(
     : "unknown" as const;
   return {
     result,
+    recordIdentity: input.validationRecord?.id ?? null,
+    checks: input.validationRecord?.evidence ?? null,
     identity: input.recordedValidationFilesystemIdentity,
     evidence: hasEvidence
       ? {
@@ -496,19 +500,44 @@ function presentedValidation(
   };
 }
 
-function historicalProvenance(
-  job: EncodeJob,
-  originalDiscArchiveId: string | null,
-  retainedOutputId: string | null,
-) {
+type InspectedEncodeOutputSourceSnapshot = Omit<EncodeOutputSourceSnapshot, "source"> & {
+  source: Omit<EncodeClaimSource, "archive" | "output"> & {
+    archive: Omit<EncodeClaimSource["archive"], "archivePath">;
+    output: Omit<EncodeClaimSource["output"], "path">;
+  };
+};
+
+function presentedSourceSnapshot(record: EncodeOutputValidationRecord | null): InspectedEncodeOutputSourceSnapshot | null {
+  const snapshot = record?.sourceSnapshot;
+  if (snapshot == null) return null;
+  const { archivePath: _archivePath, ...archive } = snapshot.source.archive;
+  const { path: _outputPath, ...output } = snapshot.source.output;
+  return { ...snapshot, source: { ...snapshot.source, archive, output } };
+}
+
+function outputProvenance(input: ResolvedEncodeOutput) {
+  const { job, originalDiscArchiveId, retainedOutputId, validationRecord } = input;
+  const sourceSnapshot = presentedSourceSnapshot(validationRecord);
   return {
     encodeJobId: job.id,
-    discSelectionId: job.discSelectionId,
-    originalDiscArchiveId,
-    encodingProfileId: job.encodingProfileId,
+    discSelectionId: sourceSnapshot?.source.selection.id ?? job.discSelectionId,
+    originalDiscArchiveId: sourceSnapshot?.source.archive.id ?? originalDiscArchiveId,
+    encodingProfileId: sourceSnapshot?.source.profile.id ?? job.encodingProfileId,
     retainedOutputId,
-    sourceSnapshot: null,
-    sourceSnapshotAvailability: "not_recorded" as const,
+    sourceSnapshot,
+    sourceSnapshotAvailability: sourceSnapshot === null ? "not_recorded" as const : "recorded" as const,
+  };
+}
+
+function recordedSourceDamage(record: EncodeOutputValidationRecord | null) {
+  const source = record?.sourceSnapshot?.source;
+  const item = source?.assessment.items.find((candidate) => candidate.titleIdentityId === source.decision.titleIdentityId);
+  return {
+    knownSourceDamage: item === undefined ? null : item.unrecoveredUniqueSourceSectorCount > 0,
+    unknownImpact: source === undefined || item === undefined || item.mappingCoverage.state !== "complete" ||
+      assessmentHasUnknownSourceImpact(source.assessment),
+    sourceContinuityRisk: source?.sourceContinuityRisk ?? null,
+    watchability: "not_assessed" as const,
   };
 }
 
@@ -561,6 +590,8 @@ function resolvePublishedEncodeOutput(
   return {
     artifactIdentity,
     artifactState: "published",
+    validationRecord: job.outputValidationFilesystemIdentity === null || job.outputValidatedAt === null ? null
+      : access.encodeJobs.findOutputValidation(job.id, job.outputValidationFilesystemIdentity, job.outputValidatedAt),
     authorityKey: JSON.stringify([
       job.id,
       job.status,
@@ -611,6 +642,8 @@ function resolveRetainedEncodeOutput(
   return {
     artifactIdentity,
     artifactState: "retained",
+    validationRecord: retainedOutput.validationFilesystemIdentity === null || retainedOutput.validatedAt === null ? null
+      : access.encodeJobs.findOutputValidation(job.id, retainedOutput.validationFilesystemIdentity, retainedOutput.validatedAt),
     authorityKey: JSON.stringify([
       retainedOutput.id,
       retainedOutput.predecessorEncodeJobId,
@@ -1049,7 +1082,7 @@ export async function acknowledgeEncodeOutputInspection(
           const authority = resolveEncodeOutputAuthority(access, parsed);
           if (authority.authorityUnavailableReason !== null ||
               evidenceDigest(authority.authorityKey) !== current.authorityRevision ||
-              canonicalPublicationJson(historicalProvenance(authority.job, authority.originalDiscArchiveId, authority.retainedOutputId)) !==
+              canonicalPublicationJson(outputProvenance(authority)) !==
                 canonicalPublicationJson(current.artifact.provenance)) {
             throw new EncodeOutputAcknowledgementRejectedError("OUTPUT_AUTHORITY_CHANGED", current);
           }
@@ -1385,11 +1418,7 @@ export async function exportEncodeOutput(
       byteSize,
       destination: input.destination,
       sourceIdentity,
-      provenance: historicalProvenance(
-        initialAuthority.job,
-        initialAuthority.originalDiscArchiveId,
-        initialAuthority.retainedOutputId,
-      ),
+      provenance: outputProvenance(initialAuthority),
     };
   } finally {
     await destination?.close().catch(() => {});

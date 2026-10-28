@@ -448,7 +448,8 @@ The facade deliberately has no general mutation `transaction(callback)` escape
 hatch. The `readConsistentSnapshot()` boundary supplies only synchronous read
 operations and keeps composed cross-table reads on one short SQLite snapshot;
 it rejects asynchronous callbacks. The narrower
-`readEncodeOutputInspectionSnapshot()` adds the private retained-output lookup
+`readEncodeOutputInspectionSnapshot()` adds private retained-output and immutable
+output-validation lookups
 only for the shared inspection operation without widening ordinary web reads.
 The few multi-statement catalog mutations
 use short internal transactions. Archive attempt start and Encode Job claim

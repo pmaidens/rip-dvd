@@ -13,7 +13,7 @@ export async function seedEncodeClaim(
   const access = openEncodeSourceTestAccess(fixture);
   access.catalog.completeCatalogReview(seeded.archive.id,
     access.catalog.listOriginalDiscArchives({ ids: [seeded.archive.id] })[0]!.updatedAt, "reviewed_with_selections");
-  if (!options.clean || options.mainFeature || options.continuityRisk) await acceptReadinessContent(fixture, seeded.archive.id,
+  if (!options.clean || options.mainFeature || options.continuityRisk || options.otherTitlePartial) await acceptReadinessContent(fixture, seeded.archive.id,
     options.mainFeature ? [{ discSelectionId: seeded.selection.id, titleIdentityId: seeded.observation.titleIdentityId }] : []);
   const readiness = (await fixture.run(["encode-readiness", seeded.archive.id])).result as EncodingReadiness;
   const expectedSourceDecision = readiness.selections[0]!.expectedSourceDecision;

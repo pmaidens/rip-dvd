@@ -1372,6 +1372,7 @@ describe("data-access facade", () => {
         "encode_claim_snapshots",
         "encode_job_failure_reports",
         "encode_output_inspection_receipts",
+        "encode_output_validations",
         "filesystem_verification_runs",
         "mutation_invocations",
         "rearchive_mapping_proposal_items",
@@ -1379,7 +1380,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(53);
+    expect(identifierTables).toHaveLength(54);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -5795,6 +5796,7 @@ describe("data-access facade", () => {
     access.readConsistentSnapshot((snapshot) => {
       expect(snapshot.encodeJobs).not.toHaveProperty("listRetainedOutputs");
       expect(snapshot.encodeJobs).not.toHaveProperty("findRetainedOutput");
+      expect(snapshot.encodeJobs).not.toHaveProperty("findOutputValidation");
       expect(
         snapshot.encodeJobs.listRetainedOutputSummaries([replacement.id]),
       ).toEqual([{
@@ -5844,6 +5846,7 @@ describe("data-access facade", () => {
       }]);
     });
     access.readEncodeOutputInspectionSnapshot((snapshot) => {
+      expect(snapshot.encodeJobs.findOutputValidation(predecessor.id, priorOutputIdentity, new Date(0))).toBeNull();
       expect(snapshot.encodeJobs.findRetainedOutput(
         retainedOutput.id,
       )).toMatchObject({
@@ -10024,10 +10027,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 16",
+          "select name from __drizzle_migrations order by id desc limit 17",
         )
         .all(),
       ).toEqual([
+        { name: "20261028231111_encode-output-validations" },
         { name: "20261028221623_encode-claim-snapshots" },
         {
           name: "20261028200703_nervous_zuras",

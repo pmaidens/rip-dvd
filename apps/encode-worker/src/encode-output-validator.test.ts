@@ -97,6 +97,7 @@ function createMediaToolRunner({
         JSON.stringify({
           packets:
             audioFirstPts === null ? [] : [{ pts_time: audioFirstPts }],
+          streams: [{ index: 1 }],
         }),
       );
     },
@@ -123,7 +124,7 @@ describe("encode output validation", () => {
     await expect(validator.prepareAndValidate("/media/subtitled.mkv", new AbortController().signal, {
       expectedVobSubStreams,
       vobSubProvenance: parser.finish(expectedVobSubStreams),
-    })).resolves.toBeUndefined();
+    })).resolves.toMatchObject({ policyVersion: "encode-output-validation-v1", decode: { completed: true } });
     expect(repairer.removeEmptyVobSubStreams).not.toHaveBeenCalled();
     expect(runMediaTool).toHaveBeenCalledWith(expect.objectContaining({
       arguments_: expect.arrayContaining(["-count_packets"]),
@@ -170,7 +171,7 @@ describe("encode output validation", () => {
     await expect(validator.prepareAndValidate("/media/subtitled.mkv", new AbortController().signal, {
       expectedVobSubStreams,
       vobSubProvenance: parser.finish(expectedVobSubStreams),
-    })).resolves.toBeUndefined();
+    })).resolves.toMatchObject({ policyVersion: "encode-output-validation-v1", decode: { completed: true } });
   });
 
   it("does not count a derived search result as its missing complete source", async () => {
@@ -226,7 +227,7 @@ describe("encode output validation", () => {
     if (damaged) {
       await expect(validation).rejects.toThrow("disposition inconsistent");
     } else {
-      await expect(validation).resolves.toBeUndefined();
+      await expect(validation).resolves.toMatchObject({ policyVersion: "encode-output-validation-v1", decode: { completed: true } });
     }
     expect(repairer.removeEmptyVobSubStreams).toHaveBeenCalledWith(expect.objectContaining({
       emptyStreamIndexes: [8],
@@ -260,7 +261,7 @@ describe("encode output validation", () => {
       { expectedVobSubStreams: [{ languageCode: "eng", title }] },
     );
     if (valid) {
-      await expect(validation).resolves.toBeUndefined();
+      await expect(validation).resolves.toMatchObject({ policyVersion: "encode-output-validation-v1", decode: { completed: true } });
     } else {
       await expect(validation).rejects.toThrow("source VobSub stream 1 has title");
     }
@@ -300,7 +301,7 @@ describe("encode output validation", () => {
         new AbortController().signal,
         { expectedDurationSeconds: 8_078 },
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ policyVersion: "encode-output-validation-v1", decode: { completed: true } });
   });
 
   it("rejects missing duration metadata for a full-title output", async () => {
@@ -363,7 +364,7 @@ describe("encode output validation", () => {
         new AbortController().signal,
         { expectedVobSubStreams: [] },
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ policyVersion: "encode-output-validation-v1", decode: { completed: true } });
   });
 
   it("accepts identified VobSub streams with language and disposition metadata", async () => {
@@ -409,7 +410,7 @@ describe("encode output validation", () => {
           ],
         },
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ policyVersion: "encode-output-validation-v1", decode: { completed: true } });
   });
 
   it("matches same-language normal, commentary, and closed-caption tracks by title", async () => {
@@ -450,7 +451,7 @@ describe("encode output validation", () => {
           ],
         },
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ policyVersion: "encode-output-validation-v1", decode: { completed: true } });
   });
 
   it("rejects a duplicated normal track that replaced same-language commentary", async () => {
@@ -599,7 +600,7 @@ describe("encode output validation", () => {
         new AbortController().signal,
         { expectedVobSubStreams: [{ languageCode: "xx" }] },
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ policyVersion: "encode-output-validation-v1", decode: { completed: true } });
   });
 
   it.each([
@@ -656,7 +657,7 @@ describe("encode output validation", () => {
     await expect(validator.prepareAndValidate("/media/subtitled.mkv", signal, {
       expectedDurationSeconds: 8_078,
       expectedVobSubStreams,
-    })).resolves.toBeUndefined();
+    })).resolves.toMatchObject({ policyVersion: "encode-output-validation-v1", decode: { completed: true } });
 
     expect(repairer.removeEmptyVobSubStreams).not.toHaveBeenCalled();
     expect(runMediaTool).toHaveBeenCalledWith(expect.objectContaining({
@@ -850,7 +851,7 @@ describe("encode output validation", () => {
             .map((stream) => ({ languageCode: stream.tags.language })),
         },
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ policyVersion: "encode-output-validation-v1", decode: { completed: true } });
 
     expect(repairer.removeEmptyVobSubStreams).toHaveBeenCalledWith({
       emptyStreamIndexes: [9, 10, 11, 12, 13, 14],
@@ -931,7 +932,7 @@ describe("encode output validation", () => {
     ] };
     const result = validator.prepareAndValidate("/media/bonus.mkv", new AbortController().signal, expectations);
     if (failure) await expect(result).rejects.toThrow(failure);
-    else await expect(result).resolves.toBeUndefined();
+    else await expect(result).resolves.toMatchObject({ policyVersion: "encode-output-validation-v1", decode: { completed: true } });
     expect(repairer.removeEmptyVobSubStreams).toHaveBeenCalledTimes(failure && !afterFault ? 0 : 1);
     if (cleaned) expect(repairer.removeEmptyVobSubStreams).toHaveBeenCalledWith(expect.objectContaining({
       emptyStreamIndexes: [2], retainedSubtitleDispositions: [{ default: false, forced: false }],
@@ -1011,6 +1012,46 @@ describe("encode output validation", () => {
     ).rejects.toThrow(
       "Encode output validation failed: first video frame starts 24.480 seconds after the audio baseline",
     );
+  });
+
+  it("requires audio only when the immutable source claim requires it", async () => {
+    const validator = createNodeEncodeOutputValidator({ runMediaTool: createMediaToolRunner({ audioFirstPts: null }) });
+    const signal = new AbortController().signal;
+    await expect(validator.prepareAndValidate("/media/synthetic-silent.mkv", signal, { expectedAudioSourceIds: [128], audioOutputSourceIds: [128] }))
+      .rejects.toThrow("required audio stream has no readable first packet");
+    const evidence = await validator.prepareAndValidate("/media/synthetic-silent.mkv", signal);
+    await expect(validator.prepareAndValidate("/media/synthetic-silent.mkv", signal, { expectedAudioSourceIds: [128, 129], audioOutputSourceIds: [128] }))
+      .rejects.toThrow("required audio source coverage does not match the source claim");
+    expect(evidence).toMatchObject({ audio: { firstPacketSeconds: null, expectedSourceIds: null },
+      duration: { expectedSeconds: null, minimumRatio: null }, decode: { seconds: 5, frames: 120, completed: true } });
+  });
+
+  it("allows a surround preset's additional encodings of a required source audio stream", async () => {
+    const runMediaTool = createMediaToolRunner();
+    const validator = createNodeEncodeOutputValidator({ runMediaTool: async (request) => {
+      if (request.arguments_.includes("a")) return mediaToolResult(JSON.stringify({
+        streams: [{ index: 1 }, { index: 2 }], packets: [{ pts_time: "0.0" }],
+      }));
+      return runMediaTool(request);
+    } });
+    await expect(validator.prepareAndValidate("/media/synthetic-surround.mkv", new AbortController().signal,
+      { expectedAudioSourceIds: [128], audioOutputSourceIds: [128, 128] }))
+      .resolves.toMatchObject({ audio: { expectedSourceIds: [128], outputSourceIds: [128, 128], observedStreams: 2 } });
+    await expect(validator.prepareAndValidate("/media/synthetic-missing-commentary.mkv", new AbortController().signal,
+      { expectedAudioSourceIds: [128, 129], audioOutputSourceIds: [128, 128] }))
+      .rejects.toThrow("required audio source coverage does not match the source claim");
+  });
+
+  it("requires a readable packet in each selected audio output", async () => {
+    const runMediaTool = createMediaToolRunner();
+    const validator = createNodeEncodeOutputValidator({ runMediaTool: async (request) => {
+      if (request.arguments_.includes("a")) return mediaToolResult(JSON.stringify({ streams: [{ index: 1 }, { index: 2 }] }));
+      if (request.arguments_.includes("a:1")) return mediaToolResult(JSON.stringify({ packets: [] }));
+      return runMediaTool(request);
+    } });
+    await expect(validator.prepareAndValidate("/media/synthetic-empty-commentary.mkv", new AbortController().signal,
+      { expectedAudioSourceIds: [128, 129], audioOutputSourceIds: [128, 129] }))
+      .rejects.toThrow("required audio stream has no readable first packet");
   });
 
   it("rejects video that produces no frames during a bounded decode", async () => {
