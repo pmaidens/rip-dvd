@@ -1,3 +1,4 @@
+import { enterArchiveImageAdmission } from "./archive-image-admission.js";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -85,6 +86,8 @@ export interface ArchiveImageOwnershipHandle {
 }
 
 interface OwnershipRequest<Result> {
+  previewRead?: { onContention(urgent: boolean, waiting: boolean): void };
+  urgent?: boolean;
   archiveId: string;
   additionalImagePaths?: readonly string[];
   imagePath: string | null;
@@ -1425,7 +1428,16 @@ export function createArchiveImageOwnership({
         ? cause
         : new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause });
     }
-    const opened = await prepareArchiveLock(
+    // Preview readers take an exclusive image interval so every ordinary
+    // reader and writer participates in contention, including surviving children.
+    if (request.previewRead) mode = "exclusive";
+    const admission = process.platform === "linux" ? await enterArchiveImageAdmission({
+      directory: `${paths.lock}.admission`, preview: request.previewRead !== undefined,
+      urgent: request.urgent === true, signal: request.signal,
+      ...(request.previewRead ? { onContention: request.previewRead.onContention } : {}),
+    }) : null;
+    let opened;
+    try { opened = await prepareArchiveLock(
       paths,
       request.archiveId,
       initialize,
@@ -1433,6 +1445,7 @@ export function createArchiveImageOwnership({
       backend,
       acquisitionTimeoutMs,
     );
+    } catch (error) { await admission?.release(); throw error; }
     const { descriptor } = opened;
     let releaseBackend: () => void = () => undefined;
     const controller = new AbortController();
@@ -1543,7 +1556,7 @@ export function createArchiveImageOwnership({
           "CONSISTENCY_FAULT",
         ));
       }
-      if (mode === "exclusive") {
+      if (mode === "exclusive" && request.previewRead === undefined) {
         const claimedAt = now();
         claim = createClaim(
           request.archiveId,
@@ -1641,6 +1654,7 @@ export function createArchiveImageOwnership({
       }
       releaseBackend();
       closeSync(descriptor);
+      await admission?.release();
     }
   };
 

@@ -149,3 +149,5 @@ export async function runConfiguredAsyncWorker(
     host.removeListener("SIGTERM", stopForSigterm);
   }
 }
+
+export { archiveProcessIdentity } from "./archive-image-admission.js";

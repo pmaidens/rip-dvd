@@ -15,8 +15,8 @@ it("reviews an unmapped title with exact provenance, grouped markers and uncappe
   const response = await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify(seeded.input)]);
   expect(response.exitCode).toBe(0);
   expect(response.result).toMatchObject({
-    available: false,
-    blockingReasons: expect.arrayContaining([{ code: "DAMAGE_PREVIEW_GENERATION_UNAVAILABLE", message: expect.any(String) }]),
+    available: true,
+    blockingReasons: [],
     preflightToken: expect.stringMatching(/^damage-preview-preflight:[a-f0-9]{64}$/),
     reviewedRequest: {
       checkpoint: { manifestId: seeded.manifest.id, manifestRevision: 1, manifestDigest: seeded.manifest.manifestDigest },

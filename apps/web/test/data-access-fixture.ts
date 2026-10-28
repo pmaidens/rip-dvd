@@ -74,6 +74,7 @@ export function withSnapshotOverrides(
     readConsistentSnapshot(read) {
       return access.readConsistentSnapshot((snapshotAccess) =>
         read({
+          damagePreviews: snapshotAccess.damagePreviews,
           dvdTitleDamageAssessments: {
             ...snapshotAccess.dvdTitleDamageAssessments,
             ...overrides.dvdTitleDamageAssessments,

@@ -213,3 +213,5 @@ export type {
   DvdCheckpointPointer,
   DvdRecoveryProtectedRange,
 } from "./dvd-archive-checkpoint.js";
+
+export * from "./damage-preview.js";

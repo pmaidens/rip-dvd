@@ -1,3 +1,4 @@
+import { decodeDvdTitleMap } from "@rip-dvd/data-access";
 import { createHash } from "node:crypto";
 import {
   DvdCheckpointReadFault,
@@ -5,6 +6,8 @@ import {
   canonicalPublicationJson,
   encodingProfileQueueBlockingReasons,
   type DataAccess,
+  type ConsistentReadAccess,
+  type CommittedDvdCheckpointEvidence,
   type DvdTitleDamageAffectedPlaybackInterval,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
@@ -19,10 +22,7 @@ interface Reason { code: string; message: string }
 interface Marker extends DvdTitleDamageAffectedPlaybackInterval { intervalIndex: number }
 interface Group extends PlaybackRange { markerIndexes: number[] }
 
-const generationUnavailable: Reason = {
-  code: "DAMAGE_PREVIEW_GENERATION_UNAVAILABLE",
-  message: "Damage Preview generation is not enabled. This review does not request work.",
-};
+
 
 function overlaps(left: PlaybackRange, right: PlaybackRange): boolean {
   return left.startMilliseconds < right.endMilliseconds && right.startMilliseconds < left.endMilliseconds;
@@ -100,7 +100,7 @@ export async function inspectDamagePreviewAvailability(
   const input = rawInput === undefined ? null : parseDamagePreviewInput(rawInput);
   const id = archiveId as OriginalDiscArchiveId;
   if (!access.catalog.listOriginalDiscArchives({ ids: [id] })[0]) throw new RecordNotFoundError("Original Disc Archive", id);
-  const reasons: Reason[] = [generationUnavailable];
+  const reasons: Reason[] = [];
   let durableCheckpoint = null;
   try {
     durableCheckpoint = await access.readDvdCheckpoint(id, ownership);
@@ -110,12 +110,31 @@ export async function inspectDamagePreviewAvailability(
       message: "The saved checkpoint cannot currently be verified for a consistent preview read.",
     });
   }
-  const evidence = access.readConsistentSnapshot((snapshot) => ({
+  return access.readConsistentSnapshot((snapshot) => reviewDamagePreviewEvidence(snapshot, archiveId, input, durableCheckpoint, reasons));
+}
+
+export function reviewDamagePreviewEvidence(
+  snapshot: ConsistentReadAccess,
+  archiveId: string,
+  input: DamagePreviewInput | null,
+  durableCheckpoint: Pick<CommittedDvdCheckpointEvidence, "id" | "revision" | "manifestDigest" | "publicationDigest"> | null,
+  initialReasons: Reason[] = [],
+) {
+  const id = archiveId as OriginalDiscArchiveId;
+  const archive = snapshot.catalog.listOriginalDiscArchives({ ids: [id] })[0];
+  if (!archive) throw new RecordNotFoundError("Original Disc Archive", id);
+  const reasons = [...initialReasons];
+  const evidence = {
     header: snapshot.catalog.findDvdArchiveEvidenceHeader(id),
     titles: snapshot.catalog.readDvdTitleIdentityReviewSet(id),
     damage: snapshot.dvdTitleDamageAssessments.inspect(id),
     profiles: snapshot.encodingProfiles.list({ mediaDomain: "dvd_video" }),
-  }));
+    recovery: snapshot.catalog.findArchiveRecovery(id),
+    disc: snapshot.catalog.listDetectedDiscs(undefined, { ids: [archive.detectedDiscId] })[0],
+  };
+  if (!evidence.recovery || !["stopped", "completed"].includes(evidence.recovery.status)) {
+    reasons.push({ code: "DAMAGE_PREVIEW_ACTIVE_RECOVERY_UNAVAILABLE", message: "Damage Preview generation requires stopped or completed Archive Recovery. Active Recovery previews are unavailable." });
+  }
   const header = evidence.header;
   const checkpoint = header === null ? null : {
     manifestId: header.currentManifestId,
@@ -144,7 +163,8 @@ export async function inspectDamagePreviewAvailability(
   if (input !== null) {
     if (title === null) reasons.push({ code: "TITLE_IDENTITY_NOT_CURRENT", message: "The selected Title Identity observation is not present at the current checkpoint." });
     if (profile === null) reasons.push({ code: "ENCODING_PROFILE_UNAVAILABLE", message: "The intended DVD Encoding Profile is unavailable." });
-    else for (const code of encodingProfileQueueBlockingReasons(profile)) reasons.push({ code: `ENCODING_PROFILE_${code.toUpperCase()}`, message: `The intended Encoding Profile is blocked: ${code}.` });
+    else if (Object.keys(profile.settings).some((key) => !["preset", "container"].includes(key))) reasons.push({ code: "DAMAGE_PREVIEW_SETTINGS_UNREPRESENTABLE", message: "This profile contains settings that a Damage Preview cannot represent." });
+    if (profile !== null) for (const code of encodingProfileQueueBlockingReasons(profile)) reasons.push({ code: `ENCODING_PROFILE_${code.toUpperCase()}`, message: `The intended Encoding Profile is blocked: ${code}.` });
     if (input.mode === "damage") {
       if (damageItem === null) {
         reasons.push({ code: "TITLE_DAMAGE_ASSESSMENT_NOT_CURRENT", message: "Damage targeting requires a current assessment for the selected title path." }, ...evidence.damage.unavailableReasons);
@@ -162,11 +182,21 @@ export async function inspectDamagePreviewAvailability(
         reasons.push({ code: "DAMAGE_TIMING_UNKNOWN", message: "Damage timing is unknown. Ordinary identified-title playback has no damage seek." });
       }
     }
-    reasons.push({ code: "STREAM_AVAILABILITY_UNVERIFIED", message: "The selected streams require verification against the saved title before generation can be enabled." });
+    const sourceTitle = decodeDvdTitleMap(evidence.disc?.scanData)?.titles.find((item) => item.number === title?.displayTitleNumber);
+    if (!sourceTitle) reasons.push({ code: "STREAM_AVAILABILITY_UNVERIFIED", message: "The saved title has no representable stream evidence." });
+    else if (input.streams.audio.some((stream) => !sourceTitle.audioStreams.some((item) => item.id === stream)) ||
+      input.streams.subtitles.some((stream) => !sourceTitle.subtitles.some((item) => item.id === stream))) {
+      reasons.push({ code: "DAMAGE_PREVIEW_STREAM_UNREPRESENTABLE", message: "A selected stream is absent from the saved title. Choose available stream IDs." });
+    }
+    if (input.streams.audio.some((stream) => stream < 1)) reasons.push({ code: "DAMAGE_PREVIEW_STREAM_UNREPRESENTABLE", message: "HandBrake audio stream IDs start at one." });
+
   }
   const plan = input === null ? { groups: [], clips: [], estimatedDurationMilliseconds: null } : planClips(input, markers, reasons);
   const reviewedRequest = input === null ? null : {
     ...input,
+    archive: { fingerprint: archive.fingerprint, path: archive.archivePath, catalogRevision: archive.updatedAt.toISOString() },
+    recovery: evidence.recovery === null ? null : { id: evidence.recovery.id, attemptId: evidence.recovery.attemptId, status: evidence.recovery.status },
+    sourceTitle: decodeDvdTitleMap(evidence.disc?.scanData)?.titles.find((item) => item.number === title?.displayTitleNumber) ?? null,
     requestedAssessmentIdentity: input.assessmentIdentity,
     originalDiscArchiveId: archiveId,
     checkpoint,
@@ -179,13 +209,14 @@ export async function inspectDamagePreviewAvailability(
     assessmentIdentity: input.mode === "damage" ? currentAssessment?.id ?? null : null,
     timingEvidence: input.mode === "damage" ? damageItem?.timingEvidence ?? null : null,
     markers,
-    encodingProfile: profile === null ? null : { id: profile.id, key: profile.key, version: profile.version, settings: profile.settings },
+    encodingProfile: profile === null ? null : { id: profile.id, key: profile.key, version: profile.version, isActive: profile.isActive, settings: profile.settings },
   };
+  if (input === null) reasons.push({ code: "DAMAGE_PREVIEW_SELECTION_REQUIRED", message: "Review a concrete title, range, streams and intended settings before requesting generation." });
   const preflightToken = reviewedRequest === null ? null : `damage-preview-preflight:${createHash("sha256").update("rip-dvd:damage-preview-preflight:v1\0").update(canonicalPublicationJson(reviewedRequest)).digest("hex")}`;
   return {
     schemaVersion: 1,
     originalDiscArchiveId: archiveId,
-    available: false as const,
+    available: input !== null && reasons.length === 0,
     blockingReasons: reasons,
     current: { checkpoint, checkpointVerified, titleIdentityReviewSetIdentity: evidence.titles?.reviewSetIdentity ?? null, assessmentIdentity: currentAssessment?.id ?? null },
     titles: titleItems.map((item) => ({
@@ -199,7 +230,7 @@ export async function inspectDamagePreviewAvailability(
       estimatedAffectedPlayback: currentAssessment?.items.find((damage) => damage.titleIdentityObservationId === item.observation.id)?.estimatedAffectedPlayback ?? null,
     })),
     encodingProfiles: evidence.profiles.map((item) => ({ id: item.id, displayName: item.displayName, version: item.version, settings: item.settings })),
-    ordinaryPlayback: { identifiable: checkpointVerified && (input === null ? titleItems.length > 0 : title !== null), available: false as const, damageSeek: null, blockingReasons: [generationUnavailable] },
+    ordinaryPlayback: { identifiable: checkpointVerified && (input === null ? titleItems.length > 0 : title !== null), available: input !== null && reasons.length === 0, damageSeek: null, blockingReasons: reasons },
     preflightToken,
     reviewedRequest,
     markers,

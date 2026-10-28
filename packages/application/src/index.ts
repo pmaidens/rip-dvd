@@ -1,3 +1,4 @@
+import { requestDamagePreview, inspectDamagePreview, cancelDamagePreview, waitDamagePreview, exportDamagePreview } from "./damage-preview-operations.js";
 import { inspectArchiveEvidence } from "./archive-evidence.js";
 import { inspectDamagePreviewAvailability } from "./damage-preview.js";
 import { inspectArchiveRecoveryRanges } from "./archive-recovery-ranges.js";
@@ -302,6 +303,7 @@ function readDeploymentReadiness(access: ConsistentReadAccess) {
       access.dvdRecoveryStorage.readCurrent(),
     ),
     activeWork: [
+      ...access.damagePreviews.list().filter((preview) => ["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(preview.status)).map(({ id, status }) => ({ kind: "damage_preview", id, status })),
       ...inspections,
       ...archiveRequests,
       ...archiveJobs,
@@ -432,6 +434,11 @@ export function createApplicationOperations(
       archiveId: string,
       options?: { limit?: number; cursor?: string },
     ) => inspectCatalogTitleDamage(access, archiveId, options),
+    requestDamagePreview: (archiveId: string, input: unknown) => requestDamagePreview(access, archiveId, input, dependencies.archiveImageOwnership),
+    inspectDamagePreview: (id: string) => inspectDamagePreview(access, id, dependencies.archiveImageOwnership),
+    waitDamagePreview: (id: string, options: { timeoutMs: number; pollMs?: number }) => waitDamagePreview(access, id, options, dependencies.archiveImageOwnership),
+    cancelDamagePreview: (id: string, key: unknown) => cancelDamagePreview(access, id, key),
+    exportDamagePreview: (identity: string, destination: string) => exportDamagePreview(access, identity, destination, dependencies.archiveImageOwnership),
     inspectDamagePreviewAvailability: (archiveId: string, input?: unknown) =>
       inspectDamagePreviewAvailability(access, archiveId, input, dependencies.archiveImageOwnership),
     previewDvdTitleDamageAcceptance: (
@@ -1075,3 +1082,9 @@ export {
   InvalidCatalogTitleDamageInputError,
   StaleCatalogTitleDamageCursorError,
 } from "./catalog-title-damage.js";
+
+export * from "./damage-preview-operations.js";
+
+export { reviewDamagePreviewEvidence } from "./damage-preview.js";
+
+export type DamagePreviewInspection = Awaited<ReturnType<typeof inspectDamagePreview>>;

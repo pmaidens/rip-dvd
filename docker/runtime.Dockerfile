@@ -28,6 +28,7 @@ RUN apt-get update \
   && apt-get install --yes --no-install-recommends libdvdread-dev \
   && rm -rf /var/lib/apt/lists/*
 COPY docker/handbrake-dvd-label.c docker/test-handbrake-dvd-label.c /tmp/
+COPY docker/dvd-preview-title.c /tmp/dvd-preview-title.c
 RUN gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
     -Wall -Wextra -Werror -Wformat=2 -fPIC -shared \
     /tmp/handbrake-dvd-label.c -ldl -Wl,-z,defs \
@@ -38,7 +39,10 @@ RUN gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
   && gcc -std=c17 -O2 -Wall -Wextra -Werror \
     /tmp/test-handbrake-dvd-label.c -L/tmp -ldvdread-label-mock -Wl,-rpath,/tmp \
     --output /tmp/test-handbrake-dvd-label \
-  && LD_PRELOAD=/usr/local/lib/rip-dvd-handbrake-dvd-label.so /tmp/test-handbrake-dvd-label
+  && LD_PRELOAD=/usr/local/lib/rip-dvd-handbrake-dvd-label.so /tmp/test-handbrake-dvd-label \
+  && gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
+    -Wall -Wextra -Werror -Wformat=2 /tmp/dvd-preview-title.c -ldvdread \
+    --output /usr/local/bin/rip-dvd-preview-title
 
 FROM build-base AS recovery-atomic-probe-builder
 RUN apt-get update \
@@ -285,6 +289,7 @@ RUN mkdir --parents /media/movies /media/originals \
 COPY --from=dvdcss-reader-builder /usr/local/lib/libdvdcss.so.2.4.0 /usr/local/lib/libdvdcss.so.2
 COPY --from=dvdcss-reader-builder /usr/local/lib/libdvdcss-sg-io.so.0 /usr/local/lib/libdvdcss-sg-io.so.0
 COPY docker/handbrake-with-css.sh /usr/local/bin/rip-dvd-handbrake
+COPY --from=handbrake-dvd-label-builder /usr/local/bin/rip-dvd-preview-title /usr/local/bin/rip-dvd-preview-title
 COPY --from=handbrake-dvd-label-builder /usr/local/lib/rip-dvd-handbrake-dvd-label.so /usr/local/lib/rip-dvd-handbrake-dvd-label.so
 COPY docker/handbrake-dvd-label.c /usr/share/doc/rip-dvd-handbrake/handbrake-dvd-label.c
 COPY docker/encode-worker-entrypoint.sh ./scripts/encode-worker-entrypoint.sh
