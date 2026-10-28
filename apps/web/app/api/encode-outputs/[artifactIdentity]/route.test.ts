@@ -2,7 +2,7 @@ import { afterEach, expect, it } from "vitest";
 import { writeFileSync } from "node:fs";
 import { claimNextEncodeJob, encodeOutputArtifactIdentity, retainedEncodeOutputArtifactIdentity, type EncodeOutputInspection } from "@rip-dvd/application";
 import { seedEncodeClaim, withdrawClaimAcceptance } from "../../../../../operator-cli/src/encode-claim.test-support.js";
-import { publishSyntheticClaim } from "../../../../../operator-cli/src/encode-output-provenance.test-support.js";
+import { publishSyntheticClaim, seedMixedCoverageOutput } from "../../../../../operator-cli/src/encode-output-provenance.test-support.js";
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
 import { createEncodeOutputAcknowledgementRoute, createEncodeOutputInspectionRoute } from "./route";
 
@@ -10,6 +10,23 @@ const origin = "http://localhost:3000";
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
 const probe = async () => ({ durationSeconds: 90, streams: [] });
+
+it("shares unknown-impact reasons with a complete selected map and omits private paths", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedMixedCoverageOutput(fixture);
+  const identity = encodeOutputArtifactIdentity(seeded.job.id);
+  const access = fixture.openAccess();
+  try {
+    const response = await createEncodeOutputInspectionRoute(new Request(`${origin}/api/encode-outputs/${identity}`), identity, () => access, probe);
+    const cli = await fixture.run(["encode-output", "inspect", identity], undefined, undefined, { encodeOutputMediaProbe: probe });
+    expect(response.status).toBe(200);
+    const web = await response.json();
+    expect(cli.result).toEqual(web);
+    expect(web).toMatchObject({ artifact: { sourceDamage: { knownSourceDamage: false, unknownImpact: true, watchability: "not_assessed" } } });
+    expect(JSON.stringify(web)).not.toContain(fixture.originalsLibraryPath);
+    expect(JSON.stringify(web)).not.toContain(fixture.mediaLibraryPath);
+  } finally { access.close(); }
+});
 
 it("shares retained replacement inspection and keeps historical source evidence unknown", async () => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);

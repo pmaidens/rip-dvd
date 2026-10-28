@@ -159,8 +159,11 @@ it("holds shared ownership for the complete marked archive encode read", async (
     const inspected = await current.run(["encode-output", "inspect", encodeOutputArtifactIdentity(seeded.job.id)],
       undefined, undefined, { encodeOutputMediaProbe: async () => ({ durationSeconds: 500, streams: [] }) });
     expect(inspected).toMatchObject({ exitCode: 0, result: { artifact: {
-      provenance: { sourceSnapshotAvailability: "recorded", sourceSnapshot: JSON.parse(JSON.stringify(snapshot)) },
+      provenance: { sourceSnapshotAvailability: "recorded", sourceSnapshot: { id: snapshot.id,
+        source: { checkpoint: snapshot.source.checkpoint, selection: snapshot.source.selection, output: { preset: snapshot.source.output.preset } } } },
       validation: { recordIdentity: expect.any(String) },
     } } });
+    expect(JSON.stringify(inspected.result)).not.toContain(current.originalsLibraryPath);
+    expect(JSON.stringify(inspected.result)).not.toContain(current.mediaLibraryPath);
   } finally { seeded.access.close(); }
 });

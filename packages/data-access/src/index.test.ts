@@ -1380,7 +1380,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(53);
+    expect(identifierTables).toHaveLength(54);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -10025,10 +10025,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 16",
+          "select name from __drizzle_migrations order by id desc limit 17",
         )
         .all(),
       ).toEqual([
+        { name: "20261028231111_encode-output-validations" },
         { name: "20261028221623_encode-claim-snapshots" },
         {
           name: "20261028200703_nervous_zuras",

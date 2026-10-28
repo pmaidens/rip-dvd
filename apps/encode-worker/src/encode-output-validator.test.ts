@@ -1017,13 +1017,25 @@ describe("encode output validation", () => {
   it("requires audio only when the immutable source claim requires it", async () => {
     const validator = createNodeEncodeOutputValidator({ runMediaTool: createMediaToolRunner({ audioFirstPts: null }) });
     const signal = new AbortController().signal;
-    await expect(validator.prepareAndValidate("/media/synthetic-silent.mkv", signal, { expectedAudioStreams: 1 }))
+    await expect(validator.prepareAndValidate("/media/synthetic-silent.mkv", signal, { minimumAudioStreams: 1 }))
       .rejects.toThrow("required audio stream has no readable first packet");
     const evidence = await validator.prepareAndValidate("/media/synthetic-silent.mkv", signal);
-    await expect(validator.prepareAndValidate("/media/synthetic-silent.mkv", signal, { expectedAudioStreams: 2 }))
+    await expect(validator.prepareAndValidate("/media/synthetic-silent.mkv", signal, { minimumAudioStreams: 2 }))
       .rejects.toThrow("required audio stream inventory does not match the source claim");
-    expect(evidence).toMatchObject({ audio: { firstPacketSeconds: null, expectedStreams: null },
+    expect(evidence).toMatchObject({ audio: { firstPacketSeconds: null, minimumStreams: null },
       duration: { expectedSeconds: null, minimumRatio: null }, decode: { seconds: 5, frames: 120, completed: true } });
+  });
+
+  it("allows a surround preset's additional encodings of a required source audio stream", async () => {
+    const runMediaTool = createMediaToolRunner();
+    const validator = createNodeEncodeOutputValidator({ runMediaTool: async (request) => {
+      if (request.arguments_.includes("a")) return mediaToolResult(JSON.stringify({
+        streams: [{ index: 1 }, { index: 2 }], packets: [{ pts_time: "0.0" }],
+      }));
+      return runMediaTool(request);
+    } });
+    await expect(validator.prepareAndValidate("/media/synthetic-surround.mkv", new AbortController().signal,
+      { minimumAudioStreams: 1 })).resolves.toMatchObject({ audio: { minimumStreams: 1, observedStreams: 2 } });
   });
 
   it("rejects video that produces no frames during a bounded decode", async () => {

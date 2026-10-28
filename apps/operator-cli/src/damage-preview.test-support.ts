@@ -8,7 +8,7 @@ export async function seedDamagePreview(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   coverage: "source_span" | "whole_cell" | "unknown" | "mixed" = "source_span",
   timings: readonly (readonly [number, number])[] = [[1_000, 5_000], [35_000, 40_000], [71_000, 400_000]],
-  options: { evidence?: { archive: Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>["archive"]; manifest: CommittedDvdCheckpointEvidence }; stopRecovery?: boolean } = {},
+  options: { evidence?: { archive: Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>["archive"]; manifest: CommittedDvdCheckpointEvidence }; stopRecovery?: boolean; otherTitlePartial?: boolean } = {},
 ) {
   const { archive, manifest } = options.evidence ?? await seedCommittedArchiveEvidence(fixture, [
     { startLba: 10, sectorCount: 1, classification: "skipped_untested" },
@@ -35,19 +35,21 @@ export async function seedDamagePreview(
   const reviewSet = access.catalog.recordDvdTitleIdentityObservations({
     originalDiscArchiveId: archive.id,
     checkpoint: { manifestId: manifest.id, manifestRevision: manifest.revision, manifestDigest: manifest.manifestDigest },
-    observations: [{
-      displayTitleNumber: 1,
-      navigation: { videoTitleSetNumber: 1, titleSetTitleNumber: 1, programChainNumber: 1 },
+    observations: (options.otherTitlePartial ? [1, 2] : [1]).map((number) => ({
+      displayTitleNumber: number,
+      navigation: { videoTitleSetNumber: 1, titleSetTitleNumber: number, programChainNumber: number },
       selectedPath: [{ programNumber: 1, cellNumber: 1, vobId: 1, cellId: 1 }],
       angleNumber: 1, angleCount: 1, chapterStart: 1, chapterEnd: 4, chapterCount: 4,
       sourceExtents: [{ startLba: 0, sectorCount: 100 }],
-    }],
+    })),
   });
   const observation = reviewSet.items[0]!.observation;
-  const assessment = await access.assessDvdTitleDamage(archive.id, ownership, async () => [{
-    titleIdentityObservationId: observation.id,
+  const assessment = await access.assessDvdTitleDamage(archive.id, ownership, async () => reviewSet.items.map(({ observation: item }) => ({
+    titleIdentityObservationId: item.id,
     sourceReferences: [{ kind: "multiplexed_content", startLba: 0, sectorCount: 100 }],
-    mappingCoverage: { state: "complete", policyVersion: "synthetic-map-v1", unknownReasons: [] },
+    mappingCoverage: { state: item.displayTitleNumber === 1 ? "complete" as const : "partial" as const,
+      policyVersion: "synthetic-map-v1", unknownReasons: item.displayTitleNumber === 1 ? []
+        : [{ code: "SYNTHETIC_OTHER_TITLE_PARTIAL", message: "Synthetic partial other title." }] },
     timingEvidence: {
       policyVersion: "dvd-title-damage-timing-v1",
       occurrences: (coverage === "unknown" ? [null] : timings).map((span, index) => ({
@@ -60,7 +62,7 @@ export async function seedDamagePreview(
         unknownReasons: span === null ? [{ code: "TIMING_UNAVAILABLE", message: "Timing is unknown." }] : [],
       })),
     },
-  }]);
+  })));
   const profile = access.encodingProfiles.create({
     key: "synthetic-preview", displayName: "Synthetic preview", mediaDomain: "dvd_video",
     settings: { preset: "Fast 1080p30", container: "mkv" },

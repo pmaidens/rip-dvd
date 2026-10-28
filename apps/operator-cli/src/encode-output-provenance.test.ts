@@ -6,12 +6,25 @@ import { claimNextEncodeJob, encodeOutputArtifactIdentity, retainedEncodeOutputA
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { seedEncodeClaim } from "./encode-claim.test-support.js";
 import { assessmentMappings } from "./encoding-readiness.test-support.js";
-import { publishSyntheticClaim, syntheticOutputValidation } from "./encode-output-provenance.test-support.js";
+import { publishSyntheticClaim, seedMixedCoverageOutput, syntheticOutputValidation } from "./encode-output-provenance.test-support.js";
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
 const probe = async () => ({ durationSeconds: 500, streams: [] });
+
+it("reports unknown impact from recorded assessment reasons with a complete selected map and no missing sectors", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedMixedCoverageOutput(fixture);
+  expect(seeded.assessment.unknownTitleImpact).toMatchObject({ unrecoveredSourceSectorCount: 0,
+    reasons: [expect.objectContaining({ code: "TITLE_SOURCE_MAP_INCOMPLETE" })] });
+  const inspected = await fixture.run(["encode-output", "inspect", encodeOutputArtifactIdentity(seeded.job.id)],
+    undefined, undefined, { encodeOutputMediaProbe: probe });
+  expect(inspected).toMatchObject({ exitCode: 0, result: { artifact: {
+    sourceDamage: { knownSourceDamage: false, unknownImpact: true, watchability: "not_assessed" },
+    provenance: { sourceSnapshot: { source: { assessment: { unknownTitleImpact: { unrecoveredSourceSectorCount: 0 } } } } },
+  } } });
+});
 
 it("leaves a historical receipt unknown when a later generation gains recorded source evidence", async () => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
@@ -66,6 +79,8 @@ it("binds passing source evidence to the exact normal generation through replace
         id: firstClaim.claimToken, source: { acceptance: null, sourceContinuityRisk: false,
           output: { expectedDurationSeconds: 500, audioStreams: [{ id: 128, format: "ac3" }] } },
       } }, media: { playability: "not_assessed" } });
+    expect(JSON.stringify(first)).not.toContain(fixture.originalsLibraryPath);
+    expect(JSON.stringify(first)).not.toContain(fixture.mediaLibraryPath);
     const ack = await fixture.run(["encode-output", "acknowledge-inspection", identity, "--key", "synthetic-source-output-receipt", "--json",
       JSON.stringify({ acknowledged: true, reviewToken: first.operatorInspection.reviewToken })], undefined, undefined, { encodeOutputMediaProbe: probe });
     expect(ack.exitCode).toBe(0);

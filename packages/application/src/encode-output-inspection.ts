@@ -24,8 +24,11 @@ import type {
   EncodeOutputInspectionAcknowledgement,
   EncodeOutputInspectionReceiptRecord,
   EncodeOutputValidationRecord,
+  EncodeOutputSourceSnapshot,
+  EncodeClaimSource,
 } from "@rip-dvd/data-access";
 import { parseMutationKey } from "./mutation-key.js";
+import { assessmentHasUnknownSourceImpact } from "./source-damage-impact.js";
 
 const ENCODE_OUTPUT_ARTIFACT_PATTERN =
   /^encode-output-v1\.(published|retained)\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
@@ -497,9 +500,24 @@ function presentedValidation(
   };
 }
 
+type InspectedEncodeOutputSourceSnapshot = Omit<EncodeOutputSourceSnapshot, "source"> & {
+  source: Omit<EncodeClaimSource, "archive" | "output"> & {
+    archive: Omit<EncodeClaimSource["archive"], "archivePath">;
+    output: Omit<EncodeClaimSource["output"], "path">;
+  };
+};
+
+function presentedSourceSnapshot(record: EncodeOutputValidationRecord | null): InspectedEncodeOutputSourceSnapshot | null {
+  const snapshot = record?.sourceSnapshot;
+  if (snapshot == null) return null;
+  const { archivePath: _archivePath, ...archive } = snapshot.source.archive;
+  const { path: _outputPath, ...output } = snapshot.source.output;
+  return { ...snapshot, source: { ...snapshot.source, archive, output } };
+}
+
 function outputProvenance(input: ResolvedEncodeOutput) {
   const { job, originalDiscArchiveId, retainedOutputId, validationRecord } = input;
-  const sourceSnapshot = validationRecord?.sourceSnapshot ?? null;
+  const sourceSnapshot = presentedSourceSnapshot(validationRecord);
   return {
     encodeJobId: job.id,
     discSelectionId: sourceSnapshot?.source.selection.id ?? job.discSelectionId,
@@ -517,7 +535,7 @@ function recordedSourceDamage(record: EncodeOutputValidationRecord | null) {
   return {
     knownSourceDamage: item === undefined ? null : item.unrecoveredUniqueSourceSectorCount > 0,
     unknownImpact: source === undefined || item === undefined || item.mappingCoverage.state !== "complete" ||
-      source.assessment.unknownTitleImpact.unrecoveredSourceSectorCount > 0,
+      assessmentHasUnknownSourceImpact(source.assessment),
     sourceContinuityRisk: source?.sourceContinuityRisk ?? null,
     watchability: "not_assessed" as const,
   };

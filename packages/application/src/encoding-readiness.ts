@@ -1,3 +1,4 @@
+import { assessmentHasUnknownSourceImpact } from "./source-damage-impact.js";
 import {
   archiveRecoveryWorkIdentity,
   dvdRecoveryEvidenceFormatForArchive,
@@ -132,11 +133,7 @@ export function describeEncodingReadiness(
     "CATALOG_REVIEW_ARCHIVE_ONLY", "Catalog Review is archive-only.",
   ));
   const assessment = assessmentState === "current" ? damage?.assessment ?? null : null;
-  const archiveUnknown = assessment !== null && (
-    assessment.unknownTitleImpact.unrecoveredSourceSectorCount > 0 ||
-    assessment.unknownTitleImpact.reasons.length > 0 || assessment.sourceContinuity === null ||
-    assessment.unattributedSourceContinuityRisk === null
-  );
+  const archiveUnknown = assessment !== null && assessmentHasUnknownSourceImpact(assessment);
   const archiveContinuityRisk = (assessment?.unattributedSourceContinuityRisk?.sourceSectorCount ?? 0) > 0;
   const selectedContent = snapshot.catalog.listDiscSelections({ originalDiscArchiveId: archiveId });
   const mediaItems = new Map(readMediaItemsWithAncestors(snapshot.catalog, selectedContent.map(({ mediaItemId }) => mediaItemId))

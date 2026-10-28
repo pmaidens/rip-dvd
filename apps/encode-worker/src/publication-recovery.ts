@@ -1819,7 +1819,7 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
     return { archive: source.archive, evidenceFormat: "dvd-recovery-evidence-v1" as const,
       preset: source.output.preset, selectionArguments: [...source.output.selectionArguments],
       expectedDurationSeconds: source.output.expectedDurationSeconds ?? undefined,
-      expectedAudioStreams: source.output.audioStreams.length,
+      minimumAudioStreams: source.output.audioStreams.length,
       subtitleScanTitleNumber: source.resolvedSource.displayTitleNumber };
   }
   return access.readConsistentSnapshot((snapshot) => {
@@ -2122,7 +2122,7 @@ export async function executeEncodeClaim(
     );
     failurePhase = "validation";
     const validationEvidence = await options.outputValidator.prepareAndValidate(partialPath, signal, {
-      ...("expectedAudioStreams" in input ? { expectedAudioStreams: input.expectedAudioStreams } : {}),
+      ...("minimumAudioStreams" in input ? { minimumAudioStreams: input.minimumAudioStreams } : {}),
       ...(input.expectedDurationSeconds === undefined
         ? {}
         : { expectedDurationSeconds: input.expectedDurationSeconds }),

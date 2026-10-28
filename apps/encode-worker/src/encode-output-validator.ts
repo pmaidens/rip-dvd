@@ -44,7 +44,7 @@ export interface EncodeOutputValidator {
 }
 
 export interface EncodeOutputValidationExpectations {
-  expectedAudioStreams?: number;
+  minimumAudioStreams?: number;
   expectedDurationSeconds?: number;
   expectedVobSubStreams?: readonly EncodeOutputVobSubExpectation[];
   vobSubProvenance?: readonly HandBrakeVobSubProvenance[];
@@ -681,10 +681,6 @@ async function validateSubtitleStreams({
       });
     } catch (error) {
       signal.throwIfAborted();
-      if (expectations.expectedAudioStreams !== undefined &&
-        (!Number.isSafeInteger(expectations.expectedAudioStreams) || expectations.expectedAudioStreams < 0)) {
-        throw new Error("Encode output audio expectation is invalid");
-      }
       throw validationError(
         "subtitle_cleanup",
         `subtitle cleanup failed: ${normalizeToolError(error)}`,
@@ -718,6 +714,10 @@ export function createNodeEncodeOutputValidator({
   return {
     async prepareAndValidate(outputPath, signal, expectations = {}): Promise<EncodeOutputValidationEvidence> {
       signal.throwIfAborted();
+      if (expectations.minimumAudioStreams !== undefined &&
+        (!Number.isSafeInteger(expectations.minimumAudioStreams) || expectations.minimumAudioStreams < 0)) {
+        throw new Error("Encode output audio expectation is invalid");
+      }
       if (
         expectations.expectedDurationSeconds !== undefined &&
         (!Number.isFinite(expectations.expectedDurationSeconds) ||
@@ -819,11 +819,11 @@ export function createNodeEncodeOutputValidator({
                 "-v",
                 "error",
                 "-select_streams",
-                expectations.expectedAudioStreams === undefined ? "a:0" : "a",
+                expectations.minimumAudioStreams === undefined ? "a:0" : "a",
                 "-read_intervals",
                 "%+#1",
                 "-show_entries",
-                expectations.expectedAudioStreams === undefined ? "packet=pts_time" : "stream=index:packet=pts_time",
+                expectations.minimumAudioStreams === undefined ? "packet=pts_time" : "stream=index:packet=pts_time",
                 "-of",
                 "json",
                 outputPath,
@@ -841,10 +841,10 @@ export function createNodeEncodeOutputValidator({
       );
       const audioFirstPts = firstPacketPts(audioProbe);
       const observedAudioStreams = Array.isArray(audioProbe.streams) ? audioProbe.streams.length : null;
-      if (expectations.expectedAudioStreams !== undefined && observedAudioStreams !== expectations.expectedAudioStreams) {
+      if (expectations.minimumAudioStreams !== undefined && (observedAudioStreams === null || observedAudioStreams < expectations.minimumAudioStreams)) {
         throw validationError("audio_timing", "required audio stream inventory does not match the source claim");
       }
-      if ((expectations.expectedAudioStreams ?? 0) > 0 && audioFirstPts === null) {
+      if ((expectations.minimumAudioStreams ?? 0) > 0 && audioFirstPts === null) {
         throw validationError("audio_timing", "required audio stream has no readable first packet");
       }
       const videoStartDelay = videoFirstPts - (audioFirstPts ?? 0);
@@ -908,7 +908,7 @@ export function createNodeEncodeOutputValidator({
           observedSeconds: outputDurationSeconds(videoProbe) },
         video: { codec: videoStream.codec_name as string, profile: videoStream.profile as string,
           pixelFormat: videoStream.pix_fmt as string, firstPacketSeconds: videoFirstPts },
-        audio: { firstPacketSeconds: audioFirstPts, expectedStreams: expectations.expectedAudioStreams ?? null,
+        audio: { firstPacketSeconds: audioFirstPts, minimumStreams: expectations.minimumAudioStreams ?? null,
           observedStreams: observedAudioStreams },
         subtitles: { expectedSourceStreams: expectations.expectedVobSubStreams?.length ?? null, checked: true },
         decode: { seconds: VALIDATION_DECODE_SECONDS, frames: decodedFrames, completed: true },
