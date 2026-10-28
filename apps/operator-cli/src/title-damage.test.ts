@@ -1024,6 +1024,26 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     JSON.stringify(acceptanceInput),
   ]);
   expect(replay.result).toEqual(accepted.result);
+  const directReplay = access.catalog.recordDvdTitleDamageDecision({
+    mutationKey: acceptanceKey,
+    originalDiscArchiveId: archive.id,
+    previewToken: acceptanceInput.previewToken,
+    operator: acceptanceInput.operator,
+    checkpoint: {
+      revision: acceptanceInput.checkpointRevision,
+      digest: acceptanceInput.checkpointDigest,
+    },
+    assessmentIdentity: acceptanceInput.assessmentIdentity,
+    reviewSetIdentity: acceptanceInput.reviewSetIdentity,
+    catalogMappingProjectionId: acceptanceInput.catalogMappingProjectionId,
+    reviewedContentIdentity: acceptanceInput.reviewedContentIdentity,
+    excludedTitleIdentityIds: acceptanceInput.excludedTitleIdentityIds,
+    mainFeatureResolutions: acceptanceInput.mainFeatureResolutions,
+    damageAcknowledgement: acceptanceInput.damageAcknowledgement,
+  });
+  expect(directReplay.catalogRevision).toBeInstanceOf(Date);
+  expect(directReplay.recordedAt).toBeInstanceOf(Date);
+  expect(typeof directReplay.snapshot.current.catalogRevision).toBe("string");
   const immutableDecision = new DatabaseSync(fixture.databasePath);
   expect(() => immutableDecision.prepare(`
     UPDATE dvd_title_damage_decisions

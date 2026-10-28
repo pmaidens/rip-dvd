@@ -6144,11 +6144,14 @@ export function createDataAccessInternal(
   function decodeDvdTitleDamageDecision(
     stored: string,
   ): DvdTitleDamageDecision {
-    return JSON.parse(stored, (field, value: unknown) =>
-      (field === "catalogRevision" || field === "recordedAt") &&
-          typeof value === "string"
-        ? new Date(value)
-        : value) as DvdTitleDamageDecision;
+    const parsed = JSON.parse(stored) as
+      & Omit<DvdTitleDamageDecision, "catalogRevision" | "recordedAt">
+      & { catalogRevision: string; recordedAt: string };
+    return {
+      ...parsed,
+      catalogRevision: new Date(parsed.catalogRevision),
+      recordedAt: new Date(parsed.recordedAt),
+    };
   }
 
   function dvdTitleDamagePreviewSemanticInput(input: {
