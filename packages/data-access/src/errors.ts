@@ -49,6 +49,26 @@ export class StaleCatalogRevisionError extends DomainInvariantError {
   }
 }
 
+export class StaleDvdTitleDamageDecisionError extends DomainInvariantError {
+  readonly code = "STALE_TITLE_DAMAGE_DECISION" as const;
+
+  constructor(readonly currentIdentities: {
+    catalogRevision: string | null;
+    checkpoint: { revision: number; digest: string } | null;
+    recovery: {
+      id: import("./types.js").ArchiveRecoveryId;
+      attemptId: import("./types.js").ArchiveRecoveryAttemptId;
+      state: import("./types.js").ArchiveRecoveryStatus;
+    } | null;
+    assessmentIdentity: string | null;
+    reviewSetIdentity: string | null;
+    catalogMappingProjectionId: string | null;
+  }) {
+    super("Title Damage Acceptance preview is stale.");
+    this.name = "StaleDvdTitleDamageDecisionError";
+  }
+}
+
 export class CatalogMappingEvidenceUnavailableError
   extends DomainInvariantError {
   constructor() {

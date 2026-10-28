@@ -8,10 +8,12 @@ import type {
 
 import type {
   CatalogReviewTitleDamage,
+  CatalogReviewTitleDamageDecision,
   CatalogReviewTitleIdentity,
 } from "./catalog-review-model";
 import { CatalogReviewTitleDamageAssessmentEvidence } from
   "./catalog-review-title-damage";
+import { createMutationKey } from "../lib/mutation-key";
 
 type CurrentTitleIdentity = Extract<
   CatalogReviewTitleIdentity,
@@ -60,11 +62,13 @@ function mediaItemLabel(item: {
 export function CatalogReviewTitleDamageAcceptancePreview({
   originalDiscArchiveId,
   titleIdentity,
+  titleDamageDecision,
   evidenceGeneration,
   fetcher = fetch,
 }: {
   originalDiscArchiveId: string;
   titleIdentity?: CatalogReviewTitleIdentity;
+  titleDamageDecision?: CatalogReviewTitleDamageDecision;
   evidenceGeneration: {
     current: CatalogReviewWorkflow["current"];
     titleDamageState: CatalogReviewTitleDamage["state"] | null;
@@ -81,7 +85,13 @@ export function CatalogReviewTitleDamageAcceptancePreview({
     null,
   );
   const [isLoading, setIsLoading] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [operator, setOperator] = useState("");
+  const [damageAcknowledged, setDamageAcknowledged] = useState(false);
+  const [recordedDecision, setRecordedDecision] = useState<
+    "accepted" | "not_required" | null
+  >(null);
   const requestVersion = useRef(0);
   const reviewSetIdentity = titleIdentity?.reviewSetIdentity ?? null;
   const evidenceGenerationKey = JSON.stringify(evidenceGeneration);
@@ -91,6 +101,8 @@ export function CatalogReviewTitleDamageAcceptancePreview({
     setPreview(null);
     setIsLoading(false);
     setError(null);
+    setDamageAcknowledged(false);
+    setRecordedDecision(null);
   };
 
   useEffect(() => {
@@ -100,6 +112,8 @@ export function CatalogReviewTitleDamageAcceptancePreview({
     setPreview(null);
     setIsLoading(false);
     setError(null);
+    setDamageAcknowledged(false);
+    setRecordedDecision(null);
   }, [evidenceGenerationKey, originalDiscArchiveId, reviewSetIdentity]);
 
   const toggle = (id: string) => {
@@ -152,6 +166,68 @@ export function CatalogReviewTitleDamageAcceptancePreview({
       if (requestVersion.current === version) setIsLoading(false);
     }
   };
+  const submitDecision = async () => {
+    if (
+      preview?.available !== true || preview.previewToken === null ||
+      preview.current?.checkpoint === null ||
+      preview.assessmentIdentity === null ||
+      preview.reviewSetIdentity === null ||
+      preview.catalogMappingProjectionId === null ||
+      preview.reviewedContentIdentity === null
+    ) return;
+    setIsSubmitting(true);
+    setError(null);
+    try {
+      const response = await fetcher(
+        `/api/catalog-reviews/${encodeURIComponent(originalDiscArchiveId)}/title-damage-acceptance`,
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            mutationKey: createMutationKey(),
+            operator,
+            previewToken: preview.previewToken,
+            checkpointRevision: preview.current.checkpoint.revision,
+            checkpointDigest: preview.current.checkpoint.manifestDigest,
+            assessmentIdentity: preview.assessmentIdentity,
+            reviewSetIdentity: preview.reviewSetIdentity,
+            catalogMappingProjectionId: preview.catalogMappingProjectionId,
+            reviewedContentIdentity: preview.reviewedContentIdentity,
+            excludedTitleIdentityIds: [...excluded].sort(),
+            mainFeatureResolutions: [...mainFeatureResolutions]
+              .filter(([, titleIdentityId]) => titleIdentityId !== "")
+              .map(([discSelectionId, titleIdentityId]) => ({
+                discSelectionId,
+                titleIdentityId,
+              }))
+              .sort((left, right) =>
+                left.discSelectionId.localeCompare(right.discSelectionId)
+              ),
+            damageAcknowledgement: damageAcknowledged,
+          }),
+        },
+      );
+      if (!response.ok) {
+        const problem = await response.json().catch(() => null) as
+          | { error?: { code?: string; message?: string } }
+          | null;
+        throw new Error(problem?.error?.code ?? "acceptance_failed");
+      }
+      const result = await response.json() as {
+        decision: { decision: "accepted" | "not_required" };
+      };
+      setRecordedDecision(result.decision.decision);
+    } catch {
+      setError(
+        "Title Damage Acceptance was not recorded. Refresh the current evidence and preview again.",
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   return (
     <section
@@ -166,6 +242,32 @@ export function CatalogReviewTitleDamageAcceptancePreview({
         content explicitly, then preview the exact set. Previewing does not
         accept damage or queue encoding.
       </p>
+      {titleDamageDecision === undefined ? null : (
+        <section aria-labelledby="title-damage-decision-status-heading">
+          <h4 id="title-damage-decision-status-heading">
+            Current exact-set decision
+          </h4>
+          {titleDamageDecision.current !== null ? (
+            <p role="status">
+              {titleDamageDecision.current.decision === "accepted"
+                ? "Damage accepted"
+                : "No damage acceptance required"} for the current exact
+              reviewed set by {titleDamageDecision.current.operator} at {
+                titleDamageDecision.current.recordedAt
+              }. {titleDamageDecision.current.snapshot.reviewedContent.length} included
+              and {titleDamageDecision.current.snapshot.exclusions.length} excluded.
+            </p>
+          ) : titleDamageDecision.state === "expired" &&
+              titleDamageDecision.latest !== null ? (
+            <p>
+              The latest exact-set decision has expired because its bound
+              evidence is no longer current. Preview the complete set again.
+            </p>
+          ) : (
+            <p>No exact-set Title Damage decision is recorded.</p>
+          )}
+        </section>
+      )}
       {items.length === 0 ? (
         <p>No current discovered content is available.</p>
       ) : (
@@ -416,6 +518,52 @@ export function CatalogReviewTitleDamageAcceptancePreview({
                     </div>
                   </dl>
                 </details>
+              )}
+              {!preview.available ? null : (
+                <fieldset>
+                  <legend>Record exact-set decision</legend>
+                  <label>
+                    Operator
+                    <input
+                      value={operator}
+                      maxLength={128}
+                      onChange={(event) => setOperator(event.currentTarget.value)}
+                    />
+                  </label>
+                  {!preview.acknowledgementRequired ? null : (
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={damageAcknowledged}
+                        onChange={(event) =>
+                          setDamageAcknowledged(event.currentTarget.checked)}
+                      />
+                      I accept the reported damage or unknown impact for this
+                      exact reviewed set.
+                    </label>
+                  )}
+                  <button
+                    type="button"
+                    disabled={
+                      isSubmitting || operator.trim() === "" ||
+                      (preview.acknowledgementRequired && !damageAcknowledged)
+                    }
+                    onClick={submitDecision}
+                  >
+                    {isSubmitting
+                      ? "Recording decision…"
+                      : preview.acknowledgementRequired
+                      ? "Accept exact reviewed set"
+                      : "Record clean reviewed set"}
+                  </button>
+                  {recordedDecision === null ? null : (
+                    <p role="status">
+                      {recordedDecision === "accepted"
+                        ? "Damage accepted for this exact reviewed set."
+                        : "This exact reviewed set is clean and needs no damage acceptance."}
+                    </p>
+                  )}
+                </fieldset>
               )}
             </>
           )}

@@ -63,6 +63,14 @@ Catalog Review read never materializes the complete replacement history merely
 to display one page.
 
 Catalog review is explicit rather than inferred from the first Disc Selection.
+For `dvd-recovery-evidence-v1`, Title Damage decisions are immutable exact-set
+records. The acceptance transaction binds the operator, Catalog Review
+revision, checkpoint, current assessment attempt, complete Title Identity set,
+mapping projection, exclusions, concrete main-feature resolutions, and the
+reviewed assessment snapshot. Later meaningful assessment attempts expire the
+decision even if a still later attempt recreates the earlier semantic identity;
+same-identity no-op attempts do not. Encode admission remains closed until its
+separate gate consumes this evidence.
 New Original Disc Archives remain in the review queue while a user builds a
 partial set of selections. `catalog.completeCatalogReview()` requires the
 archive's current `updatedAt` catalog revision and an explicit outcome:

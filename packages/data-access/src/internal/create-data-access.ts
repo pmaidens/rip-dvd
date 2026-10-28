@@ -91,6 +91,7 @@ import {
   dvdStructuralCheckAttempts,
   dvdTitleDamageAssessmentAttempts,
   dvdTitleDamageAssessments,
+  dvdTitleDamageDecisions,
   dvdTitleIdentities,
   dvdTitleIdentityObservations,
   dvdTitleIdentitySelectionBindings,
@@ -267,6 +268,7 @@ import {
   StaleDvdDiscConfirmationError,
   StaleDvdDiscVerificationError,
   StaleDvdStructuralCheckpointError,
+  StaleDvdTitleDamageDecisionError,
   StaleJobAttemptError,
 } from "../errors.js";
 import type { LegacySidecarDataAccess } from "../legacy-sidecar-types.js";
@@ -334,6 +336,9 @@ import type {
   DiscSelection,
   DiscSelectionId,
   DvdTitleIdentityId,
+  DvdTitleDamageDecision,
+  DvdTitleDamageDecisionId,
+  DvdTitleDamageDecisionInspection,
   DvdTitleIdentityObservation,
   DvdTitleIdentityObservationId,
   DvdTitleIdentityReviewSet,
@@ -387,6 +392,7 @@ import type {
   OriginalDiscArchiveId,
   RecordDvdDiscConfirmationInput,
   OriginalDiscArchive,
+  RecordDvdTitleDamageDecisionInput,
   RearchiveMappingProposalMapping,
   RearchiveMappingProposalInput,
   RearchiveMappingProposalReview,
@@ -6133,6 +6139,168 @@ export function createDataAccessInternal(
           typeof value === "string"
         ? new Date(value)
         : value) as T;
+  }
+
+  function decodeDvdTitleDamageDecision(
+    stored: string,
+  ): DvdTitleDamageDecision {
+    const parsed = JSON.parse(stored) as
+      & Omit<DvdTitleDamageDecision, "catalogRevision" | "recordedAt">
+      & { catalogRevision: string; recordedAt: string };
+    return {
+      ...parsed,
+      catalogRevision: new Date(parsed.catalogRevision),
+      recordedAt: new Date(parsed.recordedAt),
+    };
+  }
+
+  function dvdTitleDamagePreviewSemanticInput(input: {
+    originalDiscArchiveId: OriginalDiscArchiveId;
+    excludedTitleIdentityIds: readonly DvdTitleIdentityId[];
+    mainFeatureResolutions: readonly {
+      discSelectionId: DiscSelectionId;
+      titleIdentityId: DvdTitleIdentityId;
+    }[];
+  }): string {
+    return JSON.stringify([
+      input.originalDiscArchiveId,
+      [...input.excludedTitleIdentityIds].sort(),
+      [...input.mainFeatureResolutions].sort((left, right) =>
+        left.discSelectionId.localeCompare(right.discSelectionId)
+      ),
+    ]);
+  }
+
+  function dvdTitleDamageDecisionSemanticInput(
+    input: RecordDvdTitleDamageDecisionInput,
+  ): string {
+    return JSON.stringify({
+      originalDiscArchiveId: input.originalDiscArchiveId,
+      previewToken: input.previewToken,
+      operator: input.operator.trim(),
+      damageAcknowledgement: input.damageAcknowledgement,
+      checkpoint: input.checkpoint,
+      assessmentIdentity: input.assessmentIdentity,
+      reviewSetIdentity: input.reviewSetIdentity,
+      catalogMappingProjectionId: input.catalogMappingProjectionId,
+      reviewedContentIdentity: input.reviewedContentIdentity,
+      excludedTitleIdentityIds: [...input.excludedTitleIdentityIds].sort(),
+      mainFeatureResolutions: [...input.mainFeatureResolutions].sort(
+        (left, right) =>
+          left.discSelectionId.localeCompare(right.discSelectionId),
+      ),
+    });
+  }
+
+  function currentDvdTitleDamageDecisionIdentities(
+    reader: MutationTransaction | typeof database,
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): DvdTitleDamageDecisionInspection["currentIdentities"] {
+    const archive = reader.select({ updatedAt: originalDiscArchives.updatedAt })
+      .from(originalDiscArchives)
+      .where(eq(originalDiscArchives.id, originalDiscArchiveId))
+      .get();
+    const header = reader.select().from(dvdArchiveEvidenceHeaders).where(eq(
+      dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+      originalDiscArchiveId,
+    )).get();
+    const recovery = reader.select({
+      id: archiveRecoveries.id,
+      attemptId: archiveRecoveries.attemptId,
+      state: archiveRecoveries.status,
+    }).from(archiveRecoveries).where(eq(
+      archiveRecoveries.originalDiscArchiveId,
+      originalDiscArchiveId,
+    )).get();
+    // The authoritative inspection checks the current structural assessment,
+    // Title Identity review set, mapping projection, continuity, and timing
+    // evidence. During an immediate transaction these reads share the same
+    // SQLite connection and therefore the same atomic write fence.
+    const damageInspection = inspectDvdTitleDamageAssessment(
+      originalDiscArchiveId,
+    );
+    const currentAssessment = damageInspection.state === "current" &&
+        damageInspection.currentAssessmentIdentity !== null
+      ? reader.select().from(dvdTitleDamageAssessments).where(eq(
+        dvdTitleDamageAssessments.id,
+        damageInspection.currentAssessmentIdentity,
+      )).get() ?? null
+      : null;
+    return {
+      catalogRevision: archive?.updatedAt.toISOString() ?? null,
+      checkpoint: header === undefined
+        ? null
+        : {
+          revision: header.currentManifestRevision,
+          digest: header.currentManifestDigest,
+        },
+      recovery: recovery ?? null,
+      assessmentIdentity: currentAssessment?.id ?? null,
+      reviewSetIdentity:
+        currentAssessment?.titleIdentityReviewSetIdentity ?? null,
+      catalogMappingProjectionId:
+        currentAssessment?.catalogMappingProjectionId ?? null,
+    };
+  }
+
+  function inspectDvdTitleDamageDecision(
+    originalDiscArchiveId: OriginalDiscArchiveId,
+    reader: MutationTransaction | typeof database = database,
+  ): DvdTitleDamageDecisionInspection {
+    const latest = reader.select().from(dvdTitleDamageDecisions).where(eq(
+      dvdTitleDamageDecisions.originalDiscArchiveId,
+      originalDiscArchiveId,
+    )).orderBy(
+      desc(dvdTitleDamageDecisions.recordedAt),
+      desc(dvdTitleDamageDecisions.id),
+    ).limit(1).get() ?? null;
+    const currentIdentities = currentDvdTitleDamageDecisionIdentities(
+      reader,
+      originalDiscArchiveId,
+    );
+    const current = latest !== null &&
+        latest.catalogRevision.toISOString() ===
+          currentIdentities.catalogRevision &&
+        latest.checkpointRevision === currentIdentities.checkpoint?.revision &&
+        latest.checkpointDigest === currentIdentities.checkpoint?.digest &&
+        latest.assessmentIdentity === currentIdentities.assessmentIdentity &&
+        latest.reviewSetIdentity === currentIdentities.reviewSetIdentity &&
+        latest.catalogMappingProjectionId ===
+          currentIdentities.catalogMappingProjectionId &&
+        latest.snapshot.current.recovery.id === currentIdentities.recovery?.id &&
+        latest.snapshot.current.recovery.attemptId ===
+          currentIdentities.recovery?.attemptId &&
+        latest.snapshot.current.recovery.state ===
+          currentIdentities.recovery?.state &&
+        reader.select({ sequence: dvdTitleDamageAssessmentAttempts.sequence })
+          .from(dvdTitleDamageAssessmentAttempts)
+          .where(and(
+            eq(
+              dvdTitleDamageAssessmentAttempts.originalDiscArchiveId,
+              originalDiscArchiveId,
+            ),
+            gt(
+              dvdTitleDamageAssessmentAttempts.sequence,
+              latest.assessmentAttemptSequence,
+            ),
+            ne(
+              dvdTitleDamageAssessmentAttempts.assessmentId,
+              latest.assessmentIdentity,
+            ),
+          )).limit(1).get() === undefined
+      ? latest
+      : null;
+    return {
+      schemaVersion: 1,
+      state: current !== null
+        ? current.decision
+        : latest === null
+        ? "not_recorded"
+        : "expired",
+      current,
+      latest,
+      currentIdentities,
+    };
   }
 
   function decodeArchiveRecoveryStopReceipt(
@@ -14875,6 +15043,8 @@ export function createDataAccessInternal(
             access.catalog.readDvdCatalogReviewWorkflowEvidence(ids),
           listCatalogReviewEvidenceChoices: (id, options) =>
             access.catalog.listCatalogReviewEvidenceChoices(id, options),
+          inspectDvdTitleDamageDecision: (id) =>
+            access.catalog.inspectDvdTitleDamageDecision(id),
           findArchiveRecovery: (id) =>
             access.catalog.findArchiveRecovery(id),
           findArchiveRecoveryById: (id) =>
@@ -18207,18 +18377,214 @@ export function createDataAccessInternal(
         database.insert(mutationInvocations).values({
           key: requireNonEmpty(input.previewToken, "previewToken"),
           operation: "dvd_title_damage_acceptance.preview",
-          semanticInput: JSON.stringify([
-            input.originalDiscArchiveId,
-            [...input.excludedTitleIdentityIds].sort(),
-            [...input.mainFeatureResolutions].sort((left, right) =>
-              left.discSelectionId.localeCompare(right.discSelectionId)
-            ),
-          ]),
+          semanticInput: dvdTitleDamagePreviewSemanticInput(input),
           outcome: JSON.stringify({
             expectedPreviewEvidence: input.expectedPreviewEvidence,
+            decisionSnapshot: input.decisionSnapshot,
           }),
           createdAt: now(),
         }).run();
+      },
+
+      recordDvdTitleDamageDecision(input) {
+        const operation = "dvd_title_damage_acceptance.accept";
+        const semanticInput = dvdTitleDamageDecisionSemanticInput(input);
+        return database.transaction((transaction) => {
+          const replay = readMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            decodeDvdTitleDamageDecision,
+          );
+          if (replay !== undefined) return replay;
+
+          const operator = requireNonEmpty(input.operator, "operator").trim();
+          if (operator.length > 128) {
+            throw new DomainInvariantError(
+              "Title Damage Acceptance operator must be at most 128 characters",
+            );
+          }
+          const previewDecision = transaction.select()
+            .from(mutationInvocations)
+            .where(eq(mutationInvocations.key, input.previewToken))
+            .get();
+          if (
+            previewDecision?.operation !==
+              "dvd_title_damage_acceptance.preview" ||
+            previewDecision.semanticInput !==
+              dvdTitleDamagePreviewSemanticInput(input)
+          ) {
+            throw new DomainInvariantError(
+              "Title Damage Acceptance preview does not match the submitted exact set",
+            );
+          }
+          const preview = JSON.parse(previewDecision.outcome) as {
+            expectedPreviewEvidence?: unknown;
+            decisionSnapshot?: unknown;
+          };
+          const snapshot = preview.decisionSnapshot as
+            | import("../types.js").DvdTitleDamageDecisionSnapshot
+            | undefined;
+          if (
+            typeof preview.expectedPreviewEvidence !== "string" ||
+            snapshot === undefined || snapshot.schemaVersion !== 1 ||
+            !Array.isArray(snapshot.affectedWork)
+          ) {
+            throw new DomainInvariantError(
+              "Title Damage Acceptance preview is invalid",
+            );
+          }
+          const expectedMatches =
+            input.checkpoint.revision === snapshot.current.checkpoint.revision &&
+            input.checkpoint.digest ===
+              snapshot.current.checkpoint.manifestDigest &&
+            input.assessmentIdentity === snapshot.assessmentIdentity &&
+            input.reviewSetIdentity === snapshot.reviewSetIdentity &&
+            input.catalogMappingProjectionId ===
+              snapshot.catalogMappingProjectionId &&
+            input.reviewedContentIdentity ===
+              snapshot.reviewedContentIdentity &&
+            JSON.stringify([...input.excludedTitleIdentityIds].sort()) ===
+              JSON.stringify(snapshot.excludedTitleIdentityIds) &&
+            JSON.stringify([...input.mainFeatureResolutions].sort(
+              (left, right) =>
+                left.discSelectionId.localeCompare(right.discSelectionId),
+            )) === JSON.stringify(snapshot.mainFeatureResolutions);
+          if (!expectedMatches) {
+            throw new DomainInvariantError(
+              "Title Damage Acceptance expected identities do not match the preview",
+            );
+          }
+          if (snapshot.acknowledgementRequired &&
+              input.damageAcknowledgement !== true) {
+            throw new DomainInvariantError(
+              "Explicit damage acknowledgement is required for this exact set",
+            );
+          }
+
+          const current = currentDvdTitleDamageDecisionIdentities(
+            transaction,
+            input.originalDiscArchiveId,
+          );
+          const recovery = snapshot.current.recovery;
+          const currentAffectedWork = transaction.select({
+            id: encodeJobs.id,
+            discSelectionId: encodeJobs.discSelectionId,
+            status: encodeJobs.status,
+          }).from(encodeJobs).innerJoin(
+            discSelections,
+            eq(discSelections.id, encodeJobs.discSelectionId),
+          ).where(and(
+            eq(
+              discSelections.originalDiscArchiveId,
+              input.originalDiscArchiveId,
+            ),
+            eq(discSelections.isCatalogActive, true),
+            inArray(encodeJobs.status, ACTIVE_ENCODE_WORK_STATUSES),
+          )).orderBy(asc(encodeJobs.id))
+            .limit(ACTIVE_ENCODE_JOB_RESULT_LIMIT + 1).all();
+          const stale =
+            current.catalogRevision !== snapshot.current.catalogRevision ||
+            current.checkpoint?.revision !== input.checkpoint.revision ||
+            current.checkpoint?.digest !== input.checkpoint.digest ||
+            current.recovery?.id !== recovery.id ||
+            current.recovery?.attemptId !== recovery.attemptId ||
+            current.recovery?.state !== recovery.state ||
+            (current.recovery?.state !== "stopped" &&
+              current.recovery?.state !== "completed") ||
+            current.assessmentIdentity !== input.assessmentIdentity ||
+            current.reviewSetIdentity !== input.reviewSetIdentity ||
+            current.catalogMappingProjectionId !==
+              input.catalogMappingProjectionId ||
+            JSON.stringify(currentAffectedWork) !==
+              JSON.stringify(snapshot.affectedWork);
+          if (stale) {
+            throw new StaleDvdTitleDamageDecisionError(current);
+          }
+
+          const existing = inspectDvdTitleDamageDecision(
+            input.originalDiscArchiveId,
+            transaction,
+          ).current;
+          const assessmentAttempt = requireRow(
+            transaction.select({
+              sequence: dvdTitleDamageAssessmentAttempts.sequence,
+              assessmentId: dvdTitleDamageAssessmentAttempts.assessmentId,
+            }).from(dvdTitleDamageAssessmentAttempts).where(eq(
+              dvdTitleDamageAssessmentAttempts.originalDiscArchiveId,
+              input.originalDiscArchiveId,
+            )).orderBy(desc(dvdTitleDamageAssessmentAttempts.sequence))
+              .limit(1).get(),
+            "current Title Damage Assessment attempt",
+            input.assessmentIdentity,
+          );
+          if (assessmentAttempt.assessmentId !== input.assessmentIdentity) {
+            throw new StaleDvdTitleDamageDecisionError(current);
+          }
+          const requestedTimestamp = now();
+          const latestRecordedAt = transaction.select({
+            recordedAt: dvdTitleDamageDecisions.recordedAt,
+          }).from(dvdTitleDamageDecisions).where(eq(
+            dvdTitleDamageDecisions.originalDiscArchiveId,
+            input.originalDiscArchiveId,
+          )).orderBy(desc(dvdTitleDamageDecisions.recordedAt)).limit(1)
+            .get()?.recordedAt;
+          const timestamp = latestRecordedAt !== undefined &&
+              requestedTimestamp.getTime() <= latestRecordedAt.getTime()
+            ? new Date(latestRecordedAt.getTime() + 1)
+            : requestedTimestamp;
+          const decision = existing !== null &&
+              existing.reviewedContentIdentity ===
+                input.reviewedContentIdentity &&
+              existing.operator === operator &&
+              existing.decision ===
+                (snapshot.acknowledgementRequired
+                  ? "accepted"
+                  : "not_required")
+            ? existing
+            : requireRow(
+              transaction.insert(dvdTitleDamageDecisions).values({
+                id: newId<DvdTitleDamageDecisionId>(),
+                originalDiscArchiveId: input.originalDiscArchiveId,
+                decision: snapshot.acknowledgementRequired
+                  ? "accepted"
+                  : "not_required",
+                operator,
+                catalogRevision: new Date(snapshot.current.catalogRevision),
+                checkpointRevision: input.checkpoint.revision,
+                checkpointDigest: input.checkpoint.digest,
+                assessmentIdentity: input.assessmentIdentity,
+                assessmentAttemptSequence: assessmentAttempt.sequence,
+                reviewSetIdentity: input.reviewSetIdentity,
+                catalogMappingProjectionId:
+                  input.catalogMappingProjectionId,
+                reviewedContentIdentity: input.reviewedContentIdentity,
+                excludedTitleIdentityIds:
+                  snapshot.excludedTitleIdentityIds,
+                mainFeatureResolutions: snapshot.mainFeatureResolutions,
+                snapshot,
+                recordedAt: timestamp,
+              }).returning().get(),
+              "Title Damage decision",
+              input.originalDiscArchiveId,
+            );
+          transaction.delete(mutationInvocations)
+            .where(eq(mutationInvocations.key, input.previewToken))
+            .run();
+          return recordMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            decision,
+            timestamp,
+          );
+        }, { behavior: "immediate" });
+      },
+
+      inspectDvdTitleDamageDecision(id) {
+        return inspectDvdTitleDamageDecision(id);
       },
 
       createMediaItem(input, options) {

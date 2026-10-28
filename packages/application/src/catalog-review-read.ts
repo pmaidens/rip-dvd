@@ -19,6 +19,8 @@ import {
 } from "@rip-dvd/data-access";
 import { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
 import { describeCatalogReviewWorkflow } from "./catalog-review-workflow.js";
+import { serializeDvdTitleDamageDecision } from
+  "./dvd-title-damage-acceptance.js";
 
 const CATALOG_REVIEW_SELECTION_PAGE_SIZE = 100;
 const CATALOG_REVIEW_DISC_SELECTION_LOOKUP_BATCH_SIZE = 100;
@@ -362,6 +364,9 @@ export function readCatalogReview(
       }),
     });
     const reviewActionAvailability = snapshot.catalog.getCatalogReviewActionAvailability(id);
+    const titleDamageDecision = reviewWorkflow === null
+      ? null
+      : snapshot.catalog.inspectDvdTitleDamageDecision(id);
     const discSelectionRows = snapshot.catalog.listDiscSelections({
       originalDiscArchiveId: id,
       limit: CATALOG_REVIEW_SELECTION_PAGE_SIZE + 1,
@@ -544,6 +549,17 @@ export function readCatalogReview(
       archive: serializeArchiveEvidence(archive, disc.volumeLabel),
       reviewOutcome: archive.catalogReviewOutcome,
       ...(reviewWorkflow === null ? {} : { reviewWorkflow }),
+      ...(titleDamageDecision === null
+        ? {}
+        : {
+          titleDamageDecision: {
+            ...titleDamageDecision,
+            current: titleDamageDecision.current === null ? null
+              : serializeDvdTitleDamageDecision(titleDamageDecision.current),
+            latest: titleDamageDecision.latest === null ? null
+              : serializeDvdTitleDamageDecision(titleDamageDecision.latest),
+          },
+        }),
       rawScan: {
         titles: rawTitles,
       },

@@ -1362,6 +1362,7 @@ describe("data-access facade", () => {
         "dvd_structural_check_attempts",
         "dvd_title_damage_assessment_attempts",
         "dvd_title_damage_assessments",
+        "dvd_title_damage_decisions",
         "dvd_recovery_storage_preflights",
         "dvd_source_sample_manifests",
         "dvd_title_identities",
@@ -2516,7 +2517,8 @@ describe("data-access facade", () => {
           name !== "20261024185350_archive-recovery-resume" &&
           name !== "20261024192300_woozy_wasp" &&
           name !== "20261028031248_flowery_dorian_gray" &&
-          name !== "20261028062114_huge_korath",
+          name !== "20261028062114_huge_korath" &&
+          name !== "20261028075636_flowery_grim_reaper",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -10019,10 +10021,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 13",
+          "select name from __drizzle_migrations order by id desc limit 14",
         )
         .all(),
       ).toEqual([
+        {
+          name: "20261028075636_flowery_grim_reaper",
+        },
         {
           name: "20261028062114_huge_korath",
         },

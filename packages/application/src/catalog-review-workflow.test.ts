@@ -97,17 +97,19 @@ it("rejects legacy completion without inventing a damage acceptance requirement"
       expectedInputs: ["catalogRevision", "mutationKey"],
     }, {
       action: "damage_decision",
-      available: false,
-      reasons: [{
-        code: "CATALOG_DAMAGE_DECISION_UNAVAILABLE",
-        message: "Synthetic rollout fence",
-        details: { evidenceFormat: "dvd-recovery-evidence-v1" },
-      }],
+      available: true,
+      reasons: [],
       expectedInputs: [
+        "mutationKey",
+        "previewToken",
         "checkpointRevision",
+        "checkpointDigest",
         "assessmentIdentity",
         "reviewSetIdentity",
-        "mutationKey",
+        "catalogMappingProjectionId",
+        "reviewedContentIdentity",
+        "excludedTitleIdentityIds",
+        "mainFeatureResolutions",
       ],
     }, {
       action: "encode",
@@ -152,9 +154,12 @@ it("requires acceptance only when the current damage assessment proves it is nee
   expect(cleanWorkflow?.actions.find(({ action }) =>
     action === "damage_decision"
   )).toMatchObject({
-    available: false,
-    reasons: [{ code: "CATALOG_DAMAGE_DECISION_UNAVAILABLE" }],
+    available: true,
+    reasons: [],
   });
+  expect(damagedWorkflow?.actions.find(({ action }) =>
+    action === "damage_decision"
+  )).toMatchObject({ available: true, reasons: [] });
 
   expect(cleanWorkflow?.actions.find(({ action }) => action === "encode")
     ?.reasons.map(({ code }) => code)).toEqual([
@@ -251,7 +256,7 @@ it("blocks a damage decision while an absent retained title needs mapping review
       reasons: [{
         code: "MAPPING_REVIEW_REQUIRED",
         details: { affectedTitleCount: 1 },
-      }, { code: "CATALOG_DAMAGE_DECISION_UNAVAILABLE" }],
+      }],
     });
 });
 
@@ -274,7 +279,6 @@ it("keeps a no-progress Recovery pause active and decision-blocking", () => {
     action === "damage_decision"
   )?.reasons.map(({ code }) => code)).toEqual([
     "RECOVERY_ACTIVE",
-    "CATALOG_DAMAGE_DECISION_UNAVAILABLE",
   ]);
 });
 

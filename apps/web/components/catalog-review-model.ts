@@ -9,6 +9,7 @@ import type {
   DvdTitleDamageAssessmentItem,
   DvdTitleDamageSourceContinuityInput,
   DvdTitleDamageSourceContinuityRiskRange,
+  DvdTitleDamageDecision,
   DvdTitleDamageUnknownReason,
   DvdUnrecoveredSourceRange,
   UnreadableSectorRange,
@@ -186,6 +187,7 @@ export interface CatalogReviewDto {
   rawScan: { titles: DvdTitle[] };
   titleIdentity?: CatalogReviewTitleIdentity;
   titleDamage?: CatalogReviewTitleDamage;
+  titleDamageDecision?: CatalogReviewTitleDamageDecision;
   coverage: CatalogReviewCoverage;
   reviewActionAvailability: CatalogReviewActionAvailability;
   rearchiveProposal?: CatalogReviewRearchiveProposal;
@@ -219,6 +221,29 @@ export interface CatalogReviewDto {
     limit: number;
     hasPrevious: boolean;
     hasNext: boolean;
+  };
+}
+
+type SerializedDvdTitleDamageDecision = Omit<
+  DvdTitleDamageDecision,
+  "catalogRevision" | "recordedAt"
+> & {
+  catalogRevision: string;
+  recordedAt: string;
+};
+
+export interface CatalogReviewTitleDamageDecision {
+  schemaVersion: 1;
+  state: "not_recorded" | "accepted" | "not_required" | "expired";
+  current: SerializedDvdTitleDamageDecision | null;
+  latest: SerializedDvdTitleDamageDecision | null;
+  currentIdentities: {
+    catalogRevision: string | null;
+    checkpoint: { revision: number; digest: string } | null;
+    recovery: { id: string; attemptId: string; state: string } | null;
+    assessmentIdentity: string | null;
+    reviewSetIdentity: string | null;
+    catalogMappingProjectionId: string | null;
   };
 }
 

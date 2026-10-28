@@ -119,6 +119,7 @@ import type {
   DiscInspectionId,
   DiscSelectionId,
   DvdTitleIdentityId,
+  DvdTitleDamageDecisionId,
   DvdTitleIdentityObservationId,
   DvdTitleIdentityContinuityResult,
   DvdTitleIdentityMappingState,
@@ -1913,6 +1914,72 @@ export const catalogReviewEvidenceChoices = sqliteTable(
     check(
       "catalog_review_evidence_choices_timestamp_check",
       sql`typeof(${table.catalogRevision}) = 'integer' and typeof(${table.recordedAt}) = 'integer'`,
+    ),
+  ],
+);
+
+export const dvdTitleDamageDecisions = sqliteTable(
+  "dvd_title_damage_decisions",
+  {
+    id: text("id").$type<DvdTitleDamageDecisionId>().notNull().primaryKey(),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
+    decision: text("decision", { enum: ["accepted", "not_required"] })
+      .notNull(),
+    operator: text("operator").notNull(),
+    catalogRevision: integer("catalog_revision", { mode: "timestamp_ms" })
+      .notNull(),
+    checkpointRevision: integer("checkpoint_revision").notNull(),
+    checkpointDigest: text("checkpoint_digest").notNull(),
+    assessmentIdentity: text("assessment_identity").notNull(),
+    assessmentAttemptSequence: integer("assessment_attempt_sequence")
+      .notNull(),
+    reviewSetIdentity: text("review_set_identity").notNull(),
+    catalogMappingProjectionId: text("catalog_mapping_projection_id")
+      .notNull(),
+    reviewedContentIdentity: text("reviewed_content_identity").notNull(),
+    excludedTitleIdentityIds: text("excluded_title_identity_ids", {
+      mode: "json",
+    }).$type<readonly DvdTitleIdentityId[]>().notNull(),
+    mainFeatureResolutions: text("main_feature_resolutions", {
+      mode: "json",
+    }).$type<readonly {
+      discSelectionId: DiscSelectionId;
+      titleIdentityId: DvdTitleIdentityId;
+    }[]>().notNull(),
+    snapshot: text("snapshot", { mode: "json" })
+      .$type<import("../types.js").DvdTitleDamageDecisionSnapshot>()
+      .notNull(),
+    recordedAt: integer("recorded_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    check("dvd_title_damage_decisions_id_not_null", sql`${table.id} is not null`),
+    index("dvd_title_damage_decisions_archive_recorded_idx").on(
+      table.originalDiscArchiveId,
+      table.recordedAt,
+      table.id,
+    ),
+    check(
+      "dvd_title_damage_decisions_decision_check",
+      sql`${table.decision} in ('accepted', 'not_required')`,
+    ),
+    check(
+      "dvd_title_damage_decisions_operator_check",
+      sql`length(trim(${table.operator})) between 1 and 128`,
+    ),
+    check(
+      "dvd_title_damage_decisions_checkpoint_check",
+      sql`typeof(${table.checkpointRevision}) = 'integer' and ${table.checkpointRevision} > 0 and length(${table.checkpointDigest}) = 64 and ${table.checkpointDigest} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "dvd_title_damage_decisions_identities_check",
+      sql`length(${table.assessmentIdentity}) between 1 and 128 and typeof(${table.assessmentAttemptSequence}) = 'integer' and ${table.assessmentAttemptSequence} > 0 and length(${table.reviewSetIdentity}) = 64 and ${table.reviewSetIdentity} not glob '*[^0-9a-f]*' and length(${table.catalogMappingProjectionId}) = 64 and ${table.catalogMappingProjectionId} not glob '*[^0-9a-f]*' and length(${table.reviewedContentIdentity}) = 64 and ${table.reviewedContentIdentity} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "dvd_title_damage_decisions_json_check",
+      sql`json_valid(${table.excludedTitleIdentityIds}) and json_type(${table.excludedTitleIdentityIds}) = 'array' and json_valid(${table.mainFeatureResolutions}) and json_type(${table.mainFeatureResolutions}) = 'array' and json_valid(${table.snapshot}) and json_type(${table.snapshot}) = 'object'`,
     ),
   ],
 );

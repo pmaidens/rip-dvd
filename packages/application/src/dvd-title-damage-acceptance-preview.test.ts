@@ -60,7 +60,7 @@ it("resolves a main-feature choice without a representative-title heuristic", ()
     }],
     exclusions: [],
     action: {
-      expectedInputs: expect.arrayContaining(["mutationKey"]),
+      expectedInputs: expect.arrayContaining(["mutationKey", "operator"]),
     },
   });
   expect(recordPreview).toHaveBeenCalledWith(expect.objectContaining({
@@ -248,10 +248,12 @@ it("blocks an empty exact set and keeps its affected work visible", () => {
 });
 
 it("keeps assessed unmapped content available and excluded-title work bound", () => {
+  const recordPreview = vi.fn();
   const preview = previewDvdTitleDamageAcceptance(
     createDvdTitleDamageAcceptancePreviewTestAccess({
       includeAffectedWork: true,
       includeUnmappedCompanion: true,
+      recordPreview,
     }),
     DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.archiveId as never,
     {
@@ -279,6 +281,16 @@ it("keeps assessed unmapped content available and excluded-title work bound", ()
     }],
     action: { reasons: [] },
   });
+  expect(recordPreview).toHaveBeenCalledWith(expect.objectContaining({
+    decisionSnapshot: expect.objectContaining({
+      affectedWork: [{
+        id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.encodeJobId,
+        discSelectionId:
+          DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
+        status: "queued",
+      }],
+    }),
+  }));
 });
 
 it("does not report terminal Encode Job history as affected work", () => {

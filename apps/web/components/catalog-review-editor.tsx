@@ -529,6 +529,7 @@ export function CatalogReviewView({
             <CatalogReviewTitleDamageAcceptancePreview
               originalDiscArchiveId={review.archive.id}
               titleIdentity={review.titleIdentity}
+              titleDamageDecision={review.titleDamageDecision}
               evidenceGeneration={{
                 current: review.reviewWorkflow.current,
                 titleDamageState: review.titleDamage?.state ?? null,

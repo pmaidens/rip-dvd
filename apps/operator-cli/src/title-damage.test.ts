@@ -797,6 +797,297 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   }]);
   previewLedger.close();
 
+  type AcceptedPreview = {
+    previewToken: string;
+    current: {
+      checkpoint: { revision: number; manifestDigest: string };
+    };
+    assessmentIdentity: string;
+    reviewSetIdentity: string;
+    catalogMappingProjectionId: string;
+    reviewedContentIdentity: string;
+  };
+  const acceptanceInputFor = (preview: AcceptedPreview) => ({
+    operator: "Synthetic CLI operator",
+    previewToken: preview.previewToken,
+    checkpointRevision: preview.current.checkpoint.revision,
+    checkpointDigest: preview.current.checkpoint.manifestDigest,
+    assessmentIdentity: preview.assessmentIdentity,
+    reviewSetIdentity: preview.reviewSetIdentity,
+    catalogMappingProjectionId:
+      preview.catalogMappingProjectionId,
+    reviewedContentIdentity: preview.reviewedContentIdentity,
+    excludedTitleIdentityIds: [
+      currentItems[1]!.titleIdentityId,
+      currentItems[2]!.titleIdentityId,
+    ],
+    mainFeatureResolutions: [{
+      discSelectionId: mainFeatureSelection.id,
+      titleIdentityId: currentItems[0]!.titleIdentityId,
+    }],
+    damageAcknowledgement: true,
+  });
+  const previewBeforeAffectedWork = exactPreflight.result as AcceptedPreview;
+  const affectedWorkProfile = access.encodingProfiles.create({
+    key: "synthetic-affected-work-profile",
+    displayName: "Synthetic affected-work profile",
+    mediaDomain: "dvd_video",
+    settings: { preset: "Fast 480p30" },
+  });
+  const secondAffectedWorkProfile = access.encodingProfiles.create({
+    key: "synthetic-second-affected-work-profile",
+    displayName: "Synthetic second affected-work profile",
+    mediaDomain: "dvd_video",
+    settings: { preset: "Fast 480p30" },
+  });
+  const affectedWorkJobIds = [
+    "z-synthetic-title-damage-affected-work",
+    "a-synthetic-title-damage-affected-work",
+  ] as const;
+  const correctedHistoricalSelectionId =
+    "synthetic-corrected-historical-selection";
+  const correctedHistoricalReplacementId =
+    "synthetic-corrected-historical-replacement";
+  const correctedHistoricalJobId =
+    "synthetic-corrected-historical-affected-work";
+  const affectedWorkSqlite = new DatabaseSync(fixture.databasePath);
+  const insertCorrectedHistoricalSelection = affectedWorkSqlite.prepare(`
+    INSERT INTO disc_selections (
+      id, original_disc_archive_id, media_item_id, source_key, kind,
+      title_number, chapter_start, chapter_end, label, is_catalog_active,
+      created_at, updated_at
+    )
+    SELECT ?, original_disc_archive_id, media_item_id, source_key, kind,
+      title_number, chapter_start, chapter_end, label, 0, created_at, updated_at
+    FROM disc_selections
+    WHERE id = ?
+  `);
+  insertCorrectedHistoricalSelection.run(
+    correctedHistoricalSelectionId,
+    chapterMappedSelection.id,
+  );
+  insertCorrectedHistoricalSelection.run(
+    correctedHistoricalReplacementId,
+    chapterMappedSelection.id,
+  );
+  affectedWorkSqlite.prepare(`
+    INSERT INTO disc_selection_supersessions (
+      superseded_disc_selection_id, replacement_disc_selection_id,
+      reason, created_at
+    ) VALUES (?, ?, 'Synthetic corrected selection', 1)
+  `).run(
+    correctedHistoricalSelectionId,
+    correctedHistoricalReplacementId,
+  );
+  affectedWorkSqlite.prepare(`
+    INSERT INTO encode_jobs (
+      id, disc_selection_id, encoding_profile_id, output_path,
+      reserves_output_path, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 0, 'cancellation_requested', 0, 0)
+  `).run(
+    correctedHistoricalJobId,
+    correctedHistoricalSelectionId,
+    affectedWorkProfile.id,
+    join(fixture.mediaLibraryPath, "synthetic-corrected-historical.mkv"),
+  );
+  const insertAffectedWork = affectedWorkSqlite.prepare(`
+    INSERT INTO encode_jobs (
+      id, disc_selection_id, encoding_profile_id, output_path,
+      status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 'queued', ?, ?)
+  `);
+  insertAffectedWork.run(
+    affectedWorkJobIds[0],
+    mainFeatureSelection.id,
+    affectedWorkProfile.id,
+    join(fixture.mediaLibraryPath, "synthetic-affected-work-z.mkv"),
+    1,
+    1,
+  );
+  insertAffectedWork.run(
+    affectedWorkJobIds[1],
+    mainFeatureSelection.id,
+    secondAffectedWorkProfile.id,
+    join(fixture.mediaLibraryPath, "synthetic-affected-work-a.mkv"),
+    2,
+    2,
+  );
+  affectedWorkSqlite.close();
+  const staleAffectedWork = await fixture.run([
+    "catalog-review",
+    "accept-damage",
+    archive.id,
+    "--key",
+    "00000000-0000-4000-8000-000000000421",
+    "--json",
+    JSON.stringify(acceptanceInputFor(previewBeforeAffectedWork)),
+  ]);
+  expect(staleAffectedWork).toMatchObject({
+    exitCode: 2,
+    result: {
+      error: {
+        code: "STALE_TITLE_DAMAGE_DECISION",
+        current: {
+          assessmentIdentity: previewBeforeAffectedWork.assessmentIdentity,
+        },
+      },
+    },
+  });
+  const staleAffectedWorkLedger = new DatabaseSync(fixture.databasePath);
+  expect(staleAffectedWorkLedger.prepare(`
+    SELECT count(*) AS count
+    FROM dvd_title_damage_decisions
+  `).get()).toEqual({ count: 0 });
+  staleAffectedWorkLedger.close();
+  const acceptedPreflight = await fixture.run([
+    "catalog-review",
+    "preview-damage-acceptance",
+    archive.id,
+    "--exclude-title-identity",
+    currentItems[1]!.titleIdentityId,
+    "--exclude-title-identity",
+    currentItems[2]!.titleIdentityId,
+    "--resolve-main-feature",
+    mainFeatureSelection.id,
+    currentItems[0]!.titleIdentityId,
+  ]);
+  expect(acceptedPreflight).toMatchObject({
+    exitCode: 0,
+    result: {
+      available: true,
+      affectedWork: [
+        { id: affectedWorkJobIds[1] },
+        { id: affectedWorkJobIds[0] },
+      ],
+    },
+  });
+  const acceptedPreview = acceptedPreflight.result as AcceptedPreview;
+  const acceptanceInput = acceptanceInputFor(acceptedPreview);
+  const acceptanceKey = "00000000-0000-4000-8000-000000000420";
+  const accepted = await fixture.run([
+    "catalog-review",
+    "accept-damage",
+    archive.id,
+    "--key",
+    acceptanceKey,
+    "--json",
+    JSON.stringify(acceptanceInput),
+  ]);
+  expect(accepted).toMatchObject({
+    exitCode: 0,
+    result: {
+      decision: {
+        decision: "accepted",
+        operator: "Synthetic CLI operator",
+        checkpointRevision: acceptedPreview.current.checkpoint.revision,
+        assessmentIdentity: chapterRemapped.id,
+        reviewedContentIdentity: acceptedPreview.reviewedContentIdentity,
+        snapshot: {
+          reviewedContent: [{
+            titleIdentityId: currentItems[0]!.titleIdentityId,
+            sourceIdentity: {
+              angleNumber: 1,
+              chapterStart: 1,
+              chapterEnd: 4,
+            },
+          }],
+          exclusions: [
+            { titleIdentityId: currentItems[1]!.titleIdentityId },
+            { titleIdentityId: currentItems[2]!.titleIdentityId },
+          ],
+          assessmentSnapshot: { id: chapterRemapped.id },
+          affectedWork: [
+            { id: affectedWorkJobIds[1] },
+            { id: affectedWorkJobIds[0] },
+          ],
+        },
+      },
+      encodingQueued: false,
+      watchabilityProved: false,
+      outputValidationWaived: false,
+    },
+  });
+  const completedAffectedWork = new DatabaseSync(fixture.databasePath);
+  completedAffectedWork.prepare(`
+    UPDATE encode_jobs
+    SET status = 'cancelled', reserves_output_path = 0, updated_at = 3
+    WHERE id IN (?, ?)
+  `).run(...affectedWorkJobIds);
+  completedAffectedWork.close();
+  const replay = await fixture.run([
+    "catalog-review",
+    "accept-damage",
+    archive.id,
+    "--key",
+    acceptanceKey,
+    "--json",
+    JSON.stringify(acceptanceInput),
+  ]);
+  expect(replay.result).toEqual(accepted.result);
+  const directReplay = access.catalog.recordDvdTitleDamageDecision({
+    mutationKey: acceptanceKey,
+    originalDiscArchiveId: archive.id,
+    previewToken: acceptanceInput.previewToken,
+    operator: acceptanceInput.operator,
+    checkpoint: {
+      revision: acceptanceInput.checkpointRevision,
+      digest: acceptanceInput.checkpointDigest,
+    },
+    assessmentIdentity: acceptanceInput.assessmentIdentity,
+    reviewSetIdentity: acceptanceInput.reviewSetIdentity,
+    catalogMappingProjectionId: acceptanceInput.catalogMappingProjectionId,
+    reviewedContentIdentity: acceptanceInput.reviewedContentIdentity,
+    excludedTitleIdentityIds: acceptanceInput.excludedTitleIdentityIds,
+    mainFeatureResolutions: acceptanceInput.mainFeatureResolutions,
+    damageAcknowledgement: acceptanceInput.damageAcknowledgement,
+  });
+  expect(directReplay.catalogRevision).toBeInstanceOf(Date);
+  expect(directReplay.recordedAt).toBeInstanceOf(Date);
+  expect(typeof directReplay.snapshot.current.catalogRevision).toBe("string");
+  const immutableDecision = new DatabaseSync(fixture.databasePath);
+  expect(() => immutableDecision.prepare(`
+    UPDATE dvd_title_damage_decisions
+    SET operator = 'Changed synthetic operator'
+  `).run()).toThrow(/immutable/i);
+  immutableDecision.close();
+  const keyConflict = await fixture.run([
+    "catalog-review",
+    "accept-damage",
+    archive.id,
+    "--key",
+    acceptanceKey,
+    "--json",
+    JSON.stringify({
+      ...acceptanceInput,
+      operator: "Different synthetic operator",
+    }),
+  ]);
+  expect(keyConflict).toMatchObject({
+    exitCode: 2,
+    result: { error: { code: "MUTATION_KEY_CONFLICT" } },
+  });
+  expect((await fixture.run([
+    "catalog-review",
+    "show",
+    archive.id,
+  ])).result).toMatchObject({
+    titleDamageDecision: {
+      state: "accepted",
+      current: { id: (accepted.result as { decision: { id: string } }).decision.id },
+    },
+  });
+
+  const noOpAssessment = await access.assessDvdTitleDamage(
+    archive.id,
+    ownership,
+    async () => mappings,
+  );
+  expect(noOpAssessment?.id).toBe(chapterRemapped.id);
+  expect(access.catalog.inspectDvdTitleDamageDecision(archive.id)).toMatchObject({
+    state: "accepted",
+    current: { assessmentIdentity: chapterRemapped.id },
+  });
+
   const structuredInput = JSON.stringify({
     excludedTitleIdentityIds: [
       currentItems[1]!.titleIdentityId,
@@ -869,6 +1160,39 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     currentAssessmentIdentity: laterRecorded.id,
     assessment: { id: laterRecorded.id },
   });
+  expect(access.catalog.inspectDvdTitleDamageDecision(archive.id)).toMatchObject({
+    state: "expired",
+    current: null,
+    latest: { assessmentIdentity: chapterRemapped.id },
+  });
+  const stalePreview = structuredPreflights[0]!.result as typeof acceptedPreview;
+  const staleAcceptance = await fixture.run([
+    "catalog-review",
+    "accept-damage",
+    archive.id,
+    "--key",
+    "00000000-0000-4000-8000-000000000422",
+    "--json",
+    JSON.stringify({
+      ...acceptanceInput,
+      previewToken: stalePreview.previewToken,
+      checkpointRevision: stalePreview.current.checkpoint.revision,
+      checkpointDigest: stalePreview.current.checkpoint.manifestDigest,
+      assessmentIdentity: stalePreview.assessmentIdentity,
+      reviewSetIdentity: stalePreview.reviewSetIdentity,
+      catalogMappingProjectionId: stalePreview.catalogMappingProjectionId,
+      reviewedContentIdentity: stalePreview.reviewedContentIdentity,
+    }),
+  ]);
+  expect(staleAcceptance).toMatchObject({
+    exitCode: 2,
+    result: {
+      error: {
+        code: "STALE_TITLE_DAMAGE_DECISION",
+        current: { assessmentIdentity: laterRecorded.id },
+      },
+    },
+  });
 
   const restored = await access.assessDvdTitleDamage(
     archive.id,
@@ -884,6 +1208,10 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     currentAssessmentIdentity: chapterRemapped.id,
     assessment: { id: chapterRemapped.id },
   });
+  expect(access.catalog.inspectDvdTitleDamageDecision(archive.id)).toMatchObject({
+    state: "expired",
+    current: null,
+  });
   const sqlite = new DatabaseSync(fixture.databasePath);
   expect(sqlite.prepare(`
     SELECT assessment_id AS assessmentId
@@ -895,6 +1223,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     { assessmentId: recorded.id },
     { assessmentId: remapped.id },
     { assessmentId: chapterRemapped.id },
+    { assessmentId: chapterRemapped.id },
     { assessmentId: laterRecorded.id },
     { assessmentId: chapterRemapped.id },
   ]);
@@ -902,6 +1231,10 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     SELECT count(*) AS count
     FROM dvd_title_damage_assessments
   `).get()).toEqual({ count: 5 });
+  expect(sqlite.prepare(`
+    SELECT count(*) AS count
+    FROM dvd_title_damage_decisions
+  `).get()).toEqual({ count: 1 });
   sqlite.close();
 
   let newerStructuralAssessmentIdentity: string | null = null;
@@ -943,6 +1276,11 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   expect(newerStructuralAssessmentIdentity).not.toBe(
     structuralResult.assessment.id,
   );
+  expect(access.catalog.inspectDvdTitleDamageDecision(archive.id)).toMatchObject({
+    state: "expired",
+    current: null,
+    currentIdentities: { assessmentIdentity: null },
+  });
   expect(access.dvdTitleDamageAssessments.inspect(archive.id)).toMatchObject({
     state: "outdated",
     currentAssessmentIdentity: null,
@@ -982,6 +1320,267 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     currentAssessmentIdentity: null,
     assessment: { id: dependencyCycleLatest.id },
   });
+  manifest = advanceCommittedArchiveEvidence(fixture, manifest, {
+    readId: "synthetic-clean-set-recovery-read",
+    publishFilesystemCheckpoint: true,
+  });
+  expect(access.catalog.inspectDvdTitleDamageDecision(archive.id))
+    .toMatchObject({
+      state: "expired",
+      current: null,
+      latest: { operator: "Synthetic CLI operator" },
+    });
+  const cleanStructural = await access.assessDvdStructure(
+    archive.id,
+    ownership,
+    async () => ({
+      outcome: "completed" as const,
+      findings: structuralResult.assessment.findings,
+    }),
+  );
+  if (cleanStructural?.outcome !== "completed") {
+    throw new Error("Expected a Structural Assessment for the new checkpoint");
+  }
+  const cleanHeader = access.catalog.findDvdArchiveEvidenceHeader(archive.id)!;
+  const cleanReviewSet = access.catalog.recordDvdTitleIdentityObservations({
+    originalDiscArchiveId: archive.id,
+    checkpoint: {
+      manifestId: cleanHeader.currentManifestId,
+      manifestRevision: cleanHeader.currentManifestRevision,
+      manifestDigest: cleanHeader.currentManifestDigest,
+    },
+    observations: [
+      ...currentItems.map(({ observation }) => ({
+        displayTitleNumber: observation.displayTitleNumber,
+        navigation: observation.navigation,
+        selectedPath: observation.selectedPath,
+        angleNumber: observation.angleNumber,
+        angleCount: observation.angleCount,
+        chapterStart: observation.chapterStart,
+        chapterEnd: observation.chapterEnd,
+        chapterCount: observation.chapterCount,
+        sourceExtents: observation.displayTitleNumber === 3
+          ? [
+            { startLba: 200, sectorCount: 7 },
+            { startLba: 400, sectorCount: 1 },
+          ]
+          : observation.sourceExtents,
+      })),
+      {
+        displayTitleNumber: 4,
+        navigation: {
+          videoTitleSetNumber: 3,
+          titleSetTitleNumber: 1,
+          programChainNumber: 1,
+        },
+        selectedPath: [{
+          programNumber: 1,
+          cellNumber: 1,
+          vobId: 3,
+          cellId: 1,
+        }],
+        angleNumber: 1,
+        angleCount: 1,
+        chapterStart: 1,
+        chapterEnd: 1,
+        chapterCount: 1,
+        sourceExtents: [{ startLba: 600, sectorCount: 50 }],
+      },
+    ],
+  });
+  const cleanCurrentItems = cleanReviewSet.items.filter((item) =>
+    item.presentAtCurrentCheckpoint
+  ).sort((left, right) =>
+    left.observation.displayTitleNumber - right.observation.displayTitleNumber
+  );
+  expect(cleanCurrentItems).toHaveLength(4);
+  expect(cleanCurrentItems[2]).toMatchObject({
+    reviewContinuity: { result: "uncertain" },
+  });
+  expect(cleanCurrentItems[3]).toMatchObject({
+    reviewContinuity: { result: "new" },
+  });
+  const cleanCatalogRevision = access.catalog.listOriginalDiscArchives({
+    ids: [archive.id],
+  })[0]!.updatedAt;
+  access.catalog.mutateDiscSelection({
+    originalDiscArchiveId: archive.id,
+    expectedCatalogRevision: cleanCatalogRevision,
+    mutationKey: "synthetic-clean-title-mapping",
+    mutation: {
+      action: "update",
+      discSelectionId: chapterMappedSelection.id,
+      changes: {
+        originalDiscArchiveId: archive.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
+      },
+    },
+  });
+  expect(access.catalog.inspectDvdTitleDamageDecision(archive.id))
+    .toMatchObject({
+      state: "expired",
+      current: null,
+      currentIdentities: {
+        assessmentIdentity: null,
+      },
+    });
+  const cleanAssessment = await access.assessDvdTitleDamage(
+    archive.id,
+    ownership,
+    async () => [
+      ...mappings.map((mapping, index) => index === 2
+        ? {
+          ...mapping,
+          titleIdentityObservationId:
+            cleanCurrentItems[index]!.observation.id,
+          sourceReferences: [
+            {
+              kind: "multiplexed_content" as const,
+              startLba: 200,
+              sectorCount: 7,
+            },
+            {
+              kind: "multiplexed_content" as const,
+              startLba: 400,
+              sectorCount: 1,
+            },
+          ],
+          mappingCoverage: {
+            state: "complete" as const,
+            policyVersion: "synthetic-title-map-v2",
+            unknownReasons: [],
+          },
+        }
+        : {
+          ...mapping,
+          titleIdentityObservationId:
+            cleanCurrentItems[index]!.observation.id,
+        }),
+      {
+        titleIdentityObservationId: cleanCurrentItems[3]!.observation.id,
+        sourceReferences: [{
+          kind: "multiplexed_content" as const,
+          startLba: 600,
+          sectorCount: 50,
+        }],
+        mappingCoverage: {
+          state: "complete" as const,
+          policyVersion: "synthetic-title-map-v2",
+          unknownReasons: [],
+        },
+        timingEvidence: {
+          policyVersion: "dvd-title-damage-timing-v1",
+          occurrences: [{
+            playbackOccurrence: 1,
+            spans: [{
+              sourceRange: { startLba: 600, sectorCount: 50 },
+              startMilliseconds: 0,
+              endMilliseconds: 5_000,
+              timingMethod: "synthetic-cell-timing-v1",
+              coverage: "whole_cell" as const,
+            }],
+            unknownReasons: [],
+          }],
+        },
+      },
+    ],
+  );
+  if (cleanAssessment === null) {
+    throw new Error("Expected an assessment with complete source mapping");
+  }
+  expect(cleanAssessment).toMatchObject({
+    unknownTitleImpact: { unrecoveredSourceSectorCount: 0 },
+    unattributedSourceContinuityRisk: { sourceSectorCount: 0 },
+  });
+  const cleanPreflight = await fixture.run([
+    "catalog-review",
+    "preview-damage-acceptance",
+    archive.id,
+    "--exclude-title-identity",
+    cleanCurrentItems[0]!.titleIdentityId,
+    "--exclude-title-identity",
+    cleanCurrentItems[1]!.titleIdentityId,
+    "--exclude-title-identity",
+    cleanCurrentItems[2]!.titleIdentityId,
+    "--resolve-main-feature",
+    mainFeatureSelection.id,
+    cleanCurrentItems[3]!.titleIdentityId,
+  ]);
+  expect(cleanPreflight).toMatchObject({
+    exitCode: 0,
+    result: {
+      available: true,
+      acknowledgementRequired: false,
+      reviewedContent: [{
+        titleIdentityId: cleanCurrentItems[3]!.titleIdentityId,
+        assessmentSnapshot: {
+          unrecoveredUniqueSourceSectorCount: 0,
+          sourceContinuityRiskSectorCount: 0,
+        },
+      }],
+    },
+  });
+  const cleanPreview = cleanPreflight.result as typeof acceptedPreview;
+  const cleanDecision = await fixture.run([
+    "catalog-review",
+    "accept-damage",
+    archive.id,
+    "--key",
+    "00000000-0000-4000-8000-000000000424",
+    "--json",
+    JSON.stringify({
+      operator: "Synthetic clean-set operator",
+      previewToken: cleanPreview.previewToken,
+      checkpointRevision: cleanPreview.current.checkpoint.revision,
+      checkpointDigest: cleanPreview.current.checkpoint.manifestDigest,
+      assessmentIdentity: cleanPreview.assessmentIdentity,
+      reviewSetIdentity: cleanPreview.reviewSetIdentity,
+      catalogMappingProjectionId: cleanPreview.catalogMappingProjectionId,
+      reviewedContentIdentity: cleanPreview.reviewedContentIdentity,
+      excludedTitleIdentityIds: [
+        cleanCurrentItems[0]!.titleIdentityId,
+        cleanCurrentItems[1]!.titleIdentityId,
+        cleanCurrentItems[2]!.titleIdentityId,
+      ],
+      mainFeatureResolutions: [{
+        discSelectionId: mainFeatureSelection.id,
+        titleIdentityId: cleanCurrentItems[3]!.titleIdentityId,
+      }],
+      damageAcknowledgement: false,
+    }),
+  ]);
+  expect(cleanDecision).toMatchObject({
+    exitCode: 0,
+    result: {
+      decision: {
+        decision: "not_required",
+        operator: "Synthetic clean-set operator",
+      },
+    },
+  });
+  const acceptedRecordedAt = new Date((accepted.result as {
+    decision: { recordedAt: string };
+  }).decision.recordedAt).getTime();
+  const cleanRecordedAt = new Date((cleanDecision.result as {
+    decision: { recordedAt: string };
+  }).decision.recordedAt).getTime();
+  expect(cleanRecordedAt).toBeGreaterThan(acceptedRecordedAt);
+  expect((await fixture.run([
+    "catalog-review",
+    "show",
+    archive.id,
+  ])).result).toMatchObject({
+    titleDamageDecision: {
+      state: "not_required",
+      current: { operator: "Synthetic clean-set operator" },
+    },
+  });
+  const decisionLedger = new DatabaseSync(fixture.databasePath);
+  expect(decisionLedger.prepare(`
+    SELECT count(*) AS count
+    FROM dvd_title_damage_decisions
+  `).get()).toEqual({ count: 2 });
+  decisionLedger.close();
   access.close();
 
   advanceCommittedArchiveEvidence(fixture, manifest);
@@ -995,10 +1594,15 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     result: {
       titleDamage: {
         state: "outdated",
-        assessmentIdentity: dependencyCycleLatest.id,
+        assessmentIdentity: cleanAssessment.id,
         currentAssessmentIdentity: null,
         items: [],
         truncated: false,
+      },
+      titleDamageDecision: {
+        state: "expired",
+        current: null,
+        latest: { operator: "Synthetic clean-set operator" },
       },
     },
   });
@@ -1013,7 +1617,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     exitCode: 0,
     result: {
       state: "outdated",
-      assessmentIdentity: dependencyCycleLatest.id,
+      assessmentIdentity: cleanAssessment.id,
       currentAssessmentIdentity: null,
       items: [],
       truncated: false,
@@ -1033,7 +1637,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
       error: {
         code: "TITLE_DAMAGE_CURSOR_STALE",
         current: {
-          checkpointRevision: 4,
+          checkpointRevision: 5,
           assessmentIdentity: null,
         },
       },

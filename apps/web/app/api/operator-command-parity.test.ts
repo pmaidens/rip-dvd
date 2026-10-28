@@ -800,7 +800,6 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
             { code: "ASSESSMENT_PENDING" },
             { code: "RECOVERY_ACTIVE" },
             { code: "SELECTION_UNIDENTIFIED" },
-            { code: "CATALOG_DAMAGE_DECISION_UNAVAILABLE" },
           ],
         },
         {
@@ -914,7 +913,6 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       "RECOVERY_ACTIVE",
       "MAPPING_REVIEW_REQUIRED",
       "SELECTION_UNIDENTIFIED",
-      "CATALOG_DAMAGE_DECISION_UNAVAILABLE",
     ]);
 
     const missingRevisionWeb = await createCatalogReviewRoute(
@@ -1342,9 +1340,6 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
     ).toEqual([
       expect.objectContaining({ code: "ASSESSMENT_PENDING" }),
       expect.objectContaining({ code: "RECOVERY_ACTIVE" }),
-      expect.objectContaining({
-        code: "CATALOG_DAMAGE_DECISION_UNAVAILABLE",
-      }),
     ]);
 
     const completionCommand = {
@@ -5814,6 +5809,7 @@ it("keeps available, outdated, and mapping-review Title Damage Acceptance prefli
       reasons: [],
       expectedInputs: [
         "mutationKey",
+        "operator",
         "previewToken",
         "checkpointRevision",
         "checkpointDigest",

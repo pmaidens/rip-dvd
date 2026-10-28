@@ -77,6 +77,7 @@ import type {
 import type {
   DvdTitleDamageAssessmentAccess,
   DvdTitleDamageAssessmentInspection,
+  DvdTitleDamageAssessmentItem,
   DvdTitleDamageAssessmentRecord,
   RecordDvdTitleDamageMappingInput,
 } from "./dvd-title-damage-assessment.js";
@@ -216,6 +217,7 @@ export type DetectedDiscId = DomainId<"DetectedDisc">;
 export type ArchiveRequestId = DomainId<"ArchiveRequest">;
 export type OriginalDiscArchiveId = DomainId<"OriginalDiscArchive">;
 export type CatalogReviewChoiceId = DomainId<"CatalogReviewChoice">;
+export type DvdTitleDamageDecisionId = DomainId<"DvdTitleDamageDecision">;
 export type ArchiveRecoveryId = DomainId<"ArchiveRecovery">;
 export type ArchiveRecoveryAttemptId = DomainId<"ArchiveRecoveryAttempt">;
 export type ArchiveRecoveryStopOperationId =
@@ -1732,6 +1734,168 @@ export interface DvdTitleDamageAcceptancePreviewDecisionInput {
     titleIdentityId: DvdTitleIdentityId;
   }[];
   expectedPreviewEvidence: string;
+  decisionSnapshot: DvdTitleDamageDecisionSnapshot;
+}
+
+export interface DvdTitleDamageDecisionSnapshot {
+  schemaVersion: 1;
+  current: {
+    catalogRevision: string;
+    checkpoint: { revision: number; manifestDigest: string };
+    recovery: {
+      id: ArchiveRecoveryId;
+      attemptId: ArchiveRecoveryAttemptId;
+      state: "stopped" | "completed";
+    };
+  };
+  reviewSetIdentity: string;
+  catalogMappingProjectionId: string;
+  assessmentIdentity: string;
+  reviewedContentIdentity: string;
+  excludedTitleIdentityIds: readonly DvdTitleIdentityId[];
+  mainFeatureResolutions: readonly {
+    discSelectionId: DiscSelectionId;
+    titleIdentityId: DvdTitleIdentityId;
+  }[];
+  reviewedContent: readonly DvdTitleDamageDecisionContent[];
+  exclusions: readonly DvdTitleDamageDecisionExclusion[];
+  assessmentSnapshot: DvdTitleDamageDecisionAssessmentSnapshot;
+  acknowledgementRequired: boolean;
+  affectedWork: readonly DvdTitleDamageDecisionAffectedWork[];
+}
+
+export type DvdTitleDamageDecisionAssessmentSnapshot = Omit<
+  DvdTitleDamageAssessmentRecord,
+  "createdAt"
+> & { createdAt: string };
+
+export interface DvdTitleDamageDecisionMediaItem {
+  id: MediaItemId;
+  kind: MediaItemKind;
+  title: string;
+  year: number | null;
+  seasonNumber: number | null;
+  episodeNumber: number | null;
+  episodicContext: {
+    tvShow: {
+      id: MediaItemId;
+      title: string;
+      year: number | null;
+    } | null;
+    season: {
+      id: MediaItemId;
+      title: string;
+      year: number | null;
+      seasonNumber: number | null;
+    } | null;
+  } | null;
+}
+
+export interface DvdTitleDamageDecisionResolvedSourceIdentity
+  extends DvdTitleIdentityObservationInput {
+  resolution: "title_identity_binding";
+  displayTitleNumber: number;
+}
+
+export interface DvdTitleDamageDecisionCatalogMapping {
+  discSelectionId: DiscSelectionId;
+  discSelectionIdentity: string;
+  mappingState: Exclude<DvdTitleIdentityMappingState, "unmapped">;
+  sourceIdentity: DiscSelectionSourceIdentity;
+  resolvedSourceIdentity: DvdTitleDamageDecisionResolvedSourceIdentity;
+  label: string | null;
+  mediaItem: DvdTitleDamageDecisionMediaItem;
+}
+
+export interface DvdTitleDamageDecisionContent {
+  titleIdentityId: DvdTitleIdentityId;
+  titleIdentityObservationId: DvdTitleIdentityObservationId;
+  included: true;
+  mappingState: DvdTitleIdentityMappingState;
+  preflightMappingState: DvdTitleIdentityMappingState;
+  reviewContinuity: DvdTitleIdentityObservation["continuity"];
+  sourceIdentity: DvdTitleIdentityObservationInput & {
+    displayTitleNumber: number;
+  };
+  catalogMappings: readonly DvdTitleDamageDecisionCatalogMapping[];
+  assessmentSnapshot: DvdTitleDamageAssessmentItem;
+  acknowledgementRequired: boolean;
+}
+
+export interface DvdTitleDamageDecisionExclusion {
+  titleIdentityId: DvdTitleIdentityId;
+  titleIdentityObservationId: DvdTitleIdentityObservationId;
+  displayTitleNumber: number;
+  angleNumber: number;
+}
+
+export interface DvdTitleDamageDecisionAffectedWork {
+  id: EncodeJobId;
+  discSelectionId: DiscSelectionId;
+  status: EncodeJobStatus;
+}
+
+export interface DvdTitleDamageDecisionExpectedIdentities {
+  checkpoint: { revision: number; digest: string };
+  assessmentIdentity: string;
+  reviewSetIdentity: string;
+  catalogMappingProjectionId: string;
+  reviewedContentIdentity: string;
+  excludedTitleIdentityIds: readonly DvdTitleIdentityId[];
+  mainFeatureResolutions: readonly {
+    discSelectionId: DiscSelectionId;
+    titleIdentityId: DvdTitleIdentityId;
+  }[];
+}
+
+export interface DvdTitleDamageDecision {
+  id: DvdTitleDamageDecisionId;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  decision: "accepted" | "not_required";
+  operator: string;
+  catalogRevision: Date;
+  checkpointRevision: number;
+  checkpointDigest: string;
+  assessmentIdentity: string;
+  assessmentAttemptSequence: number;
+  reviewSetIdentity: string;
+  catalogMappingProjectionId: string;
+  reviewedContentIdentity: string;
+  excludedTitleIdentityIds: readonly DvdTitleIdentityId[];
+  mainFeatureResolutions: readonly {
+    discSelectionId: DiscSelectionId;
+    titleIdentityId: DvdTitleIdentityId;
+  }[];
+  snapshot: DvdTitleDamageDecisionSnapshot;
+  recordedAt: Date;
+}
+
+export interface DvdTitleDamageDecisionInspection {
+  schemaVersion: 1;
+  state: "not_recorded" | "accepted" | "not_required" | "expired";
+  current: DvdTitleDamageDecision | null;
+  latest: DvdTitleDamageDecision | null;
+  currentIdentities: {
+    catalogRevision: string | null;
+    checkpoint: { revision: number; digest: string } | null;
+    recovery: {
+      id: ArchiveRecoveryId;
+      attemptId: ArchiveRecoveryAttemptId;
+      state: ArchiveRecoveryStatus;
+    } | null;
+    assessmentIdentity: string | null;
+    reviewSetIdentity: string | null;
+    catalogMappingProjectionId: string | null;
+  };
+}
+
+export interface RecordDvdTitleDamageDecisionInput
+  extends DvdTitleDamageDecisionExpectedIdentities {
+  mutationKey: string;
+  previewToken: string;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  operator: string;
+  damageAcknowledgement: boolean;
 }
 
 export type RunningArchiveJob = ArchiveJob & {
@@ -2065,6 +2229,12 @@ export interface CatalogAccess {
   recordDvdTitleDamageAcceptancePreviewDecision(
     input: DvdTitleDamageAcceptancePreviewDecisionInput,
   ): void;
+  recordDvdTitleDamageDecision(
+    input: RecordDvdTitleDamageDecisionInput,
+  ): DvdTitleDamageDecision;
+  inspectDvdTitleDamageDecision(
+    id: OriginalDiscArchiveId,
+  ): DvdTitleDamageDecisionInspection;
   createMediaItem(input: CreateMediaItemInput, options?: MediaItemMutationOptions): MediaItem;
   createMappingProposal(
     input: CreateMappingProposalInput,
@@ -2775,6 +2945,7 @@ export type SnapshotCatalogAccess = Pick<
   | "readDvdTitleIdentityReviewSet"
   | "readDvdCatalogReviewWorkflowEvidence"
   | "listCatalogReviewEvidenceChoices"
+  | "inspectDvdTitleDamageDecision"
   | "findArchiveRecovery"
   | "findArchiveRecoveryById"
   | "readDvdArchiveRecoveryRangeEvidence"
