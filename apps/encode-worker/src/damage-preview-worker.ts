@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { reviewDamagePreviewEvidence, type DamagePreviewAvailability, type DamagePreviewInput } from "@rip-dvd/application";
+import { cleanupDamagePreviewMedia, reviewDamagePreviewEvidence, type DamagePreviewAvailability, type DamagePreviewInput } from "@rip-dvd/application";
 import { canonicalPublicationJson, type DataAccess, type DamagePreviewRecord, type OriginalDiscArchiveId } from "@rip-dvd/data-access";
 import { acquireKernelProcessLock, inspectKernelProcessLock, defaultArchiveImageOwnership, ArchiveImageOwnershipError, type ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { DamagePreviewUnrepresentableError, createDamagePreviewGenerator, type DamagePreviewGenerator, type PreviewSourceTitle } from "./damage-preview-generator.js";
@@ -191,7 +191,7 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
 }
 export async function runDamagePreviewWorker(options: Options & { pollIntervalMs: number; log(message: string): void }) {
   while (!options.signal.aborted) {
-    try { await pollDamagePreviews(options); } catch { options.log("Damage Preview worker could not complete its poll."); }
+    try { cleanupDamagePreviewMedia(options.access); await pollDamagePreviews(options); } catch { options.log("Damage Preview worker could not complete its poll."); }
     try { await delay(options.pollIntervalMs, undefined, { signal: options.signal }); } catch { if (!options.signal.aborted) throw new Error("Preview worker wait failed."); }
   }
 }

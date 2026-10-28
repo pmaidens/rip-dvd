@@ -76,6 +76,17 @@ set -e
 [ "$preview_status" -eq 2 ]
 printf '%s\n' "$preview_output" | assert_json_fields 'error.code=NOT_FOUND'
 
+for action in delete cleanup; do
+  set +e
+  removal_output="$(invoke damage-preview "$action" synthetic-missing-request \
+    --key "synthetic-smoke-$action" --json '{"mediaToken":"synthetic-reviewed-media"}' \
+    2>"$temporary_directory/preview-removal.stderr")"
+  removal_status=$?
+  set -e
+  [ "$removal_status" -eq 2 ]
+  printf '%s\n' "$removal_output" | assert_json_fields 'error.code=NOT_FOUND'
+done
+
 set +e
 verification_output="$(invoke archive-recovery inspect-verification \
   synthetic-missing-recovery \
