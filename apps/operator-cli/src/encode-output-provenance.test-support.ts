@@ -25,7 +25,12 @@ export function publishSyntheticClaim(access: DataAccess, claim: RunningEncodeJo
   if (retainedPath !== undefined) renameSync(claim.outputPath, retainedPath);
   writeFileSync(claim.outputPath, `synthetic generation ${claim.claimToken}`);
   const filesystemIdentity = encodeOutputFilesystemIdentity(lstatSync(claim.outputPath));
-  const validation = access.encodeJobs.recordOutputValidation(claim, filesystemIdentity, syntheticOutputValidation);
+  const source = access.encodeJobs.findClaimSnapshot(claim.claimToken)?.source;
+  const expectedSeconds = source === undefined ? syntheticOutputValidation.duration.expectedSeconds : source.output.expectedDurationSeconds;
+  const validation = access.encodeJobs.recordOutputValidation(claim, filesystemIdentity, {
+    ...syntheticOutputValidation,
+    duration: { ...syntheticOutputValidation.duration, expectedSeconds, minimumRatio: expectedSeconds === null ? null : 0.98 },
+  });
   access.encodeJobs.completePublishedClaim(claim, mutation, () => true, {
     ...(retainedPath === undefined ? {} : { retainedOutputPath: retainedPath,
       retainedOutputIdentity: encodeOutputFilesystemIdentity(lstatSync(retainedPath)) }),

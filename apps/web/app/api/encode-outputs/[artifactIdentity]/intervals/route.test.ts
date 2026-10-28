@@ -1,3 +1,4 @@
+import { publishCorrespondenceOutput } from "../../../../../../operator-cli/src/encode-output-correspondence.test-support.js";
 import { afterEach, expect, it } from "vitest";
 import { encodeOutputArtifactIdentity } from "@rip-dvd/application";
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../../../../operator-cli/src/operator-workflow.test-support.js";
@@ -37,4 +38,31 @@ it("rejects malformed interval queries identically", async () => {
     expect(cli.exitCode).toBe(2);
     expect(cli.result).toEqual(await web.json());
   } finally { access.close(); }
+});
+
+it.each([
+  [{}, 500, "absent", "SOURCE_EXCLUDED_BY_SELECTION"],
+  [{ chapters: true }, 100, "absent", "SOURCE_EXCLUDED_BY_SELECTION"],
+  [{ partialOmittedMap: true }, 500, "unknown", "SOURCE_MAPPING_INCOMPLETE"],
+  [{ sharedSource: true }, 500, "unknown", "OUTPUT_TIMING_UNSUPPORTED"],
+  [{ overlappingPath: true }, 500, "unknown", "OUTPUT_TIMING_UNSUPPORTED"],
+  [{ sharedSource: true }, 100, "unknown", "OUTPUT_TRUNCATED"],
+  [{ sharedSource: true, chapters: true }, 100, "unknown", "SOURCE_CHAPTER_MAPPING_INCOMPLETE"],
+] as const)("shares artifact-bound selection, omission and truncation classification, %j", async (options, durationSeconds, status, reasonCode) => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await publishCorrespondenceOutput(fixture, options);
+  const mediaProbe = async () => ({ durationSeconds, streams: [] });
+  try {
+    const web = await createEncodeOutputIntervalsRoute(new Request(`http://localhost/api/encode-outputs/${seeded.artifactIdentity}/intervals?query=${encodeURIComponent(JSON.stringify(seeded.query))}`),
+      seeded.artifactIdentity, () => seeded.access, mediaProbe);
+    const cli = await fixture.run(["encode-output", "intervals", seeded.artifactIdentity, "--json", JSON.stringify(seeded.query)],
+      undefined, undefined, { encodeOutputMediaProbe: mediaProbe });
+    expect(web.status).toBe(200);
+    expect(cli.exitCode).toBe(0);
+    expect(cli.result).toEqual(await web.json());
+    expect(cli.result).toMatchObject({
+      inspection: { artifact: { inspectability: { status: "inspected" } } },
+      intervals: [{ status, reasonCode, outputInterval: null, evidence: { claimSnapshotId: seeded.claim.claimToken } }],
+    });
+  } finally { seeded.access.close(); }
 });

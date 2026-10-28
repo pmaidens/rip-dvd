@@ -1,4 +1,4 @@
-import { canonicalPublicationJson, type DataAccess, type EncodeClaimSnapshot } from "@rip-dvd/data-access";
+import { canonicalPublicationJson, type DataAccess } from "@rip-dvd/data-access";
 import { inspectEncodeOutput, type EncodeOutputInspection, type EncodeOutputMediaProbe } from "./encode-output-inspection.js";
 
 export class InvalidEncodeOutputIntervalInputError extends Error {
@@ -29,9 +29,9 @@ function parseQuery(value: unknown): IntervalQuery {
   };
 }
 
-type SourceSnapshot = Pick<EncodeClaimSnapshot, "id" | "encodeJobId" | "source">;
+type SourceSnapshot = NonNullable<EncodeOutputInspection["artifact"]["provenance"]["sourceSnapshot"]>;
 
-type SourceInterval = EncodeClaimSnapshot["source"]["assessment"]["items"][number]["estimatedAffectedPlayback"];
+type SourceInterval = SourceSnapshot["source"]["assessment"]["items"][number]["estimatedAffectedPlayback"];
 type RecordedInterval = NonNullable<SourceInterval>["intervals"][number];
 
 interface IntervalClassification {
@@ -47,8 +47,8 @@ interface IntervalClassification {
     assessmentIdentity: string | null;
     observedFileIdentity: string | null;
     inspectionReasonCode: string | null;
-    requestedMapping: EncodeClaimSnapshot["source"]["assessment"]["items"][number] | null;
-    selectedMapping: EncodeClaimSnapshot["source"]["assessment"]["items"][number] | null;
+    requestedMapping: SourceSnapshot["source"]["assessment"]["items"][number] | null;
+    selectedMapping: SourceSnapshot["source"]["assessment"]["items"][number] | null;
   };
 }
 

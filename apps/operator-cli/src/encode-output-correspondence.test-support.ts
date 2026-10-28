@@ -1,6 +1,7 @@
 import { join } from "node:path";
-import { createApplicationOperations, claimNextEncodeJob, type EncodingReadiness, type DvdTitleDamageAcceptancePreview } from "@rip-dvd/application";
+import { createApplicationOperations, claimNextEncodeJob, type EncodingReadiness, type DvdTitleDamageAcceptancePreview, encodeOutputArtifactIdentity } from "@rip-dvd/application";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import { publishSyntheticClaim } from "./encode-output-provenance.test-support.js";
 import { seedCommittedArchiveEvidence } from "./archive-evidence.test-support.js";
 import { seedDamagePreview } from "./damage-preview.test-support.js";
 import { openEncodeSourceTestAccess } from "./encode-source-decision.test-support.js";
@@ -81,4 +82,25 @@ export async function seedCorrespondenceClaim(
     return { access, claim, assessment, selection, archive: seeded.archive,
       omitted: review.items.find((item) => item.observation.displayTitleNumber === 2)!.observation };
   } catch (error) { access.close(); throw error; }
+}
+
+export async function publishCorrespondenceOutput(
+  fixture: ReturnType<typeof createOperatorWorkflowFixture>,
+  options: Parameters<typeof seedCorrespondenceClaim>[1] = {},
+) {
+  const seeded = await seedCorrespondenceClaim(fixture, options);
+  try {
+    publishSyntheticClaim(seeded.access, seeded.claim);
+    return { ...seeded, artifactIdentity: encodeOutputArtifactIdentity(seeded.claim.id), query: {
+      assessmentIdentity: seeded.assessment.id, titleIdentityObservationId: seeded.omitted.id, intervalIndexes: [0],
+    } };
+  } catch (error) { seeded.access.close(); throw error; }
+}
+
+export function queryCorrespondence(
+  fixture: ReturnType<typeof createOperatorWorkflowFixture>,
+  seeded: Awaited<ReturnType<typeof publishCorrespondenceOutput>>, durationSeconds = 500,
+) {
+  return fixture.run(["encode-output", "intervals", seeded.artifactIdentity, "--json", JSON.stringify(seeded.query)],
+    undefined, undefined, { encodeOutputMediaProbe: async () => ({ durationSeconds, streams: [] }) });
 }
