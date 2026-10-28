@@ -797,6 +797,130 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   }]);
   previewLedger.close();
 
+  const acceptedPreview = exactPreflight.result as {
+    previewToken: string;
+    current: {
+      checkpoint: { revision: number; manifestDigest: string };
+    };
+    assessmentIdentity: string;
+    reviewSetIdentity: string;
+    catalogMappingProjectionId: string;
+    reviewedContentIdentity: string;
+  };
+  const acceptanceInput = {
+    operator: "Synthetic CLI operator",
+    previewToken: acceptedPreview.previewToken,
+    checkpointRevision: acceptedPreview.current.checkpoint.revision,
+    checkpointDigest: acceptedPreview.current.checkpoint.manifestDigest,
+    assessmentIdentity: acceptedPreview.assessmentIdentity,
+    reviewSetIdentity: acceptedPreview.reviewSetIdentity,
+    catalogMappingProjectionId:
+      acceptedPreview.catalogMappingProjectionId,
+    reviewedContentIdentity: acceptedPreview.reviewedContentIdentity,
+    excludedTitleIdentityIds: [
+      currentItems[1]!.titleIdentityId,
+      currentItems[2]!.titleIdentityId,
+    ],
+    mainFeatureResolutions: [{
+      discSelectionId: mainFeatureSelection.id,
+      titleIdentityId: currentItems[0]!.titleIdentityId,
+    }],
+    damageAcknowledgement: true,
+  };
+  const acceptanceKey = "00000000-0000-4000-8000-000000000420";
+  const accepted = await fixture.run([
+    "catalog-review",
+    "accept-damage",
+    archive.id,
+    "--key",
+    acceptanceKey,
+    "--json",
+    JSON.stringify(acceptanceInput),
+  ]);
+  expect(accepted).toMatchObject({
+    exitCode: 0,
+    result: {
+      decision: {
+        decision: "accepted",
+        operator: "Synthetic CLI operator",
+        checkpointRevision: acceptedPreview.current.checkpoint.revision,
+        assessmentIdentity: chapterRemapped.id,
+        reviewedContentIdentity: acceptedPreview.reviewedContentIdentity,
+        snapshot: {
+          reviewedContent: [{
+            titleIdentityId: currentItems[0]!.titleIdentityId,
+            sourceIdentity: {
+              angleNumber: 1,
+              chapterStart: 1,
+              chapterEnd: 4,
+            },
+          }],
+          exclusions: [
+            { titleIdentityId: currentItems[1]!.titleIdentityId },
+            { titleIdentityId: currentItems[2]!.titleIdentityId },
+          ],
+          assessmentSnapshot: { id: chapterRemapped.id },
+        },
+      },
+      encodingQueued: false,
+      watchabilityProved: false,
+      outputValidationWaived: false,
+    },
+  });
+  const replay = await fixture.run([
+    "catalog-review",
+    "accept-damage",
+    archive.id,
+    "--key",
+    acceptanceKey,
+    "--json",
+    JSON.stringify(acceptanceInput),
+  ]);
+  expect(replay.result).toEqual(accepted.result);
+  const immutableDecision = new DatabaseSync(fixture.databasePath);
+  expect(() => immutableDecision.prepare(`
+    UPDATE dvd_title_damage_decisions
+    SET operator = 'Changed synthetic operator'
+  `).run()).toThrow(/immutable/i);
+  immutableDecision.close();
+  const keyConflict = await fixture.run([
+    "catalog-review",
+    "accept-damage",
+    archive.id,
+    "--key",
+    acceptanceKey,
+    "--json",
+    JSON.stringify({
+      ...acceptanceInput,
+      operator: "Different synthetic operator",
+    }),
+  ]);
+  expect(keyConflict).toMatchObject({
+    exitCode: 2,
+    result: { error: { code: "MUTATION_KEY_CONFLICT" } },
+  });
+  expect((await fixture.run([
+    "catalog-review",
+    "show",
+    archive.id,
+  ])).result).toMatchObject({
+    titleDamageDecision: {
+      state: "accepted",
+      current: { id: (accepted.result as { decision: { id: string } }).decision.id },
+    },
+  });
+
+  const noOpAssessment = await access.assessDvdTitleDamage(
+    archive.id,
+    ownership,
+    async () => mappings,
+  );
+  expect(noOpAssessment?.id).toBe(chapterRemapped.id);
+  expect(access.catalog.inspectDvdTitleDamageDecision(archive.id)).toMatchObject({
+    state: "accepted",
+    current: { assessmentIdentity: chapterRemapped.id },
+  });
+
   const structuredInput = JSON.stringify({
     excludedTitleIdentityIds: [
       currentItems[1]!.titleIdentityId,
@@ -869,6 +993,39 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     currentAssessmentIdentity: laterRecorded.id,
     assessment: { id: laterRecorded.id },
   });
+  expect(access.catalog.inspectDvdTitleDamageDecision(archive.id)).toMatchObject({
+    state: "expired",
+    current: null,
+    latest: { assessmentIdentity: chapterRemapped.id },
+  });
+  const stalePreview = structuredPreflights[0]!.result as typeof acceptedPreview;
+  const staleAcceptance = await fixture.run([
+    "catalog-review",
+    "accept-damage",
+    archive.id,
+    "--key",
+    "00000000-0000-4000-8000-000000000422",
+    "--json",
+    JSON.stringify({
+      ...acceptanceInput,
+      previewToken: stalePreview.previewToken,
+      checkpointRevision: stalePreview.current.checkpoint.revision,
+      checkpointDigest: stalePreview.current.checkpoint.manifestDigest,
+      assessmentIdentity: stalePreview.assessmentIdentity,
+      reviewSetIdentity: stalePreview.reviewSetIdentity,
+      catalogMappingProjectionId: stalePreview.catalogMappingProjectionId,
+      reviewedContentIdentity: stalePreview.reviewedContentIdentity,
+    }),
+  ]);
+  expect(staleAcceptance).toMatchObject({
+    exitCode: 2,
+    result: {
+      error: {
+        code: "STALE_TITLE_DAMAGE_DECISION",
+        current: { assessmentIdentity: laterRecorded.id },
+      },
+    },
+  });
 
   const restored = await access.assessDvdTitleDamage(
     archive.id,
@@ -884,6 +1041,10 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     currentAssessmentIdentity: chapterRemapped.id,
     assessment: { id: chapterRemapped.id },
   });
+  expect(access.catalog.inspectDvdTitleDamageDecision(archive.id)).toMatchObject({
+    state: "expired",
+    current: null,
+  });
   const sqlite = new DatabaseSync(fixture.databasePath);
   expect(sqlite.prepare(`
     SELECT assessment_id AS assessmentId
@@ -895,6 +1056,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     { assessmentId: recorded.id },
     { assessmentId: remapped.id },
     { assessmentId: chapterRemapped.id },
+    { assessmentId: chapterRemapped.id },
     { assessmentId: laterRecorded.id },
     { assessmentId: chapterRemapped.id },
   ]);
@@ -902,6 +1064,10 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     SELECT count(*) AS count
     FROM dvd_title_damage_assessments
   `).get()).toEqual({ count: 5 });
+  expect(sqlite.prepare(`
+    SELECT count(*) AS count
+    FROM dvd_title_damage_decisions
+  `).get()).toEqual({ count: 1 });
   sqlite.close();
 
   let newerStructuralAssessmentIdentity: string | null = null;

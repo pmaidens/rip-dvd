@@ -5,6 +5,10 @@ import { inspectArchiveRecoveryRanges } from "./archive-recovery-ranges.js";
 import { inspectCatalogTitleDamage } from "./catalog-title-damage.js";
 import { previewDvdTitleDamageAcceptance } from
   "./dvd-title-damage-acceptance-preview.js";
+import {
+  acceptDvdTitleDamage,
+  inspectDvdTitleDamageDecision,
+} from "./dvd-title-damage-acceptance.js";
 import { createNotificationOperations } from "./notifications.js";
 import { isHandBrakePreset } from "@rip-dvd/config";
 import {
@@ -445,6 +449,13 @@ export function createApplicationOperations(
       archiveId: Parameters<typeof previewDvdTitleDamageAcceptance>[1],
       input?: Parameters<typeof previewDvdTitleDamageAcceptance>[2],
     ) => previewDvdTitleDamageAcceptance(access, archiveId, input),
+    acceptDvdTitleDamage: (
+      archiveId: Parameters<typeof acceptDvdTitleDamage>[1],
+      input: Parameters<typeof acceptDvdTitleDamage>[2],
+    ) => acceptDvdTitleDamage(access, archiveId, input),
+    inspectDvdTitleDamageDecision: (
+      archiveId: Parameters<typeof inspectDvdTitleDamageDecision>[1],
+    ) => inspectDvdTitleDamageDecision(access, archiveId),
     inspectEncodeOutput: (artifactIdentity: unknown) =>
       inspectEncodeOutput(
         access,
@@ -1032,6 +1043,7 @@ export * from "./rearchive-acceptance.js";
 export * from "./rearchive-acceptance-preview-token.js";
 export * from "./dvd-title-damage-acceptance-preview.js";
 export * from "./dvd-title-damage-acceptance-preview-token.js";
+export * from "./dvd-title-damage-acceptance.js";
 export * from "./archive-request-input.js";
 export type { MediaItemCommand } from "./media-item-operations.js";
 export * from "./catalog-automation.js";

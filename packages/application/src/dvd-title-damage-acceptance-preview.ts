@@ -587,8 +587,7 @@ export function previewDvdTitleDamageAcceptance(
   );
   const preflightAction = actionFor(workflow.actions);
   const baseReasons = preflightAction.reasons.filter(({ code }) =>
-    code !== "MAPPING_REVIEW_REQUIRED" && code !== "SELECTION_UNIDENTIFIED" &&
-    code !== "CATALOG_DAMAGE_DECISION_UNAVAILABLE"
+    code !== "MAPPING_REVIEW_REQUIRED" && code !== "SELECTION_UNIDENTIFIED"
   );
   const mappingReviewItems = reviewedContent.filter((item) =>
     item.preflightMappingState === "needs_mapping_review"
@@ -671,12 +670,49 @@ export function previewDvdTitleDamageAcceptance(
     ? createDvdTitleDamageAcceptancePreviewToken()
     : null;
   if (previewToken !== null) {
+    if (
+      workflow.current.checkpoint === null ||
+      workflow.current.recovery === null ||
+      (workflow.current.recovery.state !== "stopped" &&
+        workflow.current.recovery.state !== "completed") ||
+      reviewSet === null || currentAssessment === null ||
+      titleDamage.currentAssessmentIdentity === null ||
+      workflow.current.catalogMappingProjectionId === null ||
+      reviewedContentIdentity === null
+    ) {
+      throw new DomainInvariantError(
+        "Available Title Damage Acceptance preflight is missing current evidence",
+      );
+    }
     access.catalog.recordDvdTitleDamageAcceptancePreviewDecision({
       previewToken,
       originalDiscArchiveId: archiveId,
       excludedTitleIdentityIds,
       mainFeatureResolutions,
       expectedPreviewEvidence,
+      decisionSnapshot: {
+        schemaVersion: 1,
+        current: {
+          catalogRevision: workflow.current.catalogRevision,
+          checkpoint: workflow.current.checkpoint,
+          recovery: {
+            id: workflow.current.recovery.id,
+            attemptId: workflow.current.recovery.attemptId,
+            state: workflow.current.recovery.state,
+          },
+        },
+        reviewSetIdentity: reviewSet.reviewSetIdentity,
+        catalogMappingProjectionId:
+          workflow.current.catalogMappingProjectionId,
+        assessmentIdentity: titleDamage.currentAssessmentIdentity,
+        reviewedContentIdentity,
+        excludedTitleIdentityIds,
+        mainFeatureResolutions,
+        reviewedContent,
+        exclusions,
+        assessmentSnapshot: currentAssessment,
+        acknowledgementRequired,
+      },
     });
   }
 

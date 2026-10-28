@@ -419,6 +419,81 @@ it("includes all current content by default and sends only explicit exclusions",
   );
 });
 
+it("submits the exact preview identities and damage acknowledgement", async () => {
+  const acceptancePreview = {
+    ...preview,
+    current: evidenceGeneration.current,
+    acknowledgementRequired: true,
+  } as unknown as DvdTitleDamageAcceptancePreview;
+  const fetcher = vi.fn(async (
+    request: RequestInfo | URL,
+    _options?: RequestInit,
+  ) =>
+    String(request).endsWith("/title-damage-acceptance")
+      ? Response.json({ decision: { decision: "accepted" } })
+      : Response.json(acceptancePreview)
+  );
+  await act(async () => root.render(
+    <CatalogReviewTitleDamageAcceptancePreview
+      originalDiscArchiveId="synthetic-archive"
+      titleIdentity={titleIdentity}
+      evidenceGeneration={evidenceGeneration}
+      fetcher={fetcher}
+    />,
+  ));
+  await act(async () => {
+    (container.querySelector("button") as HTMLButtonElement).click();
+  });
+
+  const operator = container.querySelector(
+    'input[maxlength="128"]',
+  ) as HTMLInputElement;
+  const acknowledgement = [...container.querySelectorAll('input[type="checkbox"]')]
+    .at(-1) as HTMLInputElement;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set?.call(operator, "Synthetic operator");
+    operator.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => {
+    acknowledgement.click();
+  });
+  const accept = [...container.querySelectorAll("button")].find((button) =>
+    button.textContent === "Accept exact reviewed set"
+  ) as HTMLButtonElement;
+  expect(accept.disabled).toBe(false);
+  await act(async () => accept.click());
+
+  expect(fetcher).toHaveBeenLastCalledWith(
+    "/api/catalog-reviews/synthetic-archive/title-damage-acceptance",
+    expect.objectContaining({
+      method: "POST",
+      body: expect.any(String),
+    }),
+  );
+  const options = fetcher.mock.calls.at(-1)?.[1];
+  if (options === undefined) throw new Error("Acceptance request was not sent");
+  expect(JSON.parse(options.body as string)).toEqual({
+    mutationKey: expect.any(String),
+    operator: "Synthetic operator",
+    previewToken: preview.previewToken,
+    checkpointRevision: 2,
+    checkpointDigest: "a".repeat(64),
+    assessmentIdentity: preview.assessmentIdentity,
+    reviewSetIdentity: preview.reviewSetIdentity,
+    catalogMappingProjectionId: preview.catalogMappingProjectionId,
+    reviewedContentIdentity: preview.reviewedContentIdentity,
+    excludedTitleIdentityIds: [],
+    mainFeatureResolutions: [],
+    damageAcknowledgement: true,
+  });
+  expect(container.textContent).toContain(
+    "Damage accepted for this exact reviewed set.",
+  );
+});
+
 it("invalidates the preview when the current review set changes", async () => {
   const fetcher = vi.fn(async () => Response.json(preview));
   await act(async () => root.render(

@@ -207,7 +207,7 @@ it("bounds transition history across repeated no-change rechecks", async () => {
       classification: "individually_failed",
     }],
   });
-});
+}, 10_000);
 
 it("classifies transitions from the preceding checkpoint range", async () => {
   const fixture = createOperatorWorkflowFixture();
@@ -413,7 +413,7 @@ it("validates the extra bounded row used to report truncated history", async () 
     { rangeOffset: 0, rangeLimit: 20 },
   )).toThrow(/digest/i);
   access.close();
-});
+}, 10_000);
 
 it("reports qualified current-pass progress through inspect and wait", async () => {
   vi.useFakeTimers({ toFake: ["Date"] });

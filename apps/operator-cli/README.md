@@ -126,6 +126,7 @@ rip-dvd catalog-review preview-damage-acceptance <archive-id> [--exclude-title-i
 rip-dvd catalog-review preview-damage-acceptance <archive-id> --json '<object>'
 rip-dvd catalog-review preview-damage-acceptance <archive-id> --stdin
 rip-dvd catalog-review preview-damage-acceptance <archive-id> --file <path>
+rip-dvd catalog-review accept-damage <archive-id> --key <key> --json '<exact-preview-input>'
 rip-dvd catalog-review archive-only <archive-id> --key <key> --revision <catalog-revision> --checkpoint-revision <n> --checkpoint-digest <digest>
 rip-dvd catalog-review reopen <archive-id> --key <key> --revision <catalog-revision> --checkpoint-revision <n> --checkpoint-digest <digest>
 rip-dvd catalog-review suggest <archive-id>
@@ -153,6 +154,17 @@ exact current Title Identity; unresolved main-feature choices remain blocked
 and no representative title is inferred. Instead of repeatable flags, pass the
 same `excludedTitleIdentityIds` and `mainFeatureResolutions` fields as one JSON
 object with `--json`, `--stdin`, or `--file`.
+`accept-damage` submits the preview token, operator, expected checkpoint,
+assessment, mapping projection, complete review-set identity, reviewed-content
+identity, exclusions, and main-feature resolutions. Set
+`damageAcknowledgement` to `true` when the preview requires it. The database
+checks every identity in one transaction and records an immutable decision
+with the assessment snapshot. A changed checkpoint, assessment, mapping, or
+review set returns `STALE_TITLE_DAMAGE_DECISION` with current identities and
+records nothing. Reusing the same mutation key with the same input replays the
+result; changing the input conflicts. The decision does not queue encoding,
+claim watchability, or waive Encode Output validation. `show` reports the
+current decision or its derived `expired` state.
 `reviewActionAvailability` reports whether completion with selections or
 Archive-only completion is currently allowed, with a reason when blocked.
 Each paginated section includes its offset, limit, and next/previous flags.

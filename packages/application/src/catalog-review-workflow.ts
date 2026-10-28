@@ -28,7 +28,6 @@ export type CatalogReviewWorkflowReasonCode =
   | "ACCEPTANCE_REQUIRED"
   | "CATALOG_REVIEW_ARCHIVE_ONLY"
   | "CATALOG_REVIEW_OPEN"
-  | "CATALOG_DAMAGE_DECISION_UNAVAILABLE"
   | "STALE_CATALOG_REVISION"
   | "CATALOG_REVIEW_COMPLETION_UNAVAILABLE"
   | typeof DVD_RECOVERY_EVIDENCE_ENCODING.code;
@@ -525,15 +524,7 @@ export function describeCatalogReviewWorkflow(
         },
       }]),
   ]);
-  const damageDecisionReasons = uniqueReasons([
-    ...damageReasons,
-    {
-      code: "CATALOG_DAMAGE_DECISION_UNAVAILABLE",
-      message:
-        "Damage decision operations are unavailable until web and JSON CLI support is complete.",
-      details: { evidenceFormat: "dvd-recovery-evidence-v1" },
-    },
-  ]);
+  const damageDecisionReasons = damageReasons;
   const encodeReasons = uniqueReasons([
     ...damageReasons,
     ...(titleDamage.acceptanceRequired
@@ -622,13 +613,20 @@ export function describeCatalogReviewWorkflow(
       },
       {
         action: "damage_decision",
-        available: false,
+        available: damageDecisionReasons.length === 0,
         reasons: damageDecisionReasons,
         expectedInputs: [
+          "previewToken",
           "checkpointRevision",
+          "checkpointDigest",
           "assessmentIdentity",
           "reviewSetIdentity",
+          "catalogMappingProjectionId",
+          "reviewedContentIdentity",
+          "excludedTitleIdentityIds",
+          "mainFeatureResolutions",
           "mutationKey",
+          "operator",
         ],
       },
       {
