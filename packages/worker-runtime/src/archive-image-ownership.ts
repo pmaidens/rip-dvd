@@ -1,3 +1,5 @@
+import { assertKernelFlock } from "./kernel-process-lock.js";
+import { enterArchiveImageAdmission } from "./archive-image-admission.js";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -85,6 +87,8 @@ export interface ArchiveImageOwnershipHandle {
 }
 
 interface OwnershipRequest<Result> {
+  previewRead?: { onContention(urgent: boolean, waiting: boolean): void };
+  urgent?: boolean;
   archiveId: string;
   additionalImagePaths?: readonly string[];
   imagePath: string | null;
@@ -684,17 +688,7 @@ function createNodeLockBackend(
     },
     assertHeld(descriptor, _lockPath, mode) {
       try {
-        const evidence = readFileSync(
-          `/proc/self/fdinfo/${descriptor}`,
-          "utf8",
-        );
-        const heldModes = [...evidence.matchAll(
-          /^lock:\s+\d+:\s+FLOCK\s+ADVISORY\s+(READ|WRITE)\b/gm,
-        )].map((match) => match[1]);
-        const expected = mode === "exclusive" ? "WRITE" : "READ";
-        if (heldModes.length !== 1 || heldModes[0] !== expected) {
-          throw new Error("Descriptor does not hold the expected flock");
-        }
+        assertKernelFlock(descriptor, mode);
       } catch (cause) {
         throw cause instanceof ArchiveImageOwnershipError
           ? cause
@@ -1425,7 +1419,22 @@ export function createArchiveImageOwnership({
         ? cause
         : new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause });
     }
-    const opened = await prepareArchiveLock(
+    // Preview readers take an exclusive image interval so every ordinary
+    // reader and writer participates in contention, including surviving children.
+    if (request.previewRead) mode = "exclusive";
+    let admission: Awaited<ReturnType<typeof enterArchiveImageAdmission>> | null;
+    try {
+      admission = process.platform === "linux" ? await enterArchiveImageAdmission({
+        directory: `${paths.lock}.admission`, preview: request.previewRead !== undefined,
+        urgent: request.urgent === true, signal: request.signal,
+        ...(request.previewRead ? { onContention: request.previewRead.onContention } : {}),
+      }) : null;
+    } catch (cause) {
+      if (request.signal.aborted) throw request.signal.reason;
+      throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause });
+    }
+    let opened;
+    try { opened = await prepareArchiveLock(
       paths,
       request.archiveId,
       initialize,
@@ -1433,6 +1442,7 @@ export function createArchiveImageOwnership({
       backend,
       acquisitionTimeoutMs,
     );
+    } catch (error) { await admission?.release(); throw error; }
     const { descriptor } = opened;
     let releaseBackend: () => void = () => undefined;
     const controller = new AbortController();
@@ -1543,7 +1553,7 @@ export function createArchiveImageOwnership({
           "CONSISTENCY_FAULT",
         ));
       }
-      if (mode === "exclusive") {
+      if (mode === "exclusive" && request.previewRead === undefined) {
         const claimedAt = now();
         claim = createClaim(
           request.archiveId,
@@ -1641,6 +1651,7 @@ export function createArchiveImageOwnership({
       }
       releaseBackend();
       closeSync(descriptor);
+      try { await admission?.release(); } catch (cause) { throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause }); }
     }
   };
 

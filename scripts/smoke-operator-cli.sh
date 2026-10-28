@@ -204,3 +204,57 @@ docker compose --project-name "$project_name" logs --no-color notification-worke
   | grep -F 'Notification worker received SIGTERM; stopping' >/dev/null
 
 printf 'Operator CLI and notification dispatcher deployment smoke passed.\n'
+
+# Author canonical synthetic media inside the service namespace, then export
+# through the installed caller wrapper. No caller directory is bind-mounted.
+preview_fixture="$(docker compose --project-name "$project_name" --profile maintenance run --rm --no-deps --no-TTY --entrypoint node operator-cli --input-type=module <<'JAVASCRIPT'
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+import { createLegacySidecarDataAccess } from './apps/operator-cli/node_modules/@rip-dvd/data-access/dist/legacy-sidecars.js';
+import { loadConfig } from './apps/operator-cli/node_modules/@rip-dvd/config/dist/index.js';
+const config = loadConfig();
+const access = createLegacySidecarDataAccess({ databasePath: config.databasePath });
+const drive = access.catalog.upsertOpticalDrive({ devicePath: '/dev/synthetic-preview-export', isPresent: true });
+const disc = access.catalog.registerDetectedDisc({ opticalDriveId: drive.id, discKind: 'dvd', fingerprint: 'sha256:' + 'f'.repeat(64), volumeLabel: 'SYNTHETIC_PREVIEW_EXPORT', scanData: { schemaVersion: 2, contentId: 'sha256:' + 'f'.repeat(64), titles: [{ number: 1, durationSeconds: 1, chapters: 1, audioStreams: [], subtitles: [] }] } });
+access.catalog.updateDetectedDiscStatus(disc.id, 'scanned');
+access.catalog.updateDetectedDiscStatus(disc.id, 'approved');
+const archive = access.catalog.createOriginalDiscArchive({ detectedDiscId: disc.id, discKind: 'dvd', archiveFormat: 'iso', archivePath: '/data/synthetic-preview.iso', fingerprint: disc.fingerprint });
+const id = '11111111-2222-4333-8444-555555555555';
+const identity = `damage-preview-v1.${id}.0`;
+const path = '/data/synthetic-preview-export.mkv';
+execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=64x64:r=10', '-t', '1', '-c:v', 'ffv1', path], { stdio: 'pipe' });
+const bytes = readFileSync(path);
+const sha256 = createHash('sha256').update(bytes).digest('hex');
+const selection = { mode: 'ordinary_playback', titleIdentityObservationId: 'synthetic-observation', playbackRange: { startMilliseconds: 0, endMilliseconds: 1000 }, streams: { audio: [], subtitles: [] }, encodingProfileId: 'synthetic-profile' };
+const checkpoint = { manifestId: 'synthetic-manifest', manifestRevision: 1, manifestDigest: 'f'.repeat(64), publicationDigest: 'f'.repeat(64) };
+const record = { id, originalDiscArchiveId: archive.id, status: 'complete', preflightToken: 'synthetic-reviewed-token', selectionJson: JSON.stringify(selection), reviewJson: JSON.stringify({ reviewedRequest: { ...selection, checkpoint }, clips: [selection.playbackRange] }), workerId: null, cancellationRequested: false, reason: null, progress: { completedClips: 1, totalClips: 1, percent: 100 }, commands: [], toolVersions: { ffmpeg: 'synthetic-smoke' }, deviations: [], artifacts: [{ identity, path, sizeBytes: bytes.length, sha256, mediaType: 'video/x-matroska', coverage: selection.playbackRange, durationMilliseconds: 1000 }], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+const sqlite = new DatabaseSync(config.databasePath);
+sqlite.prepare('INSERT INTO damage_previews (id, original_disc_archive_id, status, record, created_at) VALUES (?, ?, ?, ?, ?)').run(id, archive.id, record.status, JSON.stringify(record), Date.now());
+sqlite.close(); access.close();
+process.stdout.write(JSON.stringify({ identity, sha256, sizeBytes: bytes.length }));
+JAVASCRIPT
+)"
+preview_identity="$(printf '%s' "$preview_fixture" | node -e 'let t="";for await(const c of process.stdin)t+=c;process.stdout.write(JSON.parse(t).identity)' --input-type=module)"
+preview_export="$(invoke damage-preview export "$preview_identity" --destination "$temporary_directory/caller-preview.mkv")"
+printf '%s\n' "$preview_export" | assert_json_fields \
+  "artifactIdentity=$preview_identity" 'mediaType=video/x-matroska' \
+  "path=$temporary_directory/caller-preview.mkv" 'preview.generationStatus=complete'
+node --input-type=module - "$temporary_directory/caller-preview.mkv" "$preview_fixture" <<'JAVASCRIPT'
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import assert from 'node:assert/strict';
+const media = readFileSync(process.argv[2]);
+const expected = JSON.parse(process.argv[3]);
+assert.equal(media.length, expected.sizeBytes);
+assert.equal(createHash('sha256').update(media).digest('hex'), expected.sha256);
+JAVASCRIPT
+printf 'Canonical preview export to the executing caller passed.\n'
+
+set +e
+invalid_preview_export="$(invoke damage-preview export "$preview_identity" --destination "$temporary_directory/missing-parent/preview.mkv")"
+invalid_preview_status=$?
+set -e
+[ "$invalid_preview_status" -eq 2 ]
+printf '%s\n' "$invalid_preview_export" | assert_json_fields 'error.code=EXPORT_DESTINATION_UNAVAILABLE'

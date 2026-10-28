@@ -2800,6 +2800,7 @@ export type SnapshotCatalogAccess = Pick<
 >;
 
 export interface ConsistentReadAccess {
+  readonly damagePreviews: Pick<import("./damage-preview.js").DamagePreviewAccess, "find" | "list">;
   readonly dvdTitleDamageAssessments: Pick<
     DvdTitleDamageAssessmentAccess,
     "inspect"
@@ -2880,6 +2881,15 @@ export interface DvdCheckpointReadOwnership {
 }
 
 export interface DataAccess {
+  /** Prepare under image ownership; mutate only in the synchronous commit after
+   * the final ownership and checkpoint checks have succeeded. */
+  withDvdCheckpoint<Result>(
+    id: OriginalDiscArchiveId,
+    ownership: DvdCheckpointReadOwnership,
+    task: (checkpoint: import("./dvd-archive-checkpoint.js").CommittedDvdCheckpointEvidence, handle: DvdCheckpointReadHandle) => Promise<Result>,
+    commit?: (checkpoint: import("./dvd-archive-checkpoint.js").CommittedDvdCheckpointEvidence, prepared: Result) => Result,
+  ): Promise<Result | null>;
+  readonly damagePreviews: import("./damage-preview.js").DamagePreviewAccess;
   withDvdCurrentCheckpoint<Result>(
     id: OriginalDiscArchiveId,
     ownership: DvdCheckpointReadOwnership,

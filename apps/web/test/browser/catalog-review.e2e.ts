@@ -549,7 +549,7 @@ test("Title Damage paging retrieves evidence beyond the review summary", async (
   await expect(loadMore).toHaveCount(0);
 });
 
-test("Damage Preview reviews selections and keeps generation explicitly unavailable", async ({ page }, testInfo) => {
+test("Damage Preview reviews selections and keeps active Recovery generation unavailable", async ({ page }, testInfo) => {
   await openCatalogReview(page, `CATALOG_BROWSER_DAMAGE_${fixtureVariant(testInfo.project.name).toUpperCase()}`);
   await page.getByRole("tab", { name: "Damage decision" }).click();
   const preview = page.getByRole("region", { name: "Damage Preview", exact: true });
@@ -558,11 +558,11 @@ test("Damage Preview reviews selections and keeps generation explicitly unavaila
   await expect(preview.getByLabel("Identified title")).toBeVisible();
   await preview.getByLabel("Interval 1:", { exact: false }).check();
   await preview.getByLabel("Playback range end in seconds").fill("180");
-  await preview.getByLabel("Audio stream IDs, separated by commas").fill("1");
+  await preview.getByLabel("Audio stream IDs, separated by commas").fill("128");
   await preview.getByRole("button", { name: "Review preview selections" }).click();
   await expect(preview.getByRole("heading", { name: "Reviewed preview" })).toBeVisible();
   await expect(preview.getByText("Estimated duration: 13 s. Estimated storage: unknown.")).toBeVisible();
-  await expect(preview.getByText(/DAMAGE_PREVIEW_GENERATION_UNAVAILABLE:/)).toBeVisible();
+  await expect(preview.getByText(/DAMAGE_PREVIEW_ACTIVE_RECOVERY_UNAVAILABLE:/)).toBeVisible();
   await expect(preview.getByRole("button", { name: "Generate Damage Preview" })).toBeDisabled();
   await preview.getByLabel("Context before in seconds").fill("1.001");
   await expect(preview.getByRole("heading", { name: "Reviewed preview" })).toHaveCount(0);
@@ -723,3 +723,41 @@ test("complex Catalog Review remains responsive and exposes accessible state", a
 function pageLabel(variant: "desktop" | "mobile"): string {
   return `CATALOG_BROWSER_LAYOUT_${variant.toUpperCase()}_${"UNBROKEN-CATALOG-LABEL-".repeat(8)}`.slice(0, 256);
 }
+
+
+test("Damage Preview requests, waits for and cancels reviewed work with visible provenance", async ({ page }, testInfo) => {
+  let cancelled = false;
+  const requestId = "11111111-2222-4333-8444-555555555555";
+  const state = () => ({ schemaVersion: 1, id: requestId, status: cancelled ? "cancelled" : "queued", generationStatus: cancelled ? "cancelled" : "queued", outdated: false, outdatedReasons: [], reason: null, cancellationRequested: cancelled, progress: { completedClips: 0, totalClips: 1, percent: null }, artifacts: [], provenance: { checkpoint: { manifestRevision: 1 } }, warning: "Failed, empty or partial media never means no damage." });
+  await page.route("**/api/damage-previews/*/availability", async (route) => {
+    const endpoint = new URL(route.request().url());
+    const browserHost = endpoint.host;
+    endpoint.hostname = "127.0.0.1";
+    // Node requests do not inherit Chromium's test-host resolver rule.
+    const response = await route.fetch({ url: endpoint.href, headers: { ...route.request().headers(), host: browserHost } });
+    expect(response.ok()).toBe(true);
+    const body = await response.json();
+    if (route.request().method() === "POST") { body.available = true; body.blockingReasons = []; }
+    await route.fulfill({ response, json: body });
+  });
+  await page.route(/\/api\/damage-previews\/[^/]+(?:\?.*)?$/, async (route) => {
+    if (route.request().method() === "DELETE") cancelled = true;
+    await route.fulfill({ json: state() });
+  });
+  await openCatalogReview(page, `CATALOG_BROWSER_DAMAGE_${fixtureVariant(testInfo.project.name).toUpperCase()}`);
+  await page.getByRole("tab", { name: "Damage decision" }).click();
+  const preview = page.getByRole("region", { name: "Damage Preview", exact: true });
+  await preview.getByRole("button", { name: "Review preview availability" }).click();
+  await preview.getByLabel("Interval 1:", { exact: false }).check();
+  await preview.getByLabel("Playback range end in seconds").fill("180");
+  await preview.getByRole("button", { name: "Review preview selections" }).click();
+  await preview.getByRole("button", { name: "Generate Damage Preview" }).click();
+  await expect(preview.getByLabel("Damage Preview request identity")).toHaveValue(requestId);
+  await expect(preview.getByText(/Status: queued/)).toBeVisible();
+  await preview.getByRole("button", { name: "Wait for preview", exact: true }).click();
+  await preview.getByRole("button", { name: "Cancel preview request" }).click();
+  await expect(preview.getByText(/Status: cancelled/)).toBeVisible();
+  await expect(preview.getByText("Failed, empty or partial media never means no damage.")).toBeVisible();
+  await preview.getByText("Preview provenance").click();
+  await expect(preview.locator("pre")).toContainText('"manifestRevision": 1');
+});

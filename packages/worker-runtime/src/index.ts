@@ -149,3 +149,5 @@ export async function runConfiguredAsyncWorker(
     host.removeListener("SIGTERM", stopForSigterm);
   }
 }
+
+export { acquireKernelProcessLock, inspectKernelProcessLock, type KernelProcessLock } from "./kernel-process-lock.js";

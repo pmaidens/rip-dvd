@@ -15,8 +15,8 @@ it("reviews an unmapped title with exact provenance, grouped markers and uncappe
   const response = await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify(seeded.input)]);
   expect(response.exitCode).toBe(0);
   expect(response.result).toMatchObject({
-    available: false,
-    blockingReasons: expect.arrayContaining([{ code: "DAMAGE_PREVIEW_GENERATION_UNAVAILABLE", message: expect.any(String) }]),
+    available: true,
+    blockingReasons: [],
     preflightToken: expect.stringMatching(/^damage-preview-preflight:[a-f0-9]{64}$/),
     reviewedRequest: {
       checkpoint: { manifestId: seeded.manifest.id, manifestRevision: 1, manifestDigest: seeded.manifest.manifestDigest },
@@ -109,7 +109,7 @@ it("rejects malformed selections and keeps discovery, legacy evidence and missin
     expect(response).toMatchObject({ exitCode: 2, result: { error: { code: "INVALID_ARGUMENTS" } } });
   }
   const discovery = await fixture.run(["damage-preview", "availability", seeded.archive.id]);
-  expect(discovery).toMatchObject({ exitCode: 0, result: { available: false, preflightToken: null, titles: [{ observationId: seeded.observation.id }] } });
+  expect(discovery).toMatchObject({ exitCode: 0, result: { available: false, preflightToken: null, titles: [{ observationId: seeded.observation.id, audioStreams: [{ id: 128 }], subtitles: [] }] } });
   expect(await fixture.run(["damage-preview", "availability", "synthetic-missing-archive"])).toMatchObject({ exitCode: 2, result: { error: { code: "NOT_FOUND" } } });
   expect(await fixture.run(["damage-preview", "request", seeded.archive.id])).toMatchObject({ exitCode: 2 });
 });

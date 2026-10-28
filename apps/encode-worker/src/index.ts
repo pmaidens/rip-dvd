@@ -1,3 +1,4 @@
+import { runDamagePreviewWorker } from "./damage-preview-worker.js";
 import { randomUUID } from "node:crypto";
 
 import { createDataAccess } from "@rip-dvd/data-access";
@@ -23,8 +24,9 @@ await runConfiguredAsyncWorker(
           config.mediaLibraryPath,
         ),
     });
+    const previewAccess = createDataAccess({ databasePath: config.databasePath, originalsLibraryPath: config.originalsLibraryPath });
     try {
-      await runEncodeWorker({
+      await Promise.all([runDamagePreviewWorker({ access: previewAccess, originalsLibraryPath: config.originalsLibraryPath, mediaLibraryPath: config.mediaLibraryPath, signal, pollIntervalMs: config.workerPollIntervalMs, log }), runEncodeWorker({
         access,
         concurrency: config.encodeWorkerConcurrency,
         log,
@@ -33,8 +35,9 @@ await runConfiguredAsyncWorker(
         pollIntervalMs: config.workerPollIntervalMs,
         signal,
         workerId: `encode-worker:${process.pid}:${randomUUID()}`,
-      });
+      })]);
     } finally {
+      previewAccess.close();
       access.close();
     }
   },

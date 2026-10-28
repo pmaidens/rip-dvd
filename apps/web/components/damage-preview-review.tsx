@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
-import type { DamagePreviewAvailability } from "@rip-dvd/application";
+import { useRef, useState, type FormEvent } from "react";
+import { createMutationKey } from "../lib/mutation-key";
+import type { DamagePreviewAvailability, DamagePreviewInspection } from "@rip-dvd/application";
 
 function seconds(milliseconds: number): string {
   return `${milliseconds / 1_000} s`;
@@ -14,6 +15,10 @@ function streamIds(value: string): number[] {
 export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
   const [availability, setAvailability] = useState<DamagePreviewAvailability | null>(null);
   const [review, setReview] = useState<DamagePreviewAvailability | null>(null);
+  const [preview, setPreview] = useState<DamagePreviewInspection | null>(null);
+  const requestKey = useRef<{ token: string; key: string } | null>(null);
+  const cancelKey = useRef<{ id: string; key: string } | null>(null);
+  const [requestId, setRequestId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [titleId, setTitleId] = useState("");
@@ -47,6 +52,7 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
       return;
     }
     const hasWindow = hasWindowStart && hasWindowEnd;
+    requestKey.current = null;
     const input = {
       mode,
       titleIdentityObservationId: titleId,
@@ -70,10 +76,45 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
     } finally { setBusy(false); }
   }
 
+  async function requestPreview() {
+    if (!review?.available || !review.reviewedRequest) return;
+    setBusy(true); setError(null);
+    try {
+      const selection = review.reviewedRequest;
+      if (requestKey.current?.token !== review.preflightToken) requestKey.current = { token: review.preflightToken!, key: createMutationKey() };
+      const response = await fetch(`/api/damage-previews/${encodeURIComponent(archiveId)}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mutationKey: requestKey.current.key, preflightToken: review.preflightToken, selection: {
+          mode: selection.mode, titleIdentityObservationId: selection.titleIdentityObservationId,
+          playbackRange: selection.playbackRange, intervalIndexes: selection.intervalIndexes,
+          assessmentIdentity: selection.requestedAssessmentIdentity, samplingWindow: selection.samplingWindow,
+          streams: selection.streams, context: selection.context, encodingProfileId: selection.encodingProfileId,
+        } }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error?.message ?? "Damage Preview could not be requested.");
+      setPreview(result); setRequestId(result.id); setReview(null);
+    } catch (failure) { setError(failure instanceof Error ? failure.message : "Damage Preview could not be requested."); }
+    finally { setBusy(false); }
+  }
+  async function inspectPreview(action: "inspect" | "wait" | "cancel") {
+    if (!requestId) return;
+    setBusy(true); setError(null);
+    try {
+      if (cancelKey.current?.id !== requestId) cancelKey.current = { id: requestId, key: createMutationKey() };
+      const url = `/api/damage-previews/${encodeURIComponent(requestId)}${action === "wait" ? "?timeoutMs=10000" : ""}`;
+      const response = await fetch(url, action === "cancel" ? { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mutationKey: cancelKey.current.key }) } : { cache: "no-store" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error?.message ?? "Damage Preview could not be inspected.");
+      setPreview(result);
+    } catch (failure) { setError(failure instanceof Error ? failure.message : "Damage Preview could not be inspected."); }
+    finally { setBusy(false); }
+  }
+
   return (
     <section className="catalog-pane" aria-label="Damage Preview">
       <h3>Damage Preview</h3>
-      <p>Damage Preview generation is unavailable. You can review an identified title before catalog mapping is complete. Reviewing does not request work or accept damage.</p>
+      <p>Generate a canonical MKV sample from stopped or completed Archive Recovery, including before catalog mapping. Active Recovery previews remain unavailable. Reviewing does not request work or accept damage.</p>
       {availability === null ? <button type="button" disabled={busy} onClick={() => void load()}>Review preview availability</button> : null}
       {error ? <p role="alert">{error}</p> : null}
       {availability !== null ? <>
@@ -108,9 +149,10 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
             <p>Choose a range within this title path. Context is clipped only to this range. Actual decoded coverage is not yet verified.</p>
             <label>Context before in seconds<input name="context-before" type="number" min="0" step="0.001" defaultValue="5" required /></label>
             <label>Context after in seconds<input name="context-after" type="number" min="0" step="0.001" defaultValue="5" required /></label>
-            <label>Audio stream IDs, separated by commas<input name="audio" placeholder="1" /></label>
+            <p>Available audio stream IDs: {title?.audioStreams.map((stream) => stream.id).join(", ") || "none"}. Subtitle stream IDs: {title?.subtitles.map((stream) => stream.id).join(", ") || "none"}.</p>
+            <label>Audio stream IDs, separated by commas<input name="audio" placeholder="128" /></label>
             <label>Subtitle stream IDs, separated by commas<input name="subtitles" /></label>
-            <p>Stream availability must be verified against the saved title before generation is enabled.</p>
+            <p>Selected streams are rechecked against the saved title when generation starts. Unsupported streams or settings fail explicitly.</p>
             <label>Intended Encoding Profile
               <select name="profile" required>
                 {availability.encodingProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.displayName}, version {profile.version}</option>)}
@@ -130,7 +172,22 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
         <ul>{review.knownUnknowns.map((reason) => <li key={reason.code}>{reason.message}</li>)}</ul>
         <ul>{review.blockingReasons.map((reason, index) => <li key={`${reason.code}-${index}`}>{reason.code}: {reason.message}</li>)}</ul>
       </div> : null}
-      <button type="button" disabled>Generate Damage Preview</button>
+      <button type="button" disabled={busy || !review?.available} onClick={() => void requestPreview()}>Generate Damage Preview</button>
+      <label>Damage Preview request identity<input value={requestId} onChange={(event) => setRequestId(event.target.value)} /></label>
+      <button type="button" disabled={busy || !requestId} onClick={() => void inspectPreview("inspect")}>Refresh preview status</button>
+      <button type="button" disabled={busy || !requestId} onClick={() => void inspectPreview("wait")}>Wait for preview</button>
+      <button type="button" disabled={busy || !requestId || (preview !== null && !["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(preview.generationStatus))} onClick={() => void inspectPreview("cancel")}>Cancel preview request</button>
+      {preview ? <div aria-label="Damage Preview request" role="status">
+        <p>Request {preview.id}. Status: {preview.status}. Generation: {preview.generationStatus}.</p>
+        {preview.reason ? <p>{preview.reason.code}: {preview.reason.message}</p> : null}
+        {preview.outdatedReasons.map((reason) => <p key={reason.code}>{reason.message}</p>)}
+        <p>{preview.progress.completedClips} of {preview.progress.totalClips} clips. Progress: {preview.progress.percent === null ? "unknown" : `${preview.progress.percent}%`}.</p>
+        <p>{preview.warning}</p>
+        {preview.artifacts.map((artifact) => <p key={artifact.identity}>
+          <a href={`/api/damage-preview-media/${encodeURIComponent(artifact.identity)}`}>Download canonical MKV, {artifact.sizeBytes} bytes</a>. Actual coverage: {seconds(artifact.coverage.startMilliseconds)} to {seconds(artifact.coverage.endMilliseconds)}. {preview.status}.
+        </p>)}
+        <details><summary>Preview provenance</summary><pre>{JSON.stringify(preview.provenance, null, 2)}</pre></details>
+      </div> : null}
     </section>
   );
 }

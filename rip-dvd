@@ -4,6 +4,52 @@ set -eu
 
 repository_root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 invocation_directory="$(pwd -P)"
+# A Docker daemon may be remote. docker cp transports canonical bytes back to
+# this caller without assuming a bind mount refers to the caller's filesystem.
+if [ "$#" -eq 5 ] && [ "$1" = "damage-preview" ] && [ "$2" = "export" ] && [ "$4" = "--destination" ]; then
+    artifact_identity="$3"
+    case "$5" in
+        /*) destination="$5" ;;
+        *) destination="$invocation_directory/$5" ;;
+    esac
+    if [ -e "$destination" ] || [ -L "$destination" ]; then
+        printf '%s\n' '{"error":{"code":"EXPORT_DESTINATION_EXISTS","message":"Export destination already exists."}}'
+        exit 2
+    fi
+    umask 077
+    if ! export_directory=$(mktemp -d "$(dirname "$destination")/.rip-dvd-preview-export.XXXXXX" 2>/dev/null); then
+        printf '%s\n' '{"error":{"code":"EXPORT_DESTINATION_UNAVAILABLE","message":"The export destination parent must exist and be writable."}}'
+        exit 2
+    fi
+    export_container="rip-dvd-preview-export-$(basename "$export_directory" | tr '[:upper:].' '[:lower:]-')"
+    cleanup_export() {
+        docker rm --force "$export_container" >/dev/null 2>&1 || true
+        rm -rf "$export_directory"
+    }
+    trap cleanup_export EXIT HUP INT TERM
+    cd "$repository_root"
+    if docker compose --profile maintenance run --no-deps --no-TTY \
+        --name "$export_container" --env "RIP_DVD_EXPORT_CALLER_PATH=$destination" \
+        operator-cli damage-preview export "$artifact_identity" \
+        --destination /tmp/rip-dvd-preview-export.mkv >"$export_directory/result.json"; then
+        :
+    else
+        export_status=$?
+        if [ -s "$export_directory/result.json" ]; then
+            cat "$export_directory/result.json"
+        else
+            printf '%s\n' '{"error":{"code":"EXPORT_SERVICE_UNAVAILABLE","message":"The canonical media export service is unavailable."}}'
+        fi
+        exit "$export_status"
+    fi
+    if ! docker cp "$export_container:/tmp/rip-dvd-preview-export.mkv" "$export_directory/media.mkv" >/dev/null || ! link "$export_directory/media.mkv" "$destination"; then
+        printf '%s\n' '{"error":{"code":"EXPORT_TRANSFER_FAILED","message":"Canonical media could not be saved to the caller destination."}}'
+        exit 1
+    fi
+    cat "$export_directory/result.json"
+    exit 0
+fi
+
 file_mount=""
 expects_file_path=false
 

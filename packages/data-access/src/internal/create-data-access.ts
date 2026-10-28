@@ -1,3 +1,4 @@
+import { createDamagePreviewAccess } from "./damage-preview-store.js";
 import {
   canonicalPublicationJson,
   DvdCheckpointReadFault,
@@ -11418,6 +11419,11 @@ export function createDataAccessInternal(
   }
 
   const access: LegacySidecarDataAccess = {
+    damagePreviews: createDamagePreviewAccess(sqlite, now),
+    async withDvdCheckpoint(id, ownership, task, commit) {
+      const read = await withDvdCheckpointRead(id, ownership, readCommittedDvdCheckpoint, task, (checkpoint, prepared) => commit ? commit(checkpoint, prepared) : prepared);
+      return read?.result ?? null;
+    },
     async readDvdCheckpoint(id, ownership) {
       const read = await withDvdCheckpointRead(
         id,
@@ -14835,6 +14841,7 @@ export function createDataAccessInternal(
     },
     readConsistentSnapshot(read) {
       const snapshotAccess: ConsistentReadAccess = {
+        damagePreviews: { find: (id) => access.damagePreviews.find(id), list: (id) => access.damagePreviews.list(id) },
         dvdTitleDamageAssessments: {
           inspect: inspectDvdTitleDamageAssessment,
         },
@@ -14995,7 +15002,7 @@ export function createDataAccessInternal(
           listActive: () => access.archiveAudits.listActive(),
         },
       };
-      sqlite.exec("BEGIN");
+      sqlite.exec("SAVEPOINT consistent_read_snapshot");
       try {
         const result = read(snapshotAccess);
         if (result instanceof Promise) {
@@ -15003,10 +15010,11 @@ export function createDataAccessInternal(
             "Consistent snapshot reads must be synchronous",
           );
         }
-        sqlite.exec("COMMIT");
+        sqlite.exec("RELEASE consistent_read_snapshot");
         return result;
       } catch (error) {
-        sqlite.exec("ROLLBACK");
+        sqlite.exec("ROLLBACK TO consistent_read_snapshot");
+        sqlite.exec("RELEASE consistent_read_snapshot");
         throw error;
       }
     },
