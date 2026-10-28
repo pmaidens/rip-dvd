@@ -15309,7 +15309,6 @@ export function createDataAccessInternal(
             access.archiveJobs.listLatestForRequests(archiveRequestIds),
         },
         encodeJobs: {
-          findOutputValidation: (id, identity, validatedAt) => access.encodeJobs.findOutputValidation(id, identity, validatedAt),
           listClaimSnapshots: (id, options) => access.encodeJobs.listClaimSnapshots(id, options),
           find: (id) => access.encodeJobs.find(id),
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
@@ -15389,6 +15388,8 @@ export function createDataAccessInternal(
           ...snapshot,
           encodeJobs: {
             ...snapshot.encodeJobs,
+            findOutputValidation: (id, identity, validatedAt) =>
+              access.encodeJobs.findOutputValidation(id, identity, validatedAt),
             findRetainedOutput: (id) =>
               access.encodeJobs.findRetainedOutput(id),
           },

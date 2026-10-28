@@ -3076,7 +3076,6 @@ export interface ConsistentReadAccess {
   readonly encodeJobs: Pick<
     EncodeJobAccess,
     | "listClaimSnapshots"
-    | "findOutputValidation"
     | "find"
     | "list"
     | "listForDiscSelection"
@@ -3103,7 +3102,7 @@ export interface ConsistentReadAccess {
 export interface EncodeOutputInspectionReadAccess
   extends Omit<ConsistentReadAccess, "encodeJobs"> {
   readonly encodeJobs: ConsistentReadAccess["encodeJobs"] &
-    Pick<EncodeJobAccess, "findRetainedOutput">;
+    Pick<EncodeJobAccess, "findRetainedOutput" | "findOutputValidation">;
 }
 
 export interface DvdCheckpointReadHandle {

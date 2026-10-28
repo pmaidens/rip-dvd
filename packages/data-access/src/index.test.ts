@@ -5796,6 +5796,7 @@ describe("data-access facade", () => {
     access.readConsistentSnapshot((snapshot) => {
       expect(snapshot.encodeJobs).not.toHaveProperty("listRetainedOutputs");
       expect(snapshot.encodeJobs).not.toHaveProperty("findRetainedOutput");
+      expect(snapshot.encodeJobs).not.toHaveProperty("findOutputValidation");
       expect(
         snapshot.encodeJobs.listRetainedOutputSummaries([replacement.id]),
       ).toEqual([{
@@ -5845,6 +5846,7 @@ describe("data-access facade", () => {
       }]);
     });
     access.readEncodeOutputInspectionSnapshot((snapshot) => {
+      expect(snapshot.encodeJobs.findOutputValidation(predecessor.id, priorOutputIdentity, new Date(0))).toBeNull();
       expect(snapshot.encodeJobs.findRetainedOutput(
         retainedOutput.id,
       )).toMatchObject({
