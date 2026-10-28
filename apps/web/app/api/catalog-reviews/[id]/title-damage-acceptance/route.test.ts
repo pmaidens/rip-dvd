@@ -47,6 +47,7 @@ function decision(
     id: "synthetic-title-damage-decision" as DvdTitleDamageDecision["id"],
     originalDiscArchiveId: accepted.originalDiscArchiveId,
     decision: "not_required",
+    acceptedDecisionId: null,
     operator: accepted.operator,
     catalogRevision: recordedAt,
     checkpointRevision: accepted.checkpoint.revision,

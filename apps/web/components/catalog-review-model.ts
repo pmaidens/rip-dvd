@@ -224,17 +224,25 @@ export interface CatalogReviewDto {
   };
 }
 
-type SerializedDvdTitleDamageDecision = Omit<
-  DvdTitleDamageDecision,
-  "catalogRevision" | "recordedAt"
-> & {
-  catalogRevision: string;
-  recordedAt: string;
-};
+type SerializeDvdTitleDamageDecision<
+  Decision extends DvdTitleDamageDecision = DvdTitleDamageDecision,
+> = Decision extends DvdTitleDamageDecision
+  ? Omit<Decision, "catalogRevision" | "recordedAt"> & {
+    catalogRevision: string;
+    recordedAt: string;
+  }
+  : never;
+
+type SerializedDvdTitleDamageDecision = SerializeDvdTitleDamageDecision;
 
 export interface CatalogReviewTitleDamageDecision {
   schemaVersion: 1;
-  state: "not_recorded" | "accepted" | "not_required" | "expired";
+  state:
+    | "not_recorded"
+    | "accepted"
+    | "not_required"
+    | "withdrawn"
+    | "expired";
   current: SerializedDvdTitleDamageDecision | null;
   latest: SerializedDvdTitleDamageDecision | null;
   currentIdentities: {

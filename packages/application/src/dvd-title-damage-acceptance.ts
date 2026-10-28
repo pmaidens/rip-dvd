@@ -9,26 +9,16 @@ import {
 
 import { isDvdTitleDamageAcceptancePreviewToken } from
   "./dvd-title-damage-acceptance-preview-token.js";
+import { parseRequiredText } from "./input-validation.js";
 import { parseMutationKey } from "./mutation-key.js";
 
 export class InvalidDvdTitleDamageAcceptanceInputError extends Error {}
 
-function requiredText(
-  value: unknown,
-  name: string,
-  maximum = 128,
-): string {
-  if (typeof value !== "string" || value.trim() === "" ||
-      value.length > maximum) {
-    throw new InvalidDvdTitleDamageAcceptanceInputError(
-      `${name} must be a non-empty string.`,
-    );
-  }
-  return value.trim();
-}
+const invalidInput = (message: string) =>
+  new InvalidDvdTitleDamageAcceptanceInputError(message);
 
 function digest(value: unknown, name: string): string {
-  const parsed = requiredText(value, name, 64);
+  const parsed = parseRequiredText(value, name, invalidInput, 64);
   if (!/^[0-9a-f]{64}$/.test(parsed)) {
     throw new InvalidDvdTitleDamageAcceptanceInputError(
       `${name} must be a lowercase SHA-256 digest.`,
@@ -44,7 +34,11 @@ function excludedTitleIdentityIds(value: unknown): DvdTitleIdentityId[] {
     );
   }
   const ids = value.map((candidate) =>
-    requiredText(candidate, "Excluded Title Identity") as DvdTitleIdentityId
+    parseRequiredText(
+      candidate,
+      "Excluded Title Identity",
+      invalidInput,
+    ) as DvdTitleIdentityId
   ).sort();
   if (new Set(ids).size !== ids.length) {
     throw new InvalidDvdTitleDamageAcceptanceInputError(
@@ -79,13 +73,15 @@ function mainFeatureResolutions(value: unknown): Array<{
       );
     }
     return {
-      discSelectionId: requiredText(
+      discSelectionId: parseRequiredText(
         record.discSelectionId,
         "Disc Selection ID",
+        invalidInput,
       ) as DiscSelectionId,
-      titleIdentityId: requiredText(
+      titleIdentityId: parseRequiredText(
         record.titleIdentityId,
         "Title Identity ID",
+        invalidInput,
       ) as DvdTitleIdentityId,
     };
   }).sort((left, right) =>
@@ -145,15 +141,16 @@ function parseInput(value: unknown) {
   }
   return {
     mutationKey: parseMutationKey(record.mutationKey),
-    operator: requiredText(record.operator, "operator"),
+    operator: parseRequiredText(record.operator, "operator", invalidInput),
     previewToken: record.previewToken,
     checkpoint: {
       revision: record.checkpointRevision as number,
       digest: digest(record.checkpointDigest, "checkpointDigest"),
     },
-    assessmentIdentity: requiredText(
+    assessmentIdentity: parseRequiredText(
       record.assessmentIdentity,
       "assessmentIdentity",
+      invalidInput,
     ),
     reviewSetIdentity: digest(record.reviewSetIdentity, "reviewSetIdentity"),
     catalogMappingProjectionId: digest(

@@ -9,6 +9,10 @@ import {
   acceptDvdTitleDamage,
   inspectDvdTitleDamageDecision,
 } from "./dvd-title-damage-acceptance.js";
+import {
+  previewDvdTitleDamageAcceptanceWithdrawal,
+  withdrawDvdTitleDamageAcceptance,
+} from "./dvd-title-damage-acceptance-withdrawal.js";
 import { createNotificationOperations } from "./notifications.js";
 import { isHandBrakePreset } from "@rip-dvd/config";
 import {
@@ -457,7 +461,20 @@ export function createApplicationOperations(
     inspectDvdTitleDamageDecision: (
       archiveId: Parameters<typeof inspectDvdTitleDamageDecision>[1],
     ) => inspectDvdTitleDamageDecision(access, archiveId),
-    inspectEncodeOutput: (artifactIdentity: unknown, page?: { receiptLimit?: number; receiptOffset?: number }) =>
+    previewDvdTitleDamageAcceptanceWithdrawal: (
+      archiveId: Parameters<
+        typeof previewDvdTitleDamageAcceptanceWithdrawal
+      >[1],
+      input: Parameters<typeof previewDvdTitleDamageAcceptanceWithdrawal>[2],
+    ) => previewDvdTitleDamageAcceptanceWithdrawal(access, archiveId, input),
+    withdrawDvdTitleDamageAcceptance: (
+      archiveId: Parameters<typeof withdrawDvdTitleDamageAcceptance>[1],
+      input: Parameters<typeof withdrawDvdTitleDamageAcceptance>[2],
+    ) => withdrawDvdTitleDamageAcceptance(access, archiveId, input),
+    inspectEncodeOutput: (
+      artifactIdentity: unknown,
+      page?: { receiptLimit?: number; receiptOffset?: number },
+    ) =>
       inspectEncodeOutput(
         access,
         artifactIdentity,
@@ -1053,6 +1070,8 @@ export * from "./rearchive-acceptance-preview-token.js";
 export * from "./dvd-title-damage-acceptance-preview.js";
 export * from "./dvd-title-damage-acceptance-preview-token.js";
 export * from "./dvd-title-damage-acceptance.js";
+export * from "./dvd-title-damage-acceptance-withdrawal.js";
+export * from "./dvd-title-damage-acceptance-withdrawal-preview-token.js";
 export * from "./archive-request-input.js";
 export type { MediaItemCommand } from "./media-item-operations.js";
 export * from "./catalog-automation.js";

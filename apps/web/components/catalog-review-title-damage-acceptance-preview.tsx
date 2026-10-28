@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type {
   CatalogReviewWorkflow,
   DvdTitleDamageAcceptancePreview,
+  DvdTitleDamageAcceptanceWithdrawalPreview,
 } from "@rip-dvd/application";
 
 import type {
@@ -92,6 +93,11 @@ export function CatalogReviewTitleDamageAcceptancePreview({
   const [recordedDecision, setRecordedDecision] = useState<
     "accepted" | "not_required" | null
   >(null);
+  const [withdrawalPreview, setWithdrawalPreview] = useState<
+    DvdTitleDamageAcceptanceWithdrawalPreview | null
+  >(null);
+  const [withdrawalOperator, setWithdrawalOperator] = useState("");
+  const [withdrawalRecorded, setWithdrawalRecorded] = useState(false);
   const requestVersion = useRef(0);
   const reviewSetIdentity = titleIdentity?.reviewSetIdentity ?? null;
   const evidenceGenerationKey = JSON.stringify(evidenceGeneration);
@@ -103,6 +109,8 @@ export function CatalogReviewTitleDamageAcceptancePreview({
     setError(null);
     setDamageAcknowledged(false);
     setRecordedDecision(null);
+    setWithdrawalPreview(null);
+    setWithdrawalRecorded(false);
   };
 
   useEffect(() => {
@@ -114,6 +122,9 @@ export function CatalogReviewTitleDamageAcceptancePreview({
     setError(null);
     setDamageAcknowledged(false);
     setRecordedDecision(null);
+    setWithdrawalPreview(null);
+    setWithdrawalOperator("");
+    setWithdrawalRecorded(false);
   }, [evidenceGenerationKey, originalDiscArchiveId, reviewSetIdentity]);
 
   const toggle = (id: string) => {
@@ -228,6 +239,86 @@ export function CatalogReviewTitleDamageAcceptancePreview({
       setIsSubmitting(false);
     }
   };
+  const requestWithdrawalPreview = async () => {
+    const accepted = titleDamageDecision?.current;
+    if (accepted?.decision !== "accepted") return;
+    const version = requestVersion.current + 1;
+    requestVersion.current = version;
+    setIsLoading(true);
+    setError(null);
+    try {
+      const response = await fetcher(
+        `/api/catalog-reviews/${encodeURIComponent(originalDiscArchiveId)}/title-damage-acceptance-withdrawal-preview`,
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ acceptedDecisionId: accepted.id }),
+        },
+      );
+      if (!response.ok) throw new Error("withdrawal_preview_failed");
+      const result = await response.json() as
+        DvdTitleDamageAcceptanceWithdrawalPreview;
+      if (requestVersion.current === version) setWithdrawalPreview(result);
+    } catch {
+      if (requestVersion.current === version) {
+        setError(
+          "Title Damage Acceptance withdrawal preflight is unavailable.",
+        );
+      }
+    } finally {
+      if (requestVersion.current === version) setIsLoading(false);
+    }
+  };
+  const submitWithdrawal = async () => {
+    if (
+      withdrawalPreview?.available !== true ||
+      withdrawalPreview.previewToken === null ||
+      withdrawalPreview.acceptedDecision === null
+    ) return;
+    setIsSubmitting(true);
+    setError(null);
+    try {
+      const response = await fetcher(
+        `/api/catalog-reviews/${encodeURIComponent(originalDiscArchiveId)}/title-damage-acceptance-withdrawal`,
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            mutationKey: createMutationKey(),
+            operator: withdrawalOperator,
+            previewToken: withdrawalPreview.previewToken,
+            acceptedDecisionId: withdrawalPreview.acceptedDecision.id,
+          }),
+        },
+      );
+      if (!response.ok) throw new Error("withdrawal_failed");
+      setWithdrawalRecorded(true);
+    } catch {
+      setError(
+        "Title Damage Acceptance was not withdrawn. Refresh the current decision and preview again.",
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+  const currentDecision = titleDamageDecision?.current;
+  const currentDecisionLabel = currentDecision?.decision === "accepted"
+    ? "Damage accepted"
+    : currentDecision?.decision === "withdrawn"
+    ? "Damage acceptance withdrawn"
+    : "No damage acceptance required";
+  const currentDecisionStatus = currentDecision === undefined ||
+      currentDecision === null
+    ? null
+    : withdrawalRecorded
+    ? `Damage acceptance withdrawn for the current exact reviewed set by ${withdrawalOperator}.`
+    : `${currentDecisionLabel} for the current exact reviewed set by ${currentDecision.operator} at ${currentDecision.recordedAt}. ${currentDecision.snapshot.reviewedContent.length} included and ${currentDecision.snapshot.exclusions.length} excluded.`;
 
   return (
     <section
@@ -248,15 +339,94 @@ export function CatalogReviewTitleDamageAcceptancePreview({
             Current exact-set decision
           </h4>
           {titleDamageDecision.current !== null ? (
-            <p role="status">
-              {titleDamageDecision.current.decision === "accepted"
-                ? "Damage accepted"
-                : "No damage acceptance required"} for the current exact
-              reviewed set by {titleDamageDecision.current.operator} at {
-                titleDamageDecision.current.recordedAt
-              }. {titleDamageDecision.current.snapshot.reviewedContent.length} included
-              and {titleDamageDecision.current.snapshot.exclusions.length} excluded.
-            </p>
+            <>
+              <p role="status">{currentDecisionStatus}</p>
+              {titleDamageDecision.current.decision !== "accepted" ||
+                  withdrawalRecorded
+                ? null
+                : (
+                  <div>
+                    <button
+                      type="button"
+                      disabled={isLoading}
+                      onClick={requestWithdrawalPreview}
+                    >
+                      Preview withdrawal
+                    </button>
+                    {withdrawalPreview === null ? null : (
+                      <div>
+                        <p>
+                          Withdrawal preflight {
+                            withdrawalPreview.available
+                              ? "available"
+                              : "unavailable"
+                          }. {withdrawalPreview.affectedWork.length} queued or
+                          running Encode Jobs affected.
+                        </p>
+                        {withdrawalPreview.acceptedDecision === null
+                          ? null
+                          : (
+                            <p>
+                              Withdrawal targets accepted decision{" "}
+                              <code>
+                                {withdrawalPreview.acceptedDecision.id}
+                              </code>, recorded by{" "}
+                              {withdrawalPreview.acceptedDecision.operator} at{" "}
+                              {withdrawalPreview.acceptedDecision.recordedAt}.
+                            </p>
+                          )}
+                        {withdrawalPreview.action.reasons.length === 0
+                          ? null
+                          : (
+                            <ul className="catalog-workflow-reasons">
+                              {withdrawalPreview.action.reasons.map((reason) => (
+                                <li key={reason.code}>
+                                  <code>{reason.code}</code>
+                                  <span>{reason.message}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        <ul>
+                          {withdrawalPreview.affectedWork.map((job) => (
+                            <li key={job.id}>
+                              Encode Job {job.id}: {job.status}.
+                            </li>
+                          ))}
+                        </ul>
+                        {!withdrawalPreview.available ? null : (
+                          <fieldset>
+                            <legend>
+                              Withdraw Title Damage Acceptance decision
+                            </legend>
+                            <label>
+                              Operator
+                              <input
+                                value={withdrawalOperator}
+                                maxLength={128}
+                                onChange={(event) =>
+                                  setWithdrawalOperator(
+                                    event.currentTarget.value,
+                                  )}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              disabled={
+                                isSubmitting ||
+                                withdrawalOperator.trim() === ""
+                              }
+                              onClick={submitWithdrawal}
+                            >
+                              Withdraw damage acceptance
+                            </button>
+                          </fieldset>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+            </>
           ) : titleDamageDecision.state === "expired" &&
               titleDamageDecision.latest !== null ? (
             <p>
