@@ -11,6 +11,7 @@ import {
   createDvdDiscConfirmationPreviewRoute,
   createDvdDiscConfirmationRoute,
 } from "./route";
+import { createOperationsResponse } from "../../../operations/route.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 
@@ -173,6 +174,31 @@ it.each(["mismatch", "inconclusive"] as const)(
       expect(webRecorded.status).toBe(201);
       expect(cliReplay.exitCode).toBe(0);
       expect(await webRecorded.json()).toEqual(cliReplay.result);
+      const artifactWeb = await createOperationsResponse(
+        access,
+        new Request(
+          `http://localhost:3000/api/operations?kind=original-disc-archives&id=${seeded.archive.id}`,
+        ),
+        fixture.originalsLibraryPath,
+      );
+      const artifactCli = await fixture.run([
+        "inspect",
+        "original-disc-archives",
+        seeded.archive.id,
+      ]);
+      expect(artifactCli.result).toEqual(await artifactWeb.json());
+      expect(artifactCli.result).toMatchObject({
+        item: {
+          archiveArtifact: {
+            sourceIdentity: {
+              confirmation: {
+                current: true,
+                verificationOutcome: outcome,
+              },
+            },
+          },
+        },
+      });
     } finally {
       access.close();
     }

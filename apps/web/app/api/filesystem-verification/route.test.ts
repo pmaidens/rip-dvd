@@ -253,7 +253,7 @@ describe("Filesystem Verification API", () => {
     await access.filesystemVerification.execute(archiveClaim);
     const jobClaim = access.filesystemVerification.claimNext()!;
     await access.filesystemVerification.execute(jobClaim);
-    const result = createOperationsResponse(
+    const result = await createOperationsResponse(
       access,
       new Request(`http://localhost:3000/api/operations?kind=filesystem-verifications&id=${archiveBody.verificationRun.id}`),
     );

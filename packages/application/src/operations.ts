@@ -56,6 +56,12 @@ import { dvdRecoveryStopAction } from "./dvd-recovery-stop.js";
 import { dvdRecoveryResumeAction } from "./dvd-recovery-resume.js";
 import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 import { presentArchiveRecoveryRangeEvidence } from "./archive-recovery-ranges.js";
+import {
+  ArchiveArtifactChangedError,
+  describeArchiveArtifact,
+  enrichArchiveArtifactSourceIdentity,
+  type ArchiveArtifact,
+} from "./archive-artifact.js";
 
 export const OPERATION_KINDS = [
   "optical-drives",
@@ -904,6 +910,14 @@ function readDetail(
       const recovery = evidenceFormat === null
         ? null
         : access.catalog.findArchiveRecovery(archive.id);
+      const archiveArtifact = evidenceFormat === null
+        ? null
+        : describeArchiveArtifact(access, archive, {
+            ...options,
+            ...(ownership === null
+              ? {}
+              : { ownershipInspection: ownership }),
+          });
       const encodeWorkConflict = conflictingEncodeJobs.length === 0
         ? null
         : {
@@ -916,6 +930,7 @@ function readDetail(
         ...(structuralAssessment === null
           ? {}
           : { structuralAssessment }),
+        ...(archiveArtifact === null ? {} : { archiveArtifact }),
         ...(recoveryStorage === null
           ? {}
           : {
@@ -1170,6 +1185,66 @@ export function inspectOperations(
         ),
       }
   );
+}
+
+export async function inspectOperationsWithArtifacts(
+  access: DataAccess,
+  kind: OperationKind,
+  options: OperationInspectionOptions = {},
+) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const inspection = inspectOperations(access, kind, options);
+    if (
+      kind !== "original-disc-archives" || options.id === undefined ||
+      !("item" in inspection) || inspection.item === null ||
+      inspection.item === undefined ||
+      !("archiveArtifact" in inspection.item)
+    ) {
+      return inspection;
+    }
+    const item = inspection.item as typeof inspection.item & {
+      archiveArtifact: ArchiveArtifact;
+    };
+    try {
+      const enrichedArtifact = await enrichArchiveArtifactSourceIdentity(
+        access,
+        item.archiveArtifact,
+      );
+      const refreshedInspection = inspectOperations(access, kind, options);
+      if (
+        !("item" in refreshedInspection) ||
+        refreshedInspection.item === null ||
+        refreshedInspection.item === undefined ||
+        !("archiveArtifact" in refreshedInspection.item)
+      ) {
+        throw new ArchiveArtifactChangedError();
+      }
+      const refreshedItem = refreshedInspection.item as
+        typeof refreshedInspection.item & { archiveArtifact: ArchiveArtifact };
+      const refreshedEnrichedArtifact = await enrichArchiveArtifactSourceIdentity(
+        access,
+        refreshedItem.archiveArtifact,
+      );
+      if (
+        JSON.stringify(enrichedArtifact) !==
+          JSON.stringify(refreshedEnrichedArtifact)
+      ) {
+        throw new ArchiveArtifactChangedError();
+      }
+      return {
+        ...refreshedInspection,
+        item: {
+          ...refreshedItem,
+          archiveArtifact: refreshedEnrichedArtifact,
+        },
+      };
+    } catch (error) {
+      if (!(error instanceof ArchiveArtifactChangedError) || attempt === 2) {
+        throw error;
+      }
+    }
+  }
+  throw new ArchiveArtifactChangedError();
 }
 
 const TERMINAL_STATUSES: Record<WaitableKind, readonly string[]> = {

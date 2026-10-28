@@ -29,6 +29,8 @@ import {
 } from "@rip-dvd/application";
 import type {
   ArchiveRequestId,
+  ConsistentReadAccess,
+  DataAccess,
   MediaItemId,
 } from "@rip-dvd/data-access";
 import {
@@ -2039,7 +2041,7 @@ it("keeps every structural assessment state identical through web and CLI", asyn
   }]);
   const access = fixture.openAccess();
   const inspectBoth = async () => {
-    const web = createOperationsResponse(
+    const web = await createOperationsResponse(
       access,
       new Request(
         `${trustedOrigin}/api/operations?kind=original-disc-archives&id=${archive.id}`,
@@ -2563,6 +2565,223 @@ it("reports unsupported Archive evidence formats consistently through web and CL
       },
     });
     expect(access.archiveRequests.list()).toEqual([]);
+  } finally {
+    access.close();
+    fixture.dispose();
+  }
+});
+
+it("presents a clean new-format save as completed without scheduling source reads", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  const seedAccess = createLegacySidecarDataAccess({
+    databasePath: fixture.databasePath,
+    mediaLibraryPath: fixture.mediaLibraryPath,
+    originalsLibraryPath: fixture.originalsLibraryPath,
+  });
+  const drive = seedAccess.catalog.upsertOpticalDrive({
+    devicePath: "/dev/synthetic-clean-artifact",
+    isEnabled: true,
+    isPresent: true,
+  });
+  const disc = seedAccess.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint: "synthetic-clean-artifact-fingerprint",
+    volumeLabel: "SYNTHETIC_CLEAN_ARTIFACT",
+  });
+  seedAccess.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  seedAccess.catalog.updateDetectedDiscStatus(disc.id, "approved");
+  const settled = beginSettledDiscInspectionForTest(seedAccess, {
+    opticalDriveId: drive.id,
+    mediaGeneration: "synthetic-clean-artifact-generation",
+    mediaCapacityBytes: 2_048,
+  });
+  seedAccess.discInspections.record(settled.claim, {
+    type: "metadata",
+    volumeLabel: disc.volumeLabel,
+    titleCount: 0,
+    chapterCount: 0,
+    audioStreamCount: 0,
+    subtitleStreamCount: 0,
+    totalBytes: 2_048,
+  });
+  const currentInspection = seedAccess.discInspections.record(settled.claim, {
+    type: "complete",
+    detectedDiscId: disc.id,
+  });
+  settled.restoreSystemTime();
+  const archive = seedAccess.catalog.createOriginalDiscArchive({
+    detectedDiscId: disc.id,
+    discKind: "dvd",
+    archiveFormat: "iso",
+    archivePath: join(fixture.originalsLibraryPath, "clean-artifact.iso"),
+    fingerprint: disc.fingerprint,
+  });
+  seedAccess.close();
+  markArchiveWithDvdRecoveryEvidence(
+    fixture.databasePath,
+    archive.id,
+    "synthetic-clean-artifact",
+  );
+  const sqlite = new DatabaseSync(fixture.databasePath);
+  sqlite.prepare(`
+    INSERT INTO archive_recoveries (
+      id, original_disc_archive_id, attempt_id, attempt_ordinal, status,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, 1, 'completed', 1, 1)
+  `).run(
+    "synthetic-clean-artifact-recovery",
+    archive.id,
+    "synthetic-clean-artifact-recovery:attempt:1",
+  );
+  sqlite.close();
+
+  const access = fixture.openAccess();
+  try {
+    const response = await createOperationsResponse(
+      access,
+      new Request(
+        `${trustedOrigin}/api/operations?kind=original-disc-archives&id=${archive.id}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    const cli = await fixture.run([
+      "inspect",
+      "original-disc-archives",
+      archive.id,
+    ]);
+    expect(cli.result).toEqual(await response.json());
+    expect(cli.result).toMatchObject({
+      item: {
+        archiveArtifact: {
+          initialPreservation: { saved: true },
+          recovery: {
+            state: "completed",
+            progress: {
+              skippedUntestedSectorCount: 0,
+              individuallyFailedSectorCount: 0,
+              recoveredSectorCount: 0,
+              unresolvedSectorCount: 0,
+              currentPass: null,
+            },
+          },
+          readiness: {
+            sourceStability: { state: "stable" },
+          },
+        },
+      },
+    });
+    const readAudit = new DatabaseSync(fixture.databasePath);
+    expect(readAudit.prepare(`
+      SELECT count(*) AS count FROM dvd_disc_verifications
+    `).get()).toEqual({ count: 0 });
+    readAudit.close();
+
+    let snapshotReadCount = 0;
+    let reconciliationInjected = false;
+    const cleanRecovery = access.catalog.findArchiveRecovery(archive.id);
+    if (cleanRecovery === null) {
+      throw new Error("Expected clean Archive Recovery fixture");
+    }
+    const racingAccess: DataAccess = {
+      ...access,
+      readConsistentSnapshot<T>(
+        read: (snapshot: ConsistentReadAccess) => T,
+      ): T {
+        const result = access.readConsistentSnapshot(read);
+        snapshotReadCount += 1;
+        if (!reconciliationInjected) {
+          reconciliationInjected = true;
+          access.dvdRecoveryReconciliations.submit({
+            mutationKey: "synthetic-artifact-race-reconciliation",
+            archiveRecoveryId: cleanRecovery.id,
+          });
+        }
+        return result;
+      },
+    };
+    const racedResponse = await createOperationsResponse(
+      racingAccess,
+      new Request(
+        `${trustedOrigin}/api/operations?kind=original-disc-archives&id=${archive.id}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    expect(racedResponse.status).toBe(200);
+    expect(await racedResponse.json()).toMatchObject({
+      item: {
+        archiveArtifact: {
+          recovery: { reconciliation: { status: "queued" } },
+        },
+      },
+    });
+    expect(snapshotReadCount).toBe(4);
+
+    const checkpoint = access.catalog.findDvdArchiveEvidenceHeader(archive.id);
+    if (checkpoint === null) {
+      throw new Error("Expected clean archive checkpoint fixture");
+    }
+    let sourceSnapshotReadCount = 0;
+    let verificationInjected = false;
+    const sourceRacingAccess: DataAccess = {
+      ...access,
+      readConsistentSnapshot<T>(
+        read: (snapshot: ConsistentReadAccess) => T,
+      ): T {
+        const result = access.readConsistentSnapshot(read);
+        sourceSnapshotReadCount += 1;
+        if (sourceSnapshotReadCount === 2 && !verificationInjected) {
+          verificationInjected = true;
+          const raceFixture = new DatabaseSync(fixture.databasePath);
+          raceFixture.prepare(`
+            INSERT INTO dvd_disc_verifications (
+              id, archive_recovery_id, archive_recovery_attempt_id,
+              attempt_ordinal, original_disc_archive_id, disc_inspection_id,
+              detected_disc_id, media_generation, source_metadata_fingerprint,
+              observed_metadata_fingerprint, checkpoint_revision,
+              checkpoint_digest, status, outcome, reasons, findings,
+              budget_exhausted, worker_execution_id, claim_token, claimed_at,
+              started_at, completed_at, failure_code, created_at, updated_at
+            ) VALUES (
+              ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, '[]', '[]',
+              0, NULL, NULL, NULL, NULL, NULL, NULL, 1, 1
+            )
+          `).run(
+            "synthetic-artifact-race-verification",
+            cleanRecovery.id,
+            cleanRecovery.attemptId,
+            archive.id,
+            currentInspection.id,
+            disc.id,
+            currentInspection.mediaGeneration,
+            archive.fingerprint,
+            archive.fingerprint,
+            checkpoint.currentManifestRevision,
+            checkpoint.currentManifestDigest,
+          );
+          raceFixture.close();
+        }
+        return result;
+      },
+    };
+    const sourceRacedResponse = await createOperationsResponse(
+      sourceRacingAccess,
+      new Request(
+        `${trustedOrigin}/api/operations?kind=original-disc-archives&id=${archive.id}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    expect(sourceRacedResponse.status).toBe(200);
+    expect(await sourceRacedResponse.json()).toMatchObject({
+      item: {
+        archiveArtifact: {
+          sourceIdentity: {
+            verification: { id: "synthetic-artifact-race-verification" },
+          },
+        },
+      },
+    });
+    expect(sourceSnapshotReadCount).toBe(4);
   } finally {
     access.close();
     fixture.dispose();
@@ -3641,7 +3860,7 @@ it("reports Archive Recovery conflicts identically through Encode web and CLI op
     `).get(mutationKey)).toEqual({ count: 0 });
     sqlite.close();
 
-    const archiveWeb = createOperationsResponse(
+    const archiveWeb = await createOperationsResponse(
       access,
       new Request(
         `${trustedOrigin}/api/operations?kind=original-disc-archives&id=${archive.id}`,
@@ -3667,7 +3886,7 @@ it("reports Archive Recovery conflicts identically through Encode web and CLI op
     expect(JSON.stringify(archiveCli.result)).not.toContain("claimToken");
     expect(JSON.stringify(archiveCli.result)).not.toContain("claimedBy");
 
-    const encodeWeb = createOperationsResponse(
+    const encodeWeb = await createOperationsResponse(
       access,
       new Request(
         `${trustedOrigin}/api/operations?kind=encode-jobs&id=${predecessor.id}`,
@@ -4330,6 +4549,23 @@ it("returns the same operational records and evidence through web and CLI", asyn
       integrityEvidence: createCleanReadArchiveIntegrityEvidence("dvd-recovery-v1"),
     });
     const archiveId = completedJob.originalDiscArchiveId!;
+    const historicalArchiveResponse = await createOperationsResponse(
+      access,
+      new Request(
+        `http://localhost/api/operations?kind=original-disc-archives&id=${archiveId}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    const historicalArchiveCli = await fixture.run([
+      "inspect",
+      "original-disc-archives",
+      archiveId,
+    ]);
+    expect(historicalArchiveCli.result).toEqual(
+      await historicalArchiveResponse.json(),
+    );
+    expect((historicalArchiveCli.result as { item: object }).item)
+      .not.toHaveProperty("archiveArtifact");
     const mediaItem = access.catalog.createMediaItem({ kind: "movie", title: "Synthetic Film" });
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archiveId,
@@ -4472,7 +4708,7 @@ it("returns the same operational records and evidence through web and CLI", asyn
       archiveId,
     );
     evidenceFixture.close();
-    const laggingProjectionResponse = createOperationsResponse(
+    const laggingProjectionResponse = await createOperationsResponse(
       access,
       new Request(
         `http://localhost/api/operations?kind=original-disc-archives&id=${archiveId}`,
@@ -4613,7 +4849,7 @@ it("returns the same operational records and evidence through web and CLI", asyn
       )
     `).run(archivedDisc.id, DVD_RECOVERY_EVIDENCE_FORMAT);
     projectionFixture.close();
-    const markedRequestResponse = createOperationsResponse(
+    const markedRequestResponse = await createOperationsResponse(
       access,
       new Request(
         "http://localhost/api/operations?kind=archive-requests&id=synthetic-evidence-pending-request",
@@ -4850,7 +5086,7 @@ it("returns the same operational records and evidence through web and CLI", asyn
       "optical-drives", "detected-discs", "disc-inspections", "archive-requests",
       "archive-jobs", "original-disc-archives", "encode-jobs", "worker-incidents", "activity",
     ]) {
-      const response = createOperationsResponse(access,
+      const response = await createOperationsResponse(access,
         new Request(`http://localhost/api/operations?kind=${kind}`),
         fixture.originalsLibraryPath);
       expect(response.status).toBe(200);
@@ -4867,13 +5103,13 @@ it("returns the same operational records and evidence through web and CLI", asyn
       ["encode-jobs", encodeJob.id],
       ["worker-incidents", incident.id],
     ]) {
-      const response = createOperationsResponse(access,
+      const response = await createOperationsResponse(access,
         new Request(`http://localhost/api/operations?kind=${kind}&id=${id}`),
         fixture.originalsLibraryPath);
       expect(response.status).toBe(200);
       expect((await fixture.run(["inspect", kind, id])).result).toEqual(await response.json());
     }
-    const encodeHistoryResponse = createOperationsResponse(
+    const encodeHistoryResponse = await createOperationsResponse(
       access,
       new Request(
         `http://localhost/api/operations?kind=encode-jobs&id=${encodeJob.id}&limit=1&offset=0`,
@@ -4984,14 +5220,138 @@ it("returns the same operational records and evidence through web and CLI", asyn
             stableRead: { available: true, blockingReasons: [] },
           },
         },
+        archiveArtifact: {
+          initialPreservation: {
+            saved: true,
+            archiveRequest: { status: "fulfilled" },
+            archiveJob: { status: "completed" },
+          },
+          recovery: {
+            state: "running",
+            checkpoint: { revision: 1, manifestDigest },
+            progress: {
+              skippedUntestedSectorCount: 1,
+              individuallyFailedSectorCount: 0,
+              recoveredSectorCount: 0,
+              unresolvedSectorCount: 1,
+            },
+          },
+          readiness: {
+            sourceStability: {
+              ready: false,
+              state: "recovering",
+              reasons: expect.arrayContaining([
+                expect.objectContaining({ code: "RECOVERY_ACTIVE" }),
+              ]),
+            },
+            titleAssessment: { ready: false, state: "pending" },
+            encodeEligibility: { ready: false },
+          },
+          actions: expect.arrayContaining([
+            expect.objectContaining({ name: "stop" }),
+            expect.objectContaining({ name: "resume" }),
+            expect.objectContaining({ name: "verify-disc" }),
+            expect.objectContaining({ name: "confirm-disc" }),
+            expect.objectContaining({ name: "reconcile" }),
+          ]),
+        },
       } });
+    expect((archiveInspection.result as {
+      item: { archiveArtifact: { actions: Array<{ name: string }> } };
+    }).item.archiveArtifact.actions.map(({ name }) => name)).toEqual([
+      "stop",
+      "resume",
+      "verify-disc",
+      "confirm-disc",
+      "reconcile",
+    ]);
+    for (const [status, projectedState, pauseReason, stopOperationId,
+      stopRequestedAt, stoppedAt] of [
+      ["waiting_for_disc", "waiting", null, null, null, null],
+      ["paused", "paused", "no_progress", null, null, null],
+      ["stopping", "stopping", null, "synthetic-stop", 10, null],
+      ["stopped", "stopped", null, "synthetic-stop", 10, 11],
+    ] as const) {
+      const stateFixture = new DatabaseSync(fixture.databasePath);
+      stateFixture.prepare(`
+        UPDATE archive_recoveries
+        SET status = ?, pause_reason = ?, stop_operation_id = ?,
+            stop_requested_at = ?, stopped_at = ?, fault_code = NULL,
+            updated_at = updated_at + 1
+        WHERE id = 'synthetic-evidence-recovery'
+      `).run(
+        status,
+        pauseReason,
+        stopOperationId,
+        stopRequestedAt,
+        stoppedAt,
+      );
+      stateFixture.close();
+      const stateResponse = await createOperationsResponse(
+        access,
+        new Request(
+          `http://localhost/api/operations?kind=original-disc-archives&id=${archiveId}`,
+        ),
+        fixture.originalsLibraryPath,
+      );
+      const stateCli = await fixture.run([
+        "inspect",
+        "original-disc-archives",
+        archiveId,
+      ]);
+      expect(stateCli.result).toEqual(await stateResponse.json());
+      expect(stateCli.result).toMatchObject({
+        item: { archiveArtifact: { recovery: { state: projectedState } } },
+      });
+    }
+    const faultedRecoveryFixture = new DatabaseSync(fixture.databasePath);
+    faultedRecoveryFixture.prepare(`
+      UPDATE archive_recoveries
+      SET status = 'faulted', pause_reason = NULL, stopped_at = NULL,
+          fault_code = 'CONSISTENCY_FAULT', updated_at = updated_at + 1
+      WHERE id = 'synthetic-evidence-recovery'
+    `).run();
+    faultedRecoveryFixture.close();
+    const faultedArtifactResponse = await createOperationsResponse(
+      access,
+      new Request(
+        `http://localhost/api/operations?kind=original-disc-archives&id=${archiveId}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    const faultedArtifactCli = await fixture.run([
+      "inspect",
+      "original-disc-archives",
+      archiveId,
+    ]);
+    expect(faultedArtifactCli.result).toEqual(
+      await faultedArtifactResponse.json(),
+    );
+    expect(faultedArtifactCli.result).toMatchObject({
+      item: {
+        archiveArtifact: {
+          initialPreservation: { saved: true },
+          recovery: { state: "faulted" },
+          readiness: {
+            sourceStability: {
+              ready: false,
+              state: "faulted",
+              reasons: expect.arrayContaining([
+                expect.objectContaining({ code: "RECOVERY_FAULTED" }),
+              ]),
+            },
+            encodeEligibility: { ready: false },
+          },
+        },
+      },
+    });
     await defaultArchiveImageOwnership.withInitialPublicationWriter({
       archiveId,
       imagePath: join(fixture.originalsLibraryPath, "synthetic.iso"),
       originalsLibraryPath: fixture.originalsLibraryPath,
       signal: new AbortController().signal,
       async task() {
-        const response = createOperationsResponse(
+        const response = await createOperationsResponse(
           access,
           new Request(
             `http://localhost/api/operations?kind=original-disc-archives&id=${archiveId}`,
@@ -5018,7 +5378,7 @@ it("returns the same operational records and evidence through web and CLI", asyn
             },
           },
         });
-        const recoveryResponse = createOperationsResponse(
+        const recoveryResponse = await createOperationsResponse(
           access,
           new Request(
             "http://localhost/api/operations?kind=archive-recoveries&id=synthetic-evidence-recovery",
@@ -5301,7 +5661,7 @@ it.each([
       opticalDriveId: drive.id, mediaGeneration: "synthetic-notice-generation", mediaCapacityBytes: 8192,
     });
     access.discInspections.record(started.claim!, { type: "read_path_notice", notice });
-    const response = createOperationsResponse(access, new Request(
+    const response = await createOperationsResponse(access, new Request(
       `http://localhost/api/operations?kind=disc-inspections&id=${started.inspection.id}`,
     ));
     const cli = await fixture.run(["inspect", "disc-inspections", started.inspection.id]);

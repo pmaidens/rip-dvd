@@ -163,9 +163,9 @@ it("notifies every subscribed browser once after later Recovery completes, with 
     expect(await pollDvdRecoveryPass(input)).toBe(false);
     const cli = await fixture.run(["inspect", "archive-recoveries", seeded.recoveryId]);
     expect(cli).toMatchObject({ exitCode: 0, result: { item: { status: "completed" } } });
-    expect(await createOperationsResponse(input.access, new Request(
+    expect(await (await createOperationsResponse(input.access, new Request(
       `https://operator.example/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
-    ), fixture.originalsLibraryPath).json()).toEqual(cli.result);
+    ), fixture.originalsLibraryPath)).json()).toEqual(cli.result);
     const deliveries = await fixture.run(["notifications", "deliveries"]);
     expect(deliveries.result).toMatchObject({ deliveries: [
       { status: "queued" }, { status: "queued" },
@@ -999,7 +999,7 @@ it("continues a productive pass in reverse and pauses after no progress", async 
       "archive-recoveries",
       seeded.recoveryId,
     ]);
-    const queuedWeb = createOperationsResponse(
+    const queuedWeb = await createOperationsResponse(
       input.access,
       new Request(
         `http://localhost/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
@@ -1258,7 +1258,7 @@ it("keeps a no-progress pause durable and exposes it identically", async () => {
       "archive-recoveries",
       seeded.recoveryId,
     ]);
-    const web = createOperationsResponse(
+    const web = await createOperationsResponse(
       restarted.access,
       new Request(
         `http://localhost/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
@@ -1575,9 +1575,9 @@ it("does not admit a pass while reconciliation remains unresolved", async () => 
     expect(detail.result).toMatchObject({ item: {
       reconciliation: { status: "failed", failureCode: "CONSISTENCY_FAULT" },
     } });
-    expect(await createOperationsResponse(input.access, new Request(
+    expect(await (await createOperationsResponse(input.access, new Request(
       `https://operator.example/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
-    ), fixture.originalsLibraryPath).json()).toEqual(detail.result);
+    ), fixture.originalsLibraryPath)).json()).toEqual(detail.result);
     expect(await pollDvdRecoveryPass(input)).toBe(false);
     expect(source.start).not.toHaveBeenCalled();
     expect((await fixture.run(["notifications", "deliveries"])).result)

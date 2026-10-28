@@ -14,6 +14,7 @@ import type {
   ArchiveJob,
   ArchiveJobStatus,
   ArchiveProgressPhase,
+  ArchiveRecovery,
   ArchiveRequestStatus,
   CatalogReviewArchiveListCursor,
   CatalogReviewArchiveView,
@@ -155,6 +156,8 @@ export interface DashboardDetectedDiscDetails {
 
 export interface DashboardArchiveJob {
   id: string;
+  originalDiscArchiveId?: string | null;
+  recoveryArtifact?: boolean;
   activityRevision?: string;
   detectedDiscId: string;
   archiveRequestId: string;
@@ -392,6 +395,36 @@ function readSource<T>(read: () => T): SourceResult<T> {
   } catch {
     return { status: "error" };
   }
+}
+
+function archiveArtifactActivityRevision(
+  access: ConsistentReadAccess,
+  recovery: ArchiveRecovery,
+  discInspectionRevision: string,
+): string {
+  const checkpoint = access.catalog.findDvdArchiveEvidenceHeader(
+    recovery.originalDiscArchiveId,
+  );
+  const reconciliation = access.dvdRecoveryReconciliations
+    .findLatestForRecovery(recovery.id);
+  const encodeJobs = access.catalog.listDiscSelections({
+    originalDiscArchiveId: recovery.originalDiscArchiveId,
+    includeHistorical: true,
+  }).flatMap(({ id }) => access.encodeJobs.listForDiscSelection(id));
+  const revision = JSON.stringify({
+    recovery: recovery.updatedAt.toISOString(),
+    work: recovery.work?.updatedAt.toISOString() ?? null,
+    checkpoint: checkpoint?.updatedAt.toISOString() ?? null,
+    reconciliation: reconciliation?.updatedAt.toISOString() ?? null,
+    encodeJobs: encodeJobs.map(({ id, status, updatedAt }) => [
+      id,
+      status,
+      updatedAt.toISOString(),
+    ]),
+    storage: access.dvdRecoveryStorage.readCurrent(),
+    discInspections: discInspectionRevision,
+  });
+  return createHash("sha256").update(revision).digest("hex");
 }
 
 function loaded<T>(items: T[]): DashboardSectionResult<T> {
@@ -1349,7 +1382,7 @@ function readDashboardSnapshotRecords(
         ),
       )]
     : [];
-  const archiveJobSource =
+  const currentArchiveJobSource =
     currentDetectedDiscArchiveJobSource.status === "error"
       ? currentDetectedDiscArchiveJobSource
       : readSource(() =>
@@ -1358,6 +1391,55 @@ function readDashboardSnapshotRecords(
             archiveRequestIds: currentArchiveRequestIds,
           }),
         );
+  const archiveRecoverySource = readSource(() =>
+    access.catalog.listArchiveRecoveries({
+      limit: activityLimit ?? DASHBOARD_ACTIVE_JOB_LIMIT,
+    })
+  );
+  const discInspectionRevision = discInspectionSource.status === "error"
+    ? null
+    : JSON.stringify(discInspectionSource.value.map((inspection) => [
+        inspection.id,
+        inspection.status,
+        inspection.updatedAt.toISOString(),
+        inspection.detectedDiscId,
+        inspection.mediaGeneration,
+      ]));
+  const archiveArtifactRevisionSource =
+    archiveRecoverySource.status === "error" ||
+      discInspectionRevision === null
+      ? { status: "error" as const }
+      : readSource(() => new Map(
+          archiveRecoverySource.value.map((recovery) => [
+            recovery.originalDiscArchiveId,
+            archiveArtifactActivityRevision(
+              access,
+              recovery,
+              discInspectionRevision,
+            ),
+          ]),
+        ));
+  const recoveryArchiveJobSource = archiveRecoverySource.status === "error"
+    ? { status: "error" as const }
+    : readSource(() =>
+        archiveRecoverySource.value.flatMap((recovery) =>
+          access.archiveJobs.listForArchive(recovery.originalDiscArchiveId)
+            .filter(({ evidenceFormat }) =>
+              evidenceFormat === "dvd-recovery-evidence-v1"
+            )
+        )
+      );
+  const archiveJobSource = currentArchiveJobSource.status === "error" ||
+      recoveryArchiveJobSource.status === "error" ||
+      archiveArtifactRevisionSource.status === "error"
+    ? { status: "error" as const }
+    : {
+        status: "loaded" as const,
+        value: [...new Map(
+          [...currentArchiveJobSource.value, ...recoveryArchiveJobSource.value]
+            .map((job) => [job.id, job]),
+        ).values()],
+      };
   const displayedDetectedDiscIds = detectedDiscSource.status === "loaded"
     ? detectedDiscSource.value.map((disc) => disc.id)
     : [];
@@ -1822,8 +1904,14 @@ function readDashboardSnapshotRecords(
         }, new Map<ArchiveJob["archiveRequestId"], ArchiveJob>())
       : null;
 
+  const archiveArtifactActivityRevisions =
+    archiveArtifactRevisionSource.status === "loaded"
+      ? archiveArtifactRevisionSource.value
+      : null;
+
   const archiveJobs =
     archiveJobSource.status === "error" ||
+    archiveArtifactActivityRevisions === null ||
     currentDetectedDiscIds === null ||
     drivesById === null ||
     discsById === null
@@ -1836,7 +1924,20 @@ function readDashboardSnapshotRecords(
               : undefined;
             return {
               id: job.id,
-              activityRevision: job.updatedAt.toISOString(),
+              ...(job.evidenceFormat === "dvd-recovery-evidence-v1" &&
+                  job.originalDiscArchiveId !== null
+                ? {
+                    originalDiscArchiveId: job.originalDiscArchiveId,
+                    recoveryArtifact: true,
+                  }
+                : {}),
+              activityRevision: job.evidenceFormat ===
+                    "dvd-recovery-evidence-v1" &&
+                  job.originalDiscArchiveId !== null
+                ? archiveArtifactActivityRevisions.get(
+                    job.originalDiscArchiveId,
+                  ) ?? job.updatedAt.toISOString()
+                : job.updatedAt.toISOString(),
               archiveRequestId: job.archiveRequestId,
               attemptOrdinal: job.attemptOrdinal,
               detectedDiscId: job.detectedDiscId,

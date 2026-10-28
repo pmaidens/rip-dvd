@@ -145,12 +145,14 @@ function detailedTitle(number, durationSeconds, chapters) {
   };
 }
 
-function seedTitleDamagePaging(variant, fingerprintFill) {
-  const key = `damage-${variant}`;
+function seedTitleDamagePaging(variant, fingerprintFill, fixture = "damage") {
+  const key = `${fixture}-${variant}`;
   const acceptedEndLbaExclusive = 4_096;
   const archive = createArchive({
     key,
-    label: `CATALOG_BROWSER_DAMAGE_${variant.toUpperCase()}`,
+    label: fixture === "damage"
+      ? `CATALOG_BROWSER_DAMAGE_${variant.toUpperCase()}`
+      : `ARCHIVE_ARTIFACT_BROWSER_${variant.toUpperCase()}`,
     fingerprintFill,
     titles: Array.from({ length: 21 }, (_, index) =>
       detailedTitle(index + 1, 3_600, 4)
@@ -853,6 +855,8 @@ try {
   const reconciliationClaim = access.dvdRecoveryReconciliations.claimNext("synthetic-browser-notification-worker");
   if (reconciliationClaim?.id !== reconciliation.id) throw new Error("Expected synthetic notification reconciliation claim");
   access.dvdRecoveryReconciliations.fail(reconciliationClaim, "CONSISTENCY_FAULT");
+  seedTitleDamagePaging("desktop", "bc", "artifact");
+  seedTitleDamagePaging("mobile", "de", "artifact");
   seedKeyboardJourney("desktop", "1");
   seedComplexLayout("desktop", "2");
   seedKeyboardJourney("mobile", "3");

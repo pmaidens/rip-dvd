@@ -32,9 +32,11 @@ import {
 } from "../lib/dashboard-activity";
 import { archiveIntegrityLabel } from "../lib/archive-integrity";
 import { displayTerm } from "../lib/display-term";
+import { countLabel, formatDuration } from "../lib/display-value";
 import { isTerminalEncodeJobStatus } from "../lib/encode-job-status";
 import { ArchiveIntegrityDescription } from "./archive-integrity-description";
 import { ArchiveBoundaryDescription } from "./archive-boundary-description";
+import { ArchiveArtifactCard } from "./archive-artifact-card";
 import { CatalogReviewEditor } from "./catalog-review-editor";
 import { CatalogReviewWorkflowFacts } from "./catalog-review-workflow";
 import { InvestigationPanel } from "./investigation-panel";
@@ -119,21 +121,6 @@ function formatTimestamp(value: string): string {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));
-}
-
-function formatDuration(totalSeconds: number): string {
-  const hours = Math.floor(totalSeconds / 3_600);
-  const minutes = Math.floor((totalSeconds % 3_600) / 60);
-  const seconds = totalSeconds % 60;
-  return [
-    ...(hours > 0 ? [`${hours}h`] : []),
-    ...(minutes > 0 ? [`${minutes}m`] : []),
-    `${seconds}s`,
-  ].join(" ");
-}
-
-function countLabel(count: number, singular: string, plural = `${singular}s`) {
-  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 type EncodeOutputInspectionState =
@@ -463,7 +450,11 @@ function IndeterminateProgress({ label }: { label: string }) {
   );
 }
 
-function StatusBadge({ value }: { value: DashboardStatus }) {
+function StatusBadge({
+  value,
+}: {
+  value: DashboardStatus;
+}) {
   return <span className={`status status-${value}`}>{displayTerm(value)}</span>;
 }
 
@@ -665,18 +656,34 @@ function formatProgressAge(durationSeconds: number): string {
 function ArchiveJobItem({
   job,
   busy,
+  onRefresh,
   onCancel,
   onInvestigate,
 }: {
   job: DashboardArchiveJob;
   busy: boolean;
+  onRefresh(): void;
   onCancel: (archiveRequestId: string) => void;
   onInvestigate: (
     archiveJobId: DashboardArchiveJob["id"],
     trigger: HTMLButtonElement,
   ) => void;
 }) {
-  const currentTime = useCurrentTime(job.status === "running" ? 5_000 : 0);
+  const recoveryArtifact = job.recoveryArtifact &&
+    typeof job.originalDiscArchiveId === "string";
+  const currentTime = useCurrentTime(
+    !recoveryArtifact && job.status === "running" ? 5_000 : 0,
+  );
+  if (job.recoveryArtifact && typeof job.originalDiscArchiveId === "string") {
+    return (
+      <ArchiveArtifactCard
+        job={{ ...job, originalDiscArchiveId: job.originalDiscArchiveId }}
+        busy={busy}
+        onRefresh={onRefresh}
+        onInvestigate={onInvestigate}
+      />
+    );
+  }
   const progressHealth = job.status === "running"
     ? assessArchiveProgress(job, currentTime)
     : null;
@@ -1372,6 +1379,7 @@ export function DashboardView({
   onCatalogReviewSearch = () => undefined,
   onVerifyFilesystem = () => undefined,
   verifyingFilesystemTarget = null,
+  onRefresh = () => undefined,
 }: {
   state: DashboardLoadState;
   section?: "all" | "discs" | "encoding" | "catalog";
@@ -1399,6 +1407,7 @@ export function DashboardView({
   ) => void;
   onVerifyFilesystem?: (target: FilesystemVerificationTarget, id: string) => void;
   verifyingFilesystemTarget?: string | null;
+  onRefresh?: () => void;
 }) {
   const [encodeOutputInspection, setEncodeOutputInspection] =
     useState<EncodeOutputInspectionState>(null);
@@ -1582,6 +1591,7 @@ export function DashboardView({
             <ArchiveJobItem
               job={group.latest}
               busy={busyWorkflowId === group.archiveRequestId}
+              onRefresh={onRefresh}
               onCancel={onCancelArchiveRequest}
               onInvestigate={(archiveJobId, trigger) =>
                 setActiveInvestigation({
@@ -2877,6 +2887,7 @@ export function OperationsDashboard({
                 void verifyFilesystem(target, id)
               }
               verifyingFilesystemTarget={verifyingFilesystemTarget}
+              onRefresh={() => setRequestNumber((value) => value + 1)}
             />
           </div>
 
@@ -3012,6 +3023,7 @@ export function OperationsDashboard({
             void verifyFilesystem(target, id)
           }
           verifyingFilesystemTarget={verifyingFilesystemTarget}
+          onRefresh={() => setRequestNumber((value) => value + 1)}
         />
       )}
 

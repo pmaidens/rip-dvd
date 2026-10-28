@@ -12,6 +12,7 @@ import {
   seedDvdDiscVerificationFixture,
 } from "../../../../../../operator-cli/src/dvd-disc-verification.test-support.js";
 import { createDvdRecoveryResumeRoute } from "./route.js";
+import { createOperationsResponse } from "../../../operations/route.js";
 
 const fixtures: Array<ReturnType<typeof createOperatorWorkflowFixture>> = [];
 
@@ -113,6 +114,29 @@ it("offers the same checkpoint-bound no-progress Resume through web and CLI", as
         kind: "archive-recoveries",
         id: seeded.recoveryId,
         status: "eligible",
+      },
+    });
+    const artifactWeb = await createOperationsResponse(
+      access,
+      new Request(
+        `http://localhost:3000/api/operations?kind=original-disc-archives&id=${seeded.archive.id}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    const artifactCli = await fixture.run([
+      "inspect",
+      "original-disc-archives",
+      seeded.archive.id,
+    ]);
+    expect(artifactCli.result).toEqual(await artifactWeb.json());
+    expect(artifactCli.result).toMatchObject({
+      item: {
+        archiveArtifact: {
+          recovery: {
+            state: "running",
+            record: { attemptOrdinal: 2, speedMode: "low" },
+          },
+        },
       },
     });
   } finally {

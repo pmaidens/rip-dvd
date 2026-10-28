@@ -239,6 +239,7 @@ export type { MappingProposalCommand } from "./mapping-proposal-operations.js";
 export {
   encodeRequeueAvailability,
   inspectOperations,
+  inspectOperationsWithArtifacts,
   isOperationKind,
   isWaitableKind,
   OPERATION_KINDS,
@@ -1040,6 +1041,16 @@ export * from "./notification-dispatch.js";
 export * from "./notification-transport.js";
 
 export { inspectArchiveEvidence, InvalidArchiveEvidenceInputError } from "./archive-evidence.js";
+export {
+  describeArchiveArtifact,
+  enrichArchiveArtifactSourceIdentity,
+} from "./archive-artifact.js";
+export type {
+  ArchiveArtifact,
+  ArchiveArtifactAction,
+  ArchiveArtifactReason,
+  ArchiveArtifactRecoveryState,
+} from "./archive-artifact.js";
 export {
   inspectArchiveRecoveryRanges,
   InvalidArchiveRecoveryRangesInputError,
