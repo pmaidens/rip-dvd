@@ -1094,6 +1094,7 @@ function readDetail(
         ],
       }).map((candidate) => [candidate.id, candidate]));
       const visibleJob = visibleById.get(job.id)!;
+      const claimPage = access.encodeJobs.listClaimSnapshots(job.id, { limit: options.limit + 1, offset: options.offset });
       const pageArtifacts = visibleJob.encodeOutputArtifacts.filter(
         ({ state }) => state === "retained" || options.offset === 0,
       );
@@ -1105,6 +1106,8 @@ function readDetail(
           limit: options.limit,
           nextOffset: outputPage.nextOffset,
         },
+        claimSnapshots: claimPage.slice(0, options.limit),
+        claimSnapshotPage: { limit: options.limit, offset: options.offset, nextOffset: claimPage.length > options.limit ? options.offset + options.limit : null },
         failureReports: access.encodeJobs.listFailureReports([job.id]),
         discSelection: selection ?? null,
         archive: archives.map((archive) =>

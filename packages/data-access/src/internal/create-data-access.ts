@@ -1,3 +1,4 @@
+import type { EncodeJobClaimOptions } from "../encode-claim-snapshot.js";
 import { ArchiveRecoveryPreviewPauseError } from "../archive-recovery-work.js";
 import { createDamagePreviewAccess, damagePreviewHoldsRecovery } from "./damage-preview-store.js";
 import { createEncodeOutputInspectionReceiptAccess } from "./encode-output-inspection-receipt-store.js";
@@ -103,6 +104,7 @@ import {
   dvdSourceSampleManifests,
   encodeJobFailureReports,
   encodeJobs,
+  encodeClaimSnapshots,
   encodingProfiles,
   filesystemVerificationRuns,
   legacyCutoverStagedSidecars,
@@ -5724,7 +5726,7 @@ export function createDataAccessInternal(
     find: (id) =>
       database.select().from(encodeJobs).where(eq(encodeJobs.id, id)).get(),
     list: listEncodeJobs,
-    claim: (workerId, token, timestamp) =>
+    claim: (workerId, token, timestamp, options?: EncodeJobClaimOptions) =>
       database.transaction((transaction) => {
         const nextReviewedJob = transaction
           .select({
@@ -5758,6 +5760,7 @@ export function createDataAccessInternal(
           .where(
             and(
               eq(encodeJobs.status, "queued"),
+              options === undefined ? undefined : eq(encodeJobs.id, options.jobId),
               isNull(encodeJobs.partialCleanupClaimToken),
               isNull(encodeJobs.partialCleanupOutputPath),
               isNull(encodeJobs.partialCleanupLeaseToken),
@@ -5793,6 +5796,22 @@ export function createDataAccessInternal(
           .get();
         if (!nextReviewedJob) {
           return undefined;
+        }
+        const queued = requireRow(transaction.select().from(encodeJobs)
+          .where(eq(encodeJobs.id, nextReviewedJob.id)).get(), "Encode Job", nextReviewedJob.id);
+        const selection = requireRow(transaction.select().from(discSelections)
+          .where(eq(discSelections.id, queued.discSelectionId)).get(), "Disc Selection", queued.discSelectionId);
+        const newFormat = dvdRecoveryEvidenceFormatForArchive(
+          access.catalog.findDvdArchiveEvidenceHeader(selection.originalDiscArchiveId),
+          access.archiveJobs.listForArchive(selection.originalDiscArchiveId),
+        ) !== null;
+        // Legacy callers cannot claim new-format work without checkpoint preparation.
+        if (newFormat && options === undefined) return undefined;
+        const source = newFormat ? options!.snapshotSource(queued) : null;
+        if (source !== null && (source.archive.id !== selection.originalDiscArchiveId ||
+          source.selection.id !== queued.discSelectionId || source.profile.id !== queued.encodingProfileId ||
+          canonicalPublicationJson(source.decision) !== canonicalPublicationJson(queued.expectedSourceDecision))) {
+          throw new DomainInvariantError("Encode claim source does not match the queued decision");
         }
         const predecessorStillEligible = or(
           isNull(encodeJobs.predecessorEncodeJobId),
@@ -5869,6 +5888,9 @@ export function createDataAccessInternal(
           )
           .returning()
           .get();
+        if (claimed && source !== null) transaction.insert(encodeClaimSnapshots).values({
+          id: token, encodeJobId: claimed.id, source, createdAt: timestamp,
+        }).run();
         return claimed ? asRunningEncodeJob(claimed) : undefined;
       }, { behavior: "immediate" }),
     isAttemptCurrent: (current, _claim, timestamp) =>
@@ -6026,6 +6048,7 @@ export function createDataAccessInternal(
           .set({
             ...update,
             completedAt: current.completedAt,
+            expectedSourceDecision: options?.expectedSourceDecision ?? null,
             outputPath: effectiveOutputPath,
             reservesOutputPath: true,
             priority: options?.priority,
@@ -6100,7 +6123,7 @@ export function createDataAccessInternal(
     EncodeJobClaimToken,
     void,
     EncodeJobRequeueOptions,
-    void,
+    EncodeJobClaimOptions,
     Pick<EncodeJobProgress, "etaSeconds" | "phase">,
     EncodeJobAttemptFailureOptions
   >;
@@ -15274,6 +15297,7 @@ export function createDataAccessInternal(
             access.archiveJobs.listLatestForRequests(archiveRequestIds),
         },
         encodeJobs: {
+          listClaimSnapshots: (id, options) => access.encodeJobs.listClaimSnapshots(id, options),
           find: (id) => access.encodeJobs.find(id),
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
           listForDiscSelection: (id) =>
@@ -23873,6 +23897,7 @@ export function createDataAccessInternal(
                 id: newId<EncodeJobId>(),
                 discSelectionId: input.discSelectionId,
                 encodingProfileId: input.encodingProfileId,
+                expectedSourceDecision: input.expectedSourceDecision ?? null,
                 outputPath,
                 priority: input.priority ?? 0,
                 createdAt: timestamp,
@@ -23928,6 +23953,16 @@ export function createDataAccessInternal(
       },
 
       claimNext: encodeJobQueue.claimNext,
+      findClaimSnapshot(id) {
+        return database.select().from(encodeClaimSnapshots).where(eq(encodeClaimSnapshots.id, id)).get() ?? null;
+      },
+      listClaimSnapshots(id, options = { limit: 20, offset: 0 }) {
+        if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 101 ||
+          !Number.isSafeInteger(options.offset) || options.offset < 0) throw new DomainInvariantError("Invalid claim snapshot page");
+        return database.select().from(encodeClaimSnapshots).where(eq(encodeClaimSnapshots.encodeJobId, id))
+          .orderBy(desc(encodeClaimSnapshots.createdAt), desc(encodeClaimSnapshots.id))
+          .limit(options.limit).offset(options.offset).all();
+      },
       listDiscSelectionCorrectionEncodeJobLinks(options) {
         if (
           !Number.isSafeInteger(options.limit) ||

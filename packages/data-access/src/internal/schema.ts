@@ -1,3 +1,5 @@
+import type { EncodeClaimSource } from "../encode-claim-snapshot.js";
+import type { EncodeSourceDecision } from "../types.js";
 import { sql } from "drizzle-orm";
 import {
   type AnySQLiteColumn,
@@ -2426,6 +2428,7 @@ export const encodeJobs = sqliteTable(
       .$type<EncodingProfileId>()
       .notNull()
       .references(() => encodingProfiles.id, { onDelete: "restrict" }),
+    expectedSourceDecision: text("expected_source_decision", { mode: "json" }).$type<EncodeSourceDecision>(),
     outputPath: text("output_path").notNull(),
     reservesOutputPath: integer("reserves_output_path", { mode: "boolean" })
       .notNull()
@@ -2875,4 +2878,17 @@ export const encodeOutputInspectionReceipts = sqliteTable("encode_output_inspect
   check("encode_output_inspection_receipts_id_not_null", sql`${table.id} is not null`),
   check("encode_output_inspection_receipts_record_check", sql`json_valid(${table.record}) and json_extract(${table.record}, '$.id') = ${table.id} and json_extract(${table.record}, '$.encodeJobId') = ${table.encodeJobId} and json_extract(${table.record}, '$.generationIdentity') = ${table.generationIdentity}`),
   index("encode_output_inspection_receipts_job_idx").on(table.encodeJobId, table.createdAt),
+]);
+
+// A retry appends another claim. It never updates the source of an earlier attempt.
+export const encodeClaimSnapshots = sqliteTable("encode_claim_snapshots", {
+  id: text("id").$type<EncodeJobClaimToken>().notNull().primaryKey(),
+  encodeJobId: text("encode_job_id").$type<EncodeJobId>().notNull()
+    .references(() => encodeJobs.id, { onDelete: "restrict" }),
+  source: text("source", { mode: "json" }).$type<EncodeClaimSource>().notNull(),
+  createdAt: createdAt(),
+}, (table) => [
+  check("encode_claim_snapshots_id_not_null", sql`${table.id} is not null`),
+  check("encode_claim_snapshots_source_check", sql`json_valid(${table.source}) and json_type(${table.source}, '$.schemaVersion') is 'integer' and json_extract(${table.source}, '$.schemaVersion') is 1`),
+  index("encode_claim_snapshots_job_index").on(table.encodeJobId, table.createdAt, table.id),
 ]);

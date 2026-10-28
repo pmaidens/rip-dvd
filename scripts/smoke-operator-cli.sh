@@ -53,6 +53,9 @@ help_output="$(invoke)"
 printf '%s\n' "$help_output" | assert_json_fields \
   'schemaVersion=1' 'usage=rip-dvd <command>'
 
+claim_inventory="$(invoke inspect encode-jobs)"
+printf '%s\n' "$claim_inventory" | assert_json_fields 'schemaVersion=1' 'kind=encode-jobs' 'items.length=0'
+
 readiness_help="$(invoke help encode-readiness)"
 printf '%s\n' "$readiness_help" | assert_json_fields 'schemaVersion=1'
 readiness_choices="$(invoke encode-readiness)"

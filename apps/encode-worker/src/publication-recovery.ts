@@ -1,3 +1,4 @@
+import { assertEncodeClaimSource } from "@rip-dvd/application";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -1809,6 +1810,17 @@ function resolveSelectionExecutionPlan(
 }
 
 function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
+  const recorded = access.encodeJobs.findClaimSnapshot(claim.claimToken);
+  if (recorded !== null) {
+    if (recorded.encodeJobId !== claim.id || recorded.source.output.path !== claim.outputPath) {
+      throw new Error("Encode claim snapshot identity is inconsistent");
+    }
+    const source = recorded.source;
+    return { archive: source.archive, evidenceFormat: "dvd-recovery-evidence-v1" as const,
+      preset: source.output.preset, selectionArguments: [...source.output.selectionArguments],
+      expectedDurationSeconds: source.output.expectedDurationSeconds ?? undefined,
+      subtitleScanTitleNumber: source.resolvedSource.displayTitleNumber };
+  }
   return access.readConsistentSnapshot((snapshot) => {
     const selection = snapshot.catalog.listDiscSelections({
       ids: [claim.discSelectionId],
@@ -1856,6 +1868,7 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
       snapshot.catalog.findDvdArchiveEvidenceHeader(archive.id),
       snapshot.archiveJobs.listForArchive(archive.id),
     );
+    if (evidenceFormat !== null) throw new Error("New-format Encode claim snapshot is missing");
     const selectionPlan = resolveSelectionExecutionPlan(
       sourceIdentity,
       archivedTitles,
@@ -2014,6 +2027,7 @@ export async function executeEncodeClaim(
       ownership?: ArchiveImageOwnershipHandle,
     ): Promise<void> => {
       const readSignal = ownership?.signal ?? signal;
+      if (ownership !== undefined) await assertEncodeClaimSource(options.access, claim, ownership, options.originalsLibraryPath);
       if (input.subtitleScanTitleNumber !== undefined) {
         expectedVobSubStreams = await runEncodePreparationStep(
           () => options.subtitleScanner.scan(
@@ -2064,6 +2078,11 @@ export async function executeEncodeClaim(
         etaSeconds: null,
       });
       renewClaim();
+      if (ownership !== undefined) {
+        await assertEncodeClaimSource(options.access, claim, ownership, options.originalsLibraryPath);
+        renewClaim();
+        ownership.assertOwned();
+      }
       await options.runner.run({
         arguments_,
         onOutput: parseProgress,
