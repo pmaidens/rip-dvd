@@ -114,7 +114,7 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
   return (
     <section className="catalog-pane" aria-label="Damage Preview">
       <h3>Damage Preview</h3>
-      <p>Generate a canonical MKV sample from stopped or completed Archive Recovery, including before catalog mapping. Active Recovery previews remain unavailable. Reviewing does not request work or accept damage.</p>
+      <p>Generate a canonical MKV sample from one saved checkpoint, including before catalog mapping. During active Recovery, the request waits for a planned pause. Reviewing does not request work or accept damage.</p>
       {availability === null ? <button type="button" disabled={busy} onClick={() => void load()}>Review preview availability</button> : null}
       {error ? <p role="alert">{error}</p> : null}
       {availability !== null ? <>

@@ -139,7 +139,7 @@ function isRetiredCommand(name: string): name is keyof typeof retiredCommandGuid
 const commandDefinitions = [
   {
     name: "damage-preview",
-    description: "Review and request checkpoint-bound Damage Previews from stopped or completed Recovery; inspect, wait, cancel, and export canonical MKV artifacts. Active Recovery previews remain unavailable.",
+    description: "Review and request checkpoint-bound Damage Previews; active Recovery requests wait durably for a planned checkpoint pause. Inspect, wait, cancel, and export canonical MKV artifacts.",
     usage: "rip-dvd damage-preview availability|request|inspect|wait|cancel|export <identity> [--key <key>] [--json <input>|--stdin|--file <path>] [--timeout-ms <ms>] [--poll-ms <ms>] [--destination <path>]",
     inputs: { arguments: ["availability|request|inspect|wait|cancel|export", "identity"], options: ["--json", "--stdin", "--file", "--key", "--timeout-ms", "--poll-ms", "--destination"] },
     example: "rip-dvd damage-preview availability <archive-id>",
