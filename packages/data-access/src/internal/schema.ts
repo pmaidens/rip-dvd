@@ -1926,8 +1926,11 @@ export const dvdTitleDamageDecisions = sqliteTable(
       .$type<OriginalDiscArchiveId>()
       .notNull()
       .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
-    decision: text("decision", { enum: ["accepted", "not_required"] })
-      .notNull(),
+    decision: text("decision", {
+      enum: ["accepted", "not_required", "withdrawn"],
+    }).notNull(),
+    acceptedDecisionId: text("accepted_decision_id")
+      .$type<DvdTitleDamageDecisionId>(),
     operator: text("operator").notNull(),
     catalogRevision: integer("catalog_revision", { mode: "timestamp_ms" })
       .notNull(),
@@ -1963,8 +1966,13 @@ export const dvdTitleDamageDecisions = sqliteTable(
     ),
     check(
       "dvd_title_damage_decisions_decision_check",
-      sql`${table.decision} in ('accepted', 'not_required')`,
+      sql`${table.decision} in ('accepted', 'not_required', 'withdrawn') and ((${table.decision} = 'withdrawn' and ${table.acceptedDecisionId} is not null) or (${table.decision} <> 'withdrawn' and ${table.acceptedDecisionId} is null))`,
     ),
+    foreignKey({
+      name: "dvd_title_damage_decisions_accepted_decision_fk",
+      columns: [table.acceptedDecisionId],
+      foreignColumns: [table.id],
+    }).onDelete("restrict"),
     check(
       "dvd_title_damage_decisions_operator_check",
       sql`length(trim(${table.operator})) between 1 and 128`,

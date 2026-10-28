@@ -234,7 +234,12 @@ type SerializedDvdTitleDamageDecision = Omit<
 
 export interface CatalogReviewTitleDamageDecision {
   schemaVersion: 1;
-  state: "not_recorded" | "accepted" | "not_required" | "expired";
+  state:
+    | "not_recorded"
+    | "accepted"
+    | "not_required"
+    | "withdrawn"
+    | "expired";
   current: SerializedDvdTitleDamageDecision | null;
   latest: SerializedDvdTitleDamageDecision | null;
   currentIdentities: {

@@ -69,6 +69,19 @@ export class StaleDvdTitleDamageDecisionError extends DomainInvariantError {
   }
 }
 
+export class StaleDvdTitleDamageAcceptanceWithdrawalError
+  extends DomainInvariantError {
+  readonly code = "STALE_TITLE_DAMAGE_ACCEPTANCE_WITHDRAWAL" as const;
+
+  constructor(readonly current: {
+    state: import("./types.js").DvdTitleDamageDecisionInspection["state"];
+    decisionId: import("./types.js").DvdTitleDamageDecisionId | null;
+  }) {
+    super("Title Damage Acceptance withdrawal preview is stale.");
+    this.name = "StaleDvdTitleDamageAcceptanceWithdrawalError";
+  }
+}
+
 export class CatalogMappingEvidenceUnavailableError
   extends DomainInvariantError {
   constructor() {

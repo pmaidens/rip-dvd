@@ -2519,7 +2519,8 @@ describe("data-access facade", () => {
           name !== "20261024192300_woozy_wasp" &&
           name !== "20261028031248_flowery_dorian_gray" &&
           name !== "20261028062114_huge_korath" &&
-          name !== "20261028075636_flowery_grim_reaper",
+          name !== "20261028075636_flowery_grim_reaper" &&
+          name !== "20261028184008_loving_nuke",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -10067,9 +10068,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         },
         {
           name: "20261023003003_ambiguous_gwen_stacy",
-        },
-        {
-          name: "20261022222723_awesome_cyclops",
         },
       ]);
     expect(

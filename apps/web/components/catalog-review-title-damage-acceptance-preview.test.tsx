@@ -4,7 +4,10 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-import type { DvdTitleDamageAcceptancePreview } from "@rip-dvd/application";
+import type {
+  DvdTitleDamageAcceptancePreview,
+  DvdTitleDamageAcceptanceWithdrawalPreview,
+} from "@rip-dvd/application";
 
 import { CatalogReviewTitleDamageAcceptancePreview } from
   "./catalog-review-title-damage-acceptance-preview";
@@ -251,7 +254,9 @@ const persistedDecision = {
   schemaVersion: 1,
   state: "accepted",
   current: {
+    id: "synthetic-accepted-decision",
     decision: "accepted",
+    acceptedDecisionId: null,
     operator: "Synthetic persisted operator",
     recordedAt: "2026-10-28T08:00:00.000Z",
     snapshot: {
@@ -262,6 +267,35 @@ const persistedDecision = {
   latest: null,
   currentIdentities: {},
 } as unknown as CatalogReviewTitleDamageDecision;
+
+const withdrawalPreview = {
+  schemaVersion: 1,
+  evidenceFormat: "dvd-recovery-evidence-v1",
+  available: true,
+  previewToken:
+    "dvd-title-damage-acceptance-withdrawal-preview:00000000-0000-4000-8000-000000000421",
+  action: {
+    available: true,
+    reasons: [],
+    expectedInputs: [
+      "mutationKey",
+      "operator",
+      "previewToken",
+      "acceptedDecisionId",
+    ],
+  },
+  acceptedEvent: persistedDecision.current,
+  affectedWork: [{
+    id: "synthetic-encode-job",
+    discSelectionId: "synthetic-selection-1",
+    status: "queued",
+  }],
+  effects: {
+    queuedClaimsBlocked: true,
+    runningWorkContinues: true,
+    existingOutputsChanged: false,
+  },
+} as unknown as DvdTitleDamageAcceptanceWithdrawalPreview;
 
 const boundEvidenceChanges = [
   {
@@ -346,6 +380,69 @@ it("shows the persisted current exact-set decision after refresh", async () => {
     "Damage accepted for the current exact reviewed set by Synthetic persisted operator",
   );
   expect(container.textContent).toContain("1 included and 2 excluded");
+});
+
+it("preflights and withdraws the current accepted event", async () => {
+  const fetcher = vi.fn(async (
+    request: RequestInfo | URL,
+    _options?: RequestInit,
+  ) =>
+    String(request).endsWith("title-damage-acceptance-withdrawal-preview")
+      ? Response.json(withdrawalPreview)
+      : Response.json({ decision: { decision: "withdrawn" } })
+  );
+  await act(async () => root.render(
+    <CatalogReviewTitleDamageAcceptancePreview
+      originalDiscArchiveId="synthetic-archive"
+      titleIdentity={titleIdentity}
+      titleDamageDecision={persistedDecision}
+      evidenceGeneration={evidenceGeneration}
+      fetcher={fetcher}
+    />,
+  ));
+
+  const previewButton = [...container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Preview withdrawal",
+  ) as HTMLButtonElement;
+  await act(async () => previewButton.click());
+  expect(container.textContent).toContain(
+    "1 queued or running Encode Jobs affected",
+  );
+  expect(container.textContent).toContain(
+    "Encode Job synthetic-encode-job: queued",
+  );
+
+  const operator = container.querySelector(
+    'input[maxlength="128"]',
+  ) as HTMLInputElement;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set?.call(operator, "Synthetic withdrawal operator");
+    operator.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const withdrawButton = [...container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Withdraw damage acceptance",
+  ) as HTMLButtonElement;
+  expect(withdrawButton.disabled).toBe(false);
+  await act(async () => withdrawButton.click());
+
+  expect(fetcher).toHaveBeenLastCalledWith(
+    "/api/catalog-reviews/synthetic-archive/title-damage-acceptance-withdrawal",
+    expect.objectContaining({ method: "POST", body: expect.any(String) }),
+  );
+  const options = fetcher.mock.calls.at(-1)?.[1];
+  if (options === undefined) throw new Error("Withdrawal request was not sent");
+  expect(JSON.parse(options.body as string)).toEqual({
+    mutationKey: expect.any(String),
+    operator: "Synthetic withdrawal operator",
+    previewToken: withdrawalPreview.previewToken,
+    acceptedDecisionId: "synthetic-accepted-decision",
+  });
+  expect(container.textContent).toContain(
+    "Damage acceptance withdrawn for the current exact reviewed set by Synthetic withdrawal operator.",
+  );
 });
 
 it("includes all current content by default and sends only explicit exclusions", async () => {

@@ -1738,6 +1738,13 @@ export interface DvdTitleDamageAcceptancePreviewDecisionInput {
   decisionSnapshot: DvdTitleDamageDecisionSnapshot;
 }
 
+export interface DvdTitleDamageAcceptanceWithdrawalPreviewDecisionInput {
+  previewToken: string;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  acceptedDecisionId: DvdTitleDamageDecisionId;
+  affectedWork: readonly DvdTitleDamageDecisionAffectedWork[];
+}
+
 export interface DvdTitleDamageDecisionSnapshot {
   schemaVersion: 1;
   current: {
@@ -1852,7 +1859,8 @@ export interface DvdTitleDamageDecisionExpectedIdentities {
 export interface DvdTitleDamageDecision {
   id: DvdTitleDamageDecisionId;
   originalDiscArchiveId: OriginalDiscArchiveId;
-  decision: "accepted" | "not_required";
+  decision: "accepted" | "not_required" | "withdrawn";
+  acceptedDecisionId: DvdTitleDamageDecisionId | null;
   operator: string;
   catalogRevision: Date;
   checkpointRevision: number;
@@ -1873,7 +1881,12 @@ export interface DvdTitleDamageDecision {
 
 export interface DvdTitleDamageDecisionInspection {
   schemaVersion: 1;
-  state: "not_recorded" | "accepted" | "not_required" | "expired";
+  state:
+    | "not_recorded"
+    | "accepted"
+    | "not_required"
+    | "withdrawn"
+    | "expired";
   current: DvdTitleDamageDecision | null;
   latest: DvdTitleDamageDecision | null;
   currentIdentities: {
@@ -1897,6 +1910,14 @@ export interface RecordDvdTitleDamageDecisionInput
   originalDiscArchiveId: OriginalDiscArchiveId;
   operator: string;
   damageAcknowledgement: boolean;
+}
+
+export interface RecordDvdTitleDamageAcceptanceWithdrawalInput {
+  mutationKey: string;
+  previewToken: string;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  acceptedDecisionId: DvdTitleDamageDecisionId;
+  operator: string;
 }
 
 export type RunningArchiveJob = ArchiveJob & {
@@ -2230,8 +2251,14 @@ export interface CatalogAccess {
   recordDvdTitleDamageAcceptancePreviewDecision(
     input: DvdTitleDamageAcceptancePreviewDecisionInput,
   ): void;
+  recordDvdTitleDamageAcceptanceWithdrawalPreviewDecision(
+    input: DvdTitleDamageAcceptanceWithdrawalPreviewDecisionInput,
+  ): void;
   recordDvdTitleDamageDecision(
     input: RecordDvdTitleDamageDecisionInput,
+  ): DvdTitleDamageDecision;
+  withdrawDvdTitleDamageAcceptance(
+    input: RecordDvdTitleDamageAcceptanceWithdrawalInput,
   ): DvdTitleDamageDecision;
   inspectDvdTitleDamageDecision(
     id: OriginalDiscArchiveId,

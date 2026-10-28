@@ -67,6 +67,8 @@ import { runDvdTitleDamageAcceptancePreview } from
   "./dvd-title-damage-acceptance-preview.js";
 import { runDvdTitleDamageAcceptance } from
   "./dvd-title-damage-acceptance.js";
+import { runDvdTitleDamageAcceptanceWithdrawal } from
+  "./dvd-title-damage-acceptance-withdrawal.js";
 import { runRearchiveMappingProposal } from "./rearchive-mapping-proposal.js";
 import { runRearchiveAcceptance } from "./rearchive-acceptance.js";
 
@@ -276,14 +278,16 @@ const commandDefinitions = [
   {
     name: "catalog-review",
     description: "Inspect or change a Catalog Review and review Mapping Proposals or Title Damage evidence.",
-    usage: "rip-dvd catalog-review <show|damage|preview-damage-acceptance|accept-damage|suggest|archive-only|reopen|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive> <archive-id> [options]",
+    usage: "rip-dvd catalog-review <show|damage|preview-damage-acceptance|accept-damage|preview-withdrawal|withdraw-damage|suggest|archive-only|reopen|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive> <archive-id> [options]",
     inputs: {
-      arguments: ["show|damage|preview-damage-acceptance|accept-damage|suggest|archive-only|reopen|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive", "archive-id"],
+      arguments: ["show|damage|preview-damage-acceptance|accept-damage|preview-withdrawal|withdraw-damage|suggest|archive-only|reopen|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive", "archive-id"],
       options: [
         "show: --selection-offset, --correction-offset, --correction-job-offset, --correction-output-offset, --replacement-offset, --replacement-profile-offset",
         "damage: --limit <1..100> --cursor <cursor>",
         "preview-damage-acceptance: flags or exactly one of --json <object>, --stdin, --file <path>; flags are --exclude-title-identity <id> and --resolve-main-feature <disc-selection-id> <title-identity-id> (repeatable)",
         "accept-damage: --key <key> and exactly one of --json <object>, --stdin, --file <path>",
+        "preview-withdrawal: --accepted-event-id <id>",
+        "withdraw-damage: --key <key> and exactly one of --json <object>, --stdin, --file <path>",
         "suggest: --tmdb-id <positive integer> --media-type <movie|tv_show> (together, optional)",
         "apply-proposal: --key <key> and exactly one of --json <object>, --stdin, --file <path>",
         "preview-completion: exactly one of --json <object>, --stdin, --file <path>",
@@ -2295,6 +2299,9 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
             ? runDvdTitleDamageAcceptancePreview(rest, io)
           : rest[0] === "accept-damage"
             ? runDvdTitleDamageAcceptance(rest, io)
+          : rest[0] === "preview-withdrawal" ||
+              rest[0] === "withdraw-damage"
+            ? runDvdTitleDamageAcceptanceWithdrawal(rest, io)
           : rest[0] === "archive-only" || rest[0] === "reopen"
             ? runCatalogReviewChoice(rest, io)
           : rest[0] === "preview-completion" || rest[0] === "complete"

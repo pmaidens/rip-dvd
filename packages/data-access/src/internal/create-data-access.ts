@@ -269,6 +269,7 @@ import {
   StaleDvdDiscConfirmationError,
   StaleDvdDiscVerificationError,
   StaleDvdStructuralCheckpointError,
+  StaleDvdTitleDamageAcceptanceWithdrawalError,
   StaleDvdTitleDamageDecisionError,
   StaleJobAttemptError,
 } from "../errors.js";
@@ -393,6 +394,7 @@ import type {
   OriginalDiscArchiveId,
   RecordDvdDiscConfirmationInput,
   OriginalDiscArchive,
+  RecordDvdTitleDamageAcceptanceWithdrawalInput,
   RecordDvdTitleDamageDecisionInput,
   RearchiveMappingProposalMapping,
   RearchiveMappingProposalInput,
@@ -1698,6 +1700,27 @@ export function createDataAccessInternal(
   const dvdRecoveryEvidenceEncodingGateClosed =
     hasDvdRecoveryEvidenceSchema &&
     testOptions?.allowDvdRecoveryEvidenceEncodingForExclusionTest !== true;
+  const noWithdrawnTitleDamageAcceptanceForSelection = (
+    originalDiscArchiveId: AnySQLiteColumn,
+    discSelectionId: AnySQLiteColumn,
+  ) => sql`not exists (
+    select 1
+    from dvd_title_damage_decisions as withdrawn_decision
+    where withdrawn_decision.id = (
+      select latest_decision.id
+      from dvd_title_damage_decisions as latest_decision
+      where latest_decision.original_disc_archive_id = ${originalDiscArchiveId}
+      order by latest_decision.recorded_at desc, latest_decision.id desc
+      limit 1
+    )
+      and withdrawn_decision.decision = 'withdrawn'
+      and exists (
+        select 1
+        from json_each(withdrawn_decision.snapshot, '$.reviewedContent') as content
+        join json_each(content.value, '$.catalogMappings') as mapping
+        where json_extract(mapping.value, '$.discSelectionId') = ${discSelectionId}
+      )
+  )`;
   const dvdRecoveryEvidenceMarkerCondition = (
     querySource: Pick<typeof database, "select">,
     archiveId: AnySQLiteColumn,
@@ -5730,6 +5753,10 @@ export function createDataAccessInternal(
                 originalDiscArchives.id,
               ),
               dvdRecoveryEvidenceEncodeExclusion.forArchive(transaction),
+              noWithdrawnTitleDamageAcceptanceForSelection(
+                originalDiscArchives.id,
+                encodeJobs.discSelectionId,
+              ),
               or(
                 isNull(encodeJobs.predecessorEncodeJobId),
                 correctedEncodePredecessorReadyCondition(
@@ -5812,6 +5839,10 @@ export function createDataAccessInternal(
                     ),
                     dvdRecoveryEvidenceEncodeExclusion.forArchive(
                       transaction,
+                    ),
+                    noWithdrawnTitleDamageAcceptanceForSelection(
+                      originalDiscArchives.id,
+                      encodeJobs.discSelectionId,
                     ),
                   )),
               ),
@@ -6191,6 +6222,58 @@ export function createDataAccessInternal(
           left.discSelectionId.localeCompare(right.discSelectionId),
       ),
     });
+  }
+
+  function dvdTitleDamageWithdrawalPreviewSemanticInput(input: {
+    originalDiscArchiveId: OriginalDiscArchiveId;
+    acceptedDecisionId: DvdTitleDamageDecisionId;
+  }): string {
+    return JSON.stringify({
+      originalDiscArchiveId: input.originalDiscArchiveId,
+      acceptedDecisionId: input.acceptedDecisionId,
+    });
+  }
+
+  function dvdTitleDamageWithdrawalSemanticInput(
+    input: RecordDvdTitleDamageAcceptanceWithdrawalInput,
+  ): string {
+    return JSON.stringify({
+      originalDiscArchiveId: input.originalDiscArchiveId,
+      acceptedDecisionId: input.acceptedDecisionId,
+      previewToken: input.previewToken,
+      operator: input.operator.trim(),
+    });
+  }
+
+  function dvdTitleDamageDecisionSelectionIds(
+    decision: DvdTitleDamageDecision,
+  ): DiscSelectionId[] {
+    return [...new Set(decision.snapshot.reviewedContent.flatMap((content) =>
+      content.catalogMappings.map((mapping) => mapping.discSelectionId)
+    ))].sort();
+  }
+
+  function dvdTitleDamageWithdrawalAffectedWork(
+    reader: MutationTransaction | typeof database,
+    decision: DvdTitleDamageDecision,
+  ) {
+    const selectionIds = dvdTitleDamageDecisionSelectionIds(decision);
+    if (selectionIds.length === 0) return [];
+    const jobs = reader.select({
+      id: encodeJobs.id,
+      discSelectionId: encodeJobs.discSelectionId,
+      status: encodeJobs.status,
+    }).from(encodeJobs).where(and(
+      inArray(encodeJobs.discSelectionId, selectionIds),
+      inArray(encodeJobs.status, ["queued", "running"]),
+    )).orderBy(asc(encodeJobs.id))
+      .limit(ACTIVE_ENCODE_JOB_RESULT_LIMIT + 1).all();
+    if (jobs.length > ACTIVE_ENCODE_JOB_RESULT_LIMIT) {
+      throw new DomainInvariantError(
+        `Title Damage Acceptance withdrawal exceeds the ${ACTIVE_ENCODE_JOB_RESULT_LIMIT}-job limit`,
+      );
+    }
+    return jobs;
   }
 
   function currentDvdTitleDamageDecisionIdentities(
@@ -18388,6 +18471,16 @@ export function createDataAccessInternal(
         }).run();
       },
 
+      recordDvdTitleDamageAcceptanceWithdrawalPreviewDecision(input) {
+        database.insert(mutationInvocations).values({
+          key: requireNonEmpty(input.previewToken, "previewToken"),
+          operation: "dvd_title_damage_acceptance.withdraw.preview",
+          semanticInput: dvdTitleDamageWithdrawalPreviewSemanticInput(input),
+          outcome: JSON.stringify({ affectedWork: input.affectedWork }),
+          createdAt: now(),
+        }).run();
+      },
+
       recordDvdTitleDamageDecision(input) {
         const operation = "dvd_title_damage_acceptance.accept";
         const semanticInput = dvdTitleDamageDecisionSemanticInput(input);
@@ -18552,6 +18645,7 @@ export function createDataAccessInternal(
                 decision: snapshot.acknowledgementRequired
                   ? "accepted"
                   : "not_required",
+                acceptedDecisionId: null,
                 operator,
                 catalogRevision: new Date(snapshot.current.catalogRevision),
                 checkpointRevision: input.checkpoint.revision,
@@ -18580,6 +18674,109 @@ export function createDataAccessInternal(
             operation,
             semanticInput,
             decision,
+            timestamp,
+          );
+        }, { behavior: "immediate" });
+      },
+
+      withdrawDvdTitleDamageAcceptance(input) {
+        const operation = "dvd_title_damage_acceptance.withdraw";
+        const semanticInput = dvdTitleDamageWithdrawalSemanticInput(input);
+        return database.transaction((transaction) => {
+          const replay = readMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            decodeDvdTitleDamageDecision,
+          );
+          if (replay !== undefined) return replay;
+
+          const operator = requireNonEmpty(input.operator, "operator").trim();
+          if (operator.length > 128) {
+            throw new DomainInvariantError(
+              "Title Damage Acceptance withdrawal operator must be at most 128 characters",
+            );
+          }
+          const previewDecision = transaction.select()
+            .from(mutationInvocations)
+            .where(eq(mutationInvocations.key, input.previewToken))
+            .get();
+          if (
+            previewDecision?.operation !==
+              "dvd_title_damage_acceptance.withdraw.preview" ||
+            previewDecision.semanticInput !==
+              dvdTitleDamageWithdrawalPreviewSemanticInput(input)
+          ) {
+            throw new DomainInvariantError(
+              "Title Damage Acceptance withdrawal preview does not match the accepted event",
+            );
+          }
+
+          const inspection = inspectDvdTitleDamageDecision(
+            input.originalDiscArchiveId,
+            transaction,
+          );
+          const accepted = inspection.current;
+          if (
+            accepted?.decision !== "accepted" ||
+            accepted.id !== input.acceptedDecisionId
+          ) {
+            throw new StaleDvdTitleDamageAcceptanceWithdrawalError({
+              state: inspection.state,
+              decisionId: accepted?.id ?? null,
+            });
+          }
+          const affectedWork = dvdTitleDamageWithdrawalAffectedWork(
+            transaction,
+            accepted,
+          );
+          const requestedTimestamp = now();
+          const latestRecordedAt = transaction.select({
+            recordedAt: dvdTitleDamageDecisions.recordedAt,
+          }).from(dvdTitleDamageDecisions).where(eq(
+            dvdTitleDamageDecisions.originalDiscArchiveId,
+            input.originalDiscArchiveId,
+          )).orderBy(desc(dvdTitleDamageDecisions.recordedAt)).limit(1)
+            .get()?.recordedAt;
+          const timestamp = latestRecordedAt !== undefined &&
+              requestedTimestamp.getTime() <= latestRecordedAt.getTime()
+            ? new Date(latestRecordedAt.getTime() + 1)
+            : requestedTimestamp;
+          const withdrawn = requireRow(
+            transaction.insert(dvdTitleDamageDecisions).values({
+              id: newId<DvdTitleDamageDecisionId>(),
+              originalDiscArchiveId: accepted.originalDiscArchiveId,
+              decision: "withdrawn",
+              acceptedDecisionId: accepted.id,
+              operator,
+              catalogRevision: accepted.catalogRevision,
+              checkpointRevision: accepted.checkpointRevision,
+              checkpointDigest: accepted.checkpointDigest,
+              assessmentIdentity: accepted.assessmentIdentity,
+              assessmentAttemptSequence: accepted.assessmentAttemptSequence,
+              reviewSetIdentity: accepted.reviewSetIdentity,
+              catalogMappingProjectionId:
+                accepted.catalogMappingProjectionId,
+              reviewedContentIdentity: accepted.reviewedContentIdentity,
+              excludedTitleIdentityIds:
+                accepted.excludedTitleIdentityIds,
+              mainFeatureResolutions: accepted.mainFeatureResolutions,
+              snapshot: { ...accepted.snapshot, affectedWork },
+              recordedAt: timestamp,
+            }).returning().get(),
+            "Title Damage Acceptance withdrawal",
+            accepted.id,
+          );
+          transaction.delete(mutationInvocations)
+            .where(eq(mutationInvocations.key, input.previewToken))
+            .run();
+          return recordMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            withdrawn,
             timestamp,
           );
         }, { behavior: "immediate" });

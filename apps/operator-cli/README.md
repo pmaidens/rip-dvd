@@ -127,6 +127,8 @@ rip-dvd catalog-review preview-damage-acceptance <archive-id> --json '<object>'
 rip-dvd catalog-review preview-damage-acceptance <archive-id> --stdin
 rip-dvd catalog-review preview-damage-acceptance <archive-id> --file <path>
 rip-dvd catalog-review accept-damage <archive-id> --key <key> --json '<exact-preview-input>'
+rip-dvd catalog-review preview-withdrawal <archive-id> --accepted-event-id <id>
+rip-dvd catalog-review withdraw-damage <archive-id> --key <key> --json '<withdrawal-input>'
 rip-dvd catalog-review archive-only <archive-id> --key <key> --revision <catalog-revision> --checkpoint-revision <n> --checkpoint-digest <digest>
 rip-dvd catalog-review reopen <archive-id> --key <key> --revision <catalog-revision> --checkpoint-revision <n> --checkpoint-digest <digest>
 rip-dvd catalog-review suggest <archive-id>
@@ -165,6 +167,11 @@ records nothing. Reusing the same mutation key with the same input replays the
 result; changing the input conflicts. The decision does not queue encoding,
 claim watchability, or waive Encode Output validation. `show` reports the
 current decision or its derived `expired` state.
+`preview-withdrawal` reports the exact accepted event plus queued and running
+Encode Jobs that use its reviewed content. `withdraw-damage` submits that
+event ID, the preview token, and the operator. A withdrawal blocks later claims
+for queued work. Running work continues unless separately cancelled, and
+existing outputs are unchanged.
 `reviewActionAvailability` reports whether completion with selections or
 Archive-only completion is currently allowed, with a reason when blocked.
 Each paginated section includes its offset, limit, and next/previous flags.
