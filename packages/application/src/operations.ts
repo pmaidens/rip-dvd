@@ -57,6 +57,7 @@ import { dvdRecoveryResumeAction } from "./dvd-recovery-resume.js";
 import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 import { presentArchiveRecoveryRangeEvidence } from "./archive-recovery-ranges.js";
 import {
+  ArchiveArtifactChangedError,
   describeArchiveArtifact,
   enrichArchiveArtifactSourceIdentity,
   type ArchiveArtifact,
@@ -1191,28 +1192,37 @@ export async function inspectOperationsWithArtifacts(
   kind: OperationKind,
   options: OperationInspectionOptions = {},
 ) {
-  const inspection = inspectOperations(access, kind, options);
-  if (
-    kind !== "original-disc-archives" || options.id === undefined ||
-    !("item" in inspection) || inspection.item === null ||
-    inspection.item === undefined ||
-    !("archiveArtifact" in inspection.item)
-  ) {
-    return inspection;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const inspection = inspectOperations(access, kind, options);
+    if (
+      kind !== "original-disc-archives" || options.id === undefined ||
+      !("item" in inspection) || inspection.item === null ||
+      inspection.item === undefined ||
+      !("archiveArtifact" in inspection.item)
+    ) {
+      return inspection;
+    }
+    const item = inspection.item as typeof inspection.item & {
+      archiveArtifact: ArchiveArtifact;
+    };
+    try {
+      return {
+        ...inspection,
+        item: {
+          ...item,
+          archiveArtifact: await enrichArchiveArtifactSourceIdentity(
+            access,
+            item.archiveArtifact,
+          ),
+        },
+      };
+    } catch (error) {
+      if (!(error instanceof ArchiveArtifactChangedError) || attempt === 2) {
+        throw error;
+      }
+    }
   }
-  const item = inspection.item as typeof inspection.item & {
-    archiveArtifact: ArchiveArtifact;
-  };
-  return {
-    ...inspection,
-    item: {
-      ...item,
-      archiveArtifact: await enrichArchiveArtifactSourceIdentity(
-        access,
-        item.archiveArtifact,
-      ),
-    },
-  };
+  throw new ArchiveArtifactChangedError();
 }
 
 const TERMINAL_STATUSES: Record<WaitableKind, readonly string[]> = {

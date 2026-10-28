@@ -119,6 +119,13 @@ export interface ArchiveArtifact {
   actions: readonly ArchiveArtifactAction[];
 }
 
+export class ArchiveArtifactChangedError extends Error {
+  constructor() {
+    super("Archive artifact identities changed during inspection");
+    this.name = "ArchiveArtifactChangedError";
+  }
+}
+
 function uniqueReasons(
   reasons: readonly (ArchiveArtifactReason | null)[],
 ): ArchiveArtifactReason[] {
@@ -462,6 +469,20 @@ export async function enrichArchiveArtifactSourceIdentity(
     archiveImageOwnership,
   );
   const confirmation = sourceIdentity.preview;
+  const inspectedRecovery = confirmation.archiveRecovery;
+  const inspectedCheckpoint = confirmation.checkpoint;
+  if (
+    inspectedRecovery.originalDiscArchiveId !== artifact.originalDiscArchiveId ||
+    inspectedRecovery.id !== artifact.recovery.record?.id ||
+    inspectedRecovery.attemptId !== artifact.recovery.record.attemptId ||
+    inspectedRecovery.status !== artifact.recovery.record.status ||
+    (inspectedCheckpoint !== null &&
+      (inspectedCheckpoint.revision !== artifact.recovery.checkpoint?.revision ||
+        inspectedCheckpoint.digest !==
+          artifact.recovery.checkpoint?.manifestDigest))
+  ) {
+    throw new ArchiveArtifactChangedError();
+  }
   const verificationAction: ArchiveArtifactAction = {
     name: "verify-disc",
     available: sourceIdentity.verificationAction.available,

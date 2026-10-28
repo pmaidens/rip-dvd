@@ -176,6 +176,19 @@ function seedEncodeJob(
 }
 
 describe("readDashboardSnapshot", () => {
+  it("marks Archive Jobs unavailable when Archive Recovery inventory fails", () => {
+    const access = dataAccessFixture.create();
+    const snapshot = readDashboardSnapshot(withSnapshotOverrides(access, {
+      catalog: {
+        listArchiveRecoveries() {
+          throw new Error("Synthetic Archive Recovery inventory failure");
+        },
+      },
+    }));
+
+    expect(snapshot.archiveJobs).toEqual({ status: "error" });
+  });
+
   it("uses one bounded workflow-evidence read as Catalog Review rows grow", () => {
     const { access, databasePath } = dataAccessFixture.createWithDatabasePath();
     const drive = access.catalog.upsertOpticalDrive({

@@ -142,6 +142,22 @@ it("offers the same attempt-bound durable Stop through web and CLI", async () =>
         ]),
       },
     });
+    const artifactWeb = await createOperationsResponse(
+      access,
+      new Request(
+        `http://localhost:3000/api/operations?kind=original-disc-archives&id=${seeded.archive.id}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    const artifactCli = await fixture.run([
+      "inspect",
+      "original-disc-archives",
+      seeded.archive.id,
+    ]);
+    expect(artifactCli.result).toEqual(await artifactWeb.json());
+    expect(artifactCli.result).toMatchObject({
+      item: { archiveArtifact: { recovery: { state: "stopped" } } },
+    });
     expect((await fixture.run([
       "wait",
       "archive-recoveries",

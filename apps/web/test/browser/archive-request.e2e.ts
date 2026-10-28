@@ -39,7 +39,15 @@ test("shows the saved archive and active recovery as one truthful artifact", asy
   await expect(initial.getByText("completed", { exact: true })).toBeVisible();
 
   const recovery = artifact.getByRole("region", { name: "Archive Recovery" });
-  await expect(recovery.getByText("Revision 1", { exact: true })).toBeVisible();
+  await expect(recovery.getByText("Revision 1", { exact: false })).toBeVisible();
+  await expect(recovery.getByText("Accepted extent", { exact: true })).toBeVisible();
+  await expect(recovery.getByText("4096 sectors", { exact: true })).toBeVisible();
+  await expect(recovery.getByText("Current pass estimate", { exact: true }))
+    .toBeVisible();
+  await expect(
+    recovery.getByText("Current pass estimate", { exact: true })
+      .locator("..").getByText("Unknown", { exact: true }),
+  ).toBeVisible();
   await expect(recovery.getByText("1 sector", { exact: true })).toHaveCount(2);
   await expect(recovery.getByText("0 sectors", { exact: true })).toHaveCount(2);
 

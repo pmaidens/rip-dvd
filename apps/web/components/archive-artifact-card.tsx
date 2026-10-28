@@ -100,9 +100,9 @@ export function ArchiveArtifactCard({
   const [actionFailed, setActionFailed] = useState(false);
   const mutationKeys = React.useRef(new Map<string, string>());
 
-  const load = React.useCallback(async () => {
+  const load = React.useCallback(async (showLoading = true) => {
     try {
-      setState({ status: "loading" });
+      if (showLoading) setState({ status: "loading" });
       setState({
         status: "loaded",
         artifact: await requestArchiveArtifact(job.originalDiscArchiveId),
@@ -115,6 +115,18 @@ export function ArchiveArtifactCard({
   useEffect(() => {
     void load();
   }, [load, job.activityRevision]);
+
+  useEffect(() => {
+    if (
+      state.status !== "loaded" ||
+      state.artifact.recovery.state === "stopped" ||
+      state.artifact.recovery.state === "completed"
+    ) {
+      return;
+    }
+    const timer = window.setInterval(() => void load(false), 5_000);
+    return () => window.clearInterval(timer);
+  }, [load, state]);
 
   const run = async (
     name: ArchiveArtifactAction["name"],
@@ -175,6 +187,14 @@ export function ArchiveArtifactCard({
   const artifact = state.artifact;
   const progress = artifact.recovery.progress;
   const currentPass = progress?.currentPass ?? null;
+  const currentPassEstimate = currentPass === null ||
+      currentPass.completionEstimate === "unknown"
+    ? "Unknown"
+    : `${formatDuration(Math.ceil(
+        currentPass.completionEstimate.minimumRemainingMs / 1_000,
+      ))} to ${formatDuration(Math.ceil(
+        currentPass.completionEstimate.maximumRemainingMs / 1_000,
+      ))}`;
   const verification = artifact.sourceIdentity.verification;
   const confirmation = artifact.sourceIdentity.confirmation;
   const reconciliation = artifact.recovery.reconciliation;
@@ -243,7 +263,16 @@ export function ArchiveArtifactCard({
             <dt>Checkpoint</dt>
             <dd>{artifact.recovery.checkpoint === null
               ? "Unavailable"
-              : `Revision ${artifact.recovery.checkpoint.revision}`}</dd>
+              : <>Revision {artifact.recovery.checkpoint.revision} · <code>{artifact.recovery.checkpoint.manifestDigest}</code></>}</dd>
+          </div>
+          <div>
+            <dt>Accepted extent</dt>
+            <dd>{artifact.recovery.checkpoint === null
+              ? "Unavailable"
+              : countLabel(
+                  artifact.recovery.checkpoint.acceptedEndLbaExclusive,
+                  "sector",
+                )}</dd>
           </div>
           <div>
             <dt>Skipped, untested</dt>
@@ -286,6 +315,24 @@ export function ArchiveArtifactCard({
             <dd>{currentPass?.elapsedMs === null || currentPass === null
               ? "Unavailable"
               : formatDuration(Math.floor(currentPass.elapsedMs / 1_000))}</dd>
+          </div>
+          <div>
+            <dt>Current pass progress</dt>
+            <dd>{currentPass?.initialUnrecoveredSectorCount === null ||
+                currentPass?.initialUnrecoveredSectorCount === undefined ||
+                currentPass.remainingSectorCount === null
+              ? "Unknown"
+              : `${countLabel(
+                  currentPass.remainingSectorCount,
+                  "sector",
+                )} remain of ${countLabel(
+                  currentPass.initialUnrecoveredSectorCount,
+                  "sector",
+                )}`}</dd>
+          </div>
+          <div>
+            <dt>Current pass estimate</dt>
+            <dd>{currentPassEstimate}</dd>
           </div>
           <div>
             <dt>Recovery work</dt>

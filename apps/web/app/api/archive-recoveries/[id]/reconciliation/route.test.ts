@@ -17,6 +17,7 @@ import {
   createDvdRecoveryReconciliationInspectionRoute,
   createDvdRecoveryReconciliationRoute,
 } from "./route";
+import { createOperationsResponse } from "../../../operations/route.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
@@ -170,6 +171,31 @@ it("keeps web and JSON CLI submission, progress, replay, and evidence equal", as
         status: "completed",
         recoveryStatus: "eligible",
         reconciliation: { status: "completed" },
+      },
+    });
+    const artifactWeb = await createOperationsResponse(
+      access,
+      new Request(
+        `http://localhost:3000/api/operations?kind=original-disc-archives&id=${seeded.archive.id}`,
+      ),
+      fixture.originalsLibraryPath,
+    );
+    const artifactCli = await fixture.run([
+      "inspect",
+      "original-disc-archives",
+      seeded.archive.id,
+    ]);
+    expect(artifactCli.result).toEqual(await artifactWeb.json());
+    expect(artifactCli.result).toMatchObject({
+      item: {
+        archiveArtifact: {
+          recovery: {
+            reconciliation: {
+              status: "completed",
+              outcome: "already_consistent",
+            },
+          },
+        },
       },
     });
     const waited = await fixture.run([
