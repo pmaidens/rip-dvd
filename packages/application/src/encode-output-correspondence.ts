@@ -25,7 +25,7 @@ function parseQuery(value: unknown): IntervalQuery {
   return {
     assessmentIdentity: input.assessmentIdentity as string,
     titleIdentityObservationId: input.titleIdentityObservationId as string,
-    intervalIndexes: input.intervalIndexes as number[],
+    intervalIndexes: [...input.intervalIndexes] as number[],
   };
 }
 
