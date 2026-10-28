@@ -71,6 +71,8 @@ and compare both adapters with the same application rule.
 | Connected diagnosis, recovery, fresh preservation, review, acceptance, and replacement | The preservation, Catalog Review, and encoding routes above | Supported `rip-dvd` request, inspect, retry, review, acceptance, and encoding commands | `apps/operator-cli/src/full-operator-parity.integration.test.ts` |
 | Archive Job saved/failure notifications from any submitting client, outcome navigation, labeled detail and safe missing-target fallback | `/notifications/target`, `GET apps/web/app/api/operations/route.ts` | `rip-dvd inspect` archive-jobs and original-disc-archives | `apps/web/test/browser/notifications.e2e.ts`, `apps/operator-cli/src/archive-job-notifications.test.ts`, `apps/web/app/api/notifications/route.test.ts`, `apps/archive-worker/src/archive-worker.test.ts` |
 | Confirmed Recovery Stop notifications after source commands, writer ownership and checkpoint reconciliation settle, with current remaining-source wording, replay/restart deduplication, distinct later stop identities, and safe navigation to current Recovery status, checkpoint, source counts and action availability | `POST apps/web/app/api/archive-recoveries/[id]/stop/route.ts`, `/notifications/target`, `GET apps/web/app/api/notifications/route.ts` | `rip-dvd archive-recovery stop`, `rip-dvd inspect archive-recoveries`, `rip-dvd notifications deliveries` | `apps/web/app/api/archive-recoveries/[id]/stop-notifications.test.ts`, `apps/web/app/api/archive-recoveries/[id]/recovery-worker.test.ts`, `apps/web/app/api/archive-recoveries/[id]/stop/route.test.ts`, `apps/web/test/browser/notifications.e2e.ts` |
+
+| Later Archive Recovery completion and committed attention notifications, including storage-fault pauses, with current recovery status, reasons and remaining-source facts at the labeled archive destination | `/notifications/target`, `GET apps/web/app/api/operations/route.ts`, `GET apps/web/app/api/notifications/route.ts` | `rip-dvd inspect` archive-recoveries and original-disc-archives, `rip-dvd notifications deliveries` | `apps/web/app/api/archive-recoveries/[id]/recovery-worker.test.ts` public CLI workflow and HTTP parity, `apps/archive-worker/src/dvd-initial-save.test.ts` initial-completion suppression, `apps/web/test/browser/notifications.e2e.ts` click navigation |
 | Browser notification configuration, subscription administration preserved through worker updates, queued tests, and retained queued/retrying/accepted/expired/failed delivery inspection with redacted reasons, attempt counts, retry timing and expiry | `apps/web/app/api/notifications/route.ts`, `/notifications` | `rip-dvd notifications` status, subscriptions, register, remove, test, deliveries | `apps/operator-cli/src/notifications.test.ts`, `apps/operator-cli/src/archive-job-notifications.test.ts`, `apps/web/app/api/notifications/route.test.ts`, `apps/web/test/browser/notifications.e2e.ts`, `apps/web/test/browser/notification-updates.e2e.ts` |
 <!-- capability-inventory:end -->
 
@@ -135,6 +137,16 @@ atomically queue notifications at persistence. These producers add no operator
 mutation command. Existing notification delivery inspection and Archive Job detail
 commands expose the same outcomes to HTTP and JSON CLI clients. Cancellation and
 cooperative abort do not emit failure notifications.
+
+Archive Recovery completion and committed attention outcomes also queue events
+within their persistence transactions. Pass settlement, reconciled completion,
+storage-fault pauses, failed continuation verification or checkpoint
+reconciliation, and unreconcilable Stop
+faults reuse the shared producer contract. They add no operator command or
+background work type. The recovery worker workflow tests inspect the same
+durable results through public JSON CLI and HTTP operations and dispatch through
+the controlled sender. Initial completed Recovery, productive or no-progress
+passes, tolerable reads, and interruption alone do not create Recovery alerts.
 
 Notification worker update checks, activation and subscription continuity are
 browser-only lifecycle behavior, covered by `notification-updates.e2e.ts` on the

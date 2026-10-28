@@ -5,6 +5,17 @@ import { createECDH } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { NotificationPayload } from "@rip-dvd/data-access";
+
+export function recoveryNotificationPayload(originalDiscArchiveId: string, label: string): NotificationPayload {
+  const data = pathToFileURL(resolve("../../packages/data-access/dist/index.js")).href;
+  return JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", `
+    import { formatNotification } from ${JSON.stringify(data)};
+    console.log(JSON.stringify(formatNotification({ kind: "recovery_attention",
+      sourceEventId: "synthetic-browser-recovery-attention",
+      originalDiscArchiveId: process.argv[1], label: process.argv[2] }).payload));
+  `, originalDiscArchiveId, label], { encoding: "utf8" }));
+}
 
 export async function controlledSubscription(page: Page, permission: "granted" | "denied" = "granted") {
   const key = createECDH("prime256v1"); key.setPrivateKey(Buffer.alloc(32, 2));
