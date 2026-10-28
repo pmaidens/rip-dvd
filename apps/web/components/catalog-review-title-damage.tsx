@@ -23,6 +23,127 @@ function playbackTime(milliseconds: number): string {
   return `${clock}.${String(fraction).padStart(3, "0")}`;
 }
 
+type TitleDamageAssessmentEvidence = Pick<
+  CatalogReviewTitleDamage["items"][number],
+  | "estimatedAffectedPlayback"
+  | "mappingCoverage"
+  | "sourceContinuityRiskSectorCount"
+  | "titleMissingSourcePercentage"
+  | "uniqueSourceSectorCount"
+  | "unrecoveredUniqueSourceSectorCount"
+>;
+
+export function CatalogReviewTitleDamageAssessmentEvidence({
+  assessment,
+}: {
+  assessment: TitleDamageAssessmentEvidence;
+}) {
+  return (
+    <>
+      <span>
+        {assessment.unrecoveredUniqueSourceSectorCount} known unrecovered {
+          assessment.unrecoveredUniqueSourceSectorCount === 1
+            ? "source sector"
+            : "source sectors"
+        }.
+      </span>
+      {assessment.sourceContinuityRiskSectorCount > 0 ? (
+        <span>
+          {assessment.sourceContinuityRiskSectorCount} recovered source {
+            assessment.sourceContinuityRiskSectorCount === 1
+              ? "sector has"
+              : "sectors have"
+          } operator-confirmed uncertain continuity.
+        </span>
+      ) : null}
+      {assessment.titleMissingSourcePercentage === null ? (
+        <span>Complete Title Missing-Source Percentage unavailable.</span>
+      ) : (
+        <span>
+          Title Missing-Source Percentage: {
+            percentage(assessment.titleMissingSourcePercentage)
+          } ({assessment.unrecoveredUniqueSourceSectorCount} of {
+            assessment.uniqueSourceSectorCount
+          } unique source sectors).
+        </span>
+      )}
+      {assessment.mappingCoverage.unknownReasons.length === 0 ? null : (
+        <ul>
+          {assessment.mappingCoverage.unknownReasons.map((reason) => (
+            <li key={`${reason.code}\0${reason.message}`}>
+              <code>{reason.code}</code> {reason.message}
+            </li>
+          ))}
+        </ul>
+      )}
+      {assessment.estimatedAffectedPlayback !== null &&
+          (assessment.estimatedAffectedPlayback.intervals.length > 0 ||
+            assessment.estimatedAffectedPlayback.unknownCoverage.length > 0)
+        ? (
+          <div>
+            <p>Estimated affected playback</p>
+            <p>
+              These intervals locate source associated with the gap. They do
+              not claim exact playback lost or bound decoder effects.
+            </p>
+            {assessment.estimatedAffectedPlayback.intervals.length > 0
+              ? (
+                <ul>
+                  {assessment.estimatedAffectedPlayback.intervals.map(
+                    (interval) => (
+                      <li
+                        key={JSON.stringify([
+                          interval.playbackOccurrence,
+                          interval.startMilliseconds,
+                          interval.endMilliseconds,
+                          interval.timingMethods,
+                        ])}
+                      >
+                        Occurrence {interval.playbackOccurrence}: {
+                          playbackTime(interval.startMilliseconds)
+                        } to {playbackTime(interval.endMilliseconds)}. Timing {
+                          interval.timingMethods.length === 1
+                            ? "method"
+                            : "methods"
+                        }: {interval.timingMethods.join(", ")}. Coverage: {
+                          interval.coverage === "whole_cell"
+                            ? "whole-cell span"
+                            : "source span"
+                        }.
+                      </li>
+                    ),
+                  )}
+                </ul>
+              )
+              : null}
+            {assessment.estimatedAffectedPlayback.unknownCoverage.map(
+              (unknown) => (
+                <div key={unknown.playbackOccurrence}>
+                  <p>
+                    Occurrence {unknown.playbackOccurrence}: playback location
+                    unknown for {unknown.unrecoveredSourceSectorCount} {
+                      unknown.unrecoveredSourceSectorCount === 1
+                        ? "unrecovered source sector"
+                        : "unrecovered source sectors"
+                    }.
+                  </p>
+                  <ul>
+                    {unknown.reasons.map((reason) => (
+                      <li key={`${reason.code}\0${reason.message}`}>
+                        <code>{reason.code}</code> {reason.message}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ),
+            )}
+          </div>
+        )
+        : null}
+    </>
+  );
+}
+
 interface TitleDamagePagingState {
   items: CatalogReviewTitleDamage["items"];
   nextCursor: string | null;
@@ -193,110 +314,7 @@ function CatalogReviewTitleDamageEvidenceGeneration({
                   item.selection.chapterStart
                 }–{item.selection.chapterEnd}.
               </span>
-              <span>
-                {item.unrecoveredUniqueSourceSectorCount} known unrecovered {
-                  item.unrecoveredUniqueSourceSectorCount === 1
-                    ? "source sector"
-                    : "source sectors"
-                }.
-              </span>
-              {item.sourceContinuityRiskSectorCount > 0 ? (
-                <span>
-                  {item.sourceContinuityRiskSectorCount} recovered source {
-                    item.sourceContinuityRiskSectorCount === 1
-                      ? "sector has"
-                      : "sectors have"
-                  } operator-confirmed uncertain continuity.
-                </span>
-              ) : null}
-              {item.titleMissingSourcePercentage === null ? (
-                <>
-                  <span>
-                    Complete Title Missing-Source Percentage unavailable.
-                  </span>
-                  <ul>
-                    {item.mappingCoverage.unknownReasons.map((reason) => (
-                      <li key={`${reason.code}\0${reason.message}`}>
-                        {reason.message}
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              ) : (
-                <span>
-                  Title Missing-Source Percentage: {
-                    percentage(item.titleMissingSourcePercentage)
-                  } ({item.unrecoveredUniqueSourceSectorCount} of {
-                    item.uniqueSourceSectorCount
-                  } unique source sectors).
-                </span>
-              )}
-              {item.estimatedAffectedPlayback !== null &&
-                  (item.estimatedAffectedPlayback.intervals.length > 0 ||
-                    item.estimatedAffectedPlayback.unknownCoverage.length > 0)
-                ? (
-                  <div>
-                    <p>Estimated affected playback</p>
-                    <p>
-                      These intervals locate source associated with the gap.
-                      They do not claim exact playback lost or bound decoder
-                      effects.
-                    </p>
-                    {item.estimatedAffectedPlayback.intervals.length > 0
-                      ? (
-                        <ul>
-                          {item.estimatedAffectedPlayback.intervals.map(
-                            (interval) => (
-                              <li
-                                key={JSON.stringify([
-                                  interval.playbackOccurrence,
-                                  interval.startMilliseconds,
-                                  interval.endMilliseconds,
-                                  interval.timingMethods,
-                                ])}
-                              >
-                                Occurrence {interval.playbackOccurrence}: {
-                                  playbackTime(interval.startMilliseconds)
-                                } to {playbackTime(interval.endMilliseconds)}.
-                                Timing {interval.timingMethods.length === 1
-                                  ? "method"
-                                  : "methods"}: {
-                                  interval.timingMethods.join(", ")
-                                }. Coverage: {interval.coverage === "whole_cell"
-                                  ? "whole-cell span"
-                                  : "source span"}.
-                              </li>
-                            ),
-                          )}
-                        </ul>
-                      )
-                      : null}
-                    {item.estimatedAffectedPlayback.unknownCoverage.map(
-                      (unknown) => (
-                        <div key={unknown.playbackOccurrence}>
-                          <p>
-                            Occurrence {unknown.playbackOccurrence}: playback
-                            location unknown for {
-                              unknown.unrecoveredSourceSectorCount
-                            } unrecovered source {
-                              unknown.unrecoveredSourceSectorCount === 1
-                                ? "sector"
-                                : "sectors"
-                            }.
-                          </p>
-                          <ul>
-                            {unknown.reasons.map((reason) => (
-                              <li key={`${reason.code}\0${reason.message}`}>
-                                {reason.message}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      ),
-                    )}
-                  </div>
-                )
-                : null}
+              <CatalogReviewTitleDamageAssessmentEvidence assessment={item} />
             </li>
           ))}
         </ul>

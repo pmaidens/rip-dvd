@@ -1,4 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 
 import {
@@ -654,6 +656,196 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     currentAssessmentIdentity: chapterRemapped.id,
     assessment: { id: chapterRemapped.id },
   });
+
+  const stableRecoverySqlite = new DatabaseSync(fixture.databasePath);
+  stableRecoverySqlite.prepare(`
+    UPDATE archive_recoveries
+    SET status = 'stopped', stop_operation_id = 'synthetic-stop',
+        stop_requested_at = 3, stopped_at = 4, updated_at = 4
+    WHERE original_disc_archive_id = ?
+  `).run(archive.id);
+  stableRecoverySqlite.close();
+  const mainFeatureSelection = access.catalog.listDiscSelections({
+    originalDiscArchiveId: archive.id,
+  }).find((selection) => selection.sourceIdentity.kind === "main_feature");
+  if (mainFeatureSelection === undefined) {
+    throw new Error("Expected a main-feature Disc Selection");
+  }
+  const completePreflight = await fixture.run([
+    "catalog-review",
+    "preview-title-damage-acceptance",
+    archive.id,
+  ]);
+  expect(completePreflight).toMatchObject({
+    exitCode: 0,
+    result: {
+      available: false,
+      previewToken: null,
+      action: {
+        available: false,
+        reasons: [{ code: "SELECTION_UNIDENTIFIED" }],
+      },
+      allContent: [
+        { titleIdentityId: currentItems[0]!.titleIdentityId, included: true },
+        { titleIdentityId: currentItems[1]!.titleIdentityId, included: true },
+        { titleIdentityId: currentItems[2]!.titleIdentityId, included: true },
+      ],
+      exclusions: [],
+    },
+  });
+  const exactPreflight = await fixture.run([
+    "catalog-review",
+    "preview-damage-acceptance",
+    archive.id,
+    "--exclude-title-identity",
+    currentItems[1]!.titleIdentityId,
+    "--exclude-title-identity",
+    currentItems[2]!.titleIdentityId,
+    "--resolve-main-feature",
+    mainFeatureSelection.id,
+    currentItems[0]!.titleIdentityId,
+  ]);
+  const exactPreflightResult = JSON.parse(exactPreflight.stdout) as {
+    reviewedContent: Array<{ catalogMappings: unknown[] }>;
+  };
+  expect(exactPreflight).toMatchObject({
+    exitCode: 0,
+    result: {
+      available: true,
+      previewToken: expect.stringMatching(
+        /^dvd-title-damage-acceptance-preview:/,
+      ),
+      assessmentIdentity: chapterRemapped.id,
+      reviewSetIdentity: expect.any(String),
+      catalogMappingProjectionId: expect.any(String),
+      reviewedContentIdentity: expect.any(String),
+      acknowledgementRequired: true,
+      action: {
+        expectedInputs: expect.arrayContaining(["damageAcknowledgement"]),
+      },
+      reviewedContent: [{
+        titleIdentityId: currentItems[0]!.titleIdentityId,
+        sourceIdentity: {
+          displayTitleNumber: 1,
+          angleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 4,
+        },
+        catalogMappings: expect.any(Array),
+        assessmentSnapshot: {
+          unrecoveredUniqueSourceSectorCount: 4,
+          sourceContinuityRiskSectorCount: 1,
+        },
+      }],
+      exclusions: [
+        { titleIdentityId: currentItems[1]!.titleIdentityId },
+        { titleIdentityId: currentItems[2]!.titleIdentityId },
+      ],
+      mainFeatureChoices: [{
+        discSelectionId: mainFeatureSelection.id,
+        resolvedTitleIdentityId: currentItems[0]!.titleIdentityId,
+        resolvedSourceIdentity: {
+          displayTitleNumber: 1,
+          angleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 4,
+        },
+      }],
+      affectedWork: [],
+      damagePreview: {
+        required: false,
+        available: false,
+      },
+    },
+  });
+  expect(exactPreflightResult.reviewedContent[0]!.catalogMappings).toEqual(
+    expect.arrayContaining([expect.objectContaining({
+      discSelectionId: mappedSelection.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 1,
+        chapterEnd: 2,
+      },
+      mediaItem: expect.objectContaining({
+        kind: "movie",
+        title: "Synthetic remapped damage",
+      }),
+    }), expect.objectContaining({
+      discSelectionId: mainFeatureSelection.id,
+      sourceIdentity: { kind: "main_feature" },
+      resolvedSourceIdentity: expect.objectContaining({
+        displayTitleNumber: 1,
+        angleNumber: 1,
+        chapterStart: 1,
+        chapterEnd: 4,
+      }),
+      mediaItem: expect.objectContaining({
+        kind: "movie",
+        title: "Corrected Film",
+      }),
+    })]),
+  );
+  const previewLedger = new DatabaseSync(fixture.databasePath);
+  expect(previewLedger.prepare(`
+    SELECT operation, outcome
+    FROM mutation_invocations
+    WHERE operation = 'dvd_title_damage_acceptance.preview'
+  `).all()).toEqual([{
+    operation: "dvd_title_damage_acceptance.preview",
+    outcome: expect.stringContaining("expectedPreviewEvidence"),
+  }]);
+  previewLedger.close();
+
+  const structuredInput = JSON.stringify({
+    excludedTitleIdentityIds: [
+      currentItems[1]!.titleIdentityId,
+      currentItems[2]!.titleIdentityId,
+    ],
+    mainFeatureResolutions: [{
+      discSelectionId: mainFeatureSelection.id,
+      titleIdentityId: currentItems[0]!.titleIdentityId,
+    }],
+  });
+  const structuredFile = join(
+    fixture.operatorHostPath,
+    "title-damage-acceptance.json",
+  );
+  writeFileSync(structuredFile, structuredInput);
+  const structuredPreflights = [
+    await fixture.run([
+      "catalog-review",
+      "preview-damage-acceptance",
+      archive.id,
+      "--json",
+      structuredInput,
+    ]),
+    await fixture.run([
+      "catalog-review",
+      "preview-damage-acceptance",
+      archive.id,
+      "--stdin",
+    ], null, structuredInput),
+    await fixture.run([
+      "catalog-review",
+      "preview-damage-acceptance",
+      archive.id,
+      "--file",
+      structuredFile,
+    ]),
+  ];
+  for (const structuredPreflight of structuredPreflights) {
+    expect(structuredPreflight).toMatchObject({
+      exitCode: 0,
+      result: {
+        available: true,
+        exclusions: [
+          { titleIdentityId: currentItems[1]!.titleIdentityId },
+          { titleIdentityId: currentItems[2]!.titleIdentityId },
+        ],
+      },
+    });
+  }
 
   const laterRecorded = await access.assessDvdTitleDamage(
     archive.id,

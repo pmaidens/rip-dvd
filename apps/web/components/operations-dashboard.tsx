@@ -91,20 +91,7 @@ export function catalogReviewActivityRevision(
     ? state.catalogReview.items.find(({ id }) => id === archiveId)
         ?.activityRevision ?? null
     : state.catalogReview.status;
-  const correctedJobRevisions = state.encodeJobs.status === "loaded"
-    ? state.encodeJobs.items
-      .filter((job) =>
-        job.discSelectionCorrection !== undefined ||
-        job.correctedReplacement !== undefined
-      )
-      .map((job) => [
-        job.id,
-        job.activityRevision ?? null,
-        job.status,
-        job.correctedReplacement?.predecessorReady ?? null,
-      ])
-    : state.encodeJobs.status;
-  return JSON.stringify([archiveRevision, correctedJobRevisions]);
+  return JSON.stringify([archiveRevision]);
 }
 
 interface SectionProps<T> {

@@ -317,6 +317,19 @@ it("keeps an open review revision stable across unchanged SSE heartbeats", () =>
         activityRevision: "2026-08-13T16:00:01.000Z",
       })),
     },
+  }, "archive-a")).toBe(first);
+  const catalogReview = state.catalogReview.status === "loaded"
+    ? state.catalogReview
+    : { status: "loaded" as const, items: [] };
+  expect(catalogReviewActivityRevision({
+    ...state,
+    catalogReview: {
+      ...catalogReview,
+      items: catalogReview.items.map((item) => ({
+        ...item,
+        activityRevision: "2026-08-13T16:00:01.000Z",
+      })),
+    },
   }, "archive-a")).not.toBe(first);
 });
 

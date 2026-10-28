@@ -434,12 +434,15 @@ const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
 const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const MAX_DISC_INSPECTION_SETTLING_RESET_COUNT = 10_000;
 const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
+const DISC_SELECTION_ARCHIVE_LOOKUP_LIMIT = 100;
 const DISC_SELECTION_ACTION_AVAILABILITY_LIMIT = 100;
 const DISC_SELECTION_SUPERSESSION_LIMIT = 100;
 const DISC_SELECTION_SUPERSESSION_HISTORY_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
 const ENCODE_JOB_FAILURE_REPORT_JOB_LIMIT = 400;
+const ACTIVE_ENCODE_JOB_DISC_SELECTION_LIMIT = MAX_DVD_TITLES;
+const ACTIVE_ENCODE_JOB_RESULT_LIMIT = MAX_DVD_TITLES * 8;
 const DVD_ARCHIVE_EVIDENCE_AUDIT_MANIFEST_LIMIT = 10_000;
 const DVD_RECOVERY_PASS_HISTORY_LIMIT = 16;
 function discSelectionMatchesTitleObservation(
@@ -14944,6 +14947,10 @@ export function createDataAccessInternal(
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
           listForDiscSelection: (id) =>
             access.encodeJobs.listForDiscSelection(id),
+          listActiveForDiscSelections: (options) =>
+            access.encodeJobs.listActiveForDiscSelections(options),
+          listActiveForOriginalDiscArchives: (options) =>
+            access.encodeJobs.listActiveForOriginalDiscArchives(options),
           hasReservedOutputPathConflict: (job) =>
             access.encodeJobs.hasReservedOutputPathConflict(job),
           hasReservedOutputPath: (outputPath) =>
@@ -18188,6 +18195,24 @@ export function createDataAccessInternal(
         }).run();
       },
 
+      recordDvdTitleDamageAcceptancePreviewDecision(input) {
+        database.insert(mutationInvocations).values({
+          key: requireNonEmpty(input.previewToken, "previewToken"),
+          operation: "dvd_title_damage_acceptance.preview",
+          semanticInput: JSON.stringify([
+            input.originalDiscArchiveId,
+            [...input.excludedTitleIdentityIds].sort(),
+            [...input.mainFeatureResolutions].sort((left, right) =>
+              left.discSelectionId.localeCompare(right.discSelectionId)
+            ),
+          ]),
+          outcome: JSON.stringify({
+            expectedPreviewEvidence: input.expectedPreviewEvidence,
+          }),
+          createdAt: now(),
+        }).run();
+      },
+
       createMediaItem(input, options) {
         const timestamp = now();
         const id = newId<MediaItemId>();
@@ -19425,7 +19450,30 @@ export function createDataAccessInternal(
       },
 
       listDiscSelections(options) {
-        if (options?.ids !== undefined && options.ids.length === 0) {
+        if (
+          options?.originalDiscArchiveId !== undefined &&
+          options.originalDiscArchiveIds !== undefined
+        ) {
+          throw new DomainInvariantError(
+            "Disc Selection lookup accepts one archive ID filter form",
+          );
+        }
+        const originalDiscArchiveIds = options?.originalDiscArchiveIds ===
+            undefined
+          ? undefined
+          : [...new Set(options.originalDiscArchiveIds)];
+        if (
+          originalDiscArchiveIds !== undefined &&
+          originalDiscArchiveIds.length > DISC_SELECTION_ARCHIVE_LOOKUP_LIMIT
+        ) {
+          throw new DomainInvariantError(
+            `Disc Selection lookup is limited to ${DISC_SELECTION_ARCHIVE_LOOKUP_LIMIT} archives`,
+          );
+        }
+        if (
+          (options?.ids !== undefined && options.ids.length === 0) ||
+          originalDiscArchiveIds?.length === 0
+        ) {
           return [];
         }
         const conditions = [
@@ -19438,6 +19486,12 @@ export function createDataAccessInternal(
                 options.originalDiscArchiveId,
               )
             : undefined,
+          originalDiscArchiveIds === undefined
+            ? undefined
+            : inArray(
+                discSelections.originalDiscArchiveId,
+                originalDiscArchiveIds,
+              ),
           options?.encodeEligibleOnly
             ? encodeEligibleDiscSelectionCondition()
             : options?.ids === undefined && !options?.includeHistorical
@@ -22654,6 +22708,91 @@ export function createDataAccessInternal(
           .where(eq(encodeJobs.discSelectionId, id))
           .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
           .all();
+      },
+      listActiveForDiscSelections(options) {
+        const discSelectionIds = [...new Set(options.discSelectionIds)];
+        if (
+          discSelectionIds.length > ACTIVE_ENCODE_JOB_DISC_SELECTION_LIMIT
+        ) {
+          throw new DomainInvariantError(
+            `Active Encode Job lookup is limited to ${ACTIVE_ENCODE_JOB_DISC_SELECTION_LIMIT} Disc Selections`,
+          );
+        }
+        if (
+          !Number.isSafeInteger(options.limit) || options.limit < 1 ||
+          options.limit > ACTIVE_ENCODE_JOB_RESULT_LIMIT
+        ) {
+          throw new DomainInvariantError(
+            `Active Encode Job lookup limit must be a safe integer between 1 and ${ACTIVE_ENCODE_JOB_RESULT_LIMIT}`,
+          );
+        }
+        if (discSelectionIds.length === 0) return [];
+        const jobs = database.select().from(encodeJobs)
+          .where(and(
+            inArray(encodeJobs.discSelectionId, discSelectionIds),
+            inArray(encodeJobs.status, [
+              "queued",
+              "running",
+              "cancellation_requested",
+            ]),
+          ))
+          .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
+          .limit(options.limit + 1)
+          .all();
+        if (jobs.length > options.limit) {
+          throw new DomainInvariantError(
+            `Active Encode Job lookup exceeds the ${options.limit}-job limit`,
+          );
+        }
+        return jobs;
+      },
+      listActiveForOriginalDiscArchives(options) {
+        const originalDiscArchiveIds = [
+          ...new Set(options.originalDiscArchiveIds),
+        ];
+        if (
+          originalDiscArchiveIds.length > DISC_SELECTION_ARCHIVE_LOOKUP_LIMIT
+        ) {
+          throw new DomainInvariantError(
+            `Active Encode Job lookup is limited to ${DISC_SELECTION_ARCHIVE_LOOKUP_LIMIT} archives`,
+          );
+        }
+        if (
+          !Number.isSafeInteger(options.limit) || options.limit < 1 ||
+          options.limit > ACTIVE_ENCODE_JOB_RESULT_LIMIT
+        ) {
+          throw new DomainInvariantError(
+            `Active Encode Job lookup limit must be a safe integer between 1 and ${ACTIVE_ENCODE_JOB_RESULT_LIMIT}`,
+          );
+        }
+        if (originalDiscArchiveIds.length === 0) return [];
+        const selectionIds = database.select({ id: discSelections.id })
+          .from(discSelections)
+          .where(and(
+            inArray(
+              discSelections.originalDiscArchiveId,
+              originalDiscArchiveIds,
+            ),
+            eq(discSelections.isCatalogActive, true),
+          ));
+        const jobs = database.select().from(encodeJobs)
+          .where(and(
+            inArray(encodeJobs.discSelectionId, selectionIds),
+            inArray(encodeJobs.status, [
+              "queued",
+              "running",
+              "cancellation_requested",
+            ]),
+          ))
+          .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
+          .limit(options.limit + 1)
+          .all();
+        if (jobs.length > options.limit) {
+          throw new DomainInvariantError(
+            `Active Encode Job lookup exceeds the ${options.limit}-job limit`,
+          );
+        }
+        return jobs;
       },
       hasReservedOutputPathConflict(job) {
         return database.select({ id: encodeJobs.id }).from(encodeJobs)

@@ -3,6 +3,7 @@ import {
   describeArchiveRequestWaitingStatus,
   encodeOutputArtifactReferences,
   encodeRequeueAvailability,
+  readMediaItemsWithAncestors,
 } from "@rip-dvd/application";
 import { createHash } from "node:crypto";
 import type { PresentedArchiveRequestWaitingStatus } from "@rip-dvd/application";
@@ -35,6 +36,7 @@ import type {
   EncodeJobStatus,
   EncodeProgressPhase,
   FilesystemVerificationStatus,
+  MediaItem,
   OriginalDiscArchive,
   OriginalDiscArchiveId,
   UnreadableSectorRange,
@@ -52,6 +54,7 @@ import {
 } from "@rip-dvd/data-access";
 import {
   decodeDvdTitleMap,
+  MAX_DVD_TITLES,
   type DvdTitle,
 } from "@rip-dvd/data-access/dvd-scan";
 
@@ -81,23 +84,65 @@ export interface DashboardOpticalDrive {
 export function catalogReviewActivityRevision(
   archive: Pick<OriginalDiscArchive, "updatedAt">,
   workflow: CatalogReviewWorkflow | null,
+  affectedWork: readonly Pick<
+    EncodeJob,
+    "id" | "discSelectionId" | "status"
+  >[] = [],
+  mediaItems: readonly Pick<
+    MediaItem,
+    | "id"
+    | "kind"
+    | "parentId"
+    | "title"
+    | "year"
+    | "seasonNumber"
+    | "episodeNumber"
+  >[] = [],
 ): string {
-  if (workflow === null) return archive.updatedAt.toISOString();
-  const recovery = workflow.current.recovery;
+  const recovery = workflow?.current.recovery;
   const work = recovery?.work;
-  return [
-    archive.updatedAt.toISOString(),
-    workflow.current.checkpoint?.revision ?? "checkpoint",
-    recovery?.id ?? "recovery-id",
-    recovery?.attemptId ?? "recovery-attempt",
-    recovery?.state ?? "recovery-state",
-    work?.archiveRecoveryId ?? "work-recovery-id",
-    work?.originalDiscArchiveId ?? "work-archive-id",
-    work?.attemptId ?? "work-attempt-id",
-    work?.status ?? "work-status",
-    workflow.current.catalogMappingProjectionId ?? "review-set",
-    workflow.current.titleDamageAssessmentId ?? "assessment",
-  ].join(":");
+  const affectedWorkIdentity = createHash("sha256")
+    .update(JSON.stringify(
+      affectedWork
+        .map((job) => [job.id, job.discSelectionId, job.status])
+        .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
+    ))
+    .digest("base64url")
+    .slice(0, 22);
+  const mediaItemIdentity = createHash("sha256")
+    .update(JSON.stringify(
+      mediaItems
+        .map((item) => [
+          item.id,
+          item.kind,
+          item.parentId,
+          item.title,
+          item.year,
+          item.seasonNumber,
+          item.episodeNumber,
+        ])
+        .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
+    ))
+    .digest("base64url")
+    .slice(0, 22);
+  return createHash("sha256")
+    .update(JSON.stringify([
+      archive.updatedAt.toISOString(),
+      workflow?.current.checkpoint?.revision ?? null,
+      recovery?.id ?? null,
+      recovery?.attemptId ?? null,
+      recovery?.state ?? null,
+      work?.archiveRecoveryId ?? null,
+      work?.originalDiscArchiveId ?? null,
+      work?.attemptId ?? null,
+      work?.status ?? null,
+      workflow?.current.catalogMappingProjectionId ?? null,
+      workflow?.current.titleDamageAssessmentId ?? null,
+      affectedWorkIdentity,
+      mediaItemIdentity,
+    ]))
+    .digest("base64url")
+    .slice(0, 22);
 }
 
 export interface DashboardDiscInspection {
@@ -1573,6 +1618,73 @@ function readDashboardSnapshotRecords(
         evidenceHeader: evidenceHeadersByArchiveId.get(archive.id) ?? null,
       })),
     ));
+  const catalogReviewBoundEvidenceSource = readSource(() =>
+    (() => {
+      const archiveIds = catalogReviewArchives.map((archive) => archive.id);
+      if (archiveIds.length === 0) {
+        return new Map();
+      }
+      const selections = access.catalog.listDiscSelections({
+        originalDiscArchiveIds: archiveIds,
+        limit: Math.max(1, archiveIds.length * MAX_DVD_TITLES),
+      });
+      const affectedWork = access.encodeJobs
+        .listActiveForOriginalDiscArchives({
+          originalDiscArchiveIds: archiveIds,
+          limit: MAX_DVD_TITLES * 8,
+        });
+      const mediaItems = readMediaItemsWithAncestors(
+        access.catalog,
+        selections.map((selection) => selection.mediaItemId),
+      );
+      const mediaItemById = new Map(mediaItems.map((item) => [item.id, item]));
+      const selectionsByArchiveId = new Map<
+        OriginalDiscArchiveId,
+        typeof selections
+      >();
+      for (const selection of selections) {
+        const grouped = selectionsByArchiveId.get(
+          selection.originalDiscArchiveId,
+        ) ?? [];
+        grouped.push(selection);
+        selectionsByArchiveId.set(selection.originalDiscArchiveId, grouped);
+      }
+      const workBySelectionId = new Map<
+        (typeof selections)[number]["id"],
+        typeof affectedWork
+      >();
+      for (const job of affectedWork) {
+        const grouped = workBySelectionId.get(job.discSelectionId) ?? [];
+        grouped.push(job);
+        workBySelectionId.set(job.discSelectionId, grouped);
+      }
+      return new Map(catalogReviewArchives.map((archive) => {
+        const archiveSelections = selectionsByArchiveId.get(archive.id) ?? [];
+        const archiveMediaItems: MediaItem[] = [];
+        const seenMediaItemIds = new Set<MediaItem["id"]>();
+        let pendingMediaItemIds = archiveSelections.map((selection) =>
+          selection.mediaItemId
+        );
+        while (pendingMediaItemIds.length > 0) {
+          const level = [...new Set(pendingMediaItemIds)]
+            .filter((id) => !seenMediaItemIds.has(id))
+            .map((id) => mediaItemById.get(id))
+            .filter((item): item is MediaItem => item !== undefined);
+          level.forEach((item) => seenMediaItemIds.add(item.id));
+          archiveMediaItems.push(...level);
+          pendingMediaItemIds = level.flatMap((item) =>
+            item.parentId === null ? [] : [item.parentId]
+          );
+        }
+        return [archive.id, {
+          affectedWork: archiveSelections.flatMap((selection) =>
+            workBySelectionId.get(selection.id) ?? []
+          ),
+          mediaItems: archiveMediaItems,
+        }] as const;
+      }));
+    })()
+  );
   const previousCatalogReviewBoundary =
     catalogReviewArchives.at(-1) ??
     (catalogReviewCursor?.direction === "older"
@@ -2253,6 +2365,7 @@ function readDashboardSnapshotRecords(
     archiveSource.status === "error" ||
       rearchiveRequestSource.status === "error" ||
       rearchiveJobSource.status === "error" ||
+      catalogReviewBoundEvidenceSource.status === "error" ||
       catalogReviewWorkflowEvidenceSource.status === "error"
       ? unavailable<DashboardCatalogReviewItem>()
       : {
@@ -2295,11 +2408,16 @@ function readDashboardSnapshotRecords(
               : rearchiveJobSource.value.find(
                   (job) => job.archiveRequestId === rearchiveRequest.id,
                 );
+            const boundEvidence = catalogReviewBoundEvidenceSource.value.get(
+              archive.id,
+            );
             return {
               id: archive.id,
               activityRevision: catalogReviewActivityRevision(
                 archive,
                 reviewWorkflow,
+                boundEvidence?.affectedWork ?? [],
+                boundEvidence?.mediaItems ?? [],
               ),
               discLabel: archive.discLabel,
               discKind: archive.discKind,

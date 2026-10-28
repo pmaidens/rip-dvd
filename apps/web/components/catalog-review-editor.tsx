@@ -18,6 +18,8 @@ import { CatalogReviewRearchiveProposal } from "./catalog-review-rearchive-propo
 import { CatalogReviewTitleIdentity } from "./catalog-review-title-identity";
 import { CatalogReviewTitleDamageEvidence } from "./catalog-review-title-damage";
 import { DamagePreviewReview } from "./damage-preview-review";
+import { CatalogReviewTitleDamageAcceptancePreview } from
+  "./catalog-review-title-damage-acceptance-preview";
 import {
   CatalogReviewDamageDecisionStatus,
   CatalogReviewMappingStatus,
@@ -41,6 +43,7 @@ import { useCatalogReviewState } from "./catalog-review-state";
 
 interface CatalogReviewViewProps {
   state: CatalogReviewLoadState;
+  activityRevision?: string;
   editingMediaItemId: string | null;
   isSaving: boolean;
   requestError: string | null;
@@ -145,6 +148,7 @@ function catalogReviewEvidenceTitles(
 
 export function CatalogReviewView({
   state,
+  activityRevision,
   editingMediaItemId,
   isSaving,
   requestError,
@@ -522,6 +526,15 @@ export function CatalogReviewView({
             aria-labelledby="catalog-review-step-damage"
             hidden={activeStep !== "damage"}
           >
+            <CatalogReviewTitleDamageAcceptancePreview
+              originalDiscArchiveId={review.archive.id}
+              titleIdentity={review.titleIdentity}
+              evidenceGeneration={{
+                current: review.reviewWorkflow.current,
+                titleDamageState: review.titleDamage?.state ?? null,
+                activityRevision: activityRevision ?? null,
+              }}
+            />
             <CatalogReviewTitleDamageEvidence
               originalDiscArchiveId={review.archive.id}
               titleDamage={review.titleDamage}
@@ -559,6 +572,7 @@ export function CatalogReviewEditor({
   return (
     <CatalogReviewView
       state={review.state}
+      activityRevision={activityRevision}
       editingMediaItemId={review.editingMediaItemId}
       isSaving={review.isSaving}
       requestError={review.requestError}

@@ -1723,6 +1723,17 @@ export interface CatalogReviewCompletionPreviewDecisionInput {
   expectedPreviewEvidence: string;
 }
 
+export interface DvdTitleDamageAcceptancePreviewDecisionInput {
+  previewToken: string;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  excludedTitleIdentityIds: readonly DvdTitleIdentityId[];
+  mainFeatureResolutions: readonly {
+    discSelectionId: DiscSelectionId;
+    titleIdentityId: DvdTitleIdentityId;
+  }[];
+  expectedPreviewEvidence: string;
+}
+
 export type RunningArchiveJob = ArchiveJob & {
   status: "running";
   claimToken: ArchiveJobClaimToken;
@@ -2051,6 +2062,9 @@ export interface CatalogAccess {
   recordCatalogReviewCompletionPreviewDecision(
     input: CatalogReviewCompletionPreviewDecisionInput,
   ): void;
+  recordDvdTitleDamageAcceptancePreviewDecision(
+    input: DvdTitleDamageAcceptancePreviewDecisionInput,
+  ): void;
   createMediaItem(input: CreateMediaItemInput, options?: MediaItemMutationOptions): MediaItem;
   createMappingProposal(
     input: CreateMappingProposalInput,
@@ -2120,6 +2134,7 @@ export interface CatalogAccess {
   listDiscSelections(options?: {
     ids?: readonly DiscSelectionId[];
     originalDiscArchiveId?: OriginalDiscArchiveId;
+    originalDiscArchiveIds?: readonly OriginalDiscArchiveId[];
     encodeEligibleOnly?: boolean;
     includeHistorical?: boolean;
     limit?: number;
@@ -2418,6 +2433,14 @@ export interface ArchiveRequestWaitingStatus {
 export interface EncodeJobAccess {
   find(id: EncodeJobId): EncodeJob | null;
   listForDiscSelection(id: DiscSelectionId): EncodeJob[];
+  listActiveForDiscSelections(options: {
+    discSelectionIds: readonly DiscSelectionId[];
+    limit: number;
+  }): EncodeJob[];
+  listActiveForOriginalDiscArchives(options: {
+    originalDiscArchiveIds: readonly OriginalDiscArchiveId[];
+    limit: number;
+  }): EncodeJob[];
   hasReservedOutputPathConflict(job: Pick<EncodeJob, "id" | "outputPath">): boolean;
   hasReservedOutputPath(outputPath: string): boolean;
   resolveQueueLogicalJobs(options: {
@@ -2814,6 +2837,8 @@ export interface ConsistentReadAccess {
     | "find"
     | "list"
     | "listForDiscSelection"
+    | "listActiveForDiscSelections"
+    | "listActiveForOriginalDiscArchives"
     | "hasReservedOutputPathConflict"
     | "hasReservedOutputPath"
     | "resolveQueueLogicalJobs"

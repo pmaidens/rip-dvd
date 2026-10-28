@@ -34,6 +34,10 @@ import type {
   MediaItemId,
 } from "@rip-dvd/data-access";
 import {
+  createDvdTitleDamageAcceptancePreviewTestAccess,
+  DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS,
+} from "@rip-dvd/application/dvd-title-damage-acceptance-preview-test-support";
+import {
   createArchiveImageOwnership,
   defaultArchiveImageOwnership,
 } from "@rip-dvd/worker-runtime";
@@ -49,10 +53,15 @@ import {
   seedCommittedArchiveEvidence,
   withEvidenceGuardsDisabled,
 } from "../../../operator-cli/src/archive-evidence.test-support.js";
+import { runDvdTitleDamageAcceptancePreview } from
+  "../../../operator-cli/src/dvd-title-damage-acceptance-preview.js";
 import { createCatalogReviewRoute } from "./catalog-reviews/[id]/route";
 import {
   createCatalogTitleDamageRoute,
 } from "./catalog-reviews/[id]/damage/route";
+import {
+  createDvdTitleDamageAcceptancePreviewRoute,
+} from "./catalog-reviews/[id]/title-damage-acceptance-preview/route";
 import { createCatalogSuggestionRoute } from "./catalog-reviews/[id]/suggestion/route";
 import { createDeploymentReadinessResponse } from "./deployment-readiness/route";
 import { createDashboardRoute } from "./dashboard/route";
@@ -805,6 +814,47 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
           reasons: [{ code: "CATALOG_REVIEW_OPEN" }],
         },
         { action: "encode", available: false },
+      ],
+    });
+    const preflightRequest = new Request(
+      `${trustedOrigin}/api/catalog-reviews/${archive.id}/title-damage-acceptance-preview`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: new URL(trustedOrigin).host,
+          Origin: trustedOrigin,
+        },
+        body: JSON.stringify({ excludedTitleIdentityIds: [] }),
+      },
+    );
+    const webPreflight = await createDvdTitleDamageAcceptancePreviewRoute(
+      preflightRequest,
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const cliPreflight = await fixture.run([
+      "catalog-review",
+      "preview-title-damage-acceptance",
+      archive.id,
+    ]);
+    expect(webPreflight.status).toBe(200);
+    expect(cliPreflight.exitCode).toBe(0);
+    expect(cliPreflight.result).toEqual(await webPreflight.json());
+    expect(cliPreflight.result).toMatchObject({
+      available: false,
+      previewToken: null,
+      action: {
+        reasons: [
+          { code: "RECOVERY_ACTIVE" },
+          { code: "ASSESSMENT_PENDING" },
+        ],
+      },
+      allContent: [
+        { sourceIdentity: { displayTitleNumber: 1, angleNumber: 1 } },
+        { sourceIdentity: { displayTitleNumber: 1, angleNumber: 2 } },
+        { sourceIdentity: { displayTitleNumber: 3, angleNumber: 1 } },
       ],
     });
     const dashboardResponse = createDashboardRoute(
@@ -5677,4 +5727,255 @@ it.each([
   } finally {
     access.close(); fixture.dispose();
   }
+});
+
+async function titleDamageAcceptanceAdapterResults(options: {
+  assessmentState: "current" | "outdated" | "pending";
+  mappingState: "mapped" | "needs_mapping_review" | "unmapped";
+  recoveryStatus?: "stopped" | "running";
+  resolveMainFeature?: boolean;
+}) {
+  const archiveId = "synthetic-title-damage-acceptance-archive";
+  const mainFeatureResolutions = options.resolveMainFeature
+    ? [{
+      discSelectionId: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
+      titleIdentityId: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.titleIdentityId,
+    }]
+    : [];
+  const accessOptions = {
+    ...options,
+    sourceIdentity: options.resolveMainFeature
+      ? { kind: "main_feature" as const }
+      : undefined,
+    bindSelection: !options.resolveMainFeature,
+    includeAffectedWork: true,
+  };
+  const request = new Request(
+    `${trustedOrigin}/api/catalog-reviews/${archiveId}/title-damage-acceptance-preview`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Host: new URL(trustedOrigin).host,
+        Origin: trustedOrigin,
+      },
+      body: JSON.stringify({
+        excludedTitleIdentityIds: [],
+        mainFeatureResolutions,
+      }),
+    },
+  );
+  const web = await createDvdTitleDamageAcceptancePreviewRoute(
+    request,
+    archiveId,
+    () => createDvdTitleDamageAcceptancePreviewTestAccess(accessOptions),
+    () => trustedOrigin,
+  );
+  const cli = runDvdTitleDamageAcceptancePreview([
+    "preview-title-damage-acceptance",
+    archiveId,
+    ...(options.resolveMainFeature
+      ? [
+        "--resolve-main-feature",
+        DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
+        DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.titleIdentityId,
+      ]
+      : []),
+  ], {
+    openAccess: () =>
+      createDvdTitleDamageAcceptancePreviewTestAccess(accessOptions),
+  });
+  expect(web.status).toBe(200);
+  return {
+    web: await web.json() as Record<string, unknown>,
+    cli: JSON.parse(JSON.stringify(cli)) as Record<string, unknown>,
+  };
+}
+
+it("keeps available, outdated, and mapping-review Title Damage Acceptance preflights aligned", async () => {
+  const available = await titleDamageAcceptanceAdapterResults({
+    assessmentState: "current",
+    mappingState: "mapped",
+  });
+  expect(available.web.previewToken).toEqual(expect.stringMatching(
+    /^dvd-title-damage-acceptance-preview:/,
+  ));
+  expect(available.cli.previewToken).toEqual(expect.stringMatching(
+    /^dvd-title-damage-acceptance-preview:/,
+  ));
+  expect({ ...available.cli, previewToken: null }).toEqual({
+    ...available.web,
+    previewToken: null,
+  });
+  expect(available.web).toMatchObject({
+    available: true,
+    action: {
+      available: true,
+      reasons: [],
+      expectedInputs: [
+        "mutationKey",
+        "previewToken",
+        "checkpointRevision",
+        "checkpointDigest",
+        "assessmentIdentity",
+        "reviewSetIdentity",
+        "catalogMappingProjectionId",
+        "reviewedContentIdentity",
+        "excludedTitleIdentityIds",
+        "mainFeatureResolutions",
+      ],
+    },
+    reviewSetIdentity: expect.any(String),
+    assessmentIdentity: expect.any(String),
+    catalogMappingProjectionId: expect.any(String),
+    reviewedContentIdentity: expect.any(String),
+  });
+
+  const outdated = await titleDamageAcceptanceAdapterResults({
+    assessmentState: "outdated",
+    mappingState: "mapped",
+  });
+  expect(outdated.cli).toEqual(outdated.web);
+  expect(outdated.web).toMatchObject({
+    available: false,
+    previewToken: null,
+    action: { reasons: [{ code: "ASSESSMENT_OUTDATED" }] },
+  });
+
+  const mappingReview = await titleDamageAcceptanceAdapterResults({
+    assessmentState: "outdated",
+    mappingState: "needs_mapping_review",
+  });
+  expect(mappingReview.cli).toEqual(mappingReview.web);
+  expect(mappingReview.web).toMatchObject({
+    available: false,
+    previewToken: null,
+    action: {
+      reasons: [
+        { code: "ASSESSMENT_OUTDATED" },
+        { code: "MAPPING_REVIEW_REQUIRED" },
+      ],
+    },
+  });
+});
+
+it("rejects unknown Title Damage Acceptance input fields through web and CLI", async () => {
+  const archiveId = DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.archiveId;
+  const body = { excludedTitleIdentities: [] };
+  const web = await createDvdTitleDamageAcceptancePreviewRoute(
+    new Request(
+      `${trustedOrigin}/api/catalog-reviews/${archiveId}/title-damage-acceptance-preview`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: new URL(trustedOrigin).host,
+          Origin: trustedOrigin,
+        },
+        body: JSON.stringify(body),
+      },
+    ),
+    archiveId,
+    () => createDvdTitleDamageAcceptancePreviewTestAccess(),
+    () => trustedOrigin,
+  );
+  let cliError: unknown;
+  try {
+    runDvdTitleDamageAcceptancePreview([
+      "preview-damage-acceptance",
+      archiveId,
+      "--json",
+      JSON.stringify(body),
+    ], {
+      openAccess: () => createDvdTitleDamageAcceptancePreviewTestAccess(),
+    });
+  } catch (error) {
+    cliError = error;
+  }
+
+  expect(web.status).toBe(400);
+  expect(await web.json()).toEqual({
+    error: {
+      code: "INVALID_ARGUMENTS",
+      message: "Title Damage Acceptance preflight input contains an unknown field.",
+    },
+  });
+  expect(cliError).toMatchObject({
+    code: "INVALID_ARGUMENTS",
+    message: "Title Damage Acceptance preflight input contains an unknown field.",
+  });
+});
+
+it("keeps explicit main-feature resolution aligned across HTTP and CLI", async () => {
+  const resolved = await titleDamageAcceptanceAdapterResults({
+    assessmentState: "current",
+    mappingState: "unmapped",
+    resolveMainFeature: true,
+  });
+
+  expect({ ...resolved.cli, previewToken: null }).toEqual({
+    ...resolved.web,
+    previewToken: null,
+  });
+  expect(resolved.web).toMatchObject({
+    available: true,
+    mainFeatureChoices: [{
+      discSelectionId: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
+      resolvedTitleIdentityId:
+        DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.titleIdentityId,
+    }],
+    reviewedContent: [{
+      preflightMappingState: "mapped",
+      catalogMappings: [{
+        sourceIdentity: { kind: "main_feature" },
+        resolvedSourceIdentity: {
+          resolution: "title_identity_binding",
+          displayTitleNumber: 1,
+          angleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 4,
+        },
+      }],
+    }],
+  });
+});
+
+it("keeps pending and Recovery-active blocker ordering aligned", async () => {
+  const pending = await titleDamageAcceptanceAdapterResults({
+    assessmentState: "pending",
+    mappingState: "mapped",
+  });
+  expect(pending.cli).toEqual(pending.web);
+  expect(pending.web).toMatchObject({
+    available: false,
+    assessmentSnapshot: null,
+    action: { reasons: [{ code: "ASSESSMENT_PENDING" }] },
+  });
+
+  const recoveryActive = await titleDamageAcceptanceAdapterResults({
+    assessmentState: "current",
+    mappingState: "mapped",
+    recoveryStatus: "running",
+  });
+  expect(recoveryActive.cli).toEqual(recoveryActive.web);
+  expect(recoveryActive.web).toMatchObject({
+    available: false,
+    action: { reasons: [{ code: "RECOVERY_ACTIVE" }] },
+  });
+
+  const pendingDuringRecovery = await titleDamageAcceptanceAdapterResults({
+    assessmentState: "pending",
+    mappingState: "mapped",
+    recoveryStatus: "running",
+  });
+  expect(pendingDuringRecovery.cli).toEqual(pendingDuringRecovery.web);
+  expect(pendingDuringRecovery.web).toMatchObject({
+    available: false,
+    action: {
+      reasons: [
+        { code: "RECOVERY_ACTIVE" },
+        { code: "ASSESSMENT_PENDING" },
+      ],
+    },
+  });
 });
