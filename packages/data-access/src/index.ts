@@ -159,6 +159,7 @@ export {
 } from "./domain-values.js";
 export type { DvdSalvageRejectionReason } from "./domain-values.js";
 export type * from "./types.js";
+export type * from "./encode-output-inspection-receipt.js";
 export type {
   DiscSelectionSourceIdentity,
   DiscSelectionSourceIdentityInput,

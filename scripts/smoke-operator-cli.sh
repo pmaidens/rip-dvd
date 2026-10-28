@@ -55,6 +55,19 @@ printf '%s\n' "$help_output" | assert_json_fields \
 
 preview_help="$(invoke help damage-preview)"
 printf '%s\n' "$preview_help" | assert_json_fields 'schemaVersion=1'
+
+receipt_help="$(invoke help encode-output)"
+printf '%s\n' "$receipt_help" | assert_json_fields 'schemaVersion=1'
+set +e
+receipt_output="$(invoke encode-output acknowledge-inspection \
+  encode-output-v1.published.00000000-0000-4000-8000-000000000000 \
+  --key synthetic-smoke-inspection-receipt \
+  --json '{"acknowledged":true,"reviewToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' \
+  2>"$temporary_directory/receipt.stderr")"
+receipt_status=$?
+set -e
+[ "$receipt_status" -eq 2 ]
+printf '%s\n' "$receipt_output" | assert_json_fields 'error.code=OUTPUT_AUTHORITY_CHANGED'
 set +e
 preview_output="$(invoke damage-preview availability synthetic-missing-archive \
   2>"$temporary_directory/preview.stderr")"

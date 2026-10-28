@@ -9,6 +9,7 @@ import type {
   CompletedCatalogReviewOutcome,
 } from "@rip-dvd/data-access";
 import type { EncodeOutputInspection } from "@rip-dvd/application";
+import { EncodeOutputInspectionAcknowledgement } from "./encode-output-inspection-acknowledgement";
 
 import type {
   ActionOverviewCategory,
@@ -234,6 +235,10 @@ function EncodeOutputInspectionDetails({
       aria-label={`Encode Output ${artifact.identity}`}
     >
       <h4>Encode Output</h4>
+      {inspection.operatorInspection === undefined ? null : <EncodeOutputInspectionAcknowledgement
+        key={inspection.operatorInspection.reviewToken}
+        inspection={inspection}
+      />}
       <dl>
         <div>
           <dt>Artifact identity</dt>

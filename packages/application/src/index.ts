@@ -94,6 +94,7 @@ import {
 import { UnsupportedArchiveEvidenceFormatError } from "./archive-request-input.js";
 import {
   exportEncodeOutput,
+  acknowledgeEncodeOutputInspection,
   inspectEncodeOutput,
   type EncodeOutputMediaProbe,
 } from "./encode-output-inspection.js";
@@ -462,6 +463,8 @@ export function createApplicationOperations(
         artifactIdentity,
         dependencies.encodeOutputMediaProbe,
       ),
+    acknowledgeEncodeOutputInspection: (artifactIdentity: unknown, input: unknown) =>
+      acknowledgeEncodeOutputInspection(access, artifactIdentity, input, dependencies.encodeOutputMediaProbe),
     exportEncodeOutput: (input: {
       artifactIdentity: unknown;
       destination: unknown;
@@ -1000,6 +1003,9 @@ export {
   encodeOutputArtifactReferences,
   encodeOutputArtifactIdentity,
   EncodeOutputExportRejectedError,
+  acknowledgeEncodeOutputInspection,
+  EncodeOutputAcknowledgementRejectedError,
+  InvalidEncodeOutputAcknowledgementError,
   exportEncodeOutput,
   inspectEncodeOutput,
   InvalidEncodeOutputArtifactIdentityError,
@@ -1011,6 +1017,7 @@ export type {
   EncodeOutputArtifactReference,
   EncodeOutputExportReasonCode,
   EncodeOutputInspection,
+  EncodeOutputInspectionReceipt,
   EncodeOutputInspectionReasonCode,
   EncodeOutputMediaInspection,
   EncodeOutputMediaProbe,

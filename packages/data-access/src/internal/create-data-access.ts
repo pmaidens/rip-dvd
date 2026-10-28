@@ -1,4 +1,5 @@
 import { createDamagePreviewAccess } from "./damage-preview-store.js";
+import { createEncodeOutputInspectionReceiptAccess } from "./encode-output-inspection-receipt-store.js";
 import {
   canonicalPublicationJson,
   DvdCheckpointReadFault,
@@ -11588,6 +11589,7 @@ export function createDataAccessInternal(
 
   const access: LegacySidecarDataAccess = {
     damagePreviews: createDamagePreviewAccess(sqlite, now),
+    encodeOutputInspectionReceipts: createEncodeOutputInspectionReceiptAccess(sqlite, now),
     async withDvdCheckpoint(id, ownership, task, commit) {
       const read = await withDvdCheckpointRead(id, ownership, readCommittedDvdCheckpoint, task, (checkpoint, prepared) => commit ? commit(checkpoint, prepared) : prepared);
       return read?.result ?? null;
