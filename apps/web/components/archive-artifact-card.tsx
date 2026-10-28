@@ -117,16 +117,9 @@ export function ArchiveArtifactCard({
   }, [load, job.activityRevision]);
 
   useEffect(() => {
-    if (
-      state.status !== "loaded" ||
-      state.artifact.recovery.state === "stopped" ||
-      state.artifact.recovery.state === "completed"
-    ) {
-      return;
-    }
     const timer = window.setInterval(() => void load(false), 5_000);
     return () => window.clearInterval(timer);
-  }, [load, state]);
+  }, [load]);
 
   const run = async (
     name: ArchiveArtifactAction["name"],
