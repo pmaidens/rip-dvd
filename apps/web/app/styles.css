@@ -2751,6 +2751,8 @@ h3 {
 .status-approved,
 .status-scanned,
 .status-pending,
+.status-waiting,
+.status-stopping,
 .status-cancellation_requested {
   border-color: #796331;
   background: rgba(174, 127, 42, 0.12);
@@ -2758,6 +2760,7 @@ h3 {
 }
 
 .status-failed,
+.status-faulted,
 .status-rejected,
 .status-missing,
 .status-aborted,
@@ -2779,6 +2782,14 @@ h3 {
   border-color: #a77f4f;
   background: rgba(167, 127, 79, 0.14);
   color: #e4c08f;
+}
+
+.status-paused,
+.status-stopped,
+.status-unavailable {
+  border-color: #53686f;
+  background: rgba(85, 113, 122, 0.14);
+  color: #a9c4cd;
 }
 
 .progress-row {
@@ -2866,6 +2877,119 @@ h3 {
 
 .archive-attempt-history li button {
   display: block;
+}
+
+.archive-artifact-card {
+  display: grid;
+  gap: 1rem;
+  background:
+    linear-gradient(145deg, rgba(210, 161, 75, 0.055), transparent 42%),
+    #0c1b18;
+}
+
+.archive-artifact-stage,
+.archive-artifact-readiness,
+.archive-artifact-actions {
+  padding: 0.9rem;
+  border: 1px solid #29483f;
+  border-radius: 0.65rem;
+  background: #10231e;
+}
+
+.archive-artifact-stage p,
+.archive-artifact-readiness h4,
+.archive-artifact-actions small {
+  margin: 0.2rem 0 0;
+}
+
+.archive-artifact-readiness h4 {
+  color: #eef4f1;
+  font-size: 0.82rem;
+}
+
+.archive-artifact-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.65rem;
+  margin: 0.8rem 0 0;
+}
+
+.archive-artifact-facts div {
+  min-width: 0;
+  padding: 0.65rem;
+  border: 1px solid #29483f;
+  border-radius: 0.5rem;
+  background: #0b1b17;
+}
+
+.archive-artifact-facts dt {
+  color: #829790;
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.archive-artifact-facts dd {
+  margin: 0.25rem 0 0;
+  color: #eef4f1;
+  font-size: 0.78rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.archive-artifact-reasons {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.7rem 0 0;
+  padding: 0;
+  color: #b8c8c3;
+  font-size: 0.72rem;
+  list-style: none;
+}
+
+.archive-artifact-reasons li {
+  display: grid;
+  grid-template-columns: minmax(8rem, auto) minmax(0, 1fr);
+  gap: 0.55rem;
+  align-items: start;
+}
+
+.archive-artifact-reasons code {
+  color: #e1b765;
+  overflow-wrap: anywhere;
+}
+
+.archive-artifact-actions summary {
+  color: #eef4f1;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.archive-artifact-action {
+  display: grid;
+  gap: 0.25rem;
+  margin-top: 0.8rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid #29483f;
+  color: #b8c8c3;
+  font-size: 0.72rem;
+}
+
+.archive-artifact-action small {
+  color: #829790;
+  overflow-wrap: anywhere;
+}
+
+.archive-artifact-expected-inputs {
+  padding: 0.45rem;
+  border-radius: 0.35rem;
+  background: #091713;
+  color: #9fb0ab;
+  font-size: 0.66rem;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .job-progress-detail {

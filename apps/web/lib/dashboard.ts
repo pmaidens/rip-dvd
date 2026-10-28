@@ -155,6 +155,8 @@ export interface DashboardDetectedDiscDetails {
 
 export interface DashboardArchiveJob {
   id: string;
+  originalDiscArchiveId?: string | null;
+  recoveryArtifact?: boolean;
   activityRevision?: string;
   detectedDiscId: string;
   archiveRequestId: string;
@@ -1349,7 +1351,7 @@ function readDashboardSnapshotRecords(
         ),
       )]
     : [];
-  const archiveJobSource =
+  const currentArchiveJobSource =
     currentDetectedDiscArchiveJobSource.status === "error"
       ? currentDetectedDiscArchiveJobSource
       : readSource(() =>
@@ -1358,6 +1360,31 @@ function readDashboardSnapshotRecords(
             archiveRequestIds: currentArchiveRequestIds,
           }),
         );
+  const archiveRecoverySource = readSource(() =>
+    access.catalog.listArchiveRecoveries({
+      limit: activityLimit ?? DASHBOARD_ACTIVE_JOB_LIMIT,
+    })
+  );
+  const recoveryArchiveJobSource = readSource(() =>
+    archiveRecoverySource.status === "error"
+      ? []
+      : archiveRecoverySource.value.flatMap((recovery) =>
+          access.archiveJobs.listForArchive(recovery.originalDiscArchiveId)
+            .filter(({ evidenceFormat }) =>
+              evidenceFormat === "dvd-recovery-evidence-v1"
+            )
+        )
+  );
+  const archiveJobSource = currentArchiveJobSource.status === "error" ||
+      recoveryArchiveJobSource.status === "error"
+    ? { status: "error" as const }
+    : {
+        status: "loaded" as const,
+        value: [...new Map(
+          [...currentArchiveJobSource.value, ...recoveryArchiveJobSource.value]
+            .map((job) => [job.id, job]),
+        ).values()],
+      };
   const displayedDetectedDiscIds = detectedDiscSource.status === "loaded"
     ? detectedDiscSource.value.map((disc) => disc.id)
     : [];
@@ -1836,6 +1863,13 @@ function readDashboardSnapshotRecords(
               : undefined;
             return {
               id: job.id,
+              ...(job.evidenceFormat === "dvd-recovery-evidence-v1" &&
+                  job.originalDiscArchiveId !== null
+                ? {
+                    originalDiscArchiveId: job.originalDiscArchiveId,
+                    recoveryArtifact: true,
+                  }
+                : {}),
               activityRevision: job.updatedAt.toISOString(),
               archiveRequestId: job.archiveRequestId,
               attemptOrdinal: job.attemptOrdinal,

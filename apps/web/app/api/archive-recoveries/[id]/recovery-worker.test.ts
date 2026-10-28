@@ -999,7 +999,7 @@ it("continues a productive pass in reverse and pauses after no progress", async 
       "archive-recoveries",
       seeded.recoveryId,
     ]);
-    const queuedWeb = createOperationsResponse(
+    const queuedWeb = await createOperationsResponse(
       input.access,
       new Request(
         `http://localhost/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
@@ -1258,7 +1258,7 @@ it("keeps a no-progress pause durable and exposes it identically", async () => {
       "archive-recoveries",
       seeded.recoveryId,
     ]);
-    const web = createOperationsResponse(
+    const web = await createOperationsResponse(
       restarted.access,
       new Request(
         `http://localhost/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,

@@ -77,7 +77,7 @@ it("shows a labeled Archive Job notification target through both CLI and HTTP de
     const cli = await fixture.run(["inspect", "archive-jobs", job.id]);
     expect(cli.exitCode).toBe(0);
     expect(cli.result).toMatchObject({ item: { detectedDisc: { volumeLabel: "Synthetic labeled disc" } } });
-    const http = createOperationsResponse(access, new Request(`https://operator.example/api/operations?kind=archive-jobs&id=${job.id}`));
+    const http = await createOperationsResponse(access, new Request(`https://operator.example/api/operations?kind=archive-jobs&id=${job.id}`));
     expect(await http.json()).toEqual(cli.result);
   } finally { access.close(); }
 });

@@ -17,7 +17,7 @@ import {
   InvalidMutationKeyError,
   InvalidProfileInputError,
   parseMutationKey,
-  inspectOperations,
+  inspectOperationsWithArtifacts,
   isOperationKind,
   isWaitableKind,
   OPERATION_KINDS,
@@ -1620,7 +1620,7 @@ function numericOption(rest: readonly string[], flag: string): number | undefine
   return Number(rest[index + 1]);
 }
 
-function inspectCommand(rest: readonly string[], io: CommandIO) {
+async function inspectCommand(rest: readonly string[], io: CommandIO) {
   const optionIndexes = new Set<number>();
   for (const flag of ["--limit", "--offset"] as const) {
     const index = rest.indexOf(flag);
@@ -1650,8 +1650,8 @@ function inspectCommand(rest: readonly string[], io: CommandIO) {
     throw new CommandFailure("INVALID_ARGUMENTS", "Invalid inspect arguments.", 2);
   }
   try {
-    const result = withAccess(io.openAccess, (access) =>
-      inspectOperations(access, kind, {
+    const result = await withAccessAsync(io.openAccess, (access) =>
+      inspectOperationsWithArtifacts(access, kind, {
         ...(positional.length === 2 ? { id } : {}),
         limit,
         offset,
@@ -2274,7 +2274,7 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
       if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
         emit(io.stdout, help(name));
       } else {
-        emit(io.stdout, inspectCommand(rest, io));
+        emit(io.stdout, await inspectCommand(rest, io));
       }
       return 0;
     }

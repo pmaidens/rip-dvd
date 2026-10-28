@@ -56,6 +56,11 @@ import { dvdRecoveryStopAction } from "./dvd-recovery-stop.js";
 import { dvdRecoveryResumeAction } from "./dvd-recovery-resume.js";
 import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 import { presentArchiveRecoveryRangeEvidence } from "./archive-recovery-ranges.js";
+import {
+  describeArchiveArtifact,
+  enrichArchiveArtifactSourceIdentity,
+  type ArchiveArtifact,
+} from "./archive-artifact.js";
 
 export const OPERATION_KINDS = [
   "optical-drives",
@@ -904,6 +909,9 @@ function readDetail(
       const recovery = evidenceFormat === null
         ? null
         : access.catalog.findArchiveRecovery(archive.id);
+      const archiveArtifact = evidenceFormat === null
+        ? null
+        : describeArchiveArtifact(access, archive, options);
       const encodeWorkConflict = conflictingEncodeJobs.length === 0
         ? null
         : {
@@ -916,6 +924,7 @@ function readDetail(
         ...(structuralAssessment === null
           ? {}
           : { structuralAssessment }),
+        ...(archiveArtifact === null ? {} : { archiveArtifact }),
         ...(recoveryStorage === null
           ? {}
           : {
@@ -1170,6 +1179,35 @@ export function inspectOperations(
         ),
       }
   );
+}
+
+export async function inspectOperationsWithArtifacts(
+  access: DataAccess,
+  kind: OperationKind,
+  options: OperationInspectionOptions = {},
+) {
+  const inspection = inspectOperations(access, kind, options);
+  if (
+    kind !== "original-disc-archives" || options.id === undefined ||
+    !("item" in inspection) || inspection.item === null ||
+    inspection.item === undefined ||
+    !("archiveArtifact" in inspection.item)
+  ) {
+    return inspection;
+  }
+  const item = inspection.item as typeof inspection.item & {
+    archiveArtifact: ArchiveArtifact;
+  };
+  return {
+    ...inspection,
+    item: {
+      ...item,
+      archiveArtifact: await enrichArchiveArtifactSourceIdentity(
+        access,
+        item.archiveArtifact,
+      ),
+    },
+  };
 }
 
 const TERMINAL_STATUSES: Record<WaitableKind, readonly string[]> = {

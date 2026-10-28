@@ -1,4 +1,8 @@
-import { inspectOperations, isOperationKind, validOperationLimit } from "@rip-dvd/application";
+import {
+  inspectOperationsWithArtifacts,
+  isOperationKind,
+  validOperationLimit,
+} from "@rip-dvd/application";
 import { loadConfig } from "@rip-dvd/config";
 import type { DataAccess } from "@rip-dvd/data-access";
 
@@ -7,11 +11,11 @@ import { getDataAccess } from "../../../lib/data-access";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export function createOperationsResponse(
+export async function createOperationsResponse(
   access: DataAccess,
   request: Request,
   originalsLibraryPath?: string,
-): Response {
+): Promise<Response> {
   const params = new URL(request.url).searchParams;
   const kind = params.get("kind");
   const id = params.get("id") ?? undefined;
@@ -31,7 +35,7 @@ export function createOperationsResponse(
     });
   }
   try {
-    const result = inspectOperations(access, kind, {
+    const result = await inspectOperationsWithArtifacts(access, kind, {
       id,
       limit,
       offset,
@@ -50,9 +54,9 @@ export function createOperationsResponse(
   }
 }
 
-export function GET(request: Request): Response {
+export async function GET(request: Request): Promise<Response> {
   try {
-    return createOperationsResponse(
+    return await createOperationsResponse(
       getDataAccess(),
       request,
       loadConfig().originalsLibraryPath,

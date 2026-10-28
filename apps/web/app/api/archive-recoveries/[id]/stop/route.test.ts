@@ -115,7 +115,7 @@ it("offers the same attempt-bound durable Stop through web and CLI", async () =>
       "http://localhost:3000/api/notifications?action=deliveries",
     ), () => access);
     expect(await webDeliveries.json()).toEqual(deliveries.result);
-    const webStatus = createOperationsResponse(
+    const webStatus = await createOperationsResponse(
       access,
       new Request(
         `http://localhost:3000/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
@@ -204,7 +204,7 @@ it("retains the Stop operation identity through a terminal fault", async () => {
       faultCode: "STORAGE_UNSUPPORTED",
     });
 
-    const webStatus = createOperationsResponse(
+    const webStatus = await createOperationsResponse(
       access,
       new Request(
         `http://localhost:3000/api/operations?kind=archive-recoveries&id=${seeded.recoveryId}`,
@@ -318,7 +318,7 @@ it("reports queued Encode ownership through Stop web, CLI, and availability", as
       },
     });
 
-    const webStatus = createOperationsResponse(
+    const webStatus = await createOperationsResponse(
       access,
       new Request(
         `http://localhost:3000/api/operations?kind=archive-recoveries&id=${recoveryId}`,

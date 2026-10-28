@@ -230,16 +230,21 @@ describe("inspectOperations", () => {
             : []
         ),
         findDvdArchiveEvidenceHeaders: vi.fn(() => new Map()),
+        findDvdArchiveEvidenceHeader: vi.fn(() => null),
         listDiscSelections: vi.fn(() => []),
         listDetectedDiscs: vi.fn(() => []),
         findArchiveRecovery: vi.fn(() => null),
+        readDvdTitleIdentityReviewSet: vi.fn(() => null),
       },
       archiveJobs: {
         listForArchive: vi.fn(() => [{
           evidenceFormat: "dvd-recovery-evidence-v1",
         }]),
       },
-      archiveRequests: { listForRearchiveSources: vi.fn(() => []) },
+      archiveRequests: {
+        find: vi.fn(() => null),
+        listForRearchiveSources: vi.fn(() => []),
+      },
       encodeJobs: { listForDiscSelection: vi.fn(() => []) },
       dvdStructuralAssessments: {
         inspect: vi.fn(() => ({
@@ -258,6 +263,17 @@ describe("inspectOperations", () => {
         })),
       },
       dvdRecoveryStorage: { readCurrent: vi.fn(() => null) },
+      dvdTitleDamageAssessments: {
+        inspect: vi.fn(() => ({
+          state: "unavailable",
+          currentAssessmentIdentity: null,
+          assessment: null,
+          unavailableReasons: [{
+            code: "CONSISTENCY_FAULT",
+            message: "The committed DVD checkpoint is unavailable.",
+          }],
+        })),
+      },
     } as unknown as ConsistentReadAccess;
     const access = {
       readConsistentSnapshot<T>(
