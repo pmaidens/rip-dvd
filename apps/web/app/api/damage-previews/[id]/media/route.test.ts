@@ -4,6 +4,7 @@ import { createOperatorWorkflowFixture } from "../../../../../../operator-cli/sr
 import { seedRetainedDamagePreview } from "../../../../../../operator-cli/src/damage-preview.test-support.js";
 import { advanceCommittedArchiveEvidence } from "../../../../../../operator-cli/src/archive-evidence.test-support.js";
 import { createDamagePreviewMediaRemovalRoute } from "./route";
+import { createDamagePreviewRoute } from "../route";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => { vi.useRealTimers(); fixtures.splice(0).forEach((fixture) => fixture.dispose()); });
@@ -16,6 +17,8 @@ it("shares deletion authorization, availability, stale evidence and replay with 
   const web = (input = body, trusted = true, method = "DELETE") => createDamagePreviewMediaRemovalRoute(new Request(`${origin}/api/damage-previews/${id}/media`, { method, headers: { Origin: trusted ? origin : "http://untrusted.invalid", Host: "localhost:3000", "Content-Type": "application/json" }, body: JSON.stringify(input) }), id, () => access, () => origin);
   const cli = (action: string, input = body) => fixture.run(["damage-preview", action, id, "--key", input.mutationKey, "--json", JSON.stringify({ mediaToken: input.mediaToken })]);
   try {
+    const cancelKey = "synthetic-web-cancel-before-delete";
+    const cancelled = await fixture.run(["damage-preview", "cancel", id, "--key", cancelKey]);
     expect((await web(body, false)).status).toBe(403); expect(existsSync(path)).toBe(true);
     const unavailable = await web(body, true, "POST");
     expect(unavailable.status).toBe(409);
@@ -26,6 +29,9 @@ it("shares deletion authorization, availability, stale evidence and replay with 
     expect(deleted.exitCode).toBe(0);
     expect(await web().then((response) => response.json())).toEqual(deleted.result);
     expect(existsSync(path)).toBe(false);
+    const replayedCancel = await createDamagePreviewRoute(new Request(`${origin}/api/damage-previews/${id}`, { method: "DELETE", headers: { Origin: origin, Host: "localhost:3000", "Content-Type": "application/json" }, body: JSON.stringify({ mutationKey: cancelKey }) }), id, () => access, () => origin);
+    expect(replayedCancel.status).toBe(200);
+    expect(await replayedCancel.json()).toEqual(cancelled.result);
     expect(await web({ ...body, mediaToken: "changed" }).then((response) => response.json())).toEqual((await cli("delete", { ...body, mediaToken: "changed" })).result);
   } finally { access.close(); }
 });
