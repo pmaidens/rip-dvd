@@ -1,5 +1,5 @@
 import { Readable } from "node:stream";
-import { inspectDamagePreview, openDamagePreviewArtifact, InvalidDamagePreviewInputError, DamagePreviewRejectedError } from "@rip-dvd/application";
+import { describeDamagePreview, openDamagePreviewArtifact, InvalidDamagePreviewInputError, DamagePreviewRejectedError } from "@rip-dvd/application";
 import { RecordNotFoundError, type DataAccess } from "@rip-dvd/data-access";
 import { getDataAccess } from "../../../../lib/data-access";
 
@@ -13,7 +13,7 @@ export async function createDamagePreviewMediaRoute(request: Request, identity: 
     const access = getAccess();
     const { file, artifact, record } = await openDamagePreviewArtifact(access, identity);
     let inspection;
-    try { inspection = await inspectDamagePreview(access, record.id); }
+    try { inspection = describeDamagePreview(access, record); }
     catch (error) { await file.close(); throw error; }
     const stream = file.createReadStream({ start: 0, autoClose: true });
     return new Response(Readable.toWeb(stream) as ReadableStream<Uint8Array>, { headers: {

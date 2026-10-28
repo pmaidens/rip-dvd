@@ -1,9 +1,9 @@
-import { createApplicationOperations, DamagePreviewRejectedError, InvalidDamagePreviewInputError, InvalidMutationKeyError } from "@rip-dvd/application";
+import { createApplicationOperations, DamagePreviewRejectedError, InvalidDamagePreviewInputError, InvalidMutationKeyError, type EncodeOutputMediaProbe } from "@rip-dvd/application";
 import { MutationKeyConflictError, RecordNotFoundError, type DataAccess } from "@rip-dvd/data-access";
 import { CommandFailure } from "./command.js";
 import { readStructuredObject, type StructuredInputIO } from "./structured-input.js";
 
-export async function runDamagePreview(args: readonly string[], io: StructuredInputIO & { openAccess(): DataAccess }): Promise<unknown> {
+export async function runDamagePreview(args: readonly string[], io: StructuredInputIO & { openAccess(): DataAccess; encodeOutputMediaProbe?: EncodeOutputMediaProbe }): Promise<unknown> {
   const [action, id, ...tail] = args;
   const allowed: Record<string, string[]> = {
     availability: ["--json", "--stdin", "--file"], request: ["--json", "--stdin", "--file", "--key"],
@@ -22,7 +22,7 @@ export async function runDamagePreview(args: readonly string[], io: StructuredIn
   const input = readStructuredObject(options, io);
   const access = io.openAccess();
   try {
-    const operations = createApplicationOperations(access);
+    const operations = createApplicationOperations(access, { encodeOutputMediaProbe: io.encodeOutputMediaProbe });
     switch (action) {
       case "availability": return await operations.inspectDamagePreviewAvailability(id, input);
       case "request": return await operations.requestDamagePreview(id, { ...(input as Record<string, unknown> | undefined), mutationKey: options.get("--key") });

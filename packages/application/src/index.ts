@@ -441,7 +441,7 @@ export function createApplicationOperations(
       options?: { limit?: number; cursor?: string },
     ) => inspectCatalogTitleDamage(access, archiveId, options),
     requestDamagePreview: (archiveId: string, input: unknown) => requestDamagePreview(access, archiveId, input, dependencies.archiveImageOwnership),
-    inspectDamagePreview: (id: string) => inspectDamagePreview(access, id, dependencies.archiveImageOwnership),
+    inspectDamagePreview: (id: string) => inspectDamagePreview(access, id, dependencies.archiveImageOwnership, dependencies.encodeOutputMediaProbe),
     waitDamagePreview: (id: string, options: { timeoutMs: number; pollMs?: number }) => waitDamagePreview(access, id, options, dependencies.archiveImageOwnership),
     cancelDamagePreview: (id: string, key: unknown) => cancelDamagePreview(access, id, key),
     deleteDamagePreviewMedia: (id: string, input: unknown) => removeDamagePreviewMedia(access, id, input, "explicit_deletion"),
