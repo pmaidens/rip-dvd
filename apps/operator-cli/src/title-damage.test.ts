@@ -834,18 +834,38 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     mediaDomain: "dvd_video",
     settings: { preset: "Fast 480p30" },
   });
-  const affectedWorkJobId = "synthetic-title-damage-affected-work";
+  const secondAffectedWorkProfile = access.encodingProfiles.create({
+    key: "synthetic-second-affected-work-profile",
+    displayName: "Synthetic second affected-work profile",
+    mediaDomain: "dvd_video",
+    settings: { preset: "Fast 480p30" },
+  });
+  const affectedWorkJobIds = [
+    "z-synthetic-title-damage-affected-work",
+    "a-synthetic-title-damage-affected-work",
+  ] as const;
   const affectedWorkSqlite = new DatabaseSync(fixture.databasePath);
-  affectedWorkSqlite.prepare(`
+  const insertAffectedWork = affectedWorkSqlite.prepare(`
     INSERT INTO encode_jobs (
       id, disc_selection_id, encoding_profile_id, output_path,
       status, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, 'queued', 1, 1)
-  `).run(
-    affectedWorkJobId,
+    ) VALUES (?, ?, ?, ?, 'queued', ?, ?)
+  `);
+  insertAffectedWork.run(
+    affectedWorkJobIds[0],
     mainFeatureSelection.id,
     affectedWorkProfile.id,
-    join(fixture.mediaLibraryPath, "synthetic-affected-work.mkv"),
+    join(fixture.mediaLibraryPath, "synthetic-affected-work-z.mkv"),
+    1,
+    1,
+  );
+  insertAffectedWork.run(
+    affectedWorkJobIds[1],
+    mainFeatureSelection.id,
+    secondAffectedWorkProfile.id,
+    join(fixture.mediaLibraryPath, "synthetic-affected-work-a.mkv"),
+    2,
+    2,
   );
   affectedWorkSqlite.close();
   const staleAffectedWork = await fixture.run([
@@ -873,11 +893,6 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     SELECT count(*) AS count
     FROM dvd_title_damage_decisions
   `).get()).toEqual({ count: 0 });
-  staleAffectedWorkLedger.prepare(`
-    UPDATE encode_jobs
-    SET status = 'cancelled', reserves_output_path = 0, updated_at = 2
-    WHERE id = ?
-  `).run(affectedWorkJobId);
   staleAffectedWorkLedger.close();
   const acceptedPreflight = await fixture.run([
     "catalog-review",
@@ -893,7 +908,13 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   ]);
   expect(acceptedPreflight).toMatchObject({
     exitCode: 0,
-    result: { available: true, affectedWork: [] },
+    result: {
+      available: true,
+      affectedWork: [
+        { id: affectedWorkJobIds[1] },
+        { id: affectedWorkJobIds[0] },
+      ],
+    },
   });
   const acceptedPreview = acceptedPreflight.result as AcceptedPreview;
   const acceptanceInput = acceptanceInputFor(acceptedPreview);
@@ -930,6 +951,10 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
             { titleIdentityId: currentItems[2]!.titleIdentityId },
           ],
           assessmentSnapshot: { id: chapterRemapped.id },
+          affectedWork: [
+            { id: affectedWorkJobIds[1] },
+            { id: affectedWorkJobIds[0] },
+          ],
         },
       },
       encodingQueued: false,
@@ -937,6 +962,13 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
       outputValidationWaived: false,
     },
   });
+  const completedAffectedWork = new DatabaseSync(fixture.databasePath);
+  completedAffectedWork.prepare(`
+    UPDATE encode_jobs
+    SET status = 'cancelled', reserves_output_path = 0, updated_at = 3
+    WHERE id IN (?, ?)
+  `).run(...affectedWorkJobIds);
+  completedAffectedWork.close();
   const replay = await fixture.run([
     "catalog-review",
     "accept-damage",

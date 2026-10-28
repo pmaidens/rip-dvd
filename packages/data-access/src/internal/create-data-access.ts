@@ -18478,10 +18478,8 @@ export function createDataAccessInternal(
               input.originalDiscArchiveId,
             ),
             inArray(encodeJobs.status, ACTIVE_ENCODE_WORK_STATUSES),
-          )).orderBy(
-            asc(encodeJobs.createdAt),
-            asc(encodeJobs.id),
-          ).limit(ACTIVE_ENCODE_JOB_RESULT_LIMIT + 1).all();
+          )).orderBy(asc(encodeJobs.id))
+            .limit(ACTIVE_ENCODE_JOB_RESULT_LIMIT + 1).all();
           const stale =
             current.catalogRevision !== snapshot.current.catalogRevision ||
             current.checkpoint?.revision !== input.checkpoint.revision ||
