@@ -1,9 +1,11 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, lstatSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout } from "node:timers/promises";
 
 import {
+  canonicalPublicationJson,
+  createDvdInitialPublicationDigest,
   archiveBoundaryEvidenceFromRecord,
   createDvdArchiveBoundaryEvidenceDigest,
   createDvdArchiveEvidenceManifestDigests,
@@ -12,6 +14,7 @@ import {
   dvdTitleIdentityCatalogMappingProjectionDigest,
   DVD_RECOVERY_EVIDENCE_FORMAT,
 } from "@rip-dvd/data-access";
+import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 
 const databasePath = process.env.RIP_DVD_DATABASE_PATH;
@@ -43,6 +46,8 @@ const access = createLegacySidecarDataAccess({
   mediaLibraryPath,
   originalsLibraryPath,
 });
+
+const previewPublications = [];
 
 const longToken = "UNBROKEN-CATALOG-LABEL-".repeat(8);
 const longMediaTitle = "A deliberately long Catalog Review title with edition, language, season, and archival context ";
@@ -162,7 +167,8 @@ function seedTitleDamagePaging(variant, fingerprintFill, fixture = "damage") {
   const requestId = `${fixtureId}-request`;
   const jobId = `${fixtureId}-job`;
   const inspectionId = `${fixtureId}-inspection`;
-  const manifestId = `${fixtureId}-manifest`;
+  const durablePreview = fixture === "damage" && ["desktop", "mobile"].includes(variant);
+  const manifestId = durablePreview ? `${archive.id}:initial` : `${fixtureId}-manifest`;
   const recoveryId = `${fixtureId}-recovery`;
   const recoveryAttemptId = `${recoveryId}:attempt:1`;
   const unrecoveredSourceRanges = [{
@@ -203,6 +209,7 @@ function seedTitleDamagePaging(variant, fingerprintFill, fixture = "damage") {
     acceptedEndLbaExclusive,
     archive.id,
   );
+  if (durablePreview) sqlite.prepare("UPDATE original_disc_archives SET archive_path = ? WHERE id = ?").run(join(originalsLibraryPath, `${archive.id}.iso`), archive.id);
   const updatedArchive = access.catalog.listOriginalDiscArchives({
     ids: [archive.id],
   })[0];
@@ -553,6 +560,35 @@ function seedTitleDamagePaging(variant, fingerprintFill, fixture = "damage") {
     ) VALUES (?, ?, 1)
   `).run(archive.id, assessment.id);
   evidenceSqlite.close();
+  if (durablePreview) previewPublications.push(async () => {
+    const imagePath = updatedArchive.archivePath;
+    writeFileSync(imagePath, Buffer.alloc(acceptedEndLbaExclusive * 2_048));
+    const image = lstatSync(imagePath, { bigint: true });
+    const unresolved = unrecoveredSourceRanges.reduce((count, range) => count + range.sectorCount, 0);
+    const payload = {
+      ...manifestInput, ...manifestDigests, id: manifestId, sourceArchiveJobId: jobId,
+      image: { filesystemIdentity: `${image.dev}:${image.ino}`, mtimeNs: image.mtimeNs.toString() },
+      boundaryEvidence,
+      initialCopy: {
+        copyPolicyVersion: "dvd-initial-copy-v1", declaredByteCount: boundaryEvidence.reportedSizeBytes,
+        recoveredByteCount: (acceptedEndLbaExclusive - unresolved) * 2_048,
+        unrecoveredSourceRanges,
+      },
+      metadataDecision: { policyVersion: "dvd-full-extent-metadata-v1", decision: "publishable", blockers: [], observations: [] },
+      integrity: { integrity: "incomplete_read", policyVersion: "dvd-recovery-evidence-v1", badSectorCount: unresolved, badAreaCount: unrecoveredSourceRanges.length, badSectorRanges: unrecoveredSourceRanges.map(({ startLba, sectorCount }) => ({ startLba, sectorCount })) },
+      policies: { publication: "dvd-initial-publication-v1", copy: "dvd-initial-copy-v1", metadata: "dvd-full-extent-metadata-v1" },
+    };
+    const publicationDigest = createDvdInitialPublicationDigest(payload);
+    await createArchiveImageOwnership({ authorityRootPath: dirname(databasePath) }).withInitialPublicationWriter({
+      archiveId: archive.id, imagePath, originalsLibraryPath, signal: new AbortController().signal,
+      async task() {
+        const directory = join(originalsLibraryPath, ".dvd-evidence", archive.id);
+        mkdirSync(directory, { recursive: true });
+        writeFileSync(join(directory, "initial-manifest.json"), canonicalPublicationJson({ ...payload, publicationDigest }));
+        writeFileSync(join(directory, "checkpoint.json"), canonicalPublicationJson({ originalDiscArchiveId: archive.id, currentManifestId: manifestId, currentManifestRevision: 1, currentManifestDigest: manifestDigests.manifestDigest, publicationDigest }));
+      },
+    });
+  });
   return { archive, recoveryId };
 }
 
@@ -877,6 +913,7 @@ try {
     overflowSelection: "c",
     batchSelections: "e",
   });
+  for (const publish of previewPublications) await publish();
 } finally {
   access.close();
 }
