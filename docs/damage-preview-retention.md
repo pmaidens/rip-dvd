@@ -46,5 +46,7 @@ failures remain in `media.history`.
 Inspection and canonical export distinguish `DAMAGE_PREVIEW_MEDIA_DELETED`,
 `DAMAGE_PREVIEW_MEDIA_EXPIRED`, `DAMAGE_PREVIEW_MEDIA_MISSING`,
 `DAMAGE_PREVIEW_MEDIA_REMOVING` and `DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED`.
+Storage inspection failures report `DAMAGE_PREVIEW_MEDIA_UNAVAILABLE`, and
+unsafe paths report `DAMAGE_PREVIEW_MEDIA_UNSAFE`, without claiming absence.
 A request that generated no artifact reports `not_generated`; an unknown
 request reports `NOT_FOUND`.

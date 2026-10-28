@@ -1,4 +1,6 @@
 import { existsSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { cleanupDamagePreviewMedia, createApplicationOperations } from "@rip-dvd/application";
@@ -7,7 +9,7 @@ import { seedRetainedDamagePreview } from "./damage-preview.test-support.js";
 import { advanceCommittedArchiveEvidence, withEvidenceGuardsDisabled } from "./archive-evidence.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
-afterEach(() => { vi.useRealTimers(); fixtures.splice(0).forEach((fixture) => fixture.dispose()); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); syncBuiltinESMExports(); fixtures.splice(0).forEach((fixture) => fixture.dispose()); });
 
 async function setup() {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
@@ -143,19 +145,47 @@ it("resumes durable deletion after process death, including already missing file
   expect(await fixture.run(args)).toMatchObject({ exitCode: 0, result: after });
 });
 
-it("records removal failure without following a substituted symlink, and permits a new reviewed retry", async () => {
+it("rejects a substituted symlink without following it, and permits reviewed deletion after it is removed", async () => {
   const { fixture, id, path, inspect } = await setup();
   const before = await inspect();
   unlinkSync(path); symlinkSync(fixture.databasePath, path);
   const current = await inspect();
-  expect(current.media.state).toBe("missing");
+  expect(current.media.state).toBe("unsafe");
   const stale = await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-changed-file", "--json", JSON.stringify({ mediaToken: before.media.token })]);
   expect(stale).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_STALE" } } });
-  expect(await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-failed-removal", "--json", JSON.stringify({ mediaToken: current.media.token })])).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED", current: { media: { state: "removal_failed", removal: { state: "failed", outcomes: [{ outcome: "failed" }] } } } } } });
+  expect(await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-unsafe-removal", "--json", JSON.stringify({ mediaToken: current.media.token })])).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE", reasons: [{ code: "DAMAGE_PREVIEW_MEDIA_UNSAFE" }] } } });
   expect(existsSync(fixture.databasePath)).toBe(true);
   unlinkSync(path);
   expect(await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-retry-removal", "--json", JSON.stringify({ mediaToken: (await inspect()).media.token })])).toMatchObject({ exitCode: 0, result: { media: { state: "removed", removal: { outcomes: [{ outcome: "already_missing" }] } } } });
-  expect((await inspect()).media.history).toMatchObject([{ state: "failed", outcomes: [{ outcome: "failed" }] }]);
+});
+
+it("keeps an unflushed unlink failed across retries until the directory can be synchronized", async () => {
+  const { fixture, id, path, inspect } = await setup();
+  const before = await inspect();
+  const failSync = vi.spyOn(fs, "fsyncSync").mockImplementation(() => { throw Object.assign(new Error("Synthetic directory sync failure"), { code: "EIO" }); });
+  syncBuiltinESMExports();
+  const remove = (key: string, mediaToken: string) => fixture.run(["damage-preview", "delete", id, "--key", key, "--json", JSON.stringify({ mediaToken })]);
+  expect(await remove("synthetic-unflushed-unlink", before.media.token)).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED" } } });
+  expect(existsSync(path)).toBe(false);
+  // This retry sees ENOENT. It must still fail while directory sync fails.
+  expect(await remove("synthetic-still-unflushed", (await inspect()).media.token)).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED" } } });
+  failSync.mockRestore(); syncBuiltinESMExports();
+  expect(await remove("synthetic-synchronized-removal", (await inspect()).media.token)).toMatchObject({ exitCode: 0, result: { media: { state: "removed", removal: { state: "complete", outcomes: [{ outcome: "already_missing" }] }, history: [{ state: "failed" }, { state: "failed" }] } } });
+});
+
+it("reports storage inspection failure separately from proven missing media", async () => {
+  const { fixture, id, path, inspect } = await setup();
+  const before = await inspect();
+  const original = fs.lstatSync;
+  vi.spyOn(fs, "lstatSync").mockImplementation(((...args: unknown[]) => {
+    if (args[0] === path) throw Object.assign(new Error("Synthetic storage fault"), { code: "EIO" });
+    return Reflect.apply(original, fs, args);
+  }) as typeof fs.lstatSync);
+  syncBuiltinESMExports();
+  const unavailable = await inspect();
+  expect(unavailable).toMatchObject({ generationStatus: "complete", artifacts: [{ media: { state: "unavailable", reasonCode: "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE" } }], media: { state: "unavailable", deletion: { available: false } } });
+  expect(await fixture.run(["damage-preview", "export", before.artifacts[0]!.identity, "--destination", join(fixture.operatorHostPath, "unavailable.mkv")])).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE" } } });
+  expect(await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-storage-fault-delete", "--json", JSON.stringify({ mediaToken: unavailable.media.token })])).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE" } } });
 });
 
 it("preserves a replacement file when an interrupted deletion resumes", async () => {
