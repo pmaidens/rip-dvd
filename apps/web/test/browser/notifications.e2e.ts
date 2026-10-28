@@ -145,5 +145,14 @@ test("displays a confirmed Recovery Stop with remaining source and navigates to 
   await expect(recoveryDetail.getByText("stopped", { exact: true })).toBeVisible();
   await expect(recoveryDetail.getByText("1 sectors", { exact: true })).toBeVisible();
   await expect(recoveryDetail.getByRole("list", { name: "Recovery action availability" })).toContainText("Archive Recovery is already stopped.");
+  const current = await (await page.request.get(`/api/operations?kind=archive-recoveries&id=${recoveryId}`)).json();
+  const resume = current.item.availableActions.find((action: { name: string }) => action.name === "resume");
+  expect(resume.eligible).toBe(false);
+  // This fixture has no ownership namespace. Both views must fail closed.
+  expect(resume.blockingReasons).toEqual(expect.arrayContaining([
+    expect.objectContaining({ code: "CONSISTENCY_FAULT" }),
+  ]));
+  await expect(recoveryDetail.getByRole("list", { name: "Recovery action availability" }))
+    .toContainText(`resume: ${resume.reason}`);
   expect(context.pages()).toHaveLength(1);
 });

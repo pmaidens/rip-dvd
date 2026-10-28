@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { inspectOperations } from "@rip-dvd/application";
+import { loadConfig } from "@rip-dvd/config";
 import { getDataAccess } from "../../../lib/data-access";
 
 export const dynamic = "force-dynamic";
@@ -18,7 +19,9 @@ export default async function NotificationTargetPage({ searchParams }: {
   } | null = null;
   if (supported && typeof id === "string" && id.length > 0 && id.length <= 256) {
     try {
-      const result = inspectOperations(getDataAccess(), kind, { id });
+      const access = getDataAccess();
+      const inspectionOptions = { id, originalsLibraryPath: loadConfig().originalsLibraryPath };
+      const result = inspectOperations(access, kind, inspectionOptions);
       if ("item" in result && result.item) {
         const item = result.item;
         detail = {
@@ -27,7 +30,8 @@ export default async function NotificationTargetPage({ searchParams }: {
           label: "detectedDisc" in item && item.detectedDisc && "volumeLabel" in item.detectedDisc ? item.detectedDisc.volumeLabel : null,
         };
         if ("archiveRecovery" in item && item.archiveRecovery?.record) {
-          const recovery = inspectOperations(getDataAccess(), "archive-recoveries", {
+          const recovery = inspectOperations(access, "archive-recoveries", {
+            ...inspectionOptions,
             id: item.archiveRecovery.record.id,
           });
           if ("item" in recovery && recovery.item && "recoveryStatus" in recovery.item) {
