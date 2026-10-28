@@ -1,5 +1,4 @@
 import {
-  DomainInvariantError,
   MAX_DVD_TITLES,
   type DataAccess,
   type DiscSelectionId,
@@ -220,19 +219,4 @@ export function inspectDvdTitleDamageDecision(
     current: serialize(inspection.current),
     latest: serialize(inspection.latest),
   };
-}
-
-export function assertDvdTitleDamageDecisionAvailable(
-  access: DataAccess,
-  originalDiscArchiveId: OriginalDiscArchiveId,
-): void {
-  const inspection = access.catalog.inspectDvdTitleDamageDecision(
-    originalDiscArchiveId,
-  );
-  if (inspection.state === "accepted" || inspection.state === "not_required") {
-    return;
-  }
-  throw new DomainInvariantError(
-    "A current exact-set Title Damage decision is required.",
-  );
 }
