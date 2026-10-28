@@ -37,6 +37,10 @@
     "./dvd-title-damage-acceptance-preview-token": {
       "types": "./src/dvd-title-damage-acceptance-preview-token.ts",
       "default": "./dist/dvd-title-damage-acceptance-preview-token.js"
+    },
+    "./dvd-title-damage-acceptance-preview-test-support": {
+      "types": "./src/dvd-title-damage-acceptance-preview.test-support.ts",
+      "default": "./dist/dvd-title-damage-acceptance-preview.test-support.js"
     }
   },
   "files": ["dist"],

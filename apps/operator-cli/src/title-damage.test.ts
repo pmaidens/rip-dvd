@@ -663,6 +663,12 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     WHERE original_disc_archive_id = ?
   `).run(archive.id);
   stableRecoverySqlite.close();
+  const mainFeatureSelection = access.catalog.listDiscSelections({
+    originalDiscArchiveId: archive.id,
+  }).find((selection) => selection.sourceIdentity.kind === "main_feature");
+  if (mainFeatureSelection === undefined) {
+    throw new Error("Expected a main-feature Disc Selection");
+  }
   const completePreflight = await fixture.run([
     "catalog-review",
     "preview-title-damage-acceptance",
@@ -693,7 +699,13 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     currentItems[1]!.titleIdentityId,
     "--exclude-title-identity",
     currentItems[2]!.titleIdentityId,
+    "--resolve-main-feature",
+    mainFeatureSelection.id,
+    currentItems[0]!.titleIdentityId,
   ]);
+  const exactPreflightResult = JSON.parse(exactPreflight.stdout) as {
+    reviewedContent: Array<{ catalogMappings: unknown[] }>;
+  };
   expect(exactPreflight).toMatchObject({
     exitCode: 0,
     result: {
@@ -714,19 +726,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
           chapterStart: 1,
           chapterEnd: 4,
         },
-        catalogMappings: [{
-          discSelectionId: mappedSelection.id,
-          sourceIdentity: {
-            kind: "dvd_chapters",
-            titleNumber: 1,
-            chapterStart: 1,
-            chapterEnd: 2,
-          },
-          mediaItem: {
-            kind: "movie",
-            title: "Synthetic remapped damage",
-          },
-        }],
+        catalogMappings: expect.any(Array),
         assessmentSnapshot: {
           unrecoveredUniqueSourceSectorCount: 4,
           sourceContinuityRiskSectorCount: 1,
@@ -736,6 +736,16 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
         { titleIdentityId: currentItems[1]!.titleIdentityId },
         { titleIdentityId: currentItems[2]!.titleIdentityId },
       ],
+      mainFeatureChoices: [{
+        discSelectionId: mainFeatureSelection.id,
+        resolvedTitleIdentityId: currentItems[0]!.titleIdentityId,
+        resolvedSourceIdentity: {
+          displayTitleNumber: 1,
+          angleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 4,
+        },
+      }],
       affectedWork: [],
       damagePreview: {
         required: false,
@@ -743,6 +753,34 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
       },
     },
   });
+  expect(exactPreflightResult.reviewedContent[0]!.catalogMappings).toEqual(
+    expect.arrayContaining([expect.objectContaining({
+      discSelectionId: mappedSelection.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 1,
+        chapterEnd: 2,
+      },
+      mediaItem: expect.objectContaining({
+        kind: "movie",
+        title: "Synthetic remapped damage",
+      }),
+    }), expect.objectContaining({
+      discSelectionId: mainFeatureSelection.id,
+      sourceIdentity: { kind: "main_feature" },
+      resolvedSourceIdentity: expect.objectContaining({
+        displayTitleNumber: 1,
+        angleNumber: 1,
+        chapterStart: 1,
+        chapterEnd: 4,
+      }),
+      mediaItem: expect.objectContaining({
+        kind: "movie",
+        title: "Corrected Film",
+      }),
+    })]),
+  );
   const previewLedger = new DatabaseSync(fixture.databasePath);
   expect(previewLedger.prepare(`
     SELECT operation, outcome

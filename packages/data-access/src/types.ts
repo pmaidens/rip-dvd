@@ -1727,6 +1727,10 @@ export interface DvdTitleDamageAcceptancePreviewDecisionInput {
   previewToken: string;
   originalDiscArchiveId: OriginalDiscArchiveId;
   excludedTitleIdentityIds: readonly DvdTitleIdentityId[];
+  mainFeatureResolutions: readonly {
+    discSelectionId: DiscSelectionId;
+    titleIdentityId: DvdTitleIdentityId;
+  }[];
   expectedPreviewEvidence: string;
 }
 

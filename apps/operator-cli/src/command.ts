@@ -276,7 +276,7 @@ const commandDefinitions = [
       options: [
         "show: --selection-offset, --correction-offset, --correction-job-offset, --correction-output-offset, --replacement-offset, --replacement-profile-offset",
         "damage: --limit <1..100> --cursor <cursor>",
-        "preview-title-damage-acceptance: --exclude-title-identity <id> (repeatable)",
+        "preview-title-damage-acceptance: --exclude-title-identity <id> (repeatable), --resolve-main-feature <disc-selection-id> <title-identity-id> (repeatable)",
         "suggest: --tmdb-id <positive integer> --media-type <movie|tv_show> (together, optional)",
         "apply-proposal: --key <key> and exactly one of --json <object>, --stdin, --file <path>",
         "preview-completion: exactly one of --json <object>, --stdin, --file <path>",

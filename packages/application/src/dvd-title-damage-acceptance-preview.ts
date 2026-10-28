@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 
 import {
   DomainInvariantError,
+  MAX_DVD_TITLES,
   RecordNotFoundError,
   type DataAccess,
+  type DiscSelectionId,
   type DiscSelection,
   type DvdTitleDamageAssessmentItem,
   type DvdTitleIdentityId,
@@ -21,7 +23,7 @@ import {
 import { createDvdTitleDamageAcceptancePreviewToken } from
   "./dvd-title-damage-acceptance-preview-token.js";
 
-const MAX_EXCLUSIONS = 100;
+const MAX_EXCLUSIONS = MAX_DVD_TITLES;
 
 export class InvalidDvdTitleDamageAcceptancePreviewInputError extends Error {}
 
@@ -31,7 +33,7 @@ function parseExcludedTitleIdentityIds(
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > MAX_EXCLUSIONS) {
     throw new InvalidDvdTitleDamageAcceptancePreviewInputError(
-      "excludedTitleIdentityIds must be an array with at most 100 entries.",
+      `excludedTitleIdentityIds must be an array with at most ${MAX_EXCLUSIONS} entries.`,
     );
   }
   const ids = value.map((candidate) => {
@@ -51,6 +53,58 @@ function parseExcludedTitleIdentityIds(
     );
   }
   return [...ids].sort();
+}
+
+interface MainFeatureResolution {
+  discSelectionId: DiscSelectionId;
+  titleIdentityId: DvdTitleIdentityId;
+}
+
+function parseMainFeatureResolutions(value: unknown): MainFeatureResolution[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_DVD_TITLES) {
+    throw new InvalidDvdTitleDamageAcceptancePreviewInputError(
+      `mainFeatureResolutions must be an array with at most ${MAX_DVD_TITLES} entries.`,
+    );
+  }
+  const resolutions = value.map((candidate) => {
+    if (
+      typeof candidate !== "object" || candidate === null ||
+      Array.isArray(candidate)
+    ) {
+      throw new InvalidDvdTitleDamageAcceptancePreviewInputError(
+        "Each main-feature resolution must identify one Disc Selection and Title Identity.",
+      );
+    }
+    const record = candidate as Record<string, unknown>;
+    if (
+      Object.keys(record).some((key) =>
+        key !== "discSelectionId" && key !== "titleIdentityId"
+      ) || typeof record.discSelectionId !== "string" ||
+      record.discSelectionId.length === 0 ||
+      record.discSelectionId.length > 128 ||
+      typeof record.titleIdentityId !== "string" ||
+      record.titleIdentityId.length === 0 ||
+      record.titleIdentityId.length > 128
+    ) {
+      throw new InvalidDvdTitleDamageAcceptancePreviewInputError(
+        "Each main-feature resolution must identify one Disc Selection and Title Identity.",
+      );
+    }
+    return {
+      discSelectionId: record.discSelectionId as DiscSelectionId,
+      titleIdentityId: record.titleIdentityId as DvdTitleIdentityId,
+    };
+  });
+  if (new Set(resolutions.map(({ discSelectionId }) => discSelectionId)).size !==
+      resolutions.length) {
+    throw new InvalidDvdTitleDamageAcceptancePreviewInputError(
+      "Each main-feature Disc Selection may be resolved only once.",
+    );
+  }
+  return resolutions.sort((left, right) =>
+    left.discSelectionId.localeCompare(right.discSelectionId)
+  );
 }
 
 function actionFor(
@@ -147,10 +201,16 @@ function evidenceIdentity(value: unknown): string {
 export function previewDvdTitleDamageAcceptance(
   access: DataAccess,
   archiveId: OriginalDiscArchiveId,
-  input: { excludedTitleIdentityIds?: unknown } = {},
+  input: {
+    excludedTitleIdentityIds?: unknown;
+    mainFeatureResolutions?: unknown;
+  } = {},
 ) {
   const excludedTitleIdentityIds = parseExcludedTitleIdentityIds(
     input.excludedTitleIdentityIds,
+  );
+  const mainFeatureResolutions = parseMainFeatureResolutions(
+    input.mainFeatureResolutions,
   );
   const plan = access.readConsistentSnapshot((snapshot) => {
     const archive = snapshot.catalog.listOriginalDiscArchives({
@@ -180,12 +240,10 @@ export function previewDvdTitleDamageAcceptance(
         affectedWork: [] as EncodeJob[],
       };
     }
-    const selectionIds = reviewSet.items.flatMap((item) =>
-      item.discSelectionMappings.map((mapping) => mapping.discSelectionId)
-    );
-    const selections = selectionIds.length === 0
-      ? []
-      : snapshot.catalog.listDiscSelections({ ids: selectionIds });
+    const selections = snapshot.catalog.listDiscSelections({
+      originalDiscArchiveId: archiveId,
+      limit: MAX_DVD_TITLES,
+    });
     const mediaItemIds = [...new Set(selections.map((selection) =>
       selection.mediaItemId
     ))];
@@ -221,7 +279,10 @@ export function previewDvdTitleDamageAcceptance(
             "Title Damage Acceptance preflight requires dvd-recovery-evidence-v1.",
           details: { originalDiscArchiveId: archiveId },
         }],
-        expectedInputs: ["excludedTitleIdentityIds"],
+        expectedInputs: [
+          "excludedTitleIdentityIds",
+          "mainFeatureResolutions",
+        ],
       },
       current: null,
       reviewSetIdentity: null,
@@ -231,6 +292,7 @@ export function previewDvdTitleDamageAcceptance(
       allContent: [],
       reviewedContent: [],
       exclusions: [],
+      mainFeatureChoices: [],
       assessmentSnapshot: null,
       acknowledgementRequired: false,
       affectedWork: [],
@@ -266,7 +328,29 @@ export function previewDvdTitleDamageAcceptance(
       "An excluded Title Identity is not in the current complete review set.",
     );
   }
+  const mainFeatureSelections = selections.filter((selection) =>
+    selection.sourceIdentity.kind === "main_feature"
+  );
+  const mainFeatureSelectionIds = new Set(mainFeatureSelections.map((selection) =>
+    selection.id
+  ));
+  const invalidMainFeatureResolutions = mainFeatureResolutions.filter(
+    (resolution) =>
+      !mainFeatureSelectionIds.has(resolution.discSelectionId) ||
+      !currentIdentityIds.has(resolution.titleIdentityId),
+  );
+  if (invalidMainFeatureResolutions.length > 0) {
+    throw new InvalidDvdTitleDamageAcceptancePreviewInputError(
+      "A main-feature resolution does not match a current active Disc Selection and Title Identity.",
+    );
+  }
   const excluded = new Set(excludedTitleIdentityIds);
+  const mainFeatureResolutionBySelectionId = new Map(
+    mainFeatureResolutions.map((resolution) => [
+      resolution.discSelectionId,
+      resolution.titleIdentityId,
+    ]),
+  );
   const selectionById = new Map(selections.map((selection) => [
     selection.id,
     selection,
@@ -280,7 +364,7 @@ export function previewDvdTitleDamageAcceptance(
   );
   const allContent = currentItems.map((item) => {
     const assessment = assessmentByIdentity.get(item.titleIdentityId) ?? null;
-    const mappings = item.discSelectionMappings.map((mapping) => {
+    const boundMappings = item.discSelectionMappings.map((mapping) => {
       const selection = selectionById.get(mapping.discSelectionId);
       if (selection === undefined) {
         throw new DomainInvariantError(
@@ -303,11 +387,54 @@ export function previewDvdTitleDamageAcceptance(
         mediaItem: mediaItemView(mediaItem),
       };
     });
+    const boundSelectionIds = new Set(boundMappings.map((mapping) =>
+      mapping.discSelectionId
+    ));
+    const resolvedMainFeatureMappings = mainFeatureSelections.flatMap(
+      (selection) => {
+        if (
+          mainFeatureResolutionBySelectionId.get(selection.id) !==
+              item.titleIdentityId || boundSelectionIds.has(selection.id)
+        ) return [];
+        const mediaItem = mediaItemById.get(selection.mediaItemId);
+        if (mediaItem === undefined) {
+          throw new DomainInvariantError(
+            "Main-feature Disc Selection references a missing Media Item",
+          );
+        }
+        return [{
+          discSelectionId: selection.id,
+          discSelectionIdentity: evidenceIdentity([
+            "resolved-main-feature",
+            selection.id,
+            selection.mediaItemId,
+            item.titleIdentityId,
+            item.observation.id,
+          ]),
+          mappingState: "mapped" as const,
+          sourceIdentity: selection.sourceIdentity,
+          resolvedSourceIdentity: resolvedMappingSourceIdentity(
+            item,
+            selection,
+          ),
+          label: selection.label,
+          mediaItem: mediaItemView(mediaItem),
+        }];
+      },
+    );
+    const mappings = [...boundMappings, ...resolvedMainFeatureMappings].sort(
+      (left, right) => left.discSelectionId.localeCompare(right.discSelectionId),
+    );
     return {
       titleIdentityId: item.titleIdentityId,
       titleIdentityObservationId: item.observation.id,
       included: !excluded.has(item.titleIdentityId),
       mappingState: item.mappingState,
+      preflightMappingState: item.mappingState === "needs_mapping_review"
+        ? "needs_mapping_review" as const
+        : mappings.length > 0
+        ? "mapped" as const
+        : "unmapped" as const,
       reviewContinuity: item.reviewContinuity,
       sourceIdentity: {
         displayTitleNumber: item.observation.displayTitleNumber,
@@ -334,16 +461,45 @@ export function previewDvdTitleDamageAcceptance(
     displayTitleNumber: item.sourceIdentity.displayTitleNumber,
     angleNumber: item.sourceIdentity.angleNumber,
   }));
+  const currentItemById = new Map(currentItems.map((item) => [
+    item.titleIdentityId,
+    item,
+  ]));
+  const mainFeatureChoices = mainFeatureSelections.map((selection) => {
+    const mediaItem = mediaItemById.get(selection.mediaItemId);
+    if (mediaItem === undefined) {
+      throw new DomainInvariantError(
+        "Main-feature Disc Selection references a missing Media Item",
+      );
+    }
+    const resolvedTitleIdentityId = mainFeatureResolutionBySelectionId.get(
+      selection.id,
+    ) ?? null;
+    const resolvedItem = resolvedTitleIdentityId === null
+      ? null
+      : currentItemById.get(resolvedTitleIdentityId) ?? null;
+    return {
+      discSelectionId: selection.id,
+      mediaItem: mediaItemView(mediaItem),
+      resolvedTitleIdentityId,
+      resolvedSourceIdentity: resolvedItem === null
+        ? null
+        : resolvedMappingSourceIdentity(resolvedItem, selection),
+    };
+  });
+  const unresolvedMainFeatureSelectionIds = mainFeatureChoices
+    .filter((choice) => choice.resolvedTitleIdentityId === null)
+    .map((choice) => choice.discSelectionId);
   const preflightAction = actionFor(workflow.actions);
   const baseReasons = preflightAction.reasons.filter(({ code }) =>
     code !== "MAPPING_REVIEW_REQUIRED" && code !== "SELECTION_UNIDENTIFIED" &&
     code !== "CATALOG_DAMAGE_DECISION_UNAVAILABLE"
   );
   const mappingReviewItems = reviewedContent.filter((item) =>
-    item.mappingState === "needs_mapping_review"
+    item.preflightMappingState === "needs_mapping_review"
   );
   const unidentifiedItems = reviewedContent.filter((item) =>
-    item.mappingState === "unmapped" || item.catalogMappings.length === 0
+    item.preflightMappingState === "unmapped"
   );
   const reasons = uniqueReasons([
     ...baseReasons,
@@ -358,7 +514,8 @@ export function previewDvdTitleDamageAcceptance(
           ),
         },
       }]),
-    ...(unidentifiedItems.length === 0
+    ...(unidentifiedItems.length === 0 &&
+        unresolvedMainFeatureSelectionIds.length === 0
       ? []
       : [{
         code: "SELECTION_UNIDENTIFIED" as const,
@@ -368,6 +525,7 @@ export function previewDvdTitleDamageAcceptance(
           affectedTitleIdentityIds: unidentifiedItems.map((item) =>
             item.titleIdentityId
           ),
+          unresolvedMainFeatureSelectionIds,
         },
       }]),
   ]);
@@ -419,6 +577,7 @@ export function previewDvdTitleDamageAcceptance(
       previewToken,
       originalDiscArchiveId: archiveId,
       excludedTitleIdentityIds,
+      mainFeatureResolutions,
       expectedPreviewEvidence,
     });
   }
@@ -441,8 +600,9 @@ export function previewDvdTitleDamageAcceptance(
           "catalogMappingProjectionId",
           "reviewedContentIdentity",
           "excludedTitleIdentityIds",
+          "mainFeatureResolutions",
         ]
-        : ["excludedTitleIdentityIds"],
+        : ["excludedTitleIdentityIds", "mainFeatureResolutions"],
     },
     current: workflow.current,
     reviewSetIdentity: reviewSet?.reviewSetIdentity ?? null,
@@ -453,6 +613,7 @@ export function previewDvdTitleDamageAcceptance(
     allContent,
     reviewedContent,
     exclusions,
+    mainFeatureChoices,
     assessmentSnapshot: titleDamage.assessment,
     acknowledgementRequired,
     affectedWork,

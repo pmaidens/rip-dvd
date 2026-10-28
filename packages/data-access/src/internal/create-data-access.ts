@@ -18195,6 +18195,9 @@ export function createDataAccessInternal(
           semanticInput: JSON.stringify([
             input.originalDiscArchiveId,
             [...input.excludedTitleIdentityIds].sort(),
+            [...input.mainFeatureResolutions].sort((left, right) =>
+              left.discSelectionId.localeCompare(right.discSelectionId)
+            ),
           ]),
           outcome: JSON.stringify({
             expectedPreviewEvidence: input.expectedPreviewEvidence,

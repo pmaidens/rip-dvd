@@ -34,6 +34,10 @@ import type {
   MediaItemId,
 } from "@rip-dvd/data-access";
 import {
+  createDvdTitleDamageAcceptancePreviewTestAccess,
+  DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS,
+} from "@rip-dvd/application/dvd-title-damage-acceptance-preview-test-support";
+import {
   createArchiveImageOwnership,
   defaultArchiveImageOwnership,
 } from "@rip-dvd/worker-runtime";
@@ -5726,221 +5730,26 @@ it.each([
   }
 });
 
-function titleDamageAcceptanceParityAccess(options: {
-  assessmentState: "current" | "outdated";
-  mappingState: "mapped" | "needs_mapping_review";
-}): DataAccess {
-  const archiveId = "synthetic-title-damage-acceptance-archive";
-  const checkpoint = {
-    manifestId: "synthetic-title-damage-manifest",
-    manifestRevision: 2,
-    manifestDigest: "a".repeat(64),
-  };
-  const observation = {
-    id: "synthetic-title-damage-observation",
-    titleIdentityId: "synthetic-title-damage-identity",
-    checkpoint,
-    displayTitleNumber: 1,
-    navigation: {
-      videoTitleSetNumber: 1,
-      titleSetTitleNumber: 1,
-      programChainNumber: 1,
-    },
-    selectedPath: [{
-      programNumber: 1,
-      cellNumber: 1,
-      vobId: 1,
-      cellId: 1,
-    }],
-    angleNumber: 1,
-    angleCount: 1,
-    chapterStart: 1,
-    chapterEnd: 4,
-    chapterCount: 4,
-    sourceExtents: [{ startLba: 0, sectorCount: 100 }],
-    contentDigest: "b".repeat(64),
-    continuity: {
-      result: "initial" as const,
-      policyVersion: "synthetic-title-identity-v1",
-      previousObservationId: null,
-    },
-    createdAt: new Date("2026-01-01T00:00:00.000Z"),
-  };
-  const reviewSet = {
-    originalDiscArchiveId: archiveId,
-    evidenceFormat: "dvd-recovery-evidence-v1" as const,
-    checkpoint,
-    policyVersion: "synthetic-title-identity-v1",
-    reviewSetIdentity: "c".repeat(64),
-    items: [{
-      titleIdentityId: observation.titleIdentityId,
-      presentAtCurrentCheckpoint: true,
-      observation,
-      reviewContinuity: observation.continuity,
-      mappingState: options.mappingState,
-      discSelectionMappings: [{
-        discSelectionId: "synthetic-title-damage-selection",
-        discSelectionIdentity: "d".repeat(64),
-        mappingState: options.mappingState,
-      }],
-    }],
-    createdAt: new Date("2026-01-01T00:00:00.000Z"),
-  };
-  const assessmentId = `dvd-title-damage-assessment:${"e".repeat(64)}`;
-  const assessmentItem = {
-    titleIdentityId: observation.titleIdentityId,
-    titleIdentityObservationId: observation.id,
-    displayTitleNumber: 1,
-    selection: {
-      selectedPath: observation.selectedPath,
-      angleNumber: 1,
-      chapterStart: 1,
-      chapterEnd: 4,
-    },
-    mappingCoverage: {
-      state: "complete" as const,
-      policyVersion: "synthetic-title-damage-map-v1",
-      unknownReasons: [],
-    },
-    uniqueSourceRanges: [{ startLba: 0, sectorCount: 100 }],
-    uniqueSourceSectorCount: 100,
-    knownUnrecoveredSourceRanges: [],
-    unrecoveredUniqueSourceSectorCount: 0,
-    titleMissingSourcePercentage: 0,
-    knownSourceContinuityRiskRanges: [],
-    sourceContinuityRiskSectorCount: 0,
-    timingEvidence: {
-      policyVersion: "dvd-title-damage-timing-v1" as const,
-      occurrences: [],
-    },
-    estimatedAffectedPlayback: {
-      policyVersion: "dvd-title-damage-timing-v1" as const,
-      intervals: [],
-      unknownCoverage: [],
-    },
-  };
-  const assessment = {
-    id: assessmentId,
-    policyVersion: "dvd-title-damage-assessment-v1" as const,
-    checkpoint: {
-      originalDiscArchiveId: archiveId,
-      ...checkpoint,
-      acceptedEndLbaExclusive: 1_000,
-    },
-    titleIdentityReviewSetIdentity: reviewSet.reviewSetIdentity,
-    structuralAssessmentIdentity:
-      `dvd-structural-assessment:${"f".repeat(64)}`,
-    structuralFindings: {
-      dvdNavigation: "valid" as const,
-      titleEnumeration: "valid" as const,
-    },
-    sourceContinuity: {
-      policyVersion: "dvd-title-source-continuity-v1" as const,
-      provenance: [],
-      sourceContinuityRiskSectorCount: 0,
-    },
-    items: [assessmentItem],
-    unknownTitleImpact: {
-      unrecoveredSourceSectorCount: 0,
-      unrecoveredSourceRanges: [],
-      reasons: [],
-    },
-    unattributedSourceContinuityRisk: {
-      sourceSectorCount: 0,
-      sourceRanges: [],
-    },
-    noTitleMissingSourceProved: true,
-    createdAt: new Date("2026-01-01T00:00:00.000Z"),
-  };
-  const catalog = {
-    listOriginalDiscArchives: () => [{
-      id: archiveId,
-      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
-      catalogReviewOutcome: "needs_review",
-    }],
-    findDvdArchiveEvidenceHeader: () => ({
-      originalDiscArchiveId: archiveId,
-      evidenceFormat: "dvd-recovery-evidence-v1",
-      sourceArchiveJobId: "synthetic-title-damage-archive-job",
-      currentManifestId: checkpoint.manifestId,
-      currentManifestRevision: checkpoint.manifestRevision,
-      currentManifestDigest: checkpoint.manifestDigest,
-      acceptedEndLbaExclusive: 1_000,
-    }),
-    readDvdTitleIdentityReviewSet: () => reviewSet,
-    findArchiveRecovery: () => ({
-      id: "synthetic-title-damage-recovery",
-      attemptId: "synthetic-title-damage-attempt",
-      status: "stopped",
-      work: null,
-    }),
-    listCatalogReviewEvidenceChoices: () => [],
-    listDiscSelections: () => [{
-      id: "synthetic-title-damage-selection",
-      originalDiscArchiveId: archiveId,
-      mediaItemId: "synthetic-title-damage-movie",
-      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
-      label: null,
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
-    }],
-    listMediaItems: () => [{
-      id: "synthetic-title-damage-movie",
-      parentId: null,
-      kind: "movie",
-      title: "Synthetic parity movie",
-      year: 2026,
-      seasonNumber: null,
-      episodeNumber: null,
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
-    }],
-    recordDvdTitleDamageAcceptancePreviewDecision: vi.fn(),
-  };
-  const snapshot = {
-    catalog,
-    archiveJobs: {
-      listForArchive: () => [{
-        id: "synthetic-title-damage-archive-job",
-        status: "completed",
-        evidenceFormat: "dvd-recovery-evidence-v1",
-      }],
-    },
-    dvdTitleDamageAssessments: {
-      inspect: () => ({
-        schemaVersion: 1,
-        policyVersion: "dvd-title-damage-assessment-v1",
-        originalDiscArchiveId: archiveId,
-        state: options.assessmentState,
-        checkpoint: assessment.checkpoint,
-        currentAssessmentIdentity: options.assessmentState === "current"
-          ? assessmentId
-          : null,
-        assessment,
-        unavailableReasons: [],
-      }),
-    },
-    encodeJobs: {
-      listForDiscSelection: () => [{
-        id: "synthetic-title-damage-encode-job",
-        discSelectionId: "synthetic-title-damage-selection",
-        status: "queued",
-      }],
-    },
-  };
-  return {
-    ...snapshot,
-    readConsistentSnapshot: (read: (value: unknown) => unknown) =>
-      read(snapshot),
-    close: vi.fn(),
-  } as unknown as DataAccess;
-}
-
 async function titleDamageAcceptanceAdapterResults(options: {
   assessmentState: "current" | "outdated";
-  mappingState: "mapped" | "needs_mapping_review";
+  mappingState: "mapped" | "needs_mapping_review" | "unmapped";
+  resolveMainFeature?: boolean;
 }) {
   const archiveId = "synthetic-title-damage-acceptance-archive";
+  const mainFeatureResolutions = options.resolveMainFeature
+    ? [{
+      discSelectionId: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
+      titleIdentityId: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.titleIdentityId,
+    }]
+    : [];
+  const accessOptions = {
+    ...options,
+    sourceIdentity: options.resolveMainFeature
+      ? { kind: "main_feature" as const }
+      : undefined,
+    bindSelection: !options.resolveMainFeature,
+    includeAffectedWork: true,
+  };
   const request = new Request(
     `${trustedOrigin}/api/catalog-reviews/${archiveId}/title-damage-acceptance-preview`,
     {
@@ -5950,20 +5759,31 @@ async function titleDamageAcceptanceAdapterResults(options: {
         Host: new URL(trustedOrigin).host,
         Origin: trustedOrigin,
       },
-      body: JSON.stringify({ excludedTitleIdentityIds: [] }),
+      body: JSON.stringify({
+        excludedTitleIdentityIds: [],
+        mainFeatureResolutions,
+      }),
     },
   );
   const web = await createDvdTitleDamageAcceptancePreviewRoute(
     request,
     archiveId,
-    () => titleDamageAcceptanceParityAccess(options),
+    () => createDvdTitleDamageAcceptancePreviewTestAccess(accessOptions),
     () => trustedOrigin,
   );
   const cli = runDvdTitleDamageAcceptancePreview([
     "preview-title-damage-acceptance",
     archiveId,
+    ...(options.resolveMainFeature
+      ? [
+        "--resolve-main-feature",
+        DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
+        DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.titleIdentityId,
+      ]
+      : []),
   ], {
-    openAccess: () => titleDamageAcceptanceParityAccess(options),
+    openAccess: () =>
+      createDvdTitleDamageAcceptancePreviewTestAccess(accessOptions),
   });
   expect(web.status).toBe(200);
   return {
@@ -6001,6 +5821,7 @@ it("keeps available, outdated, and mapping-review Title Damage Acceptance prefli
         "catalogMappingProjectionId",
         "reviewedContentIdentity",
         "excludedTitleIdentityIds",
+        "mainFeatureResolutions",
       ],
     },
     reviewSetIdentity: expect.any(String),
@@ -6034,5 +5855,39 @@ it("keeps available, outdated, and mapping-review Title Damage Acceptance prefli
         { code: "MAPPING_REVIEW_REQUIRED" },
       ],
     },
+  });
+});
+
+it("keeps explicit main-feature resolution aligned across HTTP and CLI", async () => {
+  const resolved = await titleDamageAcceptanceAdapterResults({
+    assessmentState: "current",
+    mappingState: "unmapped",
+    resolveMainFeature: true,
+  });
+
+  expect({ ...resolved.cli, previewToken: null }).toEqual({
+    ...resolved.web,
+    previewToken: null,
+  });
+  expect(resolved.web).toMatchObject({
+    available: true,
+    mainFeatureChoices: [{
+      discSelectionId: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
+      resolvedTitleIdentityId:
+        DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.titleIdentityId,
+    }],
+    reviewedContent: [{
+      preflightMappingState: "mapped",
+      catalogMappings: [{
+        sourceIdentity: { kind: "main_feature" },
+        resolvedSourceIdentity: {
+          resolution: "title_identity_binding",
+          displayTitleNumber: 1,
+          angleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 4,
+        },
+      }],
+    }],
   });
 });

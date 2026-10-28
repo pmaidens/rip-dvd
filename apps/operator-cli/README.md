@@ -122,7 +122,7 @@ stdout. Invalid input exits 2; an unavailable read exits 1.
 ```sh
 rip-dvd catalog-review show <archive-id>
 rip-dvd catalog-review damage <archive-id> [--limit 100] [--cursor <cursor>]
-rip-dvd catalog-review preview-title-damage-acceptance <archive-id> [--exclude-title-identity <id> ...]
+rip-dvd catalog-review preview-title-damage-acceptance <archive-id> [--exclude-title-identity <id> ...] [--resolve-main-feature <disc-selection-id> <title-identity-id> ...]
 rip-dvd catalog-review archive-only <archive-id> --key <key> --revision <catalog-revision> --checkpoint-revision <n> --checkpoint-digest <digest>
 rip-dvd catalog-review reopen <archive-id> --key <key> --revision <catalog-revision> --checkpoint-revision <n> --checkpoint-digest <digest>
 rip-dvd catalog-review suggest <archive-id>
@@ -144,7 +144,10 @@ available result returns the concrete catalog mappings, angle and chapter
 bounds, assessment snapshots, damage and unknown coverage, affected work, the
 identities a later acceptance must present, and a persisted opaque token. The
 preview does not accept damage or queue an Encode Job. A missing optional
-Damage Preview never appears as an acceptance blocker.
+Damage Preview never appears as an acceptance blocker. Repeat
+`--resolve-main-feature` to bind each active main-feature Disc Selection to an
+exact current Title Identity; unresolved main-feature choices remain blocked
+and no representative title is inferred.
 `reviewActionAvailability` reports whether completion with selections or
 Archive-only completion is currently allowed, with a reason when blocked.
 Each paginated section includes its offset, limit, and next/previous flags.

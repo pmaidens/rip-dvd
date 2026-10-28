@@ -24,7 +24,7 @@ function contentLabel(item: CurrentTitleIdentity): string {
   return `DVD title ${item.observation.displayTitleNumber}, angle ${item.observation.angleNumber} of ${item.observation.angleCount}, chapters ${item.observation.chapterStart}-${item.observation.chapterEnd}`;
 }
 
-export function CatalogReviewDamageAcceptancePreview({
+export function CatalogReviewTitleDamageAcceptancePreview({
   originalDiscArchiveId,
   titleIdentity,
   fetcher = fetch,
@@ -35,6 +35,9 @@ export function CatalogReviewDamageAcceptancePreview({
 }) {
   const items = currentItems(titleIdentity);
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
+  const [mainFeatureResolutions, setMainFeatureResolutions] = useState<
+    Map<string, string>
+  >(new Map());
   const [preview, setPreview] = useState<DvdTitleDamageAcceptancePreview | null>(
     null,
   );
@@ -64,6 +67,14 @@ export function CatalogReviewDamageAcceptancePreview({
           },
           body: JSON.stringify({
             excludedTitleIdentityIds: [...excluded].sort(),
+            mainFeatureResolutions: [...mainFeatureResolutions]
+              .map(([discSelectionId, titleIdentityId]) => ({
+                discSelectionId,
+                titleIdentityId,
+              }))
+              .sort((left, right) =>
+                left.discSelectionId.localeCompare(right.discSelectionId)
+              ),
           }),
         },
       );
@@ -128,6 +139,52 @@ export function CatalogReviewDamageAcceptancePreview({
                 </li>
               ))}
             </ul>
+          )}
+          {preview.mainFeatureChoices.length === 0 ? null : (
+            <fieldset>
+              <legend>Resolve main-feature choices</legend>
+              <p className="catalog-help">
+                Bind each main-feature Disc Selection to exact discovered
+                content, then preview again. No representative title is
+                inferred.
+              </p>
+              {preview.mainFeatureChoices.map((choice) => (
+                <label key={choice.discSelectionId}>
+                  {choice.mediaItem.kind}: {choice.mediaItem.title}
+                  <select
+                    aria-label={`Resolved content for ${choice.mediaItem.title}`}
+                    value={mainFeatureResolutions.get(choice.discSelectionId) ??
+                      choice.resolvedTitleIdentityId ?? ""}
+                    onChange={(event) => {
+                      const titleIdentityId = event.currentTarget.value;
+                      setMainFeatureResolutions((current) => {
+                        const next = new Map(current);
+                        if (titleIdentityId === "") {
+                          next.delete(choice.discSelectionId);
+                        } else {
+                          next.set(choice.discSelectionId, titleIdentityId);
+                        }
+                        return next;
+                      });
+                    }}
+                  >
+                    <option value="">Choose exact content</option>
+                    {preview.allContent.map((item) => (
+                      <option
+                        key={item.titleIdentityId}
+                        value={item.titleIdentityId}
+                      >
+                        DVD title {item.sourceIdentity.displayTitleNumber}, angle {
+                          item.sourceIdentity.angleNumber
+                        }, chapters {item.sourceIdentity.chapterStart}-{
+                          item.sourceIdentity.chapterEnd
+                        }
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </fieldset>
           )}
           {preview.evidenceFormat === null ? null : (
             <>

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import type { DvdTitleDamageAcceptancePreview } from "@rip-dvd/application";
 
-import { CatalogReviewDamageAcceptancePreview } from
+import { CatalogReviewTitleDamageAcceptancePreview } from
   "./catalog-review-title-damage-acceptance-preview";
 import type { CatalogReviewTitleIdentity } from "./catalog-review-model";
 
@@ -153,6 +153,19 @@ const preview = {
     displayTitleNumber: 1,
     angleNumber: 1,
   }],
+  mainFeatureChoices: [{
+    discSelectionId: "synthetic-selection-1",
+    mediaItem: {
+      id: "synthetic-movie",
+      kind: "movie",
+      title: "Synthetic Movie",
+      year: 2026,
+      seasonNumber: null,
+      episodeNumber: null,
+    },
+    resolvedTitleIdentityId: null,
+    resolvedSourceIdentity: null,
+  }],
   assessmentSnapshot: {
     unknownTitleImpact: {
       unrecoveredSourceSectorCount: 7,
@@ -183,7 +196,7 @@ const preview = {
 it("includes all current content by default and sends only explicit exclusions", async () => {
   const fetcher = vi.fn(async () => Response.json(preview));
   await act(async () => root.render(
-    <CatalogReviewDamageAcceptancePreview
+    <CatalogReviewTitleDamageAcceptancePreview
       originalDiscArchiveId="synthetic-archive"
       titleIdentity={titleIdentity}
       fetcher={fetcher}
@@ -204,6 +217,7 @@ it("includes all current content by default and sends only explicit exclusions",
       method: "POST",
       body: JSON.stringify({
         excludedTitleIdentityIds: ["synthetic-title-1"],
+        mainFeatureResolutions: [],
       }),
     }),
   );
@@ -216,6 +230,26 @@ it("includes all current content by default and sends only explicit exclusions",
     "Unknown title impact: 7 unrecovered source sectors",
   );
   expect(container.textContent).toContain("Encode Job synthetic-encode-job");
+  const resolution = container.querySelector("select") as HTMLSelectElement;
+  await act(async () => {
+    resolution.value = "synthetic-title-1";
+    resolution.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await act(async () => {
+    (container.querySelector("button") as HTMLButtonElement).click();
+  });
+  expect(fetcher).toHaveBeenLastCalledWith(
+    "/api/catalog-reviews/synthetic-archive/title-damage-acceptance-preview",
+    expect.objectContaining({
+      body: JSON.stringify({
+        excludedTitleIdentityIds: ["synthetic-title-1"],
+        mainFeatureResolutions: [{
+          discSelectionId: "synthetic-selection-1",
+          titleIdentityId: "synthetic-title-1",
+        }],
+      }),
+    }),
+  );
   expect(container.textContent).toContain(
     "A Damage Preview is optional. Its unavailability does not block this preflight.",
   );

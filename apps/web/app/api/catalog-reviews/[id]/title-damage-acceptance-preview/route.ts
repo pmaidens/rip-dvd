@@ -69,7 +69,7 @@ export async function createDvdTitleDamageAcceptancePreviewRoute(
   }
   const body = asRecord(await request.json().catch(() => null));
   if (body === null || Object.keys(body).some((key) =>
-    key !== "excludedTitleIdentityIds"
+    key !== "excludedTitleIdentityIds" && key !== "mainFeatureResolutions"
   )) {
     return errorResponse(
       "INVALID_ARGUMENTS",
@@ -81,6 +81,7 @@ export async function createDvdTitleDamageAcceptancePreviewRoute(
     return response(createApplicationOperations(getAccess())
       .previewDvdTitleDamageAcceptance(id as OriginalDiscArchiveId, {
         excludedTitleIdentityIds: body.excludedTitleIdentityIds,
+        mainFeatureResolutions: body.mainFeatureResolutions,
       }));
   } catch (error) {
     if (error instanceof InvalidDvdTitleDamageAcceptancePreviewInputError) {

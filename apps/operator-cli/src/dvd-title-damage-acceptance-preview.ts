@@ -29,18 +29,32 @@ function parseArguments(rest: readonly string[]) {
     invalid("A valid archive ID is required.");
   }
   const excludedTitleIdentityIds: string[] = [];
-  for (let index = 0; index < options.length; index += 2) {
-    if (
-      options[index] !== "--exclude-title-identity" ||
-      index + 1 >= options.length
-    ) {
-      invalid("Invalid Title Damage Acceptance preflight options.");
+  const mainFeatureResolutions: Array<{
+    discSelectionId: string;
+    titleIdentityId: string;
+  }> = [];
+  for (let index = 0; index < options.length;) {
+    if (options[index] === "--exclude-title-identity" &&
+        index + 1 < options.length) {
+      excludedTitleIdentityIds.push(options[index + 1]!);
+      index += 2;
+      continue;
     }
-    excludedTitleIdentityIds.push(options[index + 1]!);
+    if (options[index] === "--resolve-main-feature" &&
+        index + 2 < options.length) {
+      mainFeatureResolutions.push({
+        discSelectionId: options[index + 1]!,
+        titleIdentityId: options[index + 2]!,
+      });
+      index += 3;
+      continue;
+    }
+    invalid("Invalid Title Damage Acceptance preflight options.");
   }
   return {
     archiveId: archiveId as OriginalDiscArchiveId,
     excludedTitleIdentityIds,
+    mainFeatureResolutions,
   };
 }
 
@@ -53,7 +67,10 @@ export function runDvdTitleDamageAcceptancePreview(
   try {
     return createApplicationOperations(access).previewDvdTitleDamageAcceptance(
       input.archiveId,
-      { excludedTitleIdentityIds: input.excludedTitleIdentityIds },
+      {
+        excludedTitleIdentityIds: input.excludedTitleIdentityIds,
+        mainFeatureResolutions: input.mainFeatureResolutions,
+      },
     );
   } catch (error) {
     if (error instanceof InvalidDvdTitleDamageAcceptancePreviewInputError) {
