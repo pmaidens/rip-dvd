@@ -6209,26 +6209,19 @@ export function createDataAccessInternal(
       archiveRecoveries.originalDiscArchiveId,
       originalDiscArchiveId,
     )).get();
-    const latestAssessment = reader.select({
-      assessment: dvdTitleDamageAssessments,
-    }).from(dvdTitleDamageAssessmentAttempts).innerJoin(
-      dvdTitleDamageAssessments,
-      eq(
-        dvdTitleDamageAssessments.id,
-        dvdTitleDamageAssessmentAttempts.assessmentId,
-      ),
-    ).where(eq(
-      dvdTitleDamageAssessmentAttempts.originalDiscArchiveId,
+    // The authoritative inspection checks the current structural assessment,
+    // Title Identity review set, mapping projection, continuity, and timing
+    // evidence. During an immediate transaction these reads share the same
+    // SQLite connection and therefore the same atomic write fence.
+    const damageInspection = inspectDvdTitleDamageAssessment(
       originalDiscArchiveId,
-    )).orderBy(desc(dvdTitleDamageAssessmentAttempts.sequence)).limit(1)
-      .get()?.assessment;
-    const currentAssessment = header !== undefined &&
-        latestAssessment !== undefined &&
-        latestAssessment.manifestId === header.currentManifestId &&
-        latestAssessment.manifestRevision === header.currentManifestRevision &&
-        latestAssessment.manifestDigest === header.currentManifestDigest &&
-        latestAssessment.catalogMappingProjectionId !== null
-      ? latestAssessment
+    );
+    const currentAssessment = damageInspection.state === "current" &&
+        damageInspection.currentAssessmentIdentity !== null
+      ? reader.select().from(dvdTitleDamageAssessments).where(eq(
+        dvdTitleDamageAssessments.id,
+        damageInspection.currentAssessmentIdentity,
+      )).get() ?? null
       : null;
     return {
       catalogRevision: archive?.updatedAt.toISOString() ?? null,
@@ -18507,7 +18500,18 @@ export function createDataAccessInternal(
           if (assessmentAttempt.assessmentId !== input.assessmentIdentity) {
             throw new StaleDvdTitleDamageDecisionError(current);
           }
-          const timestamp = now();
+          const requestedTimestamp = now();
+          const latestRecordedAt = transaction.select({
+            recordedAt: dvdTitleDamageDecisions.recordedAt,
+          }).from(dvdTitleDamageDecisions).where(eq(
+            dvdTitleDamageDecisions.originalDiscArchiveId,
+            input.originalDiscArchiveId,
+          )).orderBy(desc(dvdTitleDamageDecisions.recordedAt)).limit(1)
+            .get()?.recordedAt;
+          const timestamp = latestRecordedAt !== undefined &&
+              requestedTimestamp.getTime() <= latestRecordedAt.getTime()
+            ? new Date(latestRecordedAt.getTime() + 1)
+            : requestedTimestamp;
           const decision = existing !== null &&
               existing.reviewedContentIdentity ===
                 input.reviewedContentIdentity &&

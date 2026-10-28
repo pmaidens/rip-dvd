@@ -6,6 +6,8 @@ import { runDvdTitleDamageAcceptance } from
   "../../../../../../operator-cli/src/dvd-title-damage-acceptance.js";
 import {
   StaleDvdTitleDamageDecisionError,
+  type ArchiveRecoveryAttemptId,
+  type ArchiveRecoveryId,
   type DataAccess,
   type DvdTitleDamageDecision,
   type RecordDvdTitleDamageDecisionInput,
@@ -62,8 +64,8 @@ function decision(
         catalogRevision: recordedAt.toISOString(),
         checkpoint: { revision: 4, manifestDigest: checkpointDigest },
         recovery: {
-          id: "synthetic-recovery",
-          attemptId: "synthetic-attempt",
+          id: "synthetic-recovery" as ArchiveRecoveryId,
+          attemptId: "synthetic-attempt" as ArchiveRecoveryAttemptId,
           state: "stopped",
         },
       },
@@ -75,7 +77,7 @@ function decision(
       mainFeatureResolutions: [],
       reviewedContent: [],
       exclusions: [],
-      assessmentSnapshot: {},
+      assessmentSnapshot: {} as DvdTitleDamageDecision["snapshot"]["assessmentSnapshot"],
       acknowledgementRequired: false,
     },
     recordedAt,
@@ -93,8 +95,9 @@ function access(options: { stale?: boolean } = {}): DataAccess {
             catalogRevision: "2026-10-28T08:01:00.000Z",
             checkpoint: { revision: 5, digest: "f".repeat(64) },
             recovery: {
-              id: "synthetic-recovery",
-              attemptId: "synthetic-attempt-2",
+              id: "synthetic-recovery" as ArchiveRecoveryId,
+              attemptId: "synthetic-attempt-2" as
+                ArchiveRecoveryAttemptId,
               state: "running",
             },
             assessmentIdentity: null,

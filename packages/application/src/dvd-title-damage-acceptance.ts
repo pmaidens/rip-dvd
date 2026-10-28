@@ -3,6 +3,7 @@ import {
   MAX_DVD_TITLES,
   type DataAccess,
   type DiscSelectionId,
+  type DvdTitleDamageDecision,
   type DvdTitleIdentityId,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
@@ -174,8 +175,8 @@ function parseInput(value: unknown) {
   };
 }
 
-function serializeDecision(
-  decision: ReturnType<DataAccess["catalog"]["recordDvdTitleDamageDecision"]>,
+export function serializeDvdTitleDamageDecision(
+  decision: DvdTitleDamageDecision,
 ) {
   return {
     ...decision,
@@ -192,10 +193,12 @@ export function acceptDvdTitleDamage(
   const input = parseInput(value);
   return {
     schemaVersion: 1 as const,
-    decision: serializeDecision(access.catalog.recordDvdTitleDamageDecision({
+    decision: serializeDvdTitleDamageDecision(
+      access.catalog.recordDvdTitleDamageDecision({
       ...input,
       originalDiscArchiveId,
-    })),
+      }),
+    ),
     encodingQueued: false as const,
     watchabilityProved: false as const,
     outputValidationWaived: false as const,
@@ -211,7 +214,7 @@ export function inspectDvdTitleDamageDecision(
   );
   const serialize = (decision: typeof inspection.latest) => decision === null
     ? null
-    : serializeDecision(decision);
+    : serializeDvdTitleDamageDecision(decision);
   return {
     ...inspection,
     current: serialize(inspection.current),

@@ -1109,6 +1109,11 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   expect(newerStructuralAssessmentIdentity).not.toBe(
     structuralResult.assessment.id,
   );
+  expect(access.catalog.inspectDvdTitleDamageDecision(archive.id)).toMatchObject({
+    state: "expired",
+    current: null,
+    currentIdentities: { assessmentIdentity: null },
+  });
   expect(access.dvdTitleDamageAssessments.inspect(archive.id)).toMatchObject({
     state: "outdated",
     currentAssessmentIdentity: null,
@@ -1148,6 +1153,267 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     currentAssessmentIdentity: null,
     assessment: { id: dependencyCycleLatest.id },
   });
+  manifest = advanceCommittedArchiveEvidence(fixture, manifest, {
+    readId: "synthetic-clean-set-recovery-read",
+    publishFilesystemCheckpoint: true,
+  });
+  expect(access.catalog.inspectDvdTitleDamageDecision(archive.id))
+    .toMatchObject({
+      state: "expired",
+      current: null,
+      latest: { operator: "Synthetic CLI operator" },
+    });
+  const cleanStructural = await access.assessDvdStructure(
+    archive.id,
+    ownership,
+    async () => ({
+      outcome: "completed" as const,
+      findings: structuralResult.assessment.findings,
+    }),
+  );
+  if (cleanStructural?.outcome !== "completed") {
+    throw new Error("Expected a Structural Assessment for the new checkpoint");
+  }
+  const cleanHeader = access.catalog.findDvdArchiveEvidenceHeader(archive.id)!;
+  const cleanReviewSet = access.catalog.recordDvdTitleIdentityObservations({
+    originalDiscArchiveId: archive.id,
+    checkpoint: {
+      manifestId: cleanHeader.currentManifestId,
+      manifestRevision: cleanHeader.currentManifestRevision,
+      manifestDigest: cleanHeader.currentManifestDigest,
+    },
+    observations: [
+      ...currentItems.map(({ observation }) => ({
+        displayTitleNumber: observation.displayTitleNumber,
+        navigation: observation.navigation,
+        selectedPath: observation.selectedPath,
+        angleNumber: observation.angleNumber,
+        angleCount: observation.angleCount,
+        chapterStart: observation.chapterStart,
+        chapterEnd: observation.chapterEnd,
+        chapterCount: observation.chapterCount,
+        sourceExtents: observation.displayTitleNumber === 3
+          ? [
+            { startLba: 200, sectorCount: 7 },
+            { startLba: 400, sectorCount: 1 },
+          ]
+          : observation.sourceExtents,
+      })),
+      {
+        displayTitleNumber: 4,
+        navigation: {
+          videoTitleSetNumber: 3,
+          titleSetTitleNumber: 1,
+          programChainNumber: 1,
+        },
+        selectedPath: [{
+          programNumber: 1,
+          cellNumber: 1,
+          vobId: 3,
+          cellId: 1,
+        }],
+        angleNumber: 1,
+        angleCount: 1,
+        chapterStart: 1,
+        chapterEnd: 1,
+        chapterCount: 1,
+        sourceExtents: [{ startLba: 600, sectorCount: 50 }],
+      },
+    ],
+  });
+  const cleanCurrentItems = cleanReviewSet.items.filter((item) =>
+    item.presentAtCurrentCheckpoint
+  ).sort((left, right) =>
+    left.observation.displayTitleNumber - right.observation.displayTitleNumber
+  );
+  expect(cleanCurrentItems).toHaveLength(4);
+  expect(cleanCurrentItems[2]).toMatchObject({
+    reviewContinuity: { result: "uncertain" },
+  });
+  expect(cleanCurrentItems[3]).toMatchObject({
+    reviewContinuity: { result: "new" },
+  });
+  const cleanCatalogRevision = access.catalog.listOriginalDiscArchives({
+    ids: [archive.id],
+  })[0]!.updatedAt;
+  access.catalog.mutateDiscSelection({
+    originalDiscArchiveId: archive.id,
+    expectedCatalogRevision: cleanCatalogRevision,
+    mutationKey: "synthetic-clean-title-mapping",
+    mutation: {
+      action: "update",
+      discSelectionId: chapterMappedSelection.id,
+      changes: {
+        originalDiscArchiveId: archive.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
+      },
+    },
+  });
+  expect(access.catalog.inspectDvdTitleDamageDecision(archive.id))
+    .toMatchObject({
+      state: "expired",
+      current: null,
+      currentIdentities: {
+        assessmentIdentity: null,
+      },
+    });
+  const cleanAssessment = await access.assessDvdTitleDamage(
+    archive.id,
+    ownership,
+    async () => [
+      ...mappings.map((mapping, index) => index === 2
+        ? {
+          ...mapping,
+          titleIdentityObservationId:
+            cleanCurrentItems[index]!.observation.id,
+          sourceReferences: [
+            {
+              kind: "multiplexed_content" as const,
+              startLba: 200,
+              sectorCount: 7,
+            },
+            {
+              kind: "multiplexed_content" as const,
+              startLba: 400,
+              sectorCount: 1,
+            },
+          ],
+          mappingCoverage: {
+            state: "complete" as const,
+            policyVersion: "synthetic-title-map-v2",
+            unknownReasons: [],
+          },
+        }
+        : {
+          ...mapping,
+          titleIdentityObservationId:
+            cleanCurrentItems[index]!.observation.id,
+        }),
+      {
+        titleIdentityObservationId: cleanCurrentItems[3]!.observation.id,
+        sourceReferences: [{
+          kind: "multiplexed_content" as const,
+          startLba: 600,
+          sectorCount: 50,
+        }],
+        mappingCoverage: {
+          state: "complete" as const,
+          policyVersion: "synthetic-title-map-v2",
+          unknownReasons: [],
+        },
+        timingEvidence: {
+          policyVersion: "dvd-title-damage-timing-v1",
+          occurrences: [{
+            playbackOccurrence: 1,
+            spans: [{
+              sourceRange: { startLba: 600, sectorCount: 50 },
+              startMilliseconds: 0,
+              endMilliseconds: 5_000,
+              timingMethod: "synthetic-cell-timing-v1",
+              coverage: "whole_cell" as const,
+            }],
+            unknownReasons: [],
+          }],
+        },
+      },
+    ],
+  );
+  if (cleanAssessment === null) {
+    throw new Error("Expected an assessment with complete source mapping");
+  }
+  expect(cleanAssessment).toMatchObject({
+    unknownTitleImpact: { unrecoveredSourceSectorCount: 0 },
+    unattributedSourceContinuityRisk: { sourceSectorCount: 0 },
+  });
+  const cleanPreflight = await fixture.run([
+    "catalog-review",
+    "preview-damage-acceptance",
+    archive.id,
+    "--exclude-title-identity",
+    cleanCurrentItems[0]!.titleIdentityId,
+    "--exclude-title-identity",
+    cleanCurrentItems[1]!.titleIdentityId,
+    "--exclude-title-identity",
+    cleanCurrentItems[2]!.titleIdentityId,
+    "--resolve-main-feature",
+    mainFeatureSelection.id,
+    cleanCurrentItems[3]!.titleIdentityId,
+  ]);
+  expect(cleanPreflight).toMatchObject({
+    exitCode: 0,
+    result: {
+      available: true,
+      acknowledgementRequired: false,
+      reviewedContent: [{
+        titleIdentityId: cleanCurrentItems[3]!.titleIdentityId,
+        assessmentSnapshot: {
+          unrecoveredUniqueSourceSectorCount: 0,
+          sourceContinuityRiskSectorCount: 0,
+        },
+      }],
+    },
+  });
+  const cleanPreview = cleanPreflight.result as typeof acceptedPreview;
+  const cleanDecision = await fixture.run([
+    "catalog-review",
+    "accept-damage",
+    archive.id,
+    "--key",
+    "00000000-0000-4000-8000-000000000424",
+    "--json",
+    JSON.stringify({
+      operator: "Synthetic clean-set operator",
+      previewToken: cleanPreview.previewToken,
+      checkpointRevision: cleanPreview.current.checkpoint.revision,
+      checkpointDigest: cleanPreview.current.checkpoint.manifestDigest,
+      assessmentIdentity: cleanPreview.assessmentIdentity,
+      reviewSetIdentity: cleanPreview.reviewSetIdentity,
+      catalogMappingProjectionId: cleanPreview.catalogMappingProjectionId,
+      reviewedContentIdentity: cleanPreview.reviewedContentIdentity,
+      excludedTitleIdentityIds: [
+        cleanCurrentItems[0]!.titleIdentityId,
+        cleanCurrentItems[1]!.titleIdentityId,
+        cleanCurrentItems[2]!.titleIdentityId,
+      ],
+      mainFeatureResolutions: [{
+        discSelectionId: mainFeatureSelection.id,
+        titleIdentityId: cleanCurrentItems[3]!.titleIdentityId,
+      }],
+      damageAcknowledgement: false,
+    }),
+  ]);
+  expect(cleanDecision).toMatchObject({
+    exitCode: 0,
+    result: {
+      decision: {
+        decision: "not_required",
+        operator: "Synthetic clean-set operator",
+      },
+    },
+  });
+  const acceptedRecordedAt = new Date((accepted.result as {
+    decision: { recordedAt: string };
+  }).decision.recordedAt).getTime();
+  const cleanRecordedAt = new Date((cleanDecision.result as {
+    decision: { recordedAt: string };
+  }).decision.recordedAt).getTime();
+  expect(cleanRecordedAt).toBeGreaterThan(acceptedRecordedAt);
+  expect((await fixture.run([
+    "catalog-review",
+    "show",
+    archive.id,
+  ])).result).toMatchObject({
+    titleDamageDecision: {
+      state: "not_required",
+      current: { operator: "Synthetic clean-set operator" },
+    },
+  });
+  const decisionLedger = new DatabaseSync(fixture.databasePath);
+  expect(decisionLedger.prepare(`
+    SELECT count(*) AS count
+    FROM dvd_title_damage_decisions
+  `).get()).toEqual({ count: 2 });
+  decisionLedger.close();
   access.close();
 
   advanceCommittedArchiveEvidence(fixture, manifest);
@@ -1161,10 +1427,15 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     result: {
       titleDamage: {
         state: "outdated",
-        assessmentIdentity: dependencyCycleLatest.id,
+        assessmentIdentity: cleanAssessment.id,
         currentAssessmentIdentity: null,
         items: [],
         truncated: false,
+      },
+      titleDamageDecision: {
+        state: "expired",
+        current: null,
+        latest: { operator: "Synthetic clean-set operator" },
       },
     },
   });
@@ -1179,7 +1450,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     exitCode: 0,
     result: {
       state: "outdated",
-      assessmentIdentity: dependencyCycleLatest.id,
+      assessmentIdentity: cleanAssessment.id,
       currentAssessmentIdentity: null,
       items: [],
       truncated: false,
@@ -1199,7 +1470,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
       error: {
         code: "TITLE_DAMAGE_CURSOR_STALE",
         current: {
-          checkpointRevision: 4,
+          checkpointRevision: 5,
           assessmentIdentity: null,
         },
       },

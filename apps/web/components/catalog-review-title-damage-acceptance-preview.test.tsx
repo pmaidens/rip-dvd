@@ -8,7 +8,10 @@ import type { DvdTitleDamageAcceptancePreview } from "@rip-dvd/application";
 
 import { CatalogReviewTitleDamageAcceptancePreview } from
   "./catalog-review-title-damage-acceptance-preview";
-import type { CatalogReviewTitleIdentity } from "./catalog-review-model";
+import type {
+  CatalogReviewTitleDamageDecision,
+  CatalogReviewTitleIdentity,
+} from "./catalog-review-model";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -244,6 +247,22 @@ const evidenceGeneration = {
   activityRevision: "activity-revision-1",
 };
 
+const persistedDecision = {
+  schemaVersion: 1,
+  state: "accepted",
+  current: {
+    decision: "accepted",
+    operator: "Synthetic persisted operator",
+    recordedAt: "2026-10-28T08:00:00.000Z",
+    snapshot: {
+      reviewedContent: [{}],
+      exclusions: [{}, {}],
+    },
+  },
+  latest: null,
+  currentIdentities: {},
+} as unknown as CatalogReviewTitleDamageDecision;
+
 const boundEvidenceChanges = [
   {
     name: "catalog revision",
@@ -311,6 +330,23 @@ const boundEvidenceChanges = [
     },
   },
 ];
+
+it("shows the persisted current exact-set decision after refresh", async () => {
+  await act(async () => root.render(
+    <CatalogReviewTitleDamageAcceptancePreview
+      originalDiscArchiveId="synthetic-archive"
+      titleIdentity={titleIdentity}
+      titleDamageDecision={persistedDecision}
+      evidenceGeneration={evidenceGeneration}
+    />,
+  ));
+
+  expect(container.textContent).toContain("Current exact-set decision");
+  expect(container.textContent).toContain(
+    "Damage accepted for the current exact reviewed set by Synthetic persisted operator",
+  );
+  expect(container.textContent).toContain("1 included and 2 excluded");
+});
 
 it("includes all current content by default and sends only explicit exclusions", async () => {
   const fetcher = vi.fn(async () => Response.json(preview));

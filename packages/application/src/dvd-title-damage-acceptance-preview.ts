@@ -5,6 +5,8 @@ import {
   MAX_DVD_TITLES,
   RecordNotFoundError,
   type DataAccess,
+  type ArchiveRecoveryAttemptId,
+  type ArchiveRecoveryId,
   type DiscSelectionId,
   type DiscSelection,
   type DvdTitleDamageAssessmentItem,
@@ -684,6 +686,20 @@ export function previewDvdTitleDamageAcceptance(
         "Available Title Damage Acceptance preflight is missing current evidence",
       );
     }
+    const decisionReviewedContent = reviewedContent.map((item) => {
+      if (
+        item.included !== true || item.assessmentSnapshot === null
+      ) {
+        throw new DomainInvariantError(
+          "Available Title Damage Acceptance content is not decision-ready",
+        );
+      }
+      return {
+        ...item,
+        included: true as const,
+        assessmentSnapshot: item.assessmentSnapshot,
+      };
+    });
     access.catalog.recordDvdTitleDamageAcceptancePreviewDecision({
       previewToken,
       originalDiscArchiveId: archiveId,
@@ -696,8 +712,9 @@ export function previewDvdTitleDamageAcceptance(
           catalogRevision: workflow.current.catalogRevision,
           checkpoint: workflow.current.checkpoint,
           recovery: {
-            id: workflow.current.recovery.id,
-            attemptId: workflow.current.recovery.attemptId,
+            id: workflow.current.recovery.id as ArchiveRecoveryId,
+            attemptId: workflow.current.recovery.attemptId as
+              ArchiveRecoveryAttemptId,
             state: workflow.current.recovery.state,
           },
         },
@@ -708,9 +725,12 @@ export function previewDvdTitleDamageAcceptance(
         reviewedContentIdentity,
         excludedTitleIdentityIds,
         mainFeatureResolutions,
-        reviewedContent,
+        reviewedContent: decisionReviewedContent,
         exclusions,
-        assessmentSnapshot: currentAssessment,
+        assessmentSnapshot: {
+          ...currentAssessment,
+          createdAt: currentAssessment.createdAt.toISOString(),
+        },
         acknowledgementRequired,
       },
     });

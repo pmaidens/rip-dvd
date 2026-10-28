@@ -8,6 +8,7 @@ import type {
 
 import type {
   CatalogReviewTitleDamage,
+  CatalogReviewTitleDamageDecision,
   CatalogReviewTitleIdentity,
 } from "./catalog-review-model";
 import { CatalogReviewTitleDamageAssessmentEvidence } from
@@ -61,11 +62,13 @@ function mediaItemLabel(item: {
 export function CatalogReviewTitleDamageAcceptancePreview({
   originalDiscArchiveId,
   titleIdentity,
+  titleDamageDecision,
   evidenceGeneration,
   fetcher = fetch,
 }: {
   originalDiscArchiveId: string;
   titleIdentity?: CatalogReviewTitleIdentity;
+  titleDamageDecision?: CatalogReviewTitleDamageDecision;
   evidenceGeneration: {
     current: CatalogReviewWorkflow["current"];
     titleDamageState: CatalogReviewTitleDamage["state"] | null;
@@ -239,6 +242,32 @@ export function CatalogReviewTitleDamageAcceptancePreview({
         content explicitly, then preview the exact set. Previewing does not
         accept damage or queue encoding.
       </p>
+      {titleDamageDecision === undefined ? null : (
+        <section aria-labelledby="title-damage-decision-status-heading">
+          <h4 id="title-damage-decision-status-heading">
+            Current exact-set decision
+          </h4>
+          {titleDamageDecision.current !== null ? (
+            <p role="status">
+              {titleDamageDecision.current.decision === "accepted"
+                ? "Damage accepted"
+                : "No damage acceptance required"} for the current exact
+              reviewed set by {titleDamageDecision.current.operator} at {
+                titleDamageDecision.current.recordedAt
+              }. {titleDamageDecision.current.snapshot.reviewedContent.length} included
+              and {titleDamageDecision.current.snapshot.exclusions.length} excluded.
+            </p>
+          ) : titleDamageDecision.state === "expired" &&
+              titleDamageDecision.latest !== null ? (
+            <p>
+              The latest exact-set decision has expired because its bound
+              evidence is no longer current. Preview the complete set again.
+            </p>
+          ) : (
+            <p>No exact-set Title Damage decision is recorded.</p>
+          )}
+        </section>
+      )}
       {items.length === 0 ? (
         <p>No current discovered content is available.</p>
       ) : (

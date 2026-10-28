@@ -55,7 +55,11 @@ export class StaleDvdTitleDamageDecisionError extends DomainInvariantError {
   constructor(readonly currentIdentities: {
     catalogRevision: string | null;
     checkpoint: { revision: number; digest: string } | null;
-    recovery: { id: string; attemptId: string; state: string } | null;
+    recovery: {
+      id: import("./types.js").ArchiveRecoveryId;
+      attemptId: import("./types.js").ArchiveRecoveryAttemptId;
+      state: import("./types.js").ArchiveRecoveryStatus;
+    } | null;
     assessmentIdentity: string | null;
     reviewSetIdentity: string | null;
     catalogMappingProjectionId: string | null;
