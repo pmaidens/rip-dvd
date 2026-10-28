@@ -5809,6 +5809,7 @@ it("keeps available, outdated, and mapping-review Title Damage Acceptance prefli
       reasons: [],
       expectedInputs: [
         "mutationKey",
+        "operator",
         "previewToken",
         "checkpointRevision",
         "checkpointDigest",

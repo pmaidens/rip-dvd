@@ -60,7 +60,7 @@ it("resolves a main-feature choice without a representative-title heuristic", ()
     }],
     exclusions: [],
     action: {
-      expectedInputs: expect.arrayContaining(["mutationKey"]),
+      expectedInputs: expect.arrayContaining(["mutationKey", "operator"]),
     },
   });
   expect(recordPreview).toHaveBeenCalledWith(expect.objectContaining({

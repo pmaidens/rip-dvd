@@ -748,6 +748,7 @@ export function previewDvdTitleDamageAcceptance(
       expectedInputs: available
         ? [
           "mutationKey",
+          "operator",
           "previewToken",
           "checkpointRevision",
           "checkpointDigest",
