@@ -43,6 +43,7 @@ import { useCatalogReviewState } from "./catalog-review-state";
 
 interface CatalogReviewViewProps {
   state: CatalogReviewLoadState;
+  activityRevision?: string;
   editingMediaItemId: string | null;
   isSaving: boolean;
   requestError: string | null;
@@ -147,6 +148,7 @@ function catalogReviewEvidenceTitles(
 
 export function CatalogReviewView({
   state,
+  activityRevision,
   editingMediaItemId,
   isSaving,
   requestError,
@@ -530,6 +532,7 @@ export function CatalogReviewView({
               evidenceGeneration={{
                 current: review.reviewWorkflow.current,
                 titleDamageState: review.titleDamage?.state ?? null,
+                activityRevision: activityRevision ?? null,
               }}
             />
             <CatalogReviewTitleDamageEvidence
@@ -569,6 +572,7 @@ export function CatalogReviewEditor({
   return (
     <CatalogReviewView
       state={review.state}
+      activityRevision={activityRevision}
       editingMediaItemId={review.editingMediaItemId}
       isSaving={review.isSaving}
       requestError={review.requestError}

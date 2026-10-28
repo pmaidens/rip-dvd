@@ -37,6 +37,7 @@ export function CatalogReviewTitleDamageAcceptancePreview({
   evidenceGeneration: {
     current: CatalogReviewWorkflow["current"];
     titleDamageState: CatalogReviewTitleDamage["state"] | null;
+    activityRevision: string | null;
   };
   fetcher?: typeof fetch;
 }) {

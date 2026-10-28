@@ -212,6 +212,7 @@ const evidenceGeneration = {
       `dvd-title-damage-assessment:${"d".repeat(64)}`,
   },
   titleDamageState: "current" as const,
+  activityRevision: "activity-revision-1",
 };
 
 const boundEvidenceChanges = [
@@ -271,6 +272,13 @@ const boundEvidenceChanges = [
           state: "running" as const,
         },
       },
+    },
+  },
+  {
+    name: "affected-work activity revision",
+    value: {
+      ...evidenceGeneration,
+      activityRevision: "activity-revision-2",
     },
   },
 ];
@@ -436,7 +444,10 @@ it("ignores an in-flight preview from an older evidence generation", async () =>
     (container.querySelector("button") as HTMLButtonElement).click();
   });
 
-  const changed = boundEvidenceChanges[2]!.value;
+  const changed = {
+    ...evidenceGeneration,
+    activityRevision: "activity-revision-2",
+  };
   await act(async () => root.render(
     <CatalogReviewTitleDamageAcceptancePreview
       originalDiscArchiveId="synthetic-archive"
