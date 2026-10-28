@@ -73,6 +73,15 @@ printf '%s\n' "$preview_help" | assert_json_fields 'schemaVersion=1'
 receipt_help="$(invoke help encode-output)"
 printf '%s\n' "$receipt_help" | assert_json_fields 'schemaVersion=1'
 set +e
+interval_output="$(invoke encode-output intervals \
+  encode-output-v1.published.00000000-0000-4000-8000-000000000000 \
+  --json '{"assessmentIdentity":"synthetic-assessment","titleIdentityObservationId":"synthetic-observation","intervalIndexes":[0]}' \
+  2>"$temporary_directory/interval.stderr")"
+interval_status=$?
+set -e
+[ "$interval_status" -eq 2 ]
+printf '%s\n' "$interval_output" | assert_json_fields 'error.code=ENCODE_OUTPUT_NOT_FOUND'
+set +e
 receipt_output="$(invoke encode-output acknowledge-inspection \
   encode-output-v1.published.00000000-0000-4000-8000-000000000000 \
   --key synthetic-smoke-inspection-receipt \

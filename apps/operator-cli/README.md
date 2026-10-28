@@ -612,6 +612,7 @@ rip-dvd encode-requeue --key <new-key> --encode-job-id <job-id>
 rip-dvd encode-requeue-preview --encode-job-id <completed-job-id>
 rip-dvd encode-requeue --key <new-key> --encode-job-id <completed-job-id> --revision <preview-revision> --acknowledge
 rip-dvd encode-output inspect encode-output-v1.published.<encode-job-id>
+rip-dvd encode-output intervals encode-output-v1.published.<encode-job-id> --json '{"assessmentIdentity":"<recorded-assessment-id>","titleIdentityObservationId":"<recorded-observation-id>","intervalIndexes":[0]}'
 rip-dvd encode-output acknowledge-inspection encode-output-v1.published.<encode-job-id> --key <key> --json '{"acknowledged":true,"reviewToken":"<operatorInspection.reviewToken>"}'
 rip-dvd encode-output export encode-output-v1.published.<encode-job-id> --destination /exports/example-output.mkv
 ```
@@ -624,6 +625,20 @@ Bounded lists set `encodeOutputArtifactsTruncated` when older generations are
 omitted. Page the complete history with
 `inspect encode-jobs <encode-job-id> --limit 1..100 --offset <n>`; each result
 returns `encodeOutputArtifactPage.nextOffset` when older generations remain.
+`encode-output intervals` queries indexes in the immutable source assessment's
+`estimatedAffectedPlayback.intervals` for one recorded title observation. It
+returns the actual canonical inspection together with each interval's reason
+and evidence. Source excluded by the complete concrete playback map is
+`absent`. Historical missing provenance, incomplete maps, unresolved chapter
+locations, unsupported output timing and truncation remain `unknown`. Input
+identities must match the output generation's source evidence. A caller cannot
+supply a percentage, preview, arbitrary timestamp or current catalog selection
+as proof. This operation does not return verified output seeks.
+
+`OUTPUT_MAPPING_UNKNOWN` applies to the query's targeted-location capability.
+Ordinary output inspection and its independently available actions remain
+available. Both `--file` and `--stdin` accept the same query as `--json`.
+
 `encode-output inspect` reports the artifact state, recorded validation and
 provenance, file identity and completeness, and probed duration and streams.
 Historical outputs keep unavailable validation identities and source snapshots

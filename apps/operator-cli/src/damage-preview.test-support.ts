@@ -1,4 +1,4 @@
-import type { CommittedDvdCheckpointEvidence } from "@rip-dvd/data-access";
+import type { CommittedDvdCheckpointEvidence, DvdTitleIdentityObservationInput } from "@rip-dvd/data-access";
 import { DatabaseSync } from "node:sqlite";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { seedCommittedArchiveEvidence } from "./archive-evidence.test-support.js";
@@ -8,7 +8,7 @@ export async function seedDamagePreview(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   coverage: "source_span" | "whole_cell" | "unknown" | "mixed" = "source_span",
   timings: readonly (readonly [number, number])[] = [[1_000, 5_000], [35_000, 40_000], [71_000, 400_000]],
-  options: { evidence?: { archive: Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>["archive"]; manifest: CommittedDvdCheckpointEvidence }; stopRecovery?: boolean; otherTitlePartial?: boolean } = {},
+  options: { evidence?: { archive: Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>["archive"]; manifest: CommittedDvdCheckpointEvidence }; stopRecovery?: boolean; otherTitlePartial?: boolean; additionalTitleObservations?: readonly DvdTitleIdentityObservationInput[] } = {},
 ) {
   const { archive, manifest } = options.evidence ?? await seedCommittedArchiveEvidence(fixture, [
     { startLba: 10, sectorCount: 1, classification: "skipped_untested" },
@@ -35,27 +35,27 @@ export async function seedDamagePreview(
   const reviewSet = access.catalog.recordDvdTitleIdentityObservations({
     originalDiscArchiveId: archive.id,
     checkpoint: { manifestId: manifest.id, manifestRevision: manifest.revision, manifestDigest: manifest.manifestDigest },
-    observations: (options.otherTitlePartial ? [1, 2] : [1]).map((number) => ({
+    observations: [...(options.otherTitlePartial ? [1, 2] : [1]).map((number) => ({
       displayTitleNumber: number,
       navigation: { videoTitleSetNumber: 1, titleSetTitleNumber: number, programChainNumber: number },
       selectedPath: [{ programNumber: 1, cellNumber: 1, vobId: 1, cellId: 1 }],
       angleNumber: 1, angleCount: 1, chapterStart: 1, chapterEnd: 4, chapterCount: 4,
       sourceExtents: [{ startLba: 0, sectorCount: 100 }],
-    })),
+    })), ...(options.additionalTitleObservations ?? [])],
   });
   const observation = reviewSet.items[0]!.observation;
-  const assessment = await access.assessDvdTitleDamage(archive.id, ownership, async () => reviewSet.items.map(({ observation: item }) => ({
-    titleIdentityObservationId: item.id,
-    sourceReferences: [{ kind: "multiplexed_content", startLba: 0, sectorCount: 100 }],
-    mappingCoverage: { state: item.displayTitleNumber === 1 ? "complete" as const : "partial" as const,
-      policyVersion: "synthetic-map-v1", unknownReasons: item.displayTitleNumber === 1 ? []
-        : [{ code: "SYNTHETIC_OTHER_TITLE_PARTIAL", message: "Synthetic partial other title." }] },
+  const assessment = await access.assessDvdTitleDamage(archive.id, ownership, async () => reviewSet.items.map(({ observation }) => ({
+    titleIdentityObservationId: observation.id,
+    sourceReferences: observation.sourceExtents.map((range) => ({ kind: "multiplexed_content" as const, ...range })),
+    mappingCoverage: { state: options.otherTitlePartial && observation.displayTitleNumber !== 1 ? "partial" as const : "complete" as const,
+      policyVersion: "synthetic-map-v1", unknownReasons: options.otherTitlePartial && observation.displayTitleNumber !== 1
+        ? [{ code: "SYNTHETIC_OTHER_TITLE_PARTIAL", message: "Synthetic partial other title." }] : [] },
     timingEvidence: {
       policyVersion: "dvd-title-damage-timing-v1",
       occurrences: (coverage === "unknown" ? [null] : timings).map((span, index) => ({
         playbackOccurrence: index + 1,
         spans: span === null ? [] : [{
-          sourceRange: { startLba: 0, sectorCount: 100 },
+          sourceRange: observation.sourceExtents[0]!,
           startMilliseconds: span[0]!, endMilliseconds: span[1]!,
           timingMethod: "synthetic-timing-v1", coverage: coverage === "whole_cell" || (coverage === "mixed" && index > 0) ? "whole_cell" : "source_span",
         }],

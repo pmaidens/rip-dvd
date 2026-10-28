@@ -1,4 +1,5 @@
 import { inspectEncodingReadiness, listEncodingReadinessArchives } from "./encoding-readiness.js";
+import { inspectEncodeOutputIntervals } from "./encode-output-correspondence.js";
 import { requestDamagePreview, inspectDamagePreview, cancelDamagePreview, waitDamagePreview, exportDamagePreview } from "./damage-preview-operations.js";
 import { inspectArchiveEvidence } from "./archive-evidence.js";
 import { inspectDamagePreviewAvailability } from "./damage-preview.js";
@@ -485,6 +486,8 @@ export function createApplicationOperations(
         dependencies.encodeOutputMediaProbe,
         page,
       ),
+    inspectEncodeOutputIntervals: (artifactIdentity: unknown, input: unknown) =>
+      inspectEncodeOutputIntervals(access, artifactIdentity, input, dependencies.encodeOutputMediaProbe),
     acknowledgeEncodeOutputInspection: (artifactIdentity: unknown, input: unknown) =>
       acknowledgeEncodeOutputInspection(access, artifactIdentity, input, dependencies.encodeOutputMediaProbe),
     exportEncodeOutput: (input: {
@@ -1138,3 +1141,6 @@ export { InvalidEncodingReadinessInputError, type EncodingReadiness } from "./en
 export { EncodeSourceDecisionRejectedError, InvalidEncodeSourceDecisionError } from "./encode-source-decision.js";
 
 export { claimNextEncodeJob, assertEncodeClaimSource } from "./encode-claim.js";
+
+export { InvalidEncodeOutputIntervalInputError } from "./encode-output-correspondence.js";
+export type { EncodeOutputIntervalInspection } from "./encode-output-correspondence.js";

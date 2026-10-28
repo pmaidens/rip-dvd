@@ -15,6 +15,7 @@ import {
   EncodeOutputAcknowledgementRejectedError,
   InvalidEncodeOutputAcknowledgementError,
   InvalidEncodeOutputInspectionInputError,
+  InvalidEncodeOutputIntervalInputError,
   InvalidEncodeOutputArtifactIdentityError,
   InvalidEncodeOutputExportInputError,
   generateMutationKey,
@@ -232,11 +233,12 @@ const commandDefinitions = [
   },
   {
     name: "encode-output",
-    description: "Inspect, export, or explicitly acknowledge inspection of a canonical Encode Output generation. Inspection and export are read-only.",
-    usage: "rip-dvd encode-output <inspect|export|acknowledge-inspection> <artifact-identity> [options]",
+    description: "Inspect, query source interval correspondence, export, or explicitly acknowledge inspection of a canonical Encode Output generation. Inspection, interval queries and export are read-only.",
+    usage: "rip-dvd encode-output <inspect|intervals|export|acknowledge-inspection> <artifact-identity> [options]",
     inputs: {
-      arguments: ["action: inspect|export|acknowledge-inspection", "artifact-identity"],
-      options: ["--destination <path> (export only)", "--receipt-limit <1..100> (inspect)", "--receipt-offset <n> (inspect)", "--key <key> (acknowledge-inspection)", "--json <object> | --file <path> | --stdin (acknowledge-inspection)"],
+      arguments: ["action: inspect|intervals|export|acknowledge-inspection", "artifact-identity"],
+      options: ["--destination <path> (export only)", "--receipt-limit <1..100> (inspect)", "--receipt-offset <n> (inspect)", "--key <key> (acknowledge-inspection)", "--json <object> | --file <path> | --stdin (intervals or acknowledge-inspection)"],
+      intervalQuerySchema: { assessmentIdentity: "exact recorded assessment identity", titleIdentityObservationId: "recorded title observation identity", intervalIndexes: "1..100 distinct indexes in recorded estimatedAffectedPlayback.intervals" },
       acknowledgementSchema: { acknowledged: "true", reviewToken: "exact operatorInspection.reviewToken from inspect" },
     },
     example:
@@ -1705,7 +1707,7 @@ async function encodeOutputCommand(
 ) {
   const [action, artifactIdentity] = rest;
   if (
-    (action !== "inspect" && action !== "export" && action !== "acknowledge-inspection") ||
+    (action !== "inspect" && action !== "export" && action !== "acknowledge-inspection" && action !== "intervals") ||
     artifactIdentity === undefined ||
     artifactIdentity.length > 256 ||
     (action === "export" &&
@@ -1713,7 +1715,7 @@ async function encodeOutputCommand(
   ) {
     throw new CommandFailure(
       "INVALID_ARGUMENTS",
-      "Expected encode-output inspect, export, or acknowledge-inspection with an artifact identity and the action's required options.",
+      "Expected encode-output inspect, intervals, export, or acknowledge-inspection with an artifact identity and the action's required options.",
       2,
     );
   }
@@ -1729,18 +1731,19 @@ async function encodeOutputCommand(
     }
   }
   let acknowledgement: Record<string, unknown> | undefined;
-  if (action === "acknowledge-inspection") {
+  let intervalQuery: unknown;
+  if (action === "acknowledge-inspection" || action === "intervals") {
     const options = new Map<string, string>();
     for (let index = 2; index < rest.length;) {
       const name = rest[index]!;
-      if (!["--key", "--json", "--file", "--stdin"].includes(name) || options.has(name)) {
-        throw new CommandFailure("INVALID_ARGUMENTS", "Invalid acknowledgement options.", 2);
+      if (!(action === "intervals" ? ["--json", "--file", "--stdin"] : ["--key", "--json", "--file", "--stdin"]).includes(name) || options.has(name)) {
+        throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Encode Output structured input options.", 2);
       }
       if (name === "--stdin") {
         options.set(name, "true");
         index += 1;
       } else {
-        if (!rest[index + 1]) throw new CommandFailure("INVALID_ARGUMENTS", "Missing acknowledgement option value.", 2);
+        if (!rest[index + 1]) throw new CommandFailure("INVALID_ARGUMENTS", "Missing Encode Output option value.", 2);
         options.set(name, rest[index + 1]!);
         index += 2;
       }
@@ -1751,10 +1754,14 @@ async function encodeOutputCommand(
       if (error instanceof StructuredInputError) throw new CommandFailure(error.code, error.message, 2);
       throw error;
     }
-    if (structured === undefined || !options.has("--key") || "mutationKey" in (structured as Record<string, unknown>)) {
-      throw new CommandFailure("INVALID_ARGUMENTS", "Acknowledgement requires --key and reviewed JSON input.", 2);
+    if (action === "intervals") {
+      intervalQuery = structured;
+    } else {
+      if (structured === undefined || !options.has("--key") || "mutationKey" in (structured as Record<string, unknown>)) {
+        throw new CommandFailure("INVALID_ARGUMENTS", "Acknowledgement requires --key and reviewed JSON input.", 2);
+      }
+      acknowledgement = { ...(structured as Record<string, unknown>), mutationKey: options.get("--key") };
     }
-    acknowledgement = { ...(structured as Record<string, unknown>), mutationKey: options.get("--key") };
   }
   let access: DataAccess | undefined;
   try {
@@ -1764,6 +1771,7 @@ async function encodeOutputCommand(
         ? {}
         : { encodeOutputMediaProbe: io.encodeOutputMediaProbe }),
     });
+    if (action === "intervals") return await operations.inspectEncodeOutputIntervals(artifactIdentity, intervalQuery);
     if (action === "acknowledge-inspection") {
       return await operations.acknowledgeEncodeOutputInspection(artifactIdentity, acknowledgement);
     }
@@ -1778,6 +1786,7 @@ async function encodeOutputCommand(
       error instanceof InvalidEncodeOutputArtifactIdentityError ||
       error instanceof InvalidEncodeOutputAcknowledgementError ||
       error instanceof InvalidEncodeOutputInspectionInputError ||
+      error instanceof InvalidEncodeOutputIntervalInputError ||
       error instanceof InvalidMutationKeyError ||
       error instanceof InvalidEncodeOutputExportInputError
     ) {
