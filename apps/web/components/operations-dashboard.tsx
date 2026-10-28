@@ -1,5 +1,7 @@
 "use client";
 
+import { EncodingReadinessPanel } from "./encoding-readiness";
+
 import { createMutationKey } from "../lib/mutation-key";
 
 import Link from "next/link";
@@ -2889,6 +2891,7 @@ export function OperationsDashboard({
             aria-labelledby="encoding-tab-queue"
             hidden={encodingTab !== "queue"}
           >
+            <EncodingReadinessPanel revision={requestNumber} />
             <EncodeJobsManager
               revision={requestNumber}
               onChanged={() => setRequestNumber((value) => value + 1)}

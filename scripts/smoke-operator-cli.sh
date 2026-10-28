@@ -53,6 +53,17 @@ help_output="$(invoke)"
 printf '%s\n' "$help_output" | assert_json_fields \
   'schemaVersion=1' 'usage=rip-dvd <command>'
 
+readiness_help="$(invoke help encode-readiness)"
+printf '%s\n' "$readiness_help" | assert_json_fields 'schemaVersion=1'
+readiness_choices="$(invoke encode-readiness)"
+printf '%s\n' "$readiness_choices" | assert_json_fields 'schemaVersion=1' 'page.offset=0'
+set +e
+readiness_missing="$(invoke encode-readiness synthetic-missing-archive 2>"$temporary_directory/readiness.stderr")"
+readiness_status=$?
+set -e
+[ "$readiness_status" -eq 2 ]
+printf '%s\n' "$readiness_missing" | assert_json_fields 'error.code=NOT_FOUND'
+
 preview_help="$(invoke help damage-preview)"
 printf '%s\n' "$preview_help" | assert_json_fields 'schemaVersion=1'
 

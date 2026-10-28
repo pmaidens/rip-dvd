@@ -1,3 +1,4 @@
+import { inspectEncodingReadiness, listEncodingReadinessArchives } from "./encoding-readiness.js";
 import { requestDamagePreview, inspectDamagePreview, cancelDamagePreview, waitDamagePreview, exportDamagePreview } from "./damage-preview-operations.js";
 import { inspectArchiveEvidence } from "./archive-evidence.js";
 import { inspectDamagePreviewAvailability } from "./damage-preview.js";
@@ -399,6 +400,9 @@ export function createApplicationOperations(
         mediaDomain: "dvd_video", isActive: input.isActive, expectedRevision,
       })) };
     },
+    inspectEncodingReadiness: (archiveId: string, originalsLibraryPath: string) =>
+      inspectEncodingReadiness(access, archiveId, originalsLibraryPath, dependencies.archiveImageOwnership),
+    listEncodingReadinessArchives: (offset?: number) => listEncodingReadinessArchives(access, offset),
     encodeQueueOptions: (input: {
       mediaLibraryPath: string;
       selectionOffset?: number;
@@ -1128,3 +1132,5 @@ export * from "./damage-preview-operations.js";
 export { reviewDamagePreviewEvidence } from "./damage-preview.js";
 
 export type DamagePreviewInspection = Awaited<ReturnType<typeof inspectDamagePreview>>;
+
+export { InvalidEncodingReadinessInputError, type EncodingReadiness } from "./encoding-readiness.js";

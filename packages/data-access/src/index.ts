@@ -185,6 +185,7 @@ export type { FilesystemPathProbe } from "./internal/bounded-filesystem-path-pro
 export {
   dvdTitleIdentityCatalogMappingItems,
   dvdTitleIdentityCatalogMappingProjectionDigest,
+  dvdTitleIdentityDiscSelectionDigest,
 } from "./dvd-title-identity.js";
 
 export function createDataAccess(input: CreateDataAccessOptions): DataAccess {

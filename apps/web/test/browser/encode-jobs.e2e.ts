@@ -369,3 +369,48 @@ test("queues a mixed worklist after resolving a new shared profile", async ({
     .toBeDisabled();
   await expectNoPageOverflow(page);
 });
+
+test("reviews source blockers and refreshed identities without admitting encode work", async ({ page }) => {
+  let refreshed = false;
+  await page.route("**/api/encode-readiness?*", async (route) => {
+    const params = new URL(route.request().url()).searchParams;
+    if (!params.has("archiveId")) {
+      await route.fulfill({ json: { archives: [{ id: "synthetic-readiness-archive", label: "Synthetic readiness disc" }],
+        page: { offset: 0, limit: 50, hasNext: false } } });
+      return;
+    }
+    await route.fulfill({ json: {
+      schemaVersion: 1, applicable: true, evidenceFormat: "dvd-recovery-evidence-v1",
+      sourceReady: refreshed, admissionAvailable: false, recordedIntegrity: "clean_read",
+      current: { originalDiscArchiveId: "synthetic-readiness-archive", checkpoint: { revision: refreshed ? 2 : 1 },
+        recovery: { state: refreshed ? "completed" : "paused" }, assessmentIdentity: "synthetic-assessment" },
+      assessment: { state: "current" },
+      blockingReasons: refreshed ? [] : [
+        { code: "ACCEPTANCE_REQUIRED", message: "Current acceptance is required.", details: {} },
+        { code: "RECOVERY_PAUSED", message: "Recovery must stop or complete.", details: {} },
+      ],
+      selections: [{ discSelectionId: "synthetic-readiness-selection", selectionIdentity: "synthetic-selection-identity",
+        titleIdentityId: "synthetic-title-identity", titleIdentityObservationId: "synthetic-title-observation",
+        resolvedSource: { angleNumber: 1, chapterStart: 1, chapterEnd: 4 },
+        assessment: { impact: "clean", sourceContinuityRisk: !refreshed },
+        acceptanceRequired: !refreshed, acceptanceSatisfied: refreshed }],
+    } });
+  });
+  await page.goto("/encoding");
+  await page.getByRole("tab", { name: "Queue new jobs" }).click();
+  const panel = page.getByRole("region", { name: "Source readiness" });
+  await panel.getByLabel("Original Disc Archive").selectOption("synthetic-readiness-archive");
+  await expect(panel.getByRole("status")).toHaveText("Source blocked. Encode admission is closed.");
+  await expect(panel.locator("ol li")).toHaveText([
+    "ACCEPTANCE_REQUIRED: Current acceptance is required.",
+    "RECOVERY_PAUSED: Recovery must stop or complete.",
+  ]);
+  await expect(panel.getByText(/Source-continuity risk: present/)).toBeVisible();
+  await panel.getByText("Current evidence identities", { exact: true }).click();
+  await expect(panel.locator("pre").first()).toContainText('"revision": 1');
+  refreshed = true;
+  await panel.getByRole("button", { name: "Refresh readiness" }).click();
+  await expect(panel.getByRole("status")).toHaveText("Source ready. Encode admission is closed.");
+  await expect(panel.locator("pre").first()).toContainText('"revision": 2');
+  await expectNoPageOverflow(page);
+});

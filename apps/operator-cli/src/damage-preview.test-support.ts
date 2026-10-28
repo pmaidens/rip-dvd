@@ -1,3 +1,4 @@
+import type { CommittedDvdCheckpointEvidence } from "@rip-dvd/data-access";
 import { DatabaseSync } from "node:sqlite";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { seedCommittedArchiveEvidence } from "./archive-evidence.test-support.js";
@@ -7,7 +8,7 @@ export async function seedDamagePreview(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   coverage: "source_span" | "whole_cell" | "unknown" | "mixed" = "source_span",
   timings: readonly (readonly [number, number])[] = [[1_000, 5_000], [35_000, 40_000], [71_000, 400_000]],
-  options: { evidence?: Pick<Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>, "archive" | "manifest">; stopRecovery?: boolean } = {},
+  options: { evidence?: { archive: Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>["archive"]; manifest: CommittedDvdCheckpointEvidence }; stopRecovery?: boolean } = {},
 ) {
   const { archive, manifest } = options.evidence ?? await seedCommittedArchiveEvidence(fixture, [
     { startLba: 10, sectorCount: 1, classification: "skipped_untested" },
@@ -33,7 +34,7 @@ export async function seedDamagePreview(
   }));
   const reviewSet = access.catalog.recordDvdTitleIdentityObservations({
     originalDiscArchiveId: archive.id,
-    checkpoint: { manifestId: manifest.id, manifestRevision: 1, manifestDigest: manifest.manifestDigest },
+    checkpoint: { manifestId: manifest.id, manifestRevision: manifest.revision, manifestDigest: manifest.manifestDigest },
     observations: [{
       displayTitleNumber: 1,
       navigation: { videoTitleSetNumber: 1, titleSetTitleNumber: 1, programChainNumber: 1 },
