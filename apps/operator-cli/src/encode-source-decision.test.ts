@@ -3,7 +3,7 @@ import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { advanceCommittedArchiveEvidence, withEvidenceGuardsDisabled } from "./archive-evidence.test-support.js";
 import { assessmentMappings } from "./encoding-readiness.test-support.js";
 import { afterEach, expect, it } from "vitest";
-import type { EncodingReadiness } from "@rip-dvd/application";
+import { createApplicationOperations, type EncodingReadiness } from "@rip-dvd/application";
 import type { EncodeJobId } from "@rip-dvd/data-access";
 import { openEncodeSourceTestAccess } from "./encode-source-decision.test-support.js";
 import { acceptReadinessContent, seedEncodingReadiness } from "./encoding-readiness.test-support.js";
@@ -156,4 +156,36 @@ it("rejects enqueue against a live old writer despite lease expiry", async () =>
         .toMatchObject({ exitCode: 2, result: { error: { blockingReasons: [expect.objectContaining({ code: "WRITER_NOT_QUIESCENT" }), expect.anything()] } } });
     } });
   const access = fixture.openAccess(); expect(access.encodeJobs.list(["queued", "running"])).toEqual([]); access.close();
+});
+
+it.each(["enqueue", "requeue"] as const)("requires owned checkpoint preparation when an initial writer blocker clears before %s", async (operation) => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedEncodingReadiness(fixture, { clean: true });
+  const access = openEncodeSourceTestAccess(fixture);
+  access.catalog.completeCatalogReview(seeded.archive.id, access.catalog.listOriginalDiscArchives({ ids: [seeded.archive.id] })[0]!.updatedAt, "reviewed_with_selections");
+  const decision = ((await fixture.run(["encode-readiness", seeded.archive.id])).result as EncodingReadiness).selections[0]!.expectedSourceDecision;
+  const input = { mutationKey: "synthetic-settled-writer", discSelectionId: seeded.selection.id,
+    encodingProfileId: seeded.profile.id, outputPath: join(fixture.mediaLibraryPath, "synthetic-settled-writer.mkv"),
+    expectedSourceDecision: decision, mediaLibraryPath: fixture.mediaLibraryPath, originalsLibraryPath: fixture.originalsLibraryPath };
+  const job = operation === "requeue" ? access.encodeJobs.enqueue({ ...input, mutationKey: undefined }) : null;
+  if (job) access.encodeJobs.requestCancellation(job.id);
+  const ownership = createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath });
+  let inspections = 0;
+  const operations = createApplicationOperations(access, { archiveImageOwnership: {
+    ...ownership,
+    inspect(value) {
+      const current = ownership.inspect(value);
+      return inspections++ === 0 ? { ...current, stableRead: { available: false,
+        blockingReasons: [{ code: "WRITER_NOT_QUIESCENT", message: "Synthetic prior writer is finishing." }] } } : current;
+    },
+  } });
+  try {
+    await expect(operation === "enqueue" ? operations.enqueueEncodeJob(input)
+      : operations.requeueEncodeJob({ ...input, encodeJobId: job!.id })).rejects.toMatchObject({
+        code: "ENCODE_SOURCE_UNAVAILABLE", blockingReasons: expect.arrayContaining([
+          expect.objectContaining({ code: "CONSISTENCY_FAULT", details: expect.objectContaining({ checkpointFailure: "DVD_EVIDENCE_CHECKPOINT_UNVERIFIED" }) }),
+        ]),
+      });
+    expect(access.encodeJobs.list(["queued", "running"])).toEqual([]);
+  } finally { access.close(); }
 });

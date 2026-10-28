@@ -3812,6 +3812,7 @@ it("reports Archive Recovery conflicts identically through Encode web and CLI op
     );
     const config = () => ({
       mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
       webTrustedOrigin: trustedOrigin,
     });
     const webPreview = await createEncodeJobsRoute(new Request(
@@ -3834,16 +3835,11 @@ it("reports Archive Recovery conflicts identically through Encode web and CLI op
       "--encode-job-id",
       predecessor.id,
     ]);
-    expect(webPreview.status).toBe(409);
-    expect(cliPreview.exitCode).toBe(2);
-    expect(cliPreview.result).toEqual(await webPreview.json());
-    expect(cliPreview.result).toMatchObject({
-      error: {
-        code: "ENCODE_WORK_CONFLICT",
-        current: {
-          archiveRecovery: { id: recoveryId },
-        },
-      },
+    expect(webPreview.status).toBe(200);
+    expect(cliPreview.exitCode).toBe(0);
+    expect(await webPreview.json()).toEqual({ preview: cliPreview.result });
+    expect(cliPreview.result).toMatchObject({ available: false,
+      sourceReadiness: { current: { recovery: { id: recoveryId } } },
     });
 
     const web = await createEncodeJobsRoute(new Request(
@@ -3881,7 +3877,7 @@ it("reports Archive Recovery conflicts identically through Encode web and CLI op
     expect(cli.result).toMatchObject({
       error: {
         code: "ENCODE_WORK_CONFLICT",
-        blockingReasons: [{ code: "ENCODE_WORK_CONFLICT" }],
+        blockingReasons: expect.arrayContaining([expect.objectContaining({ code: "ENCODE_WORK_CONFLICT" })]),
         current: {
           archiveRecovery: {
             id: recoveryId,
@@ -3994,6 +3990,7 @@ it("replays persisted Encode enqueue outcomes before DVD evidence blocking", asy
     const blockedMutationKey = "synthetic-evidence-enqueue-blocked";
     const config = () => ({
       mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
       webTrustedOrigin: trustedOrigin,
     });
     const request = (key: string, path = outputPath) => new Request(
@@ -4070,7 +4067,12 @@ it("replays persisted Encode enqueue outcomes before DVD evidence blocking", asy
     expect(webBlocked.status).toBe(409);
     expect(cliBlocked.exitCode).toBe(2);
     expect(cliBlocked.result).toEqual(await webBlocked.json());
-    expect(cliBlocked.result).toEqual(dvdEvidenceEncodingUnavailableError);
+    expect(cliBlocked.result).toMatchObject({ error: {
+      code: "STALE_ENCODE_SOURCE_DECISION", blockingReasons: expect.arrayContaining([
+        expect.objectContaining({ code: "SOURCE_DECISION_STALE" }),
+        expect.objectContaining({ code: DVD_RECOVERY_EVIDENCE_ENCODING.code }),
+      ]),
+    } });
 
     const sqlite = new DatabaseSync(fixture.databasePath);
     expect(sqlite.prepare(`
@@ -4113,6 +4115,7 @@ it("replays persisted Encode requeue outcomes before DVD evidence blocking", asy
     const blockedMutationKey = "synthetic-evidence-requeue-blocked";
     const config = () => ({
       mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
       webTrustedOrigin: trustedOrigin,
     });
     const request = (key: string, priority?: number) => new Request(
@@ -4185,7 +4188,12 @@ it("replays persisted Encode requeue outcomes before DVD evidence blocking", asy
     expect(webBlocked.status).toBe(409);
     expect(cliBlocked.exitCode).toBe(2);
     expect(cliBlocked.result).toEqual(await webBlocked.json());
-    expect(cliBlocked.result).toEqual(dvdEvidenceEncodingUnavailableError);
+    expect(cliBlocked.result).toMatchObject({ error: {
+      code: "STALE_ENCODE_SOURCE_DECISION", blockingReasons: expect.arrayContaining([
+        expect.objectContaining({ code: "SOURCE_DECISION_STALE" }),
+        expect.objectContaining({ code: DVD_RECOVERY_EVIDENCE_ENCODING.code }),
+      ]),
+    } });
 
     const sqlite = new DatabaseSync(fixture.databasePath);
     expect(sqlite.prepare(`
@@ -5039,18 +5047,9 @@ it("returns the same operational records and evidence through web and CLI", asyn
     unreviewedEvidenceFixture.close();
     const encodeConfig = () => ({
       mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
       webTrustedOrigin: trustedOrigin,
     });
-    const blockedEncodeError = {
-      error: {
-        code: DVD_RECOVERY_EVIDENCE_ENCODING.code,
-        message: DVD_RECOVERY_EVIDENCE_ENCODING.message,
-        blockingReasons: [{
-          code: DVD_RECOVERY_EVIDENCE_ENCODING.code,
-          message: DVD_RECOVERY_EVIDENCE_ENCODING.message,
-        }],
-      },
-    };
     for (const blockedMutation of [
       {
         command: [
@@ -5103,10 +5102,21 @@ it("returns the same operational records and evidence through web and CLI", asyn
         },
       ), () => access, encodeConfig);
       const cli = await fixture.run(blockedMutation.command);
-      expect(web.status).toBe(409);
-      expect(cli.exitCode).toBe(2);
-      expect(cli.result).toEqual(await web.json());
-      expect(cli.result).toEqual(blockedEncodeError);
+      if ("action" in blockedMutation.body && blockedMutation.body.action === "preview_requeue") {
+        expect(web.status).toBe(200);
+        expect(cli.exitCode).toBe(0);
+        expect(await web.json()).toEqual({ preview: cli.result });
+        expect(cli.result).toMatchObject({ available: false, blockingReasons: expect.arrayContaining([
+          expect.objectContaining({ code: DVD_RECOVERY_EVIDENCE_ENCODING.code }),
+        ]) });
+      } else {
+        expect(web.status).toBe(409);
+        expect(cli.exitCode).toBe(2);
+        expect(cli.result).toEqual(await web.json());
+        expect(cli.result).toMatchObject({ error: { code: "STALE_ENCODE_SOURCE_DECISION", blockingReasons: expect.arrayContaining([
+          expect.objectContaining({ code: DVD_RECOVERY_EVIDENCE_ENCODING.code }),
+        ]) } });
+      }
     }
     const encodeReplayFixture = new DatabaseSync(fixture.databasePath);
     expect(encodeReplayFixture.prepare(`

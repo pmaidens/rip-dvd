@@ -18,8 +18,8 @@ import {
 } from "@rip-dvd/data-access";
 
 import { defaultArchiveImageOwnership, type ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
-import { inspectEncodingReadiness } from "./encoding-readiness.js";
-import { parseEncodeSourceDecision, withEncodeSourceDecision } from "./encode-source-decision.js";
+import { inspectEncodingReadiness, orderEncodingReadinessReasons } from "./encoding-readiness.js";
+import { parseEncodeSourceDecision, readEncodeRecoveryConflict, withEncodeSourceDecision } from "./encode-source-decision.js";
 import { readMediaItemsWithAncestors } from "./media-item-ancestor-context.js";
 import { mediaOutputPath, suggestedMediaOutputPath } from "./media-output-path.js";
 import { parseMutationKey } from "./mutation-key.js";
@@ -164,13 +164,19 @@ export async function previewEncodeRequeue(
   const readiness = selection === undefined ? null : await inspectEncodingReadiness(
     access, selection.originalDiscArchiveId, input.originalsLibraryPath ?? "", ownership,
   );
+  const conflict = selection === undefined ? null : readEncodeRecoveryConflict(access, selection.originalDiscArchiveId);
   const replacesOutput = job.status === "completed" || job.replaceExistingOutput;
   return {
     ...(readiness?.applicable ? {
       sourceReadiness: readiness,
       expectedSourceDecision: readiness.selections.find((item) => item.discSelectionId === job.discSelectionId)?.expectedSourceDecision ?? null,
       available: readiness.sourceReady && readiness.admissionAvailable,
-      blockingReasons: [...readiness.blockingReasons, ...readiness.admissionReasons],
+      ...(conflict === null ? {} : { currentWork: conflict }),
+      blockingReasons: orderEncodingReadinessReasons([
+        ...readiness.blockingReasons,
+        ...(conflict === null ? [] : [{ ...ENCODE_WORK_CONFLICT, details: { current: conflict } }]),
+        ...readiness.admissionReasons.map((reason) => ({ ...reason, details: {} })),
+      ]),
     } : {}),
     encodeJobId: job.id,
     status: job.status,

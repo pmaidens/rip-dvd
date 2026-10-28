@@ -75,7 +75,7 @@ it.each(["enqueue", "requeue"] as const)("serializes current-source %s with Reco
         expect(encoded).toMatchObject({ outcome: "queued" });
         expect(resumed).toMatchObject({ outcome: "rejected", code: "ENCODE_WORK_CONFLICT" });
       } else {
-        expect(encoded).toMatchObject({ outcome: "rejected", code: "ENCODE_SOURCE_UNAVAILABLE", reasons: expect.arrayContaining(["RECOVERY_WAITING"]) });
+        expect(encoded).toMatchObject({ outcome: "rejected", code: "ENCODE_WORK_CONFLICT", reasons: expect.arrayContaining(["RECOVERY_WAITING", "ENCODE_WORK_CONFLICT"]) });
         expect(resumed).toMatchObject({ outcome: "resumed" });
       }
       const observer = fixture.openAccess();

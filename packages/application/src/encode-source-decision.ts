@@ -1,6 +1,6 @@
 import {
-  DvdRecoveryEvidenceEncodingUnavailableError,
-  type DataAccess, type DiscSelectionId, type EncodeSourceDecision,
+  DvdRecoveryEvidenceEncodingUnavailableError, createEncodeWorkConflictCurrent, ENCODE_WORK_CONFLICT,
+  type DataAccess, type DiscSelectionId, type EncodeSourceDecision, type EncodeWorkConflictCurrent, type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import { defaultArchiveImageOwnership, type ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { describeEncodingReadiness, orderEncodingReadinessReasons, type EncodingReadiness, type EncodingReadinessReason } from "./encoding-readiness.js";
@@ -29,9 +29,19 @@ export function parseEncodeSourceDecision(value: unknown): EncodeSourceDecision 
 export class EncodeSourceDecisionRejectedError extends Error {
   constructor(
     readonly code: string,
-    readonly current: { readiness: EncodingReadiness; expectedSourceDecision: EncodeSourceDecision | null },
+    readonly current: { readiness: EncodingReadiness; expectedSourceDecision: EncodeSourceDecision | null } & Partial<EncodeWorkConflictCurrent>,
     readonly blockingReasons: readonly EncodingReadinessReason[],
   ) { super("Encode source decision is unavailable or stale."); }
+}
+
+export function readEncodeRecoveryConflict(access: DataAccess, id: OriginalDiscArchiveId) {
+  return access.readConsistentSnapshot((snapshot) => {
+    const recovery = snapshot.catalog.findArchiveRecovery(id);
+    if (recovery?.work == null) return null;
+    const jobs = snapshot.catalog.listDiscSelections({ originalDiscArchiveId: id, includeHistorical: true })
+      .flatMap((selection) => snapshot.encodeJobs.listForDiscSelection(selection.id));
+    return createEncodeWorkConflictCurrent(recovery, jobs);
+  });
 }
 
 /** Prepare checkpoint proof under shared image ownership, then recheck the same
@@ -55,17 +65,24 @@ export async function withEncodeSourceDecision<T>(
   let checkpointFailure: string | null = null;
   let latest = initial;
   const assertSourceDecision = () => {
-    const readiness = read(verified, checkpointFailure);
+    let readiness = read(verified, checkpointFailure);
+    // An external writer may settle after the initial inspection. That cannot
+    // turn an unprepared request into permission to read the image.
+    if (readiness.applicable && readiness.sourceReady && !verified && expected !== undefined) {
+      readiness = read(false, "DVD_EVIDENCE_CHECKPOINT_UNVERIFIED");
+    }
     if (!readiness.applicable) throw new Error("Encode source evidence format changed");
     latest = readiness;
     const content = readiness.selections.find((item) => item.discSelectionId === discSelectionId);
     const currentDecision = content?.expectedSourceDecision ?? null;
-    const current = { readiness, expectedSourceDecision: currentDecision };
+    const conflict = readEncodeRecoveryConflict(access, id);
+    const current = { readiness, expectedSourceDecision: currentDecision, ...conflict };
     const stale = expected === undefined || JSON.stringify(expected) !== JSON.stringify(currentDecision);
     const reasons = [...readiness.blockingReasons];
     if (stale) reasons.unshift({ code: "SOURCE_DECISION_STALE", message: "Expected current checkpoint, selection, assessment and applicable acceptance identities are required.", details: {} });
+    if (conflict !== null) reasons.push({ ...ENCODE_WORK_CONFLICT, details: { current: conflict } });
     if (stale || reasons.length > 0) throw new EncodeSourceDecisionRejectedError(
-      stale ? "STALE_ENCODE_SOURCE_DECISION" : "ENCODE_SOURCE_UNAVAILABLE", current,
+      conflict !== null ? ENCODE_WORK_CONFLICT.code : stale ? "STALE_ENCODE_SOURCE_DECISION" : "ENCODE_SOURCE_UNAVAILABLE", current,
       orderEncodingReadinessReasons([...reasons, ...readiness.admissionReasons.map((reason) => ({ ...reason, details: {} }))]),
     );
   };
