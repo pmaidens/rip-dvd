@@ -1369,6 +1369,7 @@ describe("data-access facade", () => {
         "dvd_title_identity_observations",
         "dvd_title_identity_selection_bindings",
         "dvd_title_identity_sets",
+        "encode_claim_snapshots",
         "encode_job_failure_reports",
         "encode_output_inspection_receipts",
         "filesystem_verification_runs",
@@ -1378,7 +1379,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(52);
+    expect(identifierTables).toHaveLength(53);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -10023,10 +10024,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 15",
+          "select name from __drizzle_migrations order by id desc limit 16",
         )
         .all(),
       ).toEqual([
+        { name: "20261028221623_encode-claim-snapshots" },
         {
           name: "20261028200703_nervous_zuras",
         },

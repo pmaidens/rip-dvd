@@ -2695,6 +2695,7 @@ export interface EncodeJobAccess {
   replayRequeue(id: EncodeJobId, options: EncodeJobRequeueOptions): EncodeJob | null;
   enqueue(input: EncodeJobEnqueueInput, assertSourceDecision?: () => void): EncodeJob;
   requestCancellation(id: EncodeJobId, mutationKey?: string): EncodeJob;
+  listSourceClaimCandidates(options: { limit: number; offset: number }): EncodeJob[];
   claimNext(workerId: string, options?: EncodeJobClaimOptions): RunningEncodeJob | null;
   findClaimSnapshot(id: EncodeJobClaimToken): EncodeClaimSnapshot | null;
   listClaimSnapshots(id: EncodeJobId, options?: { limit: number; offset: number }): EncodeClaimSnapshot[];

@@ -68,33 +68,36 @@ export async function claimNextEncodeJob(
   // Preserve the indexed historical queue path while new-format admission is closed.
   const historical = access.encodeJobs.claimNext(workerId);
   if (historical) return historical;
-  for (const queued of access.encodeJobs.list(["queued"])) {
-    const selection = access.catalog.listDiscSelections({ ids: [queued.discSelectionId] })[0];
-    if (!selection) continue;
-    const newFormat = dvdRecoveryEvidenceFormatForArchive(
-      access.catalog.findDvdArchiveEvidenceHeader(selection.originalDiscArchiveId),
-      access.archiveJobs.listForArchive(selection.originalDiscArchiveId),
-    ) !== null;
-    try {
-      const claim = await withEncodeSourceDecision(access, queued.discSelectionId,
-        queued.expectedSourceDecision ?? undefined, originalsLibraryPath,
-        (assertSourceDecision) => access.encodeJobs.claimNext(workerId, {
-          jobId: queued.id,
-          snapshotSource(job) {
-            if (!assertSourceDecision) throw new DomainInvariantError("Encode checkpoint preparation is required");
-            assertSourceDecision();
-            return snapshotClaimSource(access, job, originalsLibraryPath, ownership);
-          },
-        }), ownership);
-      if (claim) return claim;
-    } catch (error) {
-      if (!newFormat || !(error instanceof EncodeSourceDecisionRejectedError ||
-        error instanceof DvdCheckpointReadFault || error instanceof ArchiveImageOwnershipError ||
-        error instanceof DomainInvariantError)) throw error;
-      // Leave stale work queued for an explicit current-source requeue. Other archives may proceed.
+  for (let offset = 0;; offset += 100) {
+    const candidates = access.encodeJobs.listSourceClaimCandidates({ limit: 100, offset });
+    if (candidates.length === 0) return null;
+    for (const queued of candidates) {
+      const selection = access.catalog.listDiscSelections({ ids: [queued.discSelectionId] })[0];
+      if (!selection) continue;
+      const newFormat = dvdRecoveryEvidenceFormatForArchive(
+        access.catalog.findDvdArchiveEvidenceHeader(selection.originalDiscArchiveId),
+        access.archiveJobs.listForArchive(selection.originalDiscArchiveId),
+      ) !== null;
+      try {
+        const claim = await withEncodeSourceDecision(access, queued.discSelectionId,
+          queued.expectedSourceDecision ?? undefined, originalsLibraryPath,
+          (assertSourceDecision) => access.encodeJobs.claimNext(workerId, {
+            jobId: queued.id,
+            snapshotSource(job) {
+              if (!assertSourceDecision) throw new DomainInvariantError("Encode checkpoint preparation is required");
+              assertSourceDecision();
+              return snapshotClaimSource(access, job, originalsLibraryPath, ownership);
+            },
+          }), ownership);
+        if (claim) return claim;
+      } catch (error) {
+        if (!newFormat || !(error instanceof EncodeSourceDecisionRejectedError ||
+          error instanceof DvdCheckpointReadFault || error instanceof ArchiveImageOwnershipError ||
+          error instanceof DomainInvariantError)) throw error;
+        // Leave stale work queued for an explicit current-source requeue. Other archives may proceed.
+      }
     }
   }
-  return null;
 }
 
 /** Revalidate bytes and ownership, not later mutable catalog decisions. Withdrawal

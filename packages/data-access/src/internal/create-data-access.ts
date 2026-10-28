@@ -23952,6 +23952,20 @@ export function createDataAccessInternal(
         );
       },
 
+      listSourceClaimCandidates(options) {
+        if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 100 ||
+          !Number.isSafeInteger(options.offset) || options.offset < 0) throw new DomainInvariantError("Invalid source claim candidate page");
+        // No source scans or queue materialization while the core admission gate is closed.
+        if (dvdRecoveryEvidenceEncodingGateClosed) return [];
+        return database.select({ job: encodeJobs }).from(encodeJobs)
+          .innerJoin(discSelections, eq(discSelections.id, encodeJobs.discSelectionId))
+          .innerJoin(originalDiscArchives, eq(originalDiscArchives.id, discSelections.originalDiscArchiveId))
+          .where(and(eq(encodeJobs.status, "queued"), eq(discSelections.isCatalogActive, true),
+            eq(originalDiscArchives.catalogReviewOutcome, "reviewed_with_selections"),
+            dvdRecoveryEvidenceMarkerCondition(database, originalDiscArchives.id)))
+          .orderBy(desc(encodeJobs.priority), asc(encodeJobs.createdAt), asc(encodeJobs.id))
+          .limit(options.limit).offset(options.offset).all().map(({ job }) => job);
+      },
       claimNext: encodeJobQueue.claimNext,
       findClaimSnapshot(id) {
         return database.select().from(encodeClaimSnapshots).where(eq(encodeClaimSnapshots.id, id)).get() ?? null;

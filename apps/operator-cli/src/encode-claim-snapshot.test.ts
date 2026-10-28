@@ -2,12 +2,12 @@ import { DatabaseSync } from "node:sqlite";
 import { createApplicationOperations } from "@rip-dvd/application";
 import { seedEncodeClaim, withdrawClaimAcceptance, injectClaimRecoveryState } from "./encode-claim.test-support.js";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { claimNextEncodeJob, type EncodingReadiness } from "@rip-dvd/application";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { assessmentMappings, seedEncodingReadiness } from "./encoding-readiness.test-support.js";
 import { openEncodeSourceTestAccess } from "./encode-source-decision.test-support.js";
-import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
+import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "./operator-workflow.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
@@ -24,6 +24,8 @@ it("commits immutable concrete source evidence with the winning claim and expose
     const job = access.encodeJobs.enqueue({ discSelectionId: seeded.selection.id, encodingProfileId: seeded.profile.id,
       outputPath: join(fixture.mediaLibraryPath, "synthetic-claim.mkv"), expectedSourceDecision: readiness.selections[0]!.expectedSourceDecision });
     expect(access.encodeJobs.claimNext("unprepared-worker")).toBeNull();
+    expect(access.encodeJobs.listSourceClaimCandidates({ limit: 1, offset: 0 }).map(({ id }) => id)).toEqual([job.id]);
+    expect(access.encodeJobs.listSourceClaimCandidates({ limit: 1, offset: 1 })).toEqual([]);
     const claim = await claimNextEncodeJob(access, "synthetic-worker", fixture.originalsLibraryPath, ownership);
     expect(claim?.id).toBe(job.id);
     const snapshot = access.encodeJobs.findClaimSnapshot(claim!.claimToken)!;
@@ -130,4 +132,22 @@ it("blocks a superseded queued selection and snapshots exact chapter bounds with
         selectionArguments: ["--title", "1", "--angle", "1", "--chapters", "2-3", "--all-audio"] },
     });
   } finally { seeded.access.close(); }
+});
+
+it("does no source-candidate scan or historical backlog materialization while admission is closed", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  seedCatalogReviewForReadFixture(fixture);
+  const access = fixture.openAccess();
+  const db = new DatabaseSync(fixture.databasePath);
+  db.prepare("UPDATE encode_jobs SET status = 'queued', claim_token = NULL").run();
+  db.prepare("UPDATE original_disc_archives SET catalog_review_outcome = 'needs_review', catalog_reviewed_at = NULL").run();
+  db.close();
+  try {
+    const list = vi.spyOn(access.encodeJobs, "list").mockImplementation(() => { throw new Error("Historical backlog must not be materialized"); });
+    const sourceReads = vi.spyOn(access.catalog, "listDiscSelections");
+    expect(await claimNextEncodeJob(access, "synthetic-idle-worker", fixture.originalsLibraryPath)).toBeNull();
+    expect(list).not.toHaveBeenCalled();
+    expect(sourceReads).not.toHaveBeenCalled();
+    expect(access.encodeJobs.listSourceClaimCandidates({ limit: 1, offset: 0 })).toEqual([]);
+  } finally { vi.restoreAllMocks(); access.close(); }
 });
