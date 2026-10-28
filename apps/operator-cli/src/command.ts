@@ -138,6 +138,13 @@ function isRetiredCommand(name: string): name is keyof typeof retiredCommandGuid
 
 const commandDefinitions = [
   {
+    name: "encode-readiness",
+    description: "Inspect current source readiness without authorizing an Encode Job. Omit the archive ID to list archives.",
+    usage: "rip-dvd encode-readiness [<archive-id>] [--offset <n>]",
+    inputs: { arguments: ["archive-id"], options: ["--offset"] },
+    example: "rip-dvd encode-readiness <archive-id>",
+  },
+  {
     name: "damage-preview",
     description: "Review and request checkpoint-bound Damage Previews; active Recovery requests wait durably for a planned checkpoint pause. Inspect, wait, cancel, and export canonical MKV artifacts.",
     usage: "rip-dvd damage-preview availability|request|inspect|wait|cancel|export <identity> [--key <key>] [--json <input>|--stdin|--file <path>] [--timeout-ms <ms>] [--poll-ms <ms>] [--destination <path>]",
@@ -2314,6 +2321,29 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
                   rest[0] === "accept-rearchive"
                 ? runRearchiveAcceptance(rest, io)
             : await runCatalogReview(rest, io));
+      return 0;
+    }
+    if (name === "encode-readiness") {
+      if (rest.length === 1 && ["--help", "-h"].includes(rest[0]!)) {
+        emit(io.stdout, help(name));
+        return 0;
+      }
+      const id = rest[0]?.startsWith("--") ? undefined : rest[0];
+      const options = profileOptions(id === undefined ? rest : rest.slice(1), ["--offset"], "Invalid readiness options.");
+      if ((id !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id) || options.size > 0)) ||
+          (options.has("--offset") && !/^(0|[1-9][0-9]{0,14})$/.test(options.get("--offset")!))) {
+        throw new CommandFailure("INVALID_ARGUMENTS", "Invalid readiness arguments.", 2);
+      }
+      const access = io.openAccess();
+      try {
+        const operations = createApplicationOperations(access);
+        emit(io.stdout, id === undefined
+          ? operations.listEncodingReadinessArchives(Number(options.get("--offset") ?? 0))
+          : await operations.inspectEncodingReadiness(id, io.originalsLibraryPath?.() ?? loadConfig().originalsLibraryPath));
+      } catch (error) {
+        if (error instanceof RecordNotFoundError) throw new CommandFailure("NOT_FOUND", "Original Disc Archive not found.", 2);
+        throw error;
+      } finally { access.close(); }
       return 0;
     }
     if (["encode-queue", "encode-resolve", "encode-enqueue", "encode-requeue-preview", "encode-requeue", "encode-cancel"].includes(name)) {

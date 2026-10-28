@@ -3768,3 +3768,20 @@ h3 {
 
 .notification-settings { max-width: 54rem; margin: 2rem auto; padding: 0 1rem; }
 .notification-controls { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-block: 1rem; }
+
+.encoding-readiness {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.encoding-readiness > label {
+  display: grid;
+  min-width: 0;
+  gap: 0.5rem;
+}
+
+.encoding-readiness select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}

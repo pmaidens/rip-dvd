@@ -751,3 +751,13 @@ preset settings do not provide a reliable byte rate; stream reproducibility
 also requires verification before generation is enabled. Every inspection
 returns all blocking reasons, and unavailable inspection succeeds with JSON
 `available: false`. Malformed input returns exit 2.
+
+## Encoding readiness
+
+Inspect source readiness with `rip-dvd encode-readiness <archive-id>`. Omit the
+archive ID to list archive choices, using `--offset <n>` for later pages.
+The result reports current evidence identities, every blocker in priority
+order, and each selection's concrete content, assessment and acceptance.
+`sourceReady` describes source evidence only. New-format admission remains
+closed even when the source is ready. Historical archives return
+`applicable: false` and retain their existing encoding path.
