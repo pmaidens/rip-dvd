@@ -92,7 +92,8 @@ export function createDamagePreviewGenerator(runner: HandBrakeRunner = nodeHandB
       await runner.run({
         arguments_: ["--no-dvdnav", "--scan", "--json", "--title", String(titleNumber), "--min-duration", "0", "--previews", "1:0", "-i", source, "-o", outputPath],
         outputPath, sourceOwnershipDescriptor: descriptor, signal,
-        onOutput(chunk) { text += chunk; if (Buffer.byteLength(text) > 4 * 1024 * 1024) throw new Error("Preview title scan exceeded its bound."); },
+        onOutput() {},
+        onStdout(chunk) { text += chunk; if (Buffer.byteLength(text) > 4 * 1024 * 1024) throw new Error("Preview title scan exceeded its bound."); },
       });
       const marker = "JSON Title Set: ";
       const offset = text.indexOf(marker);

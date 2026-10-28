@@ -11420,8 +11420,8 @@ export function createDataAccessInternal(
 
   const access: LegacySidecarDataAccess = {
     damagePreviews: createDamagePreviewAccess(sqlite, now),
-    async withDvdCheckpoint(id, ownership, task) {
-      const read = await withDvdCheckpointRead(id, ownership, readCommittedDvdCheckpoint, task, (_evidence, prepared) => prepared);
+    async withDvdCheckpoint(id, ownership, task, commit) {
+      const read = await withDvdCheckpointRead(id, ownership, readCommittedDvdCheckpoint, task, (checkpoint, prepared) => commit ? commit(checkpoint, prepared) : prepared);
       return read?.result ?? null;
     },
     async readDvdCheckpoint(id, ownership) {

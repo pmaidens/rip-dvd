@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { open, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -7,8 +7,8 @@ import { seedDamagePreview } from "../../../../../operator-cli/src/damage-previe
 import { advanceCommittedArchiveEvidence } from "../../../../../operator-cli/src/archive-evidence.test-support.js";
 import { pollDamagePreviews } from "../../../../../encode-worker/src/damage-preview-worker.js";
 import type { DamagePreviewGenerator } from "../../../../../encode-worker/src/damage-preview-generator.js";
-import { createArchiveImageOwnership, acquireKernelProcessLock } from "@rip-dvd/worker-runtime";
-import type { DamagePreviewInspection, DamagePreviewAvailability } from "@rip-dvd/application";
+import { ArchiveImageOwnershipError, createArchiveImageOwnership, acquireKernelProcessLock, type ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import { createApplicationOperations, type DamagePreviewInspection, type DamagePreviewAvailability } from "@rip-dvd/application";
 import { createDamagePreviewRoute } from "./route";
 import { createDamagePreviewMediaRoute } from "../../damage-preview-media/[artifactIdentity]/route";
 
@@ -20,7 +20,7 @@ function media(overrides: Partial<DamagePreviewGenerator> = {}): DamagePreviewGe
     versions: async () => ({ handbrake: "synthetic-handbrake-v1", ffprobe: "synthetic-probe-v1" }),
     scan: async () => ({ navigation: { videoTitleSetNumber: 1, titleSetTitleNumber: 1, programChainNumber: 1 }, selectedPath: [{ programNumber: 1, cellNumber: 1, vobId: 1, cellId: 1 }], durationMilliseconds: 500_000, chapterDurations: [125_000, 125_000, 125_000, 125_000], audio: [1], subtitles: [], angleCount: 1 }),
     async generate(request) { writeFileSync(request.outputPath, bytes); request.onOutput("Encoding: task 1 of 1, 100.00 %"); },
-    inspect: async (path) => ({ videoStartMilliseconds: 0, durationMilliseconds: path.endsWith("0.partial.mkv") ? 45_000 : 339_000, videoCount: 1, audioCount: 1, subtitleCount: 0 }),
+    inspect: async (path) => ({ videoStartMilliseconds: 0, durationMilliseconds: /\/0(?:\.partial)?\.mkv$/.test(path) ? 45_000 : 339_000, videoCount: 1, audioCount: 1, subtitleCount: 0 }),
     requireInactive() {}, whenInactive: async () => undefined,
     ...overrides,
   };
@@ -192,5 +192,70 @@ it("rejects unsupported streams and path substitution and marks older media outd
     access.encodingProfiles.setActive({ id: seeded.profile.id, mediaDomain: "dvd_video", isActive: false });
     expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ status: "outdated", provenance: { encodingProfile: { isActive: true, version: 1 } } });
     expect(access.dvdTitleDamageAssessments.inspect(seeded.archive.id).currentAssessmentIdentity).toBe(assessmentBefore);
+  } finally { access.close(); }
+});
+
+it("commits request admission only after final ownership validation and returns current identities for acquisition races", async () => {
+  for (const kind of ["before-task", "before-commit"] as const) {
+    const { fixture, seeded, input, access } = await setup();
+    try {
+      const base = createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath });
+      const ownership: ArchiveImageOwnership = { ...base, withConsistentRead(request) {
+        return base.withConsistentRead({ ...request,
+          async task(handle) {
+            if (kind === "before-task") advanceCommittedArchiveEvidence(fixture, seeded.manifest, { publishFilesystemCheckpoint: true });
+            return request.task(handle);
+          },
+          commit(prepared, handle) {
+            if (kind === "before-commit") throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT");
+            return request.commit ? request.commit(prepared, handle) : prepared;
+          },
+        });
+      } };
+      const operations = createApplicationOperations(access, { archiveImageOwnership: ownership });
+      await expect(operations.requestDamagePreview(seeded.archive.id, { ...input, mutationKey: "synthetic-owned-race" })).rejects.toMatchObject({
+        code: kind === "before-task" ? "DAMAGE_PREVIEW_STALE" : "DAMAGE_PREVIEW_UNAVAILABLE",
+        current: { originalDiscArchiveId: seeded.archive.id, current: { checkpoint: { manifestRevision: kind === "before-task" ? 2 : 1 } } },
+      });
+      expect(access.damagePreviews.list()).toEqual([]);
+      if (kind === "before-commit") expect(await fixture.run(["damage-preview", "request", seeded.archive.id, "--key", "synthetic-owned-race", "--json", JSON.stringify(input)])).toMatchObject({ exitCode: 0, result: { status: "queued" } });
+    } finally { access.close(); }
+  }
+});
+it("releases source ownership before slow artifact validation and acknowledges cancellation as partial media", async () => {
+  const { fixture, seeded, request, generate, access } = await setup();
+  let entered!: () => void, finish!: () => void;
+  const validating = new Promise<void>((resolve) => { entered = resolve; });
+  const released = new Promise<void>((resolve) => { finish = resolve; });
+  try {
+    const id = ((await request()).result as DamagePreviewInspection).id;
+    const running = generate(media({ inspect: async (path) => { entered(); await released; return { videoStartMilliseconds: 0, durationMilliseconds: /\/0(?:\.partial)?\.mkv$/.test(path) ? 45_000 : 339_000, videoCount: 1, audioCount: 1, subtitleCount: 0 }; } }));
+    await validating;
+    const ownership = createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath });
+    await expect(ownership.withConsistentRead({ archiveId: seeded.archive.id, imagePath: seeded.archive.archivePath, originalsLibraryPath: fixture.originalsLibraryPath, signal: new AbortController().signal, async task() {} })).resolves.toBeUndefined();
+    await fixture.run(["damage-preview", "cancel", id, "--key", "synthetic-postprocessing-cancel"]);
+    finish(); await running;
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "partial", cancellationRequested: true, artifacts: [{}, {}] });
+  } finally { finish?.(); access.close(); }
+});
+it("reconciles a finalized MKV after worker death before artifact persistence without restarting source generation", async () => {
+  const { fixture, request, generate, access } = await setup();
+  try {
+    const id = ((await request()).result as DamagePreviewInspection).id;
+    const workerId = "11111111-2222-4333-8444-777777777777";
+    const lock = acquireKernelProcessLock(join(fixture.mediaLibraryPath, ".damage-previews", ".workers", `${workerId}.lock`));
+    const record = access.damagePreviews.claim(workerId)!;
+    const directory = join(fixture.mediaLibraryPath, ".damage-previews", id);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const command = ["synthetic-generator", "-o", join(directory, "0.partial.mkv")];
+    record.commands = [command]; record.status = "generating"; access.damagePreviews.update(record);
+    writeFileSync(join(directory, "0.mkv"), bytes);
+    lock.release();
+    await generate(); await generate();
+    const inspected = (await fixture.run(["damage-preview", "inspect", id])).result as DamagePreviewInspection;
+    expect(inspected).toMatchObject({ generationStatus: "partial", reason: { code: "DAMAGE_PREVIEW_WORKER_INTERRUPTED" }, provenance: { commands: [command] }, artifacts: [{ identity: `damage-preview-v1.${id}.0`, sizeBytes: bytes.length }] });
+    const destination = join(fixture.operatorHostPath, "reconciled-preview.mkv");
+    expect(await fixture.run(["damage-preview", "export", inspected.artifacts[0]!.identity, "--destination", destination])).toMatchObject({ exitCode: 0 });
+    expect(readFileSync(destination)).toEqual(bytes);
   } finally { access.close(); }
 });

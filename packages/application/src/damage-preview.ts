@@ -162,6 +162,7 @@ export function reviewDamagePreviewEvidence(
   const markers: Marker[] = [];
   if (input !== null) {
     if (title === null) reasons.push({ code: "TITLE_IDENTITY_NOT_CURRENT", message: "The selected Title Identity observation is not present at the current checkpoint." });
+    if (title !== null && (title.angleNumber !== 1 || title.angleCount !== 1)) reasons.push({ code: "DAMAGE_PREVIEW_PATH_UNREPRESENTABLE", message: "Canonical preview generation currently supports single-angle title paths only." });
     if (profile === null) reasons.push({ code: "ENCODING_PROFILE_UNAVAILABLE", message: "The intended DVD Encoding Profile is unavailable." });
     else if (Object.keys(profile.settings).some((key) => !["preset", "container"].includes(key))) reasons.push({ code: "DAMAGE_PREVIEW_SETTINGS_UNREPRESENTABLE", message: "This profile contains settings that a Damage Preview cannot represent." });
     if (profile !== null) for (const code of encodingProfileQueueBlockingReasons(profile)) reasons.push({ code: `ENCODING_PROFILE_${code.toUpperCase()}`, message: `The intended Encoding Profile is blocked: ${code}.` });
@@ -203,7 +204,7 @@ export function reviewDamagePreviewEvidence(
     title: title === null ? null : {
       titleIdentityId: title.titleIdentityId, observationId: title.id, contentDigest: title.contentDigest,
       displayTitleNumber: title.displayTitleNumber, navigation: title.navigation, selectedPath: title.selectedPath,
-      angleNumber: title.angleNumber, chapterStart: title.chapterStart, chapterEnd: title.chapterEnd,
+      angleNumber: title.angleNumber, angleCount: title.angleCount, chapterStart: title.chapterStart, chapterEnd: title.chapterEnd,
     },
     titleIdentityReviewSetIdentity: evidence.titles?.reviewSetIdentity ?? null,
     assessmentIdentity: input.mode === "damage" ? currentAssessment?.id ?? null : null,

@@ -30,6 +30,12 @@ it.skipIf(!available)("scans a synthetic DVD and generates a playable canonical 
     expect(title.navigation).toEqual({ videoTitleSetNumber: 1, titleSetTitleNumber: 1, programChainNumber: 1 });
     expect(title.selectedPath).toEqual([{ programNumber: 1, cellNumber: 1, vobId: 1, cellId: 1 }]);
     await expect(generator.scan({ source, titleNumber: 1, angleNumber: 2, chapterStart: 1, chapterEnd: 1, outputPath: scanPath, descriptor: handle.descriptor, signal: handle.signal })).rejects.toBeInstanceOf(DamagePreviewUnrepresentableError);
+    const structuredScan = createDamagePreviewGenerator({ async run(request) {
+      const json = 'JSON Title Set: ' + JSON.stringify({ TitleList: [{ Index: 1, AngleCount: 1, Duration: { Ticks: 360000 }, ChapterList: [{ Duration: { Ticks: 360000 } }], AudioList: [{ TrackNumber: 1 }], SubtitleList: [] }] });
+      request.onStdout?.(json); request.onOutput(json);
+      request.onStderr?.("trailing diagnostic"); request.onOutput("trailing diagnostic");
+    } });
+    expect(await structuredScan.scan({ source, titleNumber: 1, angleNumber: 1, chapterStart: 1, chapterEnd: 1, outputPath: scanPath, descriptor: handle.descriptor, signal: handle.signal })).toMatchObject({ audio: [1], durationMilliseconds: 4000 });
     expect(title.audio).toEqual([1]); expect(title.durationMilliseconds).toBeGreaterThan(3_500);
     const outputPath = join(root, "preview.mkv");
     await generator.generate({ outputPath, sourceOwnershipDescriptor: handle.descriptor, signal: handle.signal, onOutput() {}, arguments_: ["--no-dvdnav", "--title", "1", "--angle", "1", "-i", source, "-o", outputPath, "--format", "av_mkv", "--preset", "Fast 1080p30", "--audio", "1", "--subtitle", "none", "--subtitle-burned=none", "--start-at", "seconds:1", "--stop-at", "seconds:2"] });

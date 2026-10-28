@@ -1422,11 +1422,17 @@ export function createArchiveImageOwnership({
     // Preview readers take an exclusive image interval so every ordinary
     // reader and writer participates in contention, including surviving children.
     if (request.previewRead) mode = "exclusive";
-    const admission = process.platform === "linux" ? await enterArchiveImageAdmission({
-      directory: `${paths.lock}.admission`, preview: request.previewRead !== undefined,
-      urgent: request.urgent === true, signal: request.signal,
-      ...(request.previewRead ? { onContention: request.previewRead.onContention } : {}),
-    }) : null;
+    let admission: Awaited<ReturnType<typeof enterArchiveImageAdmission>> | null;
+    try {
+      admission = process.platform === "linux" ? await enterArchiveImageAdmission({
+        directory: `${paths.lock}.admission`, preview: request.previewRead !== undefined,
+        urgent: request.urgent === true, signal: request.signal,
+        ...(request.previewRead ? { onContention: request.previewRead.onContention } : {}),
+      }) : null;
+    } catch (cause) {
+      if (request.signal.aborted) throw request.signal.reason;
+      throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause });
+    }
     let opened;
     try { opened = await prepareArchiveLock(
       paths,
@@ -1645,7 +1651,7 @@ export function createArchiveImageOwnership({
       }
       releaseBackend();
       closeSync(descriptor);
-      await admission?.release();
+      try { await admission?.release(); } catch (cause) { throw new ArchiveImageOwnershipError("CONSISTENCY_FAULT", { cause }); }
     }
   };
 

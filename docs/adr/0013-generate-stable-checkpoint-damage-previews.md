@@ -2,7 +2,8 @@
 
 Damage Preview requests use the reviewed preflight token and a canonical input
 snapshot. Submission holds Archive Image Ownership while verifying the durable
-checkpoint, then rechecks all database identities inside the same immediate
+checkpoint, then rechecks all database identities in the final synchronous ownership commit
+and inside the same immediate
 transaction that records the request and mutation result. Replaying a committed
 key returns its original admission result even after source changes. Changed
 input conflicts with that key; stale input creates no request.
@@ -28,14 +29,18 @@ multi-angle, multi-PGC and other unrepresentable paths explicitly. The title sca
 then checks chapter boundaries and selected audio and subtitle streams.
 Generation uses the versioned intended HandBrake preset and canonical MKV.
 Each interval group produces an artifact with a retained command, tool versions,
-stream choices, checksum, requested seek and probed video-packet coverage. The coverage method
+stream choices, checksum, requested seek and probed video-packet coverage.
+Source ownership closes as soon as the admitted source processes are quiescent.
+Artifact probing, hashing and publication then run without an image lock. The coverage method
 is qualified as HandBrake seek plus video-packet timestamps. Incomplete coverage
 or interrupted finalized media remains partial. Empty and undecodable files
 are never successful evidence about damage.
 
 Requests retain queued, waiting, generating and terminal state independently of
 media currency. An abandoned execution becomes interrupted or partial after
-process closure is proven. It never restarts automatically. Cancellation targets
+process closure is proven. Finalized files whose metadata commit was interrupted are reconciled by the
+request identity and command list before settling partial state. Generation
+never restarts automatically. Cancellation targets
 the request identity and does not require a current checkpoint. Source,
 selection, title, stream, profile and later admitted preview-intent changes mark
 retained media outdated while preserving its original provenance. New profile

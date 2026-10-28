@@ -12,8 +12,9 @@ trap cleanup EXIT HUP INT TERM
 docker volume create "$volume" >/dev/null
 docker run --rm --interactive --user 0:0 --workdir /app --volume "$volume:/shared" --entrypoint node "$RIP_DVD_PREVIEW_TEST_IMAGE" --input-type=module <<'JAVASCRIPT'
 import { writeFileSync } from 'node:fs';
-import { createArchiveImageOwnership } from './packages/worker-runtime/dist/index.js';
-const ownership = createArchiveImageOwnership({ authorityRootPath: '/shared', inspectStorage: () => ({ filesystemType: 'ext', storageClass: 'local' }) });
+import { createArchiveImageOwnership, inspectLinuxStorage } from './packages/worker-runtime/dist/index.js';
+if (inspectLinuxStorage('/shared').filesystemType !== 'ext') throw new Error('This smoke requires the declared local ext storage provider');
+const ownership = createArchiveImageOwnership({ authorityRootPath: '/shared' });
 writeFileSync('/shared/source.iso', Buffer.alloc(2048));
 await ownership.withInitialPublicationWriter({ archiveId: 'synthetic-preview-namespace', imagePath: '/shared/source.iso', originalsLibraryPath: '/shared', signal: new AbortController().signal, async task() {} });
 writeFileSync('/shared/run.mjs', `
@@ -23,7 +24,7 @@ import { acquireKernelProcessLock, inspectKernelProcessLock, createArchiveImageO
 const role = process.argv[2];
 const worker = role === 'owner' ? acquireKernelProcessLock('/shared/workers/execution.lock') : null;
 if (role !== 'owner' && inspectKernelProcessLock('/shared/workers/execution.lock') !== 'held') throw new Error('Other PID namespace lost worker liveness');
-const ownership = createArchiveImageOwnership({ authorityRootPath: '/shared', inspectStorage: () => ({ filesystemType: 'ext', storageClass: 'local' }) });
+const ownership = createArchiveImageOwnership({ authorityRootPath: '/shared' });
 await ownership.withConsistentRead({ archiveId: 'synthetic-preview-namespace', imagePath: '/shared/source.iso', originalsLibraryPath: '/shared', signal: new AbortController().signal,
   ...(role === 'owner' ? { previewRead: { onContention(urgent, waiting) { if (waiting) writeFileSync('/shared/contention', 'waiting'); } } } : {}),
   async task() { writeFileSync('/shared/' + role + '.acquired', String(process.pid)); while (!existsSync('/shared/' + role + '.release')) await delay(10); }

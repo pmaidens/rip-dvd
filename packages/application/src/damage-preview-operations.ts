@@ -3,8 +3,8 @@ import { constants } from "node:fs";
 import { open, link, unlink } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { canonicalPublicationJson, RecordNotFoundError, type DataAccess, type DamagePreviewRecord, type OriginalDiscArchiveId } from "@rip-dvd/data-access";
-import { defaultArchiveImageOwnership, type ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import { canonicalPublicationJson, DvdCheckpointReadFault, RecordNotFoundError, type DataAccess, type DamagePreviewRecord, type OriginalDiscArchiveId } from "@rip-dvd/data-access";
+import { ArchiveImageOwnershipError, defaultArchiveImageOwnership, type ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { parseMutationKey } from "./mutation-key.js";
 import { InvalidDamagePreviewInputError, parseDamagePreviewInput } from "./damage-preview-input.js";
 import { inspectDamagePreviewAvailability, reviewDamagePreviewEvidence } from "./damage-preview.js";
@@ -41,23 +41,31 @@ export async function requestDamagePreview(access: DataAccess, archiveId: string
   const mutationKey = parseMutationKey(input.mutationKey);
   if (typeof input.preflightToken !== "string" || input.preflightToken.length > 256) throw new InvalidDamagePreviewInputError("A reviewed preflight token is required.");
   const selection = parseDamagePreviewInput(input.selection);
+  const admission = { mutationKey, archiveId, preflightToken: input.preflightToken, selectionJson: canonicalPublicationJson(selection) };
   // The OS ownership interval covers durable validation and the transaction that admits work.
   // A replay is resolved before its prepare callback, even when evidence has since changed.
-  const submit = (checkpoint: Awaited<ReturnType<DataAccess["readDvdCheckpoint"]>>) => access.damagePreviews.submit({
-    mutationKey, archiveId, preflightToken: input.preflightToken as string, selectionJson: canonicalPublicationJson(selection),
-  }, () => access.readConsistentSnapshot((snapshot) => {
+  const submit = (checkpoint: Awaited<ReturnType<DataAccess["readDvdCheckpoint"]>>) => access.damagePreviews.submit(admission, () => access.readConsistentSnapshot((snapshot) => {
     const current = reviewDamagePreviewEvidence(snapshot, archiveId, selection, checkpoint);
     if (current.preflightToken !== input.preflightToken) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_STALE", [{ code: "DAMAGE_PREVIEW_STALE", message: "Review current preview inputs before requesting work." }], current);
     if (!current.available) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_UNAVAILABLE", current.blockingReasons, current);
     return JSON.stringify(current);
   }));
-  const replay = access.damagePreviews.replay({ mutationKey, archiveId, preflightToken: input.preflightToken, selectionJson: canonicalPublicationJson(selection) });
+  const replay = access.damagePreviews.replay(admission);
   if (replay) return presentDamagePreview(replay);
-  let record: DamagePreviewRecord | null = null;
-  await access.withDvdCheckpoint(archiveId as OriginalDiscArchiveId, ownership, async (checkpoint, handle) => {
-    handle.assertOwned();
-    record = submit(checkpoint);
-  });
+  let record: DamagePreviewRecord | null;
+  try {
+    record = await access.withDvdCheckpoint<DamagePreviewRecord | null>(archiveId as OriginalDiscArchiveId, ownership,
+      async (_checkpoint, handle) => { handle.assertOwned(); return null; },
+      (checkpoint) => submit(checkpoint));
+  } catch (error) {
+    const committed = access.damagePreviews.replay(admission);
+    if (committed) return presentDamagePreview(committed);
+    if (!(error instanceof DvdCheckpointReadFault) && !(error instanceof ArchiveImageOwnershipError)) throw error;
+    const stale = error.code === "DVD_EVIDENCE_CHANGED_DURING_READ";
+    const reason = { code: stale ? "DAMAGE_PREVIEW_STALE" : error.code, message: stale ? "The saved checkpoint changed while the request waited. Review current evidence." : "The saved checkpoint cannot be admitted under proven image ownership." };
+    const current = access.readConsistentSnapshot((snapshot) => reviewDamagePreviewEvidence(snapshot, archiveId, selection, null, [reason]));
+    throw new DamagePreviewRejectedError(stale ? "DAMAGE_PREVIEW_STALE" : "DAMAGE_PREVIEW_UNAVAILABLE", [reason], current);
+  }
   if (record === null) record = submit(null);
   return presentDamagePreview(record);
 }

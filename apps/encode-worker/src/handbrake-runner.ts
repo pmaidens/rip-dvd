@@ -21,6 +21,7 @@ export interface HandBrakeRunRequest {
   arguments_: readonly string[];
   onOutput(text: string): void;
   onStderr?(text: string): void;
+  onStdout?(text: string): void;
   outputPath: string;
   sourceOwnershipDescriptor?: number;
   signal: AbortSignal;
@@ -293,6 +294,7 @@ export function createNodeHandBrakeRunner({
       arguments_,
       onOutput,
       onStderr,
+      onStdout,
       outputPath,
       sourceOwnershipDescriptor,
       signal,
@@ -366,6 +368,7 @@ export function createNodeHandBrakeRunner({
           diagnostics = boundedDiagnostic(`${diagnostics}${text}`);
           try {
             if (stderr) onStderr?.(text);
+            else onStdout?.(text);
             onOutput(text);
           } catch (error) {
             cancel(error);

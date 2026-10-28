@@ -52,6 +52,7 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
       return;
     }
     const hasWindow = hasWindowStart && hasWindowEnd;
+    requestKey.current = null;
     const input = {
       mode,
       titleIdentityObservationId: titleId,
@@ -92,7 +93,7 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error?.message ?? "Damage Preview could not be requested.");
-      setPreview(result); setRequestId(result.id);
+      setPreview(result); setRequestId(result.id); setReview(null);
     } catch (failure) { setError(failure instanceof Error ? failure.message : "Damage Preview could not be requested."); }
     finally { setBusy(false); }
   }
