@@ -17,7 +17,10 @@ if [ "$#" -eq 5 ] && [ "$1" = "damage-preview" ] && [ "$2" = "export" ] && [ "$4
         exit 2
     fi
     umask 077
-    export_directory=$(mktemp -d "$(dirname "$destination")/.rip-dvd-preview-export.XXXXXX")
+    if ! export_directory=$(mktemp -d "$(dirname "$destination")/.rip-dvd-preview-export.XXXXXX" 2>/dev/null); then
+        printf '%s\n' '{"error":{"code":"EXPORT_DESTINATION_UNAVAILABLE","message":"The export destination parent must exist and be writable."}}'
+        exit 2
+    fi
     export_container="rip-dvd-preview-export-$(basename "$export_directory" | tr '[:upper:].' '[:lower:]-')"
     cleanup_export() {
         docker rm --force "$export_container" >/dev/null 2>&1 || true
@@ -32,7 +35,11 @@ if [ "$#" -eq 5 ] && [ "$1" = "damage-preview" ] && [ "$2" = "export" ] && [ "$4
         :
     else
         export_status=$?
-        cat "$export_directory/result.json"
+        if [ -s "$export_directory/result.json" ]; then
+            cat "$export_directory/result.json"
+        else
+            printf '%s\n' '{"error":{"code":"EXPORT_SERVICE_UNAVAILABLE","message":"The canonical media export service is unavailable."}}'
+        fi
         exit "$export_status"
     fi
     if ! docker cp "$export_container:/tmp/rip-dvd-preview-export.mkv" "$export_directory/media.mkv" >/dev/null || ! ln "$export_directory/media.mkv" "$destination"; then

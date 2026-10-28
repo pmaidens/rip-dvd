@@ -38,5 +38,8 @@ else if (args[0] !== 'rm') process.exit(8);
     assert.equal(duplicate.status, 2);
     assert.equal(JSON.parse(duplicate.stdout).error.code, "EXPORT_DESTINATION_EXISTS");
     assert.deepEqual(readFileSync(destination), expected);
+    const invalid = spawnSync(resolve("rip-dvd"), ["damage-preview", "export", "damage-preview-v1.synthetic.0", "--destination", join(root, "missing-parent", "preview.mkv")], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+    assert.equal(invalid.status, 2);
+    assert.equal(JSON.parse(invalid.stdout).error.code, "EXPORT_DESTINATION_UNAVAILABLE");
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(staging, { recursive: true, force: true }); }
 });

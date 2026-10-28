@@ -251,3 +251,10 @@ assert.equal(media.length, expected.sizeBytes);
 assert.equal(createHash('sha256').update(media).digest('hex'), expected.sha256);
 JAVASCRIPT
 printf 'Canonical preview export to the executing caller passed.\n'
+
+set +e
+invalid_preview_export="$(invoke damage-preview export "$preview_identity" --destination "$temporary_directory/missing-parent/preview.mkv")"
+invalid_preview_status=$?
+set -e
+[ "$invalid_preview_status" -eq 2 ]
+printf '%s\n' "$invalid_preview_export" | assert_json_fields 'error.code=EXPORT_DESTINATION_UNAVAILABLE'
