@@ -228,18 +228,6 @@ export function previewDvdTitleDamageAcceptance(
     }
     const reviewSet = snapshot.catalog.readDvdTitleIdentityReviewSet(archiveId);
     const titleDamage = snapshot.dvdTitleDamageAssessments.inspect(archiveId);
-    if (reviewSet === null) {
-      return {
-        unsupported: false as const,
-        archive,
-        workflow,
-        reviewSet,
-        titleDamage,
-        selections: [] as DiscSelection[],
-        mediaItems: [] as MediaItem[],
-        affectedWork: [] as EncodeJob[],
-      };
-    }
     const selections = snapshot.catalog.listDiscSelections({
       originalDiscArchiveId: archiveId,
       limit: MAX_DVD_TITLES,
@@ -293,6 +281,7 @@ export function previewDvdTitleDamageAcceptance(
       reviewedContent: [],
       exclusions: [],
       mainFeatureChoices: [],
+      unresolvedSelections: [],
       assessmentSnapshot: null,
       acknowledgementRequired: false,
       affectedWork: [],
@@ -356,8 +345,11 @@ export function previewDvdTitleDamageAcceptance(
     selection,
   ]));
   const mediaItemById = new Map(mediaItems.map((item) => [item.id, item]));
+  const currentAssessment = titleDamage.state === "current"
+    ? titleDamage.assessment
+    : null;
   const assessmentByIdentity = new Map(
-    (titleDamage.assessment?.items ?? []).map((item) => [
+    (currentAssessment?.items ?? []).map((item) => [
       item.titleIdentityId,
       item,
     ]),
@@ -490,6 +482,28 @@ export function previewDvdTitleDamageAcceptance(
   const unresolvedMainFeatureSelectionIds = mainFeatureChoices
     .filter((choice) => choice.resolvedTitleIdentityId === null)
     .map((choice) => choice.discSelectionId);
+  const concretelyMappedSelectionIds = new Set(allContent.flatMap((item) =>
+    item.catalogMappings.map((mapping) => mapping.discSelectionId)
+  ));
+  const unresolvedSelections = selections.filter((selection) =>
+    selection.sourceIdentity.kind !== "main_feature" &&
+    !concretelyMappedSelectionIds.has(selection.id)
+  ).map((selection) => {
+    const mediaItem = mediaItemById.get(selection.mediaItemId);
+    if (mediaItem === undefined) {
+      throw new DomainInvariantError(
+        "Unresolved Disc Selection references a missing Media Item",
+      );
+    }
+    return {
+      discSelectionId: selection.id,
+      sourceIdentity: selection.sourceIdentity,
+      label: selection.label,
+      mediaItem: mediaItemView(mediaItem),
+    };
+  }).sort((left, right) =>
+    left.discSelectionId.localeCompare(right.discSelectionId)
+  );
   const preflightAction = actionFor(workflow.actions);
   const baseReasons = preflightAction.reasons.filter(({ code }) =>
     code !== "MAPPING_REVIEW_REQUIRED" && code !== "SELECTION_UNIDENTIFIED" &&
@@ -515,32 +529,42 @@ export function previewDvdTitleDamageAcceptance(
         },
       }]),
     ...(unidentifiedItems.length === 0 &&
-        unresolvedMainFeatureSelectionIds.length === 0
+        unresolvedMainFeatureSelectionIds.length === 0 &&
+        unresolvedSelections.length === 0
       ? []
       : [{
         code: "SELECTION_UNIDENTIFIED" as const,
         message:
-          "Every included content item must have a concrete current mapping and assessment.",
+          "Every included content item and active Disc Selection must have a concrete current mapping and assessment.",
         details: {
           affectedTitleIdentityIds: unidentifiedItems.map((item) =>
             item.titleIdentityId
           ),
           unresolvedMainFeatureSelectionIds,
+          unresolvedSelectionIds: unresolvedSelections.map((selection) =>
+            selection.discSelectionId
+          ),
         },
       }]),
   ]);
   const reviewedSelectionIds = new Set(reviewedContent.flatMap((item) =>
     item.catalogMappings.map((mapping) => mapping.discSelectionId)
   ));
+  unresolvedMainFeatureSelectionIds.forEach((id) =>
+    reviewedSelectionIds.add(id)
+  );
+  unresolvedSelections.forEach(({ discSelectionId }) =>
+    reviewedSelectionIds.add(discSelectionId)
+  );
   const affectedWork = [...new Map(plan.affectedWork
     .filter((job) => reviewedSelectionIds.has(job.discSelectionId))
     .map((job) => [job.id, affectedWorkView(job)] as const)).values()]
     .sort((left, right) => left.id.localeCompare(right.id));
   const archiveImpactRequiresAcknowledgement = reviewedContent.length > 0 && (
-    (titleDamage.assessment?.unknownTitleImpact.unrecoveredSourceSectorCount ??
+    (currentAssessment?.unknownTitleImpact.unrecoveredSourceSectorCount ??
       0) > 0 ||
-    (titleDamage.assessment?.unknownTitleImpact.reasons.length ?? 0) > 0 ||
-    (titleDamage.assessment?.unattributedSourceContinuityRisk
+    (currentAssessment?.unknownTitleImpact.reasons.length ?? 0) > 0 ||
+    (currentAssessment?.unattributedSourceContinuityRisk
       ?.sourceSectorCount ?? 0) > 0
   );
   const acknowledgementRequired = archiveImpactRequiresAcknowledgement ||
@@ -614,7 +638,8 @@ export function previewDvdTitleDamageAcceptance(
     reviewedContent,
     exclusions,
     mainFeatureChoices,
-    assessmentSnapshot: titleDamage.assessment,
+    unresolvedSelections,
+    assessmentSnapshot: currentAssessment,
     acknowledgementRequired,
     affectedWork,
     damagePreview: {

@@ -5731,8 +5731,9 @@ it.each([
 });
 
 async function titleDamageAcceptanceAdapterResults(options: {
-  assessmentState: "current" | "outdated";
+  assessmentState: "current" | "outdated" | "pending";
   mappingState: "mapped" | "needs_mapping_review" | "unmapped";
+  recoveryStatus?: "stopped" | "running";
   resolveMainFeature?: boolean;
 }) {
   const archiveId = "synthetic-title-damage-acceptance-archive";
@@ -5889,5 +5890,45 @@ it("keeps explicit main-feature resolution aligned across HTTP and CLI", async (
         },
       }],
     }],
+  });
+});
+
+it("keeps pending and Recovery-active blocker ordering aligned", async () => {
+  const pending = await titleDamageAcceptanceAdapterResults({
+    assessmentState: "pending",
+    mappingState: "mapped",
+  });
+  expect(pending.cli).toEqual(pending.web);
+  expect(pending.web).toMatchObject({
+    available: false,
+    assessmentSnapshot: null,
+    action: { reasons: [{ code: "ASSESSMENT_PENDING" }] },
+  });
+
+  const recoveryActive = await titleDamageAcceptanceAdapterResults({
+    assessmentState: "current",
+    mappingState: "mapped",
+    recoveryStatus: "running",
+  });
+  expect(recoveryActive.cli).toEqual(recoveryActive.web);
+  expect(recoveryActive.web).toMatchObject({
+    available: false,
+    action: { reasons: [{ code: "RECOVERY_ACTIVE" }] },
+  });
+
+  const pendingDuringRecovery = await titleDamageAcceptanceAdapterResults({
+    assessmentState: "pending",
+    mappingState: "mapped",
+    recoveryStatus: "running",
+  });
+  expect(pendingDuringRecovery.cli).toEqual(pendingDuringRecovery.web);
+  expect(pendingDuringRecovery.web).toMatchObject({
+    available: false,
+    action: {
+      reasons: [
+        { code: "ASSESSMENT_PENDING" },
+        { code: "RECOVERY_ACTIVE" },
+      ],
+    },
   });
 });

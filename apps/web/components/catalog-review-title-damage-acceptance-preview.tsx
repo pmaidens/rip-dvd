@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   DvdTitleDamageAcceptancePreview,
 } from "@rip-dvd/application";
@@ -43,6 +43,24 @@ export function CatalogReviewTitleDamageAcceptancePreview({
   );
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
+  const reviewSetIdentity = titleIdentity?.reviewSetIdentity ?? null;
+
+  const invalidatePreview = () => {
+    requestVersion.current += 1;
+    setPreview(null);
+    setIsLoading(false);
+    setError(null);
+  };
+
+  useEffect(() => {
+    requestVersion.current += 1;
+    setExcluded(new Set());
+    setMainFeatureResolutions(new Map());
+    setPreview(null);
+    setIsLoading(false);
+    setError(null);
+  }, [originalDiscArchiveId, reviewSetIdentity]);
 
   const toggle = (id: string) => {
     setExcluded((current) => {
@@ -51,9 +69,11 @@ export function CatalogReviewTitleDamageAcceptancePreview({
       else next.add(id);
       return next;
     });
-    setPreview(null);
+    invalidatePreview();
   };
   const requestPreview = async () => {
+    const version = requestVersion.current + 1;
+    requestVersion.current = version;
     setIsLoading(true);
     setError(null);
     try {
@@ -68,6 +88,7 @@ export function CatalogReviewTitleDamageAcceptancePreview({
           body: JSON.stringify({
             excludedTitleIdentityIds: [...excluded].sort(),
             mainFeatureResolutions: [...mainFeatureResolutions]
+              .filter(([, titleIdentityId]) => titleIdentityId !== "")
               .map(([discSelectionId, titleIdentityId]) => ({
                 discSelectionId,
                 titleIdentityId,
@@ -81,11 +102,14 @@ export function CatalogReviewTitleDamageAcceptancePreview({
       if (!response.ok) {
         throw new Error("Title Damage Acceptance preflight request failed");
       }
-      setPreview(await response.json() as DvdTitleDamageAcceptancePreview);
+      const result = await response.json() as DvdTitleDamageAcceptancePreview;
+      if (requestVersion.current === version) setPreview(result);
     } catch {
-      setError("Title Damage Acceptance preflight is unavailable.");
+      if (requestVersion.current === version) {
+        setError("Title Damage Acceptance preflight is unavailable.");
+      }
     } finally {
-      setIsLoading(false);
+      if (requestVersion.current === version) setIsLoading(false);
     }
   };
 
@@ -140,6 +164,30 @@ export function CatalogReviewTitleDamageAcceptancePreview({
               ))}
             </ul>
           )}
+          {preview.unresolvedSelections.length === 0 ? null : (
+            <section aria-labelledby="title-damage-unresolved-selections-heading">
+              <h4 id="title-damage-unresolved-selections-heading">
+                Unresolved Disc Selections
+              </h4>
+              <p className="catalog-help">
+                These active selections no longer have a concrete binding in
+                the current Title Identity review set.
+              </p>
+              <ul>
+                {preview.unresolvedSelections.map((selection) => (
+                  <li key={selection.discSelectionId}>
+                    {selection.mediaItem.kind}: {selection.mediaItem.title}. {
+                      selection.sourceIdentity.kind === "dvd_title"
+                        ? `DVD title ${selection.sourceIdentity.titleNumber}`
+                        : selection.sourceIdentity.kind === "dvd_chapters"
+                        ? `DVD title ${selection.sourceIdentity.titleNumber}, chapters ${selection.sourceIdentity.chapterStart}-${selection.sourceIdentity.chapterEnd}`
+                        : `Selection ${selection.sourceIdentity.kind}`
+                    }. Disc Selection {selection.discSelectionId}.
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
           {preview.mainFeatureChoices.length === 0 ? null : (
             <fieldset>
               <legend>Resolve main-feature choices</legend>
@@ -159,13 +207,10 @@ export function CatalogReviewTitleDamageAcceptancePreview({
                       const titleIdentityId = event.currentTarget.value;
                       setMainFeatureResolutions((current) => {
                         const next = new Map(current);
-                        if (titleIdentityId === "") {
-                          next.delete(choice.discSelectionId);
-                        } else {
-                          next.set(choice.discSelectionId, titleIdentityId);
-                        }
+                        next.set(choice.discSelectionId, titleIdentityId);
                         return next;
                       });
+                      invalidatePreview();
                     }}
                   >
                     <option value="">Choose exact content</option>

@@ -166,6 +166,7 @@ const preview = {
     resolvedTitleIdentityId: null,
     resolvedSourceIdentity: null,
   }],
+  unresolvedSelections: [],
   assessmentSnapshot: {
     unknownTitleImpact: {
       unrecoveredSourceSectorCount: 7,
@@ -235,6 +236,7 @@ it("includes all current content by default and sends only explicit exclusions",
     resolution.value = "synthetic-title-1";
     resolution.dispatchEvent(new Event("change", { bubbles: true }));
   });
+  expect(container.textContent).not.toContain(preview.previewToken);
   await act(async () => {
     (container.querySelector("button") as HTMLButtonElement).click();
   });
@@ -250,7 +252,98 @@ it("includes all current content by default and sends only explicit exclusions",
       }),
     }),
   );
+  const clearedResolution = container.querySelector(
+    "select",
+  ) as HTMLSelectElement;
+  await act(async () => {
+    clearedResolution.value = "";
+    clearedResolution.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect(container.textContent).not.toContain(preview.previewToken);
+  await act(async () => {
+    (container.querySelector("button") as HTMLButtonElement).click();
+  });
+  expect(fetcher).toHaveBeenLastCalledWith(
+    "/api/catalog-reviews/synthetic-archive/title-damage-acceptance-preview",
+    expect.objectContaining({
+      body: JSON.stringify({
+        excludedTitleIdentityIds: ["synthetic-title-1"],
+        mainFeatureResolutions: [],
+      }),
+    }),
+  );
   expect(container.textContent).toContain(
     "A Damage Preview is optional. Its unavailability does not block this preflight.",
   );
+});
+
+it("invalidates the preview when the current review set changes", async () => {
+  const fetcher = vi.fn(async () => Response.json(preview));
+  await act(async () => root.render(
+    <CatalogReviewTitleDamageAcceptancePreview
+      originalDiscArchiveId="synthetic-archive"
+      titleIdentity={titleIdentity}
+      fetcher={fetcher}
+    />,
+  ));
+  await act(async () => {
+    (container.querySelector("button") as HTMLButtonElement).click();
+  });
+  expect(container.textContent).toContain(preview.previewToken);
+
+  await act(async () => root.render(
+    <CatalogReviewTitleDamageAcceptancePreview
+      originalDiscArchiveId="synthetic-archive"
+      titleIdentity={{
+        ...titleIdentity,
+        reviewSetIdentity: "new-review-set-identity",
+      }}
+      fetcher={fetcher}
+    />,
+  ));
+
+  expect(container.textContent).not.toContain(preview.previewToken);
+});
+
+it("shows active Disc Selections without a current Title Identity binding", async () => {
+  const unresolvedPreview = {
+    ...preview,
+    available: false,
+    previewToken: null,
+    unresolvedSelections: [{
+      discSelectionId: "synthetic-orphaned-selection",
+      sourceIdentity: {
+        kind: "dvd_chapters" as const,
+        titleNumber: 7,
+        chapterStart: 2,
+        chapterEnd: 5,
+      },
+      label: null,
+      mediaItem: {
+        id: "synthetic-orphaned-episode",
+        kind: "episode" as const,
+        title: "Synthetic Episode",
+        year: 2026,
+        seasonNumber: 1,
+        episodeNumber: 2,
+      },
+    }],
+  } as unknown as DvdTitleDamageAcceptancePreview;
+  const fetcher = vi.fn(async () => Response.json(unresolvedPreview));
+  await act(async () => root.render(
+    <CatalogReviewTitleDamageAcceptancePreview
+      originalDiscArchiveId="synthetic-archive"
+      titleIdentity={titleIdentity}
+      fetcher={fetcher}
+    />,
+  ));
+  await act(async () => {
+    (container.querySelector("button") as HTMLButtonElement).click();
+  });
+
+  expect(container.textContent).toContain("Unresolved Disc Selections");
+  expect(container.textContent).toContain(
+    "episode: Synthetic Episode. DVD title 7, chapters 2-5",
+  );
+  expect(container.textContent).toContain("synthetic-orphaned-selection");
 });

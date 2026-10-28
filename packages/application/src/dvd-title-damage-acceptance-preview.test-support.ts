@@ -15,7 +15,8 @@ export const DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS = {
 } as const;
 
 export function createDvdTitleDamageAcceptancePreviewTestAccess(options: {
-  assessmentState?: "current" | "outdated";
+  assessmentState?: "current" | "outdated" | "pending";
+  recoveryStatus?: "stopped" | "running";
   mappingState?: "mapped" | "needs_mapping_review" | "unmapped";
   sourceIdentity?: DiscSelectionSourceIdentityInput;
   bindSelection?: boolean;
@@ -173,7 +174,7 @@ export function createDvdTitleDamageAcceptancePreviewTestAccess(options: {
     findArchiveRecovery: () => ({
       id: "synthetic-title-damage-recovery",
       attemptId: "synthetic-title-damage-attempt",
-      status: "stopped",
+      status: options.recoveryStatus ?? "stopped",
       work: null,
     }),
     listCatalogReviewEvidenceChoices: () => [],
@@ -216,11 +217,13 @@ export function createDvdTitleDamageAcceptancePreviewTestAccess(options: {
         originalDiscArchiveId:
           DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.archiveId,
         state: assessmentState,
-        checkpoint: assessment.checkpoint,
+        checkpoint: assessmentState === "pending"
+          ? null
+          : assessment.checkpoint,
         currentAssessmentIdentity: assessmentState === "current"
           ? assessmentId
           : null,
-        assessment,
+        assessment: assessmentState === "pending" ? null : assessment,
         unavailableReasons: [],
       }),
     },
