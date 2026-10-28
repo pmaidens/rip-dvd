@@ -99,6 +99,7 @@ interface CatalogReviewViewProps {
     outcome: CompletedCatalogReviewOutcome,
     replacements: CatalogReviewReplacementEncodeInput[],
   ): void;
+  onEvidenceChoice?(choice: "archive_only" | "reopen"): void;
 }
 
 export function catalogReviewSelectionTitles(
@@ -186,6 +187,7 @@ export function CatalogReviewView({
   onUpdateDiscSelection,
   onDeleteDiscSelection,
   onCompleteReview,
+  onEvidenceChoice = () => undefined,
 }: CatalogReviewViewProps) {
   const [activeStep, setActiveStep] = useState<
     "recovery" | "mapping" | "damage"
@@ -525,6 +527,8 @@ export function CatalogReviewView({
             />
             <CatalogReviewDamageDecisionStatus
               workflow={review.reviewWorkflow}
+              isSaving={isSaving}
+              onChoice={onEvidenceChoice}
             />
           </section>
         </>
@@ -606,6 +610,7 @@ export function CatalogReviewEditor({
       onUpdateDiscSelection={review.updateDiscSelection}
       onDeleteDiscSelection={review.deleteDiscSelection}
       onCompleteReview={review.completeReview}
+      onEvidenceChoice={review.recordEvidenceChoice}
     />
   );
 }

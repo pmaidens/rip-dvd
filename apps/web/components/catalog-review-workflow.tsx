@@ -68,6 +68,10 @@ export function CatalogReviewWorkflowFacts({
         <dd>{mappingLabel(workflow.facts.mappingState)}</dd>
       </div>
       <div>
+        <dt>Catalog Review choice</dt>
+        <dd>{workflow.facts.archiveOnly ? "Archive only" : "Open"}</dd>
+      </div>
+      <div>
         <dt>Damage decision</dt>
         <dd>{workflow.facts.readyForDamageDecision
           ? "Ready"
@@ -102,6 +106,10 @@ export function CatalogReviewRecoveryStep({
             <dd>{workflow.current.originalDiscArchiveId}</dd>
           </div>
           <div>
+            <dt>Catalog revision</dt>
+            <dd>{workflow.current.catalogRevision}</dd>
+          </div>
+          <div>
             <dt>Initial Archive Job</dt>
             <dd>{identity(workflow.current.archiveJob?.id ?? null)}</dd>
           </div>
@@ -133,6 +141,29 @@ export function CatalogReviewRecoveryStep({
           </div>
         </dl>
       </details>
+      {workflow.choiceHistory.length === 0 ? null : (
+        <details className="catalog-workflow-identities">
+          <summary>Archive-only choice history</summary>
+          <ol className="catalog-workflow-history">
+            {workflow.choiceHistory.map((entry) => (
+              <li key={entry.id}>
+                <strong>{entry.choice === "archive_only"
+                  ? "Kept archive only"
+                  : "Reopened Catalog Review"}</strong>
+                <span>
+                  {` at checkpoint ${entry.checkpoint.revision} while Recovery was ${entry.recovery.state} (${entry.recordedAt})`}
+                </span>
+              </li>
+            ))}
+          </ol>
+          {workflow.choiceHistoryPage.truncated ? (
+            <p className="catalog-help">
+              Showing the 100 most recent choices. Older choices remain
+              retained.
+            </p>
+          ) : null}
+        </details>
+      )}
     </div>
   );
 }
@@ -184,10 +215,18 @@ function actionFor(
 
 export function CatalogReviewDamageDecisionStatus({
   workflow,
+  isSaving = false,
+  onChoice = () => undefined,
 }: {
   workflow: CatalogReviewWorkflow;
+  isSaving?: boolean;
+  onChoice?(choice: "archive_only" | "reopen"): void;
 }) {
   const action = actionFor(workflow, "damage_decision");
+  const choiceAction = workflow.facts.archiveOnly
+    ? actionFor(workflow, "reopen")
+    : actionFor(workflow, "archive_only");
+  const choice = workflow.facts.archiveOnly ? "reopen" : "archive_only";
   return (
     <section
       className="catalog-pane catalog-damage-decision"
@@ -215,6 +254,35 @@ export function CatalogReviewDamageDecisionStatus({
           </ul>
         </>
       )}
+      <div className="catalog-review-evidence-choice">
+        <h4>{workflow.facts.archiveOnly
+          ? "Reopen Catalog Review"
+          : "Keep archive only"}</h4>
+        <p className="catalog-help">
+          {workflow.facts.archiveOnly
+            ? "Reopen against the current checkpoint. This does not queue encoding or restore an expired damage acceptance."
+            : "Keep the saved archive without accepting damage or starting encoding. Recovery may run again later, but encoding stays blocked until this review is reopened."}
+        </p>
+        <button
+          type="button"
+          disabled={isSaving || !choiceAction.available}
+          onClick={() => onChoice(choice)}
+        >
+          {workflow.facts.archiveOnly
+            ? "Reopen Catalog Review"
+            : "Keep archive only"}
+        </button>
+        {choiceAction.available ? null : (
+          <ul className="catalog-workflow-reasons">
+            {choiceAction.reasons.map((reason) => (
+              <li key={reason.code}>
+                <code>{reason.code}</code>
+                <span>{reason.message}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </section>
   );
 }

@@ -32,6 +32,7 @@ import {
   mutateCatalogReview,
 } from "./catalog-review-editor";
 import { rearchiveAcceptancePreviewConfirmation } from "./catalog-review-mutation";
+import { CatalogReviewDamageDecisionStatus } from "./catalog-review-workflow";
 
 interface PendingRequest {
   url: string;
@@ -345,9 +346,12 @@ function activeRecoveryCatalogReview(
       mappingState: "mapped",
       readyForDamageDecision: false,
       readyForEncoding: false,
+      archiveOnly: false,
     },
     current: {
       originalDiscArchiveId: review.archive.id,
+      catalogRevision: review.catalogRevision,
+      catalogReviewOutcome: "needs_review",
       archiveJob: { id: "archive-job-1", status: "completed" },
       checkpoint: { revision: checkpointRevision, manifestDigest },
       recovery: {
@@ -359,6 +363,8 @@ function activeRecoveryCatalogReview(
       catalogMappingProjectionId: "e".repeat(64),
       titleDamageAssessmentId: null,
     },
+    choiceHistory: [],
+    choiceHistoryPage: { limit: 100, truncated: false },
     actions: [{
       action: "catalog_mapping",
       available: true,
@@ -370,6 +376,24 @@ function activeRecoveryCatalogReview(
       reasons: [{
         code: "RECOVERY_ACTIVE",
         message: "Archive Recovery is still active.",
+        details: {},
+      }],
+      expectedInputs: [],
+    }, {
+      action: "archive_only",
+      available: false,
+      reasons: [{
+        code: "RECOVERY_ACTIVE",
+        message: "Archive Recovery is still active.",
+        details: {},
+      }],
+      expectedInputs: [],
+    }, {
+      action: "reopen",
+      available: false,
+      reasons: [{
+        code: "CATALOG_REVIEW_OPEN",
+        message: "Catalog Review is already open.",
         details: {},
       }],
       expectedInputs: [],
@@ -407,6 +431,60 @@ function renderCatalogReviewEditor(archiveId: string): void {
 }
 
 describe("CatalogReviewEditor", () => {
+  it("offers archive-only and reports its current evidence blockers", async () => {
+    const workflow = activeRecoveryCatalogReview(catalogReview({
+      archiveId: "synthetic-choice-archive",
+      discLabel: "SYNTHETIC_CHOICE",
+    }), 1).reviewWorkflow!;
+    workflow.actions = workflow.actions.map((action) =>
+      action.action === "archive_only"
+        ? { ...action, available: true, reasons: [] }
+        : action
+    );
+    const onChoice = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewDamageDecisionStatus
+          workflow={workflow}
+          onChoice={onChoice}
+        />,
+      );
+    });
+    const archiveOnly = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Keep archive only",
+    );
+    expect(archiveOnly?.disabled).toBe(false);
+    await act(async () => archiveOnly?.click());
+    expect(onChoice).toHaveBeenCalledWith("archive_only");
+
+    workflow.actions = workflow.actions.map((action) =>
+      action.action === "archive_only"
+        ? {
+          ...action,
+          available: false,
+          reasons: [{
+            code: "RECOVERY_ACTIVE",
+            message: "Archive Recovery must stop or complete first.",
+            details: {},
+          }],
+        }
+        : action
+    );
+    await act(async () => {
+      root.render(
+        <CatalogReviewDamageDecisionStatus
+          workflow={workflow}
+          onChoice={onChoice}
+        />,
+      );
+    });
+    expect(container.textContent).toContain("RECOVERY_ACTIVE");
+    expect(container.textContent).toContain(
+      "Archive Recovery must stop or complete first.",
+    );
+  });
+
   it("surfaces bounded messages from structured mutation errors", async () => {
     await expect(mutateCatalogReview("archive-1", {
       action: "create_disc_selection",
@@ -2866,6 +2944,18 @@ describe("CatalogReviewView", () => {
         action: "delete_disc_selection",
         discSelectionId: "selection-1",
       },
+      archive_only: {
+        action: "archive_only",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        checkpointRevision: 2,
+        checkpointDigest: "a".repeat(64),
+      },
+      reopen: {
+        action: "reopen",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        checkpointRevision: 2,
+        checkpointDigest: "a".repeat(64),
+      },
       complete_review: {
         action: "complete_review",
         catalogRevision: "2026-08-11T06:00:00.000Z",
@@ -2909,6 +2999,7 @@ describe("CatalogReviewView", () => {
     const consequential = new Set(["repair_disc_selection", "correct_disc_selection",
       "delete_disc_selection"]);
     const keyedDiscSelections = new Set(["create_disc_selection", "update_disc_selection"]);
+    const keyedEvidenceChoices = new Set(["archive_only", "reopen"]);
     expect(withoutProposalKeys(postedBodies)).toEqual(
       CATALOG_REVIEW_COMMAND_ACTIONS.flatMap((action) => {
         const command = commands[action];
@@ -2950,6 +3041,8 @@ describe("CatalogReviewView", () => {
             },
           ]
           : keyedDiscSelections.has(action)
+          ? [{ ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/) }]
+          : keyedEvidenceChoices.has(action)
           ? [{ ...command, mutationKey: expect.stringMatching(/^[0-9a-f-]{36}$/) }]
           : [command];
       }),
@@ -3014,9 +3107,12 @@ describe("CatalogReviewView", () => {
         mappingState: "pending",
         readyForDamageDecision: false,
         readyForEncoding: false,
+        archiveOnly: false,
       },
       current: {
         originalDiscArchiveId: review.archive.id,
+        catalogRevision: review.catalogRevision,
+        catalogReviewOutcome: "needs_review",
         archiveJob: { id: "archive-job-1", status: "completed" },
         checkpoint: { revision: 1, manifestDigest: "a".repeat(64) },
         recovery: {
@@ -3028,6 +3124,8 @@ describe("CatalogReviewView", () => {
         catalogMappingProjectionId: null,
         titleDamageAssessmentId: null,
       },
+      choiceHistory: [],
+      choiceHistoryPage: { limit: 100, truncated: false },
       actions: [{
         action: "catalog_mapping",
         available: false,
@@ -3043,6 +3141,24 @@ describe("CatalogReviewView", () => {
         reasons: [{
           code: "RECOVERY_ACTIVE",
           message: "Archive Recovery is still active.",
+          details: {},
+        }],
+        expectedInputs: [],
+      }, {
+        action: "archive_only",
+        available: false,
+        reasons: [{
+          code: "RECOVERY_ACTIVE",
+          message: "Archive Recovery is still active.",
+          details: {},
+        }],
+        expectedInputs: [],
+      }, {
+        action: "reopen",
+        available: false,
+        reasons: [{
+          code: "CATALOG_REVIEW_OPEN",
+          message: "Catalog Review is already open.",
           details: {},
         }],
         expectedInputs: [],

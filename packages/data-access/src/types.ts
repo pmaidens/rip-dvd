@@ -215,6 +215,7 @@ export type DiscInspectionAttemptId = DomainId<"DiscInspectionAttempt">;
 export type DetectedDiscId = DomainId<"DetectedDisc">;
 export type ArchiveRequestId = DomainId<"ArchiveRequest">;
 export type OriginalDiscArchiveId = DomainId<"OriginalDiscArchive">;
+export type CatalogReviewChoiceId = DomainId<"CatalogReviewChoice">;
 export type ArchiveRecoveryId = DomainId<"ArchiveRecovery">;
 export type ArchiveRecoveryAttemptId = DomainId<"ArchiveRecoveryAttempt">;
 export type ArchiveRecoveryStopOperationId =
@@ -540,6 +541,10 @@ export interface DvdTitleIdentityReviewSet {
 }
 
 export interface DvdCatalogReviewWorkflowEvidence {
+  catalogReview?: {
+    catalogRevision: string;
+    outcome: CatalogReviewOutcome;
+  };
   archiveJobs: readonly ArchiveJob[];
   evidenceHeader: DvdArchiveEvidenceHeader | null;
   recovery: ArchiveRecovery | null;
@@ -553,6 +558,49 @@ export interface DvdCatalogReviewWorkflowEvidence {
     currentAssessmentIdentity: string | null;
     acceptanceRequired: boolean;
   };
+  choiceHistory?: readonly CatalogReviewEvidenceChoiceRecord[];
+}
+
+export type CatalogReviewEvidenceChoice = "archive_only" | "reopen";
+
+export interface CatalogReviewEvidenceChoiceRecord {
+  id: CatalogReviewChoiceId;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  choice: CatalogReviewEvidenceChoice;
+  catalogRevision: Date;
+  checkpointRevision: number;
+  checkpointDigest: string;
+  archiveRecoveryId: ArchiveRecoveryId;
+  archiveRecoveryAttemptId: ArchiveRecoveryAttemptId;
+  archiveRecoveryStatus: ArchiveRecoveryStatus;
+  recordedAt: Date;
+}
+
+export interface CatalogReviewEvidenceChoiceInput {
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  choice: CatalogReviewEvidenceChoice;
+  mutationKey: string;
+  catalogRevision: Date;
+  checkpointRevision: number;
+  checkpointDigest: string;
+}
+
+export interface CatalogReviewEvidenceChoiceResult {
+  choiceId: CatalogReviewChoiceId;
+  choice: CatalogReviewEvidenceChoice;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  catalogRevision: Date;
+  checkpoint: {
+    revision: number;
+    manifestDigest: string;
+  };
+  recovery: {
+    id: ArchiveRecoveryId;
+    attemptId: ArchiveRecoveryAttemptId;
+    state: ArchiveRecoveryStatus;
+  };
+  resultingArchive: OriginalDiscArchive;
+  recordedAt: Date;
 }
 
 export interface RecordDvdTitleIdentityObservationsInput {
@@ -1993,6 +2041,13 @@ export interface CatalogAccess {
     replacements: readonly CorrectedEncodeReplacementInput[],
     options?: { mutationKey?: string; previewToken?: string },
   ): CompletedCatalogReviewWithReplacements;
+  recordCatalogReviewEvidenceChoice(
+    input: CatalogReviewEvidenceChoiceInput,
+  ): CatalogReviewEvidenceChoiceResult;
+  listCatalogReviewEvidenceChoices(
+    id: OriginalDiscArchiveId,
+    options: { limit: number },
+  ): CatalogReviewEvidenceChoiceRecord[];
   recordCatalogReviewCompletionPreviewDecision(
     input: CatalogReviewCompletionPreviewDecisionInput,
   ): void;
@@ -2696,6 +2751,7 @@ export type SnapshotCatalogAccess = Pick<
   | "findDvdArchiveEvidenceHeaders"
   | "readDvdTitleIdentityReviewSet"
   | "readDvdCatalogReviewWorkflowEvidence"
+  | "listCatalogReviewEvidenceChoices"
   | "findArchiveRecovery"
   | "findArchiveRecoveryById"
   | "readDvdArchiveRecoveryRangeEvidence"

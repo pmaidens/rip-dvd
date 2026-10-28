@@ -71,6 +71,7 @@ import {
   archiveJobs,
   archiveRecoveries,
   archiveRecoveryWork,
+  catalogReviewEvidenceChoices,
   archiveAuditFindings,
   archiveAuditRuns,
   correctedEncodePublicationAuthorities,
@@ -302,7 +303,10 @@ import type {
   ArchiveRequest,
   ArchiveRequestStatus,
   CatalogReviewActionAvailability,
+  CatalogReviewChoiceId,
   CatalogReviewCompletionPreviewDecisionInput,
+  CatalogReviewEvidenceChoiceResult,
+  CatalogReviewEvidenceChoiceRecord,
   CatalogReviewCoverage,
   ClaimedEncodeJob,
   ClaimedArchiveRecoveryWork,
@@ -3985,6 +3989,36 @@ export function createDataAccessInternal(
     expectedRevision?: Date,
     staleOperation = "Mapping Proposal",
   ): void {
+    const latestEvidenceChoice = transaction
+      .select({ choice: catalogReviewEvidenceChoices.choice })
+      .from(catalogReviewEvidenceChoices)
+      .where(eq(
+        catalogReviewEvidenceChoices.originalDiscArchiveId,
+        archiveId,
+      ))
+      .orderBy(
+        desc(catalogReviewEvidenceChoices.catalogRevision),
+        desc(catalogReviewEvidenceChoices.id),
+      )
+      .limit(1)
+      .get();
+    const currentArchive = requireRow(
+      transaction
+        .select({
+          catalogReviewOutcome: originalDiscArchives.catalogReviewOutcome,
+        })
+        .from(originalDiscArchives)
+        .where(eq(originalDiscArchives.id, archiveId))
+        .get(),
+      "original disc archive",
+      archiveId,
+    );
+    if (
+      currentArchive.catalogReviewOutcome === "archive_only" &&
+      latestEvidenceChoice?.choice === "archive_only"
+    ) {
+      throw new CatalogMappingEvidenceUnavailableError();
+    }
     const changedArchive = transaction
       .update(originalDiscArchives)
       .set({
@@ -6151,6 +6185,16 @@ export function createDataAccessInternal(
         : value) as CompletedCatalogReviewWithReplacements;
   }
 
+  function decodeCatalogReviewEvidenceChoiceResult(
+    stored: string,
+  ): CatalogReviewEvidenceChoiceResult {
+    return JSON.parse(stored, (field, value: unknown) =>
+      (field.endsWith("At") || field === "catalogRevision") &&
+          typeof value === "string"
+        ? new Date(value)
+        : value) as CatalogReviewEvidenceChoiceResult;
+  }
+
   function decodeRearchiveMappingProposalReview(
     stored: string,
   ): RearchiveMappingProposalReview {
@@ -7449,6 +7493,22 @@ export function createDataAccessInternal(
       catalogRevision: input.catalogRevision.toISOString(),
       outcome: input.outcome,
       replacements: input.replacements,
+    });
+  }
+
+  function catalogReviewEvidenceChoiceSemanticInput(input: {
+    originalDiscArchiveId: OriginalDiscArchiveId;
+    choice: "archive_only" | "reopen";
+    catalogRevision: Date;
+    checkpointRevision: number;
+    checkpointDigest: string;
+  }): string {
+    return JSON.stringify({
+      originalDiscArchiveId: input.originalDiscArchiveId,
+      choice: input.choice,
+      catalogRevision: input.catalogRevision.toISOString(),
+      checkpointRevision: input.checkpointRevision,
+      checkpointDigest: input.checkpointDigest,
     });
   }
 
@@ -9439,6 +9499,26 @@ export function createDataAccessInternal(
     }
     if (uniqueIds.length === 0) return new Map();
 
+    const catalogReviewRows = database.select({
+      id: originalDiscArchives.id,
+      outcome: originalDiscArchives.catalogReviewOutcome,
+      updatedAt: originalDiscArchives.updatedAt,
+    }).from(originalDiscArchives).where(inArray(
+      originalDiscArchives.id,
+      uniqueIds,
+    )).all();
+    const catalogReviewByArchiveId = new Map(catalogReviewRows.map((row) => [
+      row.id,
+      {
+        catalogRevision: row.updatedAt.toISOString(),
+        outcome: row.outcome,
+      },
+    ] as const));
+    const catalogReview = (id: OriginalDiscArchiveId) => requireRow(
+      catalogReviewByArchiveId.get(id),
+      "original disc archive",
+      id,
+    );
     const sourceJobIds = archives.flatMap(({ evidenceHeader }) =>
       evidenceHeader === null ? [] : [evidenceHeader.sourceArchiveJobId]
     );
@@ -9502,6 +9582,7 @@ export function createDataAccessInternal(
     };
     if (!hasDvdRecoveryEvidenceSchema) {
       return new Map(uniqueIds.map((id) => [id, {
+        catalogReview: catalogReview(id),
         archiveJobs: workflowJobs(id),
         evidenceHeader: archiveById.get(id)?.evidenceHeader ?? null,
         recovery: null,
@@ -9536,6 +9617,7 @@ export function createDataAccessInternal(
     );
     if (markedIds.length === 0) {
       return new Map(uniqueIds.map((id) => [id, {
+        catalogReview: catalogReview(id),
         archiveJobs: workflowJobs(id),
         evidenceHeader: archiveById.get(id)?.evidenceHeader ?? null,
         recovery: recoveryByArchiveId.get(id) ?? null,
@@ -10288,6 +10370,7 @@ export function createDataAccessInternal(
     }
 
     return new Map(uniqueIds.map((id) => [id, {
+      catalogReview: catalogReview(id),
       archiveJobs: workflowJobs(id),
       evidenceHeader: archiveById.get(id)?.evidenceHeader ?? null,
       recovery: recoveryByArchiveId.get(id) ?? null,
@@ -14684,6 +14767,8 @@ export function createDataAccessInternal(
             access.catalog.readDvdTitleIdentityReviewSet(id),
           readDvdCatalogReviewWorkflowEvidence: (ids) =>
             access.catalog.readDvdCatalogReviewWorkflowEvidence(ids),
+          listCatalogReviewEvidenceChoices: (id, options) =>
+            access.catalog.listCatalogReviewEvidenceChoices(id, options),
           findArchiveRecovery: (id) =>
             access.catalog.findArchiveRecovery(id),
           findArchiveRecoveryById: (id) =>
@@ -17816,6 +17901,174 @@ export function createDataAccessInternal(
         }, { behavior: "immediate" });
       },
 
+      recordCatalogReviewEvidenceChoice(input) {
+        if (
+          !(input.catalogRevision instanceof Date) ||
+          !Number.isSafeInteger(input.catalogRevision.getTime()) ||
+          !Number.isSafeInteger(input.checkpointRevision) ||
+          input.checkpointRevision < 1 ||
+          !/^[0-9a-f]{64}$/.test(input.checkpointDigest)
+        ) {
+          throw new DomainInvariantError(
+            "Catalog Review choice evidence is invalid",
+          );
+        }
+        const semanticInput = catalogReviewEvidenceChoiceSemanticInput(input);
+        const operation = `catalog_review.${input.choice}`;
+        return database.transaction((transaction) => {
+          const replay = readMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            decodeCatalogReviewEvidenceChoiceResult,
+          );
+          if (replay !== undefined) return replay;
+
+          const archive = requireRow(
+            transaction.select().from(originalDiscArchives).where(eq(
+              originalDiscArchives.id,
+              input.originalDiscArchiveId,
+            )).get(),
+            "original disc archive",
+            input.originalDiscArchiveId,
+          );
+          // Hold the write reservation while validating every manifest back to
+          // revision 1, then read the exact checkpoint identity used below.
+          access.catalog.auditDvdArchiveEvidenceChains([
+            input.originalDiscArchiveId,
+          ]);
+          const header = requireRow(
+            transaction.select().from(dvdArchiveEvidenceHeaders).where(eq(
+              dvdArchiveEvidenceHeaders.originalDiscArchiveId,
+              input.originalDiscArchiveId,
+            )).get(),
+            "DVD Archive Evidence",
+            input.originalDiscArchiveId,
+          );
+          if (header.evidenceFormat !== DVD_RECOVERY_EVIDENCE_FORMAT) {
+            throw new DomainInvariantError(
+              "Catalog Review evidence choice requires dvd-recovery-evidence-v1",
+            );
+          }
+          const recovery = findArchiveRecoveryRecord(transaction, {
+            originalDiscArchiveId: input.originalDiscArchiveId,
+          });
+          if (recovery === null || recovery.status === "faulted") {
+            throw new DomainInvariantError(
+              "Archive Recovery has no consistent current state",
+            );
+          }
+          if (
+            input.choice === "archive_only" &&
+            recovery.status !== "stopped" &&
+            recovery.status !== "completed"
+          ) {
+            throw new DomainInvariantError(
+              "Archive Recovery must stop or complete before choosing archive-only",
+            );
+          }
+          if (
+            input.choice === "archive_only"
+              ? archive.catalogReviewOutcome !== "needs_review"
+              : archive.catalogReviewOutcome !== "archive_only"
+          ) {
+            throw new DomainInvariantError(
+              input.choice === "archive_only"
+                ? "Catalog Review is not open for an archive-only choice"
+                : "Catalog Review is not archive-only",
+            );
+          }
+          if (
+            archive.updatedAt.getTime() !== input.catalogRevision.getTime() ||
+            header.currentManifestRevision !== input.checkpointRevision ||
+            header.currentManifestDigest !== input.checkpointDigest
+          ) {
+            throw new StaleCatalogRevisionError(
+              "Catalog Review evidence changed; inspect it again before recording the choice",
+            );
+          }
+
+          const recordedAt = now();
+          const choiceId = newId<CatalogReviewChoiceId>();
+          transaction.insert(catalogReviewEvidenceChoices).values({
+            id: choiceId,
+            originalDiscArchiveId: input.originalDiscArchiveId,
+            choice: input.choice,
+            catalogRevision: input.catalogRevision,
+            checkpointRevision: header.currentManifestRevision,
+            checkpointDigest: header.currentManifestDigest,
+            archiveRecoveryId: recovery.id,
+            archiveRecoveryAttemptId: recovery.attemptId,
+            archiveRecoveryStatus: recovery.status,
+            recordedAt,
+          }).run();
+          const resultingArchive = requireRow(
+            transaction.update(originalDiscArchives).set({
+              catalogReviewedAt: input.choice === "archive_only"
+                ? recordedAt
+                : null,
+              catalogReviewOutcome: input.choice === "archive_only"
+                ? "archive_only"
+                : "needs_review",
+              updatedAt: nextCatalogMutationTimestamp(recordedAt),
+            }).where(and(
+              eq(originalDiscArchives.id, input.originalDiscArchiveId),
+              eq(originalDiscArchives.updatedAt, input.catalogRevision),
+              eq(
+                originalDiscArchives.catalogReviewOutcome,
+                input.choice === "archive_only"
+                  ? "needs_review"
+                  : "archive_only",
+              ),
+            )).returning().get(),
+            "current Catalog Review",
+            input.originalDiscArchiveId,
+          );
+          const result: CatalogReviewEvidenceChoiceResult = {
+            choiceId,
+            choice: input.choice,
+            originalDiscArchiveId: input.originalDiscArchiveId,
+            catalogRevision: input.catalogRevision,
+            checkpoint: {
+              revision: header.currentManifestRevision,
+              manifestDigest: header.currentManifestDigest,
+            },
+            recovery: {
+              id: recovery.id,
+              attemptId: recovery.attemptId,
+              state: recovery.status,
+            },
+            resultingArchive,
+            recordedAt,
+          };
+          return recordMutationInvocation(
+            transaction,
+            input.mutationKey,
+            operation,
+            semanticInput,
+            result,
+            recordedAt,
+          );
+        }, { behavior: "immediate" });
+      },
+
+      listCatalogReviewEvidenceChoices(id, options) {
+        if (!Number.isSafeInteger(options.limit) || options.limit < 1 ||
+            options.limit > 101) {
+          throw new DomainInvariantError(
+            "Catalog Review choice history limit must be between 1 and 101",
+          );
+        }
+        return database.select().from(catalogReviewEvidenceChoices).where(eq(
+          catalogReviewEvidenceChoices.originalDiscArchiveId,
+          id,
+        )).orderBy(
+          desc(catalogReviewEvidenceChoices.catalogRevision),
+          desc(catalogReviewEvidenceChoices.id),
+        ).limit(options.limit).all() satisfies CatalogReviewEvidenceChoiceRecord[];
+      },
+
       recordCatalogReviewCompletionPreviewDecision(input) {
         if (!(input.catalogRevision instanceof Date) ||
             !Number.isSafeInteger(input.catalogRevision.getTime())) {
@@ -18887,15 +19140,11 @@ export function createDataAccessInternal(
               selection,
               timestamp,
             );
-            transaction
-              .update(originalDiscArchives)
-              .set({
-                catalogReviewedAt: null,
-                catalogReviewOutcome: "needs_review",
-                updatedAt: nextCatalogMutationTimestamp(timestamp),
-              })
-              .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
-              .run();
+            reopenCatalogReview(
+              transaction,
+              input.originalDiscArchiveId,
+              timestamp,
+            );
             return selection;
           },
           { behavior: "immediate" },
@@ -19011,20 +19260,11 @@ export function createDataAccessInternal(
                 );
               }
             }
-            transaction
-              .update(originalDiscArchives)
-              .set({
-                catalogReviewedAt: null,
-                catalogReviewOutcome: "needs_review",
-                updatedAt: nextCatalogMutationTimestamp(timestamp),
-              })
-              .where(
-                eq(
-                  originalDiscArchives.id,
-                  selection.originalDiscArchiveId,
-                ),
-              )
-              .run();
+            reopenCatalogReview(
+              transaction,
+              selection.originalDiscArchiveId,
+              timestamp,
+            );
             return {
               ...toDiscSelection(selection),
               deletedEncodeJobs: 0,

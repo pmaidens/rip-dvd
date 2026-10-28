@@ -163,6 +163,18 @@ const validCommands = {
     action: "delete_disc_selection",
     discSelectionId: "selection-1",
   },
+  archive_only: {
+    action: "archive_only",
+    catalogRevision: "2026-08-11T06:00:00.000Z",
+    checkpointRevision: 2,
+    checkpointDigest: "a".repeat(64),
+  },
+  reopen: {
+    action: "reopen",
+    catalogRevision: "2026-08-11T06:00:00.000Z",
+    checkpointRevision: 2,
+    checkpointDigest: "a".repeat(64),
+  },
   complete_review: {
     action: "complete_review",
     catalogRevision: "2026-08-11T06:00:00.000Z",

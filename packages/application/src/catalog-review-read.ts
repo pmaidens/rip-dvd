@@ -357,6 +357,9 @@ export function readCatalogReview(
             titleDamageInspection.assessment,
           ),
       },
+      choiceHistory: snapshot.catalog.listCatalogReviewEvidenceChoices(id, {
+        limit: 101,
+      }),
     });
     const reviewActionAvailability = snapshot.catalog.getCatalogReviewActionAvailability(id);
     const discSelectionRows = snapshot.catalog.listDiscSelections({

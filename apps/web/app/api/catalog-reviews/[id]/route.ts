@@ -16,6 +16,8 @@ import {
 import { loadConfig } from "@rip-dvd/config";
 import {
   applyMappingProposal,
+  CatalogReviewChoiceStaleError,
+  CatalogReviewChoiceUnavailableError,
   CatalogReviewCompletionUnavailableError,
   CatalogReviewMappingUnavailableError,
   CatalogReviewRevisionStaleError,
@@ -320,6 +322,16 @@ export async function createCatalogReviewRoute(
         );
       }
 
+      case "archive_only":
+      case "reopen":
+        return response(
+          createApplicationOperations(access).recordCatalogReviewEvidenceChoice(
+            archiveId,
+            command,
+            bodyRecord?.mutationKey,
+          ),
+        );
+
       case "complete_review": {
         let mediaLibraryPath = "/";
         if (command.replacementEncodes.length > 0) {
@@ -359,7 +371,9 @@ export async function createCatalogReviewRoute(
     }
   } catch (error) {
     if (error instanceof CatalogReviewMappingUnavailableError ||
-        error instanceof CatalogReviewRevisionStaleError) {
+        error instanceof CatalogReviewRevisionStaleError ||
+        error instanceof CatalogReviewChoiceUnavailableError ||
+        error instanceof CatalogReviewChoiceStaleError) {
       return response({ error: {
         code: error.code,
         message: error.message,

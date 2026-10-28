@@ -239,6 +239,11 @@ describe("Disc Selection preview policy", () => {
           work: null,
         }),
         readDvdTitleIdentityReviewSet: () => null,
+        listOriginalDiscArchives: () => [{
+          updatedAt: new Date(currentRevision),
+          catalogReviewOutcome: "needs_review",
+        }],
+        listCatalogReviewEvidenceChoices: () => [],
       },
       archiveJobs: {
         listForArchive: () => [{

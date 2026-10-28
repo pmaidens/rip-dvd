@@ -281,9 +281,12 @@ describe("CatalogReviewAutomation", () => {
         mappingState: "unmapped",
         readyForDamageDecision: false,
         readyForEncoding: false,
+        archiveOnly: false,
       },
       current: {
         originalDiscArchiveId: recoveringReview.archive.id,
+        catalogRevision: recoveringReview.catalogRevision,
+        catalogReviewOutcome: "needs_review",
         archiveJob: { id: "archive-job-1", status: "completed" },
         checkpoint: { revision: 2, manifestDigest: "synthetic-digest" },
         recovery: {
@@ -295,6 +298,8 @@ describe("CatalogReviewAutomation", () => {
         catalogMappingProjectionId: "mapping-projection-1",
         titleDamageAssessmentId: null,
       },
+      choiceHistory: [],
+      choiceHistoryPage: { limit: 100, truncated: false },
       actions: [{
         action: "catalog_mapping",
         available: true,
