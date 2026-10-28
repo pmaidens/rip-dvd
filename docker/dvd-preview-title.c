@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 static unsigned parse(const char *text) {
     char *end;
@@ -14,6 +15,13 @@ static unsigned parse(const char *text) {
     if (errno || *text == '\0' || *end != '\0' || value == 0 || value > 65535)
         exit(EXIT_FAILURE);
     return (unsigned)value;
+}
+struct audio_mapping { unsigned source, physical, channels; const char *codec; };
+struct subtitle_mapping { unsigned source, physical; const char *style; };
+static void add_subtitle(struct subtitle_mapping *items, unsigned *count,
+                         unsigned source, unsigned physical, const char *style) {
+    for (unsigned i = 0; i < *count; i++) if (items[i].physical == physical) return;
+    items[(*count)++] = (struct subtitle_mapping){source, physical, style};
 }
 int main(int argc, char **argv) {
     if (argc != 7) return EXIT_FAILURE;
@@ -50,6 +58,42 @@ int main(int argc, char **argv) {
         if (cell == 0 || cell > pgc->nr_of_cells || (program > 1 && cell <= pgc->program_map[program - 2])) goto done;
     }
     for (unsigned cell = 0; cell < pgc->nr_of_cells; cell++) if (pgc->cell_playback[cell].block_type) goto done;
+    if (!vts->vtsi_mat || vts->vtsi_mat->nr_of_vts_audio_streams > 8 || vts->vtsi_mat->nr_of_vts_subp_streams > 32) goto done;
+    struct audio_mapping audio[8];
+    struct subtitle_mapping subtitles[32];
+    unsigned audio_count = 0, subtitle_count = 0;
+    for (unsigned slot = 0; slot < vts->vtsi_mat->nr_of_vts_audio_streams; slot++) {
+        unsigned control = pgc->audio_control[slot];
+        if (!(control & 0x8000)) continue;
+        unsigned position = (control >> 8) & 0x7f, base;
+        const char *codec;
+        switch (vts->vtsi_mat->vts_audio_attr[slot].audio_format) {
+            case 0: base = 0x80; codec = "ac3"; break;
+            case 2: case 3: base = 0xc0; codec = "mpeg"; break;
+            case 4: base = 0xa0; codec = "lpcm"; break;
+            case 6: base = 0x88; codec = "dts"; break;
+            default: continue;
+        }
+        if (position > 7) goto done;
+        unsigned duplicate = 0;
+        for (unsigned j = 0; j < audio_count; j++) if (audio[j].physical == base + position) duplicate = 1;
+        if (duplicate) continue;
+        audio[audio_count++] = (struct audio_mapping){base + slot, base + position,
+            vts->vtsi_mat->vts_audio_attr[slot].channels + 1, codec};
+    }
+    unsigned aspect = vts->vtsi_mat->vts_video_attr.display_aspect_ratio;
+    if (aspect != 0 && aspect != 3) goto done;
+    for (unsigned slot = 0; slot < vts->vtsi_mat->nr_of_vts_subp_streams; slot++) {
+        uint32_t control = pgc->subp_control[slot];
+        if (!(control & 0x80000000u)) continue;
+        if (aspect == 0) add_subtitle(subtitles, &subtitle_count, 0x20 + slot, 0x20 + ((control >> 24) & 31), "4By3");
+        else {
+            add_subtitle(subtitles, &subtitle_count, 0x20 + slot, 0x20 + ((control >> 16) & 31), "Wide");
+            unsigned permitted = vts->vtsi_mat->vts_video_attr.permitted_df;
+            if (!(permitted & 1)) add_subtitle(subtitles, &subtitle_count, 0x20 + slot, 0x20 + ((control >> 8) & 31), "Letterbox");
+            if (!(permitted & 2)) add_subtitle(subtitles, &subtitle_count, 0x20 + slot, 0x20 + (control & 31), "PanScan");
+        }
+    }
     printf("{\"navigation\":{\"videoTitleSetNumber\":%u,\"titleSetTitleNumber\":%u,\"programChainNumber\":%u},\"selectedPath\":[", info->title_set_nr, info->vts_ttn, pgcn);
     int comma = 0;
     for (unsigned program = first_program; program <= last_program; program++) {
@@ -60,6 +104,10 @@ int main(int argc, char **argv) {
             comma = 1;
         }
     }
+    printf("],\"audio\":[");
+    for (unsigned i = 0; i < audio_count; i++) printf("%s{\"sourceId\":%u,\"physicalId\":%u,\"codec\":\"%s\",\"channels\":%u}", i ? "," : "", audio[i].source, audio[i].physical, audio[i].codec, audio[i].channels);
+    printf("],\"subtitles\":[");
+    for (unsigned i = 0; i < subtitle_count; i++) printf("%s{\"sourceId\":%u,\"physicalId\":%u,\"style\":\"%s\"}", i ? "," : "", subtitles[i].source, subtitles[i].physical, subtitles[i].style);
     puts("]}");
     result = ferror(stdout) ? EXIT_FAILURE : EXIT_SUCCESS;
 done:

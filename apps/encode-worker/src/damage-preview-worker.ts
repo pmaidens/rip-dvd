@@ -38,7 +38,7 @@ function sourceOffset(review: DamagePreviewAvailability, title: PreviewSourceTit
   const request = review.reviewedRequest!;
   const identity = request.title!;
   if (canonicalPublicationJson(title.navigation) !== canonicalPublicationJson(identity.navigation) || canonicalPublicationJson(title.selectedPath) !== canonicalPublicationJson(identity.selectedPath)) throw new PreviewFailure("DAMAGE_PREVIEW_PATH_UNREPRESENTABLE", "The source default title path differs from the reviewed Title Identity. No substitute path was generated.");
-  if (!title.chapterDurations.every((duration) => Number.isFinite(duration) && duration > 0) || identity.chapterStart < 1 || identity.chapterEnd > title.chapterDurations.length || identity.angleNumber > title.angleCount || request.streams.audio.some((stream) => !title.audio.includes(stream)) || request.streams.subtitles.some((stream) => !title.subtitles.includes(stream + 1))) {
+  if (!title.chapterDurations.every((duration) => Number.isFinite(duration) && duration > 0) || identity.chapterStart < 1 || identity.chapterEnd > title.chapterDurations.length || identity.angleNumber > title.angleCount) {
     throw new PreviewFailure("DAMAGE_PREVIEW_UNREPRESENTABLE", "The selected path, angle or streams cannot be represented by this source and HandBrake version.");
   }
   const duration = title.chapterDurations.slice(identity.chapterStart - 1, identity.chapterEnd).reduce((sum, value) => sum + value, 0);
@@ -47,11 +47,12 @@ function sourceOffset(review: DamagePreviewAvailability, title: PreviewSourceTit
 }
 async function retainGeneratedMedia(record: DamagePreviewRecord, directory: string, generator: DamagePreviewGenerator, access: DataAccess) {
   const review = plan(record);
+  if (!record.streamMapping) return false;
   let incomplete = false;
   for (const [index, clip] of review.clips.entries()) {
     if (index >= record.commands.length || record.artifacts.some((artifact) => artifact.identity === `damage-preview-v1.${record.id}.${index}`)) continue;
     try {
-      const result = await finalizePreviewArtifact({ id: record.id, index, directory, clip, streams: review.reviewedRequest!.streams, generator });
+      const result = await finalizePreviewArtifact({ id: record.id, index, directory, clip, streams: record.streamMapping, generator });
       if (!result) { incomplete = true; continue; }
       record.artifacts.push(result.artifact);
       record.progress.completedClips = record.artifacts.length;
@@ -141,11 +142,17 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
             const scanPath = join(directory, "scan.mkv");
             const title = await generator.scan({ source: request.archive.path, titleNumber: request.title!.displayTitleNumber, angleNumber: request.title!.angleNumber, chapterStart: request.title!.chapterStart, chapterEnd: request.title!.chapterEnd, outputPath: scanPath, descriptor: handle.descriptor, signal: handle.signal }).finally(() => quiesce(generator, scanPath));
             const offset = sourceOffset(review, title);
+            const audio = request.streams.audio.flatMap((id) => title.audio.filter((stream) => stream.sourceId === id));
+            const subtitles = request.streams.subtitles.flatMap((id) => title.subtitles.filter((stream) => stream.sourceId === id));
+            if (request.streams.audio.some((id) => audio.filter((stream) => stream.sourceId === id).length !== 1) || request.streams.subtitles.some((id) => !subtitles.some((stream) => stream.sourceId === id))) {
+              throw new PreviewFailure("DAMAGE_PREVIEW_STREAM_UNREPRESENTABLE", "A selected DVD source stream cannot be mapped to HandBrake tracks. No substitute stream was generated.");
+            }
+            record.streamMapping = { policyVersion: "dvd-preview-stream-map-v1", audio, subtitles };
             record.deviations = ["The sample uses explicit title-time boundaries instead of the complete playback selection."];
             for (const [index, clip] of review.clips.entries()) {
               handle.signal.throwIfAborted(); handle.assertOwned(); execution.assertHeld();
               const paths = previewClipPaths(directory, index);
-              const arguments_ = ["--no-dvdnav", "--title", String(request.title!.displayTitleNumber), "--angle", String(request.title!.angleNumber), "-i", request.archive.path, "-o", paths.partial, "--format", "av_mkv", "--preset", String(request.encodingProfile!.settings.preset), "--audio", request.streams.audio.length ? request.streams.audio.join(",") : "none", "--subtitle", request.streams.subtitles.length ? request.streams.subtitles.map((id) => id + 1).join(",") : "none", "--subtitle-burned=none", "--start-at", `seconds:${(offset + clip.startMilliseconds) / 1_000}`, "--stop-at", `seconds:${(clip.endMilliseconds - clip.startMilliseconds) / 1_000}`];
+              const arguments_ = ["--no-dvdnav", "--title", String(request.title!.displayTitleNumber), "--angle", String(request.title!.angleNumber), "-i", request.archive.path, "-o", paths.partial, "--format", "av_mkv", "--preset", String(request.encodingProfile!.settings.preset), "--audio", audio.length ? audio.map((stream) => stream.trackNumber).join(",") : "none", "--subtitle", subtitles.length ? subtitles.map((stream) => stream.trackNumber).join(",") : "none", "--subtitle-burned=none", "--start-at", `seconds:${(offset + clip.startMilliseconds) / 1_000}`, "--stop-at", `seconds:${(clip.endMilliseconds - clip.startMilliseconds) / 1_000}`];
               record.commands.push(["rip-dvd-handbrake", ...arguments_]);
               options.access.damagePreviews.update(record);
               try {

@@ -18,6 +18,8 @@ it("atomically requests reviewed preview work, replays its key, rejects changed 
   expect(await fixture.run(args)).toEqual(requested);
   expect(await fixture.run([...args.slice(0, -1), JSON.stringify({ ...input, preflightToken: "stale" })])).toMatchObject({ exitCode: 2, result: { error: { code: "MUTATION_KEY_CONFLICT" } } });
   const id = (requested.result as { id: string }).id;
+  expect(await fixture.run(["readiness"])).toMatchObject({ exitCode: 0, result: { activeWork: expect.arrayContaining([{ kind: "damage_preview", id, status: "queued" }]) } });
   expect(await fixture.run(["damage-preview", "cancel", id, "--key", "synthetic-preview-cancel"])).toMatchObject({ exitCode: 0, result: { status: "cancelled" } });
   expect(await fixture.run(["damage-preview", "inspect", id])).toMatchObject({ exitCode: 0, result: { status: "cancelled" } });
+  expect(await fixture.run(["readiness"])).toMatchObject({ exitCode: 0, result: { activeWork: [] } });
 });

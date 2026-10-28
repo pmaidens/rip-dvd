@@ -42,7 +42,7 @@ if [ "$#" -eq 5 ] && [ "$1" = "damage-preview" ] && [ "$2" = "export" ] && [ "$4
         fi
         exit "$export_status"
     fi
-    if ! docker cp "$export_container:/tmp/rip-dvd-preview-export.mkv" "$export_directory/media.mkv" >/dev/null || ! ln "$export_directory/media.mkv" "$destination"; then
+    if ! docker cp "$export_container:/tmp/rip-dvd-preview-export.mkv" "$export_directory/media.mkv" >/dev/null || ! link "$export_directory/media.mkv" "$destination"; then
         printf '%s\n' '{"error":{"code":"EXPORT_TRANSFER_FAILED","message":"Canonical media could not be saved to the caller destination."}}'
         exit 1
     fi

@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
+import type { DamagePreviewResolvedAudio, DamagePreviewResolvedSubtitle } from "@rip-dvd/data-access";
 import { nodeHandBrakeRunner, type HandBrakeRunner, type HandBrakeRunRequest } from "./handbrake-runner.js";
 
 export class DamagePreviewUnrepresentableError extends Error {}
@@ -56,8 +57,8 @@ async function videoPacketCoverage(path: string): Promise<{ startMilliseconds: n
 export interface PreviewSourceTitle {
   durationMilliseconds: number;
   chapterDurations: number[];
-  audio: number[];
-  subtitles: number[];
+  audio: DamagePreviewResolvedAudio[];
+  subtitles: DamagePreviewResolvedSubtitle[];
   angleCount: number;
   navigation: { videoTitleSetNumber: number; titleSetTitleNumber: number; programChainNumber: number };
   selectedPath: { programNumber: number; cellNumber: number; vobId: number; cellId: number }[];
@@ -87,7 +88,7 @@ export function createDamagePreviewGenerator(runner: HandBrakeRunner = nodeHandB
       return { pathVerifier: "dvd-preview-title-v1", handbrake: `${handbrake.stdout}\n${handbrake.stderr}`.trim(), ffprobe: ffprobe.stdout.split("\n")[0]! };
     },
     async scan({ source, titleNumber, angleNumber, chapterStart, chapterEnd, outputPath, descriptor, signal }) {
-      const path = JSON.parse(await readPreviewTitle([source, String(titleNumber), String(angleNumber), String(chapterStart), String(chapterEnd), outputPath], descriptor, signal)) as Pick<PreviewSourceTitle, "navigation" | "selectedPath">;
+      const path = JSON.parse(await readPreviewTitle([source, String(titleNumber), String(angleNumber), String(chapterStart), String(chapterEnd), outputPath], descriptor, signal)) as Pick<PreviewSourceTitle, "navigation" | "selectedPath"> & { audio: Omit<DamagePreviewResolvedAudio, "trackNumber">[]; subtitles: Omit<DamagePreviewResolvedSubtitle, "trackNumber">[] };
       let text = "";
       await runner.run({
         arguments_: ["--no-dvdnav", "--scan", "--json", "--title", String(titleNumber), "--min-duration", "0", "--previews", "1:0", "-i", source, "-o", outputPath],
@@ -98,15 +99,29 @@ export function createDamagePreviewGenerator(runner: HandBrakeRunner = nodeHandB
       const marker = "JSON Title Set: ";
       const offset = text.indexOf(marker);
       if (offset < 0) throw new Error("Preview title scan has no stream evidence.");
-      const scan = JSON.parse(text.slice(offset + marker.length)) as { TitleList: { Index: number; AngleCount?: number; Duration: { Ticks: number }; ChapterList: { Duration: { Ticks: number } }[]; AudioList: { TrackNumber: number }[]; SubtitleList: { TrackNumber: number }[] }[] };
+      const scan = JSON.parse(text.slice(offset + marker.length)) as { TitleList: { Index: number; AngleCount?: number; Duration: { Ticks: number }; ChapterList: { Duration: { Ticks: number } }[]; AudioList: { TrackNumber: number; CodecName: string; ChannelCount: number }[]; SubtitleList: { TrackNumber: number; SourceName: string; Attributes: Record<string, boolean> }[] }[] };
       const title = scan.TitleList.find((item) => item.Index === titleNumber);
       if (!title || !Number.isFinite(title.Duration.Ticks) || !title.ChapterList.length) throw new Error("Selected title cannot be represented by HandBrake.");
+      const subtitleTracks = title.SubtitleList.filter((item) => item.SourceName === "VOBSUB");
+      if (path.audio.length !== title.AudioList.length || path.subtitles.length !== subtitleTracks.length) throw new DamagePreviewUnrepresentableError("The native DVD stream identities do not match HandBrake's retained tracks.");
+      const audio = path.audio.map((source, index) => {
+        const track = title.AudioList[index]!;
+        const codec = track.CodecName.toLowerCase();
+        const matches = source.codec === "mpeg" ? /mpeg|mp2/.test(codec) : source.codec === "lpcm" ? /lpcm|pcm/.test(codec) : codec.includes(source.codec);
+        if (track.TrackNumber !== index + 1 || !matches || track.ChannelCount !== source.channels) throw new DamagePreviewUnrepresentableError("The source audio identity cannot be proved against HandBrake's selected track.");
+        return { ...source, trackNumber: track.TrackNumber };
+      });
+      const subtitles = path.subtitles.map((source, index) => {
+        const track = subtitleTracks[index]!;
+        if (!Number.isSafeInteger(track.TrackNumber) || track.TrackNumber < 1 || track.Attributes[source.style] !== true) throw new DamagePreviewUnrepresentableError("The source subtitle display variant cannot be proved against HandBrake's selected track.");
+        return { ...source, trackNumber: track.TrackNumber };
+      });
       return {
         ...path,
         durationMilliseconds: title.Duration.Ticks / 90,
         chapterDurations: title.ChapterList.map((item) => item.Duration.Ticks / 90),
-        audio: title.AudioList.map((item) => item.TrackNumber),
-        subtitles: title.SubtitleList.map((item) => item.TrackNumber), angleCount: title.AngleCount ?? 1,
+        audio,
+        subtitles, angleCount: title.AngleCount ?? 1,
       };
     },
     generate: (request) => runner.run(request),

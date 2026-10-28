@@ -58,7 +58,7 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
           id: randomUUID(), originalDiscArchiveId: input.archiveId, status: "queued", preflightToken: input.preflightToken,
           selectionJson: input.selectionJson, reviewJson, workerId: null, cancellationRequested: false, reason: null,
           progress: { completedClips: 0, totalClips: review.clips.length, percent: null },
-          commands: [], toolVersions: {}, deviations: [], artifacts: [], createdAt: timestamp.toISOString(), updatedAt: timestamp.toISOString(),
+          commands: [], streamMapping: null, toolVersions: {}, deviations: [], artifacts: [], createdAt: timestamp.toISOString(), updatedAt: timestamp.toISOString(),
         };
         sqlite.prepare("INSERT INTO damage_previews (id, original_disc_archive_id, status, record, created_at) VALUES (?, ?, ?, ?, ?)").run(record.id, input.archiveId, record.status, JSON.stringify(record), timestamp.getTime());
         return record;

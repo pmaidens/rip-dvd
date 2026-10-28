@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const listDamagePreviews = vi.fn();
 const listOpticalDrives = vi.fn();
 const listInspections = vi.fn();
 const listArchiveRequests = vi.fn();
@@ -12,6 +13,7 @@ const readDvdRecoveryStoragePreflight = vi.fn();
 const readConsistentSnapshot = vi.fn((read: (access: unknown) => unknown) =>
   read({
     catalog: { listOpticalDrives },
+    damagePreviews: { list: listDamagePreviews },
     discInspections: { list: listInspections },
     archiveRequests: { list: listArchiveRequests },
     archiveJobs: { list: listArchiveJobs },
@@ -43,6 +45,7 @@ describe("GET /api/deployment-readiness", () => {
         isPresent: true,
       },
     ]);
+    listDamagePreviews.mockReturnValue([]);
     listInspections.mockReturnValue([]);
     listArchiveRequests.mockReturnValue([]);
     listArchiveJobs.mockReturnValue([]);
@@ -58,6 +61,7 @@ describe("GET /api/deployment-readiness", () => {
       { id: "waiting-for-reinsertion", status: "pending" },
     ]);
     listEncodeJobs.mockReturnValue([{ id: "encode-1", status: "running" }]);
+    listDamagePreviews.mockReturnValue([{ id: "preview-1", status: "generating" }, { id: "preview-2", status: "complete" }]);
     listDvdRecoveryReconciliations.mockReturnValue([{
       id: "reconciliation-1",
       status: "queued",
@@ -87,6 +91,7 @@ describe("GET /api/deployment-readiness", () => {
         },
       },
       activeWork: [
+        { kind: "damage_preview", id: "preview-1", status: "generating" },
         {
           kind: "archive_request",
           id: "waiting-for-reinsertion",

@@ -149,7 +149,8 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
             <p>Choose a range within this title path. Context is clipped only to this range. Actual decoded coverage is not yet verified.</p>
             <label>Context before in seconds<input name="context-before" type="number" min="0" step="0.001" defaultValue="5" required /></label>
             <label>Context after in seconds<input name="context-after" type="number" min="0" step="0.001" defaultValue="5" required /></label>
-            <label>Audio stream IDs, separated by commas<input name="audio" placeholder="1" /></label>
+            <p>Available audio stream IDs: {title?.audioStreams.map((stream) => stream.id).join(", ") || "none"}. Subtitle stream IDs: {title?.subtitles.map((stream) => stream.id).join(", ") || "none"}.</p>
+            <label>Audio stream IDs, separated by commas<input name="audio" placeholder="128" /></label>
             <label>Subtitle stream IDs, separated by commas<input name="subtitles" /></label>
             <p>Selected streams are rechecked against the saved title when generation starts. Unsupported streams or settings fail explicitly.</p>
             <label>Intended Encoding Profile

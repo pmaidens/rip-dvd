@@ -109,7 +109,7 @@ it("rejects malformed selections and keeps discovery, legacy evidence and missin
     expect(response).toMatchObject({ exitCode: 2, result: { error: { code: "INVALID_ARGUMENTS" } } });
   }
   const discovery = await fixture.run(["damage-preview", "availability", seeded.archive.id]);
-  expect(discovery).toMatchObject({ exitCode: 0, result: { available: false, preflightToken: null, titles: [{ observationId: seeded.observation.id }] } });
+  expect(discovery).toMatchObject({ exitCode: 0, result: { available: false, preflightToken: null, titles: [{ observationId: seeded.observation.id, audioStreams: [{ id: 128 }], subtitles: [] }] } });
   expect(await fixture.run(["damage-preview", "availability", "synthetic-missing-archive"])).toMatchObject({ exitCode: 2, result: { error: { code: "NOT_FOUND" } } });
   expect(await fixture.run(["damage-preview", "request", seeded.archive.id])).toMatchObject({ exitCode: 2 });
 });

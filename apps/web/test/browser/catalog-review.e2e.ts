@@ -558,7 +558,7 @@ test("Damage Preview reviews selections and keeps active Recovery generation una
   await expect(preview.getByLabel("Identified title")).toBeVisible();
   await preview.getByLabel("Interval 1:", { exact: false }).check();
   await preview.getByLabel("Playback range end in seconds").fill("180");
-  await preview.getByLabel("Audio stream IDs, separated by commas").fill("1");
+  await preview.getByLabel("Audio stream IDs, separated by commas").fill("128");
   await preview.getByRole("button", { name: "Review preview selections" }).click();
   await expect(preview.getByRole("heading", { name: "Reviewed preview" })).toBeVisible();
   await expect(preview.getByText("Estimated duration: 13 s. Estimated storage: unknown.")).toBeVisible();

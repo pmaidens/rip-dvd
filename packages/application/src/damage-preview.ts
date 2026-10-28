@@ -149,6 +149,7 @@ export function reviewDamagePreviewEvidence(
     durableCheckpoint.id === checkpoint.manifestId && durableCheckpoint.revision === checkpoint.manifestRevision && durableCheckpoint.manifestDigest === checkpoint.manifestDigest;
   if (header === null) reasons.push({ code: "UNSUPPORTED_EVIDENCE_FORMAT", message: "Damage Preview requires a saved DVD recovery evidence checkpoint." });
   else if (!checkpointVerified) reasons.push({ code: "CHECKPOINT_UNVERIFIED", message: "The current saved checkpoint and durable manifest must agree." });
+  const savedTitles = decodeDvdTitleMap(evidence.disc?.scanData)?.titles ?? [];
   const titleItems = evidence.titles?.items.filter((item) => item.presentAtCurrentCheckpoint &&
     item.observation.checkpoint.manifestId === checkpoint?.manifestId &&
     item.observation.checkpoint.manifestRevision === checkpoint?.manifestRevision &&
@@ -183,13 +184,12 @@ export function reviewDamagePreviewEvidence(
         reasons.push({ code: "DAMAGE_TIMING_UNKNOWN", message: "Damage timing is unknown. Ordinary identified-title playback has no damage seek." });
       }
     }
-    const sourceTitle = decodeDvdTitleMap(evidence.disc?.scanData)?.titles.find((item) => item.number === title?.displayTitleNumber);
+    const sourceTitle = savedTitles.find((item) => item.number === title?.displayTitleNumber);
     if (!sourceTitle) reasons.push({ code: "STREAM_AVAILABILITY_UNVERIFIED", message: "The saved title has no representable stream evidence." });
     else if (input.streams.audio.some((stream) => !sourceTitle.audioStreams.some((item) => item.id === stream)) ||
       input.streams.subtitles.some((stream) => !sourceTitle.subtitles.some((item) => item.id === stream))) {
       reasons.push({ code: "DAMAGE_PREVIEW_STREAM_UNREPRESENTABLE", message: "A selected stream is absent from the saved title. Choose available stream IDs." });
     }
-    if (input.streams.audio.some((stream) => stream < 1)) reasons.push({ code: "DAMAGE_PREVIEW_STREAM_UNREPRESENTABLE", message: "HandBrake audio stream IDs start at one." });
 
   }
   const plan = input === null ? { groups: [], clips: [], estimatedDurationMilliseconds: null } : planClips(input, markers, reasons);
@@ -197,7 +197,7 @@ export function reviewDamagePreviewEvidence(
     ...input,
     archive: { fingerprint: archive.fingerprint, path: archive.archivePath, catalogRevision: archive.updatedAt.toISOString() },
     recovery: evidence.recovery === null ? null : { id: evidence.recovery.id, attemptId: evidence.recovery.attemptId, status: evidence.recovery.status },
-    sourceTitle: decodeDvdTitleMap(evidence.disc?.scanData)?.titles.find((item) => item.number === title?.displayTitleNumber) ?? null,
+    sourceTitle: savedTitles.find((item) => item.number === title?.displayTitleNumber) ?? null,
     requestedAssessmentIdentity: input.assessmentIdentity,
     originalDiscArchiveId: archiveId,
     checkpoint,
@@ -225,6 +225,8 @@ export function reviewDamagePreviewEvidence(
       observationId: item.observation.id,
       displayTitleNumber: item.observation.displayTitleNumber,
       selectedPath: item.observation.selectedPath,
+      audioStreams: savedTitles.find((saved) => saved.number === item.observation.displayTitleNumber)?.audioStreams ?? [],
+      subtitles: savedTitles.find((saved) => saved.number === item.observation.displayTitleNumber)?.subtitles ?? [],
       angleNumber: item.observation.angleNumber,
       chapterStart: item.observation.chapterStart,
       chapterEnd: item.observation.chapterEnd,

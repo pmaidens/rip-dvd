@@ -9,6 +9,17 @@ export interface DamagePreviewArtifact {
   durationMilliseconds: number;
   coverageMethod?: "handbrake_seek_and_probed_video_packets";
 }
+export interface DamagePreviewResolvedAudio {
+  sourceId: number; physicalId: number; trackNumber: number; codec: string; channels: number;
+}
+export interface DamagePreviewResolvedSubtitle {
+  sourceId: number; physicalId: number; trackNumber: number; style: string;
+}
+export interface DamagePreviewStreamMapping {
+  policyVersion: "dvd-preview-stream-map-v1";
+  audio: DamagePreviewResolvedAudio[];
+  subtitles: DamagePreviewResolvedSubtitle[];
+}
 export interface DamagePreviewRecord {
   id: string;
   originalDiscArchiveId: string;
@@ -21,6 +32,7 @@ export interface DamagePreviewRecord {
   reason: { code: string; message: string } | null;
   progress: { completedClips: number; totalClips: number; percent: number | null };
   commands: string[][];
+  streamMapping: DamagePreviewStreamMapping | null;
   toolVersions: Record<string, string>;
   deviations: string[];
   artifacts: DamagePreviewArtifact[];

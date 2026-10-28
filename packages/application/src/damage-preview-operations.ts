@@ -30,7 +30,7 @@ export function presentDamagePreview(record: DamagePreviewRecord, current?: Revi
     outdatedReasons: outdated ? [{ code: "DAMAGE_PREVIEW_INPUTS_CHANGED", message: "The current archive, title, selection, streams or intended settings differ from this sample." }] : [],
     reason: record.reason, cancellationRequested: record.cancellationRequested, progress: record.progress,
     artifacts: record.artifacts.map(({ path: _path, ...artifact }) => artifact),
-    provenance: { preflightToken: record.preflightToken, ...review.reviewedRequest, clips: review.clips, commands: record.commands, toolVersions: record.toolVersions, deviations: record.deviations },
+    provenance: { preflightToken: record.preflightToken, ...review.reviewedRequest, clips: review.clips, commands: record.commands, streamMapping: record.streamMapping, toolVersions: record.toolVersions, deviations: record.deviations },
     createdAt: record.createdAt, updatedAt: record.updatedAt,
     warning: "A sample illustrates decoding at the recorded interval. Failed, empty or partial media never means no damage.",
   };

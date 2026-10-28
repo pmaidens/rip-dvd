@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, rename } from "node:fs/promises";
 import { join } from "node:path";
-import type { DamagePreviewArtifact } from "@rip-dvd/data-access";
+import type { DamagePreviewArtifact, DamagePreviewStreamMapping } from "@rip-dvd/data-access";
 import type { DamagePreviewGenerator } from "./damage-preview-generator.js";
 
 export class DamagePreviewArtifactError extends Error {
@@ -22,7 +22,7 @@ export async function finalizePreviewArtifact(input: {
   index: number;
   directory: string;
   clip: { startMilliseconds: number; endMilliseconds: number };
-  streams: { audio: number[]; subtitles: number[] };
+  streams: DamagePreviewStreamMapping;
   generator: DamagePreviewGenerator;
 }): Promise<{ artifact: DamagePreviewArtifact; complete: boolean } | null> {
   const paths = previewClipPaths(input.directory, input.index);

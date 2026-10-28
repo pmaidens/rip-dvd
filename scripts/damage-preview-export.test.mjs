@@ -19,6 +19,7 @@ import { copyFileSync } from 'node:fs';
 const args = process.argv.slice(2);
 if (args[0] === 'compose') {
   if (args.includes('--volume')) process.exit(9);
+  if (process.env.PREVIEW_TEST_DIRECTORY_RACE) { const { mkdirSync } = await import('node:fs'); mkdirSync(process.env.PREVIEW_TEST_DIRECTORY_RACE); }
   const environment = args[args.indexOf('--env') + 1];
   const path = environment.slice('RIP_DVD_EXPORT_CALLER_PATH='.length);
   process.stdout.write(JSON.stringify({ artifactIdentity: 'damage-preview-v1.synthetic.0', mediaType: 'video/x-matroska', path, sizeBytes: ${expected.length}, provenance: { fixture: 'synthetic-service' } }));
@@ -39,6 +40,11 @@ else if (args[0] !== 'rm') process.exit(8);
     assert.equal(JSON.parse(duplicate.stdout).error.code, "EXPORT_DESTINATION_EXISTS");
     assert.deepEqual(readFileSync(destination), expected);
     const invalid = spawnSync(resolve("rip-dvd"), ["damage-preview", "export", "damage-preview-v1.synthetic.0", "--destination", join(root, "missing-parent", "preview.mkv")], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+    const directoryDestination = join(root, "concurrent-directory");
+    const directoryRace = spawnSync(resolve("rip-dvd"), ["damage-preview", "export", "damage-preview-v1.synthetic.0", "--destination", directoryDestination], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PREVIEW_TEST_SERVICE_FILE: source, PREVIEW_TEST_DIRECTORY_RACE: directoryDestination } });
+    assert.equal(directoryRace.status, 1);
+    assert.equal(JSON.parse(directoryRace.stdout).error.code, "EXPORT_TRANSFER_FAILED");
+    assert.deepEqual(readdirSync(directoryDestination), []);
     assert.equal(invalid.status, 2);
     assert.equal(JSON.parse(invalid.stdout).error.code, "EXPORT_DESTINATION_UNAVAILABLE");
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(staging, { recursive: true, force: true }); }

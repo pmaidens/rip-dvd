@@ -26,7 +26,12 @@ eligible waiter can enter. Lease expiry never proves reader quiescence.
 A libdvdread verifier checks the exact navigation identity and selected cell
 path against the reviewed Title Identity. The first implementation rejects
 multi-angle, multi-PGC and other unrepresentable paths explicitly. The title scan
-then checks chapter boundaries and selected audio and subtitle streams.
+then checks chapter boundaries. DVD source stream IDs are logical lsdvd identities,
+not HandBrake track ordinals. The verifier maps logical IDs through the PGC physical
+stream controls in HandBrake enumeration order. The scan must agree on count,
+codec, channels and subtitle display style. Selected subtitle sources retain every
+representable display variant. Unprovable mappings fail explicitly. The resolved
+source IDs, physical IDs and HandBrake ordinals remain in provenance.
 Generation uses the versioned intended HandBrake preset and canonical MKV.
 Each interval group produces an artifact with a retained command, tool versions,
 stream choices, checksum, requested seek and probed video-packet coverage.

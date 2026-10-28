@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { open, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
@@ -18,7 +19,7 @@ const bytes = Buffer.from("synthetic canonical MKV bytes for adapter transport")
 function media(overrides: Partial<DamagePreviewGenerator> = {}): DamagePreviewGenerator {
   return {
     versions: async () => ({ handbrake: "synthetic-handbrake-v1", ffprobe: "synthetic-probe-v1" }),
-    scan: async () => ({ navigation: { videoTitleSetNumber: 1, titleSetTitleNumber: 1, programChainNumber: 1 }, selectedPath: [{ programNumber: 1, cellNumber: 1, vobId: 1, cellId: 1 }], durationMilliseconds: 500_000, chapterDurations: [125_000, 125_000, 125_000, 125_000], audio: [1], subtitles: [], angleCount: 1 }),
+    scan: async () => ({ navigation: { videoTitleSetNumber: 1, titleSetTitleNumber: 1, programChainNumber: 1 }, selectedPath: [{ programNumber: 1, cellNumber: 1, vobId: 1, cellId: 1 }], durationMilliseconds: 500_000, chapterDurations: [125_000, 125_000, 125_000, 125_000], audio: [{ sourceId: 128, physicalId: 128, trackNumber: 1, codec: "ac3", channels: 2 }], subtitles: [], angleCount: 1 }),
     async generate(request) { writeFileSync(request.outputPath, bytes); request.onOutput("Encoding: task 1 of 1, 100.00 %"); },
     inspect: async (path) => ({ videoStartMilliseconds: 0, durationMilliseconds: /\/0(?:\.partial)?\.mkv$/.test(path) ? 45_000 : 339_000, videoCount: 1, audioCount: 1, subtitleCount: 0 }),
     requireInactive() {}, whenInactive: async () => undefined,
@@ -66,6 +67,8 @@ it("generates every reviewed group, retains provenance, exports canonical bytes 
     const completed = (await fixture.run(["damage-preview", "inspect", id])).result as DamagePreviewInspection;
     expect(completed).toMatchObject({ status: "complete", generationStatus: "complete", progress: { completedClips: 2, totalClips: 2 }, provenance: { checkpoint: { manifestRevision: 1 }, toolVersions: { handbrake: "synthetic-handbrake-v1" }, clips: [{ startMilliseconds: 0, endMilliseconds: 45_000 }, { startMilliseconds: 66_000, endMilliseconds: 405_000 }] } });
     expect(completed.provenance.commands).toHaveLength(2);
+    expect(completed.provenance).toMatchObject({ streams: { audio: [128], subtitles: [] }, streamMapping: { policyVersion: "dvd-preview-stream-map-v1", audio: [{ sourceId: 128, physicalId: 128, trackNumber: 1 }], subtitles: [] } });
+    expect(completed.provenance.commands[0]).toEqual(expect.arrayContaining(["--audio", "1", "--subtitle", "none"]));
     expect(completed.artifacts.map((artifact) => artifact.coverage)).toEqual([{ startMilliseconds: 0, endMilliseconds: 45_000 }, { startMilliseconds: 66_000, endMilliseconds: 405_000 }]);
     const identity = completed.artifacts[0]!.identity;
     const destination = join(fixture.operatorHostPath, "selected-preview.mkv");
@@ -182,11 +185,11 @@ it("rejects unsupported streams and path substitution and marks older media outd
     const changed = { ...seeded.input, streams: { audio: [], subtitles: [] } };
     const reviewed = (await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify(changed)])).result as DamagePreviewAvailability;
     expect(await fixture.run(["damage-preview", "request", seeded.archive.id, "--key", "synthetic-stream-change", "--json", JSON.stringify({ selection: changed, preflightToken: reviewed.preflightToken })])).toMatchObject({ exitCode: 0 });
-    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ status: "outdated", provenance: { streams: { audio: [1], subtitles: [] } } });
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ status: "outdated", provenance: { streams: { audio: [128], subtitles: [] } } });
     const unsupported = (await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify({ ...seeded.input, streams: { audio: [2], subtitles: [] } })])).result as DamagePreviewAvailability;
     expect(unsupported.available).toBe(false);
     expect(unsupported.blockingReasons.map((reason) => reason.code)).toContain("DAMAGE_PREVIEW_STREAM_UNREPRESENTABLE");
-    await generate(media({ scan: async () => ({ navigation: { videoTitleSetNumber: 2, titleSetTitleNumber: 1, programChainNumber: 1 }, selectedPath: [], durationMilliseconds: 500_000, chapterDurations: [125_000, 125_000, 125_000, 125_000], audio: [1], subtitles: [], angleCount: 1 }) }));
+    await generate(media({ scan: async () => ({ navigation: { videoTitleSetNumber: 2, titleSetTitleNumber: 1, programChainNumber: 1 }, selectedPath: [], durationMilliseconds: 500_000, chapterDurations: [125_000, 125_000, 125_000, 125_000], audio: [{ sourceId: 128, physicalId: 128, trackNumber: 1, codec: "ac3", channels: 2 }], subtitles: [], angleCount: 1 }) }));
     const failed = access.damagePreviews.list().at(-1)!;
     expect((await fixture.run(["damage-preview", "inspect", failed.id])).result).toMatchObject({ generationStatus: "failed", artifacts: [], reason: { code: "DAMAGE_PREVIEW_PATH_UNREPRESENTABLE" } });
     access.encodingProfiles.setActive({ id: seeded.profile.id, mediaDomain: "dvd_video", isActive: false });
@@ -248,6 +251,7 @@ it("reconciles a finalized MKV after worker death before artifact persistence wi
     const directory = join(fixture.mediaLibraryPath, ".damage-previews", id);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const command = ["synthetic-generator", "-o", join(directory, "0.partial.mkv")];
+    record.streamMapping = { policyVersion: "dvd-preview-stream-map-v1", audio: [{ sourceId: 128, physicalId: 128, trackNumber: 1, codec: "ac3", channels: 2 }], subtitles: [] };
     record.commands = [command]; record.status = "generating"; access.damagePreviews.update(record);
     writeFileSync(join(directory, "0.mkv"), bytes);
     lock.release();
@@ -258,4 +262,39 @@ it("reconciles a finalized MKV after worker death before artifact persistence wi
     expect(await fixture.run(["damage-preview", "export", inspected.artifacts[0]!.identity, "--destination", destination])).toMatchObject({ exitCode: 0 });
     expect(readFileSync(destination)).toEqual(bytes);
   } finally { access.close(); }
+});
+
+it("maps logical DVD source IDs to track ordinals, retains subtitle variants and refuses a missing source mapping", async () => {
+  for (const representable of [true, false]) {
+    const { fixture, seeded, generate, access } = await setup();
+    try {
+      const sqlite = new DatabaseSync(fixture.databasePath);
+      sqlite.prepare("UPDATE detected_discs SET scan_data = ? WHERE id = ?").run(JSON.stringify({ schemaVersion: 2, contentId: seeded.archive.fingerprint, titles: [{ number: 1, durationSeconds: 500, chapters: 4, audioStreams: [{ id: 128, format: "ac3" }, { id: 129, format: "ac3" }], subtitles: [{ id: 32, language: "fr" }] }] }), seeded.archive.detectedDiscId);
+      sqlite.close();
+      const selection = { ...seeded.input, streams: { audio: [129], subtitles: [32] } };
+      const review = (await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify(selection)])).result as DamagePreviewAvailability;
+      expect(review.available).toBe(true);
+      const requested = await fixture.run(["damage-preview", "request", seeded.archive.id, "--key", "synthetic-source-mapping", "--json", JSON.stringify({ selection, preflightToken: review.preflightToken })]);
+      const id = (requested.result as DamagePreviewInspection).id;
+      const audio = [
+        { sourceId: 128, physicalId: 129, trackNumber: 1, codec: "ac3", channels: 2 },
+        { sourceId: 129, physicalId: 128, trackNumber: 2, codec: "ac3", channels: 2 },
+      ];
+      const subtitles = [
+        { sourceId: 32, physicalId: 34, trackNumber: 1, style: "Wide" },
+        { sourceId: 32, physicalId: 35, trackNumber: 2, style: "Letterbox" },
+      ];
+      const base = media();
+      const generation = vi.fn(base.generate);
+      await generate(media({ scan: async () => ({ ...await base.scan({ source: "", titleNumber: 1, angleNumber: 1, chapterStart: 1, chapterEnd: 4, outputPath: "", descriptor: 0, signal: new AbortController().signal }), audio: representable ? audio : audio.slice(0, 1), subtitles }), generate: generation, inspect: async (path) => ({ ...await base.inspect(path), subtitleCount: 2 }) }));
+      const inspected = (await fixture.run(["damage-preview", "inspect", id])).result as DamagePreviewInspection;
+      if (representable) {
+        expect(inspected).toMatchObject({ generationStatus: "complete", provenance: { streams: selection.streams, streamMapping: { audio: [audio[1]], subtitles } } });
+        expect(inspected.provenance.commands[0]).toEqual(expect.arrayContaining(["--audio", "2", "--subtitle", "1,2"]));
+      } else {
+        expect(inspected).toMatchObject({ generationStatus: "failed", reason: { code: "DAMAGE_PREVIEW_STREAM_UNREPRESENTABLE" }, artifacts: [] });
+        expect(generation).not.toHaveBeenCalled();
+      }
+    } finally { access.close(); }
+  }
 });
