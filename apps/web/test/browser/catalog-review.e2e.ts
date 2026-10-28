@@ -277,6 +277,32 @@ test("Review Steps preserve mapping drafts and explain an unavailable damage dec
   await expect(damagePanel.getByText("SELECTION_UNIDENTIFIED", {
     exact: true,
   })).toBeVisible();
+  const acceptancePreflight = damagePanel.getByRole("heading", {
+    name: "Title Damage Acceptance preflight",
+  }).locator("xpath=ancestor::section[1]");
+  const exclusions = acceptancePreflight.getByRole("checkbox");
+  expect(await exclusions.count()).toBeGreaterThan(0);
+  await expect(exclusions.first()).not.toBeChecked();
+  await exclusions.first().click();
+  await expect(exclusions.first()).toBeChecked();
+  const preflightResponse = page.waitForResponse((response) =>
+    response.url().includes("/title-damage-acceptance-preview") &&
+    response.request().method() === "POST"
+  );
+  await acceptancePreflight.getByRole("button", {
+    name: "Preview exact review set",
+  }).click();
+  const completedPreflight = await preflightResponse;
+  expect(completedPreflight.status()).toBe(200);
+  expect(completedPreflight.request().postDataJSON()).toMatchObject({
+    excludedTitleIdentityIds: [expect.any(String)],
+  });
+  await expect(acceptancePreflight.getByText(/Preflight unavailable\./))
+    .toBeVisible();
+  await expect(acceptancePreflight.getByText(
+    "A Damage Preview is optional. Its unavailability does not block this preflight.",
+    { exact: true },
+  )).toBeVisible();
   await expect(damagePanel.getByRole("button", {
     name: "Keep archive only",
   })).toBeDisabled();

@@ -2,8 +2,8 @@ import { expect, it, vi } from "vitest";
 
 import type { DataAccess } from "@rip-dvd/data-access";
 
-import { previewDvdDamageAcceptance } from
-  "./dvd-damage-acceptance-preview.js";
+import { previewDvdTitleDamageAcceptance } from
+  "./dvd-title-damage-acceptance-preview.js";
 
 it("previews clean fully mapped content without a damage acknowledgement", () => {
   const archiveId = "synthetic-clean-archive";
@@ -159,7 +159,7 @@ it("previews clean fully mapped content without a damage acknowledgement", () =>
       id: "synthetic-selection-1",
       originalDiscArchiveId: archiveId,
       mediaItemId: "synthetic-movie",
-      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      sourceIdentity: { kind: "main_feature" },
       label: null,
       createdAt: new Date("2026-10-27T12:00:00.000Z"),
       updatedAt: new Date("2026-10-27T12:00:00.000Z"),
@@ -175,7 +175,7 @@ it("previews clean fully mapped content without a damage acknowledgement", () =>
       createdAt: new Date("2026-10-27T12:00:00.000Z"),
       updatedAt: new Date("2026-10-27T12:00:00.000Z"),
     }],
-    recordDvdDamageAcceptancePreviewDecision: recordPreview,
+    recordDvdTitleDamageAcceptancePreviewDecision: recordPreview,
   };
   const snapshot = {
     catalog,
@@ -206,7 +206,7 @@ it("previews clean fully mapped content without a damage acknowledgement", () =>
       read(snapshot),
   } as unknown as DataAccess;
 
-  const preview = previewDvdDamageAcceptance(
+  const preview = previewDvdTitleDamageAcceptance(
     access,
     archiveId as never,
   );
@@ -214,13 +214,21 @@ it("previews clean fully mapped content without a damage acknowledgement", () =>
   expect(preview).toMatchObject({
     available: true,
     previewToken: expect.stringMatching(
-      /^dvd-damage-acceptance-preview:/,
+      /^dvd-title-damage-acceptance-preview:/,
     ),
     acknowledgementRequired: false,
     reviewedContent: [{
       titleIdentityId: "synthetic-title-1",
       catalogMappings: [{
         mediaItem: { title: "Synthetic clean movie" },
+        sourceIdentity: { kind: "main_feature" },
+        resolvedSourceIdentity: {
+          resolution: "title_identity_binding",
+          displayTitleNumber: 1,
+          angleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 4,
+        },
       }],
       acknowledgementRequired: false,
     }],

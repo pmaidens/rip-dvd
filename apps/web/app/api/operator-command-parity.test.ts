@@ -49,13 +49,15 @@ import {
   seedCommittedArchiveEvidence,
   withEvidenceGuardsDisabled,
 } from "../../../operator-cli/src/archive-evidence.test-support.js";
+import { runDvdTitleDamageAcceptancePreview } from
+  "../../../operator-cli/src/dvd-title-damage-acceptance-preview.js";
 import { createCatalogReviewRoute } from "./catalog-reviews/[id]/route";
 import {
   createCatalogTitleDamageRoute,
 } from "./catalog-reviews/[id]/damage/route";
 import {
-  createDvdDamageAcceptancePreviewRoute,
-} from "./catalog-reviews/[id]/damage-acceptance-preview/route";
+  createDvdTitleDamageAcceptancePreviewRoute,
+} from "./catalog-reviews/[id]/title-damage-acceptance-preview/route";
 import { createCatalogSuggestionRoute } from "./catalog-reviews/[id]/suggestion/route";
 import { createDeploymentReadinessResponse } from "./deployment-readiness/route";
 import { createDashboardRoute } from "./dashboard/route";
@@ -811,7 +813,7 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       ],
     });
     const preflightRequest = new Request(
-      `${trustedOrigin}/api/catalog-reviews/${archive.id}/damage-acceptance-preview`,
+      `${trustedOrigin}/api/catalog-reviews/${archive.id}/title-damage-acceptance-preview`,
       {
         method: "POST",
         headers: {
@@ -822,7 +824,7 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
         body: JSON.stringify({ excludedTitleIdentityIds: [] }),
       },
     );
-    const webPreflight = await createDvdDamageAcceptancePreviewRoute(
+    const webPreflight = await createDvdTitleDamageAcceptancePreviewRoute(
       preflightRequest,
       archive.id,
       () => access,
@@ -830,7 +832,7 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
     );
     const cliPreflight = await fixture.run([
       "catalog-review",
-      "preview-damage-acceptance",
+      "preview-title-damage-acceptance",
       archive.id,
     ]);
     expect(webPreflight.status).toBe(200);
@@ -5722,4 +5724,315 @@ it.each([
   } finally {
     access.close(); fixture.dispose();
   }
+});
+
+function titleDamageAcceptanceParityAccess(options: {
+  assessmentState: "current" | "outdated";
+  mappingState: "mapped" | "needs_mapping_review";
+}): DataAccess {
+  const archiveId = "synthetic-title-damage-acceptance-archive";
+  const checkpoint = {
+    manifestId: "synthetic-title-damage-manifest",
+    manifestRevision: 2,
+    manifestDigest: "a".repeat(64),
+  };
+  const observation = {
+    id: "synthetic-title-damage-observation",
+    titleIdentityId: "synthetic-title-damage-identity",
+    checkpoint,
+    displayTitleNumber: 1,
+    navigation: {
+      videoTitleSetNumber: 1,
+      titleSetTitleNumber: 1,
+      programChainNumber: 1,
+    },
+    selectedPath: [{
+      programNumber: 1,
+      cellNumber: 1,
+      vobId: 1,
+      cellId: 1,
+    }],
+    angleNumber: 1,
+    angleCount: 1,
+    chapterStart: 1,
+    chapterEnd: 4,
+    chapterCount: 4,
+    sourceExtents: [{ startLba: 0, sectorCount: 100 }],
+    contentDigest: "b".repeat(64),
+    continuity: {
+      result: "initial" as const,
+      policyVersion: "synthetic-title-identity-v1",
+      previousObservationId: null,
+    },
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+  };
+  const reviewSet = {
+    originalDiscArchiveId: archiveId,
+    evidenceFormat: "dvd-recovery-evidence-v1" as const,
+    checkpoint,
+    policyVersion: "synthetic-title-identity-v1",
+    reviewSetIdentity: "c".repeat(64),
+    items: [{
+      titleIdentityId: observation.titleIdentityId,
+      presentAtCurrentCheckpoint: true,
+      observation,
+      reviewContinuity: observation.continuity,
+      mappingState: options.mappingState,
+      discSelectionMappings: [{
+        discSelectionId: "synthetic-title-damage-selection",
+        discSelectionIdentity: "d".repeat(64),
+        mappingState: options.mappingState,
+      }],
+    }],
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+  };
+  const assessmentId = `dvd-title-damage-assessment:${"e".repeat(64)}`;
+  const assessmentItem = {
+    titleIdentityId: observation.titleIdentityId,
+    titleIdentityObservationId: observation.id,
+    displayTitleNumber: 1,
+    selection: {
+      selectedPath: observation.selectedPath,
+      angleNumber: 1,
+      chapterStart: 1,
+      chapterEnd: 4,
+    },
+    mappingCoverage: {
+      state: "complete" as const,
+      policyVersion: "synthetic-title-damage-map-v1",
+      unknownReasons: [],
+    },
+    uniqueSourceRanges: [{ startLba: 0, sectorCount: 100 }],
+    uniqueSourceSectorCount: 100,
+    knownUnrecoveredSourceRanges: [],
+    unrecoveredUniqueSourceSectorCount: 0,
+    titleMissingSourcePercentage: 0,
+    knownSourceContinuityRiskRanges: [],
+    sourceContinuityRiskSectorCount: 0,
+    timingEvidence: {
+      policyVersion: "dvd-title-damage-timing-v1" as const,
+      occurrences: [],
+    },
+    estimatedAffectedPlayback: {
+      policyVersion: "dvd-title-damage-timing-v1" as const,
+      intervals: [],
+      unknownCoverage: [],
+    },
+  };
+  const assessment = {
+    id: assessmentId,
+    policyVersion: "dvd-title-damage-assessment-v1" as const,
+    checkpoint: {
+      originalDiscArchiveId: archiveId,
+      ...checkpoint,
+      acceptedEndLbaExclusive: 1_000,
+    },
+    titleIdentityReviewSetIdentity: reviewSet.reviewSetIdentity,
+    structuralAssessmentIdentity:
+      `dvd-structural-assessment:${"f".repeat(64)}`,
+    structuralFindings: {
+      dvdNavigation: "valid" as const,
+      titleEnumeration: "valid" as const,
+    },
+    sourceContinuity: {
+      policyVersion: "dvd-title-source-continuity-v1" as const,
+      provenance: [],
+      sourceContinuityRiskSectorCount: 0,
+    },
+    items: [assessmentItem],
+    unknownTitleImpact: {
+      unrecoveredSourceSectorCount: 0,
+      unrecoveredSourceRanges: [],
+      reasons: [],
+    },
+    unattributedSourceContinuityRisk: {
+      sourceSectorCount: 0,
+      sourceRanges: [],
+    },
+    noTitleMissingSourceProved: true,
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+  };
+  const catalog = {
+    listOriginalDiscArchives: () => [{
+      id: archiveId,
+      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+      catalogReviewOutcome: "needs_review",
+    }],
+    findDvdArchiveEvidenceHeader: () => ({
+      originalDiscArchiveId: archiveId,
+      evidenceFormat: "dvd-recovery-evidence-v1",
+      sourceArchiveJobId: "synthetic-title-damage-archive-job",
+      currentManifestId: checkpoint.manifestId,
+      currentManifestRevision: checkpoint.manifestRevision,
+      currentManifestDigest: checkpoint.manifestDigest,
+      acceptedEndLbaExclusive: 1_000,
+    }),
+    readDvdTitleIdentityReviewSet: () => reviewSet,
+    findArchiveRecovery: () => ({
+      id: "synthetic-title-damage-recovery",
+      attemptId: "synthetic-title-damage-attempt",
+      status: "stopped",
+      work: null,
+    }),
+    listCatalogReviewEvidenceChoices: () => [],
+    listDiscSelections: () => [{
+      id: "synthetic-title-damage-selection",
+      originalDiscArchiveId: archiveId,
+      mediaItemId: "synthetic-title-damage-movie",
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      label: null,
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    }],
+    listMediaItems: () => [{
+      id: "synthetic-title-damage-movie",
+      parentId: null,
+      kind: "movie",
+      title: "Synthetic parity movie",
+      year: 2026,
+      seasonNumber: null,
+      episodeNumber: null,
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    }],
+    recordDvdTitleDamageAcceptancePreviewDecision: vi.fn(),
+  };
+  const snapshot = {
+    catalog,
+    archiveJobs: {
+      listForArchive: () => [{
+        id: "synthetic-title-damage-archive-job",
+        status: "completed",
+        evidenceFormat: "dvd-recovery-evidence-v1",
+      }],
+    },
+    dvdTitleDamageAssessments: {
+      inspect: () => ({
+        schemaVersion: 1,
+        policyVersion: "dvd-title-damage-assessment-v1",
+        originalDiscArchiveId: archiveId,
+        state: options.assessmentState,
+        checkpoint: assessment.checkpoint,
+        currentAssessmentIdentity: options.assessmentState === "current"
+          ? assessmentId
+          : null,
+        assessment,
+        unavailableReasons: [],
+      }),
+    },
+    encodeJobs: {
+      listForDiscSelection: () => [{
+        id: "synthetic-title-damage-encode-job",
+        discSelectionId: "synthetic-title-damage-selection",
+        status: "queued",
+      }],
+    },
+  };
+  return {
+    ...snapshot,
+    readConsistentSnapshot: (read: (value: unknown) => unknown) =>
+      read(snapshot),
+    close: vi.fn(),
+  } as unknown as DataAccess;
+}
+
+async function titleDamageAcceptanceAdapterResults(options: {
+  assessmentState: "current" | "outdated";
+  mappingState: "mapped" | "needs_mapping_review";
+}) {
+  const archiveId = "synthetic-title-damage-acceptance-archive";
+  const request = new Request(
+    `${trustedOrigin}/api/catalog-reviews/${archiveId}/title-damage-acceptance-preview`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Host: new URL(trustedOrigin).host,
+        Origin: trustedOrigin,
+      },
+      body: JSON.stringify({ excludedTitleIdentityIds: [] }),
+    },
+  );
+  const web = await createDvdTitleDamageAcceptancePreviewRoute(
+    request,
+    archiveId,
+    () => titleDamageAcceptanceParityAccess(options),
+    () => trustedOrigin,
+  );
+  const cli = runDvdTitleDamageAcceptancePreview([
+    "preview-title-damage-acceptance",
+    archiveId,
+  ], {
+    openAccess: () => titleDamageAcceptanceParityAccess(options),
+  });
+  expect(web.status).toBe(200);
+  return {
+    web: await web.json() as Record<string, unknown>,
+    cli: JSON.parse(JSON.stringify(cli)) as Record<string, unknown>,
+  };
+}
+
+it("keeps available, outdated, and mapping-review Title Damage Acceptance preflights aligned", async () => {
+  const available = await titleDamageAcceptanceAdapterResults({
+    assessmentState: "current",
+    mappingState: "mapped",
+  });
+  expect(available.web.previewToken).toEqual(expect.stringMatching(
+    /^dvd-title-damage-acceptance-preview:/,
+  ));
+  expect(available.cli.previewToken).toEqual(expect.stringMatching(
+    /^dvd-title-damage-acceptance-preview:/,
+  ));
+  expect({ ...available.cli, previewToken: null }).toEqual({
+    ...available.web,
+    previewToken: null,
+  });
+  expect(available.web).toMatchObject({
+    available: true,
+    action: {
+      available: true,
+      reasons: [],
+      expectedInputs: [
+        "previewToken",
+        "checkpointRevision",
+        "checkpointDigest",
+        "assessmentIdentity",
+        "reviewSetIdentity",
+        "catalogMappingProjectionId",
+        "reviewedContentIdentity",
+        "excludedTitleIdentityIds",
+      ],
+    },
+    reviewSetIdentity: expect.any(String),
+    assessmentIdentity: expect.any(String),
+    catalogMappingProjectionId: expect.any(String),
+    reviewedContentIdentity: expect.any(String),
+  });
+
+  const outdated = await titleDamageAcceptanceAdapterResults({
+    assessmentState: "outdated",
+    mappingState: "mapped",
+  });
+  expect(outdated.cli).toEqual(outdated.web);
+  expect(outdated.web).toMatchObject({
+    available: false,
+    previewToken: null,
+    action: { reasons: [{ code: "ASSESSMENT_OUTDATED" }] },
+  });
+
+  const mappingReview = await titleDamageAcceptanceAdapterResults({
+    assessmentState: "outdated",
+    mappingState: "needs_mapping_review",
+  });
+  expect(mappingReview.cli).toEqual(mappingReview.web);
+  expect(mappingReview.web).toMatchObject({
+    available: false,
+    previewToken: null,
+    action: {
+      reasons: [
+        { code: "ASSESSMENT_OUTDATED" },
+        { code: "MAPPING_REVIEW_REQUIRED" },
+      ],
+    },
+  });
 });

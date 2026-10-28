@@ -4,10 +4,10 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-import type { DvdDamageAcceptancePreview } from "@rip-dvd/application";
+import type { DvdTitleDamageAcceptancePreview } from "@rip-dvd/application";
 
 import { CatalogReviewDamageAcceptancePreview } from
-  "./catalog-review-damage-acceptance-preview";
+  "./catalog-review-title-damage-acceptance-preview";
 import type { CatalogReviewTitleIdentity } from "./catalog-review-model";
 
 let container: HTMLDivElement;
@@ -92,7 +92,7 @@ const preview = {
   evidenceFormat: "dvd-recovery-evidence-v1",
   available: true,
   previewToken:
-    "dvd-damage-acceptance-preview:00000000-0000-4000-8000-000000000001",
+    "dvd-title-damage-acceptance-preview:00000000-0000-4000-8000-000000000001",
   action: { available: true, reasons: [], expectedInputs: ["previewToken"] },
   current: null,
   reviewSetIdentity: "b".repeat(64),
@@ -120,11 +120,18 @@ const preview = {
       discSelectionId: "synthetic-selection-1",
       discSelectionIdentity: "f".repeat(64),
       mappingState: "mapped",
-      sourceIdentity: {
-        kind: "dvd_chapters",
-        titleNumber: 1,
+      sourceIdentity: { kind: "main_feature" },
+      resolvedSourceIdentity: {
+        resolution: "title_identity_binding",
+        displayTitleNumber: 1,
+        navigation: titleIdentity.items[0]!.observation.navigation,
+        selectedPath: titleIdentity.items[0]!.observation.selectedPath,
+        angleNumber: 1,
+        angleCount: 1,
         chapterStart: 1,
-        chapterEnd: 2,
+        chapterEnd: 4,
+        chapterCount: 4,
+        sourceExtents: [{ startLba: 0, sectorCount: 100 }],
       },
       label: null,
       mediaItem: {
@@ -146,9 +153,23 @@ const preview = {
     displayTitleNumber: 1,
     angleNumber: 1,
   }],
-  assessmentSnapshot: null,
+  assessmentSnapshot: {
+    unknownTitleImpact: {
+      unrecoveredSourceSectorCount: 7,
+      unrecoveredSourceRanges: [],
+      reasons: [{ code: "SYNTHETIC_UNKNOWN", message: "Synthetic unknown." }],
+    },
+    unattributedSourceContinuityRisk: {
+      sourceSectorCount: 2,
+      sourceRanges: [],
+    },
+  },
   acknowledgementRequired: false,
-  affectedWork: [],
+  affectedWork: [{
+    id: "synthetic-encode-job",
+    discSelectionId: "synthetic-selection-1",
+    status: "queued",
+  }],
   damagePreview: {
     required: false,
     available: false,
@@ -157,7 +178,7 @@ const preview = {
       message: "Damage Preview is optional.",
     }],
   },
-} as unknown as DvdDamageAcceptancePreview;
+} as unknown as DvdTitleDamageAcceptancePreview;
 
 it("includes all current content by default and sends only explicit exclusions", async () => {
   const fetcher = vi.fn(async () => Response.json(preview));
@@ -178,7 +199,7 @@ it("includes all current content by default and sends only explicit exclusions",
     (container.querySelector("button") as HTMLButtonElement).click();
   });
   expect(fetcher).toHaveBeenCalledWith(
-    "/api/catalog-reviews/synthetic-archive/damage-acceptance-preview",
+    "/api/catalog-reviews/synthetic-archive/title-damage-acceptance-preview",
     expect.objectContaining({
       method: "POST",
       body: JSON.stringify({
@@ -188,6 +209,13 @@ it("includes all current content by default and sends only explicit exclusions",
   );
   expect(container.textContent).toContain("0 included, 1 excluded");
   expect(container.textContent).toContain("movie: Synthetic Movie");
+  expect(container.textContent).toContain(
+    "Main-feature choice resolved by its Title Identity binding to DVD title 1, angle 1, chapters 1-4",
+  );
+  expect(container.textContent).toContain(
+    "Unknown title impact: 7 unrecovered source sectors",
+  );
+  expect(container.textContent).toContain("Encode Job synthetic-encode-job");
   expect(container.textContent).toContain(
     "A Damage Preview is optional. Its unavailability does not block this preflight.",
   );

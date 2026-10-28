@@ -665,7 +665,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   stableRecoverySqlite.close();
   const completePreflight = await fixture.run([
     "catalog-review",
-    "preview-damage-acceptance",
+    "preview-title-damage-acceptance",
     archive.id,
   ]);
   expect(completePreflight).toMatchObject({
@@ -687,7 +687,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   });
   const exactPreflight = await fixture.run([
     "catalog-review",
-    "preview-damage-acceptance",
+    "preview-title-damage-acceptance",
     archive.id,
     "--exclude-title-identity",
     currentItems[1]!.titleIdentityId,
@@ -699,7 +699,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     result: {
       available: true,
       previewToken: expect.stringMatching(
-        /^dvd-damage-acceptance-preview:/,
+        /^dvd-title-damage-acceptance-preview:/,
       ),
       assessmentIdentity: chapterRemapped.id,
       reviewSetIdentity: expect.any(String),
@@ -747,9 +747,9 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
   expect(previewLedger.prepare(`
     SELECT operation, outcome
     FROM mutation_invocations
-    WHERE operation = 'dvd_damage_acceptance.preview'
+    WHERE operation = 'dvd_title_damage_acceptance.preview'
   `).all()).toEqual([{
-    operation: "dvd_damage_acceptance.preview",
+    operation: "dvd_title_damage_acceptance.preview",
     outcome: expect.stringContaining("expectedPreviewEvidence"),
   }]);
   previewLedger.close();

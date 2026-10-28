@@ -122,7 +122,7 @@ stdout. Invalid input exits 2; an unavailable read exits 1.
 ```sh
 rip-dvd catalog-review show <archive-id>
 rip-dvd catalog-review damage <archive-id> [--limit 100] [--cursor <cursor>]
-rip-dvd catalog-review preview-damage-acceptance <archive-id> [--exclude-title-identity <id> ...]
+rip-dvd catalog-review preview-title-damage-acceptance <archive-id> [--exclude-title-identity <id> ...]
 rip-dvd catalog-review archive-only <archive-id> --key <key> --revision <catalog-revision> --checkpoint-revision <n> --checkpoint-digest <digest>
 rip-dvd catalog-review reopen <archive-id> --key <key> --revision <catalog-revision> --checkpoint-revision <n> --checkpoint-digest <digest>
 rip-dvd catalog-review suggest <archive-id>
@@ -137,7 +137,7 @@ initial save, current recovery, mapping state, damage-decision readiness,
 current workflow identities, and stable reasons for unavailable actions.
 Mapping remains available while recovery is active. Legacy archives keep the
 legacy response and completion behavior.
-`preview-damage-acceptance` starts with every Title Identity observed at the
+`preview-title-damage-acceptance` starts with every Title Identity observed at the
 current checkpoint, including unmapped content and every angle. Repeat
 `--exclude-title-identity` only for content the operator does not want. An
 available result returns the concrete catalog mappings, angle and chapter

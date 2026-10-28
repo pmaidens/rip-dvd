@@ -18188,10 +18188,10 @@ export function createDataAccessInternal(
         }).run();
       },
 
-      recordDvdDamageAcceptancePreviewDecision(input) {
+      recordDvdTitleDamageAcceptancePreviewDecision(input) {
         database.insert(mutationInvocations).values({
           key: requireNonEmpty(input.previewToken, "previewToken"),
-          operation: "dvd_damage_acceptance.preview",
+          operation: "dvd_title_damage_acceptance.preview",
           semanticInput: JSON.stringify([
             input.originalDiscArchiveId,
             [...input.excludedTitleIdentityIds].sort(),

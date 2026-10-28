@@ -1,6 +1,6 @@
 import {
   createApplicationOperations,
-  InvalidDvdDamageAcceptancePreviewInputError,
+  InvalidDvdTitleDamageAcceptancePreviewInputError,
 } from "@rip-dvd/application";
 import {
   DomainInvariantError,
@@ -11,7 +11,7 @@ import {
 
 import { CommandFailure } from "./command.js";
 
-interface DvdDamageAcceptancePreviewIO {
+interface DvdTitleDamageAcceptancePreviewIO {
   openAccess(): DataAccess;
 }
 
@@ -21,8 +21,8 @@ function invalid(message: string): never {
 
 function parseArguments(rest: readonly string[]) {
   const [verb, rawArchiveId, ...options] = rest;
-  if (verb !== "preview-damage-acceptance") {
-    invalid("Expected catalog-review preview-damage-acceptance.");
+  if (verb !== "preview-title-damage-acceptance") {
+    invalid("Expected catalog-review preview-title-damage-acceptance.");
   }
   const archiveId = rawArchiveId?.trim();
   if (!archiveId || archiveId.length > 128) {
@@ -34,7 +34,7 @@ function parseArguments(rest: readonly string[]) {
       options[index] !== "--exclude-title-identity" ||
       index + 1 >= options.length
     ) {
-      invalid("Invalid damage acceptance preflight options.");
+      invalid("Invalid Title Damage Acceptance preflight options.");
     }
     excludedTitleIdentityIds.push(options[index + 1]!);
   }
@@ -44,19 +44,19 @@ function parseArguments(rest: readonly string[]) {
   };
 }
 
-export function runDvdDamageAcceptancePreview(
+export function runDvdTitleDamageAcceptancePreview(
   rest: readonly string[],
-  io: DvdDamageAcceptancePreviewIO,
+  io: DvdTitleDamageAcceptancePreviewIO,
 ): unknown {
   const input = parseArguments(rest);
   const access = io.openAccess();
   try {
-    return createApplicationOperations(access).previewDvdDamageAcceptance(
+    return createApplicationOperations(access).previewDvdTitleDamageAcceptance(
       input.archiveId,
       { excludedTitleIdentityIds: input.excludedTitleIdentityIds },
     );
   } catch (error) {
-    if (error instanceof InvalidDvdDamageAcceptancePreviewInputError) {
+    if (error instanceof InvalidDvdTitleDamageAcceptancePreviewInputError) {
       throw new CommandFailure("INVALID_ARGUMENTS", error.message, 2);
     }
     if (error instanceof RecordNotFoundError) {
@@ -64,14 +64,14 @@ export function runDvdDamageAcceptancePreview(
     }
     if (error instanceof DomainInvariantError) {
       throw new CommandFailure(
-        "DAMAGE_ACCEPTANCE_PREFLIGHT_REJECTED",
+        "TITLE_DAMAGE_ACCEPTANCE_PREFLIGHT_REJECTED",
         error.message,
         2,
       );
     }
     throw new CommandFailure(
-      "DAMAGE_ACCEPTANCE_PREFLIGHT_UNAVAILABLE",
-      "Damage acceptance preflight is unavailable.",
+      "TITLE_DAMAGE_ACCEPTANCE_PREFLIGHT_UNAVAILABLE",
+      "Title Damage Acceptance preflight is unavailable.",
       1,
     );
   } finally {

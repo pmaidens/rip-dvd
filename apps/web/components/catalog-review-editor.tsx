@@ -19,7 +19,7 @@ import { CatalogReviewTitleIdentity } from "./catalog-review-title-identity";
 import { CatalogReviewTitleDamageEvidence } from "./catalog-review-title-damage";
 import { DamagePreviewReview } from "./damage-preview-review";
 import { CatalogReviewDamageAcceptancePreview } from
-  "./catalog-review-damage-acceptance-preview";
+  "./catalog-review-title-damage-acceptance-preview";
 import {
   CatalogReviewDamageDecisionStatus,
   CatalogReviewMappingStatus,

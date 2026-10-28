@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type {
-  DvdDamageAcceptancePreview,
+  DvdTitleDamageAcceptancePreview,
 } from "@rip-dvd/application";
 
 import type {
@@ -35,7 +35,7 @@ export function CatalogReviewDamageAcceptancePreview({
 }) {
   const items = currentItems(titleIdentity);
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
-  const [preview, setPreview] = useState<DvdDamageAcceptancePreview | null>(
+  const [preview, setPreview] = useState<DvdTitleDamageAcceptancePreview | null>(
     null,
   );
   const [isLoading, setIsLoading] = useState(false);
@@ -55,7 +55,7 @@ export function CatalogReviewDamageAcceptancePreview({
     setError(null);
     try {
       const response = await fetcher(
-        `/api/catalog-reviews/${encodeURIComponent(originalDiscArchiveId)}/damage-acceptance-preview`,
+        `/api/catalog-reviews/${encodeURIComponent(originalDiscArchiveId)}/title-damage-acceptance-preview`,
         {
           method: "POST",
           headers: {
@@ -68,11 +68,11 @@ export function CatalogReviewDamageAcceptancePreview({
         },
       );
       if (!response.ok) {
-        throw new Error("Damage acceptance preflight request failed");
+        throw new Error("Title Damage Acceptance preflight request failed");
       }
-      setPreview(await response.json() as DvdDamageAcceptancePreview);
+      setPreview(await response.json() as DvdTitleDamageAcceptancePreview);
     } catch {
-      setError("Damage acceptance preflight is unavailable.");
+      setError("Title Damage Acceptance preflight is unavailable.");
     } finally {
       setIsLoading(false);
     }
@@ -80,11 +80,11 @@ export function CatalogReviewDamageAcceptancePreview({
 
   return (
     <section
-      className="catalog-pane catalog-damage-acceptance-preview"
-      aria-labelledby="catalog-damage-acceptance-preview-heading"
+      className="catalog-pane catalog-title-damage-acceptance-preview"
+      aria-labelledby="catalog-title-damage-acceptance-preview-heading"
     >
-      <h3 id="catalog-damage-acceptance-preview-heading">
-        Damage acceptance preflight
+      <h3 id="catalog-title-damage-acceptance-preview-heading">
+        Title Damage Acceptance preflight
       </h3>
       <p className="catalog-help">
         The complete discovered-content set is included. Exclude unwanted
@@ -113,7 +113,7 @@ export function CatalogReviewDamageAcceptancePreview({
       </button>
       {error === null ? null : <p role="alert">{error}</p>}
       {preview === null ? null : (
-        <div className="catalog-damage-acceptance-preview-result">
+        <div className="catalog-title-damage-acceptance-preview-result">
           <p>
             Preflight {preview.available ? "available" : "unavailable"}. {
               preview.reviewedContent.length
@@ -156,9 +156,17 @@ export function CatalogReviewDamageAcceptancePreview({
                         {item.catalogMappings.map((mapping) => (
                           <li key={mapping.discSelectionId}>
                             {mapping.mediaItem.kind}: {mapping.mediaItem.title}. {
-                              mapping.sourceIdentity.kind === "dvd_chapters"
-                                ? `Chapters ${mapping.sourceIdentity.chapterStart}-${mapping.sourceIdentity.chapterEnd}`
+                              mapping.sourceIdentity.kind === "main_feature"
+                                ? "Main-feature choice"
                                 : `Selection ${mapping.sourceIdentity.kind}`
+                            } resolved by its Title Identity binding to DVD title {
+                              mapping.resolvedSourceIdentity.displayTitleNumber
+                            }, angle {
+                              mapping.resolvedSourceIdentity.angleNumber
+                            }, chapters {
+                              mapping.resolvedSourceIdentity.chapterStart
+                            }-{
+                              mapping.resolvedSourceIdentity.chapterEnd
                             }.
                           </li>
                         ))}
@@ -179,6 +187,52 @@ export function CatalogReviewDamageAcceptancePreview({
                   </li>
                 ))}
               </ul>
+              {preview.assessmentSnapshot === null ? null : (
+                <section aria-labelledby="title-damage-unknown-coverage-heading">
+                  <h4 id="title-damage-unknown-coverage-heading">
+                    Damage and unknown coverage
+                  </h4>
+                  <p>
+                    Unknown title impact: {
+                      preview.assessmentSnapshot.unknownTitleImpact
+                        .unrecoveredSourceSectorCount
+                    } unrecovered source sectors. Unattributed
+                    source-continuity risk: {
+                      preview.assessmentSnapshot
+                        .unattributedSourceContinuityRisk?.sourceSectorCount ?? 0
+                    } source sectors.
+                  </p>
+                  {preview.assessmentSnapshot.unknownTitleImpact.reasons.length ===
+                      0
+                    ? <p>No archive-level unknown-impact reasons.</p>
+                    : (
+                      <ul>
+                        {preview.assessmentSnapshot.unknownTitleImpact.reasons
+                          .map((reason) => (
+                            <li key={reason.code}>
+                              <code>{reason.code}</code> {reason.message}
+                            </li>
+                          ))}
+                      </ul>
+                    )}
+                </section>
+              )}
+              <section aria-labelledby="title-damage-affected-work-heading">
+                <h4 id="title-damage-affected-work-heading">Affected work</h4>
+                {preview.affectedWork.length === 0 ? (
+                  <p>No Encode Jobs are affected by this exact set.</p>
+                ) : (
+                  <ul>
+                    {preview.affectedWork.map((job) => (
+                      <li key={job.id}>
+                        Encode Job {job.id}: {job.status}; Disc Selection {
+                          job.discSelectionId
+                        }.
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
               <p>
                 A Damage Preview is optional. Its unavailability does not block
                 this preflight.

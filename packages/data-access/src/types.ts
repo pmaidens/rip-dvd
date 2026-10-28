@@ -1723,7 +1723,7 @@ export interface CatalogReviewCompletionPreviewDecisionInput {
   expectedPreviewEvidence: string;
 }
 
-export interface DvdDamageAcceptancePreviewDecisionInput {
+export interface DvdTitleDamageAcceptancePreviewDecisionInput {
   previewToken: string;
   originalDiscArchiveId: OriginalDiscArchiveId;
   excludedTitleIdentityIds: readonly DvdTitleIdentityId[];
@@ -2058,8 +2058,8 @@ export interface CatalogAccess {
   recordCatalogReviewCompletionPreviewDecision(
     input: CatalogReviewCompletionPreviewDecisionInput,
   ): void;
-  recordDvdDamageAcceptancePreviewDecision(
-    input: DvdDamageAcceptancePreviewDecisionInput,
+  recordDvdTitleDamageAcceptancePreviewDecision(
+    input: DvdTitleDamageAcceptancePreviewDecisionInput,
   ): void;
   createMediaItem(input: CreateMediaItemInput, options?: MediaItemMutationOptions): MediaItem;
   createMappingProposal(

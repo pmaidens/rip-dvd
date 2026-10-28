@@ -1,6 +1,6 @@
 import {
   createApplicationOperations,
-  InvalidDvdDamageAcceptancePreviewInputError,
+  InvalidDvdTitleDamageAcceptancePreviewInputError,
 } from "@rip-dvd/application";
 import { loadConfig } from "@rip-dvd/config";
 import {
@@ -34,7 +34,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-export async function createDvdDamageAcceptancePreviewRoute(
+export async function createDvdTitleDamageAcceptancePreviewRoute(
   request: Request,
   id: string,
   getAccess: () => DataAccess = getDataAccess,
@@ -48,8 +48,8 @@ export async function createDvdDamageAcceptancePreviewRoute(
     trustedOrigin = getTrustedOrigin();
   } catch {
     return errorResponse(
-      "DAMAGE_ACCEPTANCE_PREFLIGHT_UNAVAILABLE",
-      "Damage acceptance preflight is unavailable.",
+      "TITLE_DAMAGE_ACCEPTANCE_PREFLIGHT_UNAVAILABLE",
+      "Title Damage Acceptance preflight is unavailable.",
       503,
     );
   }
@@ -73,17 +73,17 @@ export async function createDvdDamageAcceptancePreviewRoute(
   )) {
     return errorResponse(
       "INVALID_ARGUMENTS",
-      "Damage acceptance preflight requires a JSON exclusions object.",
+      "Title Damage Acceptance preflight requires a JSON exclusions object.",
       400,
     );
   }
   try {
     return response(createApplicationOperations(getAccess())
-      .previewDvdDamageAcceptance(id as OriginalDiscArchiveId, {
+      .previewDvdTitleDamageAcceptance(id as OriginalDiscArchiveId, {
         excludedTitleIdentityIds: body.excludedTitleIdentityIds,
       }));
   } catch (error) {
-    if (error instanceof InvalidDvdDamageAcceptancePreviewInputError) {
+    if (error instanceof InvalidDvdTitleDamageAcceptancePreviewInputError) {
       return errorResponse("INVALID_ARGUMENTS", error.message, 400);
     }
     if (error instanceof RecordNotFoundError) {
@@ -91,14 +91,14 @@ export async function createDvdDamageAcceptancePreviewRoute(
     }
     if (error instanceof DomainInvariantError) {
       return errorResponse(
-        "DAMAGE_ACCEPTANCE_PREFLIGHT_REJECTED",
+        "TITLE_DAMAGE_ACCEPTANCE_PREFLIGHT_REJECTED",
         error.message,
         409,
       );
     }
     return errorResponse(
-      "DAMAGE_ACCEPTANCE_PREFLIGHT_UNAVAILABLE",
-      "Damage acceptance preflight is unavailable.",
+      "TITLE_DAMAGE_ACCEPTANCE_PREFLIGHT_UNAVAILABLE",
+      "Title Damage Acceptance preflight is unavailable.",
       503,
     );
   }
@@ -108,7 +108,7 @@ export async function POST(
   request: Request,
   context: { params: Promise<{ id: string }> },
 ) {
-  return createDvdDamageAcceptancePreviewRoute(
+  return createDvdTitleDamageAcceptancePreviewRoute(
     request,
     (await context.params).id,
   );

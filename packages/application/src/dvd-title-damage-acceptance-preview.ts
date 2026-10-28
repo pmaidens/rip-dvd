@@ -18,19 +18,19 @@ import {
   type CatalogReviewWorkflowAction,
   type CatalogReviewWorkflowReason,
 } from "./catalog-review-workflow.js";
-import { createDvdDamageAcceptancePreviewToken } from
-  "./dvd-damage-acceptance-preview-token.js";
+import { createDvdTitleDamageAcceptancePreviewToken } from
+  "./dvd-title-damage-acceptance-preview-token.js";
 
 const MAX_EXCLUSIONS = 100;
 
-export class InvalidDvdDamageAcceptancePreviewInputError extends Error {}
+export class InvalidDvdTitleDamageAcceptancePreviewInputError extends Error {}
 
 function parseExcludedTitleIdentityIds(
   value: unknown,
 ): readonly DvdTitleIdentityId[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > MAX_EXCLUSIONS) {
-    throw new InvalidDvdDamageAcceptancePreviewInputError(
+    throw new InvalidDvdTitleDamageAcceptancePreviewInputError(
       "excludedTitleIdentityIds must be an array with at most 100 entries.",
     );
   }
@@ -39,14 +39,14 @@ function parseExcludedTitleIdentityIds(
       typeof candidate !== "string" || candidate.length === 0 ||
       candidate.length > 128
     ) {
-      throw new InvalidDvdDamageAcceptancePreviewInputError(
+      throw new InvalidDvdTitleDamageAcceptancePreviewInputError(
         "Each excluded Title Identity must be a non-empty string.",
       );
     }
     return candidate as DvdTitleIdentityId;
   });
   if (new Set(ids).size !== ids.length) {
-    throw new InvalidDvdDamageAcceptancePreviewInputError(
+    throw new InvalidDvdTitleDamageAcceptancePreviewInputError(
       "Excluded Title Identities must be unique.",
     );
   }
@@ -61,7 +61,7 @@ function actionFor(
   );
   if (action === undefined) {
     throw new DomainInvariantError(
-      "Catalog Review workflow is missing damage acceptance preflight availability",
+      "Catalog Review workflow is missing Title Damage Acceptance preflight availability",
     );
   }
   return action;
@@ -117,11 +117,34 @@ function affectedWorkView(job: EncodeJob) {
   };
 }
 
+function resolvedMappingSourceIdentity(
+  item: DvdTitleIdentityReviewSetItem,
+  selection: DiscSelection,
+) {
+  const { observation } = item;
+  return {
+    resolution: "title_identity_binding" as const,
+    displayTitleNumber: observation.displayTitleNumber,
+    navigation: observation.navigation,
+    selectedPath: observation.selectedPath,
+    angleNumber: observation.angleNumber,
+    angleCount: observation.angleCount,
+    chapterStart: selection.sourceIdentity.kind === "dvd_chapters"
+      ? selection.sourceIdentity.chapterStart
+      : observation.chapterStart,
+    chapterEnd: selection.sourceIdentity.kind === "dvd_chapters"
+      ? selection.sourceIdentity.chapterEnd
+      : observation.chapterEnd,
+    chapterCount: observation.chapterCount,
+    sourceExtents: observation.sourceExtents,
+  };
+}
+
 function evidenceIdentity(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-export function previewDvdDamageAcceptance(
+export function previewDvdTitleDamageAcceptance(
   access: DataAccess,
   archiveId: OriginalDiscArchiveId,
   input: { excludedTitleIdentityIds?: unknown } = {},
@@ -195,7 +218,7 @@ export function previewDvdDamageAcceptance(
         reasons: [{
           code: "UNSUPPORTED_EVIDENCE_FORMAT",
           message:
-            "Damage acceptance preflight requires dvd-recovery-evidence-v1.",
+            "Title Damage Acceptance preflight requires dvd-recovery-evidence-v1.",
           details: { originalDiscArchiveId: archiveId },
         }],
         expectedInputs: ["excludedTitleIdentityIds"],
@@ -239,7 +262,7 @@ export function previewDvdDamageAcceptance(
     !currentIdentityIds.has(id)
   );
   if (unknownExclusions.length > 0) {
-    throw new InvalidDvdDamageAcceptancePreviewInputError(
+    throw new InvalidDvdTitleDamageAcceptancePreviewInputError(
       "An excluded Title Identity is not in the current complete review set.",
     );
   }
@@ -275,6 +298,7 @@ export function previewDvdDamageAcceptance(
         discSelectionIdentity: mapping.discSelectionIdentity,
         mappingState: mapping.mappingState,
         sourceIdentity: selection.sourceIdentity,
+        resolvedSourceIdentity: resolvedMappingSourceIdentity(item, selection),
         label: selection.label,
         mediaItem: mediaItemView(mediaItem),
       };
@@ -388,10 +412,10 @@ export function previewDvdDamageAcceptance(
   const available = reasons.length === 0 && reviewSet !== null &&
     titleDamage.state === "current";
   const previewToken = available
-    ? createDvdDamageAcceptancePreviewToken()
+    ? createDvdTitleDamageAcceptancePreviewToken()
     : null;
   if (previewToken !== null) {
-    access.catalog.recordDvdDamageAcceptancePreviewDecision({
+    access.catalog.recordDvdTitleDamageAcceptancePreviewDecision({
       previewToken,
       originalDiscArchiveId: archiveId,
       excludedTitleIdentityIds,
@@ -443,6 +467,6 @@ export function previewDvdDamageAcceptance(
   };
 }
 
-export type DvdDamageAcceptancePreview = ReturnType<
-  typeof previewDvdDamageAcceptance
+export type DvdTitleDamageAcceptancePreview = ReturnType<
+  typeof previewDvdTitleDamageAcceptance
 >;
