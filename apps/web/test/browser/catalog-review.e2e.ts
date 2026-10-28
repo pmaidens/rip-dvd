@@ -333,6 +333,26 @@ test("Title Damage paging retrieves evidence beyond the review summary", async (
   await expect(loadMore).toHaveCount(0);
 });
 
+test("Damage Preview reviews selections and keeps generation explicitly unavailable", async ({ page }, testInfo) => {
+  await openCatalogReview(page, `CATALOG_BROWSER_DAMAGE_${fixtureVariant(testInfo.project.name).toUpperCase()}`);
+  await page.getByRole("tab", { name: "Damage decision" }).click();
+  const preview = page.getByRole("region", { name: "Damage Preview", exact: true });
+  await expect(preview.getByRole("button", { name: "Generate Damage Preview" })).toBeDisabled();
+  await preview.getByRole("button", { name: "Review preview availability" }).click();
+  await expect(preview.getByLabel("Identified title")).toBeVisible();
+  await preview.getByLabel("Interval 1:", { exact: false }).check();
+  await preview.getByLabel("Playback range end in seconds").fill("180");
+  await preview.getByLabel("Audio stream IDs, separated by commas").fill("1");
+  await preview.getByRole("button", { name: "Review preview selections" }).click();
+  await expect(preview.getByRole("heading", { name: "Reviewed preview" })).toBeVisible();
+  await expect(preview.getByText("Estimated duration: 13 s. Estimated storage: unknown.")).toBeVisible();
+  await expect(preview.getByText(/DAMAGE_PREVIEW_GENERATION_UNAVAILABLE:/)).toBeVisible();
+  await expect(preview.getByRole("button", { name: "Generate Damage Preview" })).toBeDisabled();
+  await preview.getByLabel("Context before in seconds").fill("10");
+  await expect(preview.getByRole("heading", { name: "Reviewed preview" })).toHaveCount(0);
+  await expectNoPageOverflow(page);
+});
+
 test("complex Catalog Review remains responsive and exposes accessible state", async ({ page }, testInfo) => {
   const variant = fixtureVariant(testInfo.project.name);
   await openCatalogReview(

@@ -1,4 +1,5 @@
 import { runNotifications } from "./notifications.js";
+import { runDamagePreview } from "./damage-preview.js";
 import { StructuredInputError } from "./structured-input.js";
 import {
   createApplicationOperations,
@@ -127,6 +128,13 @@ function isRetiredCommand(name: string): name is keyof typeof retiredCommandGuid
 }
 
 const commandDefinitions = [
+  {
+    name: "damage-preview",
+    description: "Review checkpoint-bound Damage Preview availability and selections. Generation is unavailable.",
+    usage: "rip-dvd damage-preview availability <archive-id> [--json <selection>|--stdin|--file <path>]",
+    inputs: { arguments: ["availability", "archive-id"], options: ["--json", "--stdin", "--file"] },
+    example: "rip-dvd damage-preview availability <archive-id>",
+  },
   {
     name: "notifications",
     description: "Inspect push readiness, administer subscriptions, submit a test, and inspect queued, retrying, provider-accepted, expired or failed deliveries with redacted reasons, attempt counts, retry times and expiry. Archive Job outcomes, later Recovery completion and committed Recovery faults use this shared queue. Browser worker updates preserve subscriptions; no re-registration is needed.",
@@ -2207,6 +2215,11 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         return 0;
       }
       emit(io.stdout, submitArchiveAudit(archiveAuditInputs(rest), io.openAccess));
+      return 0;
+    }
+    if (name === "damage-preview") {
+      if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) emit(io.stdout, help(name));
+      else emit(io.stdout, await runDamagePreview(rest, io));
       return 0;
     }
     if (name === "catalog-review") {

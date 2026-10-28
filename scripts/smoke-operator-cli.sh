@@ -53,6 +53,16 @@ help_output="$(invoke)"
 printf '%s\n' "$help_output" | assert_json_fields \
   'schemaVersion=1' 'usage=rip-dvd <command>'
 
+preview_help="$(invoke help damage-preview)"
+printf '%s\n' "$preview_help" | assert_json_fields 'schemaVersion=1'
+set +e
+preview_output="$(invoke damage-preview availability synthetic-missing-archive \
+  2>"$temporary_directory/preview.stderr")"
+preview_status=$?
+set -e
+[ "$preview_status" -eq 2 ]
+printf '%s\n' "$preview_output" | assert_json_fields 'error.code=NOT_FOUND'
+
 set +e
 verification_output="$(invoke archive-recovery inspect-verification \
   synthetic-missing-recovery \
