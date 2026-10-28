@@ -122,6 +122,7 @@ stdout. Invalid input exits 2; an unavailable read exits 1.
 ```sh
 rip-dvd catalog-review show <archive-id>
 rip-dvd catalog-review damage <archive-id> [--limit 100] [--cursor <cursor>]
+rip-dvd catalog-review preview-damage-acceptance <archive-id> [--exclude-title-identity <id> ...]
 rip-dvd catalog-review archive-only <archive-id> --key <key> --revision <catalog-revision> --checkpoint-revision <n> --checkpoint-digest <digest>
 rip-dvd catalog-review reopen <archive-id> --key <key> --revision <catalog-revision> --checkpoint-revision <n> --checkpoint-digest <digest>
 rip-dvd catalog-review suggest <archive-id>
@@ -136,6 +137,14 @@ initial save, current recovery, mapping state, damage-decision readiness,
 current workflow identities, and stable reasons for unavailable actions.
 Mapping remains available while recovery is active. Legacy archives keep the
 legacy response and completion behavior.
+`preview-damage-acceptance` starts with every Title Identity observed at the
+current checkpoint, including unmapped content and every angle. Repeat
+`--exclude-title-identity` only for content the operator does not want. An
+available result returns the concrete catalog mappings, angle and chapter
+bounds, assessment snapshots, damage and unknown coverage, affected work, the
+identities a later acceptance must present, and a persisted opaque token. The
+preview does not accept damage or queue an Encode Job. A missing optional
+Damage Preview never appears as an acceptance blocker.
 `reviewActionAvailability` reports whether completion with selections or
 Archive-only completion is currently allowed, with a reason when blocked.
 Each paginated section includes its offset, limit, and next/previous flags.

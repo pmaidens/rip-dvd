@@ -1723,6 +1723,13 @@ export interface CatalogReviewCompletionPreviewDecisionInput {
   expectedPreviewEvidence: string;
 }
 
+export interface DvdDamageAcceptancePreviewDecisionInput {
+  previewToken: string;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  excludedTitleIdentityIds: readonly DvdTitleIdentityId[];
+  expectedPreviewEvidence: string;
+}
+
 export type RunningArchiveJob = ArchiveJob & {
   status: "running";
   claimToken: ArchiveJobClaimToken;
@@ -2050,6 +2057,9 @@ export interface CatalogAccess {
   ): CatalogReviewEvidenceChoiceRecord[];
   recordCatalogReviewCompletionPreviewDecision(
     input: CatalogReviewCompletionPreviewDecisionInput,
+  ): void;
+  recordDvdDamageAcceptancePreviewDecision(
+    input: DvdDamageAcceptancePreviewDecisionInput,
   ): void;
   createMediaItem(input: CreateMediaItemInput, options?: MediaItemMutationOptions): MediaItem;
   createMappingProposal(

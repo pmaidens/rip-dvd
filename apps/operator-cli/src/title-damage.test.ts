@@ -655,6 +655,105 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     assessment: { id: chapterRemapped.id },
   });
 
+  const stableRecoverySqlite = new DatabaseSync(fixture.databasePath);
+  stableRecoverySqlite.prepare(`
+    UPDATE archive_recoveries
+    SET status = 'stopped', stop_operation_id = 'synthetic-stop',
+        stop_requested_at = 3, stopped_at = 4, updated_at = 4
+    WHERE original_disc_archive_id = ?
+  `).run(archive.id);
+  stableRecoverySqlite.close();
+  const completePreflight = await fixture.run([
+    "catalog-review",
+    "preview-damage-acceptance",
+    archive.id,
+  ]);
+  expect(completePreflight).toMatchObject({
+    exitCode: 0,
+    result: {
+      available: false,
+      previewToken: null,
+      action: {
+        available: false,
+        reasons: [{ code: "SELECTION_UNIDENTIFIED" }],
+      },
+      allContent: [
+        { titleIdentityId: currentItems[0]!.titleIdentityId, included: true },
+        { titleIdentityId: currentItems[1]!.titleIdentityId, included: true },
+        { titleIdentityId: currentItems[2]!.titleIdentityId, included: true },
+      ],
+      exclusions: [],
+    },
+  });
+  const exactPreflight = await fixture.run([
+    "catalog-review",
+    "preview-damage-acceptance",
+    archive.id,
+    "--exclude-title-identity",
+    currentItems[1]!.titleIdentityId,
+    "--exclude-title-identity",
+    currentItems[2]!.titleIdentityId,
+  ]);
+  expect(exactPreflight).toMatchObject({
+    exitCode: 0,
+    result: {
+      available: true,
+      previewToken: expect.stringMatching(
+        /^dvd-damage-acceptance-preview:/,
+      ),
+      assessmentIdentity: chapterRemapped.id,
+      reviewSetIdentity: expect.any(String),
+      catalogMappingProjectionId: expect.any(String),
+      reviewedContentIdentity: expect.any(String),
+      acknowledgementRequired: true,
+      reviewedContent: [{
+        titleIdentityId: currentItems[0]!.titleIdentityId,
+        sourceIdentity: {
+          displayTitleNumber: 1,
+          angleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 4,
+        },
+        catalogMappings: [{
+          discSelectionId: mappedSelection.id,
+          sourceIdentity: {
+            kind: "dvd_chapters",
+            titleNumber: 1,
+            chapterStart: 1,
+            chapterEnd: 2,
+          },
+          mediaItem: {
+            kind: "movie",
+            title: "Synthetic remapped damage",
+          },
+        }],
+        assessmentSnapshot: {
+          unrecoveredUniqueSourceSectorCount: 4,
+          sourceContinuityRiskSectorCount: 1,
+        },
+      }],
+      exclusions: [
+        { titleIdentityId: currentItems[1]!.titleIdentityId },
+        { titleIdentityId: currentItems[2]!.titleIdentityId },
+      ],
+      affectedWork: [],
+      damagePreview: {
+        required: false,
+        available: false,
+      },
+    },
+  });
+  const previewLedger = new DatabaseSync(fixture.databasePath);
+  expect(previewLedger.prepare(`
+    SELECT operation, outcome
+    FROM mutation_invocations
+    WHERE operation = 'dvd_damage_acceptance.preview'
+  `).all()).toEqual([{
+    operation: "dvd_damage_acceptance.preview",
+    outcome: expect.stringContaining("expectedPreviewEvidence"),
+  }]);
+  previewLedger.close();
+
   const laterRecorded = await access.assessDvdTitleDamage(
     archive.id,
     ownership,

@@ -18,6 +18,8 @@ import { CatalogReviewRearchiveProposal } from "./catalog-review-rearchive-propo
 import { CatalogReviewTitleIdentity } from "./catalog-review-title-identity";
 import { CatalogReviewTitleDamageEvidence } from "./catalog-review-title-damage";
 import { DamagePreviewReview } from "./damage-preview-review";
+import { CatalogReviewDamageAcceptancePreview } from
+  "./catalog-review-damage-acceptance-preview";
 import {
   CatalogReviewDamageDecisionStatus,
   CatalogReviewMappingStatus,
@@ -522,6 +524,10 @@ export function CatalogReviewView({
             aria-labelledby="catalog-review-step-damage"
             hidden={activeStep !== "damage"}
           >
+            <CatalogReviewDamageAcceptancePreview
+              originalDiscArchiveId={review.archive.id}
+              titleIdentity={review.titleIdentity}
+            />
             <CatalogReviewTitleDamageEvidence
               originalDiscArchiveId={review.archive.id}
               titleDamage={review.titleDamage}

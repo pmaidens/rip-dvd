@@ -53,6 +53,9 @@ import { createCatalogReviewRoute } from "./catalog-reviews/[id]/route";
 import {
   createCatalogTitleDamageRoute,
 } from "./catalog-reviews/[id]/damage/route";
+import {
+  createDvdDamageAcceptancePreviewRoute,
+} from "./catalog-reviews/[id]/damage-acceptance-preview/route";
 import { createCatalogSuggestionRoute } from "./catalog-reviews/[id]/suggestion/route";
 import { createDeploymentReadinessResponse } from "./deployment-readiness/route";
 import { createDashboardRoute } from "./dashboard/route";
@@ -805,6 +808,48 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
           reasons: [{ code: "CATALOG_REVIEW_OPEN" }],
         },
         { action: "encode", available: false },
+      ],
+    });
+    const preflightRequest = new Request(
+      `${trustedOrigin}/api/catalog-reviews/${archive.id}/damage-acceptance-preview`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: new URL(trustedOrigin).host,
+          Origin: trustedOrigin,
+        },
+        body: JSON.stringify({ excludedTitleIdentityIds: [] }),
+      },
+    );
+    const webPreflight = await createDvdDamageAcceptancePreviewRoute(
+      preflightRequest,
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const cliPreflight = await fixture.run([
+      "catalog-review",
+      "preview-damage-acceptance",
+      archive.id,
+    ]);
+    expect(webPreflight.status).toBe(200);
+    expect(cliPreflight.exitCode).toBe(0);
+    expect(cliPreflight.result).toEqual(await webPreflight.json());
+    expect(cliPreflight.result).toMatchObject({
+      available: false,
+      previewToken: null,
+      action: {
+        reasons: [
+          { code: "ASSESSMENT_PENDING" },
+          { code: "RECOVERY_ACTIVE" },
+          { code: "SELECTION_UNIDENTIFIED" },
+        ],
+      },
+      allContent: [
+        { sourceIdentity: { displayTitleNumber: 1, angleNumber: 1 } },
+        { sourceIdentity: { displayTitleNumber: 1, angleNumber: 2 } },
+        { sourceIdentity: { displayTitleNumber: 3, angleNumber: 1 } },
       ],
     });
     const dashboardResponse = createDashboardRoute(

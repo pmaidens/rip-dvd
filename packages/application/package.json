@@ -33,6 +33,10 @@
     "./rearchive-acceptance-preview-token": {
       "types": "./src/rearchive-acceptance-preview-token.ts",
       "default": "./dist/rearchive-acceptance-preview-token.js"
+    },
+    "./dvd-damage-acceptance-preview-token": {
+      "types": "./src/dvd-damage-acceptance-preview-token.ts",
+      "default": "./dist/dvd-damage-acceptance-preview-token.js"
     }
   },
   "files": ["dist"],

@@ -18188,6 +18188,21 @@ export function createDataAccessInternal(
         }).run();
       },
 
+      recordDvdDamageAcceptancePreviewDecision(input) {
+        database.insert(mutationInvocations).values({
+          key: requireNonEmpty(input.previewToken, "previewToken"),
+          operation: "dvd_damage_acceptance.preview",
+          semanticInput: JSON.stringify([
+            input.originalDiscArchiveId,
+            [...input.excludedTitleIdentityIds].sort(),
+          ]),
+          outcome: JSON.stringify({
+            expectedPreviewEvidence: input.expectedPreviewEvidence,
+          }),
+          createdAt: now(),
+        }).run();
+      },
+
       createMediaItem(input, options) {
         const timestamp = now();
         const id = newId<MediaItemId>();

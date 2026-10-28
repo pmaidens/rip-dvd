@@ -60,6 +60,8 @@ import { runMediaItem } from "./media-item.js";
 import { runMappingProposal } from "./mapping-proposal.js";
 import { runCatalogReviewCompletion } from "./catalog-review-completion.js";
 import { runCatalogReviewChoice } from "./catalog-review-choice.js";
+import { runDvdDamageAcceptancePreview } from
+  "./dvd-damage-acceptance-preview.js";
 import { runRearchiveMappingProposal } from "./rearchive-mapping-proposal.js";
 import { runRearchiveAcceptance } from "./rearchive-acceptance.js";
 
@@ -268,12 +270,13 @@ const commandDefinitions = [
   {
     name: "catalog-review",
     description: "Inspect or change a Catalog Review and review Mapping Proposals or Title Damage evidence.",
-    usage: "rip-dvd catalog-review <show|damage|suggest|archive-only|reopen|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive> <archive-id> [options]",
+    usage: "rip-dvd catalog-review <show|damage|preview-damage-acceptance|suggest|archive-only|reopen|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive> <archive-id> [options]",
     inputs: {
-      arguments: ["show|damage|suggest|archive-only|reopen|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive", "archive-id"],
+      arguments: ["show|damage|preview-damage-acceptance|suggest|archive-only|reopen|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive", "archive-id"],
       options: [
         "show: --selection-offset, --correction-offset, --correction-job-offset, --correction-output-offset, --replacement-offset, --replacement-profile-offset",
         "damage: --limit <1..100> --cursor <cursor>",
+        "preview-damage-acceptance: --exclude-title-identity <id> (repeatable)",
         "suggest: --tmdb-id <positive integer> --media-type <movie|tv_show> (together, optional)",
         "apply-proposal: --key <key> and exactly one of --json <object>, --stdin, --file <path>",
         "preview-completion: exactly one of --json <object>, --stdin, --file <path>",
@@ -2230,6 +2233,8 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
       emit(io.stdout,
         rest[0] === "apply-proposal"
           ? runMappingProposal(rest.slice(1), io)
+          : rest[0] === "preview-damage-acceptance"
+            ? runDvdDamageAcceptancePreview(rest, io)
           : rest[0] === "archive-only" || rest[0] === "reopen"
             ? runCatalogReviewChoice(rest, io)
           : rest[0] === "preview-completion" || rest[0] === "complete"
