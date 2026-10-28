@@ -1,4 +1,5 @@
-import { Worker } from "node:worker_threads";
+import { encodeContender } from "./encode-concurrency.test-support.js";
+import { recordSyntheticRecoveryStorage } from "./encode-source-decision.test-support.js";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import type { EncodingReadiness } from "@rip-dvd/application";
@@ -9,25 +10,7 @@ import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
-type Result = { outcome: string; code?: string; reasons?: string[] };
-
-function contender(data: Record<string, unknown>) {
-  const worker = new Worker(new URL("../test/encode-source-concurrency-worker.mjs", import.meta.url), { workerData: data });
-  const events = new Map<string, () => void>();
-  const received = new Set<string>();
-  const result = new Promise<Result>((resolve, reject) => {
-    worker.on("error", reject);
-    worker.on("message", (message: { type: string; value: Result }) => {
-      received.add(message.type); events.get(message.type)?.();
-      if (message.type === "result") resolve(message.value);
-    });
-    worker.on("exit", (code) => { if (code !== 0) reject(new Error(`Contender exited ${code}`)); });
-  });
-  const event = (name: string) => received.has(name) ? Promise.resolve() : new Promise<void>((resolve, reject) => {
-    events.set(name, resolve); result.then(() => reject(new Error(`Contender ended before ${name}`)), reject);
-  });
-  return { result, event, terminate: () => worker.terminate() };
-}
+const contender = (data: Record<string, unknown>) => encodeContender(new URL("../test/encode-source-concurrency-worker.mjs", import.meta.url), data);
 
 it.each(["enqueue", "requeue"] as const)("serializes current-source %s with Recovery Resume in both exact orderings", async (operation) => {
   for (const order of ["encode-first", "resume-first"] as const) {
@@ -35,13 +18,7 @@ it.each(["enqueue", "requeue"] as const)("serializes current-source %s with Reco
     const seeded = await seedEncodingReadiness(fixture, { clean: true });
     const access = fixture.openAccess();
     access.catalog.completeCatalogReview(seeded.archive.id, access.catalog.listOriginalDiscArchives({ ids: [seeded.archive.id] })[0]!.updatedAt, "reviewed_with_selections");
-    access.dvdRecoveryStorage.record({ contractVersion: "dvd-recovery-storage-preflight-v1", status: "supported", reasonCode: null,
-      facts: { filesystemType: "synthetic-local", storageClass: "local", mutationProtection: {
-        status: "verified", contract: "linux-rwf-atomic-v1", unitBytes: 4096, memoryAlignmentBytes: 4096,
-      }, journalReservationBytes: 1048576, journalPayloadBytes: 983040, journalReservation: "verified",
-      journalSynchronization: "verified", imageSynchronization: "verified", checkpointSynchronization: "verified",
-      checkpointReplacement: "verified", directorySynchronization: "verified", crossProcessWriterExclusion: "verified",
-      crossHostWriterExclusion: "not_applicable", disconnectionBehavior: "not_applicable" } });
+    recordSyntheticRecoveryStorage(access);
     const recovery = access.catalog.findArchiveRecovery(seeded.archive.id)!;
     access.close();
     const decision = ((await fixture.run(["encode-readiness", seeded.archive.id])).result as EncodingReadiness).selections[0]!.expectedSourceDecision;

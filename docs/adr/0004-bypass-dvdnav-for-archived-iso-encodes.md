@@ -16,8 +16,11 @@ The output validator also compares a full-title encode with the archived DVD
 title duration. An output must retain at least 98 percent of the stored
 duration. This allows for whole-second source metadata and container timestamp
 differences while rejecting a material truncation. An explicit `dvd_title`
-selection uses that title's duration. A `main_feature` selection uses the
-longest stored title, matching HandBrake's main-feature choice.
+selection uses that title's duration. Historical `main_feature` selections use
+the longest stored title, matching HandBrake's main-feature choice. A new-format
+claim resolves `main_feature` to the operator's concrete Title Identity and uses
+that title's stored duration. Later catalog changes cannot change the claim's
+duration target.
 
 A bounded `dvd_chapters` selection still uses `--no-dvdnav`, but it has no
 duration requirement. The archived title map records the whole-title duration

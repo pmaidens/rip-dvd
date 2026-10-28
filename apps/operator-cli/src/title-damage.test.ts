@@ -1224,12 +1224,16 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     mediaLibraryPath: fixture.mediaLibraryPath,
     originalsLibraryPath: fixture.originalsLibraryPath,
   });
-  const claimWinner = claimAccess.encodeJobs.claimNext(
-    "synthetic-withdrawal-race-worker",
-  );
-  if (claimWinner === null) {
-    throw new Error("Expected one Encode Job to win the withdrawal race");
-  }
+  // Seed already-running work for the withdrawal inventory. Prepared source
+  // claim races are covered in encode-claim-concurrency.test.ts.
+  const runningSeed = new DatabaseSync(fixture.databasePath);
+  runningSeed.prepare(`UPDATE encode_jobs SET status = 'running', claim_token = 'synthetic-existing-running-claim',
+    claimed_by = 'synthetic-existing-worker', claimed_at = ?, started_at = ?, updated_at = ? WHERE id = ?`)
+    .run(Date.now(), Date.now(), Date.now(), affectedWorkJobIds[0]);
+  runningSeed.close();
+  const running = claimAccess.encodeJobs.find(affectedWorkJobIds[0] as never);
+  if (running?.status !== "running" || running.claimToken === null) throw new Error("Expected synthetic running withdrawal work");
+  const claimWinner = { ...running, status: running.status, claimToken: running.claimToken };
   const withdrawalPreview = await fixture.run([
     "catalog-review",
     "preview-withdrawal",

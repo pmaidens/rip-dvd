@@ -1,3 +1,4 @@
+import type { EncodeClaimSnapshot, EncodeJobClaimOptions } from "./encode-claim-snapshot.js";
 import type {
   ARCHIVE_FAILURE_DETAIL_VERSIONS,
   ARCHIVE_JOB_STATUSES,
@@ -1583,6 +1584,7 @@ export interface ArchiveReadFailureEvidence {
 }
 
 export interface EncodeJob {
+  expectedSourceDecision?: EncodeSourceDecision | null;
   id: EncodeJobId;
   predecessorEncodeJobId: EncodeJobId | null;
   discSelectionId: DiscSelectionId;
@@ -2693,7 +2695,10 @@ export interface EncodeJobAccess {
   replayRequeue(id: EncodeJobId, options: EncodeJobRequeueOptions): EncodeJob | null;
   enqueue(input: EncodeJobEnqueueInput, assertSourceDecision?: () => void): EncodeJob;
   requestCancellation(id: EncodeJobId, mutationKey?: string): EncodeJob;
-  claimNext(workerId: string): RunningEncodeJob | null;
+  listSourceClaimCandidates(options: { limit: number; offset: number }): EncodeJob[];
+  claimNext(workerId: string, options?: EncodeJobClaimOptions): RunningEncodeJob | null;
+  findClaimSnapshot(id: EncodeJobClaimToken): EncodeClaimSnapshot | null;
+  listClaimSnapshots(id: EncodeJobId, options?: { limit: number; offset: number }): EncodeClaimSnapshot[];
   renewClaim(claim: RunningEncodeJob): ClaimedEncodeJob;
   completeCancellation(claim: RunningEncodeJob): EncodeJob;
   completeCancellationWithReports(
@@ -3067,6 +3072,7 @@ export interface ConsistentReadAccess {
   >;
   readonly encodeJobs: Pick<
     EncodeJobAccess,
+    | "listClaimSnapshots"
     | "find"
     | "list"
     | "listForDiscSelection"

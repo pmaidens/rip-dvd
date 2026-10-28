@@ -1,3 +1,4 @@
+import { claimNextEncodeJob } from "@rip-dvd/application";
 import { setTimeout as delay } from "node:timers/promises";
 
 import type { DataAccess } from "@rip-dvd/data-access";
@@ -102,9 +103,8 @@ export async function pollEncodeWorker(
   await reconcileEncodePublications(publicationOptions);
   const runSlot = async () => {
     while (!options.signal.aborted) {
-      const claim = options.access.encodeJobs.claimNext(
-        options.workerId ?? "encode-worker",
-      );
+      const claim = await claimNextEncodeJob(options.access,
+        options.workerId ?? "encode-worker", options.originalsLibraryPath, options.archiveImageOwnership);
       if (!claim) {
         return;
       }

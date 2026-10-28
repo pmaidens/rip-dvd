@@ -772,3 +772,11 @@ without queueing work. Mutation keys bind these identities as well as output
 settings. Matching source decisions survive compression-only changes and
 ordinary retries. New-format admission remains closed until the full core path
 passes its release gate.
+
+Encode Job inspection includes `claimSnapshots` and a `claimSnapshotPage` with
+`limit`, `offset`, and `nextOffset`. Each new-format winning claim retains its
+source checkpoint, concrete title/path/angle/chapter selection, audio and subtitle
+identities, versioned profile, resolved execution settings, and source decision
+evidence. A retry appends a new record. Withdrawal and later catalog edits leave
+prior records intact. Historical claims have no invented source evidence.
+New-format admission remains closed until the complete core release gate passes.

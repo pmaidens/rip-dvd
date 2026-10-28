@@ -6,6 +6,7 @@ export default defineConfig({
   root: import.meta.dirname,
   resolve: {
     alias: [
+      { find: "@rip-dvd/data-access/test-support", replacement: fileURLToPath(new URL("../../packages/data-access/src/disc-settling-fixture.ts", import.meta.url)) },
       {
         find: "@rip-dvd/data-access/rearchive-test-support",
         replacement: fileURLToPath(
@@ -25,7 +26,7 @@ export default defineConfig({
         ),
       },
       {
-        find: "@rip-dvd/data-access",
+        find: /^@rip-dvd\/data-access$/,
         replacement: fileURLToPath(
           new URL("../../packages/data-access/src/index.ts", import.meta.url),
         ),

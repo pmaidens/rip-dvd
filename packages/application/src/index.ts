@@ -1136,3 +1136,5 @@ export type DamagePreviewInspection = Awaited<ReturnType<typeof inspectDamagePre
 export { InvalidEncodingReadinessInputError, type EncodingReadiness } from "./encoding-readiness.js";
 
 export { EncodeSourceDecisionRejectedError, InvalidEncodeSourceDecisionError } from "./encode-source-decision.js";
+
+export { claimNextEncodeJob, assertEncodeClaimSource } from "./encode-claim.js";
