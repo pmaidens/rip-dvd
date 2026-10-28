@@ -121,3 +121,38 @@ it("checks the claimed checkpoint before even the subtitle scan opens the image"
     expect(seeded.access.encodeJobs.find(seeded.job.id)?.status).toBe("failed");
   } finally { seeded.access.close(); }
 });
+
+it("holds shared ownership for the complete marked archive encode read", async () => {
+  const current = fixture();
+  const seeded = await seedEncodeClaim(current);
+  const ownership = createArchiveImageOwnership({ authorityRootPath: current.originalsLibraryPath });
+  let ownershipActive = false;
+  let descriptor: number | undefined;
+  const assertOwned = vi.fn(() => { expect(ownershipActive).toBe(true); });
+  const guarded = { ...ownership, withConsistentRead: ((request: Parameters<typeof ownership.withConsistentRead>[0]) =>
+    ownership.withConsistentRead({ ...request, task: async (handle) => {
+      ownershipActive = true; descriptor = handle.descriptor;
+      try { return await request.task({ ...handle, assertOwned() { handle.assertOwned(); assertOwned(); } }); }
+      finally { ownershipActive = false; }
+    } })) as typeof ownership.withConsistentRead };
+  const runner = { run: vi.fn(async ({ outputPath, sourceOwnershipDescriptor }: HandBrakeRunRequest) => {
+    expect(ownershipActive).toBe(true);
+    expect(sourceOwnershipDescriptor).toBe(descriptor);
+    writeFileSync(outputPath, "synthetic consistent encode", { flag: "wx" });
+  }) };
+  const scanner = { scan: vi.fn(async (_path: string, _title: number, _signal: AbortSignal, sourceOwnershipDescriptor?: number) => {
+    expect(ownershipActive).toBe(true);
+    expect(sourceOwnershipDescriptor).toBe(descriptor);
+    return [];
+  }) };
+  try {
+    await pollEncodeWorker({ ...current, access: seeded.access, concurrency: 1, log: () => {},
+      signal: new AbortController().signal, archiveImageOwnership: guarded, runner, subtitleScanner: scanner,
+      outputValidator: { prepareAndValidate: vi.fn(async () => {}) } });
+    expect(runner.run).toHaveBeenCalledOnce();
+    expect(scanner.scan).toHaveBeenCalledOnce();
+    expect(assertOwned).toHaveBeenCalled();
+    expect(ownershipActive).toBe(false);
+    expect(seeded.access.encodeJobs.find(seeded.job.id)?.status).toBe("completed");
+  } finally { seeded.access.close(); }
+});

@@ -15477,14 +15477,15 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           outcome: "rejected",
           code: "ENCODE_WORK_CONFLICT",
         });
-        expect(results[1]).toMatchObject({ outcome: "claimed" });
+        // Reservation-only fixtures cannot authorize unprepared source claims.
+        expect(results[1]).toMatchObject({ outcome: "rejected" });
         expect(
           exclusionAccess.catalog.findArchiveRecovery(archive.id),
         ).toMatchObject({ id: recoveryId, work: null });
         expect(exclusionAccess.encodeJobs.list()).toEqual([
           expect.objectContaining({
             id: existingJob!.id,
-            status: "running",
+            status: "queued",
           }),
         ]);
       } else if (ordering === "recovery-first") {
@@ -15696,7 +15697,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           code: "ENCODE_WORK_CONFLICT",
         });
         expect(results[1]).toMatchObject({
-          outcome: operation === "claim" ? "claimed" : "enqueued",
+          outcome: operation === "claim" ? "rejected" : "enqueued",
         });
         expect(settled).toMatchObject({
           id: recoveryId,
@@ -15708,7 +15709,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         expect(exclusionAccess.encodeJobs.list()).toEqual([
           expect.objectContaining({
             ...(existingJob === null ? {} : { id: existingJob.id }),
-            status: operation === "claim" ? "running" : "queued",
+            status: "queued",
           }),
         ]);
       }
@@ -15961,14 +15962,14 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           code: "ENCODE_WORK_CONFLICT",
         });
         expect(results[1]).toMatchObject({
-          outcome: operation === "claim" ? "claimed" : "enqueued",
+          outcome: operation === "claim" ? "rejected" : "enqueued",
         });
         expect(exclusionAccess.catalog.findArchiveRecovery(archive.id))
           .toMatchObject({ id: recoveryId, status: "eligible", work: null });
         expect(exclusionAccess.encodeJobs.list()).toEqual([
           expect.objectContaining({
             ...(existingJob === null ? {} : { id: existingJob.id }),
-            status: operation === "claim" ? "running" : "queued",
+            status: "queued",
           }),
         ]);
       }

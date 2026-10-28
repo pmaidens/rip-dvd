@@ -41,3 +41,28 @@ it.each(["claim-first", "withdraw-first"])("serializes acceptance withdrawal and
       checkpointDigest: seeded.expectedSourceDecision.checkpoint!.manifestDigest, speedMode: "normal" })).toThrow(expect.objectContaining({ code: "ENCODE_WORK_CONFLICT" }));
   } finally { await claim.terminate(); await withdrawal?.terminate(); seeded.access.close(); }
 }, 30_000);
+
+it.each(["claim-first", "resume-first"])("excludes Recovery Resume across a prepared claim transaction, %s", async (order) => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedEncodeClaim(fixture);
+  recordSyntheticRecoveryStorage(seeded.access);
+  const recovery = seeded.access.catalog.findArchiveRecovery(seeded.archive.id)!;
+  const common = { databasePath: fixture.databasePath, originalsLibraryPath: fixture.originalsLibraryPath,
+    mediaLibraryPath: fixture.mediaLibraryPath, order: order === "claim-first" ? "claim-first" : "withdraw-first", barrier: new SharedArrayBuffer(4) };
+  const claim = contender({ ...common, role: "claim" });
+  let resume: ReturnType<typeof contender> | undefined;
+  try {
+    await claim.event("held");
+    resume = contender({ ...common, role: "resume", input: { archiveRecoveryId: recovery.id, attemptId: recovery.attemptId,
+      mutationKey: "synthetic-prepared-claim-resume", checkpointRevision: seeded.expectedSourceDecision.checkpoint!.revision,
+      checkpointDigest: seeded.expectedSourceDecision.checkpoint!.manifestDigest, speedMode: "normal" } });
+    await resume.event("attempt");
+    if (order === "resume-first") expect(await resume.result).toMatchObject({ outcome: "rejected", code: "ENCODE_WORK_CONFLICT" });
+    Atomics.store(new Int32Array(common.barrier), 0, 1); Atomics.notify(new Int32Array(common.barrier), 0);
+    expect(await claim.result).toMatchObject({ outcome: "running" });
+    expect(await resume.result).toMatchObject({ outcome: "rejected", code: "ENCODE_WORK_CONFLICT" });
+    expect(seeded.access.encodeJobs.find(seeded.job.id)?.status).toBe("running");
+    expect(seeded.access.encodeJobs.listClaimSnapshots(seeded.job.id)).toHaveLength(1);
+    expect(seeded.access.catalog.findArchiveRecovery(seeded.archive.id)?.work).toBeNull();
+  } finally { await claim.terminate(); await resume?.terminate(); seeded.access.close(); }
+}, 30_000);

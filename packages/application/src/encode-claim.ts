@@ -65,6 +65,9 @@ export async function claimNextEncodeJob(
   access: DataAccess, workerId: string, originalsLibraryPath: string,
   ownership: ArchiveImageOwnership = defaultArchiveImageOwnership,
 ): Promise<RunningEncodeJob | null> {
+  // Preserve the indexed historical queue path while new-format admission is closed.
+  const historical = access.encodeJobs.claimNext(workerId);
+  if (historical) return historical;
   for (const queued of access.encodeJobs.list(["queued"])) {
     const selection = access.catalog.listDiscSelections({ ids: [queued.discSelectionId] })[0];
     if (!selection) continue;

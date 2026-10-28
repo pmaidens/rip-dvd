@@ -12,13 +12,18 @@ const hold = () => {
   if (Atomics.wait(gate, 0, 0, 10_000) === "timed-out") throw new Error("Claim concurrency barrier timed out");
 };
 try {
-  if (role === "withdraw") {
+  if (role === "resume") {
+    parentPort.postMessage({ type: "attempt" });
+    try { access.archiveRecoveryWork.requestResume(input); parentPort.postMessage({ type: "result", value: { outcome: "resumed" } }); }
+    catch (error) { parentPort.postMessage({ type: "result", value: { outcome: "rejected", code: error.code ?? error.name } }); }
+  } else if (role === "withdraw") {
     parentPort.postMessage({ type: "attempt" });
     const withdrawn = access.catalog.withdrawDvdTitleDamageAcceptance(input);
     parentPort.postMessage({ type: "result", value: { outcome: withdrawn.decision } });
   } else {
     const claimNext = access.encodeJobs.claimNext;
     access.encodeJobs.claimNext = (id, options) => {
+      if (options === undefined) return claimNext(id);
       if (order === "withdraw-first") hold();
       return claimNext(id, { ...options, snapshotSource(job) {
         const source = options.snapshotSource(job);
