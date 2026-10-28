@@ -192,6 +192,23 @@ function recoveryAction(
   return { ...action, name };
 }
 
+const CONFIRM_DISC_REQUIRED_INPUTS = [
+  "mutationKey",
+  "archiveRecoveryId",
+  "originalDiscArchiveId",
+  "archiveRecoveryAttemptId",
+  "discInspectionId",
+  "detectedDiscId",
+  "mediaGeneration",
+  "verificationId",
+  "verificationWorkerExecutionId",
+  "verificationOutcome",
+  "verificationResultDigest",
+  "checkpointRevision",
+  "checkpointDigest",
+  "acknowledgeMixedSource",
+] as const;
+
 export function describeArchiveArtifact(
   access: ConsistentReadAccess,
   archive: OriginalDiscArchive,
@@ -349,12 +366,11 @@ export function describeArchiveArtifact(
           "checkpointRevision",
           "checkpointDigest",
         ]),
-        unavailableRecoveryAction("confirm-disc", recoveryUnavailable, [
-          "mutationKey",
-          "archiveRecoveryId",
-          "verificationId",
-          "acknowledgeMixedSource",
-        ]),
+        unavailableRecoveryAction(
+          "confirm-disc",
+          recoveryUnavailable,
+          CONFIRM_DISC_REQUIRED_INPUTS,
+        ),
         unavailableRecoveryAction("reconcile", recoveryUnavailable, [
           "mutationKey",
           "archiveRecoveryId",
@@ -509,22 +525,7 @@ export async function enrichArchiveArtifactSourceIdentity(
     name: "confirm-disc",
     available: confirmation.action.available,
     blockingReasons: confirmation.action.blockingReasons,
-    requiredInputs: [
-      "mutationKey",
-      "archiveRecoveryId",
-      "originalDiscArchiveId",
-      "archiveRecoveryAttemptId",
-      "discInspectionId",
-      "detectedDiscId",
-      "mediaGeneration",
-      "verificationId",
-      "verificationWorkerExecutionId",
-      "verificationOutcome",
-      "verificationResultDigest",
-      "checkpointRevision",
-      "checkpointDigest",
-      "acknowledgeMixedSource",
-    ],
+    requiredInputs: CONFIRM_DISC_REQUIRED_INPUTS,
     expectedInputs: confirmation.action.expectedInputs,
   };
   const actions = mergeAction(
