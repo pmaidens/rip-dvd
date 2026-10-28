@@ -125,21 +125,24 @@ export function catalogReviewActivityRevision(
     ))
     .digest("base64url")
     .slice(0, 22);
-  return [
-    archive.updatedAt.toISOString(),
-    workflow?.current.checkpoint?.revision ?? "checkpoint",
-    recovery?.id ?? "recovery-id",
-    recovery?.attemptId ?? "recovery-attempt",
-    recovery?.state ?? "recovery-state",
-    work?.archiveRecoveryId ?? "work-recovery-id",
-    work?.originalDiscArchiveId ?? "work-archive-id",
-    work?.attemptId ?? "work-attempt-id",
-    work?.status ?? "work-status",
-    workflow?.current.catalogMappingProjectionId ?? "review-set",
-    workflow?.current.titleDamageAssessmentId ?? "assessment",
-    affectedWorkIdentity,
-    mediaItemIdentity,
-  ].join(":");
+  return createHash("sha256")
+    .update(JSON.stringify([
+      archive.updatedAt.toISOString(),
+      workflow?.current.checkpoint?.revision ?? null,
+      recovery?.id ?? null,
+      recovery?.attemptId ?? null,
+      recovery?.state ?? null,
+      work?.archiveRecoveryId ?? null,
+      work?.originalDiscArchiveId ?? null,
+      work?.attemptId ?? null,
+      work?.status ?? null,
+      workflow?.current.catalogMappingProjectionId ?? null,
+      workflow?.current.titleDamageAssessmentId ?? null,
+      affectedWorkIdentity,
+      mediaItemIdentity,
+    ]))
+    .digest("base64url")
+    .slice(0, 22);
 }
 
 export interface DashboardDiscInspection {
