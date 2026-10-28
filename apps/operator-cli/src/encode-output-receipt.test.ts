@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from "vitest";
-import { lstatSync, realpathSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, realpathSync, renameSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { encodeOutputArtifactIdentity, retainedEncodeOutputArtifactIdentity, type EncodeOutputInspection } from "@rip-dvd/application";
@@ -92,7 +92,7 @@ it("keeps receipts with retained normal generations through replacement and requ
   const retainedIdentity = retainedEncodeOutputArtifactIdentity(retained.id);
   const preserved = await inspect(retainedIdentity);
   expect(preserved.operatorInspection).toMatchObject({
-    generationIdentity: first.operatorInspection.generationIdentity, status: "acknowledged", receipts: [receipt],
+    generationIdentity: first.operatorInspection.generationIdentity, status: "not_acknowledged", receipts: [], history: [receipt],
   });
   expect((await inspect(encodeOutputArtifactIdentity(replacement.id))).operatorInspection.receipts).toEqual([]);
   const retainedAck = await fixture.run(["encode-output", "acknowledge-inspection", retainedIdentity,
@@ -115,7 +115,7 @@ it("keeps receipts with retained normal generations through replacement and requ
   expect((await inspect(retainedIdentity)).operatorInspection.history).toContainEqual(receipt);
 });
 
-it("rechecks evidence inside the receipt transaction and reports the changed identities", async () => {
+it("rechecks staged file evidence and reports the changed identities without a partial receipt", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
   const { predecessor } = seedCatalogReviewForReadFixture(fixture, { validatedOutputContents: "synthetic stable review" });
@@ -219,4 +219,81 @@ it("requires an explicit acknowledgement, artifact authority and an exact token"
   expect((await fixture.run(["encode-output", "acknowledge-inspection", identity,
     "--key", "synthetic-explicit-receipt", "--json", JSON.stringify({ acknowledged: true, reviewToken: reviewed.operatorInspection.reviewToken })], undefined, undefined, options)).result)
     .toMatchObject({ error: { code: "OUTPUT_IDENTITY_NOT_RECORDED", current: { operatorInspection: { history: [] } } } });
+});
+
+it("never applies a receipt to changed same-inode bytes with a restored modification time", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const { predecessor } = seedCatalogReviewForReadFixture(fixture, { validatedOutputContents: "synthetic original bytes" });
+  // A whole-second synthetic timestamp makes the adversarial restoration exact
+  // on filesystems with different timestamp precision.
+  utimesSync(predecessor.outputPath, 1_700_000_000, 1_700_000_000);
+  const sqlite = new DatabaseSync(fixture.databasePath);
+  try { sqlite.prepare("UPDATE encode_jobs SET output_validation_filesystem_identity = ? WHERE id = ?")
+    .run(encodeOutputFilesystemIdentity(lstatSync(predecessor.outputPath)), predecessor.id); }
+  finally { sqlite.close(); }
+  const identity = encodeOutputArtifactIdentity(predecessor.id);
+  const options = { encodeOutputMediaProbe: probe };
+  const inspect = async () => (await fixture.run(["encode-output", "inspect", identity], undefined, undefined, options)).result as EncodeOutputInspection;
+  const reviewed = await inspect();
+  const accepted = await fixture.run(["encode-output", "acknowledge-inspection", identity, "--key", "synthetic-ctime-receipt", "--json",
+    JSON.stringify({ acknowledged: true, reviewToken: reviewed.operatorInspection.reviewToken })], undefined, undefined, options);
+  expect(accepted.exitCode).toBe(0);
+  const before = lstatSync(predecessor.outputPath);
+  writeFileSync(predecessor.outputPath, "synthetic modified bytes");
+  utimesSync(predecessor.outputPath, before.atime, before.mtime);
+  const changed = await inspect();
+  expect(changed.artifact.file.identity).toBe(reviewed.artifact.file.identity);
+  expect(changed.operatorInspection.generationIdentity).toBe(reviewed.operatorInspection.generationIdentity);
+  expect(changed.operatorInspection).toMatchObject({ status: "not_acknowledged", receipts: [], history: [(accepted.result as { receipt: unknown }).receipt] });
+  expect(changed.artifact.file.mutationRevision).not.toBe(reviewed.artifact.file.mutationRevision);
+});
+
+it("replays a concurrent winner even when the waiting retry observes changed media", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const { predecessor } = seedCatalogReviewForReadFixture(fixture, { validatedOutputContents: "synthetic concurrent acknowledgement" });
+  const identity = encodeOutputArtifactIdentity(predecessor.id);
+  const reviewed = (await fixture.run(["encode-output", "inspect", identity], undefined, undefined, { encodeOutputMediaProbe: probe })).result as EncodeOutputInspection;
+  const args = ["encode-output", "acknowledge-inspection", identity, "--key", "synthetic-concurrent-receipt", "--json",
+    JSON.stringify({ acknowledged: true, reviewToken: reviewed.operatorInspection.reviewToken })];
+  let release!: () => void;
+  let entered!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const probing = new Promise<void>((resolve) => { entered = resolve; });
+  const waiting = fixture.run(args, undefined, undefined, { encodeOutputMediaProbe: async () => {
+    entered(); await held; return probe();
+  } });
+  await probing;
+  const winner = await fixture.run(args, undefined, undefined, { encodeOutputMediaProbe: probe });
+  writeFileSync(predecessor.outputPath, "synthetic bytes changed after the winning acknowledgement");
+  release();
+  expect(winner.exitCode).toBe(0);
+  expect((await waiting).result).toEqual(winner.result);
+});
+
+it("pages bounded acknowledgement history independently of the latest matching receipt", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const { predecessor } = seedCatalogReviewForReadFixture(fixture, { validatedOutputContents: "synthetic paged receipt history" });
+  const identity = encodeOutputArtifactIdentity(predecessor.id);
+  const options = { encodeOutputMediaProbe: probe };
+  const reviewed = (await fixture.run(["encode-output", "inspect", identity], undefined, undefined, options)).result as EncodeOutputInspection;
+  const recorded: unknown[] = [];
+  for (let index = 0; index < 5; index += 1) {
+    const result = await fixture.run(["encode-output", "acknowledge-inspection", identity, "--key", `synthetic-paged-receipt-${index}`, "--json",
+      JSON.stringify({ acknowledged: true, reviewToken: reviewed.operatorInspection.reviewToken })], undefined, undefined, options);
+    expect(result.exitCode).toBe(0);
+    recorded.unshift((result.result as { receipt: unknown }).receipt);
+  }
+  const collected: unknown[] = [];
+  let offset: number | null = 0;
+  while (offset !== null) {
+    const page = (await fixture.run(["encode-output", "inspect", identity, "--receipt-limit", "2", "--receipt-offset", String(offset)], undefined, undefined, options)).result as EncodeOutputInspection;
+    expect(page.operatorInspection.receipts).toEqual([recorded[0]]);
+    expect(page.operatorInspection.history.length).toBeLessThanOrEqual(2);
+    collected.push(...page.operatorInspection.history);
+    offset = page.operatorInspection.historyNextOffset;
+  }
+  expect(collected).toEqual(recorded);
 });

@@ -882,7 +882,12 @@ export async function inspectEncodeOutput(
   access: DataAccess,
   artifactIdentityInput: unknown,
   mediaProbe: EncodeOutputMediaProbe = probeEncodeOutputMedia,
+  page: { receiptLimit?: number; receiptOffset?: number } = {},
 ) {
+  const limit = page.receiptLimit ?? 20;
+  const offset = page.receiptOffset ?? 0;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
+      !Number.isSafeInteger(offset) || offset < 0) throw new InvalidEncodeOutputInspectionInputError();
   const inspected = await inspectEncodeOutputEvidence(access, artifactIdentityInput, mediaProbe);
   const artifact = inspected.artifact;
   // File and validation evidence distinguish generations even when a job is requeued.
@@ -895,9 +900,14 @@ export async function inspectEncodeOutput(
   ])}`;
   const eligible = artifact.file.status === "available" &&
     artifact.file.identityContinuity === "verified";
-  const history = access.encodeOutputInspectionReceipts.list(artifact.provenance.encodeJobId)
-    .map(presentInspectionReceipt);
-  const receipts = history.filter((receipt) => receipt.generationIdentity === generationIdentity);
+  const historyPage = access.encodeOutputInspectionReceipts.list(artifact.provenance.encodeJobId, { limit, offset });
+  const history = historyPage.receipts.map(presentInspectionReceipt);
+  const latestRecord = generationIdentity === null ? null : access.encodeOutputInspectionReceipts
+    .latestForGeneration(artifact.provenance.encodeJobId, generationIdentity);
+  const latest = latestRecord === null ? null : presentInspectionReceipt(latestRecord);
+  const receipts = latest !== null && latest.evidence.file.mutationRevision === artifact.file.mutationRevision &&
+      canonicalPublicationJson(latest.evidence.provenance) === canonicalPublicationJson(artifact.provenance)
+    ? [latest] : [];
   return {
     ...inspected,
     operatorInspection: {
@@ -912,8 +922,16 @@ export async function inspectEncodeOutput(
       },
       receipts,
       history,
+      historyNextOffset: historyPage.nextOffset,
     },
   };
+}
+
+export class InvalidEncodeOutputInspectionInputError extends Error {
+  constructor() {
+    super("Receipt history requires a limit from 1 to 100 and a nonnegative integer offset.");
+    this.name = "InvalidEncodeOutputInspectionInputError";
+  }
 }
 
 export class InvalidEncodeOutputAcknowledgementError extends Error {
@@ -962,9 +980,13 @@ export async function acknowledgeEncodeOutputInspection(
   try {
     current = await inspectEncodeOutput(access, artifactIdentity, mediaProbe);
   } catch (error) {
+    const replay = access.encodeOutputInspectionReceipts.replay(input);
+    if (replay !== null) return { schemaVersion: 1 as const, receipt: presentInspectionReceipt(replay) };
     if (!(error instanceof RecordNotFoundError)) throw error;
     throw new EncodeOutputAcknowledgementRejectedError("OUTPUT_AUTHORITY_CHANGED", null);
   }
+  const concurrentReplay = access.encodeOutputInspectionReceipts.replay(input);
+  if (concurrentReplay !== null) return { schemaVersion: 1 as const, receipt: presentInspectionReceipt(concurrentReplay) };
   if (!current.operatorInspection.acknowledgement.eligible) {
     throw new EncodeOutputAcknowledgementRejectedError(
       current.operatorInspection.acknowledgement.reasonCode ?? "OUTPUT_AUTHORITY_CHANGED", current,
@@ -979,15 +1001,10 @@ export async function acknowledgeEncodeOutputInspection(
     descriptor = await open(base.outputPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const opened = descriptor;
     const record = access.encodeOutputInspectionReceipts.record(input, () => {
-      const authority = resolveEncodeOutputAuthority(access, parsed);
-      if (authority.authorityUnavailableReason !== null ||
-          evidenceDigest(authority.authorityKey) !== current.authorityRevision ||
-          canonicalPublicationJson(historicalProvenance(authority.job, authority.originalDiscArchiveId, authority.retainedOutputId)) !==
-            canonicalPublicationJson(current.artifact.provenance)) {
-        throw new EncodeOutputAcknowledgementRejectedError("OUTPUT_AUTHORITY_CHANGED", current);
-      }
+      // Publication commits its authority fence before changing media. Stage
+      // file checks outside SQLite, then reject a changed fence in the write.
       const file = fstatSync(opened.fd);
-      const path = lstatSync(authority.outputPath);
+      const path = lstatSync(base.outputPath);
       if (fileIsRegularAndNonempty(file) !== null || fileIsRegularAndNonempty(path) !== null ||
           !sameEncodeOutputMutationSnapshot(file, path) ||
           fileMutationRevision(file) !== current.artifact.file.mutationRevision) {
@@ -997,10 +1014,21 @@ export async function acknowledgeEncodeOutputInspection(
         generationIdentity: current.operatorInspection.generationIdentity!,
         encodeJobId: current.artifact.provenance.encodeJobId,
         evidenceJson: canonicalPublicationJson(current.artifact),
+        assertAuthority() {
+          const authority = resolveEncodeOutputAuthority(access, parsed);
+          if (authority.authorityUnavailableReason !== null ||
+              evidenceDigest(authority.authorityKey) !== current.authorityRevision ||
+              canonicalPublicationJson(historicalProvenance(authority.job, authority.originalDiscArchiveId, authority.retainedOutputId)) !==
+                canonicalPublicationJson(current.artifact.provenance)) {
+            throw new EncodeOutputAcknowledgementRejectedError("OUTPUT_AUTHORITY_CHANGED", current);
+          }
+        },
       };
     });
     return { schemaVersion: 1 as const, receipt: presentInspectionReceipt(record) };
   } catch (error) {
+    const replay = access.encodeOutputInspectionReceipts.replay(input);
+    if (replay !== null) return { schemaVersion: 1 as const, receipt: presentInspectionReceipt(replay) };
     const fileError = typeof error === "object" && error !== null && "code" in error &&
       ["ENOENT", "EACCES", "ELOOP", "ENOTDIR", "ESTALE"].includes(String(error.code));
     if (!(error instanceof EncodeOutputAcknowledgementRejectedError) &&

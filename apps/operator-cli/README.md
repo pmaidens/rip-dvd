@@ -632,6 +632,9 @@ and a mutation key. JSON input also supports `--file` or `--stdin`.
 The response returns a durable `receipt` with its identity, generation identity,
 acknowledgement time and exact evidence. Inspection exposes matching generation
 receipts and the Encode Job's receipt history in `operatorInspection`.
+History defaults to 20 receipts. Use `inspect --receipt-limit <1..100>
+--receipt-offset <n>` and follow `operatorInspection.historyNextOffset` to page
+older receipts. The HTTP query uses `receipt-limit` and `receipt-offset`.
 
 The receipt binds the observed file and recorded validation evidence to a
 particular normal output generation. Requeueing a job does not acknowledge its
@@ -643,6 +646,11 @@ returns current inspection identities with a stable reason. Missing, unowned,
 unsafe or changing files cannot be acknowledged. Probe failure can be
 acknowledged as an explicit unknown, preserving the reported validation result
 and `playability: not_assessed`.
+Receipt applicability also requires the same observed file mutation revision
+and provenance. Moving a retained file may change that revision. Its original
+receipt stays in history, but a fresh acknowledgement is required unless a
+producer records proof that the changed observation still represents the
+reviewed bytes. This capability does not manufacture that correspondence.
 
 Receipts preserve the inspection producer's source provenance exactly as
 recorded. Historical `sourceSnapshotAvailability: not_recorded` remains

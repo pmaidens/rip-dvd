@@ -241,6 +241,7 @@ export type DvdTitleIdentityObservationId =
 export type EncodingProfileId = DomainId<"EncodingProfile">;
 export type ArchiveJobId = DomainId<"ArchiveJob">;
 export type EncodeJobId = DomainId<"EncodeJob">;
+export type EncodeOutputInspectionReceiptId = DomainId<"EncodeOutputInspectionReceipt">;
 export type EncodeJobFailureReportId = DomainId<"EncodeJobFailureReport">;
 export type RetainedEncodeOutputId = DomainId<"RetainedEncodeOutput">;
 export type ArchiveJobClaimToken = DomainId<"ArchiveJobClaim">;

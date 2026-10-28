@@ -34,6 +34,11 @@ it("shares acknowledgement, replay, conflict and stale evidence results with the
       JSON.stringify({ acknowledged: true, reviewToken: body.reviewToken })], undefined, undefined, { encodeOutputMediaProbe: probe });
     expect(cli.exitCode).toBe(0);
     expect(cli.result).toEqual(await web.json());
+    const webPage = await createEncodeOutputInspectionRoute(new Request(`${origin}/api/encode-outputs/${identity}?receipt-limit=1&receipt-offset=1`), identity, () => access, probe);
+    const cliPage = await fixture.run(["encode-output", "inspect", identity, "--receipt-limit", "1", "--receipt-offset", "1"], undefined, undefined, { encodeOutputMediaProbe: probe });
+    expect(cliPage.exitCode).toBe(0);
+    expect(cliPage.result).toEqual(await webPage.json());
+    expect(cliPage.result).toMatchObject({ operatorInspection: { history: [], receipts: [expect.any(Object)], historyNextOffset: null } });
     const changed = { ...body, reviewToken: "0".repeat(64) };
     const conflict = await createEncodeOutputAcknowledgementRoute(request(identity, changed), identity, () => access, () => origin, probe);
     const cliConflict = await fixture.run(["encode-output", "acknowledge-inspection", identity, "--key", body.mutationKey, "--json", JSON.stringify({ acknowledged: true, reviewToken: changed.reviewToken })]);

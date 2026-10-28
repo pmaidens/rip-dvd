@@ -66,7 +66,7 @@ test("inspects and explicitly acknowledges a completed canonical Encode Output",
         operatorInspection: {
           generationIdentity: "synthetic-browser-output-generation", reviewToken: "a".repeat(64),
           status: "not_acknowledged", acknowledgement: { eligible: true, reasonCode: null },
-          receipts: [], history: [],
+          receipts: [], history: [], historyNextOffset: null,
         },
         artifact: {
           identity: artifactIdentity,

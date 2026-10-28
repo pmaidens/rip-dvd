@@ -14,6 +14,7 @@ import {
   EncodeOutputExportRejectedError,
   EncodeOutputAcknowledgementRejectedError,
   InvalidEncodeOutputAcknowledgementError,
+  InvalidEncodeOutputInspectionInputError,
   InvalidEncodeOutputArtifactIdentityError,
   InvalidEncodeOutputExportInputError,
   generateMutationKey,
@@ -224,7 +225,7 @@ const commandDefinitions = [
     usage: "rip-dvd encode-output <inspect|export|acknowledge-inspection> <artifact-identity> [options]",
     inputs: {
       arguments: ["action: inspect|export|acknowledge-inspection", "artifact-identity"],
-      options: ["--destination <path> (export only)", "--key <key> (acknowledge-inspection)", "--json <object> | --file <path> | --stdin (acknowledge-inspection)"],
+      options: ["--destination <path> (export only)", "--receipt-limit <1..100> (inspect)", "--receipt-offset <n> (inspect)", "--key <key> (acknowledge-inspection)", "--json <object> | --file <path> | --stdin (acknowledge-inspection)"],
       acknowledgementSchema: { acknowledged: "true", reviewToken: "exact operatorInspection.reviewToken from inspect" },
     },
     example:
@@ -1694,15 +1695,25 @@ async function encodeOutputCommand(
     (action !== "inspect" && action !== "export" && action !== "acknowledge-inspection") ||
     artifactIdentity === undefined ||
     artifactIdentity.length > 256 ||
-    (action === "inspect" && rest.length !== 2) ||
     (action === "export" &&
       (rest.length !== 4 || rest[2] !== "--destination" || !rest[3]))
   ) {
     throw new CommandFailure(
       "INVALID_ARGUMENTS",
-      "Expected encode-output inspect <artifact-identity> or encode-output export <artifact-identity> --destination <path>.",
+      "Expected encode-output inspect, export, or acknowledge-inspection with an artifact identity and the action's required options.",
       2,
     );
+  }
+  const page: { receiptLimit?: number; receiptOffset?: number } = {};
+  if (action === "inspect") {
+    for (let index = 2; index < rest.length; index += 2) {
+      const name = rest[index];
+      const field = name === "--receipt-limit" ? "receiptLimit" : name === "--receipt-offset" ? "receiptOffset" : null;
+      if (field === null || page[field] !== undefined || !/^\d+$/.test(rest[index + 1] ?? "")) {
+        throw new CommandFailure("INVALID_ARGUMENTS", "Invalid receipt history options.", 2);
+      }
+      page[field] = Number(rest[index + 1]);
+    }
   }
   let acknowledgement: Record<string, unknown> | undefined;
   if (action === "acknowledge-inspection") {
@@ -1739,7 +1750,7 @@ async function encodeOutputCommand(
       return await operations.acknowledgeEncodeOutputInspection(artifactIdentity, acknowledgement);
     }
     return action === "inspect"
-      ? await operations.inspectEncodeOutput(artifactIdentity)
+      ? await operations.inspectEncodeOutput(artifactIdentity, page)
       : await operations.exportEncodeOutput({
         artifactIdentity,
         destination: rest[3],
@@ -1748,6 +1759,7 @@ async function encodeOutputCommand(
     if (
       error instanceof InvalidEncodeOutputArtifactIdentityError ||
       error instanceof InvalidEncodeOutputAcknowledgementError ||
+      error instanceof InvalidEncodeOutputInspectionInputError ||
       error instanceof InvalidMutationKeyError ||
       error instanceof InvalidEncodeOutputExportInputError
     ) {

@@ -11,8 +11,24 @@ export function EncodeOutputInspectionAcknowledgement({ inspection }: { inspecti
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<EncodeOutputInspectionReceipt | null>(null);
-  const history = receipt === null || reviewed.history.some((entry) => entry.id === receipt.id)
-    ? reviewed.history : [...reviewed.history, receipt];
+  const [olderHistory, setOlderHistory] = useState<EncodeOutputInspectionReceipt[]>([]);
+  const [nextOffset, setNextOffset] = useState(reviewed.historyNextOffset);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const history = [...new Map([...reviewed.history, ...olderHistory, ...(receipt === null ? [] : [receipt])]
+    .map((entry) => [entry.id, entry])).values()];
+
+  async function loadHistory() {
+    if (nextOffset === null || loadingHistory) return;
+    setLoadingHistory(true);
+    try {
+      const response = await fetch(`/api/encode-outputs/${encodeURIComponent(inspection.artifact.identity)}?receipt-offset=${nextOffset}`, { cache: "no-store" });
+      if (!response.ok) throw new Error("History unavailable");
+      const result = await response.json() as EncodeOutputInspection;
+      setOlderHistory((current) => [...current, ...result.operatorInspection.history]);
+      setNextOffset(result.operatorInspection.historyNextOffset);
+    } catch { setError("Acknowledgement history is unavailable. Retry loading history."); }
+    finally { setLoadingHistory(false); }
+  }
 
   async function submit() {
     if (!acknowledged || pending) return;
@@ -58,6 +74,9 @@ export function EncodeOutputInspectionAcknowledgement({ inspection }: { inspecti
           <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{JSON.stringify(entry.evidence, null, 2)}</pre>
         </details>
       </li>)}</ul>
+      {nextOffset === null ? null : <button type="button" disabled={loadingHistory} onClick={() => { void loadHistory(); }}>
+        {loadingHistory ? "Loading acknowledgement history…" : "Load more acknowledgement history"}
+      </button>}
     </details> : null}
   </div>;
 }

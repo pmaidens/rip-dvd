@@ -2,6 +2,7 @@ import {
   createApplicationOperations,
   InvalidEncodeOutputArtifactIdentityError,
   InvalidEncodeOutputAcknowledgementError,
+  InvalidEncodeOutputInspectionInputError,
   InvalidMutationKeyError,
   EncodeOutputAcknowledgementRejectedError,
   type EncodeOutputMediaProbe,
@@ -32,16 +33,22 @@ export async function createEncodeOutputInspectionRoute(
   getAccess: () => DataAccess = getDataAccess,
   mediaProbe?: EncodeOutputMediaProbe,
 ): Promise<Response> {
-  if (request.method !== "GET" || new URL(request.url).search !== "") {
+  const parameters = new URL(request.url).searchParams;
+  if (request.method !== "GET" || [...parameters.keys()].some((key) =>
+    !["receipt-limit", "receipt-offset"].includes(key) || parameters.getAll(key).length !== 1 ||
+    !/^\d+$/.test(parameters.get(key) ?? ""))) {
     return response({ error: "Invalid Encode Output inspection" }, 400);
   }
   try {
     const result = await createApplicationOperations(getAccess(), {
       ...(mediaProbe === undefined ? {} : { encodeOutputMediaProbe: mediaProbe }),
-    }).inspectEncodeOutput(artifactIdentity);
+    }).inspectEncodeOutput(artifactIdentity, {
+      ...(parameters.has("receipt-limit") ? { receiptLimit: Number(parameters.get("receipt-limit")) } : {}),
+      ...(parameters.has("receipt-offset") ? { receiptOffset: Number(parameters.get("receipt-offset")) } : {}),
+    });
     return response(result);
   } catch (error) {
-    if (error instanceof InvalidEncodeOutputArtifactIdentityError) {
+    if (error instanceof InvalidEncodeOutputArtifactIdentityError || error instanceof InvalidEncodeOutputInspectionInputError) {
       return response({ error: error.message }, 400);
     }
     if (error instanceof RecordNotFoundError) {

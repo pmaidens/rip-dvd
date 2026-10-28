@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { MutationKeyConflictError } from "../errors.js";
+import type { EncodeOutputInspectionReceiptId } from "../types.js";
 import type {
   EncodeOutputInspectionAcknowledgement,
   EncodeOutputInspectionReceiptAccess,
@@ -35,15 +36,19 @@ export function createEncodeOutputInspectionReceiptAccess(
   return {
     replay,
     record(input, prepare) {
+      const previous = replay(input);
+      if (previous !== null) return previous;
+      // Stage all media-filesystem evidence before taking SQLite's writer lock.
+      const { assertAuthority, ...prepared } = prepare();
       sqlite.exec("BEGIN IMMEDIATE");
       try {
         let receipt = replay(input);
         if (receipt === null) {
-          const prepared = prepare();
+          assertAuthority();
           const timestamp = now();
           receipt = {
             ...prepared,
-            id: randomUUID(),
+            id: randomUUID() as EncodeOutputInspectionReceiptId,
             artifactIdentity: input.artifactIdentity,
             reviewToken: input.reviewToken,
             acknowledgedAt: timestamp.toISOString(),
@@ -66,10 +71,19 @@ export function createEncodeOutputInspectionReceiptAccess(
         throw error;
       }
     },
-    list(encodeJobId) {
-      return sqlite.prepare(`SELECT record FROM encode_output_inspection_receipts
-        WHERE encode_job_id = ? ORDER BY created_at, rowid`).all(encodeJobId)
+    list(encodeJobId, page) {
+      const limit = Math.max(1, Math.min(100, Math.floor(page.limit)));
+      const offset = Math.max(0, Math.floor(page.offset));
+      const receipts = sqlite.prepare(`SELECT record FROM encode_output_inspection_receipts
+        WHERE encode_job_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?`).all(encodeJobId, limit + 1, offset)
         .map((row) => JSON.parse(String(row.record)) as EncodeOutputInspectionReceiptRecord);
+      return { receipts: receipts.slice(0, limit), nextOffset: receipts.length > limit ? offset + limit : null };
+    },
+    latestForGeneration(encodeJobId, generationIdentity) {
+      const row = sqlite.prepare(`SELECT record FROM encode_output_inspection_receipts
+        WHERE encode_job_id = ? AND generation_identity = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+        .get(encodeJobId, generationIdentity);
+      return row ? JSON.parse(String(row.record)) as EncodeOutputInspectionReceiptRecord : null;
     },
   };
 }

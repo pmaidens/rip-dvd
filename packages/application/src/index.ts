@@ -457,11 +457,12 @@ export function createApplicationOperations(
     inspectDvdTitleDamageDecision: (
       archiveId: Parameters<typeof inspectDvdTitleDamageDecision>[1],
     ) => inspectDvdTitleDamageDecision(access, archiveId),
-    inspectEncodeOutput: (artifactIdentity: unknown) =>
+    inspectEncodeOutput: (artifactIdentity: unknown, page?: { receiptLimit?: number; receiptOffset?: number }) =>
       inspectEncodeOutput(
         access,
         artifactIdentity,
         dependencies.encodeOutputMediaProbe,
+        page,
       ),
     acknowledgeEncodeOutputInspection: (artifactIdentity: unknown, input: unknown) =>
       acknowledgeEncodeOutputInspection(access, artifactIdentity, input, dependencies.encodeOutputMediaProbe),
@@ -1006,6 +1007,7 @@ export {
   acknowledgeEncodeOutputInspection,
   EncodeOutputAcknowledgementRejectedError,
   InvalidEncodeOutputAcknowledgementError,
+  InvalidEncodeOutputInspectionInputError,
   exportEncodeOutput,
   inspectEncodeOutput,
   InvalidEncodeOutputArtifactIdentityError,
