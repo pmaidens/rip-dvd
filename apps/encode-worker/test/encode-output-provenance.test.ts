@@ -39,10 +39,14 @@ linux.each(["duration", "audio", "audio_source", "audio_provenance", "audio_prov
     }
     const sample = join(fixture.operatorHostPath, "synthetic-validator-input.mkv");
     media(sample, fault === "duration" ? 2 : 500, { audio: fault !== "audio", video: fault !== "video", delay: fault === "timing", duplicateAudio: fault === "audio_source" });
-    const validator = createNodeEncodeOutputValidator(fault === "decode" ? {
+    const validator = createNodeEncodeOutputValidator(fault === "decode" || fault === "timing" ? {
       runMediaTool: async (request) => {
-        if (request.executable === "ffmpeg") throw new Error("Synthetic bounded decoder fault");
-        return { stdout: execFileSync(request.executable, [...request.arguments_], { encoding: "utf8" }), stderr: "" };
+        if (fault === "decode" && request.executable === "ffmpeg") throw new Error("Synthetic bounded decoder fault");
+        // Let the fixture's deliberately delayed video reach the timing check
+        // rather than stopping earlier at ffprobe's default analysis budget.
+        const arguments_ = fault === "timing" && request.executable === "ffprobe"
+          ? ["-analyzeduration", "15000000", ...request.arguments_] : [...request.arguments_];
+        return { stdout: execFileSync(request.executable, arguments_, { encoding: "utf8", timeout: request.timeoutMs }), stderr: "" };
       },
     } : {});
     try {
