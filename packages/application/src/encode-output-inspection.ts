@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { constants, type Stats } from "node:fs";
+import { createHash } from "node:crypto";
+import { constants, fstatSync, lstatSync, type Stats } from "node:fs";
 import { lstat, open, unlink } from "node:fs/promises";
 
 import {
@@ -8,6 +9,7 @@ import {
   RecordNotFoundError,
   sameEncodeOutputInode,
   sameEncodeOutputMutationSnapshot,
+  canonicalPublicationJson,
 } from "@rip-dvd/data-access";
 import type {
   ConsistentReadAccess,
@@ -19,7 +21,10 @@ import type {
   RetainedEncodeOutput,
   RetainedEncodeOutputId,
   RetainedEncodeOutputSummary,
+  EncodeOutputInspectionAcknowledgement,
+  EncodeOutputInspectionReceiptRecord,
 } from "@rip-dvd/data-access";
+import { parseMutationKey } from "./mutation-key.js";
 
 const ENCODE_OUTPUT_ARTIFACT_PATTERN =
   /^encode-output-v1\.(published|retained)\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
@@ -346,6 +351,7 @@ interface ResolvedEncodeOutput {
 interface PresentedEncodeOutputFile {
   status: "available" | "missing" | "unknown";
   identity: EncodeOutputFilesystemIdentity | null;
+  mutationRevision: string | null;
   sizeBytes: number | null;
   modifiedAt: string | null;
   completeness: "complete" | "unknown";
@@ -374,6 +380,7 @@ function inspectionResponse(
   };
   return {
     schemaVersion: 1 as const,
+    authorityRevision: evidenceDigest(input.authorityKey),
     artifact: {
       identity: input.artifactIdentity,
       type: "canonical_encode_output" as const,
@@ -446,6 +453,7 @@ function fileUnavailable(
     {
       status: code === "OUTPUT_MISSING" ? "missing" : "unknown",
       identity: null,
+      mutationRevision: null,
       sizeBytes: null,
       modifiedAt: null,
       completeness: "unknown",
@@ -702,7 +710,7 @@ function fileIsRegularAndNonempty(metadata: Stats): {
     : null;
 }
 
-export async function inspectEncodeOutput(
+async function inspectEncodeOutputEvidence(
   access: DataAccess,
   artifactIdentityInput: unknown,
   mediaProbe: EncodeOutputMediaProbe = probeEncodeOutputMedia,
@@ -814,6 +822,7 @@ export async function inspectEncodeOutput(
       {
         status: "available",
         identity,
+        mutationRevision: fileMutationRevision(before),
         sizeBytes: before.size,
         modifiedAt: before.mtime.toISOString(),
         completeness: "unknown",
@@ -831,6 +840,7 @@ export async function inspectEncodeOutput(
     {
       status: "available",
       identity,
+      mutationRevision: fileMutationRevision(before),
       sizeBytes: before.size,
       modifiedAt: before.mtime.toISOString(),
       completeness: "unknown",
@@ -849,6 +859,218 @@ export async function inspectEncodeOutput(
       },
     },
   );
+}
+
+function evidenceDigest(evidence: unknown): string {
+  return createHash("sha256").update(canonicalPublicationJson(evidence)).digest("hex");
+}
+
+function fileMutationRevision(metadata: Stats): string {
+  return evidenceDigest([encodeOutputFilesystemIdentity(metadata), metadata.ctimeMs]);
+}
+
+type EncodeOutputAcknowledgedEvidence = Awaited<ReturnType<typeof inspectEncodeOutputEvidence>>["artifact"];
+
+function presentInspectionReceipt(record: EncodeOutputInspectionReceiptRecord) {
+  const { evidenceJson, ...receipt } = record;
+  return { ...receipt, evidence: JSON.parse(evidenceJson) as EncodeOutputAcknowledgedEvidence };
+}
+
+export type EncodeOutputInspectionReceipt = ReturnType<typeof presentInspectionReceipt>;
+
+export async function inspectEncodeOutput(
+  access: DataAccess,
+  artifactIdentityInput: unknown,
+  mediaProbe: EncodeOutputMediaProbe = probeEncodeOutputMedia,
+  page: { receiptLimit?: number; receiptOffset?: number } = {},
+) {
+  const limit = page.receiptLimit ?? 20;
+  const offset = page.receiptOffset ?? 0;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
+      !Number.isSafeInteger(offset) || offset < 0) throw new InvalidEncodeOutputInspectionInputError();
+  const inspected = await inspectEncodeOutputEvidence(access, artifactIdentityInput, mediaProbe);
+  const artifact = inspected.artifact;
+  // File and validation evidence distinguish generations even when a job is requeued.
+  // Retaining the same normal output does not create a different generation.
+  const generationIdentity = artifact.file.identity === null ? null : `encode-output-generation-v1.${evidenceDigest([
+    artifact.provenance.encodeJobId,
+    artifact.file.identity,
+    artifact.validation.identity,
+    artifact.validation.evidence,
+  ])}`;
+  const eligible = artifact.file.status === "available" &&
+    artifact.file.identityContinuity === "verified";
+  const historyPage = access.encodeOutputInspectionReceipts.list(artifact.provenance.encodeJobId, { limit, offset });
+  const history = historyPage.receipts.map(presentInspectionReceipt);
+  const latestRecord = generationIdentity === null ? null : access.encodeOutputInspectionReceipts
+    .latestForGeneration(artifact.provenance.encodeJobId, generationIdentity);
+  const latest = latestRecord === null ? null : presentInspectionReceipt(latestRecord);
+  const receipts = latest !== null && latest.evidence.file.mutationRevision === artifact.file.mutationRevision &&
+      canonicalPublicationJson(latest.evidence.provenance) === canonicalPublicationJson(artifact.provenance)
+    ? [latest] : [];
+  return {
+    ...inspected,
+    operatorInspection: {
+      generationIdentity,
+      reviewToken: evidenceDigest(inspected),
+      status: receipts.length === 0 ? "not_acknowledged" as const : "acknowledged" as const,
+      acknowledgement: {
+        eligible,
+        reasonCode: eligible ? null : artifact.file.identityContinuity === "not_recorded"
+          ? "OUTPUT_IDENTITY_NOT_RECORDED" : artifact.inspectability.reasonCode,
+        requiredInputs: ["acknowledged", "reviewToken", "artifactIdentity", "mutationKey"],
+      },
+      receipts,
+      history,
+      historyNextOffset: historyPage.nextOffset,
+    },
+  };
+}
+
+export class InvalidEncodeOutputInspectionInputError extends Error {
+  constructor() {
+    super("Receipt history requires a limit from 1 to 100 and a nonnegative integer offset.");
+    this.name = "InvalidEncodeOutputInspectionInputError";
+  }
+}
+
+export class InvalidEncodeOutputAcknowledgementError extends Error {
+  constructor() {
+    super("Explicit acknowledgement and the exact reviewed inspection token are required.");
+    this.name = "InvalidEncodeOutputAcknowledgementError";
+  }
+}
+
+export class EncodeOutputAcknowledgementRejectedError extends Error {
+  constructor(
+    readonly reasonCode: string,
+    readonly current: EncodeOutputInspection | null,
+    readonly currentIdentity: EncodeOutputFilesystemIdentity | null = current?.artifact.file.identity ?? null,
+  ) {
+    super("Encode Output inspection acknowledgement rejected. Inspect the current evidence again.");
+    this.name = "EncodeOutputAcknowledgementRejectedError";
+  }
+}
+
+function acknowledgementResult(record: EncodeOutputInspectionReceiptRecord) {
+  return { schemaVersion: 1 as const, receipt: presentInspectionReceipt(record) };
+}
+
+async function rejectAcknowledgementWithCurrentEvidence(
+  access: DataAccess,
+  input: EncodeOutputInspectionAcknowledgement,
+  mediaProbe: EncodeOutputMediaProbe,
+  reasonCode: string,
+) {
+  let fresh: EncodeOutputInspection | null = null;
+  try { fresh = await inspectEncodeOutput(access, input.artifactIdentity, mediaProbe); }
+  catch (error) { if (!(error instanceof RecordNotFoundError)) throw error; }
+  let currentIdentity: EncodeOutputFilesystemIdentity | null = null;
+  try {
+    const authority = resolveEncodeOutputAuthority(access, parseEncodeOutputArtifactIdentity(input.artifactIdentity));
+    currentIdentity = await currentEncodeOutputIdentity(authority.outputPath);
+  } catch (error) { if (!(error instanceof RecordNotFoundError)) throw error; }
+  // Refreshing may race a successfully committed retry too.
+  const replay = access.encodeOutputInspectionReceipts.replay(input);
+  if (replay !== null) return acknowledgementResult(replay);
+  throw new EncodeOutputAcknowledgementRejectedError(
+    fresh === null ? "OUTPUT_AUTHORITY_CHANGED"
+      : !fresh.operatorInspection.acknowledgement.eligible
+        ? fresh.operatorInspection.acknowledgement.reasonCode ?? "OUTPUT_AUTHORITY_CHANGED"
+        : reasonCode,
+    fresh,
+    currentIdentity,
+  );
+}
+
+export async function acknowledgeEncodeOutputInspection(
+  access: DataAccess,
+  artifactIdentityInput: unknown,
+  raw: unknown,
+  mediaProbe: EncodeOutputMediaProbe = probeEncodeOutputMedia,
+) {
+  const parsed = parseEncodeOutputArtifactIdentity(artifactIdentityInput);
+  const artifactIdentity = parsed.kind === "published"
+    ? encodeOutputArtifactIdentity(parsed.jobId)
+    : retainedEncodeOutputArtifactIdentity(parsed.retainedOutputId);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new InvalidEncodeOutputAcknowledgementError();
+  }
+  const body = raw as Record<string, unknown>;
+  if (Object.keys(body).some((key) => !["mutationKey", "reviewToken", "acknowledged"].includes(key)) ||
+      body.acknowledged !== true || typeof body.reviewToken !== "string" ||
+      !/^[a-f0-9]{64}$/.test(body.reviewToken)) {
+    throw new InvalidEncodeOutputAcknowledgementError();
+  }
+  const input: EncodeOutputInspectionAcknowledgement = {
+    mutationKey: parseMutationKey(body.mutationKey), artifactIdentity,
+    acknowledged: true, reviewToken: body.reviewToken,
+  };
+  const replayed = access.encodeOutputInspectionReceipts.replay(input);
+  if (replayed !== null) return acknowledgementResult(replayed);
+  let current: EncodeOutputInspection;
+  try {
+    current = await inspectEncodeOutput(access, artifactIdentity, mediaProbe);
+  } catch (error) {
+    const replay = access.encodeOutputInspectionReceipts.replay(input);
+    if (replay !== null) return acknowledgementResult(replay);
+    if (!(error instanceof RecordNotFoundError)) throw error;
+    return rejectAcknowledgementWithCurrentEvidence(access, input, mediaProbe, "OUTPUT_AUTHORITY_CHANGED");
+  }
+  const concurrentReplay = access.encodeOutputInspectionReceipts.replay(input);
+  if (concurrentReplay !== null) return acknowledgementResult(concurrentReplay);
+  if (!current.operatorInspection.acknowledgement.eligible) {
+    return rejectAcknowledgementWithCurrentEvidence(access, input, mediaProbe,
+      current.operatorInspection.acknowledgement.reasonCode ?? "OUTPUT_AUTHORITY_CHANGED");
+  }
+  if (current.operatorInspection.reviewToken !== input.reviewToken) {
+    return rejectAcknowledgementWithCurrentEvidence(access, input, mediaProbe, "OUTPUT_INSPECTION_STALE");
+  }
+  let descriptor: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    const base = resolveEncodeOutputAuthority(access, parsed);
+    descriptor = await open(base.outputPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const opened = descriptor;
+    const record = access.encodeOutputInspectionReceipts.record(input, () => {
+      // Publication commits its authority fence before changing media. Stage
+      // file checks outside SQLite, then reject a changed fence in the write.
+      const file = fstatSync(opened.fd);
+      const path = lstatSync(base.outputPath);
+      if (fileIsRegularAndNonempty(file) !== null || fileIsRegularAndNonempty(path) !== null ||
+          !sameEncodeOutputMutationSnapshot(file, path) ||
+          fileMutationRevision(file) !== current.artifact.file.mutationRevision) {
+        throw new EncodeOutputAcknowledgementRejectedError("OUTPUT_IDENTITY_CHANGED", current);
+      }
+      return {
+        generationIdentity: current.operatorInspection.generationIdentity!,
+        encodeJobId: current.artifact.provenance.encodeJobId,
+        evidenceJson: canonicalPublicationJson(current.artifact),
+        assertAuthority() {
+          const authority = resolveEncodeOutputAuthority(access, parsed);
+          if (authority.authorityUnavailableReason !== null ||
+              evidenceDigest(authority.authorityKey) !== current.authorityRevision ||
+              canonicalPublicationJson(historicalProvenance(authority.job, authority.originalDiscArchiveId, authority.retainedOutputId)) !==
+                canonicalPublicationJson(current.artifact.provenance)) {
+            throw new EncodeOutputAcknowledgementRejectedError("OUTPUT_AUTHORITY_CHANGED", current);
+          }
+        },
+      };
+    });
+    return acknowledgementResult(record);
+  } catch (error) {
+    const replay = access.encodeOutputInspectionReceipts.replay(input);
+    if (replay !== null) return acknowledgementResult(replay);
+    const fileError = typeof error === "object" && error !== null && "code" in error &&
+      ["ENOENT", "EACCES", "ELOOP", "ENOTDIR", "ESTALE"].includes(String(error.code));
+    if (!(error instanceof EncodeOutputAcknowledgementRejectedError) &&
+        !(error instanceof RecordNotFoundError) && !fileError) throw error;
+    // The transaction has rolled back. Return fresh identities, including when
+    // the change happened after the asynchronous probe or descriptor open.
+    return await rejectAcknowledgementWithCurrentEvidence(access, input, mediaProbe,
+      error instanceof EncodeOutputAcknowledgementRejectedError ? error.reasonCode : "OUTPUT_INSPECTION_STALE");
+  } finally {
+    await descriptor?.close();
+  }
 }
 
 const EXPORT_BUFFER_SIZE_BYTES = 1024 * 1024;

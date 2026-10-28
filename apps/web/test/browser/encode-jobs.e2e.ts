@@ -39,18 +39,35 @@ async function expectNoPageOverflow(page: Page): Promise<void> {
   expect(result.scrollWidth).toBeLessThanOrEqual(result.clientWidth);
 }
 
-test("inspects a completed canonical Encode Output", async ({
+test("inspects and explicitly acknowledges a completed canonical Encode Output", async ({
   page,
 }, testInfo) => {
   const variant = fixtureVariant(testInfo.project.name);
+  const acknowledgements: unknown[] = [];
   await page.route("**/api/encode-outputs/*", async (route) => {
     const artifactIdentity = decodeURIComponent(
       new URL(route.request().url()).pathname.split("/").at(-1) ?? "",
     );
+    if (route.request().method() === "POST") {
+      acknowledgements.push(route.request().postDataJSON());
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({
+        schemaVersion: 1, receipt: {
+          id: "synthetic-browser-inspection-receipt", artifactIdentity,
+          generationIdentity: "synthetic-browser-output-generation",
+          acknowledgedAt: "2026-09-01T12:30:00.000Z", evidence: { provenance: { sourceSnapshotAvailability: "not_recorded" } },
+        },
+      }) });
+      return;
+    }
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
         schemaVersion: 1,
+        operatorInspection: {
+          generationIdentity: "synthetic-browser-output-generation", reviewToken: "a".repeat(64),
+          status: "not_acknowledged", acknowledgement: { eligible: true, reasonCode: null },
+          receipts: [], history: [], historyNextOffset: null,
+        },
         artifact: {
           identity: artifactIdentity,
           type: "canonical_encode_output",
@@ -82,7 +99,7 @@ test("inspects a completed canonical Encode Output", async ({
             sizeBytes: 2_048,
             modifiedAt: "2026-09-01T12:00:00.000Z",
             completeness: "unknown",
-            identityContinuity: "not_recorded",
+            identityContinuity: "verified",
           },
           inspectability: {
             status: "inspected",
@@ -138,6 +155,15 @@ test("inspects a completed canonical Encode Output", async ({
     "Playability is not assessed by this inspection.",
   );
   await expect(inspection).toContainText("ExportUnavailable");
+  expect(acknowledgements).toEqual([]);
+  const acknowledge = inspection.getByRole("button", { name: "Record inspection acknowledgement" });
+  await expect(acknowledge).toBeDisabled();
+  await inspection.getByRole("checkbox", { name: /I have inspected this output generation/ }).check();
+  await acknowledge.click();
+  await expect(inspection).toContainText("Acknowledgement recorded for this generation.");
+  expect(acknowledgements).toEqual([{ acknowledged: true, reviewToken: "a".repeat(64), mutationKey: expect.any(String) }]);
+  await inspection.getByText("Inspection acknowledgement history", { exact: true }).click();
+  await expect(inspection).toContainText("synthetic-browser-inspection-receipt");
   await expectNoPageOverflow(page);
 });
 

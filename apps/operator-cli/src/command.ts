@@ -1,6 +1,6 @@
 import { runNotifications } from "./notifications.js";
 import { runDamagePreview } from "./damage-preview.js";
-import { StructuredInputError } from "./structured-input.js";
+import { readStructuredObject, StructuredInputError } from "./structured-input.js";
 import {
   createApplicationOperations,
   DvdDiscVerificationUnavailableError,
@@ -12,6 +12,9 @@ import {
   NotificationsUnavailableError,
   createTmdbCatalogLookup,
   EncodeOutputExportRejectedError,
+  EncodeOutputAcknowledgementRejectedError,
+  InvalidEncodeOutputAcknowledgementError,
+  InvalidEncodeOutputInspectionInputError,
   InvalidEncodeOutputArtifactIdentityError,
   InvalidEncodeOutputExportInputError,
   generateMutationKey,
@@ -218,11 +221,12 @@ const commandDefinitions = [
   },
   {
     name: "encode-output",
-    description: "Inspect or export a canonical Encode Output by artifact identity.",
-    usage: "rip-dvd encode-output <inspect|export> <artifact-identity> [--destination <path>]",
+    description: "Inspect, export, or explicitly acknowledge inspection of a canonical Encode Output generation. Inspection and export are read-only.",
+    usage: "rip-dvd encode-output <inspect|export|acknowledge-inspection> <artifact-identity> [options]",
     inputs: {
-      arguments: ["action: inspect|export", "artifact-identity"],
-      options: ["--destination <path> (export only)"],
+      arguments: ["action: inspect|export|acknowledge-inspection", "artifact-identity"],
+      options: ["--destination <path> (export only)", "--receipt-limit <1..100> (inspect)", "--receipt-offset <n> (inspect)", "--key <key> (acknowledge-inspection)", "--json <object> | --file <path> | --stdin (acknowledge-inspection)"],
+      acknowledgementSchema: { acknowledged: "true", reviewToken: "exact operatorInspection.reviewToken from inspect" },
     },
     example:
       "rip-dvd encode-output inspect encode-output-v1.published.<encode-job-id>",
@@ -1688,18 +1692,56 @@ async function encodeOutputCommand(
 ) {
   const [action, artifactIdentity] = rest;
   if (
-    (action !== "inspect" && action !== "export") ||
+    (action !== "inspect" && action !== "export" && action !== "acknowledge-inspection") ||
     artifactIdentity === undefined ||
     artifactIdentity.length > 256 ||
-    (action === "inspect" && rest.length !== 2) ||
     (action === "export" &&
       (rest.length !== 4 || rest[2] !== "--destination" || !rest[3]))
   ) {
     throw new CommandFailure(
       "INVALID_ARGUMENTS",
-      "Expected encode-output inspect <artifact-identity> or encode-output export <artifact-identity> --destination <path>.",
+      "Expected encode-output inspect, export, or acknowledge-inspection with an artifact identity and the action's required options.",
       2,
     );
+  }
+  const page: { receiptLimit?: number; receiptOffset?: number } = {};
+  if (action === "inspect") {
+    for (let index = 2; index < rest.length; index += 2) {
+      const name = rest[index];
+      const field = name === "--receipt-limit" ? "receiptLimit" : name === "--receipt-offset" ? "receiptOffset" : null;
+      if (field === null || page[field] !== undefined || !/^\d+$/.test(rest[index + 1] ?? "")) {
+        throw new CommandFailure("INVALID_ARGUMENTS", "Invalid receipt history options.", 2);
+      }
+      page[field] = Number(rest[index + 1]);
+    }
+  }
+  let acknowledgement: Record<string, unknown> | undefined;
+  if (action === "acknowledge-inspection") {
+    const options = new Map<string, string>();
+    for (let index = 2; index < rest.length;) {
+      const name = rest[index]!;
+      if (!["--key", "--json", "--file", "--stdin"].includes(name) || options.has(name)) {
+        throw new CommandFailure("INVALID_ARGUMENTS", "Invalid acknowledgement options.", 2);
+      }
+      if (name === "--stdin") {
+        options.set(name, "true");
+        index += 1;
+      } else {
+        if (!rest[index + 1]) throw new CommandFailure("INVALID_ARGUMENTS", "Missing acknowledgement option value.", 2);
+        options.set(name, rest[index + 1]!);
+        index += 2;
+      }
+    }
+    let structured: unknown;
+    try { structured = readStructuredObject(options, io); }
+    catch (error) {
+      if (error instanceof StructuredInputError) throw new CommandFailure(error.code, error.message, 2);
+      throw error;
+    }
+    if (structured === undefined || !options.has("--key") || "mutationKey" in (structured as Record<string, unknown>)) {
+      throw new CommandFailure("INVALID_ARGUMENTS", "Acknowledgement requires --key and reviewed JSON input.", 2);
+    }
+    acknowledgement = { ...(structured as Record<string, unknown>), mutationKey: options.get("--key") };
   }
   let access: DataAccess | undefined;
   try {
@@ -1709,8 +1751,11 @@ async function encodeOutputCommand(
         ? {}
         : { encodeOutputMediaProbe: io.encodeOutputMediaProbe }),
     });
+    if (action === "acknowledge-inspection") {
+      return await operations.acknowledgeEncodeOutputInspection(artifactIdentity, acknowledgement);
+    }
     return action === "inspect"
-      ? await operations.inspectEncodeOutput(artifactIdentity)
+      ? await operations.inspectEncodeOutput(artifactIdentity, page)
       : await operations.exportEncodeOutput({
         artifactIdentity,
         destination: rest[3],
@@ -1718,9 +1763,18 @@ async function encodeOutputCommand(
   } catch (error) {
     if (
       error instanceof InvalidEncodeOutputArtifactIdentityError ||
+      error instanceof InvalidEncodeOutputAcknowledgementError ||
+      error instanceof InvalidEncodeOutputInspectionInputError ||
+      error instanceof InvalidMutationKeyError ||
       error instanceof InvalidEncodeOutputExportInputError
     ) {
       throw new CommandFailure("INVALID_ARGUMENTS", error.message, 2);
+    }
+    if (error instanceof MutationKeyConflictError) {
+      throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    if (error instanceof EncodeOutputAcknowledgementRejectedError) {
+      throw new CommandFailure(error.reasonCode, error.message, 2, undefined, { current: error.current, currentIdentity: error.currentIdentity });
     }
     if (error instanceof RecordNotFoundError) {
       throw new CommandFailure("ENCODE_OUTPUT_NOT_FOUND", "Encode Output not found.", 2);

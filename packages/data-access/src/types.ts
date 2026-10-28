@@ -241,6 +241,7 @@ export type DvdTitleIdentityObservationId =
 export type EncodingProfileId = DomainId<"EncodingProfile">;
 export type ArchiveJobId = DomainId<"ArchiveJob">;
 export type EncodeJobId = DomainId<"EncodeJob">;
+export type EncodeOutputInspectionReceiptId = DomainId<"EncodeOutputInspectionReceipt">;
 export type EncodeJobFailureReportId = DomainId<"EncodeJobFailureReport">;
 export type RetainedEncodeOutputId = DomainId<"RetainedEncodeOutput">;
 export type ArchiveJobClaimToken = DomainId<"ArchiveJobClaim">;
@@ -3052,6 +3053,7 @@ export interface DvdCheckpointReadOwnership {
 }
 
 export interface DataAccess {
+  readonly encodeOutputInspectionReceipts: import("./encode-output-inspection-receipt.js").EncodeOutputInspectionReceiptAccess;
   /** Prepare under image ownership; mutate only in the synchronous commit after
    * the final ownership and checkpoint checks have succeeded. */
   withDvdCheckpoint<Result>(

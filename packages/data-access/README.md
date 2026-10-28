@@ -455,6 +455,14 @@ use short internal transactions. Archive attempt start and Encode Job claim
 return only after their atomic writes commit. Workers start external programs
 only after those operations return; process execution never belongs in a
 database transaction.
+Encode Output inspection acknowledgements stage file checks outside writer
+transactions. A short immediate write rechecks the publication authority and
+recorded provenance, then commits the receipt and mutation result together.
+Publication must persist its existing authority fence before changing media,
+so a publication racing the staged file check cannot commit an acknowledgement
+against changed authority. Receipt history is bounded and paged; the latest
+receipt for one generation is queried separately. Receipt records retain the
+evidence originally acknowledged even after later observations change.
 Encode publication persists a mutation token in one short transaction before
 filesystem work begins. Identity callbacks inspect already-staged media entries
 only outside writer transactions. Completion first commits while retaining the

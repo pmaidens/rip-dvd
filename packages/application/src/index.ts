@@ -94,6 +94,7 @@ import {
 import { UnsupportedArchiveEvidenceFormatError } from "./archive-request-input.js";
 import {
   exportEncodeOutput,
+  acknowledgeEncodeOutputInspection,
   inspectEncodeOutput,
   type EncodeOutputMediaProbe,
 } from "./encode-output-inspection.js";
@@ -456,12 +457,15 @@ export function createApplicationOperations(
     inspectDvdTitleDamageDecision: (
       archiveId: Parameters<typeof inspectDvdTitleDamageDecision>[1],
     ) => inspectDvdTitleDamageDecision(access, archiveId),
-    inspectEncodeOutput: (artifactIdentity: unknown) =>
+    inspectEncodeOutput: (artifactIdentity: unknown, page?: { receiptLimit?: number; receiptOffset?: number }) =>
       inspectEncodeOutput(
         access,
         artifactIdentity,
         dependencies.encodeOutputMediaProbe,
+        page,
       ),
+    acknowledgeEncodeOutputInspection: (artifactIdentity: unknown, input: unknown) =>
+      acknowledgeEncodeOutputInspection(access, artifactIdentity, input, dependencies.encodeOutputMediaProbe),
     exportEncodeOutput: (input: {
       artifactIdentity: unknown;
       destination: unknown;
@@ -1000,6 +1004,10 @@ export {
   encodeOutputArtifactReferences,
   encodeOutputArtifactIdentity,
   EncodeOutputExportRejectedError,
+  acknowledgeEncodeOutputInspection,
+  EncodeOutputAcknowledgementRejectedError,
+  InvalidEncodeOutputAcknowledgementError,
+  InvalidEncodeOutputInspectionInputError,
   exportEncodeOutput,
   inspectEncodeOutput,
   InvalidEncodeOutputArtifactIdentityError,
@@ -1011,6 +1019,7 @@ export type {
   EncodeOutputArtifactReference,
   EncodeOutputExportReasonCode,
   EncodeOutputInspection,
+  EncodeOutputInspectionReceipt,
   EncodeOutputInspectionReasonCode,
   EncodeOutputMediaInspection,
   EncodeOutputMediaProbe,

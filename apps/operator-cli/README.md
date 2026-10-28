@@ -604,6 +604,7 @@ rip-dvd encode-requeue --key <new-key> --encode-job-id <job-id>
 rip-dvd encode-requeue-preview --encode-job-id <completed-job-id>
 rip-dvd encode-requeue --key <new-key> --encode-job-id <completed-job-id> --revision <preview-revision> --acknowledge
 rip-dvd encode-output inspect encode-output-v1.published.<encode-job-id>
+rip-dvd encode-output acknowledge-inspection encode-output-v1.published.<encode-job-id> --key <key> --json '{"acknowledged":true,"reviewToken":"<operatorInspection.reviewToken>"}'
 rip-dvd encode-output export encode-output-v1.published.<encode-job-id> --destination /exports/example-output.mkv
 ```
 
@@ -622,6 +623,53 @@ explicit. A successful media probe does not manufacture validation evidence.
 Probe failure reports unknown inspectability and does not claim that the file
 is playable. Inspection reports export as available only when the observed
 regular, nonempty file matches its recorded identity.
+
+Inspection, probing, export and playback do not record an operator
+acknowledgement. Use `acknowledge-inspection` with explicit `acknowledged: true`,
+the exact `operatorInspection.reviewToken` you reviewed, the artifact identity,
+and a mutation key. JSON input also supports `--file` or `--stdin`.
+`commands` and `help encode-output` describe the required input schema.
+The response returns a durable `receipt` with its identity, generation identity,
+acknowledgement time and exact evidence. Inspection exposes matching generation
+receipts and the Encode Job's receipt history in `operatorInspection`.
+History defaults to 20 receipts. Use `inspect --receipt-limit <1..100>
+--receipt-offset <n>` and follow `operatorInspection.historyNextOffset` to page
+older receipts. The HTTP query uses `receipt-limit` and `receipt-offset`.
+
+The receipt binds the observed file and recorded validation evidence to a
+particular normal output generation. Requeueing a job does not acknowledge its
+replacement bytes. Retained normal generations stay separately addressable,
+and their original receipts remain available. Same-key, same-input retries
+return the original receipt even after later changes. Changed input conflicts
+with that key. A fresh key with stale evidence fails without a receipt and
+returns current inspection identities with a stable reason. Missing, unowned,
+changed or unsafe files also report their observed `error.currentIdentity`
+when obtainable, separately from the owned artifact's inspection state.
+Unsafe or changing files cannot be acknowledged. Probe failure can be
+acknowledged as an explicit unknown, preserving the reported validation result
+and `playability: not_assessed`.
+Receipt applicability also requires the same observed file mutation revision
+and provenance. Moving a retained file may change that revision. Its original
+receipt stays in history, but a fresh acknowledgement is required unless a
+producer records proof that the changed observation still represents the
+reviewed bytes. This capability does not manufacture that correspondence.
+
+Receipts preserve the inspection producer's source provenance exactly as
+recorded. Historical `sourceSnapshotAvailability: not_recorded` remains
+`not_recorded` in an old receipt even when later producers record more evidence.
+An acknowledgement asserts neither validation success, watchability,
+damage-interval playback nor Keep. Failed-output integration is separate.
+
+Damage Preview automatic-retention consumers require both an explicit receipt
+and immutable normal-output source provenance. They must prove that the receipt
+and exact generation match the preview's archive, checkpoint, concrete title,
+path, angle, playback selection, applicable streams and versioned intended
+settings, or a documented, proved equivalence. Current job or Disc Selection
+state cannot supply missing proof. Missing or mismatched proof protects current
+media, and failed-output receipts never release that protection. Active Catalog
+Review independently protects current media. Archive-only decisions and explicit
+deletion keep their separate rules. This receipt capability does not implement
+retention cleanup or open new-format admission.
 
 `encode-output export` copies that identity-bound canonical file to the path
 on the machine running the CLI. The destination must not already exist. Success
