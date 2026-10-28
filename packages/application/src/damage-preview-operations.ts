@@ -20,14 +20,29 @@ function requiredRecord(access: DataAccess, id: string) {
   if (!record) throw new RecordNotFoundError("Damage Preview", id);
   return record;
 }
+function previewInputIdentity(review: Review): string {
+  const request = review.reviewedRequest;
+  // Admission status and token format may change after Stop without changing
+  // the sample's source or intended content within the same Recovery attempt.
+  return canonicalPublicationJson(request === null ? null : {
+    ...request,
+    recovery: request.recovery ? { id: request.recovery.id, attemptId: request.recovery.attemptId } : null,
+  });
+}
 export function presentDamagePreview(record: DamagePreviewRecord, current?: Review, superseded = false) {
   const review = JSON.parse(record.reviewJson) as Review;
-  const outdated = superseded || (current !== undefined && current.preflightToken !== record.preflightToken);
+  const outdated = superseded || (current !== undefined && previewInputIdentity(current) !== previewInputIdentity(review));
   return {
     schemaVersion: 1, id: record.id, originalDiscArchiveId: record.originalDiscArchiveId,
     status: outdated && record.artifacts.length > 0 ? "outdated" : record.status,
-    generationStatus: record.status, outdated,
+    generationStatus: record.status, outdated, checkpointVerified: record.checkpointVerified ?? review.current?.checkpointVerified ?? false,
     outdatedReasons: outdated ? [{ code: "DAMAGE_PREVIEW_INPUTS_CHANGED", message: "The current archive, title, selection, streams or intended settings differ from this sample." }] : [],
+    recoveryPause: review.reviewedRequest?.recovery && !["stopped", "completed"].includes(review.reviewedRequest.recovery.status) ? {
+      recoveryId: review.reviewedRequest.recovery.id,
+      attemptId: review.reviewedRequest.recovery.attemptId,
+      state: record.sourceReleased || !["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(record.status) ? "released" : record.status === "generating" ? "paused" : "waiting",
+      reason: { code: "DAMAGE_PREVIEW_PLANNED_RECOVERY_PAUSE", message: "Recovery finishes its admitted command and durable checkpoint, then pauses for this preview. This planned pause does not start the contention grace period." },
+    } : null,
     reason: record.reason, cancellationRequested: record.cancellationRequested, progress: record.progress,
     artifacts: record.artifacts.map(({ path: _path, ...artifact }) => artifact),
     provenance: { preflightToken: record.preflightToken, ...review.reviewedRequest, clips: review.clips, commands: record.commands, streamMapping: record.streamMapping, toolVersions: record.toolVersions, deviations: record.deviations },
@@ -42,16 +57,30 @@ export async function requestDamagePreview(access: DataAccess, archiveId: string
   if (typeof input.preflightToken !== "string" || input.preflightToken.length > 256) throw new InvalidDamagePreviewInputError("A reviewed preflight token is required.");
   const selection = parseDamagePreviewInput(input.selection);
   const admission = { mutationKey, archiveId, preflightToken: input.preflightToken, selectionJson: canonicalPublicationJson(selection) };
-  // The OS ownership interval covers durable validation and the transaction that admits work.
-  // A replay is resolved before its prepare callback, even when evidence has since changed.
-  const submit = (checkpoint: Awaited<ReturnType<DataAccess["readDvdCheckpoint"]>>) => access.damagePreviews.submit(admission, () => access.readConsistentSnapshot((snapshot) => {
-    const current = reviewDamagePreviewEvidence(snapshot, archiveId, selection, checkpoint);
+  // Stable requests validate the durable checkpoint under OS ownership.
+  // Active requests retain the reviewed identity while deferring that proof.
+  // Replay precedes preparation even after source changes.
+  const activeToken = /^damage-preview-preflight:v2:([a-f0-9]{64}):[a-f0-9]{64}$/.exec(input.preflightToken);
+  const submit = (checkpoint: Awaited<ReturnType<DataAccess["readDvdCheckpoint"]>>, deferCheckpoint = false) => access.damagePreviews.submit(admission, () => access.readConsistentSnapshot((snapshot) => {
+    const header = deferCheckpoint ? snapshot.catalog.findDvdArchiveEvidenceHeader(archiveId as OriginalDiscArchiveId) : null;
+    const reviewedCheckpoint = header && activeToken ? {
+      id: header.currentManifestId, revision: header.currentManifestRevision, manifestDigest: header.currentManifestDigest, publicationDigest: activeToken[1]!,
+    } : checkpoint;
+    const current = reviewDamagePreviewEvidence(snapshot, archiveId, selection, reviewedCheckpoint);
     if (current.preflightToken !== input.preflightToken) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_STALE", [{ code: "DAMAGE_PREVIEW_STALE", message: "Review current preview inputs before requesting work." }], current);
     if (!current.available) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_UNAVAILABLE", current.blockingReasons, current);
+    if (deferCheckpoint) {
+      current.current.checkpointVerified = false;
+      current.knownUnknowns.push({ code: "DAMAGE_PREVIEW_CHECKPOINT_PENDING", message: "Generation must verify the reviewed durable checkpoint under image ownership after Recovery pauses." });
+    }
     return JSON.stringify(current);
   }));
   const replay = access.damagePreviews.replay(admission);
   if (replay) return presentDamagePreview(replay);
+  // Active requests commit a durable waiting identity before any ownership wait.
+  // The token and all database identities are checked in that same transaction;
+  // source admission remains fenced until the worker verifies the exact bytes.
+  if (activeToken) return presentDamagePreview(submit(null, true));
   let record: DamagePreviewRecord | null;
   try {
     record = await access.withDvdCheckpoint<DamagePreviewRecord | null>(archiveId as OriginalDiscArchiveId, ownership,
@@ -79,7 +108,7 @@ export async function inspectDamagePreview(access: DataAccess, id: string, _owne
   const history = access.damagePreviews.list(record.originalDiscArchiveId);
   const newerIntent = history.slice(history.findIndex((candidate) => candidate.id === record.id) + 1).filter((candidate) =>
     (JSON.parse(candidate.reviewJson) as Review).reviewedRequest?.title?.titleIdentityId === originalTitle).at(-1);
-  return presentDamagePreview(record, current, newerIntent !== undefined && newerIntent.preflightToken !== record.preflightToken);
+  return presentDamagePreview(record, current, newerIntent !== undefined && previewInputIdentity(JSON.parse(newerIntent.reviewJson) as Review) !== previewInputIdentity(JSON.parse(record.reviewJson) as Review));
 }
 export function cancelDamagePreview(access: DataAccess, id: string, mutationKey: unknown) {
   return presentDamagePreview(access.damagePreviews.cancel(id, parseMutationKey(mutationKey)));

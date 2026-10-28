@@ -7,6 +7,7 @@ import { createOperatorWorkflowFixture } from "../../../../../operator-cli/src/o
 import { seedDamagePreview } from "../../../../../operator-cli/src/damage-preview.test-support.js";
 import { advanceCommittedArchiveEvidence } from "../../../../../operator-cli/src/archive-evidence.test-support.js";
 import { pollDamagePreviews } from "../../../../../encode-worker/src/damage-preview-worker.js";
+import { bytes, media } from "../../../../../encode-worker/src/damage-preview.test-support.js";
 import type { DamagePreviewGenerator } from "../../../../../encode-worker/src/damage-preview-generator.js";
 import { ArchiveImageOwnershipError, createArchiveImageOwnership, acquireKernelProcessLock, type ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { createApplicationOperations, type DamagePreviewInspection, type DamagePreviewAvailability } from "@rip-dvd/application";
@@ -15,20 +16,14 @@ import { createDamagePreviewMediaRoute } from "../../damage-preview-media/[artif
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
-const bytes = Buffer.from("synthetic canonical MKV bytes for adapter transport");
-function media(overrides: Partial<DamagePreviewGenerator> = {}): DamagePreviewGenerator {
-  return {
-    versions: async () => ({ handbrake: "synthetic-handbrake-v1", ffprobe: "synthetic-probe-v1" }),
-    scan: async () => ({ navigation: { videoTitleSetNumber: 1, titleSetTitleNumber: 1, programChainNumber: 1 }, selectedPath: [{ programNumber: 1, cellNumber: 1, vobId: 1, cellId: 1 }], durationMilliseconds: 500_000, chapterDurations: [125_000, 125_000, 125_000, 125_000], audio: [{ sourceId: 128, physicalId: 128, trackNumber: 1, codec: "ac3", channels: 2 }], subtitles: [], angleCount: 1 }),
-    async generate(request) { writeFileSync(request.outputPath, bytes); request.onOutput("Encoding: task 1 of 1, 100.00 %"); },
-    inspect: async (path) => ({ videoStartMilliseconds: 0, durationMilliseconds: /\/0(?:\.partial)?\.mkv$/.test(path) ? 45_000 : 339_000, videoCount: 1, audioCount: 1, subtitleCount: 0 }),
-    requireInactive() {}, whenInactive: async () => undefined,
-    ...overrides,
-  };
-}
-async function setup() {
+async function setup(activeRecovery = false) {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
   const seeded = await seedDamagePreview(fixture);
+  if (activeRecovery) {
+    const database = new DatabaseSync(fixture.databasePath);
+    database.prepare("UPDATE archive_recoveries SET status = 'eligible', stop_operation_id = NULL, stop_requested_at = NULL, stopped_at = NULL WHERE original_disc_archive_id = ?").run(seeded.archive.id);
+    database.close();
+  }
   const review = (await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify(seeded.input)])).result as DamagePreviewAvailability;
   const input = { preflightToken: review.preflightToken, selection: seeded.input };
   const request = async (key = "synthetic-request") => fixture.run(["damage-preview", "request", seeded.archive.id, "--key", key, "--json", JSON.stringify(input)]);
@@ -40,7 +35,7 @@ async function setup() {
   };
 }
 it("shares request, replay, changed-input conflict, wait and checkpoint-free cancellation with the public CLI", async () => {
-  const { fixture, seeded, input, access, request } = await setup();
+  const { fixture, seeded, input, access, request } = await setup(true);
   try {
     const origin = "http://localhost:3000";
     const webRequest = (id: string, method: string, body?: unknown, query = "") => createDamagePreviewRoute(new Request(`${origin}/api/damage-previews/${id}${query}`, { method, ...(body ? { headers: { Origin: origin, Host: "localhost:3000", "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}) }), id, () => access, () => origin);
@@ -106,7 +101,7 @@ it("generates every reviewed group, retains provenance, exports canonical bytes 
 });
 it("keeps actual partial coverage, failures and cancellation distinct, and never restarts abandoned work", async () => {
   for (const outcome of ["partial", "failed", "cancelled", "interrupted"] as const) {
-    const { fixture, request, generate, access } = await setup();
+    const { fixture, request, generate, access } = await setup(true);
     try {
       const id = ((await request()).result as DamagePreviewInspection).id;
       if (outcome === "interrupted") {
@@ -133,7 +128,7 @@ it("keeps actual partial coverage, failures and cancellation distinct, and never
 });
 
 it.skipIf(process.platform !== "linux")("lets a long preview continue without waiters, applies two minutes of contention grace, and proves quiescence before oldest-waiter admission", async () => {
-  const { fixture, seeded, request, access } = await setup();
+  const { fixture, seeded, request, access } = await setup(true);
   const ownership = createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath });
   let enter!: () => void;
   const entered = new Promise<void>((resolve) => { enter = resolve; });
@@ -297,4 +292,80 @@ it("maps logical DVD source IDs to track ordinals, retains subtitle variants and
       }
     } finally { access.close(); }
   }
+});
+
+it("retains a stale terminal reason when an active writer advances the checkpoint during worker ownership acquisition", async () => {
+  const { fixture, seeded, request, access } = await setup(true);
+  const base = createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath });
+  let enter!: () => void, release!: () => void, acquiring!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const acquisition = new Promise<void>((resolve) => { acquiring = resolve; });
+  const id = ((await request()).result as DamagePreviewInspection).id;
+  const writer = base.withWriter({ archiveId: seeded.archive.id, imagePath: seeded.archive.archivePath, originalsLibraryPath: fixture.originalsLibraryPath, signal: new AbortController().signal, async task() { enter(); await released; advanceCommittedArchiveEvidence(fixture, seeded.manifest, { publishFilesystemCheckpoint: true }); } });
+  const ownership: ArchiveImageOwnership = { ...base, withConsistentRead(input) { acquiring(); return base.withConsistentRead(input); } };
+  try {
+    await entered;
+    const generate = () => pollDamagePreviews({ access, mediaLibraryPath: fixture.mediaLibraryPath, originalsLibraryPath: fixture.originalsLibraryPath, signal: new AbortController().signal, generator: media(), ownership });
+    const generating = generate();
+    await acquisition;
+    release(); await writer; await generating;
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "failed", checkpointVerified: false, reason: { code: "DAMAGE_PREVIEW_STALE" }, artifacts: [], provenance: { checkpoint: { manifestRevision: 1 }, commands: [] } });
+    await generate();
+    expect(access.damagePreviews.find(id)?.commands).toEqual([]);
+  } finally { release?.(); await writer; access.close(); }
+});
+
+it("reports Recovery Stop when it commits between the owned Recovery check and the generation evidence snapshot", async () => {
+  const { fixture, seeded, request, access } = await setup(true);
+  const id = ((await request()).result as DamagePreviewInspection).id;
+  const base = createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath });
+  let owned = false, inSnapshot = false, stopAfterCheck = false, stopCommitted = false;
+  const findRecovery = access.catalog.findArchiveRecovery;
+  access.catalog.findArchiveRecovery = (archiveId) => {
+    const recovery = findRecovery(archiveId);
+    if (owned && !inSnapshot) stopAfterCheck = true;
+    return recovery;
+  };
+  const readSnapshot = access.readConsistentSnapshot;
+  access.readConsistentSnapshot = (read) => {
+    if (stopAfterCheck && !stopCommitted) {
+      stopCommitted = true;
+      const recovery = findRecovery(seeded.archive.id)!;
+      access.archiveRecoveryWork.requestStop({ mutationKey: "synthetic-stop-snapshot-race", archiveRecoveryId: recovery.id, attemptId: recovery.attemptId });
+    }
+    inSnapshot = true;
+    try { return readSnapshot(read); } finally { inSnapshot = false; }
+  };
+  const ownership: ArchiveImageOwnership = { ...base, withConsistentRead(input) { return base.withConsistentRead({ ...input, async task(handle) { owned = true; return input.task(handle); } }); } };
+  try {
+    await pollDamagePreviews({ access, mediaLibraryPath: fixture.mediaLibraryPath, originalsLibraryPath: fixture.originalsLibraryPath, signal: new AbortController().signal, generator: media(), ownership });
+    expect(stopCommitted).toBe(true);
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "failed", checkpointVerified: false, reason: { code: "DAMAGE_PREVIEW_RECOVERY_STOP" }, artifacts: [], provenance: { commands: [] } });
+  } finally { access.close(); }
+});
+
+it("gives a committed Recovery Stop priority when the contention grace callback runs before the Recovery monitor", async () => {
+  const { fixture, seeded, request, access } = await setup(true);
+  const id = ((await request()).result as DamagePreviewInspection).id;
+  const base = createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath });
+  let onContention: ((urgent: boolean, waiting: boolean) => void) | undefined;
+  const ownership: ArchiveImageOwnership = { ...base, withConsistentRead(input) { onContention = input.previewRead?.onContention; return base.withConsistentRead(input); } };
+  let clock = 1_000_000;
+  const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+  try {
+    await pollDamagePreviews({ access, mediaLibraryPath: fixture.mediaLibraryPath, originalsLibraryPath: fixture.originalsLibraryPath, signal: new AbortController().signal, ownership, generator: media({
+      async generate(input) {
+        writeFileSync(input.outputPath, bytes);
+        onContention!(false, true);
+        clock += 120_001;
+        const recovery = access.catalog.findArchiveRecovery(seeded.archive.id)!;
+        access.archiveRecoveryWork.requestStop({ mutationKey: "synthetic-stop-at-grace-expiry", archiveRecoveryId: recovery.id, attemptId: recovery.attemptId });
+        onContention!(false, true);
+        input.signal.throwIfAborted();
+      },
+      inspect: async () => ({ videoStartMilliseconds: 0, durationMilliseconds: 1_000, videoCount: 1, audioCount: 1, subtitleCount: 0 }),
+    }) });
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "partial", reason: { code: "DAMAGE_PREVIEW_RECOVERY_STOP" }, artifacts: [{ coverage: { startMilliseconds: 0, endMilliseconds: 1_000 } }] });
+  } finally { now.mockRestore(); access.close(); }
 });

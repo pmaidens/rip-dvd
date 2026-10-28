@@ -33,6 +33,7 @@ export {
   dvdRecoveryEvidenceFormatForArchive,
 } from "./dvd-recovery-evidence.js";
 export {
+  ArchiveRecoveryPreviewPauseError,
   ACTIVE_ENCODE_WORK_STATUSES,
   ENCODE_WORK_CONFLICT,
   EncodeWorkConflictError,

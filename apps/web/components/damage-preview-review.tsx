@@ -114,7 +114,7 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
   return (
     <section className="catalog-pane" aria-label="Damage Preview">
       <h3>Damage Preview</h3>
-      <p>Generate a canonical MKV sample from stopped or completed Archive Recovery, including before catalog mapping. Active Recovery previews remain unavailable. Reviewing does not request work or accept damage.</p>
+      <p>Generate a canonical MKV sample from one saved checkpoint, including before catalog mapping. During active Recovery, the request waits for a planned pause. Reviewing does not request work or accept damage.</p>
       {availability === null ? <button type="button" disabled={busy} onClick={() => void load()}>Review preview availability</button> : null}
       {error ? <p role="alert">{error}</p> : null}
       {availability !== null ? <>
@@ -179,6 +179,8 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
       <button type="button" disabled={busy || !requestId || (preview !== null && !["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(preview.generationStatus))} onClick={() => void inspectPreview("cancel")}>Cancel preview request</button>
       {preview ? <div aria-label="Damage Preview request" role="status">
         <p>Request {preview.id}. Status: {preview.status}. Generation: {preview.generationStatus}.</p>
+        <p>Reviewed checkpoint verification: {preview.checkpointVerified ? "verified" : ["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(preview.generationStatus) ? "waiting for Recovery and a consistent read" : "not verified"}.</p>
+        {preview.recoveryPause ? <p>Planned Recovery pause: {preview.recoveryPause.state}. {preview.recoveryPause.reason.message}</p> : null}
         {preview.reason ? <p>{preview.reason.code}: {preview.reason.message}</p> : null}
         {preview.outdatedReasons.map((reason) => <p key={reason.code}>{reason.message}</p>)}
         <p>{preview.progress.completedClips} of {preview.progress.totalClips} clips. Progress: {preview.progress.percent === null ? "unknown" : `${preview.progress.percent}%`}.</p>

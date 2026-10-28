@@ -6,6 +6,7 @@ import {
   readFileSync,
   utimesSync,
   writeSync,
+  writeFileSync,
 } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { dispatchNotifications } from "@rip-dvd/application";
@@ -24,6 +25,9 @@ import {
   type ArchiveImageOwnership,
 } from "@rip-dvd/worker-runtime";
 
+import { pollDamagePreviews } from "../../../../../encode-worker/src/damage-preview-worker.js";
+import { media, bytes } from "../../../../../encode-worker/src/damage-preview.test-support.js";
+import { seedDamagePreview } from "../../../../../operator-cli/src/damage-preview.test-support.js";
 import { seedDvdDiscVerificationFixture } from "../../../../../operator-cli/src/dvd-disc-verification.test-support.js";
 import { notificationWorkflow } from "../../../../../operator-cli/src/notification-workflow.test-support.js";
 import { createOperatorWorkflowFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
@@ -4246,4 +4250,159 @@ it("leaves eligible Recovery work dormant on unsupported storage", async () => {
   } finally {
     input.access.close();
   }
+});
+
+it.each([false, true])("holds verified Recovery for a durable planned preview pause and survives cancellation during handoff: %s", async (cancelDuringHandoff) => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{ startLba: 10, sectorCount: 2, classification: "skipped_untested" }]);
+  const preview = await seedDamagePreview(fixture, "source_span", [[1_000, 5_000]], { evidence: seeded, stopRecovery: false });
+  await completeVerification(fixture, seeded);
+  const selection = { ...preview.input, intervalIndexes: [0] };
+  let previewId = "";
+  const source = immediateReader(() => ({ outcome: "unreadable", diagnostic: mediumError }));
+  const run = pollInput(fixture, source.reader);
+  const admit = run.access.archiveRecoveryWork.admitSourceRead;
+  run.access.archiveRecoveryWork.admitSourceRead = (...args) => {
+    try {
+      const result = admit(...args);
+      if (cancelDuringHandoff && result === null) run.access.damagePreviews.cancel(previewId, "synthetic-handoff-cancel");
+      return result;
+    } catch (error) {
+      if (cancelDuringHandoff) run.access.damagePreviews.cancel(previewId, "synthetic-handoff-cancel");
+      throw error;
+    }
+  };
+  const observe = run.mediaGenerationObserver.observe;
+  run.mediaGenerationObserver.observe = async (path, signal) => {
+    if (!previewId) {
+      const review = await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify(selection)]);
+      const request = await fixture.run(["damage-preview", "request", seeded.archive.id, "--key", "synthetic-racing-preview", "--json", JSON.stringify({ selection, preflightToken: (review.result as { preflightToken: string }).preflightToken })]);
+      expect(request.exitCode).toBe(0);
+      previewId = (request.result as { id: string }).id;
+    }
+    return observe(path, signal);
+  };
+  try {
+    expect(await pollDvdRecoveryPass(run)).toBe(true);
+    expect(source.start.mock.results.every((result) => result.type === "return" && result.value.authorize.mock.calls.length === 0)).toBe(true);
+    expect(run.access.catalog.findArchiveRecovery(seeded.archive.id)).toMatchObject({ status: "eligible", faultCode: null });
+    if (!cancelDuringHandoff) {
+      expect(await pollDvdRecoveryPass(run)).toBe(false);
+      await fixture.run(["damage-preview", "cancel", previewId, "--key", "synthetic-racing-cancel"]);
+    }
+    expect(await pollDvdRecoveryPass(run)).toBe(true);
+    expect(source.start.mock.results.some((result) => result.type === "return" && result.value.authorize.mock.calls.length > 0)).toBe(true);
+  } finally { run.access.close(); }
+});
+
+it("waits durably for an admitted Recovery command and rejects an advanced checkpoint without reading or restarting the preview", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{ startLba: 10, sectorCount: 2, classification: "skipped_untested" }]);
+  const preview = await seedDamagePreview(fixture, "source_span", [[1_000, 5_000]], { evidence: seeded, stopRecovery: false });
+  await completeVerification(fixture, seeded);
+  let entered!: () => void, finish!: (read: SyntheticSourceReadResult) => void, close!: () => void;
+  const enteredRead = new Promise<void>((resolve) => { entered = resolve; });
+  const result = new Promise<SyntheticSourceReadResult>((resolve) => { finish = resolve; });
+  const closed = new Promise<void>((resolve) => { close = resolve; });
+  const reader: DvdRecoverySourceReader = { start(request) { return { result, closed, cancel() {}, deviceIdentity: syntheticDeviceIdentity(request.devicePath), ready: Promise.resolve(), authorize: entered }; } };
+  const run = pollInput(fixture, reader);
+  try {
+    const recovery = pollDvdRecoveryPass(run);
+    await enteredRead;
+    const selection = { ...preview.input, intervalIndexes: [0] };
+    const review = await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify(selection)]);
+    const requested = await fixture.run(["damage-preview", "request", seeded.archive.id, "--key", "synthetic-inflight-preview", "--json", JSON.stringify({ selection, preflightToken: (review.result as { preflightToken: string }).preflightToken })]);
+    expect(requested.exitCode).toBe(0);
+    const id = (requested.result as { id: string }).id;
+    const pollPreview = () => pollDamagePreviews({ access: run.access, mediaLibraryPath: fixture.mediaLibraryPath, originalsLibraryPath: fixture.originalsLibraryPath, signal: new AbortController().signal, generator: media() });
+    const generating = pollPreview();
+    await vi.waitFor(async () => expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "waiting_for_checkpoint_or_ownership", reason: { code: "DAMAGE_PREVIEW_WAITING_FOR_CHECKPOINT" }, provenance: { commands: [] } }));
+    finish({ outcome: "readable", bytes: Buffer.alloc(2_048, 91) });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(run.access.catalog.findDvdArchiveEvidenceHeader(seeded.archive.id)?.currentManifestRevision).toBe(1);
+    close(); await recovery; await generating;
+    expect(run.access.catalog.findDvdArchiveEvidenceHeader(seeded.archive.id)?.currentManifestRevision).toBe(2);
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "failed", reason: { code: "DAMAGE_PREVIEW_STALE" }, artifacts: [], provenance: { checkpoint: { manifestRevision: 1 }, commands: [] } });
+    await pollPreview();
+    expect(run.access.damagePreviews.find(id)?.commands).toEqual([]);
+  } finally { finish?.({ outcome: "unreadable", diagnostic: mediumError }); close?.(); run.access.close(); }
+});
+
+it("preempts an active preview immediately for Recovery Stop and acknowledges only after source readers close", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{ startLba: 10, sectorCount: 2, classification: "skipped_untested" }]);
+  const preview = await seedDamagePreview(fixture, "source_span", [[1_000, 5_000]], { evidence: seeded, stopRecovery: false });
+  await completeVerification(fixture, seeded);
+  const selection = { ...preview.input, intervalIndexes: [0] };
+  const review = await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify(selection)]);
+  const requested = await fixture.run(["damage-preview", "request", seeded.archive.id, "--key", "synthetic-stop-preview", "--json", JSON.stringify({ selection, preflightToken: (review.result as { preflightToken: string }).preflightToken })]);
+  expect(requested.exitCode).toBe(0);
+  const id = (requested.result as { id: string }).id;
+  let enter!: () => void, quiesce!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const quiescent = new Promise<void>((resolve) => { quiesce = resolve; });
+  let generatorSignal: AbortSignal | undefined;
+  const source = immediateReader(() => ({ outcome: "readable", bytes: Buffer.alloc(2_048, 92) }));
+  const run = pollInput(fixture, source.reader);
+  try {
+    const generating = pollDamagePreviews({ access: run.access, mediaLibraryPath: fixture.mediaLibraryPath, originalsLibraryPath: fixture.originalsLibraryPath, signal: new AbortController().signal, generator: media({
+      async generate(request) { writeFileSync(request.outputPath, bytes); generatorSignal = request.signal; enter(); await new Promise<void>((_resolve, reject) => request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true })); },
+      whenInactive: (path) => path.endsWith("scan.mkv") ? Promise.resolve() : quiescent,
+      inspect: async () => ({ videoStartMilliseconds: 0, durationMilliseconds: 1_000, videoCount: 1, audioCount: 1, subtitleCount: 0 }),
+    }) });
+    await entered;
+    expect(await pollDvdRecoveryPass(run)).toBe(false);
+    expect(source.start).not.toHaveBeenCalled();
+    const stop = await fixture.run(["archive-recovery", "stop", seeded.recoveryId, "--attempt-id", seeded.attemptId, "--key", "synthetic-preview-stop"]);
+    expect(stop).toMatchObject({ exitCode: 0, result: { archiveRecovery: { status: "stopping" } } });
+    const stopping = pollDvdRecoveryPass(run);
+    await vi.waitFor(() => expect(generatorSignal?.aborted).toBe(true));
+    expect(run.access.catalog.findArchiveRecovery(seeded.archive.id)?.status).toBe("stopping");
+    expect(run.access.catalog.findDvdArchiveEvidenceHeader(seeded.archive.id)?.currentManifestRevision).toBe(1);
+    quiesce(); await generating; await stopping;
+    await pollDvdRecoveryPass(run);
+    expect(run.access.catalog.findArchiveRecovery(seeded.archive.id)).toMatchObject({ status: "stopped", faultCode: null });
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ status: "partial", generationStatus: "partial", outdated: false, checkpointVerified: true, reason: { code: "DAMAGE_PREVIEW_RECOVERY_STOP" }, artifacts: [{ coverage: { startMilliseconds: 0, endMilliseconds: 1_000 } }], recoveryPause: { state: "released" } });
+    const stoppedReview = await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify(selection)]);
+    expect(stoppedReview).toMatchObject({ exitCode: 0, result: { available: true } });
+    const sameIntent = await fixture.run(["damage-preview", "request", seeded.archive.id, "--key", "synthetic-same-intent-after-stop", "--json", JSON.stringify({ selection, preflightToken: (stoppedReview.result as { preflightToken: string }).preflightToken })]);
+    expect(sameIntent.exitCode).toBe(0);
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ status: "partial", outdated: false });
+    expect(await pollDvdRecoveryPass(run)).toBe(false);
+  } finally { quiesce?.(); run.access.close(); }
+});
+
+it("samples one active Recovery revision for a preview and releases its planned pause before artifact validation so Recovery can continue", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedDvdDiscVerificationFixture(fixture, [{ startLba: 10, sectorCount: 1, classification: "skipped_untested" }]);
+  const preview = await seedDamagePreview(fixture, "source_span", [[1_000, 5_000]], { evidence: seeded, stopRecovery: false });
+  await completeVerification(fixture, seeded);
+  const selection = { ...preview.input, intervalIndexes: [0] };
+  const review = await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify(selection)]);
+  const requested = await fixture.run(["damage-preview", "request", seeded.archive.id, "--key", "synthetic-consistent-preview", "--json", JSON.stringify({ selection, preflightToken: (review.result as { preflightToken: string }).preflightToken })]);
+  expect(requested.exitCode).toBe(0);
+  const id = (requested.result as { id: string }).id;
+  let enter!: () => void, finish!: () => void, validate!: () => void, publish!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const done = new Promise<void>((resolve) => { finish = resolve; });
+  const validating = new Promise<void>((resolve) => { validate = resolve; });
+  const published = new Promise<void>((resolve) => { publish = resolve; });
+  const source = immediateReader(() => ({ outcome: "readable", bytes: Buffer.alloc(2_048, 93) }));
+  const run = pollInput(fixture, source.reader);
+  const baseline = readFileSync(seeded.archive.archivePath!);
+  try {
+    const generating = pollDamagePreviews({ access: run.access, mediaLibraryPath: fixture.mediaLibraryPath, originalsLibraryPath: fixture.originalsLibraryPath, signal: new AbortController().signal, generator: media({
+      async generate(request) { enter(); await done; expect(readFileSync(seeded.archive.archivePath!).equals(baseline)).toBe(true); writeFileSync(request.outputPath, bytes); },
+      async inspect() { validate(); await published; return { videoStartMilliseconds: 0, durationMilliseconds: 10_000, videoCount: 1, audioCount: 1, subtitleCount: 0 }; },
+    }) });
+    await entered;
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "generating", checkpointVerified: true, recoveryPause: { state: "paused" }, provenance: { checkpoint: { manifestRevision: 1 } } });
+    expect(await pollDvdRecoveryPass(run)).toBe(false);
+    finish(); await validating;
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "generating", recoveryPause: { state: "released" } });
+    expect(await pollDvdRecoveryPass(run)).toBe(true);
+    expect(run.access.catalog.findDvdArchiveEvidenceHeader(seeded.archive.id)?.currentManifestRevision).toBe(2);
+    publish(); await generating;
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ status: "outdated", generationStatus: "complete", provenance: { checkpoint: { manifestRevision: 1 } }, artifacts: [{ coverage: { startMilliseconds: 0, endMilliseconds: 10_000 } }] });
+  } finally { finish?.(); publish?.(); run.access.close(); }
 });

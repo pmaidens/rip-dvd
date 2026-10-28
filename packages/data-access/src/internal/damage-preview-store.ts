@@ -1,9 +1,16 @@
+import { and, eq, sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/node-sqlite";
+import { damagePreviews } from "./schema.js";
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { MutationKeyConflictError, RecordNotFoundError } from "../errors.js";
 import type { DamagePreviewAccess, DamagePreviewRecord } from "../damage-preview.js";
 
+// Shared by the recovery admission transaction and the preview store.
+export const damagePreviewHoldsRecovery = sql`${damagePreviews.status} IN ('queued', 'waiting_for_checkpoint_or_ownership', 'generating') AND coalesce(json_extract(${damagePreviews.record}, '$.sourceReleased'), 0) = 0`;
+
 export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date): DamagePreviewAccess {
+  const database = drizzle({ client: sqlite });
   function transaction<T>(action: () => T): T {
     sqlite.exec("BEGIN IMMEDIATE");
     try { const result = action(); sqlite.exec("COMMIT"); return result; }
@@ -37,6 +44,12 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
   }
   return {
     find,
+    pendingForRecovery(archiveId) {
+      const row = database.select({ record: damagePreviews.record }).from(damagePreviews).where(and(
+        eq(damagePreviews.originalDiscArchiveId, archiveId), damagePreviewHoldsRecovery,
+      )).orderBy(damagePreviews.createdAt, damagePreviews.id).limit(1).get();
+      return row ? JSON.parse(row.record) as DamagePreviewRecord : null;
+    },
     replay(input) {
       const previous = sqlite.prepare("SELECT operation, semantic_input, outcome FROM mutation_invocations WHERE key = ?").get(input.mutationKey);
       if (!previous) return null;
@@ -52,11 +65,12 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
     submit(input, prepare) {
       return mutate(input.mutationKey, "damage-preview-request", { archiveId: input.archiveId, preflightToken: input.preflightToken, selectionJson: input.selectionJson }, () => {
         const reviewJson = prepare();
-        const review = JSON.parse(reviewJson) as { clips: unknown[] };
+        const review = JSON.parse(reviewJson) as { clips: unknown[]; current: { checkpointVerified: boolean } };
         const timestamp = now();
         const record: DamagePreviewRecord = {
-          id: randomUUID(), originalDiscArchiveId: input.archiveId, status: "queued", preflightToken: input.preflightToken,
-          selectionJson: input.selectionJson, reviewJson, workerId: null, cancellationRequested: false, reason: null,
+          id: randomUUID(), originalDiscArchiveId: input.archiveId, status: review.current.checkpointVerified ? "queued" : "waiting_for_checkpoint_or_ownership", preflightToken: input.preflightToken,
+          selectionJson: input.selectionJson, reviewJson, workerId: null, cancellationRequested: false,
+          reason: review.current.checkpointVerified ? null : { code: "DAMAGE_PREVIEW_WAITING_FOR_CHECKPOINT", message: "The request is waiting for Recovery to settle and for verification of its reviewed checkpoint under image ownership." },
           progress: { completedClips: 0, totalClips: review.clips.length, percent: null },
           commands: [], streamMapping: null, toolVersions: {}, deviations: [], artifacts: [], createdAt: timestamp.toISOString(), updatedAt: timestamp.toISOString(),
         };
@@ -78,7 +92,7 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
     },
     claim(workerId) {
       return transaction(() => {
-        const row = sqlite.prepare("SELECT record FROM damage_previews WHERE status = 'queued' ORDER BY rowid LIMIT 1").get();
+        const row = sqlite.prepare("SELECT record FROM damage_previews WHERE status = 'queued' OR (status = 'waiting_for_checkpoint_or_ownership' AND json_extract(record, '$.workerId') IS NULL) ORDER BY rowid LIMIT 1").get();
         if (!row) return null;
         const record = JSON.parse(String(row.record)) as DamagePreviewRecord;
         record.workerId = workerId;

@@ -8,9 +8,29 @@ transaction that records the request and mutation result. Replaying a committed
 key returns its original admission result even after source changes. Changed
 input conflicts with that key; stale input creates no request.
 
-Generation is available only after Archive Recovery stops or completes.
-Active-Recovery checkpoint pauses remain unavailable. This capability does not
-open new-format Archive Job admission or record Title Damage Acceptance.
+Generation also supports active Archive Recovery. Submission atomically rechecks
+all database identities and commits a durable waiting request without acquiring
+image ownership. Active preflight tokens carry the exact reviewed immutable
+publication digest as well as the complete reviewed-input hash. The request
+reports checkpoint verification pending, and remains inspectable, waitable and
+cancellable by identity across process restarts and a live Recovery writer.
+The worker verifies that exact durable publication under ownership before source
+reads; changed evidence fails stale and never retargets the request. An admitted
+request durably fences new Recovery source reads. An already admitted command closes and its
+batch commits before Recovery yields its claim at a complete checkpoint. The
+preview waits for that handoff, then takes exclusive consistent-read ownership.
+If the checkpoint advanced, the reviewed request fails stale rather than
+substituting a new revision. Recovery attempt identity remains bound; an ordinary
+state transition within that attempt does not by itself change the reviewed
+source. Stopping and faulted Recovery cannot admit new previews.
+
+The durable planned pause belongs to preview work and does not enqueue Recovery
+as an ordinary contender. It ends after source readers close, before artifact
+postprocessing. Recovery can continue its saved pass after the preview releases
+it. Cancellation addresses only its request. Dead executions settle interrupted
+or partial after closure proof and never restart source generation. This
+capability does not open new-format Archive Job admission or record Title Damage
+Acceptance.
 
 The Encode worker runs a separate preview loop. A preview takes an exclusive
 image-read interval and passes the locked descriptor to its path verifier and
@@ -19,7 +39,7 @@ readers and writers waiting behind it. Ticket and worker-execution locks prove l
 The image lock remains authoritative:
 removing an unlocked dead parent's queue ticket never releases a surviving helper's lock.
 A preview has no clip-length cap. Ordinary contention starts a two-minute grace;
-Recovery Stop and changed Recovery state interrupt it immediately. Process
+Recovery Stop and changed Recovery attempt interrupt it immediately. Process
 closure is proven before the preview returns its interval and the oldest
 eligible waiter can enter. Lease expiry never proves reader quiescence.
 
@@ -58,5 +78,5 @@ chosen path, including with a remote daemon. Staging beside the destination
 also supports a caller destination on another filesystem; no caller bind mount or server-local
 path substitutes for that transfer. JSON stdout contains metadata only. The web
 offers canonical downloads through the deployment's operator authentication
-boundary. Browser Viewing Renditions, retention cleanup, recreation and
-active-Recovery previews remain separate capabilities.
+boundary. Browser Viewing Renditions, retention cleanup and recreation remain separate
+capabilities.

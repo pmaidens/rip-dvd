@@ -3,7 +3,7 @@ import { mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { reviewDamagePreviewEvidence, type DamagePreviewAvailability, type DamagePreviewInput } from "@rip-dvd/application";
-import { canonicalPublicationJson, type DataAccess, type DamagePreviewRecord, type OriginalDiscArchiveId } from "@rip-dvd/data-access";
+import { canonicalPublicationJson, DvdCheckpointReadFault, type DataAccess, type DamagePreviewRecord, type OriginalDiscArchiveId } from "@rip-dvd/data-access";
 import { acquireKernelProcessLock, inspectKernelProcessLock, defaultArchiveImageOwnership, ArchiveImageOwnershipError, type ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { DamagePreviewUnrepresentableError, createDamagePreviewGenerator, type DamagePreviewGenerator, type PreviewSourceTitle } from "./damage-preview-generator.js";
 import { DamagePreviewArtifactError, finalizePreviewArtifact, previewClipPaths } from "./damage-preview-artifact.js";
@@ -21,6 +21,7 @@ class PreviewFailure extends Error {
   constructor(readonly code: string, message: string) { super(message); }
 }
 function failureReason(error: unknown) {
+  if (error instanceof DvdCheckpointReadFault && error.code === "DVD_EVIDENCE_CHANGED_DURING_READ") return { code: "DAMAGE_PREVIEW_STALE", message: "The reviewed checkpoint changed while the request waited for image ownership." };
   return {
     code: error instanceof PreviewFailure || error instanceof DamagePreviewArtifactError || error instanceof ArchiveImageOwnershipError ? error.code : error instanceof DamagePreviewUnrepresentableError ? "DAMAGE_PREVIEW_UNREPRESENTABLE" : "DAMAGE_PREVIEW_GENERATION_FAILED",
     message: error instanceof PreviewFailure || error instanceof DamagePreviewArtifactError || error instanceof DamagePreviewUnrepresentableError ? error.message : "Preview generation did not complete. No conclusion about damage can be drawn.",
@@ -95,7 +96,7 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
     } catch { /* Uncertain reader closure keeps the execution unresolved. */ }
     finally { reconciliation.release(); }
   }
-  if (!options.access.damagePreviews.list().some((candidate) => candidate.status === "queued")) return;
+  if (!options.access.damagePreviews.list().some((candidate) => candidate.status === "queued" || (candidate.status === "waiting_for_checkpoint_or_ownership" && candidate.workerId === null))) return;
   const workerId = randomUUID();
   const execution = acquireKernelProcessLock(workerLockPath(workerId));
   try {
@@ -106,17 +107,28 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
     const controller = new AbortController();
     const signal = AbortSignal.any([options.signal, controller.signal]);
     let contentionStarted: number | null = null;
+    const checkRecovery = () => {
+      const recovery = options.access.catalog.findArchiveRecovery(record.originalDiscArchiveId as OriginalDiscArchiveId);
+      const reviewedRecovery = review.reviewedRequest!.recovery;
+      if (recovery?.status === "stopping" || (recovery?.status === "stopped" && reviewedRecovery?.status !== "stopped")) {
+        controller.abort(new PreviewFailure("DAMAGE_PREVIEW_RECOVERY_STOP", "Recovery Stop preempted preview work without a contention grace period."));
+      } else if (!recovery || recovery.attemptId !== reviewedRecovery?.attemptId || recovery.status === "faulted") {
+        controller.abort(new PreviewFailure("DAMAGE_PREVIEW_RECOVERY_CHANGED", "Archive Recovery changed before the preview finished."));
+      }
+      return recovery;
+    };
     const monitor = setInterval(() => {
       try { execution.assertHeld(); } catch { controller.abort(new PreviewFailure("DAMAGE_PREVIEW_EXECUTION_LOST", "Preview execution ownership could not be proved.")); }
       if (options.access.damagePreviews.find(record.id)?.cancellationRequested) controller.abort(new PreviewFailure("DAMAGE_PREVIEW_CANCELLED", "The operator cancelled this request."));
-      const recovery = options.access.catalog.findArchiveRecovery(record.originalDiscArchiveId as OriginalDiscArchiveId);
-      if (recovery && !["stopped", "completed"].includes(recovery.status)) controller.abort(new PreviewFailure("DAMAGE_PREVIEW_RECOVERY_CHANGED", "Archive Recovery changed. Stop takes priority over preview work."));
+      if (!record.sourceReleased) checkRecovery();
     }, 100);
     monitor.unref();
     const previewOwnership: ArchiveImageOwnership = {
       ...ownership,
       withConsistentRead(request) {
         return ownership.withConsistentRead({ ...request, signal, previewRead: { onContention(urgent, waiting) {
+          checkRecovery();
+          if (controller.signal.aborted) return;
           if (!waiting) { contentionStarted = null; return; }
           contentionStarted ??= Date.now();
           if (urgent || Date.now() - contentionStarted >= CONTENTION_GRACE_MS) controller.abort(new PreviewFailure("DAMAGE_PREVIEW_CONTENTION", "Preview generation yielded to the oldest eligible archive waiter."));
@@ -129,13 +141,24 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
       if (await realpath(directory) !== directory) throw new Error("Unsafe preview request directory.");
       while (true) {
         execution.assertHeld();
+        const recovery = checkRecovery();
+        signal.throwIfAborted();
+        if (recovery?.work?.status === "claimed") {
+          record.reason = { code: "DAMAGE_PREVIEW_WAITING_FOR_CHECKPOINT", message: "Recovery is settling its admitted source command and durable checkpoint before the planned preview pause." };
+          options.access.damagePreviews.update(record);
+          await delay(100, undefined, { signal });
+          continue;
+        }
         try {
           const outcome = await options.access.withDvdCheckpoint(record.originalDiscArchiveId as OriginalDiscArchiveId, previewOwnership, async (checkpoint, handle) => {
             execution.assertHeld();
+            checkRecovery(); signal.throwIfAborted();
             const current = options.access.readConsistentSnapshot((snapshot) => reviewDamagePreviewEvidence(snapshot, record.originalDiscArchiveId, JSON.parse(record.selectionJson) as DamagePreviewInput, checkpoint));
+            checkRecovery(); signal.throwIfAborted();
             if (current.preflightToken !== record.preflightToken || !current.available) throw new PreviewFailure("DAMAGE_PREVIEW_STALE", "The reviewed preview inputs changed before generation.");
             const request = review.reviewedRequest!;
             handle.assertOwned();
+            record.checkpointVerified = true;
             record.status = "generating"; record.reason = null;
             options.access.damagePreviews.update(record);
             record.toolVersions = await generator.versions();
@@ -174,6 +197,10 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
         }
       }
     } catch (error) { generationFailure = controller.signal.reason ?? error; record.reason = failureReason(generationFailure); }
+    // No source operation remains after the ownership callback settles. Release
+    // the durable planned pause before slow artifact validation and publication.
+    record.sourceReleased = true;
+    options.access.damagePreviews.update(record);
     try {
       // Source ownership has already closed. Validation, checksums and publication
       // operate only on generated media and cannot delay Recovery Stop or waiters.

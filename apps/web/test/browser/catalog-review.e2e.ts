@@ -631,7 +631,7 @@ test("Title Damage paging retrieves evidence beyond the review summary", async (
   await expect(loadMore).toHaveCount(0);
 });
 
-test("Damage Preview reviews selections and keeps active Recovery generation unavailable", async ({ page }, testInfo) => {
+test("Damage Preview reviews selections and requests a planned active Recovery pause", async ({ page }, testInfo) => {
   await openCatalogReview(page, `CATALOG_BROWSER_DAMAGE_${fixtureVariant(testInfo.project.name).toUpperCase()}`);
   await page.getByRole("tab", { name: "Damage decision" }).click();
   const preview = page.getByRole("region", { name: "Damage Preview", exact: true });
@@ -644,8 +644,14 @@ test("Damage Preview reviews selections and keeps active Recovery generation una
   await preview.getByRole("button", { name: "Review preview selections" }).click();
   await expect(preview.getByRole("heading", { name: "Reviewed preview" })).toBeVisible();
   await expect(preview.getByText("Estimated duration: 13 s. Estimated storage: unknown.")).toBeVisible();
-  await expect(preview.getByText(/DAMAGE_PREVIEW_ACTIVE_RECOVERY_UNAVAILABLE:/)).toBeVisible();
-  await expect(preview.getByRole("button", { name: "Generate Damage Preview" })).toBeDisabled();
+  await expect(preview.getByRole("button", { name: "Generate Damage Preview" })).toBeEnabled();
+  await preview.getByRole("button", { name: "Generate Damage Preview" }).click();
+  const request = preview.getByLabel("Damage Preview request", { exact: true });
+  await expect(request.getByText(/Generation: waiting_for_checkpoint_or_ownership/)).toBeVisible();
+  await expect(request.getByText(/Planned Recovery pause: waiting/)).toBeVisible();
+  await preview.getByRole("button", { name: "Cancel preview request" }).click();
+  await expect(request.getByText(/Generation: cancelled/)).toBeVisible();
+  await expect(request.getByText("Reviewed checkpoint verification: not verified.")).toBeVisible();
   await preview.getByLabel("Context before in seconds").fill("1.001");
   await expect(preview.getByRole("heading", { name: "Reviewed preview" })).toHaveCount(0);
   await preview.getByRole("button", { name: "Review preview selections" }).click();

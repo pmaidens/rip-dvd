@@ -1,4 +1,5 @@
 import {
+  ArchiveRecoveryPreviewPauseError,
   dvdConfirmedRecoveryWriteAuthority,
   dvdDiscVerificationInsertionIsCurrent,
   dvdRecoveryWriteAuthority,
@@ -631,6 +632,7 @@ export async function pollDvdRecoveryPass(input: {
         throw new DvdRecoveryPassFault("SOURCE_CHANGED");
       }
       input.access.archiveRecoveryWork.assertClaim(claim);
+      if (input.access.damagePreviews.pendingForRecovery(candidate.recovery.originalDiscArchiveId)) throw new ArchiveRecoveryPreviewPauseError();
       const devicePath = await currentInsertionDevicePath({
         access: input.access,
         authority,
@@ -807,6 +809,12 @@ export async function pollDvdRecoveryPass(input: {
         signal,
       });
       return outcome !== "deferred";
+    }
+    if (error instanceof ArchiveRecoveryPreviewPauseError) {
+      // Every admitted read and batch is closed before yielding the pass. Keep
+      // its cursor and verification so completion of preview work can resume it.
+      input.access.archiveRecoveryWork.requeue(claim);
+      return true;
     }
     input.access.archiveRecoveryWork.markFault({
       claim,
