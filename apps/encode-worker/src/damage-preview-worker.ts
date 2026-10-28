@@ -95,7 +95,7 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
     } catch { /* Uncertain reader closure keeps the execution unresolved. */ }
     finally { reconciliation.release(); }
   }
-  if (!options.access.damagePreviews.list().some((candidate) => candidate.status === "queued")) return;
+  if (!options.access.damagePreviews.list().some((candidate) => candidate.status === "queued" || (candidate.status === "waiting_for_checkpoint_or_ownership" && candidate.workerId === null))) return;
   const workerId = randomUUID();
   const execution = acquireKernelProcessLock(workerLockPath(workerId));
   try {
@@ -154,6 +154,7 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
             if (current.preflightToken !== record.preflightToken || !current.available) throw new PreviewFailure("DAMAGE_PREVIEW_STALE", "The reviewed preview inputs changed before generation.");
             const request = review.reviewedRequest!;
             handle.assertOwned();
+            record.reviewJson = JSON.stringify(current);
             record.status = "generating"; record.reason = null;
             options.access.damagePreviews.update(record);
             record.toolVersions = await generator.versions();

@@ -647,7 +647,7 @@ test("Damage Preview reviews selections and requests a planned active Recovery p
   await expect(preview.getByRole("button", { name: "Generate Damage Preview" })).toBeEnabled();
   await preview.getByRole("button", { name: "Generate Damage Preview" }).click();
   const request = preview.getByLabel("Damage Preview request", { exact: true });
-  await expect(request.getByText(/Generation: queued/)).toBeVisible();
+  await expect(request.getByText(/Generation: waiting_for_checkpoint_or_ownership/)).toBeVisible();
   await expect(request.getByText(/Planned Recovery pause: waiting/)).toBeVisible();
   await preview.getByRole("button", { name: "Cancel preview request" }).click();
   await expect(request.getByText(/Generation: cancelled/)).toBeVisible();

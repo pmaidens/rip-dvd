@@ -8,11 +8,15 @@ transaction that records the request and mutation result. Replaying a committed
 key returns its original admission result even after source changes. Changed
 input conflicts with that key; stale input creates no request.
 
-Generation also supports active Archive Recovery. Submission waits through a
-live Recovery writer instead of treating the ownership acquisition timeout as
-unavailability. Once ownership is available, admission rechecks the exact
-reviewed token and commits no work if its checkpoint changed. An admitted request durably
-fences new Recovery source reads. An already admitted command closes and its
+Generation also supports active Archive Recovery. Submission atomically rechecks
+all database identities and commits a durable waiting request without acquiring
+image ownership. Active preflight tokens carry the exact reviewed immutable
+publication digest as well as the complete reviewed-input hash. The request
+reports checkpoint verification pending, and remains inspectable, waitable and
+cancellable by identity across process restarts and a live Recovery writer.
+The worker verifies that exact durable publication under ownership before source
+reads; changed evidence fails stale and never retargets the request. An admitted
+request durably fences new Recovery source reads. An already admitted command closes and its
 batch commits before Recovery yields its claim at a complete checkpoint. The
 preview waits for that handoff, then takes exclusive consistent-read ownership.
 If the checkpoint advanced, the reviewed request fails stale rather than

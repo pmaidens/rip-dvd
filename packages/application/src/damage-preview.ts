@@ -213,7 +213,17 @@ export function reviewDamagePreviewEvidence(
     encodingProfile: profile === null ? null : { id: profile.id, key: profile.key, version: profile.version, isActive: profile.isActive, settings: profile.settings },
   };
   if (input === null) reasons.push({ code: "DAMAGE_PREVIEW_SELECTION_REQUIRED", message: "Review a concrete title, range, streams and intended settings before requesting generation." });
-  const preflightToken = reviewedRequest === null ? null : `damage-preview-preflight:${createHash("sha256").update("rip-dvd:damage-preview-preflight:v1\0").update(canonicalPublicationJson({ ...reviewedRequest, recovery: evidence.recovery === null ? null : { id: evidence.recovery.id, attemptId: evidence.recovery.attemptId, status: ["stopped", "completed"].includes(evidence.recovery.status) ? evidence.recovery.status : "active" } })).digest("hex")}`;
+  const preflightDigest = reviewedRequest === null ? null : createHash("sha256").update("rip-dvd:damage-preview-preflight:v1\0").update(canonicalPublicationJson({
+    ...reviewedRequest,
+    recovery: evidence.recovery === null ? null : { id: evidence.recovery.id, attemptId: evidence.recovery.attemptId, status: ["stopped", "completed"].includes(evidence.recovery.status) ? evidence.recovery.status : "active" },
+  })).digest("hex");
+  // The active format carries the reviewed immutable publication identity so
+  // admission can check database identities without reading a changing image.
+  // Only the worker's owned checkpoint read proves that publication is current.
+  const activeRecovery = evidence.recovery !== null && !["stopped", "completed"].includes(evidence.recovery.status);
+  const preflightToken = preflightDigest === null ? null : activeRecovery && checkpoint?.publicationDigest
+    ? `damage-preview-preflight:v2:${checkpoint.publicationDigest}:${preflightDigest}`
+    : `damage-preview-preflight:${preflightDigest}`;
   return {
     schemaVersion: 1,
     originalDiscArchiveId: archiveId,
