@@ -25,12 +25,12 @@ export interface EncodingReadinessReason {
 }
 
 // Equal-priority reasons retain their declared order, including selection order.
-function ordered(reasons: readonly EncodingReadinessReason[]) {
+export function orderEncodingReadinessReasons(reasons: readonly EncodingReadinessReason[]) {
   const priority: Record<string, number> = {
     CONSISTENCY_FAULT: 0, WRITER_NOT_QUIESCENT: 0,
     ARCHIVE_NOT_SAVED: 1, MAPPING_REVIEW_REQUIRED: 1, SELECTION_UNIDENTIFIED: 1,
     ASSESSMENT_PENDING: 2, ASSESSMENT_OUTDATED: 2,
-    ACCEPTANCE_REQUIRED: 2, ACCEPTANCE_WITHDRAWN: 2,
+    ACCEPTANCE_REQUIRED: 2, ACCEPTANCE_WITHDRAWN: 2, SOURCE_DECISION_STALE: 2,
   };
   return reasons.map((reason, index) => ({ reason, index }))
     .sort((a, b) => (priority[a.reason.code] ?? 3) -
@@ -38,7 +38,7 @@ function ordered(reasons: readonly EncodingReadinessReason[]) {
     .map(({ reason }) => reason);
 }
 
-function describe(
+export function describeEncodingReadiness(
   snapshot: ConsistentReadAccess,
   archiveId: OriginalDiscArchiveId,
   ownership: ArchiveImageOwnership,
@@ -196,6 +196,19 @@ function describe(
         (decision?.state ?? "unavailable") === "withdrawn" ? "Title Damage Acceptance was withdrawn." : "Current Title Damage Acceptance is required for this content.",
       ));
       return {
+        expectedSourceDecision: {
+          checkpoint: current.checkpoint === null ? null : {
+            manifestId: current.checkpoint.manifestId, revision: current.checkpoint.revision,
+            manifestDigest: current.checkpoint.manifestDigest,
+          },
+          selectionIdentity, titleIdentityId: item?.titleIdentityId ?? null,
+          titleIdentityObservationId: observation?.id ?? null,
+          reviewSetIdentity: current.reviewSetIdentity,
+          catalogMappingProjectionId: current.catalogMappingProjectionId,
+          assessmentIdentity: current.assessmentIdentity,
+          acceptanceIdentity: current.acceptanceIdentity,
+          reviewedContentIdentity: current.reviewedContentIdentity,
+        },
         discSelectionId: selection.id, selectionIdentity, mediaItemId: selection.mediaItemId,
         mediaTitle: mediaItems.get(selection.mediaItemId)?.title ?? "Unknown Media Item", label: selection.label,
         sourceIdentity: selection.sourceIdentity,
@@ -211,13 +224,13 @@ function describe(
           evidence: titleAssessment },
         acceptanceRequired, acceptanceSatisfied: acceptanceRequired === false || covered,
         sourceReady: reasons.length === 0 && selectionReasons.length === 0,
-        blockingReasons: ordered(selectionReasons.map((entry) => ({ ...entry,
+        blockingReasons: orderEncodingReadinessReasons(selectionReasons.map((entry) => ({ ...entry,
           details: { ...entry.details, discSelectionId: selection.id, selectionIdentity },
         }))),
       };
     });
   if (selections.length === 0) reasons.push(reason("SELECTION_UNIDENTIFIED", "No active content is selected."));
-  const blockingReasons = ordered([...reasons, ...selections.flatMap((selection) => selection.blockingReasons)]);
+  const blockingReasons = orderEncodingReadinessReasons([...reasons, ...selections.flatMap((selection) => selection.blockingReasons)]);
   return {
     schemaVersion: 1 as const, evidenceFormat, applicable: true as const,
     sourceReady: blockingReasons.length === 0, admissionAvailable: false,
@@ -240,7 +253,7 @@ export async function inspectEncodingReadiness(
   }
   const id = archiveId as OriginalDiscArchiveId;
   const read = (verified: boolean, failure: string | null = null) => access.readConsistentSnapshot((snapshot) =>
-    describe(snapshot, id, ownership, originalsLibraryPath, verified, failure));
+    describeEncodingReadiness(snapshot, id, ownership, originalsLibraryPath, verified, failure));
   const initial = read(false);
   if (!initial.applicable || !initial.ownership.stableRead.available ||
       !["stopped", "completed"].includes(initial.current.recovery?.state ?? "")) return initial;

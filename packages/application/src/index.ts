@@ -420,11 +420,11 @@ export function createApplicationOperations(
       encodingProfileId: EncodingProfileId;
     }) => resolveQueueLogicalJobs(access, input.discSelectionIds, input.encodingProfileId),
     enqueueEncodeJob: (input: Parameters<typeof enqueueEncodeJob>[2] & { mediaLibraryPath: string }) =>
-      enqueueEncodeJob(access, input.mediaLibraryPath, input),
+      enqueueEncodeJob(access, input.mediaLibraryPath, input, dependencies.archiveImageOwnership),
     requeueEncodeJob: (input: Parameters<typeof requeueEncodeJob>[2] & { mediaLibraryPath: string }) =>
-      requeueEncodeJob(access, input.mediaLibraryPath, input),
+      requeueEncodeJob(access, input.mediaLibraryPath, input, dependencies.archiveImageOwnership),
     previewEncodeRequeue: (input: Parameters<typeof previewEncodeRequeue>[1]) =>
-      previewEncodeRequeue(access, input),
+      previewEncodeRequeue(access, input, dependencies.archiveImageOwnership),
     cancelEncodeJob: (input: Parameters<typeof cancelEncodeJob>[1]) =>
       cancelEncodeJob(access, input),
     inspectArchiveEvidence: (archiveId: string, options?: { limit?: number; cursor?: string }) =>
@@ -1134,3 +1134,5 @@ export { reviewDamagePreviewEvidence } from "./damage-preview.js";
 export type DamagePreviewInspection = Awaited<ReturnType<typeof inspectDamagePreview>>;
 
 export { InvalidEncodingReadinessInputError, type EncodingReadiness } from "./encoding-readiness.js";
+
+export { EncodeSourceDecisionRejectedError, InvalidEncodeSourceDecisionError } from "./encode-source-decision.js";

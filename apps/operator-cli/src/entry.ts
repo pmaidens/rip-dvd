@@ -9,6 +9,7 @@ process.exitCode = await runCommand(process.argv.slice(2), {
   readStdin: () => readFileSync(0, "utf8"),
   readFile: (path) => readFileSync(path, "utf8"),
   mediaLibraryPath: () => loadConfig().mediaLibraryPath,
+  originalsLibraryPath: () => loadConfig().originalsLibraryPath,
   openAccess: () => {
     let config;
     try {

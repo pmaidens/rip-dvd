@@ -761,3 +761,14 @@ order, and each selection's concrete content, assessment and acceptance.
 `sourceReady` describes source evidence only. New-format admission remains
 closed even when the source is ready. Historical archives return
 `applicable: false` and retain their existing encoding path.
+
+For evidence-format archives, `encode-readiness <archive-id>` returns
+`selections[].expectedSourceDecision`. Pass that complete object as JSON in
+`encode-enqueue --source-decision '<object>'`. Requeue preview returns the same
+object for `encode-requeue --source-decision '<object>'`. Requests require the
+reviewed checkpoint, concrete selection, assessment and applicable acceptance
+identities. Stale requests return current identities and every current blocker
+without queueing work. Mutation keys bind these identities as well as output
+settings. Matching source decisions survive compression-only changes and
+ordinary retries. New-format admission remains closed until the full core path
+passes its release gate.

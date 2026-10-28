@@ -40,7 +40,8 @@ it("shows clean fully mapped content as source ready while admission stays close
   } });
   expect((await fixture.run(["encode-enqueue", "--key", "synthetic-readiness-admission",
     "--disc-selection-id", seeded.selection.id, "--encoding-profile-id", seeded.profile.id,
-    "--output-path", join(fixture.mediaLibraryPath, "synthetic-readiness.mkv")])).result)
+    "--output-path", join(fixture.mediaLibraryPath, "synthetic-readiness.mkv"),
+    "--source-decision", JSON.stringify((before.result as EncodingReadiness).selections[0]!.expectedSourceDecision)])).result)
     .toMatchObject({ error: { code: "DVD_RECOVERY_EVIDENCE_ENCODING_UNAVAILABLE" } });
   const reopened = await fixture.run(["encode-readiness", seeded.archive.id]);
   expect(reopened.result).toEqual(before.result);

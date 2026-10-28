@@ -282,3 +282,22 @@ invalid_preview_status=$?
 set -e
 [ "$invalid_preview_status" -eq 2 ]
 printf '%s\n' "$invalid_preview_export" | assert_json_fields 'error.code=EXPORT_DESTINATION_UNAVAILABLE'
+
+source_enqueue_help="$(invoke help encode-enqueue)"
+source_requeue_help="$(invoke help encode-requeue)"
+printf '%s\n%s\n' "$source_enqueue_help" "$source_requeue_help" | node --input-type=module -e '
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  for (const line of Buffer.concat(chunks).toString("utf8").trim().split("\n")) {
+    const value = JSON.parse(line);
+    if (!value.command.inputs.options.includes("--source-decision")) process.exit(1);
+  }
+'
+set +e
+invalid_source_decision="$(invoke encode-enqueue --key synthetic-source-decision \
+  --disc-selection-id synthetic-selection --encoding-profile-id synthetic-profile \
+  --output-path /media/movies/synthetic.mkv --source-decision '{')"
+invalid_source_status=$?
+set -e
+[ "$invalid_source_status" -eq 2 ]
+printf '%s\n' "$invalid_source_decision" | assert_json_fields 'error.code=INVALID_ARGUMENTS'

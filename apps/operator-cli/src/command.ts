@@ -33,6 +33,8 @@ import {
   type CatalogReviewPageCoordinates,
   type EncodeOutputMediaProbe,
   InvalidEncodeJobInputError,
+  EncodeSourceDecisionRejectedError,
+  InvalidEncodeSourceDecisionError,
   serializeJob,
   StaleCatalogTitleDamageCursorError,
   UnsupportedArchiveEvidenceFormatError,
@@ -257,8 +259,8 @@ const commandDefinitions = [
   {
     name: "encode-enqueue",
     description: "Enqueue an Encode Job, deduplicating the initial logical job.",
-    usage: "rip-dvd encode-enqueue --key <key> --disc-selection-id <id> --encoding-profile-id <id> --output-path <absolute .mkv path> [--priority <integer>]",
-    inputs: { arguments: [], options: ["--key", "--disc-selection-id", "--encoding-profile-id", "--output-path", "--priority"] },
+    usage: "rip-dvd encode-enqueue --key <key> --disc-selection-id <id> --encoding-profile-id <id> --output-path <absolute .mkv path> [--priority <integer>] [--source-decision <readiness JSON>]",
+    inputs: { arguments: [], options: ["--key", "--disc-selection-id", "--encoding-profile-id", "--output-path", "--priority", "--source-decision"] },
     example: "rip-dvd encode-enqueue --key 00000000-0000-4000-8000-000000000001 --disc-selection-id <id> --encoding-profile-id <id> --output-path /media/movies/example.mkv",
   },
   {
@@ -271,8 +273,8 @@ const commandDefinitions = [
   {
     name: "encode-requeue",
     description: "Explicitly requeue a terminal Encode Job, optionally resolving a failed output conflict.",
-    usage: "rip-dvd encode-requeue --key <key> --encode-job-id <id> [--output-path <absolute .mkv path>] [--priority <integer>] [--revision <preview-revision> --acknowledge]",
-    inputs: { arguments: [], options: ["--key", "--encode-job-id", "--output-path", "--priority", "--revision", "--acknowledge"] },
+    usage: "rip-dvd encode-requeue --key <key> --encode-job-id <id> [--output-path <absolute .mkv path>] [--priority <integer>] [--revision <preview-revision> --acknowledge] [--source-decision <readiness JSON>]",
+    inputs: { arguments: [], options: ["--key", "--encode-job-id", "--output-path", "--priority", "--revision", "--acknowledge", "--source-decision"] },
     example: "rip-dvd encode-requeue --key 00000000-0000-4000-8000-000000000001 --encode-job-id <id>",
   },
   {
@@ -2018,7 +2020,7 @@ function encodeMediaLibraryPath(io: CommandIO): string {
   }
 }
 
-function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) {
+async function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) {
   const options = encodeOptions(
     rest,
     name === "encode-resolve" ? "--disc-selection-id" : undefined,
@@ -2027,9 +2029,9 @@ function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) 
   const permitted: Record<string, string[]> = {
     "encode-queue": ["--history-group", "--query", "--encoding-profile-id", "--selection-offset", "--profile-offset"],
     "encode-resolve": ["--encoding-profile-id", "--disc-selection-id"],
-    "encode-enqueue": ["--key", "--disc-selection-id", "--encoding-profile-id", "--output-path", "--priority"],
+    "encode-enqueue": ["--key", "--disc-selection-id", "--encoding-profile-id", "--output-path", "--priority", "--source-decision"],
     "encode-requeue-preview": ["--encode-job-id"],
-    "encode-requeue": ["--key", "--encode-job-id", "--output-path", "--priority", "--revision", "--acknowledge"],
+    "encode-requeue": ["--key", "--encode-job-id", "--output-path", "--priority", "--revision", "--acknowledge", "--source-decision"],
     "encode-cancel": ["--key", "--encode-job-id"],
   };
   onlyEncodeOptions(options, permitted[name]!);
@@ -2058,7 +2060,7 @@ function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) 
     throw new CommandFailure("INVALID_ARGUMENTS", "Expected 1 to 100 Disc Selection IDs.", 2);
   }
   try {
-    return withAccess(io.openAccess, (access) => {
+    return await withAccessAsync(io.openAccess, async (access) => {
       const operations = createApplicationOperations(access);
       if (name === "encode-queue") {
         return operations.encodeQueueOptions({
@@ -2080,12 +2082,21 @@ function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) 
         };
       }
       if (name === "encode-requeue-preview") {
-        return operations.previewEncodeRequeue({
+        return await operations.previewEncodeRequeue({
           encodeJobId: encodeId(options, "--encode-job-id"),
+          originalsLibraryPath: io.originalsLibraryPath?.() ?? "",
         });
       }
+      let expectedSourceDecision: unknown;
+      if (options.has("--source-decision")) {
+        try { expectedSourceDecision = JSON.parse(options.get("--source-decision")![0]!); }
+        catch { throw new CommandFailure("INVALID_ARGUMENTS", "Invalid source decision JSON.", 2); }
+      }
+      const source = { expectedSourceDecision,
+        originalsLibraryPath: io.originalsLibraryPath?.() ?? "" };
       const job = name === "encode-enqueue"
-        ? operations.enqueueEncodeJob({
+        ? await operations.enqueueEncodeJob({
+          ...source,
           mutationKey,
           discSelectionId: encodeId(options, "--disc-selection-id"),
           encodingProfileId: encodeId(options, "--encoding-profile-id"),
@@ -2093,7 +2104,8 @@ function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) 
           mediaLibraryPath: mediaLibraryPath!,
         })
         : name === "encode-requeue"
-          ? operations.requeueEncodeJob({
+          ? await operations.requeueEncodeJob({
+            ...source,
             mutationKey, encodeJobId: encodeId(options, "--encode-job-id"),
             outputPath: options.get("--output-path")?.[0], priority,
             expectedRevision: options.get("--revision")?.[0],
@@ -2107,6 +2119,10 @@ function runEncodeCommand(name: string, rest: readonly string[], io: CommandIO) 
     });
   } catch (error) {
     if (error instanceof CommandFailure) throw error;
+    if (error instanceof EncodeSourceDecisionRejectedError) {
+      throw new CommandFailure(error.code, error.message, 2, error.blockingReasons, { current: error.current });
+    }
+    if (error instanceof InvalidEncodeSourceDecisionError) throw new CommandFailure("INVALID_ARGUMENTS", "Invalid expected source decision.", 2);
     if (error instanceof EncodeWorkConflictError) {
       throw new CommandFailure(
         error.code,
@@ -2350,7 +2366,7 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
       if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
         emit(io.stdout, help(name));
       } else {
-        emit(io.stdout, runEncodeCommand(name, rest, io));
+        emit(io.stdout, await runEncodeCommand(name, rest, io));
       }
       return 0;
     }

@@ -219,3 +219,5 @@ export type {
 } from "./dvd-archive-checkpoint.js";
 
 export * from "./damage-preview.js";
+
+export type { EncodeSourceDecision, EncodeJobEnqueueInput } from "./types.js";
