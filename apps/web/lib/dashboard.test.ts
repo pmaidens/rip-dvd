@@ -14,6 +14,7 @@ import {
 import {
   createNormalDvdArchiveBoundaryEvidenceForTest,
 } from "@rip-dvd/data-access/test-support";
+import { MAX_DVD_TITLES } from "@rip-dvd/data-access/dvd-scan";
 import {
   createLegacySidecarDataAccess,
   type LegacySidecarDataAccess,
@@ -259,6 +260,29 @@ describe("readDashboardSnapshot", () => {
         `synthetic-dashboard-batch-${index}`,
       )
     );
+    const show = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "Synthetic batched series",
+    });
+    const season = access.catalog.createMediaItem({
+      kind: "season",
+      title: "Synthetic batched season",
+      parentId: show.id,
+      seasonNumber: 1,
+    });
+    archiveIds.forEach((originalDiscArchiveId, index) => {
+      const episode = access.catalog.createMediaItem({
+        kind: "episode",
+        title: `Synthetic batched episode ${index + 1}`,
+        parentId: season.id,
+        episodeNumber: index + 1,
+      });
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId,
+        mediaItemId: episode.id,
+        sourceIdentity: { kind: "main_feature" },
+      });
+    });
     const evidenceHeaders = access.catalog.findDvdArchiveEvidenceHeaders(
       archiveIds,
     );
@@ -267,6 +291,9 @@ describe("readDashboardSnapshot", () => {
       evidenceHeader: evidenceHeaders.get(id) ?? null,
     }));
     const workflowEvidenceReads = vi.fn();
+    const boundSelectionReads = vi.fn();
+    const boundActiveWorkReads = vi.fn();
+    const boundMediaItemReads = vi.fn();
     const batchedAccess: DataAccess = {
       ...access,
       readConsistentSnapshot(read) {
@@ -289,6 +316,26 @@ describe("readDashboardSnapshot", () => {
               findArchiveRecovery() {
                 throw new Error("Dashboard workflow read fanned out by row");
               },
+              listDiscSelections(options) {
+                if (options?.originalDiscArchiveIds !== undefined) {
+                  boundSelectionReads(options);
+                }
+                return snapshot.catalog.listDiscSelections(options);
+              },
+              listMediaItems(options) {
+                if ((options?.ids?.length ?? 0) > 0) {
+                  boundMediaItemReads(options);
+                }
+                return snapshot.catalog.listMediaItems(options);
+              },
+            },
+            encodeJobs: {
+              ...snapshot.encodeJobs,
+              listActiveForOriginalDiscArchives(options) {
+                boundActiveWorkReads(options);
+                return snapshot.encodeJobs
+                  .listActiveForOriginalDiscArchives(options);
+              },
             },
           })
         );
@@ -307,6 +354,17 @@ describe("readDashboardSnapshot", () => {
     expect(workflowEvidenceReads).toHaveBeenCalledWith(
       workflowEvidenceInputs,
     );
+    expect(boundSelectionReads).toHaveBeenCalledOnce();
+    expect(boundSelectionReads).toHaveBeenCalledWith({
+      originalDiscArchiveIds: archiveIds,
+      limit: archiveIds.length * MAX_DVD_TITLES,
+    });
+    expect(boundActiveWorkReads).toHaveBeenCalledOnce();
+    expect(boundActiveWorkReads).toHaveBeenCalledWith({
+      originalDiscArchiveIds: archiveIds,
+      limit: MAX_DVD_TITLES * 8,
+    });
+    expect(boundMediaItemReads).toHaveBeenCalledTimes(3);
 
     const prepare = vi.spyOn(DatabaseSync.prototype, "prepare");
     access.readConsistentSnapshot((snapshot) =>
@@ -326,6 +384,18 @@ describe("readDashboardSnapshot", () => {
 
     expect(singleArchiveQueryCount).toBeGreaterThan(0);
     expect(multipleArchiveQueryCount).toBe(singleArchiveQueryCount);
+
+    const dashboardPrepare = vi.spyOn(DatabaseSync.prototype, "prepare");
+    readDashboardSnapshot(access, { activityLimit: 1 });
+    const singleRowDashboardQueryCount = dashboardPrepare.mock.calls.length;
+    dashboardPrepare.mockClear();
+    readDashboardSnapshot(access, { activityLimit: 20 });
+    const multipleRowDashboardQueryCount = dashboardPrepare.mock.calls.length;
+    dashboardPrepare.mockRestore();
+
+    expect(singleRowDashboardQueryCount).toBeGreaterThan(0);
+    expect(multipleRowDashboardQueryCount - singleRowDashboardQueryCount)
+      .toBeLessThan(8);
   });
 
   it("revises Catalog Review evidence for ordinary active work and bound Media Items", () => {

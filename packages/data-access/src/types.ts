@@ -2134,6 +2134,7 @@ export interface CatalogAccess {
   listDiscSelections(options?: {
     ids?: readonly DiscSelectionId[];
     originalDiscArchiveId?: OriginalDiscArchiveId;
+    originalDiscArchiveIds?: readonly OriginalDiscArchiveId[];
     encodeEligibleOnly?: boolean;
     includeHistorical?: boolean;
     limit?: number;
@@ -2434,6 +2435,10 @@ export interface EncodeJobAccess {
   listForDiscSelection(id: DiscSelectionId): EncodeJob[];
   listActiveForDiscSelections(options: {
     discSelectionIds: readonly DiscSelectionId[];
+    limit: number;
+  }): EncodeJob[];
+  listActiveForOriginalDiscArchives(options: {
+    originalDiscArchiveIds: readonly OriginalDiscArchiveId[];
     limit: number;
   }): EncodeJob[];
   hasReservedOutputPathConflict(job: Pick<EncodeJob, "id" | "outputPath">): boolean;
@@ -2833,6 +2838,7 @@ export interface ConsistentReadAccess {
     | "list"
     | "listForDiscSelection"
     | "listActiveForDiscSelections"
+    | "listActiveForOriginalDiscArchives"
     | "hasReservedOutputPathConflict"
     | "hasReservedOutputPath"
     | "resolveQueueLogicalJobs"

@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import {
   DomainInvariantError,
   MAX_DVD_TITLES,
-  MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
   RecordNotFoundError,
   type DataAccess,
   type DiscSelectionId,
@@ -24,11 +23,38 @@ import {
 } from "./catalog-review-workflow.js";
 import { createDvdTitleDamageAcceptancePreviewToken } from
   "./dvd-title-damage-acceptance-preview-token.js";
+import { readMediaItemsWithAncestors } from
+  "./media-item-ancestor-context.js";
 
 const MAX_EXCLUSIONS = MAX_DVD_TITLES;
 const MAX_AFFECTED_ENCODE_JOBS = MAX_DVD_TITLES * 8;
 
 export class InvalidDvdTitleDamageAcceptancePreviewInputError extends Error {}
+
+function parsePreviewInput(value: unknown): {
+  excludedTitleIdentityIds: unknown;
+  mainFeatureResolutions: unknown;
+} {
+  if (
+    typeof value !== "object" || value === null || Array.isArray(value)
+  ) {
+    throw new InvalidDvdTitleDamageAcceptancePreviewInputError(
+      "Title Damage Acceptance preflight input must be an object.",
+    );
+  }
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some((key) =>
+    key !== "excludedTitleIdentityIds" && key !== "mainFeatureResolutions"
+  )) {
+    throw new InvalidDvdTitleDamageAcceptancePreviewInputError(
+      "Title Damage Acceptance preflight input contains an unknown field.",
+    );
+  }
+  return {
+    excludedTitleIdentityIds: record.excludedTitleIdentityIds,
+    mainFeatureResolutions: record.mainFeatureResolutions,
+  };
+}
 
 function parseExcludedTitleIdentityIds(
   value: unknown,
@@ -259,16 +285,14 @@ function evidenceIdentity(value: unknown): string {
 export function previewDvdTitleDamageAcceptance(
   access: DataAccess,
   archiveId: OriginalDiscArchiveId,
-  input: {
-    excludedTitleIdentityIds?: unknown;
-    mainFeatureResolutions?: unknown;
-  } = {},
+  input: unknown = {},
 ) {
+  const parsedInput = parsePreviewInput(input);
   const excludedTitleIdentityIds = parseExcludedTitleIdentityIds(
-    input.excludedTitleIdentityIds,
+    parsedInput.excludedTitleIdentityIds,
   );
   const mainFeatureResolutions = parseMainFeatureResolutions(
-    input.mainFeatureResolutions,
+    parsedInput.mainFeatureResolutions,
   );
   const plan = access.readConsistentSnapshot((snapshot) => {
     const archive = snapshot.catalog.listOriginalDiscArchives({
@@ -290,29 +314,10 @@ export function previewDvdTitleDamageAcceptance(
       originalDiscArchiveId: archiveId,
       limit: MAX_DVD_TITLES,
     });
-    const mediaItemIds = [...new Set(selections.map((selection) =>
-      selection.mediaItemId
-    ))];
-    const mediaItems: MediaItem[] = [];
-    const seenMediaItemIds = new Set<MediaItem["id"]>();
-    let pendingMediaItemIds = mediaItemIds;
-    for (
-      let depth = 0;
-      pendingMediaItemIds.length > 0 &&
-      depth < MAX_MEDIA_ITEM_HIERARCHY_DEPTH;
-      depth += 1
-    ) {
-      const level = snapshot.catalog.listMediaItems({
-        ids: pendingMediaItemIds,
-      });
-      mediaItems.push(...level);
-      level.forEach((item) => seenMediaItemIds.add(item.id));
-      pendingMediaItemIds = [...new Set(level.flatMap((item) =>
-        item.parentId === null || seenMediaItemIds.has(item.parentId)
-          ? []
-          : [item.parentId]
-      ))];
-    }
+    const mediaItems = readMediaItemsWithAncestors(
+      snapshot.catalog,
+      selections.map((selection) => selection.mediaItemId),
+    );
     const affectedWork = snapshot.encodeJobs.listActiveForDiscSelections({
       discSelectionIds: selections.map((selection) => selection.id),
       limit: MAX_AFFECTED_ENCODE_JOBS,
@@ -588,9 +593,6 @@ export function previewDvdTitleDamageAcceptance(
   const mappingReviewItems = reviewedContent.filter((item) =>
     item.preflightMappingState === "needs_mapping_review"
   );
-  const unidentifiedItems = reviewedContent.filter((item) =>
-    item.preflightMappingState === "unmapped"
-  );
   const emptyReviewedContent = reviewSet !== null &&
     reviewedContent.length === 0;
   const missingReviewSet = reviewSet === null;
@@ -611,8 +613,7 @@ export function previewDvdTitleDamageAcceptance(
           ),
         },
       }]),
-    ...(unidentifiedItems.length === 0 &&
-        unresolvedMainFeatureSelectionIds.length === 0 &&
+    ...(unresolvedMainFeatureSelectionIds.length === 0 &&
         unresolvedSelections.length === 0 &&
         !emptyReviewedContent && !missingReviewSet
       ? []
@@ -623,9 +624,6 @@ export function previewDvdTitleDamageAcceptance(
         details: {
           emptyReviewedContent,
           missingReviewSet,
-          affectedTitleIdentityIds: unidentifiedItems.map((item) =>
-            item.titleIdentityId
-          ),
           unresolvedMainFeatureSelectionIds,
           unresolvedSelectionIds: unresolvedSelections.map((selection) =>
             selection.discSelectionId
@@ -633,20 +631,7 @@ export function previewDvdTitleDamageAcceptance(
         },
       }]),
   ]), workflow.current.recovery?.state ?? null);
-  const reviewedSelectionIds = new Set(reviewedContent.flatMap((item) =>
-    item.catalogMappings.map((mapping) => mapping.discSelectionId)
-  ));
-  unresolvedMainFeatureSelectionIds.forEach((id) =>
-    reviewedSelectionIds.add(id)
-  );
-  unresolvedSelections.forEach(({ discSelectionId }) =>
-    reviewedSelectionIds.add(discSelectionId)
-  );
-  if (emptyReviewedContent) {
-    selections.forEach(({ id }) => reviewedSelectionIds.add(id));
-  }
   const affectedWork = [...new Map(plan.affectedWork
-    .filter((job) => reviewedSelectionIds.has(job.discSelectionId))
     .map((job) => [job.id, affectedWorkView(job)] as const)).values()]
     .sort((left, right) => left.id.localeCompare(right.id));
   const archiveImpactRequiresAcknowledgement = reviewedContent.length > 0 && (
@@ -705,6 +690,7 @@ export function previewDvdTitleDamageAcceptance(
       reasons,
       expectedInputs: available
         ? [
+          "mutationKey",
           "previewToken",
           "checkpointRevision",
           "checkpointDigest",

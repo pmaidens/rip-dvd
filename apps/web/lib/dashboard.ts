@@ -3,6 +3,7 @@ import {
   describeArchiveRequestWaitingStatus,
   encodeOutputArtifactReferences,
   encodeRequeueAvailability,
+  readMediaItemsWithAncestors,
 } from "@rip-dvd/application";
 import { createHash } from "node:crypto";
 import type { PresentedArchiveRequestWaitingStatus } from "@rip-dvd/application";
@@ -48,7 +49,6 @@ import {
   archiveBoundaryEvidenceFromRecord,
   DVD_RECOVERY_EVIDENCE_ENCODING,
   isEncodeJobSafelyTerminal,
-  MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
   withAuthoritativeDvdArchiveIntegrity,
   WORKER_KINDS,
 } from "@rip-dvd/data-access";
@@ -1616,40 +1616,71 @@ function readDashboardSnapshotRecords(
       })),
     ));
   const catalogReviewBoundEvidenceSource = readSource(() =>
-    new Map(catalogReviewArchives.map((archive) => {
-      const selections = access.catalog.listDiscSelections({
-        originalDiscArchiveId: archive.id,
-        limit: MAX_DVD_TITLES,
-      });
-      const affectedWork = access.encodeJobs.listActiveForDiscSelections({
-        discSelectionIds: selections.map((selection) => selection.id),
-        limit: MAX_DVD_TITLES * 8,
-      });
-      const mediaItemIds = [...new Set(selections.map((selection) =>
-        selection.mediaItemId
-      ))];
-      const boundMediaItems: MediaItem[] = [];
-      const seenMediaItemIds = new Set<MediaItem["id"]>();
-      let pendingMediaItemIds = mediaItemIds;
-      for (
-        let depth = 0;
-        pendingMediaItemIds.length > 0 &&
-        depth < MAX_MEDIA_ITEM_HIERARCHY_DEPTH;
-        depth += 1
-      ) {
-        const level = access.catalog.listMediaItems({
-          ids: pendingMediaItemIds,
-        });
-        boundMediaItems.push(...level);
-        level.forEach((item) => seenMediaItemIds.add(item.id));
-        pendingMediaItemIds = [...new Set(level.flatMap((item) =>
-          item.parentId === null || seenMediaItemIds.has(item.parentId)
-            ? []
-            : [item.parentId]
-        ))];
+    (() => {
+      const archiveIds = catalogReviewArchives.map((archive) => archive.id);
+      if (archiveIds.length === 0) {
+        return new Map();
       }
-      return [archive.id, { affectedWork, mediaItems: boundMediaItems }] as const;
-    }))
+      const selections = access.catalog.listDiscSelections({
+        originalDiscArchiveIds: archiveIds,
+        limit: Math.max(1, archiveIds.length * MAX_DVD_TITLES),
+      });
+      const affectedWork = access.encodeJobs
+        .listActiveForOriginalDiscArchives({
+          originalDiscArchiveIds: archiveIds,
+          limit: MAX_DVD_TITLES * 8,
+        });
+      const mediaItems = readMediaItemsWithAncestors(
+        access.catalog,
+        selections.map((selection) => selection.mediaItemId),
+      );
+      const mediaItemById = new Map(mediaItems.map((item) => [item.id, item]));
+      const selectionsByArchiveId = new Map<
+        OriginalDiscArchiveId,
+        typeof selections
+      >();
+      for (const selection of selections) {
+        const grouped = selectionsByArchiveId.get(
+          selection.originalDiscArchiveId,
+        ) ?? [];
+        grouped.push(selection);
+        selectionsByArchiveId.set(selection.originalDiscArchiveId, grouped);
+      }
+      const workBySelectionId = new Map<
+        (typeof selections)[number]["id"],
+        typeof affectedWork
+      >();
+      for (const job of affectedWork) {
+        const grouped = workBySelectionId.get(job.discSelectionId) ?? [];
+        grouped.push(job);
+        workBySelectionId.set(job.discSelectionId, grouped);
+      }
+      return new Map(catalogReviewArchives.map((archive) => {
+        const archiveSelections = selectionsByArchiveId.get(archive.id) ?? [];
+        const archiveMediaItems: MediaItem[] = [];
+        const seenMediaItemIds = new Set<MediaItem["id"]>();
+        let pendingMediaItemIds = archiveSelections.map((selection) =>
+          selection.mediaItemId
+        );
+        while (pendingMediaItemIds.length > 0) {
+          const level = [...new Set(pendingMediaItemIds)]
+            .filter((id) => !seenMediaItemIds.has(id))
+            .map((id) => mediaItemById.get(id))
+            .filter((item): item is MediaItem => item !== undefined);
+          level.forEach((item) => seenMediaItemIds.add(item.id));
+          archiveMediaItems.push(...level);
+          pendingMediaItemIds = level.flatMap((item) =>
+            item.parentId === null ? [] : [item.parentId]
+          );
+        }
+        return [archive.id, {
+          affectedWork: archiveSelections.flatMap((selection) =>
+            workBySelectionId.get(selection.id) ?? []
+          ),
+          mediaItems: archiveMediaItems,
+        }] as const;
+      }));
+    })()
   );
   const previousCatalogReviewBoundary =
     catalogReviewArchives.at(-1) ??

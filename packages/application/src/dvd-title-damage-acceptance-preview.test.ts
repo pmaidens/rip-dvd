@@ -59,6 +59,9 @@ it("resolves a main-feature choice without a representative-title heuristic", ()
         DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.titleIdentityId,
     }],
     exclusions: [],
+    action: {
+      expectedInputs: expect.arrayContaining(["mutationKey"]),
+    },
   });
   expect(recordPreview).toHaveBeenCalledWith(expect.objectContaining({
     originalDiscArchiveId: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.archiveId,
@@ -168,7 +171,6 @@ it("keeps an active unbound title selection visible and blocked", () => {
         {
           code: "SELECTION_UNIDENTIFIED",
           details: {
-            affectedTitleIdentityIds: [],
             unresolvedSelectionIds: [
               DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
             ],
@@ -242,6 +244,40 @@ it("blocks an empty exact set and keeps its affected work visible", () => {
         },
       }],
     },
+  });
+});
+
+it("keeps assessed unmapped content available and excluded-title work bound", () => {
+  const preview = previewDvdTitleDamageAcceptance(
+    createDvdTitleDamageAcceptancePreviewTestAccess({
+      includeAffectedWork: true,
+      includeUnmappedCompanion: true,
+    }),
+    DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.archiveId as never,
+    {
+      excludedTitleIdentityIds: [
+        DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.titleIdentityId,
+      ],
+    },
+  );
+
+  expect(preview).toMatchObject({
+    available: true,
+    reviewedContent: [{
+      titleIdentityId:
+        DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.companionTitleIdentityId,
+      preflightMappingState: "unmapped",
+      catalogMappings: [],
+      assessmentSnapshot: expect.any(Object),
+    }],
+    exclusions: [{
+      titleIdentityId: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.titleIdentityId,
+    }],
+    affectedWork: [{
+      id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.encodeJobId,
+      discSelectionId: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.discSelectionId,
+    }],
+    action: { reasons: [] },
   });
 });
 

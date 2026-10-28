@@ -10,6 +10,8 @@ export const DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS = {
   archiveId: "synthetic-title-damage-acceptance-archive",
   titleIdentityId: "synthetic-title-damage-identity",
   observationId: "synthetic-title-damage-observation",
+  companionTitleIdentityId: "synthetic-unmapped-title-damage-identity",
+  companionObservationId: "synthetic-unmapped-title-damage-observation",
   discSelectionId: "synthetic-title-damage-selection",
   mediaItemId: "synthetic-title-damage-movie",
   tvShowId: "synthetic-title-damage-show",
@@ -27,6 +29,7 @@ export function createDvdTitleDamageAcceptancePreviewTestAccess(options: {
   includeAffectedWork?: boolean;
   affectedWorkStatus?: EncodeJobStatus;
   episodicMedia?: boolean;
+  includeUnmappedCompanion?: boolean;
   recordPreview?: (
     input: DvdTitleDamageAcceptancePreviewDecisionInput,
   ) => void;
@@ -161,6 +164,35 @@ export function createDvdTitleDamageAcceptancePreviewTestAccess(options: {
     noTitleMissingSourceProved: true,
     createdAt: new Date("2026-01-01T00:00:00.000Z"),
   };
+  if (options.includeUnmappedCompanion) {
+    const companionObservation = {
+      ...observation,
+      id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.companionObservationId as
+        typeof observation.id,
+      titleIdentityId:
+        DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.companionTitleIdentityId as
+          typeof observation.titleIdentityId,
+      displayTitleNumber: 2,
+      navigation: {
+        ...observation.navigation,
+        titleSetTitleNumber: 2,
+      },
+      contentDigest: "9".repeat(64),
+    };
+    reviewSet.items.push({
+      titleIdentityId: companionObservation.titleIdentityId,
+      presentAtCurrentCheckpoint: true,
+      observation: companionObservation,
+      reviewContinuity: companionObservation.continuity,
+      mappingState: "unmapped",
+      discSelectionMappings: [],
+    });
+    assessment.items.push({
+      ...assessment.items[0]!,
+      titleIdentityId: companionObservation.titleIdentityId,
+      titleIdentityObservationId: companionObservation.id,
+    });
+  }
   const catalog = {
     listOriginalDiscArchives: () => [{
       id: DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.archiveId,

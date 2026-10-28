@@ -98,13 +98,12 @@ function parseArguments(
   ) {
     invalid("Choose flags or one structured input form, not both.");
   }
-  const structured = structuredInput as Readonly<Record<string, unknown>> | undefined;
   return {
     archiveId: archiveId as OriginalDiscArchiveId,
-    excludedTitleIdentityIds:
-      structured?.excludedTitleIdentityIds ?? excludedTitleIdentityIds,
-    mainFeatureResolutions:
-      structured?.mainFeatureResolutions ?? mainFeatureResolutions,
+    input: structuredInput ?? {
+      excludedTitleIdentityIds,
+      mainFeatureResolutions,
+    },
   };
 }
 
@@ -117,10 +116,7 @@ export function runDvdTitleDamageAcceptancePreview(
   try {
     return createApplicationOperations(access).previewDvdTitleDamageAcceptance(
       input.archiveId,
-      {
-        excludedTitleIdentityIds: input.excludedTitleIdentityIds,
-        mainFeatureResolutions: input.mainFeatureResolutions,
-      },
+      input.input,
     );
   } catch (error) {
     if (error instanceof InvalidDvdTitleDamageAcceptancePreviewInputError) {

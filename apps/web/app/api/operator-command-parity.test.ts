@@ -849,7 +849,6 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
         reasons: [
           { code: "RECOVERY_ACTIVE" },
           { code: "ASSESSMENT_PENDING" },
-          { code: "SELECTION_UNIDENTIFIED" },
         ],
       },
       allContent: [
@@ -5814,6 +5813,7 @@ it("keeps available, outdated, and mapping-review Title Damage Acceptance prefli
       available: true,
       reasons: [],
       expectedInputs: [
+        "mutationKey",
         "previewToken",
         "checkpointRevision",
         "checkpointDigest",
@@ -5856,6 +5856,53 @@ it("keeps available, outdated, and mapping-review Title Damage Acceptance prefli
         { code: "MAPPING_REVIEW_REQUIRED" },
       ],
     },
+  });
+});
+
+it("rejects unknown Title Damage Acceptance input fields through web and CLI", async () => {
+  const archiveId = DVD_TITLE_DAMAGE_ACCEPTANCE_TEST_IDS.archiveId;
+  const body = { excludedTitleIdentities: [] };
+  const web = await createDvdTitleDamageAcceptancePreviewRoute(
+    new Request(
+      `${trustedOrigin}/api/catalog-reviews/${archiveId}/title-damage-acceptance-preview`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: new URL(trustedOrigin).host,
+          Origin: trustedOrigin,
+        },
+        body: JSON.stringify(body),
+      },
+    ),
+    archiveId,
+    () => createDvdTitleDamageAcceptancePreviewTestAccess(),
+    () => trustedOrigin,
+  );
+  let cliError: unknown;
+  try {
+    runDvdTitleDamageAcceptancePreview([
+      "preview-damage-acceptance",
+      archiveId,
+      "--json",
+      JSON.stringify(body),
+    ], {
+      openAccess: () => createDvdTitleDamageAcceptancePreviewTestAccess(),
+    });
+  } catch (error) {
+    cliError = error;
+  }
+
+  expect(web.status).toBe(400);
+  expect(await web.json()).toEqual({
+    error: {
+      code: "INVALID_ARGUMENTS",
+      message: "Title Damage Acceptance preflight input contains an unknown field.",
+    },
+  });
+  expect(cliError).toMatchObject({
+    code: "INVALID_ARGUMENTS",
+    message: "Title Damage Acceptance preflight input contains an unknown field.",
   });
 });
 

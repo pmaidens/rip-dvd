@@ -28,12 +28,6 @@ function errorResponse(code: string, message: string, status: number) {
   return response({ error: { code, message } }, status);
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
 export async function createDvdTitleDamageAcceptancePreviewRoute(
   request: Request,
   id: string,
@@ -67,22 +61,10 @@ export async function createDvdTitleDamageAcceptancePreviewRoute(
           problem.status,
         );
   }
-  const body = asRecord(await request.json().catch(() => null));
-  if (body === null || Object.keys(body).some((key) =>
-    key !== "excludedTitleIdentityIds" && key !== "mainFeatureResolutions"
-  )) {
-    return errorResponse(
-      "INVALID_ARGUMENTS",
-      "Title Damage Acceptance preflight requires a JSON exclusions object.",
-      400,
-    );
-  }
+  const body = await request.json().catch(() => null);
   try {
     return response(createApplicationOperations(getAccess())
-      .previewDvdTitleDamageAcceptance(id as OriginalDiscArchiveId, {
-        excludedTitleIdentityIds: body.excludedTitleIdentityIds,
-        mainFeatureResolutions: body.mainFeatureResolutions,
-      }));
+      .previewDvdTitleDamageAcceptance(id as OriginalDiscArchiveId, body));
   } catch (error) {
     if (error instanceof InvalidDvdTitleDamageAcceptancePreviewInputError) {
       return errorResponse("INVALID_ARGUMENTS", error.message, 400);
