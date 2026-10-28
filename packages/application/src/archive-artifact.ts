@@ -14,8 +14,7 @@ import {
 } from "@rip-dvd/worker-runtime";
 
 import { describeCatalogReviewWorkflow } from "./catalog-review-workflow.js";
-import { inspectDvdDiscVerification } from "./dvd-disc-verification.js";
-import { previewDvdDiscConfirmation } from "./dvd-disc-confirmation.js";
+import { inspectDvdDiscSourceIdentity } from "./dvd-disc-confirmation.js";
 import { presentArchiveRecoveryRangeEvidence } from "./archive-recovery-ranges.js";
 import { visibleArchiveRecovery } from "./archive-recovery-view.js";
 import {
@@ -101,6 +100,9 @@ export interface ArchiveArtifact {
   sourceIdentity: {
     verification: {
       id: string;
+      discInspectionId: string;
+      detectedDiscId: string;
+      mediaGeneration: string;
       status: string;
       outcome: string | null;
       current: boolean;
@@ -184,6 +186,7 @@ export function describeArchiveArtifact(
   options: {
     originalsLibraryPath?: string;
     archiveImageOwnership?: Pick<ArchiveImageOwnership, "inspect">;
+    ownershipInspection?: ReturnType<ArchiveImageOwnership["inspect"]>;
   } = {},
 ): ArchiveArtifact | null {
   const archiveJobs = access.archiveJobs.listForArchive(archive.id);
@@ -225,13 +228,14 @@ export function describeArchiveArtifact(
   const storage = describeDvdRecoveryStorage(
     access.dvdRecoveryStorage.readCurrent(),
   );
-  const ownership = options.originalsLibraryPath === undefined
+  const ownership = options.ownershipInspection ??
+    (options.originalsLibraryPath === undefined
     ? null
     : (options.archiveImageOwnership ?? defaultArchiveImageOwnership).inspect({
         archiveId: archive.id,
         imagePath: archive.archivePath,
         originalsLibraryPath: options.originalsLibraryPath,
-      });
+      }));
   const boundaryReason = archiveBoundaryEvidenceFromRecord(archive) === null
     ? {
         code: "BOUNDARY_UNPROVEN",
@@ -452,20 +456,16 @@ export async function enrichArchiveArtifactSourceIdentity(
 ): Promise<ArchiveArtifact> {
   const recoveryId = artifact.recovery.record?.id;
   if (recoveryId === undefined) return artifact;
-  const verification = await inspectDvdDiscVerification(
+  const sourceIdentity = await inspectDvdDiscSourceIdentity(
     access,
     recoveryId,
     archiveImageOwnership,
   );
-  const confirmation = await previewDvdDiscConfirmation(
-    access,
-    recoveryId,
-    archiveImageOwnership,
-  );
+  const confirmation = sourceIdentity.preview;
   const verificationAction: ArchiveArtifactAction = {
     name: "verify-disc",
-    available: verification.action.available,
-    blockingReasons: verification.action.blockingReasons,
+    available: sourceIdentity.verificationAction.available,
+    blockingReasons: sourceIdentity.verificationAction.blockingReasons,
     requiredInputs: [
       "mutationKey",
       "archiveRecoveryId",
@@ -473,7 +473,7 @@ export async function enrichArchiveArtifactSourceIdentity(
       "checkpointRevision",
       "checkpointDigest",
     ],
-    expectedInputs: verification.action.expectedInputs,
+    expectedInputs: sourceIdentity.verificationAction.expectedInputs,
   };
   const confirmationAction: ArchiveArtifactAction = {
     name: "confirm-disc",
@@ -507,7 +507,7 @@ export async function enrichArchiveArtifactSourceIdentity(
   return {
     ...artifact,
     sourceIdentity: {
-      verification: verification.verification,
+      verification: confirmation.verification,
       confirmation: confirmation.confirmation,
     },
     actions,

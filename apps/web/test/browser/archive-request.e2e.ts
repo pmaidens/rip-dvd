@@ -25,7 +25,7 @@ test("shows the saved archive and active recovery as one truthful artifact", asy
   page,
 }, testInfo) => {
   const variant = testInfo.project.name === "desktop" ? "desktop" : "mobile";
-  const discLabel = `CATALOG_BROWSER_DAMAGE_${variant.toUpperCase()}`;
+  const discLabel = `ARCHIVE_ARTIFACT_BROWSER_${variant.toUpperCase()}`;
   await page.goto("/discs");
 
   const artifact = page.getByRole("article", {
@@ -58,4 +58,11 @@ test("shows the saved archive and active recovery as one truthful artifact", asy
     has: page.getByText("Resume", { exact: true }),
   });
   await expect(resume.getByText("Unavailable", { exact: true })).toBeVisible();
+
+  await actions.getByRole("button", {
+    name: "Stop and keep archive",
+    exact: true,
+  }).click();
+  await expect(artifact.locator(".status-stopping")).toHaveCount(2);
+  await expect(initial.getByText("completed", { exact: true })).toBeVisible();
 });

@@ -5137,10 +5137,50 @@ it("returns the same operational records and evidence through web and CLI", asyn
       "confirm-disc",
       "reconcile",
     ]);
+    for (const [status, projectedState, pauseReason, stopOperationId,
+      stopRequestedAt, stoppedAt] of [
+      ["waiting_for_disc", "waiting", null, null, null, null],
+      ["paused", "paused", "no_progress", null, null, null],
+      ["stopping", "stopping", null, "synthetic-stop", 10, null],
+      ["stopped", "stopped", null, "synthetic-stop", 10, 11],
+    ] as const) {
+      const stateFixture = new DatabaseSync(fixture.databasePath);
+      stateFixture.prepare(`
+        UPDATE archive_recoveries
+        SET status = ?, pause_reason = ?, stop_operation_id = ?,
+            stop_requested_at = ?, stopped_at = ?, fault_code = NULL,
+            updated_at = updated_at + 1
+        WHERE id = 'synthetic-evidence-recovery'
+      `).run(
+        status,
+        pauseReason,
+        stopOperationId,
+        stopRequestedAt,
+        stoppedAt,
+      );
+      stateFixture.close();
+      const stateResponse = await createOperationsResponse(
+        access,
+        new Request(
+          `http://localhost/api/operations?kind=original-disc-archives&id=${archiveId}`,
+        ),
+        fixture.originalsLibraryPath,
+      );
+      const stateCli = await fixture.run([
+        "inspect",
+        "original-disc-archives",
+        archiveId,
+      ]);
+      expect(stateCli.result).toEqual(await stateResponse.json());
+      expect(stateCli.result).toMatchObject({
+        item: { archiveArtifact: { recovery: { state: projectedState } } },
+      });
+    }
     const faultedRecoveryFixture = new DatabaseSync(fixture.databasePath);
     faultedRecoveryFixture.prepare(`
       UPDATE archive_recoveries
-      SET status = 'faulted', updated_at = 3
+      SET status = 'faulted', pause_reason = NULL, stopped_at = NULL,
+          fault_code = 'CONSISTENCY_FAULT', updated_at = updated_at + 1
       WHERE id = 'synthetic-evidence-recovery'
     `).run();
     faultedRecoveryFixture.close();

@@ -911,7 +911,12 @@ function readDetail(
         : access.catalog.findArchiveRecovery(archive.id);
       const archiveArtifact = evidenceFormat === null
         ? null
-        : describeArchiveArtifact(access, archive, options);
+        : describeArchiveArtifact(access, archive, {
+            ...options,
+            ...(ownership === null
+              ? {}
+              : { ownershipInspection: ownership }),
+          });
       const encodeWorkConflict = conflictingEncodeJobs.length === 0
         ? null
         : {

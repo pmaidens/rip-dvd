@@ -234,6 +234,7 @@ describe("inspectOperations", () => {
         listDiscSelections: vi.fn(() => []),
         listDetectedDiscs: vi.fn(() => []),
         findArchiveRecovery: vi.fn(() => null),
+        listCatalogReviewEvidenceChoices: vi.fn(() => []),
         readDvdTitleIdentityReviewSet: vi.fn(() => null),
       },
       archiveJobs: {
@@ -294,6 +295,7 @@ describe("inspectOperations", () => {
       imagePath: archive.archivePath,
       originalsLibraryPath: "/media/originals",
     });
+    expect(inspect).toHaveBeenCalledTimes(1);
     expect(result.item).toMatchObject({
       structuralAssessment: {
         state: "unavailable",

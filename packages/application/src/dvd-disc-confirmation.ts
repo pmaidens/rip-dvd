@@ -70,7 +70,7 @@ function confirmationIsCurrent(
     verification.checkpointDigest === input.checkpoint.digest;
 }
 
-export async function previewDvdDiscConfirmation(
+async function inspectDvdDiscConfirmation(
   access: DataAccess,
   archiveRecoveryId: ArchiveRecoveryId,
   archiveImageOwnership: ArchiveImageOwnership = defaultArchiveImageOwnership,
@@ -178,47 +178,74 @@ export async function previewDvdDiscConfirmation(
       )
     : null;
   return {
-    archiveRecovery: inspection.archiveRecovery,
-    checkpoint: inspection.checkpoint,
-    insertion: inspection.insertion,
-    insertionCandidates: inspection.insertionCandidates,
-    verification,
-    confirmation: latestConfirmation === null
-      ? null
-      : visibleConfirmation(latestConfirmation, confirmationCurrent),
-    provenance: {
-      imageUsesConfirmedSource:
-        confirmationProvenance.imageUsesConfirmedSource,
-      confirmations: confirmationProvenance.items.map((entry) => ({
-        confirmation: visibleConfirmation(
-          entry.confirmation,
-          confirmationCurrent &&
-            entry.confirmation.id === latestConfirmation?.id,
-        ),
-        recoveredSectorCount: entry.recoveredSectorCount,
-        failedReadCount: entry.failedReadCount,
-        firstRecoveredLba: entry.firstRecoveredLba,
-        lastRecoveredLba: entry.lastRecoveredLba,
-        recoveredRanges: entry.recoveredRanges,
-        recoveredRangesTruncated: entry.recoveredRangesTruncated,
-      })),
-      truncated: confirmationProvenance.truncated,
-    },
-    writeAuthority: authority === null || blockingReasons.length > 0
-      ? { available: false, blockingReasons }
-      : { available: true, blockingReasons: [], authority },
-    action: {
-      name: "confirm-disc",
-      available: blockingReasons.length === 0 && !confirmationCurrent,
-      blockingReasons: confirmationCurrent
-        ? [{
-            code: "DISC_ALREADY_CONFIRMED",
-            message: "The current DVD Disc Verification is already confirmed.",
-          }]
-        : blockingReasons,
-      expectedInputs,
+    verificationAction: inspection.action,
+    preview: {
+      archiveRecovery: inspection.archiveRecovery,
+      checkpoint: inspection.checkpoint,
+      insertion: inspection.insertion,
+      insertionCandidates: inspection.insertionCandidates,
+      verification,
+      confirmation: latestConfirmation === null
+        ? null
+        : visibleConfirmation(latestConfirmation, confirmationCurrent),
+      provenance: {
+        imageUsesConfirmedSource:
+          confirmationProvenance.imageUsesConfirmedSource,
+        confirmations: confirmationProvenance.items.map((entry) => ({
+          confirmation: visibleConfirmation(
+            entry.confirmation,
+            confirmationCurrent &&
+              entry.confirmation.id === latestConfirmation?.id,
+          ),
+          recoveredSectorCount: entry.recoveredSectorCount,
+          failedReadCount: entry.failedReadCount,
+          firstRecoveredLba: entry.firstRecoveredLba,
+          lastRecoveredLba: entry.lastRecoveredLba,
+          recoveredRanges: entry.recoveredRanges,
+          recoveredRangesTruncated: entry.recoveredRangesTruncated,
+        })),
+        truncated: confirmationProvenance.truncated,
+      },
+      writeAuthority: authority === null || blockingReasons.length > 0
+        ? { available: false, blockingReasons }
+        : { available: true, blockingReasons: [], authority },
+      action: {
+        name: "confirm-disc",
+        available: blockingReasons.length === 0 && !confirmationCurrent,
+        blockingReasons: confirmationCurrent
+          ? [{
+              code: "DISC_ALREADY_CONFIRMED",
+              message: "The current DVD Disc Verification is already confirmed.",
+            }]
+          : blockingReasons,
+        expectedInputs,
+      },
     },
   };
+}
+
+export async function inspectDvdDiscSourceIdentity(
+  access: DataAccess,
+  archiveRecoveryId: ArchiveRecoveryId,
+  archiveImageOwnership: ArchiveImageOwnership = defaultArchiveImageOwnership,
+) {
+  return inspectDvdDiscConfirmation(
+    access,
+    archiveRecoveryId,
+    archiveImageOwnership,
+  );
+}
+
+export async function previewDvdDiscConfirmation(
+  access: DataAccess,
+  archiveRecoveryId: ArchiveRecoveryId,
+  archiveImageOwnership: ArchiveImageOwnership = defaultArchiveImageOwnership,
+) {
+  return (await inspectDvdDiscConfirmation(
+    access,
+    archiveRecoveryId,
+    archiveImageOwnership,
+  )).preview;
 }
 
 export async function recordDvdDiscConfirmation(
