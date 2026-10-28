@@ -297,3 +297,30 @@ it("pages bounded acknowledgement history independently of the latest matching r
   }
   expect(collected).toEqual(recorded);
 });
+
+it("returns current validation identities when evidence changes during the acknowledgement probe", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const { predecessor } = seedCatalogReviewForReadFixture(fixture, { validatedOutputContents: "synthetic changing validation" });
+  const identity = encodeOutputArtifactIdentity(predecessor.id);
+  const reviewed = (await fixture.run(["encode-output", "inspect", identity], undefined, undefined, { encodeOutputMediaProbe: probe })).result as EncodeOutputInspection;
+  let changed = false;
+  const result = await fixture.run(["encode-output", "acknowledge-inspection", identity, "--key", "synthetic-validation-race", "--json",
+    JSON.stringify({ acknowledged: true, reviewToken: reviewed.operatorInspection.reviewToken })], undefined, undefined, {
+    encodeOutputMediaProbe: async () => {
+      if (!changed) {
+        changed = true;
+        const sqlite = new DatabaseSync(fixture.databasePath);
+        try { sqlite.prepare("UPDATE encode_jobs SET output_validated_at = output_validated_at + 1000 WHERE id = ?").run(predecessor.id); }
+        finally { sqlite.close(); }
+      }
+      return probe();
+    },
+  });
+  const updatedTime = new Date(new Date(reviewed.artifact.validation.evidence!.validatedAt).getTime() + 1000).toISOString();
+  expect(result.exitCode).toBe(2);
+  expect(result.result).toMatchObject({ error: { code: "OUTPUT_AUTHORITY_CHANGED", current: {
+    artifact: { validation: { evidence: { validatedAt: updatedTime } } },
+    operatorInspection: { history: [] },
+  } } });
+});

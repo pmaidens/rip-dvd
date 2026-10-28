@@ -10851,6 +10851,12 @@
     },
     {
       "value": "\"id\" is not null",
+      "name": "encode_output_inspection_receipts_id_not_null",
+      "entityType": "checks",
+      "table": "encode_output_inspection_receipts"
+    },
+    {
+      "value": "\"id\" is not null",
       "name": "encoding_profiles_id_not_null",
       "entityType": "checks",
       "table": "encoding_profiles"

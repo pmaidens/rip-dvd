@@ -951,6 +951,31 @@ export class EncodeOutputAcknowledgementRejectedError extends Error {
   }
 }
 
+function acknowledgementResult(record: EncodeOutputInspectionReceiptRecord) {
+  return { schemaVersion: 1 as const, receipt: presentInspectionReceipt(record) };
+}
+
+async function rejectAcknowledgementWithCurrentEvidence(
+  access: DataAccess,
+  input: EncodeOutputInspectionAcknowledgement,
+  mediaProbe: EncodeOutputMediaProbe,
+  reasonCode: string,
+) {
+  let fresh: EncodeOutputInspection | null = null;
+  try { fresh = await inspectEncodeOutput(access, input.artifactIdentity, mediaProbe); }
+  catch (error) { if (!(error instanceof RecordNotFoundError)) throw error; }
+  // Refreshing may race a successfully committed retry too.
+  const replay = access.encodeOutputInspectionReceipts.replay(input);
+  if (replay !== null) return acknowledgementResult(replay);
+  throw new EncodeOutputAcknowledgementRejectedError(
+    fresh === null ? "OUTPUT_AUTHORITY_CHANGED"
+      : !fresh.operatorInspection.acknowledgement.eligible
+        ? fresh.operatorInspection.acknowledgement.reasonCode ?? "OUTPUT_AUTHORITY_CHANGED"
+        : reasonCode,
+    fresh,
+  );
+}
+
 export async function acknowledgeEncodeOutputInspection(
   access: DataAccess,
   artifactIdentityInput: unknown,
@@ -975,25 +1000,24 @@ export async function acknowledgeEncodeOutputInspection(
     acknowledged: true, reviewToken: body.reviewToken,
   };
   const replayed = access.encodeOutputInspectionReceipts.replay(input);
-  if (replayed !== null) return { schemaVersion: 1 as const, receipt: presentInspectionReceipt(replayed) };
+  if (replayed !== null) return acknowledgementResult(replayed);
   let current: EncodeOutputInspection;
   try {
     current = await inspectEncodeOutput(access, artifactIdentity, mediaProbe);
   } catch (error) {
     const replay = access.encodeOutputInspectionReceipts.replay(input);
-    if (replay !== null) return { schemaVersion: 1 as const, receipt: presentInspectionReceipt(replay) };
+    if (replay !== null) return acknowledgementResult(replay);
     if (!(error instanceof RecordNotFoundError)) throw error;
-    throw new EncodeOutputAcknowledgementRejectedError("OUTPUT_AUTHORITY_CHANGED", null);
+    return rejectAcknowledgementWithCurrentEvidence(access, input, mediaProbe, "OUTPUT_AUTHORITY_CHANGED");
   }
   const concurrentReplay = access.encodeOutputInspectionReceipts.replay(input);
-  if (concurrentReplay !== null) return { schemaVersion: 1 as const, receipt: presentInspectionReceipt(concurrentReplay) };
+  if (concurrentReplay !== null) return acknowledgementResult(concurrentReplay);
   if (!current.operatorInspection.acknowledgement.eligible) {
-    throw new EncodeOutputAcknowledgementRejectedError(
-      current.operatorInspection.acknowledgement.reasonCode ?? "OUTPUT_AUTHORITY_CHANGED", current,
-    );
+    return rejectAcknowledgementWithCurrentEvidence(access, input, mediaProbe,
+      current.operatorInspection.acknowledgement.reasonCode ?? "OUTPUT_AUTHORITY_CHANGED");
   }
   if (current.operatorInspection.reviewToken !== input.reviewToken) {
-    throw new EncodeOutputAcknowledgementRejectedError("OUTPUT_INSPECTION_STALE", current);
+    return rejectAcknowledgementWithCurrentEvidence(access, input, mediaProbe, "OUTPUT_INSPECTION_STALE");
   }
   let descriptor: Awaited<ReturnType<typeof open>> | undefined;
   try {
@@ -1025,27 +1049,18 @@ export async function acknowledgeEncodeOutputInspection(
         },
       };
     });
-    return { schemaVersion: 1 as const, receipt: presentInspectionReceipt(record) };
+    return acknowledgementResult(record);
   } catch (error) {
     const replay = access.encodeOutputInspectionReceipts.replay(input);
-    if (replay !== null) return { schemaVersion: 1 as const, receipt: presentInspectionReceipt(replay) };
+    if (replay !== null) return acknowledgementResult(replay);
     const fileError = typeof error === "object" && error !== null && "code" in error &&
       ["ENOENT", "EACCES", "ELOOP", "ENOTDIR", "ESTALE"].includes(String(error.code));
     if (!(error instanceof EncodeOutputAcknowledgementRejectedError) &&
         !(error instanceof RecordNotFoundError) && !fileError) throw error;
     // The transaction has rolled back. Return fresh identities, including when
     // the change happened after the asynchronous probe or descriptor open.
-    let fresh: EncodeOutputInspection | null = null;
-    try { fresh = await inspectEncodeOutput(access, artifactIdentity, mediaProbe); }
-    catch (inspectionError) { if (!(inspectionError instanceof RecordNotFoundError)) throw inspectionError; }
-    throw new EncodeOutputAcknowledgementRejectedError(
-      fresh === null ? "OUTPUT_AUTHORITY_CHANGED"
-        : !fresh.operatorInspection.acknowledgement.eligible
-          ? fresh.operatorInspection.acknowledgement.reasonCode ?? "OUTPUT_AUTHORITY_CHANGED"
-          : error instanceof EncodeOutputAcknowledgementRejectedError
-            ? error.reasonCode : "OUTPUT_INSPECTION_STALE",
-      fresh,
-    );
+    return await rejectAcknowledgementWithCurrentEvidence(access, input, mediaProbe,
+      error instanceof EncodeOutputAcknowledgementRejectedError ? error.reasonCode : "OUTPUT_INSPECTION_STALE");
   } finally {
     await descriptor?.close();
   }

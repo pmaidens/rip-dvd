@@ -11,8 +11,12 @@ export function EncodeOutputInspectionAcknowledgement({ inspection }: { inspecti
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<EncodeOutputInspectionReceipt | null>(null);
-  const [olderHistory, setOlderHistory] = useState<EncodeOutputInspectionReceipt[]>([]);
-  const [nextOffset, setNextOffset] = useState(reviewed.historyNextOffset);
+  const [loadedHistory, setLoadedHistory] = useState<{
+    revision: string; receipts: EncodeOutputInspectionReceipt[]; nextOffset: number | null;
+  } | null>(null);
+  const historyRevision = JSON.stringify([reviewed.history.map((entry) => entry.id), reviewed.historyNextOffset]);
+  const olderHistory = loadedHistory?.revision === historyRevision ? loadedHistory.receipts : [];
+  const nextOffset = loadedHistory?.revision === historyRevision ? loadedHistory.nextOffset : reviewed.historyNextOffset;
   const [loadingHistory, setLoadingHistory] = useState(false);
   const history = [...new Map([...reviewed.history, ...olderHistory, ...(receipt === null ? [] : [receipt])]
     .map((entry) => [entry.id, entry])).values()];
@@ -24,8 +28,11 @@ export function EncodeOutputInspectionAcknowledgement({ inspection }: { inspecti
       const response = await fetch(`/api/encode-outputs/${encodeURIComponent(inspection.artifact.identity)}?receipt-offset=${nextOffset}`, { cache: "no-store" });
       if (!response.ok) throw new Error("History unavailable");
       const result = await response.json() as EncodeOutputInspection;
-      setOlderHistory((current) => [...current, ...result.operatorInspection.history]);
-      setNextOffset(result.operatorInspection.historyNextOffset);
+      setLoadedHistory((current) => ({
+        revision: historyRevision,
+        receipts: [...(current?.revision === historyRevision ? current.receipts : []), ...result.operatorInspection.history],
+        nextOffset: result.operatorInspection.historyNextOffset,
+      }));
     } catch { setError("Acknowledgement history is unavailable. Retry loading history."); }
     finally { setLoadingHistory(false); }
   }

@@ -2858,12 +2858,13 @@ export const damagePreviews = sqliteTable("damage_previews", {
 ]);
 
 export const encodeOutputInspectionReceipts = sqliteTable("encode_output_inspection_receipts", {
-  id: text("id").notNull().primaryKey(),
-  encodeJobId: text("encode_job_id").notNull(),
+  id: text("id").$type<import("../types.js").EncodeOutputInspectionReceiptId>().notNull().primaryKey(),
+  encodeJobId: text("encode_job_id").$type<EncodeJobId>().notNull(),
   generationIdentity: text("generation_identity").notNull(),
   record: text("record").notNull(),
   createdAt: integer("created_at").notNull(),
 }, (table) => [
+  check("encode_output_inspection_receipts_id_not_null", sql`${table.id} is not null`),
   check("encode_output_inspection_receipts_record_check", sql`json_valid(${table.record}) and json_extract(${table.record}, '$.id') = ${table.id} and json_extract(${table.record}, '$.encodeJobId') = ${table.encodeJobId} and json_extract(${table.record}, '$.generationIdentity') = ${table.generationIdentity}`),
   index("encode_output_inspection_receipts_job_idx").on(table.encodeJobId, table.createdAt),
 ]);
