@@ -315,3 +315,32 @@ it("retains a stale terminal reason when an active writer advances the checkpoin
     expect(access.damagePreviews.find(id)?.commands).toEqual([]);
   } finally { release?.(); await writer; access.close(); }
 });
+
+it("reports Recovery Stop when it commits between the owned Recovery check and the generation evidence snapshot", async () => {
+  const { fixture, seeded, request, access } = await setup(true);
+  const id = ((await request()).result as DamagePreviewInspection).id;
+  const base = createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath });
+  let owned = false, inSnapshot = false, stopAfterCheck = false, stopCommitted = false;
+  const findRecovery = access.catalog.findArchiveRecovery;
+  access.catalog.findArchiveRecovery = (archiveId) => {
+    const recovery = findRecovery(archiveId);
+    if (owned && !inSnapshot) stopAfterCheck = true;
+    return recovery;
+  };
+  const readSnapshot = access.readConsistentSnapshot;
+  access.readConsistentSnapshot = (read) => {
+    if (stopAfterCheck && !stopCommitted) {
+      stopCommitted = true;
+      const recovery = findRecovery(seeded.archive.id)!;
+      access.archiveRecoveryWork.requestStop({ mutationKey: "synthetic-stop-snapshot-race", archiveRecoveryId: recovery.id, attemptId: recovery.attemptId });
+    }
+    inSnapshot = true;
+    try { return readSnapshot(read); } finally { inSnapshot = false; }
+  };
+  const ownership: ArchiveImageOwnership = { ...base, withConsistentRead(input) { return base.withConsistentRead({ ...input, async task(handle) { owned = true; return input.task(handle); } }); } };
+  try {
+    await pollDamagePreviews({ access, mediaLibraryPath: fixture.mediaLibraryPath, originalsLibraryPath: fixture.originalsLibraryPath, signal: new AbortController().signal, generator: media(), ownership });
+    expect(stopCommitted).toBe(true);
+    expect((await fixture.run(["damage-preview", "inspect", id])).result).toMatchObject({ generationStatus: "failed", checkpointVerified: false, reason: { code: "DAMAGE_PREVIEW_RECOVERY_STOP" }, artifacts: [], provenance: { commands: [] } });
+  } finally { access.close(); }
+});

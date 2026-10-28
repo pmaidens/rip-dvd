@@ -152,6 +152,7 @@ export async function pollDamagePreviews(options: Options): Promise<void> {
             execution.assertHeld();
             checkRecovery(); signal.throwIfAborted();
             const current = options.access.readConsistentSnapshot((snapshot) => reviewDamagePreviewEvidence(snapshot, record.originalDiscArchiveId, JSON.parse(record.selectionJson) as DamagePreviewInput, checkpoint));
+            checkRecovery(); signal.throwIfAborted();
             if (current.preflightToken !== record.preflightToken || !current.available) throw new PreviewFailure("DAMAGE_PREVIEW_STALE", "The reviewed preview inputs changed before generation.");
             const request = review.reviewedRequest!;
             handle.assertOwned();
