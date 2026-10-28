@@ -26,6 +26,20 @@ function contentLabel(item: CurrentTitleIdentity): string {
   return `DVD title ${item.observation.displayTitleNumber}, angle ${item.observation.angleNumber} of ${item.observation.angleCount}, chapters ${item.observation.chapterStart}-${item.observation.chapterEnd}`;
 }
 
+function mediaItemLabel(item: {
+  kind: string;
+  title: string;
+  year: number | null;
+  seasonNumber: number | null;
+  episodeNumber: number | null;
+}): string {
+  const year = item.year === null ? "" : ` (${item.year})`;
+  if (item.kind === "episode") {
+    return `${item.kind}: ${item.title}, season ${item.seasonNumber ?? "unknown"}, episode ${item.episodeNumber ?? "unknown"}${year}`;
+  }
+  return `${item.kind}: ${item.title}${year}`;
+}
+
 export function CatalogReviewTitleDamageAcceptancePreview({
   originalDiscArchiveId,
   titleIdentity,
@@ -38,6 +52,14 @@ export function CatalogReviewTitleDamageAcceptancePreview({
     current: CatalogReviewWorkflow["current"];
     titleDamageState: CatalogReviewTitleDamage["state"] | null;
     activityRevision: string | null;
+    mediaItems: readonly {
+      id: string;
+      kind: string;
+      title: string;
+      year: number | null;
+      seasonNumber: number | null;
+      episodeNumber: number | null;
+    }[];
   };
   fetcher?: typeof fetch;
 }) {
@@ -185,7 +207,7 @@ export function CatalogReviewTitleDamageAcceptancePreview({
               <ul>
                 {preview.unresolvedSelections.map((selection) => (
                   <li key={selection.discSelectionId}>
-                    {selection.mediaItem.kind}: {selection.mediaItem.title}. {
+                    {mediaItemLabel(selection.mediaItem)}. {
                       selection.sourceIdentity.kind === "dvd_title"
                         ? `DVD title ${selection.sourceIdentity.titleNumber}`
                         : selection.sourceIdentity.kind === "dvd_chapters"
@@ -207,7 +229,7 @@ export function CatalogReviewTitleDamageAcceptancePreview({
               </p>
               {preview.mainFeatureChoices.map((choice) => (
                 <label key={choice.discSelectionId}>
-                  {choice.mediaItem.kind}: {choice.mediaItem.title}
+                  {mediaItemLabel(choice.mediaItem)}
                   <select
                     aria-label={`Resolved content for ${choice.mediaItem.title}`}
                     value={mainFeatureResolutions.get(choice.discSelectionId) ??
@@ -266,7 +288,7 @@ export function CatalogReviewTitleDamageAcceptancePreview({
                       <ul>
                         {item.catalogMappings.map((mapping) => (
                           <li key={mapping.discSelectionId}>
-                            {mapping.mediaItem.kind}: {mapping.mediaItem.title}. {
+                            {mediaItemLabel(mapping.mediaItem)}. {
                               mapping.sourceIdentity.kind === "main_feature"
                                 ? "Main-feature choice"
                                 : `Selection ${mapping.sourceIdentity.kind}`
@@ -286,14 +308,100 @@ export function CatalogReviewTitleDamageAcceptancePreview({
                     {item.assessmentSnapshot === null ? (
                       <span>Current assessment snapshot unavailable.</span>
                     ) : (
-                      <span>
-                        {item.assessmentSnapshot.unrecoveredUniqueSourceSectorCount}
-                        {" unrecovered source sectors; "}
-                        {item.assessmentSnapshot.sourceContinuityRiskSectorCount}
-                        {" source-continuity-risk sectors; "}
-                        {item.assessmentSnapshot.mappingCoverage.state}
-                        {" mapping coverage."}
-                      </span>
+                      <>
+                        <span>
+                          {item.assessmentSnapshot
+                            .unrecoveredUniqueSourceSectorCount}
+                          {" unrecovered source sectors; "}
+                          {item.assessmentSnapshot
+                            .sourceContinuityRiskSectorCount}
+                          {" source-continuity-risk sectors; "}
+                          {item.assessmentSnapshot.mappingCoverage.state}
+                          {" mapping coverage."}
+                        </span>
+                        <span>
+                          Title Missing-Source Percentage: {
+                            item.assessmentSnapshot.titleMissingSourcePercentage ===
+                                null
+                              ? "unavailable"
+                              : `${item.assessmentSnapshot.titleMissingSourcePercentage}%`
+                          }.
+                        </span>
+                        {item.assessmentSnapshot.mappingCoverage.unknownReasons
+                              .length === 0
+                          ? null
+                          : (
+                            <ul>
+                              {item.assessmentSnapshot.mappingCoverage
+                                .unknownReasons.map((reason) => (
+                                  <li key={reason.code}>
+                                    Mapping coverage unknown: <code>
+                                      {reason.code}
+                                    </code> {reason.message}
+                                  </li>
+                                ))}
+                            </ul>
+                          )}
+                        {(() => {
+                          const affectedPlayback = item.assessmentSnapshot
+                            .estimatedAffectedPlayback;
+                          if (affectedPlayback === null) {
+                            return <span>
+                              Estimated Affected Playback is unavailable.
+                            </span>;
+                          }
+                          return <>
+                            {affectedPlayback.intervals.length === 0
+                              ? (
+                                <span>
+                                  No known affected playback intervals.
+                                </span>
+                              )
+                              : (
+                                <ul>
+                                  {affectedPlayback.intervals.map(
+                                    (interval, index) => (
+                                      <li
+                                        key={`${interval.playbackOccurrence}:${index}`}
+                                      >
+                                        Playback occurrence {
+                                          interval.playbackOccurrence
+                                        }: affected source estimated at {
+                                          interval.startMilliseconds
+                                        }-{interval.endMilliseconds} ms; {
+                                          interval.timingMethods.join(", ")
+                                        }; {interval.coverage} coverage.
+                                      </li>
+                                    ),
+                                  )}
+                                </ul>
+                              )}
+                            {affectedPlayback.unknownCoverage.length === 0
+                              ? null
+                              : (
+                                <ul>
+                                  {affectedPlayback.unknownCoverage.map(
+                                    (coverage, index) => (
+                                      <li
+                                        key={`${coverage.playbackOccurrence}:${index}`}
+                                      >
+                                        Playback occurrence {
+                                          coverage.playbackOccurrence
+                                        } has unknown timing coverage for {
+                                          coverage.unrecoveredSourceSectorCount
+                                        } unrecovered source sectors. {
+                                          coverage.reasons.map((reason) =>
+                                            `${reason.code}: ${reason.message}`
+                                          ).join(" ")
+                                        }
+                                      </li>
+                                    ),
+                                  )}
+                                </ul>
+                              )}
+                          </>;
+                        })()}
+                      </>
                     )}
                   </li>
                 ))}

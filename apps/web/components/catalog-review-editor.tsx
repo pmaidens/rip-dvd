@@ -533,6 +533,14 @@ export function CatalogReviewView({
                 current: review.reviewWorkflow.current,
                 titleDamageState: review.titleDamage?.state ?? null,
                 activityRevision: activityRevision ?? null,
+                mediaItems: review.mediaItems.map((item) => ({
+                  id: item.id,
+                  kind: item.kind,
+                  title: item.title,
+                  year: item.year,
+                  seasonNumber: item.seasonNumber,
+                  episodeNumber: item.episodeNumber,
+                })),
               }}
             />
             <CatalogReviewTitleDamageEvidence

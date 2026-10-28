@@ -132,6 +132,30 @@ function uniqueReasons(
   });
 }
 
+function orderedReasons(
+  reasons: readonly CatalogReviewWorkflowReason[],
+): CatalogReviewWorkflowReason[] {
+  const priority: Partial<Record<
+    CatalogReviewWorkflowReason["code"],
+    number
+  >> = {
+    ARCHIVE_NOT_SAVED: 0,
+    CONSISTENCY_FAULT: 0,
+    RECOVERY_ACTIVE: 1,
+    RECOVERY_STOPPING: 1,
+    ASSESSMENT_PENDING: 2,
+    ASSESSMENT_OUTDATED: 2,
+    CATALOG_REVIEW_ARCHIVE_ONLY: 3,
+    MAPPING_REVIEW_REQUIRED: 3,
+    SELECTION_UNIDENTIFIED: 3,
+  };
+  return reasons.map((reason, index) => ({ reason, index })).sort(
+    (left, right) =>
+      (priority[left.reason.code] ?? 3) -
+        (priority[right.reason.code] ?? 3) || left.index - right.index,
+  ).map(({ reason }) => reason);
+}
+
 function assessmentRequiresAcknowledgement(
   assessment: DvdTitleDamageAssessmentItem,
 ): boolean {
@@ -518,7 +542,7 @@ export function previewDvdTitleDamageAcceptance(
   const emptyReviewedContent = reviewSet !== null &&
     reviewedContent.length === 0;
   const missingReviewSet = reviewSet === null;
-  const reasons = uniqueReasons([
+  const reasons = orderedReasons(uniqueReasons([
     ...baseReasons,
     ...(mappingReviewItems.length === 0
       ? []
@@ -552,7 +576,7 @@ export function previewDvdTitleDamageAcceptance(
           ),
         },
       }]),
-  ]);
+  ]));
   const reviewedSelectionIds = new Set(reviewedContent.flatMap((item) =>
     item.catalogMappings.map((mapping) => mapping.discSelectionId)
   ));

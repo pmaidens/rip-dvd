@@ -143,8 +143,36 @@ const preview = {
         episodeNumber: null,
       },
     }],
-    assessmentSnapshot: null,
-    acknowledgementRequired: false,
+    assessmentSnapshot: {
+      unrecoveredUniqueSourceSectorCount: 4,
+      sourceContinuityRiskSectorCount: 1,
+      titleMissingSourcePercentage: 4,
+      mappingCoverage: {
+        state: "partial",
+        unknownReasons: [{
+          code: "SYNTHETIC_MAPPING_UNKNOWN",
+          message: "Synthetic mapping coverage is incomplete.",
+        }],
+      },
+      estimatedAffectedPlayback: {
+        intervals: [{
+          playbackOccurrence: 1,
+          startMilliseconds: 1_000,
+          endMilliseconds: 5_000,
+          timingMethods: ["synthetic-vobu-timing-v1"],
+          coverage: "source_span",
+        }],
+        unknownCoverage: [{
+          playbackOccurrence: 2,
+          unrecoveredSourceSectorCount: 4,
+          reasons: [{
+            code: "SYNTHETIC_TIMING_UNKNOWN",
+            message: "Synthetic timing is unavailable.",
+          }],
+        }],
+      },
+    },
+    acknowledgementRequired: true,
   }],
   reviewedContent: [],
   exclusions: [{
@@ -213,6 +241,14 @@ const evidenceGeneration = {
   },
   titleDamageState: "current" as const,
   activityRevision: "activity-revision-1",
+  mediaItems: [{
+    id: "synthetic-movie",
+    kind: "movie",
+    title: "Synthetic Movie",
+    year: 2026,
+    seasonNumber: null,
+    episodeNumber: null,
+  }],
 };
 
 const boundEvidenceChanges = [
@@ -281,6 +317,16 @@ const boundEvidenceChanges = [
       activityRevision: "activity-revision-2",
     },
   },
+  {
+    name: "mapped Media Item evidence",
+    value: {
+      ...evidenceGeneration,
+      mediaItems: [{
+        ...evidenceGeneration.mediaItems[0]!,
+        title: "Renamed Synthetic Movie",
+      }],
+    },
+  },
 ];
 
 it("includes all current content by default and sends only explicit exclusions", async () => {
@@ -314,6 +360,7 @@ it("includes all current content by default and sends only explicit exclusions",
   );
   expect(container.textContent).toContain("0 included, 1 excluded");
   expect(container.textContent).toContain("movie: Synthetic Movie");
+  expect(container.textContent).toContain("movie: Synthetic Movie (2026)");
   expect(container.textContent).toContain(
     "Main-feature choice resolved by its Title Identity binding to DVD title 1, angle 1, chapters 1-4",
   );
@@ -321,6 +368,16 @@ it("includes all current content by default and sends only explicit exclusions",
     "Unknown title impact: 7 unrecovered source sectors",
   );
   expect(container.textContent).toContain("Encode Job synthetic-encode-job");
+  expect(container.textContent).toContain(
+    "Title Missing-Source Percentage: 4%",
+  );
+  expect(container.textContent).toContain("SYNTHETIC_MAPPING_UNKNOWN");
+  expect(container.textContent).toContain(
+    "Playback occurrence 1: affected source estimated at 1000-5000 ms",
+  );
+  expect(container.textContent).toContain(
+    "Playback occurrence 2 has unknown timing coverage for 4 unrecovered source sectors",
+  );
   const resolution = container.querySelector("select") as HTMLSelectElement;
   await act(async () => {
     resolution.value = "synthetic-title-1";
@@ -503,7 +560,7 @@ it("shows active Disc Selections without a current Title Identity binding", asyn
 
   expect(container.textContent).toContain("Unresolved Disc Selections");
   expect(container.textContent).toContain(
-    "episode: Synthetic Episode. DVD title 7, chapters 2-5",
+    "episode: Synthetic Episode, season 1, episode 2 (2026). DVD title 7, chapters 2-5",
   );
   expect(container.textContent).toContain("synthetic-orphaned-selection");
 });

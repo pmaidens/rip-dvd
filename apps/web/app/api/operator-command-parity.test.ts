@@ -847,8 +847,8 @@ it("keeps recovering Catalog Review facts and mapping identical through web and 
       previewToken: null,
       action: {
         reasons: [
-          { code: "ASSESSMENT_PENDING" },
           { code: "RECOVERY_ACTIVE" },
+          { code: "ASSESSMENT_PENDING" },
           { code: "SELECTION_UNIDENTIFIED" },
         ],
       },
@@ -5926,8 +5926,8 @@ it("keeps pending and Recovery-active blocker ordering aligned", async () => {
     available: false,
     action: {
       reasons: [
-        { code: "ASSESSMENT_PENDING" },
         { code: "RECOVERY_ACTIVE" },
+        { code: "ASSESSMENT_PENDING" },
       ],
     },
   });
