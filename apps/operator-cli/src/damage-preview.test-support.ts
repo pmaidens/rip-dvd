@@ -4,7 +4,8 @@ import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.
 
 export async function seedDamagePreview(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
-  coverage: "source_span" | "whole_cell" | "unknown" = "source_span",
+  coverage: "source_span" | "whole_cell" | "unknown" | "mixed" = "source_span",
+  timings: readonly (readonly [number, number])[] = [[1_000, 5_000], [35_000, 40_000], [71_000, 400_000]],
 ) {
   const { archive, manifest } = await seedCommittedArchiveEvidence(fixture, [
     { startLba: 10, sectorCount: 1, classification: "skipped_untested" },
@@ -40,14 +41,12 @@ export async function seedDamagePreview(
     mappingCoverage: { state: "complete", policyVersion: "synthetic-map-v1", unknownReasons: [] },
     timingEvidence: {
       policyVersion: "dvd-title-damage-timing-v1",
-      occurrences: (coverage === "unknown" ? [null] : [
-        [1_000, 5_000], [35_000, 40_000], [71_000, 400_000],
-      ]).map((span, index) => ({
+      occurrences: (coverage === "unknown" ? [null] : timings).map((span, index) => ({
         playbackOccurrence: index + 1,
         spans: span === null ? [] : [{
           sourceRange: { startLba: 0, sectorCount: 100 },
           startMilliseconds: span[0]!, endMilliseconds: span[1]!,
-          timingMethod: "synthetic-timing-v1", coverage: coverage === "whole_cell" ? "whole_cell" : "source_span",
+          timingMethod: "synthetic-timing-v1", coverage: coverage === "whole_cell" || (coverage === "mixed" && index > 0) ? "whole_cell" : "source_span",
         }],
         unknownReasons: span === null ? [{ code: "TIMING_UNAVAILABLE", message: "Timing is unknown." }] : [],
       })),

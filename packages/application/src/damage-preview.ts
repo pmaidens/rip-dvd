@@ -64,7 +64,11 @@ function planClips(input: DamagePreviewInput, markers: Marker[], reasons: Reason
     // Precise markers in a mixed group must remain covered even when a coarse
     // marker uses a smaller operator-selected sampling window.
     const precise = markers.filter((marker) => group.markerIndexes.includes(marker.intervalIndex) && marker.coverage !== "whole_cell");
-    return hasCoarse ? [window!, ...precise] : [group];
+    if (!hasCoarse) return [group];
+    return [{
+      startMilliseconds: Math.min(window!.startMilliseconds, ...precise.map((marker) => marker.startMilliseconds)),
+      endMilliseconds: Math.max(window!.endMilliseconds, ...precise.map((marker) => marker.endMilliseconds)),
+    }];
   });
   const clips: PlaybackRange[] = [];
   for (const span of spans.map((span) => ({
@@ -79,7 +83,9 @@ function planClips(input: DamagePreviewInput, markers: Marker[], reasons: Reason
     } else clips.push(span);
   }
   const duration = clips.reduce((sum, clip) => sum + clip.endMilliseconds - clip.startMilliseconds, 0);
-  return { groups, clips, estimatedDurationMilliseconds: clips.length === 0 ? null : duration };
+  const incomplete = (coarse.length > 0 && window === null) ||
+    markers.length !== input.intervalIndexes.length;
+  return { groups, clips, estimatedDurationMilliseconds: incomplete || clips.length === 0 ? null : duration };
 }
 
 export async function inspectDamagePreviewAvailability(

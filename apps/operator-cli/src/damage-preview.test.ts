@@ -113,3 +113,30 @@ it("rejects malformed selections and keeps discovery, legacy evidence and missin
   expect(await fixture.run(["damage-preview", "availability", "synthetic-missing-archive"])).toMatchObject({ exitCode: 2, result: { error: { code: "NOT_FOUND" } } });
   expect(await fixture.run(["damage-preview", "request", seeded.archive.id])).toMatchObject({ exitCode: 2 });
 });
+
+it("keeps mixed precise and coarse markers in one sampled clip and withholds incomplete total cost", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDamagePreview(fixture, "mixed", [[1_000, 5_000], [20_000, 40_000]]);
+  const input = { ...seeded.input, intervalIndexes: [0, 1], context: { beforeMilliseconds: 0, afterMilliseconds: 0 } };
+  const review = async (selection: unknown) => (await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify(selection)])).result as DamagePreviewAvailability;
+  expect((await review(input)).estimatedDurationMilliseconds).toBeNull();
+  const sampled = await review({ ...input, samplingWindow: { startMilliseconds: 25_000, endMilliseconds: 30_000 } });
+  expect(sampled.groups).toEqual([{ markerIndexes: [0, 1], startMilliseconds: 1_000, endMilliseconds: 40_000 }]);
+  expect(sampled.clips).toEqual([{ startMilliseconds: 1_000, endMilliseconds: 30_000 }]);
+  expect(sampled.estimatedDurationMilliseconds).toBe(29_000);
+  expect(sampled.uncertainSpans).toMatchObject([{ startMilliseconds: 20_000, endMilliseconds: 40_000 }]);
+});
+
+it("preserves overlapping occurrence markers without double counting their duration", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  fixtures.push(fixture);
+  const seeded = await seedDamagePreview(fixture, "source_span", [[1_000, 5_000], [3_000, 7_000], [37_000, 40_000], [71_000, 75_000]]);
+  const result = await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify({ ...seeded.input, intervalIndexes: [0, 1, 2, 3], context: { beforeMilliseconds: 0, afterMilliseconds: 0 } })]);
+  expect(result).toMatchObject({ exitCode: 0, result: {
+    markers: [{ playbackOccurrence: 1 }, { playbackOccurrence: 2 }, { playbackOccurrence: 3 }, { playbackOccurrence: 4 }],
+    groups: [{ markerIndexes: [0, 1, 2], startMilliseconds: 1_000, endMilliseconds: 40_000 }, { markerIndexes: [3], startMilliseconds: 71_000, endMilliseconds: 75_000 }],
+    clips: [{ startMilliseconds: 1_000, endMilliseconds: 40_000 }, { startMilliseconds: 71_000, endMilliseconds: 75_000 }],
+    estimatedDurationMilliseconds: 43_000,
+  } });
+});

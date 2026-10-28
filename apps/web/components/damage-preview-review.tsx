@@ -8,7 +8,7 @@ function seconds(milliseconds: number): string {
 }
 
 function streamIds(value: string): number[] {
-  return value.trim() === "" ? [] : value.split(",").map((item) => Number(item.trim()));
+  return value.trim() === "" ? [] : value.split(",").map((item) => item.trim() === "" ? NaN : Number(item.trim()));
 }
 
 export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
@@ -39,8 +39,14 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
   async function preflight(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     const values = new FormData(event.currentTarget);
-    const milliseconds = (name: string) => Number(values.get(name)) * 1_000;
-    const hasWindow = String(values.get("sampling-start") ?? "").trim() !== "" || String(values.get("sampling-end") ?? "").trim() !== "";
+    const milliseconds = (name: string) => Math.round(Number(values.get(name)) * 1_000);
+    const hasWindowStart = String(values.get("sampling-start") ?? "").trim() !== "";
+    const hasWindowEnd = String(values.get("sampling-end") ?? "").trim() !== "";
+    if (mode === "damage" && hasWindowStart !== hasWindowEnd) {
+      setError("Enter both sampling window boundaries.");
+      return;
+    }
+    const hasWindow = hasWindowStart && hasWindowEnd;
     const input = {
       mode,
       titleIdentityObservationId: titleId,

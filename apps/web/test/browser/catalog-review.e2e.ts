@@ -348,8 +348,14 @@ test("Damage Preview reviews selections and keeps generation explicitly unavaila
   await expect(preview.getByText("Estimated duration: 13 s. Estimated storage: unknown.")).toBeVisible();
   await expect(preview.getByText(/DAMAGE_PREVIEW_GENERATION_UNAVAILABLE:/)).toBeVisible();
   await expect(preview.getByRole("button", { name: "Generate Damage Preview" })).toBeDisabled();
-  await preview.getByLabel("Context before in seconds").fill("10");
+  await preview.getByLabel("Context before in seconds").fill("1.001");
   await expect(preview.getByRole("heading", { name: "Reviewed preview" })).toHaveCount(0);
+  await preview.getByRole("button", { name: "Review preview selections" }).click();
+  await expect(preview.getByText("Estimated duration: 9.001 s. Estimated storage: unknown.")).toBeVisible();
+  await preview.getByLabel("Interval 2:", { exact: false }).check();
+  await preview.getByRole("button", { name: "Review preview selections" }).click();
+  await expect(preview.getByText("Estimated duration: unknown. Estimated storage: unknown.")).toBeVisible();
+  await expect(preview.getByText(/COARSE_SAMPLING_WINDOW_REQUIRED:/)).toBeVisible();
   await expectNoPageOverflow(page);
 });
 
