@@ -273,6 +273,8 @@ import {
   StaleDvdTitleDamageDecisionError,
   StaleJobAttemptError,
 } from "../errors.js";
+import { dvdTitleDamageDecisionSelectionIds } from
+  "../dvd-title-damage-decision.js";
 import type { LegacySidecarDataAccess } from "../legacy-sidecar-types.js";
 import { normalizeMediaItemSearchTitle } from "../media-item-title-search.js";
 import { rearchiveAcceptancePreviewEvidence } from "../rearchive-acceptance.js";
@@ -6243,14 +6245,6 @@ export function createDataAccessInternal(
       previewToken: input.previewToken,
       operator: input.operator.trim(),
     });
-  }
-
-  function dvdTitleDamageDecisionSelectionIds(
-    decision: DvdTitleDamageDecision,
-  ): DiscSelectionId[] {
-    return [...new Set(decision.snapshot.reviewedContent.flatMap((content) =>
-      content.catalogMappings.map((mapping) => mapping.discSelectionId)
-    ))].sort();
   }
 
   function dvdTitleDamageWithdrawalAffectedWork(
@@ -18709,7 +18703,7 @@ export function createDataAccessInternal(
               dvdTitleDamageWithdrawalPreviewSemanticInput(input)
           ) {
             throw new DomainInvariantError(
-              "Title Damage Acceptance withdrawal preview does not match the accepted event",
+              "Title Damage Acceptance withdrawal preview does not match the accepted decision",
             );
           }
 

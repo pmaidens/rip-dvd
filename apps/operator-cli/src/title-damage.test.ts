@@ -1104,14 +1104,14 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     "catalog-review",
     "preview-withdrawal",
     archive.id,
-    "--accepted-event-id",
+    "--accepted-decision-id",
     acceptedDecisionId,
   ]);
   expect(withdrawalPreview).toMatchObject({
     exitCode: 0,
     result: {
       available: true,
-      acceptedEvent: { id: acceptedDecisionId, decision: "accepted" },
+      acceptedDecision: { id: acceptedDecisionId, decision: "accepted" },
       effects: {
         queuedClaimsBlocked: true,
         runningWorkContinues: true,
@@ -1136,7 +1136,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     "catalog-review",
     "preview-withdrawal",
     archive.id,
-    "--accepted-event-id",
+    "--accepted-decision-id",
     acceptedDecisionId,
   ]);
   const staleWithdrawalToken = (secondWithdrawalPreview.result as {
@@ -1151,7 +1151,7 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     "--json",
     JSON.stringify({
       ...withdrawalInput,
-      acceptedDecisionId: "different-synthetic-accepted-event",
+      acceptedDecisionId: "different-synthetic-accepted-decision",
     }),
   ]);
   expect(wrongEventWithdrawal).toMatchObject({
@@ -1213,13 +1213,6 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     "Synthetic running winner completed its withdrawal observation.",
   );
   claimAccess.close();
-  const completedAffectedWork = new DatabaseSync(fixture.databasePath);
-  completedAffectedWork.prepare(`
-    UPDATE encode_jobs
-    SET status = 'cancelled', reserves_output_path = 0, updated_at = 3
-    WHERE id IN (?, ?) AND status = 'queued'
-  `).run(...affectedWorkJobIds);
-  completedAffectedWork.close();
   const restartedClaimAccess = createDvdRecoveryEvidenceEncodingTestAccess({
     databasePath: fixture.databasePath,
     mediaLibraryPath: fixture.mediaLibraryPath,
@@ -1234,6 +1227,13 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     "synthetic-withdrawal-restart-worker",
   )).toBeNull();
   restartedClaimAccess.close();
+  const completedAffectedWork = new DatabaseSync(fixture.databasePath);
+  completedAffectedWork.prepare(`
+    UPDATE encode_jobs
+    SET status = 'cancelled', reserves_output_path = 0, updated_at = 3
+    WHERE id IN (?, ?) AND status = 'queued'
+  `).run(...affectedWorkJobIds);
+  completedAffectedWork.close();
   const withdrawalReplay = await fixture.run([
     "catalog-review",
     "withdraw-damage",
@@ -1285,8 +1285,8 @@ it("pages revision-bound Title Damage evidence through the public JSON CLI", asy
     "catalog-review",
     "preview-withdrawal",
     archive.id,
-    "--accepted-event-id",
-    "different-synthetic-accepted-event",
+    "--accepted-decision-id",
+    "different-synthetic-accepted-decision",
   ])).toMatchObject({
     exitCode: 0,
     result: {

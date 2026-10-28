@@ -276,7 +276,7 @@ export function CatalogReviewTitleDamageAcceptancePreview({
     if (
       withdrawalPreview?.available !== true ||
       withdrawalPreview.previewToken === null ||
-      withdrawalPreview.acceptedEvent === null
+      withdrawalPreview.acceptedDecision === null
     ) return;
     setIsSubmitting(true);
     setError(null);
@@ -293,7 +293,7 @@ export function CatalogReviewTitleDamageAcceptancePreview({
             mutationKey: createMutationKey(),
             operator: withdrawalOperator,
             previewToken: withdrawalPreview.previewToken,
-            acceptedDecisionId: withdrawalPreview.acceptedEvent.id,
+            acceptedDecisionId: withdrawalPreview.acceptedDecision.id,
           }),
         },
       );
@@ -384,7 +384,9 @@ export function CatalogReviewTitleDamageAcceptancePreview({
                         </ul>
                         {!withdrawalPreview.available ? null : (
                           <fieldset>
-                            <legend>Withdraw accepted event</legend>
+                            <legend>
+                              Withdraw Title Damage Acceptance decision
+                            </legend>
                             <label>
                               Operator
                               <input

@@ -1,33 +1,20 @@
-import {
-  createApplicationOperations,
-  InvalidDvdTitleDamageAcceptanceWithdrawalInputError,
-} from "@rip-dvd/application";
+import { createApplicationOperations } from "@rip-dvd/application";
 import { loadConfig } from "@rip-dvd/config";
 import {
-  DomainInvariantError,
-  RecordNotFoundError,
   type DataAccess,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 
 import { getDataAccess } from
   "../../../../../lib/data-access";
-import { trustedMutationRequestProblem } from
-  "../../../../../lib/server/trusted-mutation-request";
+import {
+  prepareTitleDamageAcceptanceWithdrawalRequest,
+  titleDamageAcceptanceWithdrawalErrorResponse,
+  titleDamageAcceptanceWithdrawalResponse,
+} from "../title-damage-acceptance-withdrawal-http";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-
-function response(body: unknown, status = 200): Response {
-  return Response.json(body, {
-    status,
-    headers: { "Cache-Control": "no-store" },
-  });
-}
-
-function errorResponse(code: string, message: string, status: number) {
-  return response({ error: { code, message } }, status);
-}
 
 export async function createDvdTitleDamageAcceptanceWithdrawalPreviewRoute(
   request: Request,
@@ -35,59 +22,21 @@ export async function createDvdTitleDamageAcceptanceWithdrawalPreviewRoute(
   getAccess: () => DataAccess = getDataAccess,
   getTrustedOrigin: () => string = () => loadConfig().webTrustedOrigin,
 ): Promise<Response> {
-  if (request.method !== "POST") {
-    return errorResponse("METHOD_NOT_ALLOWED", "Method not allowed.", 405);
-  }
-  let trustedOrigin: string;
+  const prepared = await prepareTitleDamageAcceptanceWithdrawalRequest(
+    request,
+    getTrustedOrigin,
+  );
+  if (prepared.response !== null) return prepared.response;
   try {
-    trustedOrigin = getTrustedOrigin();
-  } catch {
-    return errorResponse(
-      "TITLE_DAMAGE_ACCEPTANCE_WITHDRAWAL_UNAVAILABLE",
-      "Title Damage Acceptance withdrawal is unavailable.",
-      503,
-    );
-  }
-  const problem = trustedMutationRequestProblem(request, trustedOrigin);
-  if (problem !== null) {
-    return problem.status === 415
-      ? errorResponse(
-        "JSON_CONTENT_TYPE_REQUIRED",
-        "JSON content type required.",
-        problem.status,
-      )
-      : errorResponse(
-        "CROSS_ORIGIN_MUTATION_REJECTED",
-        "Cross-origin mutation rejected.",
-        problem.status,
-      );
-  }
-  const body = await request.json().catch(() => null);
-  try {
-    return response(createApplicationOperations(getAccess())
+    return titleDamageAcceptanceWithdrawalResponse(
+      createApplicationOperations(getAccess())
       .previewDvdTitleDamageAcceptanceWithdrawal(
         id as OriginalDiscArchiveId,
-        body,
-      ));
-  } catch (error) {
-    if (error instanceof InvalidDvdTitleDamageAcceptanceWithdrawalInputError) {
-      return errorResponse("INVALID_ARGUMENTS", error.message, 400);
-    }
-    if (error instanceof RecordNotFoundError) {
-      return errorResponse("NOT_FOUND", error.message, 404);
-    }
-    if (error instanceof DomainInvariantError) {
-      return errorResponse(
-        "TITLE_DAMAGE_ACCEPTANCE_WITHDRAWAL_REJECTED",
-        error.message,
-        409,
-      );
-    }
-    return errorResponse(
-      "TITLE_DAMAGE_ACCEPTANCE_WITHDRAWAL_UNAVAILABLE",
-      "Title Damage Acceptance withdrawal is unavailable.",
-      503,
+        prepared.body,
+      ),
     );
+  } catch (error) {
+    return titleDamageAcceptanceWithdrawalErrorResponse(error);
   }
 }
 

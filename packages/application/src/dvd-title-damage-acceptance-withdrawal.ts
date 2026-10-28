@@ -1,9 +1,9 @@
 import {
   MAX_DVD_TITLES,
   RecordNotFoundError,
+  dvdTitleDamageDecisionSelectionIds,
   type DataAccess,
   type DiscSelectionId,
-  type DvdTitleDamageDecision,
   type DvdTitleDamageDecisionId,
   type EncodeJobId,
   type EncodeJobStatus,
@@ -82,12 +82,6 @@ function withdrawalInput(value: unknown) {
   };
 }
 
-function affectedSelectionIds(decision: DvdTitleDamageDecision) {
-  return [...new Set(decision.snapshot.reviewedContent.flatMap((content) =>
-    content.catalogMappings.map((mapping) => mapping.discSelectionId)
-  ))].sort() as DiscSelectionId[];
-}
-
 function affectedWorkView(job: {
   id: EncodeJobId;
   discSelectionId: DiscSelectionId;
@@ -128,12 +122,12 @@ export function previewDvdTitleDamageAcceptanceWithdrawal(
     const jobs = accepted === null
       ? []
       : snapshot.encodeJobs.listActiveForDiscSelections({
-        discSelectionIds: affectedSelectionIds(accepted),
+        discSelectionIds: dvdTitleDamageDecisionSelectionIds(accepted),
         limit: MAX_DVD_TITLES * 8,
       }).filter((job) => job.status === "queued" || job.status === "running");
     return { evidence, inspection, accepted, jobs };
   });
-  const acceptedEvent = plan.accepted === null
+  const acceptedDecision = plan.accepted === null
     ? null
     : serializeDvdTitleDamageDecision(plan.accepted);
   const affectedWork = plan.jobs.map(affectedWorkView)
@@ -167,7 +161,7 @@ export function previewDvdTitleDamageAcceptanceWithdrawal(
     : plan.accepted.id !== input.acceptedDecisionId
     ? [{
       code: "ACCEPTANCE_CHANGED" as const,
-      message: "The requested accepted event is not current.",
+      message: "The requested Title Damage Acceptance decision is not current.",
       details: { currentAcceptedDecisionId: plan.accepted.id },
     }]
     : [];
@@ -197,7 +191,7 @@ export function previewDvdTitleDamageAcceptanceWithdrawal(
         ? ["mutationKey", "operator", "previewToken", "acceptedDecisionId"]
         : ["acceptedDecisionId"],
     },
-    acceptedEvent,
+    acceptedDecision,
     affectedWork,
     effects: {
       queuedClaimsBlocked: available,

@@ -39,10 +39,10 @@ function previewArguments(rest: readonly string[]) {
     invalid("Expected catalog-review preview-withdrawal.");
   }
   if (
-    options.length !== 2 || options[0] !== "--accepted-event-id" ||
+    options.length !== 2 || options[0] !== "--accepted-decision-id" ||
     options[1]?.trim() === ""
   ) {
-    invalid("--accepted-event-id is required.");
+    invalid("--accepted-decision-id is required.");
   }
   return {
     archiveId: archiveId(rawArchiveId),

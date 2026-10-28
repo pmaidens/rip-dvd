@@ -286,7 +286,7 @@ const commandDefinitions = [
         "damage: --limit <1..100> --cursor <cursor>",
         "preview-damage-acceptance: flags or exactly one of --json <object>, --stdin, --file <path>; flags are --exclude-title-identity <id> and --resolve-main-feature <disc-selection-id> <title-identity-id> (repeatable)",
         "accept-damage: --key <key> and exactly one of --json <object>, --stdin, --file <path>",
-        "preview-withdrawal: --accepted-event-id <id>",
+        "preview-withdrawal: --accepted-decision-id <id>",
         "withdraw-damage: --key <key> and exactly one of --json <object>, --stdin, --file <path>",
         "suggest: --tmdb-id <positive integer> --media-type <movie|tv_show> (together, optional)",
         "apply-proposal: --key <key> and exactly one of --json <object>, --stdin, --file <path>",

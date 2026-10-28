@@ -284,7 +284,7 @@ const withdrawalPreview = {
       "acceptedDecisionId",
     ],
   },
-  acceptedEvent: persistedDecision.current,
+  acceptedDecision: persistedDecision.current,
   affectedWork: [{
     id: "synthetic-encode-job",
     discSelectionId: "synthetic-selection-1",
@@ -382,7 +382,7 @@ it("shows the persisted current exact-set decision after refresh", async () => {
   expect(container.textContent).toContain("1 included and 2 excluded");
 });
 
-it("preflights and withdraws the current accepted event", async () => {
+it("preflights and withdraws the current accepted decision", async () => {
   const fetcher = vi.fn(async (
     request: RequestInfo | URL,
     _options?: RequestInit,

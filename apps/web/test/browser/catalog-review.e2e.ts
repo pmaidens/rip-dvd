@@ -1,8 +1,10 @@
 import {
+  type APIResponse,
   expect,
   type Locator,
   type Page,
   type Response,
+  type Route,
   test,
 } from "@playwright/test";
 
@@ -66,6 +68,16 @@ async function expectNoPageOverflow(page: Page): Promise<void> {
     result.scrollWidth,
     `Horizontal overflow: ${JSON.stringify(result.offenders)}`,
   ).toBeLessThanOrEqual(result.clientWidth);
+}
+
+async function fetchFromBrowserServer(route: Route): Promise<APIResponse> {
+  const endpoint = new URL(route.request().url());
+  const browserHost = endpoint.host;
+  endpoint.hostname = "127.0.0.1";
+  return route.fetch({
+    url: endpoint.href,
+    headers: { ...route.request().headers(), host: browserHost },
+  });
 }
 
 async function openCatalogReview(page: Page, discLabel: string): Promise<void> {
@@ -292,6 +304,76 @@ function damageAcceptanceBrowserPreview(
         code: "DAMAGE_PREVIEW_UNAVAILABLE",
         message: "Damage Preview is optional.",
       }],
+    },
+  };
+}
+
+const browserAcceptedDecisionId = "synthetic-browser-accepted-decision";
+
+function damageAcceptanceBrowserDecision() {
+  const current = {
+    id: browserAcceptedDecisionId,
+    originalDiscArchiveId: "synthetic-browser-archive",
+    decision: "accepted",
+    acceptedDecisionId: null,
+    operator: "Synthetic browser acceptance operator",
+    catalogRevision: "2026-10-28T08:00:00.000Z",
+    checkpointRevision: 2,
+    checkpointDigest: "a".repeat(64),
+    assessmentIdentity: `dvd-title-damage-assessment:${"b".repeat(64)}`,
+    assessmentAttemptSequence: 1,
+    reviewSetIdentity: "c".repeat(64),
+    catalogMappingProjectionId: "d".repeat(64),
+    reviewedContentIdentity: "e".repeat(64),
+    excludedTitleIdentityIds: [],
+    mainFeatureResolutions: [],
+    snapshot: {
+      reviewedContent: [{}],
+      exclusions: [{}],
+      affectedWork: [],
+    },
+    recordedAt: "2026-10-28T08:00:00.000Z",
+  };
+  return {
+    schemaVersion: 1,
+    state: "accepted",
+    current,
+    latest: current,
+    currentIdentities: {},
+  };
+}
+
+function damageAcceptanceWithdrawalBrowserPreview() {
+  return {
+    schemaVersion: 1,
+    evidenceFormat: "dvd-recovery-evidence-v1",
+    available: true,
+    previewToken:
+      "dvd-title-damage-acceptance-withdrawal-preview:00000000-0000-4000-8000-000000000421",
+    action: {
+      available: true,
+      reasons: [],
+      expectedInputs: [
+        "mutationKey",
+        "operator",
+        "previewToken",
+        "acceptedDecisionId",
+      ],
+    },
+    acceptedDecision: damageAcceptanceBrowserDecision().current,
+    affectedWork: [{
+      id: "synthetic-browser-queued-job",
+      discSelectionId: "synthetic-browser-selection",
+      status: "queued",
+    }, {
+      id: "synthetic-browser-running-job",
+      discSelectionId: "synthetic-browser-selection",
+      status: "running",
+    }],
+    effects: {
+      queuedClaimsBlocked: true,
+      runningWorkContinues: true,
+      existingOutputsChanged: false,
     },
   };
 }
@@ -629,6 +711,96 @@ test("exact damage preflight identifies mapped and excluded content across asses
   await expectNoPageOverflow(page);
 });
 
+test("withdraws the current Title Damage Acceptance decision", async ({
+  page,
+}, testInfo) => {
+  const variant = fixtureVariant(testInfo.project.name);
+  const persistedDecision = damageAcceptanceBrowserDecision();
+  await page.route(
+    /\/api\/catalog-reviews\/[^/?]+(?:\?.*)?$/,
+    async (route) => {
+      const response = await fetchFromBrowserServer(route);
+      const body = await response.json() as Record<string, unknown>;
+      await route.fulfill({
+        response,
+        body: JSON.stringify({
+          ...body,
+          titleDamageDecision: persistedDecision,
+        }),
+      });
+    },
+  );
+  await page.route(
+    "**/title-damage-acceptance-withdrawal-preview",
+    async (route) => route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(damageAcceptanceWithdrawalBrowserPreview()),
+    }),
+  );
+  let submitted: Record<string, unknown> | null = null;
+  await page.route(
+    "**/title-damage-acceptance-withdrawal",
+    async (route) => {
+      submitted = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          schemaVersion: 1,
+          decision: {
+            ...persistedDecision.current,
+            decision: "withdrawn",
+            acceptedDecisionId: browserAcceptedDecisionId,
+          },
+          affectedWork:
+            damageAcceptanceWithdrawalBrowserPreview().affectedWork,
+          queuedClaimsBlocked: true,
+          runningWorkContinues: true,
+          existingOutputsChanged: false,
+        }),
+      });
+    },
+  );
+
+  await openCatalogReview(
+    page,
+    `CATALOG_BROWSER_DAMAGE_${variant.toUpperCase()}`,
+  );
+  await page.getByRole("tab", { name: "Damage decision" }).click();
+  const preflight = page.getByRole("heading", {
+    name: "Title Damage Acceptance preflight",
+  }).locator("xpath=ancestor::section[1]");
+  await expect(preflight.getByText(
+    /Damage accepted for the current exact reviewed set/,
+  )).toBeVisible();
+  await preflight.getByRole("button", {
+    name: "Preview withdrawal",
+  }).click();
+  await expect(preflight.getByText(
+    "2 queued or running Encode Jobs affected.",
+  )).toBeVisible();
+  await expect(preflight.getByText(
+    "Encode Job synthetic-browser-running-job: running.",
+  )).toBeVisible();
+  const withdrawal = preflight.getByRole("group", {
+    name: "Withdraw Title Damage Acceptance decision",
+  });
+  await withdrawal.getByLabel("Operator").fill(
+    "Synthetic browser withdrawal operator",
+  );
+  await withdrawal.getByRole("button", {
+    name: "Withdraw damage acceptance",
+  }).click();
+  await expect(preflight.getByText(
+    "Damage acceptance withdrawn for the current exact reviewed set by Synthetic browser withdrawal operator.",
+  )).toBeVisible();
+  expect(submitted).toMatchObject({
+    mutationKey: expect.any(String),
+    operator: "Synthetic browser withdrawal operator",
+    acceptedDecisionId: browserAcceptedDecisionId,
+  });
+  await expectNoPageOverflow(page);
+});
+
 test("complex Catalog Review remains responsive and exposes accessible state", async ({ page }, testInfo) => {
   const variant = fixtureVariant(testInfo.project.name);
   await openCatalogReview(
@@ -730,11 +902,8 @@ test("Damage Preview requests, waits for and cancels reviewed work with visible 
   const requestId = "11111111-2222-4333-8444-555555555555";
   const state = () => ({ schemaVersion: 1, id: requestId, status: cancelled ? "cancelled" : "queued", generationStatus: cancelled ? "cancelled" : "queued", outdated: false, outdatedReasons: [], reason: null, cancellationRequested: cancelled, progress: { completedClips: 0, totalClips: 1, percent: null }, artifacts: [], provenance: { checkpoint: { manifestRevision: 1 } }, warning: "Failed, empty or partial media never means no damage." });
   await page.route("**/api/damage-previews/*/availability", async (route) => {
-    const endpoint = new URL(route.request().url());
-    const browserHost = endpoint.host;
-    endpoint.hostname = "127.0.0.1";
     // Node requests do not inherit Chromium's test-host resolver rule.
-    const response = await route.fetch({ url: endpoint.href, headers: { ...route.request().headers(), host: browserHost } });
+    const response = await fetchFromBrowserServer(route);
     expect(response.ok()).toBe(true);
     const body = await response.json();
     if (route.request().method() === "POST") { body.available = true; body.blockingReasons = []; }

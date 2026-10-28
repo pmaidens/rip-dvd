@@ -93,6 +93,10 @@ function access(options: {
     operator: "Synthetic withdrawal operator",
   };
   const current = options.currentState === "withdrawn" ? withdrawn : accepted;
+  const mutationResults = new Map<string, {
+    semanticInput: string;
+    decision: DvdTitleDamageDecision;
+  }>();
   let fake: DataAccess;
   fake = {
     readConsistentSnapshot: (task: (snapshot: DataAccess) => unknown) =>
@@ -121,13 +125,23 @@ function access(options: {
         if (options.failure === "conflict") {
           throw new MutationKeyConflictError();
         }
-        return {
+        const semanticInput = JSON.stringify(input);
+        const previous = mutationResults.get(input.mutationKey);
+        if (previous !== undefined) {
+          if (previous.semanticInput !== semanticInput) {
+            throw new MutationKeyConflictError();
+          }
+          return previous.decision;
+        }
+        const decision = {
           ...withdrawn,
           acceptedDecisionId: input.acceptedDecisionId,
           operator: input.operator,
           snapshot: { ...accepted.snapshot, affectedWork },
           recordedAt: new Date("2026-10-28T08:01:00.000Z"),
         };
+        mutationResults.set(input.mutationKey, { semanticInput, decision });
+        return decision;
       },
     },
     encodeJobs: {
@@ -191,7 +205,7 @@ it("keeps withdrawal preflight aligned through web and JSON CLI", async () => {
   const cliResult = runDvdTitleDamageAcceptanceWithdrawal([
     "preview-withdrawal",
     archiveId,
-    "--accepted-event-id",
+    "--accepted-decision-id",
     acceptedDecisionId,
   ], cliIo()) as Record<string, unknown>;
   expect({ ...cliResult, previewToken: null }).toEqual({
@@ -200,7 +214,7 @@ it("keeps withdrawal preflight aligned through web and JSON CLI", async () => {
   });
   expect(cliResult).toMatchObject({
     available: true,
-    acceptedEvent: { id: acceptedDecisionId },
+    acceptedDecision: { id: acceptedDecisionId },
     affectedWork,
     effects: {
       queuedClaimsBlocked: true,
@@ -216,17 +230,30 @@ it("keeps withdrawal mutation aligned through web and JSON CLI", async () => {
     previewToken,
     acceptedDecisionId,
   };
+  const sharedAccess = access();
+  const getSharedAccess = () => sharedAccess;
   const web = await createDvdTitleDamageAcceptanceWithdrawalRoute(
     request(
       `/api/catalog-reviews/${archiveId}/title-damage-acceptance-withdrawal`,
       { ...input, mutationKey },
     ),
     archiveId,
-    access,
+    getSharedAccess,
     () => "https://operator.example",
   );
   expect(web.status).toBe(200);
   const webResult = await web.json();
+  const replay = await createDvdTitleDamageAcceptanceWithdrawalRoute(
+    request(
+      `/api/catalog-reviews/${archiveId}/title-damage-acceptance-withdrawal`,
+      { ...input, mutationKey },
+    ),
+    archiveId,
+    getSharedAccess,
+    () => "https://operator.example",
+  );
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toEqual(webResult);
   const cliResult = runDvdTitleDamageAcceptanceWithdrawal([
     "withdraw-damage",
     archiveId,
@@ -263,7 +290,7 @@ it("keeps already-withdrawn preflight reasons aligned", async () => {
   const cliResult = runDvdTitleDamageAcceptanceWithdrawal([
     "preview-withdrawal",
     archiveId,
-    "--accepted-event-id",
+    "--accepted-decision-id",
     acceptedDecisionId,
   ], cliIo({ currentState: "withdrawn" }));
   expect(cliResult).toEqual(webResult);
