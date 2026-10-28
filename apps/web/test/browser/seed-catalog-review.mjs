@@ -802,6 +802,7 @@ try {
   await Promise.all([seedArchiveRequest("desktop"), seedArchiveRequest("mobile"), seedArchiveRequest("notification")]);
   seedTitleDamagePaging("desktop", "ab");
   seedTitleDamagePaging("mobile", "cd");
+  seedTitleDamagePaging("notification", "ef");
   seedKeyboardJourney("desktop", "1");
   seedComplexLayout("desktop", "2");
   seedKeyboardJourney("mobile", "3");

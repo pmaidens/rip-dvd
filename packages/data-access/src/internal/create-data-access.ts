@@ -12928,6 +12928,28 @@ export function createDataAccessInternal(
             eq(archiveRecoveries.stopOperationId, input.stopOperationId),
             eq(archiveRecoveries.status, "stopping"),
           )).run();
+          const disc = requireRow(
+            transaction.select({ volumeLabel: detectedDiscs.volumeLabel })
+              .from(originalDiscArchives).innerJoin(
+                detectedDiscs,
+                eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+              ).where(eq(
+                originalDiscArchives.id,
+                recovery.originalDiscArchiveId,
+              )).get(),
+            "Original Disc Archive",
+            recovery.originalDiscArchiveId,
+          );
+          recordNotificationOutcome(createNotificationEventWriter(transaction, now), {
+            kind: "recovery_stopped",
+            sourceEventId: `recovery-stop:${input.stopOperationId}`,
+            originalDiscArchiveId: recovery.originalDiscArchiveId,
+            label: disc.volumeLabel,
+            remainingSource: currentDvdUnrecoveredSourceRanges(
+              transaction,
+              recovery.originalDiscArchiveId,
+            ).length > 0,
+          });
           return requireRow(
             findArchiveRecoveryRecord(transaction, {
               archiveRecoveryId: recovery.id,

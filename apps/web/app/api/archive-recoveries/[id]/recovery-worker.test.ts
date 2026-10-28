@@ -23,6 +23,7 @@ import {
 } from "@rip-dvd/worker-runtime";
 
 import { seedDvdDiscVerificationFixture } from "../../../../../operator-cli/src/dvd-disc-verification.test-support.js";
+import { notificationWorkflow } from "../../../../../operator-cli/src/notification-workflow.test-support.js";
 import { createOperatorWorkflowFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
 import {
   commitDvdRecoveryBatch,
@@ -128,6 +129,7 @@ async function completeMismatchAndConfirm(
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   fixtures.splice(0).forEach((fixture) => fixture.dispose());
 });
 
@@ -1953,6 +1955,7 @@ it("finishes a fully recovered pass without rewriting the successful Archive Job
 it("keeps Stop durable until a blocked source command is reaped", async () => {
   const fixture = createOperatorWorkflowFixture();
   fixtures.push(fixture);
+  await notificationWorkflow(fixture);
   const seeded = await seedDvdDiscVerificationFixture(fixture, [{
     startLba: 200,
     sectorCount: 2,
@@ -1984,21 +1987,26 @@ it("keeps Stop durable until a blocked source command is reaped", async () => {
       stopPollIntervalMs: 1,
     });
     await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(1));
-    input.access.archiveRecoveryWork.requestStop({
-      mutationKey: "00000000-0000-4000-8000-000000000451",
-      archiveRecoveryId: seeded.recoveryId,
-      attemptId: seeded.attemptId,
-    });
+    expect((await fixture.run([
+      "archive-recovery", "stop", seeded.recoveryId,
+      "--key", "synthetic-blocked-stop", "--attempt-id", seeded.attemptId,
+    ])).exitCode).toBe(0);
     await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({ status: "stopping" });
     expect(reconcile).not.toHaveBeenCalled();
+    expect((await fixture.run(["notifications", "deliveries"])).result)
+      .toMatchObject({ deliveries: [] });
     closeRead();
     await polling;
     expect(start).toHaveBeenCalledTimes(1);
     expect(reconcile).toHaveBeenCalledTimes(1);
     expect(input.access.catalog.findArchiveRecoveryById(seeded.recoveryId))
       .toMatchObject({ status: "stopped", work: null });
+    expect((await fixture.run(["notifications", "deliveries"])).result)
+      .toMatchObject({ deliveries: [
+        { status: "queued" }, { status: "queued" },
+      ] });
     const inspected = await fixture.run([
       "inspect",
       "archive-recoveries",
