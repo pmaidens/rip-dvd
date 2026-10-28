@@ -146,6 +146,7 @@ function access(options: {
     },
     encodeJobs: {
       listActiveForDiscSelections: () => affectedWork,
+      listDvdTitleDamageAcceptanceWithdrawalWork: () => affectedWork,
     },
     close: () => undefined,
   } as unknown as DataAccess;

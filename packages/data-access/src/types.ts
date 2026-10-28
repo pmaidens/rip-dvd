@@ -1856,11 +1856,9 @@ export interface DvdTitleDamageDecisionExpectedIdentities {
   }[];
 }
 
-export interface DvdTitleDamageDecision {
+interface DvdTitleDamageDecisionBase {
   id: DvdTitleDamageDecisionId;
   originalDiscArchiveId: OriginalDiscArchiveId;
-  decision: "accepted" | "not_required" | "withdrawn";
-  acceptedDecisionId: DvdTitleDamageDecisionId | null;
   operator: string;
   catalogRevision: Date;
   checkpointRevision: number;
@@ -1878,6 +1876,17 @@ export interface DvdTitleDamageDecision {
   snapshot: DvdTitleDamageDecisionSnapshot;
   recordedAt: Date;
 }
+
+export type DvdTitleDamageDecision = DvdTitleDamageDecisionBase & (
+  | {
+      decision: "accepted" | "not_required";
+      acceptedDecisionId: null;
+    }
+  | {
+      decision: "withdrawn";
+      acceptedDecisionId: DvdTitleDamageDecisionId;
+    }
+);
 
 export interface DvdTitleDamageDecisionInspection {
   schemaVersion: 1;
@@ -2633,7 +2642,10 @@ export interface EncodeJobAccess {
   listForDiscSelection(id: DiscSelectionId): EncodeJob[];
   listActiveForDiscSelections(options: {
     discSelectionIds: readonly DiscSelectionId[];
-    limit: number | null;
+    limit: number;
+  }): EncodeJob[];
+  listDvdTitleDamageAcceptanceWithdrawalWork(options: {
+    discSelectionIds: readonly DiscSelectionId[];
   }): EncodeJob[];
   listActiveForOriginalDiscArchives(options: {
     originalDiscArchiveIds: readonly OriginalDiscArchiveId[];
@@ -3038,6 +3050,7 @@ export interface ConsistentReadAccess {
     | "list"
     | "listForDiscSelection"
     | "listActiveForDiscSelections"
+    | "listDvdTitleDamageAcceptanceWithdrawalWork"
     | "listActiveForOriginalDiscArchives"
     | "hasReservedOutputPathConflict"
     | "hasReservedOutputPath"

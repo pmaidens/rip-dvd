@@ -114,10 +114,9 @@ export function previewDvdTitleDamageAcceptanceWithdrawal(
       : null;
     const jobs = accepted === null
       ? []
-      : snapshot.encodeJobs.listActiveForDiscSelections({
+      : snapshot.encodeJobs.listDvdTitleDamageAcceptanceWithdrawalWork({
         discSelectionIds: dvdTitleDamageDecisionSelectionIds(accepted),
-        limit: null,
-      }).filter((job) => job.status === "queued" || job.status === "running");
+      });
     return { evidence, inspection, accepted, jobs };
   });
   const acceptedDecision = plan.accepted === null

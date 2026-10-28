@@ -6175,17 +6175,47 @@ export function createDataAccessInternal(
         : value) as T;
   }
 
+  function toDvdTitleDamageDecision(
+    row: typeof dvdTitleDamageDecisions.$inferSelect,
+  ): DvdTitleDamageDecision {
+    if (row.decision === "withdrawn") {
+      if (row.acceptedDecisionId === null) {
+        throw new DomainInvariantError(
+          "Withdrawn Title Damage decision must reference its accepted decision",
+        );
+      }
+      return {
+        ...row,
+        decision: "withdrawn",
+        acceptedDecisionId: row.acceptedDecisionId,
+      };
+    }
+    if (row.acceptedDecisionId !== null) {
+      throw new DomainInvariantError(
+        "Only a withdrawn Title Damage decision may reference an accepted decision",
+      );
+    }
+    return {
+      ...row,
+      decision: row.decision,
+      acceptedDecisionId: null,
+    };
+  }
+
   function decodeDvdTitleDamageDecision(
     stored: string,
   ): DvdTitleDamageDecision {
     const parsed = JSON.parse(stored) as
-      & Omit<DvdTitleDamageDecision, "catalogRevision" | "recordedAt">
+      & Omit<
+        typeof dvdTitleDamageDecisions.$inferSelect,
+        "catalogRevision" | "recordedAt"
+      >
       & { catalogRevision: string; recordedAt: string };
-    return {
+    return toDvdTitleDamageDecision({
       ...parsed,
       catalogRevision: new Date(parsed.catalogRevision),
       recordedAt: new Date(parsed.recordedAt),
-    };
+    });
   }
 
   function dvdTitleDamagePreviewSemanticInput(input: {
@@ -6319,13 +6349,16 @@ export function createDataAccessInternal(
     originalDiscArchiveId: OriginalDiscArchiveId,
     reader: MutationTransaction | typeof database = database,
   ): DvdTitleDamageDecisionInspection {
-    const latest = reader.select().from(dvdTitleDamageDecisions).where(eq(
+    const latestRow = reader.select().from(dvdTitleDamageDecisions).where(eq(
       dvdTitleDamageDecisions.originalDiscArchiveId,
       originalDiscArchiveId,
     )).orderBy(
       desc(dvdTitleDamageDecisions.recordedAt),
       desc(dvdTitleDamageDecisions.id),
     ).limit(1).get() ?? null;
+    const latest = latestRow === null
+      ? null
+      : toDvdTitleDamageDecision(latestRow);
     const currentIdentities = currentDvdTitleDamageDecisionIdentities(
       reader,
       originalDiscArchiveId,
@@ -11658,6 +11691,29 @@ export function createDataAccessInternal(
     return toDvdTitleDamageAssessment(persisted);
   }
 
+  function listActiveEncodeJobsForDiscSelections(
+    requestedDiscSelectionIds: readonly DiscSelectionId[],
+    statuses: readonly EncodeJobStatus[],
+    resultLimit?: number,
+  ) {
+    const discSelectionIds = [...new Set(requestedDiscSelectionIds)];
+    if (discSelectionIds.length > ACTIVE_ENCODE_JOB_DISC_SELECTION_LIMIT) {
+      throw new DomainInvariantError(
+        `Active Encode Job lookup is limited to ${ACTIVE_ENCODE_JOB_DISC_SELECTION_LIMIT} Disc Selections`,
+      );
+    }
+    if (discSelectionIds.length === 0) return [];
+    const query = database.select().from(encodeJobs)
+      .where(and(
+        inArray(encodeJobs.discSelectionId, discSelectionIds),
+        inArray(encodeJobs.status, statuses),
+      ))
+      .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id));
+    return resultLimit === undefined
+      ? query.all()
+      : query.limit(resultLimit).all();
+  }
+
   const access: LegacySidecarDataAccess = {
     damagePreviews: createDamagePreviewAccess(sqlite, now),
     encodeOutputInspectionReceipts: createEncodeOutputInspectionReceiptAccess(sqlite, now),
@@ -15199,6 +15255,9 @@ export function createDataAccessInternal(
             access.encodeJobs.listForDiscSelection(id),
           listActiveForDiscSelections: (options) =>
             access.encodeJobs.listActiveForDiscSelections(options),
+          listDvdTitleDamageAcceptanceWithdrawalWork: (options) =>
+            access.encodeJobs
+              .listDvdTitleDamageAcceptanceWithdrawalWork(options),
           listActiveForOriginalDiscArchives: (options) =>
             access.encodeJobs.listActiveForOriginalDiscArchives(options),
           hasReservedOutputPathConflict: (job) =>
@@ -18626,7 +18685,7 @@ export function createDataAccessInternal(
                   ? "accepted"
                   : "not_required")
             ? existing
-            : requireRow(
+            : toDvdTitleDamageDecision(requireRow(
               transaction.insert(dvdTitleDamageDecisions).values({
                 id: newId<DvdTitleDamageDecisionId>(),
                 originalDiscArchiveId: input.originalDiscArchiveId,
@@ -18652,7 +18711,7 @@ export function createDataAccessInternal(
               }).returning().get(),
               "Title Damage decision",
               input.originalDiscArchiveId,
-            );
+            ));
           transaction.delete(mutationInvocations)
             .where(eq(mutationInvocations.key, input.previewToken))
             .run();
@@ -18731,7 +18790,7 @@ export function createDataAccessInternal(
               requestedTimestamp.getTime() <= latestRecordedAt.getTime()
             ? new Date(latestRecordedAt.getTime() + 1)
             : requestedTimestamp;
-          const withdrawn = requireRow(
+          const withdrawn = toDvdTitleDamageDecision(requireRow(
             transaction.insert(dvdTitleDamageDecisions).values({
               id: newId<DvdTitleDamageDecisionId>(),
               originalDiscArchiveId: accepted.originalDiscArchiveId,
@@ -18755,7 +18814,7 @@ export function createDataAccessInternal(
             }).returning().get(),
             "Title Damage Acceptance withdrawal",
             accepted.id,
-          );
+          ));
           transaction.delete(mutationInvocations)
             .where(eq(mutationInvocations.key, input.previewToken))
             .run();
@@ -23271,41 +23330,31 @@ export function createDataAccessInternal(
           .all();
       },
       listActiveForDiscSelections(options) {
-        const discSelectionIds = [...new Set(options.discSelectionIds)];
         if (
-          discSelectionIds.length > ACTIVE_ENCODE_JOB_DISC_SELECTION_LIMIT
-        ) {
-          throw new DomainInvariantError(
-            `Active Encode Job lookup is limited to ${ACTIVE_ENCODE_JOB_DISC_SELECTION_LIMIT} Disc Selections`,
-          );
-        }
-        if (options.limit !== null && (
           !Number.isSafeInteger(options.limit) || options.limit < 1 ||
           options.limit > ACTIVE_ENCODE_JOB_RESULT_LIMIT
-        )) {
+        ) {
           throw new DomainInvariantError(
             `Active Encode Job lookup limit must be a safe integer between 1 and ${ACTIVE_ENCODE_JOB_RESULT_LIMIT}`,
           );
         }
-        if (discSelectionIds.length === 0) return [];
-        const query = database.select().from(encodeJobs)
-          .where(and(
-            inArray(encodeJobs.discSelectionId, discSelectionIds),
-            inArray(encodeJobs.status, [
-              "queued",
-              "running",
-              "cancellation_requested",
-            ]),
-          ))
-          .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id));
-        if (options.limit === null) return query.all();
-        const jobs = query.limit(options.limit + 1).all();
+        const jobs = listActiveEncodeJobsForDiscSelections(
+          options.discSelectionIds,
+          ["queued", "running", "cancellation_requested"],
+          options.limit + 1,
+        );
         if (jobs.length > options.limit) {
           throw new DomainInvariantError(
             `Active Encode Job lookup exceeds the ${options.limit}-job limit`,
           );
         }
         return jobs;
+      },
+      listDvdTitleDamageAcceptanceWithdrawalWork(options) {
+        return listActiveEncodeJobsForDiscSelections(
+          options.discSelectionIds,
+          ["queued", "running"],
+        );
       },
       listActiveForOriginalDiscArchives(options) {
         const originalDiscArchiveIds = [
