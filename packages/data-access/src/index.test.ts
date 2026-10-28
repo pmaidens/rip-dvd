@@ -936,6 +936,20 @@ function titleIdentityObservation(
   };
 }
 
+function unavailableTitleDamageTimingEvidence() {
+  return {
+    policyVersion: "dvd-title-damage-timing-v1",
+    occurrences: [{
+      playbackOccurrence: 1,
+      spans: [],
+      unknownReasons: [{
+        code: "TIMING_UNAVAILABLE",
+        message: "Synthetic playback timing is unavailable.",
+      }],
+    }],
+  } as const;
+}
+
 function completeDiscInspection(
   access: ReturnType<typeof openTestDatabase>,
   input: {
@@ -17096,6 +17110,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         policyVersion: "synthetic-title-map-v1",
         unknownReasons: [],
       },
+      timingEvidence: unavailableTitleDamageTimingEvidence(),
     }];
     const catalogMappingProjectionId =
       dvdTitleIdentityCatalogMappingProjectionDigest(
@@ -17127,7 +17142,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           chapterEnd: currentItem.observation.chapterEnd,
         },
         ...titleMappings[0]!,
-        timingEvidence: null,
       }],
     });
     const sqlite = new DatabaseSync(fixture.databasePath);
@@ -17425,6 +17439,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
             policyVersion: "synthetic-title-map-v1",
             unknownReasons: [],
           },
+          timingEvidence: unavailableTitleDamageTimingEvidence(),
         }));
       const catalogMappingProjectionId =
         dvdTitleIdentityCatalogMappingProjectionDigest(
@@ -17456,7 +17471,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
             chapterEnd: item.observation.chapterEnd,
           },
           ...titleMappings[index]!,
-          timingEvidence: null,
         })),
       });
       const sqlite = new DatabaseSync(first.databasePath);
