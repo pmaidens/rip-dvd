@@ -10036,10 +10036,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 18",
+          "select name from __drizzle_migrations order by id desc limit 19",
         )
         .all(),
       ).toEqual([
+        { name: "20261029042748_elite_gargoyle" },
         { name: "20261028235557_slippery_paladin" },
         { name: "20261028231111_encode-output-validations" },
         { name: "20261028221623_encode-claim-snapshots" },
