@@ -7,30 +7,60 @@ status remains separate from media availability.
 
 Current complete samples remain protected during active Catalog Review and
 while inspection of a related finished output remains unproved. Choosing
-archive-only releases this protection. An old output's current Disc Selection
-alone does not prove that it represents the sample. When immutable output
-correspondence or a durable operator inspection receipt is unavailable,
-inspection reports `FINISHED_OUTPUT_INSPECTION_NOT_RECORDED` and protects the
-current sample.
+archive-only releases this protection. An output's current Disc Selection or
+Encode Job alone never proves that it represents the sample. Missing receipts,
+source evidence, validation evidence or correspondence keep current media
+protected with an explicit reason.
 
 Preview inspection reads exact-generation acknowledgement receipts through the
-shared Encode Output inspector. `finishedOutputInspection` reports matching
-receipts separately from whether the output represents this sample. Receipt
-history and a matching job identity do not establish acknowledgement of the
-current generation. The captured source snapshot stays unchanged, including a
-historical `not_recorded` value.
+shared Encode Output identity inspector. `finishedOutputInspection` reports
+matching receipts separately from whether the output represents this sample.
+Receipt history and matching job identity cannot acknowledge another generation.
+The receipt's captured source snapshot stays unchanged, including historical
+`not_recorded` evidence. Ordinary inspection never creates a receipt.
+
+A proof requires a currently owned, regular, nonempty normal output matching its
+recorded filesystem identity and the receipt's exact file mutation revision,
+generation, validation identity and immutable provenance. The receipt must have
+captured passing validation with its immutable validation record and checks.
+Failed outputs and receipts with unknown validation cannot release retention.
+A successful later probe cannot upgrade the receipt's original unknowns.
+
+The source comparison uses only the preview's saved request and the receipt's
+original source snapshot. It requires the same archive identity/fingerprint,
+manifest identity/revision/digest, title identity/observation/content digest,
+navigation, playback path, angle, source title metadata, and profile
+identity/key/version/settings. The manifest digest binds the committed source
+revision; current catalog links, filenames and mutable jobs supply no proof.
+
+The current proved equivalence has two bounded differences:
+
+- A normal full-title Encode includes a preview's time window when both name the
+  same complete chapter path starting at chapter one, and the requested window
+  ends within both stored title duration and recorded observed output duration.
+  A chapter subset remains unproved because the producer records no chapter-time
+  map. This proves source selection containment, not a damage seek or playback.
+- The normal output's versioned `encode-claim-output-v1` policy includes all
+  source audio/subtitles without subtitle burn. A preview may choose a subset
+  from those same recorded streams. Selected audio must also occur in the
+  validation's output source IDs, and validation must have checked the complete
+  expected subtitle inventory. Additional output tracks do not replace a
+  selected preview stream. The recorded format, preset, navigation mode and
+  concrete title/angle/chapter arguments must match the intended settings.
+
+A matching proof satisfies only the finished-output condition. Active Catalog
+Review still protects a current sample. The acknowledgement makes no watchability,
+damage-interval inspection or Keep claim. Replacement bytes, changed validation,
+unsafe/missing media, or mismatched source/settings cannot inherit authority.
 
 Candidate discovery uses bounded current catalog links and reports truncation.
-Those mutable links are discovery hints and never source proof. Until normal
-outputs provide immutable source equivalence, `retentionSatisfied` remains
-false, including when an acknowledgement matches. Read-only inspection does
-not create another receipt. Ordinary cleanup remains protected by the same
-unproved relationship.
-
-This output lookup runs during explicit preview inspection. Wait, cancellation,
-deletion and media transfer keep their request-status response and leave
-`finishedOutputInspection` null, so unrelated output probes do not extend a
-wait deadline or delay canonical media transfer.
+Those mutable links are hints only; the proof remains immutable. Discovery that
+misses an older candidate conservatively preserves media. Identity checks run
+without media probes during inspection, cleanup and media-status projection.
+Wait, cancellation, deletion and media transfer leave `finishedOutputInspection`
+null in their status response. The retention decision still rechecks applicable
+receipts synchronously, so unrelated probes cannot extend a wait deadline or
+block the cleanup transaction.
 
 Unprotected media expires after 30 idle days. Outdated and partial media can
 expire during active review. Successful canonical media access resets idle

@@ -3,6 +3,8 @@ import { lstatSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { canonicalPublicationJson, type DamagePreviewRecord, type ConsistentReadAccess, type OriginalDiscArchiveId } from "@rip-dvd/data-access";
 
+import type { DamagePreviewFinishedOutputInspection } from "./damage-preview-output-inspection.js";
+
 export const DAMAGE_PREVIEW_IDLE_MS = 30 * 24 * 60 * 60 * 1_000;
 export function previewGenerationActive(record: DamagePreviewRecord) {
   return ["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(record.status);
@@ -49,21 +51,20 @@ export function damagePreviewMediaState(record: DamagePreviewRecord, targets = p
   return { state, token, lastAccessedAt: record.mediaLastAccessedAt ?? record.updatedAt, removal, history: record.mediaRemovalHistory ?? [], files };
 }
 
-export function damagePreviewRetention(access: ConsistentReadAccess, record: DamagePreviewRecord, outdated: boolean) {
+export function damagePreviewRetention(access: ConsistentReadAccess, record: DamagePreviewRecord, outdated: boolean, outputInspection: DamagePreviewFinishedOutputInspection | null) {
   const archive = access.catalog.listOriginalDiscArchives({ ids: [record.originalDiscArchiveId as OriginalDiscArchiveId] })[0];
   const archiveOnly = archive?.catalogReviewOutcome === "archive_only";
   const activeCatalogReview = archive !== undefined && archive.catalogReviewedAt === null && !archiveOnly;
   const currentSample = !outdated && record.status === "complete";
-  // A historical output's mutable selection is not proof that it represents
-  // this preview. Until immutable output correspondence is supplied, retain it.
-  const awaitingFinishedOutputInspection = currentSample && !archiveOnly;
+  const awaitingFinishedOutputInspection = currentSample && !archiveOnly && outputInspection?.retentionSatisfied !== true;
   const protectedForReview = currentSample && (activeCatalogReview || awaitingFinishedOutputInspection);
   const idleSince = record.mediaLastAccessedAt ?? record.updatedAt;
+  const outputReasons = outputInspection?.outputs.flatMap((output) => output.reasonCode === null ? [] : [output.reasonCode]) ?? [];
   return {
     protectedForReview, activeCatalogReview, awaitingFinishedOutputInspection,
     reasonCodes: protectedForReview ? [
       ...(activeCatalogReview ? ["CATALOG_REVIEW_ACTIVE"] : []),
-      ...(awaitingFinishedOutputInspection ? ["FINISHED_OUTPUT_INSPECTION_NOT_RECORDED"] : []),
+      ...(awaitingFinishedOutputInspection ? [...new Set(outputReasons.length > 0 ? outputReasons : ["FINISHED_OUTPUT_INSPECTION_NOT_RECORDED"])] : []),
     ] : [],
     idleSince, eligibleAt: protectedForReview ? null : new Date(Date.parse(idleSince) + DAMAGE_PREVIEW_IDLE_MS).toISOString(),
   };

@@ -207,7 +207,7 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
         <p>Media: {preview.media.state}. Deletion preserves the request, selections, generation result, coverage and provenance.</p>
         {preview.media.retention?.protectedForReview ? <p>Current media is protected from routine cleanup while review or finished-output inspection still needs it.</p> : null}
         {preview.media.retention?.awaitingFinishedOutputInspection ? <p>This sample remains protected until inspection of a related finished output is proved.</p> : null}
-        {preview.finishedOutputInspection?.outputs.some((output) => output.acknowledgementStatus === "acknowledged") ? <p>A normal output inspection acknowledgement is recorded. Its source relationship to this sample is unproved, so it does not release retention.</p> : null}
+        {preview.finishedOutputInspection?.outputs.some((output) => output.acknowledgementStatus === "acknowledged") ? <p>{preview.finishedOutputInspection.retentionSatisfied ? "An applicable normal output inspection acknowledgement proves the recorded source relationship. Active Catalog Review still protects current media." : "A normal output inspection acknowledgement is recorded. Its source relationship or validation proof is unavailable, so it does not release retention."}</p> : null}
         {preview.media.removal ? <p>Removal: {preview.media.removal.cause}, {preview.media.removal.state}.</p> : null}
         <button type="button" disabled={busy || !preview.media.deletion.available} onClick={() => void deleteMedia()}>Delete preview media</button>
         {preview.media.deletion.reasons.map((reason) => <p key={reason.code}>{reason.message}</p>)}

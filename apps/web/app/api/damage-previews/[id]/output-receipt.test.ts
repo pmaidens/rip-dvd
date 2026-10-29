@@ -1,13 +1,15 @@
 import { DatabaseSync } from "node:sqlite";
 import { unlinkSync } from "node:fs";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { encodeOutputArtifactIdentity, type EncodeOutputInspection, type DamagePreviewInspection } from "@rip-dvd/application";
 import { createOperatorWorkflowFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
 import { seedDamagePreviewWithNormalOutput } from "../../../../../operator-cli/src/damage-preview.test-support.js";
 import { createDamagePreviewRoute } from "./route";
+import { createDamagePreviewMediaRemovalRoute } from "./media/route";
+import { seedProvedPreviewOutput } from "../../../../../operator-cli/src/damage-preview-source-retention.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
-afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
+afterEach(() => { vi.useRealTimers(); fixtures.splice(0).forEach((fixture) => fixture.dispose()); });
 const probe = async () => ({ durationSeconds: 90, streams: [] });
 
 it("shares matching receipt consumption and stale-generation protection with the public CLI without recording another acknowledgement", async () => {
@@ -37,5 +39,24 @@ it("shares matching receipt consumption and stale-generation protection with the
     expect((await inspectOutput()).operatorInspection.history).toEqual(history);
     unlinkSync(output.outputPath);
     expect((await inspectBoth()).finishedOutputInspection?.outputs[0]).toMatchObject({ acknowledgementStatus: "unavailable", matchingReceipts: [], reasonCode: "FINISHED_OUTPUT_UNAVAILABLE" });
+  } finally { access.close(); }
+});
+
+it("shares exact-source receipt release and keyed idle cleanup between HTTP and CLI", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const { id, inspectPreview, acknowledge } = await seedProvedPreviewOutput(fixture);
+  await acknowledge("synthetic-http-source-proof");
+  const current = await inspectPreview();
+  expect(current).toMatchObject({ outdated: false, finishedOutputInspection: { retentionSatisfied: true }, media: { retention: { protectedForReview: false } } });
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(current.updatedAt) + 31 * 24 * 60 * 60 * 1_000);
+  const access = fixture.openAccess();
+  try {
+    const origin = "http://localhost:3000";
+    const web = await createDamagePreviewRoute(new Request(`${origin}/api/damage-previews/${id}`), id, () => access);
+    expect(await web.json()).toEqual(await inspectPreview());
+    const input = { mutationKey: "synthetic-http-proved-cleanup", mediaToken: current.media.token };
+    const cleanup = await createDamagePreviewMediaRemovalRoute(new Request(`${origin}/api/damage-previews/${id}/media`, { method: "POST", headers: { Origin: origin, Host: "localhost:3000", "Content-Type": "application/json" }, body: JSON.stringify(input) }), id, () => access, () => origin);
+    expect(cleanup.status).toBe(200);
+    expect(await cleanup.json()).toEqual((await fixture.run(["damage-preview", "cleanup", id, "--key", input.mutationKey, "--json", JSON.stringify({ mediaToken: input.mediaToken })])).result);
   } finally { access.close(); }
 });

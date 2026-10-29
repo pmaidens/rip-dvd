@@ -87,8 +87,8 @@ export async function seedDamagePreview(
   };
 }
 
-export async function seedRetainedDamagePreview(fixture: ReturnType<typeof createOperatorWorkflowFixture>) {
-  const seeded = await seedDamagePreview(fixture);
+export async function seedRetainedDamagePreview(fixture: ReturnType<typeof createOperatorWorkflowFixture>, provided?: Awaited<ReturnType<typeof seedDamagePreview>>) {
+  const seeded = provided ?? await seedDamagePreview(fixture);
   const review = (await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify(seeded.input)])).result as { preflightToken: string };
   const requested = await fixture.run(["damage-preview", "request", seeded.archive.id, "--key", "synthetic-retained-request", "--json", JSON.stringify({ selection: seeded.input, preflightToken: review.preflightToken })]);
   const id = (requested.result as { id: string }).id;

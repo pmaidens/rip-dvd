@@ -1,5 +1,7 @@
-import { RecordNotFoundError, type DataAccess, type OriginalDiscArchiveId } from "@rip-dvd/data-access";
-import { encodeOutputArtifactReferences, inspectEncodeOutput, type EncodeOutputInspectionReceipt, type EncodeOutputMediaProbe } from "./encode-output-inspection.js";
+import { RecordNotFoundError, type DataAccess, type DamagePreviewRecord, type OriginalDiscArchiveId } from "@rip-dvd/data-access";
+import { encodeOutputArtifactReferences, inspectEncodeOutputIdentity, type EncodeOutputInspectionReceipt } from "./encode-output-inspection.js";
+
+import { previewOutputSourceProof, type FinishedOutputProofReason } from "./damage-preview-output-source.js";
 
 const CANDIDATE_LIMIT = 100;
 const OUTPUT_LIMIT = 10;
@@ -8,17 +10,18 @@ interface OutputAcknowledgement {
   generationIdentity: string | null;
   acknowledgementStatus: "acknowledged" | "not_acknowledged" | "unavailable";
   matchingReceipts: EncodeOutputInspectionReceipt[];
-  reasonCode: "FINISHED_OUTPUT_INSPECTION_NOT_RECORDED" | "FINISHED_OUTPUT_SOURCE_NOT_RECORDED" | "FINISHED_OUTPUT_UNAVAILABLE";
+  reasonCode: FinishedOutputProofReason | "FINISHED_OUTPUT_INSPECTION_NOT_RECORDED" | "FINISHED_OUTPUT_UNAVAILABLE" | null;
 }
 export interface DamagePreviewFinishedOutputInspection {
-  state: "unproved";
-  retentionSatisfied: false;
+  state: "proved" | "unproved";
+  retentionSatisfied: boolean;
   discovery: "bounded_current_catalog";
   truncated: boolean;
   outputs: OutputAcknowledgement[];
 }
 
-export async function inspectDamagePreviewOutputAcknowledgements(access: DataAccess, archiveId: string, mediaProbe?: EncodeOutputMediaProbe): Promise<DamagePreviewFinishedOutputInspection | null> {
+export function inspectDamagePreviewOutputAcknowledgements(access: DataAccess, record: DamagePreviewRecord): DamagePreviewFinishedOutputInspection | null {
+  const archiveId = record.originalDiscArchiveId;
   const candidates = access.readConsistentSnapshot((snapshot) => {
     // Mutable catalog links discover candidates only. They never prove that
     // an acknowledged output represents this preview's immutable source.
@@ -41,22 +44,20 @@ export async function inspectDamagePreviewOutputAcknowledgements(access: DataAcc
   const outputs: OutputAcknowledgement[] = [];
   for (const reference of references.slice(0, OUTPUT_LIMIT)) {
     try {
-      const inspected = await inspectEncodeOutput(access, reference.identity, mediaProbe, { receiptLimit: 1 });
+      const inspected = inspectEncodeOutputIdentity(access, reference.identity);
       const { generationIdentity, status, receipts } = inspected.operatorInspection;
       const available = inspected.artifact.file.status === "available" && inspected.artifact.file.identityContinuity === "verified";
+      const proof = receipts.map((receipt) => previewOutputSourceProof(record, receipt, inspected.artifact));
       outputs.push({
         artifactIdentity: inspected.artifact.identity, generationIdentity, acknowledgementStatus: available ? status : "unavailable",
         matchingReceipts: available ? receipts : [],
-        // The current producer records no immutable source snapshot. Never
-        // enrich a receipt from today's catalog, title, streams or profile.
-        reasonCode: !available ? "FINISHED_OUTPUT_UNAVAILABLE" : receipts.length > 0 ? "FINISHED_OUTPUT_SOURCE_NOT_RECORDED" : "FINISHED_OUTPUT_INSPECTION_NOT_RECORDED",
+        reasonCode: !available ? "FINISHED_OUTPUT_UNAVAILABLE" : receipts.length === 0 ? "FINISHED_OUTPUT_INSPECTION_NOT_RECORDED" : proof.includes(null) ? null : proof[0]!,
       });
     } catch (error) {
       if (!(error instanceof RecordNotFoundError)) throw error;
       outputs.push({ artifactIdentity: reference.identity, generationIdentity: null, acknowledgementStatus: "unavailable", matchingReceipts: [], reasonCode: "FINISHED_OUTPUT_UNAVAILABLE" });
     }
   }
-  // Source equivalence and release remain unavailable until their producer
-  // supplies generation-bound proof. A receipt alone never releases retention.
-  return { state: "unproved", retentionSatisfied: false, discovery: "bounded_current_catalog", truncated, outputs };
+  const retentionSatisfied = outputs.some((output) => output.reasonCode === null);
+  return { state: retentionSatisfied ? "proved" : "unproved", retentionSatisfied, discovery: "bounded_current_catalog", truncated, outputs };
 }

@@ -106,7 +106,7 @@ export async function requestDamagePreview(access: DataAccess, archiveId: string
   if (record === null) record = submit(null);
   return presentDamagePreview(record);
 }
-export function describeDamagePreview(access: DataAccess, record: DamagePreviewRecord, mediaTargets?: ReturnType<typeof previewMediaTargets>) {
+export function describeDamagePreview(access: DataAccess, record: DamagePreviewRecord, mediaTargets?: ReturnType<typeof previewMediaTargets>, includeOutputInspection = false) {
   const original = JSON.parse(record.reviewJson) as Review;
   const saved = original.reviewedRequest!.checkpoint!;
   const current = access.readConsistentSnapshot((snapshot) => reviewDamagePreviewEvidence(snapshot, record.originalDiscArchiveId, parseDamagePreviewInput(JSON.parse(record.selectionJson)), {
@@ -118,12 +118,11 @@ export function describeDamagePreview(access: DataAccess, record: DamagePreviewR
     (JSON.parse(candidate.reviewJson) as Review).reviewedRequest?.title?.titleIdentityId === originalTitle).at(-1);
   const superseded = newerIntent !== undefined && previewMediaInputs(JSON.parse(newerIntent.reviewJson) as Review) !== previewMediaInputs(original);
   const outdated = superseded || previewMediaInputs(current) !== previewMediaInputs(original);
-  return presentDamagePreview(record, { outdated, retention: damagePreviewRetention(access, record, outdated), mediaTargets });
+  const finishedOutputInspection = inspectDamagePreviewOutputAcknowledgements(access, record);
+  return { ...presentDamagePreview(record, { outdated, retention: damagePreviewRetention(access, record, outdated, finishedOutputInspection), mediaTargets }), finishedOutputInspection: includeOutputInspection ? finishedOutputInspection : null };
 }
-export async function inspectDamagePreview(access: DataAccess, id: string, _ownership?: ArchiveImageOwnership, mediaProbe?: EncodeOutputMediaProbe) {
-  const record = requiredRecord(access, id);
-  const finishedOutputInspection = await inspectDamagePreviewOutputAcknowledgements(access, record.originalDiscArchiveId, mediaProbe);
-  return { ...describeDamagePreview(access, requiredRecord(access, id)), finishedOutputInspection };
+export async function inspectDamagePreview(access: DataAccess, id: string, _ownership?: ArchiveImageOwnership, _mediaProbe?: EncodeOutputMediaProbe) {
+  return describeDamagePreview(access, requiredRecord(access, id), undefined, true);
 }
 export function cancelDamagePreview(access: DataAccess, id: string, mutationKey: unknown) {
   return access.damagePreviews.cancel(id, parseMutationKey(mutationKey), presentDamagePreview);
