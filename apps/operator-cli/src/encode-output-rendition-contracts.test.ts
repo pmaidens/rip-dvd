@@ -57,3 +57,45 @@ it("leaves Keep, receipts and a coexisting normal output independent from failed
     expect(readFileSync(predecessor.outputPath)).toEqual(normalBytes);
   } finally { access.close(); }
 });
+
+it.each([false, true])("stages media without retaining the database writer lock and rejects a racing authority change, race=%s", async (race) => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { seedCatalogReviewForReadFixture } = await import("./operator-workflow.test-support.js");
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const { predecessor } = seedCatalogReviewForReadFixture(fixture, { validatedOutputContents: "synthetic admission source" });
+  const identity = `encode-output-v1.published.${predecessor.id}`;
+  const review = (await fixture.run(["encode-output", "rendition-availability", identity], undefined, undefined, options)).result as BrowserRenditionAvailability;
+  let writerAvailableDuringStaging = false;
+  const openAccess = () => {
+    const access = fixture.openAccess();
+    const wrapped: import("@rip-dvd/data-access").DataAccess = { ...access, browserRenditions: {
+      ...access.browserRenditions,
+      submit(input, prepare) {
+        return access.browserRenditions.submit(input, () => {
+          const staged = prepare();
+          const writer = new DatabaseSync(fixture.databasePath);
+          try {
+            writer.exec("PRAGMA busy_timeout = 1");
+            writer.exec("BEGIN IMMEDIATE");
+            writer.exec("ROLLBACK");
+            writerAvailableDuringStaging = true;
+            if (race) writer.prepare("UPDATE encode_jobs SET output_validated_at = output_validated_at + 1 WHERE id = ?").run(predecessor.id);
+          } finally { writer.close(); }
+          return staged;
+        });
+      },
+    } };
+    return wrapped;
+  };
+  const args = ["encode-output", "request-rendition", identity, "--key", "synthetic-staged-admission", "--json", JSON.stringify({ reviewToken: review.reviewToken })];
+  const outcome = await fixture.run(args, undefined, undefined, { ...options, openAccess });
+  expect(writerAvailableDuringStaging).toBe(true);
+  if (race) {
+    expect(outcome).toMatchObject({ exitCode: 2, result: { error: { code: "RENDITION_REVIEW_STALE", current: { available: true } } } });
+    expect((await fixture.run(["readiness"])).result).toMatchObject({ activeWork: [] });
+    const fresh = (await fixture.run(["encode-output", "rendition-availability", identity], undefined, undefined, options)).result as BrowserRenditionAvailability;
+    expect((await fixture.run([...args.slice(0, -1), JSON.stringify({ reviewToken: fresh.reviewToken })], undefined, undefined, options)).result).toMatchObject({ status: "queued" });
+  } else {
+    expect(outcome).toMatchObject({ exitCode: 0, result: { status: "queued" } });
+  }
+});

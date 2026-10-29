@@ -3,7 +3,7 @@ import { constants, lstatSync, type Stats } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { browserRenditionConfig } from "@rip-dvd/config";
 import { canonicalPublicationJson, matchesEncodeOutputFilesystemIdentity, RecordNotFoundError, type BrowserRenditionRecord, type DataAccess } from "@rip-dvd/data-access";
-import { assertEncodeOutputEvidenceCurrent, inspectEncodeOutputEvidence, type EncodeOutputMediaProbe } from "./encode-output-inspection.js";
+import { prepareEncodeOutputEvidenceCommit, inspectEncodeOutputEvidence, type EncodeOutputMediaProbe } from "./encode-output-inspection.js";
 import { parseMutationKey } from "./mutation-key.js";
 
 export class InvalidBrowserRenditionInputError extends Error {
@@ -82,10 +82,12 @@ export async function requestEncodeOutputRendition(access: DataAccess, identity:
   if (current.reviewToken !== input.reviewToken) throw new BrowserRenditionRejectedError("RENDITION_REVIEW_STALE", current);
   try {
     return presentBrowserRendition(access.browserRenditions.submit(input, () => {
-      assertEncodeOutputEvidenceCurrent(access, { schemaVersion: 1, authorityRevision: current.current.authorityRevision, artifact: current.source });
-      return { sourceJson: canonicalPublicationJson(current.source), sourceAuthorityRevision: current.current.authorityRevision, conversion: current.conversion };
+      const assertAuthority = prepareEncodeOutputEvidenceCommit(access, { schemaVersion: 1, authorityRevision: current.current.authorityRevision, artifact: current.source });
+      return { assertAuthority, sourceJson: canonicalPublicationJson(current.source), sourceAuthorityRevision: current.current.authorityRevision, conversion: current.conversion };
     }));
   } catch (error) {
+    const committed = access.browserRenditions.replay(input);
+    if (committed) return presentBrowserRendition(committed);
     const fileError = typeof error === "object" && error !== null && "code" in error && ["ENOENT", "EACCES", "ELOOP", "ENOTDIR", "ESTALE"].includes(String(error.code));
     if (error instanceof RecordNotFoundError || fileError || (error instanceof Error && ["OUTPUT_AUTHORITY_CHANGED", "OUTPUT_IDENTITY_CHANGED"].includes(error.message))) {
       let refreshed: BrowserRenditionAvailability | null = null;

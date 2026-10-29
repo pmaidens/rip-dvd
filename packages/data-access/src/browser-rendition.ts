@@ -31,7 +31,7 @@ export interface BrowserRenditionRequest {
 export interface BrowserRenditionAccess {
   find(id: string): BrowserRenditionRecord | null;
   replay(input: BrowserRenditionRequest): BrowserRenditionRecord | null;
-  submit(input: BrowserRenditionRequest, prepare: () => Pick<BrowserRenditionRecord, "sourceJson" | "sourceAuthorityRevision" | "conversion">): BrowserRenditionRecord;
+  submit(input: BrowserRenditionRequest, prepare: () => Pick<BrowserRenditionRecord, "sourceJson" | "sourceAuthorityRevision" | "conversion"> & { assertAuthority(): void }): BrowserRenditionRecord;
   active(): BrowserRenditionRecord[];
   claim(): BrowserRenditionRecord | null;
   update(record: BrowserRenditionRecord): void;

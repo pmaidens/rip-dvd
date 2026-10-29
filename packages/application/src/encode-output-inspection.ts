@@ -1516,8 +1516,8 @@ export type EncodeOutputInspection = Awaited<
   ReturnType<typeof inspectEncodeOutput>
 >;
 
-/** Recheck reviewed output authority and the complete file in the admission transaction. */
-export function assertEncodeOutputEvidenceCurrent(access: DataAccess, evidence: Awaited<ReturnType<typeof inspectEncodeOutputEvidence>>) {
+/** Stage media checks before the writer lock; return a database-only authority fence. */
+export function prepareEncodeOutputEvidenceCommit(access: DataAccess, evidence: Awaited<ReturnType<typeof inspectEncodeOutputEvidence>>) {
   const base = resolveEncodeOutputAuthority(access, parseEncodeOutputArtifactIdentity(evidence.artifact.identity));
   if (base.authorityUnavailableReason !== null || evidenceDigest(base.authorityKey) !== evidence.authorityRevision) {
     throw new Error("OUTPUT_AUTHORITY_CHANGED");
@@ -1525,4 +1525,10 @@ export function assertEncodeOutputEvidenceCurrent(access: DataAccess, evidence: 
   const metadata = lstatSync(base.outputPath);
   if (fileIsRegularAndNonempty(metadata) !== null || exportSourceRejection(base, metadata) !== null ||
       fileMutationRevision(metadata) !== evidence.artifact.file.mutationRevision) throw new Error("OUTPUT_IDENTITY_CHANGED");
+  return () => {
+    const current = resolveEncodeOutputAuthority(access, parseEncodeOutputArtifactIdentity(evidence.artifact.identity));
+    if (current.authorityUnavailableReason !== null || evidenceDigest(current.authorityKey) !== evidence.authorityRevision) {
+      throw new Error("OUTPUT_AUTHORITY_CHANGED");
+    }
+  };
 }

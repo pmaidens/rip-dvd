@@ -28,10 +28,15 @@ export function createBrowserRenditionAccess(sqlite: DatabaseSync, now: () => Da
     find: (id) => decode(sqlite.prepare("SELECT record FROM browser_renditions WHERE id = ?").get(id)),
     replay,
     submit(input, prepare) {
+      const replayed = replay(input);
+      if (replayed) return replayed;
+      // Media mounts can stall. Stage filesystem checks before SQLite's writer
+      // lock; only authenticate the recorded authority inside the transaction.
+      const { assertAuthority, ...prepared } = prepare();
       return transaction(() => {
         const previous = replay(input);
         if (previous) return previous;
-        const prepared = prepare();
+        assertAuthority();
         const timestamp = now();
         const record: BrowserRenditionRecord = {
           ...prepared, id: randomUUID(), sourceIdentity: input.sourceIdentity, reviewToken: input.reviewToken,
