@@ -787,7 +787,13 @@ returns one JSON document with the artifact identity and type, byte size,
 destination, source identity, and provenance. Media bytes never go to stdout.
 Missing, substituted, changed, or otherwise unsafe source files return a
 nonzero status and a stable JSON reason with the current observed identity.
-Export never substitutes a browser rendition or Damage Preview.
+Export never substitutes a browser rendition or Damage Preview. The installed
+wrapper transports the service export with `docker cp`, so a remote Docker daemon
+does not need a bind mount of the caller's destination directory. Publication at
+the caller uses a mode-0600 file and an atomic no-clobber link. Existing files,
+symlinks and directories are rejected; a detected parent-directory replacement
+fails without deleting caller data. JSON names the resolved caller destination,
+not the private service staging path.
 
 An initial `encode-enqueue` is deduplicated by Disc Selection and Encoding
 Profile, including after completion. Use `encode-requeue` for a terminal job.

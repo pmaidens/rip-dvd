@@ -16,6 +16,10 @@ trap cleanup EXIT HUP INT TERM
 
 cd "$repository_root"
 export COMPOSE_PROJECT_NAME="$project_name"
+# Fixture writes must never inherit an operator's bind mounts or local overlays.
+export COMPOSE_FILE="$repository_root/compose.yaml"
+export RIP_DVD_MEDIA_LIBRARY_HOST_PATH=rip-dvd-media
+export RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH=rip-dvd-originals
 ./install.sh --bin-dir "$temporary_directory/bin" >/dev/null
 installed_cli="$temporary_directory/bin/rip-dvd"
 
@@ -107,6 +111,16 @@ keep_preflight_status=$?
 set -e
 [ "$keep_preflight_status" -eq 2 ]
 printf '%s\n' "$keep_preflight" | assert_json_fields 'error.code=ENCODE_OUTPUT_NOT_FOUND'
+set +e
+keep_output="$(invoke encode-output keep \
+  encode-output-v1.failed.00000000-0000-4000-8000-000000000000 \
+  --key synthetic-smoke-keep \
+  --json '{"validationIdentity":"00000000-0000-4000-8000-000000000000","previewToken":"encode-output-keep-preview-v1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","acknowledged":true}' \
+  2>"$temporary_directory/keep.stderr")"
+keep_status=$?
+set -e
+[ "$keep_status" -eq 2 ]
+printf '%s\n' "$keep_output" | assert_json_fields 'error.code=OUTPUT_AUTHORITY_CHANGED' 'error.current=null'
 set +e
 preview_output="$(invoke damage-preview availability synthetic-missing-archive \
   2>"$temporary_directory/preview.stderr")"
@@ -329,3 +343,139 @@ invalid_source_status=$?
 set -e
 [ "$invalid_source_status" -eq 2 ]
 printf '%s\n' "$invalid_source_decision" | assert_json_fields 'error.code=INVALID_ARGUMENTS'
+
+# The writer role authors one synthetic current failure in this project's own
+# media volume. The CLI keeps its production read-only media mount throughout.
+docker compose --project-name "$project_name" --profile maintenance build encode-worker
+encode_fixture="$(docker compose --project-name "$project_name" --profile maintenance run --rm --no-deps --no-TTY \
+  --user 0:0 --env RIP_DVD_SYNTHETIC_KEEP_FIXTURE=1 --entrypoint node encode-worker --input-type=module <<'JAVASCRIPT'
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { chownSync, closeSync, constants, existsSync, fsyncSync, lstatSync, openSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { createLegacySidecarDataAccess } from './apps/encode-worker/node_modules/@rip-dvd/data-access/dist/legacy-sidecars.js';
+import { encodeOutputFilesystemIdentity } from './apps/encode-worker/node_modules/@rip-dvd/data-access/dist/index.js';
+import { loadConfig } from './apps/encode-worker/node_modules/@rip-dvd/config/dist/index.js';
+assert.equal(process.env.RIP_DVD_SYNTHETIC_KEEP_FIXTURE, '1');
+const config = loadConfig();
+assert.equal(config.mediaLibraryPath, '/media/movies');
+// A CLI-first empty named volume can begin root-owned. Prepare only this
+// isolated volume root, then author all fixture evidence as the runtime user.
+chownSync(config.mediaLibraryPath, 1000, 1000);
+process.setgid(1000); process.setuid(1000);
+assert.equal(process.getuid(), 1000);
+const access = createLegacySidecarDataAccess(config);
+try {
+  const drive = access.catalog.upsertOpticalDrive({ devicePath: '/dev/synthetic-installed-keep', isPresent: true });
+  const fingerprint = 'sha256:' + 'c'.repeat(64);
+  const disc = access.catalog.registerDetectedDisc({ opticalDriveId: drive.id, discKind: 'dvd', fingerprint,
+    volumeLabel: 'SYNTHETIC_INSTALLED_KEEP', scanData: { schemaVersion: 2, contentId: fingerprint,
+      titles: [{ number: 1, durationSeconds: 500, chapters: 1, audioStreams: [], subtitles: [] }] } });
+  access.catalog.updateDetectedDiscStatus(disc.id, 'scanned');
+  access.catalog.updateDetectedDiscStatus(disc.id, 'approved');
+  const archive = access.catalog.createOriginalDiscArchive({ detectedDiscId: disc.id, discKind: 'dvd', archiveFormat: 'iso',
+    archivePath: '/media/originals/synthetic-installed-keep.iso', fingerprint });
+  const item = access.catalog.createMediaItem({ kind: 'movie', title: 'Synthetic installed Keep fixture' });
+  const selection = access.catalog.createDiscSelection({ originalDiscArchiveId: archive.id, mediaItemId: item.id,
+    sourceIdentity: { kind: 'dvd_title', titleNumber: 1 } });
+  access.catalog.completeCatalogReview(archive.id,
+    access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0].updatedAt, 'reviewed_with_selections');
+  const profile = access.encodingProfiles.create({ key: 'synthetic-installed-keep', displayName: 'Synthetic installed Keep',
+    mediaDomain: 'dvd_video', settings: { preset: 'Fast 480p30' } });
+  const normalPath = join(config.mediaLibraryPath, 'synthetic-installed-normal.mkv');
+  const job = access.encodeJobs.enqueue({ discSelectionId: selection.id, encodingProfileId: profile.id, outputPath: normalPath });
+  const claim = access.encodeJobs.claimNext('synthetic-installed-keep-worker');
+  assert.equal(claim?.id, job.id);
+  const path = join(config.mediaLibraryPath, `synthetic-installed-failed-${claim.claimToken}.mkv`);
+  const bytes = Buffer.from('synthetic complete failed encode');
+  writeFileSync(path, bytes, { flag: 'wx', mode: 0o600 });
+  for (const target of [path, config.mediaLibraryPath]) {
+    const descriptor = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+  }
+  const metadata = lstatSync(path);
+  access.encodeJobs.retainValidationFailedOutput(claim, { outputPath: path, filesystemIdentity: encodeOutputFilesystemIdentity(metadata),
+    changeTimeMs: metadata.ctimeMs, failure: { schemaVersion: 1, reasonCode: 'output_validation_failed', phase: 'validation',
+      retryability: 'after_action', diagnostic: 'Synthetic complete output failed duration validation.',
+      evidence: { kind: 'duration', expectedSeconds: 500, observedSeconds: 10 } } }, { preserveReplacementAuthority: false });
+  const failed = access.encodeJobs.listValidationFailedOutputs(job.id, { limit: 1 })[0];
+  assert.equal(access.encodeJobs.find(job.id).status, 'failed'); assert.equal(existsSync(normalPath), false);
+  process.stdout.write(JSON.stringify({ identity: `encode-output-v1.failed.${failed.id}`, validationIdentity: failed.id,
+    jobId: job.id, sourceIdentity: failed.filesystemIdentity, byteSize: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }));
+} finally { access.close(); }
+JAVASCRIPT
+)"
+encode_mount_proof="$(docker compose --project-name "$project_name" --profile maintenance run --rm --no-deps --no-TTY \
+  --env RIP_DVD_SYNTHETIC_KEEP_FIXTURE=1 --entrypoint node operator-cli --input-type=module <<'JAVASCRIPT'
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { loadConfig } from './apps/operator-cli/node_modules/@rip-dvd/config/dist/index.js';
+assert.equal(process.env.RIP_DVD_SYNTHETIC_KEEP_FIXTURE, '1'); assert.equal(process.getuid(), 1000);
+const config = loadConfig(), suffix = randomUUID();
+const mediaProbe = join(config.mediaLibraryPath, `.synthetic-keep-ro-${suffix}`);
+let code;
+try { writeFileSync(mediaProbe, 'synthetic', { flag: 'wx', mode: 0o600 }); unlinkSync(mediaProbe); }
+catch (error) { code = error.code; }
+assert.equal(code, 'EROFS');
+const dataProbe = join(dirname(config.databasePath), `.synthetic-keep-rw-${suffix}`);
+writeFileSync(dataProbe, 'synthetic', { flag: 'wx', mode: 0o600 }); unlinkSync(dataProbe);
+process.stdout.write(JSON.stringify({ readOnlyMedia: true, writableData: true, effectiveUid: process.getuid() }));
+JAVASCRIPT
+)"
+printf '%s\n' "$encode_mount_proof" | assert_json_fields 'readOnlyMedia=true' 'writableData=true' 'effectiveUid=1000'
+encode_identity="$(printf '%s' "$encode_fixture" | node --input-type=module -e 'let t="";for await(const c of process.stdin)t+=c;process.stdout.write(JSON.parse(t).identity)')"
+encode_inspected="$(invoke encode-output inspect "$encode_identity")"
+printf '%s\n' "$encode_inspected" | assert_json_fields \
+  "artifact.identity=$encode_identity" 'artifact.state=validation_failed' 'artifact.encodeJob.status=failed' 'operatorInspection.status=not_acknowledged'
+encode_preview="$(invoke encode-output keep-preflight "$encode_identity")"
+encode_review="$(node --input-type=module - "$encode_fixture" "$encode_preview" <<'JAVASCRIPT'
+import assert from 'node:assert/strict';
+const expected = JSON.parse(process.argv[2]), preview = JSON.parse(process.argv[3]);
+assert.equal(preview.eligible, true); assert.deepEqual(preview.blockers, []);
+assert.equal(preview.current.artifactIdentity, expected.identity);
+assert.equal(preview.current.validationIdentity, expected.validationIdentity);
+assert.equal(preview.current.fileIdentity, expected.sourceIdentity);
+assert.equal(preview.completeWrite.sha256, expected.sha256);
+assert.equal(preview.normalDestination.status, 'absent'); assert.equal(preview.normalDestination.normalOutput, null);
+process.stdout.write(JSON.stringify({ validationIdentity: expected.validationIdentity, previewToken: preview.previewToken, acknowledged: true }));
+JAVASCRIPT
+)"
+encode_kept="$(invoke encode-output keep "$encode_identity" --key synthetic-installed-keep --json "$encode_review")"
+encode_replay="$(invoke encode-output keep "$encode_identity" --key synthetic-installed-keep --json "$encode_review")"
+node --input-type=module - "$encode_kept" "$encode_replay" "$encode_fixture" <<'JAVASCRIPT'
+import assert from 'node:assert/strict';
+const kept = JSON.parse(process.argv[2]), replay = JSON.parse(process.argv[3]), expected = JSON.parse(process.argv[4]);
+assert.deepEqual(replay, kept); assert.equal(kept.kept.artifactIdentity, expected.identity);
+assert.equal(kept.kept.validationIdentity, expected.validationIdentity);
+JAVASCRIPT
+encode_stale_review="$(printf '%s' "$encode_review" | node --input-type=module -e 'let t="";for await(const c of process.stdin)t+=c;process.stdout.write(JSON.stringify({...JSON.parse(t),validationIdentity:"00000000-0000-4000-8000-000000000000"}))')"
+set +e
+encode_stale="$(invoke encode-output keep "$encode_identity" --key synthetic-installed-stale --json "$encode_stale_review")"
+encode_stale_status=$?
+set -e
+[ "$encode_stale_status" -eq 2 ]
+printf '%s\n' "$encode_stale" | assert_json_fields 'error.code=OUTPUT_VALIDATION_CHANGED'
+encode_export="$(invoke encode-output export "$encode_identity" --destination "$temporary_directory/caller-encode.mkv")"
+node --input-type=module - "$temporary_directory/caller-encode.mkv" "$encode_fixture" "$encode_export" <<'JAVASCRIPT'
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
+const expected = JSON.parse(process.argv[3]), exported = JSON.parse(process.argv[4]);
+const bytes = readFileSync(process.argv[2]);
+assert.equal(exported.artifact.identity, expected.identity); assert.equal(exported.artifact.type, 'canonical_encode_output');
+assert.equal(exported.artifact.state, 'validation_failed'); assert.equal(exported.destination, process.argv[2]);
+assert.equal(exported.provenance.encodeJobId, expected.jobId); assert.equal(exported.byteSize, expected.byteSize);
+assert.equal(exported.sourceIdentity, expected.sourceIdentity);
+assert.equal(bytes.length, expected.byteSize); assert.equal(createHash('sha256').update(bytes).digest('hex'), expected.sha256);
+assert.equal(statSync(process.argv[2]).mode & 0o777, 0o600);
+JAVASCRIPT
+encode_after="$(invoke encode-output inspect "$encode_identity")"
+node --input-type=module - "$encode_after" "$encode_kept" <<'JAVASCRIPT'
+import assert from 'node:assert/strict';
+const inspected = JSON.parse(process.argv[2]), kept = JSON.parse(process.argv[3]);
+assert.equal(inspected.kept.id, kept.kept.id); assert.equal(inspected.artifact.encodeJob.status, 'failed');
+assert.equal(inspected.operatorInspection.status, 'not_acknowledged'); assert.deepEqual(inspected.operatorInspection.receipts, []);
+JAVASCRIPT
+printf 'Installed CLI Keep, replay, stale rejection and canonical caller export passed.\n'

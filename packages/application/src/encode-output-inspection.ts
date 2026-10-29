@@ -1,3 +1,4 @@
+import { presentKeptFailedEncodeOutput } from "./encode-output-keep-record.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, fstatSync, lstatSync, type Stats } from "node:fs";
@@ -263,6 +264,13 @@ function parseEncodeOutputArtifactIdentity(
       kind: "retained",
       retainedOutputId: match[2] as RetainedEncodeOutputId,
     };
+}
+
+export function canonicalEncodeOutputArtifactIdentity(input: unknown): string {
+  const parsed = parseEncodeOutputArtifactIdentity(typeof input === "string" ? input.toLowerCase() : input);
+  return parsed.kind === "published" ? encodeOutputArtifactIdentity(parsed.jobId)
+    : parsed.kind === "retained" ? retainedEncodeOutputArtifactIdentity(parsed.retainedOutputId)
+    : validationFailedEncodeOutputArtifactIdentity(parsed.failedOutputId);
 }
 
 export function validationFailedEncodeOutputArtifactIdentity(id: ValidationFailedEncodeOutputId): string {
@@ -998,6 +1006,7 @@ export async function inspectEncodeOutput(
     ? [latest] : [];
   return {
     ...inspected,
+    kept: presentKeptFailedEncodeOutput(access.encodeOutputKeeps.latest(artifact.identity)),
     operatorInspection: {
       generationIdentity,
       reviewToken: evidenceDigest(inspected),

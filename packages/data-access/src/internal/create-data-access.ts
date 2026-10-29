@@ -3,6 +3,7 @@ import type { EncodeJobClaimOptions } from "../encode-claim-snapshot.js";
 import { ArchiveRecoveryPreviewPauseError } from "../archive-recovery-work.js";
 import { createDamagePreviewAccess, damagePreviewHoldsRecovery } from "./damage-preview-store.js";
 import { createEncodeOutputInspectionReceiptAccess } from "./encode-output-inspection-receipt-store.js";
+import { createEncodeOutputKeepAccess } from "./encode-output-keep-store.js";
 import {
   canonicalPublicationJson,
   DvdCheckpointReadFault,
@@ -11810,6 +11811,7 @@ export function createDataAccessInternal(
   const access: LegacySidecarDataAccess = {
     damagePreviews: createDamagePreviewAccess(sqlite, now),
     encodeOutputInspectionReceipts: createEncodeOutputInspectionReceiptAccess(sqlite, now),
+    encodeOutputKeeps: createEncodeOutputKeepAccess(sqlite, now),
     async withDvdCheckpoint(id, ownership, task, commit) {
       const read = await withDvdCheckpointRead(id, ownership, readCommittedDvdCheckpoint, task, (checkpoint, prepared) => commit ? commit(checkpoint, prepared) : prepared);
       return read?.result ?? null;

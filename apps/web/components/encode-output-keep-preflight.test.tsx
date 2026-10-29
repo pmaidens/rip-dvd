@@ -48,7 +48,8 @@ it("loads the exact failed-output evidence on request and compares a refreshed p
     expect(container.textContent).toContain("a".repeat(64));
     expect(container.textContent).toContain("Synthetic media probe unavailable");
     expect(container.textContent).toContain("I acknowledge the exact failed output and its failure evidence.");
-    expect(container.querySelectorAll("input")).toHaveLength(0);
+    expect(container.querySelectorAll("input")).toHaveLength(1);
+    expect(container.querySelectorAll("button")[1]!.disabled).toBe(true);
     const changed = preview();
     fetcher.mockResolvedValueOnce(Response.json({ ...changed, eligible: false, previewToken: null,
       blockers: [{ code: "OUTPUT_IDENTITY_CHANGED", message: "Synthetic reviewed file changed." }, { code: "VALIDATION_STALE", message: "Synthetic validation changed." }],
@@ -78,5 +79,48 @@ it("clears an earlier preview when refreshing current evidence fails", async () 
     expect(container.textContent).not.toContain("synthetic-failed-validation");
     expect(container.textContent).not.toContain(preview().previewToken);
     expect(container.querySelector("button")?.textContent).toBe("Preview Keep");
+  } finally { await act(async () => { root.unmount(); }); }
+});
+
+it("requires acknowledgement, retries Keep with identical canonical input, then shows the persisted failed decision", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const fetcher = vi.fn(async () => Response.json(preview())); vi.stubGlobal("fetch", fetcher);
+  const container = document.createElement("div"); document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => { root.render(<EncodeOutputKeepPreflightPanel artifactIdentity="synthetic-failed-artifact" />); });
+    await act(async () => { container.querySelector("button")!.click(); });
+    const button = () => [...container.querySelectorAll("button")].find((item) => item.textContent === "Keep failed output")!;
+    expect(button().disabled).toBe(true);
+    await act(async () => { container.querySelector("input")!.click(); });
+    fetcher.mockRejectedValueOnce(new Error("Synthetic lost response"));
+    await act(async () => { button().click(); });
+    const first = fetcher.mock.calls.at(-1);
+    expect(first).toMatchObject(["/api/encode-outputs/synthetic-failed-artifact/keep", { method: "POST", headers: { "Content-Type": "application/json" } }]);
+    expect(container.textContent).toContain("same mutation key");
+    fetcher.mockResolvedValueOnce(Response.json({ kept: { keptAt: "2020-01-01T00:00:00.000Z" } }));
+    await act(async () => { button().click(); });
+    expect(fetcher.mock.calls.at(-1)).toEqual(first);
+    expect(container.textContent).toContain("Failed output kept separately");
+    expect(container.textContent).toContain("The Encode Job remains failed.");
+    expect(container.querySelector("input")).toBeNull();
+  } finally { await act(async () => { root.unmount(); }); }
+});
+
+it("clears acknowledgement and disables Keep after a stale mutation response", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const fetcher = vi.fn(async () => Response.json(preview())); vi.stubGlobal("fetch", fetcher);
+  const container = document.createElement("div"); document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => { root.render(<EncodeOutputKeepPreflightPanel artifactIdentity="synthetic-failed-artifact" />); });
+    await act(async () => { container.querySelector("button")!.click(); });
+    await act(async () => { container.querySelector("input")!.click(); });
+    fetcher.mockResolvedValueOnce(Response.json({ error: { code: "KEEP_PREFLIGHT_STALE", current: { ...preview(),
+      eligible: false, previewToken: null, blockers: [{ code: "OUTPUT_IDENTITY_CHANGED", message: "Synthetic changed file" }] } } }, { status: 409 }));
+    await act(async () => { container.querySelectorAll("button")[1]!.click(); });
+    expect(container.textContent).toContain("KEEP_PREFLIGHT_STALE");
+    expect(container.textContent).toContain("OUTPUT_IDENTITY_CHANGED");
+    expect(container.querySelector("input")).toBeNull();
   } finally { await act(async () => { root.unmount(); }); }
 });
