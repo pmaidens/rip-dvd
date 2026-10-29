@@ -12,11 +12,14 @@ const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
 const options = { encodeOutputMediaProbe: compatibleOutputProbe, browserRenditionsEnabled: true };
 
-it.each([false, true])("keeps source-proved Damage Preview retention independent of rendition admission and inspection, validationFailed=%s", async (validationFailed) => {
+it.each([false, true])("keeps a current Damage Preview protected through rendition admission and inspection, validationFailed=%s", async (validationFailed) => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
   const seeded = await seedProvedPreviewOutput(fixture, { validationFailed });
   const before = await seeded.inspectPreview();
-  expect(before).toMatchObject({ finishedOutputInspection: { retentionSatisfied: false }, media: { retention: { protectedForReview: true } } });
+  expect(before).toMatchObject({ finishedOutputInspection: null, media: { retention: {
+    protectedForReview: true, activeCatalogReview: false, awaitingFinishedOutputInspection: true,
+    reasonCodes: ["FINISHED_OUTPUT_INSPECTION_NOT_RECORDED"],
+  } } });
   const run = (args: string[]) => fixture.run(["encode-output", ...args], undefined, undefined, options);
   const review = (await run(["rendition-availability", seeded.identity])).result as BrowserRenditionAvailability;
   expect(review.available).toBe(true);
