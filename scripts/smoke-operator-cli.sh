@@ -98,7 +98,7 @@ failed_inspection="$(invoke encode-output inspect \
 failed_inspection_status=$?
 set -e
 [ "$failed_inspection_status" -eq 2 ]
-printf '%s\n' "$failed_inspection" | assert_json_fields 'error.code=NOT_FOUND'
+printf '%s\n' "$failed_inspection" | assert_json_fields 'error.code=ENCODE_OUTPUT_NOT_FOUND'
 set +e
 preview_output="$(invoke damage-preview availability synthetic-missing-archive \
   2>"$temporary_directory/preview.stderr")"
