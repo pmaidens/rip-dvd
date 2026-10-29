@@ -11915,8 +11915,14 @@
       "table": "browser_renditions"
     },
     {
-      "value": "json_valid(\"record\") and json_extract(\"record\", '$.id') = \"id\" and json_extract(\"record\", '$.status') = \"status\" and json_extract(\"record\", '$.sourceIdentity') = \"source_identity\"",
+      "value": "json_valid(\"record\") and json_extract(\"record\", '$.id') is \"id\" and json_extract(\"record\", '$.status') is \"status\" and json_extract(\"record\", '$.sourceIdentity') is \"source_identity\"",
       "name": "browser_renditions_record_check",
+      "entityType": "checks",
+      "table": "browser_renditions"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "browser_renditions_id_not_null",
       "entityType": "checks",
       "table": "browser_renditions"
     }

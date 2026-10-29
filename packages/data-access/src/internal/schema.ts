@@ -2951,7 +2951,8 @@ export const browserRenditions = sqliteTable("browser_renditions", {
   record: text("record").notNull(),
   createdAt: integer("created_at").notNull(),
 }, (table) => [
+  check("browser_renditions_id_not_null", sql`${table.id} is not null`),
   check("browser_renditions_status_check", sql`${table.status} in ('queued', 'generating', 'complete', 'failed', 'interrupted')`),
-  check("browser_renditions_record_check", sql`json_valid(${table.record}) and json_extract(${table.record}, '$.id') = ${table.id} and json_extract(${table.record}, '$.status') = ${table.status} and json_extract(${table.record}, '$.sourceIdentity') = ${table.sourceIdentity}`),
+  check("browser_renditions_record_check", sql`json_valid(${table.record}) and json_extract(${table.record}, '$.id') is ${table.id} and json_extract(${table.record}, '$.status') is ${table.status} and json_extract(${table.record}, '$.sourceIdentity') is ${table.sourceIdentity}`),
   index("browser_renditions_queue_idx").on(table.status, table.createdAt, table.id),
 ]);
