@@ -48,7 +48,9 @@ test(`inspects and explicitly acknowledges a canonical Encode Output, scenario=$
   const variant = fixtureVariant(testInfo.project.name);
   const acknowledgements: unknown[] = [];
   if (validationFailed) await page.route("**/api/dashboard*", async (route) => {
-    const response = await route.fetch();
+    const backendUrl = new URL(route.request().url());
+    backendUrl.hostname = "127.0.0.1";
+    const response = await route.fetch({ url: backendUrl.toString() });
     const body = await response.json();
     body.encodeJobs.items = body.encodeJobs.items.map((job: { encodeOutputArtifacts?: { identity: string; state: string }[] }) => ({
       ...job, encodeOutputArtifacts: job.encodeOutputArtifacts?.map((artifact) => ({
