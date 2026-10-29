@@ -860,7 +860,8 @@ override. Leave it disabled on Docker Desktop, rootless Docker, and unsupported
 storage drivers. Tune CPU shares and process priorities through `.env`; edit a
 reviewed local override if the server needs different block-I/O weights.
 
-The dashboard has no authentication and Compose binds it to `127.0.0.1` by
+The dashboard is unauthenticated except for optional Browser Viewing Rendition
+access. Compose binds it to `127.0.0.1` by
 default. Archive approval requires both the request `Origin` and `Host` to
 match `RIP_DVD_WEB_TRUSTED_ORIGIN`, which defaults to
 `http://localhost:<RIP_DVD_WEB_PORT>`; the request URL does not establish
@@ -1695,3 +1696,58 @@ tests against isolated SQLite files.
 
 Browser push setup, opt-in and JSON CLI administration are described in
 [Browser notifications](docs/notifications.md).
+
+### Encode Output browser playback
+
+Browser Viewing Renditions remain disabled by default. After the required media,
+browser, build and installed-CLI gates pass, an operator can opt in with
+`RIP_DVD_BROWSER_RENDITIONS_ENABLED=true` and configure a private
+`RIP_DVD_BROWSER_RENDITIONS_PASSWORD` for the web service. Use HTTPS when sending
+credentials beyond loopback. In Encoding, choose **Sign in for browser playback**
+and use username `operator` with that password. Creation, status inspection and
+every full, HEAD or byte-range media request require HTTP Basic authentication.
+Mutation requests also retain the trusted Origin/Host and JSON checks.
+
+Choose **Check browser playback**, then **Create browser rendition**. The Encode
+worker records queued, generating, complete, failed or interrupted status. A
+worker interruption never automatically retries generation. Refreshing status or
+returning to the same output in that browser tab resumes inspection by the saved
+request ID. Canonical MKV bytes and normal publication remain unchanged.
+
+The initial conversion copies one actual H.264 video stream with a known 8-bit
+`yuv420p` Baseline, Main or High profile at level 4.2 or below, plus actual AAC-LC
+audio, into a distinct MP4 with fast-start metadata. Silent video is identified as
+having no audio. The command, tool version, copied and omitted stream indexes,
+and original output evidence remain recorded. Soft subtitles, including DVD
+bitmap subtitles, are omitted; no subtitle burn-in or codec conversion is
+available. Unsupported codecs, unknown compatibility and failed probes have
+specific unavailable reasons. Generation temporarily needs a complete verified
+canonical snapshot in addition to the resulting MP4.
+
+The JSON CLI calls the same application operations without the web service:
+
+```sh
+rip-dvd encode-output rendition-availability <artifact-identity>
+rip-dvd encode-output request-rendition <artifact-identity> --key <mutation-key> \
+  --json '{"reviewToken":"<exact-token-from-rendition-availability>"}'
+rip-dvd encode-output inspect-rendition <request-id>
+```
+
+`--file` and `--stdin` also accept the request JSON. An exact mutation-key replay
+returns the original admission, while inspection returns current durable status.
+Changed input conflicts with a used key. A stale review creates no request and
+returns current authority and file identities. Readiness includes active
+rendition work for quiescent deployment checks.
+
+Playback is ordinary viewing of a finished Encode Output even when source
+correspondence is unknown. It claims no damage-targeted seek, watchability,
+validation success or Keep decision. A safely retained validation-failed source
+stays visibly failed, and its job, validation, provenance and existing normal
+output remain unchanged. Rendition work does not acknowledge output inspection
+or release Damage Preview retention.
+
+The focused command/HTTP/worker tests use persisted synthetic outputs. The
+separate `pnpm test:rendition-media` gate requires real `ffmpeg`, `ffprobe` and
+Linux process locks. Browser coverage is authored for stable desktop Chrome and
+mobile WebKit using actual synthetic MP4 media. Mobile WebKit automation is an
+approximation; the release gate also requires current mobile Safari validation.

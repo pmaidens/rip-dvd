@@ -70,6 +70,22 @@ printf '%s\n' "$readiness_missing" | assert_json_fields 'error.code=NOT_FOUND'
 preview_help="$(invoke help damage-preview)"
 printf '%s\n' "$preview_help" | assert_json_fields 'schemaVersion=1'
 
+set +e
+rendition_missing="$(invoke encode-output rendition-availability \
+  encode-output-v1.published.00000000-0000-4000-8000-000000000000 \
+  2>"$temporary_directory/rendition.stderr")"
+rendition_status=$?
+set -e
+[ "$rendition_status" -eq 2 ]
+printf '%s\n' "$rendition_missing" | assert_json_fields 'error.code=NOT_FOUND'
+set +e
+rendition_inspection="$(invoke encode-output inspect-rendition 00000000-0000-4000-8000-000000000000 \
+  2>"$temporary_directory/rendition-inspection.stderr")"
+rendition_inspection_status=$?
+set -e
+[ "$rendition_inspection_status" -eq 2 ]
+printf '%s\n' "$rendition_inspection" | assert_json_fields 'error.code=NOT_FOUND'
+
 receipt_help="$(invoke help encode-output)"
 printf '%s\n' "$receipt_help" | assert_json_fields 'schemaVersion=1'
 set +e

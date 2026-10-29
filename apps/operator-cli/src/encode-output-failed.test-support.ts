@@ -3,9 +3,9 @@ import { join } from "node:path";
 import { encodeOutputFilesystemIdentity, type DataAccess, type RunningEncodeJob } from "@rip-dvd/data-access";
 
 /** Supply the already-completed worker write at the real persistence boundary. */
-export function retainSyntheticFailedOutput(access: DataAccess, claim: RunningEncodeJob, mediaLibraryPath: string) {
+export function retainSyntheticFailedOutput(access: DataAccess, claim: RunningEncodeJob, mediaLibraryPath: string, contents: string | Uint8Array = "synthetic complete failed encode") {
   const path = join(mediaLibraryPath, `synthetic-validation-failed-${claim.claimToken}.mkv`);
-  writeFileSync(path, "synthetic complete failed encode");
+  writeFileSync(path, contents);
   const metadata = lstatSync(path);
   access.encodeJobs.retainValidationFailedOutput(claim, {
     outputPath: path, changeTimeMs: metadata.ctimeMs, filesystemIdentity: encodeOutputFilesystemIdentity(metadata),

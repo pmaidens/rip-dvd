@@ -27,15 +27,14 @@ import type {
 
 import { runCommand } from "./command.js";
 
-export function createOperatorWorkflowFixture() {
-  const directory = mkdtempSync(join(tmpdir(), "rip-dvd-operator-cli-"));
+export function createOperatorWorkflowFixture(directory = mkdtempSync(join(tmpdir(), "rip-dvd-operator-cli-"))) {
   const databasePath = join(directory, "catalog.sqlite");
   const mediaLibraryPath = join(directory, "movies");
   const originalsLibraryPath = join(directory, "originals");
   const operatorHostPath = join(directory, "operator-host");
-  mkdirSync(mediaLibraryPath);
-  mkdirSync(originalsLibraryPath);
-  mkdirSync(operatorHostPath);
+  mkdirSync(mediaLibraryPath, { recursive: true });
+  mkdirSync(originalsLibraryPath, { recursive: true });
+  mkdirSync(operatorHostPath, { recursive: true });
 
   const openAccess = () => createDataAccess({
     databasePath,
@@ -55,6 +54,7 @@ export function createOperatorWorkflowFixture() {
       stdin?: string,
       options: {
         encodeOutputMediaProbe?: EncodeOutputMediaProbe;
+        browserRenditionsEnabled?: boolean;
         openAccess?: () => ReturnType<typeof openAccess>;
       } = {},
     ) {
@@ -376,7 +376,7 @@ export function seedCatalogReviewForReadFixture(
   current: ReturnType<typeof createOperatorWorkflowFixture>,
   options: {
     predecessorOutcome?: "completed" | "running" | "failed_cleanup_pending";
-    validatedOutputContents?: string;
+    validatedOutputContents?: string | Uint8Array;
   } = {},
 ) {
   const access = createLegacySidecarDataAccess({

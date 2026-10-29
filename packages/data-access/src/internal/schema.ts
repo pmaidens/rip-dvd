@@ -2931,3 +2931,15 @@ export const validationFailedEncodeOutputs = sqliteTable("validation_failed_enco
   uniqueIndex("validation_failed_outputs_path_unique").on(table.outputPath),
   index("validation_failed_outputs_job_index").on(table.encodeJobId, table.validatedAt, table.id),
 ]);
+
+export const browserRenditions = sqliteTable("browser_renditions", {
+  id: text("id").notNull().primaryKey(),
+  sourceIdentity: text("source_identity").notNull(),
+  status: text("status").notNull(),
+  record: text("record").notNull(),
+  createdAt: integer("created_at").notNull(),
+}, (table) => [
+  check("browser_renditions_status_check", sql`${table.status} in ('queued', 'generating', 'complete', 'failed', 'interrupted')`),
+  check("browser_renditions_record_check", sql`json_valid(${table.record}) and json_extract(${table.record}, '$.id') = ${table.id} and json_extract(${table.record}, '$.status') = ${table.status} and json_extract(${table.record}, '$.sourceIdentity') = ${table.sourceIdentity}`),
+  index("browser_renditions_queue_idx").on(table.status, table.createdAt, table.id),
+]);

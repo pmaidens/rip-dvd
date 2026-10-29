@@ -1,3 +1,4 @@
+import { runEncodeOutputRendition } from "./encode-output-rendition.js";
 import { runNotifications } from "./notifications.js";
 import { runDamagePreview } from "./damage-preview.js";
 import { readStructuredObject, StructuredInputError } from "./structured-input.js";
@@ -81,6 +82,7 @@ export type CommandExitCode = 0 | 1 | 2 | 3;
 interface CommandIO {
   openAccess(): DataAccess;
   encodeOutputMediaProbe?: EncodeOutputMediaProbe;
+  browserRenditionsEnabled?: boolean;
   mediaLibraryPath?(): string;
   originalsLibraryPath?(): string;
   getLookup?(): CatalogMetadataLookup | null;
@@ -235,13 +237,14 @@ const commandDefinitions = [
   {
     name: "encode-output",
     description: "Inspect, query source interval correspondence, export, preview Keep, or explicitly acknowledge inspection of a canonical Encode Output. Keep preflight is read-only and names the evidence and acknowledgement a later Keep decision requires.",
-    usage: "rip-dvd encode-output <inspect|intervals|export|keep-preflight|acknowledge-inspection> <artifact-identity> [options]",
+    usage: "rip-dvd encode-output <inspect|intervals|export|keep-preflight|acknowledge-inspection|rendition-availability|request-rendition|inspect-rendition> <artifact-identity> [options]",
     inputs: {
-      arguments: ["action: inspect|intervals|export|keep-preflight|acknowledge-inspection", "artifact-identity"],
-      options: ["--destination <path> (export only)", "--receipt-limit <1..100> (inspect)", "--receipt-offset <n> (inspect)", "--key <key> (acknowledge-inspection)", "--json <object> | --file <path> | --stdin (intervals, keep-preflight or acknowledge-inspection)"],
+      arguments: ["action: inspect|intervals|export|keep-preflight|acknowledge-inspection|rendition-availability|request-rendition|inspect-rendition", "artifact-identity"],
+      options: ["--destination <path> (export only)", "--receipt-limit <1..100> (inspect)", "--receipt-offset <n> (inspect)", "--key <key> (acknowledge-inspection or request-rendition)", "--json <object> | --file <path> | --stdin (intervals, keep-preflight, acknowledge-inspection or request-rendition)"],
       keepPreflightSchema: { previewToken: "optional exact token from an earlier Keep preflight to compare with current evidence" },
       intervalQuerySchema: { assessmentIdentity: "exact recorded assessment identity", titleIdentityObservationId: "recorded title observation identity", intervalIndexes: "1..100 distinct indexes in recorded estimatedAffectedPlayback.intervals" },
       artifactIdentityKinds: ["encode-output-v1.published.<encode-job-id>", "encode-output-v1.retained.<retained-output-id>", "encode-output-v1.failed.<failed-output-id>"],
+      renditionRequestSchema: { reviewToken: "exact token from rendition-availability; inspect-rendition takes a request ID" },
       acknowledgementSchema: { acknowledged: "true", reviewToken: "exact operatorInspection.reviewToken from inspect" },
     },
     example:
@@ -1709,6 +1712,7 @@ async function encodeOutputCommand(
   io: CommandIO,
 ) {
   const [action, artifactIdentity] = rest;
+  if (["rendition-availability", "request-rendition", "inspect-rendition"].includes(action ?? "")) return runEncodeOutputRendition(rest, io);
   if (
     (action !== "inspect" && action !== "export" && action !== "acknowledge-inspection" && action !== "intervals" && action !== "keep-preflight") ||
     artifactIdentity === undefined ||

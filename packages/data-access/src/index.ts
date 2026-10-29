@@ -224,3 +224,5 @@ export * from "./damage-preview.js";
 export type { EncodeSourceDecision, EncodeJobEnqueueInput } from "./types.js";
 
 export type * from "./encode-claim-snapshot.js";
+
+export type * from "./browser-rendition.js";

@@ -1,5 +1,6 @@
 "use client";
 
+import { EncodeOutputBrowserViewing } from "./encode-output-browser-viewing";
 import { EncodingReadinessPanel } from "./encoding-readiness";
 
 import { createMutationKey } from "../lib/mutation-key";
@@ -239,6 +240,7 @@ function EncodeOutputInspectionDetails({
       aria-label={`Encode Output ${artifact.identity}`}
     >
       <h4>Encode Output</h4>
+      <EncodeOutputBrowserViewing key={artifact.identity} artifactIdentity={artifact.identity} validationFailed={artifact.state === "validation_failed"} />
       {artifact.state === "validation_failed" ? <EncodeOutputKeepPreflightPanel
         key={inspection.operatorInspection?.reviewToken ?? artifact.identity}
         artifactIdentity={artifact.identity}

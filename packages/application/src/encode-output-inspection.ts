@@ -50,6 +50,9 @@ export interface EncodeOutputMediaStream {
   index: number;
   kind: EncodeOutputStreamKind;
   codecName: string | null;
+  profile?: string | null;
+  pixelFormat?: string | null;
+  level?: number | null;
   language: string | null;
   title: string | null;
   default: boolean | null;
@@ -115,6 +118,9 @@ export class EncodeOutputExportRejectedError extends Error {
 
 interface ProbeJsonStream {
   codec_name?: unknown;
+  profile?: unknown;
+  pix_fmt?: unknown;
+  level?: unknown;
   codec_type?: unknown;
   disposition?: unknown;
   index?: unknown;
@@ -177,6 +183,9 @@ function parseMediaProbe(stdout: string): EncodeOutputMediaInspection {
       index: stream.index as number,
       kind: streamKind(stream.codec_type),
       codecName: boundedMetadata(stream.codec_name),
+      profile: boundedMetadata(stream.profile),
+      pixelFormat: boundedMetadata(stream.pix_fmt),
+      level: typeof stream.level === "number" && Number.isSafeInteger(stream.level) ? stream.level : null,
       language: boundedMetadata(tags.language),
       title: boundedMetadata(tags.title),
       default: probeFlag(disposition.default),
@@ -209,7 +218,7 @@ export const probeEncodeOutputMedia: EncodeOutputMediaProbe =
           "-v",
           "error",
           "-show_entries",
-          "format=duration:stream=index,codec_type,codec_name:stream_tags=language,title:stream_disposition=default,forced",
+          "format=duration:stream=index,codec_type,codec_name,profile,pix_fmt,level:stream_tags=language,title:stream_disposition=default,forced",
           "-of",
           "json",
           outputPath,
@@ -1491,3 +1500,14 @@ export async function exportEncodeOutput(
 export type EncodeOutputInspection = Awaited<
   ReturnType<typeof inspectEncodeOutput>
 >;
+
+/** Recheck reviewed output authority and the complete file in the admission transaction. */
+export function assertEncodeOutputEvidenceCurrent(access: DataAccess, evidence: Awaited<ReturnType<typeof inspectEncodeOutputEvidence>>) {
+  const base = resolveEncodeOutputAuthority(access, parseEncodeOutputArtifactIdentity(evidence.artifact.identity));
+  if (base.authorityUnavailableReason !== null || evidenceDigest(base.authorityKey) !== evidence.authorityRevision) {
+    throw new Error("OUTPUT_AUTHORITY_CHANGED");
+  }
+  const metadata = lstatSync(base.outputPath);
+  if (fileIsRegularAndNonempty(metadata) !== null || exportSourceRejection(base, metadata) !== null ||
+      fileMutationRevision(metadata) !== evidence.artifact.file.mutationRevision) throw new Error("OUTPUT_IDENTITY_CHANGED");
+}

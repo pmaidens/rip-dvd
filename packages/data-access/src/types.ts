@@ -3050,6 +3050,7 @@ export type SnapshotCatalogAccess = Pick<
 >;
 
 export interface ConsistentReadAccess {
+  readonly browserRenditions: Pick<import("./browser-rendition.js").BrowserRenditionAccess, "active">;
   readonly damagePreviews: Pick<import("./damage-preview.js").DamagePreviewAccess, "find" | "list">;
   readonly dvdTitleDamageAssessments: Pick<
     DvdTitleDamageAssessmentAccess,
@@ -3134,6 +3135,7 @@ export interface DvdCheckpointReadOwnership {
 }
 
 export interface DataAccess {
+  readonly browserRenditions: import("./browser-rendition.js").BrowserRenditionAccess;
   readonly encodeOutputInspectionReceipts: import("./encode-output-inspection-receipt.js").EncodeOutputInspectionReceiptAccess;
   /** Prepare under image ownership; mutate only in the synchronous commit after
    * the final ownership and checkpoint checks have succeeded. */
