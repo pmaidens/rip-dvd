@@ -8,6 +8,7 @@ import { cleanupDamagePreviewMedia, createApplicationOperations } from "@rip-dvd
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
 import { seedRetainedDamagePreview, settleDamagePreviewMedia } from "./damage-preview.test-support.js";
 import { advanceCommittedArchiveEvidence, withEvidenceGuardsDisabled } from "./archive-evidence.test-support.js";
+import { seedProvedPreviewOutput } from "./damage-preview-source-retention.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); syncBuiltinESMExports(); fixtures.splice(0).forEach((fixture) => fixture.dispose()); });
@@ -271,6 +272,43 @@ it.each([false, true])("reconciles prior idle-cleanup unlinks before retaining p
     outcomes: [expect.objectContaining({ outcome: syncAvailable ? "already_missing" : "failed" }), expect.objectContaining({ outcome: "retained" })],
   } } });
 });
+
+it.each(["review", "output"] as const)("preserves remaining media when %s evidence changes during live cleanup", async (change) => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const { id, path, seeded, claim, inspectPreview, acknowledge } = await seedProvedPreviewOutput(fixture);
+  const access = fixture.openAccess();
+  const record = access.damagePreviews.find(id)!;
+  const second = join(dirname(path), "1.mkv");
+  writeFileSync(second, readFileSync(path));
+  record.artifacts.push({ ...record.artifacts[0]!, identity: `damage-preview-v1.${id}.1`, path: second });
+  access.damagePreviews.update(record); access.close();
+  await acknowledge(`synthetic-before-live-${change}`);
+  const current = await inspectPreview();
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(current.updatedAt) + 31 * day);
+  const args = ["damage-preview", "cleanup", id, "--key", `synthetic-live-${change}-cleanup`, "--json", JSON.stringify({ mediaToken: current.media.token })];
+  const accepted = await fixture.run(args);
+  expect(accepted).toMatchObject({ exitCode: 0, result: { media: { removal: { state: "pending" } } } });
+  const originalSync = fs.fsyncSync;
+  let changed = false;
+  vi.spyOn(fs, "fsyncSync").mockImplementation((descriptor) => {
+    originalSync(descriptor);
+    if (changed || existsSync(path)) return;
+    changed = true;
+    if (change === "review") withEvidenceGuardsDisabled(fixture.databasePath, (database) => {
+      database.prepare("UPDATE original_disc_archives SET catalog_reviewed_at = NULL, catalog_review_outcome = 'needs_review' WHERE id = ?").run(seeded.archive.id);
+    });
+    else writeFileSync(claim.outputPath, "synthetic output changed after first preview unlink");
+  });
+  syncBuiltinESMExports();
+  settleDamagePreviewMedia(fixture);
+  expect(changed).toBe(true);
+  expect(existsSync(path)).toBe(false); expect(existsSync(second)).toBe(true);
+  expect(await inspectPreview()).toMatchObject({ media: { retention: { protectedForReview: true }, removal: {
+    state: "cancelled", outcomes: [{ outcome: "removed" }, { outcome: "retained", reasonCode: "DAMAGE_PREVIEW_CLEANUP_RETENTION_CHANGED" }],
+  } } });
+  expect(await fixture.run(args)).toEqual(accepted);
+});
+
 it("keeps accepted removal durable after response projection fails and lets the worker settle it", async () => {
   const { fixture, id, path, inspect } = await setup();
   const token = (await inspect()).media.token;

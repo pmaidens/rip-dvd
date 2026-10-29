@@ -109,8 +109,9 @@ stopped, the request remains pending until it returns.
 Filesystem observations and response projection run outside SQLite writer
 transactions. Admission rechecks preview metadata, current review state and
 recorded output authority using the staged observations. Before executing idle
-cleanup, the worker checks retention again. A newly protected sample cancels
-further unlinking with `DAMAGE_PREVIEW_CLEANUP_RETENTION_CHANGED`. Files still
+cleanup, the worker checks retention before each present file's unlink. A newly
+protected sample cancels further unlinking with
+`DAMAGE_PREVIEW_CLEANUP_RETENTION_CHANGED`. Files still
 present remain available for review and export. If a prior worker already
 unlinked some targets, restart reconciles those absences and synchronizes their
 directories before settling; missing media is reported distinctly, and a sync
