@@ -132,14 +132,23 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
         if (previous.operation !== operation || previous.semantic_input !== semantic) throw new MutationKeyConflictError();
         return JSON.parse(String(previous.outcome)) as Receipt;
       };
-      let pending = previousReceipt();
-      if (pending === null) {
+      const admit = (): Receipt => {
+        const previous = previousReceipt();
+        if (previous) return previous;
         const observed = find(input.id);
         if (!observed) throw new RecordNotFoundError("Damage Preview", input.id);
-        const prepared = prepare(observed);
-        pending = transaction(() => {
-          const previous = previousReceipt();
-          if (previous) return previous;
+        let prepared: ReturnType<typeof prepare>;
+        try { prepared = prepare(observed); }
+        catch (error) {
+          // A same-input winner takes precedence over stale observations from
+          // a slower caller that prepared outside the writer transaction.
+          const winner = previousReceipt();
+          if (winner) return winner;
+          throw error;
+        }
+        return transaction(() => {
+          const winner = previousReceipt();
+          if (winner) return winner;
           const record = find(input.id);
           if (!record) throw new RecordNotFoundError("Damage Preview", input.id);
           prepared.assertCurrent(record);
@@ -151,7 +160,8 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
           sqlite.prepare("INSERT INTO mutation_invocations (key, operation, semantic_input, outcome, created_at) VALUES (?, ?, ?, ?, ?)").run(input.mutationKey, operation, semantic, JSON.stringify(receipt), now().getTime());
           return receipt;
         });
-      }
+      };
+      let pending = admit();
       if (Object.hasOwn(pending, "result")) return pending.result!;
       // The durable intent fences exports before filesystem mutation. Replays
       // resume only pending removal; settled metadata survives response loss.
@@ -169,7 +179,13 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
         });
       }
       if (Object.hasOwn(pending, "result")) return pending.result!;
-      const result = present(pending.record);
+      let result: T;
+      try { result = present(pending.record); }
+      catch (error) {
+        const winner = previousReceipt()!;
+        if (Object.hasOwn(winner, "result")) return winner.result!;
+        throw error;
+      }
       return transaction(() => {
         const previous = previousReceipt()!;
         if (Object.hasOwn(previous, "result")) return previous.result!;

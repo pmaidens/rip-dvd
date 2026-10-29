@@ -996,14 +996,25 @@ export function inspectEncodeOutputIdentity(access: DataAccess, artifactIdentity
   const base = resolveEncodeOutputAuthority(access, parsed);
   const present = (inspected: Awaited<ReturnType<typeof inspectEncodeOutputEvidence>>) => {
     const result = withInspectionReceipts(access, inspected, 1, 0);
-    return { ...result, isCurrent() {
+    const matchingGeneration = () => {
+      const identity = result.operatorInspection.generationIdentity;
+      const page = identity === null ? { receipts: [], truncated: false }
+        : access.encodeOutputInspectionReceipts.listForGeneration(result.artifact.provenance.encodeJobId, identity, 100);
+      return { receipts: page.receipts.map(presentInspectionReceipt).filter((receipt) =>
+        receipt.evidence.file.mutationRevision === result.artifact.file.mutationRevision &&
+        canonicalPublicationJson(receipt.evidence.provenance) === canonicalPublicationJson(result.artifact.provenance)), truncated: page.truncated };
+    };
+    const matching = matchingGeneration();
+    return { ...result, matchingGenerationReceipts: matching.receipts, matchingGenerationReceiptsTruncated: matching.truncated, isCurrent() {
       // Database-only authority recheck for a surrounding admission transaction.
       // The observed file metadata was captured before taking its writer lock.
       try {
         const current = resolveEncodeOutputAuthority(access, parsed);
         const evidence = inspectionResponse(current, inspected.artifact.file,
           unknownInspection("OUTPUT_PROBE_NOT_REQUESTED", "This identity check does not probe playback metadata."));
-        return canonicalPublicationJson(withInspectionReceipts(access, evidence, 1, 0)) === canonicalPublicationJson(result);
+        return current.authorityUnavailableReason === null &&
+          canonicalPublicationJson(withInspectionReceipts(access, evidence, 1, 0)) === canonicalPublicationJson(result) &&
+          canonicalPublicationJson(matchingGeneration()) === canonicalPublicationJson(matching);
       } catch (error) {
         if (error instanceof RecordNotFoundError) return false;
         throw error;

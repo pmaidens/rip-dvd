@@ -81,6 +81,24 @@ it("rejects changed preview metadata after filesystem preparation without removi
   expect((await inspect()).media.removal).toBeNull();
 });
 
+it("replays a concurrent deletion winner when slower preparation observes stale media", async () => {
+  const { fixture, id, inspect } = await setup();
+  const token = (await inspect()).media.token;
+  const args = ["damage-preview", "delete", id, "--key", "synthetic-concurrent-deletion", "--json", JSON.stringify({ mediaToken: token })];
+  const access = fixture.openAccess();
+  const other = fixture.openAccess();
+  const removeMedia = access.damagePreviews.removeMedia.bind(access.damagePreviews);
+  let winner: unknown;
+  access.damagePreviews.removeMedia = (input, prepare, remove, present) => removeMedia(input, (record) => {
+    winner = createApplicationOperations(other).deleteDamagePreviewMedia(id, { mediaToken: token, mutationKey: input.mutationKey });
+    return prepare(record);
+  }, remove, present);
+  try {
+    expect(await fixture.run(args, undefined, undefined, { openAccess: () => access })).toMatchObject({ exitCode: 0, result: winner });
+    expect((await fixture.run(args)).result).toEqual(winner);
+  } finally { other.close(); }
+});
+
 it("upgrades a historical cancellation receipt once without changing later replay", async () => {
   const { fixture, id, inspect } = await setup();
   const key = "synthetic-historical-cancel";

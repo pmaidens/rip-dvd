@@ -15,7 +15,11 @@ protected with an explicit reason.
 Preview inspection reads exact-generation acknowledgement receipts through the
 shared Encode Output identity inspector. `finishedOutputInspection` reports
 matching receipts separately from whether the output represents this sample.
-Receipt history and matching job identity cannot acknowledge another generation.
+A bounded lookup considers up to 100 receipts for the exact observed generation,
+then requires the same file mutation and immutable provenance. A later
+probe-unknown acknowledgement does not revoke an earlier applicable passing
+receipt. Truncated receipt discovery is reported. Unmatched history and matching
+job identity cannot acknowledge another generation.
 The receipt's captured source snapshot stays unchanged, including historical
 `not_recorded` evidence. Ordinary inspection never creates a receipt.
 

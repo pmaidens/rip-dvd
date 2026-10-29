@@ -73,6 +73,7 @@ export async function seedDamagePreview(
     settings: { preset: "Fast 1080p30", container: "mkv" },
   });
   access.close();
+  const subtitleIds: number[] = [];
   return {
     archive, manifest, observation, assessment, profile,
     input: {
@@ -81,7 +82,7 @@ export async function seedDamagePreview(
       playbackRange: { startMilliseconds: 0, endMilliseconds: 500_000 },
       intervalIndexes: [0, 1, 2],
       assessmentIdentity: assessment!.id,
-      streams: { audio: [128], subtitles: [] },
+      streams: { audio: [128], subtitles: subtitleIds },
       encodingProfileId: profile.id,
     },
   };

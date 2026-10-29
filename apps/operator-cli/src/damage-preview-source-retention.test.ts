@@ -1,11 +1,12 @@
-import { existsSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
-import { claimNextEncodeJob, retainedEncodeOutputArtifactIdentity, type DamagePreviewInspection, type EncodeOutputInspection } from "@rip-dvd/application";
-import { withEvidenceGuardsDisabled } from "./archive-evidence.test-support.js";
+import { claimNextEncodeJob, encodeOutputArtifactIdentity, retainedEncodeOutputArtifactIdentity, type DamagePreviewInspection, type EncodeOutputInspection, type EncodingReadiness } from "@rip-dvd/application";
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
 import { seedProvedPreviewOutput } from "./damage-preview-source-retention.test-support.js";
 import { openEncodeSourceTestAccess } from "./encode-source-decision.test-support.js";
+import { acceptReadinessContent } from "./encoding-readiness.test-support.js";
 import { publishSyntheticClaim } from "./encode-output-provenance.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
@@ -38,7 +39,8 @@ it("releases a current sample only after exact-generation source acknowledgement
 it("keeps active Catalog Review protected independently of an applicable receipt", async () => {
   const { fixture, id, seeded, inspectPreview, acknowledge } = await setup();
   await acknowledge("synthetic-reopened-source-ack");
-  withEvidenceGuardsDisabled(fixture.databasePath, (db) => db.prepare("UPDATE original_disc_archives SET catalog_reviewed_at = NULL, catalog_review_outcome = NULL WHERE id = ?").run(seeded.archive.id));
+  const review = (await fixture.run(["catalog-review", "show", seeded.archive.id])).result as { catalogRevision: string };
+  expect(await fixture.run(["catalog-review", "reopen", seeded.archive.id, "--key", "synthetic-reopen-after-output-inspection", "--revision", review.catalogRevision, "--checkpoint-revision", String(seeded.manifest.revision), "--checkpoint-digest", seeded.manifest.manifestDigest])).toMatchObject({ exitCode: 0 });
   const current = await inspectPreview();
   vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(current.updatedAt) + 31 * day);
   expect(await inspectPreview()).toMatchObject({ outdated: false, finishedOutputInspection: { retentionSatisfied: true }, media: { retention: { protectedForReview: true, activeCatalogReview: true, awaitingFinishedOutputInspection: false, reasonCodes: ["CATALOG_REVIEW_ACTIVE"] } } });
@@ -84,6 +86,15 @@ it("requires passing validation recorded by the receipt and never upgrades an ac
   expect((await inspectPreview()).finishedOutputInspection?.retentionSatisfied).toBe(true);
 });
 
+it("preserves an applicable passing receipt after a later same-generation probe-unknown acknowledgement", async () => {
+  const { inspectPreview, acknowledge } = await setup();
+  const first = await acknowledge("synthetic-first-passing-source-ack");
+  expect((await inspectPreview()).finishedOutputInspection?.retentionSatisfied).toBe(true);
+  await acknowledge("synthetic-later-probe-unknown-source-ack", async () => { throw new Error("Synthetic later probe failure"); });
+  expect(await inspectPreview()).toMatchObject({ outdated: false, media: { retention: { protectedForReview: false } }, finishedOutputInspection: { retentionSatisfied: true,
+    outputs: [expect.objectContaining({ acknowledgementStatus: "acknowledged", reasonCode: null, matchingReceipts: expect.arrayContaining([(first.result as { receipt: unknown }).receipt]) })] } });
+});
+
 it.each(["failed_output", "unknown_source"] as const)("protects media from a persisted %s receipt even when its file generation matches", async (kind) => {
   const { fixture, identity, inspectOutput, inspectPreview } = await setup();
   const current = await inspectOutput();
@@ -121,23 +132,35 @@ it("proves an explicitly acknowledged retained normal generation independently o
   await acknowledge("synthetic-before-requeue-receipt");
   const access = openEncodeSourceTestAccess(fixture);
   try {
-    access.encodeJobs.requeue(claim.id, { expectedSourceDecision: seeded.expectedSourceDecision });
-    const next = (await claimNextEncodeJob(access, "synthetic-requeued-retention-worker", fixture.originalsLibraryPath))!;
+    access.catalog.correctDiscSelection(seeded.selection.id, { originalDiscArchiveId: seeded.archive.id,
+      catalogRevision: access.catalog.listOriginalDiscArchives({ ids: [seeded.archive.id] })[0]!.updatedAt,
+      mediaItemId: access.catalog.createMediaItem({ kind: "movie", title: "Synthetic corrected retention mapping" }).id,
+      sourceIdentity: seeded.selection.sourceIdentity, reason: "Synthetic replacement mapping." });
+    expect(await acceptReadinessContent(fixture, seeded.archive.id, [], "synthetic-replacement-retention-acceptance")).toMatchObject({ exitCode: 0 });
+    const replacement = access.catalog.completeCatalogReviewWithReplacements(seeded.archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [seeded.archive.id] })[0]!.updatedAt, "reviewed_with_selections",
+      [{ predecessorEncodeJobId: claim.id, encodingProfileId: seeded.profile.id, outputPath: claim.outputPath }]).replacementEncodeJobs[0]!;
+    const readiness = (await fixture.run(["encode-readiness", seeded.archive.id])).result as EncodingReadiness;
+    const expectedSourceDecision = readiness.selections[0]!.expectedSourceDecision;
+    const db = new DatabaseSync(fixture.databasePath);
+    try { db.prepare("UPDATE encode_jobs SET expected_source_decision = ? WHERE id = ?").run(JSON.stringify(expectedSourceDecision), replacement.id); } finally { db.close(); }
+    const next = (await claimNextEncodeJob(access, "synthetic-replacement-retention-worker", fixture.originalsLibraryPath))!;
     publishSyntheticClaim(access, next, true);
-    expect((await inspectOutput()).operatorInspection.receipts).toEqual([]);
+    expect(((await fixture.run(["encode-output", "inspect", encodeOutputArtifactIdentity(next.id)], undefined, undefined, { encodeOutputMediaProbe: probe })).result as EncodeOutputInspection).operatorInspection.receipts).toEqual([]);
+    access.encodeJobs.requeue(next.id, { expectedSourceDecision });
     expect((await inspectPreview()).finishedOutputInspection?.retentionSatisfied).toBe(false);
-    const retained = access.encodeJobs.listRetainedOutputs([claim.id])[0]!;
+    const retained = access.encodeJobs.listRetainedOutputs([claim.id, next.id])[0]!;
     const identity = retainedEncodeOutputArtifactIdentity(retained.id);
     const old = (await fixture.run(["encode-output", "inspect", identity], undefined, undefined, { encodeOutputMediaProbe: probe })).result as EncodeOutputInspection;
     expect(old.artifact.provenance.sourceSnapshot?.id).toBe(claim.claimToken);
     expect(await fixture.run(["encode-output", "acknowledge-inspection", identity, "--key", "synthetic-retained-proof-ack", "--json", JSON.stringify({ acknowledged: true, reviewToken: old.operatorInspection.reviewToken })], undefined, undefined, { encodeOutputMediaProbe: probe })).toMatchObject({ exitCode: 0 });
     expect(await inspectPreview()).toMatchObject({ outdated: false, finishedOutputInspection: { retentionSatisfied: true,
-      outputs: [expect.objectContaining({ acknowledgementStatus: "not_acknowledged" }), expect.objectContaining({ artifactIdentity: identity, acknowledgementStatus: "acknowledged", reasonCode: null })] } });
+      outputs: expect.arrayContaining([expect.objectContaining({ artifactIdentity: identity, acknowledgementStatus: "acknowledged", reasonCode: null })]) } });
   } finally { access.close(); }
 });
 
 it.each(["checkpoint", "title", "path", "angle", "playback", "audio", "subtitles"] as const)("does not prove a recorded preview's mismatched %s from the output snapshot", async (changed) => {
-  const { fixture, id, inspectPreview, acknowledge } = await setup();
+  const { fixture, id, path, acknowledge } = await setup();
   await acknowledge(`synthetic-source-mismatch-${changed}`);
   const access = fixture.openAccess();
   try {
@@ -151,7 +174,19 @@ it.each(["checkpoint", "title", "path", "angle", "playback", "audio", "subtitles
     if (changed === "playback") request.playbackRange!.endMilliseconds = 501_000;
     if (changed === "audio") request.streams!.audio = [999];
     if (changed === "subtitles") request.streams!.subtitles = [999];
-    record.reviewJson = JSON.stringify(saved); access.damagePreviews.update(record);
+    // Seed a separate historical request with its original differing evidence;
+    // the original admitted request and its immutable provenance stay untouched.
+    const historical = access.damagePreviews.submit({ archiveId: record.originalDiscArchiveId,
+      mutationKey: `synthetic-historical-${changed}`, preflightToken: `synthetic-historical-${changed}`, selectionJson: record.selectionJson }, () => JSON.stringify(saved));
+    const retained = access.damagePreviews.claim("synthetic-historical-preview-worker")!;
+    expect(retained.id).toBe(historical.id);
+    const directory = join(fixture.mediaLibraryPath, ".damage-previews", retained.id);
+    mkdirSync(directory, { recursive: true });
+    const historicalPath = join(directory, "0.mkv"); copyFileSync(path, historicalPath);
+    retained.status = "complete";
+    retained.artifacts = record.artifacts.map((artifact) => ({ ...artifact, identity: `damage-preview-v1.${retained.id}.0`, path: historicalPath }));
+    access.damagePreviews.update(retained);
+    const inspected = (await fixture.run(["damage-preview", "inspect", retained.id])).result as DamagePreviewInspection;
+    expect(inspected.finishedOutputInspection).toMatchObject({ retentionSatisfied: false, outputs: [{ reasonCode: "FINISHED_OUTPUT_SOURCE_MISMATCH" }] });
   } finally { access.close(); }
-  expect((await inspectPreview()).finishedOutputInspection).toMatchObject({ retentionSatisfied: false, outputs: [{ reasonCode: "FINISHED_OUTPUT_SOURCE_MISMATCH" }] });
 });

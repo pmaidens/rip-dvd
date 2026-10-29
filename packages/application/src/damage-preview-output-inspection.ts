@@ -50,7 +50,10 @@ export function observeDamagePreviewOutputAcknowledgements(access: DataAccess, r
   for (const reference of references.slice(0, OUTPUT_LIMIT)) {
     try {
       const inspected = inspectEncodeOutputIdentity(access, reference.identity);
-      const { generationIdentity, status, receipts } = inspected.operatorInspection;
+      const { generationIdentity } = inspected.operatorInspection;
+      const receipts = inspected.matchingGenerationReceipts;
+      const status = receipts.length > 0 ? "acknowledged" : "not_acknowledged";
+      truncated ||= inspected.matchingGenerationReceiptsTruncated;
       const available = inspected.artifact.file.status === "available" && inspected.artifact.file.identityContinuity === "verified";
       const proof = receipts.map((receipt) => previewOutputSourceProof(record, receipt, inspected.artifact));
       if (available && proof.includes(null)) authorityChecks.push(inspected.isCurrent);
