@@ -15434,6 +15434,8 @@ export function createDataAccessInternal(
             findRetainedOutput: (id) =>
               access.encodeJobs.findRetainedOutput(id),
             findValidationFailedOutput: (id) => access.encodeJobs.findValidationFailedOutput(id),
+            findReservedOutputPathOwner: (path) => access.encodeJobs.findReservedOutputPathOwner(path),
+            readOutputFileConflicts: (path) => access.encodeJobs.readOutputFileConflicts(path),
           },
         })
       );
@@ -23523,6 +23525,19 @@ export function createDataAccessInternal(
             eq(encodeJobs.outputPath, outputPath),
             eq(encodeJobs.reservesOutputPath, true),
           )).limit(1).get() !== undefined;
+      },
+      findReservedOutputPathOwner(outputPath) {
+        return database.select().from(encodeJobs).where(and(
+          eq(encodeJobs.outputPath, outputPath), eq(encodeJobs.reservesOutputPath, true),
+        )).limit(1).get() ?? null;
+      },
+      readOutputFileConflicts(outputPath) {
+        return {
+          cleanupEncodeJobId: database.select({ id: encodeJobs.id }).from(encodeJobs)
+            .where(eq(encodeJobs.partialCleanupOutputPath, outputPath)).orderBy(asc(encodeJobs.id)).limit(1).get()?.id ?? null,
+          retainedOutputId: database.select({ id: retainedEncodeOutputs.id }).from(retainedEncodeOutputs)
+            .where(eq(retainedEncodeOutputs.retainedOutputPath, outputPath)).limit(1).get()?.id ?? null,
+        };
       },
       resolveQueueLogicalJobs(options) {
         if (

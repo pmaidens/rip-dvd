@@ -694,8 +694,7 @@ Unsafe or changing files cannot be acknowledged. Probe failure can be
 acknowledged as an explicit unknown, preserving the reported validation result
 and `playability: not_assessed`. A failed-artifact receipt records only inspection.
 It does not imply Keep or satisfy the normal-output acknowledgement condition for
-automatic Damage Preview retention. Keep preflight and mutation are unavailable
-until their separate capabilities ship.
+automatic Damage Preview retention. Keep mutation remains unavailable.
 Receipt applicability also requires the same observed file mutation revision
 and provenance. Moving a retained file may change that revision. Its original
 receipt stays in history, but a fresh acknowledgement is required unless a
@@ -718,6 +717,29 @@ media, and failed-output receipts never release that protection. Active Catalog
 Review independently protects current media. Archive-only decisions and explicit
 deletion keep their separate rules. This receipt capability does not implement
 retention cleanup or open new-format admission.
+
+`encode-output keep-preflight <artifact-identity>` reviews a retained
+validation-failed artifact without recording a Keep decision or inspection
+receipt. It reports exact artifact and validation identities, immutable source
+and structured failure evidence, inspectability, complete-write proof, current
+file identity and SHA-256, any normal output at the original destination, all
+blockers in priority order, and the acknowledgement a later Keep must require.
+When a corrected replacement reserves the destination but fails before publishing,
+the normal output still identifies its published predecessor and validation.
+A failed media probe leaves inspectability unknown without disqualifying a
+stable complete file. Incomplete, changed, unowned or unreadable files receive
+no actionable token. New-format admission stays closed.
+
+An eligible preflight returns an opaque `previewToken`. To compare an earlier
+review with current evidence, provide `--json '{"previewToken":"<token>"}'`,
+or the same object through `--file` or `--stdin`. A stale comparison reports
+`review.status: stale`, `KEEP_PREFLIGHT_STALE`, current identities, and a null
+token. A completed read exits zero even when its result reports blockers.
+Invalid input, missing artifacts and unavailable operations exit nonzero.
+Tokens bind the artifact, validation and source evidence, complete file bytes,
+normal destination and ownership evidence. A later Keep must recompute the
+same evidence and match the token before changing state. Preflight creates no
+durable authorization or retention release.
 
 `encode-output export` copies that identity-bound canonical file to the path
 on the machine running the CLI. The destination must not already exist. Success

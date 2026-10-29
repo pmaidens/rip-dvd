@@ -12,6 +12,7 @@ import type {
 } from "@rip-dvd/data-access";
 import type { EncodeOutputInspection } from "@rip-dvd/application";
 import { EncodeOutputInspectionAcknowledgement } from "./encode-output-inspection-acknowledgement";
+import { EncodeOutputKeepPreflightPanel } from "./encode-output-keep-preflight";
 
 import type {
   ActionOverviewCategory,
@@ -238,6 +239,10 @@ function EncodeOutputInspectionDetails({
       aria-label={`Encode Output ${artifact.identity}`}
     >
       <h4>Encode Output</h4>
+      {artifact.state === "validation_failed" ? <EncodeOutputKeepPreflightPanel
+        key={inspection.operatorInspection?.reviewToken ?? artifact.identity}
+        artifactIdentity={artifact.identity}
+      /> : null}
       {inspection.operatorInspection === undefined ? null : <EncodeOutputInspectionAcknowledgement
         key={inspection.operatorInspection.reviewToken}
         inspection={inspection}

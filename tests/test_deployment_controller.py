@@ -209,7 +209,7 @@ case "$*" in
   'compose config --environment')
     printf 'RIP_DVD_BACKUP_HOST_PATH=%s\n' "$RIP_DVD_BACKUP_HOST_PATH"
     ;;
-  'compose ps') printf 'web healthy\narchive-worker running\nencode-worker running\n' ;;
+  'compose ps') printf 'web healthy\narchive-worker running\nencode-worker running\nnotification-worker running\n' ;;
   'system df') printf 'TYPE TOTAL ACTIVE SIZE RECLAIMABLE\nImages 5 5 1GB 0B\n' ;;
   'compose --profile maintenance run --rm --no-deps backup')
     if [ "${DOCKER_SKIP_BACKUP_FILE:-0}" != 1 ]; then
@@ -226,22 +226,22 @@ case "$*" in
     ;;
   'compose ps --status running --services')
     if [ ! -f "$RUNTIME_STOPPED_MARKER" ]; then
-      printf '%s\n' "${RUNNING_SERVICES:-web archive-worker encode-worker}" | tr ' ' '\n'
+      printf '%s\n' "${RUNNING_SERVICES:-web archive-worker encode-worker notification-worker}" | tr ' ' '\n'
     fi
     ;;
   'compose exec -T archive-worker lsblk --json --output PATH,TYPE,MODEL,SERIAL')
     printf '%s\n' "$LSBLK_JSON"
     ;;
-  'compose logs --since 10m --no-color web archive-worker encode-worker'|'compose logs --tail 200 --timestamps web archive-worker encode-worker')
+  'compose logs --since 10m --no-color web archive-worker encode-worker notification-worker'|'compose logs --tail 200 --timestamps web archive-worker encode-worker notification-worker')
     printf '%s\n' "${LOG_OUTPUT:-}"
     ;;
-  'compose stop --timeout 30 archive-worker encode-worker web')
+  'compose stop --timeout 30 archive-worker encode-worker notification-worker web')
     : > "$RUNTIME_STOPPED_MARKER"
     ;;
-  'compose up --detach --no-build web archive-worker encode-worker')
+  'compose up --detach --no-build web archive-worker encode-worker notification-worker')
     rm -f "$RUNTIME_STOPPED_MARKER"
     ;;
-  'compose --progress plain --profile maintenance build migrate'|'compose --progress plain --profile maintenance build backup'|'compose --progress plain --profile maintenance build operator-cli'|'compose --progress plain --profile maintenance build web'|'compose --progress plain --profile maintenance build archive-worker'|'compose --progress plain --profile maintenance build encode-worker')
+  'compose --progress plain --profile maintenance build migrate'|'compose --progress plain --profile maintenance build backup'|'compose --progress plain --profile maintenance build operator-cli'|'compose --progress plain --profile maintenance build web'|'compose --progress plain --profile maintenance build archive-worker'|'compose --progress plain --profile maintenance build encode-worker'|'compose --progress plain --profile maintenance build notification-worker')
     exit 0
     ;;
   *) printf 'unexpected fake docker command: %s\n' "$*" >&2; exit 64 ;;
@@ -521,6 +521,10 @@ class DeploymentControllerTests(unittest.TestCase):
         self.assertEqual(
             payload["details"]["backup"],
             {"filename": "rip-dvd-test.sqlite", "sizeBytes": 8},
+        )
+        self.assertEqual(
+            payload["details"]["verification"]["services"],
+            ["web", "archive-worker", "encode-worker", "notification-worker"],
         )
 
     def test_apply_rechecks_active_work_before_quiescence(self) -> None:

@@ -720,12 +720,21 @@ function resolveEncodeOutputAuthority(
   identity: ParsedEncodeOutputArtifactIdentity,
 ): ResolvedEncodeOutput {
   return access.readEncodeOutputInspectionSnapshot((snapshot) =>
-    identity.kind === "published"
-      ? resolvePublishedEncodeOutput(snapshot, identity.jobId)
-      : identity.kind === "failed"
-        ? resolveValidationFailedEncodeOutput(snapshot, identity.failedOutputId)
-        : resolveRetainedEncodeOutput(snapshot, identity.retainedOutputId)
+    resolveEncodeOutputFromSnapshot(snapshot, identity)
   );
+}
+
+function resolveEncodeOutputFromSnapshot(access: EncodeOutputInspectionReadAccess, identity: ParsedEncodeOutputArtifactIdentity) {
+  return identity.kind === "published"
+      ? resolvePublishedEncodeOutput(access, identity.jobId)
+      : identity.kind === "failed"
+        ? resolveValidationFailedEncodeOutput(access, identity.failedOutputId)
+        : resolveRetainedEncodeOutput(access, identity.retainedOutputId);
+}
+
+/** Internal authority evidence for read-only Keep preflight and its later consumer. */
+export function readEncodeOutputAuthority(access: EncodeOutputInspectionReadAccess, artifactIdentity: unknown) {
+  return resolveEncodeOutputFromSnapshot(access, parseEncodeOutputArtifactIdentity(artifactIdentity));
 }
 
 function changedAuthorityResponse(
@@ -788,7 +797,7 @@ function fileIsRegularAndNonempty(metadata: Stats): {
     : null;
 }
 
-async function inspectEncodeOutputEvidence(
+export async function inspectEncodeOutputEvidence(
   access: DataAccess,
   artifactIdentityInput: unknown,
   mediaProbe: EncodeOutputMediaProbe = probeEncodeOutputMedia,
