@@ -47,6 +47,7 @@ test(`inspects and explicitly acknowledges a canonical Encode Output, scenario=$
 }, testInfo) => {
   const variant = fixtureVariant(testInfo.project.name);
   const acknowledgements: unknown[] = [];
+  const keepPreflightRequests: string[] = [];
   if (validationFailed) await page.route(/\/api\/dashboard(?:\/events)?(?:\?|$)/, async (route) => {
     const backendUrl = new URL(route.request().url());
     const isEventStream = backendUrl.pathname.endsWith("/events");
@@ -151,6 +152,32 @@ test(`inspects and explicitly acknowledges a canonical Encode Output, scenario=$
       }),
     });
   });
+  if (validationFailed) await page.route("**/api/encode-outputs/*/keep-preflight*", async (route) => {
+    expect(route.request().method()).toBe("GET");
+    const url = new URL(route.request().url());
+    keepPreflightRequests.push(url.search);
+    const stale = url.searchParams.has("preview-token");
+    await route.fulfill({ json: {
+      schemaVersion: 1,
+      artifact: {
+        identity: decodeURIComponent(url.pathname.split("/").at(-2)!),
+        validation: { failure: { reasonCode: "output_validation_failed", evidence: { kind: "duration", expectedSeconds: 500, observedSeconds: 10 } } },
+        file: { completeness: "complete" },
+        provenance: { sourceSnapshot: { id: "synthetic-browser-source-claim" } },
+        inspectability: { status: "unknown", reason: "Synthetic media probe unavailable" },
+      },
+      current: { validationIdentity: "synthetic-browser-validation-record", fileIdentity: "synthetic-browser-file-identity",
+        fileRevision: "synthetic-browser-file-revision", authorityRevision: "synthetic-browser-authority",
+        destinationRevision: "synthetic-browser-destination", sourceSnapshotIdentity: "synthetic-browser-source-claim" },
+      completeWrite: { status: "verified", sha256: "a".repeat(64), recordedFileIdentity: "synthetic-browser-file-identity" },
+      normalDestination: { status: "present", fileIdentity: "synthetic-browser-normal-file", normalOutput: { artifactIdentity: "synthetic-browser-normal-output" } },
+      requiredAcknowledgement: { acknowledged: true, message: "I acknowledge the exact failed output and its failure evidence." },
+      eligible: !stale,
+      blockers: stale ? [{ code: "OUTPUT_IDENTITY_CHANGED", message: "The reviewed output changed." }] : [],
+      previewToken: stale ? null : `encode-output-keep-preview-v1.${"b".repeat(64)}`,
+      review: { status: stale ? "stale" : "not_supplied", reasonCode: stale ? "KEEP_PREFLIGHT_STALE" : null },
+    } });
+  });
 
   await page.goto("/encoding");
   await page.getByRole("button", { name: /Completed \d+/ }).click();
@@ -168,6 +195,23 @@ test(`inspects and explicitly acknowledges a canonical Encode Output, scenario=$
     await expect(inspection).toContainText("Artifact stateValidation Failed");
     await expect(inspection).toContainText("Synthetic output duration failure");
     await expect(inspection).toContainText("It does not assert validation success, watchability, damage-interval playback, or a Keep decision.");
+    expect(keepPreflightRequests).toEqual([]);
+    await inspection.getByRole("button", { name: "Preview Keep", exact: true }).click();
+    const preflight = inspection.getByRole("region", { name: "Keep preflight", exact: true });
+    await expect(preflight).toContainText("Complete stable output available for a Keep decision.");
+    await expect(preflight).toContainText("synthetic-browser-validation-record");
+    await expect(preflight).toContainText("synthetic-browser-source-claim");
+    await expect(preflight).toContainText("synthetic-browser-normal-output");
+    await expect(preflight).toContainText("Synthetic media probe unavailable");
+    await expect(preflight).toContainText("Complete-write proofVerified");
+    await expect(preflight).toContainText("a".repeat(64));
+    await expect(preflight).toContainText("I acknowledge the exact failed output and its failure evidence.");
+    await expect(preflight.getByRole("checkbox")).toHaveCount(0);
+    await preflight.getByRole("button", { name: "Refresh Keep preflight" }).click();
+    await expect(preflight).toContainText("The earlier Keep preview is stale.");
+    await expect(preflight).toContainText("OUTPUT_IDENTITY_CHANGED");
+    await expect(preflight).toContainText("Keep is unavailable for the current evidence.");
+    expect(keepPreflightRequests).toEqual(["", `?preview-token=encode-output-keep-preview-v1.${"b".repeat(64)}`]);
   }
   await expect(inspection).toContainText("Validation identityNot recorded");
   await expect(inspection).toContainText("Validation evidenceNot Recorded");

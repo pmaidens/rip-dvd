@@ -100,6 +100,14 @@ set -e
 [ "$failed_inspection_status" -eq 2 ]
 printf '%s\n' "$failed_inspection" | assert_json_fields 'error.code=ENCODE_OUTPUT_NOT_FOUND'
 set +e
+keep_preflight="$(invoke encode-output keep-preflight \
+  encode-output-v1.failed.00000000-0000-4000-8000-000000000000 \
+  2>"$temporary_directory/keep-preflight.stderr")"
+keep_preflight_status=$?
+set -e
+[ "$keep_preflight_status" -eq 2 ]
+printf '%s\n' "$keep_preflight" | assert_json_fields 'error.code=ENCODE_OUTPUT_NOT_FOUND'
+set +e
 preview_output="$(invoke damage-preview availability synthetic-missing-archive \
   2>"$temporary_directory/preview.stderr")"
 preview_status=$?

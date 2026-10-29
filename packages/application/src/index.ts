@@ -1,5 +1,6 @@
 import { inspectEncodingReadiness, listEncodingReadinessArchives } from "./encoding-readiness.js";
 import { inspectEncodeOutputIntervals } from "./encode-output-correspondence.js";
+import { previewEncodeOutputKeep } from "./encode-output-keep-preflight.js";
 import { requestDamagePreview, inspectDamagePreview, cancelDamagePreview, waitDamagePreview, exportDamagePreview } from "./damage-preview-operations.js";
 import { inspectArchiveEvidence } from "./archive-evidence.js";
 import { inspectDamagePreviewAvailability } from "./damage-preview.js";
@@ -488,6 +489,8 @@ export function createApplicationOperations(
       ),
     inspectEncodeOutputIntervals: (artifactIdentity: unknown, input: unknown) =>
       inspectEncodeOutputIntervals(access, artifactIdentity, input, dependencies.encodeOutputMediaProbe),
+    previewEncodeOutputKeep: (artifactIdentity: unknown, input?: unknown) =>
+      previewEncodeOutputKeep(access, artifactIdentity, input, dependencies.encodeOutputMediaProbe),
     acknowledgeEncodeOutputInspection: (artifactIdentity: unknown, input: unknown) =>
       acknowledgeEncodeOutputInspection(access, artifactIdentity, input, dependencies.encodeOutputMediaProbe),
     exportEncodeOutput: (input: {
@@ -1145,3 +1148,5 @@ export { claimNextEncodeJob, assertEncodeClaimSource } from "./encode-claim.js";
 
 export { InvalidEncodeOutputIntervalInputError } from "./encode-output-correspondence.js";
 export type { EncodeOutputIntervalInspection } from "./encode-output-correspondence.js";
+export { previewEncodeOutputKeep, InvalidEncodeOutputKeepPreflightInputError } from "./encode-output-keep-preflight.js";
+export type { EncodeOutputKeepPreflight } from "./encode-output-keep-preflight.js";

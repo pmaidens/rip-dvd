@@ -2680,6 +2680,8 @@ export interface EncodeJobAccess {
   }): EncodeJob[];
   hasReservedOutputPathConflict(job: Pick<EncodeJob, "id" | "outputPath">): boolean;
   hasReservedOutputPath(outputPath: string): boolean;
+  findReservedOutputPathOwner(outputPath: string): EncodeJob | null;
+  readOutputFileConflicts(outputPath: string): { cleanupEncodeJobId: EncodeJobId | null; retainedOutputId: RetainedEncodeOutputId | null };
   resolveQueueLogicalJobs(options: {
     discSelectionIds: readonly DiscSelectionId[];
     encodingProfileId: EncodingProfileId;
@@ -3111,7 +3113,7 @@ export interface ConsistentReadAccess {
 export interface EncodeOutputInspectionReadAccess
   extends Omit<ConsistentReadAccess, "encodeJobs"> {
   readonly encodeJobs: ConsistentReadAccess["encodeJobs"] &
-    Pick<EncodeJobAccess, "findRetainedOutput" | "findOutputValidation" | "findValidationFailedOutput">;
+    Pick<EncodeJobAccess, "findRetainedOutput" | "findOutputValidation" | "findValidationFailedOutput" | "findReservedOutputPathOwner" | "readOutputFileConflicts">;
 }
 
 export interface DvdCheckpointReadHandle {

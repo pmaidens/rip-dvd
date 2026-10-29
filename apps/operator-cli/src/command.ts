@@ -16,6 +16,7 @@ import {
   InvalidEncodeOutputAcknowledgementError,
   InvalidEncodeOutputInspectionInputError,
   InvalidEncodeOutputIntervalInputError,
+  InvalidEncodeOutputKeepPreflightInputError,
   InvalidEncodeOutputArtifactIdentityError,
   InvalidEncodeOutputExportInputError,
   generateMutationKey,
@@ -233,11 +234,12 @@ const commandDefinitions = [
   },
   {
     name: "encode-output",
-    description: "Inspect, query source interval correspondence, export, or explicitly acknowledge inspection of a normal or complete validation-failed canonical Encode Output. Inspection, interval queries and export are read-only; acknowledgement does not Keep a failed output.",
-    usage: "rip-dvd encode-output <inspect|intervals|export|acknowledge-inspection> <artifact-identity> [options]",
+    description: "Inspect, query source interval correspondence, export, preview Keep, or explicitly acknowledge inspection of a canonical Encode Output. Keep preflight is read-only and names the evidence and acknowledgement a later Keep decision requires.",
+    usage: "rip-dvd encode-output <inspect|intervals|export|keep-preflight|acknowledge-inspection> <artifact-identity> [options]",
     inputs: {
-      arguments: ["action: inspect|intervals|export|acknowledge-inspection", "artifact-identity"],
-      options: ["--destination <path> (export only)", "--receipt-limit <1..100> (inspect)", "--receipt-offset <n> (inspect)", "--key <key> (acknowledge-inspection)", "--json <object> | --file <path> | --stdin (intervals or acknowledge-inspection)"],
+      arguments: ["action: inspect|intervals|export|keep-preflight|acknowledge-inspection", "artifact-identity"],
+      options: ["--destination <path> (export only)", "--receipt-limit <1..100> (inspect)", "--receipt-offset <n> (inspect)", "--key <key> (acknowledge-inspection)", "--json <object> | --file <path> | --stdin (intervals, keep-preflight or acknowledge-inspection)"],
+      keepPreflightSchema: { previewToken: "optional exact token from an earlier Keep preflight to compare with current evidence" },
       intervalQuerySchema: { assessmentIdentity: "exact recorded assessment identity", titleIdentityObservationId: "recorded title observation identity", intervalIndexes: "1..100 distinct indexes in recorded estimatedAffectedPlayback.intervals" },
       artifactIdentityKinds: ["encode-output-v1.published.<encode-job-id>", "encode-output-v1.retained.<retained-output-id>", "encode-output-v1.failed.<failed-output-id>"],
       acknowledgementSchema: { acknowledged: "true", reviewToken: "exact operatorInspection.reviewToken from inspect" },
@@ -1708,7 +1710,7 @@ async function encodeOutputCommand(
 ) {
   const [action, artifactIdentity] = rest;
   if (
-    (action !== "inspect" && action !== "export" && action !== "acknowledge-inspection" && action !== "intervals") ||
+    (action !== "inspect" && action !== "export" && action !== "acknowledge-inspection" && action !== "intervals" && action !== "keep-preflight") ||
     artifactIdentity === undefined ||
     artifactIdentity.length > 256 ||
     (action === "export" &&
@@ -1716,7 +1718,7 @@ async function encodeOutputCommand(
   ) {
     throw new CommandFailure(
       "INVALID_ARGUMENTS",
-      "Expected encode-output inspect, intervals, export, or acknowledge-inspection with an artifact identity and the action's required options.",
+      "Expected encode-output inspect, intervals, export, keep-preflight, or acknowledge-inspection with an artifact identity and the action's required options.",
       2,
     );
   }
@@ -1733,11 +1735,12 @@ async function encodeOutputCommand(
   }
   let acknowledgement: Record<string, unknown> | undefined;
   let intervalQuery: unknown;
-  if (action === "acknowledge-inspection" || action === "intervals") {
+  let keepPreflight: unknown;
+  if (action === "acknowledge-inspection" || action === "intervals" || action === "keep-preflight") {
     const options = new Map<string, string>();
     for (let index = 2; index < rest.length;) {
       const name = rest[index]!;
-      if (!(action === "intervals" ? ["--json", "--file", "--stdin"] : ["--key", "--json", "--file", "--stdin"]).includes(name) || options.has(name)) {
+      if (!(action === "acknowledge-inspection" ? ["--key", "--json", "--file", "--stdin"] : ["--json", "--file", "--stdin"]).includes(name) || options.has(name)) {
         throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Encode Output structured input options.", 2);
       }
       if (name === "--stdin") {
@@ -1757,6 +1760,8 @@ async function encodeOutputCommand(
     }
     if (action === "intervals") {
       intervalQuery = structured;
+    } else if (action === "keep-preflight") {
+      keepPreflight = structured;
     } else {
       if (structured === undefined || !options.has("--key") || "mutationKey" in (structured as Record<string, unknown>)) {
         throw new CommandFailure("INVALID_ARGUMENTS", "Acknowledgement requires --key and reviewed JSON input.", 2);
@@ -1773,6 +1778,7 @@ async function encodeOutputCommand(
         : { encodeOutputMediaProbe: io.encodeOutputMediaProbe }),
     });
     if (action === "intervals") return await operations.inspectEncodeOutputIntervals(artifactIdentity, intervalQuery);
+    if (action === "keep-preflight") return await operations.previewEncodeOutputKeep(artifactIdentity, keepPreflight);
     if (action === "acknowledge-inspection") {
       return await operations.acknowledgeEncodeOutputInspection(artifactIdentity, acknowledgement);
     }
@@ -1788,6 +1794,7 @@ async function encodeOutputCommand(
       error instanceof InvalidEncodeOutputAcknowledgementError ||
       error instanceof InvalidEncodeOutputInspectionInputError ||
       error instanceof InvalidEncodeOutputIntervalInputError ||
+      error instanceof InvalidEncodeOutputKeepPreflightInputError ||
       error instanceof InvalidMutationKeyError ||
       error instanceof InvalidEncodeOutputExportInputError
     ) {
@@ -1818,9 +1825,13 @@ async function encodeOutputCommand(
     throw new CommandFailure(
       action === "export"
         ? "ENCODE_OUTPUT_EXPORT_UNAVAILABLE"
+        : action === "keep-preflight"
+          ? "ENCODE_OUTPUT_KEEP_PREFLIGHT_UNAVAILABLE"
         : "ENCODE_OUTPUT_INSPECTION_UNAVAILABLE",
       action === "export"
         ? "Encode Output export is unavailable."
+        : action === "keep-preflight"
+          ? "Encode Output Keep preflight is unavailable."
         : "Encode Output inspection is unavailable.",
       1,
     );
