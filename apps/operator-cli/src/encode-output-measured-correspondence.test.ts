@@ -117,6 +117,29 @@ it("checks measured bytes even when an edited output retains its recorded size a
   } finally { seeded.access.close(); }
 });
 
+it("rejects changed measured bytes before proving another title absent", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await publishMeasuredCorrespondenceOutput(fixture, { sharedSource: false });
+  const query = { ...seeded.query, titleIdentityObservationId: seeded.omitted.id };
+  const run = () => fixture.run(["encode-output", "intervals", seeded.artifactIdentity, "--json", JSON.stringify(query)],
+    undefined, undefined, { encodeOutputMediaProbe: async () => ({ durationSeconds: 1, streams: [] }) });
+  try {
+    expect(await run()).toMatchObject({ exitCode: 0, result: {
+      intervals: [{ status: "absent", reasonCode: "SOURCE_EXCLUDED_BY_SELECTION",
+        evidence: { measuredCorrespondence: { status: "measured" } } }],
+    } });
+    const before = lstatSync(seeded.claim.outputPath);
+    writeFileSync(seeded.claim.outputPath, "X".repeat(before.size));
+    utimesSync(seeded.claim.outputPath, before.atime, before.mtime);
+    expect(lstatSync(seeded.claim.outputPath).mtimeMs).toBe(before.mtimeMs);
+    expect(await run()).toMatchObject({ exitCode: 0, result: {
+      inspection: { artifact: { inspectability: { status: "inspected" } } },
+      intervals: [{ status: "unknown", reasonCode: "OUTPUT_MEASUREMENT_MISMATCH", outputInterval: null }],
+      targetedLocation: { eligible: false, reasonCode: "OUTPUT_MAPPING_UNKNOWN" },
+    } });
+  } finally { seeded.access.close(); }
+});
+
 it("does not retarget an earlier measured location to a replacement output generation", async () => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
   const seeded = await publishMeasuredCorrespondenceOutput(fixture);

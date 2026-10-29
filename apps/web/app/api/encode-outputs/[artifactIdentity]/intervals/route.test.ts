@@ -1,6 +1,7 @@
 import { publishCorrespondenceOutput, seedFailedCorrespondenceOutput } from "../../../../../../operator-cli/src/encode-output-correspondence.test-support.js";
 import { publishMeasuredCorrespondenceOutput } from "../../../../../../operator-cli/src/encode-output-measured-correspondence.test-support.js";
 import { afterEach, expect, it } from "vitest";
+import { lstatSync, utimesSync, writeFileSync } from "node:fs";
 import { encodeOutputArtifactIdentity } from "@rip-dvd/application";
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../../../../operator-cli/src/operator-workflow.test-support.js";
 import { createEncodeOutputIntervalsRoute } from "./route";
@@ -8,6 +9,32 @@ import { createEncodeOutputIntervalsRoute } from "./route";
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
 const probe = async () => ({ durationSeconds: 90, streams: [] });
+
+it.each([false, true])("binds proven exclusion to unchanged measured bytes, changed %s", async (changed) => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await publishMeasuredCorrespondenceOutput(fixture, { sharedSource: false });
+  const query = { ...seeded.query, titleIdentityObservationId: seeded.omitted.id };
+  try {
+    if (changed) {
+      const before = lstatSync(seeded.claim.outputPath);
+      writeFileSync(seeded.claim.outputPath, "X".repeat(before.size));
+      utimesSync(seeded.claim.outputPath, before.atime, before.mtime);
+      expect(lstatSync(seeded.claim.outputPath).mtimeMs).toBe(before.mtimeMs);
+    }
+    const response = await createEncodeOutputIntervalsRoute(new Request(`http://localhost/api/encode-outputs/${seeded.artifactIdentity}/intervals?query=${encodeURIComponent(JSON.stringify(query))}`),
+      seeded.artifactIdentity, () => seeded.access, probe);
+    const cli = await fixture.run(["encode-output", "intervals", seeded.artifactIdentity, "--json", JSON.stringify(query)],
+      undefined, undefined, { encodeOutputMediaProbe: probe });
+    expect(response.status).toBe(200);
+    expect(cli.exitCode).toBe(0);
+    expect(cli.result).toEqual(await response.json());
+    expect(cli.result).toMatchObject({
+      inspection: { artifact: { inspectability: { status: "inspected" } } },
+      intervals: [{ status: changed ? "unknown" : "absent", outputInterval: null,
+        reasonCode: changed ? "OUTPUT_MEASUREMENT_MISMATCH" : "SOURCE_EXCLUDED_BY_SELECTION" }],
+    });
+  } finally { seeded.access.close(); }
+});
 
 it("shares inspected failed-artifact source evidence without inventing an output location", async () => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { utimesSync, writeFileSync } from "node:fs";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { encodeOutputArtifactIdentity, measureEncodeSourceCell, measureEncodeOutputCell, type CorrespondenceMediaTool } from "@rip-dvd/application";
 import { seedCorrespondenceClaim } from "./encode-output-correspondence.test-support.js";
@@ -17,7 +17,7 @@ export async function publishMeasuredCorrespondenceOutput(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   options: { outputFrames?: readonly string[]; decoderFailure?: boolean; outputOffsetMilliseconds?: number;
     incompleteNativeFrames?: boolean; sourceFault?: "zeroed_sector" | "encrypted_packet"; legacyFrameDuration?: boolean;
-    sourceMissingPts?: boolean; outputMissingPts?: boolean; outputFirstPts?: number; outputOriginSeconds?: number } = {},
+    sourceMissingPts?: boolean; outputMissingPts?: boolean; outputFirstPts?: number; outputOriginSeconds?: number; sharedSource?: boolean } = {},
 ) {
   const imageContents = Buffer.alloc(100 * 2048, 0xff);
   for (let offset = 0; offset < imageContents.length; offset += 2048) {
@@ -26,10 +26,12 @@ export async function publishMeasuredCorrespondenceOutput(
   }
   if (options.sourceFault === "zeroed_sector") imageContents.fill(0, 10 * 2048, 11 * 2048);
   if (options.sourceFault === "encrypted_packet") imageContents[20] = 0xa0;
-  const seeded = await seedCorrespondenceClaim(fixture, { sharedSource: true, singleCell: { imageContents } });
+  const seeded = await seedCorrespondenceClaim(fixture, { sharedSource: options.sharedSource ?? true, singleCell: { imageContents } });
   try {
     const snapshot = seeded.access.encodeJobs.findClaimSnapshot(seeded.claim.claimToken)!;
     writeFileSync(seeded.claim.outputPath, "synthetic canonical output");
+    // Make an exact mtime-preserving rewrite reproducible across filesystems.
+    utimesSync(seeded.claim.outputPath, 1_700_000_000, 1_700_000_000);
     const runMediaTool: CorrespondenceMediaTool = async (request) => {
       if (options.decoderFailure) throw new Error("Synthetic decoder failure");
       const output = request.arguments_.includes(seeded.claim.outputPath);

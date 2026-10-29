@@ -677,7 +677,8 @@ admission. Historical records keep their existing meaning.
 
 Measured evidence is retained with the validation's exact claim and output
 generation. The query checks those identities and hashes the current bounded
-canonical bytes before returning `verified`. Later source or selection changes
+canonical bytes before returning `verified` or using the recorded source
+selection to prove `absent`. Later source or selection changes
 cannot retarget it. An output replacement or byte change cannot reuse the old
 measurement. A query has an eligible targeted location only when every
 requested interval is verified.
