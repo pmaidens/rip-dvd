@@ -2220,7 +2220,7 @@ function readDashboardSnapshotRecords(
                   ? [legacyEncodeJobInvestigation(job, canRequeue)]
                   : []),
               ];
-              const failedOutputPage = access.encodeJobs.listValidationFailedOutputs(job.id, { limit: DASHBOARD_ENCODE_OUTPUT_ARTIFACT_LIMIT + 1 });
+              const failedOutputPage = access.encodeJobs.listValidationFailedOutputSummaries(job.id, { limit: DASHBOARD_ENCODE_OUTPUT_ARTIFACT_LIMIT + 1 });
               const encodeOutputArtifacts = encodeOutputArtifactReferences(
                 job,
                 relationshipJobs,

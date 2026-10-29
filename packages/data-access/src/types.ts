@@ -2704,6 +2704,7 @@ export interface EncodeJobAccess {
     options?: EncodeJobFailureOptions): EncodeJob;
   hasValidationFailedOutputPath(path: string): boolean;
   findValidationFailedOutput(id: ValidationFailedEncodeOutputId): import("./encode-output-validation.js").ValidationFailedEncodeOutput | null;
+  listValidationFailedOutputSummaries(id: EncodeJobId, page: { limit: number; offset?: number }): import("./encode-output-validation.js").ValidationFailedEncodeOutputSummary[];
   listValidationFailedOutputs(id: EncodeJobId, page: { limit: number; offset?: number }): import("./encode-output-validation.js").ValidationFailedEncodeOutput[];
   recordOutputValidation(claim: RunningEncodeJob, identity: EncodeOutputFilesystemIdentity,
     evidence: import("./encode-output-validation.js").EncodeOutputValidationEvidence | null): import("./encode-output-validation.js").EncodeOutputValidationRecord;
@@ -3083,7 +3084,7 @@ export interface ConsistentReadAccess {
   readonly encodeJobs: Pick<
     EncodeJobAccess,
     | "listClaimSnapshots"
-    | "listValidationFailedOutputs"
+    | "listValidationFailedOutputSummaries"
     | "find"
     | "list"
     | "listForDiscSelection"

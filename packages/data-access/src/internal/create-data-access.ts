@@ -527,6 +527,13 @@ interface EncodeJobAttemptFailureOptions extends EncodeJobFailureOptions {
   failureReports?: readonly ValidatedEncodeJobFailureReportInput[];
   validationFailedOutput?: import("../encode-output-validation.js").ValidationFailedEncodeOutputInput;
 }
+function failedOutputPageOffset(page: { limit: number; offset?: number }): number {
+  const offset = page.offset ?? 0;
+  if (!Number.isSafeInteger(page.limit) || page.limit < 1 || page.limit > 101 ||
+      !Number.isSafeInteger(offset) || offset < 0) throw new DomainInvariantError("Invalid failed output page");
+  return offset;
+}
+
 const MEDIA_ITEM_SEARCH_LIMIT = 100;
 const WORKER_INCIDENT_RETENTION_LIMIT = 100;
 const ARCHIVE_READ_FAILURE_MESSAGES = {
@@ -15343,7 +15350,7 @@ export function createDataAccessInternal(
         },
         encodeJobs: {
           listClaimSnapshots: (id, options) => access.encodeJobs.listClaimSnapshots(id, options),
-          listValidationFailedOutputs: (id, page) => access.encodeJobs.listValidationFailedOutputs(id, page),
+          listValidationFailedOutputSummaries: (id, page) => access.encodeJobs.listValidationFailedOutputSummaries(id, page),
           find: (id) => access.encodeJobs.find(id),
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
           listForDiscSelection: (id) =>
@@ -24042,12 +24049,18 @@ export function createDataAccessInternal(
       findValidationFailedOutput(id) {
         return database.select().from(validationFailedEncodeOutputs).where(eq(validationFailedEncodeOutputs.id, id)).get() ?? null;
       },
+      listValidationFailedOutputSummaries(id, page) {
+        const offset = failedOutputPageOffset(page);
+        return database.select({ id: validationFailedEncodeOutputs.id, encodeJobId: validationFailedEncodeOutputs.encodeJobId })
+          .from(validationFailedEncodeOutputs).where(eq(validationFailedEncodeOutputs.encodeJobId, id))
+          .orderBy(desc(validationFailedEncodeOutputs.validatedAt), desc(validationFailedEncodeOutputs.id))
+          .limit(page.limit).offset(offset).all();
+      },
       listValidationFailedOutputs(id, page) {
-        if (!Number.isSafeInteger(page.limit) || page.limit < 1 || page.limit > 101 ||
-          !Number.isSafeInteger(page.offset ?? 0) || (page.offset ?? 0) < 0) throw new DomainInvariantError("Invalid failed output page");
+        const offset = failedOutputPageOffset(page);
         return database.select().from(validationFailedEncodeOutputs).where(eq(validationFailedEncodeOutputs.encodeJobId, id))
           .orderBy(desc(validationFailedEncodeOutputs.validatedAt), desc(validationFailedEncodeOutputs.id))
-          .limit(page.limit).offset(page.offset ?? 0).all();
+          .limit(page.limit).offset(offset).all();
       },
       recordOutputValidation(claim, identity, evidence) {
         return database.transaction((transaction) => {

@@ -38,6 +38,9 @@ export interface ValidationFailedEncodeOutput extends Omit<EncodeOutputValidatio
   failure: import("./types.js").EncodeJobFailureReportInput;
 }
 
+/** Artifact discovery never loads media paths or full failure/source evidence. */
+export type ValidationFailedEncodeOutputSummary = Pick<ValidationFailedEncodeOutput, "id" | "encodeJobId">;
+
 export interface ValidationFailedEncodeOutputInput {
   outputPath: string;
   filesystemIdentity: EncodeOutputFilesystemIdentity;

@@ -27,6 +27,7 @@ import type {
   EncodeOutputSourceSnapshot,
   EncodeClaimSource,
   ValidationFailedEncodeOutput,
+  ValidationFailedEncodeOutputSummary,
   ValidationFailedEncodeOutputId,
 } from "@rip-dvd/data-access";
 import { parseMutationKey } from "./mutation-key.js";
@@ -301,7 +302,7 @@ export function encodeOutputArtifactReferences(
   job: EncodeJob,
   correctionLinks: readonly EncodeJob[],
   retainedOutputs: readonly RetainedEncodeOutputSummary[],
-  failedOutputs: readonly Pick<ValidationFailedEncodeOutput, "id" | "encodeJobId">[] = [],
+  failedOutputs: readonly ValidationFailedEncodeOutputSummary[] = [],
 ): EncodeOutputArtifactReference[] {
   const directSuccessor = correctionLinks.find(
     (candidate) => candidate.predecessorEncodeJobId === job.id,

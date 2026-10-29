@@ -19,6 +19,11 @@ it("inspects and exports a complete failed generation without promising playback
     const claim = (await claimNextEncodeJob(access, "synthetic-failed-output-worker", fixture.originalsLibraryPath))!;
     const retained = retainSyntheticFailedOutput(access, claim, fixture.mediaLibraryPath);
     const path = retained.outputPath;
+    const summaries = access.readConsistentSnapshot((snapshot) => {
+      expect(snapshot.encodeJobs).not.toHaveProperty("listValidationFailedOutputs");
+      return snapshot.encodeJobs.listValidationFailedOutputSummaries(claim.id, { limit: 1 });
+    });
+    expect(summaries).toEqual([{ id: retained.id, encodeJobId: claim.id }]);
     const listed = await fixture.run(["inspect", "encode-jobs", claim.id]);
     expect(listed.exitCode).toBe(0);
     const artifacts = (listed.result as { item: { encodeOutputArtifacts: { identity: string; state: string }[] } }).item.encodeOutputArtifacts;
