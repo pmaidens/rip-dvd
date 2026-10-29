@@ -9,6 +9,8 @@ import {
   sameEncodeOutputMutationSnapshot,
   type DataAccess,
   type EncodeJob,
+  type EncodeOutputInspectionReadAccess,
+  RecordNotFoundError,
 } from "@rip-dvd/data-access";
 import {
   inspectEncodeOutputEvidence,
@@ -62,11 +64,35 @@ function readAuthority(access: DataAccess, identity: unknown) {
     const destination = output.validationRecord?.sourceSnapshot?.source.output.path ?? output.job.outputPath;
     return {
       output, destination,
-      normalOwner: snapshot.encodeJobs.findReservedOutputPathOwner(destination),
+      normal: readNormalDestinationAuthority(snapshot, destination),
       fileOwner: snapshot.encodeJobs.findReservedOutputPathOwner(output.outputPath),
       fileConflicts: snapshot.encodeJobs.readOutputFileConflicts(output.outputPath),
     };
   });
+}
+
+function readNormalDestinationAuthority(access: EncodeOutputInspectionReadAccess, destination: string) {
+  const reservation = access.encodeJobs.findReservedOutputPathOwner(destination);
+  const lineage: EncodeJob[] = [];
+  const visited = new Set<string>();
+  let candidate = reservation;
+  // A corrected replacement reserves the destination before replacing its
+  // predecessor's published bytes. Follow only this bounded authority chain.
+  while (candidate !== null && candidate.outputPath === destination && lineage.length < 100 &&
+      !visited.has(candidate.id)) {
+    visited.add(candidate.id);
+    lineage.push(candidate);
+    try {
+      return { reservation, lineage, publication: readEncodeOutputAuthority(access, encodeOutputArtifactIdentity(candidate.id)), complete: true };
+    } catch (error) {
+      if (!(error instanceof RecordNotFoundError)) throw error;
+    }
+    if (!candidate.replaceExistingOutput || candidate.predecessorEncodeJobId === null) {
+      return { reservation, lineage, publication: null, complete: true };
+    }
+    candidate = access.encodeJobs.find(candidate.predecessorEncodeJobId);
+  }
+  return { reservation, lineage, publication: null, complete: reservation === null || (candidate !== null && candidate.outputPath !== destination) };
 }
 
 function errorCode(error: unknown) {
@@ -128,11 +154,13 @@ async function fingerprintFile(output: Authority) {
   } finally { await descriptor?.close(); }
 }
 
-function normalOutput(owner: EncodeJob | null) {
-  return owner === null || !(owner.status === "completed" || (owner.replaceExistingOutput && owner.completedAt !== null)) ? null : {
-    artifactIdentity: encodeOutputArtifactIdentity(owner.id), encodeJobId: owner.id,
-    validationIdentity: owner.outputValidationFilesystemIdentity,
-    validationResult: owner.outputValidationResult,
+function normalOutput(output: Authority | null) {
+  return output === null ? null : {
+    artifactIdentity: output.artifactIdentity, encodeJobId: output.job.id,
+    validationIdentity: output.validationRecord?.id ?? null,
+    fileIdentity: output.recordedFilesystemIdentity,
+    validationResult: output.recordedValidationResult,
+    authorityRevision: digest(output.authorityKey),
   };
 }
 
@@ -171,11 +199,12 @@ export async function previewEncodeOutputKeep(
   }
   if (destinationAfter.status === "unknown" || !sameObservation(destinationBefore, destinationAfter) ||
       (destinationAfter.metadata !== null && (!destinationAfter.metadata.isFile() || destinationAfter.metadata.isSymbolicLink())) ||
-      canonicalPublicationJson(before.normalOwner) !== canonicalPublicationJson(after.normalOwner)) {
+      !before.normal.complete || !after.normal.complete ||
+      canonicalPublicationJson(before.normal) !== canonicalPublicationJson(after.normal)) {
     blockers.push({ code: "DESTINATION_EVIDENCE_UNAVAILABLE", message: "Normal destination file or authority evidence is unavailable or changed during preflight." });
   }
-  if (before.normalOwner?.publicationPending || after.normalOwner?.publicationPending ||
-      before.normalOwner?.publicationCompletionPending || after.normalOwner?.publicationCompletionPending) {
+  if ([...before.normal.lineage, ...after.normal.lineage].some((job) => job.publicationPending || job.publicationCompletionPending) ||
+      before.normal.publication?.authorityUnavailableReason != null || after.normal.publication?.authorityUnavailableReason != null) {
     blockers.push({ code: "DESTINATION_AUTHORITY_CHANGING", message: "Normal output publication authority is changing." });
   }
   if (file.blocker !== null) blockers.push(file.blocker);
@@ -202,13 +231,13 @@ export async function previewEncodeOutputKeep(
     authorityRevision: digest([after.output.authorityKey, after.fileOwner, after.fileConflicts, after.output.job]),
     fileAuthority: { publicationEncodeJobId: after.fileOwner?.id ?? null, ...after.fileConflicts },
     sourceSnapshotIdentity: source?.id ?? null,
-    destinationRevision: digest([after.destination, after.normalOwner, destinationAfter.revision, destinationAfter.status]),
+    destinationRevision: digest([after.destination, after.normal, destinationAfter.revision, destinationAfter.status]),
   };
   const stableCompleteFile = file.sha256 !== null && file.metadata !== null && finalFile.metadata !== null &&
     sameEncodeOutputMutationSnapshot(file.metadata, finalFile.metadata);
   const completeWrite = { status: stableCompleteFile ? "verified" as const : "unknown" as const, sha256: stableCompleteFile ? file.sha256 : null,
     recordedFileIdentity: after.output.recordedFilesystemIdentity };
-  const normalDestination = { status: destinationAfter.status, fileIdentity: destinationAfter.fileIdentity, normalOutput: normalOutput(after.normalOwner) };
+  const normalDestination = { status: destinationAfter.status, fileIdentity: destinationAfter.fileIdentity, normalOutput: normalOutput(after.normal.publication) };
   const candidateToken = `encode-output-keep-preview-v1.${digest({ artifact, current, completeWrite, normalDestination,
     validation: after.output.validationRecord, acknowledgement: ACKNOWLEDGEMENT })}`;
   const stale = input.previewToken !== undefined && input.previewToken !== candidateToken;

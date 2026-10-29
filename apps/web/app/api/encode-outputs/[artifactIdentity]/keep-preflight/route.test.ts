@@ -2,8 +2,9 @@ import { afterEach, expect, it } from "vitest";
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { claimNextEncodeJob, type EncodeOutputKeepPreflight, type EncodeOutputMediaProbe } from "@rip-dvd/application";
 import {
-  changeFailedCleanupOwnership, changeFailedOwnership, changeFailedValidation, denyFailedFileRead, disconnectKeepStorage, failedFileFaults,
-  seedKeepPreflightFixture, unavailableKeepProbe,
+  changeFailedCleanupOwnership, changeFailedOwnership, changeFailedValidation, changePredecessorValidation,
+  denyFailedFileRead, disconnectKeepStorage, failedFileFaults,
+  seedCorrectedKeepPreflightFixture, seedKeepPreflightFixture, unavailableKeepProbe,
   type KeepPreflightFixture,
 } from "../../../../../../operator-cli/src/encode-output-keep-preflight.test-support.js";
 import { seedEncodeClaim } from "../../../../../../operator-cli/src/encode-claim.test-support.js";
@@ -132,6 +133,33 @@ it("shares normal destination identity and leaves both files and the failed job 
     expect(readFileSync(seeded.job.outputPath)).toEqual(normalBefore);
     expect(readFileSync(output.outputPath)).toEqual(failedBefore);
     expect(seeded.access.encodeJobs.find(seeded.job.id)?.status).toBe("failed");
+  } finally { seeded.access.close(); }
+});
+
+it("shares the actual predecessor publication and stales its changed validation despite an unchanged failed replacement", async () => {
+  const seeded = await seedCorrectedKeepPreflightFixture(); fixtures.push(seeded.fixture);
+  try {
+    const jobBefore = seeded.access.encodeJobs.find(seeded.job.id);
+    expect(jobBefore).toMatchObject({ status: "failed", completedAt: null, predecessorEncodeJobId: seeded.predecessor.id, reservesOutputPath: true });
+    const normalBefore = readFileSync(seeded.predecessor.outputPath);
+    const failedBefore = readFileSync(seeded.output.outputPath);
+    const reviewed = await parity(seeded);
+    expect(reviewed).toMatchObject({ eligible: true, normalDestination: { status: "present", normalOutput: {
+      artifactIdentity: `encode-output-v1.published.${seeded.predecessor.id}`, encodeJobId: seeded.predecessor.id,
+      validationIdentity: seeded.normalValidation.id, fileIdentity: seeded.normalValidation.filesystemIdentity,
+    } } });
+    changePredecessorValidation(seeded);
+    const stale = await parity(seeded, reviewed.previewToken!);
+    expect(stale).toMatchObject({ eligible: false, previewToken: null, review: { status: "stale" },
+      current: { fileIdentity: reviewed.current.fileIdentity, authorityRevision: reviewed.current.authorityRevision },
+      normalDestination: { fileIdentity: reviewed.normalDestination.fileIdentity, normalOutput: { encodeJobId: seeded.predecessor.id } } });
+    expect(stale.blockers.map(({ code }) => code)).toEqual(["KEEP_PREFLIGHT_STALE"]);
+    expect(stale.current.destinationRevision).not.toBe(reviewed.current.destinationRevision);
+    expect(await parity(seeded)).toMatchObject({ eligible: true, normalDestination: { normalOutput: { encodeJobId: seeded.predecessor.id } } });
+    expect(readFileSync(seeded.predecessor.outputPath)).toEqual(normalBefore);
+    expect(readFileSync(seeded.output.outputPath)).toEqual(failedBefore);
+    expect(seeded.access.encodeJobs.find(seeded.job.id)).toEqual(jobBefore);
+    expect(seeded.access.encodeOutputInspectionReceipts.list(seeded.job.id, { limit: 1, offset: 0 }).receipts).toEqual([]);
   } finally { seeded.access.close(); }
 });
 

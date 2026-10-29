@@ -8,8 +8,9 @@ import { encodeOutputArtifactIdentity, retainedEncodeOutputArtifactIdentity } fr
 import { publishSyntheticClaim } from "./encode-output-provenance.test-support.js";
 import { withEvidenceGuardsDisabled } from "./archive-evidence.test-support.js";
 import {
-  changeFailedCleanupOwnership, changeFailedOwnership, changeFailedValidation, denyFailedFileRead, disconnectKeepStorage, failedFileFaults,
-  seedKeepPreflightFixture, unavailableKeepProbe,
+  changeFailedCleanupOwnership, changeFailedOwnership, changeFailedValidation, changePredecessorValidation,
+  denyFailedFileRead, disconnectKeepStorage, failedFileFaults,
+  seedCorrectedKeepPreflightFixture, seedKeepPreflightFixture, unavailableKeepProbe,
 } from "./encode-output-keep-preflight.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
@@ -228,6 +229,42 @@ it("names a coexisting normal output and binds destination evidence without repl
     expect(stale.blockers.map(({ code }) => code)).toEqual(["KEEP_PREFLIGHT_STALE"]);
     expect(access.encodeJobs.find(job.id)?.status).toBe("failed");
   } finally { access.close(); }
+});
+
+it("identifies the published predecessor when a failed correction reserves its unchanged normal destination", async () => {
+  const seeded = await seedCorrectedKeepPreflightFixture(); fixtures.push(seeded.fixture);
+  try {
+    expect(seeded.claim.id).toBe(seeded.job.id);
+    const jobBefore = seeded.access.encodeJobs.find(seeded.job.id);
+    expect(jobBefore).toMatchObject({ status: "failed", completedAt: null, predecessorEncodeJobId: seeded.predecessor.id, reservesOutputPath: true });
+    const normalBefore = readFileSync(seeded.predecessor.outputPath);
+    const failedBefore = readFileSync(seeded.output.outputPath);
+    const recordBefore = seeded.access.encodeJobs.findValidationFailedOutput(seeded.output.id);
+    const reviewed = await seeded.preview();
+    expect(reviewed.exitCode).toBe(0);
+    expect(reviewed.result).toMatchObject({ eligible: true, blockers: [], normalDestination: {
+      status: "present", normalOutput: { encodeJobId: seeded.predecessor.id,
+        artifactIdentity: encodeOutputArtifactIdentity(seeded.predecessor.id), validationIdentity: seeded.normalValidation.id,
+        fileIdentity: seeded.normalValidation.filesystemIdentity, validationResult: "passed" },
+    }, artifact: { encodeJob: { id: seeded.job.id, status: "failed", completedAt: null } } });
+    changePredecessorValidation(seeded);
+    const stale = await seeded.preview(reviewed.result.previewToken!);
+    expect(stale.result).toMatchObject({ eligible: false, previewToken: null, review: { status: "stale" },
+      current: { artifactIdentity: seeded.identity, validationIdentity: seeded.output.id,
+        fileIdentity: reviewed.result.current.fileIdentity, authorityRevision: reviewed.result.current.authorityRevision },
+      normalDestination: { fileIdentity: reviewed.result.normalDestination.fileIdentity,
+        normalOutput: { encodeJobId: seeded.predecessor.id, validationIdentity: seeded.normalValidation.id } } });
+    expect(stale.result.blockers.map(({ code }) => code)).toEqual(["KEEP_PREFLIGHT_STALE"]);
+    expect(stale.result.current.destinationRevision).not.toBe(reviewed.result.current.destinationRevision);
+    const fresh = await seeded.preview();
+    expect(fresh.result).toMatchObject({ eligible: true, blockers: [], normalDestination: { normalOutput: { encodeJobId: seeded.predecessor.id } } });
+    expect(readFileSync(seeded.predecessor.outputPath)).toEqual(normalBefore);
+    expect(readFileSync(seeded.output.outputPath)).toEqual(failedBefore);
+    expect(seeded.access.encodeJobs.find(seeded.job.id)).toEqual(jobBefore);
+    expect(seeded.access.encodeJobs.findValidationFailedOutput(seeded.output.id)).toEqual(recordBefore);
+    expect(seeded.access.encodeOutputInspectionReceipts.list(seeded.job.id, { limit: 1, offset: 0 }).receipts).toEqual([]);
+    expect(JSON.stringify(fresh.result)).not.toContain(seeded.fixture.mediaLibraryPath);
+  } finally { seeded.access.close(); }
 });
 
 for (const [name, change, expected] of [

@@ -724,6 +724,8 @@ receipt. It reports exact artifact and validation identities, immutable source
 and structured failure evidence, inspectability, complete-write proof, current
 file identity and SHA-256, any normal output at the original destination, all
 blockers in priority order, and the acknowledgement a later Keep must require.
+When a corrected replacement reserves the destination but fails before publishing,
+the normal output still identifies its published predecessor and validation.
 A failed media probe leaves inspectability unknown without disqualifying a
 stable complete file. Incomplete, changed, unowned or unreadable files receive
 no actionable token. New-format admission stays closed.
