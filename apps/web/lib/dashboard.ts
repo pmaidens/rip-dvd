@@ -223,7 +223,7 @@ export interface DashboardEncodeJob {
   encodeOutputArtifactIdentity?: string;
   encodeOutputArtifacts?: readonly {
     identity: string;
-    state: "published" | "retained";
+    state: "published" | "retained" | "validation_failed";
   }[];
   encodeOutputArtifactsTruncated?: boolean;
   encodeOutputInspectionRevisions?: {
@@ -2220,10 +2220,12 @@ function readDashboardSnapshotRecords(
                   ? [legacyEncodeJobInvestigation(job, canRequeue)]
                   : []),
               ];
+              const failedOutputPage = access.encodeJobs.listValidationFailedOutputs(job.id, { limit: DASHBOARD_ENCODE_OUTPUT_ARTIFACT_LIMIT + 1 });
               const encodeOutputArtifacts = encodeOutputArtifactReferences(
                 job,
                 relationshipJobs,
                 retainedEncodeOutputSource.value.outputs,
+                failedOutputPage.slice(0, DASHBOARD_ENCODE_OUTPUT_ARTIFACT_LIMIT),
               );
               const publishedEncodeOutput = encodeOutputArtifacts.find(
                 ({ state }) => state === "published",
@@ -2264,7 +2266,7 @@ function readDashboardSnapshotRecords(
                       },
                     }),
                 encodeOutputArtifacts,
-                ...(truncatedEncodeOutputJobIds.has(job.id)
+                ...(truncatedEncodeOutputJobIds.has(job.id) || failedOutputPage.length > DASHBOARD_ENCODE_OUTPUT_ARTIFACT_LIMIT
                   ? { encodeOutputArtifactsTruncated: true }
                   : {}),
                 ...(publishedEncodeOutput === undefined

@@ -2911,3 +2911,23 @@ export const encodeOutputValidations = sqliteTable("encode_output_validations", 
   uniqueIndex("encode_output_validations_claim_unique").on(table.encodeJobId, table.claimToken),
   uniqueIndex("encode_output_validations_generation_unique").on(table.encodeJobId, table.filesystemIdentity, table.validatedAt),
 ]);
+
+export const validationFailedEncodeOutputs = sqliteTable("validation_failed_encode_outputs", {
+  id: text("id").$type<import("../types.js").ValidationFailedEncodeOutputId>().notNull().primaryKey(),
+  encodeJobId: text("encode_job_id").$type<EncodeJobId>().notNull()
+    .references(() => encodeJobs.id, { onDelete: "restrict" }),
+  claimToken: text("claim_token").$type<EncodeJobClaimToken>().notNull(),
+  outputPath: text("output_path").notNull(),
+  changeTimeMs: real("change_time_ms").notNull(),
+  filesystemIdentity: text("filesystem_identity").$type<EncodeOutputFilesystemIdentity>().notNull(),
+  validatedAt: integer("validated_at", { mode: "timestamp_ms" }).notNull(),
+  sourceSnapshot: text("source_snapshot", { mode: "json" }).$type<EncodeOutputSourceSnapshot>(),
+  failure: text("failure", { mode: "json" }).$type<import("../types.js").EncodeJobFailureReportInput>().notNull(),
+}, (table) => [
+  check("validation_failed_outputs_id_not_null", sql`${table.id} is not null`),
+  check("validation_failed_outputs_failure_check", sql`json_valid(${table.failure}) and json_extract(${table.failure}, '$.reasonCode') is 'output_validation_failed' and json_extract(${table.failure}, '$.phase') is 'validation'`),
+  check("validation_failed_outputs_source_check", sql`${table.sourceSnapshot} is null or (json_valid(${table.sourceSnapshot}) and json_extract(${table.sourceSnapshot}, '$.id') is ${table.claimToken} and json_extract(${table.sourceSnapshot}, '$.encodeJobId') is ${table.encodeJobId} and json_extract(${table.sourceSnapshot}, '$.source.schemaVersion') is 1)`),
+  uniqueIndex("validation_failed_outputs_claim_unique").on(table.encodeJobId, table.claimToken),
+  uniqueIndex("validation_failed_outputs_path_unique").on(table.outputPath),
+  index("validation_failed_outputs_job_index").on(table.encodeJobId, table.validatedAt, table.id),
+]);

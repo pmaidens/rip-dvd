@@ -244,6 +244,7 @@ export type ArchiveJobId = DomainId<"ArchiveJob">;
 export type EncodeJobId = DomainId<"EncodeJob">;
 export type EncodeOutputInspectionReceiptId = DomainId<"EncodeOutputInspectionReceipt">;
 export type EncodeJobFailureReportId = DomainId<"EncodeJobFailureReport">;
+export type ValidationFailedEncodeOutputId = DomainId<"ValidationFailedEncodeOutput">;
 export type RetainedEncodeOutputId = DomainId<"RetainedEncodeOutput">;
 export type ArchiveJobClaimToken = DomainId<"ArchiveJobClaim">;
 export type DiscInspectionClaimToken = DomainId<"DiscInspectionClaim">;
@@ -2698,6 +2699,11 @@ export interface EncodeJobAccess {
   listSourceClaimCandidates(options: { limit: number; offset: number }): EncodeJob[];
   claimNext(workerId: string, options?: EncodeJobClaimOptions): RunningEncodeJob | null;
   findClaimSnapshot(id: EncodeJobClaimToken): EncodeClaimSnapshot | null;
+  retainValidationFailedOutput(claim: RunningEncodeJob,
+    input: import("./encode-output-validation.js").ValidationFailedEncodeOutputInput,
+    options?: EncodeJobFailureOptions): EncodeJob;
+  findValidationFailedOutput(id: ValidationFailedEncodeOutputId): import("./encode-output-validation.js").ValidationFailedEncodeOutput | null;
+  listValidationFailedOutputs(id: EncodeJobId, page: { limit: number; offset?: number }): import("./encode-output-validation.js").ValidationFailedEncodeOutput[];
   recordOutputValidation(claim: RunningEncodeJob, identity: EncodeOutputFilesystemIdentity,
     evidence: import("./encode-output-validation.js").EncodeOutputValidationEvidence | null): import("./encode-output-validation.js").EncodeOutputValidationRecord;
   findOutputValidation(jobId: EncodeJobId, identity: EncodeOutputFilesystemIdentity, validatedAt: Date): import("./encode-output-validation.js").EncodeOutputValidationRecord | null;
@@ -3076,6 +3082,7 @@ export interface ConsistentReadAccess {
   readonly encodeJobs: Pick<
     EncodeJobAccess,
     | "listClaimSnapshots"
+    | "listValidationFailedOutputs"
     | "find"
     | "list"
     | "listForDiscSelection"
@@ -3102,7 +3109,7 @@ export interface ConsistentReadAccess {
 export interface EncodeOutputInspectionReadAccess
   extends Omit<ConsistentReadAccess, "encodeJobs"> {
   readonly encodeJobs: ConsistentReadAccess["encodeJobs"] &
-    Pick<EncodeJobAccess, "findRetainedOutput" | "findOutputValidation">;
+    Pick<EncodeJobAccess, "findRetainedOutput" | "findOutputValidation" | "findValidationFailedOutput">;
 }
 
 export interface DvdCheckpointReadHandle {

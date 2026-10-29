@@ -620,7 +620,14 @@ rip-dvd encode-output export encode-output-v1.published.<encode-job-id> --destin
 A completed Encode Job exposes its current and retained generations in
 `encodeOutputArtifacts`; retained-output summaries also include their artifact
 identity. Current identities use `encode-output-v1.published.<encode-job-id>`
-and retained identities use `encode-output-v1.retained.<retained-output-id>`.
+and retained normal identities use `encode-output-v1.retained.<retained-output-id>`.
+Complete validation-failed writes use `encode-output-v1.failed.<failed-output-id>`
+and state `validation_failed`. Only newly completed, stable, owned writes gain
+this identity. Earlier quarantined failures remain unclassified. Failed artifacts
+preserve their validation failure, file identity and immutable source claim when
+recorded. A changed file loses completeness and acknowledgement/export availability.
+The Encode Job stays failed and the normal library output stays in place.
+Inspection and export use the same commands for all three identity kinds.
 Bounded lists set `encodeOutputArtifactsTruncated` when older generations are
 omitted. Page the complete history with
 `inspect encode-jobs <encode-job-id> --limit 1..100 --offset <n>`; each result
@@ -675,7 +682,7 @@ History defaults to 20 receipts. Use `inspect --receipt-limit <1..100>
 older receipts. The HTTP query uses `receipt-limit` and `receipt-offset`.
 
 The receipt binds the observed file and recorded validation evidence to a
-particular normal output generation. Requeueing a job does not acknowledge its
+particular output generation. Requeueing a job does not acknowledge its
 replacement bytes. Retained normal generations stay separately addressable,
 and their original receipts remain available. Same-key, same-input retries
 return the original receipt even after later changes. Changed input conflicts
@@ -685,7 +692,10 @@ changed or unsafe files also report their observed `error.currentIdentity`
 when obtainable, separately from the owned artifact's inspection state.
 Unsafe or changing files cannot be acknowledged. Probe failure can be
 acknowledged as an explicit unknown, preserving the reported validation result
-and `playability: not_assessed`.
+and `playability: not_assessed`. A failed-artifact receipt records only inspection.
+It does not imply Keep or satisfy the normal-output acknowledgement condition for
+automatic Damage Preview retention. Keep preflight and mutation are unavailable
+until their separate capabilities ship.
 Receipt applicability also requires the same observed file mutation revision
 and provenance. Moving a retained file may change that revision. Its original
 receipt stays in history, but a fresh acknowledgement is required unless a

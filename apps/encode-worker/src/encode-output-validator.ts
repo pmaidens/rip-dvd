@@ -106,6 +106,7 @@ export class EncodeOutputValidationError extends Error {
   constructor(
     message: string,
     readonly evidence: EncodeOutputFailureEvidence,
+    readonly retentionSafe = true,
   ) {
     super(`Encode output validation failed: ${message}`);
     this.name = "EncodeOutputValidationError";
@@ -121,6 +122,12 @@ function validationError(
   },
 ): EncodeOutputValidationError {
   return new EncodeOutputValidationError(message, evidence);
+}
+
+function storageFault(error: unknown): boolean {
+  const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
+  return ["EIO", "ENOSPC", "EDQUOT", "EROFS", "ESTALE", "ENODEV", "ENXIO"].includes(code) ||
+    /input\/output error|no space left|disk quota exceeded|read-only file system|stale file handle/i.test(normalizeToolError(error));
 }
 
 function normalizeToolError(error: unknown): string {
@@ -290,10 +297,8 @@ async function runTool(
     return await runMediaTool(request);
   } catch (error) {
     request.signal.throwIfAborted();
-    throw validationError(
-      check,
-      `${description} failed: ${normalizeToolError(error)}`,
-    );
+    throw new EncodeOutputValidationError(`${description} failed: ${normalizeToolError(error)}`,
+      { kind: "validation_check", check }, !storageFault(error));
   }
 }
 
@@ -682,10 +687,8 @@ async function validateSubtitleStreams({
       });
     } catch (error) {
       signal.throwIfAborted();
-      throw validationError(
-        "subtitle_cleanup",
-        `subtitle cleanup failed: ${normalizeToolError(error)}`,
-      );
+      throw new EncodeOutputValidationError(`subtitle cleanup failed: ${normalizeToolError(error)}`,
+        { kind: "validation_check", check: "subtitle_cleanup" }, false);
     }
     removedEmptyStreams = true;
   }

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   closeSync,
   constants as fsConstants,
+  fstatSync,
   fsyncSync,
   linkSync,
   lstatSync,
@@ -1921,6 +1922,7 @@ export async function executeEncodeClaim(
   let published = false;
   let mutationLockHandle: number | null = null;
   let failurePhase: EncodeJobFailureReportInput["phase"] = "preparation";
+  let completedWriteMetadata: Stats | undefined;
   let publicationOperation: Extract<
     EncodeJobFailureReportInput["evidence"],
     { kind: "publication" }
@@ -2118,7 +2120,7 @@ export async function executeEncodeClaim(
       phase: "validation",
       etaSeconds: null,
     });
-    await requireRegularOutputForValidation(
+    completedWriteMetadata = await requireRegularOutputForValidation(
       partialPath,
       "HandBrake did not produce a complete regular output file",
     );
@@ -2295,6 +2297,47 @@ export async function executeEncodeClaim(
           `Encode Job ${claim.id} cancellation is waiting for HandBrake closure`,
         );
         return;
+      }
+    }
+    if (!cancellationRequested && !signal.aborted && !published &&
+        pendingPartialCleanup === undefined && partialPath !== undefined &&
+        completedWriteMetadata !== undefined && error instanceof EncodeOutputValidationError && error.retentionSafe) {
+      try {
+        options.runner.requireInactive?.(partialPath);
+        if (options.runner.isActive?.(partialPath) ?? false) throw new Error("Encode writer is still active");
+        // The mutation lock stays held across proof, durable relocation, and the
+        // claim-fenced transaction. A crash before the record creates no authority.
+        renewClaim();
+        const descriptor = openSync(partialPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+        try {
+          const before = fstatSync(descriptor);
+          if (!sameEncodeOutputMutationSnapshot(completedWriteMetadata, before) ||
+              !sameEncodeOutputMutationSnapshot(before, lstatSync(partialPath))) {
+            throw new Error("Encode Output changed during validation");
+          }
+          fsyncSync(descriptor);
+          if (!sameEncodeOutputMutationSnapshot(before, fstatSync(descriptor))) throw new Error("Encode Output changed during storage synchronization");
+          signal.throwIfAborted();
+          renewClaim();
+          const failedPath = `${partialPath}.failed.${randomUUID()}`;
+          if (Buffer.byteLength(failedPath) > MAX_PATH_BYTES) throw new Error("Failed Encode Output path is unsafe");
+          renameSync(partialPath, failedPath);
+          syncPathAtMutationBoundary(dirname(failedPath));
+          const retained = lstatSync(failedPath);
+          if (!sameEncodeOutputAuthoritySnapshot(before, retained) ||
+              !sameEncodeOutputMutationSnapshot(retained, fstatSync(descriptor))) {
+            throw new Error("Failed Encode Output changed during retention");
+          }
+          signal.throwIfAborted();
+          options.access.encodeJobs.retainValidationFailedOutput(claim, {
+            outputPath: failedPath, filesystemIdentity: encodeOutputFilesystemIdentity(retained), changeTimeMs: retained.ctimeMs,
+            failure: encodeFailureReport(error, "validation"),
+          }, { preserveReplacementAuthority: replaceableFinal !== undefined });
+          options.log("Encode Output retained as a separate validation-failed artifact");
+          return;
+        } finally { closeSync(descriptor); }
+      } catch (retentionError) {
+        options.log(`Failed Encode Output was not eligible for retention: ${normalizeErrorMessage(retentionError)}`);
       }
     }
     const cleanupFailures: string[] = [];

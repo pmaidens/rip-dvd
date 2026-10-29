@@ -233,12 +233,13 @@ const commandDefinitions = [
   },
   {
     name: "encode-output",
-    description: "Inspect, query source interval correspondence, export, or explicitly acknowledge inspection of a canonical Encode Output generation. Inspection, interval queries and export are read-only.",
+    description: "Inspect, query source interval correspondence, export, or explicitly acknowledge inspection of a normal or complete validation-failed canonical Encode Output. Inspection, interval queries and export are read-only; acknowledgement does not Keep a failed output.",
     usage: "rip-dvd encode-output <inspect|intervals|export|acknowledge-inspection> <artifact-identity> [options]",
     inputs: {
       arguments: ["action: inspect|intervals|export|acknowledge-inspection", "artifact-identity"],
       options: ["--destination <path> (export only)", "--receipt-limit <1..100> (inspect)", "--receipt-offset <n> (inspect)", "--key <key> (acknowledge-inspection)", "--json <object> | --file <path> | --stdin (intervals or acknowledge-inspection)"],
       intervalQuerySchema: { assessmentIdentity: "exact recorded assessment identity", titleIdentityObservationId: "recorded title observation identity", intervalIndexes: "1..100 distinct indexes in recorded estimatedAffectedPlayback.intervals" },
+      artifactIdentityKinds: ["encode-output-v1.published.<encode-job-id>", "encode-output-v1.retained.<retained-output-id>", "encode-output-v1.failed.<failed-output-id>"],
       acknowledgementSchema: { acknowledged: "true", reviewToken: "exact operatorInspection.reviewToken from inspect" },
     },
     example:

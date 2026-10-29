@@ -63,7 +63,7 @@ function inspectedOutputResponse(
   job: DashboardEncodeJob,
   fileIdentity: string,
   artifactIdentity = job.encodeOutputArtifactIdentity,
-  state: "published" | "retained" = "published",
+  state: "published" | "retained" | "validation_failed" = "published",
   probeFailed = false,
   exportEligible = false,
 ): Response {
@@ -79,7 +79,8 @@ function inspectedOutputResponse(
         completedAt: "2026-09-01T12:00:00.000Z",
       },
       validation: {
-        result: exportEligible ? "passed" : "unknown",
+        result: state === "validation_failed" ? "failed" : exportEligible ? "passed" : "unknown",
+        ...(state === "validation_failed" ? { failure: { diagnostic: "Synthetic complete-output validation failure", evidence: { kind: "duration", expectedSeconds: 500, observedSeconds: 10 } } } : {}),
         identity: exportEligible ? fileIdentity : null,
         evidence: exportEligible
           ? {
@@ -273,16 +274,18 @@ describe("encoding page tabs", () => {
     }
   });
 
-  it("offers each current and retained Encode Output generation", async () => {
+  it("offers current, retained normal and validation-failed Encode Output generations", async () => {
     const completed = encodeJob("completed");
     const publishedIdentity = completed.encodeOutputArtifactIdentity!;
     const retainedIdentity =
       `encode-output-v1.retained.${"a".repeat(8)}-${"b".repeat(4)}-${"c".repeat(4)}-${"d".repeat(4)}-${"e".repeat(12)}`;
+    const failedIdentity = `encode-output-v1.failed.${"6".repeat(8)}-${"7".repeat(4)}-${"8".repeat(4)}-${"9".repeat(4)}-${"a".repeat(12)}`;
     const job = {
       ...completed,
       encodeOutputArtifacts: [
         { identity: publishedIdentity, state: "published" as const },
         { identity: retainedIdentity, state: "retained" as const },
+        { identity: failedIdentity, state: "validation_failed" as const },
       ],
     };
     const state = {
@@ -301,7 +304,7 @@ describe("encoding page tabs", () => {
           ? "synthetic-retained-identity"
           : "synthetic-published-identity",
         identity,
-        identity === retainedIdentity ? "retained" : "published",
+        identity === failedIdentity ? "validation_failed" : identity === retainedIdentity ? "retained" : "published",
       );
     });
     vi.stubGlobal("fetch", fetcher);
@@ -319,6 +322,7 @@ describe("encoding page tabs", () => {
         expect.arrayContaining([
           "Inspect current output",
           "Inspect retained output 1",
+          "Inspect failed output 1",
         ]),
       );
       const retainedButton = buttons.find(
@@ -334,6 +338,13 @@ describe("encoding page tabs", () => {
         expect.objectContaining({ cache: "no-store" }),
       );
       expect(container.textContent).toContain("synthetic-retained-identity");
+      await act(async () => {
+        buttons.find(({ textContent }) => textContent === "Inspect failed output 1")!.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(container.textContent).toContain("Artifact stateValidation Failed");
+      expect(container.textContent).toContain("Validation resultFailed");
+      expect(container.textContent).toContain("Synthetic complete-output validation failure");
     } finally {
       await act(async () => root.unmount());
     }

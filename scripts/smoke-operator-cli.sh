@@ -92,6 +92,14 @@ set -e
 [ "$receipt_status" -eq 2 ]
 printf '%s\n' "$receipt_output" | assert_json_fields 'error.code=OUTPUT_AUTHORITY_CHANGED'
 set +e
+failed_inspection="$(invoke encode-output inspect \
+  encode-output-v1.failed.00000000-0000-4000-8000-000000000000 \
+  2>"$temporary_directory/failed-inspection.stderr")"
+failed_inspection_status=$?
+set -e
+[ "$failed_inspection_status" -eq 2 ]
+printf '%s\n' "$failed_inspection" | assert_json_fields 'error.code=NOT_FOUND'
+set +e
 preview_output="$(invoke damage-preview availability synthetic-missing-archive \
   2>"$temporary_directory/preview.stderr")"
 preview_status=$?

@@ -47,6 +47,7 @@ import { describeArchiveRequestWaitingStatus } from "./archive-request-waiting-s
 import {
   encodeOutputArtifactReferences,
   retainedEncodeOutputArtifactIdentity,
+  validationFailedEncodeOutputArtifactIdentity,
 } from "./encode-output-inspection.js";
 import { describeDvdRecoveryStorage } from "./dvd-recovery-storage.js";
 import {
@@ -237,11 +238,13 @@ function presentEncodeJob(
   correctionLinks: readonly EncodeJob[],
   retainedOutputs: Parameters<typeof encodeOutputArtifactReferences>[2],
   retainedHistoryTruncated: boolean,
+  failedOutputs: readonly import("@rip-dvd/data-access").ValidationFailedEncodeOutput[] = [],
 ) {
   const artifacts = encodeOutputArtifactReferences(
     job,
     correctionLinks,
     retainedOutputs,
+    failedOutputs,
   );
   const publishedArtifact = artifacts.find(({ state }) => state === "published");
   const {
@@ -330,12 +333,11 @@ function visibleEncodeJobs(
     options.truncatedSourceEncodeJobIds ??
       retainedPage?.truncatedSourceEncodeJobIds ?? [],
   );
-  return jobs.map((job) => presentEncodeJob(
-    job,
-    correctionLinks,
-    retainedOutputs,
-    truncatedJobIds.has(job.id),
-  ));
+  return jobs.map((job) => {
+    const failedOutputs = access.encodeJobs.listValidationFailedOutputs(job.id, { limit: 101 });
+    return presentEncodeJob(job, correctionLinks, retainedOutputs,
+      truncatedJobIds.has(job.id) || failedOutputs.length > 100, failedOutputs.slice(0, 100));
+  });
 }
 
 function visibleArchive(
@@ -1095,16 +1097,18 @@ function readDetail(
       }).map((candidate) => [candidate.id, candidate]));
       const visibleJob = visibleById.get(job.id)!;
       const claimPage = access.encodeJobs.listClaimSnapshots(job.id, { limit: options.limit + 1, offset: options.offset });
-      const pageArtifacts = visibleJob.encodeOutputArtifacts.filter(
-        ({ state }) => state === "retained" || options.offset === 0,
-      );
+      const failedPage = access.encodeJobs.listValidationFailedOutputs(job.id, { limit: options.limit + 1, offset: options.offset });
+      const pageArtifacts = [
+        ...visibleJob.encodeOutputArtifacts.filter(({ state }) => state === "retained" || (state === "published" && options.offset === 0)),
+        ...failedPage.slice(0, options.limit).map((output) => ({ identity: validationFailedEncodeOutputArtifactIdentity(output.id), state: "validation_failed" as const })),
+      ];
       return {
         ...visibleJob,
         encodeOutputArtifacts: pageArtifacts,
         encodeOutputArtifactPage: {
           offset: options.offset,
           limit: options.limit,
-          nextOffset: outputPage.nextOffset,
+          nextOffset: failedPage.length > options.limit ? options.offset + options.limit : outputPage.nextOffset,
         },
         claimSnapshots: claimPage.slice(0, options.limit),
         claimSnapshotPage: { limit: options.limit, offset: options.offset, nextOffset: claimPage.length > options.limit ? options.offset + options.limit : null },

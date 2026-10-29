@@ -204,12 +204,13 @@ export async function requestEncodeOutputHistoryPage(
   if (!Array.isArray(payload.item?.encodeOutputArtifacts) ||
       !payload.item.encodeOutputArtifacts.every((artifact): artifact is {
         identity: string;
-        state: "published" | "retained";
+        state: "published" | "retained" | "validation_failed";
       } =>
         typeof artifact === "object" && artifact !== null &&
         typeof (artifact as { identity?: unknown }).identity === "string" &&
         ((artifact as { state?: unknown }).state === "published" ||
-          (artifact as { state?: unknown }).state === "retained")
+          (artifact as { state?: unknown }).state === "retained" ||
+          (artifact as { state?: unknown }).state === "validation_failed")
       ) || typeof page !== "object" || page === null ||
       (page as { offset?: unknown }).offset !== offset ||
       !(
@@ -268,6 +269,10 @@ function EncodeOutputInspectionDetails({
           <dt>Validation result</dt>
           <dd>{displayTerm(artifact.validation.result)}</dd>
         </div>
+        {artifact.validation.failure === undefined ? null : <div>
+          <dt>Validation failure</dt>
+          <dd>{artifact.validation.failure.diagnostic ?? "Validation failed"} · {JSON.stringify(artifact.validation.failure.evidence)}</dd>
+        </div>}
         <div>
           <dt>Validation identity</dt>
           <dd>{artifact.validation.identity ?? "Not recorded"}</dd>
@@ -1912,6 +1917,8 @@ export function DashboardView({
                             >
                               {currentInspection?.status === "loading"
                                 ? "Inspecting output…"
+                                : artifact.state === "validation_failed"
+                                  ? `Inspect failed output ${artifacts.slice(0, artifactIndex + 1).filter(({ state }) => state === "validation_failed").length}`
                                 : artifacts.length === 1
                                   ? "Inspect output"
                                   : artifact.state === "published"

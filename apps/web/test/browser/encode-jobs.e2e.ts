@@ -39,12 +39,24 @@ async function expectNoPageOverflow(page: Page): Promise<void> {
   expect(result.scrollWidth).toBeLessThanOrEqual(result.clientWidth);
 }
 
-for (const recordedSource of [false, true]) {
-test(`inspects and explicitly acknowledges a completed canonical Encode Output, source recorded=${recordedSource}`, async ({
+for (const scenario of ["historical", "recorded", "validation_failed"] as const) {
+const recordedSource = scenario !== "historical";
+const validationFailed = scenario === "validation_failed";
+test(`inspects and explicitly acknowledges a canonical Encode Output, scenario=${scenario}`, async ({
   page,
 }, testInfo) => {
   const variant = fixtureVariant(testInfo.project.name);
   const acknowledgements: unknown[] = [];
+  if (validationFailed) await page.route("**/api/dashboard*", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.encodeJobs.items = body.encodeJobs.items.map((job: { encodeOutputArtifacts?: { identity: string; state: string }[] }) => ({
+      ...job, encodeOutputArtifacts: job.encodeOutputArtifacts?.map((artifact) => ({
+        identity: artifact.identity.replace(".published.", ".failed."), state: "validation_failed",
+      })),
+    }));
+    await route.fulfill({ response, json: body });
+  });
   await page.route("**/api/encode-outputs/*", async (route) => {
     const artifactIdentity = decodeURIComponent(
       new URL(route.request().url()).pathname.split("/").at(-1) ?? "",
@@ -72,14 +84,15 @@ test(`inspects and explicitly acknowledges a completed canonical Encode Output, 
         artifact: {
           identity: artifactIdentity,
           type: "canonical_encode_output",
-          state: "published",
+          state: validationFailed ? "validation_failed" : "published",
           encodeJob: {
             id: "synthetic-browser-encode-job",
-            status: "completed",
+            status: validationFailed ? "failed" : "completed",
             completedAt: "2026-09-01T12:00:00.000Z",
           },
           validation: {
-            result: "unknown",
+            result: validationFailed ? "failed" : "unknown",
+            ...(validationFailed ? { recordedResult: "failed", failure: { diagnostic: "Synthetic output duration failure", evidence: { kind: "duration", expectedSeconds: 500, observedSeconds: 10 } } } : {}),
             recordIdentity: recordedSource ? "synthetic-browser-validation-record" : null,
             checks: recordedSource ? { policyVersion: "encode-output-validation-v1" } : null,
             identity: null,
@@ -138,13 +151,18 @@ test(`inspects and explicitly acknowledges a completed canonical Encode Output, 
   const outputCard = page.getByRole("article").filter({
     hasText: `Queue completed ${variant}`,
   });
-  await outputCard.getByRole("button", { name: "Inspect output" }).click();
+  await outputCard.getByRole("button", { name: validationFailed ? "Inspect failed output 1" : "Inspect output" }).click();
 
   const inspection = outputCard.getByRole("region", {
     name: /Encode Output encode-output-v1\./,
   });
   await expect(inspection).toContainText("Media metadata inspected");
-  await expect(inspection).toContainText("Validation resultUnknown");
+  await expect(inspection).toContainText(validationFailed ? "Validation resultFailed" : "Validation resultUnknown");
+  if (validationFailed) {
+    await expect(inspection).toContainText("Artifact stateValidation Failed");
+    await expect(inspection).toContainText("Synthetic output duration failure");
+    await expect(inspection).toContainText("It does not assert validation success, watchability, damage-interval playback, or a Keep decision.");
+  }
   await expect(inspection).toContainText("Validation identityNot recorded");
   await expect(inspection).toContainText("Validation evidenceNot Recorded");
   await expect(inspection).toContainText(

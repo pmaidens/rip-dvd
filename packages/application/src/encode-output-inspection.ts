@@ -26,12 +26,14 @@ import type {
   EncodeOutputValidationRecord,
   EncodeOutputSourceSnapshot,
   EncodeClaimSource,
+  ValidationFailedEncodeOutput,
+  ValidationFailedEncodeOutputId,
 } from "@rip-dvd/data-access";
 import { parseMutationKey } from "./mutation-key.js";
 import { assessmentHasUnknownSourceImpact } from "./source-damage-impact.js";
 
 const ENCODE_OUTPUT_ARTIFACT_PATTERN =
-  /^encode-output-v1\.(published|retained)\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+  /^encode-output-v1\.(published|retained|failed)\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 const MEDIA_PROBE_TIMEOUT_MS = 30_000;
 const MEDIA_PROBE_MAX_OUTPUT_BYTES = 1024 * 1024;
 
@@ -240,7 +242,8 @@ export function retainedEncodeOutputArtifactIdentity(
 
 type ParsedEncodeOutputArtifactIdentity =
   | { kind: "published"; jobId: EncodeJobId }
-  | { kind: "retained"; retainedOutputId: RetainedEncodeOutputId };
+  | { kind: "retained"; retainedOutputId: RetainedEncodeOutputId }
+  | { kind: "failed"; failedOutputId: ValidationFailedEncodeOutputId };
 
 function parseEncodeOutputArtifactIdentity(
   identity: unknown,
@@ -252,6 +255,7 @@ function parseEncodeOutputArtifactIdentity(
   if (!match) {
     throw new InvalidEncodeOutputArtifactIdentityError();
   }
+  if (match[1] === "failed") return { kind: "failed", failedOutputId: match[2] as ValidationFailedEncodeOutputId };
   return match[1] === "published"
     ? { kind: "published", jobId: match[2] as EncodeJobId }
     : {
@@ -260,9 +264,13 @@ function parseEncodeOutputArtifactIdentity(
     };
 }
 
+export function validationFailedEncodeOutputArtifactIdentity(id: ValidationFailedEncodeOutputId): string {
+  return `encode-output-v1.failed.${id}`;
+}
+
 export interface EncodeOutputArtifactReference {
   identity: string;
-  state: "published" | "retained";
+  state: "published" | "retained" | "validation_failed";
 }
 
 function ownsPublishedOutput(job: EncodeJob): boolean {
@@ -293,6 +301,7 @@ export function encodeOutputArtifactReferences(
   job: EncodeJob,
   correctionLinks: readonly EncodeJob[],
   retainedOutputs: readonly RetainedEncodeOutputSummary[],
+  failedOutputs: readonly Pick<ValidationFailedEncodeOutput, "id" | "encodeJobId">[] = [],
 ): EncodeOutputArtifactReference[] {
   const directSuccessor = correctionLinks.find(
     (candidate) => candidate.predecessorEncodeJobId === job.id,
@@ -313,7 +322,8 @@ export function encodeOutputArtifactReferences(
       identity: retainedEncodeOutputArtifactIdentity(output.id),
       state: "retained" as const,
     }));
-  return [...published, ...retained];
+  return [...published, ...retained, ...failedOutputs.filter((output) => output.encodeJobId === job.id)
+    .map((output) => ({ identity: validationFailedEncodeOutputArtifactIdentity(output.id), state: "validation_failed" as const }))];
 }
 
 function unknownInspection(
@@ -337,14 +347,16 @@ function unknownInspection(
 interface ResolvedEncodeOutput {
   validationRecord: EncodeOutputValidationRecord | null;
   artifactIdentity: string;
-  artifactState: "published" | "retained";
+  artifactState: "published" | "retained" | "validation_failed";
   authorityKey: string;
   authorityUnavailableReason: string | null;
   job: EncodeJob;
   originalDiscArchiveId: string | null;
   outputPath: string;
   recordedFilesystemIdentity: EncodeOutputFilesystemIdentity | null;
-  recordedValidationResult: "passed" | null;
+  recordedValidationResult: "passed" | "failed" | null;
+  failure?: ValidationFailedEncodeOutput["failure"];
+  recordedChangeTimeMs?: number;
   recordedValidationFilesystemIdentity:
     | EncodeOutputFilesystemIdentity
     | null;
@@ -378,7 +390,7 @@ function inspectionResponse(
   const validation = presentedValidation(input, file, inspection);
   const presentedFile = {
     ...file,
-    completeness: validation.result === "passed" &&
+    completeness: (validation.result === "passed" || validation.result === "failed") &&
         input.recordedCompleteness === "complete"
       ? "complete" as const
       : "unknown" as const,
@@ -470,7 +482,7 @@ function presentedValidation(
   file: PresentedEncodeOutputFile,
   inspection: Parameters<typeof inspectionResponse>[2],
 ) {
-  const hasEvidence = input.recordedValidationResult === "passed" &&
+  const hasEvidence = input.recordedValidationResult !== null &&
     input.recordedValidationFilesystemIdentity !== null &&
     input.recordedValidatedAt !== null &&
     input.recordedCompleteness === "complete";
@@ -478,11 +490,12 @@ function presentedValidation(
     ? null
     : file.identity === input.recordedValidationFilesystemIdentity;
   const result = hasEvidence && appliesToObservedFile === true &&
-      inspection.inspectability.status === "inspected"
-    ? "passed" as const
+      (input.recordedValidationResult === "failed" || inspection.inspectability.status === "inspected")
+    ? input.recordedValidationResult!
     : "unknown" as const;
   return {
     result,
+    ...(input.failure === undefined ? {} : { recordedResult: "failed" as const, failure: input.failure }),
     recordIdentity: input.validationRecord?.id ?? null,
     checks: input.validationRecord?.evidence ?? null,
     identity: input.recordedValidationFilesystemIdentity,
@@ -672,6 +685,25 @@ function resolveRetainedEncodeOutput(
   };
 }
 
+function resolveValidationFailedEncodeOutput(
+  access: EncodeOutputInspectionReadAccess,
+  id: ValidationFailedEncodeOutputId,
+): ResolvedEncodeOutput {
+  const artifactIdentity = validationFailedEncodeOutputArtifactIdentity(id);
+  const output = access.encodeJobs.findValidationFailedOutput(id);
+  const job = output === null ? null : access.encodeJobs.find(output.encodeJobId);
+  if (output === null || job === null) throw new RecordNotFoundError("Encode Output", artifactIdentity);
+  return {
+    artifactIdentity, artifactState: "validation_failed", job,
+    validationRecord: { ...output, evidence: null }, failure: output.failure,
+    authorityKey: canonicalPublicationJson(output), authorityUnavailableReason: null,
+    originalDiscArchiveId: originalDiscArchiveId(access, job), outputPath: output.outputPath,
+    recordedFilesystemIdentity: output.filesystemIdentity, recordedValidationResult: "failed",
+    recordedValidationFilesystemIdentity: output.filesystemIdentity, recordedValidatedAt: output.validatedAt,
+    recordedCompleteness: "complete", retainedOutputId: null, recordedChangeTimeMs: output.changeTimeMs,
+  };
+}
+
 function resolveEncodeOutputAuthority(
   access: DataAccess,
   identity: ParsedEncodeOutputArtifactIdentity,
@@ -679,7 +711,9 @@ function resolveEncodeOutputAuthority(
   return access.readEncodeOutputInspectionSnapshot((snapshot) =>
     identity.kind === "published"
       ? resolvePublishedEncodeOutput(snapshot, identity.jobId)
-      : resolveRetainedEncodeOutput(snapshot, identity.retainedOutputId)
+      : identity.kind === "failed"
+        ? resolveValidationFailedEncodeOutput(snapshot, identity.failedOutputId)
+        : resolveRetainedEncodeOutput(snapshot, identity.retainedOutputId)
   );
 }
 
@@ -784,10 +818,10 @@ async function inspectEncodeOutputEvidence(
   }
   if (
     base.recordedFilesystemIdentity !== null &&
-    !matchesEncodeOutputFilesystemIdentity(
+    (!matchesEncodeOutputFilesystemIdentity(
       base.recordedFilesystemIdentity,
       before,
-    )
+    ) || (base.recordedChangeTimeMs !== undefined && before.ctimeMs !== base.recordedChangeTimeMs))
   ) {
     const changedAuthority = changedAuthorityResponse(
       access,
@@ -930,6 +964,7 @@ export async function inspectEncodeOutput(
     artifact.file.identity,
     artifact.validation.identity,
     artifact.validation.evidence,
+    ...(artifact.state === "validation_failed" ? [artifact.state, artifact.validation.recordIdentity] : []),
   ])}`;
   const eligible = artifact.file.status === "available" &&
     artifact.file.identityContinuity === "verified";
@@ -1025,6 +1060,7 @@ export async function acknowledgeEncodeOutputInspection(
   const parsed = parseEncodeOutputArtifactIdentity(artifactIdentityInput);
   const artifactIdentity = parsed.kind === "published"
     ? encodeOutputArtifactIdentity(parsed.jobId)
+    : parsed.kind === "failed" ? validationFailedEncodeOutputArtifactIdentity(parsed.failedOutputId)
     : retainedEncodeOutputArtifactIdentity(parsed.retainedOutputId);
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new InvalidEncodeOutputAcknowledgementError();
@@ -1182,7 +1218,7 @@ function exportSourceRejection(
   return matchesEncodeOutputFilesystemIdentity(
     base.recordedFilesystemIdentity,
     metadata,
-  )
+  ) && (base.recordedChangeTimeMs === undefined || metadata.ctimeMs === base.recordedChangeTimeMs)
     ? null
     : new EncodeOutputExportRejectedError(
       "OUTPUT_IDENTITY_CHANGED",
