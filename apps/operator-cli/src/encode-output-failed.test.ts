@@ -32,6 +32,15 @@ it("inspects and exports a complete failed generation without promising playback
       provenance: { sourceSnapshot: { id: claim.claimToken, source: { sourceContinuityRisk: true } } },
       inspectability: { status: "unknown", reasonCode: "OUTPUT_PROBE_FAILED" }, media: { playability: "not_assessed" } });
     expect(inspected.operatorInspection.history).toEqual([]);
+    const source = inspected.artifact.provenance.sourceSnapshot!.source;
+    const intervals = await fixture.run(["encode-output", "intervals", identity, "--json", JSON.stringify({
+      assessmentIdentity: source.assessment.id, titleIdentityObservationId: source.titleIdentity.id, intervalIndexes: [0],
+    })], undefined, undefined, { encodeOutputMediaProbe: probe });
+    expect(intervals).toMatchObject({ exitCode: 0, result: {
+      inspection: { artifact: { state: "validation_failed", validation: { result: "failed" } } },
+      intervals: [{ status: "unknown", outputInterval: null, reasonCode: "OUTPUT_INSPECTION_UNAVAILABLE" }],
+      targetedLocation: { eligible: false, reasonCode: "OUTPUT_MAPPING_UNKNOWN" },
+    } });
     const destination = join(fixture.operatorHostPath, "failed-export.mkv");
     expect((await fixture.run(["encode-output", "export", identity, "--destination", destination])).exitCode).toBe(0);
     expect(readFileSync(destination, "utf8")).toBe("synthetic complete failed encode");

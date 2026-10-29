@@ -5,6 +5,7 @@ import { seedEncodeClaim, withdrawClaimAcceptance } from "../../../../../operato
 import { publishSyntheticClaim, seedMixedCoverageOutput } from "../../../../../operator-cli/src/encode-output-provenance.test-support.js";
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
 import { retainSyntheticFailedOutput } from "../../../../../operator-cli/src/encode-output-failed.test-support.js";
+import { createEncodeOutputIntervalsRoute } from "./intervals/route";
 import { createEncodeOutputAcknowledgementRoute, createEncodeOutputInspectionRoute } from "./route";
 
 const origin = "http://localhost:3000";
@@ -164,6 +165,14 @@ it("shares failed-artifact inspection and acknowledgement without changing norma
     expect(cli.result).toEqual(inspection);
     expect(inspection.artifact).toMatchObject({ state: "validation_failed", validation: { result: "failed" },
       file: { completeness: "complete" }, inspectability: { status: "unknown" }, media: { playability: "not_assessed" } });
+    const source = inspection.artifact.provenance.sourceSnapshot!.source;
+    const query = { assessmentIdentity: source.assessment.id, titleIdentityObservationId: source.titleIdentity.id, intervalIndexes: [0] };
+    const intervalWeb = await createEncodeOutputIntervalsRoute(new Request(`${origin}/api/encode-outputs/${identity}/intervals?query=${encodeURIComponent(JSON.stringify(query))}`), identity, () => access, failedProbe);
+    const intervalCli = await fixture.run(["encode-output", "intervals", identity, "--json", JSON.stringify(query)], undefined, undefined, { encodeOutputMediaProbe: failedProbe });
+    expect(intervalWeb.status).toBe(200);
+    expect(intervalCli.exitCode).toBe(0);
+    expect(intervalCli.result).toEqual(await intervalWeb.json());
+    expect(intervalCli.result).toMatchObject({ intervals: [{ status: "unknown", outputInterval: null }], targetedLocation: { eligible: false } });
     const body = { acknowledged: true, reviewToken: inspection.operatorInspection.reviewToken, mutationKey: "synthetic-failed-http-receipt" };
     const acknowledged = await createEncodeOutputAcknowledgementRoute(request(identity, body), identity, () => access, () => origin, failedProbe);
     const replay = await fixture.run(["encode-output", "acknowledge-inspection", identity, "--key", body.mutationKey, "--json",
