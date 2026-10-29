@@ -1,5 +1,5 @@
 import type { EncodeClaimSource } from "./encode-claim-snapshot.js";
-import type { EncodeJobClaimToken, EncodeJobId, EncodeOutputFilesystemIdentity } from "./types.js";
+import type { EncodeJobClaimToken, EncodeJobId, EncodeOutputFilesystemIdentity, ValidationFailedEncodeOutputId } from "./types.js";
 
 export interface EncodeOutputSourceSnapshot {
   id: EncodeJobClaimToken;
@@ -28,4 +28,22 @@ export interface EncodeOutputValidationRecord {
   validatedAt: Date;
   sourceSnapshot: EncodeOutputSourceSnapshot | null;
   evidence: EncodeOutputValidationEvidence | null;
+}
+
+/** A completed write that failed media validation, separate from normal generations. */
+export interface ValidationFailedEncodeOutput extends Omit<EncodeOutputValidationRecord, "evidence"> {
+  id: ValidationFailedEncodeOutputId;
+  outputPath: string;
+  changeTimeMs: number;
+  failure: import("./types.js").EncodeJobFailureReportInput;
+}
+
+/** Artifact discovery never loads media paths or full failure/source evidence. */
+export type ValidationFailedEncodeOutputSummary = Pick<ValidationFailedEncodeOutput, "id" | "encodeJobId">;
+
+export interface ValidationFailedEncodeOutputInput {
+  outputPath: string;
+  filesystemIdentity: EncodeOutputFilesystemIdentity;
+  changeTimeMs: number;
+  failure: import("./types.js").EncodeJobFailureReportInput;
 }

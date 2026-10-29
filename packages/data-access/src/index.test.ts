@@ -1373,6 +1373,7 @@ describe("data-access facade", () => {
         "encode_job_failure_reports",
         "encode_output_inspection_receipts",
         "encode_output_validations",
+        "validation_failed_encode_outputs",
         "filesystem_verification_runs",
         "mutation_invocations",
         "rearchive_mapping_proposal_items",
@@ -1380,7 +1381,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(54);
+    expect(identifierTables).toHaveLength(55);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -10027,10 +10028,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 17",
+          "select name from __drizzle_migrations order by id desc limit 18",
         )
         .all(),
       ).toEqual([
+        { name: "20261028235557_slippery_paladin" },
         { name: "20261028231111_encode-output-validations" },
         { name: "20261028221623_encode-claim-snapshots" },
         {

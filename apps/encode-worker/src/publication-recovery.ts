@@ -1,8 +1,10 @@
+import { fingerprintCompletedEncodeOutput } from "./encode-output-completion.js";
 import { assertEncodeClaimSource } from "@rip-dvd/application";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
   constants as fsConstants,
+  fstatSync,
   fsyncSync,
   linkSync,
   lstatSync,
@@ -732,6 +734,11 @@ async function optionalMetadata(path: string): Promise<Stats | null> {
   }
 }
 
+async function priorFinalAuthorityPresent(path: string, expected: Stats): Promise<boolean> {
+  const current = await optionalMetadata(path);
+  return current !== null && sameEncodeOutputAuthoritySnapshot(expected, current);
+}
+
 function retainedOutputProvenance(path: string, metadata: Stats | null) {
   if (metadata === null) {
     return undefined;
@@ -1147,6 +1154,7 @@ async function cleanupReplacementLink(
 async function moveStalePartials(
   finalPath: string,
   runner: HandBrakeRunner,
+  isRetained: (path: string) => boolean,
 ): Promise<void> {
   const directory = dirname(finalPath);
   const prefix = `.${basename(finalPath)}.`;
@@ -1156,7 +1164,7 @@ async function moveStalePartials(
       continue;
     }
     const path = join(directory, name);
-    if (dirname(path) !== directory || (runner.isActive?.(path) ?? false)) {
+    if (dirname(path) !== directory || isRetained(path) || (runner.isActive?.(path) ?? false)) {
       continue;
     }
     await moveAside(path);
@@ -1921,6 +1929,7 @@ export async function executeEncodeClaim(
   let published = false;
   let mutationLockHandle: number | null = null;
   let failurePhase: EncodeJobFailureReportInput["phase"] = "preparation";
+  let completedWriteMetadata: Stats | undefined;
   let publicationOperation: Extract<
     EncodeJobFailureReportInput["evidence"],
     { kind: "publication" }
@@ -2013,7 +2022,7 @@ export async function executeEncodeClaim(
     replaceableFinal = existingFinal ?? undefined;
     try {
       await moveAside(paths.legacyPartialPath);
-      await moveStalePartials(finalPath, options.runner);
+      await moveStalePartials(finalPath, options.runner, (path) => options.access.encodeJobs.hasValidationFailedOutputPath(path));
     } catch (error) {
       throw new ClassifiedEncodeFailureError(
         normalizeErrorMessage(error),
@@ -2118,7 +2127,7 @@ export async function executeEncodeClaim(
       phase: "validation",
       etaSeconds: null,
     });
-    await requireRegularOutputForValidation(
+    completedWriteMetadata = await requireRegularOutputForValidation(
       partialPath,
       "HandBrake did not produce a complete regular output file",
     );
@@ -2297,6 +2306,54 @@ export async function executeEncodeClaim(
         return;
       }
     }
+    if (!cancellationRequested && !signal.aborted && !published &&
+        pendingPartialCleanup === undefined && partialPath !== undefined &&
+        completedWriteMetadata !== undefined && error instanceof EncodeOutputValidationError && error.retentionSafe) {
+      try {
+        options.runner.requireInactive?.(partialPath);
+        if (options.runner.isActive?.(partialPath) ?? false) throw new Error("Encode writer is still active");
+        // Retain the claim-specific path in place. Relocation would change ctime
+        // and could conceal a same-size rewrite with a restored mtime.
+        renewClaim();
+        let stableMetadata = completedWriteMetadata;
+        if (error.repairCompletion !== undefined) {
+          const repair = error.repairCompletion;
+          if (!sameEncodeOutputMutationSnapshot(completedWriteMetadata, repair.source)) throw new Error("Subtitle cleanup source changed before preparation");
+          const completed = await fingerprintCompletedEncodeOutput(partialPath, signal);
+          if (!sameEncodeOutputMutationSnapshot(repair.output, completed.metadata) || repair.sha256 !== completed.sha256) {
+            throw new Error("Subtitle cleanup output changed after preparation");
+          }
+          stableMetadata = repair.output;
+        }
+        const descriptor = openSync(partialPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+        try {
+          const before = fstatSync(descriptor);
+          if (!sameEncodeOutputMutationSnapshot(stableMetadata, before) ||
+              !sameEncodeOutputMutationSnapshot(before, lstatSync(partialPath))) {
+            throw new Error("Encode Output changed during validation");
+          }
+          fsyncSync(descriptor);
+          syncPathAtMutationBoundary(dirname(partialPath));
+          const retained = fstatSync(descriptor);
+          if (!sameEncodeOutputMutationSnapshot(before, retained) ||
+              !sameEncodeOutputMutationSnapshot(before, lstatSync(partialPath))) {
+            throw new Error("Failed Encode Output changed during storage synchronization");
+          }
+          signal.throwIfAborted();
+          const preserveReplacementAuthority = finalPath !== undefined && replaceableFinal !== undefined &&
+            await priorFinalAuthorityPresent(finalPath, replaceableFinal);
+          renewClaim();
+          options.access.encodeJobs.retainValidationFailedOutput(claim, {
+            outputPath: partialPath, filesystemIdentity: encodeOutputFilesystemIdentity(retained), changeTimeMs: retained.ctimeMs,
+            failure: encodeFailureReport(error, "validation"),
+          }, { preserveReplacementAuthority });
+          options.log("Encode Output retained as a separate validation-failed artifact");
+          return;
+        } finally { closeSync(descriptor); }
+      } catch (retentionError) {
+        options.log(`Failed Encode Output was not eligible for retention: ${normalizeErrorMessage(retentionError)}`);
+      }
+    }
     const cleanupFailures: string[] = [];
     const cleanupFailureReports: EncodeJobFailureReportInput[] = [];
     const rememberCleanupFailure = (
@@ -2354,16 +2411,7 @@ export async function executeEncodeClaim(
       replaceableFinal !== undefined
     ) {
       try {
-        const currentFinal = await optionalMetadata(finalPath);
-        if (
-          currentFinal !== null &&
-          sameEncodeOutputAuthoritySnapshot(
-            replaceableFinal,
-            currentFinal,
-          )
-        ) {
-          preserveReplacementAuthority = true;
-        }
+        preserveReplacementAuthority = await priorFinalAuthorityPresent(finalPath, replaceableFinal);
       } catch (cleanupError) {
         rememberCleanupFailure(cleanupError, "published_output");
       }

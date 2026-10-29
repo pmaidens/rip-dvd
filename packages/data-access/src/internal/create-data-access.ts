@@ -1,3 +1,4 @@
+import { matchesEncodeOutputFilesystemIdentity } from "../encode-output-filesystem-identity.js";
 import type { EncodeJobClaimOptions } from "../encode-claim-snapshot.js";
 import { ArchiveRecoveryPreviewPauseError } from "../archive-recovery-work.js";
 import { createDamagePreviewAccess, damagePreviewHoldsRecovery } from "./damage-preview-store.js";
@@ -18,6 +19,7 @@ import { recordNotificationOutcome } from "../notification-policy.js";
 import {
   closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   openSync,
   realpathSync,
@@ -106,6 +108,7 @@ import {
   encodeJobs,
   encodeClaimSnapshots,
   encodeOutputValidations,
+  validationFailedEncodeOutputs,
   encodingProfiles,
   filesystemVerificationRuns,
   legacyCutoverStagedSidecars,
@@ -522,7 +525,15 @@ function discSelectionMutationEvidence(
 
 interface EncodeJobAttemptFailureOptions extends EncodeJobFailureOptions {
   failureReports?: readonly ValidatedEncodeJobFailureReportInput[];
+  validationFailedOutput?: import("../encode-output-validation.js").ValidationFailedEncodeOutputInput;
 }
+function failedOutputPageOffset(page: { limit: number; offset?: number }): number {
+  const offset = page.offset ?? 0;
+  if (!Number.isSafeInteger(page.limit) || page.limit < 1 || page.limit > 101 ||
+      !Number.isSafeInteger(offset) || offset < 0) throw new DomainInvariantError("Invalid failed output page");
+  return offset;
+}
+
 const MEDIA_ITEM_SEARCH_LIMIT = 100;
 const WORKER_INCIDENT_RETENTION_LIMIT = 100;
 const ARCHIVE_READ_FAILURE_MESSAGES = {
@@ -5731,6 +5742,33 @@ export function createDataAccessInternal(
       ),
     );
 
+  function appendValidationFailedOutput(
+    transaction: Parameters<Parameters<typeof database.transaction>[0]>[0],
+    claim: RunningEncodeJob,
+    updated: EncodeJob | undefined,
+    input: EncodeJobAttemptFailureOptions["validationFailedOutput"],
+    timestamp: Date,
+  ): void {
+    if (updated === undefined || input === undefined) return;
+    if (updated.publicationPending || updated.partialCleanupOutputPath !== null || input.outputPath === updated.outputPath) {
+      throw new DomainInvariantError("Failed Encode Output cannot share publication or cleanup authority");
+    }
+    if (transaction.select().from(encodeOutputValidations).where(and(eq(encodeOutputValidations.encodeJobId, claim.id),
+      eq(encodeOutputValidations.claimToken, claim.claimToken))).get() !== undefined) {
+      throw new DomainInvariantError("A passing Encode Output validation cannot become a failed artifact");
+    }
+    const snapshot = transaction.select().from(encodeClaimSnapshots).where(eq(encodeClaimSnapshots.id, claim.claimToken)).get();
+    if (snapshot !== undefined && (snapshot.encodeJobId !== claim.id || snapshot.source.output.path !== updated.outputPath)) {
+      throw new DomainInvariantError("Failed Encode Output claim provenance is inconsistent");
+    }
+    transaction.insert(validationFailedEncodeOutputs).values({
+      id: newId<import("../types.js").ValidationFailedEncodeOutputId>(), encodeJobId: claim.id, claimToken: claim.claimToken,
+      outputPath: input.outputPath, filesystemIdentity: input.filesystemIdentity, changeTimeMs: input.changeTimeMs,
+      validatedAt: timestamp, sourceSnapshot: snapshot === undefined ? null : JSON.parse(JSON.stringify(snapshot)),
+      failure: input.failure,
+    }).run();
+  }
+
   const encodeJobAdapter = {
     recordType: "encode job",
     find: (id) =>
@@ -5947,6 +5985,7 @@ export function createDataAccessInternal(
         ) {
           clearCorrectedEncodePublicationAuthority(transaction, updated.id);
         }
+        appendValidationFailedOutput(transaction, claim, updated, failureOptions?.validationFailedOutput, update.updatedAt);
         appendEncodeJobFailureReports(
           transaction,
           update.status === "failed" ? updated?.id : undefined,
@@ -5982,6 +6021,7 @@ export function createDataAccessInternal(
         ) {
           clearCorrectedEncodePublicationAuthority(transaction, updated.id);
         }
+        appendValidationFailedOutput(transaction, claim, updated, failureOptions?.validationFailedOutput, update.updatedAt);
         appendEncodeJobFailureReports(
           transaction,
           update.status === "failed" ? updated?.id : undefined,
@@ -15310,6 +15350,7 @@ export function createDataAccessInternal(
         },
         encodeJobs: {
           listClaimSnapshots: (id, options) => access.encodeJobs.listClaimSnapshots(id, options),
+          listValidationFailedOutputSummaries: (id, page) => access.encodeJobs.listValidationFailedOutputSummaries(id, page),
           find: (id) => access.encodeJobs.find(id),
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
           listForDiscSelection: (id) =>
@@ -15392,6 +15433,7 @@ export function createDataAccessInternal(
               access.encodeJobs.findOutputValidation(id, identity, validatedAt),
             findRetainedOutput: (id) =>
               access.encodeJobs.findRetainedOutput(id),
+            findValidationFailedOutput: (id) => access.encodeJobs.findValidationFailedOutput(id),
           },
         })
       );
@@ -23983,6 +24025,42 @@ export function createDataAccessInternal(
       claimNext: encodeJobQueue.claimNext,
       findClaimSnapshot(id) {
         return database.select().from(encodeClaimSnapshots).where(eq(encodeClaimSnapshots.id, id)).get() ?? null;
+      },
+      retainValidationFailedOutput(claim, input, options) {
+        const failure = validateEncodeJobFailureReport(input.failure);
+        if (failure.reasonCode !== "output_validation_failed" || failure.phase !== "validation" ||
+          (failure.evidence.kind !== "duration" && failure.evidence.kind !== "validation_check") ||
+          (failure.evidence.kind === "validation_check" && failure.evidence.check === "output_file")) {
+          throw new DomainInvariantError("Only a complete media-validation failure can be retained");
+        }
+        const metadata = lstatSync(input.outputPath);
+        if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size <= 0 ||
+          !matchesEncodeOutputFilesystemIdentity(input.filesystemIdentity, metadata) || metadata.ctimeMs !== input.changeTimeMs) {
+          throw new DomainInvariantError("Failed Encode Output file is incomplete or changed");
+        }
+        return encodeJobQueue.fail(claim, "Encode output validation failed", {
+          ...options, failureReports: [failure], validationFailedOutput: { ...input, failure },
+        });
+      },
+      hasValidationFailedOutputPath(path) {
+        return database.select({ id: validationFailedEncodeOutputs.id }).from(validationFailedEncodeOutputs)
+          .where(eq(validationFailedEncodeOutputs.outputPath, path)).limit(1).get() !== undefined;
+      },
+      findValidationFailedOutput(id) {
+        return database.select().from(validationFailedEncodeOutputs).where(eq(validationFailedEncodeOutputs.id, id)).get() ?? null;
+      },
+      listValidationFailedOutputSummaries(id, page) {
+        const offset = failedOutputPageOffset(page);
+        return database.select({ id: validationFailedEncodeOutputs.id, encodeJobId: validationFailedEncodeOutputs.encodeJobId })
+          .from(validationFailedEncodeOutputs).where(eq(validationFailedEncodeOutputs.encodeJobId, id))
+          .orderBy(desc(validationFailedEncodeOutputs.validatedAt), desc(validationFailedEncodeOutputs.id))
+          .limit(page.limit).offset(offset).all();
+      },
+      listValidationFailedOutputs(id, page) {
+        const offset = failedOutputPageOffset(page);
+        return database.select().from(validationFailedEncodeOutputs).where(eq(validationFailedEncodeOutputs.encodeJobId, id))
+          .orderBy(desc(validationFailedEncodeOutputs.validatedAt), desc(validationFailedEncodeOutputs.id))
+          .limit(page.limit).offset(offset).all();
       },
       recordOutputValidation(claim, identity, evidence) {
         return database.transaction((transaction) => {

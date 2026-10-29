@@ -4,6 +4,8 @@ import { claimNextEncodeJob, encodeOutputArtifactIdentity, retainedEncodeOutputA
 import { seedEncodeClaim, withdrawClaimAcceptance } from "../../../../../operator-cli/src/encode-claim.test-support.js";
 import { publishSyntheticClaim, seedMixedCoverageOutput } from "../../../../../operator-cli/src/encode-output-provenance.test-support.js";
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
+import { retainSyntheticFailedOutput } from "../../../../../operator-cli/src/encode-output-failed.test-support.js";
+import { createEncodeOutputIntervalsRoute } from "./intervals/route";
 import { createEncodeOutputAcknowledgementRoute, createEncodeOutputInspectionRoute } from "./route";
 
 const origin = "http://localhost:3000";
@@ -143,5 +145,50 @@ it("requires a trusted mutation request and explicit acknowledgement before open
     const invalid = await createEncodeOutputAcknowledgementRoute(request(identity, { acknowledged: false }), identity, () => access, () => origin);
     expect(invalid.status).toBe(400);
     expect(await invalid.json()).toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
+  } finally { access.close(); }
+});
+
+
+it("shares failed-artifact inspection and acknowledgement without changing normal-output receipt semantics", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedEncodeClaim(fixture, { continuityRisk: true });
+  const { access } = seeded;
+  const failedProbe = async () => { throw new Error("Synthetic unavailable probe"); };
+  try {
+    const claim = (await claimNextEncodeJob(access, "synthetic-failed-http-worker", fixture.originalsLibraryPath))!;
+    const failed = retainSyntheticFailedOutput(access, claim, fixture.mediaLibraryPath);
+    const identity = `encode-output-v1.failed.${failed.id}`;
+    const web = await createEncodeOutputInspectionRoute(new Request(`${origin}/api/encode-outputs/${identity}`), identity, () => access, failedProbe);
+    const cli = await fixture.run(["encode-output", "inspect", identity], undefined, undefined, { encodeOutputMediaProbe: failedProbe });
+    expect(web.status).toBe(200);
+    const inspection = await web.json() as EncodeOutputInspection;
+    expect(cli.result).toEqual(inspection);
+    expect(JSON.stringify(inspection)).not.toContain(fixture.mediaLibraryPath);
+    expect(inspection.artifact).toMatchObject({ state: "validation_failed", validation: { result: "failed" },
+      file: { completeness: "complete" }, inspectability: { status: "unknown" }, media: { playability: "not_assessed" } });
+    const source = inspection.artifact.provenance.sourceSnapshot!.source;
+    const query = { assessmentIdentity: source.assessment.id, titleIdentityObservationId: source.titleIdentity.id, intervalIndexes: [0] };
+    const intervalWeb = await createEncodeOutputIntervalsRoute(new Request(`${origin}/api/encode-outputs/${identity}/intervals?query=${encodeURIComponent(JSON.stringify(query))}`), identity, () => access, failedProbe);
+    const intervalCli = await fixture.run(["encode-output", "intervals", identity, "--json", JSON.stringify(query)], undefined, undefined, { encodeOutputMediaProbe: failedProbe });
+    expect(intervalWeb.status).toBe(200);
+    expect(intervalCli.exitCode).toBe(0);
+    expect(intervalCli.result).toEqual(await intervalWeb.json());
+    expect(intervalCli.result).toMatchObject({ intervals: [{ status: "unknown", outputInterval: null }], targetedLocation: { eligible: false } });
+    const body = { acknowledged: true, reviewToken: inspection.operatorInspection.reviewToken, mutationKey: "synthetic-failed-http-receipt" };
+    const acknowledged = await createEncodeOutputAcknowledgementRoute(request(identity, body), identity, () => access, () => origin, failedProbe);
+    const replay = await fixture.run(["encode-output", "acknowledge-inspection", identity, "--key", body.mutationKey, "--json",
+      JSON.stringify({ acknowledged: true, reviewToken: body.reviewToken })], undefined, undefined, { encodeOutputMediaProbe: failedProbe });
+    expect(acknowledged.status).toBe(200);
+    expect(replay.result).toEqual(await acknowledged.json());
+    expect(JSON.stringify(replay.result)).not.toContain(fixture.mediaLibraryPath);
+    expect(replay.result).toMatchObject({ receipt: { evidence: { state: "validation_failed", validation: { result: "failed" } } } });
+    writeFileSync(failed.outputPath, "synthetic changed failed artifact");
+    const stale = { ...body, mutationKey: "synthetic-stale-failed-http-receipt" };
+    const rejected = await createEncodeOutputAcknowledgementRoute(request(identity, stale), identity, () => access, () => origin, failedProbe);
+    const cliRejected = await fixture.run(["encode-output", "acknowledge-inspection", identity, "--key", stale.mutationKey, "--json",
+      JSON.stringify({ acknowledged: true, reviewToken: stale.reviewToken })], undefined, undefined, { encodeOutputMediaProbe: failedProbe });
+    expect(rejected.status).toBe(409);
+    expect(cliRejected.exitCode).not.toBe(0);
+    expect(cliRejected.result).toEqual(await rejected.json());
   } finally { access.close(); }
 });

@@ -105,6 +105,27 @@ function createMediaToolRunner({
 }
 
 describe("encode output validation", () => {
+  it.each(["EIO", "ENOSPC", "EDQUOT", "EROFS", "ESTALE"])("does not make a %s probe storage fault retainable", async (code) => {
+    const validator = createNodeEncodeOutputValidator({ runMediaTool: async () => {
+      throw Object.assign(new Error("Synthetic media storage failure"), { code });
+    } });
+    await expect(validator.prepareAndValidate("/media/synthetic.mkv", new AbortController().signal)).rejects.toMatchObject({ retentionSafe: false });
+  });
+
+  it.each(["Input/output error", "No such device", "No such device or address"])("rejects successful media-tool exit with storage-fault stderr %s", async (diagnostic) => {
+    const validator = createNodeEncodeOutputValidator({ runMediaTool: async () => ({
+      stdout: JSON.stringify({ streams: [] }), stderr: diagnostic,
+    }) });
+    await expect(validator.prepareAndValidate("/media/synthetic.mkv", new AbortController().signal)).rejects.toMatchObject({ retentionSafe: false });
+  });
+
+  it.each(["No such device", "No such device or address"])("rejects numeric subprocess failure reporting %s without retention eligibility", async (diagnostic) => {
+    const validator = createNodeEncodeOutputValidator({ runMediaTool: async () => {
+      throw Object.assign(new Error(diagnostic), { code: 1 });
+    } });
+    await expect(validator.prepareAndValidate("/media/synthetic.mkv", new AbortController().signal)).rejects.toMatchObject({ retentionSafe: false });
+  });
+
   it.each([true, false])("preserves complete sources and search playback flags, reused=%s", async (reused) => {
     const expectedVobSubStreams = [
       { languageCode: "eng", sourceTrackNumber: 1, title: null },

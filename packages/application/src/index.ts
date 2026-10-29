@@ -1038,6 +1038,7 @@ export {
   InvalidEncodeOutputExportInputError,
   probeEncodeOutputMedia,
   retainedEncodeOutputArtifactIdentity,
+  validationFailedEncodeOutputArtifactIdentity,
 } from "./encode-output-inspection.js";
 export type {
   EncodeOutputArtifactReference,

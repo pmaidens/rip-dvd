@@ -29,6 +29,8 @@ from chapter count would reject valid ranges on discs with uneven chapters.
 Stream metadata, subtitle packets, initial timing, and bounded video decode
 validation continue to apply.
 
-A duration failure follows the existing failed-output path. The worker does not
-publish the partial, marks the Encode Job failed, and retains the partial under
-the existing quarantine and recovery rules.
+A duration failure never publishes or replaces a normal output. A newly completed,
+stable, owned write remains at its claim-specific path as a separate
+validation-failed artifact with its failure and claim evidence. The Encode Job
+stays failed. Incomplete, inconsistent or unowned writes still follow quarantine
+and recovery rules. Historical quarantined failures do not gain artifact authority.
