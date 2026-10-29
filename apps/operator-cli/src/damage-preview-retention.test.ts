@@ -2,7 +2,7 @@ import { existsSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { DatabaseSync } from "node:sqlite";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { cleanupDamagePreviewMedia, createApplicationOperations } from "@rip-dvd/application";
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
@@ -233,6 +233,43 @@ it("resumes a durable worker deletion after process death, including already mis
   settleDamagePreviewMedia(fixture);
   expect(await inspect()).toMatchObject({ media: { state: "removed", removal: { state: "complete", outcomes: [{ outcome: "already_missing" }] } }, provenance: before.provenance });
   expect(await fixture.run(args)).toEqual(accepted);
+});
+
+it.each([false, true])("reconciles prior idle-cleanup unlinks before retaining present media after review reopens, directory sync available: %s", async (syncAvailable) => {
+  const { fixture, id, path, seeded, inspect } = await setup();
+  const access = fixture.openAccess();
+  const record = access.damagePreviews.find(id)!;
+  const second = join(dirname(path), "1.mkv");
+  writeFileSync(second, readFileSync(path));
+  record.artifacts.push({ ...record.artifacts[0]!, identity: `damage-preview-v1.${id}.1`, path: second });
+  access.damagePreviews.update(record);
+  access.close();
+  const choose = async (choice: string, key: string) => {
+    const review = (await fixture.run(["catalog-review", "show", seeded.archive.id])).result as { catalogRevision: string };
+    return fixture.run(["catalog-review", choice, seeded.archive.id, "--key", key, "--revision", review.catalogRevision, "--checkpoint-revision", String(seeded.manifest.revision), "--checkpoint-digest", seeded.manifest.manifestDigest]);
+  };
+  expect(await choose("archive-only", "synthetic-before-interrupted-cleanup")).toMatchObject({ exitCode: 0 });
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse((await inspect()).updatedAt) + 31 * day);
+  expect(await fixture.run(["damage-preview", "cleanup", id, "--key", "synthetic-interrupted-idle-cleanup", "--json", JSON.stringify({ mediaToken: (await inspect()).media.token })])).toMatchObject({ exitCode: 0 });
+  const failSync = vi.spyOn(fs, "fsyncSync").mockImplementation(() => { throw new Error("Synthetic directory sync failure"); });
+  syncBuiltinESMExports();
+  const worker = fixture.openAccess();
+  const complete = worker.damagePreviews.completeMediaRemoval.bind(worker.damagePreviews);
+  worker.damagePreviews.completeMediaRemoval = (requestId, removalId, remove) => complete(requestId, removalId, (current) => {
+    remove({ ...current, artifacts: current.artifacts.slice(0, 1) });
+    throw new Error("Synthetic worker death after first unlink before directory sync");
+  });
+  try { expect(() => cleanupDamagePreviewMedia(worker)).toThrow("Synthetic worker death"); } finally { worker.close(); }
+  expect(existsSync(path)).toBe(false); expect(existsSync(second)).toBe(true);
+  expect((await inspect()).media.removal?.state).toBe("pending");
+  expect(await choose("reopen", "synthetic-review-after-first-unlink")).toMatchObject({ exitCode: 0 });
+  if (syncAvailable) { failSync.mockRestore(); syncBuiltinESMExports(); }
+  settleDamagePreviewMedia(fixture);
+  expect(existsSync(second)).toBe(true);
+  expect(await inspect()).toMatchObject({ media: { removal: {
+    state: syncAvailable ? "cancelled" : "failed",
+    outcomes: [expect.objectContaining({ outcome: syncAvailable ? "already_missing" : "failed" }), expect.objectContaining({ outcome: "retained" })],
+  } } });
 });
 it("keeps accepted removal durable after response projection fails and lets the worker settle it", async () => {
   const { fixture, id, path, inspect } = await setup();

@@ -20,7 +20,7 @@ function synchronizeRemovalDirectory(directory: string) {
   const handle = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY);
   try { fsyncSync(handle); } finally { closeSync(handle); }
 }
-function removeFiles(record: DamagePreviewRecord): DamagePreviewMediaRemoval["outcomes"] {
+function removeFiles(record: DamagePreviewRecord, retainExisting = false): DamagePreviewMediaRemoval["outcomes"] {
   return previewMediaTargets(record).map(({ path, identity }) => {
     try {
       const directory = dirname(path);
@@ -28,6 +28,7 @@ function removeFiles(record: DamagePreviewRecord): DamagePreviewMediaRemoval["ou
       // A missing request directory also means its media is already absent.
       if (realpathSync(directory) !== directory) throw new Error("Unsafe media directory");
       if (!lstatSync(path).isFile()) throw new Error("Unsafe media file");
+      if (retainExisting) return { identity, outcome: "retained" as const, reasonCode: "DAMAGE_PREVIEW_CLEANUP_RETENTION_CHANGED" };
       const expected = record.mediaRemoval!.expectedFiles.find((file) => file.identity === identity);
       if (!expected || expected.filesystemIdentity !== previewMediaFileObservation(path).filesystemIdentity) throw new Error("Preview media identity changed after deletion admission");
       unlinkSync(path);
@@ -89,7 +90,9 @@ function removeWorkerFiles(access: DataAccess, record: DamagePreviewRecord): Dam
     const retention = current.media.retention;
     if (retention === null || retention.protectedForReview || retention.eligibleAt === null ||
         Date.parse(retention.eligibleAt) > Date.now()) {
-      return previewMediaTargets(record).map(({ identity }) => ({ identity, outcome: "retained", reasonCode: "DAMAGE_PREVIEW_CLEANUP_RETENTION_CHANGED" }));
+      // A prior worker may have unlinked some targets before dying. Reconcile
+      // and synchronize those absences while preserving files still present.
+      return removeFiles(record, true);
     }
   }
   return removeFiles(record);

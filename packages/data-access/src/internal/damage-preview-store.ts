@@ -188,7 +188,7 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
       return transaction(() => {
         const current = find(id);
         if (!current || current.mediaRemoval?.requestId !== requestId || current.mediaRemoval.state !== "pending") return current;
-        current.mediaRemoval = { ...current.mediaRemoval, state: outcomes.some((item) => item.outcome === "retained") ? "cancelled" : outcomes.some((item) => item.outcome === "failed") ? "failed" : "complete", completedAt: now().toISOString(), outcomes };
+        current.mediaRemoval = { ...current.mediaRemoval, state: outcomes.some((item) => item.outcome === "failed") ? "failed" : outcomes.some((item) => item.outcome === "retained") ? "cancelled" : "complete", completedAt: now().toISOString(), outcomes };
         update(current);
         return current;
       });
