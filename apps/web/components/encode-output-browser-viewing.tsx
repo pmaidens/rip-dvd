@@ -41,7 +41,7 @@ export function EncodeOutputBrowserViewing({ artifactIdentity, validationFailed,
   return <section aria-label="Browser Viewing Rendition">
     <h5>Browser Viewing Rendition</h5>
     <p>Ordinary playback of a finished Encode Output. Source correspondence may be unknown. No damage seek is claimed.</p>
-    {validationFailed || rendition?.source.state === "validation_failed" ? <p role="alert">Validation-failed source. Its Encode Job remains failed. Viewing does not validate the output or record a Keep decision.</p> : null}
+    {validationFailed || rendition?.source.state === "validation_failed" ? <p role="alert">Validation-failed source. Viewing does not change Encode Job status, validate the output or record a Keep decision.</p> : null}
     <p>This separate MP4 copies compatible video and audio from the canonical MKV. It does not replace that file or establish watchability.</p>
     <a href="/viewing-access" target="_blank" rel="noreferrer">Sign in for browser playback</a>
     <button type="button" disabled={busy} onClick={() => {
@@ -51,8 +51,8 @@ export function EncodeOutputBrowserViewing({ artifactIdentity, validationFailed,
     }}>Check browser playback</button>
     {availability ? <>
       {availability.reasons.map((reason) => <p key={reason.code}>{reason.message} [{reason.code}]</p>)}
-      <p>Audio: {availability.source.media.streams?.filter((stream) => stream.kind === "audio").map((stream) => `${stream.codecName ?? "unknown"} ${stream.language ?? "language unknown"}`).join(", ") || "none"}.</p>
-      <p>{availability.conversion.subtitles === "omitted" ? "Soft subtitles, including DVD bitmap subtitles, are omitted. No subtitles are burned in." : "No subtitles are present."}</p>
+      <p>Audio: {availability.source.media.streams === null ? "unknown inventory" : availability.source.media.streams.filter((stream) => stream.kind === "audio").map((stream) => `${stream.codecName ?? "unknown"} ${stream.language ?? "language unknown"}`).join(", ") || "none"}.</p>
+      <p>{availability.conversion.subtitles === "omitted" ? "Soft subtitles, including DVD bitmap subtitles, are omitted. No subtitles are burned in." : availability.conversion.subtitles === "unknown" ? "Subtitle inventory is unknown." : "No subtitles are present."}</p>
       <button type="button" disabled={busy || !availability.available} onClick={() => {
         setBusy(true); setError(null);
         submission.current ??= { mutationKey: createMutationKey(), reviewToken: availability.reviewToken };
@@ -64,7 +64,7 @@ export function EncodeOutputBrowserViewing({ artifactIdentity, validationFailed,
     {rendition ? <>
       {rendition.sourceAuthorityRevision !== sourceAuthorityRevision || rendition.source.file.mutationRevision !== sourceFileMutationRevision ? <p role="alert">Historical rendition. Its source file or authority differs from the currently inspected output. This playback shows the recorded earlier generation.</p> : null}
       <p>Rendition {rendition.id}: {rendition.status}{rendition.progress.percent === null ? "" : ` · ${Math.floor(rendition.progress.percent)}%`}.</p>
-      <p>Stream-copy remux to MP4. {rendition.conversion.subtitles === "omitted" ? "Soft subtitles omitted; none burned in." : "No subtitles."}</p>
+      <p>Stream-copy remux to MP4. {rendition.conversion.subtitles === "omitted" ? "Soft subtitles omitted; none burned in." : rendition.conversion.subtitles === "unknown" ? "Subtitle inventory is unknown." : "No subtitles."}</p>
       {rendition.reason ? <p role="alert">{rendition.reason.message} [{rendition.reason.code}]</p> : null}
       <button type="button" onClick={() => { setError(null); void inspect(rendition.id).catch((failure: Error) => setError(failure.message)); }}>Refresh rendition status</button>
       {rendition.media?.availability?.available === false ? <p role="alert">Rendition media is unavailable. [{rendition.media.availability.reasonCode}]</p> : null}

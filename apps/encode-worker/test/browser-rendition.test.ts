@@ -89,3 +89,31 @@ it("contains a progress persistence failure and rejects only after its child clo
   await expect(runRenditionCommand(process.execPath, ["-e", script, marker], undefined, undefined, () => { throw new Error("Synthetic persistence failure"); })).rejects.toThrow("Synthetic persistence failure");
   expect(await readFile(marker, "utf8")).toBe("closed");
 });
+it("does not remux a newer canonical generation that races the reviewed snapshot export", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { lstatSync, writeFileSync, renameSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { encodeOutputFilesystemIdentity } = await import("@rip-dvd/data-access");
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await requestSyntheticRendition(fixture);
+  const access = fixture.openAccess();
+  let authorityReads = 0;
+  const racedAccess = { ...access, readEncodeOutputInspectionSnapshot: ((read: Parameters<typeof access.readEncodeOutputInspectionSnapshot>[0]) => {
+    authorityReads += 1;
+    if (authorityReads === 3) {
+      // Stand in for the publication commit between preflight and source open.
+      const path = join(fixture.mediaLibraryPath, "previous-film.mkv");
+      writeFileSync(`${path}.next`, "synthetic replacement canonical generation"); renameSync(`${path}.next`, path);
+      const sqlite = new DatabaseSync(fixture.databasePath);
+      try { sqlite.prepare("UPDATE encode_jobs SET output_validation_filesystem_identity = ?, output_validated_at = output_validated_at + 1 WHERE id = ?")
+        .run(encodeOutputFilesystemIdentity(lstatSync(path)), seeded.request.source.encodeJob.id); }
+      finally { sqlite.close(); }
+    }
+    return access.readEncodeOutputInspectionSnapshot(read);
+  }) as typeof access.readEncodeOutputInspectionSnapshot };
+  try {
+    await pollBrowserRenditions({ access: racedAccess, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, enabled: true, generator });
+    expect((await fixture.run(["encode-output", "inspect-rendition", seeded.request.id])).result).toMatchObject({ status: "failed", media: null, reason: { code: "RENDITION_SOURCE_CHANGED" } });
+    expect(readFileSync(join(fixture.mediaLibraryPath, "previous-film.mkv"), "utf8")).toBe("synthetic replacement canonical generation");
+  } finally { access.close(); }
+});

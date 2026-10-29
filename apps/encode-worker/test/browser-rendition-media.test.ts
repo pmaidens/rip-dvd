@@ -36,7 +36,6 @@ it.skipIf(process.env.RIP_DVD_TEST_RENDITION_MEDIA !== "true").each([false, true
 it.skipIf(process.env.RIP_DVD_TEST_RENDITION_MEDIA !== "true")("a surviving remux keeps its kernel execution lock after its parent dies", async () => {
   const { spawn } = await import("node:child_process");
   const { mkdir } = await import("node:fs/promises");
-  const { once } = await import("node:events");
   const { setTimeout: delay } = await import("node:timers/promises");
   const { inspectKernelProcessLock } = await import("@rip-dvd/worker-runtime");
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
@@ -54,14 +53,19 @@ it.skipIf(process.env.RIP_DVD_TEST_RENDITION_MEDIA !== "true")("a surviving remu
   const parent = spawn(process.execPath, ["--input-type=module", "-e", script, lockPath, output], { stdio: ["ignore", "pipe", "pipe"] });
   let childPid: number | undefined;
   try {
-    const [message] = await once(parent.stdout!, "data"); childPid = Number(String(message).trim());
+    const message = await new Promise<Buffer>((resolve, reject) => {
+      parent.stdout!.once("data", resolve); parent.once("error", reject);
+      parent.once("exit", () => reject(new Error("Synthetic remux parent exited before progress.")));
+    });
+    childPid = Number(String(message).trim());
     expect(Number.isSafeInteger(childPid)).toBe(true);
     // Wait until ffmpeg has opened its output, so the proof covers live writes.
     for (let attempt = 0; attempt < 40; attempt++) {
       try { if ((await readFile(output)).length > 0) break; } catch { /* output not open yet */ }
       await delay(25);
     }
-    parent.kill("SIGKILL"); await once(parent, "exit");
+    const closed = new Promise<void>((resolve) => parent.once("exit", () => resolve()));
+    parent.kill("SIGKILL"); await closed;
     expect(inspectKernelProcessLock(lockPath)).toBe("held");
     for (let attempt = 0; attempt < 160 && inspectKernelProcessLock(lockPath) === "held"; attempt++) await delay(25);
     expect(inspectKernelProcessLock(lockPath)).toBe("inactive");

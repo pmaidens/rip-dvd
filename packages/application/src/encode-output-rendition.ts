@@ -51,9 +51,9 @@ export async function inspectEncodeOutputRenditionAvailability(access: DataAcces
     if (source.media.durationSeconds === null || source.media.durationSeconds <= 0) reasons.push({ code: "RENDITION_DURATION_UNKNOWN", message: "The actual output duration is unavailable." });
   }
   const conversion: BrowserRenditionRecord["conversion"] = {
-    kind: "stream_copy_remux", container: "mp4", copiedStreamIndexes: streams.filter((stream) => stream.kind === "video" || stream.kind === "audio").map((stream) => stream.index),
-    omittedStreamIndexes: streams.filter((stream) => stream.kind !== "video" && stream.kind !== "audio").map((stream) => stream.index),
-    subtitles: streams.some((stream) => stream.kind === "subtitle") ? "omitted" : "none",
+    kind: "stream_copy_remux", container: "mp4", copiedStreamIndexes: source.media.streams === null ? null : streams.filter((stream) => stream.kind === "video" || stream.kind === "audio").map((stream) => stream.index),
+    omittedStreamIndexes: source.media.streams === null ? null : streams.filter((stream) => stream.kind !== "video" && stream.kind !== "audio").map((stream) => stream.index),
+    subtitles: source.media.streams === null ? "unknown" : streams.some((stream) => stream.kind === "subtitle") ? "omitted" : "none",
   };
   const reviewToken = createHash("sha256").update(canonicalPublicationJson({ policy: "encode-output-remux-v1", inspection, conversion })).digest("hex");
   return { schemaVersion: 1 as const, available: reasons.length === 0, reasons, reviewToken, source, conversion,

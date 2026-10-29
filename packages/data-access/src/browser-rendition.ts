@@ -12,9 +12,9 @@ export interface BrowserRenditionRecord {
   conversion: {
     kind: "stream_copy_remux";
     container: "mp4";
-    copiedStreamIndexes: number[];
-    omittedStreamIndexes: number[];
-    subtitles: "omitted" | "none";
+    copiedStreamIndexes: number[] | null;
+    omittedStreamIndexes: number[] | null;
+    subtitles: "omitted" | "none" | "unknown";
   };
   command: string[];
   durationCoverage: { sourceSeconds: number; renditionSeconds: number | null; toleranceSeconds: number } | null;

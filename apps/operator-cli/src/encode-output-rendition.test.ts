@@ -47,6 +47,7 @@ it.each([
   const options = { encodeOutputMediaProbe: mediaProbe, browserRenditionsEnabled: variant !== "disabled" };
   const available = await fixture.run(["encode-output", "rendition-availability", identity], undefined, undefined, options);
   expect(available.exitCode).toBe(0);
+  if (variant === "probe") expect(available.result).toMatchObject({ source: { media: { streams: null } }, conversion: { copiedStreamIndexes: null, omittedStreamIndexes: null, subtitles: "unknown" } });
   expect(available.result).toMatchObject({ available: false, reasons: expect.arrayContaining([{ code: reason, message: expect.any(String) }]) });
   const reviewToken = (available.result as { reviewToken: string }).reviewToken;
   const rejected = await fixture.run(["encode-output", "request-rendition", identity, "--key", "synthetic-unavailable-request", "--json", JSON.stringify({ reviewToken })], undefined, undefined, options);

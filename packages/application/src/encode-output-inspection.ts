@@ -1314,7 +1314,7 @@ async function copyOpenFile(
 
 export async function exportEncodeOutput(
   access: DataAccess,
-  input: { artifactIdentity: unknown; destination: unknown },
+  input: { artifactIdentity: unknown; destination: unknown; expectedEvidence?: { authorityRevision: string; fileMutationRevision: string | null } },
 ) {
   if (
     typeof input.destination !== "string" ||
@@ -1329,6 +1329,9 @@ export async function exportEncodeOutput(
     input.artifactIdentity,
   );
   const initialAuthority = resolveEncodeOutputAuthority(access, parsedIdentity);
+  if (input.expectedEvidence !== undefined && evidenceDigest(initialAuthority.authorityKey) !== input.expectedEvidence.authorityRevision) {
+    throw new EncodeOutputExportRejectedError("OUTPUT_AUTHORITY_CHANGED", "The Encode Output authority differs from the reviewed generation.", initialAuthority.artifactIdentity, await currentEncodeOutputIdentity(initialAuthority.outputPath));
+  }
   if (initialAuthority.authorityUnavailableReason !== null) {
     throw new EncodeOutputExportRejectedError(
       "OUTPUT_AUTHORITY_CHANGED",
@@ -1362,6 +1365,9 @@ export async function exportEncodeOutput(
       throw await rejectedSourceOpen(initialAuthority, error);
     }
     const before = await source.stat();
+    if (input.expectedEvidence !== undefined && fileMutationRevision(before) !== input.expectedEvidence.fileMutationRevision) {
+      throw new EncodeOutputExportRejectedError("OUTPUT_IDENTITY_CHANGED", "The Encode Output file differs from the reviewed generation.", initialAuthority.artifactIdentity, encodeOutputFilesystemIdentity(before));
+    }
     const sourceRejection = exportSourceRejection(initialAuthority, before);
     if (sourceRejection !== null) throw sourceRejection;
     const sourceIdentity = encodeOutputFilesystemIdentity(before);

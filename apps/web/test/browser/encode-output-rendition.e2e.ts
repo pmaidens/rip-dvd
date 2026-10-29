@@ -64,7 +64,11 @@ test("plays actual failed-source rendition with audio and seeking, and protects 
     await context.close(); return peak;
   });
   expect(audioLevel).toBeGreaterThan(0.001);
-  await video.evaluate((element: HTMLVideoElement) => { element.pause(); element.currentTime = 1.5; });
+  await video.evaluate((element: HTMLVideoElement) => new Promise<void>((resolve, reject) => {
+    element.pause();
+    element.addEventListener("seeked", () => element.readyState >= 2 ? resolve() : reject(new Error("Seek completed without media data.")), { once: true });
+    element.currentTime = 1.5;
+  }));
   await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeGreaterThanOrEqual(1.4);
   expect(await video.evaluate((element: HTMLVideoElement) => element.muted)).toBe(false);
   const failedRanges: string[] = [];

@@ -3,7 +3,7 @@ import { mkdir, open, realpath, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { browserRenditionConfig } from "@rip-dvd/config";
-import { exportEncodeOutput, inspectEncodeOutputRenditionAvailability } from "@rip-dvd/application";
+import { EncodeOutputExportRejectedError, exportEncodeOutput, inspectEncodeOutputRenditionAvailability } from "@rip-dvd/application";
 import { canonicalPublicationJson, encodeOutputFilesystemIdentity, type DataAccess } from "@rip-dvd/data-access";
 import { acquireKernelProcessLock } from "@rip-dvd/worker-runtime";
 
@@ -43,14 +43,21 @@ export async function pollBrowserRenditions(options: Options) {
       const review = await inspectEncodeOutputRenditionAvailability(options.access, record.sourceIdentity, media.probe, true);
       if (!review.available || review.reviewToken !== record.reviewToken) throw new Error("RENDITION_SOURCE_CHANGED");
       const source = join(directory, "source.mkv"), partial = join(directory, "partial.mp4"), final = join(directory, "view.mp4");
-      await exportEncodeOutput(options.access, { artifactIdentity: record.sourceIdentity, destination: source });
+      try {
+        await exportEncodeOutput(options.access, { artifactIdentity: record.sourceIdentity, destination: source, expectedEvidence: review.current });
+      } catch (error) {
+        if (error instanceof EncodeOutputExportRejectedError && error.reasonCode.startsWith("OUTPUT_")) throw new Error("RENDITION_SOURCE_CHANGED");
+        throw error;
+      }
       const snapshot = await media.probe(source);
       if (canonicalPublicationJson(snapshot) !== canonicalPublicationJson({ durationSeconds: review.source.media.durationSeconds, streams: review.source.media.streams })) throw new Error("RENDITION_SOURCE_CHANGED");
+      const copiedStreamIndexes = record.conversion.copiedStreamIndexes;
+      if (copiedStreamIndexes === null) throw new Error("RENDITION_SOURCE_CHANGED");
       record.toolVersion = await media.version();
-      record.command = ["ffmpeg", ...browserRenditionCommand("<canonical-output-snapshot>", "<browser-rendition>", record.conversion.copiedStreamIndexes)];
+      record.command = ["ffmpeg", ...browserRenditionCommand("<canonical-output-snapshot>", "<browser-rendition>", copiedStreamIndexes)];
       options.access.browserRenditions.update(record);
       lock.assertHeld();
-      await media.remux({ source, destination: partial, streamIndexes: record.conversion.copiedStreamIndexes, executionDescriptor: lock.descriptor,
+      await media.remux({ source, destination: partial, streamIndexes: copiedStreamIndexes, executionDescriptor: lock.descriptor,
         signal: options.signal, durationSeconds: snapshot.durationSeconds!, onProgress(percent) {
           record.progress.percent = percent; options.access.browserRenditions.update(record);
         } });
@@ -60,7 +67,7 @@ export async function pollBrowserRenditions(options: Options) {
       // This tolerance concerns container timing only, never source watchability.
       record.durationCoverage = { sourceSeconds: snapshot.durationSeconds!, renditionSeconds: inspected.durationSeconds, toleranceSeconds: 0.25 };
       if (inspected.durationSeconds === null || Math.abs(inspected.durationSeconds - snapshot.durationSeconds!) > record.durationCoverage.toleranceSeconds) throw new Error("RENDITION_INCOMPLETE_COVERAGE");
-      const copied = snapshot.streams.filter((stream) => record.conversion.copiedStreamIndexes.includes(stream.index));
+      const copied = snapshot.streams.filter((stream) => copiedStreamIndexes.includes(stream.index));
       if (inspected.durationSeconds === null || inspected.durationSeconds <= 0 || inspected.streams.length !== copied.length ||
           inspected.streams.some((stream, index) => stream.kind !== copied[index]!.kind || stream.codecName !== copied[index]!.codecName)) throw new Error("RENDITION_REMUX_FAILED");
       const file = await open(partial, constants.O_RDWR | constants.O_NOFOLLOW);

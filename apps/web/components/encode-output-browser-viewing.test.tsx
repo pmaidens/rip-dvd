@@ -17,7 +17,7 @@ it("keeps failed-source and ordinary-playback warnings visible through authoriza
     const check = [...container.querySelectorAll("button")].find((button) => button.textContent === "Check browser playback")!;
     await act(async () => check.click());
     expect(container.textContent).toContain("Sign in for browser playback, then try again");
-    expect(container.textContent).toContain("Its Encode Job remains failed");
+    expect(container.textContent).toContain("Viewing does not change Encode Job status");
   } finally { await act(async () => root.unmount()); }
 });
 it("resumes a saved durable rendition without requesting another one or acknowledging inspection", async () => {
@@ -36,5 +36,17 @@ it("resumes a saved durable rendition without requesting another one or acknowle
     await act(async () => container.querySelector("video")!.dispatchEvent(new Event("error")));
     expect(container.textContent).toContain("The browser could not play this rendition");
     expect(container.textContent).toContain("Validation-failed source");
+  } finally { await act(async () => root.unmount()); }
+});
+it("keeps a failed probe's stream inventory unknown instead of claiming audio or subtitles are absent", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("fetch", async () => Response.json({ available: false, reasons: [{ code: "OUTPUT_PROBE_FAILED", message: "The media probe failed." }], source: { media: { streams: null } }, conversion: { subtitles: "unknown" } }));
+  const container = document.createElement("div"); document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<EncodeOutputBrowserViewing artifactIdentity="synthetic-artifact" validationFailed sourceAuthorityRevision="synthetic-authority" sourceFileMutationRevision="synthetic-file" />));
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Check browser playback")!.click());
+    expect(container.textContent).toContain("Audio: unknown inventory"); expect(container.textContent).toContain("Subtitle inventory is unknown");
+    expect(container.textContent).not.toContain("Audio: none"); expect(container.textContent).not.toContain("No subtitles are present");
   } finally { await act(async () => root.unmount()); }
 });
