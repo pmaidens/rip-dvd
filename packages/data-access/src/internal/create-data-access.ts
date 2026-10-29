@@ -24035,6 +24035,10 @@ export function createDataAccessInternal(
           ...options, failureReports: [failure], validationFailedOutput: { ...input, failure },
         });
       },
+      hasValidationFailedOutputPath(path) {
+        return database.select({ id: validationFailedEncodeOutputs.id }).from(validationFailedEncodeOutputs)
+          .where(eq(validationFailedEncodeOutputs.outputPath, path)).limit(1).get() !== undefined;
+      },
       findValidationFailedOutput(id) {
         return database.select().from(validationFailedEncodeOutputs).where(eq(validationFailedEncodeOutputs.id, id)).get() ?? null;
       },

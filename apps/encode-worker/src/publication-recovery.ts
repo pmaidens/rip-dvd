@@ -733,6 +733,11 @@ async function optionalMetadata(path: string): Promise<Stats | null> {
   }
 }
 
+async function priorFinalAuthorityPresent(path: string, expected: Stats): Promise<boolean> {
+  const current = await optionalMetadata(path);
+  return current !== null && sameEncodeOutputAuthoritySnapshot(expected, current);
+}
+
 function retainedOutputProvenance(path: string, metadata: Stats | null) {
   if (metadata === null) {
     return undefined;
@@ -1148,6 +1153,7 @@ async function cleanupReplacementLink(
 async function moveStalePartials(
   finalPath: string,
   runner: HandBrakeRunner,
+  isRetained: (path: string) => boolean,
 ): Promise<void> {
   const directory = dirname(finalPath);
   const prefix = `.${basename(finalPath)}.`;
@@ -1157,7 +1163,7 @@ async function moveStalePartials(
       continue;
     }
     const path = join(directory, name);
-    if (dirname(path) !== directory || (runner.isActive?.(path) ?? false)) {
+    if (dirname(path) !== directory || isRetained(path) || (runner.isActive?.(path) ?? false)) {
       continue;
     }
     await moveAside(path);
@@ -2015,7 +2021,7 @@ export async function executeEncodeClaim(
     replaceableFinal = existingFinal ?? undefined;
     try {
       await moveAside(paths.legacyPartialPath);
-      await moveStalePartials(finalPath, options.runner);
+      await moveStalePartials(finalPath, options.runner, (path) => options.access.encodeJobs.hasValidationFailedOutputPath(path));
     } catch (error) {
       throw new ClassifiedEncodeFailureError(
         normalizeErrorMessage(error),
@@ -2305,8 +2311,10 @@ export async function executeEncodeClaim(
       try {
         options.runner.requireInactive?.(partialPath);
         if (options.runner.isActive?.(partialPath) ?? false) throw new Error("Encode writer is still active");
-        // The mutation lock stays held across proof, durable relocation, and the
-        // claim-fenced transaction. A crash before the record creates no authority.
+        // Retain the claim-specific path in place. Relocation would change ctime
+        // and could conceal a same-size rewrite with a restored mtime.
+        const preserveReplacementAuthority = finalPath !== undefined && replaceableFinal !== undefined &&
+          await priorFinalAuthorityPresent(finalPath, replaceableFinal);
         renewClaim();
         const descriptor = openSync(partialPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
         try {
@@ -2316,23 +2324,18 @@ export async function executeEncodeClaim(
             throw new Error("Encode Output changed during validation");
           }
           fsyncSync(descriptor);
-          if (!sameEncodeOutputMutationSnapshot(before, fstatSync(descriptor))) throw new Error("Encode Output changed during storage synchronization");
-          signal.throwIfAborted();
-          renewClaim();
-          const failedPath = `${partialPath}.failed.${randomUUID()}`;
-          if (Buffer.byteLength(failedPath) > MAX_PATH_BYTES) throw new Error("Failed Encode Output path is unsafe");
-          renameSync(partialPath, failedPath);
-          syncPathAtMutationBoundary(dirname(failedPath));
-          const retained = lstatSync(failedPath);
-          if (!sameEncodeOutputAuthoritySnapshot(before, retained) ||
-              !sameEncodeOutputMutationSnapshot(retained, fstatSync(descriptor))) {
-            throw new Error("Failed Encode Output changed during retention");
+          syncPathAtMutationBoundary(dirname(partialPath));
+          const retained = fstatSync(descriptor);
+          if (!sameEncodeOutputMutationSnapshot(before, retained) ||
+              !sameEncodeOutputMutationSnapshot(before, lstatSync(partialPath))) {
+            throw new Error("Failed Encode Output changed during storage synchronization");
           }
           signal.throwIfAborted();
+          renewClaim();
           options.access.encodeJobs.retainValidationFailedOutput(claim, {
-            outputPath: failedPath, filesystemIdentity: encodeOutputFilesystemIdentity(retained), changeTimeMs: retained.ctimeMs,
+            outputPath: partialPath, filesystemIdentity: encodeOutputFilesystemIdentity(retained), changeTimeMs: retained.ctimeMs,
             failure: encodeFailureReport(error, "validation"),
-          }, { preserveReplacementAuthority: replaceableFinal !== undefined });
+          }, { preserveReplacementAuthority });
           options.log("Encode Output retained as a separate validation-failed artifact");
           return;
         } finally { closeSync(descriptor); }
@@ -2397,16 +2400,7 @@ export async function executeEncodeClaim(
       replaceableFinal !== undefined
     ) {
       try {
-        const currentFinal = await optionalMetadata(finalPath);
-        if (
-          currentFinal !== null &&
-          sameEncodeOutputAuthoritySnapshot(
-            replaceableFinal,
-            currentFinal,
-          )
-        ) {
-          preserveReplacementAuthority = true;
-        }
+        preserveReplacementAuthority = await priorFinalAuthorityPresent(finalPath, replaceableFinal);
       } catch (cleanupError) {
         rememberCleanupFailure(cleanupError, "published_output");
       }

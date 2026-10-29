@@ -1362,7 +1362,7 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
-  it("quarantines a materially truncated full-title output instead of publishing it", async () => {
+  it("retains a complete materially truncated full-title output as a failed artifact", async () => {
     const fixture = createQueuedJob(
       { kind: "main_feature" },
       "Example.mkv",
@@ -1405,7 +1405,10 @@ describe("encode worker polling", () => {
 
     expect(outputValidator.prepareAndValidate).toHaveBeenCalledOnce();
     expect(existsSync(fixture.outputPath)).toBe(false);
-    expect(quarantinedContents(partialPath)).toContain("corrupt encode");
+    const failedOutput = fixture.access.encodeJobs.listValidationFailedOutputs(fixture.job.id, { limit: 1 })[0]!;
+    expect(failedOutput.outputPath).toBe(partialPath);
+    expect(readFileSync(failedOutput.outputPath, "utf8")).toBe("corrupt encode");
+    expect(failedOutput.failure.evidence).toEqual({ kind: "duration", expectedSeconds: 8_078, observedSeconds: 97.205 });
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({
         errorMessage: "Encode output validation failed",

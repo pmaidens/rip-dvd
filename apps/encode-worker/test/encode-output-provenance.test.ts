@@ -71,6 +71,16 @@ linux.each(["duration", "audio", "audio_source", "audio_provenance", "audio_prov
       const snapshots = seeded.access.encodeJobs.listClaimSnapshots(seeded.job.id);
       expect(snapshots).toHaveLength(1);
       expect(snapshots[0]!.source.acceptance?.decision).toBe("accepted");
+      const failedOutputs = seeded.access.encodeJobs.listValidationFailedOutputs(seeded.job.id, { limit: 10 });
+      if (fault === "storage" || fault === "ownership") expect(failedOutputs).toEqual([]);
+      else {
+        expect(failedOutputs).toHaveLength(1);
+        expect(failedOutputs[0]!.sourceSnapshot?.id).toBe(snapshots[0]!.id);
+        const failedInspection = await fixture.run(["encode-output", "inspect", `encode-output-v1.failed.${failedOutputs[0]!.id}`]);
+        expect(failedInspection.exitCode).toBe(0);
+        expect(failedInspection.result).toMatchObject({ artifact: { state: "validation_failed", validation: { result: "failed" },
+          file: { completeness: "complete" }, provenance: { sourceSnapshot: { id: snapshots[0]!.id } }, media: { playability: "not_assessed" } } });
+      }
       if (fault !== "ownership") {
         expect(seeded.access.encodeJobs.find(seeded.job.id)?.status).toBe("failed");
         expect(seeded.access.encodeJobs.listFailureReports([seeded.job.id])).not.toHaveLength(0);

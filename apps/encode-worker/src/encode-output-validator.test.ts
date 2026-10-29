@@ -112,6 +112,13 @@ describe("encode output validation", () => {
     await expect(validator.prepareAndValidate("/media/synthetic.mkv", new AbortController().signal)).rejects.toMatchObject({ retentionSafe: false });
   });
 
+  it("rejects successful media-tool exit with storage-fault stderr without retention eligibility", async () => {
+    const validator = createNodeEncodeOutputValidator({ runMediaTool: async () => ({
+      stdout: JSON.stringify({ streams: [] }), stderr: "Input/output error",
+    }) });
+    await expect(validator.prepareAndValidate("/media/synthetic.mkv", new AbortController().signal)).rejects.toMatchObject({ retentionSafe: false });
+  });
+
   it.each([true, false])("preserves complete sources and search playback flags, reused=%s", async (reused) => {
     const expectedVobSubStreams = [
       { languageCode: "eng", sourceTrackNumber: 1, title: null },

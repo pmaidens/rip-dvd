@@ -293,13 +293,19 @@ async function runTool(
   description: string,
   check: EncodeJobFailureValidationCheck,
 ): Promise<MediaToolRunResult> {
+  let result: MediaToolRunResult;
   try {
-    return await runMediaTool(request);
+    result = await runMediaTool(request);
   } catch (error) {
     request.signal.throwIfAborted();
     throw new EncodeOutputValidationError(`${description} failed: ${normalizeToolError(error)}`,
       { kind: "validation_check", check }, !storageFault(error));
   }
+  if (storageFault(result.stderr)) {
+    throw new EncodeOutputValidationError(`${description} reported a storage fault: ${result.stderr}`,
+      { kind: "validation_check", check }, false);
+  }
+  return result;
 }
 
 function sourceVobSubStreams(

@@ -2702,6 +2702,7 @@ export interface EncodeJobAccess {
   retainValidationFailedOutput(claim: RunningEncodeJob,
     input: import("./encode-output-validation.js").ValidationFailedEncodeOutputInput,
     options?: EncodeJobFailureOptions): EncodeJob;
+  hasValidationFailedOutputPath(path: string): boolean;
   findValidationFailedOutput(id: ValidationFailedEncodeOutputId): import("./encode-output-validation.js").ValidationFailedEncodeOutput | null;
   listValidationFailedOutputs(id: EncodeJobId, page: { limit: number; offset?: number }): import("./encode-output-validation.js").ValidationFailedEncodeOutput[];
   recordOutputValidation(claim: RunningEncodeJob, identity: EncodeOutputFilesystemIdentity,
