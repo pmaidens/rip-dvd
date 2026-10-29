@@ -520,7 +520,36 @@ explicitly unknown. When inspection reports export as available,
 identity-bound canonical file to a new path on the CLI host. It returns JSON
 metadata and provenance on stdout, never media bytes. The command rejects an
 existing destination and reports stable JSON reasons for missing, changed, or
-unsafe source files.
+unsafe source files. The installed wrapper copies exports back from the service
+with `docker cp` and atomically publishes a mode-0600 file without clobbering an
+existing caller destination. It supports a remote Docker daemon without mounting
+the caller's directory, and JSON reports the caller's resolved destination.
+
+A complete validation-failed output can be kept separately through the Encoding
+view or `encode-output keep-preflight <artifact-identity>`. Review the returned
+failure, immutable source, validation identity, complete-file proof, normal
+destination and required acknowledgement. Submit
+`encode-output keep <artifact-identity> --key <new-key> --json '<review>'`, where
+`<review>` contains the exact `validationIdentity`, `previewToken` and
+`"acknowledged": true`. The command also accepts `--file` or `--stdin`.
+Keep recomputes the shared preflight, holds a shared kernel flock on the exact
+retained inode through commit, and rechecks file and database authority. Its
+read-only descriptor works on read-only media mounts without creating a lock
+sidecar, including for a first failed artifact with no normal output or lock file.
+Keep leaves the normal destination's worker publication lock available to newer
+encode claims. Filesystem checks run before SQLite's short writer transaction; the
+transaction authenticates the immutable retained-artifact and cleanup/publication
+fences. Retained failed files have no admitted writer. The flock excludes
+cooperating inode writers across proof and commit; an external process that
+ignores advisory locks can still alter a file after its last checked observation.
+Keep does not make media immutable against external administration. Changed
+evidence rejects the entire decision with current identities and blockers. Retry an uncertain response with the same key and input to retrieve its
+recorded result. A changed input with the same key conflicts. Inspection reports
+the persisted Keep evidence separately from inspection acknowledgement. The job
+stays failed, and normal library output is untouched. Unknown media inspectability
+does not alone block Keep of a complete stable file. Historical failures without
+retained artifact authority cannot be kept. New-format admission remains closed
+pending the combined release gate.
 
 `wait <kind> <id> --timeout-ms <milliseconds>` polls existing Disc Inspection,
 Archive Request, Archive Job, Encode Job, archive audit, or filesystem verification state for up to one hour. It returns

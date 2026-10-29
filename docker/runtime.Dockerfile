@@ -187,7 +187,8 @@ FROM runtime-base AS encode-output-inspection-runtime
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends ffmpeg \
   && rm -rf /var/lib/apt/lists/* \
-  && ffprobe -version >/dev/null
+  && ffprobe -version >/dev/null \
+  && flock --version >/dev/null
 
 FROM runtime-base AS deployment-tools
 RUN apt-get update \

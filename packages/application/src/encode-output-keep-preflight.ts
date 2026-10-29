@@ -1,5 +1,6 @@
+import { acquireEncodeOutputReadOwnership } from "@rip-dvd/worker-runtime";
 import { createHash } from "node:crypto";
-import { constants, type Stats } from "node:fs";
+import { constants, lstatSync, type Stats } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
@@ -53,7 +54,7 @@ const BLOCKER_ORDER = ["OUTPUT_FILE_UNAVAILABLE", "DESTINATION_EVIDENCE_UNAVAILA
   "OUTPUT_CHANGED_DURING_PREFLIGHT", "OUTPUT_NOT_REGULAR", "OUTPUT_EMPTY", "OUTPUT_INCOMPLETE",
   "OUTPUT_VALIDATION_CHANGED", "KEEP_PREFLIGHT_STALE", "OUTPUT_NOT_VALIDATION_FAILED", "ENCODE_JOB_NOT_FAILED"];
 
-function orderedBlockers(blockers: Blocker[]) {
+export function orderedKeepBlockers(blockers: Blocker[]) {
   return [...new Map(blockers.map((blocker) => [blocker.code, blocker])).values()]
     .sort((left, right) => BLOCKER_ORDER.indexOf(left.code) - BLOCKER_ORDER.indexOf(right.code));
 }
@@ -99,23 +100,23 @@ function errorCode(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
 }
 
-async function observeFile(path: string) {
+function observeFile(path: string) {
   try {
-    const metadata = await lstat(path);
+    const metadata = lstatSync(path);
     return { status: "present" as const, metadata, fileIdentity: encodeOutputFilesystemIdentity(metadata),
       revision: digest([encodeOutputFilesystemIdentity(metadata), metadata.ctimeMs, metadata.mode]) };
   } catch (error) {
     if (errorCode(error) === "ENOENT") {
       // A missing storage directory is not evidence that the destination is empty.
       try {
-        if ((await lstat(dirname(path))).isDirectory()) return { status: "absent" as const, metadata: null, fileIdentity: null, revision: null };
+        if (lstatSync(dirname(path)).isDirectory()) return { status: "absent" as const, metadata: null, fileIdentity: null, revision: null };
       } catch { /* Report unavailable storage without exposing its path. */ }
     }
     return { status: "unknown" as const, metadata: null, fileIdentity: null, revision: null };
   }
 }
 
-function sameObservation(first: Awaited<ReturnType<typeof observeFile>>, second: Awaited<ReturnType<typeof observeFile>>) {
+function sameObservation(first: ReturnType<typeof observeFile>, second: ReturnType<typeof observeFile>) {
   return first.status === second.status && first.revision === second.revision;
 }
 
@@ -171,7 +172,7 @@ const ACKNOWLEDGEMENT = {
 };
 
 /** Read-only evidence. A later Keep must recompute this preview before any write. */
-export async function previewEncodeOutputKeep(
+export async function prepareEncodeOutputKeepReview(
   access: DataAccess,
   artifactIdentity: unknown,
   raw?: unknown,
@@ -179,12 +180,12 @@ export async function previewEncodeOutputKeep(
 ) {
   const input = parseInput(raw);
   const before = readAuthority(access, artifactIdentity);
-  const destinationBefore = await observeFile(before.destination);
+  const destinationBefore = observeFile(before.destination);
   const inspected = await inspectEncodeOutputEvidence(access, artifactIdentity, mediaProbe);
   const failedArtifact = inspected.artifact.state === "validation_failed";
   const file = failedArtifact ? await fingerprintFile(before.output) : { metadata: null, sha256: null, blocker: null };
-  const destinationAfter = await observeFile(before.destination);
-  const finalFile = await observeFile(before.output.outputPath);
+  const destinationAfter = observeFile(before.destination);
+  const finalFile = observeFile(before.output.outputPath);
   const after = readAuthority(access, artifactIdentity);
   const { artifact } = inspected;
   const blockers: Blocker[] = [];
@@ -242,14 +243,59 @@ export async function previewEncodeOutputKeep(
     validation: after.output.validationRecord, acknowledgement: ACKNOWLEDGEMENT })}`;
   const stale = input.previewToken !== undefined && input.previewToken !== candidateToken;
   if (stale) blockers.push({ code: "KEEP_PREFLIGHT_STALE", message: "The reviewed Keep evidence changed. Request and review a new preflight." });
-  return {
+  const preview = {
     schemaVersion: 1 as const, artifact, current, completeWrite, normalDestination,
     requiredAcknowledgement: ACKNOWLEDGEMENT,
-    eligible: blockers.length === 0, blockers: orderedBlockers(blockers),
+    eligible: blockers.length === 0, blockers: orderedKeepBlockers(blockers),
     previewToken: blockers.length === 0 ? candidateToken : null,
     review: { status: input.previewToken === undefined ? "not_supplied" as const : stale ? "stale" as const : "current" as const,
       reasonCode: stale ? "KEEP_PREFLIGHT_STALE" : null },
   };
+  return {
+    preview,
+    prepareCommit(assertReadOwnership: () => void) {
+      assertReadOwnership();
+      if (!sameObservation(finalFile, observeFile(after.output.outputPath)) ||
+          !sameObservation(destinationAfter, observeFile(after.destination))) {
+        throw new EncodeOutputKeepEvidenceChangedError();
+      }
+      assertReadOwnership();
+      // Retained failed files have no admitted writer; cleanup and publication
+      // must also preserve their immutable artifact authority.
+      // Authenticate those fences under SQLite's writer lock, without media I/O.
+      return () => {
+        if (canonicalPublicationJson(readAuthority(access, artifactIdentity)) !== canonicalPublicationJson(after)) {
+          throw new EncodeOutputKeepEvidenceChangedError();
+        }
+      };
+    },
+  };
+}
+
+export class EncodeOutputKeepEvidenceChangedError extends Error {
+  constructor(readonly reasonCode = "KEEP_PREFLIGHT_STALE") { super("Keep evidence changed."); }
+}
+
+/** Keep holds the retained file's read ownership; preflight stays read-only. */
+export async function withEncodeOutputKeepReadOwnership<T>(
+  access: DataAccess, artifactIdentity: string, task: (assertHeld: () => void) => Promise<T>,
+): Promise<T> {
+  const { output } = readAuthority(access, artifactIdentity);
+  let ownership: Awaited<ReturnType<typeof acquireEncodeOutputReadOwnership>>;
+  try { ownership = await acquireEncodeOutputReadOwnership(output.outputPath); }
+  catch { throw new EncodeOutputKeepEvidenceChangedError("OUTPUT_OWNERSHIP_LOST"); }
+  try {
+    return await task(() => {
+      try { ownership.assertHeld(); }
+      catch { throw new EncodeOutputKeepEvidenceChangedError("OUTPUT_OWNERSHIP_LOST"); }
+    });
+  } finally { await ownership.release(); }
+}
+
+export async function previewEncodeOutputKeep(
+  access: DataAccess, artifactIdentity: unknown, raw?: unknown, mediaProbe?: EncodeOutputMediaProbe,
+) {
+  return (await prepareEncodeOutputKeepReview(access, artifactIdentity, raw, mediaProbe)).preview;
 }
 
 export type EncodeOutputKeepPreflight = Awaited<ReturnType<typeof previewEncodeOutputKeep>>;

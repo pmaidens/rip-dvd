@@ -1373,6 +1373,7 @@ describe("data-access facade", () => {
         "encode_job_failure_reports",
         "encode_output_inspection_receipts",
         "encode_output_validations",
+        "kept_failed_encode_outputs",
         "validation_failed_encode_outputs",
         "filesystem_verification_runs",
         "mutation_invocations",
@@ -1381,7 +1382,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(55);
+    expect(identifierTables).toHaveLength(56);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -1411,6 +1412,13 @@ describe("data-access facade", () => {
                               : sql.includes(`${name}_id_not_null`),
       ),
     ).toBe(true);
+    expect(sqlite.prepare("PRAGMA foreign_key_list(kept_failed_encode_outputs)").all()).toMatchObject([
+      { table: "validation_failed_encode_outputs", from: "failed_output_id", to: "id", on_delete: "RESTRICT" },
+    ]);
+    expect(sqlite.prepare("PRAGMA index_list(kept_failed_encode_outputs)").all()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "kept_failed_outputs_artifact_index" }),
+    ]));
+    expect(identifierTables.find(({ name }) => name === "kept_failed_encode_outputs")?.sql).toContain("kept_failed_outputs_record_check");
     expect(() =>
       sqlite.exec(`
         insert into optical_drives (
@@ -10028,10 +10036,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 18",
+          "select name from __drizzle_migrations order by id desc limit 19",
         )
         .all(),
       ).toEqual([
+        { name: "20261029042748_elite_gargoyle" },
         { name: "20261028235557_slippery_paladin" },
         { name: "20261028231111_encode-output-validations" },
         { name: "20261028221623_encode-claim-snapshots" },

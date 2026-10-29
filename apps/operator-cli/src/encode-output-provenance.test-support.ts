@@ -1,6 +1,6 @@
 import { lstatSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { encodeOutputFilesystemIdentity, type DataAccess, type RunningEncodeJob } from "@rip-dvd/data-access";
+import { encodeOutputFilesystemIdentity, type DataAccess, type RunningEncodeJob, type EncodeOutputValidationEvidence } from "@rip-dvd/data-access";
 import { claimNextEncodeJob } from "@rip-dvd/application";
 import { seedEncodeClaim } from "./encode-claim.test-support.js";
 import type { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
@@ -15,7 +15,8 @@ export const syntheticOutputValidation = {
 };
 
 /** Stand in for validated worker publication, keeping the real ownership transaction. */
-export function publishSyntheticClaim(access: DataAccess, claim: RunningEncodeJob, retainPrevious = false) {
+export function publishSyntheticClaim(access: DataAccess, claim: RunningEncodeJob, retainPrevious = false,
+  measured?: { evidence: EncodeOutputValidationEvidence; preserveOutput: true }) {
   const retainedPath = retainPrevious ? join(realpathSync(dirname(claim.outputPath)), `${basename(claim.outputPath)}.failed.${claim.claimToken}`) : undefined;
   if (retainedPath !== undefined) {
     access.encodeJobs.recordReplacementOutputIdentity(claim, encodeOutputFilesystemIdentity(lstatSync(claim.outputPath)));
@@ -23,12 +24,12 @@ export function publishSyntheticClaim(access: DataAccess, claim: RunningEncodeJo
   const cleanup = access.encodeJobs.registerPartialCleanup(claim, { publicationPending: true });
   const mutation = access.encodeJobs.beginPublicationMutation(claim, cleanup, retainedPath);
   if (retainedPath !== undefined) renameSync(claim.outputPath, retainedPath);
-  writeFileSync(claim.outputPath, `synthetic generation ${claim.claimToken}`);
+  if (!measured?.preserveOutput) writeFileSync(claim.outputPath, `synthetic generation ${claim.claimToken}`);
   const filesystemIdentity = encodeOutputFilesystemIdentity(lstatSync(claim.outputPath));
   const source = access.encodeJobs.findClaimSnapshot(claim.claimToken)?.source;
   const expectedSeconds = source === undefined ? syntheticOutputValidation.duration.expectedSeconds : source.output.expectedDurationSeconds;
   const validation = access.encodeJobs.recordOutputValidation(claim, filesystemIdentity, {
-    ...syntheticOutputValidation,
+    ...(measured?.evidence ?? syntheticOutputValidation),
     duration: { ...syntheticOutputValidation.duration, expectedSeconds, minimumRatio: expectedSeconds === null ? null : 0.98 },
   });
   access.encodeJobs.completePublishedClaim(claim, mutation, () => true, {

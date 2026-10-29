@@ -11,7 +11,7 @@ afterEach(() => { vi.unstubAllGlobals(); document.body.replaceChildren(); });
 function inspectedOutput(): EncodeOutputInspection {
   const jobId = "synthetic-history-job" as EncodeJobId;
   return {
-    schemaVersion: 1, authorityRevision: "synthetic-authority-revision",
+    schemaVersion: 1, kept: null, authorityRevision: "synthetic-authority-revision",
     artifact: {
       identity: "synthetic-artifact-identity", type: "canonical_encode_output", state: "published",
       encodeJob: { id: jobId, status: "completed", completedAt: null },

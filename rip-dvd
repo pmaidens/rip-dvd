@@ -6,7 +6,13 @@ repository_root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 invocation_directory="$(pwd -P)"
 # A Docker daemon may be remote. docker cp transports canonical bytes back to
 # this caller without assuming a bind mount refers to the caller's filesystem.
-if [ "$#" -eq 5 ] && [ "$1" = "damage-preview" ] && [ "$2" = "export" ] && [ "$4" = "--destination" ]; then
+if [ "$#" -eq 5 ] && { [ "$1" = "damage-preview" ] || [ "$1" = "encode-output" ]; } && [ "$2" = "export" ] && [ "$4" = "--destination" ]; then
+    export_family="$1"
+    case "$export_family" in
+        damage-preview) export_type="preview" ;;
+        encode-output) export_type="output" ;;
+    esac
+    service_export_path="/tmp/rip-dvd-$export_type-export.mkv"
     artifact_identity="$3"
     case "$5" in
         /*) destination="$5" ;;
@@ -16,37 +22,98 @@ if [ "$#" -eq 5 ] && [ "$1" = "damage-preview" ] && [ "$2" = "export" ] && [ "$4
         printf '%s\n' '{"error":{"code":"EXPORT_DESTINATION_EXISTS","message":"Export destination already exists."}}'
         exit 2
     fi
-    umask 077
-    if ! export_directory=$(mktemp -d "$(dirname "$destination")/.rip-dvd-preview-export.XXXXXX" 2>/dev/null); then
+    destination_named_parent="$(dirname "$destination")"
+    destination_leaf="$(basename "$destination")"
+    if ! cd -P "$destination_named_parent"; then
         printf '%s\n' '{"error":{"code":"EXPORT_DESTINATION_UNAVAILABLE","message":"The export destination parent must exist and be writable."}}'
         exit 2
     fi
-    export_container="rip-dvd-preview-export-$(basename "$export_directory" | tr '[:upper:].' '[:lower:]-')"
-    cleanup_export() {
-        docker rm --force "$export_container" >/dev/null 2>&1 || true
-        rm -rf "$export_directory"
+    destination_parent="$(pwd -P)"
+    umask 077
+    if ! export_directory=$(mktemp -d "./.rip-dvd-$export_type-export.XXXXXX" 2>/dev/null); then
+        printf '%s\n' '{"error":{"code":"EXPORT_DESTINATION_UNAVAILABLE","message":"The export destination parent must exist and be writable."}}'
+        exit 2
+    fi
+    export_basename="$(basename "$export_directory")"
+    export_container="rip-dvd-$export_type-export-$(printf '%s' "$export_basename" | tr '[:upper:].' '[:lower:]-')"
+    if ! cd -P "$export_directory"; then
+        rmdir "$export_directory" 2>/dev/null || true
+        printf '%s\n' '{"error":{"code":"EXPORT_DESTINATION_UNAVAILABLE","message":"The export staging directory is unavailable."}}'
+        exit 2
+    fi
+    published=false
+    export_owner=""
+    export_container_id=""
+    find_owned_export_container() {
+        [ -n "$export_owner" ] || return 1
+        export_inspected=$(docker inspect --format '{{.Id}}:{{index .Config.Labels "rip-dvd.export-owner"}}' \
+            "${export_container_id:-$export_container}" 2>/dev/null) || return 1
+        case "$export_inspected" in
+            *:"$export_owner") export_inspected_id="${export_inspected%:*}" ;;
+            *) return 1 ;;
+        esac
+        [ "${#export_inspected_id}" -eq 64 ] || return 1
+        case "$export_inspected_id" in *[!0-9a-f]*) return 1 ;; esac
+        export_container_id="$export_inspected_id"
     }
-    trap cleanup_export EXIT HUP INT TERM
-    cd "$repository_root"
-    if docker compose --profile maintenance run --no-deps --no-TTY \
-        --name "$export_container" --env "RIP_DVD_EXPORT_CALLER_PATH=$destination" \
-        operator-cli damage-preview export "$artifact_identity" \
-        --destination /tmp/rip-dvd-preview-export.mkv >"$export_directory/result.json"; then
+    export_parent_unchanged() {
+        [ "$destination_named_parent" -ef .. ] && [ "$destination_parent" -ef .. ] && [ "../$export_basename" -ef . ]
+    }
+    cleanup_export() {
+        if find_owned_export_container; then
+            docker rm --force "$export_container_id" >/dev/null 2>&1 || true
+        fi
+        # The working directory pins our private staging inode even if its
+        # parent was renamed. Never recursively remove a re-resolved path.
+        if [ "$published" = false ] && [ "../$destination_leaf" -ef ./media.mkv ]; then
+            rm -f "../$destination_leaf" 2>/dev/null || true
+        fi
+        rm -rf ./media.mkv ./result.json
+        if [ -n "$export_owner" ]; then rm -f "./$export_owner"; fi
+        if [ "../$export_basename" -ef . ]; then
+            (cd -P .. && rmdir "./$export_basename") 2>/dev/null || true
+        fi
+    }
+    export_transfer_failed() {
+        printf '%s\n' '{"error":{"code":"EXPORT_TRANSFER_FAILED","message":"Canonical media could not be saved to the caller destination."}}'
+        exit 1
+    }
+    trap cleanup_export EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    if ! export_owner_file=$(mktemp ./owner.XXXXXXXXXXXX 2>/dev/null); then
+        export_transfer_failed
+    fi
+    export_owner="${export_owner_file#./}"
+    if (cd "$repository_root" && docker compose --profile maintenance run --no-deps --no-TTY \
+        --name "$export_container" --label "rip-dvd.export-owner=$export_owner" \
+        --env "RIP_DVD_EXPORT_CALLER_PATH=$destination" \
+        operator-cli "$export_family" export "$artifact_identity" \
+        --destination "$service_export_path") >./result.json; then
         :
     else
         export_status=$?
-        if [ -s "$export_directory/result.json" ]; then
-            cat "$export_directory/result.json"
+        if [ -s ./result.json ]; then
+            cat ./result.json
         else
             printf '%s\n' '{"error":{"code":"EXPORT_SERVICE_UNAVAILABLE","message":"The canonical media export service is unavailable."}}'
         fi
         exit "$export_status"
     fi
-    if ! docker cp "$export_container:/tmp/rip-dvd-preview-export.mkv" "$export_directory/media.mkv" >/dev/null || ! link "$export_directory/media.mkv" "$destination"; then
-        printf '%s\n' '{"error":{"code":"EXPORT_TRANSFER_FAILED","message":"Canonical media could not be saved to the caller destination."}}'
-        exit 1
+    export_parent_unchanged || export_transfer_failed
+    find_owned_export_container || export_transfer_failed
+    if ! docker cp "$export_container_id:$service_export_path" ./media.mkv >/dev/null ||
+        [ ! -f ./media.mkv ] || [ -L ./media.mkv ] || ! chmod 0600 ./media.mkv; then
+        export_transfer_failed
     fi
-    cat "$export_directory/result.json"
+    export_parent_unchanged || export_transfer_failed
+    # link creates exactly this name atomically and refuses files, symlinks
+    # and directories. ln could instead create a link inside a raced directory.
+    link ./media.mkv "../$destination_leaf" || export_transfer_failed
+    export_parent_unchanged || export_transfer_failed
+    published=true
+    cat ./result.json
     exit 0
 fi
 

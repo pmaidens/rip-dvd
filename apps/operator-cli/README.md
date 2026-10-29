@@ -641,7 +641,47 @@ and evidence. Source excluded by the complete concrete playback map is
 locations, unsupported output timing and truncation remain `unknown`. Input
 identities must match the output generation's source evidence. A caller cannot
 supply a percentage, preview, arbitrary timestamp or current catalog selection
-as proof. This operation does not return verified output seeks.
+as proof.
+
+New worker validation may record `encode-output-exact-cell-video-v1` evidence.
+Its supported source is one complete cell, one chapter and angle, and one
+contiguous physical content extent at the immutable claim checkpoint. Every
+source sector must contain complete clear MPEG-2 DVD packs; missing, encrypted
+or malformed packs stay unknown. Under
+Archive Image Ownership, the worker reads that exact extent and decodes every
+video frame. After independent output validation, it decodes the canonical
+output and requires exactly one complete match of the source's ordered raw
+video SHA-256 frame hashes, with matching dimensions and `yuv420p` pixels.
+Source matching needs the complete ordered content fingerprint; source-frame
+timestamps may be unavailable. Every output frame still needs native PTS and
+duration. Those timestamps and the actual container origin determine the output
+interval. The interval is the envelope of the whole selected cell, retaining
+the source interval's `whole_cell` coverage. Its bounds are never calculated
+from estimated source seconds. This does not measure decoder effects or
+establish watchability.
+The complete decoded video bounds validate this envelope on that same clock.
+Container duration metadata can use a different origin, including when audio
+starts before zero; it is not used as an output timestamp limit. The independent
+full-title duration validation requirement remains in force.
+
+This conservative policy can verify unchanged decoded video, including simple
+content preserved exactly by a supported preset. Typical lossy changes,
+scaling, unsupported pixel formats, complex paths, multiple chapters or angles,
+source-span timing, repeated matches, omitted frames and incomplete decoding
+remain `unknown`. The producer bounds source bytes to 16 MiB, output bytes to
+64 MiB, each decoded sequence to 4,096 frames, each media command to 30 seconds
+and its output to 1 MiB. Temporary source bytes are private and removed after
+measurement, including failure. Exceeding a bound yields unknown evidence.
+Measurement never bypasses normal output validation or opens new-format
+admission. Historical records keep their existing meaning.
+
+Measured evidence is retained with the validation's exact claim and output
+generation. The query checks those identities and hashes the current bounded
+canonical bytes before returning `verified` or using the recorded source
+selection to prove `absent`. Later source or selection changes
+cannot retarget it. An output replacement or byte change cannot reuse the old
+measurement. A query has an eligible targeted location only when every
+requested interval is verified.
 
 `OUTPUT_MAPPING_UNKNOWN` applies to the query's targeted-location capability.
 Ordinary output inspection and its independently available actions remain
@@ -747,7 +787,13 @@ returns one JSON document with the artifact identity and type, byte size,
 destination, source identity, and provenance. Media bytes never go to stdout.
 Missing, substituted, changed, or otherwise unsafe source files return a
 nonzero status and a stable JSON reason with the current observed identity.
-Export never substitutes a browser rendition or Damage Preview.
+Export never substitutes a browser rendition or Damage Preview. The installed
+wrapper transports the service export with `docker cp`, so a remote Docker daemon
+does not need a bind mount of the caller's destination directory. Publication at
+the caller uses a mode-0600 file and an atomic no-clobber link. Existing files,
+symlinks and directories are rejected; a detected parent-directory replacement
+fails without deleting caller data. JSON names the resolved caller destination,
+not the private service staging path.
 
 An initial `encode-enqueue` is deduplicated by Disc Selection and Encoding
 Profile, including after completion. Use `encode-requeue` for a terminal job.

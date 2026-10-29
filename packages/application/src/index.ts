@@ -2,6 +2,7 @@ import { inspectEncodeOutputRenditionAvailability, requestEncodeOutputRendition,
 import { inspectEncodingReadiness, listEncodingReadinessArchives } from "./encoding-readiness.js";
 import { inspectEncodeOutputIntervals } from "./encode-output-correspondence.js";
 import { previewEncodeOutputKeep } from "./encode-output-keep-preflight.js";
+import { keepFailedEncodeOutput } from "./encode-output-keep.js";
 import { requestDamagePreview, inspectDamagePreview, cancelDamagePreview, waitDamagePreview, exportDamagePreview } from "./damage-preview-operations.js";
 import { inspectArchiveEvidence } from "./archive-evidence.js";
 import { inspectDamagePreviewAvailability } from "./damage-preview.js";
@@ -497,6 +498,8 @@ export function createApplicationOperations(
       inspectEncodeOutputIntervals(access, artifactIdentity, input, dependencies.encodeOutputMediaProbe),
     previewEncodeOutputKeep: (artifactIdentity: unknown, input?: unknown) =>
       previewEncodeOutputKeep(access, artifactIdentity, input, dependencies.encodeOutputMediaProbe),
+    keepFailedEncodeOutput: (artifactIdentity: unknown, input: unknown) =>
+      keepFailedEncodeOutput(access, artifactIdentity, input, dependencies.encodeOutputMediaProbe),
     acknowledgeEncodeOutputInspection: (artifactIdentity: unknown, input: unknown) =>
       acknowledgeEncodeOutputInspection(access, artifactIdentity, input, dependencies.encodeOutputMediaProbe),
     exportEncodeOutput: (input: {
@@ -1156,5 +1159,9 @@ export { InvalidEncodeOutputIntervalInputError } from "./encode-output-correspon
 export type { EncodeOutputIntervalInspection } from "./encode-output-correspondence.js";
 export { previewEncodeOutputKeep, InvalidEncodeOutputKeepPreflightInputError } from "./encode-output-keep-preflight.js";
 export type { EncodeOutputKeepPreflight } from "./encode-output-keep-preflight.js";
+export { measureEncodeSourceCell, measureEncodeOutputCell } from "./encode-output-cell-correspondence.js";
+export type { EncodeSourceCellMeasurement, CorrespondenceMediaTool } from "./encode-output-cell-correspondence.js";
+export { keepFailedEncodeOutput, EncodeOutputKeepRejectedError, InvalidEncodeOutputKeepInputError } from "./encode-output-keep.js";
+export type { EncodeOutputKeepResult } from "./encode-output-keep.js";
 
 export * from "./encode-output-rendition.js";

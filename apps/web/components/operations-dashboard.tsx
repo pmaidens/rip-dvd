@@ -244,6 +244,7 @@ function EncodeOutputInspectionDetails({
       {artifact.state === "validation_failed" ? <EncodeOutputKeepPreflightPanel
         key={inspection.operatorInspection?.reviewToken ?? artifact.identity}
         artifactIdentity={artifact.identity}
+        initialKeptAt={inspection.kept?.keptAt}
       /> : null}
       {inspection.operatorInspection === undefined ? null : <EncodeOutputInspectionAcknowledgement
         key={inspection.operatorInspection.reviewToken}

@@ -151,3 +151,5 @@ export async function runConfiguredAsyncWorker(
 }
 
 export { acquireKernelProcessLock, inspectKernelProcessLock, type KernelProcessLock } from "./kernel-process-lock.js";
+
+export { acquireEncodeOutputReadOwnership, type EncodeOutputReadOwnership } from "./encode-output-read-ownership.js";

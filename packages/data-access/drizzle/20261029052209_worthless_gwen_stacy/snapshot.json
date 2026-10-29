@@ -3,7 +3,7 @@
   "dialect": "sqlite",
   "id": "10cf3aba-7091-4d0b-b6b9-7848dc15ca7b",
   "prevIds": [
-    "648ab7dd-fa49-40f8-88d7-2d9882bcb3da"
+    "8525435c-5256-4cbf-b23b-1b4020082d46"
   ],
   "ddl": [
     {
@@ -28,10 +28,6 @@
     },
     {
       "name": "archive_requests",
-      "entityType": "tables"
-    },
-    {
-      "name": "browser_renditions",
       "entityType": "tables"
     },
     {
@@ -160,6 +156,10 @@
     },
     {
       "name": "filesystem_verification_runs",
+      "entityType": "tables"
+    },
+    {
+      "name": "kept_failed_encode_outputs",
       "entityType": "tables"
     },
     {
@@ -1369,56 +1369,6 @@
       "name": "updated_at",
       "entityType": "columns",
       "table": "archive_requests"
-    },
-    {
-      "type": "text",
-      "notNull": false,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "id",
-      "entityType": "columns",
-      "table": "browser_renditions"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "source_identity",
-      "entityType": "columns",
-      "table": "browser_renditions"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "status",
-      "entityType": "columns",
-      "table": "browser_renditions"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "record",
-      "entityType": "columns",
-      "table": "browser_renditions"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "created_at",
-      "entityType": "columns",
-      "table": "browser_renditions"
     },
     {
       "type": "text",
@@ -5262,6 +5212,56 @@
     },
     {
       "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "kept_failed_encode_outputs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "artifact_identity",
+      "entityType": "columns",
+      "table": "kept_failed_encode_outputs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "failed_output_id",
+      "entityType": "columns",
+      "table": "kept_failed_encode_outputs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "record",
+      "entityType": "columns",
+      "table": "kept_failed_encode_outputs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "kept_failed_encode_outputs"
+    },
+    {
+      "type": "text",
       "notNull": true,
       "autoincrement": false,
       "default": null,
@@ -7865,6 +7865,21 @@
     },
     {
       "columns": [
+        "failed_output_id"
+      ],
+      "tableTo": "validation_failed_encode_outputs",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_kept_failed_encode_outputs_failed_output_id_validation_failed_encode_outputs_id_fk",
+      "entityType": "fks",
+      "table": "kept_failed_encode_outputs"
+    },
+    {
+      "columns": [
         "media_item_id"
       ],
       "tableTo": "media_items",
@@ -8163,15 +8178,6 @@
         "id"
       ],
       "nameExplicit": false,
-      "name": "browser_renditions_pk",
-      "table": "browser_renditions",
-      "entityType": "pks"
-    },
-    {
-      "columns": [
-        "id"
-      ],
-      "nameExplicit": false,
       "name": "catalog_review_evidence_choices_pk",
       "table": "catalog_review_evidence_choices",
       "entityType": "pks"
@@ -8444,6 +8450,15 @@
       "nameExplicit": false,
       "name": "filesystem_verification_runs_pk",
       "table": "filesystem_verification_runs",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "kept_failed_encode_outputs_pk",
+      "table": "kept_failed_encode_outputs",
       "entityType": "pks"
     },
     {
@@ -8874,28 +8889,6 @@
       "name": "archive_requests_status_idx",
       "entityType": "indexes",
       "table": "archive_requests"
-    },
-    {
-      "columns": [
-        {
-          "value": "status",
-          "isExpression": false
-        },
-        {
-          "value": "created_at",
-          "isExpression": false
-        },
-        {
-          "value": "id",
-          "isExpression": false
-        }
-      ],
-      "isUnique": false,
-      "where": null,
-      "origin": "manual",
-      "name": "browser_renditions_queue_idx",
-      "entityType": "indexes",
-      "table": "browser_renditions"
     },
     {
       "columns": [
@@ -9862,6 +9855,24 @@
     {
       "columns": [
         {
+          "value": "artifact_identity",
+          "isExpression": false
+        },
+        {
+          "value": "created_at",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "kept_failed_outputs_artifact_index",
+      "entityType": "indexes",
+      "table": "kept_failed_encode_outputs"
+    },
+    {
+      "columns": [
+        {
           "value": "originals_library_path",
           "isExpression": false
         }
@@ -10557,18 +10568,6 @@
       "name": "archive_requests_terminal_fields_check",
       "entityType": "checks",
       "table": "archive_requests"
-    },
-    {
-      "value": "\"status\" in ('queued', 'generating', 'complete', 'failed', 'interrupted')",
-      "name": "browser_renditions_status_check",
-      "entityType": "checks",
-      "table": "browser_renditions"
-    },
-    {
-      "value": "json_valid(\"record\") and json_extract(\"record\", '$.id') = \"id\" and json_extract(\"record\", '$.status') = \"status\" and json_extract(\"record\", '$.sourceIdentity') = \"source_identity\"",
-      "name": "browser_renditions_record_check",
-      "entityType": "checks",
-      "table": "browser_renditions"
     },
     {
       "value": "\"id\" is not null",
@@ -11483,6 +11482,18 @@
       "table": "filesystem_verification_runs"
     },
     {
+      "value": "\"id\" is not null",
+      "name": "kept_failed_encode_outputs_id_not_null",
+      "entityType": "checks",
+      "table": "kept_failed_encode_outputs"
+    },
+    {
+      "value": "json_valid(\"record\") and json_extract(\"record\", '$.id') is \"id\" and json_extract(\"record\", '$.artifactIdentity') is \"artifact_identity\" and json_extract(\"record\", '$.validationIdentity') is \"failed_output_id\"",
+      "name": "kept_failed_outputs_record_check",
+      "entityType": "checks",
+      "table": "kept_failed_encode_outputs"
+    },
+    {
       "value": "\"media_item_id\" is not null",
       "name": "media_item_tmdb_identities_id_not_null",
       "entityType": "checks",
@@ -11811,6 +11822,103 @@
       "name": "worker_incidents_resolution_order_check",
       "entityType": "checks",
       "table": "worker_incidents"
+    },
+    {
+      "name": "browser_renditions",
+      "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "browser_renditions"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "source_identity",
+      "entityType": "columns",
+      "table": "browser_renditions"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "status",
+      "entityType": "columns",
+      "table": "browser_renditions"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "record",
+      "entityType": "columns",
+      "table": "browser_renditions"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "browser_renditions"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "browser_renditions_pk",
+      "table": "browser_renditions",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        {
+          "value": "status",
+          "isExpression": false
+        },
+        {
+          "value": "created_at",
+          "isExpression": false
+        },
+        {
+          "value": "id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "browser_renditions_queue_idx",
+      "entityType": "indexes",
+      "table": "browser_renditions"
+    },
+    {
+      "value": "\"status\" in ('queued', 'generating', 'complete', 'failed', 'interrupted')",
+      "name": "browser_renditions_status_check",
+      "entityType": "checks",
+      "table": "browser_renditions"
+    },
+    {
+      "value": "json_valid(\"record\") and json_extract(\"record\", '$.id') = \"id\" and json_extract(\"record\", '$.status') = \"status\" and json_extract(\"record\", '$.sourceIdentity') = \"source_identity\"",
+      "name": "browser_renditions_record_check",
+      "entityType": "checks",
+      "table": "browser_renditions"
     }
   ],
   "renames": []
