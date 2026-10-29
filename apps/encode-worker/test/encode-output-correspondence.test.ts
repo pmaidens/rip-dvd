@@ -78,7 +78,9 @@ linux.each(["shifted", "shifted_pts", "repeated", "omitted", "truncated"] as con
       : kind === "repeated" ? `${normalized},split[a][b];[a][b]concat=n=2:v=1:a=0[authored]`
       : kind === "omitted" ? `${normalized},select='lt(t,1)+gte(t,2)',setpts=N/(25*TB)[authored]`
       : `${normalized},trim=end_frame=50,setpts=N/(25*TB)[authored]`;
-    const filter = `${content};[authored]fps=25[v]`;
+    // tpad preserves the normalized frame timing, but its EOF timestamp does
+    // not include start padding. A second fps would discard its final frame.
+    const filter = `${content};[authored]${kind.startsWith("shifted") ? "null" : "fps=25"}[v]`;
     tool("ffmpeg", ["-v", "error", "-y", "-i", media.path, "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono:d=6",
       "-filter_complex", filter, "-map", "[v]", "-map", "1:a:0", "-c:a", "pcm_s16le", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0",
       "-fps_mode:v", "passthrough", "-enc_time_base:v", "1:1000",
