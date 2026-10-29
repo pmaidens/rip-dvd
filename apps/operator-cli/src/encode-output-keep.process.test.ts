@@ -1,9 +1,8 @@
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { chmodSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createDataAccess } from "@rip-dvd/data-access";
 import { runCommand } from "./command.js";
-import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
 import { seedKeepPreflightFixture, unavailableKeepProbe } from "./encode-output-keep-preflight.test-support.js";
@@ -13,9 +12,6 @@ afterEach(() => fixtures.splice(0).forEach(({ access, fixture }) => { access.clo
 
 const proofMode = process.env.RIP_DVD_KEEP_PROOF_MODE;
 const manifestPath = process.env.RIP_DVD_KEEP_PROOF_MANIFEST;
-const workerBindingPath = fileURLToPath(new URL("../../encode-worker/dist/rip-dvd-atomic-exchange.node", import.meta.url));
-const workerLockProbe = "const {createRequire}=await import('node:module');const binding=createRequire(import.meta.url)(process.argv[1]);const h=binding.tryAcquireLock(process.argv[2]);if(h===null)process.exit(75);binding.releaseLock(h);";
-
 interface ReadOnlyProofFixture {
   databasePath: string; mediaLibraryPath: string; originalsLibraryPath: string;
   identity: string; outputPath: string; validationIdentity: string; previewToken: string;
@@ -105,39 +101,6 @@ describe.skipIf(process.platform !== "linux")("Keep retained-file kernel read ow
       expect(readFileSync(seeded.output.outputPath)).toEqual(before);
       expect(readdirSync(seeded.fixture.mediaLibraryPath).sort()).toEqual(names);
     } finally { chmodSync(seeded.fixture.mediaLibraryPath, 0o755); }
-  });
-
-  it("holds the actual Encode Worker publication and cleanup lock through filesystem staging and Keep commit", async () => {
-    expect(process.getuid?.()).not.toBe(0);
-    const seeded = await seedKeepPreflightFixture(); fixtures.push(seeded);
-    const mutationLockPath = join(realpathSync(dirname(seeded.job.outputPath)), `.${basename(seeded.job.outputPath)}.rip-dvd-mutation-lock`);
-    const initialized = spawnSync(process.execPath, ["--input-type=module", "-e", workerLockProbe,
-      workerBindingPath, mutationLockPath], { encoding: "utf8" });
-    if (initialized.error) throw initialized.error;
-    expect(initialized.status).toBe(0);
-    const preview = (await seeded.preview()).result;
-    const before = readFileSync(seeded.output.outputPath);
-    let workerStatus: number | null | undefined;
-    const result = await seeded.fixture.run(["encode-output", "keep", seeded.identity, "--key", "synthetic-worker-locked-keep", "--json",
-      JSON.stringify({ acknowledged: true, validationIdentity: preview.current.validationIdentity, previewToken: preview.previewToken })],
-    undefined, undefined, { encodeOutputMediaProbe: unavailableKeepProbe,
-      openAccess() {
-        const access = seeded.fixture.openAccess();
-        const record = access.encodeOutputKeeps.record;
-        access.encodeOutputKeeps.record = (input, prepare) => record(input, () => {
-          const prepared = prepare();
-          const worker = spawnSync(process.execPath, ["--input-type=module", "-e", workerLockProbe,
-            workerBindingPath, mutationLockPath], { encoding: "utf8" });
-          if (worker.error) throw worker.error;
-          workerStatus = worker.status;
-          return prepared;
-        });
-        return access;
-      },
-    });
-    expect(workerStatus).toBe(75);
-    expect(result.exitCode).toBe(0);
-    expect(readFileSync(seeded.output.outputPath)).toEqual(before);
   });
 
   it("rejects a live exclusive inode owner without recording Keep", async () => {

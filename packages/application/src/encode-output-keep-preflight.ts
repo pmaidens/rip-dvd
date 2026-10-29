@@ -280,9 +280,9 @@ export class EncodeOutputKeepEvidenceChangedError extends Error {
 export async function withEncodeOutputKeepReadOwnership<T>(
   access: DataAccess, artifactIdentity: string, task: (assertHeld: () => void) => Promise<T>,
 ): Promise<T> {
-  const { output, destination } = readAuthority(access, artifactIdentity);
+  const { output } = readAuthority(access, artifactIdentity);
   let ownership: Awaited<ReturnType<typeof acquireEncodeOutputReadOwnership>>;
-  try { ownership = await acquireEncodeOutputReadOwnership(output.outputPath, destination); }
+  try { ownership = await acquireEncodeOutputReadOwnership(output.outputPath); }
   catch { throw new EncodeOutputKeepEvidenceChangedError("OUTPUT_OWNERSHIP_LOST"); }
   try {
     return await task(() => {

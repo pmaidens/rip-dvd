@@ -2939,7 +2939,7 @@ export const keptFailedEncodeOutputs = sqliteTable("kept_failed_encode_outputs",
   record: text("record").notNull(),
   createdAt: integer("created_at").notNull(),
 }, (table) => [
-  check("kept_failed_outputs_id_not_null", sql`${table.id} is not null`),
+  check("kept_failed_encode_outputs_id_not_null", sql`${table.id} is not null`),
   check("kept_failed_outputs_record_check", sql`json_valid(${table.record}) and json_extract(${table.record}, '$.id') is ${table.id} and json_extract(${table.record}, '$.artifactIdentity') is ${table.artifactIdentity} and json_extract(${table.record}, '$.validationIdentity') is ${table.failedOutputId}`),
   index("kept_failed_outputs_artifact_index").on(table.artifactIdentity, table.createdAt),
 ]);

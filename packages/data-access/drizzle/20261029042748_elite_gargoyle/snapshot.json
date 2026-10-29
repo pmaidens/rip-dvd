@@ -11483,7 +11483,7 @@
     },
     {
       "value": "\"id\" is not null",
-      "name": "kept_failed_outputs_id_not_null",
+      "name": "kept_failed_encode_outputs_id_not_null",
       "entityType": "checks",
       "table": "kept_failed_encode_outputs"
     },

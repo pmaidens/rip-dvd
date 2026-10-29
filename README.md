@@ -530,17 +530,17 @@ destination and required acknowledgement. Submit
 `<review>` contains the exact `validationIdentity`, `previewToken` and
 `"acknowledged": true`. The command also accepts `--file` or `--stdin`.
 Keep recomputes the shared preflight, holds a shared kernel flock on the exact
-retained inode through commit, takes the shared side of an existing worker
-publication lock, and rechecks file and database authority. Its
+retained inode through commit, and rechecks file and database authority. Its
 read-only descriptor works on read-only media mounts without creating a lock
-sidecar. A missing publication lock stays absent, including for the first failed
-artifact; the retained-artifact and publication fences still apply. Filesystem checks run before SQLite's short writer transaction; the
+sidecar, including for a first failed artifact with no normal output or lock file.
+Keep leaves the normal destination's worker publication lock available to newer
+encode claims. Filesystem checks run before SQLite's short writer transaction; the
 transaction authenticates the immutable retained-artifact and cleanup/publication
 fences. Retained failed files have no admitted writer. The flock excludes
 cooperating inode writers across proof and commit; an external process that
 ignores advisory locks can still alter a file after its last checked observation.
-Keep does not make media immutable against external administration. Changed evidence rejects the entire decision with current identities and
-blockers. Retry an uncertain response with the same key and input to retrieve its
+Keep does not make media immutable against external administration. Changed
+evidence rejects the entire decision with current identities and blockers. Retry an uncertain response with the same key and input to retrieve its
 recorded result. A changed input with the same key conflicts. Inspection reports
 the persisted Keep evidence separately from inspection acknowledgement. The job
 stays failed, and normal library output is untouched. Unknown media inspectability
