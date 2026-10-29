@@ -188,6 +188,7 @@ it("does not transfer a kept failed-output receipt to a later passing generation
 
 it("rejects a rewritten failed artifact even after its size and modification time are restored", async () => {
   const { validation, inspectPreview, acknowledge } = await setup({ validationFailed: true });
+  if (!("outputPath" in validation)) throw new Error("Synthetic failed output was not retained.");
   await acknowledge("synthetic-failed-before-restored-mtime");
   const before = lstatSync(validation.outputPath);
   writeFileSync(validation.outputPath, "SYNTHETIC COMPLETE FAILED ENCODE");
