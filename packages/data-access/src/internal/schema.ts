@@ -2924,7 +2924,7 @@ export const validationFailedEncodeOutputs = sqliteTable("validation_failed_enco
   sourceSnapshot: text("source_snapshot", { mode: "json" }).$type<EncodeOutputSourceSnapshot>(),
   failure: text("failure", { mode: "json" }).$type<import("../types.js").EncodeJobFailureReportInput>().notNull(),
 }, (table) => [
-  check("validation_failed_outputs_id_not_null", sql`${table.id} is not null`),
+  check("validation_failed_encode_outputs_id_not_null", sql`${table.id} is not null`),
   check("validation_failed_outputs_failure_check", sql`json_valid(${table.failure}) and json_extract(${table.failure}, '$.reasonCode') is 'output_validation_failed' and json_extract(${table.failure}, '$.phase') is 'validation'`),
   check("validation_failed_outputs_source_check", sql`${table.sourceSnapshot} is null or (json_valid(${table.sourceSnapshot}) and json_extract(${table.sourceSnapshot}, '$.id') is ${table.claimToken} and json_extract(${table.sourceSnapshot}, '$.encodeJobId') is ${table.encodeJobId} and json_extract(${table.sourceSnapshot}, '$.source.schemaVersion') is 1)`),
   uniqueIndex("validation_failed_outputs_claim_unique").on(table.encodeJobId, table.claimToken),

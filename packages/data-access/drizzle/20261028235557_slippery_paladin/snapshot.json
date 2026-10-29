@@ -11645,7 +11645,7 @@
     },
     {
       "value": "\"id\" is not null",
-      "name": "validation_failed_outputs_id_not_null",
+      "name": "validation_failed_encode_outputs_id_not_null",
       "entityType": "checks",
       "table": "validation_failed_encode_outputs"
     },
