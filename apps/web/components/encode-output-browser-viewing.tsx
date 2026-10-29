@@ -5,6 +5,10 @@ import { useEffect, useRef, useState } from "react";
 import type { BrowserRenditionAvailability, presentBrowserRendition } from "@rip-dvd/application";
 
 type Rendition = ReturnType<typeof presentBrowserRendition>;
+function audioInventoryLabel(streams: Rendition["source"]["media"]["streams"]) {
+  return streams === null ? "unknown inventory" : streams.filter((stream) => stream.kind === "audio")
+    .map((stream) => `${stream.codecName ?? "unknown"} ${stream.language ?? "language unknown"}`).join(", ") || "none";
+}
 async function readResponse(response: Response) {
   if (response.status === 401) throw new Error("Sign in for browser playback, then try again.");
   const body = await response.json();
@@ -51,7 +55,7 @@ export function EncodeOutputBrowserViewing({ artifactIdentity, validationFailed,
     }}>Check browser playback</button>
     {availability ? <>
       {availability.reasons.map((reason) => <p key={reason.code}>{reason.message} [{reason.code}]</p>)}
-      <p>Audio: {availability.source.media.streams === null ? "unknown inventory" : availability.source.media.streams.filter((stream) => stream.kind === "audio").map((stream) => `${stream.codecName ?? "unknown"} ${stream.language ?? "language unknown"}`).join(", ") || "none"}.</p>
+      <p>Audio: {audioInventoryLabel(availability.source.media.streams)}.</p>
       <p>{availability.conversion.subtitles === "omitted" ? "Soft subtitles, including DVD bitmap subtitles, are omitted. No subtitles are burned in." : availability.conversion.subtitles === "unknown" ? "Subtitle inventory is unknown." : "No subtitles are present."}</p>
       <button type="button" disabled={busy || !availability.available} onClick={() => {
         setBusy(true); setError(null);
@@ -64,6 +68,7 @@ export function EncodeOutputBrowserViewing({ artifactIdentity, validationFailed,
     {rendition ? <>
       {rendition.sourceAuthorityRevision !== sourceAuthorityRevision || rendition.source.file.mutationRevision !== sourceFileMutationRevision ? <p role="alert">Historical rendition. Its source file or authority differs from the currently inspected output. This playback shows the recorded earlier generation.</p> : null}
       <p>Rendition {rendition.id}: {rendition.status}{rendition.progress.percent === null ? "" : ` · ${Math.floor(rendition.progress.percent)}%`}.</p>
+      <p>Audio: {audioInventoryLabel(rendition.source.media.streams)}.</p>
       <p>Stream-copy remux to MP4. {rendition.conversion.subtitles === "omitted" ? "Soft subtitles omitted; none burned in." : rendition.conversion.subtitles === "unknown" ? "Subtitle inventory is unknown." : "No subtitles."}</p>
       {rendition.reason ? <p role="alert">{rendition.reason.message} [{rendition.reason.code}]</p> : null}
       <button type="button" onClick={() => { setError(null); void inspect(rendition.id).catch((failure: Error) => setError(failure.message)); }}>Refresh rendition status</button>

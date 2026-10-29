@@ -23,7 +23,7 @@ it("keeps failed-source and ordinary-playback warnings visible through authoriza
 it("resumes a saved durable rendition without requesting another one or acknowledging inspection", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   sessionStorage.setItem("encode-output-browser-rendition:synthetic-artifact", "synthetic-rendition");
-  const fetcher = vi.fn(async () => Response.json({ id: "synthetic-rendition", status: "complete", progress: { percent: 100 }, sourceAuthorityRevision: "earlier-authority", source: { identity: "synthetic-artifact", state: "validation_failed", file: { mutationRevision: "earlier-file" } }, conversion: { kind: "stream_copy_remux", subtitles: "omitted" }, reason: null, media: { identity: "synthetic-rendition-media" } }));
+  const fetcher = vi.fn(async () => Response.json({ id: "synthetic-rendition", status: "complete", progress: { percent: 100 }, sourceAuthorityRevision: "earlier-authority", source: { identity: "synthetic-artifact", state: "validation_failed", file: { mutationRevision: "earlier-file" }, media: { streams: [{ kind: "audio", codecName: "aac", language: "eng" }] } }, conversion: { kind: "stream_copy_remux", subtitles: "omitted" }, reason: null, media: { identity: "synthetic-rendition-media" } }));
   vi.stubGlobal("fetch", fetcher);
   const container = document.createElement("div"); document.body.append(container);
   const root = createRoot(container);
@@ -32,6 +32,7 @@ it("resumes a saved durable rendition without requesting another one or acknowle
     expect(container.querySelector("video")?.getAttribute("src")).toBe("/api/browser-renditions/synthetic-rendition/media");
     expect(container.textContent).toContain("Validation-failed source"); expect(container.textContent).toContain("Soft subtitles omitted");
     expect(container.textContent).toContain("Historical rendition");
+    expect(container.textContent).toContain("Audio: aac eng");
     expect(fetcher.mock.calls).toHaveLength(1);
     await act(async () => container.querySelector("video")!.dispatchEvent(new Event("error")));
     expect(container.textContent).toContain("The browser could not play this rendition");
