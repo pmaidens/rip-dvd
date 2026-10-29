@@ -1712,13 +1712,16 @@ Choose **Check browser playback**, then **Create browser rendition**. The Encode
 worker records queued, generating, complete, failed or interrupted status. A
 worker interruption never automatically retries generation. Refreshing status or
 returning to the same output in that browser tab resumes inspection by the saved
-request ID. Canonical MKV bytes and normal publication remain unchanged.
+request ID. A saved rendition from an earlier file or authority generation is
+labeled historical beside current inspection. Canonical MKV bytes and normal publication remain unchanged.
 
 The initial conversion copies one actual H.264 video stream with a known 8-bit
 `yuv420p` Baseline, Main or High profile at level 4.2 or below, plus actual AAC-LC
 audio, into a distinct MP4 with fast-start metadata. Silent video is identified as
 having no audio. The command, tool version, copied and omitted stream indexes,
-and original output evidence remain recorded. Soft subtitles, including DVD
+and original output evidence remain recorded. The probed source and rendition durations must agree within 250 ms
+for mux timestamp rounding and AAC padding; incomplete coverage stays failed.
+Soft subtitles, including DVD
 bitmap subtitles, are omitted; no subtitle burn-in or codec conversion is
 available. Unsupported codecs, unknown compatibility and failed probes have
 specific unavailable reasons. Generation temporarily needs a complete verified

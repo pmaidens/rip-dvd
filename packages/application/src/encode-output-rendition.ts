@@ -83,7 +83,7 @@ export async function requestEncodeOutputRendition(access: DataAccess, identity:
   try {
     return presentBrowserRendition(access.browserRenditions.submit(input, () => {
       assertEncodeOutputEvidenceCurrent(access, { schemaVersion: 1, authorityRevision: current.current.authorityRevision, artifact: current.source });
-      return { sourceJson: canonicalPublicationJson(current.source), conversion: current.conversion };
+      return { sourceJson: canonicalPublicationJson(current.source), sourceAuthorityRevision: current.current.authorityRevision, conversion: current.conversion };
     }));
   } catch (error) {
     const fileError = typeof error === "object" && error !== null && "code" in error && ["ENOENT", "EACCES", "ELOOP", "ENOTDIR", "ESTALE"].includes(String(error.code));

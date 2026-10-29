@@ -11,7 +11,7 @@ async function readResponse(response: Response) {
   if (!response.ok) throw new Error(body.error?.message ?? body.error?.code ?? "Browser playback is unavailable.");
   return body;
 }
-export function EncodeOutputBrowserViewing({ artifactIdentity, validationFailed }: { artifactIdentity: string; validationFailed: boolean }) {
+export function EncodeOutputBrowserViewing({ artifactIdentity, validationFailed, sourceAuthorityRevision, sourceFileMutationRevision }: { artifactIdentity: string; validationFailed: boolean; sourceAuthorityRevision: string; sourceFileMutationRevision: string | null }) {
   const [availability, setAvailability] = useState<BrowserRenditionAvailability | null>(null);
   const [rendition, setRendition] = useState<Rendition | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -62,6 +62,7 @@ export function EncodeOutputBrowserViewing({ artifactIdentity, validationFailed 
       }}>Create browser rendition</button>
     </> : null}
     {rendition ? <>
+      {rendition.sourceAuthorityRevision !== sourceAuthorityRevision || rendition.source.file.mutationRevision !== sourceFileMutationRevision ? <p role="alert">Historical rendition. Its source file or authority differs from the currently inspected output. This playback shows the recorded earlier generation.</p> : null}
       <p>Rendition {rendition.id}: {rendition.status}{rendition.progress.percent === null ? "" : ` · ${Math.floor(rendition.progress.percent)}%`}.</p>
       <p>Stream-copy remux to MP4. {rendition.conversion.subtitles === "omitted" ? "Soft subtitles omitted; none burned in." : "No subtitles."}</p>
       {rendition.reason ? <p role="alert">{rendition.reason.message} [{rendition.reason.code}]</p> : null}

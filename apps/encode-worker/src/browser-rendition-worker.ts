@@ -1,52 +1,16 @@
-import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { mkdir, open, realpath, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { browserRenditionConfig } from "@rip-dvd/config";
-import { exportEncodeOutput, inspectEncodeOutputRenditionAvailability, probeEncodeOutputMedia, type EncodeOutputMediaProbe } from "@rip-dvd/application";
+import { exportEncodeOutput, inspectEncodeOutputRenditionAvailability } from "@rip-dvd/application";
 import { canonicalPublicationJson, encodeOutputFilesystemIdentity, type DataAccess } from "@rip-dvd/data-access";
 import { acquireKernelProcessLock } from "@rip-dvd/worker-runtime";
 
-interface RemuxInput {
-  source: string; destination: string; streamIndexes: number[]; executionDescriptor: number;
-  signal: AbortSignal; onProgress(percent: number): void; durationSeconds: number;
-}
-export interface BrowserRenditionGenerator {
-  probe: EncodeOutputMediaProbe;
-  version(): Promise<string>;
-  remux(input: RemuxInput): Promise<void>;
-}
-async function run(file: string, args: string[], signal?: AbortSignal, descriptor?: number, onOutput?: (text: string) => void) {
-  return new Promise<string>((resolve, reject) => {
-    const child = spawn(file, args, { signal, stdio: ["ignore", "pipe", "ignore", ...(descriptor === undefined ? [] : [descriptor])] });
-    let output = "", failure: Error | undefined;
-    child.stdout!.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8");
-      onOutput?.(text);
-      output = (output + text).slice(-16_384);
-    });
-    child.on("error", (error) => { failure = error; });
-    child.on("close", (code) => failure ? reject(failure) : code === 0 ? resolve(output) : reject(new Error("Rendition media command failed.")));
-  });
-}
-const generator: BrowserRenditionGenerator = {
-  probe: probeEncodeOutputMedia,
-  version: async () => (await run("ffmpeg", ["-version"])).split("\n")[0]!.slice(0, 512),
-  async remux(input) {
-    let pending = "";
-    await run("ffmpeg", ["-nostdin", "-v", "error", "-n", "-i", input.source,
-      ...input.streamIndexes.flatMap((index) => ["-map", `0:${index}`]),
-      "-c", "copy", "-map_metadata", "-1", "-map_chapters", "-1", "-movflags", "+faststart", "-progress", "pipe:1", "-f", "mp4", input.destination], input.signal, input.executionDescriptor, (text) => {
-      pending += text;
-      const lines = pending.split("\n"); pending = lines.pop()!.slice(-1024);
-      for (const line of lines) {
-        const match = /^out_time_us=(\d+)$/.exec(line);
-        if (match) input.onProgress(Math.min(99, Number(match[1]) / (input.durationSeconds * 10_000)));
-      }
-    });
-  },
-};
+import { createBrowserRenditionGenerator, browserRenditionCommand, type BrowserRenditionGenerator } from "./browser-rendition-generator.js";
+export type { BrowserRenditionGenerator } from "./browser-rendition-generator.js";
+
+const generator = createBrowserRenditionGenerator();
 interface Options {
   access: DataAccess; mediaLibraryPath: string; signal: AbortSignal;
   generator?: BrowserRenditionGenerator; enabled?: boolean;
@@ -83,8 +47,7 @@ export async function pollBrowserRenditions(options: Options) {
       const snapshot = await media.probe(source);
       if (canonicalPublicationJson(snapshot) !== canonicalPublicationJson({ durationSeconds: review.source.media.durationSeconds, streams: review.source.media.streams })) throw new Error("RENDITION_SOURCE_CHANGED");
       record.toolVersion = await media.version();
-      record.command = ["ffmpeg", "-nostdin", "-v", "error", "-n", "-i", "<canonical-output-snapshot>",
-        ...record.conversion.copiedStreamIndexes.flatMap((index) => ["-map", `0:${index}`]), "-c", "copy", "-map_metadata", "-1", "-map_chapters", "-1", "-movflags", "+faststart", "-progress", "pipe:1", "-f", "mp4", "<browser-rendition>"];
+      record.command = ["ffmpeg", ...browserRenditionCommand("<canonical-output-snapshot>", "<browser-rendition>", record.conversion.copiedStreamIndexes)];
       options.access.browserRenditions.update(record);
       lock.assertHeld();
       await media.remux({ source, destination: partial, streamIndexes: record.conversion.copiedStreamIndexes, executionDescriptor: lock.descriptor,
@@ -93,6 +56,10 @@ export async function pollBrowserRenditions(options: Options) {
         } });
       options.signal.throwIfAborted(); lock.assertHeld();
       const inspected = await media.probe(partial);
+      // MP4 muxing can shift duration through AAC padding and timestamp rounding.
+      // This tolerance concerns container timing only, never source watchability.
+      record.durationCoverage = { sourceSeconds: snapshot.durationSeconds!, renditionSeconds: inspected.durationSeconds, toleranceSeconds: 0.25 };
+      if (inspected.durationSeconds === null || Math.abs(inspected.durationSeconds - snapshot.durationSeconds!) > record.durationCoverage.toleranceSeconds) throw new Error("RENDITION_INCOMPLETE_COVERAGE");
       const copied = snapshot.streams.filter((stream) => record.conversion.copiedStreamIndexes.includes(stream.index));
       if (inspected.durationSeconds === null || inspected.durationSeconds <= 0 || inspected.streams.length !== copied.length ||
           inspected.streams.some((stream, index) => stream.kind !== copied[index]!.kind || stream.codecName !== copied[index]!.codecName)) throw new Error("RENDITION_REMUX_FAILED");
@@ -114,7 +81,8 @@ export async function pollBrowserRenditions(options: Options) {
     } catch (error) {
       record.status = options.signal.aborted ? "interrupted" : "failed";
       const changed = error instanceof Error && error.message === "RENDITION_SOURCE_CHANGED";
-      record.reason = { code: changed ? "RENDITION_SOURCE_CHANGED" : options.signal.aborted ? "RENDITION_INTERRUPTED" : "RENDITION_REMUX_FAILED", message: changed ? "The canonical output changed after the rendition request. Review its current identity and make a new request." : "Rendition generation did not complete. No playback or validation conclusion was recorded." };
+      const incomplete = error instanceof Error && error.message === "RENDITION_INCOMPLETE_COVERAGE";
+      record.reason = { code: changed ? "RENDITION_SOURCE_CHANGED" : incomplete ? "RENDITION_INCOMPLETE_COVERAGE" : options.signal.aborted ? "RENDITION_INTERRUPTED" : "RENDITION_REMUX_FAILED", message: changed ? "The canonical output changed after the rendition request. Review its current identity and make a new request." : "Rendition generation did not complete. No playback or validation conclusion was recorded." };
       record.media = null;
     }
     if (record.status !== "complete") await rm(directory, { recursive: true, force: true });

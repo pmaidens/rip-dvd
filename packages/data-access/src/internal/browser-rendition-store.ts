@@ -36,7 +36,7 @@ export function createBrowserRenditionAccess(sqlite: DatabaseSync, now: () => Da
         const record: BrowserRenditionRecord = {
           ...prepared, id: randomUUID(), sourceIdentity: input.sourceIdentity, reviewToken: input.reviewToken,
           status: "queued", reason: null, progress: { percent: null }, command: [], toolVersion: null,
-          media: null, createdAt: timestamp.toISOString(), updatedAt: timestamp.toISOString(),
+          media: null, durationCoverage: null, createdAt: timestamp.toISOString(), updatedAt: timestamp.toISOString(),
         };
         sqlite.prepare("INSERT INTO browser_renditions (id, source_identity, status, record, created_at) VALUES (?, ?, ?, ?, ?)")
           .run(record.id, record.sourceIdentity, record.status, JSON.stringify(record), timestamp.getTime());

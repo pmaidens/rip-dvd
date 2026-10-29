@@ -4,6 +4,7 @@ export interface BrowserRenditionRecord {
   id: string;
   sourceIdentity: string;
   sourceJson: string;
+  sourceAuthorityRevision: string;
   reviewToken: string;
   status: "queued" | "generating" | "complete" | "failed" | "interrupted";
   reason: { code: string; message: string } | null;
@@ -16,6 +17,7 @@ export interface BrowserRenditionRecord {
     subtitles: "omitted" | "none";
   };
   command: string[];
+  durationCoverage: { sourceSeconds: number; renditionSeconds: number | null; toleranceSeconds: number } | null;
   toolVersion: string | null;
   media: { identity: string; path: string; filesystemIdentity: EncodeOutputFilesystemIdentity; changeTimeMs: number; sizeBytes: number } | null;
   createdAt: string;
@@ -29,7 +31,7 @@ export interface BrowserRenditionRequest {
 export interface BrowserRenditionAccess {
   find(id: string): BrowserRenditionRecord | null;
   replay(input: BrowserRenditionRequest): BrowserRenditionRecord | null;
-  submit(input: BrowserRenditionRequest, prepare: () => Pick<BrowserRenditionRecord, "sourceJson" | "conversion">): BrowserRenditionRecord;
+  submit(input: BrowserRenditionRequest, prepare: () => Pick<BrowserRenditionRecord, "sourceJson" | "sourceAuthorityRevision" | "conversion">): BrowserRenditionRecord;
   active(): BrowserRenditionRecord[];
   claim(): BrowserRenditionRecord | null;
   update(record: BrowserRenditionRecord): void;

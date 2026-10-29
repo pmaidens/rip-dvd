@@ -67,3 +67,25 @@ it("reports subtitle omissions and refuses a source that changed after durable a
     expect((await fixture.run(["encode-output", "inspect-rendition", seeded.request.id])).result).toMatchObject({ status: "failed", reason: { code: "RENDITION_SOURCE_CHANGED" }, media: null });
   } finally { access.close(); }
 });
+it("rejects a finalized MP4 whose actual duration omits source content", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await requestSyntheticRendition(fixture);
+  const access = fixture.openAccess();
+  try {
+    await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, enabled: true, generator: {
+      ...generator, probe: async (path) => ({ ...(await compatibleOutputProbe(path)), durationSeconds: path.endsWith(".mp4") ? 1 : 10 }),
+    } });
+    expect((await fixture.run(["encode-output", "inspect-rendition", seeded.request.id])).result).toMatchObject({ status: "failed", media: null,
+      reason: { code: "RENDITION_INCOMPLETE_COVERAGE" }, durationCoverage: { sourceSeconds: 10, renditionSeconds: 1, toleranceSeconds: 0.25 } });
+  } finally { access.close(); }
+});
+it("contains a progress persistence failure and rejects only after its child closes", async () => {
+  const { runRenditionCommand } = await import("../src/browser-rendition-generator.js");
+  const { join } = await import("node:path");
+  const { readFile } = await import("node:fs/promises");
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const marker = join(fixture.operatorHostPath, "synthetic-child-closed");
+  const script = "const fs = require('node:fs'); process.on('SIGTERM', () => { fs.writeFileSync(process.argv[1], 'closed'); process.exit(0); }); process.stdout.write('progress\\n'); setInterval(() => {}, 1000);";
+  await expect(runRenditionCommand(process.execPath, ["-e", script, marker], undefined, undefined, () => { throw new Error("Synthetic persistence failure"); })).rejects.toThrow("Synthetic persistence failure");
+  expect(await readFile(marker, "utf8")).toBe("closed");
+});
