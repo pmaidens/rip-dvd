@@ -1783,3 +1783,11 @@ separate `pnpm test:rendition-media` gate requires real `ffmpeg`, `ffprobe` and
 Linux process locks. Browser coverage is authored for stable desktop Chrome and
 mobile WebKit using actual synthetic MP4 media. Mobile WebKit automation is an
 approximation; the release gate also requires current mobile Safari validation.
+
+The rendition browser gate can use a separately running isolated synthetic
+server through `RIP_DVD_RENDITION_BROWSER_BASE_URL`. Run its preparation test on
+Linux, then supply the generated private `seeded.json` through
+`RIP_DVD_RENDITION_BROWSER_FIXTURE` when the browser runs on another host.
+External mode requires `RIP_DVD_RENDITION_BROWSER_GATE=true` and does not start
+or reseed that server. This lets an installed stable Chrome browser inspect the
+same Linux-produced rendition without substituting an emulated browser.

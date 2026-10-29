@@ -2,18 +2,24 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { expect, test } from "@playwright/test";
-import { probeEncodeOutputMedia } from "@rip-dvd/application";
-import { createOperatorWorkflowFixture } from "../../../operator-cli/src/operator-workflow.test-support.js";
-import { requestSyntheticRendition } from "../../../operator-cli/src/encode-output-rendition.test-support.js";
-import { pollBrowserRenditions } from "../../../encode-worker/src/browser-rendition-worker.js";
 
 // Run only with the dedicated config and its isolated synthetic server.
 test.skip(process.env.RIP_DVD_RENDITION_BROWSER_GATE !== "true", "Requires the separate rendition browser gate.");
 const root = resolve("test-results/rendition-browser-data");
 let seeded: { id: string; identity: string };
 test.beforeAll(async () => {
-  const manifest = join(root, "seeded.json");
-  if (existsSync(manifest)) { seeded = JSON.parse(readFileSync(manifest, "utf8")); return; }
+  const suppliedManifest = process.env.RIP_DVD_RENDITION_BROWSER_FIXTURE;
+  const manifest = suppliedManifest ?? join(root, "seeded.json");
+  if (existsSync(manifest)) {
+    seeded = JSON.parse(readFileSync(manifest, "utf8"));
+    if (!/^[0-9a-f-]{36}$/.test(seeded.id) || !/^encode-output-v1\.failed\.[0-9a-f-]{36}$/.test(seeded.identity)) throw new Error("Invalid synthetic rendition fixture identity.");
+    return;
+  }
+  if (suppliedManifest) throw new Error("The supplied synthetic rendition fixture is missing.");
+  const { probeEncodeOutputMedia } = await import("@rip-dvd/application");
+  const { createOperatorWorkflowFixture } = await import("../../../operator-cli/src/operator-workflow.test-support.js");
+  const { requestSyntheticRendition } = await import("../../../operator-cli/src/encode-output-rendition.test-support.js");
+  const { pollBrowserRenditions } = await import("../../../encode-worker/src/browser-rendition-worker.js");
   const fixture = createOperatorWorkflowFixture(root);
   const source = join(fixture.operatorHostPath, "synthetic-browser-source.mkv");
   execFileSync("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "3", "-c:v", "libx264", "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-c:a", "aac", "-profile:a", "aac_low", source]);
@@ -24,13 +30,20 @@ test.beforeAll(async () => {
   seeded = { id: output.request.id, identity: output.identity };
   writeFileSync(manifest, JSON.stringify(seeded));
 });
-test("plays actual failed-source rendition with audio and seeking, and protects every range", async ({ page, request, browser }) => {
+test("prepares a retained synthetic rendition through the public operation", async ({ request }) => {
+  const response = await request.get(`/api/browser-renditions/${seeded.id}`);
+  expect(response.status()).toBe(200);
+  expect(await response.json()).toMatchObject({ status: "complete", source: { identity: seeded.identity, state: "validation_failed" },
+    conversion: { kind: "stream_copy_remux" }, media: { mediaType: "video/mp4", availability: { available: true } } });
+});
+
+test("plays actual failed-source rendition with audio and seeking, and protects every range", async ({ page, request, browser, baseURL }) => {
   const url = `/api/browser-renditions/${seeded.id}/media`;
   const state = await request.get(`/api/browser-renditions/${seeded.id}`);
   expect((await state.json()).status).toBe("complete");
   const anonymous = await browser.newContext();
   try {
-    expect((await anonymous.request.get(`http://localhost:3112${url}`, { headers: { Range: "bytes=0-1" } })).status()).toBe(401);
+    expect((await anonymous.request.get(new URL(url, baseURL).toString(), { headers: { Range: "bytes=0-1" } })).status()).toBe(401);
   } finally { await anonymous.close(); }
   const range = await request.get(url, { headers: { Range: "bytes=0-1" } });
   expect(range.status()).toBe(206); expect((await range.body()).length).toBe(2);
