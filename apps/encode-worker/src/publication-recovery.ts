@@ -1,3 +1,4 @@
+import { fingerprintCompletedEncodeOutput } from "./encode-output-completion.js";
 import { assertEncodeClaimSource } from "@rip-dvd/application";
 import { randomUUID } from "node:crypto";
 import {
@@ -2313,13 +2314,21 @@ export async function executeEncodeClaim(
         if (options.runner.isActive?.(partialPath) ?? false) throw new Error("Encode writer is still active");
         // Retain the claim-specific path in place. Relocation would change ctime
         // and could conceal a same-size rewrite with a restored mtime.
-        const preserveReplacementAuthority = finalPath !== undefined && replaceableFinal !== undefined &&
-          await priorFinalAuthorityPresent(finalPath, replaceableFinal);
         renewClaim();
+        let stableMetadata = completedWriteMetadata;
+        if (error.repairCompletion !== undefined) {
+          const repair = error.repairCompletion;
+          if (!sameEncodeOutputMutationSnapshot(completedWriteMetadata, repair.source)) throw new Error("Subtitle cleanup source changed before preparation");
+          const completed = await fingerprintCompletedEncodeOutput(partialPath, signal);
+          if (!sameEncodeOutputMutationSnapshot(repair.output, completed.metadata) || repair.sha256 !== completed.sha256) {
+            throw new Error("Subtitle cleanup output changed after preparation");
+          }
+          stableMetadata = repair.output;
+        }
         const descriptor = openSync(partialPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
         try {
           const before = fstatSync(descriptor);
-          if (!sameEncodeOutputMutationSnapshot(completedWriteMetadata, before) ||
+          if (!sameEncodeOutputMutationSnapshot(stableMetadata, before) ||
               !sameEncodeOutputMutationSnapshot(before, lstatSync(partialPath))) {
             throw new Error("Encode Output changed during validation");
           }
@@ -2331,6 +2340,8 @@ export async function executeEncodeClaim(
             throw new Error("Failed Encode Output changed during storage synchronization");
           }
           signal.throwIfAborted();
+          const preserveReplacementAuthority = finalPath !== undefined && replaceableFinal !== undefined &&
+            await priorFinalAuthorityPresent(finalPath, replaceableFinal);
           renewClaim();
           options.access.encodeJobs.retainValidationFailedOutput(claim, {
             outputPath: partialPath, filesystemIdentity: encodeOutputFilesystemIdentity(retained), changeTimeMs: retained.ctimeMs,

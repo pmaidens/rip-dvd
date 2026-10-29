@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { rename, unlink } from "node:fs/promises";
+import { lstat, rename, unlink } from "node:fs/promises";
 
-import { requireNonEmptyRegularEncodeOutput } from "./encode-output-filesystem-identity.js";
+import { requireNonEmptyRegularEncodeOutput, sameEncodeOutputMutationSnapshot, sameEncodeOutputAuthoritySnapshot } from "./encode-output-filesystem-identity.js";
+import { fingerprintCompletedEncodeOutput, type EncodeOutputRepairCompletion } from "./encode-output-completion.js";
 import type { MediaToolRunner } from "./encode-output-validator.js";
 
 export interface RetainedSubtitleDisposition {
@@ -20,7 +21,7 @@ export interface RemoveEmptyVobSubStreamsRequest {
 export interface EncodeOutputRepairer {
   removeEmptyVobSubStreams(
     request: RemoveEmptyVobSubStreamsRequest,
-  ): Promise<void>;
+  ): Promise<EncodeOutputRepairCompletion | void>;
 }
 
 type ReplaceEncodeOutput = (
@@ -65,6 +66,7 @@ export function createNodeEncodeOutputRepairer({
       const replacementPath =
         `${outputPath}.${randomUUID()}.rip-dvd-subtitle-remux`;
       try {
+        const source = await requireNonEmptyRegularEncodeOutput(outputPath, "subtitle cleanup source is incomplete");
         await runMediaTool({
           arguments_: [
             "-nostdin",
@@ -95,7 +97,15 @@ export function createNodeEncodeOutputRepairer({
           timeoutMs,
         });
         signal.throwIfAborted();
+        const completed = await fingerprintCompletedEncodeOutput(replacementPath, signal);
+        if (!sameEncodeOutputMutationSnapshot(source, await lstat(outputPath)) ||
+            !sameEncodeOutputMutationSnapshot(completed.metadata, await lstat(replacementPath))) {
+          throw new Error("subtitle cleanup input or output changed before replacement");
+        }
         await replaceOutput(replacementPath, outputPath);
+        const output = await lstat(outputPath);
+        if (!sameEncodeOutputAuthoritySnapshot(completed.metadata, output)) throw new Error("subtitle cleanup output changed during replacement");
+        return { source, output, sha256: completed.sha256 };
       } finally {
         await unlink(replacementPath).catch(() => {});
       }

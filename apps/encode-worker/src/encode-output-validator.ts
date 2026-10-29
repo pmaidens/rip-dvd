@@ -6,6 +6,7 @@ import type {
   EncodeOutputValidationEvidence,
 } from "@rip-dvd/data-access";
 
+import type { EncodeOutputRepairCompletion } from "./encode-output-completion.js";
 import type { HandBrakeVobSubProvenance } from "./handbrake-subtitle-provenance.js";
 import {
   createNodeEncodeOutputRepairer,
@@ -103,6 +104,8 @@ type EncodeOutputFailureEvidence = Extract<
 >;
 
 export class EncodeOutputValidationError extends Error {
+  repairCompletion?: EncodeOutputRepairCompletion;
+
   constructor(
     message: string,
     readonly evidence: EncodeOutputFailureEvidence,
@@ -565,7 +568,9 @@ async function validateSubtitleStreams({
   signal,
   subtitlePacketTimeoutMs,
   timeoutMs,
+  onRepairCompleted,
 }: {
+  onRepairCompleted(completion: EncodeOutputRepairCompletion): void;
   expectations: EncodeOutputValidationExpectations;
   outputPath: string;
   repairer: EncodeOutputRepairer;
@@ -679,7 +684,7 @@ async function validateSubtitleStreams({
       (_, position) => !emptyIndexes.has(vobSubStreams[position]!.index),
     );
     try {
-      await repairer.removeEmptyVobSubStreams({
+      const completion = await repairer.removeEmptyVobSubStreams({
         emptyStreamIndexes: [...emptyIndexes],
         outputPath,
         retainedSubtitleDispositions: subtitleStreams
@@ -691,10 +696,11 @@ async function validateSubtitleStreams({
         signal,
         timeoutMs: subtitlePacketTimeoutMs,
       });
+      if (completion !== undefined) onRepairCompleted(completion);
     } catch (error) {
       signal.throwIfAborted();
       throw new EncodeOutputValidationError(`subtitle cleanup failed: ${normalizeToolError(error)}`,
-        { kind: "validation_check", check: "subtitle_cleanup" }, false);
+        { kind: "validation_check", check: "subtitle_cleanup" }, error instanceof EncodeOutputValidationError && error.retentionSafe);
     }
     removedEmptyStreams = true;
   }
@@ -720,7 +726,7 @@ export function createNodeEncodeOutputValidator({
     throw new Error("Encode output validation timeout is invalid");
   }
   const outputRepairer =
-    repairer ?? createNodeEncodeOutputRepairer({ runMediaTool });
+    repairer ?? createNodeEncodeOutputRepairer({ runMediaTool: (request) => runTool(runMediaTool, request, "subtitle cleanup", "subtitle_cleanup") });
   return {
     async prepareAndValidate(outputPath, signal, expectations = {}): Promise<EncodeOutputValidationEvidence> {
       signal.throwIfAborted();
@@ -736,209 +742,218 @@ export function createNodeEncodeOutputValidator({
       ) {
         throw new Error("Encode output duration expectation is invalid");
       }
-      await validateSubtitleStreams({
-        expectations,
-        outputPath,
-        repairer: outputRepairer,
-        runMediaTool,
-        signal,
-        subtitlePacketTimeoutMs,
-        timeoutMs,
-      });
+      let repairCompletion: EncodeOutputRepairCompletion | undefined;
+      try {
+        await validateSubtitleStreams({
+          onRepairCompleted: (completion) => { repairCompletion = completion; },
+          expectations,
+          outputPath,
+          repairer: outputRepairer,
+          runMediaTool,
+          signal,
+          subtitlePacketTimeoutMs,
+          timeoutMs,
+        });
 
-      const videoProbe = parseProbeResult(
-        (
-          await runTool(
-            runMediaTool,
-            {
-              arguments_: [
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-read_intervals",
-                "%+#1",
-                "-show_entries",
-                "format=duration:stream=codec_name,profile,pix_fmt:packet=pts_time",
-                "-of",
-                "json",
-                outputPath,
-              ],
-              executable: "ffprobe",
-              signal,
-              timeoutMs,
-            },
-            "video probe",
-            "video_metadata",
-          )
-        ).stdout,
-        "video",
-        "video_metadata",
-      );
-      const videoStream = Array.isArray(videoProbe.streams)
-        ? (videoProbe.streams[0] as ProbeStream | undefined)
-        : undefined;
-      if (
-        videoStream === undefined ||
-        !identifiedMetadata(videoStream.codec_name) ||
-        !identifiedMetadata(videoStream.profile) ||
-        !identifiedMetadata(videoStream.pix_fmt)
-      ) {
-        throw validationError(
+        const videoProbe = parseProbeResult(
+          (
+            await runTool(
+              runMediaTool,
+              {
+                arguments_: [
+                  "-v",
+                  "error",
+                  "-select_streams",
+                  "v:0",
+                  "-read_intervals",
+                  "%+#1",
+                  "-show_entries",
+                  "format=duration:stream=codec_name,profile,pix_fmt:packet=pts_time",
+                  "-of",
+                  "json",
+                  outputPath,
+                ],
+                executable: "ffprobe",
+                signal,
+                timeoutMs,
+              },
+              "video probe",
+              "video_metadata",
+            )
+          ).stdout,
+          "video",
           "video_metadata",
-          "video stream metadata is incomplete",
         );
-      }
-      if (expectations.expectedDurationSeconds !== undefined) {
-        const outputDuration = outputDurationSeconds(videoProbe);
-        if (outputDuration === null) {
-          throw validationError(
-            "duration_metadata",
-            "output duration metadata is unavailable",
-          );
-        }
+        const videoStream = Array.isArray(videoProbe.streams)
+          ? (videoProbe.streams[0] as ProbeStream | undefined)
+          : undefined;
         if (
-          outputDuration <
-          expectations.expectedDurationSeconds *
-            MINIMUM_FULL_TITLE_DURATION_RATIO
+          videoStream === undefined ||
+          !identifiedMetadata(videoStream.codec_name) ||
+          !identifiedMetadata(videoStream.profile) ||
+          !identifiedMetadata(videoStream.pix_fmt)
         ) {
           throw validationError(
-            "duration_metadata",
-            `output duration ${outputDuration} seconds is materially shorter than the expected ${expectations.expectedDurationSeconds} seconds`,
-            {
-              kind: "duration",
-              expectedSeconds: expectations.expectedDurationSeconds,
-              observedSeconds: outputDuration,
-            },
+            "video_metadata",
+            "video stream metadata is incomplete",
           );
         }
-      }
-      const videoFirstPts = firstPacketPts(videoProbe);
-      if (videoFirstPts === null) {
-        throw validationError(
-          "video_packets",
-          "video stream has no readable first packet",
-        );
-      }
+        if (expectations.expectedDurationSeconds !== undefined) {
+          const outputDuration = outputDurationSeconds(videoProbe);
+          if (outputDuration === null) {
+            throw validationError(
+              "duration_metadata",
+              "output duration metadata is unavailable",
+            );
+          }
+          if (
+            outputDuration <
+            expectations.expectedDurationSeconds *
+              MINIMUM_FULL_TITLE_DURATION_RATIO
+          ) {
+            throw validationError(
+              "duration_metadata",
+              `output duration ${outputDuration} seconds is materially shorter than the expected ${expectations.expectedDurationSeconds} seconds`,
+              {
+                kind: "duration",
+                expectedSeconds: expectations.expectedDurationSeconds,
+                observedSeconds: outputDuration,
+              },
+            );
+          }
+        }
+        const videoFirstPts = firstPacketPts(videoProbe);
+        if (videoFirstPts === null) {
+          throw validationError(
+            "video_packets",
+            "video stream has no readable first packet",
+          );
+        }
 
-      const audioProbe = parseProbeResult(
-        (
-          await runTool(
-            runMediaTool,
-            {
-              arguments_: [
-                "-v",
-                "error",
-                "-select_streams",
-                expectations.expectedAudioSourceIds === undefined ? "a:0" : "a",
-                "-read_intervals",
-                "%+#1",
-                "-show_entries",
-                expectations.expectedAudioSourceIds === undefined ? "packet=pts_time" : "stream=index:packet=pts_time",
-                "-of",
-                "json",
-                outputPath,
-              ],
-              executable: "ffprobe",
-              signal,
-              timeoutMs,
-            },
-            "audio probe",
-            "audio_timing",
-          )
-        ).stdout,
-        "audio",
-        "audio_timing",
-      );
-      let audioFirstPts = firstPacketPts(audioProbe);
-      const observedAudioStreams = Array.isArray(audioProbe.streams) ? audioProbe.streams.length : null;
-      const audioFirstPackets: number[] | null = expectations.expectedAudioSourceIds === undefined ? null : [];
-      if (expectations.expectedAudioSourceIds !== undefined) {
-        const required = expectations.expectedAudioSourceIds;
-        const outputs = expectations.audioOutputSourceIds;
-        if (outputs === undefined || observedAudioStreams !== outputs.length ||
-          outputs.some((id) => !required.includes(id)) || required.some((id) => !outputs.includes(id))) {
-          throw validationError("audio_timing", "required audio source coverage does not match the source claim");
-        }
-        for (let index = 0; index < outputs.length; index++) {
-          const packets = parseProbeResult((await runTool(runMediaTool, {
-            arguments_: ["-v", "error", "-select_streams", `a:${index}`, "-read_intervals", "%+#1",
-              "-show_entries", "packet=pts_time", "-of", "json", outputPath],
-            executable: "ffprobe", signal, timeoutMs,
-          }, "required audio packet probe", "audio_timing")).stdout, "required audio packet", "audio_timing");
-          const first = firstPacketPts(packets);
-          if (first === null) throw validationError("audio_timing", "required audio stream has no readable first packet");
-          audioFirstPackets!.push(first);
-        }
-        audioFirstPts = audioFirstPackets![0] ?? null;
-      }
-      const videoStartDelay = videoFirstPts - (audioFirstPts ?? 0);
-      if (videoStartDelay > MAX_VIDEO_START_DELAY_SECONDS) {
-        throw validationError(
+        const audioProbe = parseProbeResult(
+          (
+            await runTool(
+              runMediaTool,
+              {
+                arguments_: [
+                  "-v",
+                  "error",
+                  "-select_streams",
+                  expectations.expectedAudioSourceIds === undefined ? "a:0" : "a",
+                  "-read_intervals",
+                  "%+#1",
+                  "-show_entries",
+                  expectations.expectedAudioSourceIds === undefined ? "packet=pts_time" : "stream=index:packet=pts_time",
+                  "-of",
+                  "json",
+                  outputPath,
+                ],
+                executable: "ffprobe",
+                signal,
+                timeoutMs,
+              },
+              "audio probe",
+              "audio_timing",
+            )
+          ).stdout,
+          "audio",
           "audio_timing",
-          `first video frame starts ${videoStartDelay.toFixed(3)} seconds after the audio baseline`,
         );
-      }
+        let audioFirstPts = firstPacketPts(audioProbe);
+        const observedAudioStreams = Array.isArray(audioProbe.streams) ? audioProbe.streams.length : null;
+        const audioFirstPackets: number[] | null = expectations.expectedAudioSourceIds === undefined ? null : [];
+        if (expectations.expectedAudioSourceIds !== undefined) {
+          const required = expectations.expectedAudioSourceIds;
+          const outputs = expectations.audioOutputSourceIds;
+          if (outputs === undefined || observedAudioStreams !== outputs.length ||
+            outputs.some((id) => !required.includes(id)) || required.some((id) => !outputs.includes(id))) {
+            throw validationError("audio_timing", "required audio source coverage does not match the source claim");
+          }
+          for (let index = 0; index < outputs.length; index++) {
+            const packets = parseProbeResult((await runTool(runMediaTool, {
+              arguments_: ["-v", "error", "-select_streams", `a:${index}`, "-read_intervals", "%+#1",
+                "-show_entries", "packet=pts_time", "-of", "json", outputPath],
+              executable: "ffprobe", signal, timeoutMs,
+            }, "required audio packet probe", "audio_timing")).stdout, "required audio packet", "audio_timing");
+            const first = firstPacketPts(packets);
+            if (first === null) throw validationError("audio_timing", "required audio stream has no readable first packet");
+            audioFirstPackets!.push(first);
+          }
+          audioFirstPts = audioFirstPackets![0] ?? null;
+        }
+        const videoStartDelay = videoFirstPts - (audioFirstPts ?? 0);
+        if (videoStartDelay > MAX_VIDEO_START_DELAY_SECONDS) {
+          throw validationError(
+            "audio_timing",
+            `first video frame starts ${videoStartDelay.toFixed(3)} seconds after the audio baseline`,
+          );
+        }
 
-      const decodeResult = await runTool(
-        runMediaTool,
-        {
-          arguments_: [
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            outputPath,
-            "-map",
-            "0:v:0",
-            "-an",
-            "-t",
-            String(VALIDATION_DECODE_SECONDS),
-            "-fps_mode",
-            "passthrough",
-            "-progress",
-            "pipe:1",
-            "-nostats",
-            "-f",
-            "null",
-            "-",
-          ],
-          executable: "ffmpeg",
-          signal,
-          timeoutMs,
-        },
-        "video decode",
-        "video_decode",
-      );
-      const decodedFrames = [...decodeResult.stdout.matchAll(/^frame=(\d+)$/gm)]
-        .map((match) => Number.parseInt(match[1]!, 10))
-        .reduce((maximum, frames) => Math.max(maximum, frames), 0);
-      if (decodedFrames === 0) {
-        throw validationError(
+        const decodeResult = await runTool(
+          runMediaTool,
+          {
+            arguments_: [
+              "-nostdin",
+              "-hide_banner",
+              "-loglevel",
+              "error",
+              "-i",
+              outputPath,
+              "-map",
+              "0:v:0",
+              "-an",
+              "-t",
+              String(VALIDATION_DECODE_SECONDS),
+              "-fps_mode",
+              "passthrough",
+              "-progress",
+              "pipe:1",
+              "-nostats",
+              "-f",
+              "null",
+              "-",
+            ],
+            executable: "ffmpeg",
+            signal,
+            timeoutMs,
+          },
+          "video decode",
           "video_decode",
-          `the first ${VALIDATION_DECODE_SECONDS} seconds decoded zero video frames`,
         );
+        const decodedFrames = [...decodeResult.stdout.matchAll(/^frame=(\d+)$/gm)]
+          .map((match) => Number.parseInt(match[1]!, 10))
+          .reduce((maximum, frames) => Math.max(maximum, frames), 0);
+        if (decodedFrames === 0) {
+          throw validationError(
+            "video_decode",
+            `the first ${VALIDATION_DECODE_SECONDS} seconds decoded zero video frames`,
+          );
+        }
+        if (!/^progress=end$/m.test(decodeResult.stdout)) {
+          throw validationError(
+            "video_decode",
+            "the bounded video decode did not complete",
+          );
+        }
+        return {
+          policyVersion: "encode-output-validation-v1",
+          duration: { expectedSeconds: expectations.expectedDurationSeconds ?? null,
+            minimumRatio: expectations.expectedDurationSeconds === undefined ? null : MINIMUM_FULL_TITLE_DURATION_RATIO,
+            observedSeconds: outputDurationSeconds(videoProbe) },
+          video: { codec: videoStream.codec_name as string, profile: videoStream.profile as string,
+            pixelFormat: videoStream.pix_fmt as string, firstPacketSeconds: videoFirstPts },
+          audio: { firstPacketSeconds: audioFirstPts, expectedSourceIds: expectations.expectedAudioSourceIds ?? null,
+            outputSourceIds: expectations.audioOutputSourceIds ?? null,
+            observedStreams: observedAudioStreams, firstPacketsSeconds: audioFirstPackets },
+          subtitles: { expectedSourceStreams: expectations.expectedVobSubStreams?.length ?? null, checked: true },
+          decode: { seconds: VALIDATION_DECODE_SECONDS, frames: decodedFrames, completed: true },
+        };
+      } catch (error) {
+        if (error instanceof EncodeOutputValidationError && error.retentionSafe && repairCompletion !== undefined) {
+          error.repairCompletion = repairCompletion;
+        }
+        throw error;
       }
-      if (!/^progress=end$/m.test(decodeResult.stdout)) {
-        throw validationError(
-          "video_decode",
-          "the bounded video decode did not complete",
-        );
-      }
-      return {
-        policyVersion: "encode-output-validation-v1",
-        duration: { expectedSeconds: expectations.expectedDurationSeconds ?? null,
-          minimumRatio: expectations.expectedDurationSeconds === undefined ? null : MINIMUM_FULL_TITLE_DURATION_RATIO,
-          observedSeconds: outputDurationSeconds(videoProbe) },
-        video: { codec: videoStream.codec_name as string, profile: videoStream.profile as string,
-          pixelFormat: videoStream.pix_fmt as string, firstPacketSeconds: videoFirstPts },
-        audio: { firstPacketSeconds: audioFirstPts, expectedSourceIds: expectations.expectedAudioSourceIds ?? null,
-          outputSourceIds: expectations.audioOutputSourceIds ?? null,
-          observedStreams: observedAudioStreams, firstPacketsSeconds: audioFirstPackets },
-        subtitles: { expectedSourceStreams: expectations.expectedVobSubStreams?.length ?? null, checked: true },
-        decode: { seconds: VALIDATION_DECODE_SECONDS, frames: decodedFrames, completed: true },
-      };
     },
   };
 }

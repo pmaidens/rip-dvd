@@ -1,18 +1,30 @@
-import { expect, it, vi } from "vitest";
+import { mkdtempSync, writeFileSync, renameSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { afterEach, expect, it, vi } from "vitest";
 
 import { createNodeEncodeOutputRepairer } from "./encode-output-repairer.js";
 
+const directories: string[] = [];
+afterEach(() => directories.splice(0).forEach((directory) => rmSync(directory, { recursive: true, force: true })));
+
 it("stream-copies retained subtitles with their existing dispositions", async () => {
-  const runMediaTool = vi.fn(async () => ({ stderr: "", stdout: "" }));
-  const replaceOutput = vi.fn(async () => {});
+  const directory = mkdtempSync(join(tmpdir(), "synthetic-subtitle-repair-")); directories.push(directory);
+  const outputPath = join(directory, "subtitled.mkv");
+  writeFileSync(outputPath, "synthetic original output");
+  const runMediaTool = vi.fn(async (request: import("./encode-output-validator.js").MediaToolRunRequest) => {
+    writeFileSync(request.arguments_.at(-1)!, "synthetic repaired output");
+    return { stderr: "", stdout: "" };
+  });
+  const replaceOutput = vi.fn(async (replacementPath: string, path: string) => { renameSync(replacementPath, path); });
   const repairer = createNodeEncodeOutputRepairer({
     replaceOutput,
     runMediaTool,
   });
 
-  await repairer.removeEmptyVobSubStreams({
+  const completion = await repairer.removeEmptyVobSubStreams({
     emptyStreamIndexes: [9, 10],
-    outputPath: "/media/subtitled.mkv",
+    outputPath,
     retainedSubtitleDispositions: [
       { default: true, forced: true },
       { default: false, forced: false },
@@ -44,8 +56,10 @@ it("stream-copies retained subtitles with their existing dispositions", async ()
   );
   expect(replaceOutput).toHaveBeenCalledWith(
     expect.stringMatching(
-      /^\/media\/subtitled\.mkv\..+\.rip-dvd-subtitle-remux$/,
+      /subtitled\.mkv\..+\.rip-dvd-subtitle-remux$/,
     ),
-    "/media/subtitled.mkv",
+    outputPath,
   );
+  expect(readFileSync(outputPath, "utf8")).toBe("synthetic repaired output");
+  expect(completion).toMatchObject({ sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
 });

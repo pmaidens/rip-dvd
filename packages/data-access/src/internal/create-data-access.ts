@@ -24023,7 +24023,7 @@ export function createDataAccessInternal(
         const failure = validateEncodeJobFailureReport(input.failure);
         if (failure.reasonCode !== "output_validation_failed" || failure.phase !== "validation" ||
           (failure.evidence.kind !== "duration" && failure.evidence.kind !== "validation_check") ||
-          (failure.evidence.kind === "validation_check" && ["output_file", "subtitle_cleanup"].includes(failure.evidence.check))) {
+          (failure.evidence.kind === "validation_check" && failure.evidence.check === "output_file")) {
           throw new DomainInvariantError("Only a complete media-validation failure can be retained");
         }
         const metadata = lstatSync(input.outputPath);
