@@ -31,8 +31,12 @@ Failed outputs and receipts with unknown validation cannot release retention.
 A successful later probe cannot upgrade the receipt's original unknowns.
 Retained validation-failed artifacts are discovered through bounded summaries
 and report `FINISHED_OUTPUT_VALIDATION_UNPROVED` even after acknowledgement.
-Read-only Keep preflight does not release retention. A later passing generation
-requires its own applicable acknowledgement.
+Read-only Keep preflight and an explicit Keep decision do not release retention.
+Keep leaves the artifact validation failed and preserves earlier receipt evidence.
+Source-decision withdrawal and a later passing replacement cannot upgrade that
+receipt. A later passing generation requires its own applicable acknowledgement.
+Verified measured video locations also do not upgrade an earlier unknown
+receipt or prove the preview's complete stream and intended-setting relationship.
 
 The source comparison uses only the preview's saved request and the receipt's
 original source snapshot. It requires the same archive identity/fingerprint,

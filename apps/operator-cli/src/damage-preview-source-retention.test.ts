@@ -11,6 +11,7 @@ import { seedProvedPreviewOutput } from "./damage-preview-source-retention.test-
 import { openEncodeSourceTestAccess } from "./encode-source-decision.test-support.js";
 import { acceptReadinessContent, assessmentMappings } from "./encoding-readiness.test-support.js";
 import { publishSyntheticClaim } from "./encode-output-provenance.test-support.js";
+import { withdrawClaimAcceptance } from "./encode-claim.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 const day = 24 * 60 * 60 * 1_000;
@@ -140,13 +141,16 @@ it("protects media from a persisted unknown-source receipt even when its file ge
   expect((await inspectOutput()).operatorInspection.history[0]!.evidence).toEqual(evidence);
 });
 
-it("keeps a current sample after a real failed-output receipt and read-only Keep preflight", async () => {
-  const { fixture, id, path, identity, inspectPreview, inspectOutput, acknowledge, probe } = await setup({ validationFailed: true });
+it("keeps a current sample protected through a failed-output receipt, Keep and source withdrawal", async () => {
+  const { fixture, id, path, seeded, identity, inspectPreview, inspectOutput, acknowledge, keep } = await setup({ validationFailed: true });
   expect((await inspectOutput()).operatorInspection.history).toEqual([]);
   await acknowledge("synthetic-real-failed-retention-ack");
   const history = (await inspectOutput()).operatorInspection.history;
   expect(history[0]!.evidence).toMatchObject({ state: "validation_failed", validation: { result: "failed" }, provenance: { sourceSnapshotAvailability: "recorded" } });
-  expect(await fixture.run(["encode-output", "keep-preflight", identity], undefined, undefined, { encodeOutputMediaProbe: probe })).toMatchObject({ exitCode: 0 });
+  const kept = await keep("synthetic-preview-retention-keep");
+  expect(await inspectOutput()).toMatchObject({ kept: (kept.result as { kept: unknown }).kept,
+    artifact: { state: "validation_failed", validation: { result: "failed" } }, operatorInspection: { history } });
+  await withdrawClaimAcceptance(fixture, seeded.archive.id, seeded.expectedSourceDecision.acceptanceIdentity!);
   const current = await inspectPreview();
   vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(current.updatedAt) + 31 * day);
   expect(await inspectPreview()).toMatchObject({ outdated: false, finishedOutputInspection: { retentionSatisfied: false,
@@ -158,10 +162,11 @@ it("keeps a current sample after a real failed-output receipt and read-only Keep
   expect((await inspectOutput()).operatorInspection.history).toEqual(history);
 });
 
-it("does not transfer a failed-output receipt to a later passing generation of the same job", async () => {
-  const { fixture, seeded, identity, claim, inspectPreview, inspectOutput, acknowledge, probe } = await setup({ validationFailed: true });
+it("does not transfer a kept failed-output receipt to a later passing generation of the same job", async () => {
+  const { fixture, seeded, identity, claim, inspectPreview, inspectOutput, acknowledge, keep, probe } = await setup({ validationFailed: true });
   await acknowledge("synthetic-failed-before-normal-receipt");
   const failedReceipt = (await inspectOutput()).operatorInspection.receipts[0]!;
+  await keep("synthetic-keep-before-normal-generation");
   const access = openEncodeSourceTestAccess(fixture);
   try {
     access.encodeJobs.requeue(claim.id, { expectedSourceDecision: seeded.expectedSourceDecision });
@@ -171,6 +176,7 @@ it("does not transfer a failed-output receipt to a later passing generation of t
     const normal = (await fixture.run(["encode-output", "inspect", normalIdentity], undefined, undefined, { encodeOutputMediaProbe: probe })).result as EncodeOutputInspection;
     expect(normal.operatorInspection).toMatchObject({ receipts: [], history: [failedReceipt] });
     expect(normal.operatorInspection.generationIdentity).not.toBe(failedReceipt.generationIdentity);
+    expect((await inspectOutput()).operatorInspection.history).toEqual([failedReceipt]);
     expect(await inspectPreview()).toMatchObject({ outdated: false, finishedOutputInspection: { retentionSatisfied: false }, media: { retention: { protectedForReview: true } } });
     expect(await fixture.run(["encode-output", "acknowledge-inspection", normalIdentity, "--key", "synthetic-normal-after-failed-ack", "--json", JSON.stringify({ acknowledged: true, reviewToken: normal.operatorInspection.reviewToken })], undefined, undefined, { encodeOutputMediaProbe: probe })).toMatchObject({ exitCode: 0 });
     expect(await inspectPreview()).toMatchObject({ finishedOutputInspection: { retentionSatisfied: true, outputs: expect.arrayContaining([

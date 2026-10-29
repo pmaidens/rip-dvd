@@ -1,12 +1,13 @@
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, unlinkSync } from "node:fs";
 import { afterEach, expect, it, vi } from "vitest";
-import { encodeOutputArtifactIdentity, type EncodeOutputInspection, type DamagePreviewInspection } from "@rip-dvd/application";
+import { encodeOutputArtifactIdentity, type EncodeOutputInspection, type DamagePreviewInspection, type EncodeOutputKeepPreflight } from "@rip-dvd/application";
 import { createOperatorWorkflowFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
 import { seedDamagePreviewWithNormalOutput, settleDamagePreviewMedia } from "../../../../../operator-cli/src/damage-preview.test-support.js";
 import { createDamagePreviewRoute } from "./route";
 import { createDamagePreviewMediaRemovalRoute } from "./media/route";
 import { seedProvedPreviewOutput } from "../../../../../operator-cli/src/damage-preview-source-retention.test-support.js";
+import { createEncodeOutputKeepRoute } from "../../encode-outputs/[artifactIdentity]/keep/route";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => { vi.useRealTimers(); fixtures.splice(0).forEach((fixture) => fixture.dispose()); });
@@ -64,15 +65,24 @@ it("shares exact-source receipt release and keyed idle cleanup between HTTP and 
   } finally { access.close(); }
 });
 
-it("shares retention protection for an acknowledged complete validation-failed output", async () => {
+it("shares retention protection for an acknowledged and explicitly kept validation-failed output", async () => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
-  const { id, path, identity, inspectPreview, acknowledge } = await seedProvedPreviewOutput(fixture, { validationFailed: true });
+  const { id, path, identity, inspectPreview, inspectOutput, acknowledge, probe: outputProbe } = await seedProvedPreviewOutput(fixture, { validationFailed: true });
   await acknowledge("synthetic-http-failed-output-receipt");
+  const receipts = (await inspectOutput()).operatorInspection.history;
+  const preflight = (await fixture.run(["encode-output", "keep-preflight", identity], undefined, undefined, { encodeOutputMediaProbe: outputProbe })).result as EncodeOutputKeepPreflight;
   const current = await inspectPreview();
-  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(current.updatedAt) + 31 * 24 * 60 * 60 * 1_000);
   const access = fixture.openAccess();
   const origin = "http://localhost:3000";
   try {
+    const review = { acknowledged: true, validationIdentity: preflight.current.validationIdentity, previewToken: preflight.previewToken };
+    const key = "synthetic-http-preview-keep";
+    const kept = await createEncodeOutputKeepRoute(new Request(`${origin}/api/encode-outputs/${identity}/keep`, { method: "POST",
+      headers: { Origin: origin, Host: "localhost:3000", "Content-Type": "application/json" }, body: JSON.stringify({ ...review, mutationKey: key }) }), identity, () => access, () => origin, outputProbe);
+    expect(kept.status).toBe(200);
+    expect(await kept.json()).toEqual((await fixture.run(["encode-output", "keep", identity, "--key", key, "--json", JSON.stringify(review)], undefined, undefined, { encodeOutputMediaProbe: outputProbe })).result);
+    expect((await inspectOutput()).operatorInspection.history).toEqual(receipts);
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(current.updatedAt) + 31 * 24 * 60 * 60 * 1_000);
     const inspected = await createDamagePreviewRoute(new Request(`${origin}/api/damage-previews/${id}`), id, () => access);
     const protectedPreview = await inspected.json();
     expect(protectedPreview).toEqual(await inspectPreview());

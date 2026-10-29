@@ -1,7 +1,7 @@
 import { expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import type { DvdTitleMap } from "@rip-dvd/data-access";
-import { claimNextEncodeJob, encodeOutputArtifactIdentity, validationFailedEncodeOutputArtifactIdentity, type DamagePreviewInspection, type EncodeOutputInspection, type EncodeOutputMediaProbe } from "@rip-dvd/application";
+import { claimNextEncodeJob, encodeOutputArtifactIdentity, validationFailedEncodeOutputArtifactIdentity, type DamagePreviewInspection, type EncodeOutputInspection, type EncodeOutputMediaProbe, type EncodeOutputKeepPreflight } from "@rip-dvd/application";
 import { seedEncodeClaim } from "./encode-claim.test-support.js";
 import { seedRetainedDamagePreview } from "./damage-preview.test-support.js";
 import { publishSyntheticClaim, syntheticOutputValidation } from "./encode-output-provenance.test-support.js";
@@ -36,6 +36,16 @@ export async function seedProvedPreviewOutput(fixture: ReturnType<typeof createO
       expect(result.exitCode, JSON.stringify(result.result)).toBe(0);
       return result;
     };
-    return { ...preview, seeded, claim, identity, validation, probe, inspectOutput, inspectPreview, acknowledge };
+    const keep = async (key: string) => {
+      const preflight = await fixture.run(["encode-output", "keep-preflight", identity], undefined, undefined, { encodeOutputMediaProbe: probe });
+      expect(preflight.exitCode, JSON.stringify(preflight.result)).toBe(0);
+      const reviewed = preflight.result as EncodeOutputKeepPreflight;
+      expect(reviewed.eligible).toBe(true);
+      const result = await fixture.run(["encode-output", "keep", identity, "--key", key, "--json", JSON.stringify({ acknowledged: true,
+        validationIdentity: reviewed.current.validationIdentity, previewToken: reviewed.previewToken })], undefined, undefined, { encodeOutputMediaProbe: probe });
+      expect(result.exitCode, JSON.stringify(result.result)).toBe(0);
+      return result;
+    };
+    return { ...preview, seeded, claim, identity, validation, probe, inspectOutput, inspectPreview, acknowledge, keep };
   } finally { seeded.access.close(); }
 }
