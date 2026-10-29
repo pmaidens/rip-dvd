@@ -520,7 +520,10 @@ explicitly unknown. When inspection reports export as available,
 identity-bound canonical file to a new path on the CLI host. It returns JSON
 metadata and provenance on stdout, never media bytes. The command rejects an
 existing destination and reports stable JSON reasons for missing, changed, or
-unsafe source files.
+unsafe source files. The installed wrapper copies exports back from the service
+with `docker cp` and atomically publishes a mode-0600 file without clobbering an
+existing caller destination. It supports a remote Docker daemon without mounting
+the caller's directory, and JSON reports the caller's resolved destination.
 
 A complete validation-failed output can be kept separately through the Encoding
 view or `encode-output keep-preflight <artifact-identity>`. Review the returned

@@ -15,16 +15,27 @@ test("canonical preview export publishes caller bytes across filesystems without
     const expected = Buffer.from([...Buffer.from("synthetic canonical service bytes"), 0, 1, 2]); writeFileSync(source, expected);
     const docker = join(bin, "docker");
     writeFileSync(docker, `#!/usr/bin/env node
-import { copyFileSync } from 'node:fs';
+import assert from 'node:assert/strict';
+import { copyFileSync, writeFileSync, readFileSync } from 'node:fs';
 const args = process.argv.slice(2);
 if (args[0] === 'compose') {
   if (args.includes('--volume')) process.exit(9);
+  writeFileSync(process.env.PREVIEW_TEST_SERVICE_FILE + '.container', args[args.indexOf('--name') + 1]);
+  writeFileSync(process.env.PREVIEW_TEST_SERVICE_FILE + '.owner', args[args.indexOf('--label') + 1].slice('rip-dvd.export-owner='.length));
   if (process.env.PREVIEW_TEST_DIRECTORY_RACE) { const { mkdirSync } = await import('node:fs'); mkdirSync(process.env.PREVIEW_TEST_DIRECTORY_RACE); }
   const environment = args[args.indexOf('--env') + 1];
   const path = environment.slice('RIP_DVD_EXPORT_CALLER_PATH='.length);
   process.stdout.write(JSON.stringify({ artifactIdentity: 'damage-preview-v1.synthetic.0', mediaType: 'video/x-matroska', path, sizeBytes: ${expected.length}, provenance: { fixture: 'synthetic-service' } }));
-} else if (args[0] === 'cp') copyFileSync(process.env.PREVIEW_TEST_SERVICE_FILE, args[2]);
-else if (args[0] !== 'rm') process.exit(8);
+} else if (args[0] === 'cp') {
+  assert.equal(args[1], '${"b".repeat(64)}:/tmp/rip-dvd-preview-export.mkv');
+  copyFileSync(process.env.PREVIEW_TEST_SERVICE_FILE, args[2]);
+} else if (args[0] === 'inspect') {
+  assert.deepEqual(args.slice(0, 3), ['inspect', '--format', '{{.Id}}:{{index .Config.Labels "rip-dvd.export-owner"}}']);
+  assert.equal(args.length, 4);
+  assert.ok([readFileSync(process.env.PREVIEW_TEST_SERVICE_FILE + '.container', 'utf8'), '${"b".repeat(64)}'].includes(args[3]));
+  process.stdout.write('${"b".repeat(64)}:' + readFileSync(process.env.PREVIEW_TEST_SERVICE_FILE + '.owner', 'utf8'));
+} else if (args[0] === 'rm') assert.deepEqual(args, ['rm', '--force', '${"b".repeat(64)}']);
+else process.exit(8);
 `);
     chmodSync(docker, 0o755);
     const destination = join(root, "caller selected.mkv");

@@ -1786,12 +1786,9 @@ async function encodeOutputCommand(
     if (action === "acknowledge-inspection") {
       return await operations.acknowledgeEncodeOutputInspection(artifactIdentity, acknowledgement);
     }
-    return action === "inspect"
-      ? await operations.inspectEncodeOutput(artifactIdentity, page)
-      : await operations.exportEncodeOutput({
-        artifactIdentity,
-        destination: rest[3],
-      });
+    if (action === "inspect") return await operations.inspectEncodeOutput(artifactIdentity, page);
+    const exported = await operations.exportEncodeOutput({ artifactIdentity, destination: rest[3] });
+    return { ...exported, destination: process.env.RIP_DVD_EXPORT_CALLER_PATH ?? exported.destination };
   } catch (error) {
     if (
       error instanceof InvalidEncodeOutputArtifactIdentityError ||
