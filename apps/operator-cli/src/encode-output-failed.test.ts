@@ -36,6 +36,9 @@ it("inspects and exports a complete failed generation without promising playback
       file: { completeness: "complete", identityContinuity: "verified" },
       provenance: { sourceSnapshot: { id: claim.claimToken, source: { sourceContinuityRisk: true } } },
       inspectability: { status: "unknown", reasonCode: "OUTPUT_PROBE_FAILED" }, media: { playability: "not_assessed" } });
+    expect(JSON.stringify(inspected)).not.toContain(fixture.mediaLibraryPath);
+    expect(inspected.artifact.validation.failure?.diagnostic).toBe("Encode Output duration validation failed.");
+    expect(retained.failure.diagnostic).toContain(path);
     expect(inspected.operatorInspection.history).toEqual([]);
     const source = inspected.artifact.provenance.sourceSnapshot!.source;
     const intervals = await fixture.run(["encode-output", "intervals", identity, "--json", JSON.stringify({
@@ -53,6 +56,7 @@ it("inspects and exports a complete failed generation without promising playback
       JSON.stringify({ acknowledged: true, reviewToken: inspected.operatorInspection.reviewToken })];
     const receipt = await fixture.run(args, undefined, undefined, { encodeOutputMediaProbe: probe });
     expect(receipt.exitCode).toBe(0);
+    expect(JSON.stringify(receipt.result)).not.toContain(fixture.mediaLibraryPath);
     expect(receipt.result).toMatchObject({ receipt: { evidence: { state: "validation_failed", validation: { result: "failed" } } } });
     expect((await fixture.run(args)).result).toEqual(receipt.result);
     expect((await inspect()).operatorInspection.status).toBe("acknowledged");

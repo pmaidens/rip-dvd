@@ -478,6 +478,16 @@ function fileUnavailable(
   );
 }
 
+function presentedValidationFailure(failure: ValidationFailedEncodeOutput["failure"]) {
+  const { diagnostic: _privateDiagnostic, ...details } = failure;
+  const diagnostic = failure.evidence.kind === "duration"
+    ? "Encode Output duration validation failed."
+    : failure.evidence.kind === "validation_check"
+      ? `Encode Output ${failure.evidence.check.replaceAll("_", " ")} validation failed.`
+      : "Encode Output validation failed.";
+  return { ...details, diagnostic };
+}
+
 function presentedValidation(
   input: ResolvedEncodeOutput,
   file: PresentedEncodeOutputFile,
@@ -496,7 +506,7 @@ function presentedValidation(
     : "unknown" as const;
   return {
     result,
-    ...(input.failure === undefined ? {} : { recordedResult: "failed" as const, failure: input.failure }),
+    ...(input.failure === undefined ? {} : { recordedResult: "failed" as const, failure: presentedValidationFailure(input.failure) }),
     recordIdentity: input.validationRecord?.id ?? null,
     checks: input.validationRecord?.evidence ?? null,
     identity: input.recordedValidationFilesystemIdentity,

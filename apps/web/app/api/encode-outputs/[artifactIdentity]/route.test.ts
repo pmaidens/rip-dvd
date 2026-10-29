@@ -163,6 +163,7 @@ it("shares failed-artifact inspection and acknowledgement without changing norma
     expect(web.status).toBe(200);
     const inspection = await web.json() as EncodeOutputInspection;
     expect(cli.result).toEqual(inspection);
+    expect(JSON.stringify(inspection)).not.toContain(fixture.mediaLibraryPath);
     expect(inspection.artifact).toMatchObject({ state: "validation_failed", validation: { result: "failed" },
       file: { completeness: "complete" }, inspectability: { status: "unknown" }, media: { playability: "not_assessed" } });
     const source = inspection.artifact.provenance.sourceSnapshot!.source;
@@ -179,6 +180,7 @@ it("shares failed-artifact inspection and acknowledgement without changing norma
       JSON.stringify({ acknowledged: true, reviewToken: body.reviewToken })], undefined, undefined, { encodeOutputMediaProbe: failedProbe });
     expect(acknowledged.status).toBe(200);
     expect(replay.result).toEqual(await acknowledged.json());
+    expect(JSON.stringify(replay.result)).not.toContain(fixture.mediaLibraryPath);
     expect(replay.result).toMatchObject({ receipt: { evidence: { state: "validation_failed", validation: { result: "failed" } } } });
     writeFileSync(failed.outputPath, "synthetic changed failed artifact");
     const stale = { ...body, mutationKey: "synthetic-stale-failed-http-receipt" };

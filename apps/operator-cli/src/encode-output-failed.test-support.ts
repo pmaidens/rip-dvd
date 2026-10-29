@@ -10,7 +10,7 @@ export function retainSyntheticFailedOutput(access: DataAccess, claim: RunningEn
   access.encodeJobs.retainValidationFailedOutput(claim, {
     outputPath: path, changeTimeMs: metadata.ctimeMs, filesystemIdentity: encodeOutputFilesystemIdentity(metadata),
     failure: { schemaVersion: 1, reasonCode: "output_validation_failed", phase: "validation", retryability: "after_action",
-      diagnostic: "Synthetic duration failure", evidence: { kind: "duration", expectedSeconds: 500, observedSeconds: 10 } },
+      diagnostic: `Synthetic media probe failed for ${path}`, evidence: { kind: "duration", expectedSeconds: 500, observedSeconds: 10 } },
   }, { preserveReplacementAuthority: claim.replaceExistingOutput });
   return access.encodeJobs.listValidationFailedOutputs(claim.id, { limit: 1 })[0]!;
 }
