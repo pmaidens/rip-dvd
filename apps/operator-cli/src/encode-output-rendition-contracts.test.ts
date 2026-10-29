@@ -6,10 +6,29 @@ import { compatibleOutputProbe } from "./encode-output-rendition.test-support.js
 import { publishMeasuredCorrespondenceOutput } from "./encode-output-measured-correspondence.test-support.js";
 import { seedCorrectedKeepPreflightFixture } from "./encode-output-keep-preflight.test-support.js";
 import { withdrawClaimAcceptance } from "./encode-claim.test-support.js";
+import { seedProvedPreviewOutput } from "./damage-preview-source-retention.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
 const options = { encodeOutputMediaProbe: compatibleOutputProbe, browserRenditionsEnabled: true };
+
+it.each([false, true])("keeps source-proved Damage Preview retention independent of rendition admission and inspection, validationFailed=%s", async (validationFailed) => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedProvedPreviewOutput(fixture, { validationFailed });
+  const before = await seeded.inspectPreview();
+  expect(before).toMatchObject({ finishedOutputInspection: { retentionSatisfied: false }, media: { retention: { protectedForReview: true } } });
+  const run = (args: string[]) => fixture.run(["encode-output", ...args], undefined, undefined, options);
+  const review = (await run(["rendition-availability", seeded.identity])).result as BrowserRenditionAvailability;
+  expect(review.available).toBe(true);
+  const admitted = await run(["request-rendition", seeded.identity, "--key", "synthetic-preview-retention-rendition", "--json", JSON.stringify({ reviewToken: review.reviewToken })]);
+  expect(admitted).toMatchObject({ exitCode: 0, result: { status: "queued" } });
+  const id = (admitted.result as { id: string }).id;
+  expect(await run(["inspect-rendition", id])).toMatchObject({ exitCode: 0, result: { id, status: "queued" } });
+  const after = await seeded.inspectPreview();
+  expect(after.finishedOutputInspection).toEqual(before.finishedOutputInspection);
+  expect(after.media.retention).toEqual(before.media.retention);
+  expect((await seeded.inspectOutput()).operatorInspection.history).toEqual([]);
+});
 
 it.each([false, true])("keeps ordinary playback independent of measured correspondence and later acceptance withdrawal, decoder failure=%s", async (decoderFailure) => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
