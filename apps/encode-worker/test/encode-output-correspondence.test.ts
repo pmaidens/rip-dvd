@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
-import { encodeOutputArtifactIdentity, measureEncodeSourceCell, measureEncodeOutputCell } from "@rip-dvd/application";
+import { encodeOutputArtifactIdentity, measureEncodeSourceCell, measureEncodeOutputCell, type EncodeOutputIntervalInspection } from "@rip-dvd/application";
 import { pollEncodeWorker } from "../src/encode-worker.js";
 import { seedCorrespondenceClaim, seedCorrespondenceSource } from "../../operator-cli/src/encode-output-correspondence.test-support.js";
 import { publishSyntheticClaim, syntheticOutputValidation } from "../../operator-cli/src/encode-output-provenance.test-support.js";
@@ -29,7 +29,8 @@ linux("reaches measured correspondence with the real supported HandBrake preset 
     await pollEncodeWorker({ ...fixture, access: seeded.access, concurrency: 1, log: () => {}, signal: new AbortController().signal,
       subtitleScanner: { scan: async () => [] } });
     const job = seeded.access.encodeJobs.find(seeded.job.id)!;
-    expect(job.status).toBe("completed");
+    expect(job.status, JSON.stringify({ error: job.errorMessage,
+      failures: seeded.access.encodeJobs.listFailureReports([job.id]) })).toBe("completed");
     const identity = encodeOutputArtifactIdentity(job.id);
     const inspection = await fixture.run(["encode-output", "inspect", identity]);
     const query = { assessmentIdentity: seeded.assessment.id, titleIdentityObservationId: seeded.access.encodeJobs.listClaimSnapshots(job.id)[0]!.source.titleIdentity.id, intervalIndexes: [0] };
@@ -37,7 +38,10 @@ linux("reaches measured correspondence with the real supported HandBrake preset 
     const web = await createEncodeOutputIntervalsRoute(new Request(`http://localhost/api/encode-outputs/${identity}/intervals?query=${encodeURIComponent(JSON.stringify(query))}`), identity, () => seeded.access);
     expect(inspection).toMatchObject({ exitCode: 0, result: { artifact: { validation: { result: "passed" }, provenance: { sourceSnapshot: { source: { output: { preset: "Fast 1080p30" } } } } } } });
     expect(cli.result).toEqual(await web.json());
-    expect(cli).toMatchObject({ exitCode: 0, result: { intervals: [{ status: "verified", reasonCode: "OUTPUT_CELL_CONTENT_VERIFIED" }], targetedLocation: { eligible: true } } });
+    expect(cli.exitCode).toBe(0);
+    expect((cli.result as EncodeOutputIntervalInspection).intervals.map(({ status, reasonCode, outputInterval }) => ({ status, reasonCode, outputInterval })))
+      .toMatchObject([{ status: "verified", reasonCode: "OUTPUT_CELL_CONTENT_VERIFIED" }]);
+    expect((cli.result as EncodeOutputIntervalInspection).targetedLocation).toMatchObject({ eligible: true });
   } finally { seeded.access.close(); }
 }, 120_000);
 
@@ -66,7 +70,11 @@ linux.each(["shifted", "shifted_pts", "repeated", "omitted", "truncated"] as con
     const cli = await fixture.run(["encode-output", "intervals", identity, "--json", JSON.stringify(query)]);
     const web = await createEncodeOutputIntervalsRoute(new Request(`http://localhost/api/encode-outputs/${identity}/intervals?query=${encodeURIComponent(JSON.stringify(query))}`), identity, () => seeded.access);
     expect(cli.result).toEqual(await web.json());
-    expect(cli).toMatchObject({ exitCode: 0, result: { intervals: [{ status: kind.startsWith("shifted") ? "verified" : "unknown" }] } });
+    expect(cli.exitCode).toBe(0);
+    const observed = (cli.result as EncodeOutputIntervalInspection).intervals.map(({ status, reasonCode, outputInterval }) => ({ status, reasonCode, outputInterval }));
+    expect(observed).toMatchObject([{ status: kind.startsWith("shifted") ? "verified" : "unknown",
+      reasonCode: kind.startsWith("shifted") ? "OUTPUT_CELL_CONTENT_VERIFIED"
+        : kind === "repeated" ? "OUTPUT_CONTENT_AMBIGUOUS" : "OUTPUT_CONTENT_UNRESOLVED" }]);
     if (kind.startsWith("shifted")) expect(cli.result).toMatchObject({ intervals: [{ outputInterval: {
       startMilliseconds: kind === "shifted_pts" ? 1021 : 1000, endMilliseconds: kind === "shifted_pts" ? 5021 : 5000,
     } }] });
