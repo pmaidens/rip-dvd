@@ -1,4 +1,4 @@
-import { publishCorrespondenceOutput } from "../../../../../../operator-cli/src/encode-output-correspondence.test-support.js";
+import { publishCorrespondenceOutput, seedFailedCorrespondenceOutput } from "../../../../../../operator-cli/src/encode-output-correspondence.test-support.js";
 import { publishMeasuredCorrespondenceOutput } from "../../../../../../operator-cli/src/encode-output-measured-correspondence.test-support.js";
 import { afterEach, expect, it } from "vitest";
 import { encodeOutputArtifactIdentity } from "@rip-dvd/application";
@@ -8,6 +8,25 @@ import { createEncodeOutputIntervalsRoute } from "./route";
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
 const probe = async () => ({ durationSeconds: 90, streams: [] });
+
+it("shares inspected failed-artifact source evidence without inventing an output location", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedFailedCorrespondenceOutput(fixture);
+  const mediaProbe = async () => ({ durationSeconds: 500, streams: [] });
+  try {
+    const response = await createEncodeOutputIntervalsRoute(new Request(`http://localhost/api/encode-outputs/${seeded.artifactIdentity}/intervals?query=${encodeURIComponent(JSON.stringify(seeded.query))}`),
+      seeded.artifactIdentity, () => seeded.access, mediaProbe);
+    const cli = await fixture.run(["encode-output", "intervals", seeded.artifactIdentity, "--json", JSON.stringify(seeded.query)],
+      undefined, undefined, { encodeOutputMediaProbe: mediaProbe });
+    expect(response.status).toBe(200);
+    expect(cli.exitCode).toBe(0);
+    expect(cli.result).toEqual(await response.json());
+    expect(cli.result).toMatchObject({
+      inspection: { artifact: { state: "validation_failed", inspectability: { status: "inspected" } } },
+      intervals: [{ status: "unknown", outputInterval: null, reasonCode: "OUTPUT_TIMING_UNSUPPORTED", evidence: { claimSnapshotId: seeded.claim.claimToken } }],
+    });
+  } finally { seeded.access.close(); }
+});
 
 it.each([
   [{}, "verified", "OUTPUT_CELL_CONTENT_VERIFIED"],

@@ -69,12 +69,17 @@ linux.each(["shifted", "shifted_pts", "repeated", "omitted", "truncated"] as con
   try {
     // Lossless encoding here isolates measured content and timestamp behavior.
     // The separate real worker test proves the production preset can reach it.
-    const filter = kind === "shifted" || kind === "shifted_pts" ? `[0:v]setpts=PTS-STARTPTS,tpad=start_duration=1:color=red${kind === "shifted_pts" ? ",settb=1/1000,setpts=PTS+21" : ""}[v]`
-      : kind === "repeated" ? "[0:v]setpts=PTS-STARTPTS,split[a][b];[a][b]concat=n=2:v=1:a=0[v]"
-      : kind === "omitted" ? "[0:v]select='lt(t,1)+gte(t,2)',setpts=N/(25*TB)[v]"
-      : "[0:v]trim=duration=2,setpts=PTS-STARTPTS[v]";
+    // Author deterministic output timestamps even when the DVD's decoded
+    // source frames have no PTS. These are fixture construction instructions.
+    const normalized = "[0:v]settb=1/1000,setpts=N*40";
+    const content = kind === "shifted" || kind === "shifted_pts" ? `${normalized},tpad=start=25:color=red[authored]`
+      : kind === "repeated" ? `${normalized},split[a][b];[a][b]concat=n=2:v=1:a=0[authored]`
+      : kind === "omitted" ? `${normalized},select='lt(t,1)+gte(t,2)',setpts=N*40[authored]`
+      : `${normalized},trim=end_frame=50,setpts=N*40[authored]`;
+    const filter = `${content};[authored]fps=25,settb=1/1000,setpts=N*40${kind === "shifted_pts" ? "+21" : ""}[v]`;
     tool("ffmpeg", ["-v", "error", "-y", "-i", media.path, "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono:d=6",
-      "-filter_complex", filter, "-map", "[v]", "-map", "1:a:0", "-c:a", "pcm_s16le", "-c:v", "ffv1", "-enc_time_base:v", "1:1000", seeded.claim.outputPath]);
+      "-filter_complex", filter, "-map", "[v]", "-map", "1:a:0", "-c:a", "pcm_s16le", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0",
+      "-fps_mode:v", "passthrough", "-enc_time_base:v", "1:1000", seeded.claim.outputPath]);
     const snapshot = seeded.access.encodeJobs.findClaimSnapshot(seeded.claim.claimToken)!;
     const source = await createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath }).withConsistentRead({
       archiveId: seeded.archive.id, imagePath: seeded.archive.archivePath, originalsLibraryPath: fixture.originalsLibraryPath,

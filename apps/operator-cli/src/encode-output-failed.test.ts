@@ -6,10 +6,35 @@ import { retainSyntheticFailedOutput } from "./encode-output-failed.test-support
 import { publishSyntheticClaim } from "./encode-output-provenance.test-support.js";
 import { seedEncodeClaim } from "./encode-claim.test-support.js";
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
+import { seedFailedCorrespondenceOutput } from "./encode-output-correspondence.test-support.js";
+import type { EncodeOutputIntervalInspection } from "@rip-dvd/application";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
 const probe = async () => { throw new Error("Synthetic unavailable media probe"); };
+
+it("keeps an inspected failed artifact's frozen interval evidence unknown through a later normal generation", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await seedFailedCorrespondenceOutput(fixture);
+  const query = () => fixture.run(["encode-output", "intervals", seeded.artifactIdentity, "--json", JSON.stringify(seeded.query)],
+    undefined, undefined, { encodeOutputMediaProbe: async () => ({ durationSeconds: 500, streams: [] }) });
+  try {
+    const first = await query();
+    expect(first).toMatchObject({ exitCode: 0, result: {
+      inspection: { artifact: { state: "validation_failed", validation: { result: "failed" },
+        file: { completeness: "complete" }, inspectability: { status: "inspected" }, availableActions: [{ name: "export", eligible: true }] } },
+      intervals: [{ status: "unknown", reasonCode: "OUTPUT_TIMING_UNSUPPORTED", outputInterval: null,
+        evidence: { claimSnapshotId: seeded.claim.claimToken, measuredCorrespondence: null } }],
+      targetedLocation: { eligible: false, reasonCode: "OUTPUT_MAPPING_UNKNOWN" },
+    } });
+    seeded.access.encodeJobs.requeue(seeded.claim.id, { expectedSourceDecision: seeded.snapshot.source.decision });
+    const next = (await claimNextEncodeJob(seeded.access, "synthetic-later-normal-worker", fixture.originalsLibraryPath))!;
+    publishSyntheticClaim(seeded.access, next);
+    const after = await query();
+    expect(after.exitCode).toBe(0);
+    expect((after.result as EncodeOutputIntervalInspection).intervals).toEqual((first.result as EncodeOutputIntervalInspection).intervals);
+  } finally { seeded.access.close(); }
+});
 
 it("inspects and exports a complete failed generation without promising playback or Keep", async () => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);

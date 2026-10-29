@@ -104,6 +104,33 @@ function nativeOutputFrames(video: DecodedVideo): TimedFrame[] {
   return frames;
 }
 
+function nativeInterval(timeBase: { numerator: number; denominator: number }, originSeconds: number, firstPts: number, endPts: number) {
+  const milliseconds = (pts: number) => Number(((pts * timeBase.numerator / timeBase.denominator - originSeconds) * 1000).toFixed(6));
+  return { startMilliseconds: milliseconds(firstPts), endMilliseconds: milliseconds(endPts) };
+}
+
+/** Validate recorded locations against full measured video, never a duration
+ * metadata field that may use a different origin for codec pre-roll.
+ */
+export function recordedCellOutputInterval(record: Extract<EncodeOutputCellCorrespondence, { status: "measured" }>) {
+  const video = record.outputVideo, timeline = record.outputTimeline;
+  if (!timeline || !video?.timeBase || !record.outputInterval ||
+      ![video.firstPts, video.endPts, timeline.firstPts, timeline.endPts, video.frameCount, timeline.frameCount,
+        video.timeBase.numerator, video.timeBase.denominator].every(Number.isSafeInteger) ||
+      !Number.isFinite(record.outputTimelineOriginSeconds) || video.timeBase.numerator <= 0 || video.timeBase.denominator <= 0 ||
+      video.frameCount < 1 || timeline.frameCount < video.frameCount || video.endPts <= video.firstPts ||
+      timeline.firstPts > video.firstPts || timeline.endPts < video.endPts) return null;
+  const interval = nativeInterval(video.timeBase, record.outputTimelineOriginSeconds, video.firstPts, video.endPts);
+  return Number.isFinite(interval.startMilliseconds) && Number.isFinite(interval.endMilliseconds) &&
+    interval.startMilliseconds >= 0 && interval.endMilliseconds > interval.startMilliseconds &&
+    interval.startMilliseconds === record.outputInterval.startMilliseconds && interval.endMilliseconds === record.outputInterval.endMilliseconds
+    ? interval : null;
+}
+
+function lastFrameEnd(frames: readonly TimedFrame[]) {
+  return frames.reduce((end, frame) => Math.max(end, frame.pts + frame.duration), -Infinity);
+}
+
 interface SourceCellMeasurement {
   snapshot: EncodeClaimSnapshot;
   sourceRange: { startLba: number; sectorCount: number };
@@ -244,9 +271,8 @@ export async function measureEncodeOutputCell(
     const found = matches(source.video.frames, outputFrames);
     if (found.length !== 1) return unknown(found.length > 1 ? "OUTPUT_CONTENT_AMBIGUOUS" : "OUTPUT_CONTENT_UNRESOLVED");
     const matchingFrames = outputFrames.slice(found[0]!, found[0]! + source.video.frames.length);
-    const firstPts = matchingFrames[0]!.pts, endPts = matchingFrames.at(-1)!.pts + matchingFrames.at(-1)!.duration;
-    const milliseconds = (pts: number) => Number(((pts * output.timeBase.numerator / output.timeBase.denominator - output.originSeconds) * 1000).toFixed(6));
-    const outputInterval = { startMilliseconds: milliseconds(firstPts), endMilliseconds: milliseconds(endPts) };
+    const firstPts = matchingFrames[0]!.pts, endPts = lastFrameEnd(matchingFrames);
+    const outputInterval = nativeInterval(output.timeBase, output.originSeconds, firstPts, endPts);
     if (outputInterval.startMilliseconds < 0 || outputInterval.endMilliseconds <= outputInterval.startMilliseconds) throw new Error("Unsupported output origin");
     const snapshot = source.snapshot;
     return { policyVersion: POLICY, status: "measured", claimSnapshotId: snapshot.id,
@@ -255,6 +281,7 @@ export async function measureEncodeOutputCell(
       sourceBytesSha256: source.sourceBytesSha256, sourceVideo: source.video.summary,
       outputFileIdentity: encodeOutputFilesystemIdentity(before), outputBytesSha256,
       outputVideo: { ...output.summary, timeBase: output.timeBase, frameCount: matchingFrames.length, firstPts, endPts, sequenceSha256: sequenceDigest(matchingFrames) },
+      outputTimeline: { frameCount: outputFrames.length, firstPts: outputFrames[0]!.pts, endPts: lastFrameEnd(outputFrames) },
       outputTimelineOriginSeconds: output.originSeconds, outputInterval };
   } catch {
     signal.throwIfAborted();

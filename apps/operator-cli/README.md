@@ -659,6 +659,10 @@ interval. The interval is the envelope of the whole selected cell, retaining
 the source interval's `whole_cell` coverage. Its bounds are never calculated
 from estimated source seconds. This does not measure decoder effects or
 establish watchability.
+The complete decoded video bounds validate this envelope on that same clock.
+Container duration metadata can use a different origin, including when audio
+starts before zero; it is not used as an output timestamp limit. The independent
+full-title duration validation requirement remains in force.
 
 This conservative policy can verify unchanged decoded video, including simple
 content preserved exactly by a supported preset. Typical lossy changes,

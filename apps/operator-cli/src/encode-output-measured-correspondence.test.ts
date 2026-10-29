@@ -65,6 +65,20 @@ it("matches complete source-cell content without requiring unused source frame t
   } finally { seeded.access.close(); }
 });
 
+it("uses measured video bounds on the output clock when audio starts before zero", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await publishMeasuredCorrespondenceOutput(fixture, {
+    outputFrames: ["a", "b", "c"], outputFirstPts: 0, outputOriginSeconds: -0.023,
+  });
+  try {
+    const result = await fixture.run(["encode-output", "intervals", seeded.artifactIdentity, "--json", JSON.stringify(seeded.query)],
+      undefined, undefined, { encodeOutputMediaProbe: async () => ({ durationSeconds: 0.128, streams: [] }) });
+    expect(result).toMatchObject({ exitCode: 0, result: {
+      intervals: [{ status: "verified", outputInterval: { startMilliseconds: 23, endMilliseconds: 143 } }],
+    } });
+  } finally { seeded.access.close(); }
+});
+
 it("uses native decoded timestamps when the framehash encoder rounds the output time base", async () => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
   const seeded = await publishMeasuredCorrespondenceOutput(fixture, { outputOffsetMilliseconds: 21 });

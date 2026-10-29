@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { createApplicationOperations, claimNextEncodeJob, type EncodingReadiness, type DvdTitleDamageAcceptancePreview, encodeOutputArtifactIdentity } from "@rip-dvd/application";
+import { createApplicationOperations, claimNextEncodeJob, type EncodingReadiness, type DvdTitleDamageAcceptancePreview, encodeOutputArtifactIdentity, validationFailedEncodeOutputArtifactIdentity } from "@rip-dvd/application";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { publishSyntheticClaim } from "./encode-output-provenance.test-support.js";
 import { seedCommittedArchiveEvidence } from "./archive-evidence.test-support.js";
@@ -7,6 +7,7 @@ import { seedDamagePreview } from "./damage-preview.test-support.js";
 import { openEncodeSourceTestAccess } from "./encode-source-decision.test-support.js";
 import type { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
 import type { UnreadableSectorRange } from "@rip-dvd/data-access";
+import { retainSyntheticFailedOutput } from "./encode-output-failed.test-support.js";
 
 /** Two recorded playback paths. The selected path uses sectors 0..99; the
  * omitted path uses sectors 200..299, including the unresolved sector 210. */
@@ -109,6 +110,17 @@ export async function publishCorrespondenceOutput(
     publishSyntheticClaim(seeded.access, seeded.claim);
     return { ...seeded, artifactIdentity: encodeOutputArtifactIdentity(seeded.claim.id), query: {
       assessmentIdentity: seeded.assessment.id, titleIdentityObservationId: seeded.omitted.id, intervalIndexes: [0],
+    } };
+  } catch (error) { seeded.access.close(); throw error; }
+}
+
+export async function seedFailedCorrespondenceOutput(fixture: ReturnType<typeof createOperatorWorkflowFixture>) {
+  const seeded = await seedCorrespondenceClaim(fixture, { sharedSource: true });
+  try {
+    const snapshot = seeded.access.encodeJobs.findClaimSnapshot(seeded.claim.claimToken)!;
+    const failed = retainSyntheticFailedOutput(seeded.access, seeded.claim, fixture.mediaLibraryPath);
+    return { ...seeded, snapshot, artifactIdentity: validationFailedEncodeOutputArtifactIdentity(failed.id), query: {
+      assessmentIdentity: snapshot.source.assessment.id, titleIdentityObservationId: snapshot.source.titleIdentity.id, intervalIndexes: [0],
     } };
   } catch (error) { seeded.access.close(); throw error; }
 }

@@ -1,5 +1,5 @@
 import { canonicalPublicationJson, type DataAccess } from "@rip-dvd/data-access";
-import { hashEncodeOutputBytes } from "./encode-output-cell-correspondence.js";
+import { hashEncodeOutputBytes, recordedCellOutputInterval } from "./encode-output-cell-correspondence.js";
 import { inspectEncodeOutput, probeEncodeOutputMedia, type EncodeOutputInspection, type EncodeOutputMediaProbe } from "./encode-output-inspection.js";
 
 export class InvalidEncodeOutputIntervalInputError extends Error {
@@ -114,6 +114,7 @@ function classifyInterval(
   const measured = artifact.validation.checks?.correspondence;
   if (measured?.status === "measured") {
     const { outputInterval, sourceVideo, outputVideo, sourceRange } = measured;
+    const boundedInterval = recordedCellOutputInterval(measured);
     const span = selected.timingEvidence?.occurrences.find((occurrence) => occurrence.playbackOccurrence === interval.playbackOccurrence)
       ?.spans.find((candidate) => candidate.coverage === "whole_cell" &&
         candidate.sourceRange.startLba === sourceRange.startLba && candidate.sourceRange.sectorCount === sourceRange.sectorCount &&
@@ -127,9 +128,7 @@ function classifyInterval(
         !/^[a-f0-9]{64}$/.test(measured.sourceBytesSha256) || !/^[a-f0-9]{64}$/.test(sourceVideo.sequenceSha256) ||
         sourceVideo.sequenceSha256 !== outputVideo.sequenceSha256 || sourceVideo.frameCount < 1 ||
         sourceVideo.frameCount !== outputVideo.frameCount || sourceVideo.width !== outputVideo.width || sourceVideo.height !== outputVideo.height ||
-        !Number.isFinite(outputInterval.startMilliseconds) || !Number.isFinite(outputInterval.endMilliseconds) ||
-        outputInterval.startMilliseconds < 0 || outputInterval.endMilliseconds <= outputInterval.startMilliseconds ||
-        artifact.media.durationSeconds === null || outputInterval.endMilliseconds > artifact.media.durationSeconds * 1000 + 1) {
+        boundedInterval === null) {
       return unknown("OUTPUT_MEASUREMENT_MISMATCH", "Measured correspondence does not match the immutable source claim and actual canonical output bytes.");
     }
     if (requested.titleIdentityObservationId === selected.titleIdentityObservationId && interval.coverage === "whole_cell" &&

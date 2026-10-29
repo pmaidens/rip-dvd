@@ -34,6 +34,8 @@ export type EncodeOutputCellCorrespondence = {
   outputFileIdentity: EncodeOutputFilesystemIdentity;
   outputBytesSha256: string;
   outputVideo: EncodeOutputCellVideoMeasurement;
+  /** Complete decoded video bounds on the same native clock as outputVideo. */
+  outputTimeline: Pick<EncodeOutputCellVideoMeasurement, "frameCount" | "firstPts" | "endPts">;
   outputTimelineOriginSeconds: number;
   outputInterval: { startMilliseconds: number; endMilliseconds: number };
 });
