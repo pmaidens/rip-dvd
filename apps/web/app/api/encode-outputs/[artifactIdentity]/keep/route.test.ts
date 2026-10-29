@@ -1,3 +1,7 @@
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { createDataAccess } from "@rip-dvd/data-access";
+import { runCommand } from "../../../../../../operator-cli/src/command.js";
 import { afterEach, expect, it } from "vitest";
 import {
   changeFailedCleanupOwnership, changeFailedValidation, disconnectKeepStorage, failedFileFaults,
@@ -92,3 +96,34 @@ it("shares ownership-first rejection when the submitted validation identity is a
     { code: "KEEP_PREFLIGHT_STALE", message: expect.any(String) },
   ] } } });
 });
+
+if (process.env.RIP_DVD_KEEP_PROOF_MODE === "verify-read-only-http") {
+  it("shares Keep through HTTP and public CLI on an actual read-only media mount", async () => {
+    expect(process.platform).toBe("linux"); expect(process.getuid?.()).not.toBe(0);
+    const manifestPath = process.env.RIP_DVD_KEEP_PROOF_MANIFEST;
+    if (!manifestPath) throw new Error("The private proof manifest path is required.");
+    const fixture = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+      databasePath: string; mediaLibraryPath: string; originalsLibraryPath: string;
+      identity: string; validationIdentity: string; previewToken: string;
+    };
+    let writeError: unknown;
+    try { writeFileSync(join(fixture.mediaLibraryPath, "synthetic-http-read-only-probe"), "synthetic", { flag: "wx" }); }
+    catch (error) { writeError = error; }
+    expect(writeError).toMatchObject({ code: "EROFS" });
+    const access = createDataAccess(fixture);
+    const mutationKey = "synthetic-real-ro-http-keep";
+    const review = { acknowledged: true, validationIdentity: fixture.validationIdentity, previewToken: fixture.previewToken };
+    try {
+      const response = await createEncodeOutputKeepRoute(request(fixture.identity, { ...review, mutationKey }), fixture.identity,
+        () => access, () => origin, unavailableKeepProbe);
+      expect(response.status).toBe(200);
+      const stdout: string[] = [];
+      expect(await runCommand(["encode-output", "keep", fixture.identity, "--key", mutationKey, "--json", JSON.stringify(review)], {
+        openAccess: () => createDataAccess(fixture), mediaLibraryPath: () => fixture.mediaLibraryPath,
+        originalsLibraryPath: () => fixture.originalsLibraryPath, encodeOutputMediaProbe: unavailableKeepProbe,
+        readFile: (path) => readFileSync(path, "utf8"), stdout: (text) => stdout.push(text), stderr: () => undefined,
+      })).toBe(0);
+      expect(await response.json()).toEqual(JSON.parse(stdout.join("")));
+    } finally { access.close(); }
+  });
+}

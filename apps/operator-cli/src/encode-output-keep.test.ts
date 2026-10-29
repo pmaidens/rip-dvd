@@ -1,6 +1,7 @@
+import { createDataAccess } from "@rip-dvd/data-access";
 import { afterEach, expect, it } from "vitest";
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
+import { backup, DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { changeFailedCleanupOwnership, changeFailedOwnership, changeFailedValidation, changePredecessorValidation,
   disconnectKeepStorage, failedFileFaults, seedCorrectedKeepPreflightFixture, seedKeepPreflightFixture, unavailableKeepProbe } from "./encode-output-keep-preflight.test-support.js";
@@ -225,4 +226,34 @@ it("stages final media checks while another connection can still obtain the SQLi
   });
   expect(result.exitCode).toBe(0);
   expect(stagedWithoutWriterLock).toBe(true);
+});
+
+it("restores a persisted Keep decision, mutation replay and the actual schema from a SQLite online backup", async () => {
+  const seeded = await seedKeepPreflightFixture(); fixtures.push(seeded);
+  const { result: preview } = await seeded.preview();
+  const args = ["encode-output", "keep", seeded.identity, "--key", "synthetic-backed-up-keep", "--json", JSON.stringify(reviewedInput(preview))];
+  const kept = await seeded.fixture.run(args, undefined, undefined, { encodeOutputMediaProbe: unavailableKeepProbe });
+  expect(kept.exitCode).toBe(0);
+  const destination = join(seeded.fixture.operatorHostPath, "synthetic-restore.sqlite");
+  const source = new DatabaseSync(seeded.fixture.databasePath);
+  const inventoryQuery = "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name";
+  const schemaInventory = source.prepare(inventoryQuery).all();
+  try { await backup(source, destination); } finally { source.close(); }
+  const restored = new DatabaseSync(destination);
+  try {
+    expect(restored.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+    expect(restored.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(restored.prepare(inventoryQuery).all()).toEqual(schemaInventory);
+    expect(restored.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('kept_failed_encode_outputs', 'mutation_invocations', 'validation_failed_encode_outputs') ORDER BY name").all())
+      .toEqual([{ name: "kept_failed_encode_outputs" }, { name: "mutation_invocations" }, { name: "validation_failed_encode_outputs" }]);
+    expect(restored.prepare("SELECT count(*) AS count FROM kept_failed_encode_outputs").get()).toEqual({ count: 1 });
+  } finally { restored.close(); }
+  const openRestored = () => createDataAccess({ databasePath: destination, mediaLibraryPath: seeded.fixture.mediaLibraryPath,
+    originalsLibraryPath: seeded.fixture.originalsLibraryPath });
+  const replay = await seeded.fixture.run(args, undefined, undefined, { openAccess: openRestored, encodeOutputMediaProbe: unavailableKeepProbe });
+  expect(replay).toEqual(kept);
+  const inspected = await seeded.fixture.run(["encode-output", "inspect", seeded.identity], undefined, undefined,
+    { openAccess: openRestored, encodeOutputMediaProbe: unavailableKeepProbe });
+  expect(inspected.result).toMatchObject({ kept: (kept.result as { kept: unknown }).kept,
+    artifact: { encodeJob: { status: "failed" } }, operatorInspection: { receipts: [] } });
 });

@@ -1,3 +1,4 @@
+import { acquireEncodeOutputReadOwnership } from "@rip-dvd/worker-runtime";
 import { createHash } from "node:crypto";
 import { constants, lstatSync, type Stats } from "node:fs";
 import { lstat, open } from "node:fs/promises";
@@ -252,12 +253,15 @@ export async function prepareEncodeOutputKeepReview(
   };
   return {
     preview,
-    prepareCommit() {
+    prepareCommit(assertReadOwnership: () => void) {
+      assertReadOwnership();
       if (!sameObservation(finalFile, observeFile(after.output.outputPath)) ||
           !sameObservation(destinationAfter, observeFile(after.destination))) {
         throw new EncodeOutputKeepEvidenceChangedError();
       }
-      // Publishers and cleanup commit authority fences before touching media.
+      assertReadOwnership();
+      // Retained failed files have no admitted writer; cleanup and publication
+      // must also preserve their immutable artifact authority.
       // Authenticate those fences under SQLite's writer lock, without media I/O.
       return () => {
         if (canonicalPublicationJson(readAuthority(access, artifactIdentity)) !== canonicalPublicationJson(after)) {
@@ -268,7 +272,25 @@ export async function prepareEncodeOutputKeepReview(
   };
 }
 
-export class EncodeOutputKeepEvidenceChangedError extends Error {}
+export class EncodeOutputKeepEvidenceChangedError extends Error {
+  constructor(readonly reasonCode = "KEEP_PREFLIGHT_STALE") { super("Keep evidence changed."); }
+}
+
+/** Keep holds the retained file's read ownership; preflight stays read-only. */
+export async function withEncodeOutputKeepReadOwnership<T>(
+  access: DataAccess, artifactIdentity: string, task: (assertHeld: () => void) => Promise<T>,
+): Promise<T> {
+  const { output, destination } = readAuthority(access, artifactIdentity);
+  let ownership: Awaited<ReturnType<typeof acquireEncodeOutputReadOwnership>>;
+  try { ownership = await acquireEncodeOutputReadOwnership(output.outputPath, destination); }
+  catch { throw new EncodeOutputKeepEvidenceChangedError("OUTPUT_OWNERSHIP_LOST"); }
+  try {
+    return await task(() => {
+      try { ownership.assertHeld(); }
+      catch { throw new EncodeOutputKeepEvidenceChangedError("OUTPUT_OWNERSHIP_LOST"); }
+    });
+  } finally { await ownership.release(); }
+}
 
 export async function previewEncodeOutputKeep(
   access: DataAccess, artifactIdentity: unknown, raw?: unknown, mediaProbe?: EncodeOutputMediaProbe,
