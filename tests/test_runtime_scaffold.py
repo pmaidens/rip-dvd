@@ -55,7 +55,7 @@ class RuntimeScaffoldTests(unittest.TestCase):
         for variable, path in expected_paths.items():
             self.assertIn(f"{variable}: {path}", compose)
             self.assertNotIn(f"${{{variable}", compose)
-        self.assertEqual(compose.count("*runtime-environment"), 4)
+        self.assertEqual(compose.count("*runtime-environment"), 5)
 
     def test_compose_environment_example_does_not_expose_container_paths(self) -> None:
         example = (ROOT / ".env.example").read_text()
@@ -208,7 +208,7 @@ class RuntimeScaffoldTests(unittest.TestCase):
     def test_worker_smoke_dispatches_complete_worker_descriptors(self) -> None:
         smoke = (ROOT / "scripts" / "smoke-compose-workers.sh").read_text()
 
-        self.assertIn('worker_roles="archive encode"', smoke)
+        self.assertIn('worker_roles="archive encode notification"', smoke)
         self.assertIn("worker_service=archive-worker", smoke)
         self.assertIn("worker_writable_path=/media/originals", smoke)
         self.assertIn('worker_ready_message="Archive worker ready"', smoke)
@@ -221,6 +221,13 @@ class RuntimeScaffoldTests(unittest.TestCase):
         self.assertIn('worker_ready_message="Encode worker ready"', smoke)
         self.assertIn(
             'worker_shutdown_message="Encode worker received SIGTERM; stopping"',
+            smoke,
+        )
+        self.assertIn("worker_service=notification-worker", smoke)
+        self.assertIn("worker_writable_path=/data", smoke)
+        self.assertIn('worker_ready_message="Notification dispatcher started"', smoke)
+        self.assertIn(
+            'worker_shutdown_message="Notification worker received SIGTERM; stopping"',
             smoke,
         )
         self.assertIn('smoke_worker "$worker_role"', smoke)
