@@ -1,4 +1,4 @@
-import type { CommittedDvdCheckpointEvidence, DvdTitleIdentityObservationInput } from "@rip-dvd/data-access";
+import type { CommittedDvdCheckpointEvidence, DvdTitleIdentityObservationInput, UnreadableSectorRange } from "@rip-dvd/data-access";
 import { DatabaseSync } from "node:sqlite";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { seedCommittedArchiveEvidence } from "./archive-evidence.test-support.js";
@@ -8,7 +8,7 @@ export async function seedDamagePreview(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   coverage: "source_span" | "whole_cell" | "unknown" | "mixed" = "source_span",
   timings: readonly (readonly [number, number])[] = [[1_000, 5_000], [35_000, 40_000], [71_000, 400_000]],
-  options: { evidence?: { archive: Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>["archive"]; manifest: CommittedDvdCheckpointEvidence }; stopRecovery?: boolean; otherTitlePartial?: boolean; additionalTitleObservations?: readonly DvdTitleIdentityObservationInput[]; singleChapter?: boolean; sourceSectorCount?: number } = {},
+  options: { evidence?: { archive: Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>["archive"]; manifest: CommittedDvdCheckpointEvidence }; stopRecovery?: boolean; otherTitlePartial?: boolean; additionalTitleObservations?: readonly DvdTitleIdentityObservationInput[]; singleChapter?: boolean; sourceExtent?: UnreadableSectorRange } = {},
 ) {
   const { archive, manifest } = options.evidence ?? await seedCommittedArchiveEvidence(fixture, [
     { startLba: 10, sectorCount: 1, classification: "skipped_untested" },
@@ -26,7 +26,7 @@ export async function seedDamagePreview(
     findings: (["filesystem_structure", "dvd_navigation", "title_enumeration"] as const).map((checkKind) => ({
       checkKind,
       policyVersion: "synthetic-structure-v1",
-      testedExtent: { startLba: 0, endLbaExclusive: 1_024, observedSectorCount: 1_024 },
+      testedExtent: { startLba: 0, endLbaExclusive: manifest.acceptedEndLbaExclusive, observedSectorCount: manifest.acceptedEndLbaExclusive },
       outcome: "valid" as const,
       reason: null,
       evidenceReference: `synthetic:${checkKind}`,
@@ -40,7 +40,7 @@ export async function seedDamagePreview(
       navigation: { videoTitleSetNumber: 1, titleSetTitleNumber: number, programChainNumber: number },
       selectedPath: [{ programNumber: 1, cellNumber: 1, vobId: 1, cellId: 1 }],
       angleNumber: 1, angleCount: 1, chapterStart: 1, chapterEnd: options.singleChapter ? 1 : 4, chapterCount: options.singleChapter ? 1 : 4,
-      sourceExtents: [{ startLba: 0, sectorCount: options.sourceSectorCount ?? 100 }],
+      sourceExtents: [options.sourceExtent ?? { startLba: 0, sectorCount: 100 }],
     })), ...(options.additionalTitleObservations ?? [])],
   });
   const observation = reviewSet.items[0]!.observation;

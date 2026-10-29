@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   canonicalPublicationJson, encodeOutputFilesystemIdentity, sameEncodeOutputMutationSnapshot,
-  type EncodeClaimSnapshot, type EncodeOutputCellCorrespondence, type EncodeOutputCellVideoMeasurement,
+  type EncodeClaimSnapshot, type EncodeOutputCellCorrespondence, type EncodeOutputVideoFingerprint,
 } from "@rip-dvd/data-access";
 import type { ArchiveImageOwnershipHandle } from "@rip-dvd/worker-runtime";
 
@@ -30,11 +30,13 @@ const runMediaTool: CorrespondenceMediaTool = (request) => new Promise((resolve,
   }, (error, stdout, stderr) => error ? reject(error) : resolve({ stdout, stderr }));
 });
 
-interface Frame { pts: number; duration: number; sha256: string }
+interface Frame { pts: number | null; duration: number | null; sha256: string }
+interface TimedFrame extends Frame { pts: number; duration: number }
 interface DecodedVideo {
-  summary: EncodeOutputCellVideoMeasurement;
+  summary: EncodeOutputVideoFingerprint;
   frames: Frame[];
   originSeconds: number;
+  timeBase: { numerator: number; denominator: number };
 }
 type UnknownCorrespondence = Extract<EncodeOutputCellCorrespondence, { status: "unknown" }>;
 const unknown = (reasonCode: UnknownCorrespondence["reasonCode"]): UnknownCorrespondence => ({ policyVersion: POLICY, status: "unknown", reasonCode });
@@ -49,8 +51,8 @@ async function decodeVideo(path: string, signal: AbortSignal, tool: Corresponden
     if (result.stderr.trim()) throw new Error("Media tool reported a decoding error");
     return result;
   };
-  const probe = JSON.parse((await run("ffprobe", ["-v", "error", "-select_streams", "v", "-show_entries",
-    "stream=width,height,pix_fmt,time_base:frame=pts,duration,pkt_duration:format=start_time", "-show_frames", "-err_detect", "explode", "-of", "json", path])).stdout) as {
+  const probe = JSON.parse((await run("ffprobe", ["-v", "error", "-select_streams", "v", "-show_frames", "-show_entries",
+    "stream=width,height,pix_fmt,time_base:frame=pts,duration,pkt_duration:format=start_time", "-err_detect", "explode", "-of", "json", path])).stdout) as {
       streams?: { width: number; height: number; pix_fmt: string; time_base: string }[];
       frames?: { pts: number; duration?: number; pkt_duration?: number }[]; format?: { start_time?: string };
     };
@@ -59,7 +61,7 @@ async function decodeVideo(path: string, signal: AbortSignal, tool: Corresponden
   if (probe.streams?.length !== 1 || !stream || stream.pix_fmt !== "yuv420p" ||
       !Number.isSafeInteger(stream.width) || !Number.isSafeInteger(stream.height) ||
       stream.width < 2 || stream.height < 2 || stream.width > 1920 || stream.height > 1080 ||
-      !Number.isFinite(originSeconds) || !Array.isArray(probe.frames) || probe.frames.length > MAX_FRAMES) throw new Error("Unsupported measured video");
+      !Array.isArray(probe.frames) || probe.frames.length > MAX_FRAMES) throw new Error("Unsupported measured video");
   const text = (await run("ffmpeg", ["-nostdin", "-v", "error", "-xerror", "-err_detect", "explode", "-threads", "1", "-copyts", "-i", path,
     "-map", "0:v:0", "-an", "-sn", "-dn", "-fps_mode", "passthrough", "-c:v", "rawvideo", "-threads", "1",
     "-f", "framehash", "-hash", "sha256", "-"])).stdout;
@@ -68,27 +70,38 @@ async function decodeVideo(path: string, signal: AbortSignal, tool: Corresponden
   const timeBaseMatch = /^(\d+)\/(\d+)$/.exec(stream.time_base);
   const dimensions = /^#dimensions 0: (\d+)x(\d+)\s*$/m.exec(text);
   const numerator = Number(timeBaseMatch?.[1]), denominator = Number(timeBaseMatch?.[2]);
-  if (!Number.isSafeInteger(numerator) || !Number.isSafeInteger(denominator) || numerator <= 0 || denominator <= 0 ||
-      Number(dimensions?.[1]) !== stream.width || Number(dimensions?.[2]) !== stream.height) throw new Error("Missing frame timing");
+  if (Number(dimensions?.[1]) !== stream.width || Number(dimensions?.[2]) !== stream.height) throw new Error("Missing frame dimensions");
   const frames: Frame[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim() || line.startsWith("#")) continue;
     const fields = line.split(",").map((field) => field.trim());
     const nativeFrame = probe.frames[frames.length];
     const pts = nativeFrame?.pts, duration = nativeFrame?.duration ?? nativeFrame?.pkt_duration;
-    if (fields.length !== 6 || fields[0] !== "0" || pts === undefined || duration === undefined ||
-        !Number.isSafeInteger(pts) || !Number.isSafeInteger(duration) || duration <= 0 ||
-        !Number.isSafeInteger(pts + duration) || Number(fields[4]) !== stream.width * stream.height * 1.5 ||
-        !/^[a-f0-9]{64}$/.test(fields[5]!) || frames.length >= MAX_FRAMES ||
-        (frames.length > 0 && pts <= frames.at(-1)!.pts)) throw new Error("Incomplete frame sequence");
-    frames.push({ pts, duration, sha256: fields[5]! });
+    if (fields.length !== 6 || fields[0] !== "0" || Number(fields[4]) !== stream.width * stream.height * 1.5 ||
+        !/^[a-f0-9]{64}$/.test(fields[5]!) || frames.length >= MAX_FRAMES) throw new Error("Incomplete frame sequence");
+    frames.push({ pts: pts ?? null, duration: duration ?? null, sha256: fields[5]! });
   }
   if (frames.length === 0 || frames.length !== probe.frames.length) throw new Error("Incomplete measured video frames");
-  return { frames, originSeconds, summary: {
+  return { frames, originSeconds, timeBase: { numerator, denominator }, summary: {
     frameCount: frames.length, width: stream.width, height: stream.height, pixelFormat: "yuv420p",
-    sequenceSha256: sequenceDigest(frames), timeBase: { numerator, denominator },
-    firstPts: frames[0]!.pts, endPts: frames.at(-1)!.pts + frames.at(-1)!.duration,
+    sequenceSha256: sequenceDigest(frames),
   } };
+}
+
+function nativeOutputFrames(video: DecodedVideo): TimedFrame[] {
+  const { numerator, denominator } = video.timeBase;
+  if (!Number.isFinite(video.originSeconds) || !Number.isSafeInteger(numerator) || !Number.isSafeInteger(denominator) ||
+      numerator <= 0 || denominator <= 0) throw new Error("Missing native output time base");
+  let previous: number | undefined;
+  const frames: TimedFrame[] = [];
+  for (const frame of video.frames) {
+    if (frame.pts === null || frame.duration === null || !Number.isSafeInteger(frame.pts) ||
+        !Number.isSafeInteger(frame.duration) || frame.duration <= 0 || !Number.isSafeInteger(frame.pts + frame.duration) ||
+        (previous !== undefined && frame.pts <= previous)) throw new Error("Incomplete native output frame timing");
+    previous = frame.pts;
+    frames.push({ sha256: frame.sha256, pts: frame.pts, duration: frame.duration });
+  }
+  return frames;
 }
 
 interface SourceCellMeasurement {
@@ -225,13 +238,14 @@ export async function measureEncodeOutputCell(
     const outputBytesSha256 = await hashEncodeOutputBytes(outputPath, signal);
     if (outputBytesSha256 === null) return unknown("OUTPUT_CELL_UNSUPPORTED");
     const output = await decodeVideo(outputPath, signal, tool);
+    const outputFrames = nativeOutputFrames(output);
     if (!sameEncodeOutputMutationSnapshot(before, await lstat(outputPath))) throw new Error("Output changed");
     if (source.video.summary.width !== output.summary.width || source.video.summary.height !== output.summary.height) return unknown("OUTPUT_CONTENT_UNRESOLVED");
-    const found = matches(source.video.frames, output.frames);
+    const found = matches(source.video.frames, outputFrames);
     if (found.length !== 1) return unknown(found.length > 1 ? "OUTPUT_CONTENT_AMBIGUOUS" : "OUTPUT_CONTENT_UNRESOLVED");
-    const matchingFrames = output.frames.slice(found[0]!, found[0]! + source.video.frames.length);
+    const matchingFrames = outputFrames.slice(found[0]!, found[0]! + source.video.frames.length);
     const firstPts = matchingFrames[0]!.pts, endPts = matchingFrames.at(-1)!.pts + matchingFrames.at(-1)!.duration;
-    const milliseconds = (pts: number) => Number(((pts * output.summary.timeBase.numerator / output.summary.timeBase.denominator - output.originSeconds) * 1000).toFixed(6));
+    const milliseconds = (pts: number) => Number(((pts * output.timeBase.numerator / output.timeBase.denominator - output.originSeconds) * 1000).toFixed(6));
     const outputInterval = { startMilliseconds: milliseconds(firstPts), endMilliseconds: milliseconds(endPts) };
     if (outputInterval.startMilliseconds < 0 || outputInterval.endMilliseconds <= outputInterval.startMilliseconds) throw new Error("Unsupported output origin");
     const snapshot = source.snapshot;
@@ -240,7 +254,7 @@ export async function measureEncodeOutputCell(
       checkpoint: snapshot.source.checkpoint, resolvedSource: snapshot.source.resolvedSource, sourceRange: source.sourceRange,
       sourceBytesSha256: source.sourceBytesSha256, sourceVideo: source.video.summary,
       outputFileIdentity: encodeOutputFilesystemIdentity(before), outputBytesSha256,
-      outputVideo: { ...output.summary, frameCount: matchingFrames.length, firstPts, endPts, sequenceSha256: sequenceDigest(matchingFrames) },
+      outputVideo: { ...output.summary, timeBase: output.timeBase, frameCount: matchingFrames.length, firstPts, endPts, sequenceSha256: sequenceDigest(matchingFrames) },
       outputTimelineOriginSeconds: output.originSeconds, outputInterval };
   } catch {
     signal.throwIfAborted();

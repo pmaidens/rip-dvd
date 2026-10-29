@@ -34,7 +34,7 @@ export async function seedCommittedArchiveEvidence(
 ) {
   const { archive } = seedCatalogReviewForReadFixture(fixture);
   const archivePath = join(realpathSync(fixture.originalsLibraryPath), `${archive.id}.iso`);
-  const acceptedSectors = 1024;
+  const acceptedSectors = Math.max(1024, Math.ceil((imageContents?.byteLength ?? 0) / 4096) * 2);
   const image = Buffer.alloc(acceptedSectors * 2048);
   if (imageContents && imageContents.byteLength > image.byteLength) throw new Error("Synthetic image exceeds its accepted extent");
   if (imageContents) image.set(imageContents);

@@ -1,12 +1,15 @@
 import type { EncodeClaimSource } from "./encode-claim-snapshot.js";
 import type { EncodeJobClaimToken, EncodeJobId, EncodeOutputFilesystemIdentity, ValidationFailedEncodeOutputId } from "./types.js";
 
-export interface EncodeOutputCellVideoMeasurement {
+export interface EncodeOutputVideoFingerprint {
   frameCount: number;
   width: number;
   height: number;
   pixelFormat: "yuv420p";
   sequenceSha256: string;
+}
+
+export interface EncodeOutputCellVideoMeasurement extends EncodeOutputVideoFingerprint {
   timeBase: { numerator: number; denominator: number };
   firstPts: number;
   endPts: number;
@@ -27,7 +30,7 @@ export type EncodeOutputCellCorrespondence = {
   resolvedSource: EncodeClaimSource["resolvedSource"];
   sourceRange: { startLba: number; sectorCount: number };
   sourceBytesSha256: string;
-  sourceVideo: EncodeOutputCellVideoMeasurement;
+  sourceVideo: EncodeOutputVideoFingerprint;
   outputFileIdentity: EncodeOutputFilesystemIdentity;
   outputBytesSha256: string;
   outputVideo: EncodeOutputCellVideoMeasurement;

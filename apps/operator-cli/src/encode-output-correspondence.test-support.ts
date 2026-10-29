@@ -6,21 +6,24 @@ import { seedCommittedArchiveEvidence } from "./archive-evidence.test-support.js
 import { seedDamagePreview } from "./damage-preview.test-support.js";
 import { openEncodeSourceTestAccess } from "./encode-source-decision.test-support.js";
 import type { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
+import type { UnreadableSectorRange } from "@rip-dvd/data-access";
 
 /** Two recorded playback paths. The selected path uses sectors 0..99; the
  * omitted path uses sectors 200..299, including the unresolved sector 210. */
 export async function seedCorrespondenceSource(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   options: { chapters?: boolean; partialOmittedMap?: boolean; sharedSource?: boolean; overlappingPath?: boolean;
-    singleCell?: { imageContents: Uint8Array } } = {},
+    singleCell?: { imageContents: Uint8Array; sourceRange?: UnreadableSectorRange } } = {},
 ) {
-  const omittedRange = { startLba: options.sharedSource ? 0 : options.overlappingPath ? 50 : 200,
-    sectorCount: options.overlappingPath ? 250 : 100 };
+  const contentRange = options.singleCell?.sourceRange ?? { startLba: 0,
+    sectorCount: options.singleCell ? Math.max(1, Math.ceil(options.singleCell.imageContents.byteLength / 2048)) : 100 };
+  const omittedRange = options.sharedSource ? contentRange : {
+    startLba: options.overlappingPath ? 50 : 200, sectorCount: options.overlappingPath ? 250 : 100 };
   const evidence = await seedCommittedArchiveEvidence(fixture, [
-    { startLba: options.sharedSource ? 10 : 210, sectorCount: 1, classification: "skipped_untested" },
+    { startLba: options.sharedSource ? contentRange.startLba + 10 : 210, sectorCount: 1, classification: "skipped_untested" },
   ], false, true, options.singleCell?.imageContents);
   const seeded = await seedDamagePreview(fixture, "source_span", [[1000, 5000]], { evidence, singleChapter: options.singleCell !== undefined,
-    ...(options.singleCell ? { sourceSectorCount: Math.max(1, Math.ceil(options.singleCell.imageContents.byteLength / 2048)) } : {}),
+    ...(options.singleCell ? { sourceExtent: contentRange } : {}),
     additionalTitleObservations: [{ displayTitleNumber: 2,
       navigation: { videoTitleSetNumber: 2, titleSetTitleNumber: 1, programChainNumber: 1 },
       selectedPath: [{ programNumber: 1, cellNumber: 1, vobId: 2, cellId: 1 }],

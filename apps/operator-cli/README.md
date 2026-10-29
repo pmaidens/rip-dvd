@@ -652,7 +652,9 @@ Archive Image Ownership, the worker reads that exact extent and decodes every
 video frame. After independent output validation, it decodes the canonical
 output and requires exactly one complete match of the source's ordered raw
 video SHA-256 frame hashes, with matching dimensions and `yuv420p` pixels.
-Native decoded-frame PTS, durations and the actual container origin determine the output
+Source matching needs the complete ordered content fingerprint; source-frame
+timestamps may be unavailable. Every output frame still needs native PTS and
+duration. Those timestamps and the actual container origin determine the output
 interval. The interval is the envelope of the whole selected cell, retaining
 the source interval's `whole_cell` coverage. Its bounds are never calculated
 from estimated source seconds. This does not measure decoder effects or

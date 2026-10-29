@@ -16,7 +16,8 @@ function frames(values: readonly string[], start: number) {
 export async function publishMeasuredCorrespondenceOutput(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   options: { outputFrames?: readonly string[]; decoderFailure?: boolean; outputOffsetMilliseconds?: number;
-    incompleteNativeFrames?: boolean; sourceFault?: "zeroed_sector" | "encrypted_packet"; legacyFrameDuration?: boolean } = {},
+    incompleteNativeFrames?: boolean; sourceFault?: "zeroed_sector" | "encrypted_packet"; legacyFrameDuration?: boolean;
+    sourceMissingPts?: boolean; outputMissingPts?: boolean } = {},
 ) {
   const imageContents = Buffer.alloc(100 * 2048, 0xff);
   for (let offset = 0; offset < imageContents.length; offset += 2048) {
@@ -31,13 +32,14 @@ export async function publishMeasuredCorrespondenceOutput(
     writeFileSync(seeded.claim.outputPath, "synthetic canonical output");
     const runMediaTool: CorrespondenceMediaTool = async (request) => {
       if (options.decoderFailure) throw new Error("Synthetic decoder failure");
-      const values = request.arguments_.includes(seeded.claim.outputPath) ? options.outputFrames ?? ["lead", "a", "b", "c", "tail"] : ["a", "b", "c"];
+      const output = request.arguments_.includes(seeded.claim.outputPath);
+      const values = output ? options.outputFrames ?? ["lead", "a", "b", "c", "tail"] : ["a", "b", "c"];
       const measuredValues = options.incompleteNativeFrames ? values.slice(1) : values;
       const offset = request.arguments_.includes(seeded.claim.outputPath) ? options.outputOffsetMilliseconds ?? 0 : 0;
       return { stdout: request.arguments_.includes("framehash")
         ? frames(values, 250)
         : JSON.stringify({ streams: [{ width: 64, height: 64, pix_fmt: "yuv420p", time_base: "1/1000" }],
-          frames: measuredValues.map((_, index) => ({ pts: 10000 + offset + index * 40,
+          frames: measuredValues.map((_, index) => ({ ...((output ? options.outputMissingPts : options.sourceMissingPts) && index > 0 ? {} : { pts: 10000 + offset + index * 40 }),
             ...(options.legacyFrameDuration ? { pkt_duration: 40 } : { duration: 40 }) })), format: { start_time: "10" } }), stderr: "" };
     };
     const source = await createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath }).withConsistentRead({

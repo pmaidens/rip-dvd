@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
@@ -13,18 +13,35 @@ import { createEncodeOutputIntervalsRoute } from "../../web/app/api/encode-outpu
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
 const linux = it.skipIf(process.platform !== "linux");
-function tool(executable: string, arguments_: string[]) {
-  return execFileSync(executable, arguments_, { timeout: 60_000, encoding: "utf8", stdio: "pipe" });
+function tool(executable: string, arguments_: string[], cwd?: string) {
+  return execFileSync(executable, arguments_, { cwd, env: { ...process.env, VIDEO_FORMAT: "PAL" }, timeout: 60_000, encoding: "utf8", stdio: "pipe" });
 }
-function sourceMedia(path: string) {
-  tool("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=720x480:r=25:d=4",
-    "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo:d=4", "-c:v", "mpeg2video", "-c:a", "ac3", "-f", "vob", path]);
+function sourceMedia(directory: string) {
+  tool("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=720x576:r=25:d=4",
+    "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo:d=4", "-target", "pal-dvd", "source.mpg"], directory);
+  writeFileSync(join(directory, "dvd.xml"), '<dvdauthor dest="dvd"><vmgm /><titleset><titles><video format="pal" aspect="4:3" />'
+    + '<audio lang="en" /><pgc><vob file="source.mpg" /></pgc></titles></titleset></dvdauthor>');
+  tool("dvdauthor", ["-x", "dvd.xml"], directory);
+  const image = join(directory, "source.iso");
+  tool("genisoimage", ["-quiet", "-udf", "-dvd-video", "-V", "SYNTHETIC_CELL", "-o", image, "dvd"], directory);
+  const path = join(directory, "dvd", "VIDEO_TS", "VTS_01_1.VOB");
+  const content = readFileSync(path), imageContents = readFileSync(image);
+  const offset = imageContents.indexOf(content);
+  expect(offset).toBeGreaterThanOrEqual(0);
+  expect(offset % 2048).toBe(0);
+  expect(content.byteLength % 2048).toBe(0);
+  expect(imageContents.indexOf(content, offset + 1)).toBe(-1);
+  const native = JSON.parse(tool("rip-dvd-preview-title", [image, "1", "1", "1", "1", join(directory, "synthetic-path-marker")]));
+  expect(native).toMatchObject({ navigation: { videoTitleSetNumber: 1, titleSetTitleNumber: 1, programChainNumber: 1 },
+    selectedPath: [{ programNumber: 1, cellNumber: 1, vobId: 1, cellId: 1 }], audio: [{ sourceId: 128, physicalId: 128 }] });
+  expect(native.selectedPath).toHaveLength(1);
+  return { path, singleCell: { imageContents, sourceRange: { startLba: offset / 2048, sectorCount: content.byteLength / 2048 } } };
 }
 
 linux("reaches measured correspondence with the real supported HandBrake preset through worker publication and public CLI", async () => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
-  const input = join(fixture.operatorHostPath, "synthetic-cell.mpg"); sourceMedia(input);
-  const seeded = await seedCorrespondenceSource(fixture, { sharedSource: true, singleCell: { imageContents: readFileSync(input) } });
+  const media = sourceMedia(fixture.operatorHostPath);
+  const seeded = await seedCorrespondenceSource(fixture, { sharedSource: true, singleCell: media.singleCell });
   try {
     await pollEncodeWorker({ ...fixture, access: seeded.access, concurrency: 1, log: () => {}, signal: new AbortController().signal,
       subtitleScanner: { scan: async () => [] } });
@@ -47,8 +64,8 @@ linux("reaches measured correspondence with the real supported HandBrake preset 
 
 linux.each(["shifted", "shifted_pts", "repeated", "omitted", "truncated"] as const)("measures actual synthetic %s media through the producer and both operator adapters", async (kind) => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
-  const input = join(fixture.operatorHostPath, "synthetic-cell.mpg"); sourceMedia(input);
-  const seeded = await seedCorrespondenceClaim(fixture, { sharedSource: true, singleCell: { imageContents: readFileSync(input) } });
+  const media = sourceMedia(fixture.operatorHostPath);
+  const seeded = await seedCorrespondenceClaim(fixture, { sharedSource: true, singleCell: media.singleCell });
   try {
     // Lossless encoding here isolates measured content and timestamp behavior.
     // The separate real worker test proves the production preset can reach it.
@@ -56,7 +73,7 @@ linux.each(["shifted", "shifted_pts", "repeated", "omitted", "truncated"] as con
       : kind === "repeated" ? "[0:v]setpts=PTS-STARTPTS,split[a][b];[a][b]concat=n=2:v=1:a=0[v]"
       : kind === "omitted" ? "[0:v]select='lt(t,1)+gte(t,2)',setpts=N/(25*TB)[v]"
       : "[0:v]trim=duration=2,setpts=PTS-STARTPTS[v]";
-    tool("ffmpeg", ["-v", "error", "-y", "-i", input, "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono:d=6",
+    tool("ffmpeg", ["-v", "error", "-y", "-i", media.path, "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono:d=6",
       "-filter_complex", filter, "-map", "[v]", "-map", "1:a:0", "-c:a", "pcm_s16le", "-c:v", "ffv1", "-enc_time_base:v", "1:1000", seeded.claim.outputPath]);
     const snapshot = seeded.access.encodeJobs.findClaimSnapshot(seeded.claim.claimToken)!;
     const source = await createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath }).withConsistentRead({
