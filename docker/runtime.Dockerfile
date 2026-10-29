@@ -132,10 +132,11 @@ RUN pnpm --filter @rip-dvd/config build \
   && pnpm --filter @rip-dvd/worker-runtime build
 
 FROM shared-builder AS web-builder
-# Next type-checks web tests that import worker production code. Keep those
+# Next type-checks web tests that import worker code and CLI fixtures. Keep those
 # sources in the builder; the web image copies only standalone output.
 COPY apps/archive-worker/src apps/archive-worker/src
 COPY apps/encode-worker/src apps/encode-worker/src
+COPY apps/operator-cli/src apps/operator-cli/src
 COPY apps/web apps/web
 RUN pnpm --filter @rip-dvd/web build
 # Migration-only recursive filesystem traversal must not enter the web runtime
