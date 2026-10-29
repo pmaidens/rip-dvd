@@ -73,3 +73,22 @@ it("requires trusted JSON POST and explicit complete input before accessing pers
   }
   expect(seeded.access.encodeOutputKeeps.latest(seeded.identity)).toBeNull();
 });
+
+it("shares ownership-first rejection when the submitted validation identity is also stale", async () => {
+  const seeded = await seedKeepPreflightFixture(); fixtures.push(seeded);
+  const { result: preview } = await seeded.preview();
+  changeFailedCleanupOwnership(seeded);
+  const review = { acknowledged: true, validationIdentity: "00000000-0000-4000-8000-000000000000", previewToken: preview.previewToken };
+  const mutationKey = "synthetic-http-priority-keep";
+  const web = await createEncodeOutputKeepRoute(request(seeded.identity, { ...review, mutationKey }), seeded.identity,
+    () => seeded.access, () => origin, unavailableKeepProbe);
+  const cli = await seeded.fixture.run(["encode-output", "keep", seeded.identity, "--key", mutationKey,
+    "--json", JSON.stringify(review)], undefined, undefined, { encodeOutputMediaProbe: unavailableKeepProbe });
+  expect(web.status).toBe(409); expect(cli.exitCode).not.toBe(0);
+  expect(await web.json()).toEqual(cli.result);
+  expect(cli.result).toMatchObject({ error: { code: "OUTPUT_OWNERSHIP_LOST", current: { blockers: [
+    { code: "OUTPUT_OWNERSHIP_LOST", message: expect.any(String) },
+    { code: "OUTPUT_VALIDATION_CHANGED", message: expect.any(String) },
+    { code: "KEEP_PREFLIGHT_STALE", message: expect.any(String) },
+  ] } } });
+});

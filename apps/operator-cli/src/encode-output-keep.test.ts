@@ -1,5 +1,6 @@
 import { afterEach, expect, it } from "vitest";
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { changeFailedCleanupOwnership, changeFailedOwnership, changeFailedValidation, changePredecessorValidation,
   disconnectKeepStorage, failedFileFaults, seedCorrectedKeepPreflightFixture, seedKeepPreflightFixture, unavailableKeepProbe } from "./encode-output-keep-preflight.test-support.js";
@@ -128,7 +129,12 @@ for (const [name, change] of [
       openAccess() {
         const access = seeded.fixture.openAccess();
         const record = access.encodeOutputKeeps.record;
-        access.encodeOutputKeeps.record = (input, prepared, guard) => { change(seeded); return record(input, prepared, guard); };
+        access.encodeOutputKeeps.record = (input, prepare) => record(input, () => {
+          if (name === "bytes with restored modification time") change(seeded);
+          const prepared = prepare();
+          if (name !== "bytes with restored modification time") change(seeded);
+          return prepared;
+        });
         return access;
       },
     });
@@ -174,4 +180,49 @@ it("rejects an actual unreadable complete file without recording Keep", async ()
     ]) } } });
     expect(seeded.access.encodeOutputKeeps.latest(seeded.identity)).toBeNull();
   } finally { chmodSync(seeded.output.outputPath, 0o600); }
+});
+
+for (const [name, change, code] of [
+  ["storage", disconnectKeepStorage, "DESTINATION_EVIDENCE_UNAVAILABLE"],
+  ["ownership", changeFailedCleanupOwnership, "OUTPUT_OWNERSHIP_LOST"],
+] as const) {
+  it(`prioritizes ${name} over a stale supplied validation identity`, async () => {
+    const seeded = await seedKeepPreflightFixture(); fixtures.push(seeded);
+    const { result: preview } = await seeded.preview();
+    change(seeded);
+    const result = await seeded.fixture.run(["encode-output", "keep", seeded.identity, "--key", "synthetic-priority-keep", "--json",
+      JSON.stringify({ ...reviewedInput(preview), validationIdentity: "00000000-0000-4000-8000-000000000000" })],
+    undefined, undefined, { encodeOutputMediaProbe: unavailableKeepProbe });
+    expect(result.result).toMatchObject({ error: { code, current: {
+      blockers: expect.arrayContaining([{ code: "OUTPUT_VALIDATION_CHANGED", message: expect.any(String) }]),
+    } } });
+    expect((result.result as { error: { current: { blockers: { code: string }[] } } }).error.current.blockers[0].code).toBe(code);
+    expect(seeded.access.encodeOutputKeeps.latest(seeded.identity)).toBeNull();
+  });
+}
+
+it("stages final media checks while another connection can still obtain the SQLite writer lock", async () => {
+  const seeded = await seedKeepPreflightFixture(); fixtures.push(seeded);
+  const { result: preview } = await seeded.preview();
+  let stagedWithoutWriterLock = false;
+  const result = await seeded.fixture.run(["encode-output", "keep", seeded.identity, "--key", "synthetic-short-keep", "--json",
+    JSON.stringify(reviewedInput(preview))], undefined, undefined, { encodeOutputMediaProbe: unavailableKeepProbe,
+    openAccess() {
+      const access = seeded.fixture.openAccess();
+      const record = access.encodeOutputKeeps.record;
+      access.encodeOutputKeeps.record = (input, prepare) => record(input, () => {
+        const prepared = prepare();
+        const concurrent = new DatabaseSync(seeded.fixture.databasePath);
+        try {
+          concurrent.exec("PRAGMA busy_timeout = 0");
+          concurrent.prepare("UPDATE mutation_invocations SET created_at = created_at WHERE key = ?").run("synthetic-absent-key");
+          stagedWithoutWriterLock = true;
+        } finally { concurrent.close(); }
+        return prepared;
+      });
+      return access;
+    },
+  });
+  expect(result.exitCode).toBe(0);
+  expect(stagedWithoutWriterLock).toBe(true);
 });

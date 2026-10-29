@@ -43,16 +43,17 @@ export async function keepFailedEncodeOutput(
     if (concurrentReplay !== null) return result(concurrentReplay);
     const { preview } = proof;
     if (preview.current.validationIdentity !== input.validationIdentity) {
-      throw new EncodeOutputKeepRejectedError({ ...preview, eligible: false, previewToken: null,
-        blockers: orderedKeepBlockers([...preview.blockers, { code: "OUTPUT_VALIDATION_CHANGED",
-          message: "The supplied validation identity does not match the reviewed failed output." }]) }, "OUTPUT_VALIDATION_CHANGED");
+      const blockers = orderedKeepBlockers([...preview.blockers, { code: "OUTPUT_VALIDATION_CHANGED",
+        message: "The supplied validation identity does not match the reviewed failed output." }]);
+      throw new EncodeOutputKeepRejectedError({ ...preview, eligible: false, previewToken: null, blockers }, blockers[0]!.code);
     }
     if (!preview.eligible) {
       throw new EncodeOutputKeepRejectedError(preview, preview.blockers[0]?.code ?? "KEEP_PREFLIGHT_STALE");
     }
-    return result(access.encodeOutputKeeps.record(input, {
+    return result(access.encodeOutputKeeps.record(input, () => ({
       encodeJobId: preview.artifact.provenance.encodeJobId, evidenceJson: canonicalPublicationJson(preview),
-    }, proof.assertCurrent));
+      assertAuthority: proof.prepareCommit(),
+    })));
   } catch (error) {
     const concurrentReplay = access.encodeOutputKeeps.replay(input);
     if (concurrentReplay !== null) return result(concurrentReplay);

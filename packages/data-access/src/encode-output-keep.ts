@@ -20,7 +20,9 @@ export interface KeptFailedEncodeOutput {
 
 export interface EncodeOutputKeepAccess {
   replay(input: EncodeOutputKeepInput): KeptFailedEncodeOutput | null;
-  record(input: EncodeOutputKeepInput, prepared: Pick<KeptFailedEncodeOutput, "encodeJobId" | "evidenceJson">,
-    assertCurrent: () => void): KeptFailedEncodeOutput;
+  record(input: EncodeOutputKeepInput, prepare: () => Pick<KeptFailedEncodeOutput, "encodeJobId" | "evidenceJson"> & {
+    /** Database-only check. Stage media filesystem evidence in prepare. */
+    assertAuthority(): void;
+  }): KeptFailedEncodeOutput;
   latest(artifactIdentity: string): KeptFailedEncodeOutput | null;
 }

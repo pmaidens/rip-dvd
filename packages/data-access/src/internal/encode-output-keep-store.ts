@@ -16,12 +16,16 @@ export function createEncodeOutputKeepAccess(sqlite: DatabaseSync, now: () => Da
   }
   return {
     replay,
-    record(input, prepared, assertCurrent) {
+    record(input, prepare) {
+      const previous = replay(input);
+      if (previous !== null) return previous;
+      // Media mounts may stall. Keep every filesystem check outside the writer lock.
+      const { assertAuthority, ...prepared } = prepare();
       sqlite.exec("BEGIN IMMEDIATE");
       try {
         let kept = replay(input);
         if (kept === null) {
-          assertCurrent();
+          assertAuthority();
           const timestamp = now();
           kept = { ...prepared, id: randomUUID(), artifactIdentity: input.artifactIdentity,
             validationIdentity: input.validationIdentity, previewToken: input.previewToken, keptAt: timestamp.toISOString() };

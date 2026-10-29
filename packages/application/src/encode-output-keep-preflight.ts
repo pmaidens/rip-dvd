@@ -252,15 +252,18 @@ export async function prepareEncodeOutputKeepReview(
   };
   return {
     preview,
-    // The mutation takes SQLite's writer lock before this guard. Cooperating
-    // publishers and cleanup cannot change authority across the final check.
-    assertCurrent() {
-      const fresh = readAuthority(access, artifactIdentity);
-      if (canonicalPublicationJson(fresh) !== canonicalPublicationJson(after) ||
-          !sameObservation(finalFile, observeFile(after.output.outputPath)) ||
+    prepareCommit() {
+      if (!sameObservation(finalFile, observeFile(after.output.outputPath)) ||
           !sameObservation(destinationAfter, observeFile(after.destination))) {
         throw new EncodeOutputKeepEvidenceChangedError();
       }
+      // Publishers and cleanup commit authority fences before touching media.
+      // Authenticate those fences under SQLite's writer lock, without media I/O.
+      return () => {
+        if (canonicalPublicationJson(readAuthority(access, artifactIdentity)) !== canonicalPublicationJson(after)) {
+          throw new EncodeOutputKeepEvidenceChangedError();
+        }
+      };
     },
   };
 }
