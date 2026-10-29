@@ -48,6 +48,7 @@ test(`inspects and explicitly acknowledges a canonical Encode Output, scenario=$
   const variant = fixtureVariant(testInfo.project.name);
   const acknowledgements: unknown[] = [];
   const keepPreflightRequests: string[] = [];
+  const keepDecisions: unknown[] = [];
   if (validationFailed) await page.route(/\/api\/dashboard(?:\/events)?(?:\?|$)/, async (route) => {
     const backendUrl = new URL(route.request().url());
     const isEventStream = backendUrl.pathname.endsWith("/events");
@@ -179,6 +180,12 @@ test(`inspects and explicitly acknowledges a canonical Encode Output, scenario=$
     } });
   });
 
+  if (validationFailed) await page.route("**/api/encode-outputs/*/keep", async (route) => {
+    expect(route.request().method()).toBe("POST");
+    keepDecisions.push(route.request().postDataJSON());
+    await route.fulfill({ json: { schemaVersion: 1, kept: { keptAt: "2020-01-01T00:00:00.000Z" } } });
+  });
+
   await page.goto("/encoding");
   await page.getByRole("button", { name: /Completed \d+/ }).click();
   const outputCard = page.getByRole("article").filter({
@@ -206,12 +213,25 @@ test(`inspects and explicitly acknowledges a canonical Encode Output, scenario=$
     await expect(preflight).toContainText("Complete-write proofVerified");
     await expect(preflight).toContainText("a".repeat(64));
     await expect(preflight).toContainText("I acknowledge the exact failed output and its failure evidence.");
-    await expect(preflight.getByRole("checkbox")).toHaveCount(0);
+    await expect(preflight.getByRole("checkbox")).not.toBeChecked();
+    await expect(preflight.getByRole("button", { name: "Keep failed output", exact: true })).toBeDisabled();
     await preflight.getByRole("button", { name: "Refresh Keep preflight" }).click();
     await expect(preflight).toContainText("The earlier Keep preview is stale.");
     await expect(preflight).toContainText("OUTPUT_IDENTITY_CHANGED");
     await expect(preflight).toContainText("Keep is unavailable for the current evidence.");
     expect(keepPreflightRequests).toEqual(["", `?preview-token=encode-output-keep-preview-v1.${"b".repeat(64)}`]);
+    await expect(preflight.getByRole("checkbox")).toHaveCount(0);
+    expect(keepDecisions).toEqual([]);
+    await preflight.getByRole("button", { name: "Refresh Keep preflight" }).click();
+    await preflight.getByRole("checkbox").check();
+    const keepButton = preflight.getByRole("button", { name: "Keep failed output", exact: true });
+    await keepButton.focus();
+    await page.keyboard.press("Enter");
+    await expect(preflight).toContainText("Failed output kept separately");
+    await expect(preflight).toContainText("The Encode Job remains failed.");
+    expect(keepDecisions).toEqual([{ validationIdentity: "synthetic-browser-validation-record",
+      previewToken: `encode-output-keep-preview-v1.${"b".repeat(64)}`, acknowledged: true, mutationKey: expect.any(String) }]);
+    await expect(keepButton).toHaveCount(0);
   }
   await expect(inspection).toContainText("Validation identityNot recorded");
   await expect(inspection).toContainText("Validation evidenceNot Recorded");

@@ -108,6 +108,16 @@ set -e
 [ "$keep_preflight_status" -eq 2 ]
 printf '%s\n' "$keep_preflight" | assert_json_fields 'error.code=ENCODE_OUTPUT_NOT_FOUND'
 set +e
+keep_output="$(invoke encode-output keep \
+  encode-output-v1.failed.00000000-0000-4000-8000-000000000000 \
+  --key synthetic-smoke-keep \
+  --json '{"validationIdentity":"00000000-0000-4000-8000-000000000000","previewToken":"encode-output-keep-preview-v1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","acknowledged":true}' \
+  2>"$temporary_directory/keep.stderr")"
+keep_status=$?
+set -e
+[ "$keep_status" -eq 2 ]
+printf '%s\n' "$keep_output" | assert_json_fields 'error.code=OUTPUT_AUTHORITY_CHANGED' 'error.current=null'
+set +e
 preview_output="$(invoke damage-preview availability synthetic-missing-archive \
   2>"$temporary_directory/preview.stderr")"
 preview_status=$?

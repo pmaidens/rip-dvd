@@ -2,14 +2,21 @@
 
 import { useState } from "react";
 import type { EncodeOutputKeepPreflight } from "@rip-dvd/application";
+import { createMutationKey } from "../lib/mutation-key";
 import { displayTerm } from "../lib/display-term";
 
-export function EncodeOutputKeepPreflightPanel({ artifactIdentity }: { artifactIdentity: string }) {
+export function EncodeOutputKeepPreflightPanel({ artifactIdentity, initialKeptAt }: { artifactIdentity: string; initialKeptAt?: string }) {
   const [preview, setPreview] = useState<EncodeOutputKeepPreflight | null>(null);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [mutationKey, setMutationKey] = useState(createMutationKey);
+  const [keptAt, setKeptAt] = useState(initialKeptAt ?? null);
+  const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function loadPreview() {
+    setAcknowledged(false);
+    setMutationKey(createMutationKey());
     setLoading(true);
     setError(null);
     try {
@@ -27,10 +34,38 @@ export function EncodeOutputKeepPreflightPanel({ artifactIdentity }: { artifactI
     }
   }
 
+  async function keep() {
+    if (!acknowledged || pending || !preview?.eligible || preview.previewToken === null) return;
+    setPending(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/encode-outputs/${encodeURIComponent(artifactIdentity)}/keep`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ validationIdentity: preview.current.validationIdentity,
+          previewToken: preview.previewToken, acknowledged: true, mutationKey }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        if (response.status < 500) {
+          setAcknowledged(false);
+          setPreview(result.error?.current ?? null);
+        }
+        setError(`${result.error?.code ?? "ENCODE_OUTPUT_KEEP_UNAVAILABLE"}. ${response.status < 500
+          ? "Review a fresh Keep preflight before retrying."
+          : "Retry Keep to retrieve the recorded result with the same mutation key."}`);
+        return;
+      }
+      setKeptAt(result.kept.keptAt as string);
+    } catch {
+      setError("Keep is unavailable. Retry Keep to retrieve the recorded result with the same mutation key.");
+    } finally { setPending(false); }
+  }
+
   return <section aria-label="Keep preflight">
     <h5>Keep preflight</h5>
     <p>Review the failed output before a separate Keep decision. Keep preserves a failed artifact separately from normal library outputs.</p>
-    <button type="button" disabled={loading} onClick={() => { void loadPreview(); }}>
+    {keptAt === null ? null : <p role="status">Failed output kept separately · {keptAt}. The Encode Job remains failed.</p>}
+    <button type="button" disabled={loading || pending} onClick={() => { void loadPreview(); }}>
       {loading ? "Checking Keep evidence..." : preview === null ? "Preview Keep" : "Refresh Keep preflight"}
     </button>
     {error === null ? null : <p role="alert">{error}</p>}
@@ -57,6 +92,13 @@ export function EncodeOutputKeepPreflightPanel({ artifactIdentity }: { artifactI
       </dl>
       {preview.blockers.length === 0 ? null : <ul aria-label="Keep blockers">{preview.blockers.map((blocker) => <li key={blocker.code}>{blocker.code} · {blocker.message}</li>)}</ul>}
       <p>Playability remains unassessed. A media probe failure can leave inspectability unknown for a complete stable file.</p>
+      {preview.eligible && preview.previewToken !== null && keptAt === null ? <div>
+        <label><input type="checkbox" checked={acknowledged} disabled={pending || loading}
+          onChange={(event) => setAcknowledged(event.target.checked)} />{preview.requiredAcknowledgement.message}</label>
+        <button type="button" disabled={!acknowledged || pending || loading} onClick={() => { void keep(); }}>
+          {pending ? "Keeping failed output..." : "Keep failed output"}
+        </button>
+      </div> : null}
       {preview.previewToken === null ? null : <details><summary>Keep preview token</summary><p>{preview.previewToken}</p></details>}
     </div>}
   </section>;

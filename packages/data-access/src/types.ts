@@ -3134,6 +3134,7 @@ export interface DvdCheckpointReadOwnership {
 }
 
 export interface DataAccess {
+  readonly encodeOutputKeeps: import("./encode-output-keep.js").EncodeOutputKeepAccess;
   readonly encodeOutputInspectionReceipts: import("./encode-output-inspection-receipt.js").EncodeOutputInspectionReceiptAccess;
   /** Prepare under image ownership; mutate only in the synchronous commit after
    * the final ownership and checkpoint checks have succeeded. */

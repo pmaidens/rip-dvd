@@ -2931,3 +2931,15 @@ export const validationFailedEncodeOutputs = sqliteTable("validation_failed_enco
   uniqueIndex("validation_failed_outputs_path_unique").on(table.outputPath),
   index("validation_failed_outputs_job_index").on(table.encodeJobId, table.validatedAt, table.id),
 ]);
+
+export const keptFailedEncodeOutputs = sqliteTable("kept_failed_encode_outputs", {
+  id: text("id").notNull().primaryKey(),
+  artifactIdentity: text("artifact_identity").notNull(),
+  failedOutputId: text("failed_output_id").notNull().references(() => validationFailedEncodeOutputs.id, { onDelete: "restrict" }),
+  record: text("record").notNull(),
+  createdAt: integer("created_at").notNull(),
+}, (table) => [
+  check("kept_failed_outputs_id_not_null", sql`${table.id} is not null`),
+  check("kept_failed_outputs_record_check", sql`json_valid(${table.record}) and json_extract(${table.record}, '$.id') is ${table.id} and json_extract(${table.record}, '$.artifactIdentity') is ${table.artifactIdentity} and json_extract(${table.record}, '$.validationIdentity') is ${table.failedOutputId}`),
+  index("kept_failed_outputs_artifact_index").on(table.artifactIdentity, table.createdAt),
+]);

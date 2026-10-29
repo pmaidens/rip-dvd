@@ -522,6 +522,23 @@ metadata and provenance on stdout, never media bytes. The command rejects an
 existing destination and reports stable JSON reasons for missing, changed, or
 unsafe source files.
 
+A complete validation-failed output can be kept separately through the Encoding
+view or `encode-output keep-preflight <artifact-identity>`. Review the returned
+failure, immutable source, validation identity, complete-file proof, normal
+destination and required acknowledgement. Submit
+`encode-output keep <artifact-identity> --key <new-key> --json '<review>'`, where
+`<review>` contains the exact `validationIdentity`, `previewToken` and
+`"acknowledged": true`. The command also accepts `--file` or `--stdin`.
+Keep recomputes the shared preflight and rechecks file and database authority at
+commit. Changed evidence rejects the entire decision with current identities and
+blockers. Retry an uncertain response with the same key and input to retrieve its
+recorded result. A changed input with the same key conflicts. Inspection reports
+the persisted Keep evidence separately from inspection acknowledgement. The job
+stays failed, and normal library output is untouched. Unknown media inspectability
+does not alone block Keep of a complete stable file. Historical failures without
+retained artifact authority cannot be kept. New-format admission remains closed
+pending the combined release gate.
+
 `wait <kind> <id> --timeout-ms <milliseconds>` polls existing Disc Inspection,
 Archive Request, Archive Job, Encode Job, archive audit, or filesystem verification state for up to one hour. It returns
 `outcome: settled` with the current record when work reaches a terminal or
