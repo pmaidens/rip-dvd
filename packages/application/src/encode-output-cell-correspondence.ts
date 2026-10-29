@@ -50,9 +50,9 @@ async function decodeVideo(path: string, signal: AbortSignal, tool: Corresponden
     return result;
   };
   const probe = JSON.parse((await run("ffprobe", ["-v", "error", "-select_streams", "v", "-show_entries",
-    "stream=width,height,pix_fmt,time_base:frame=pts,pkt_duration:format=start_time", "-show_frames", "-err_detect", "explode", "-of", "json", path])).stdout) as {
+    "stream=width,height,pix_fmt,time_base:frame=pts,duration,pkt_duration:format=start_time", "-show_frames", "-err_detect", "explode", "-of", "json", path])).stdout) as {
       streams?: { width: number; height: number; pix_fmt: string; time_base: string }[];
-      frames?: { pts: number; pkt_duration: number }[]; format?: { start_time?: string };
+      frames?: { pts: number; duration?: number; pkt_duration?: number }[]; format?: { start_time?: string };
     };
   const stream = probe.streams?.[0];
   const originSeconds = Number(probe.format?.start_time);
@@ -75,9 +75,10 @@ async function decodeVideo(path: string, signal: AbortSignal, tool: Corresponden
     if (!line.trim() || line.startsWith("#")) continue;
     const fields = line.split(",").map((field) => field.trim());
     const nativeFrame = probe.frames[frames.length];
-    const pts = nativeFrame?.pts, duration = nativeFrame?.pkt_duration;
-    if (fields.length !== 6 || fields[0] !== "0" || !Number.isSafeInteger(pts) || !Number.isSafeInteger(duration) || duration <= 0 ||
-        pts === undefined || duration === undefined || !Number.isSafeInteger(pts + duration) || Number(fields[4]) !== stream.width * stream.height * 1.5 ||
+    const pts = nativeFrame?.pts, duration = nativeFrame?.duration ?? nativeFrame?.pkt_duration;
+    if (fields.length !== 6 || fields[0] !== "0" || pts === undefined || duration === undefined ||
+        !Number.isSafeInteger(pts) || !Number.isSafeInteger(duration) || duration <= 0 ||
+        !Number.isSafeInteger(pts + duration) || Number(fields[4]) !== stream.width * stream.height * 1.5 ||
         !/^[a-f0-9]{64}$/.test(fields[5]!) || frames.length >= MAX_FRAMES ||
         (frames.length > 0 && pts <= frames.at(-1)!.pts)) throw new Error("Incomplete frame sequence");
     frames.push({ pts, duration, sha256: fields[5]! });

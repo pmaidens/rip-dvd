@@ -64,6 +64,18 @@ it("uses native decoded timestamps when the framehash encoder rounds the output 
   } finally { seeded.access.close(); }
 });
 
+it("also accepts native frame durations from the earlier ffprobe response schema", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await publishMeasuredCorrespondenceOutput(fixture, { legacyFrameDuration: true });
+  try {
+    const result = await fixture.run(["encode-output", "intervals", seeded.artifactIdentity, "--json", JSON.stringify(seeded.query)],
+      undefined, undefined, { encodeOutputMediaProbe: async () => ({ durationSeconds: 1, streams: [] }) });
+    expect(result).toMatchObject({ exitCode: 0, result: {
+      intervals: [{ status: "verified", outputInterval: { startMilliseconds: 40, endMilliseconds: 160 } }],
+    } });
+  } finally { seeded.access.close(); }
+});
+
 it("checks measured bytes even when an edited output retains its recorded size and mtime", async () => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
   const seeded = await publishMeasuredCorrespondenceOutput(fixture);

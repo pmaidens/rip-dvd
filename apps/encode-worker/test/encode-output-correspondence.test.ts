@@ -53,7 +53,7 @@ linux.each(["shifted", "shifted_pts", "repeated", "omitted", "truncated"] as con
       : kind === "omitted" ? "[0:v]select='lt(t,1)+gte(t,2)',setpts=N/(25*TB)[v]"
       : "[0:v]trim=duration=2,setpts=PTS-STARTPTS[v]";
     tool("ffmpeg", ["-v", "error", "-y", "-i", input, "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono:d=6",
-      "-filter_complex", filter, "-map", "[v]", "-map", "1:a:0", "-c:a", "pcm_s16le", "-c:v", "ffv1", "-enc_time_base", "1:1000", seeded.claim.outputPath]);
+      "-filter_complex", filter, "-map", "[v]", "-map", "1:a:0", "-c:a", "pcm_s16le", "-c:v", "ffv1", "-enc_time_base:v", "1:1000", seeded.claim.outputPath]);
     const snapshot = seeded.access.encodeJobs.findClaimSnapshot(seeded.claim.claimToken)!;
     const source = await createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath }).withConsistentRead({
       archiveId: seeded.archive.id, imagePath: seeded.archive.archivePath, originalsLibraryPath: fixture.originalsLibraryPath,

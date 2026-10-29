@@ -16,7 +16,7 @@ function frames(values: readonly string[], start: number) {
 export async function publishMeasuredCorrespondenceOutput(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   options: { outputFrames?: readonly string[]; decoderFailure?: boolean; outputOffsetMilliseconds?: number;
-    incompleteNativeFrames?: boolean; sourceFault?: "zeroed_sector" | "encrypted_packet" } = {},
+    incompleteNativeFrames?: boolean; sourceFault?: "zeroed_sector" | "encrypted_packet"; legacyFrameDuration?: boolean } = {},
 ) {
   const imageContents = Buffer.alloc(100 * 2048, 0xff);
   for (let offset = 0; offset < imageContents.length; offset += 2048) {
@@ -37,7 +37,8 @@ export async function publishMeasuredCorrespondenceOutput(
       return { stdout: request.arguments_.includes("framehash")
         ? frames(values, 250)
         : JSON.stringify({ streams: [{ width: 64, height: 64, pix_fmt: "yuv420p", time_base: "1/1000" }],
-          frames: measuredValues.map((_, index) => ({ pts: 10000 + offset + index * 40, pkt_duration: 40 })), format: { start_time: "10" } }), stderr: "" };
+          frames: measuredValues.map((_, index) => ({ pts: 10000 + offset + index * 40,
+            ...(options.legacyFrameDuration ? { pkt_duration: 40 } : { duration: 40 }) })), format: { start_time: "10" } }), stderr: "" };
     };
     const source = await createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath }).withConsistentRead({
       archiveId: seeded.archive.id, imagePath: seeded.archive.archivePath, originalsLibraryPath: fixture.originalsLibraryPath,
